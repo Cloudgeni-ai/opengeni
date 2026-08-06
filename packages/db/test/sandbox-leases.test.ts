@@ -2888,6 +2888,46 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       snapshotId: "im-legacy",
       workspacePersistence: "snapshot_filesystem",
     };
+    const legacyResumeState = {
+      backendId: "modal",
+      sessionState: { workspaceArchive: archive },
+      // This is the exact conservative shape emitted for a metadata-less
+      // pre-v2 archive by the maintenance warming-reset helper.
+      opengeniRecovery: {
+        provider: { status: "not_created", instanceId: null, observedAt: null },
+        archive: { status: "unverified", current: null, previous: null },
+        restore: {
+          status: "degraded",
+          rematerializationId: null,
+          selectedRevision: null,
+          startedAt: null,
+          completedAt: null,
+          failureCode: "archive_generation_mismatch",
+          retryable: false,
+        },
+        workspace: { status: "degraded", verifiedRevision: null, verifiedAt: null },
+      },
+    };
+    await admin`
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness,
+        refcount, turn_holders, viewer_holders, instance_id,
+        backend, resume_backend_id, lease_epoch,
+        workspace_generation, archive_generation, resume_state, expires_at
+      ) values (
+        ${accountId}, ${workspaceId}, ${groupId}, 'cold',
+        0, 0, 0, null,
+        'modal', 'modal', 7,
+        0, null, ${admin.json(legacyResumeState)}::jsonb, now() + interval '60 seconds'
+      )
+    `;
+    const projected = await readLease(db, workspaceId, groupId);
+    expect(projected?.recovery).toMatchObject({
+      archive: { status: "unverified" },
+      restore: { status: "degraded", retryable: true },
+      workspace: { status: "degraded" },
+    });
+
     const acquired = await acquireLease(db, {
       accountId,
       workspaceId,
@@ -2906,10 +2946,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       sandboxGroupId: groupId,
       expectedEpoch: acquired.lease.leaseEpoch,
       rematerializationId,
-      archiveSource: {
-        backendId: "modal",
-        sessionState: { workspaceArchive: archive },
-      },
+      archiveSource: acquired.lease.resumeState,
       legacyNativeArchive: { archiveBase64: archive, descriptor },
     });
 
@@ -2994,7 +3031,255 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     }
   }, 60_000);
 
-  test("(21b) a generation-gap lease may not adopt a legacy native receipt", async () => {
+  test("(21a) a generation-zero legacy native receipt with an existing holder remains blocked", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const archive = Buffer.from(
+      'MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"im-held","workspace_persistence":"snapshot_filesystem"}',
+    ).toString("base64");
+    const [lease] = await admin<Array<{ id: string }>>`
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness,
+        refcount, turn_holders, viewer_holders, instance_id,
+        backend, resume_backend_id, lease_epoch,
+        workspace_generation, archive_generation, resume_state, expires_at
+      ) values (
+        ${accountId}, ${workspaceId}, ${groupId}, 'cold',
+        0, 0, 0, null,
+        'modal', 'modal', 9,
+        0, null,
+        ${admin.json({ backendId: "modal", sessionState: { workspaceArchive: archive } })}::jsonb,
+        now() + interval '60 seconds'
+      )
+      returning id
+    `;
+    await admin`
+      insert into sandbox_lease_holders (
+        account_id, workspace_id, lease_id, kind, holder_id, subject_id, last_heartbeat_at
+      ) values (
+        ${accountId}, ${workspaceId}, ${lease!.id}, 'viewer', 'pre-existing-holder', null, now()
+      )
+    `;
+
+    const acquired = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "viewer",
+      holderId: "must-not-own-held-legacy-archive",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+
+    expect(acquired.role).toBe("blocked");
+    if (acquired.role === "blocked") expect(acquired.code).toBe("restore_degraded");
+    const [row] = await admin<Array<{ liveness: string; holders: number }>>`
+      select lease.liveness, count(holder.id)::int as holders
+      from sandbox_leases lease
+      left join sandbox_lease_holders holder on holder.lease_id = lease.id
+      where lease.workspace_id = ${workspaceId} and lease.sandbox_group_id = ${groupId}
+      group by lease.id
+    `;
+    expect(row).toEqual({ liveness: "cold", holders: 1 });
+  }, 60_000);
+
+  test("(21b) generation gaps, invalid receipts, ambiguous provider state, recovery collisions, captures, and rotations stay blocked at acquisition", async () => {
+    if (!available) return;
+    const validArchive = Buffer.from(
+      'MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"im-negative","workspace_persistence":"snapshot_filesystem"}',
+    ).toString("base64");
+    const defaultProvider = { status: "not_created", instanceId: null, observedAt: null };
+    const defaultArchive = { status: "unverified", current: null, previous: null };
+    const defaultRestore = {
+      status: "degraded",
+      rematerializationId: null,
+      selectedRevision: null,
+      startedAt: null,
+      completedAt: null,
+      failureCode: "archive_generation_mismatch",
+      retryable: false,
+    };
+    const defaultWorkspace = { status: "degraded", verifiedRevision: null, verifiedAt: null };
+    const cases: Array<{
+      label: string;
+      workspaceGeneration?: number;
+      archive?: string;
+      rowBackend?: string;
+      resumeBackendId?: string | null;
+      envelopeBackend?: string | null;
+      instanceId?: string | null;
+      dataPlaneUrl?: string | null;
+      providerLifetime?: boolean;
+      archiveCapture?: boolean;
+      rotation?: boolean;
+      previousArchive?: string;
+      providerState?: Record<string, unknown>;
+      recoveryProvider?: Record<string, unknown>;
+      recoveryArchive?: Record<string, unknown>;
+      recoveryRestore?: Record<string, unknown>;
+      recoveryWorkspace?: Record<string, unknown>;
+      expectedRole?: "blocked" | "fenced";
+    }> = [
+      {
+        label: "generation-gap",
+        workspaceGeneration: 1,
+        archive: validArchive,
+      },
+      {
+        label: "invalid-receipt",
+        archive: Buffer.from("not-a-native-snapshot").toString("base64"),
+      },
+      {
+        label: "descriptor-collision",
+        archive: validArchive,
+        recoveryArchive: {
+          status: "unverified",
+          current: { version: 2, revision: "conflicting-revision" },
+          previous: null,
+        },
+      },
+      {
+        label: "provider-backend-mismatch",
+        rowBackend: "docker",
+        resumeBackendId: "docker",
+        envelopeBackend: "docker",
+      },
+      {
+        label: "resume-backend-mismatch",
+        resumeBackendId: "docker",
+      },
+      {
+        label: "provider-state-present",
+        providerState: { sandboxId: "sb-ambiguous" },
+      },
+      {
+        label: "explicit-provider-exists",
+        recoveryProvider: {
+          status: "exists",
+          instanceId: "sb-explicit-provider",
+          observedAt: new Date().toISOString(),
+        },
+      },
+      {
+        label: "row-provider-instance-present",
+        instanceId: "sb-row-provider",
+      },
+      {
+        label: "provider-lifetime-present",
+        providerLifetime: true,
+      },
+      {
+        label: "provider-data-plane-present",
+        dataPlaneUrl: "https://stale-provider.invalid",
+      },
+      {
+        label: "previous-archive-present",
+        previousArchive: validArchive,
+      },
+      {
+        label: "archive-status-invalid",
+        recoveryArchive: { status: "invalid", current: null, previous: null },
+      },
+      {
+        label: "restore-attempt-collision",
+        recoveryRestore: { rematerializationId: crypto.randomUUID() },
+      },
+      {
+        label: "restore-failure-not-adoptable",
+        recoveryRestore: { failureCode: "checkpoint_artifact_invalid" },
+      },
+      {
+        label: "workspace-unrecoverable",
+        recoveryWorkspace: {
+          status: "unrecoverable",
+          verifiedRevision: null,
+          verifiedAt: null,
+        },
+      },
+      {
+        label: "archive-capture-present",
+        archiveCapture: true,
+        expectedRole: "fenced",
+      },
+      {
+        label: "rotation-present",
+        rotation: true,
+      },
+    ];
+
+    for (const candidate of cases) {
+      const { accountId, workspaceId, groupId } = await freshWorkspace();
+      const captureStartedAt = new Date(Date.now() - 1_000);
+      const captureDeadlineAt = new Date(Date.now() + 60_000);
+      const providerCreatedAt = new Date(Date.now() - 1_000);
+      const providerDeadlineAt = new Date(Date.now() + 60_000);
+      const resumeState = {
+        backendId: candidate.envelopeBackend ?? "modal",
+        sessionState: {
+          workspaceArchive: candidate.archive ?? validArchive,
+          ...(candidate.previousArchive ? { workspaceArchivePrev: candidate.previousArchive } : {}),
+          ...(candidate.providerState ? { providerState: candidate.providerState } : {}),
+        },
+        opengeniRecovery: {
+          provider: candidate.recoveryProvider ?? defaultProvider,
+          archive: candidate.recoveryArchive ?? defaultArchive,
+          restore: { ...defaultRestore, ...candidate.recoveryRestore },
+          workspace: candidate.recoveryWorkspace ?? defaultWorkspace,
+        },
+      };
+      await admin`
+        insert into sandbox_leases (
+          account_id, workspace_id, sandbox_group_id, liveness,
+          refcount, turn_holders, viewer_holders, instance_id,
+          backend, resume_backend_id, lease_epoch, data_plane_url,
+          workspace_generation, archive_generation,
+          archive_capture_id, archive_capture_generation,
+          archive_capture_started_at, archive_capture_deadline_at,
+          provider_created_at, provider_deadline_at,
+          rotation_requested_at, rotation_reason,
+          resume_state, expires_at
+        ) values (
+          ${accountId}, ${workspaceId}, ${groupId}, 'cold',
+          0, 0, 0, ${candidate.instanceId ?? null},
+          ${candidate.rowBackend ?? "modal"}, ${candidate.resumeBackendId ?? "modal"}, 10,
+          ${candidate.dataPlaneUrl ?? null},
+          ${candidate.workspaceGeneration ?? 0}, null,
+          ${candidate.archiveCapture ? crypto.randomUUID() : null}::uuid,
+          ${candidate.archiveCapture ? 0 : null}::int,
+          ${candidate.archiveCapture ? captureStartedAt : null}::timestamptz,
+          ${candidate.archiveCapture ? captureDeadlineAt : null}::timestamptz,
+          ${candidate.providerLifetime ? providerCreatedAt : null}::timestamptz,
+          ${candidate.providerLifetime ? providerDeadlineAt : null}::timestamptz,
+          ${candidate.rotation ? new Date() : null}::timestamptz,
+          ${candidate.rotation ? "operator" : null},
+          ${JSON.stringify(resumeState)}::text::jsonb,
+          now() + interval '60 seconds'
+        )
+      `;
+
+      const acquired = await acquireLease(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        kind: "viewer",
+        holderId: `must-not-own-${candidate.label}`,
+        backend: "modal",
+        leaseTtlMs: 45_000,
+      });
+      expect(acquired.role).toBe(candidate.expectedRole ?? "blocked");
+      if (acquired.role === "blocked") expect(acquired.code).toBe("restore_degraded");
+      const [row] = await admin<Array<{ liveness: string; holders: number }>>`
+        select lease.liveness, count(holder.id)::int as holders
+        from sandbox_leases lease
+        left join sandbox_lease_holders holder on holder.lease_id = lease.id
+        where lease.workspace_id = ${workspaceId} and lease.sandbox_group_id = ${groupId}
+        group by lease.id
+      `;
+      expect(row).toEqual({ liveness: "cold", holders: 0 });
+    }
+  }, 60_000);
+
+  test("(21c) a generation-gap lease may not adopt a legacy native receipt", async () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     const archive = Buffer.from(
@@ -3045,7 +3330,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (begun.status === "blocked") expect(begun.code).toBe("archive_unverified");
   }, 60_000);
 
-  test("(21c) an exact v1 descriptor around a native receipt is atomically upgraded to v2", async () => {
+  test("(21d) an exact v1 descriptor around a native receipt is atomically upgraded to v2", async () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     const nativeBytes = Buffer.from(

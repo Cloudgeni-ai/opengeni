@@ -46,6 +46,7 @@ import {
 import {
   captureVerifiedWorkspaceArchive,
   establishSandboxSessionFromEnvelope,
+  parseWorkspaceArchiveDescriptor,
   SandboxResumeStateUnavailableError,
 } from "@opengeni/runtime";
 import {
@@ -825,6 +826,177 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
       instance_id: null,
       archive: ARCHIVE_B64,
     });
+  }, 60_000);
+
+  test("(F3-a) a pre-v2 generation-zero Modal receipt reaches one fenced activity restore and registers its provider-bound artifact", async () => {
+    if (!available) return;
+    const settings = testSettings({
+      ...settingsFor(true),
+      sandboxBackend: "modal",
+      modalTokenId: "test-token-id",
+      modalTokenSecret: "test-token-secret",
+    });
+    const { accountId, workspaceId } = await freshWorkspace();
+    const session = await createSession(db, {
+      accountId,
+      workspaceId,
+      initialMessage: "restore historical Modal workspace",
+      resources: [],
+      metadata: {},
+      model: "gpt-test",
+      sandboxBackend: "modal",
+    });
+    const snapshotId = "im-pre-v2-activity";
+    const archive = Buffer.from(
+      `MODAL_SANDBOX_FS_SNAPSHOT_V1\n${JSON.stringify({
+        snapshot_id: snapshotId,
+        workspace_persistence: "snapshot_filesystem",
+      })}`,
+    ).toString("base64");
+    await admin`
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, refcount,
+        turn_holders, viewer_holders, instance_id, backend, lease_epoch,
+        workspace_generation, archive_generation,
+        resume_backend_id, resume_state, expires_at
+      ) values (
+        ${accountId}, ${workspaceId}, ${session.sandboxGroupId}, 'cold', 0,
+        0, 0, null, 'modal', 14,
+        0, null, 'modal',
+        ${JSON.stringify({
+          backendId: "modal",
+          sessionState: { workspaceArchive: archive },
+          opengeniRecovery: {
+            provider: { status: "not_created", instanceId: null, observedAt: null },
+            archive: { status: "unverified", current: null, previous: null },
+            restore: {
+              status: "degraded",
+              rematerializationId: null,
+              selectedRevision: null,
+              startedAt: null,
+              completedAt: null,
+              failureCode: "archive_generation_mismatch",
+              retryable: false,
+            },
+            workspace: { status: "degraded", verifiedRevision: null, verifiedAt: null },
+          },
+        })}::text::jsonb,
+        now() + interval '60 seconds'
+      )`;
+
+    const restoredInstanceId = "sb-pre-v2-restored";
+    const resumed = await resumeBoxForTurn(
+      {
+        db,
+        settings,
+        establishSpawnerSandbox: async (_settings, envelope, opts) => {
+          const sessionState =
+            envelope?.sessionState && typeof envelope.sessionState === "object"
+              ? (envelope.sessionState as Record<string, unknown>)
+              : null;
+          const descriptor = parseWorkspaceArchiveDescriptor(sessionState?.workspaceArchiveMeta);
+          if (!descriptor || descriptor.version !== 2) {
+            throw new Error("activity restore did not receive the derived v2 native descriptor");
+          }
+          const providerState = {
+            sandboxId: restoredInstanceId,
+            appName: "opengeni-test",
+          };
+          const restoredSession = {
+            modal: {
+              cpClient: {
+                workspaceNameLookup: async () => ({ workspaceName: "ope60-test-workspace" }),
+              },
+              profile: { serverUrl: "https://api.modal.com" },
+              environmentName: (value?: string) => value ?? "main",
+            },
+            exec: async () => ({ exitCode: 0 }),
+            close: async () => undefined,
+          };
+          const established = {
+            client: {
+              backendId: "modal",
+              serializeSessionState: async () => providerState,
+            },
+            session: restoredSession,
+            sessionState: providerState,
+            instanceId: restoredInstanceId,
+            backendId: "modal",
+            origin: "restored" as const,
+            restoredArchive: descriptor,
+          };
+          await opts.onSandboxCreated?.(established);
+          await opts.onWorkspaceRestoreVerifying?.(descriptor);
+          return established;
+        },
+        tagCreatedModalSandbox: async () => true,
+      },
+      {
+        accountId,
+        workspaceId,
+        sandboxGroupId: session.sandboxGroupId,
+        sessionId: session.id,
+        backend: "modal",
+        os: "linux",
+      },
+      "turn",
+      sandboxLeaseHolderIdForAttempt("activity-f3-pre-v2-modal"),
+    );
+
+    try {
+      expect(resumed.established.origin).toBe("restored");
+      expect(resumed.established.instanceId).toBe(restoredInstanceId);
+      const lease = await readLease(db, workspaceId, session.sandboxGroupId);
+      expect(lease).toMatchObject({
+        liveness: "warm",
+        instanceId: restoredInstanceId,
+        workspaceGeneration: 0,
+        archiveGeneration: 0,
+        recovery: {
+          provider: { status: "exists", instanceId: restoredInstanceId },
+          archive: {
+            status: "available",
+            current: {
+              version: 2,
+              provider: "modal_snapshot_filesystem",
+              snapshotId,
+            },
+          },
+          restore: { status: "ready" },
+          workspace: { status: "ready" },
+        },
+      });
+      expect(lease?.currentCheckpointArtifactId).not.toBeNull();
+      const [artifact] = await admin<
+        {
+          id: string;
+          provenance: string;
+          provider_backend: string;
+          provider_binding_key: string;
+          object_id: string;
+          state: string;
+          descriptor_version: number;
+        }[]
+      >`
+        select artifact.id, artifact.provenance, artifact.provider_backend,
+          artifact.provider_binding_key, artifact.object_id, artifact.state,
+          (artifact.descriptor ->> 'version')::int as descriptor_version
+        from sandbox_checkpoint_artifacts artifact
+        where artifact.id = ${lease!.currentCheckpointArtifactId}::uuid
+      `;
+      expect(artifact).toMatchObject({
+        id: lease!.currentCheckpointArtifactId,
+        provenance: "legacy_provider_adopted",
+        provider_backend: "modal",
+        object_id: snapshotId,
+        state: "current",
+        descriptor_version: 2,
+      });
+      expect(artifact?.provider_binding_key.length).toBeGreaterThan(0);
+    } finally {
+      await resumed.release();
+      await dropSession(resumed.established);
+    }
   }, 60_000);
 
   test("(F3-b) a successfully hydrated archive remains on the committed live lease", async () => {

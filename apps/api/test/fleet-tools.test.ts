@@ -323,6 +323,58 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     expect(group.workspaceStatus).toBe("ready");
   }, 60_000);
 
+  test("a generation-zero metadata-less native archive is wakeable for fenced adoption", async () => {
+    if (!available) return;
+    const { ctx, services, accountId, workspaceId } = await seedFleet();
+    const archive = Buffer.from(
+      'MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"im-fleet-legacy","workspace_persistence":"snapshot_filesystem"}',
+    ).toString("base64");
+    await admin`
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness,
+        refcount, turn_holders, viewer_holders, instance_id,
+        backend, resume_backend_id, lease_epoch,
+        workspace_generation, archive_generation, resume_state, expires_at
+      ) values (
+        ${accountId}, ${workspaceId}, ${ctx.sessionGroupId}, 'cold',
+        0, 0, 0, null,
+        'modal', 'modal', 14,
+        0, null,
+        ${admin.json({
+          backendId: "modal",
+          sessionState: { workspaceArchive: archive },
+          opengeniRecovery: {
+            provider: { status: "not_created", instanceId: null, observedAt: null },
+            archive: { status: "unverified", current: null, previous: null },
+            restore: {
+              status: "degraded",
+              rematerializationId: null,
+              selectedRevision: null,
+              startedAt: null,
+              completedAt: null,
+              failureCode: "archive_generation_mismatch",
+              retryable: false,
+            },
+            workspace: { status: "degraded", verifiedRevision: null, verifiedAt: null },
+          },
+        })}::jsonb,
+        now() + interval '15 minutes'
+      )
+    `;
+
+    const result = await listFleet(services, ctx);
+    const group = result.sandboxes.find((sandbox) => sandbox.isSessionGroup)!;
+    expect(group.liveness).toBe("offline");
+    expect(group.leaseLiveness).toBe("cold");
+    expect(group.attachable).toBe(false);
+    expect(group.operationAvailability).toBe("wakeable");
+    expect(group.archiveStatus).toBe("unverified");
+    expect(group.restoreStatus).toBe("degraded");
+    expect(group.workspaceStatus).toBe("degraded");
+    expect(group.workspaceGeneration).toBe(0);
+    expect(group.archiveGeneration).toBeNull();
+  }, 60_000);
+
   test("attach/swap: the epoch-fenced CAS flips active_sandbox_id + bumps active_epoch", async () => {
     if (!available) return;
     const { ctx, services, sandbox } = await seedFleet();

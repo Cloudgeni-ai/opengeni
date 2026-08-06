@@ -604,7 +604,12 @@ tree. A partial hydrate or failed verification terminates the unpublished box
 and leaves typed degraded/unrecoverable state; it never publishes a clean
 replacement, a previous revision, or a mixed snapshot. A legacy per-session
 archive can participate only after its archive fields—never provider identity—
-are imported and selected under that same lock.
+are imported and selected under that same lock. The sole metadata-less native
+compatibility path is reachable only for a cold, provider-free, holder-free
+generation-zero lease with no checkpoint artifact, capture, or rotation. Its
+opaque receipt must decode exactly to the lease backend before acquisition may
+elect the warming owner; generation gaps, tar bytes, malformed receipts, and
+active owners remain non-retryable.
 
 Concurrent routed calls may all discover the same missing provider. Exactly one
 observer wins the lease-loss transition; the others receive typed `superseded`

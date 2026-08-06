@@ -507,6 +507,12 @@ live sandbox under the same provider binding, then registers and attaches the
 current or previous slot in one locked transaction.
 
 A cold legacy receipt is not registered under ambient credentials before use.
+Cold acquisition treats the receipt as retryable only when the locked lease is
+provider-free and holder-free at generation zero, has no checkpoint artifact,
+capture, rotation, previous archive, or descriptor, and the exact opaque bytes
+decode to the lease's native provider. This is only admission to the existing
+warming fence; it does not itself certify or publish the archive. Any generation
+gap, malformed/tar payload, provider mismatch, or live owner remains blocked.
 The restore first materializes it through Modal; the newly active session then
 proves its exact authenticated workspace, and the warming/rematerialization
 fence atomically registers and attaches that same receipt before the successor

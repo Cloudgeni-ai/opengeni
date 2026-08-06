@@ -105,6 +105,12 @@ export type SandboxResumeServices = {
   /** Test seam for the attached/resumed path. Production uses the one runtime
    * resume primitive; callers must not use this to create a replacement box. */
   establishAttachedSandbox?: typeof establishSandboxSessionFromEnvelope;
+  /** Deterministic test seam for the cold->warming owner. Production always
+   * uses the canonical runtime create-or-restore primitive. */
+  establishSpawnerSandbox?: typeof establishSandboxSessionFromEnvelope;
+  /** Deterministic test seam for Modal attribution. Production always tags the
+   * newly-created provider box through the authenticated Modal client. */
+  tagCreatedModalSandbox?: typeof tagModalSandbox;
   /** Test seam for the bounded command-readiness proof performed before an
    * attached provider box is handed to the agent. */
   verifyAttachedSandboxReadiness?: (established: EstablishedSandboxSession) => Promise<void>;
@@ -954,7 +960,9 @@ export async function resumeBoxForTurn(
       // `_sandbox` envelope is the per-session fallback. Without this a turn-first
       // re-warm after a drain->cold would ignore the archive and start an EMPTY box.
       const providerCreateStartedAt = new Date();
-      const established = await establishSandboxSessionFromEnvelope(settings, spawnEnvelope, {
+      const establishSpawner =
+        services.establishSpawnerSandbox ?? establishSandboxSessionFromEnvelope;
+      const established = await establishSpawner(settings, spawnEnvelope, {
         sessionId: ids.sessionId,
         recovery: "create-or-restore",
         backendOverride: ids.backend as never,
@@ -1033,11 +1041,15 @@ export async function resumeBoxForTurn(
             throw new SandboxLeaseSupersededError(ids.sandboxGroupId, expectedEpoch);
           }
           if (created.backendId === "modal") {
-            await tagModalSandbox(settings, created.instanceId, {
-              leaseId: acquired.lease.id,
-              workspaceId: ids.workspaceId,
-              sandboxGroupId: ids.sandboxGroupId,
-            }).catch(() => undefined);
+            await (services.tagCreatedModalSandbox ?? tagModalSandbox)(
+              settings,
+              created.instanceId,
+              {
+                leaseId: acquired.lease.id,
+                workspaceId: ids.workspaceId,
+                sandboxGroupId: ids.sandboxGroupId,
+              },
+            ).catch(() => undefined);
           }
           throwIfReleasedOrCancelled();
         },

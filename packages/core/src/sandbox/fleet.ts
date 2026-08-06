@@ -260,12 +260,17 @@ export async function listFleet(
       groupLease.recovery.restore.status === "restoring" ||
       groupLease.recovery.restore.status === "verifying"),
   );
+  const groupRetryableDegradedRestore = Boolean(
+    groupLease?.recovery.restore.status === "degraded" &&
+    groupLease.recovery.restore.retryable === true,
+  );
   const groupRecoveryUnavailable = Boolean(
     groupLease &&
-    (groupLease.recovery.restore.status === "degraded" ||
-      groupLease.recovery.restore.status === "unrecoverable" ||
-      groupLease.recovery.workspace.status === "degraded" ||
-      groupLease.recovery.workspace.status === "unrecoverable"),
+    (groupLease.recovery.restore.status === "unrecoverable" ||
+      groupLease.recovery.workspace.status === "unrecoverable" ||
+      (!groupRetryableDegradedRestore &&
+        (groupLease.recovery.restore.status === "degraded" ||
+          groupLease.recovery.workspace.status === "degraded"))),
   );
   const groupOperationAvailability: FleetOperationAvailability = groupOnline
     ? "ready"

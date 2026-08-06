@@ -24144,6 +24144,96 @@ function parseArchiveRevision(value: unknown): SandboxArchiveRevision | null {
   return parseWorkspaceArchiveDescriptor(value);
 }
 
+function isGenerationZeroLegacyNativeSnapshotAdoptionCandidate(
+  row: LeaseRow,
+  sessionState: Record<string, unknown> | undefined,
+): boolean {
+  const recovery =
+    row.resume_state?.opengeniRecovery && typeof row.resume_state.opengeniRecovery === "object"
+      ? (row.resume_state.opengeniRecovery as Record<string, unknown>)
+      : undefined;
+  const recoveryArchive =
+    recovery?.archive && typeof recovery.archive === "object"
+      ? (recovery.archive as Record<string, unknown>)
+      : undefined;
+  const recoveryProvider =
+    recovery?.provider && typeof recovery.provider === "object"
+      ? (recovery.provider as Record<string, unknown>)
+      : undefined;
+  const recoveryRestore =
+    recovery?.restore && typeof recovery.restore === "object"
+      ? (recovery.restore as Record<string, unknown>)
+      : undefined;
+  const recoveryWorkspace =
+    recovery?.workspace && typeof recovery.workspace === "object"
+      ? (recovery.workspace as Record<string, unknown>)
+      : undefined;
+  const envelopeBackend = row.resume_state?.backendId;
+  if (
+    row.liveness !== "cold" ||
+    row.instance_id !== null ||
+    row.data_plane_url !== null ||
+    row.terminal_data_plane_url !== null ||
+    Number(row.refcount) !== 0 ||
+    Number(row.turn_holders) !== 0 ||
+    Number(row.viewer_holders) !== 0 ||
+    Number(row.workspace_generation) !== 0 ||
+    row.archive_generation !== null ||
+    row.archive_capture_id !== null ||
+    row.archive_capture_generation !== null ||
+    row.archive_capture_started_at !== null ||
+    row.archive_capture_deadline_at !== null ||
+    row.provider_created_at !== null ||
+    row.provider_deadline_at !== null ||
+    row.current_checkpoint_artifact_id !== null ||
+    row.previous_checkpoint_artifact_id !== null ||
+    row.rotation_requested_at !== null ||
+    row.rotation_reason !== null ||
+    sessionState?.providerState != null ||
+    recoveryArchive?.current != null ||
+    recoveryArchive?.previous != null ||
+    (recoveryArchive?.status !== undefined && recoveryArchive.status !== "unverified") ||
+    (recoveryProvider?.status !== undefined && recoveryProvider.status !== "not_created") ||
+    (recoveryProvider?.instanceId !== undefined && recoveryProvider.instanceId !== null) ||
+    recoveryRestore?.rematerializationId != null ||
+    recoveryRestore?.selectedRevision != null ||
+    recoveryRestore?.startedAt != null ||
+    (recoveryWorkspace?.status !== undefined && recoveryWorkspace.status !== "degraded") ||
+    sessionState?.workspaceArchiveMeta != null ||
+    sessionState?.workspaceArchivePrevMeta != null ||
+    (typeof sessionState?.workspaceArchivePrev === "string" &&
+      sessionState.workspaceArchivePrev.length > 0) ||
+    (envelopeBackend !== undefined &&
+      envelopeBackend !== null &&
+      typeof envelopeBackend !== "string")
+  ) {
+    return false;
+  }
+  const archiveBase64 = sessionState?.workspaceArchive;
+  if (
+    typeof archiveBase64 !== "string" ||
+    archiveBase64.length === 0 ||
+    archiveBase64.length % 4 !== 0
+  ) {
+    return false;
+  }
+  let bytes: Uint8Array;
+  try {
+    bytes = Uint8Array.from(Buffer.from(archiveBase64, "base64"));
+  } catch {
+    return false;
+  }
+  if (Buffer.from(bytes).toString("base64") !== archiveBase64) return false;
+  const native = decodeNativeSnapshotRef(bytes);
+  const nativeBackend = native ? backendForNativeSnapshotProvider(native.provider) : null;
+  return (
+    native !== null &&
+    nativeBackend === row.backend &&
+    (row.resume_backend_id === null || row.resume_backend_id === nativeBackend) &&
+    (envelopeBackend === undefined || envelopeBackend === null || envelopeBackend === nativeBackend)
+  );
+}
+
 function recoveryStateFromLeaseRow(row: LeaseRow): SandboxRecoveryState {
   const resume =
     row.resume_state && typeof row.resume_state === "object" ? row.resume_state : undefined;
@@ -24200,6 +24290,12 @@ function recoveryStateFromLeaseRow(row: LeaseRow): SandboxRecoveryState {
       : {}),
   };
   const restoreStatus = restoreInput?.status;
+  const legacyNativeAdoptionRetryable =
+    isGenerationZeroLegacyNativeSnapshotAdoptionCandidate(row, sessionState) &&
+    (restoreStatus === undefined || restoreStatus === "degraded") &&
+    (restoreInput?.failureCode === undefined ||
+      restoreInput.failureCode === "archive_unverified" ||
+      restoreInput.failureCode === "archive_generation_mismatch");
   const restore: SandboxRecoveryState["restore"] = {
     status:
       restoreStatus === "not_required" ||
@@ -24226,7 +24322,11 @@ function recoveryStateFromLeaseRow(row: LeaseRow): SandboxRecoveryState {
     ...(typeof restoreInput?.failureCode === "string"
       ? { failureCode: restoreInput.failureCode }
       : {}),
-    ...(typeof restoreInput?.retryable === "boolean" ? { retryable: restoreInput.retryable } : {}),
+    ...(legacyNativeAdoptionRetryable
+      ? { retryable: true }
+      : typeof restoreInput?.retryable === "boolean"
+        ? { retryable: restoreInput.retryable }
+        : {}),
   };
   const workspaceStatus = workspaceInput?.status;
   const workspace: SandboxRecoveryState["workspace"] = {
@@ -24589,6 +24689,34 @@ async function acquireLeaseOnce(
                   : ("restore_unrecoverable" as const),
               lease: mapLeaseRow(row),
             };
+          }
+          if (
+            recovery.restore.status === "degraded" &&
+            recovery.restore.retryable === true &&
+            isGenerationZeroLegacyNativeSnapshotAdoptionCandidate(
+              row,
+              row.resume_state?.sessionState && typeof row.resume_state.sessionState === "object"
+                ? (row.resume_state.sessionState as Record<string, unknown>)
+                : undefined,
+            )
+          ) {
+            // Lease counters are projections; holder rows are the authority. A
+            // historical generation-zero archive may cross the acquisition
+            // boundary only when the locked cold lease has no existing owner.
+            // Generation zero independently proves that no v2 mutation
+            // admission can exist (the table requires generation > 0).
+            const holderRows = await tx.execute<{ n: number }>(sql`
+              select count(*)::int as n
+              from sandbox_lease_holders
+              where lease_id = ${row.id}
+            `);
+            if (Number(holderRows[0]?.n ?? 0) !== 0) {
+              return {
+                role: "blocked" as const,
+                code: "restore_degraded" as const,
+                lease: mapLeaseRow(row),
+              };
+            }
           }
           const casRows = await tx.execute<{ id: string }>(sql`
           update sandbox_leases set
