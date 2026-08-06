@@ -14,6 +14,7 @@ const packageRoot = join(import.meta.dir, "..");
 const compiledPath = join(packageRoot, "styles/compiled.css");
 const compiled = await readFile(compiledPath, "utf8");
 const effectiveTokens = await readFile(join(packageRoot, "styles/effective-tokens.css"), "utf8");
+const sourceBridge = await readFile(join(packageRoot, "styles/index.css"), "utf8");
 const parsed = parse(compiled);
 
 function classesIn(node: { walkClasses(callback: (className: { value: string }) => void): void }) {
@@ -118,6 +119,10 @@ function tokenRegistration(property: string) {
 }
 
 describe("compiled CSS contract", () => {
+  test("ships effective derived tokens through the Tailwind source bridge", () => {
+    expect(sourceBridge).toContain('@import "./tokens.css";\n@import "./effective-tokens.css";');
+  });
+
   test("is deterministic, directive-free, scoped, and bounded", async () => {
     expect(await buildCompiledCss()).toBe(compiled);
     expect(await buildEffectiveTokensCss()).toBe(effectiveTokens);

@@ -16,7 +16,6 @@ const checkOnly = process.argv.includes("--check");
 const input = `@import "tailwindcss/theme.css" layer(theme);
 @import "tailwindcss/utilities.css" layer(utilities) source(none);
 @import "./index.css";
-@import "./effective-tokens.css";
 @import "./responsive.css";
 @source "../src";
 `;
