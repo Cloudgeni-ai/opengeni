@@ -1712,21 +1712,12 @@ describe("buildTimeline", () => {
     });
   });
 
-  test("tool.auth_needed tolerates a sparse payload and drops an unknown reason", () => {
+  test("historical tool.auth_needed without a concrete tool call stays out of chat", () => {
     reset();
     const items = buildTimeline([
       event("tool.auth_needed", { providerDomain: "supabase.com", reason: "who_knows" }),
     ]);
-    expect(items[0]).toMatchObject({
-      kind: "auth-needed",
-      providerDomain: "supabase.com",
-      connectionId: null,
-      reason: null,
-      scopes: [],
-      resource: null,
-      toolName: null,
-      authorizationUrl: null,
-    });
+    expect(items).toEqual([]);
   });
 
   test("credential.auth_needed reuses the reconnect card without inventing a tool", () => {

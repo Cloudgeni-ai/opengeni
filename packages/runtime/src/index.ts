@@ -3239,10 +3239,11 @@ export async function prepareAgentTools(
           ...(useBunNativeFetch ? { pinResolvedDestination: false } : {}),
         },
       );
+      const optional = tool.optional === true;
       const fetchImpl = isCodexAppsMcpServer(config)
         ? codexAppsAuthFetch(guardedFetch, settings, options)
         : config.connectionRef
-          ? connectionBrokerFetch(guardedFetch, config, options, resolvedMcpConnectionIds)
+          ? connectionBrokerFetch(guardedFetch, config, options, resolvedMcpConnectionIds, optional)
           : firstParty
             ? firstPartyAuthFetch(guardedFetch, settings, options)
             : guardedFetch;
@@ -3263,10 +3264,12 @@ export async function prepareAgentTools(
       // a best-effort server whose tools/list throws (e.g. an expired connection
       // credential surfacing as a StreamableHTTP "authentication required" 401)
       // degrades to zero tools rather than throwing out of the SDK's run-time
-      // getAllMcpTools and failing an unrelated turn. The actionable
-      // tool.auth_needed signal is preserved: the connection-broker fetch
-      // publishes it before returning the 401 that provokes the throw.
-      const optional = tool.optional === true;
+      // getAllMcpTools and failing an unrelated turn. Setup-time auth misses
+      // for an optional server are availability state, not evidence that the
+      // user asked to use that integration, so they do not publish a
+      // conversational tool.auth_needed event. A concrete tools/call auth
+      // failure still publishes the actionable event before returning the MCP
+      // auth-needed tool result.
       const bestEffort = isCodexAppsMcpServer(config) || optional || !!config.connectionRef;
       const server = new PrefixedMcpServer(
         new MCPServerStreamableHttp({
@@ -3380,6 +3383,7 @@ function connectionBrokerFetch(
   config: Settings["mcpServers"][number],
   options: PrepareToolsOptions,
   resolvedMcpConnectionIds: Map<string, string>,
+  suppressSetupAuthNeeded: boolean,
 ): FetchLike {
   const connectionRef = config.connectionRef;
   if (!connectionRef) {
@@ -3397,7 +3401,14 @@ function connectionBrokerFetch(
       false,
     );
     if (first.status === "auth_needed") {
-      return await authNeededFetchResponse(options, config.id, request, first, connectionRef);
+      return await authNeededFetchResponse(
+        options,
+        config.id,
+        request,
+        first,
+        connectionRef,
+        suppressSetupAuthNeeded,
+      );
     }
     recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, first.connectionId);
     const response = await baseFetch(
@@ -3425,10 +3436,24 @@ function connectionBrokerFetch(
       );
       if (refreshed.status === "auth_needed") {
         if (!request.replaySafeAfter401) {
-          await publishAuthNeededForRequest(options, config.id, request, refreshed, connectionRef);
+          await publishAuthNeededForRequest(
+            options,
+            config.id,
+            request,
+            refreshed,
+            connectionRef,
+            suppressSetupAuthNeeded,
+          );
           return mcpOutcomeUncertainResponse(request, providerFailure!);
         }
-        return await authNeededFetchResponse(options, config.id, request, refreshed, connectionRef);
+        return await authNeededFetchResponse(
+          options,
+          config.id,
+          request,
+          refreshed,
+          connectionRef,
+          suppressSetupAuthNeeded,
+        );
       }
       recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, refreshed.connectionId);
       if (!request.replaySafeAfter401) {
@@ -3442,7 +3467,14 @@ function connectionBrokerFetch(
         const auth = insufficientScopeAuth(retry.headers, connectionRef, refreshed.connectionId);
         if (auth) {
           await cancelMcpResponseBody(retry);
-          return await authNeededFetchResponse(options, config.id, request, auth, connectionRef);
+          return await authNeededFetchResponse(
+            options,
+            config.id,
+            request,
+            auth,
+            connectionRef,
+            suppressSetupAuthNeeded,
+          );
         }
         return retry;
       }
@@ -3465,6 +3497,7 @@ function connectionBrokerFetch(
               : {}),
           },
           connectionRef,
+          suppressSetupAuthNeeded,
         );
       }
       return retry;
@@ -3473,7 +3506,14 @@ function connectionBrokerFetch(
       const auth = insufficientScopeAuth(response.headers, connectionRef, first.connectionId);
       if (auth) {
         await cancelMcpResponseBody(response);
-        return await authNeededFetchResponse(options, config.id, request, auth, connectionRef);
+        return await authNeededFetchResponse(
+          options,
+          config.id,
+          request,
+          auth,
+          connectionRef,
+          suppressSetupAuthNeeded,
+        );
       }
       return response;
     }
@@ -3584,8 +3624,16 @@ async function authNeededFetchResponse(
   request: McpRequestReplayInfo,
   auth: Extract<ResolveConnectionCredentialResult, { status: "auth_needed" }>,
   connectionRef: McpServerConnectionRef,
+  suppressSetupAuthNeeded: boolean,
 ): Promise<Response> {
-  await publishAuthNeededForRequest(options, serverId, request, auth, connectionRef);
+  await publishAuthNeededForRequest(
+    options,
+    serverId,
+    request,
+    auth,
+    connectionRef,
+    suppressSetupAuthNeeded,
+  );
   if (request.method === "tools/call") {
     return mcpToolAuthNeededResponse(request.id);
   }
@@ -3600,7 +3648,11 @@ async function publishAuthNeededForRequest(
   request: McpRequestReplayInfo,
   auth: Extract<ResolveConnectionCredentialResult, { status: "auth_needed" }>,
   connectionRef: McpServerConnectionRef,
+  suppressSetupAuthNeeded: boolean,
 ): Promise<void> {
+  if (suppressSetupAuthNeeded && request.method !== "tools/call") {
+    return;
+  }
   const connectionId = auth.connectionId ?? connectionRef.connectionId;
   await publishAuthNeeded(options, {
     serverId,

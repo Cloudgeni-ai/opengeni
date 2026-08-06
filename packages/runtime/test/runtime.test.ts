@@ -4258,14 +4258,7 @@ describe("runtime event normalization", () => {
       expect(prepared.mcpServers).toHaveLength(0);
       expect(transportCalls).toEqual([]);
       expect(resolverCalls).toBeGreaterThan(0);
-      expect(authNeeded).toEqual([
-        expect.objectContaining({
-          serverId: "personal-slack",
-          providerDomain: "slack.com",
-          reason: "missing_connection",
-          toolName: null,
-        }),
-      ]);
+      expect(authNeeded).toEqual([]);
     } finally {
       await prepared.close();
     }
@@ -4719,7 +4712,7 @@ describe("runtime event normalization", () => {
     }
   }, 10_000);
 
-  test("skips brokered MCP servers at connect time when auth is missing and emits auth-needed", async () => {
+  test("skips an optional brokered MCP at connect time without emitting setup auth-needed", async () => {
     const authNeeded: unknown[] = [];
     const originalWarn = console.warn;
     console.warn = () => {};
@@ -4740,7 +4733,53 @@ describe("runtime event normalization", () => {
             },
           ],
         }),
-        [{ kind: "mcp", id: "cap-missing" }],
+        [{ kind: "mcp", id: "cap-missing", optional: true }],
+        {
+          workspaceId: "99999999-9999-4999-8999-999999999999",
+          resolveCredential: async () => ({
+            status: "auth_needed",
+            reason: "missing_connection",
+            providerDomain: "api.example.com",
+            authorizationUrl: "https://api.example.com/oauth/start",
+          }),
+          onAuthNeeded: (payload) => {
+            authNeeded.push(payload);
+          },
+        },
+      );
+      try {
+        expect(prepared.mcpServers).toHaveLength(0);
+        expect(authNeeded).toEqual([]);
+      } finally {
+        await prepared.close();
+      }
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
+  test("keeps setup auth-needed for a non-optional brokered MCP selection", async () => {
+    const authNeeded: unknown[] = [];
+    const originalWarn = console.warn;
+    console.warn = () => {};
+    try {
+      const prepared = await prepareAgentTools(
+        testSettings({
+          mcpServers: [
+            {
+              id: "cap-required-auth",
+              name: "Required auth capability MCP",
+              url: "http://127.0.0.1:9/mcp",
+              connectionRef: {
+                providerDomain: "api.example.com",
+                kind: "api_key",
+                subjectScope: "workspace",
+              },
+              cacheToolsList: false,
+            },
+          ],
+        }),
+        [{ kind: "mcp", id: "cap-required-auth" }],
         {
           workspaceId: "99999999-9999-4999-8999-999999999999",
           resolveCredential: async () => ({
@@ -4758,10 +4797,10 @@ describe("runtime event normalization", () => {
         expect(prepared.mcpServers).toHaveLength(0);
         expect(authNeeded).toContainEqual(
           expect.objectContaining({
-            serverId: "cap-missing",
+            serverId: "cap-required-auth",
+            toolName: null,
             reason: "missing_connection",
             providerDomain: "api.example.com",
-            authorizationUrl: "https://api.example.com/oauth/start",
           }),
         );
       } finally {
@@ -5419,8 +5458,8 @@ describe("runtime event normalization", () => {
     // still-valid credential), so the connect-time best-effort isolation lets it
     // through — but the credential is gone by the time the SDK's run-time
     // getAllMcpTools calls tools/list, which throws OUTSIDE the connect guard. The
-    // invariant: that best-effort server drops to zero tools (with its
-    // tool.auth_needed preserved) while a healthy sibling's tools survive and the
+    // invariant: that optional server drops to zero tools without manufacturing
+    // a conversational auth card while a healthy sibling's tools survive and the
     // turn proceeds. Pre-fix, getAllMcpTools rethrows and the whole turn dies.
     const connectionId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     // The broker resolves a valid credential during connect (initialize), then the
@@ -5460,7 +5499,7 @@ describe("runtime event normalization", () => {
           ],
         }),
         [
-          { kind: "mcp", id: "cap-expired" },
+          { kind: "mcp", id: "cap-expired", optional: true },
           { kind: "mcp", id: "docs" },
         ],
         {
@@ -5495,21 +5534,13 @@ describe("runtime event normalization", () => {
         // The healthy sibling's tools survive; the expired server contributes none.
         expect(toolNames).toContain("docs__search_documents");
         expect(toolNames.some((name) => name.startsWith("cap-expired__"))).toBe(false);
-        // The actionable signal is NOT silenced by the degrade.
-        expect(authNeeded).toContainEqual(
-          expect.objectContaining({
-            serverId: "cap-expired",
-            reason: "expired",
-            providerDomain: "api.integrations-example.com",
-            connectionId,
-          }),
-        );
+        expect(authNeeded).toEqual([]);
       } finally {
         await prepared.close();
       }
       // The drop is observable as an allowlisted structural warning. Exact
-      // registry identity remains available through the internal auth-needed
-      // event above, but must not cross the public console boundary.
+      // registry identity remains internal and must not cross the public console
+      // boundary.
       const warned = warnings.some((args) =>
         args.some(
           (arg) =>
@@ -5662,7 +5693,7 @@ describe("runtime event normalization", () => {
         ],
       }),
       [
-        { kind: "mcp", id: "cap" },
+        { kind: "mcp", id: "cap", optional: true },
         { kind: "mcp", id: "docs" },
       ],
       {
