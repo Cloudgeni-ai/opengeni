@@ -12,37 +12,36 @@ Use one of these product credentials:
 
 Only add `x-opengeni-access-key` when the operator says the deployment shared-key boundary is enabled. It is not a replacement for product API keys in managed SaaS.
 
-## Minimal Session Client
+## Minimal Server-Side Session Client
 
 ```ts
-const baseUrl = process.env.OPENGENI_API_BASE_URL!;
-const apiKey = process.env.OPENGENI_API_KEY!;
+import { OpenGeniClient } from "@opengeni/sdk";
 
-const headers = {
-  authorization: `Bearer ${apiKey}`,
-  "content-type": "application/json",
-};
-
-const access = await fetch(`${baseUrl}/v1/access/me`, { headers }).then((r) => r.json());
-const workspaceId = process.env.OPENGENI_WORKSPACE_ID ?? access.defaultWorkspaceId;
-
-const created = await fetch(`${baseUrl}/v1/workspaces/${workspaceId}/sessions`, {
-  method: "POST",
-  headers,
-  body: JSON.stringify({
-    initialMessage: "Inspect the uploaded logs and summarize the failing deploy step.",
-    tools: [{ kind: "mcp", id: "opengeni" }],
-  }),
-}).then((r) => r.json());
-
-const events = new EventSource(`${baseUrl}/v1/workspaces/${workspaceId}/sessions/${created.id}/events/stream`);
-events.addEventListener("agent.message.delta", (event) => {
-  const payload = JSON.parse(event.data);
-  process.stdout.write(payload.text ?? "");
+const client = new OpenGeniClient({
+  baseUrl: process.env.OPENGENI_API_BASE_URL!,
+  apiKey: process.env.OPENGENI_API_KEY!,
 });
+
+const access = await client.getAccessContext();
+const workspaceId = process.env.OPENGENI_WORKSPACE_ID ?? access.defaultWorkspaceId;
+if (!workspaceId) throw new Error("No OpenGeni workspace is available");
+
+const created = await client.createSession(workspaceId, {
+  initialMessage: "Inspect the uploaded logs and summarize the failing deploy step.",
+  idempotencyKey: crypto.randomUUID(),
+});
+
+for await (const event of client.streamEvents(workspaceId, created.id)) {
+  if (event.type === "agent.message.delta") {
+    process.stdout.write((event.payload as { text?: string }).text ?? "");
+  }
+}
 ```
 
-If the runtime cannot attach `Authorization` headers to `EventSource`, use `fetch` streaming or a server-side proxy that injects the credential.
+This code belongs on the product server, not in a browser bundle. For a browser
+timeline, expose a tenant-scoped same-origin route and use the SDK's
+`proxySessionEventStream` helper. Authenticate the product user and resolve the
+allowed workspace/session before opening the upstream stream.
 
 ## Session Creation Options
 
@@ -120,4 +119,7 @@ When generating a customer-specific agent skill that teaches their coding agents
 - Include only their non-secret base URL, workspace naming convention, and safe API examples.
 - Tell the agent to read API keys from the customer's secret manager or environment, never from the skill.
 - Keep the skill versioned with their integration code and add a quick smoke command that calls `/v1/config/client` and `/v1/access/me`.
-- Note that session/schedule APIs exist today; first-class agent-definition APIs are roadmap until the live service exposes them.
+- State which integration shape the product chose and where its tenant-safe
+  proxy/client lives; do not teach every possible shape in every customer skill.
+- Describe only primitives proven by the installed SDK and live deployment; do
+  not turn roadmap assumptions into customer instructions.

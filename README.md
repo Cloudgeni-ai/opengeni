@@ -127,6 +127,15 @@ Pair this README with the [CloudGeni Infrastructure Agents Guide](https://github
 
 The capability catalog lets operators see and enable packs, MCP tools, APIs, skills, and plugins for the same runtime. See [docs/capabilities.md](docs/capabilities.md) for the unified catalog and [docs/packs.md](docs/packs.md) for the marketing social daily analysis pack.
 
+For product integration, keep OpenGeni as a standalone service by default. Start
+with the [TypeScript SDK](packages/sdk/README.md), add the
+[React surfaces](packages/react/README.md) the product needs, and use the
+[workbench guide](docs/embedding-workbench.md) only when exposing agent compute.
+The [`opengeni-client` skill](.agents/skills/opengeni-client/SKILL.md) gives
+customer-side coding agents the same decision path. The
+[in-process embedding guide](docs/embedding.md) is for advanced hosts that
+intentionally bind OpenGeni runtime infrastructure into their own process.
+
 ## Quick Start
 
 Prerequisites:
