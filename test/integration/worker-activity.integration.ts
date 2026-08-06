@@ -61,16 +61,12 @@ import { createObservability } from "@opengeni/observability";
 import {
   createProductionAgentRuntime,
   MaxTurnsExceededError,
-  safeMcpTransportError,
+  mcpTransportErrorWithRetryMetadata,
   type OpenGeniRuntime,
 } from "@opengeni/runtime";
 import { createActivityTestHarness as createWorkerActivities } from "../../apps/worker/src/activities";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
-import {
-  headerSecretRedactions,
-  PROVIDER_BACKPRESSURE_DELAY_MS,
-} from "../../apps/worker/src/activities/agent-turn";
-import { createSecretRedactor } from "../../apps/worker/src/activities/redaction";
+import { PROVIDER_BACKPRESSURE_DELAY_MS } from "../../apps/worker/src/activities/agent-turn";
 import {
   loadWorkspaceEnvironmentForRun,
   sandboxEnvironmentForRun,
@@ -232,7 +228,7 @@ describe("worker activities integration", () => {
     });
   });
 
-  test("uses current encrypted MCP header names after a custom-header rotation", async () => {
+  test("uses current exact MCP headers after a custom-header rotation", async () => {
     const grant = await testGrant(dbClient.db);
     const encryptionKey = Buffer.alloc(32, 10);
     const oldValue = "synthetic-old-private-token-123456";
@@ -297,27 +293,9 @@ describe("worker activities integration", () => {
     const staleNames = staleProjection?.mcpServers.find(
       (server) => server.id === "crm",
     )?.headerNames;
-    const staleRedactions = headerSecretRedactions(
-      "MCP_CRM_STATIC",
-      currentServer?.headers,
-      staleNames,
-    );
-    const currentRedactions = headerSecretRedactions(
-      "MCP_CRM_STATIC",
-      currentServer?.headers,
-      resolvedHeaderNames,
-    );
-    const redactedCurrent = createSecretRedactor(currentRedactions)({ echoed: currentValue });
-
     expect(staleNames).toEqual(["Old-Private-Token"]);
     expect(resolvedHeaderNames).toEqual(["Private-Token"]);
     expect(currentServer?.headers).toEqual({ "Private-Token": currentValue });
-    expect(staleRedactions).toHaveLength(0);
-    expect(currentRedactions).toEqual([
-      { name: "MCP_CRM_STATIC_PRIVATE_TOKEN", value: currentValue },
-    ]);
-    expect(JSON.stringify(redactedCurrent)).not.toContain(currentValue);
-    expect(JSON.stringify(redactedCurrent)).toContain("[redacted:MCP_CRM_STATIC_PRIVATE_TOKEN]");
   });
 
   test("overlays host-backed session MCP refs without a local encryption key", async () => {
@@ -1468,7 +1446,7 @@ describe("worker activities integration", () => {
     );
   });
 
-  test("a sanitized required-MCP connection refusal recovers the same turn", async () => {
+  test("an exact required-MCP connection refusal recovers the same turn", async () => {
     const grant = await testGrant(dbClient.db);
     const session = await createOwnedSession(dbClient.db, grant, {
       initialMessage: "continue after required MCP reconnects",
@@ -1493,7 +1471,7 @@ describe("worker activities integration", () => {
     const runtime: OpenGeniRuntime = {
       ...baseRuntime,
       runStream: async () => {
-        throw safeMcpTransportError(raw);
+        throw mcpTransportErrorWithRetryMetadata(raw);
       },
     };
     const activities = createWorkerActivities({
@@ -1531,8 +1509,7 @@ describe("worker activities integration", () => {
       },
     );
     expect(events.some((event) => event.type === "turn.failed")).toBe(false);
-    expect(JSON.stringify(events)).not.toContain("private.example");
-    expect(JSON.stringify(events)).not.toContain("127.0.0.1");
+    expect(JSON.stringify(events)).toContain("private.example");
     expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
       "recovering",
     );
@@ -3400,7 +3377,7 @@ describe("worker activities integration", () => {
     }
   });
 
-  test("redacts attached environment values echoed by the agent into session events", async () => {
+  test("preserves attached environment values echoed by the agent in session events", async () => {
     const secret = "echoed-workspace-secret-987654";
     const grant = await testGrant(dbClient.db);
     const environment = await seedWorkspaceEnvironment(dbClient.db, grant, {
@@ -3440,17 +3417,16 @@ describe("worker activities integration", () => {
       workspaceId: grant.workspaceId,
       sessionId: session.id,
       trigger: { kind: "next" },
-      workflowId: "workflow-environment-redaction",
+      workflowId: "workflow-environment-exact-content",
       workflowRunId: crypto.randomUUID(),
     });
     expect(result.status).toBe("idle");
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
     const serialized = JSON.stringify(events);
-    expect(serialized).not.toContain(secret);
-    expect(serialized).toContain("[redacted:LEAKED_TOKEN]");
+    expect(serialized).toContain(secret);
     const completed = events.find((event) => event.type === "agent.message.completed");
     expect((completed?.payload as { text?: string } | undefined)?.text).toBe(
-      "the token is [redacted:LEAKED_TOKEN] end",
+      `the token is ${secret} end`,
     );
   });
 

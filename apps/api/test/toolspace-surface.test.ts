@@ -1318,7 +1318,7 @@ describe("prepareToolspaceMcpSurface", () => {
     server.close();
   }, 60_000);
 
-  test("returns a generic error (never the raw upstream error) when the upstream call fails", async () => {
+  test("returns the exact upstream error when the upstream call fails", async () => {
     if (!available) return;
     const server = startTestMcpServer();
     const settings = testSettings({
@@ -1344,12 +1344,13 @@ describe("prepareToolspaceMcpSurface", () => {
     expect(tool).toBeDefined();
 
     // Kill the upstream between listing (warm) and the call so the lazy per-call
-    // connection fails; the sandbox must see a generic result, not a raw error.
+    // connection fails; the sandbox must receive the exact transport detail.
     server.close();
     const result = await tool.call({ query: "boom" });
     expect(result.isError).toBe(true);
     const text = (result.content?.[0] as { text?: string } | undefined)?.text;
-    expect(text).toBe("upstream tool failed: flaky__search_documents");
+    expect(text).toBeTruthy();
+    expect(text).not.toBe("upstream tool failed: flaky__search_documents");
     await surface!.close();
   }, 60_000);
 
@@ -1403,10 +1404,10 @@ describe("prepareToolspaceMcpSurface", () => {
       const pending = tool!.call({ query: "wait" });
       await started;
       const result = await pending;
-      expect(result).toMatchObject({
-        isError: true,
-        content: [{ type: "text", text: "upstream tool failed: timeout__search_documents" }],
-      });
+      expect(result).toMatchObject({ isError: true });
+      const text = (result.content?.[0] as { text?: string } | undefined)?.text ?? "";
+      expect(text.toLowerCase()).toContain("timed out");
+      expect(text).not.toBe("upstream tool failed: timeout__search_documents");
       const events = await listSessionEvents(db, seeded.workspaceId, seeded.sessionId, 0, 100);
       expect(events.some((event) => event.type === "tool.auth_needed")).toBe(false);
     } finally {

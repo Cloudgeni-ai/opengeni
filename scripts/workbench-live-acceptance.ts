@@ -291,21 +291,6 @@ export function parseCookieHeader(header: string): Array<{ name: string; value: 
   return cookies;
 }
 
-export function sanitizeDiagnostic(value: string): string {
-  return value
-    .replace(/https?:\/\/[^\s"')]+/gi, (url) => {
-      try {
-        const parsed = new URL(url);
-        return `${parsed.origin}${parsed.pathname}`;
-      } catch {
-        return "[url-redacted]";
-      }
-    })
-    .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
-    .replace(/\b(sig|signature|token|se|sp|sv)=[^&\s]+/gi, "$1=[redacted]")
-    .slice(0, 500);
-}
-
 async function main(): Promise<void> {
   const args = parseLiveAcceptanceArgs(process.argv.slice(2));
   const productToken = secret("OPENGENI_ACCEPTANCE_PRODUCT_TOKEN");
@@ -1015,9 +1000,8 @@ export async function waitForSandboxLiveness(
       lastTransportError = undefined;
       if (accepted.has(capabilities.liveness)) return;
     } catch (error) {
-      lastTransportError = sanitizeDiagnostic(
-        error instanceof Error ? `${error.name}: ${error.message}` : String(error),
-      );
+      lastTransportError =
+        error instanceof Error ? `${error.name}: ${error.message}` : String(error);
     }
     const sleepMs = Math.min(pollIntervalMs, Math.max(0, deadline - Date.now()));
     if (sleepMs > 0) await Bun.sleep(sleepMs);
@@ -1865,12 +1849,11 @@ export async function runCaptureApiRegionalProbe(
     clearTimeout(timeout);
   }
   if (exitCode !== 0) {
-    const safe = sanitizeDiagnostic(stderr.replaceAll(request.cookieHeader, "[redacted]")).slice(
-      0,
-      512,
-    );
+    const detail = maskKnownPublicEvidenceValues(stderr, [request.cookieHeader])
+      .trim()
+      .slice(0, 2_048);
     throw new Error(
-      `capture API regional probe failed with exit code ${exitCode}${safe ? `: ${safe}` : ""}`,
+      `capture API regional probe failed with exit code ${exitCode}${detail ? `: ${detail}` : ""}`,
     );
   }
   let value: unknown;
@@ -1880,6 +1863,23 @@ export async function runCaptureApiRegionalProbe(
     throw new Error("capture API regional probe did not return one JSON object");
   }
   return validateCaptureApiRegionalProbeResult(value, request);
+}
+
+/**
+ * Mask exact values already known to this public CI/release evidence sink.
+ * This intentionally does not scan arbitrary OpenGeni content for patterns.
+ */
+export function maskKnownPublicEvidenceValues(
+  value: string,
+  knownSecretValues: readonly string[],
+): string {
+  const secrets = [...new Set(knownSecretValues.filter((candidate) => candidate.length > 0))].sort(
+    (left, right) => right.length - left.length,
+  );
+  return secrets.reduce(
+    (result, knownSecretValue) => result.replaceAll(knownSecretValue, "[masked]"),
+    value,
+  );
 }
 
 export function captureApiRegionalProbeEnvironment(
@@ -1988,7 +1988,7 @@ async function expectApiRejection(
     await operation();
   } catch (error) {
     if (error instanceof OpenGeniApiError && error.status === status) return;
-    throw new Error(`${label} failed unexpectedly: ${sanitizeDiagnostic(String(error))}`, {
+    throw new Error(`${label} failed unexpectedly: ${String(error)}`, {
       cause: error,
     });
   }
@@ -2026,10 +2026,10 @@ function observePage(page: Page): BrowserProblems {
   };
   page.on("console", (message) => {
     if (message.type() === "warning" || message.type() === "error") {
-      problems.console.push(sanitizeDiagnostic(message.text()));
+      problems.console.push(message.text());
     }
   });
-  page.on("pageerror", (error) => problems.page.push(sanitizeDiagnostic(String(error))));
+  page.on("pageerror", (error) => problems.page.push(String(error)));
   page.on("request", (request) => {
     const path = safePath(request.url());
     if (CHANNEL_A_PATH.test(path)) problems.channelA.push(path);
@@ -2038,7 +2038,7 @@ function observePage(page: Page): BrowserProblems {
     const path = safePath(request.url());
     const errorText = request.failure()?.errorText ?? "unknown request failure";
     if (isExpectedBrowserCancellation(path, errorText)) return;
-    problems.failedRequests.push(`${sanitizeDiagnostic(errorText)} ${path}`);
+    problems.failedRequests.push(`${errorText} ${path}`);
   });
   page.on("response", (response) => {
     if (response.status() >= 400) {

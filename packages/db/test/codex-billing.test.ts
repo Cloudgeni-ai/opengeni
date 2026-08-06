@@ -7,12 +7,12 @@ import {
   workspaceCodexSubscriptionActive,
 } from "../src/index";
 
-function poisonDatabase(message: string): Database {
+function poisonDatabase(failure: string | Error): Database {
   return new Proxy(
     {},
     {
       get() {
-        throw new Error(message);
+        throw typeof failure === "string" ? new Error(failure) : failure;
       },
     },
   ) as unknown as Database;
@@ -40,6 +40,51 @@ describe("workspaceCodexSubscriptionActive", () => {
     const poison = poisonDatabase("db must not be read when feature disabled");
     const settings = testSettings({ codexSubscriptionEnabled: false });
     expect(await workspaceCodexSubscriptionActive(poison, settings, "ws_1")).toBe(false);
+  });
+
+  test("rethrows the exact read failure while public console output stays structural", async () => {
+    const sentinel = "SECRET_SENTINEL_123";
+    const workspaceId = `workspace-${sentinel}`;
+    const SecretSentinelError = class SECRET_SENTINEL_123 extends Error {};
+    const exactError = Object.assign(new SecretSentinelError(`database failed ${sentinel}`), {
+      name: sentinel,
+      code: sentinel,
+      cause: { exact: sentinel },
+    });
+    const observed: Array<[unknown, unknown]> = [];
+    const originalError = console.error;
+    console.error = (message?: unknown, attributes?: unknown) => {
+      observed.push([message, attributes]);
+    };
+    let thrown: unknown;
+    try {
+      await workspaceCodexSubscriptionActive(
+        poisonDatabase(exactError),
+        testSettings({ codexSubscriptionEnabled: true }),
+        workspaceId,
+      );
+    } catch (error) {
+      thrown = error;
+    } finally {
+      console.error = originalError;
+    }
+
+    expect(thrown).toBe(exactError);
+    expect(exactError.message).toBe(`database failed ${sentinel}`);
+    expect(exactError.constructor.name).toBe(sentinel);
+    expect(exactError.code).toBe(sentinel);
+    expect(observed).toEqual([
+      [
+        "workspace Codex subscription credential read failed after retries",
+        {
+          errorClass: "CredentialReadOperationError",
+          errorCode: "codex_active_credential_read_failed",
+          origin: "db",
+        },
+      ],
+    ]);
+    expect(JSON.stringify(observed)).not.toContain(sentinel);
+    expect(JSON.stringify(observed)).not.toContain(workspaceId);
   });
 });
 

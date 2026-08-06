@@ -19,6 +19,7 @@ import {
   SCREENSHOT_READ_CHUNK_BYTES,
   type NativeDesktopSession,
 } from "../src/sandbox-computer";
+import { RoutingSandboxSession } from "../src/sandbox";
 import {
   KeyAction,
   PointerAction,
@@ -301,6 +302,34 @@ describe("SandboxComputer (P4.3 computer-use)", () => {
     ).toBeGreaterThanOrEqual(3);
   });
 
+  test("ROUTING-PROXY-FIX: an execCommand-only backend does not duplicate machine-parsed stdout", async () => {
+    const png = new Uint8Array(250_000);
+    for (let i = 0; i < png.length; i++) png[i] = (i * 31 + 7) & 0xff;
+    const { session, execCalls } = makeMockSession({ pngBytes: png });
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({
+        session: session as never,
+        sandboxId: null,
+        kind: "modal",
+      }),
+    });
+
+    // RoutingSandboxSession.exec() preserves the Modal banner body in both
+    // `output` and `stdout`. Screenshot parsing must select stdout once rather
+    // than feed the display-oriented aggregate into the strict integer parser.
+    const c = new SandboxComputer(proxy as never);
+    const shot = await c.screenshot();
+
+    expect(shot).toBe(Buffer.from(png).toString("base64"));
+    expect(
+      execCalls.filter(
+        (cmd) =>
+          cmd.includes("dd if=") && cmd.includes("/tmp/og-shot-") && cmd.includes("| base64"),
+      ).length,
+    ).toBe(3);
+  });
+
   // ── The exec-output-cap fix: a fully-painted 1280x800 desktop PNG (~222 KB) base64s
   // to ~296 KB, which trips Modal's exec-stdout buffer cap and silently returns "" from a
   // single `base64 <file>` — the blank-frame incident. The chunked read reconstructs the
@@ -428,7 +457,9 @@ describe("SandboxComputer (P4.3 computer-use)", () => {
         return formatted("", 75);
       },
     };
-    const c = new SandboxComputer(session as never, { screenshotReadbackTimeoutMs: 40 });
+    // Keep this far below the production 15s deadline while leaving enough event-loop
+    // headroom for the reserved cleanup admission under a loaded parallel test runner.
+    const c = new SandboxComputer(session as never, { screenshotReadbackTimeoutMs: 200 });
     const error = await c.screenshot().catch((value) => value);
     expect(error).toBeInstanceOf(ScreenshotReadError);
     expect((error as ScreenshotReadError).code).toBe("read_timeout");
@@ -556,11 +587,30 @@ describe("SandboxComputer (P4.3 computer-use)", () => {
     // computerCallNormalizingFetch is also in place as a second net. Non-zero exit
     // codes (true command errors) still throw — only the still-running case is
     // silenced. screenshot()'s fail-loud + retry contract is preserved.
+    const sentinel = "synthetic-command-text-123456";
+    const warnings: unknown[][] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => warnings.push(args);
     const { session } = makeMockSession({ stillRunning: true });
     const c = new SandboxComputer(session as never);
-    // move() must RESOLVE (not reject) so the SDK action loop exits cleanly and
+    // type() must RESOLVE (not reject) so the SDK action loop exits cleanly and
     // screenshot() is called afterward.
-    await expect(c.move(5, 5)).resolves.toBeUndefined();
+    try {
+      await expect(c.type(sentinel)).resolves.toBeUndefined();
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(warnings).toEqual([
+      [
+        "[SandboxComputer] action command did not finish before the yield window; proceeding to screenshot",
+        {
+          errorClass: "ComputerActionTimeoutError",
+          errorCode: "command_yield_timeout",
+          origin: "sandbox-computer",
+        },
+      ],
+    ]);
+    expect(JSON.stringify(warnings)).not.toContain(sentinel);
   });
 
   test("F5: scroll converts model pixel deltas to clamped wheel notches (not literal repeat counts)", async () => {
@@ -974,19 +1024,74 @@ describe("NativeDesktopComputer (self-hosted / macOS native inject+capture)", ()
   });
 
   test("BLANK-SCREENSHOT FIX: a permission (TCC) denial FAILS FAST and loud — no retry, no blank", async () => {
-    const denial = new Error("Screen Recording permission is not granted");
+    const sentinel = "synthetic-screen-recording-denial-123456";
+    const denial = new Error(`Screen Recording permission is not granted: ${sentinel}`);
+    const warnings: unknown[][] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => warnings.push(args);
     const { session, attempts } = makeNativeSession({ throwPerAttempt: [denial] });
     const c = new NativeDesktopComputer(session, FAST_WARMUP);
-    const result = await c.screenshot().then(
-      (s) => ({ ok: true as const, s }),
-      (e) => ({ ok: false as const, e }),
-    );
+    const result = await c
+      .screenshot()
+      .then(
+        (s) => ({ ok: true as const, s }),
+        (e) => ({ ok: false as const, e }),
+      )
+      .finally(() => {
+        console.warn = originalWarn;
+      });
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("a denied capture must throw, never resolve to a blank");
     // The AGENT's reason is surfaced verbatim (operator sees "grant Screen Recording").
     expect((result.e as Error).message).toContain("Screen Recording");
+    expect((result.e as Error).message).toContain(sentinel);
+    expect(JSON.stringify(warnings)).not.toContain(sentinel);
+    expect(warnings[0]?.[1]).toEqual({
+      errorClass: "ComputerUnavailableError",
+      errorCode: "screenshot_capture_failed",
+      origin: "sandbox-computer",
+    });
     // Terminal denial short-circuits the warm-up budget — exactly ONE attempt.
     expect(attempts()).toBe(1);
+  });
+
+  test("screenshot public status projection tolerates hostile proxies and rethrows the exact failure", async () => {
+    const sentinel = "synthetic-screenshot-hostile-status-proxy-123456";
+    const source = new Error(`Screen Recording permission is not granted: ${sentinel}`);
+    const exactFailure = new Proxy(source, {
+      get(target, property, receiver) {
+        if (property === "status" || property === "statusCode") {
+          throw new Error(`hostile public status getter: ${sentinel}`);
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const warnings: unknown[][] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => warnings.push(args);
+    const { session, attempts } = makeNativeSession({ throwPerAttempt: [exactFailure] });
+    const computer = new NativeDesktopComputer(session, FAST_WARMUP);
+    try {
+      const result = await computer.screenshot().then(
+        () => null,
+        (error) => error,
+      );
+      expect(result).toBe(exactFailure);
+      expect(attempts()).toBe(1);
+      expect(warnings).toEqual([
+        [
+          "[NativeDesktopComputer] screenshot failed after the capture retry budget",
+          {
+            errorClass: "ComputerUnavailableError",
+            errorCode: "screenshot_capture_failed",
+            origin: "sandbox-computer",
+          },
+        ],
+      ]);
+      expect(JSON.stringify(warnings)).not.toContain(sentinel);
+    } finally {
+      console.warn = originalWarn;
+    }
   });
 
   test("readOnly blocks every write but screenshot is always allowed", async () => {

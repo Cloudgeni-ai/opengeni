@@ -388,12 +388,12 @@ domain (commonly the intersection or root-session policy), decline delivery, or
 place differently trusted sessions in separate sandbox groups. OpenGeni never
 claims that `/tmp` path separation protects one same-user process from another.
 
-Environment values are automatically registered with event-output redaction.
-When a credential file embeds atomic secrets (for example a bearer inside a
-kubeconfig), the host must also return those values through `redactions`; this
-lets OpenGeni redact chunked command output without understanding provider file
-formats. `auth_needed` can coexist with usable material and becomes both bounded
-model context and a structured `credential.auth_needed` reconnect card.
+OpenGeni does not register environment or credential-file values for output
+rewriting. Accepted model, tool, event, history, failure, and diagnostic content
+remains exact even when it contains configured-secret-shaped text. Hosts should
+return only the materialization and renewal facts required by the run;
+`auth_needed` can coexist with usable material and becomes both bounded model
+context and a structured `credential.auth_needed` reconnect card.
 
 The box-global websocket `ttyd` server remains credential-free because one box
 may be shared by several sessions. Session-scoped terminal exec and PTY calls do

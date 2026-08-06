@@ -345,9 +345,17 @@ describe("OpenGeniClient scheduled tasks", () => {
 });
 
 describe("OpenGeniClient variable sets", () => {
-  test("variable set CRUD + write-only variable PUT/DELETE", async () => {
-    const { client, requests } = makeClient(() =>
-      jsonResponse({ id: ENVIRONMENT_ID, variables: [] }),
+  test("variable set CRUD + dedicated value read/PUT/DELETE", async () => {
+    const exactValue = `const fake = "ghp_not_a_credential";\nprintf '%s\\n' "$VALUE"`;
+    const { client, requests } = makeClient((request) =>
+      new URL(request.url).pathname.endsWith("/variables/EXAMPLE_TOKEN") && request.method === "GET"
+        ? jsonResponse({
+            variableSetId: ENVIRONMENT_ID,
+            name: "EXAMPLE_TOKEN",
+            value: exactValue,
+            version: 2,
+          })
+        : jsonResponse({ id: ENVIRONMENT_ID, variables: [] }),
     );
     await client.listVariableSets(WORKSPACE_ID);
     await client.createVariableSet(WORKSPACE_ID, {
@@ -355,6 +363,14 @@ describe("OpenGeniClient variable sets", () => {
       variables: [{ name: "EXAMPLE_TOKEN", value: "v" }],
     });
     await client.getVariableSet(WORKSPACE_ID, ENVIRONMENT_ID);
+    expect(
+      await client.getVariableSetVariable(WORKSPACE_ID, ENVIRONMENT_ID, "EXAMPLE_TOKEN"),
+    ).toEqual({
+      variableSetId: ENVIRONMENT_ID,
+      name: "EXAMPLE_TOKEN",
+      value: exactValue,
+      version: 2,
+    });
     await client.updateVariableSet(WORKSPACE_ID, ENVIRONMENT_ID, { description: "staging vars" });
     await client.setVariableSetVariable(WORKSPACE_ID, ENVIRONMENT_ID, "EXAMPLE_TOKEN", "v2");
     await client.deleteVariableSetVariable(WORKSPACE_ID, ENVIRONMENT_ID, "EXAMPLE_TOKEN");
@@ -364,6 +380,7 @@ describe("OpenGeniClient variable sets", () => {
         `GET /v1/workspaces/${WORKSPACE_ID}/variable-sets`,
         `POST /v1/workspaces/${WORKSPACE_ID}/variable-sets`,
         `GET /v1/workspaces/${WORKSPACE_ID}/variable-sets/${ENVIRONMENT_ID}`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/variable-sets/${ENVIRONMENT_ID}/variables/EXAMPLE_TOKEN`,
         `PATCH /v1/workspaces/${WORKSPACE_ID}/variable-sets/${ENVIRONMENT_ID}`,
         `PUT /v1/workspaces/${WORKSPACE_ID}/variable-sets/${ENVIRONMENT_ID}/variables/EXAMPLE_TOKEN`,
         `DELETE /v1/workspaces/${WORKSPACE_ID}/variable-sets/${ENVIRONMENT_ID}/variables/EXAMPLE_TOKEN`,
@@ -371,7 +388,7 @@ describe("OpenGeniClient variable sets", () => {
       ],
     );
     // The variable PUT sends only the value; nothing else carries the secret.
-    expect(JSON.parse(requests[4]!.body!)).toEqual({ value: "v2" });
+    expect(JSON.parse(requests[5]!.body!)).toEqual({ value: "v2" });
   });
 
   test("deprecated environment method names delegate to the canonical variable-set paths", async () => {

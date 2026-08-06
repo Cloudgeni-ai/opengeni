@@ -73,6 +73,42 @@ describe("Codex capacity availability diagnostics", () => {
     });
   });
 
+  test("rotation-off capped active account stays unavailable despite a healthy alternate", () => {
+    const resetAt = new Date("2100-01-01T00:00:00.000Z");
+    const context: CodexCapacitySelectionContext = {
+      accounts: [
+        account("active-capped", { primaryUsedPercent: 100, primaryResetAt: resetAt }),
+        account("healthy-alternate"),
+      ],
+      activeCredentialId: "active-capped",
+      rotationEnabled: false,
+      leaseRotationEnabled: false,
+      rotationStrategy: "sharded",
+      existingCredentialId: null,
+      policyScope: null,
+      unavailableDiagnostics: [],
+      sessionId: "session-rotation-off",
+      sessionPinnedCredentialId: null,
+      sessionPinSource: null,
+      sessionLastCredentialId: null,
+      policyHash: null,
+    };
+
+    expect(
+      codexCapacityDecision(
+        context,
+        testSettings({
+          codexCredentialLeasingEnabled: true,
+        }),
+      ),
+    ).toMatchObject({
+      kind: "unavailable",
+      earliestResetAt: resetAt,
+      resetKind: "authoritative",
+      diagnostic: { connectedCount: 2, allocatorEnabledCount: 2 },
+    });
+  });
+
   test("committed capacity targets prefer typed signals and retain generic outbox delivery", async () => {
     const target = {
       accountId: "account",

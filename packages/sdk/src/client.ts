@@ -208,6 +208,7 @@ import type {
   SetWorkspaceDefaultRigRequest,
   UploadFileInput,
   VariableSet,
+  VariableSetSecret,
   VariableSetVariableMetadata,
   Rig,
   RigVersion,
@@ -390,8 +391,12 @@ export class OpenGeniClient {
       input.audio instanceof File
         ? input.audio
         : input.audio instanceof Uint8Array
-          ? new File([Uint8Array.from(input.audio)], filename, { type: input.mimeType })
-          : new File([input.audio], filename, { type: input.mimeType || input.audio.type });
+          ? new File([Uint8Array.from(input.audio)], filename, {
+              type: input.mimeType,
+            })
+          : new File([input.audio], filename, {
+              type: input.mimeType || input.audio.type,
+            });
     form.append("audio", audio, filename);
     form.append("mimeType", input.mimeType);
     if (input.durationSeconds !== undefined) {
@@ -401,7 +406,10 @@ export class OpenGeniClient {
     try {
       response = await this.fetchImpl(this.url(`/v1/workspaces/${workspaceId}/transcriptions`), {
         method: "POST",
-        headers: { ...this.headers(correlationId), Accept: "application/json" },
+        headers: {
+          ...this.headers(correlationId),
+          Accept: "application/json",
+        },
         body: form,
         ...(input.signal ? { signal: input.signal } : {}),
       });
@@ -410,7 +418,11 @@ export class OpenGeniClient {
       throw mutationTransportError(correlationId);
     }
     assertApiContractResponse(response);
-    if (!response.ok) throw await apiErrorFromResponse(response, { method: "POST", correlationId });
+    if (!response.ok)
+      throw await apiErrorFromResponse(response, {
+        method: "POST",
+        correlationId,
+      });
     await assertJsonResponse(response, { method: "POST", correlationId });
     let body: unknown;
     try {
@@ -514,7 +526,11 @@ export class OpenGeniClient {
       throw mutationTransportError(correlationId);
     }
     assertApiContractResponse(response);
-    if (!response.ok) throw await apiErrorFromResponse(response, { method: "PUT", correlationId });
+    if (!response.ok)
+      throw await apiErrorFromResponse(response, {
+        method: "PUT",
+        correlationId,
+      });
     await assertJsonResponse(response, { method: "PUT", correlationId });
     const body = await response.json().catch(() => null);
     if (!isUploadTranscriptionRecordingChunkResponse(body)) {
@@ -918,7 +934,9 @@ export class OpenGeniClient {
 
   /** Newest turn that durably emitted `turn.started`, or null before any admission. */
   async getLatestStartedTurn(workspaceId: string, sessionId: string): Promise<SessionTurn | null> {
-    const turns = await this.listTurns(workspaceId, sessionId, { latestStarted: true });
+    const turns = await this.listTurns(workspaceId, sessionId, {
+      latestStarted: true,
+    });
     return turns[0] ?? null;
   }
 
@@ -1504,7 +1522,11 @@ export class OpenGeniClient {
   async cancelSession(
     workspaceId: string,
     sessionId: string,
-    options: { reason?: string; clientEventId?: string; expectedControlEtag?: string } = {},
+    options: {
+      reason?: string;
+      clientEventId?: string;
+      expectedControlEtag?: string;
+    } = {},
   ): Promise<SessionControlResponse> {
     return await this.controlSession(workspaceId, sessionId, {
       action: "cancel",
@@ -2517,7 +2539,8 @@ export class OpenGeniClient {
   }
 
   // --- VariableSets --------------------------------------------------------------
-  // Variable values are write-only: reads return name/version metadata only.
+  // Generic reads return name/version metadata only. Plaintext uses one
+  // dedicated permissioned endpoint.
 
   async listVariableSets(workspaceId: string): Promise<VariableSet[]> {
     return await this.requestJson<VariableSet[]>(
@@ -2544,6 +2567,17 @@ export class OpenGeniClient {
     );
   }
 
+  async getVariableSetVariable(
+    workspaceId: string,
+    variableSetId: string,
+    name: string,
+  ): Promise<VariableSetSecret> {
+    return await this.requestJson<VariableSetSecret>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/variable-sets/${variableSetId}/variables/${encodeURIComponent(name)}`,
+    );
+  }
+
   async updateVariableSet(
     workspaceId: string,
     variableSetId: string,
@@ -2563,7 +2597,7 @@ export class OpenGeniClient {
     );
   }
 
-  /** Create or rotate a variable. The value never comes back on any read. */
+  /** Create or rotate a variable. Generic reads never return its value. */
   async setVariableSetVariable(
     workspaceId: string,
     variableSetId: string,
@@ -3901,7 +3935,12 @@ function isUploadTranscriptionRecordingChunkResponse(
 ): value is UploadTranscriptionRecordingChunkResponse {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
-  if (!isTranscriptionRecordingResponse({ recording: record.recording, segments: [] })) {
+  if (
+    !isTranscriptionRecordingResponse({
+      recording: record.recording,
+      segments: [],
+    })
+  ) {
     return false;
   }
   if (!record.chunk || typeof record.chunk !== "object" || Array.isArray(record.chunk)) {

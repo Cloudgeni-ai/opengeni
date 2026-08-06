@@ -1082,11 +1082,14 @@ describe("connections routes", () => {
       expect(errors).toHaveLength(1);
       expect(errors[0]).toMatchObject({
         message: "MCP OAuth callback failed",
-        "opengeni.oauth.stage": "token_exchange",
-        "opengeni.oauth.reason": "invalid_client",
-        "opengeni.oauth.provider_domain": "mcp.example.com",
-        "opengeni.oauth.client_registration_method": "cimd",
+        errorClass: "OAuthOperationError",
+        errorCode: "oauth_operation_failed",
+        origin: "oauth",
       });
+      expect(JSON.stringify(errors)).not.toContain("token_exchange");
+      expect(JSON.stringify(errors)).not.toContain("invalid_client");
+      expect(JSON.stringify(errors)).not.toContain("mcp.example.com");
+      expect(JSON.stringify(errors)).not.toContain("cimd");
       expect(JSON.stringify(errors)).not.toContain(verifier);
       expect(JSON.stringify(errors)).not.toContain("abc");
     } finally {

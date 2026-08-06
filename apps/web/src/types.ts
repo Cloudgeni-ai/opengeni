@@ -99,6 +99,7 @@ export type {
   Workspace,
   WorkspaceEnvironment,
   VariableSet,
+  VariableSetSecret,
   VariableSetVariableMetadata,
   WorkspaceEnvironmentVariableMetadata,
   WorkspaceMember,
@@ -108,6 +109,7 @@ export type {
 } from "@opengeni/sdk";
 
 export type WorkspaceVariableSet = VariableSet;
+export type WorkspaceVariableSetSecret = VariableSetSecret;
 export type WorkspaceVariableSetVariableMetadata = VariableSetVariableMetadata;
 export type { CreateCapabilityCatalogItemRequest as CreateCapabilityInput } from "@opengeni/sdk";
 import type {
@@ -118,6 +120,7 @@ import type {
   SandboxBackend,
   ToolRef,
   VariableSet,
+  VariableSetSecret,
   VariableSetVariableMetadata,
 } from "@opengeni/sdk";
 export type { ClientModel } from "@opengeni/sdk";

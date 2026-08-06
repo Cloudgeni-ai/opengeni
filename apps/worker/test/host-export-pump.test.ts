@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import type { HostEventExportBatch } from "@opengeni/contracts";
+import { sql } from "drizzle-orm";
 import {
   appendSessionEvents,
   bootstrapWorkspace,
@@ -10,9 +11,11 @@ import {
   getHostExportConsumerStatus,
   HostExportPayloadError,
   initializeSessionStartAtomically,
+  LOSSLESS_TEXT_PREFIX,
   resumeHostExportConsumer,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { createObservability } from "@opengeni/observability";
 import { createHostExportPump } from "../src/host-export-pump";
 
 let shared: SharedTestDatabase;
@@ -78,6 +81,148 @@ async function eventually(predicate: () => Promise<boolean>, timeoutMs = 5_000):
 }
 
 describe("host export pump", () => {
+  test("stores the exact sink failure while public logs stay structural", async () => {
+    const target = await fixture("exact-last-error");
+    const sentinel = "HOST_EXPORT_PUBLIC_BOUNDARY_SENTINEL_64c9ef";
+    const nul = String.fromCharCode(0);
+    const loneHigh = String.fromCharCode(0xd800);
+    const loneLow = String.fromCharCode(0xdc00);
+    const exactMessage = [
+      `sink response ${sentinel}`,
+      `X-Synthetic-Header: ${sentinel}`,
+      `https://provider.example/failure?synthetic=${sentinel}`,
+      `nul:${nul}:end`,
+      `lone-high:${loneHigh}:end`,
+      `lone-low:${loneLow}:end`,
+      `active-prefix:${LOSSLESS_TEXT_PREFIX}:end`,
+      "x".repeat(800),
+    ].join("\n");
+    const exactError = Object.assign(new Error(exactMessage), {
+      name: sentinel,
+      code: sentinel,
+      responseBody: { sentinel },
+    });
+    const consumerId = `pump-exact-${crypto.randomUUID()}`;
+    const warnings: unknown[][] = [];
+    const errors: unknown[][] = [];
+    const originalWarn = console.warn;
+    const originalError = console.error;
+    console.warn = (...args: unknown[]) => warnings.push(args);
+    console.error = (...args: unknown[]) => errors.push(args);
+    const pump = createHostExportPump({
+      db: exporter.db,
+      eventSink: {
+        consumerId,
+        deliverEvents: async () => {
+          throw exactError;
+        },
+      },
+      observability: createObservability(
+        {
+          serviceName: "opengeni",
+          environment: "test",
+          observabilityStructuredLogs: true,
+          observabilityMetricsEnabled: false,
+          observabilityOtlpHeaders: "",
+        },
+        { component: "worker" },
+      ),
+      pollIntervalMs: 25,
+      batchLimit: 1,
+      maxFailures: 1,
+    });
+    try {
+      await pump.start();
+      await appendSessionEvents(app.db, target.grant.workspaceId!, target.session.id, [
+        {
+          type: "agent.message.completed",
+          payload: { text: "trigger exact sink failure" },
+          turnId: target.turn.id,
+        },
+      ]);
+      await eventually(async () => {
+        const status = await pump.status("session_event");
+        return status?.blockedAt !== null && status?.lastError === exactMessage;
+      });
+      const status = await pump.status("session_event");
+      expect(status?.lastError).toBe(exactMessage);
+      expect(status?.lastError?.length).toBeGreaterThan(500);
+      const [stored] = await shared.admin<
+        Array<{ lastError: string; lastErrorCodecVersion: number | null }>
+      >`
+        select last_error as "lastError",
+               last_error_codec_version as "lastErrorCodecVersion"
+        from host_export_consumers
+        where export_kind = 'session_event' and consumer_id = ${consumerId}
+      `;
+      expect(stored?.lastErrorCodecVersion).toBe(1);
+      expect(stored?.lastError).toContain(LOSSLESS_TEXT_PREFIX);
+      expect(stored?.lastError).not.toBe(exactMessage);
+    } finally {
+      await pump.stop();
+      console.warn = originalWarn;
+      console.error = originalError;
+    }
+
+    await resumeHostExportConsumer(exporter.db, {
+      kind: "session_event",
+      consumerId,
+    });
+    expect(
+      (
+        await getHostExportConsumerStatus(exporter.db, {
+          kind: "session_event",
+          consumerId,
+        })
+      )?.lastError,
+    ).toBeNull();
+
+    const oldWriterLeaseToken = crypto.randomUUID();
+    const oldWriterBatch = await claimHostExportBatch(exporter.db, {
+      kind: "session_event",
+      consumerId,
+      leaseToken: oldWriterLeaseToken,
+      leaseHolderId: "synthetic-old-host-export-writer",
+      limit: 1,
+    });
+    expect(oldWriterBatch).not.toBeNull();
+    const validActiveMarkerLiteral = ` ${LOSSLESS_TEXT_PREFIX}0041; `;
+    await exporter.db.execute(sql`
+      select opengeni_host_export.fail_host_export_batch(
+        'session_event', ${consumerId}, ${oldWriterLeaseToken}::uuid,
+        ${validActiveMarkerLiteral}, 1
+      )
+    `);
+    expect(
+      (
+        await getHostExportConsumerStatus(exporter.db, {
+          kind: "session_event",
+          consumerId,
+        })
+      )?.lastError,
+    ).toBe(validActiveMarkerLiteral);
+    const [oldWriterStored] = await shared.admin<
+      Array<{ lastError: string; lastErrorCodecVersion: number | null }>
+    >`
+      select last_error as "lastError",
+             last_error_codec_version as "lastErrorCodecVersion"
+      from host_export_consumers
+      where export_kind = 'session_event' and consumer_id = ${consumerId}
+    `;
+    expect(oldWriterStored).toEqual({
+      lastError: validActiveMarkerLiteral,
+      lastErrorCodecVersion: null,
+    });
+    await pump.retire("session_event");
+
+    const renderedLogs = JSON.stringify([...warnings, ...errors]);
+    expect(renderedLogs).toContain("HostExportOperationError");
+    expect(renderedLogs).toContain("host_export_batch_delivery_failed");
+    expect(renderedLogs).not.toContain(sentinel);
+    expect(renderedLogs).not.toContain(consumerId);
+    expect(exactError.message).toBe(exactMessage);
+  });
+
   test("registers, drains, acknowledges, and blocks a repeatedly failing sink", async () => {
     const delivered: HostEventExportBatch[] = [];
     const pump = createHostExportPump({
@@ -239,5 +384,19 @@ describe("host export pump", () => {
         reason: "explicit malformed-envelope disposition",
       }),
     ).toBe(poisonCursor);
+    expect(
+      (
+        await getHostExportConsumerStatus(exporter.db, {
+          kind: "usage_event",
+          consumerId: "pump-poison",
+        })
+      )?.lastError,
+    ).toBe("dead-lettered: explicit malformed-envelope disposition");
+    const [deadLetterStatus] = await shared.admin<Array<{ lastErrorCodecVersion: number | null }>>`
+      select last_error_codec_version as "lastErrorCodecVersion"
+      from host_export_consumers
+      where export_kind = 'usage_event' and consumer_id = 'pump-poison'
+    `;
+    expect(deadLetterStatus?.lastErrorCodecVersion).toBeNull();
   });
 });

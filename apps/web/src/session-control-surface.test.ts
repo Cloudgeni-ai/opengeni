@@ -14,6 +14,12 @@ describe("session control surface architecture", () => {
     expect(route.indexOf("<SessionChrome")).toBeLessThan(route.indexOf("<ConsoleComposer"));
   });
 
+  test("wires the authenticated retained screenshot loader into the production timeline", async () => {
+    const route = await source("routes/session.tsx");
+    expect(route).toContain("createSessionRetainedScreenshotLoader(");
+    expect(route).toContain("loadRetainedScreenshot={loadRetainedScreenshot}");
+  });
+
   test("has no second Agents home in the header or dock", async () => {
     const [header, lineage, route] = await Promise.all([
       source("components/rail/session-header.tsx"),

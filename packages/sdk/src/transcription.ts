@@ -159,7 +159,7 @@ export type TranscriptionResultMetadata = {
 export type TranscriptionDiagnostic = {
   operation: "start" | "session" | "cancel" | "close";
   code: TranscriptionErrorCode;
-  /** Diagnostic-only detail. React sanitizes and bounds this before forwarding it. */
+  /** Exact diagnostic detail forwarded by React without content rewriting. */
   detail: string;
 };
 
@@ -231,7 +231,7 @@ export type TranscriptionEventListener = (event: TranscriptionEvent) => void;
 export type TranscriptionAdapterStartContext = {
   /** Aborted on local cancellation, policy replacement, timeout, or unmount. */
   signal: AbortSignal;
-  /** Non-UI observability seam; callers receive only bounded, redacted detail. */
+  /** Non-UI observability seam; callers receive the exact provider detail. */
   reportDiagnostic: (diagnostic: TranscriptionDiagnostic) => void;
 };
 

@@ -3,6 +3,7 @@ import { type EstablishedSandboxSession, SandboxExecReadinessError } from "@open
 import {
   SandboxWarmingTimeoutError,
   isRetryableDegradedRestore,
+  safeSnapshotError,
   waitForSandboxExecReadiness,
   waitForWarmSnapshot,
 } from "../src/sandbox-resume";
@@ -77,6 +78,46 @@ describe("sandbox exec readiness", () => {
 });
 
 describe("workspace snapshot cancellation", () => {
+  test("public snapshot diagnostics omit exact provider content", () => {
+    const sentinel = "synthetic-snapshot-provider-value-123456";
+    const error = Object.assign(new Error(`snapshot failed: ${sentinel}`), {
+      name: sentinel,
+      code: sentinel,
+      status: 503,
+      responseBody: sentinel,
+    });
+
+    expect(safeSnapshotError(error)).toEqual({
+      errorClass: "SnapshotOperationError",
+      errorCode: "snapshot_operation_failed",
+      status: 503,
+      origin: "sandbox-resume",
+    });
+    expect(error.message).toContain(sentinel);
+    expect(JSON.stringify(safeSnapshotError(error))).not.toContain(sentinel);
+  });
+
+  test("public snapshot status projection tolerates hostile proxies", () => {
+    const sentinel = "synthetic-snapshot-hostile-status-123456";
+    const source = new Error(`snapshot failed: ${sentinel}`);
+    const hostile = new Proxy(source, {
+      get(target, property, receiver) {
+        if (property === "status" || property === "statusCode") {
+          throw new Error(`hostile snapshot status getter: ${sentinel}`);
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+
+    expect(safeSnapshotError(hostile)).toEqual({
+      errorClass: "SnapshotOperationError",
+      errorCode: "snapshot_operation_failed",
+      origin: "sandbox-resume",
+    });
+    expect(source.message).toContain(sentinel);
+    expect(JSON.stringify(safeSnapshotError(hostile))).not.toContain(sentinel);
+  });
+
   test("Steer/Pause preempts an in-flight snapshot wait instead of paying its timeout", async () => {
     const controller = new AbortController();
     const startedAt = performance.now();

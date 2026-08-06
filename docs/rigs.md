@@ -37,7 +37,7 @@ A rig version's `defaultVariableSetIds` are decrypted and merged in listed order
 deployment allowlist < git identity < rig default variable sets < workspace variable set < run-scoped GitHub auth
 ```
 
-A later entry wins on a name collision, so a session's own variable-set attachment always overrides a rig default with the same variable name. See [`variable-sets.md`](variable-sets.md) for the rest of that layering (redaction, reserved names, the managed-sandbox-only scope).
+A later entry wins on a name collision, so a session's own variable-set attachment always overrides a rig default with the same variable name. See [`variable-sets.md`](variable-sets.md) for the rest of that layering (permissioned secret access, exact content, reserved names, and the managed-sandbox-only scope).
 
 ### Agent-visible doctrine
 

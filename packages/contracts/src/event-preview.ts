@@ -1,10 +1,10 @@
 /**
- * Canonical bounded representation for `session_events.payload`.
+ * Canonical bounded representation for explicit session-event previews.
  *
- * Session events are the lossy human/audit projection, not model memory and not
- * an evidence blob store. This helper keeps that projection useful while making
- * the loss explicit. It deliberately has no server-only dependency so the DB,
- * realtime transports, SDK/React, and tests can share one wire contract.
+ * Canonical session-event payloads are stored in full. This helper derives a
+ * bounded monitoring/public projection without writing that projection back
+ * over canonical data. It deliberately has no server-only dependency so the
+ * DB, realtime transports, SDK/React, and tests can share one wire contract.
  */
 
 import {
@@ -184,7 +184,7 @@ export function sessionEventPayloadTruncation(
 }
 
 /**
- * Return a byte-bounded audit payload. Unchanged ordinary payloads retain their
+ * Return a byte-bounded preview payload. Unchanged ordinary payloads retain their
  * reference. Oversized strings/containers get deterministic head+tail previews;
  * inline images/binary values become metadata because `session_events` does not
  * durably retain their source bytes as independently retrievable evidence.

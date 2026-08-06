@@ -256,7 +256,7 @@ export function MemoryPane({
     setCreating(true);
     try {
       // No explicit status ⇒ the server's active default, routed through the one
-      // write gate (dedup, sanitize, redact).
+      // validation/deduplication write gate without rewriting accepted content.
       const created = await client.createKnowledgeMemory(workspaceId, { text, kind: draftKind });
       setDraftText("");
       setAdding(false);

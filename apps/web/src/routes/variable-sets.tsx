@@ -1,12 +1,16 @@
 // Variable sets: named, workspace-scoped sets of secret variables that the
 // worker decrypts and injects into the sandbox as variable set variables at
-// session start. Values are write-only by design — set or rotate, never read.
+// session start. Generic reads are metadata-only; an explicitly permissioned
+// and audited endpoint reveals one value on demand.
 import { useVariableSets, useScheduledTasks, useWorkspaceSessions } from "@opengeni/react";
 import { Link } from "@tanstack/react-router";
 import {
   BoxIcon,
   CheckIcon,
   ChevronDownIcon,
+  CopyIcon,
+  EyeIcon,
+  EyeOffIcon,
   KeyRoundIcon,
   Loader2Icon,
   PencilIcon,
@@ -14,7 +18,7 @@ import {
   RefreshCwIcon,
   Trash2Icon,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { LoadErrorState, PageHeader } from "@/components/common";
@@ -28,12 +32,33 @@ import { Label } from "@/components/ui/label";
 import { MetaChip } from "@/components/ui/meta-chip";
 import { Notice } from "@/components/ui/notice";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useAppContext } from "@/context";
 import { formatTimestamp } from "@/lib/format";
 import { listViewState } from "@/lib/load-state";
-import type { ScheduledTask, Session, WorkspaceVariableSet } from "@/types";
+import { hasWorkspacePermission } from "@/lib/permissions";
+import type {
+  ScheduledTask,
+  Session,
+  WorkspaceVariableSet,
+  WorkspaceVariableSetSecret,
+} from "@/types";
 
 export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
-  const variableSets = useVariableSets();
+  const context = useAppContext();
+  const canList =
+    hasWorkspacePermission(context.accessContext, workspaceId, "variable-sets:list") &&
+    hasWorkspacePermission(context.accessContext, workspaceId, "secrets:list");
+  const canWriteSet = hasWorkspacePermission(
+    context.accessContext,
+    workspaceId,
+    "variable-sets:write",
+  );
+  const canWriteSecrets =
+    canWriteSet && hasWorkspacePermission(context.accessContext, workspaceId, "secrets:write");
+  const canReadSecrets =
+    hasWorkspacePermission(context.accessContext, workspaceId, "variable-sets:read") &&
+    hasWorkspacePermission(context.accessContext, workspaceId, "secrets:read");
+  const variableSets = useVariableSets({ enabled: canList });
   // Attachment views: which sessions and scheduled tasks carry each variableSet.
   const {
     sessions,
@@ -52,6 +77,7 @@ export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
   const [createOpen, setCreateOpen] = useState(false);
   const [createName, setCreateName] = useState("");
   const [createDescription, setCreateDescription] = useState("");
+  const [revealEpoch, setRevealEpoch] = useState(0);
   // Honest list state: a failed load renders as an error with retry, never as
   // the "No variable sets yet…" empty state.
   const variableSetsView = listViewState({
@@ -87,14 +113,17 @@ export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
       <PageHeader
         icon={<BoxIcon className="size-4" />}
         title="Variable sets"
-        description="Named secret sets injected into the sandbox as environment variables at session start. Values are write-only: set or rotate them here; nothing ever reads them back."
+        description="Named secrets injected into sandboxes at session start. Values stay encrypted at rest; explicitly permissioned reads reveal one value on demand and are audited."
         actions={
           <>
             <Button
               type="button"
               variant="ghost"
               size="sm"
-              onClick={() => void variableSets.refresh()}
+              onClick={() => {
+                setRevealEpoch((current) => current + 1);
+                void variableSets.refresh();
+              }}
               disabled={variableSets.loading}
               className="h-9 pointer-coarse:min-h-10"
             >
@@ -103,20 +132,26 @@ export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
               />
               Refresh
             </Button>
-            <Button
-              type="button"
-              size="sm"
-              onClick={() => setCreateOpen((open) => !open)}
-              className="h-9 pointer-coarse:min-h-10"
-            >
-              <PlusIcon className="size-3.5" />
-              New variable set
-            </Button>
+            {canWriteSet ? (
+              <Button
+                type="button"
+                size="sm"
+                onClick={() => setCreateOpen((open) => !open)}
+                className="h-9 pointer-coarse:min-h-10"
+              >
+                <PlusIcon className="size-3.5" />
+                New variable set
+              </Button>
+            ) : null}
           </>
         }
       />
 
-      {createOpen ? (
+      {!canList ? (
+        <div className="mt-5">
+          <Notice tone="info">You don&apos;t have permission to list variable sets.</Notice>
+        </div>
+      ) : createOpen && canWriteSet ? (
         <div className="mt-4 grid gap-3 rounded-lg border border-border bg-surface p-3 sm:grid-cols-[14rem_minmax(0,1fr)_auto]">
           <div className="grid gap-1.5">
             <Label htmlFor="variableSet-name">Name</Label>
@@ -162,7 +197,7 @@ export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
       ) : null}
 
       <div className="mt-5 grid gap-3">
-        {variableSetsView === "loading" ? (
+        {!canList ? null : variableSetsView === "loading" ? (
           <>
             {[0, 1].map((key) => (
               <div key={key} className="rounded-lg border border-border bg-surface/45 p-3">
@@ -189,10 +224,12 @@ export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
             title="No variable sets yet"
             description="Create one to give sessions and scheduled tasks credentials without pasting secrets into prompts."
             action={
-              <Button type="button" size="sm" onClick={() => setCreateOpen(true)}>
-                <PlusIcon className="size-3.5" />
-                New variable set
-              </Button>
+              canWriteSet ? (
+                <Button type="button" size="sm" onClick={() => setCreateOpen(true)}>
+                  <PlusIcon className="size-3.5" />
+                  New variable set
+                </Button>
+              ) : undefined
             }
           />
         ) : (
@@ -207,6 +244,10 @@ export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
               attachedTasks={tasks.filter((task) => task.variableSetId === variableSet.id)}
               attachmentsUnknown={attachmentsUnknown}
               mutating={variableSets.mutating}
+              canWriteSet={canWriteSet}
+              canWriteSecrets={canWriteSecrets}
+              canReadSecrets={canReadSecrets}
+              revealEpoch={revealEpoch}
               onUpdate={(patch) => variableSets.update(variableSet.id, patch)}
               onDelete={async () => {
                 const removed = await variableSets.remove(variableSet.id);
@@ -215,6 +256,7 @@ export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
                 }
                 return removed;
               }}
+              onReadVariable={(name) => variableSets.readVariable(variableSet.id, name)}
               onSetVariable={(name, value) => variableSets.setVariable(variableSet.id, name, value)}
               onDeleteVariable={(name) => variableSets.deleteVariable(variableSet.id, name)}
             />
@@ -249,11 +291,16 @@ export function VariableSetCard(props: {
   attachedTasks: ScheduledTask[];
   attachmentsUnknown: boolean;
   mutating: boolean;
+  canWriteSet: boolean;
+  canWriteSecrets: boolean;
+  canReadSecrets: boolean;
+  revealEpoch: number;
   onUpdate: (patch: {
     name?: string;
     description?: string | null;
   }) => Promise<WorkspaceVariableSet | null>;
   onDelete: () => Promise<boolean>;
+  onReadVariable: (name: string) => Promise<WorkspaceVariableSetSecret | null>;
   onSetVariable: (name: string, value: string) => Promise<unknown>;
   onDeleteVariable: (name: string) => Promise<boolean>;
 }) {
@@ -264,9 +311,11 @@ export function VariableSetCard(props: {
   const [descriptionDraft, setDescriptionDraft] = useState(variableSet.description ?? "");
   const [variableName, setVariableName] = useState("");
   const [variableValue, setVariableValue] = useState("");
-  // Per-variable rotate drafts (write-only value entry).
+  // Per-variable rotate drafts are separate from explicitly revealed values.
   const [rotatingName, setRotatingName] = useState<string | null>(null);
   const [rotateValue, setRotateValue] = useState("");
+  const [revealedValues, setRevealedValues] = useState<Record<string, string>>({});
+  const [readingName, setReadingName] = useState<string | null>(null);
   // Destructive confirms (D5): delete the variableSet, or one of its variables.
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmDeleteVariable, setConfirmDeleteVariable] = useState<string | null>(null);
@@ -277,6 +326,42 @@ export function VariableSetCard(props: {
     : attachmentCount > 0
       ? "Detach it from sessions and tasks first"
       : undefined;
+
+  useEffect(() => {
+    setRevealedValues({});
+  }, [props.revealEpoch, variableSet.updatedAt]);
+
+  function clearRevealedValue(name: string) {
+    setRevealedValues((current) => {
+      if (!Object.hasOwn(current, name)) return current;
+      const next = { ...current };
+      delete next[name];
+      return next;
+    });
+  }
+
+  async function revealVariable(name: string) {
+    setReadingName(name);
+    try {
+      const secret = await props.onReadVariable(name);
+      if (secret) {
+        setRevealedValues((current) => ({ ...current, [name]: secret.value }));
+      }
+    } finally {
+      setReadingName((current) => (current === name ? null : current));
+    }
+  }
+
+  async function copyRevealedValue(name: string) {
+    const value = revealedValues[name];
+    if (value === undefined) return;
+    try {
+      await navigator.clipboard.writeText(value);
+      toast.success(`Copied ${name}`);
+    } catch {
+      toast.error("Clipboard access was denied");
+    }
+  }
 
   async function saveDetails() {
     const result = await props.onUpdate({
@@ -312,12 +397,23 @@ export function VariableSetCard(props: {
     if (result) {
       setRotatingName(null);
       setRotateValue("");
+      clearRevealedValue(name);
       toast.success(`Variable ${name} rotated`);
     }
   }
 
   return (
-    <Collapsible open={expanded} onOpenChange={setExpanded} asChild>
+    <Collapsible
+      open={expanded}
+      onOpenChange={(next) => {
+        setExpanded(next);
+        if (!next) {
+          setRevealedValues({});
+          setReadingName(null);
+        }
+      }}
+      asChild
+    >
       <article className="min-w-0 rounded-xl border border-border bg-surface/45 p-3 sm:p-4">
         <div className="grid min-w-0 gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
           {editing ? (
@@ -386,32 +482,36 @@ export function VariableSetCard(props: {
               </>
             ) : (
               <>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-sm"
-                  className="pointer-coarse:size-10"
-                  aria-label="Edit variable set"
-                  onClick={() => {
-                    setNameDraft(variableSet.name);
-                    setDescriptionDraft(variableSet.description ?? "");
-                    setEditing(true);
-                  }}
-                >
-                  <PencilIcon className="size-3.5" />
-                </Button>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-sm"
-                  aria-label="Delete variable set"
-                  className="hover:text-status-failed pointer-coarse:size-10"
-                  disabled={props.mutating || deleteBlocked}
-                  title={deleteBlockedReason ?? "Delete variable set"}
-                  onClick={() => setConfirmDelete(true)}
-                >
-                  <Trash2Icon className="size-3.5" />
-                </Button>
+                {props.canWriteSet ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    className="pointer-coarse:size-10"
+                    aria-label="Edit variable set"
+                    onClick={() => {
+                      setNameDraft(variableSet.name);
+                      setDescriptionDraft(variableSet.description ?? "");
+                      setEditing(true);
+                    }}
+                  >
+                    <PencilIcon className="size-3.5" />
+                  </Button>
+                ) : null}
+                {props.canWriteSecrets ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    aria-label="Delete variable set"
+                    className="hover:text-status-failed pointer-coarse:size-10"
+                    disabled={props.mutating || deleteBlocked}
+                    title={deleteBlockedReason ?? "Delete variable set"}
+                    onClick={() => setConfirmDelete(true)}
+                  >
+                    <Trash2Icon className="size-3.5" />
+                  </Button>
+                ) : null}
                 <CollapsibleTrigger asChild>
                   <Button
                     type="button"
@@ -457,44 +557,108 @@ export function VariableSetCard(props: {
                       <span className="text-2xs text-fg-subtle">
                         v{variable.version} · {formatTimestamp(variable.updatedAt)}
                       </span>
-                      <span
-                        className="rounded border border-border px-1.5 py-0.5 font-mono text-2xs text-fg-subtle"
-                        title="Values are write-only and never returned by the API"
-                        aria-label="Value is write-only"
-                      >
-                        ••••••
-                      </span>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="xs"
-                        className="h-7 text-2xs pointer-coarse:min-h-10"
-                        disabled={props.mutating}
-                        aria-label={`Rotate variable ${variable.name}`}
-                        aria-expanded={rotatingName === variable.name}
-                        onClick={() => {
-                          setRotatingName((current) =>
-                            current === variable.name ? null : variable.name,
-                          );
-                          setRotateValue("");
-                        }}
-                      >
-                        Rotate
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-xs"
-                        aria-label={`Delete variable ${variable.name}`}
-                        className="hover:text-status-failed pointer-coarse:size-10"
-                        disabled={props.mutating}
-                        onClick={() => setConfirmDeleteVariable(variable.name)}
-                      >
-                        <Trash2Icon className="size-3" />
-                      </Button>
+                      {revealedValues[variable.name] === undefined ? (
+                        <span
+                          className="rounded border border-border px-1.5 py-0.5 font-mono text-2xs text-fg-subtle"
+                          title={
+                            props.canReadSecrets
+                              ? "Value is hidden until explicitly revealed"
+                              : "Requires variable-sets:read and secrets:read"
+                          }
+                          aria-label="Value hidden"
+                        >
+                          ••••••
+                        </span>
+                      ) : null}
+                      {props.canReadSecrets ? (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="xs"
+                          className="h-7 text-2xs pointer-coarse:min-h-10"
+                          disabled={readingName === variable.name}
+                          aria-label={`${
+                            revealedValues[variable.name] === undefined ? "Reveal" : "Hide"
+                          } variable ${variable.name}`}
+                          onClick={() => {
+                            if (revealedValues[variable.name] === undefined) {
+                              void revealVariable(variable.name);
+                            } else {
+                              clearRevealedValue(variable.name);
+                            }
+                          }}
+                        >
+                          {readingName === variable.name ? (
+                            <Loader2Icon className="size-3 animate-spin" />
+                          ) : revealedValues[variable.name] === undefined ? (
+                            <EyeIcon className="size-3" />
+                          ) : (
+                            <EyeOffIcon className="size-3" />
+                          )}
+                          {revealedValues[variable.name] === undefined ? "Reveal" : "Hide"}
+                        </Button>
+                      ) : null}
+                      {props.canWriteSecrets ? (
+                        <>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="xs"
+                            className="h-7 text-2xs pointer-coarse:min-h-10"
+                            disabled={props.mutating}
+                            aria-label={`Rotate variable ${variable.name}`}
+                            aria-expanded={rotatingName === variable.name}
+                            onClick={() => {
+                              setRotatingName((current) =>
+                                current === variable.name ? null : variable.name,
+                              );
+                              setRotateValue("");
+                            }}
+                          >
+                            Rotate
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon-xs"
+                            aria-label={`Delete variable ${variable.name}`}
+                            className="hover:text-status-failed pointer-coarse:size-10"
+                            disabled={props.mutating}
+                            onClick={() => setConfirmDeleteVariable(variable.name)}
+                          >
+                            <Trash2Icon className="size-3" />
+                          </Button>
+                        </>
+                      ) : null}
                     </div>
                   </div>
-                  {rotatingName === variable.name ? (
+                  {revealedValues[variable.name] !== undefined ? (
+                    <div
+                      className="mt-2 rounded-md border border-border bg-surface px-2.5 py-2"
+                      aria-label={`Revealed value for ${variable.name}`}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <pre className="min-w-0 flex-1 whitespace-pre-wrap break-all font-mono text-xs text-fg">
+                          {revealedValues[variable.name]}
+                        </pre>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="xs"
+                          className="h-7 shrink-0 text-2xs pointer-coarse:min-h-10"
+                          aria-label={`Copy variable ${variable.name}`}
+                          onClick={() => void copyRevealedValue(variable.name)}
+                        >
+                          <CopyIcon className="size-3" />
+                          Copy
+                        </Button>
+                      </div>
+                      <p className="mt-1.5 text-2xs text-fg-subtle">
+                        Audited plaintext read. Hide it when you&apos;re done.
+                      </p>
+                    </div>
+                  ) : null}
+                  {props.canWriteSecrets && rotatingName === variable.name ? (
                     <form
                       aria-label={`Rotate variable ${variable.name}`}
                       autoComplete="off"
@@ -509,7 +673,7 @@ export function VariableSetCard(props: {
                         type="password"
                         value={rotateValue}
                         onChange={(event) => setRotateValue(event.target.value)}
-                        placeholder="New value (write-only)"
+                        placeholder="New value"
                         aria-label={`New value for ${variable.name}`}
                         autoComplete="new-password"
                         className="h-8 flex-1 text-xs pointer-coarse:min-h-10"
@@ -531,45 +695,47 @@ export function VariableSetCard(props: {
             )}
           </div>
 
-          <form
-            aria-label={`Add variable to ${variableSet.name}`}
-            autoComplete="off"
-            className="mt-2 grid gap-2 sm:grid-cols-[12rem_minmax(0,1fr)_auto]"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void addVariable();
-            }}
-          >
-            <Input
-              name="variable-name"
-              value={variableName}
-              onChange={(event) => setVariableName(event.target.value)}
-              placeholder="VARIABLE_NAME"
-              aria-label="New variable name"
+          {props.canWriteSecrets ? (
+            <form
+              aria-label={`Add variable to ${variableSet.name}`}
               autoComplete="off"
-              className="h-8 font-mono text-xs pointer-coarse:min-h-10"
-            />
-            <Input
-              name="variable-value"
-              type="password"
-              value={variableValue}
-              onChange={(event) => setVariableValue(event.target.value)}
-              placeholder="Value (write-only)"
-              aria-label="New variable value"
-              autoComplete="new-password"
-              className="h-8 text-xs pointer-coarse:min-h-10"
-            />
-            <Button
-              type="submit"
-              variant="secondary"
-              size="sm"
-              className="h-8 pointer-coarse:min-h-10"
-              disabled={props.mutating || !variableName.trim() || !variableValue}
+              className="mt-2 grid gap-2 sm:grid-cols-[12rem_minmax(0,1fr)_auto]"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void addVariable();
+              }}
             >
-              <PlusIcon className="size-3.5" />
-              Set variable
-            </Button>
-          </form>
+              <Input
+                name="variable-name"
+                value={variableName}
+                onChange={(event) => setVariableName(event.target.value)}
+                placeholder="VARIABLE_NAME"
+                aria-label="New variable name"
+                autoComplete="off"
+                className="h-8 font-mono text-xs pointer-coarse:min-h-10"
+              />
+              <Input
+                name="variable-value"
+                type="password"
+                value={variableValue}
+                onChange={(event) => setVariableValue(event.target.value)}
+                placeholder="Value"
+                aria-label="New variable value"
+                autoComplete="new-password"
+                className="h-8 text-xs pointer-coarse:min-h-10"
+              />
+              <Button
+                type="submit"
+                variant="secondary"
+                size="sm"
+                className="h-8 pointer-coarse:min-h-10"
+                disabled={props.mutating || !variableName.trim() || !variableValue}
+              >
+                <PlusIcon className="size-3.5" />
+                Set variable
+              </Button>
+            </form>
+          ) : null}
 
           {attachmentCount > 0 ? (
             <div className="mt-3 border-t border-border/70 pt-2">
@@ -579,7 +745,10 @@ export function VariableSetCard(props: {
                   <Link
                     key={session.id}
                     to="/workspaces/$workspaceId/sessions/$sessionId"
-                    params={{ workspaceId: props.workspaceId, sessionId: session.id }}
+                    params={{
+                      workspaceId: props.workspaceId,
+                      sessionId: session.id,
+                    }}
                     className="min-w-0 max-w-full rounded-md hover:text-fg"
                     title={session.initialMessage}
                   >

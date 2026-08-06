@@ -98,7 +98,7 @@ describe("sandbox Toolspace token renewal", () => {
 
   test("retries a temporarily unavailable mint without writing partial state", async () => {
     const scheduler = fakeScheduler();
-    const retries: number[] = [];
+    const retries: Array<{ retryDelayMs: number; errorClass: string }> = [];
     let writes = 0;
     const controller = startToolspaceTokenRenewalLoop({
       initialExpiresAt: new Date(Date.now() + 60 * 60_000),
@@ -108,12 +108,15 @@ describe("sandbox Toolspace token renewal", () => {
       },
       schedule: scheduler.schedule,
       clearSchedule: scheduler.clearSchedule,
-      onFailure: ({ retryDelayMs }) => retries.push(retryDelayMs),
+      onFailure: ({ retryDelayMs, errorClass }) => retries.push({ retryDelayMs, errorClass }),
     });
     await controller.refreshNow();
     await controller.refreshNow();
     expect(writes).toBe(0);
-    expect(retries).toEqual([5_000, 10_000]);
+    expect(retries).toEqual([
+      { retryDelayMs: 5_000, errorClass: "ToolspaceTokenRenewalOperationError" },
+      { retryDelayMs: 10_000, errorClass: "ToolspaceTokenRenewalOperationError" },
+    ]);
     await controller.stop();
   });
 });

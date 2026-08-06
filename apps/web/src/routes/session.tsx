@@ -61,6 +61,7 @@ import {
 import { coerceReasoningEffortForModel, findPickerRow } from "@/lib/model-policy";
 import { resolveSessionComposerModel } from "@/lib/session-model";
 import { mergeSessionContextProjection } from "@/lib/session-pins";
+import { createSessionRetainedScreenshotLoader } from "@/lib/retained-screenshot-loader";
 import {
   firstPartySessionToolOptions,
   isIntelligenceEffort,
@@ -565,6 +566,15 @@ function SessionChatPane(props: {
   const fleet = useMachines({ sessionId: props.session.id, pollIntervalMs: 5000 });
   const computeLabel =
     fleet.machines.find((machine) => machine.active)?.name ?? CLOUD_SANDBOX_LABEL;
+  const loadRetainedScreenshot = useMemo(
+    () =>
+      createSessionRetainedScreenshotLoader(
+        context.client,
+        props.session.workspaceId,
+        props.session.id,
+      ),
+    [context.client, props.session.id, props.session.workspaceId],
+  );
   const terminal = isTerminalSessionStatus(props.session.status);
   const agentsSignal = useMemo(() => {
     const agents = props.agentNodes;
@@ -982,6 +992,7 @@ function SessionChatPane(props: {
               onMemoryClick={props.onMemoryClick}
               onReconnect={props.onReconnect}
               resolveProviderLogo={props.resolveProviderLogo}
+              loadRetainedScreenshot={loadRetainedScreenshot}
               hasOlder={props.hasOlder}
               loadingOlder={props.loadingOlder}
               onLoadOlder={() => void props.onLoadOlder()}

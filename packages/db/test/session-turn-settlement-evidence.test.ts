@@ -9,6 +9,7 @@ import {
   type ApplySessionTurnSettlementInput,
   withWorkspaceRls,
 } from "../src/index";
+import { fromPostgresLosslessJson } from "../src/lossless-json";
 import * as schema from "../src/schema";
 import { and, desc, eq } from "drizzle-orm";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
@@ -79,7 +80,10 @@ async function persistedTurnEvent(
 ): Promise<Record<string, unknown>> {
   const [event] = await withWorkspaceRls(client.db, workspaceId, (db) =>
     db
-      .select({ payload: schema.sessionEvents.payload })
+      .select({
+        payload: schema.sessionEvents.payload,
+        payloadCodecVersion: schema.sessionEvents.payloadCodecVersion,
+      })
       .from(schema.sessionEvents)
       .where(
         and(
@@ -92,10 +96,11 @@ async function persistedTurnEvent(
       .orderBy(desc(schema.sessionEvents.sequence))
       .limit(1),
   );
-  if (!event?.payload || typeof event.payload !== "object" || Array.isArray(event.payload)) {
+  const payload = event ? fromPostgresLosslessJson(event.payload, event.payloadCodecVersion) : null;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     throw new Error("settled turn event payload is missing");
   }
-  return event.payload as Record<string, unknown>;
+  return payload as Record<string, unknown>;
 }
 
 const largeOutput = "output-😀".repeat(40_000);
@@ -117,7 +122,7 @@ function settlementInput(
 }
 
 describe("atomic turn settlement retained-output evidence", () => {
-  test("preserves a valid receipt through large-payload sanitization", async () => {
+  test("preserves exact canonical output while a valid receipt serves bounded projections", async () => {
     const value = await fixture();
     const artifactId = crypto.randomUUID();
     const evidence = {
@@ -153,11 +158,7 @@ describe("atomic turn settlement retained-output evidence", () => {
       value.session.id,
       value.turn.id,
     );
-    expect(payload.output).toBeDefined();
-    expect(payload.truncation).toMatchObject({
-      truncated: true,
-      fullEvidence: evidence,
-    });
+    expect(payload).toEqual({ output: largeOutput });
   });
 
   test("fails closed for malformed retained-output evidence", async () => {
@@ -182,10 +183,7 @@ describe("atomic turn settlement retained-output evidence", () => {
       value.session.id,
       value.turn.id,
     );
-    expect(payload.truncation).toMatchObject({
-      truncated: true,
-      fullEvidence: { available: false, reason: "not_retained" },
-    });
+    expect(payload).toEqual({ output: largeOutput });
   });
 
   test("keeps ordinary no-evidence settlement behavior unchanged", async () => {
@@ -205,9 +203,6 @@ describe("atomic turn settlement retained-output evidence", () => {
       value.session.id,
       value.turn.id,
     );
-    expect(payload.truncation).toMatchObject({
-      truncated: true,
-      fullEvidence: { available: false, reason: "not_retained" },
-    });
+    expect(payload).toEqual({ output: largeOutput });
   });
 });

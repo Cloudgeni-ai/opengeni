@@ -3704,16 +3704,8 @@ export function stableSandboxEnvironmentForRun(
     environment.OPENGENI_GIT_CLI_WRAPPER_DIR ??= `${home}/.opengeni/bin`;
     environment.PATH = prependPathEntry(environment.PATH, environment.OPENGENI_GIT_CLI_WRAPPER_DIR);
   }
-  if (settings.toolspaceEnabled) {
-    // Connected Machines do not share one control-plane-known home path. Keep a
-    // stable shell-resolved pointer in the manifest; runtime expands this trusted
-    // marker against the machine's own HOME for seed, renewal, and every command.
-    // Never derive it from the selfhosted descriptor root (`/`), which would try
-    // to write `/.opengeni` as an ordinary machine user.
-    environment.OPENGENI_TOOLSPACE_TOKEN_FILE ??=
-      settings.sandboxBackend === "selfhosted"
-        ? "$HOME/.opengeni/toolspace-token"
-        : `${environment.HOME ?? descriptor.workspaceRoot}/.opengeni/toolspace-token`;
+  if (settings.toolspaceEnabled && settings.sandboxBackend !== "selfhosted") {
+    environment.OPENGENI_TOOLSPACE_TOKEN_FILE ??= `${environment.HOME ?? descriptor.workspaceRoot}/.opengeni/toolspace-token`;
     if (settings.ogtoolPackageSpec) {
       environment.OPENGENI_OGTOOL_PACKAGE_SPEC ??= settings.ogtoolPackageSpec;
     }

@@ -701,7 +701,7 @@ describe("retained screenshot lifecycle fences", () => {
       join pg_namespace n on n.oid = p.pronamespace
       where n.nspname = 'opengeni_private'
         and p.proname = 'claim_retained_screenshot_maintenance'`;
-    expect(functionConfig!.config).toContain("search_path=pg_catalog, public");
+    expect(functionConfig!.config).toBe("search_path=pg_catalog");
 
     const claims = await claimRetainedScreenshotMaintenance(db, {
       pendingGraceMs: 0,
