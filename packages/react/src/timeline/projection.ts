@@ -540,6 +540,14 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
 
       case "tool.auth_needed":
       case "credential.auth_needed": {
+        if (event.type === "tool.auth_needed" && !stringValue(payload.toolName)) {
+          // Historical optional-MCP initialize/tools-list credential misses are
+          // setup availability, not evidence of a concrete conversational tool
+          // call. Keep the raw event in Debug/audit but do not manufacture an
+          // actionable reconnect card in the transcript. Actual tools/call auth
+          // failures carry a concrete toolName and remain visible.
+          break;
+        }
         // Keep the whole structured payload — the renderer turns it into a clean
         // inline reconnect card, and the app starts the recovery flow off the
         // connectionId/resource. Losing it to a plain-text notice was the ugly

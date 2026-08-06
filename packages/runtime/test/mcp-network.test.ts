@@ -65,9 +65,16 @@ describe("MCP network and payload boundary", () => {
     const nonList = await classify(
       JSON.stringify({ jsonrpc: "2.0", id: 3, method: "resources/read" }),
     );
-    const mixedBatch = await classify(
+    const toolCall = await classify(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 4,
+        method: "tools/call",
+        params: { name: "create_issue" },
+      }),
+    );
+    const toolCallBatch = await classify(
       JSON.stringify([
-        { jsonrpc: "2.0", id: 4, method: "tools/list" },
         {
           jsonrpc: "2.0",
           id: 5,
@@ -76,12 +83,43 @@ describe("MCP network and payload boundary", () => {
         },
       ]),
     );
-    for (const request of [malformed, unreadable, unknown, nonList, mixedBatch]) {
+    const mixedBatch = await classify(
+      JSON.stringify([
+        { jsonrpc: "2.0", id: 6, method: "tools/list" },
+        {
+          jsonrpc: "2.0",
+          id: 7,
+          method: "tools/call",
+          params: { name: "create_issue" },
+        },
+      ]),
+    );
+    for (const request of [
+      malformed,
+      unreadable,
+      unknown,
+      nonList,
+      toolCall,
+      toolCallBatch,
+      mixedBatch,
+    ]) {
       expect(request.replaySafeAfter401).toBe(false);
     }
+    expect(toolCall).toMatchObject({
+      batch: false,
+      method: "tools/call",
+      responseIds: [4],
+      toolName: "create_issue",
+    });
+    expect(toolCallBatch).toMatchObject({
+      batch: true,
+      responseIds: [5],
+      toolName: "create_issue",
+    });
+    expect(toolCallBatch.method).toBeUndefined();
     expect(mixedBatch).toMatchObject({
       batch: true,
-      responseIds: [4, 5],
+      responseIds: [6, 7],
       toolName: "create_issue",
     });
 
@@ -92,8 +130,8 @@ describe("MCP network and payload boundary", () => {
       error,
     });
     expect(mcpJsonRpcErrorPayloadForRequest(mixedBatch, error)).toEqual([
-      { jsonrpc: "2.0", id: 4, error },
-      { jsonrpc: "2.0", id: 5, error },
+      { jsonrpc: "2.0", id: 6, error },
+      { jsonrpc: "2.0", id: 7, error },
     ]);
   });
 
