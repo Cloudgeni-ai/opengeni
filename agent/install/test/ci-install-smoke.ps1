@@ -37,6 +37,33 @@ try {
   }
   Write-Host "install-smoke OK: verified + installed $asset"
 
+  # Compile a tiny executable that reports a future version, place it at the
+  # shared install path, and prove a lagging deployment cannot replace it unless
+  # the operator explicitly opts into a downgrade.
+  $newerDir = Join-Path $work 'newer-bin'
+  New-Item -ItemType Directory -Path $newerDir -Force | Out-Null
+  $newerSource = Join-Path $work 'newer-agent.rs'
+  'fn main() { println!("opengeni-agent 9.9.9"); }' | Set-Content $newerSource
+  $newerExe = Join-Path $newerDir 'opengeni-agent.exe'
+  & rustc $newerSource -o $newerExe
+  if ($LASTEXITCODE -ne 0) { throw "could not compile newer-agent fixture" }
+
+  $env:OPENGENI_INSTALL_DIR = $newerDir
+  Remove-Item Env:OPENGENI_ALLOW_DOWNGRADE -ErrorAction SilentlyContinue
+  & pwsh -File $script
+  if ((& $newerExe --version) -ne 'opengeni-agent 9.9.9') {
+    throw "lagging installer replaced a newer installed agent"
+  }
+  Write-Host "install-smoke OK: newer installed agent preserved"
+
+  $env:OPENGENI_ALLOW_DOWNGRADE = '1'
+  & pwsh -File $script
+  if ((& $newerExe --version) -ne (& $built --version)) {
+    throw "explicit downgrade override did not install the verified candidate"
+  }
+  Remove-Item Env:OPENGENI_ALLOW_DOWNGRADE -ErrorAction SilentlyContinue
+  Write-Host "install-smoke OK: explicit downgrade override honored"
+
   # A tampered artifact MUST be rejected (exit 5).
   Add-Content (Join-Path $mock $asset) 'TAMPER'
   $hash2 = (Get-FileHash -Algorithm SHA256 (Join-Path $mock $asset)).Hash.ToLowerInvariant()

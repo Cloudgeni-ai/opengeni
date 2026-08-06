@@ -18,6 +18,8 @@
 #      (deterministic) and logged;
 #   4. an atomic-swap FAILURE                         -> the previous bundle is
 #      restored from its .bak and the installer dies loudly (rc 2).
+#   5. a newer installed agent                        -> an older deployment's
+#      candidate is preserved unless downgrade is explicitly authorized.
 #
 # Usage:  sh agent/install/test/macos-bundle-sim.sh
 set -eu
@@ -167,6 +169,43 @@ if ls "$WORK/apps"/.*.bak.* >/dev/null 2>&1; then
 else
   ok "no .bak backup left behind"
 fi
+
+echo "SIM 5: a lagging deployment cannot downgrade the shared agent binary"
+make_version_agent() {
+  _version_path="$1"; _version_value="$2"
+  printf '%s\n' '#!/bin/sh' "printf '%s\\n' 'opengeni-agent $_version_value'" > "$_version_path"
+  chmod 0755 "$_version_path"
+}
+NEWER_AGENT="$WORK/newer-agent"
+OLDER_AGENT="$WORK/older-agent"
+UNKNOWN_AGENT="$WORK/unknown-agent"
+make_version_agent "$NEWER_AGENT" "10.0.0"
+make_version_agent "$OLDER_AGENT" "9.99.99"
+printf '%s\n' '#!/bin/sh' "printf '%s\\n' 'custom build'" > "$UNKNOWN_AGENT"
+chmod 0755 "$UNKNOWN_AGENT"
+
+if should_keep_newer_agent "$NEWER_AGENT" "$OLDER_AGENT"; then
+  ok "strict numeric semver preserves the newer installed agent"
+else
+  bad "newer installed agent was not protected"
+fi
+if should_keep_newer_agent "$OLDER_AGENT" "$NEWER_AGENT"; then
+  bad "older installed agent incorrectly blocked an upgrade"
+else
+  ok "a newer candidate remains installable"
+fi
+if should_keep_newer_agent "$UNKNOWN_AGENT" "$OLDER_AGENT"; then
+  bad "an unknown custom build was ordered as a release"
+else
+  ok "unknown/custom versions retain the historical replace behavior"
+fi
+OPENGENI_ALLOW_DOWNGRADE=1; export OPENGENI_ALLOW_DOWNGRADE
+if should_keep_newer_agent "$NEWER_AGENT" "$OLDER_AGENT"; then
+  bad "the explicit downgrade override was ignored"
+else
+  ok "OPENGENI_ALLOW_DOWNGRADE=1 permits the deliberate downgrade"
+fi
+unset OPENGENI_ALLOW_DOWNGRADE
 
 echo ""
 echo "SIM RESULT: $PASS passed, $FAIL failed"

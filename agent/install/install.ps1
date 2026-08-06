@@ -23,6 +23,8 @@
   OPENGENI_INSTALL_BASE_URL  Release asset base URL (default https://get.opengeni.ai).
                              Point at a local mock (http://localhost/...) to test offline.
   OPENGENI_AGENT_VERSION     Pin a version (default "latest").
+  OPENGENI_ALLOW_DOWNGRADE   "1" explicitly allows an older verified agent to
+                             replace a newer installed one. Default: preserve newer.
   OPENGENI_INSTALL_DIR       Install dir (default %LOCALAPPDATA%\OpenGeni\bin).
   OPENGENI_ENROLL_TOKEN      Non-interactive connection token (CI/automation);
                              adds or refreshes only its deployment/workspace.
@@ -60,6 +62,31 @@ $Version = Get-EnvOr 'OPENGENI_AGENT_VERSION' 'latest'
 
 function Log($msg)  { Write-Host "opengeni-install: $msg" }
 function Fail($code, $msg) { Write-Host "opengeni-install: ERROR: $msg" -ForegroundColor Red; exit $code }
+
+function Get-AgentReleaseVersion($path) {
+  if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+  try {
+    $line = @(& $path --version 2>$null)[0]
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($line)) { return $null }
+    $match = [regex]::Match([string]$line, '^opengeni-agent ([0-9]+\.[0-9]+\.[0-9]+)$')
+    if (-not $match.Success) { return $null }
+    return [version]$match.Groups[1].Value
+  } catch {
+    return $null
+  }
+}
+
+function Test-KeepNewerAgent($installed, $candidate) {
+  if ((Get-EnvOr 'OPENGENI_ALLOW_DOWNGRADE' '0') -eq '1') { return $false }
+  $installedVersion = Get-AgentReleaseVersion $installed
+  $candidateVersion = Get-AgentReleaseVersion $candidate
+  if ($null -eq $installedVersion -or $null -eq $candidateVersion) { return $false }
+  if ($installedVersion -gt $candidateVersion) {
+    Log "keeping installed opengeni-agent $installedVersion; verified candidate $candidateVersion is older (set OPENGENI_ALLOW_DOWNGRADE=1 to override)"
+    return $true
+  }
+  return $false
+}
 
 function Get-Asset {
   # ARM64 vs x64. PROCESSOR_ARCHITECTURE is the running process arch; on WoW64 the
@@ -200,13 +227,17 @@ function Main {
     $installDir = Get-InstallDir
     New-Item -ItemType Directory -Path $installDir -Force | Out-Null
     $dest = Join-Path $installDir 'opengeni-agent.exe'
-    if (Test-Path $dest) {
-      $aside = "$dest.old"
-      Remove-Item -Force $aside -ErrorAction SilentlyContinue
-      try { Move-Item -Force $dest $aside } catch { } # locked-running: rename aside
+    if (Test-KeepNewerAgent $dest $binTmp) {
+      Remove-Item -Force $binTmp -ErrorAction SilentlyContinue
+    } else {
+      if (Test-Path $dest) {
+        $aside = "$dest.old"
+        Remove-Item -Force $aside -ErrorAction SilentlyContinue
+        try { Move-Item -Force $dest $aside } catch { } # locked-running: rename aside
+      }
+      Move-Item -Force $binTmp $dest
+      Log "installed verified binary to $dest"
     }
-    Move-Item -Force $binTmp $dest
-    Log "installed verified binary to $dest"
     Add-UserPath $installDir
 
     Complete-Install $dest

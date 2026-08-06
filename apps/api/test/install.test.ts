@@ -41,6 +41,8 @@ describe("get.<domain> install routes", () => {
     expect(body).toContain("OPENGENI_INSTALL_BASE_URL");
     expect(body).toContain("opengeni-agent");
     expect(body).toContain('connect --token "$OPENGENI_ENROLL_TOKEN" --non-interactive');
+    expect(body).toContain("OPENGENI_ALLOW_DOWNGRADE");
+    expect(body).toContain("should_keep_newer_agent");
   });
 
   // "The agent ships inside the control-plane": a DEPLOYED control plane self-serves
@@ -79,6 +81,8 @@ describe("get.<domain> install routes", () => {
     const body = await res.text();
     expect(body.length).toBeGreaterThan(0);
     expect(body).toContain("connect --token $enrollToken --non-interactive");
+    expect(body).toContain("OPENGENI_ALLOW_DOWNGRADE");
+    expect(body).toContain("Test-KeepNewerAgent");
   });
 
   test("GET /uninstall.sh serves the uninstall script", async () => {

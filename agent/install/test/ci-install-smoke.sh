@@ -75,6 +75,39 @@ else
 fi
 echo "install-smoke OK: verified + installed $asset"
 
+# A deployment lagging behind the machine's installed agent must not downgrade
+# the one shared binary. Use a tiny executable reporting 9.9.9 as the installed
+# agent, then prove the real verified candidate is skipped unless explicitly
+# authorized. On macOS, exercise the actual app-bundle path under an isolated HOME.
+newer_home="$work/newer-home"
+newer_install_dir="$work/newer-bin"
+if [ "$os" = "Darwin" ]; then
+  newer_installed="$newer_home/Applications/OpenGeni Agent.app/Contents/MacOS/opengeni-agent"
+else
+  newer_installed="$newer_install_dir/opengeni-agent"
+fi
+mkdir -p "$(dirname "$newer_installed")"
+printf '%s\n' '#!/bin/sh' "printf '%s\\n' 'opengeni-agent 9.9.9'" > "$newer_installed"
+chmod 0755 "$newer_installed"
+
+HOME="$newer_home" OPENGENI_INSTALL_BASE_URL="file://$work/mock" \
+OPENGENI_INSTALL_DIR="$newer_install_dir" OPENGENI_NO_RUN=1 \
+  sh "$work/install.sh" </dev/null
+[ "$("$newer_install_dir/opengeni-agent" --version)" = "opengeni-agent 9.9.9" ] || {
+  echo "lagging installer replaced a newer installed agent" >&2
+  exit 1
+}
+echo "install-smoke OK: newer installed agent preserved"
+
+HOME="$newer_home" OPENGENI_INSTALL_BASE_URL="file://$work/mock" \
+OPENGENI_INSTALL_DIR="$newer_install_dir" OPENGENI_NO_RUN=1 OPENGENI_ALLOW_DOWNGRADE=1 \
+  sh "$work/install.sh" </dev/null
+[ "$("$newer_install_dir/opengeni-agent" --version)" = "$("$built" --version)" ] || {
+  echo "explicit downgrade override did not install the verified candidate" >&2
+  exit 1
+}
+echo "install-smoke OK: explicit downgrade override honored"
+
 # A tampered artifact MUST be rejected (exit 5).
 echo TAMPER >> "$mock/$asset"
 ( cd "$mock" && sha256_line "$asset" > "$asset.sha256" )
