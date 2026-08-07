@@ -1352,6 +1352,149 @@ describe("useSandboxGit", () => {
     await hook.unmount();
   });
 
+  test("warm multi-repo mode chunks 33 and 65 roots at the 32-request protocol boundary", async () => {
+    for (const [rootCount, expectedBatchSizes] of [
+      [33, [32, 1]],
+      [65, [32, 32, 1]],
+    ] as const) {
+      const roots = Array.from(
+        { length: rootCount },
+        (_, index) => `repo-${String(index).padStart(2, "0")}`,
+      );
+      const batches: string[][] = [];
+      const client = fakeClient({
+        gitReadBatch: async (_workspaceId, _sessionId, request) => {
+          const batchRoots = request.requests.map((item) => item.status.path ?? "");
+          batches.push(batchRoots);
+          if (request.requests.length > 32) {
+            throw new Error("GitReadBatchRequest exceeded 32 requests");
+          }
+          return {
+            results: batchRoots.map((root) => ({
+              status: {
+                isRepo: true,
+                head: `${root}-main`,
+                detached: false,
+                upstream: null,
+                ahead: 0,
+                behind: 0,
+                files: [],
+                revision: 1,
+              },
+              diff: { files: [fakeFileDiff({ path: "src/index.ts" })], revision: 1 },
+            })),
+          };
+        },
+      });
+      const hook = await renderHook(
+        () =>
+          useSandboxGit(SESSION_ID, {
+            client,
+            workspaceId: WORKSPACE_ID,
+            liveness: "warm",
+            repoPaths: roots,
+          }),
+        undefined,
+      );
+      await flush();
+
+      expect(batches.map((batch) => batch.length)).toEqual([...expectedBatchSizes]);
+      expect(batches.flat()).toEqual(roots);
+      expect(hook.result.current.error).toBeNull();
+      expect(hook.result.current.repoCount).toBe(rootCount);
+      expect(hook.result.current.repoRoots).toEqual(roots);
+      expect(hook.result.current.diff.map((file) => file.path)).toEqual(
+        roots.map((root) => `${root}/src/index.ts`),
+      );
+      await hook.unmount();
+    }
+  });
+
+  test("warm multi-repo mode keeps an exact 32-root request in one batch", async () => {
+    const roots = Array.from(
+      { length: 32 },
+      (_, index) => `repo-${String(index).padStart(2, "0")}`,
+    );
+    const batchSizes: number[] = [];
+    const client = fakeClient({
+      gitReadBatch: async (_workspaceId, _sessionId, request) => {
+        batchSizes.push(request.requests.length);
+        return {
+          results: request.requests.map((item) => ({
+            status: {
+              isRepo: true,
+              head: `${item.status.path ?? ""}-main`,
+              detached: false,
+              upstream: null,
+              ahead: 0,
+              behind: 0,
+              files: [],
+              revision: 1,
+            },
+            diff: { files: [], revision: 1 },
+          })),
+        };
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useSandboxGit(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          liveness: "warm",
+          repoPaths: roots,
+        }),
+      undefined,
+    );
+    await flush();
+
+    expect(batchSizes).toEqual([32]);
+    expect(hook.result.current.error).toBeNull();
+    expect(hook.result.current.repoRoots).toEqual(roots);
+    await hook.unmount();
+  });
+
+  test("warm multi-repo mode fails closed when a batch result count cannot map to its roots", async () => {
+    const roots = ["api", "web"];
+    const client = fakeClient({
+      gitReadBatch: async () => ({
+        results: [
+          {
+            status: {
+              isRepo: true,
+              head: "api-main",
+              detached: false,
+              upstream: null,
+              ahead: 0,
+              behind: 0,
+              files: [],
+              revision: 1,
+            },
+            diff: { files: [], revision: 1 },
+          },
+        ],
+      }),
+    });
+    const hook = await renderHook(
+      () =>
+        useSandboxGit(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          liveness: "warm",
+          repoPaths: roots,
+        }),
+      undefined,
+    );
+    await flush();
+
+    expect(hook.result.current.error?.message).toBe(
+      "Workspace Git batch returned 1 results for 2 repositories.",
+    );
+    expect(hook.result.current.repoRoots).toEqual([]);
+    expect(hook.result.current.diff).toEqual([]);
+    await hook.unmount();
+  });
+
   test("a non-repo box reports isRepo false with an empty diff (not an error)", async () => {
     const client = fakeClient({
       gitStatus: async () => ({

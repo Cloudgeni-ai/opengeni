@@ -1036,24 +1036,49 @@ function statusCodeOf(f: GitFileStatus): GitFileStatusCode {
 
 /**
  * sha256 over the CHANGE SURFACE only — per-file (path, status, hash, deleted,
- * tooLarge) and per-repo diff summary (path, status, additions, deletions).
+ * tooLarge), the working diff summary, and exact committed branch changes.
  * Deliberately excludes the tree index and file mtimes (which drift without a
  * real change) so two turns that leave the workspace in the same state produce
  * the same fingerprint (the empty-turn gate). Order-independent (sorted).
  */
-function changeFingerprint(repos: WorkspaceCaptureRepo[], files: WorkspaceCaptureFile[]): string {
+export function changeFingerprint(
+  repos: WorkspaceCaptureRepo[],
+  files: WorkspaceCaptureFile[],
+): string {
   const fileParts = files
     .map((f) => `${f.path}|${f.status}|${f.hash ?? ""}|${f.deleted ? 1 : 0}|${f.tooLarge ? 1 : 0}`)
     .sort();
+  const branchDiffPart = (diff: WorkspaceCaptureRepo["diff"][number]): string =>
+    JSON.stringify([
+      diff.path,
+      diff.oldPath,
+      diff.status,
+      diff.isBinary,
+      diff.isImage,
+      diff.additions,
+      diff.deletions,
+      diff.truncated,
+      diff.hunks.map((hunk) => [
+        hunk.oldStart,
+        hunk.oldLines,
+        hunk.newStart,
+        hunk.newLines,
+        hunk.header,
+        hunk.lines.map((line) => [line.type, line.oldNo, line.newNo, line.text]),
+      ]),
+    ]);
   const repoParts = repos
-    .map(
-      (r) =>
-        `${r.root}#${r.head ?? ""}#` +
-        r.diff
-          .map((d) => `${d.path}:${d.status}:${d.additions}:${d.deletions}:${d.truncated ? 1 : 0}`)
-          .sort()
-          .join(","),
-    )
+    .map((repo) => {
+      const workingDiff = repo.diff
+        .map(
+          (diff) =>
+            `${diff.path}:${diff.status}:${diff.additions}:${diff.deletions}:${diff.truncated ? 1 : 0}`,
+        )
+        .sort();
+      const branchDiff =
+        repo.branchDiff === undefined ? null : repo.branchDiff.map(branchDiffPart).sort();
+      return JSON.stringify([repo.root, repo.head, repo.ahead, workingDiff, branchDiff]);
+    })
     .sort();
   return sha256(utf8(JSON.stringify({ files: fileParts, repos: repoParts })));
 }

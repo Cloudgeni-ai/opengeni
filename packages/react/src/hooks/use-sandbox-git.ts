@@ -93,6 +93,11 @@ function uniqueRoots(roots: readonly string[]): string[] {
   return [...new Set(roots.map(normalizeRoot))].sort((a, b) => a.localeCompare(b));
 }
 
+// GitReadBatchRequest is contract-bounded to 32 items. Keep workspace-wide
+// reads bounded without changing the wire limit; sequential chunks preserve
+// deterministic root/result mapping and cap Channel-A lease concurrency at one.
+const GIT_READ_BATCH_REQUEST_LIMIT = 32;
+
 /** Find the capture repo matching `repoPath` (default workspace root). */
 function repoForPath(
   manifest: WorkspaceCaptureManifest,
@@ -251,35 +256,54 @@ export function useSandboxGit(
       // take several seconds on a remote sandbox. The legacy root probe remains
       // serial so a non-repository workspace never receives a failing git diff.
       const prefetched = hasAdvertisedRepoPaths
-        ? await client
-            .gitReadBatch(
-              workspaceId,
-              sessionId,
-              {
-                requests: repoPaths.map((root) => ({
-                  status: { path: root },
-                  diff: {
-                    path: root,
-                    ...(comparison === "branch"
-                      ? { fromRef: "origin/HEAD", includeUntracked: true }
-                      : comparison === "working"
-                        ? { fromRef: "HEAD", includeUntracked: true }
-                        : { staged: true, includeUntracked: false }),
-                  },
-                })),
-              },
-              { signal: refreshAbort.signal },
-            )
-            .then((batch) =>
-              batch.results.map((item, index) => ({
-                root: repoPaths[index] ?? "",
-                status: item.status,
-                result: item.diff ?? {
-                  files: [],
-                  revision: item.status.revision,
+        ? await (async () => {
+            const prefetchedRepos: Array<{
+              root: string;
+              status: Awaited<ReturnType<typeof client.gitStatus>>;
+              result: Awaited<ReturnType<typeof client.gitDiff>>;
+            }> = [];
+            for (
+              let offset = 0;
+              offset < repoPaths.length;
+              offset += GIT_READ_BATCH_REQUEST_LIMIT
+            ) {
+              const roots = repoPaths.slice(offset, offset + GIT_READ_BATCH_REQUEST_LIMIT);
+              const batch = await client.gitReadBatch(
+                workspaceId,
+                sessionId,
+                {
+                  requests: roots.map((root) => ({
+                    status: { path: root },
+                    diff: {
+                      path: root,
+                      ...(comparison === "branch"
+                        ? { fromRef: "origin/HEAD", includeUntracked: true }
+                        : comparison === "working"
+                          ? { fromRef: "HEAD", includeUntracked: true }
+                          : { staged: true, includeUntracked: false }),
+                    },
+                  })),
                 },
-              })),
-            )
+                { signal: refreshAbort.signal },
+              );
+              if (batch.results.length !== roots.length) {
+                throw new Error(
+                  `Workspace Git batch returned ${batch.results.length} results for ${roots.length} repositories.`,
+                );
+              }
+              batch.results.forEach((item, index) => {
+                prefetchedRepos.push({
+                  root: roots[index]!,
+                  status: item.status,
+                  result: item.diff ?? {
+                    files: [],
+                    revision: item.status.revision,
+                  },
+                });
+              });
+            }
+            return prefetchedRepos;
+          })()
         : null;
       const statuses =
         prefetched ??
