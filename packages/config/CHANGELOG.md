@@ -1,5 +1,12 @@
 # @opengeni/config
 
+## 0.12.2
+
+### Patch Changes
+
+- 7d13f51: Promote the immutable OpenGeni connected-machine agent 0.1.13 release through the default stable install and update channel.
+- 7ac558e: Continuously enforce resource-based turn-worker memory headroom through the existing graceful checkpoint and drain lifecycle.
+
 ## 0.12.1
 
 ### Patch Changes
