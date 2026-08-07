@@ -838,6 +838,33 @@ export async function waitForTurnStreamCleanup(
   await waitForTurnFinalizerStep(providerCompleted, signal);
 }
 
+/**
+ * Terminal settlement closes the active attempt before turn finalization. The
+ * ordinary workspace admission therefore correctly returns `attempt_fenced`
+ * for the final attempt-qualified credential deletion. Retry only that exact
+ * settled-attempt case directly; every other fence/status and the direct
+ * deletion itself remain fail-closed.
+ */
+export async function clearAttemptCredentialsWithSettledFence(input: {
+  activityStatus: RunAgentTurnResult["status"] | "unknown";
+  runWorkspaceFencedClear: () => Promise<void>;
+  clearExactAttempt: () => Promise<void>;
+  onSettledAttemptFence: () => void;
+}): Promise<void> {
+  try {
+    await input.runWorkspaceFencedClear();
+  } catch (error) {
+    const settledAttemptFence =
+      error instanceof Error &&
+      error.name === "SandboxWorkspaceMutationFencedError" &&
+      (error as Error & { code?: unknown }).code === "attempt_fenced" &&
+      (input.activityStatus === "idle" || input.activityStatus === "failed");
+    if (!settledAttemptFence) throw error;
+    input.onSettledAttemptFence();
+    await input.clearExactAttempt();
+  }
+}
+
 function turnFinalizerCancellationSignal(
   temporalSignal: AbortSignal | undefined,
   activityStatus: RunAgentTurnResult["status"] | "unknown",
@@ -8377,22 +8404,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               attemptId: input.attemptId,
               executionGeneration,
             });
-          const clearAttemptCredentialsWithSettledFence = async (): Promise<void> => {
-            try {
+          await clearAttemptCredentialsWithSettledFence({
+            activityStatus,
+            runWorkspaceFencedClear: async () =>
               await runWorkspaceMutationForSandbox(
                 requireResolvedSandboxForMutation(
                   "Run credential cleanup has no exact sandbox lease target",
                 ),
                 "runCredentialAttemptClear",
                 clearAttemptCredentials,
-              );
-            } catch (error) {
-              const settledAttemptFence =
-                error instanceof Error &&
-                error.name === "SandboxWorkspaceMutationFencedError" &&
-                (error as Error & { code?: unknown }).code === "attempt_fenced" &&
-                (activityStatus === "idle" || activityStatus === "failed");
-              if (!settledAttemptFence) throw error;
+              ),
+            clearExactAttempt: clearAttemptCredentials,
+            onSettledAttemptFence: () => {
               // Terminal settlement closes the active attempt before this finally
               // runs, so the ordinary workspace admission correctly rejects it.
               // The attempt-qualified delete is nevertheless successor-safe: it
@@ -8405,10 +8428,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 "opengeni.turn_id": turnId ?? "",
                 "opengeni.attempt_id": input.attemptId,
               });
-              await clearAttemptCredentials();
-            }
-          };
-          await clearAttemptCredentialsWithSettledFence();
+            },
+          });
         }
         await drainAttemptOwnedSandboxWriters({
           // Normal turn completion owns the same process boundary as

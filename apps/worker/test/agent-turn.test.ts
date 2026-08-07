@@ -17,6 +17,7 @@ import {
   SandboxImageConflictError,
   SandboxLeaseRecoveryBlockedError,
   SandboxLeaseSupersededError,
+  SandboxWorkspaceMutationFencedError,
   SessionEventPersistenceError,
 } from "@opengeni/db";
 import {
@@ -39,6 +40,7 @@ import {
   classifyContextWindowOverflowError,
   credentialSubjectIdForTurnInitiator,
   classifyMcpTransportTimeoutError,
+  clearAttemptCredentialsWithSettledFence,
   codexCredentialLeaseDeadlineExpired,
   completedToolCallFromSdkEvent,
   computerToolModeForTurn,
@@ -2823,6 +2825,88 @@ describe("worker shutdown preemption", () => {
     rejectFlush?.(new Error("late batch failure"));
     rejectProvider?.(new Error("late provider failure"));
     await Bun.sleep(0);
+  });
+});
+
+describe("settled run-credential finalization", () => {
+  for (const activityStatus of ["idle", "failed"] as const) {
+    test(`retries exact attempt cleanup after ${activityStatus} terminal settlement`, async () => {
+      const calls: string[] = [];
+      const fence = new SandboxWorkspaceMutationFencedError(
+        "attempt_fenced",
+        "terminal settlement closed the attempt",
+      );
+
+      await clearAttemptCredentialsWithSettledFence({
+        activityStatus,
+        runWorkspaceFencedClear: async () => {
+          calls.push("workspace-fenced");
+          throw fence;
+        },
+        onSettledAttemptFence: () => calls.push("observed"),
+        clearExactAttempt: async () => {
+          calls.push("exact-attempt-clear");
+        },
+      });
+
+      expect(calls).toEqual(["workspace-fenced", "observed", "exact-attempt-clear"]);
+    });
+  }
+
+  for (const [label, error, activityStatus] of [
+    ["wrong error name", Object.assign(new Error("fenced"), { code: "attempt_fenced" }), "idle"],
+    [
+      "wrong fence code",
+      new SandboxWorkspaceMutationFencedError("holder_fenced", "holder changed"),
+      "idle",
+    ],
+    [
+      "nonterminal activity",
+      new SandboxWorkspaceMutationFencedError("attempt_fenced", "attempt changed"),
+      "recovering",
+    ],
+  ] as const) {
+    test(`keeps ${label} fail-closed`, async () => {
+      let directClears = 0;
+      const caught = await clearAttemptCredentialsWithSettledFence({
+        activityStatus,
+        runWorkspaceFencedClear: async () => {
+          throw error;
+        },
+        onSettledAttemptFence: () => {
+          throw new Error("unexpected settled-fence callback");
+        },
+        clearExactAttempt: async () => {
+          directClears += 1;
+        },
+      }).catch((failure: unknown) => failure);
+
+      expect(caught).toBe(error);
+      expect(directClears).toBe(0);
+    });
+  }
+
+  test("keeps a direct exact-attempt deletion failure fail-closed", async () => {
+    const deletionFailure = new Error("exact credential deletion failed");
+    let settledFences = 0;
+    const caught = await clearAttemptCredentialsWithSettledFence({
+      activityStatus: "idle",
+      runWorkspaceFencedClear: async () => {
+        throw new SandboxWorkspaceMutationFencedError(
+          "attempt_fenced",
+          "terminal settlement closed the attempt",
+        );
+      },
+      onSettledAttemptFence: () => {
+        settledFences += 1;
+      },
+      clearExactAttempt: async () => {
+        throw deletionFailure;
+      },
+    }).catch((failure: unknown) => failure);
+
+    expect(caught).toBe(deletionFailure);
+    expect(settledFences).toBe(1);
   });
 });
 
