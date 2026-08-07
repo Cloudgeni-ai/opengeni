@@ -37,6 +37,27 @@ try {
   }
   Write-Host "install-smoke OK: verified + installed $asset"
 
+  # A pinned GitHub Release URL is already the asset directory. Exercise the
+  # documented fallback shape so the installer cannot silently append the edge
+  # /agent/v<version> path a second time.
+  $releaseVersion = (& $built --version).Split()[-1]
+  $direct = Join-Path $work "github\releases\download\agent-v$releaseVersion"
+  New-Item -ItemType Directory -Path $direct -Force | Out-Null
+  Copy-Item (Join-Path $mock $asset) $direct
+  Copy-Item (Join-Path $mock "$asset.sha256") $direct
+  Copy-Item (Join-Path $mock "$asset.minisig") $direct
+  $env:OPENGENI_INSTALL_BASE_URL = "file://$($direct -replace '\\','/')"
+  $env:OPENGENI_AGENT_VERSION = $releaseVersion
+  $env:OPENGENI_INSTALL_DIR = Join-Path $work 'direct-bin'
+  & pwsh -File $script
+  $directAgent = Join-Path $env:OPENGENI_INSTALL_DIR 'opengeni-agent.exe'
+  if (-not (Test-Path $directAgent) -or (& $directAgent --version) -ne (& $built --version)) {
+    throw "direct GitHub Release fallback installed the wrong agent"
+  }
+  Remove-Item Env:OPENGENI_AGENT_VERSION -ErrorAction SilentlyContinue
+  $env:OPENGENI_INSTALL_BASE_URL = "file://$($work -replace '\\','/')/mock"
+  Write-Host "install-smoke OK: direct GitHub Release fallback verified + installed"
+
   # Compile a tiny executable that reports a future version, place it at the
   # shared install path, and prove a lagging deployment cannot replace it unless
   # the operator explicitly opts into a downgrade.

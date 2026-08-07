@@ -75,6 +75,25 @@ else
 fi
 echo "install-smoke OK: verified + installed $asset"
 
+# The documented direct GitHub Release fallback is already an asset directory,
+# not an edge origin. Prove its pinned-version URL shape downloads the same
+# verified artifact without appending /agent/v<version> a second time.
+release_version="$("$built" --version | awk 'NR == 1 { print $NF }')"
+direct="$work/github/releases/download/agent-v$release_version"
+mkdir -p "$direct"
+cp "$mock/$asset" "$mock/$asset.sha256" "$mock/$asset.minisig" "$direct/"
+OPENGENI_INSTALL_BASE_URL="file://$direct" \
+OPENGENI_AGENT_VERSION="$release_version" \
+OPENGENI_INSTALL_DIR="$work/direct-bin" \
+OPENGENI_NO_SERVICE=1 \
+  sh "$work/install.sh" </dev/null
+test -x "$work/direct-bin/opengeni-agent"
+[ "$("$work/direct-bin/opengeni-agent" --version)" = "$("$built" --version)" ] || {
+  echo "direct GitHub Release fallback installed the wrong agent" >&2
+  exit 1
+}
+echo "install-smoke OK: direct GitHub Release fallback verified + installed"
+
 # A deployment lagging behind the machine's installed agent must not downgrade
 # the one shared binary. Use a tiny executable reporting 9.9.9 as the installed
 # agent, then prove the real verified candidate is skipped unless explicitly
