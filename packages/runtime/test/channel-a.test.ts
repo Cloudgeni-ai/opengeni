@@ -260,7 +260,11 @@ function makeStockMacCommandSurface(root: string): { bin: string; log: string } 
       "pid= fd=",
       'while [ "$#" -gt 0 ]; do case "$1" in -p) pid="$2"; shift 2 ;; -d) fd="$2"; shift 2 ;; *) shift ;; esac; done',
       '[ -n "$pid" ] && [ -n "$fd" ] || exit 64',
-      `exec ${JSON.stringify(realLsof)} -a -p "$pid" -d "$fd" -Fn0`,
+      // Linux lsof inserts an extra newline before its n<path> field; stock
+      // macOS does not. Normalize the host output so this fixture genuinely
+      // exercises the macOS parser on every CI host.
+      "set -o pipefail",
+      `${JSON.stringify(realLsof)} -a -p "$pid" -d "$fd" -Fn0 | tr -d '\\n'`,
     ].join("\n"),
   );
   return { bin, log };
