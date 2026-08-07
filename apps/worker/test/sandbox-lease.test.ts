@@ -507,7 +507,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     }
   });
 
-  test("(1) one pass: reaps a stale viewer holder, resets warming-death, terminates a draining-past-grace box → lease cold", async () => {
+  test("(1) one pass reaps stale holders and bounded subsequent passes terminate every due box", async () => {
     if (!available) return;
     const spy = makeTerminateSpy();
     const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(), {
@@ -563,7 +563,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       resumeState: { backendId: "local", sessionState: {} },
     });
 
-    const result = await reapSandboxLeases();
+    let terminated = (await reapSandboxLeases()).terminated;
 
     // The stale viewer holder is gone; that lease entered draining (refcount 0).
     expect(await holderCount(staleViewer.workspaceId, staleViewer.groupId, "viewer")).toBe(0);
@@ -575,6 +575,16 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     const warmingRow = await readRow(warmingDeath.workspaceId, warmingDeath.groupId);
     expect(warmingRow?.liveness).toBe("cold");
     expect(warmingRow?.instance_id).toBeNull();
+
+    // Provider-facing teardown admits one capture-bearing box per activity.
+    // Consecutive Schedule fires must therefore drain both due rows without
+    // abandoning either capture fence.
+    for (let sweep = 0; sweep < 4; sweep += 1) {
+      const warmingCreatedRow = await readRow(warmingCreated.workspaceId, warmingCreated.groupId);
+      const drainRow = await readRow(drainable.workspaceId, drainable.groupId);
+      if (warmingCreatedRow?.liveness === "cold" && drainRow?.liveness === "cold") break;
+      terminated += (await reapSandboxLeases()).terminated;
+    }
 
     // The post-create warming-death row kept its instance_id long enough for the
     // provider terminate seam, then went cold.
@@ -589,7 +599,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     const drainRow = await readRow(drainable.workspaceId, drainable.groupId);
     expect(drainRow?.liveness).toBe("cold");
     expect(drainRow?.instance_id).toBeNull();
-    expect(result.terminated).toBeGreaterThanOrEqual(1);
+    expect(terminated).toBeGreaterThanOrEqual(2);
   }, 60_000);
 
   test("(1b) persist-before-terminate: persistDrainSnapshot folds the /workspace archive onto the lease under the epoch fence", async () => {
