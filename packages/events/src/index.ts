@@ -865,7 +865,12 @@ export function sessionEventBatchesByBytes(
 /** Return one count+byte-bounded HTTP page and truthful continuation facts. */
 export function boundSessionEventHttpPage(
   events: readonly SessionEvent[],
-  options: { direction: "after" | "before"; maxBytes?: number },
+  options: {
+    direction: "after" | "before";
+    maxBytes?: number;
+    /** Exact mode is restricted to already-canonical forensic REST rows. */
+    eventProjection?: "bounded" | "exact";
+  },
 ): {
   events: SessionEvent[];
   truncated: boolean;
@@ -875,7 +880,10 @@ export function boundSessionEventHttpPage(
   const maxBytes = options.maxBytes ?? SESSION_EVENT_HTTP_PAGE_MAX_BYTES;
   const selected: SessionEvent[] = [];
   let bytes = 2; // []
-  const projected = events.map((event) => boundSessionEventForSurface(event, "http_projection"));
+  const projected =
+    options.eventProjection === "exact"
+      ? [...events]
+      : events.map((event) => boundSessionEventForSurface(event, "http_projection"));
   const candidates = options.direction === "after" ? projected : [...projected].reverse();
   for (const event of candidates) {
     const eventBytes = sessionEventJsonBytes(event);
