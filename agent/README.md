@@ -88,6 +88,12 @@ deployment cannot cancel, query, acknowledge, detach, or collide with another's
 work. Removing one connection sends its own going-offline event and leaves every
 other link and command running.
 
+The control plane deliberately rotates each connection's short-lived NATS user
+JWT. That expected expiry reconnects immediately with the durable enrollment
+bearer; established op-stream commands detach, keep running, and replay any
+missed output after re-attachment. Full-jitter backoff is reserved for actual
+transport failures.
+
 On Linux the systemd aggregate is deliberately unlimited and each accepted host
 operation gets a separate cgroup-v2 leaf. The supervisor has its own leaf carrying
 systemd-oomd's avoid marker before it is moved, so memory pressure in a command
