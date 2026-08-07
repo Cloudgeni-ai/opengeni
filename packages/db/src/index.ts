@@ -2597,6 +2597,8 @@ export type ModelCallFact = {
   reasoningTokens: number | null;
   totalTokens: number | null;
   pricedCostMicros: number;
+  estimatedProviderCostMicros: number | null;
+  pricingSource: "configured_list_price" | "gateway_reported" | null;
   occurredAt: Date;
   recordedAt: Date;
 };
@@ -2629,6 +2631,11 @@ function mapModelCallFact(row: typeof schema.modelCallFacts.$inferSelect): Model
     reasoningTokens: row.reasoningTokens,
     totalTokens: row.totalTokens,
     pricedCostMicros: row.pricedCostMicros,
+    estimatedProviderCostMicros: row.estimatedProviderCostMicros,
+    pricingSource:
+      row.pricingSource === "configured_list_price" || row.pricingSource === "gateway_reported"
+        ? row.pricingSource
+        : null,
     occurredAt: row.occurredAt,
     recordedAt: row.recordedAt,
   };
@@ -2689,6 +2696,8 @@ export async function recordModelCallFact(
     model: string;
     billingPath: ModelCallBillingPath;
     pricedCostMicros: number;
+    estimatedProviderCostMicros?: number | null;
+    pricingSource?: "configured_list_price" | "gateway_reported" | null;
     inputTokens?: number | null;
     outputTokens?: number | null;
     cachedTokens?: number | null;
@@ -2700,6 +2709,20 @@ export async function recordModelCallFact(
 ): Promise<ModelCallFact> {
   if (input.pricedCostMicros < 0 || !Number.isSafeInteger(input.pricedCostMicros)) {
     throw new Error("recordModelCallFact: pricedCostMicros must be a non-negative safe integer");
+  }
+  if (
+    input.estimatedProviderCostMicros != null &&
+    (input.estimatedProviderCostMicros < 0 ||
+      !Number.isSafeInteger(input.estimatedProviderCostMicros))
+  ) {
+    throw new Error(
+      "recordModelCallFact: estimatedProviderCostMicros must be null or a non-negative safe integer",
+    );
+  }
+  if ((input.estimatedProviderCostMicros == null) !== (input.pricingSource == null)) {
+    throw new Error(
+      "recordModelCallFact: estimatedProviderCostMicros and pricingSource must be present together",
+    );
   }
   return await withRlsContext(
     db,
@@ -2752,6 +2775,8 @@ export async function recordModelCallFact(
           reasoningTokens: input.reasoningTokens ?? null,
           totalTokens: input.totalTokens ?? null,
           pricedCostMicros: input.pricedCostMicros,
+          estimatedProviderCostMicros: input.estimatedProviderCostMicros ?? null,
+          pricingSource: input.pricingSource ?? null,
           occurredAt,
         })
         .onConflictDoUpdate({
@@ -2766,6 +2791,8 @@ export async function recordModelCallFact(
             initiatorKind: sql`coalesce(${schema.modelCallFacts.initiatorKind}, excluded.initiator_kind)`,
             initiatorSubjectId: sql`coalesce(${schema.modelCallFacts.initiatorSubjectId}, excluded.initiator_subject_id)`,
             turnSource: sql`coalesce(${schema.modelCallFacts.turnSource}, excluded.turn_source)`,
+            estimatedProviderCostMicros: sql`coalesce(${schema.modelCallFacts.estimatedProviderCostMicros}, excluded.estimated_provider_cost_micros)`,
+            pricingSource: sql`coalesce(${schema.modelCallFacts.pricingSource}, excluded.pricing_source)`,
           },
         })
         .returning();

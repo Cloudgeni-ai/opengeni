@@ -19,10 +19,15 @@ export type ModelCallFactAggregateRow = {
   inputTokens: number;
   outputTokens: number;
   cachedTokens: number;
+  cacheInputTokens: number;
   cacheWriteTokens: number;
   reasoningTokens: number;
   totalTokens: number;
+  tokenKnownCalls: number;
+  cacheKnownCalls: number;
   pricedCostMicros: number;
+  estimatedProviderCostMicros: number;
+  estimatedProviderCostKnownCalls: number;
 };
 
 export type InsightsDayBucket = {
@@ -52,15 +57,21 @@ export type RootSessionDriverRow = {
   rootSessionId: string;
   title: string | null;
   pricedCostMicros: number;
-  inputTokens: number;
+  estimatedProviderCostMicros: number;
+  estimatedProviderCostKnownCalls: number;
+  totalTokens: number;
   cachedTokens: number;
+  cacheInputTokens: number;
 };
 
 export type ScheduleFactAggregate = {
   scheduledTaskId: string;
   pricedCostMicros: number;
-  inputTokens: number;
+  estimatedProviderCostMicros: number;
+  estimatedProviderCostKnownCalls: number;
+  totalTokens: number;
   cachedTokens: number;
+  cacheInputTokens: number;
   calls: number;
   /** Prefer credits whenever any credits-path call exists in the window. */
   billingPath: string;
@@ -86,6 +97,28 @@ export type FloorSessionRow = {
   sandboxBackend: string;
   updatedAt: Date;
   createdAt: Date;
+};
+
+export type RecentModelCallRow = {
+  id: string;
+  occurredAt: Date;
+  recordedAt: Date;
+  sessionId: string;
+  sessionTitle: string | null;
+  turnId: string;
+  provider: string;
+  providerApi: string;
+  model: string;
+  billingPath: string;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cachedTokens: number | null;
+  cacheWriteTokens: number | null;
+  reasoningTokens: number | null;
+  totalTokens: number | null;
+  pricedCostMicros: number;
+  estimatedProviderCostMicros: number | null;
+  pricingSource: string | null;
 };
 
 function dayKeyUtc(value: Date): string {
@@ -178,10 +211,15 @@ export async function aggregateModelCallFacts(
         inputTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.inputTokens}), 0)`,
         outputTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.outputTokens}), 0)`,
         cachedTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.cachedTokens}), 0)`,
+        cacheInputTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.inputTokens}) filter (where ${schema.modelCallFacts.cachedTokens} is not null and ${schema.modelCallFacts.inputTokens} is not null), 0)`,
         cacheWriteTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.cacheWriteTokens}), 0)`,
         reasoningTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.reasoningTokens}), 0)`,
         totalTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.totalTokens}), 0)`,
-        pricedCostMicros: sql<number>`coalesce(sum(${schema.modelCallFacts.pricedCostMicros}), 0)`,
+        tokenKnownCalls: sql<number>`count(${schema.modelCallFacts.totalTokens})::int`,
+        cacheKnownCalls: sql<number>`count(*) filter (where ${schema.modelCallFacts.cachedTokens} is not null and ${schema.modelCallFacts.inputTokens} is not null)::int`,
+        pricedCostMicros: sql<number>`coalesce(sum(${schema.modelCallFacts.pricedCostMicros}) filter (where ${schema.modelCallFacts.billingPath} = 'opengeni_credits'), 0)`,
+        estimatedProviderCostMicros: sql<number>`coalesce(sum(${schema.modelCallFacts.estimatedProviderCostMicros}), 0)`,
+        estimatedProviderCostKnownCalls: sql<number>`count(${schema.modelCallFacts.estimatedProviderCostMicros})::int`,
       })
       .from(schema.modelCallFacts)
       .where(and(...clauses))
@@ -198,10 +236,15 @@ export async function aggregateModelCallFacts(
       inputTokens: Number(row.inputTokens),
       outputTokens: Number(row.outputTokens),
       cachedTokens: Number(row.cachedTokens),
+      cacheInputTokens: Number(row.cacheInputTokens),
       cacheWriteTokens: Number(row.cacheWriteTokens),
       reasoningTokens: Number(row.reasoningTokens),
       totalTokens: Number(row.totalTokens),
+      tokenKnownCalls: Number(row.tokenKnownCalls),
+      cacheKnownCalls: Number(row.cacheKnownCalls),
       pricedCostMicros: Number(row.pricedCostMicros),
+      estimatedProviderCostMicros: Number(row.estimatedProviderCostMicros),
+      estimatedProviderCostKnownCalls: Number(row.estimatedProviderCostKnownCalls),
     }));
   });
 }
@@ -216,7 +259,24 @@ export async function aggregateModelCallFactsByDay(
     model?: string | null;
   },
 ): Promise<
-  Map<string, { costMicros: number; inputTokens: number; cachedTokens: number; calls: number }>
+  Map<
+    string,
+    {
+      costMicros: number;
+      estimatedProviderCostMicros: number;
+      estimatedProviderCostKnownCalls: number;
+      inputTokens: number;
+      outputTokens: number;
+      cachedTokens: number;
+      cacheInputTokens: number;
+      cacheWriteTokens: number;
+      reasoningTokens: number;
+      totalTokens: number;
+      tokenKnownCalls: number;
+      cacheKnownCalls: number;
+      calls: number;
+    }
+  >
 > {
   const context = await rlsContextForWorkspace(db, input.workspaceId);
   return await withRlsContext(db, context, async (scopedDb) => {
@@ -230,9 +290,18 @@ export async function aggregateModelCallFactsByDay(
     const rows = await scopedDb
       .select({
         day: sql<string>`to_char(date_trunc('day', ${schema.modelCallFacts.occurredAt} at time zone 'UTC'), 'YYYY-MM-DD')`,
-        costMicros: sql<number>`coalesce(sum(${schema.modelCallFacts.pricedCostMicros}), 0)`,
+        costMicros: sql<number>`coalesce(sum(${schema.modelCallFacts.pricedCostMicros}) filter (where ${schema.modelCallFacts.billingPath} = 'opengeni_credits'), 0)`,
+        estimatedProviderCostMicros: sql<number>`coalesce(sum(${schema.modelCallFacts.estimatedProviderCostMicros}), 0)`,
+        estimatedProviderCostKnownCalls: sql<number>`count(${schema.modelCallFacts.estimatedProviderCostMicros})::int`,
         inputTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.inputTokens}), 0)`,
+        outputTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.outputTokens}), 0)`,
         cachedTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.cachedTokens}), 0)`,
+        cacheInputTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.inputTokens}) filter (where ${schema.modelCallFacts.cachedTokens} is not null and ${schema.modelCallFacts.inputTokens} is not null), 0)`,
+        cacheWriteTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.cacheWriteTokens}), 0)`,
+        reasoningTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.reasoningTokens}), 0)`,
+        totalTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.totalTokens}), 0)`,
+        tokenKnownCalls: sql<number>`count(${schema.modelCallFacts.totalTokens})::int`,
+        cacheKnownCalls: sql<number>`count(*) filter (where ${schema.modelCallFacts.cachedTokens} is not null and ${schema.modelCallFacts.inputTokens} is not null)::int`,
         calls: sql<number>`count(*)::int`,
       })
       .from(schema.modelCallFacts)
@@ -243,8 +312,17 @@ export async function aggregateModelCallFactsByDay(
         row.day,
         {
           costMicros: Number(row.costMicros),
+          estimatedProviderCostMicros: Number(row.estimatedProviderCostMicros),
+          estimatedProviderCostKnownCalls: Number(row.estimatedProviderCostKnownCalls),
           inputTokens: Number(row.inputTokens),
+          outputTokens: Number(row.outputTokens),
           cachedTokens: Number(row.cachedTokens),
+          cacheInputTokens: Number(row.cacheInputTokens),
+          cacheWriteTokens: Number(row.cacheWriteTokens),
+          reasoningTokens: Number(row.reasoningTokens),
+          totalTokens: Number(row.totalTokens),
+          tokenKnownCalls: Number(row.tokenKnownCalls),
+          cacheKnownCalls: Number(row.cacheKnownCalls),
           calls: Number(row.calls),
         },
       ]),
@@ -378,9 +456,12 @@ export async function aggregateRootSessionDrivers(
       .select({
         rootSessionId: childSessions.rootSessionId,
         title: rootSessions.title,
-        pricedCostMicros: sql<number>`coalesce(sum(${schema.modelCallFacts.pricedCostMicros}), 0)`,
-        inputTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.inputTokens}), 0)`,
+        pricedCostMicros: sql<number>`coalesce(sum(${schema.modelCallFacts.pricedCostMicros}) filter (where ${schema.modelCallFacts.billingPath} = 'opengeni_credits'), 0)`,
+        estimatedProviderCostMicros: sql<number>`coalesce(sum(${schema.modelCallFacts.estimatedProviderCostMicros}), 0)`,
+        estimatedProviderCostKnownCalls: sql<number>`count(${schema.modelCallFacts.estimatedProviderCostMicros})::int`,
+        totalTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.totalTokens}), 0)`,
         cachedTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.cachedTokens}), 0)`,
+        cacheInputTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.inputTokens}) filter (where ${schema.modelCallFacts.cachedTokens} is not null and ${schema.modelCallFacts.inputTokens} is not null), 0)`,
       })
       .from(schema.modelCallFacts)
       .innerJoin(
@@ -399,14 +480,17 @@ export async function aggregateRootSessionDrivers(
       )
       .where(and(...clauses))
       .groupBy(childSessions.rootSessionId, rootSessions.title)
-      .orderBy(sql`coalesce(sum(${schema.modelCallFacts.pricedCostMicros}), 0) desc`);
+      .orderBy(sql`coalesce(sum(${schema.modelCallFacts.totalTokens}), 0) desc`);
     const rows = input.rootSessionIds ? await query : await query.limit(input.limit ?? 8);
     return rows.map((row) => ({
       rootSessionId: row.rootSessionId,
       title: row.title,
       pricedCostMicros: Number(row.pricedCostMicros),
-      inputTokens: Number(row.inputTokens),
+      estimatedProviderCostMicros: Number(row.estimatedProviderCostMicros),
+      estimatedProviderCostKnownCalls: Number(row.estimatedProviderCostKnownCalls),
+      totalTokens: Number(row.totalTokens),
       cachedTokens: Number(row.cachedTokens),
+      cacheInputTokens: Number(row.cacheInputTokens),
     }));
   });
 }
@@ -436,6 +520,62 @@ export async function listModelCallFacets(
   });
 }
 
+export async function listRecentModelCalls(
+  db: Database,
+  input: InsightsTimeWindow & {
+    workspaceId: string;
+    provider?: string | null;
+    model?: string | null;
+    limit?: number;
+  },
+): Promise<RecentModelCallRow[]> {
+  const context = await rlsContextForWorkspace(db, input.workspaceId);
+  const factSessions = alias(schema.sessions, "insight_recent_fact_sessions");
+  return await withRlsContext(db, context, async (scopedDb) => {
+    const clauses = [
+      eq(schema.modelCallFacts.workspaceId, input.workspaceId),
+      gte(schema.modelCallFacts.occurredAt, input.since),
+      lt(schema.modelCallFacts.occurredAt, input.until),
+      ...(input.provider ? [eq(schema.modelCallFacts.provider, input.provider)] : []),
+      ...(input.model ? [eq(schema.modelCallFacts.model, input.model)] : []),
+    ];
+    const rows = await scopedDb
+      .select({
+        id: schema.modelCallFacts.id,
+        occurredAt: schema.modelCallFacts.occurredAt,
+        recordedAt: schema.modelCallFacts.recordedAt,
+        sessionId: schema.modelCallFacts.sessionId,
+        sessionTitle: factSessions.title,
+        turnId: schema.modelCallFacts.turnId,
+        provider: schema.modelCallFacts.provider,
+        providerApi: schema.modelCallFacts.providerApi,
+        model: schema.modelCallFacts.model,
+        billingPath: schema.modelCallFacts.billingPath,
+        inputTokens: schema.modelCallFacts.inputTokens,
+        outputTokens: schema.modelCallFacts.outputTokens,
+        cachedTokens: schema.modelCallFacts.cachedTokens,
+        cacheWriteTokens: schema.modelCallFacts.cacheWriteTokens,
+        reasoningTokens: schema.modelCallFacts.reasoningTokens,
+        totalTokens: schema.modelCallFacts.totalTokens,
+        pricedCostMicros: schema.modelCallFacts.pricedCostMicros,
+        estimatedProviderCostMicros: schema.modelCallFacts.estimatedProviderCostMicros,
+        pricingSource: schema.modelCallFacts.pricingSource,
+      })
+      .from(schema.modelCallFacts)
+      .leftJoin(
+        factSessions,
+        and(
+          eq(factSessions.workspaceId, schema.modelCallFacts.workspaceId),
+          eq(factSessions.id, schema.modelCallFacts.sessionId),
+        ),
+      )
+      .where(and(...clauses))
+      .orderBy(desc(schema.modelCallFacts.occurredAt), desc(schema.modelCallFacts.id))
+      .limit(Math.max(1, Math.min(input.limit ?? 50, 100)));
+    return rows;
+  });
+}
+
 export async function aggregateScheduleFacts(
   db: Database,
   input: InsightsTimeWindow & {
@@ -457,9 +597,12 @@ export async function aggregateScheduleFacts(
     const rows = await scopedDb
       .select({
         scheduledTaskId: schema.modelCallFacts.scheduledTaskId,
-        pricedCostMicros: sql<number>`coalesce(sum(${schema.modelCallFacts.pricedCostMicros}), 0)`,
-        inputTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.inputTokens}), 0)`,
+        pricedCostMicros: sql<number>`coalesce(sum(${schema.modelCallFacts.pricedCostMicros}) filter (where ${schema.modelCallFacts.billingPath} = 'opengeni_credits'), 0)`,
+        estimatedProviderCostMicros: sql<number>`coalesce(sum(${schema.modelCallFacts.estimatedProviderCostMicros}), 0)`,
+        estimatedProviderCostKnownCalls: sql<number>`count(${schema.modelCallFacts.estimatedProviderCostMicros})::int`,
+        totalTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.totalTokens}), 0)`,
         cachedTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.cachedTokens}), 0)`,
+        cacheInputTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.inputTokens}) filter (where ${schema.modelCallFacts.cachedTokens} is not null and ${schema.modelCallFacts.inputTokens} is not null), 0)`,
         calls: sql<number>`count(*)::int`,
         billingPath: sql<string>`case
           when bool_or(${schema.modelCallFacts.billingPath} = 'opengeni_credits')
@@ -475,8 +618,11 @@ export async function aggregateScheduleFacts(
       .map((row) => ({
         scheduledTaskId: row.scheduledTaskId,
         pricedCostMicros: Number(row.pricedCostMicros),
-        inputTokens: Number(row.inputTokens),
+        estimatedProviderCostMicros: Number(row.estimatedProviderCostMicros),
+        estimatedProviderCostKnownCalls: Number(row.estimatedProviderCostKnownCalls),
+        totalTokens: Number(row.totalTokens),
         cachedTokens: Number(row.cachedTokens),
+        cacheInputTokens: Number(row.cacheInputTokens),
         calls: Number(row.calls),
         billingPath: row.billingPath,
       }));
@@ -605,10 +751,11 @@ export async function countOnlineMachines(
   db: Database,
   workspaceId: string,
   heartbeatFreshMs: number,
+  now = new Date(),
 ): Promise<number> {
   const context = await rlsContextForWorkspace(db, workspaceId);
   return await withRlsContext(db, context, async (scopedDb) => {
-    const cutoff = new Date(Date.now() - heartbeatFreshMs);
+    const cutoff = new Date(now.getTime() - heartbeatFreshMs);
     const [{ n } = { n: 0 }] = await scopedDb
       .select({ n: sql<number>`count(*)::int` })
       .from(schema.enrollments)

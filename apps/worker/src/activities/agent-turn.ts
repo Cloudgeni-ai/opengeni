@@ -152,9 +152,9 @@ import {
 import { connectionTokenResolverForTurn } from "./mcp-credentials";
 import {
   assertTurnExecutionPolicyMatchesConfigV1,
-  calculateGatewayReportedCostMicros,
-  calculateModelUsageCostMicros,
-  configuredModelPricing,
+  calculateGatewayReportedCostBreakdown,
+  calculateModelUsageCostBreakdown,
+  configuredModelPricingSchedules,
   configuredStaticUsageLimits,
   responseSatisfiesLatencyMode,
   sandboxArchiveCaptureTimeoutMs,
@@ -9505,6 +9505,9 @@ export type ModelUsageBillingRecord = {
   billingPath: "opengeni_credits" | "external";
   /** Same quantity written to usage_events.model.cost when present; else 0. */
   pricedCostMicros: number;
+  /** Hypothetical provider-rate USD micros; never an OpenGeni charge. */
+  estimatedProviderCostMicros: number | null;
+  pricingSource: "configured_list_price" | "gateway_reported" | null;
   normalizedUsage: ModelCallUsageNormalization;
   upstreamProvider?: string;
 };
@@ -9552,6 +9555,29 @@ export async function recordModelUsageAndDebitCredits(
       );
     }
   }
+  const pricingSchedules = configuredModelPricingSchedules(settings);
+  const configuredPricingModel = pricingSchedules[input.model]
+    ? input.model
+    : input.model.startsWith("codex/") && pricingSchedules[input.model.slice("codex/".length)]
+      ? input.model.slice("codex/".length)
+      : null;
+  const pricingBreakdown = gatewayBilling
+    ? calculateGatewayReportedCostBreakdown(
+        settings,
+        input.model,
+        gatewayBilling.inferenceCostUsd,
+        { inputTokens },
+      )
+    : configuredPricingModel
+      ? calculateModelUsageCostBreakdown(settings, configuredPricingModel, sanitizedUsage, {
+          latencyMode: input.latencyMode ?? "standard",
+        })
+      : null;
+  const pricingSource = gatewayBilling
+    ? ("gateway_reported" as const)
+    : pricingBreakdown
+      ? ("configured_list_price" as const)
+      : null;
   // An externally billed turn is paid outside OpenGeni, so it
   // consumes ZERO OpenGeni credits and must never feed an OpenGeni cap. A
   // codex/<slug> model has no entry in configuredModelPricing, so the normal path
@@ -9578,6 +9604,8 @@ export async function recordModelUsageAndDebitCredits(
     return {
       billingPath: "external",
       pricedCostMicros: 0,
+      estimatedProviderCostMicros: pricingBreakdown?.providerCostMicros ?? null,
+      pricingSource,
       normalizedUsage,
     };
   }
@@ -9601,20 +9629,16 @@ export async function recordModelUsageAndDebitCredits(
     return {
       billingPath: "opengeni_credits",
       pricedCostMicros: 0,
+      estimatedProviderCostMicros: pricingBreakdown?.providerCostMicros ?? null,
+      pricingSource,
       normalizedUsage,
       ...(gatewayBilling ? { upstreamProvider: gatewayBilling.finalProvider } : {}),
     };
   }
-  if (!configuredModelPricing(settings)[input.model]) {
+  if (!pricingBreakdown) {
     throw new Error(`Missing model pricing for ${input.model}`);
   }
-  const costMicros = gatewayBilling
-    ? calculateGatewayReportedCostMicros(settings, input.model, gatewayBilling.inferenceCostUsd, {
-        inputTokens,
-      })
-    : calculateModelUsageCostMicros(settings, input.model, sanitizedUsage, {
-        latencyMode: input.latencyMode ?? "standard",
-      });
+  const costMicros = pricingBreakdown.creditCostMicros;
   await recordUsageEvent(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -9658,6 +9682,8 @@ export async function recordModelUsageAndDebitCredits(
   return {
     billingPath: "opengeni_credits",
     pricedCostMicros: costMicros,
+    estimatedProviderCostMicros: pricingBreakdown.providerCostMicros,
+    pricingSource,
     normalizedUsage,
     ...(gatewayBilling ? { upstreamProvider: gatewayBilling.finalProvider } : {}),
   };
@@ -9692,6 +9718,8 @@ export async function recordAuthoritativeModelCallFact(input: {
       model: input.model,
       billingPath: input.billing.billingPath,
       pricedCostMicros: input.billing.pricedCostMicros,
+      estimatedProviderCostMicros: input.billing.estimatedProviderCostMicros,
+      pricingSource: input.billing.pricingSource,
       inputTokens: telemetry.inputTokens,
       outputTokens: telemetry.outputTokens,
       cachedTokens: telemetry.cachedTokens,
@@ -9721,6 +9749,9 @@ function sanitizedModelUsageInput(normalized: ModelCallUsageNormalization): Mode
             cached_tokens: normalized.telemetry.cachedTokens,
           },
         }
+      : {}),
+    ...(normalized.requestUsageEntries
+      ? { requestUsageEntries: normalized.requestUsageEntries }
       : {}),
   };
 }

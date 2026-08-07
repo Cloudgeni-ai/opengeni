@@ -1137,6 +1137,13 @@ export type ModelUsageInput = {
   requestUsageEntries?: ModelUsageInput[] | undefined;
 };
 
+export type ModelUsageCostBreakdown = {
+  /** Provider-rate cost basis for the exact usage, before OpenGeni margin. */
+  providerCostMicros: number;
+  /** OpenGeni credit price after configured margin and latency-mode multiplier. */
+  creditCostMicros: number;
+};
+
 export type StaticUsageLimitsConfig = StaticUsageLimits;
 export type EntitlementsConfig = Entitlements;
 
@@ -3428,6 +3435,15 @@ export function calculateModelUsageCostMicros(
   usage: ModelUsageInput,
   options?: { latencyMode?: LatencyMode },
 ): number {
+  return calculateModelUsageCostBreakdown(settings, model, usage, options).creditCostMicros;
+}
+
+export function calculateModelUsageCostBreakdown(
+  settings: Settings,
+  model: string,
+  usage: ModelUsageInput,
+  options?: { latencyMode?: LatencyMode },
+): ModelUsageCostBreakdown {
   const schedule = configuredModelPricingSchedules(settings)[model];
   if (!schedule) {
     throw new Error(`Missing model pricing for ${model}`);
@@ -3444,10 +3460,12 @@ export function calculateModelUsageCostMicros(
       (rawCostByPricing.get(pricing) ?? 0) + calculateEntryCostMicros(pricing, entry),
     );
   }
-  let total = 0;
+  let providerCostMicros = 0;
+  let creditCostMicros = 0;
   for (const [pricing, rawCost] of rawCostByPricing) {
     const marginBps = pricing.marginBps ?? 0;
-    total += Math.ceil((rawCost * (10_000 + marginBps)) / 10_000);
+    providerCostMicros += rawCost;
+    creditCostMicros += Math.ceil((rawCost * (10_000 + marginBps)) / 10_000);
   }
   const latencyMode = options?.latencyMode ?? "standard";
   if (latencyMode !== "standard") {
@@ -3460,10 +3478,11 @@ export function calculateModelUsageCostMicros(
       (mode) => mode.id === latencyMode && mode.runnable,
     )?.billingMultiplierBps;
     if (multiplierBps && multiplierBps > 0) {
-      total = Math.ceil((total * multiplierBps) / 10_000);
+      providerCostMicros = Math.ceil((providerCostMicros * multiplierBps) / 10_000);
+      creditCostMicros = Math.ceil((creditCostMicros * multiplierBps) / 10_000);
     }
   }
-  return total;
+  return { providerCostMicros, creditCostMicros };
 }
 
 /**
@@ -3477,6 +3496,16 @@ export function calculateGatewayReportedCostMicros(
   inferenceCostUsd: string,
   options?: { inputTokens?: number },
 ): number {
+  return calculateGatewayReportedCostBreakdown(settings, model, inferenceCostUsd, options)
+    .creditCostMicros;
+}
+
+export function calculateGatewayReportedCostBreakdown(
+  settings: Settings,
+  model: string,
+  inferenceCostUsd: string,
+  options?: { inputTokens?: number },
+): ModelUsageCostBreakdown {
   const schedule = configuredModelPricingSchedules(settings)[model];
   if (!schedule) {
     throw new Error(`Missing model pricing for ${model}`);
@@ -3489,14 +3518,22 @@ export function calculateGatewayReportedCostMicros(
   const fraction = match[2] ?? "";
   const decimalDigits = BigInt(`${match[1]}${fraction}`);
   const decimalScale = 10n ** BigInt(fraction.length);
+  const providerNumerator = decimalDigits * 1_000_000n;
+  const providerMicros = (providerNumerator + decimalScale - 1n) / decimalScale;
   const marginBps = BigInt(10_000 + (pricing.marginBps ?? 0));
-  const numerator = decimalDigits * 1_000_000n * marginBps;
+  const numerator = providerNumerator * marginBps;
   const denominator = decimalScale * 10_000n;
-  const micros = (numerator + denominator - 1n) / denominator;
-  if (micros > BigInt(Number.MAX_SAFE_INTEGER)) {
+  const creditMicros = (numerator + denominator - 1n) / denominator;
+  if (
+    providerMicros > BigInt(Number.MAX_SAFE_INTEGER) ||
+    creditMicros > BigInt(Number.MAX_SAFE_INTEGER)
+  ) {
     throw new Error("AI Gateway inference cost exceeds the supported billing range");
   }
-  return Number(micros);
+  return {
+    providerCostMicros: Number(providerMicros),
+    creditCostMicros: Number(creditMicros),
+  };
 }
 
 export function configuredAllowedReasoningEfforts(

@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
   assertTurnExecutionPolicyMatchesConfigV1,
+  calculateGatewayReportedCostBreakdown,
   calculateGatewayReportedCostMicros,
+  calculateModelUsageCostBreakdown,
   calculateModelUsageCostMicros,
   canonicalizeConfiguredModelId,
   configuredAllowedModels,
@@ -1391,6 +1393,45 @@ describe("configuredModelPricing", () => {
         { latencyMode: "fast" },
       ),
     ).toBe(50_000);
+    expect(
+      calculateModelUsageCostBreakdown(
+        settings,
+        "gpt-5.6-luna",
+        { inputTokens: 100_000 },
+        { latencyMode: "fast" },
+      ),
+    ).toEqual({
+      providerCostMicros: 40_000,
+      creditCostMicros: 50_000,
+    });
+    expect(
+      calculateModelUsageCostBreakdown(settings, "gpt-5.6-luna", {
+        inputTokens: 300_000,
+        outputTokens: 0,
+        requestUsageEntries: [
+          { inputTokens: 150_000, outputTokens: 0 },
+          { inputTokens: 150_000, outputTokens: 0 },
+        ],
+      }),
+    ).toEqual({
+      // Each provider request stays below the long-context threshold.
+      providerCostMicros: 60_000,
+      creditCostMicros: 75_000,
+    });
+  });
+
+  test("keeps gateway provider cost separate from OpenGeni credit markup", () => {
+    const settings = withEnv({ OPENGENI_OPENAI_API_KEY: "sk-test" }, () => getSettings());
+    expect(
+      calculateGatewayReportedCostBreakdown(
+        settings,
+        OPENGENI_GATEWAY_MODELS.deepseek.productId,
+        "0.000004",
+      ),
+    ).toEqual({
+      providerCostMicros: 4,
+      creditCostMicros: 5,
+    });
   });
 
   test("maps and verifies provider Fast service tiers", () => {

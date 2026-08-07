@@ -24,10 +24,12 @@ export function CausalSheet(props: {
 }) {
   const [step, setStep] = useState(0);
   const snap = props.snapshot;
-  const modelCost = snap.models.reduce((n, m) => n + m.creditUsd, 0);
-  const inputTokens = snap.models.reduce((n, m) => n + m.inputTokens, 0);
+  const modelCreditPrice = snap.models.reduce((n, m) => n + m.creditUsd, 0);
+  const estimatedProviderUsd = snap.models.reduce((n, m) => n + m.estimatedProviderUsd, 0);
+  const totalTokens = snap.models.reduce((n, m) => n + m.totalTokens, 0);
   const cachedTokens = snap.models.reduce((n, m) => n + m.cachedTokens, 0);
-  const cachePct = inputTokens > 0 ? Math.round((cachedTokens / inputTokens) * 100) : 0;
+  const cacheInputTokens = snap.models.reduce((n, m) => n + m.cacheInputTokens, 0);
+  const cachePct = cacheInputTokens > 0 ? Math.round((cachedTokens / cacheInputTokens) * 100) : 0;
   const driver =
     snap.drivers.find((d) => d.id === props.target?.driverId) ?? snap.drivers[0] ?? null;
 
@@ -47,10 +49,10 @@ export function CausalSheet(props: {
         <div className="border-b border-border px-5 pb-4 pt-5">
           <SheetHeader className="gap-1 text-left">
             <SheetTitle className="text-base font-semibold tracking-[-0.02em]">
-              Credit driver
+              Usage driver
             </SheetTitle>
             <SheetDescription className="text-xs leading-5 text-fg-muted">
-              Window totals and the selected credit-$ driver from model_call_facts.
+              Token, cache, credit-price, and hypothetical provider-cost facts from model calls.
             </SheetDescription>
           </SheetHeader>
           <ol className="mt-4 flex gap-1">
@@ -94,10 +96,14 @@ export function CausalSheet(props: {
               {step === 0 ? (
                 <Block title="Window totals" body={`${snap.rangeLabel} · UTC`}>
                   <dl className="grid grid-cols-2 gap-2 text-xs">
-                    <Fact label="Model credit $" value={formatUsd(modelCost)} />
-                    <Fact label="Workspace credit $" value={formatUsd(snap.workspaceCreditUsd)} />
-                    <Fact label="input tokens" value={formatTokens(inputTokens)} />
+                    <Fact label="Total tokens" value={formatTokens(totalTokens)} />
                     <Fact label="cache hit" value={`${cachePct}%`} />
+                    <Fact label="Estimated provider USD" value={formatUsd(estimatedProviderUsd)} />
+                    <Fact label="Model credit price" value={formatUsd(modelCreditPrice)} />
+                    <Fact
+                      label="Workspace credit price"
+                      value={formatUsd(snap.workspaceCreditUsd)}
+                    />
                     <Fact label="warm hours" value={`${(snap.warmSeconds / 3600).toFixed(1)}h`} />
                   </dl>
                 </Block>
@@ -106,16 +112,20 @@ export function CausalSheet(props: {
                 <Block
                   title="Selected driver"
                   body={
-                    driver ? `Grouped by ${driver.groupBy}` : "No credit drivers in this window."
+                    driver ? `Grouped by ${driver.groupBy}` : "No usage drivers in this window."
                   }
                 >
                   {driver ? (
                     <div className="rounded-lg border border-border bg-surface/50 p-3">
                       <p className="text-sm font-medium text-fg">{driver.label}</p>
                       <p className="mt-1 font-mono text-xs tabular-nums text-fg-muted">
-                        {formatUsd(driver.creditUsd)} · {formatTokens(driver.tokens)} tokens ·{" "}
-                        {driver.tokens === 0 ? "—" : `${driver.cacheHitPct}% cache`} ·{" "}
-                        {driver.pctOfCreditUsd}% of window
+                        {formatTokens(driver.tokens)} tokens · {driver.pctOfTokens}% of shown
+                        drivers · {driver.tokens === 0 ? "—" : `${driver.cacheHitPct}% cache`} ·{" "}
+                        {driver.estimatedProviderCostKnownCalls > 0
+                          ? `${formatUsd(driver.estimatedProviderUsd)} estimated provider USD`
+                          : "provider price unknown"}
+                        {" · "}
+                        {formatUsd(driver.creditUsd)} OpenGeni credits
                       </p>
                     </div>
                   ) : (

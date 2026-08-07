@@ -199,12 +199,13 @@ describe("release schema contract", () => {
         (migrations.has("0179_slack_private_shortcut_delivery_gate.sql") ? 1 : 0) +
         (migrations.has("0180_retained_screenshot_lifecycle_fences.sql") ? 1 : 0) +
         (migrations.has("0181_connected_machine_removal.sql") ? 1 : 0) +
-        (migrations.has("0182_connected_machine_remove_session_default.sql") ? 1 : 0),
+        (migrations.has("0182_connected_machine_remove_session_default.sql") ? 1 : 0) +
+        (migrations.has("0183_model_call_provider_cost_estimates.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "7102df9f5f2da4825c2d2dd1a2e165afd8df256bc14465c904fcc89f06eeee83",
+      "93f88f53cb420a72b990ffe435f38ddbd31da158f87f4707777e26dff5245971",
     );
-    expect(contract.latestMigration).toBe("0182_connected_machine_remove_session_default.sql");
+    expect(contract.latestMigration).toBe("0183_model_call_provider_cost_estimates.sql");
     expect(migrations.get("0065_enrollment_credential_generation.sql")).toMatchObject({
       sha256: "2e25fa2dfb8a95a7a9ba1ef5aa9bd219755af998b3317bcdf4d7acc4f67264fe",
       deploymentMode: "rolling",
@@ -215,6 +216,10 @@ describe("release schema contract", () => {
     });
     expect(migrations.get("0182_connected_machine_remove_session_default.sql")).toMatchObject({
       sha256: "c15bd3b6d71f15be9e163481c3cb698d8f46620d655a72a5e56d193bc16310cd",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0183_model_call_provider_cost_estimates.sql")).toMatchObject({
+      sha256: "2cb087b69996c62e8836f2d65c9e2af3fb580fe1822d327600bf40e3a6977d64",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0180_retained_screenshot_lifecycle_fences.sql")).toMatchObject({

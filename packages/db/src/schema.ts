@@ -5538,6 +5538,8 @@ export const modelCallFacts = pgTable(
     reasoningTokens: bigint("reasoning_tokens", { mode: "number" }),
     totalTokens: bigint("total_tokens", { mode: "number" }),
     pricedCostMicros: bigint("priced_cost_micros", { mode: "number" }).notNull().default(0),
+    estimatedProviderCostMicros: bigint("estimated_provider_cost_micros", { mode: "number" }),
+    pricingSource: text("pricing_source"),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
     recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -5574,6 +5576,16 @@ export const modelCallFacts = pgTable(
     pricedCostNonNegative: check(
       "model_call_facts_priced_cost_check",
       sql`${table.pricedCostMicros} >= 0`,
+    ),
+    estimatedProviderCostValid: check(
+      "model_call_facts_estimated_provider_cost_check",
+      sql`${table.estimatedProviderCostMicros} is null or ${table.estimatedProviderCostMicros} >= 0`,
+    ),
+    pricingSourceValid: check(
+      "model_call_facts_pricing_source_check",
+      sql`(${table.estimatedProviderCostMicros} is null and ${table.pricingSource} is null)
+        or (${table.estimatedProviderCostMicros} is not null
+          and ${table.pricingSource} in ('configured_list_price', 'gateway_reported'))`,
     ),
     initiatorConsistent: check(
       "model_call_facts_initiator_check",

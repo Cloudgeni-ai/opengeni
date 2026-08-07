@@ -775,6 +775,20 @@ describe("runtime event normalization", () => {
         reasoningTokens: 12,
       },
       totalTokens: 3030,
+      requestUsageEntries: [
+        {
+          inputTokens: 1000,
+          outputTokens: 10,
+          totalTokens: 1010,
+          inputTokensDetails: { cached_tokens: 100 },
+        },
+        {
+          inputTokens: 2000,
+          outputTokens: 20,
+          totalTokens: 2020,
+          inputTokensDetails: { cached_tokens: 300 },
+        },
+      ],
       rejectedFields: [],
     });
   });

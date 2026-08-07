@@ -14,12 +14,14 @@ import {
   formatDeltaUsd,
   formatPctDelta,
   formatTokens,
+  formatUtcTimestamp,
   formatUsd,
   formatWarmHours,
   providerLabel,
   type BillingPath,
   type FloorSession,
   type InsightsFilters,
+  type InsightsMeasure,
   type InsightsRange,
   type TraceTarget,
 } from "@/components/insights/mock-data";
@@ -37,6 +39,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
   const canRead = hasWorkspacePermission(context.accessContext, workspaceId, "workspace:admin");
   const reduceMotion = useReducedMotion();
   const [range, setRange] = useState<InsightsRange>("week");
+  const [measure, setMeasure] = useState<InsightsMeasure>("tokens");
   const [filters, setFilters] = useState<InsightsFilters>({
     provider: "all",
     model: "all",
@@ -44,6 +47,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
   const [trace, setTrace] = useState<TraceTarget | null>(null);
   const [floorFilter, setFloorFilter] = useState<"all" | "active">("all");
   const [snapshot, setSnapshot] = useState<WorkspaceInsightsSnapshot | null>(null);
+  const [loadedFilters, setLoadedFilters] = useState<InsightsFilters>(filters);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -66,22 +70,22 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
       .then((response) => {
         if (cancelled) return;
         setSnapshot(response.snapshot);
+        setLoadedFilters(filters);
         setLoading(false);
       })
       .catch((error: unknown) => {
         if (cancelled) return;
-        setSnapshot(null);
         setLoadError(error instanceof Error ? error.message : String(error));
         setLoading(false);
       });
     return () => {
       cancelled = true;
     };
-  }, [canRead, context.client, filters.model, filters.provider, range, workspaceId]);
+  }, [canRead, context.client, filters, range, workspaceId]);
 
   const view = useMemo(
-    () => (snapshot ? buildInsightsView(snapshot, filters) : null),
-    [filters, snapshot],
+    () => (snapshot ? buildInsightsView(snapshot, loadedFilters) : null),
+    [loadedFilters, snapshot],
   );
   const snap = view?.snap ?? null;
   const totals = view?.totals;
@@ -91,6 +95,11 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
   const providers = view?.providers ?? [];
   const maxDepthSessions = Math.max(...(snap?.depth.map((b) => b.sessions) ?? [1]), 1);
   const filtered = filters.provider !== "all" || filters.model !== "all";
+  const showingPreviousSelection =
+    snapshot !== null &&
+    (snapshot.range !== range ||
+      loadedFilters.provider !== filters.provider ||
+      loadedFilters.model !== filters.model);
 
   const setProvider = (provider: string) => {
     setFilters((prev) => {
@@ -132,7 +141,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
     return true;
   });
 
-  if (!canRead || loadError) {
+  if (!canRead || (loadError && !snapshot)) {
     return (
       <ContentPage width="wide" data-insights className="gap-4">
         <h1 className="text-lg font-semibold text-fg">Workspace insights</h1>
@@ -141,7 +150,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
     );
   }
 
-  if (loading || !snap || !totals || !deltas || !view) {
+  if ((!snapshot && loading) || !snap || !totals || !deltas || !view) {
     return (
       <ContentPage width="wide" data-insights className="gap-4">
         <h1 className="text-lg font-semibold text-fg">Workspace insights</h1>
@@ -165,7 +174,10 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
             </p>
             <h1 className="mt-1 text-xl font-semibold tracking-[-0.03em] text-fg">Insights</h1>
           </div>
-          <RangeControl value={range} onChange={setRange} />
+          <div className="flex flex-wrap items-center gap-2">
+            <MeasureControl value={measure} onChange={setMeasure} />
+            <RangeControl value={range} onChange={setRange} />
+          </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
@@ -200,74 +212,158 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
               Clear
             </button>
           ) : null}
+          {loading ? (
+            <span className="text-2xs text-fg-subtle" role="status">
+              {showingPreviousSelection ? "Refreshing… showing previous selection" : "Refreshing…"}
+            </span>
+          ) : null}
         </div>
       </motion.header>
 
-      {/* 1. Headline — model $ / sandbox warm / tokens / cache */}
+      {loadError ? (
+        <div className="rounded-lg border border-status-failed/30 bg-status-failed/5 px-3 py-2 text-xs text-status-failed">
+          Refresh failed; showing the last successful selection and snapshot. {loadError}
+        </div>
+      ) : null}
+
+      {/* 1. Headline — token truth by default; money remains explicitly split. */}
       <Section title="Overview">
-        {snap.modelFilterActive ? (
-          <p className="mb-3 text-2xs text-fg-subtle">
-            Model filter active — sandbox warm, caps, live boxes, and session depth stay
-            workspace-wide.
+        <div className="flex flex-wrap items-start justify-between gap-2 text-2xs text-fg-subtle">
+          <p>
+            {formatUtcTimestamp(snap.windowStart)} – {formatUtcTimestamp(snap.windowEnd)} ·
+            generated {formatUtcTimestamp(snap.generatedAt)}
           </p>
+          {snap.modelFilterActive ? (
+            <p>Model filters do not alter sandbox, cap, or topology totals.</p>
+          ) : null}
+        </div>
+        {measure === "money" ? (
+          <div className="rounded-lg border border-brand/20 bg-brand/5 px-3 py-2 text-xs leading-5 text-fg-muted">
+            <strong className="text-fg">Estimated provider USD</strong> is a hypothetical
+            provider-rate comparison from captured list pricing or gateway-reported inference cost,
+            not an OpenGeni charge. <strong className="text-fg">OpenGeni credit price</strong> is
+            shown separately and is zero for externally paid calls.
+          </div>
         ) : null}
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <Metric
-            label={snap.modelFilterActive ? "Model $ (filtered)" : "OpenGeni credit $"}
-            value={formatUsd(totals.creditUsd, totals.creditUsd >= 100 ? 0 : 2)}
-            delta={formatPctDelta(deltas.modelPct, snap.priorLabel)}
-            tone={(deltas.modelPct ?? 0) > 20 ? "warn" : "neutral"}
-          />
-          <Metric
-            label="Sandbox warm"
-            value={formatWarmHours(snap.warmSeconds)}
-            delta={
-              snap.modelFilterActive
-                ? "workspace-wide"
-                : formatPctDelta(deltas.warmPct, snap.priorLabel)
-            }
-            tone={!snap.modelFilterActive && (deltas.warmPct ?? 0) > 40 ? "warn" : "neutral"}
-          />
-          <Metric
-            label="Input tokens"
-            value={formatTokens(totals.inputTokens)}
-            delta={formatPctDelta(deltas.tokensPct, snap.priorLabel)}
-          />
-          <Metric
-            label="Cache hit"
-            value={`${totals.cacheHitPct}%`}
-            delta={`${deltas.cachePts > 0 ? "+" : ""}${deltas.cachePts} pts vs ${snap.priorLabel.toLowerCase()}`}
-            tone={totals.cacheHitPct >= 60 ? "good" : "neutral"}
-          />
+          {measure === "tokens" ? (
+            <>
+              <Metric
+                label="Total tokens"
+                value={formatTokens(totals.totalTokens)}
+                delta={`${formatPctDelta(deltas.tokensPct, snap.priorLabel)} · ${totals.tokenCoveragePct}% call coverage`}
+              />
+              <Metric
+                label="Input tokens"
+                value={formatTokens(totals.inputTokens)}
+                delta={`${formatTokens(totals.cachedTokens)} cache reads`}
+              />
+              <Metric
+                label="Output tokens"
+                value={formatTokens(totals.outputTokens)}
+                delta={`${formatTokens(totals.reasoningTokens)} reasoning tokens reported`}
+              />
+              <Metric
+                label="Cache hit"
+                value={`${totals.cacheHitPct}%`}
+                delta={`${deltas.cachePts > 0 ? "+" : ""}${deltas.cachePts} pts vs ${snap.priorLabel.toLowerCase()} · ${totals.cacheCoveragePct}% coverage`}
+                tone={totals.cacheHitPct >= 60 ? "good" : "neutral"}
+              />
+            </>
+          ) : (
+            <>
+              <Metric
+                label="Estimated provider USD"
+                value={formatUsd(totals.estimatedProviderUsd)}
+                delta={`${formatPctDelta(deltas.estimatedPct, snap.priorLabel)} · ${totals.pricingCoveragePct}% call coverage`}
+              />
+              <Metric
+                label={
+                  snap.modelFilterActive
+                    ? "OpenGeni credit price (filtered)"
+                    : "OpenGeni credit price"
+                }
+                value={formatUsd(totals.creditUsd)}
+                delta={`${formatPctDelta(deltas.modelPct, snap.priorLabel)} · external calls excluded`}
+              />
+              <Metric
+                label="Priced calls"
+                value={`${snap.estimatedProviderCostKnownCalls.toLocaleString()} / ${snap.modelCalls.toLocaleString()}`}
+                delta="Historical or unconfigured prices remain unknown"
+              />
+              <Metric
+                label="Total tokens"
+                value={formatTokens(totals.totalTokens)}
+                delta={`${totals.tokenCoveragePct}% of calls reported total tokens`}
+              />
+            </>
+          )}
         </div>
 
         <div className="mt-4 grid gap-4 lg:grid-cols-[1.35fr_1fr]">
           <div className="rounded-lg border border-border bg-surface/35 p-4">
             <div className="flex flex-wrap items-baseline justify-between gap-2">
-              <h3 className="text-sm font-medium text-fg">{snap.seriesLabel}</h3>
-              <LegendDot className="bg-brand" label="Model $" />
+              <h3 className="text-sm font-medium text-fg">
+                {measure === "tokens" ? "Token usage / UTC day" : "Pricing / UTC day"}
+              </h3>
+              <p className="text-2xs text-fg-subtle">
+                {measure === "tokens"
+                  ? "Total includes input + output"
+                  : "Estimate and credits never merge"}
+              </p>
             </div>
             <AreaChart
-              key={`cost-${range}-${filters.provider}-${filters.model}`}
+              key={`${measure}-${range}-${filters.provider}-${filters.model}`}
               className="mt-3"
               labels={series.map((p) => p.label)}
-              valuePrefix="$"
+              formatValue={measure === "tokens" ? formatTokens : formatUsd}
               height={210}
-              series={[
-                {
-                  id: "model",
-                  label: "Model $",
-                  values: series.map((d) => d.modelCostUsd),
-                  className: "text-brand",
-                },
-              ]}
+              series={
+                measure === "tokens"
+                  ? [
+                      {
+                        id: "total",
+                        label: "Total",
+                        values: series.map((d) => d.totalTokens),
+                        className: "text-brand",
+                      },
+                      {
+                        id: "input",
+                        label: "Input",
+                        values: series.map((d) => d.inputTokens),
+                        className: "text-status-running",
+                      },
+                      {
+                        id: "output",
+                        label: "Output",
+                        values: series.map((d) => d.outputTokens),
+                        className: "text-status-waiting",
+                      },
+                    ]
+                  : [
+                      {
+                        id: "estimated",
+                        label: "Estimated provider USD",
+                        values: series.map((d) => d.estimatedProviderUsd),
+                        className: "text-brand",
+                      },
+                      {
+                        id: "credits",
+                        label: "OpenGeni credit price",
+                        values: series.map((d) => d.modelCostUsd),
+                        className: "text-status-waiting",
+                      },
+                    ]
+              }
             />
           </div>
 
           <div className="rounded-lg border border-border bg-surface/35 p-4">
             <div className="flex flex-wrap items-baseline justify-between gap-2">
               <h3 className="text-sm font-medium text-fg">{snap.cacheSeriesLabel}</h3>
-              <p className="font-mono text-xs tabular-nums text-fg-muted">{totals.cacheHitPct}%</p>
+              <p className="font-mono text-xs tabular-nums text-fg-muted">
+                {totals.cacheHitPct}% · {totals.cacheCoveragePct}% coverage
+              </p>
             </div>
             <AreaChart
               key={`cache-${range}-${filters.provider}-${filters.model}`}
@@ -294,14 +390,20 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
       <Section title="By model">
         <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)]">
           <div className="rounded-lg border border-border bg-surface/35 p-4">
-            <h3 className="text-sm font-medium text-fg">Input tokens</h3>
+            <h3 className="text-sm font-medium text-fg">
+              {measure === "tokens" ? "Total tokens" : "Estimated provider USD"}
+            </h3>
             <p className="mt-0.5 text-2xs text-fg-subtle">Share by model · click to filter</p>
             <DonutChart
-              key={`model-donut-${range}-${filters.provider}-${filters.model}`}
+              key={`model-donut-${measure}-${range}-${filters.provider}-${filters.model}`}
               className="mt-3"
-              centerLabel="input tokens"
-              centerValue={formatTokens(totals.inputTokens)}
-              formatValue={(v) => formatTokens(v)}
+              centerLabel={measure === "tokens" ? "total tokens" : "priced calls only"}
+              centerValue={
+                measure === "tokens"
+                  ? formatTokens(totals.totalTokens)
+                  : formatUsd(totals.estimatedProviderUsd)
+              }
+              formatValue={measure === "tokens" ? formatTokens : formatUsd}
               onSelect={(id) => {
                 const row = models.find((m) => m.id === id);
                 if (row) setFilters({ provider: row.provider, model: row.model });
@@ -309,7 +411,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
               slices={models.map((row, i) => ({
                 id: row.id,
                 label: row.model,
-                value: row.inputTokens,
+                value: measure === "tokens" ? row.totalTokens : row.estimatedProviderUsd,
                 toneClass: donutTone(i),
               }))}
             />
@@ -324,10 +426,14 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                     "Provider",
                     "Billing",
                     "Calls",
+                    "Total",
                     "Input",
                     "Output",
-                    "Cache",
-                    "Credit $",
+                    "Cache read",
+                    "Cache write",
+                    "Reasoning",
+                    "Est. provider USD",
+                    "OpenGeni credits",
                   ].map((h) => (
                     <th key={h} className="whitespace-nowrap px-3 py-2 font-medium">
                       {h}
@@ -353,22 +459,144 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                       {row.calls.toLocaleString()}
                     </td>
                     <td className="px-3 py-2.5 font-mono tabular-nums text-fg-muted">
+                      {formatTokens(row.totalTokens)}
+                    </td>
+                    <td className="px-3 py-2.5 font-mono tabular-nums text-fg-muted">
                       {formatTokens(row.inputTokens)}
                     </td>
                     <td className="px-3 py-2.5 font-mono tabular-nums text-fg-muted">
                       {formatTokens(row.outputTokens)}
                     </td>
                     <td className="px-3 py-2.5 font-mono tabular-nums text-fg-muted">
-                      {hit(row.cachedTokens, row.inputTokens)}%
+                      {formatTokens(row.cachedTokens)} ·{" "}
+                      {hit(row.cachedTokens, row.cacheInputTokens)}%
                     </td>
                     <td className="px-3 py-2.5 font-mono tabular-nums text-fg-muted">
-                      {row.billing === "external" ? "—" : formatUsd(row.creditUsd)}
+                      {formatTokens(row.cacheWriteTokens)}
+                    </td>
+                    <td className="px-3 py-2.5 font-mono tabular-nums text-fg-muted">
+                      {formatTokens(row.reasoningTokens)}
+                    </td>
+                    <td className="px-3 py-2.5 font-mono tabular-nums text-fg-muted">
+                      {row.estimatedProviderCostKnownCalls > 0
+                        ? `${formatUsd(row.estimatedProviderUsd)} · ${row.estimatedProviderCostKnownCalls}/${row.calls}`
+                        : "Unknown"}
+                    </td>
+                    <td className="px-3 py-2.5 font-mono tabular-nums text-fg-muted">
+                      {formatUsd(row.creditUsd)}
                     </td>
                   </tr>
                 ))}
+                {models.length === 0 ? (
+                  <tr>
+                    <td colSpan={12} className="px-3 py-8 text-center text-fg-subtle">
+                      No model calls match this window and filter.
+                    </td>
+                  </tr>
+                ) : null}
               </tbody>
             </table>
           </div>
+        </div>
+      </Section>
+
+      <Section title="Recent model calls">
+        <p className="text-2xs text-fg-subtle">
+          Most recent 50 calls in the selected UTC window. Unknown means the provider did not report
+          that field or historical pricing was not captured.
+        </p>
+        <div className="overflow-x-auto rounded-lg border border-border">
+          <table className="min-w-full text-left text-xs">
+            <thead className="border-b border-border bg-surface/50 text-fg-subtle">
+              <tr>
+                {[
+                  "Time (UTC)",
+                  "Session",
+                  "Model",
+                  "Provider / API",
+                  "Billing",
+                  "Total",
+                  "Input",
+                  "Output",
+                  "Cache read",
+                  "Cache write",
+                  "Reasoning",
+                  "Est. provider USD",
+                  "OpenGeni credits",
+                ].map((h) => (
+                  <th key={h} className="whitespace-nowrap px-3 py-2 font-medium">
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {snap.recentCalls.map((call) => (
+                <tr key={call.id} className="border-b border-border/70 last:border-0">
+                  <td
+                    className="whitespace-nowrap px-3 py-2.5 font-mono text-2xs text-fg-muted"
+                    title={call.occurredAt}
+                  >
+                    {formatUtcTimestamp(call.occurredAt)}
+                  </td>
+                  <td className="max-w-48 truncate px-3 py-2.5 font-medium text-fg">
+                    {call.sessionTitle}
+                  </td>
+                  <td className="whitespace-nowrap px-3 py-2.5 font-mono text-2xs text-fg-muted">
+                    {call.model}
+                  </td>
+                  <td className="whitespace-nowrap px-3 py-2.5 text-fg-muted">
+                    {providerLabel(call.provider)} · {call.providerApi}
+                  </td>
+                  <td className="px-3 py-2.5">
+                    <BillingPill billing={call.billing} />
+                  </td>
+                  {(
+                    [
+                      ["total", call.totalTokens],
+                      ["input", call.inputTokens],
+                      ["output", call.outputTokens],
+                    ] as const
+                  ).map(([kind, value]) => (
+                    <td
+                      key={`${call.id}-token-${kind}`}
+                      className="px-3 py-2.5 font-mono tabular-nums text-fg-muted"
+                    >
+                      {value == null ? "Unknown" : formatTokens(value)}
+                    </td>
+                  ))}
+                  <td className="px-3 py-2.5 font-mono tabular-nums text-fg-muted">
+                    {call.cachedTokens == null
+                      ? "Unknown"
+                      : `${formatTokens(call.cachedTokens)}${call.inputTokens ? ` · ${hit(call.cachedTokens, call.inputTokens)}%` : ""}`}
+                  </td>
+                  <td className="px-3 py-2.5 font-mono tabular-nums text-fg-muted">
+                    {call.cacheWriteTokens == null
+                      ? "Unknown"
+                      : formatTokens(call.cacheWriteTokens)}
+                  </td>
+                  <td className="px-3 py-2.5 font-mono tabular-nums text-fg-muted">
+                    {call.reasoningTokens == null ? "Unknown" : formatTokens(call.reasoningTokens)}
+                  </td>
+                  <td className="whitespace-nowrap px-3 py-2.5 font-mono tabular-nums text-fg-muted">
+                    {call.estimatedProviderUsd == null
+                      ? "Unknown"
+                      : `${formatUsd(call.estimatedProviderUsd)} · ${call.pricingSource === "gateway_reported" ? "gateway reported" : "list price"}`}
+                  </td>
+                  <td className="whitespace-nowrap px-3 py-2.5 font-mono tabular-nums text-fg-muted">
+                    {formatUsd(call.creditUsd)}
+                  </td>
+                </tr>
+              ))}
+              {snap.recentCalls.length === 0 ? (
+                <tr>
+                  <td colSpan={13} className="px-3 py-8 text-center text-fg-subtle">
+                    No model calls match this window and filter.
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
         </div>
       </Section>
 
@@ -376,14 +604,20 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
       <Section title="By provider">
         <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]">
           <div className="rounded-lg border border-border bg-surface/35 p-4">
-            <h3 className="text-sm font-medium text-fg">Input tokens</h3>
+            <h3 className="text-sm font-medium text-fg">
+              {measure === "tokens" ? "Total tokens" : "Estimated provider USD"}
+            </h3>
             <p className="mt-0.5 text-2xs text-fg-subtle">Share by provider · click to filter</p>
             <DonutChart
-              key={`provider-donut-${range}-${filters.provider}-${filters.model}`}
+              key={`provider-donut-${measure}-${range}-${filters.provider}-${filters.model}`}
               className="mt-3"
-              centerLabel="input tokens"
-              centerValue={formatTokens(totals.inputTokens)}
-              formatValue={(v) => formatTokens(v)}
+              centerLabel={measure === "tokens" ? "total tokens" : "priced calls only"}
+              centerValue={
+                measure === "tokens"
+                  ? formatTokens(totals.totalTokens)
+                  : formatUsd(totals.estimatedProviderUsd)
+              }
+              formatValue={measure === "tokens" ? formatTokens : formatUsd}
               onSelect={(id) => {
                 const next = id;
                 setProvider(filters.provider === next && filters.model === "all" ? "all" : next);
@@ -391,7 +625,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
               slices={providers.map((p, i) => ({
                 id: p.provider,
                 label: providerLabel(p.provider),
-                value: p.inputTokens,
+                value: measure === "tokens" ? p.totalTokens : p.estimatedProviderUsd,
                 toneClass: donutTone(i),
               }))}
             />
@@ -420,10 +654,17 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                     </p>
                   </div>
                   <p className="mt-2 font-mono text-xs tabular-nums text-fg-muted">
-                    {formatTokens(p.inputTokens)} in · {p.calls.toLocaleString()} calls
+                    {formatTokens(p.totalTokens)} total · {p.calls.toLocaleString()} calls
                   </p>
                   <p className="mt-1 font-mono text-xs tabular-nums text-fg-subtle">
-                    {p.creditUsd > 0 ? formatUsd(p.creditUsd) : "external"} · {p.models} model
+                    {p.estimatedProviderCostKnownCalls > 0
+                      ? `${formatUsd(p.estimatedProviderUsd)} est. provider`
+                      : "provider price unknown"}
+                    {" · "}
+                    {formatUsd(p.creditUsd)} credits
+                  </p>
+                  <p className="mt-1 text-2xs text-fg-subtle">
+                    {p.creditsPathCalls} credit-path · {p.externalCalls} external · {p.models} model
                     {p.models === 1 ? "" : "s"}
                   </p>
                 </button>
@@ -600,13 +841,25 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
         </div>
       </Section>
 
-      {/* 6. Credit drivers */}
-      <Section title="Credit $ drivers">
-        <div className="overflow-hidden rounded-lg border border-border">
+      {/* 6. Usage drivers */}
+      <Section title="Usage drivers">
+        <p className="text-2xs text-fg-subtle">
+          Top drivers ranked by total tokens, so externally paid work is never hidden by a zero
+          OpenGeni-credit price. Share is relative to the rows shown.
+        </p>
+        <div className="overflow-x-auto rounded-lg border border-border">
           <table className="min-w-full text-left text-xs">
             <thead className="border-b border-border bg-surface/50 text-fg-subtle">
               <tr>
-                {["Driver", "Credit $", "Tokens", "Cache", "Share", "Δ"].map((h) => (
+                {[
+                  "Driver",
+                  "Tokens",
+                  "Shown share",
+                  "Cache",
+                  "Est. provider USD",
+                  "OpenGeni credits",
+                  "Credit Δ",
+                ].map((h) => (
                   <th key={h} className="whitespace-nowrap px-3 py-2 font-medium">
                     {h}
                   </th>
@@ -622,16 +875,21 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                 >
                   <td className="px-3 py-2.5 font-medium text-fg">{driver.label}</td>
                   <td className="px-3 py-2.5 font-mono tabular-nums text-fg-muted">
-                    {formatUsd(driver.creditUsd)}
+                    {formatTokens(driver.tokens)}
                   </td>
                   <td className="px-3 py-2.5 font-mono tabular-nums text-fg-muted">
-                    {formatTokens(driver.tokens)}
+                    {driver.pctOfTokens}%
                   </td>
                   <td className="px-3 py-2.5 font-mono tabular-nums text-fg-muted">
                     {driver.tokens === 0 ? "—" : `${driver.cacheHitPct}%`}
                   </td>
                   <td className="px-3 py-2.5 font-mono tabular-nums text-fg-muted">
-                    {driver.pctOfCreditUsd}%
+                    {driver.estimatedProviderCostKnownCalls > 0
+                      ? formatUsd(driver.estimatedProviderUsd)
+                      : "Unknown"}
+                  </td>
+                  <td className="px-3 py-2.5 font-mono tabular-nums text-fg-muted">
+                    {formatUsd(driver.creditUsd)}
                   </td>
                   <td
                     className={cn(
@@ -643,6 +901,13 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                   </td>
                 </tr>
               ))}
+              {snap.drivers.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="px-3 py-8 text-center text-fg-subtle">
+                    No attributed model usage in this window.
+                  </td>
+                </tr>
+              ) : null}
             </tbody>
           </table>
         </div>
@@ -698,7 +963,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                     onClick={() => {
                       if (session.model) {
                         setFilters({
-                          provider: filters.provider,
+                          provider: "all",
                           model: session.model,
                         });
                       }
@@ -734,15 +999,22 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
       {/* 7. Schedules */}
       <Section title="Schedules">
         <p className="mb-2 text-2xs text-fg-subtle">
-          Credit $ covers turns whose initiator carried a scheduled run id (usually the first wake
-          of a fire). Goal continuations without that lineage show as session spend, not schedule
-          spend.
+          Attribution covers turns whose initiator carried a scheduled run id. Goal continuations
+          without that lineage remain session usage rather than schedule usage.
         </p>
-        <div className="overflow-hidden rounded-lg border border-border">
+        <div className="overflow-x-auto rounded-lg border border-border">
           <table className="min-w-full text-left text-xs">
             <thead className="border-b border-border bg-surface/50 text-fg-subtle">
               <tr>
-                {["Schedule", "Fires", "Credit $", "Tokens", "Cache"].map((h) => (
+                {[
+                  "Schedule",
+                  "Fires",
+                  "Tokens",
+                  "Cache",
+                  "Est. provider USD",
+                  "OpenGeni credits",
+                  "Billing",
+                ].map((h) => (
                   <th key={h} className="whitespace-nowrap px-3 py-2 font-medium">
                     {h}
                   </th>
@@ -757,9 +1029,6 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                     {row.fires.toLocaleString()}
                   </td>
                   <td className="px-3 py-2.5 font-mono tabular-nums text-fg-muted">
-                    {row.creditUsd == null || row.creditUsd === 0 ? "—" : formatUsd(row.creditUsd)}
-                  </td>
-                  <td className="px-3 py-2.5 font-mono tabular-nums text-fg-muted">
                     {row.tokens == null ? "—" : formatTokens(row.tokens)}
                   </td>
                   <td className="px-3 py-2.5 font-mono tabular-nums text-fg-muted">
@@ -767,8 +1036,28 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
                       ? "—"
                       : `${row.cacheHitPct}%`}
                   </td>
+                  <td className="px-3 py-2.5 font-mono tabular-nums text-fg-muted">
+                    {row.estimatedProviderUsd == null ||
+                    row.estimatedProviderCostKnownCalls == null ||
+                    row.estimatedProviderCostKnownCalls === 0
+                      ? "Unknown"
+                      : formatUsd(row.estimatedProviderUsd)}
+                  </td>
+                  <td className="px-3 py-2.5 font-mono tabular-nums text-fg-muted">
+                    {row.creditUsd == null ? "—" : formatUsd(row.creditUsd)}
+                  </td>
+                  <td className="px-3 py-2.5">
+                    {row.billing == null ? "—" : <BillingPill billing={row.billing} />}
+                  </td>
                 </tr>
               ))}
+              {snap.schedules.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="px-3 py-8 text-center text-fg-subtle">
+                    No schedules in this workspace.
+                  </td>
+                </tr>
+              ) : null}
             </tbody>
           </table>
         </div>
@@ -898,6 +1187,50 @@ function hit(cached: number, input: number): number {
   return Math.round((cached / input) * 100);
 }
 
+function MeasureControl(props: {
+  value: InsightsMeasure;
+  onChange: (measure: InsightsMeasure) => void;
+}) {
+  return (
+    <div
+      role="tablist"
+      aria-label="Usage measure"
+      className="inline-flex rounded-lg border border-border bg-surface/50 p-0.5"
+    >
+      {(
+        [
+          ["tokens", "Tokens"],
+          ["money", "Money"],
+        ] as const
+      ).map(([id, label]) => {
+        const active = props.value === id;
+        return (
+          <button
+            key={id}
+            type="button"
+            role="tab"
+            aria-selected={active}
+            onClick={() => props.onChange(id)}
+            className={cn(
+              "relative rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
+              active ? "text-fg" : "text-fg-muted hover:text-fg",
+            )}
+          >
+            {active ? (
+              <motion.span
+                layoutId="insights-measure-pill"
+                className="absolute inset-0 rounded-md bg-surface-2 shadow-sm"
+                transition={{ type: "spring", stiffness: 420, damping: 34 }}
+              />
+            ) : null}
+            <span className="relative z-10">{label}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function RangeControl(props: { value: InsightsRange; onChange: (range: InsightsRange) => void }) {
   return (
     <div
@@ -989,15 +1322,6 @@ function Metric(props: {
       </p>
       <p className="mt-1 line-clamp-2 text-2xs tabular-nums text-fg-muted">{props.delta}</p>
     </div>
-  );
-}
-
-function LegendDot(props: { className: string; label: string }) {
-  return (
-    <span className="inline-flex items-center gap-1.5">
-      <span className={cn("size-1.5 rounded-full", props.className)} />
-      {props.label}
-    </span>
   );
 }
 
