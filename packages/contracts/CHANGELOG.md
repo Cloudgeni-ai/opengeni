@@ -1,5 +1,11 @@
 # @opengeni/contracts
 
+## 0.39.5
+
+### Patch Changes
+
+- 200586a: Allow workspace administrators to disable structured agent human-input requests while preserving ordinary user messages.
+
 ## 0.39.4
 
 ### Patch Changes
