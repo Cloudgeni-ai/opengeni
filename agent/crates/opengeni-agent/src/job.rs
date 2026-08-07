@@ -61,14 +61,14 @@ use opengeni_agent_engine::retention::{RetentionConfig, RetentionError, Retentio
 use opengeni_agent_engine::{Channel, Frame, FrameBody};
 use opengeni_agent_platform::ContainedExec;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tokio::time::{Instant, MissedTickBehavior};
 use tracing::{debug, warn};
 
 /// A command delivered to a running (or lingering completed) job through its
 /// mailbox. The supervisor translates wire messages (`OpAck`/`OpAttach`/…)
 /// into these; the pump never sees the transport.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum JobCommand {
     /// A cumulative ack + absolute credit grant from the consumer
     /// (wire: `OpAck`).
@@ -96,7 +96,12 @@ pub enum JobCommand {
     },
     /// The transport is gone (connection loss). Sending stops; the op keeps
     /// running and retention keeps accumulating (op ⊥ connection).
-    Detach,
+    Detach {
+        /// Optional teardown barrier. The pump signals this only after the
+        /// detach has been applied, allowing a transport generation to prove
+        /// every prior sink is quiescent before exposing its successor lane.
+        completed: Option<Arc<Notify>>,
+    },
     /// Kill the job (wire: `OpCancel`). Terminates the process group and
     /// produces `Exit{cancelled}`. Idempotent; a no-op once terminal.
     Cancel,
@@ -593,7 +598,15 @@ impl Pump {
                 from_seq,
                 window_bytes,
             } => self.apply_attach(generation, from_seq, window_bytes),
-            JobCommand::Detach => self.flow.detach(),
+            JobCommand::Detach { completed } => {
+                self.flow.detach();
+                if let Some(completed) = completed {
+                    // `notify_one` stores a permit when the supervisor has not
+                    // registered its waiter yet, so the completion receipt
+                    // cannot be lost in the send→wait handoff.
+                    completed.notify_one();
+                }
+            }
             JobCommand::Cancel => {
                 // Idempotent; once the child is done the natural result stands
                 // (the registry answers a late OpCancel with AlreadyComplete).
@@ -1221,7 +1234,7 @@ mod tests {
             job.ack(1, acked, 16 * 1024).await;
             frames.push(frame);
         }
-        job.send(JobCommand::Detach).await;
+        job.send(JobCommand::Detach { completed: None }).await;
 
         // Reconnect as the next consumer generation from the ack floor; the
         // window between our last ack and the detach replays (dedup-checked).

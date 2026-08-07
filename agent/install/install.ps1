@@ -9,13 +9,12 @@
   for your arch, VERIFIES it two independent ways (a minisign signature against a
   public key PINNED in this script's body, AND a sha256 checksum), installs it to
   a per-user path, adds that path to your user PATH, and then PRINTS the exact
-  command to enroll + run it. It installs NO Windows Service by default and
-  contains NO secrets. The pinned public key travels WITH this audited script, so
+  command to connect and keeps the machine online in the background when the
+  service backend is available. It contains NO secrets. The pinned public key travels WITH this audited script, so
   a compromised CDN cannot serve a binary that verifies.
 
-  Run model: the default is a FOREGROUND `opengeni-agent run`. An
-  always-on Windows Service is an explicit opt-in (`opengeni-agent service
-  install`), never installed by this script. This script is rename-running-exe
+  Run model: the normal install is an always-on background agent; `run` remains
+  the explicit foreground mode. This script is rename-running-exe
   aware: a re-install over a running agent renames the live .exe aside before
   placing the new one (the same trick self-update uses).
 
@@ -23,11 +22,13 @@
   OPENGENI_INSTALL_BASE_URL  Release asset base URL (default https://get.opengeni.ai).
                              Point at a local mock (http://localhost/...) to test offline.
   OPENGENI_AGENT_VERSION     Pin a version (default "latest").
+  OPENGENI_ALLOW_DOWNGRADE   "1" explicitly allows an older verified agent to
+                             replace a newer installed one. Default: preserve newer.
   OPENGENI_INSTALL_DIR       Install dir (default %LOCALAPPDATA%\OpenGeni\bin).
-  OPENGENI_ENROLL_TOKEN      Non-interactive fresh-enrollment token
-                             (CI/automation); replaces an existing enrollment.
-  OPENGENI_NO_RUN            "1" => do not start a foreground run; just print the command.
-  OPENGENI_API_URL           Control-plane API base URL for enrollment.
+  OPENGENI_ENROLL_TOKEN      Non-interactive connection token (CI/automation);
+                             adds or refreshes only its deployment/workspace.
+  OPENGENI_NO_SERVICE        "1" => save the connection without installing a service.
+  OPENGENI_API_URL           Control-plane API base URL for the connection.
 
   Immutable-per-version + GitHub-Releases fallback: assets resolve to
   $BASE/agent/v<ver>/<asset>. If the edge is down, the same assets are mirrored at
@@ -57,9 +58,35 @@ function Get-EnvOr($name, $default) {
 $OpengeniInstallDefaultBaseUrl = 'https://get.opengeni.ai'
 $BaseUrl = Get-EnvOr 'OPENGENI_INSTALL_BASE_URL' $OpengeniInstallDefaultBaseUrl
 $Version = Get-EnvOr 'OPENGENI_AGENT_VERSION' 'latest'
+$script:AgentWasUpgraded = $false
 
 function Log($msg)  { Write-Host "opengeni-install: $msg" }
 function Fail($code, $msg) { Write-Host "opengeni-install: ERROR: $msg" -ForegroundColor Red; exit $code }
+
+function Get-AgentReleaseVersion($path) {
+  if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+  try {
+    $line = @(& $path --version 2>$null)[0]
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($line)) { return $null }
+    $match = [regex]::Match([string]$line, '^opengeni-agent ([0-9]+\.[0-9]+\.[0-9]+)$')
+    if (-not $match.Success) { return $null }
+    return [version]$match.Groups[1].Value
+  } catch {
+    return $null
+  }
+}
+
+function Test-KeepNewerAgent($installed, $candidate) {
+  if ((Get-EnvOr 'OPENGENI_ALLOW_DOWNGRADE' '0') -eq '1') { return $false }
+  $installedVersion = Get-AgentReleaseVersion $installed
+  $candidateVersion = Get-AgentReleaseVersion $candidate
+  if ($null -eq $installedVersion -or $null -eq $candidateVersion) { return $false }
+  if ($installedVersion -gt $candidateVersion) {
+    Log "keeping installed opengeni-agent $installedVersion; verified candidate $candidateVersion is older (set OPENGENI_ALLOW_DOWNGRADE=1 to override)"
+    return $true
+  }
+  return $false
+}
 
 function Get-Asset {
   # ARM64 vs x64. PROCESSOR_ARCHITECTURE is the running process arch; on WoW64 the
@@ -74,8 +101,15 @@ function Get-Asset {
 }
 
 function Get-AssetUrl($name) {
-  if ($Version -eq 'latest') { return "$BaseUrl/agent/latest/$name" }
-  return "$BaseUrl/agent/v$Version/$name"
+  $base = $BaseUrl.TrimEnd('/')
+  # A pinned GitHub Release URL is already the asset directory. Keep the normal
+  # edge layout everywhere else without duplicating it on the documented
+  # direct-release fallback.
+  if ($Version -ne 'latest' -and $base.EndsWith("/releases/download/agent-v$Version")) {
+    return "$base/$name"
+  }
+  if ($Version -eq 'latest') { return "$base/agent/latest/$name" }
+  return "$base/agent/v$Version/$name"
 }
 
 function Invoke-Download($url, $out) {
@@ -200,13 +234,22 @@ function Main {
     $installDir = Get-InstallDir
     New-Item -ItemType Directory -Path $installDir -Force | Out-Null
     $dest = Join-Path $installDir 'opengeni-agent.exe'
-    if (Test-Path $dest) {
-      $aside = "$dest.old"
-      Remove-Item -Force $aside -ErrorAction SilentlyContinue
-      try { Move-Item -Force $dest $aside } catch { } # locked-running: rename aside
+    if (Test-KeepNewerAgent $dest $binTmp) {
+      Remove-Item -Force $binTmp -ErrorAction SilentlyContinue
+    } else {
+      $oldVersion = Get-AgentReleaseVersion $dest
+      $newVersion = Get-AgentReleaseVersion $binTmp
+      if ($null -ne $oldVersion -and $null -ne $newVersion -and $oldVersion -ne $newVersion) {
+        $script:AgentWasUpgraded = $true
+      }
+      if (Test-Path $dest) {
+        $aside = "$dest.old"
+        Remove-Item -Force $aside -ErrorAction SilentlyContinue
+        try { Move-Item -Force $dest $aside } catch { } # locked-running: rename aside
+      }
+      Move-Item -Force $binTmp $dest
+      Log "installed verified binary to $dest"
     }
-    Move-Item -Force $binTmp $dest
-    Log "installed verified binary to $dest"
     Add-UserPath $installDir
 
     Complete-Install $dest
@@ -215,34 +258,60 @@ function Main {
   }
 }
 
+function Start-BackgroundAgent($bin) {
+  if ((Get-EnvOr 'OPENGENI_NO_SERVICE' '0') -eq '1') {
+    Log "background service skipped (OPENGENI_NO_SERVICE=1); start with: $bin run"
+    return
+  }
+  $startArgs = @('start')
+  if ($script:AgentWasUpgraded) { $startArgs += '--restart' }
+  try {
+    & $bin @startArgs
+    if ($LASTEXITCODE -eq 0) {
+      Log "connected and running in the background"
+      return
+    }
+  } catch { }
+  Log "could not install a background service on this host; connection is saved"
+  Log "start the foreground agent with: $bin run"
+}
+
 function Complete-Install($bin) {
   Write-Host ""
   $enrollToken = [Environment]::GetEnvironmentVariable('OPENGENI_ENROLL_TOKEN')
   if (-not [string]::IsNullOrEmpty($enrollToken)) {
-    Log "non-interactive enroll (OPENGENI_ENROLL_TOKEN set)"
-    # Supplying a token explicitly requests this enrollment. Never silently
-    # retain credentials for a previous control plane.
-    & $bin enroll --token $enrollToken --non-interactive --force
-    Log "enrolled. Start the agent (foreground) with:  $bin run"
+    Log "non-interactive connection (OPENGENI_ENROLL_TOKEN set)"
+    # This upserts only the token's deployment/workspace connection; unrelated
+    # OpenGeni connections remain configured and online.
+    $apiUrl = [Environment]::GetEnvironmentVariable('OPENGENI_API_URL')
+    if ([string]::IsNullOrEmpty($apiUrl)) {
+      & $bin connect --token $enrollToken --non-interactive
+    } else {
+      & $bin --api-url $apiUrl connect --token $enrollToken --non-interactive
+    }
+    if ($LASTEXITCODE -ne 0) { Fail 7 "machine connection failed; background service was not changed" }
+    Start-BackgroundAgent $bin
+    return
+  }
+
+  $workspaceId = [Environment]::GetEnvironmentVariable('OPENGENI_WORKSPACE_ID')
+  if (-not [string]::IsNullOrEmpty($workspaceId)) {
+    $apiUrl = [Environment]::GetEnvironmentVariable('OPENGENI_API_URL')
+    if ([string]::IsNullOrEmpty($apiUrl)) {
+      & $bin connect --workspace-id $workspaceId
+    } else {
+      & $bin --api-url $apiUrl connect --workspace-id $workspaceId
+    }
+    if ($LASTEXITCODE -ne 0) { Fail 7 "machine connection failed; background service was not changed" }
+    Start-BackgroundAgent $bin
     return
   }
 
   Write-Host "opengeni-agent installed at: $bin"
   Write-Host ""
-  Write-Host "Next steps (the agent runs in the FOREGROUND — it does NOT install a service):"
-  Write-Host "  1. Enroll this machine:   $bin enroll"
-  Write-Host "  2. Run it (online while this runs, offline when you stop it):"
-  Write-Host "       $bin run"
-  Write-Host ""
-  Write-Host "Want an always-on machine instead? That is opt-in:  $bin service install"
+  Write-Host "Next: $bin connect; if (`$?) { $bin start }"
+  Write-Host "Use '$bin run' only when you explicitly want foreground mode."
   Write-Host "Uninstall any time:  $bin uninstall"
-
-  $noRun = [Environment]::GetEnvironmentVariable('OPENGENI_NO_RUN')
-  if ($noRun -ne '1' -and [Environment]::UserInteractive) {
-    Write-Host ""
-    Log "starting a foreground run (Ctrl-C to stop; set OPENGENI_NO_RUN=1 to skip)"
-    & $bin run
-  }
 }
 
 Main

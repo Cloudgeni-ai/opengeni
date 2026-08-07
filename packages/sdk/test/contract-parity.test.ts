@@ -545,6 +545,8 @@ describe("SDK / contracts parity", () => {
     expect(ContractCreateKnowledgeMemoryRequest.safeParse(create).success).toBe(true);
     expect(ContractUpdateKnowledgeMemoryRequest.safeParse(update).success).toBe(true);
     expect(ContractUpdateWorkspaceSettingsRequest.safeParse(settings).success).toBe(true);
+    const humanInputPolicy: UpdateWorkspaceSettingsRequest = { agentHumanInputEnabled: false };
+    expect(ContractUpdateWorkspaceSettingsRequest.safeParse(humanInputPolicy).success).toBe(true);
     const slackReactionSummon: UpdateWorkspaceSettingsRequest = {
       slackReactionSummon: {
         enabled: true,

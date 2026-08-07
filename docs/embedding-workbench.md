@@ -1,11 +1,12 @@
-# Embedding the OpenGeni workbench (frontend)
+# Embedding the OpenGeni Workbench
 
 This guide is for a host app that wants to drop the OpenGeni **session workspace**
 — the Changes / Files / Terminal / Desktop dock, with instant cold paint and the
 machine-state chip — into its own UI. It is the frontend companion to the
-backend embedding guide in `docs/embedding.md`, and it is the exact surface
-`apps/web` itself consumes (see `apps/web/src/components/session/sandbox-workspace.tsx`),
-so an external embedder and the first-party app run the same code path.
+standalone SDK/proxy integration as well as the advanced in-process path in
+`docs/embedding.md`. It is the exact surface `apps/web` itself consumes (see
+`apps/web/src/components/session/sandbox-workspace.tsx`), so an external
+embedder and the first-party app run the same code path.
 
 Shipping that code path is not acceptance by itself. The required live,
 performance, accessibility, identity-race, browser/device, and visual evidence
@@ -42,17 +43,22 @@ surface to a notice; it never crashes the dock.
 The authoritative list is the `peerDependencies` block of the package manifest
 (`packages/react/package.json`).
 
-## 2. Provider
+## 2. Provider And Trust Boundary
 
 Wrap the tree once in `OpenGeniProvider`, giving it an OpenGeni client and the
 workspace id. Every hook and component below reads the client from here (there is
 no app-context coupling — that is what makes the workbench embeddable).
 
+Keep privileged OpenGeni credentials on the host server. The browser client
+below points at a tenant-scoped, same-origin host proxy that preserves the
+OpenGeni route contract. A host may instead pass any structural client matching
+the methods used by the mounted surfaces.
+
 ```tsx
 import { OpenGeniProvider } from "@opengeni/react";
 import { OpenGeniClient } from "@opengeni/sdk";
 
-const client = new OpenGeniClient({ baseUrl: "https://api.your-host.example", apiKey });
+const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
 
 export function Root({ children }: { children: React.ReactNode }) {
   return (
@@ -119,6 +125,13 @@ function Workspace({ sessionId }: { sessionId: string }) {
 That is the whole integration. The dock paints instantly from the latest
 turn-end capture (no machine round-trip), then reconciles to live data when the
 box is warm, with no tab switch or layout shift in between.
+
+Live reconciliation batches the visible file-tree frontier into one
+`fs/list-batch` request and all repository status/diff reads into one
+`git/read-batch` request. Each batch acquires the session's Channel-A lease once
+and runs its independent reads concurrently, avoiding repeated provider attach
+and lease traffic as repository count or expanded folders grow. The individual
+`fs/list`, `git/status`, and `git/diff` methods remain available for point reads.
 
 Repository discovery walks the workspace filesystem without a fixed nesting
 depth, recognizes both ordinary `.git` directories and linked-worktree `.git`

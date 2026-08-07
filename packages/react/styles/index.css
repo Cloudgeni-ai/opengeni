@@ -15,6 +15,7 @@
    -------------------------------------------------------------------------- */
 
 @import "./tokens.css";
+@import "./effective-tokens.css";
 
 @theme inline {
   --font-og-sans: var(--og-font-sans);

@@ -25,7 +25,6 @@ ALTER TABLE "sessions"
     "sandbox_swap",
     "run_on",
     "sandbox_provision",
-    "connected_machine_remove",
     "rig_list",
     "rig_get",
     "rig_propose_change",

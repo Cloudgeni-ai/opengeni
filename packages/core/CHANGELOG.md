@@ -1,5 +1,34 @@
 # @opengeni/core
 
+## 0.21.9
+
+### Patch Changes
+
+- 5dfb93d: Make Connected Machine command duration unbounded by default over replayable op-stream execution, preserve explicit positive deadlines for constrained deployments, wire and finalize streaming across direct and swapped machine routes, remove the generated service's aggregate memory throttle while retaining accounting and OOM isolation, and bound transient reordering memory by bytes without limiting command resources or output.
+- 5dfb93d: Let one Connected Machine agent retain and serve independent connections to multiple OpenGeni workspaces and deployments, with additive connection UX and connection-scoped runtime isolation.
+- Updated dependencies [f8eb9f9]
+- Updated dependencies [5dfb93d]
+- Updated dependencies [200586a]
+- Updated dependencies [5dfb93d]
+- Updated dependencies [5dfb93d]
+  - @opengeni/config@0.12.0
+  - @opengeni/runtime@0.18.23
+  - @opengeni/contracts@0.39.5
+  - @opengeni/db@0.28.8
+  - @opengeni/documents@0.5.17
+  - @opengeni/storage@0.2.74
+  - @opengeni/events@0.3.87
+  - @opengeni/observability@0.5.5
+
+## 0.21.8
+
+### Patch Changes
+
+- Updated dependencies [377180c]
+  - @opengeni/db@0.28.7
+  - @opengeni/documents@0.5.16
+  - @opengeni/events@0.3.86
+
 ## 0.21.7
 
 ### Patch Changes

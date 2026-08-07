@@ -1,5 +1,19 @@
 # @opengeni/runtime
 
+## 0.18.23
+
+### Patch Changes
+
+- 5dfb93d: Persist sandbox session state without the redundant hydrated provider manifest when the canonical serialized manifest is already present, so durable turn reconciliation remains JSON-safe.
+- 200586a: Allow workspace administrators to disable structured agent human-input requests while preserving ordinary user messages.
+- 5dfb93d: Make Connected Machine command duration unbounded by default over replayable op-stream execution, preserve explicit positive deadlines for constrained deployments, wire and finalize streaming across direct and swapped machine routes, remove the generated service's aggregate memory throttle while retaining accounting and OOM isolation, and bound transient reordering memory by bytes without limiting command resources or output.
+- Updated dependencies [f8eb9f9]
+- Updated dependencies [200586a]
+- Updated dependencies [5dfb93d]
+- Updated dependencies [5dfb93d]
+  - @opengeni/config@0.12.0
+  - @opengeni/contracts@0.39.5
+
 ## 0.18.22
 
 ### Patch Changes

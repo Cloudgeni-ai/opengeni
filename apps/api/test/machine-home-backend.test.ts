@@ -51,6 +51,11 @@ const settings = testSettings({
   sandboxBackend: "modal",
   sandboxOwnershipEnabled: true,
   sandboxSelfhostedEnabled: true,
+  // This fixture deliberately emulates the legacy request/reply runner; its
+  // subject responder has no op-stream connection. Keep that compatibility
+  // choice explicit now that production/test defaults are unbounded streaming.
+  agentOpStreamEnabled: false,
+  sandboxSelfhostedExecTimeoutMs: 30_000,
   selfhostedRelayUrl: "wss://relay.example",
   publicBaseUrl: "https://app.example",
 });

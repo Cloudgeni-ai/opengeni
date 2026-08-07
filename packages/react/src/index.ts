@@ -233,12 +233,14 @@ export type {
   CapturedFileUnavailableReason,
   FileTreeNode,
   FileTreeStatus,
+  SandboxFilesGitSummary,
   SandboxWriteFileOptions,
   UseSandboxFilesOptions,
   UseSandboxFilesResult,
 } from "./hooks/use-sandbox-files";
 export { useSandboxGit } from "./hooks/use-sandbox-git";
 export type {
+  SandboxGitComparison,
   SandboxGitFileDiff,
   UseSandboxGitOptions,
   UseSandboxGitResult,

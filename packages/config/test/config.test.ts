@@ -181,7 +181,7 @@ describe("Docker workspace materialization", () => {
 
 describe("agent stable release selection", () => {
   test("uses an exact stable version and supports an explicit operator promotion", () => {
-    expect(withEnv({}, () => getSettings()).agentStableVersion).toBe("0.1.9");
+    expect(withEnv({}, () => getSettings()).agentStableVersion).toBe("0.1.12");
     expect(
       withEnv({ OPENGENI_AGENT_STABLE_VERSION: "1.4.2" }, () => getSettings()).agentStableVersion,
     ).toBe("1.4.2");
@@ -465,9 +465,9 @@ describe("sandbox preparation profiles", () => {
     ).toBe(2_000);
   });
 
-  test("selfhosted exec/control timeouts default to 2min/30s and parse their env vars", () => {
+  test("selfhosted exec defaults to unbounded while control stays at 30s", () => {
     const defaults = withEnv({}, () => getSettings());
-    expect(defaults.sandboxSelfhostedExecTimeoutMs).toBe(120_000);
+    expect(defaults.sandboxSelfhostedExecTimeoutMs).toBe(0);
     expect(defaults.sandboxSelfhostedControlTimeoutMs).toBe(30_000);
     const overridden = withEnv(
       {
@@ -632,12 +632,12 @@ describe("sandbox preparation profiles", () => {
     ).toBe(true);
   });
 
-  test("agent op-stream transport is gated off unless explicitly enabled", () => {
-    expect(withEnv({}, () => getSettings()).agentOpStreamEnabled).toBe(false);
+  test("agent op-stream transport defaults on and can be explicitly disabled", () => {
+    expect(withEnv({}, () => getSettings()).agentOpStreamEnabled).toBe(true);
     expect(
-      withEnv({ OPENGENI_AGENT_OP_STREAM_ENABLED: "true" }, () => getSettings())
+      withEnv({ OPENGENI_AGENT_OP_STREAM_ENABLED: "false" }, () => getSettings())
         .agentOpStreamEnabled,
-    ).toBe(true);
+    ).toBe(false);
   });
 
   test("retries startup dependency operations with bounded backoff", async () => {

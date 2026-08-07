@@ -87,6 +87,7 @@ function fakeRepo(overrides: Partial<WorkspaceCaptureRepo> = {}): WorkspaceCaptu
     behind: 0,
     status: [],
     diff: [fakeDiff()],
+    branchDiff: [fakeDiff()],
     ...overrides,
   };
 }
@@ -1431,6 +1432,47 @@ describe("useSandboxGit — capture source", () => {
     expect(hook.result.current.isRepo).toBe(true);
     expect(hook.result.current.branch).toBe("main");
     expect(hook.result.current.diff.map((d) => d.path)).toEqual(["app.py"]);
+    expect(gitDiffCalls).toBe(0);
+    await hook.unmount();
+  });
+
+  test("cold Branch view uses the captured base-branch diff without waking the sandbox", async () => {
+    let gitStatusCalls = 0;
+    let gitDiffCalls = 0;
+    const client = fakeClient({
+      gitStatus: async () => {
+        gitStatusCalls += 1;
+        throw new Error("cold branch capture must not call live Git status");
+      },
+      gitDiff: async () => {
+        gitDiffCalls += 1;
+        throw new Error("cold branch capture must not call live Git diff");
+      },
+    });
+    const capture = fakeManifest({
+      repos: [
+        fakeRepo({
+          diff: [fakeDiff({ path: "uncommitted.py" })],
+          branchDiff: [fakeDiff({ path: "committed-and-local.py" })],
+        }),
+      ],
+    });
+    const hook = await renderHook(
+      () =>
+        useSandboxGit(SESSION_ID, {
+          ...ctx,
+          client,
+          capture,
+          comparison: "branch",
+          liveness: "cold",
+        }),
+      undefined,
+    );
+    await flush();
+
+    expect(hook.result.current.source).toBe("capture");
+    expect(hook.result.current.diff.map((file) => file.path)).toEqual(["committed-and-local.py"]);
+    expect(gitStatusCalls).toBe(0);
     expect(gitDiffCalls).toBe(0);
     await hook.unmount();
   });

@@ -12,6 +12,11 @@ describe("session control surface architecture", () => {
     expect(route).not.toContain("<GoalSurface");
     expect(route).not.toContain("<ComposerAgentsPill");
     expect(route.indexOf("<SessionChrome")).toBeLessThan(route.indexOf("<ConsoleComposer"));
+    // Both surfaces must share the same max-width child inside the same outer
+    // page gutter. Putting the gutter inside only SessionChrome makes it 48px
+    // narrower than the composer at desktop widths.
+    expect(route).not.toContain('className="mx-auto mb-2 w-full max-w-3xl shrink-0 px-4 sm:px-6"');
+    expect(route).toContain('className="mb-2 w-full shrink-0 px-4 sm:px-6"');
   });
 
   test("wires the authenticated retained screenshot loader into the production timeline", async () => {

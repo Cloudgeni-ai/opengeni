@@ -20,7 +20,7 @@ export type MachinesDashboardProps = {
   onOpenDetail?: ((machine: MachineView) => void) | undefined;
   /** Shared clock so freshness/relative times render consistently across cards. */
   now?: number | undefined;
-  /** Open the enrollment flow (the "Enroll a machine" CTA). */
+  /** Open the connection flow (the "Connect a machine" CTA). */
   onEnroll?: (() => void) | undefined;
   onRefresh?: (() => void) | undefined;
   className?: string | undefined;
@@ -38,7 +38,8 @@ function EmptyState({ onEnroll }: { onEnroll?: (() => void) | undefined }) {
       <div className="space-y-1">
         <p className="text-og-base font-medium text-og-fg">No machines yet</p>
         <p className="max-w-xs text-og-sm text-og-fg-muted">
-          Enroll your own computer to run the agent on it — your files, your terminal, your desktop.
+          Connect your own computer to run the agent on it — your files, your terminal, your
+          desktop.
         </p>
       </div>
       {onEnroll ? (
@@ -49,7 +50,7 @@ function EmptyState({ onEnroll }: { onEnroll?: (() => void) | undefined }) {
           className="inline-flex items-center gap-1.5 rounded-og-sm bg-og-accent px-3 py-1.5 text-og-sm font-medium text-og-accent-fg transition-colors hover:bg-og-accent-strong pointer-coarse:min-h-11"
         >
           <PlusIcon className="size-3.5" aria-hidden />
-          Enroll a machine
+          Connect a machine
         </button>
       ) : null}
     </div>
@@ -93,7 +94,7 @@ function Header({
             className="inline-flex items-center gap-1.5 rounded-og-sm border border-og-border px-2.5 py-1 text-og-sm font-medium text-og-fg-muted transition-colors hover:border-og-border-strong hover:text-og-fg pointer-coarse:min-h-11"
           >
             <PlusIcon className="size-3.5" aria-hidden />
-            Enroll machine
+            Connect a machine
           </button>
         ) : null}
       </div>
@@ -102,10 +103,10 @@ function Header({
 }
 
 /**
- * The workspace Machines dashboard: the fleet of selfhosted enrollments + the
+ * The workspace Machines dashboard: the fleet of Connected Machines + the
  * session's managed sandbox, each with its connection-status pill, state badges,
  * latest metrics, and an attach/swap affordance. Renders the empty state (no
- * machines → enroll CTA), a load error, and the populated grid. The component
+ * machines → connect CTA), a load error, and the populated grid. The component
  * is purely presentational — feed it `MachinesResponse` data via `useMachines`.
  */
 export function MachinesDashboard({

@@ -1,9 +1,11 @@
 //! Live cgroup-placement integration test for OOM fate isolation (issue #345).
 //!
 //! Exercises the REAL path — [`establish_oom_isolation`] runs the startup dance
-//! and a real `exec` places its child into an `op-<n>` memory leaf — then asserts
-//! the child lands in that leaf with `oom_score_adj=500` while the supervisor (this
-//! process) stays in the `supervisor` leaf.
+//! and a real shell `exec` immediately forks a child — then asserts BOTH the shell
+//! and the fast descendant land in one `op-<n>` memory leaf with
+//! `oom_score_adj=500` while the supervisor (this process) stays in the
+//! `supervisor` leaf. This is the live regression proof for the post-spawn fork
+//! race observed on jorgebot.
 //!
 //! # Why it is environment-gated
 //!
@@ -105,14 +107,22 @@ mod linux {
             self_unified.ends_with("/supervisor"),
             "supervisor must be fate-isolated in its own leaf, got {self_unified}"
         );
+        let oomd_avoid = xattr::get(service_dir.join("supervisor"), "user.oomd_avoid")
+            .expect("read supervisor oomd preference")
+            .expect("supervisor oomd preference must be present");
+        assert_eq!(
+            oomd_avoid, b"1",
+            "the actual supervisor leaf must be protected from systemd-oomd"
+        );
 
-        // Run a real exec whose direct child reports its PID and stays alive (a pure
-        // shell busy-loop — no coreutil dependency) so we can inspect it live.
+        // Run a real shell exec that IMMEDIATELY forks a descendant. Both publish
+        // their PIDs and stay alive so the test catches a child that escaped into
+        // the supervisor leaf before post-spawn placement.
         let pid_file = std::env::temp_dir().join(format!("oom-itest-{}.pid", std::process::id()));
         let _ = std::fs::remove_file(&pid_file);
         let req = ExecRequest {
             command: vec![format!(
-                "echo $$ > {}; while :; do :; done",
+                "while :; do :; done & echo $$ $! > {}; wait",
                 pid_file.display()
             )],
             shell: true,
@@ -121,13 +131,17 @@ mod linux {
         let task_platform = platform.clone();
         let exec_task = tokio::spawn(async move { task_platform.exec(&req).await });
 
-        let child_pid = read_child_pid(&pid_file).await;
+        let (shell_pid, descendant_pid) = read_fixture_pids(&pid_file).await;
 
-        // Placement is post-spawn, so poll the child's cgroup + score for the target.
-        let child_unified = poll_child_cgroup(child_pid).await;
-        let score = std::fs::read_to_string(format!("/proc/{child_pid}/oom_score_adj"))
+        let shell_unified = poll_child_cgroup(shell_pid).await;
+        let descendant_unified = poll_child_cgroup(descendant_pid).await;
+        let score = std::fs::read_to_string(format!("/proc/{shell_pid}/oom_score_adj"))
             .map(|s| s.trim().to_string())
             .unwrap_or_default();
+        let descendant_score =
+            std::fs::read_to_string(format!("/proc/{descendant_pid}/oom_score_adj"))
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
 
         exec_task.abort();
         let _ = exec_task.await;
@@ -135,45 +149,62 @@ mod linux {
 
         eprintln!("LIVE EVIDENCE (issue #345 OOM fate isolation):");
         eprintln!("  supervisor (this process) cgroup: {self_unified}");
-        eprintln!("  exec child {child_pid} cgroup:      {child_unified}");
-        eprintln!("  exec child {child_pid} oom_score_adj: {score}");
+        eprintln!("  exec shell {shell_pid} cgroup:      {shell_unified}");
+        eprintln!("  descendant {descendant_pid} cgroup: {descendant_unified}");
+        eprintln!("  exec shell {shell_pid} oom_score_adj: {score}");
+        eprintln!("  descendant {descendant_pid} oom_score_adj: {descendant_score}");
 
         assert!(
-            child_unified.contains("/op-"),
-            "exec child {child_pid} must run in an op-<n> leaf, got {child_unified}"
+            shell_unified.contains("/op-"),
+            "exec shell {shell_pid} must run in an op-<n> leaf, got {shell_unified}"
+        );
+        assert_eq!(
+            descendant_unified, shell_unified,
+            "fast descendant {descendant_pid} must share the shell's op leaf"
         );
         assert!(
-            child_unified.starts_with(&self_unified[..self_unified.len() - "/supervisor".len()]),
+            shell_unified.starts_with(&self_unified[..self_unified.len() - "/supervisor".len()]),
             "the op leaf must be a sibling of the supervisor leaf under the service cgroup \
-             ({child_unified} vs {self_unified})"
+             ({shell_unified} vs {self_unified})"
         );
         assert_eq!(
             score, "500",
-            "exec child {child_pid} must carry oom_score_adj=500"
+            "exec shell {shell_pid} must carry oom_score_adj=500"
+        );
+        assert_eq!(
+            descendant_score, "500",
+            "fast descendant {descendant_pid} must carry oom_score_adj=500"
         );
 
         // The op leaf is a real child of the resolved service cgroup.
         assert!(
             service_dir
-                .join(child_unified.rsplit('/').next().expect("op leaf name"))
+                .join(shell_unified.rsplit('/').next().expect("op leaf name"))
                 .exists(),
-            "the op leaf {child_unified} should exist under {}",
+            "the op leaf {shell_unified} should exist under {}",
             service_dir.display()
         );
     }
 
-    /// Waits for the child fixture to publish its PID (bounded), then parses it.
-    async fn read_child_pid(pid_file: &Path) -> u32 {
+    /// Waits for the shell fixture to publish both PIDs (bounded), then parses them.
+    async fn read_fixture_pids(pid_file: &Path) -> (u32, u32) {
         for _ in 0..200 {
             if let Ok(raw) = tokio::fs::read_to_string(pid_file).await {
-                if let Ok(pid) = raw.trim().parse::<u32>() {
-                    return pid;
+                let mut parts = raw.split_whitespace();
+                if let (Some(shell), Some(descendant), None) =
+                    (parts.next(), parts.next(), parts.next())
+                {
+                    if let (Ok(shell), Ok(descendant)) =
+                        (shell.parse::<u32>(), descendant.parse::<u32>())
+                    {
+                        return (shell, descendant);
+                    }
                 }
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!(
-            "child fixture never published its PID to {}",
+            "child fixture never published both PIDs to {}",
             pid_file.display()
         );
     }

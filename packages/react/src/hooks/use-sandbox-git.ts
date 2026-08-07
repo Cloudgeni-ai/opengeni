@@ -5,7 +5,7 @@ import type {
   WorkspaceCaptureRepo,
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useOpenGeni, type ClientOverride } from "../provider";
+import { type ClientOverride, useOpenGeni } from "../provider";
 
 export type UseSandboxGitOptions = ClientOverride & {
   /** Live event log (usually `useSessionEvents().events`) — drives auto-refresh
@@ -18,8 +18,14 @@ export type UseSandboxGitOptions = ClientOverride & {
   repoPaths?: readonly string[] | undefined;
   /** Diff the staged index vs HEAD (`--cached`) instead of the working tree. */
   staged?: boolean | undefined;
+  /** Review scope. `branch` compares the current branch with the remote default
+   *  branch, `working` shows uncommitted edits, and `staged` shows the index.
+   *  `staged` above remains as a compatibility alias. */
+  comparison?: SandboxGitComparison | undefined;
   /** Hold off the initial fetch. Default true. */
   enabled?: boolean | undefined;
+  /** Pause live reads/invalidation while preserving the last rendered result. */
+  active?: boolean | undefined;
   /** Lease liveness ("warm" | "draining" | "cold"). When NOT warm, the diff is
    *  served from the capture (cold/offline) instead of a live `gitDiff` RPC. */
   liveness?: string | undefined;
@@ -29,10 +35,14 @@ export type UseSandboxGitOptions = ClientOverride & {
   capture?: WorkspaceCaptureManifest | null | undefined;
 };
 
+export type SandboxGitComparison = "branch" | "working" | "staged";
+
 /** A Git diff qualified into workspace scope. `repoRoot` is present for the
  *  workspace-wide path and lets review UI group real repositories without
  *  guessing from the first path segment. */
-export type SandboxGitFileDiff = GitFileDiff & { repoRoot?: string | undefined };
+export type SandboxGitFileDiff = GitFileDiff & {
+  repoRoot?: string | undefined;
+};
 
 export type UseSandboxGitResult = {
   /** Working-tree (or staged) diff vs HEAD — the structured hunks the Pierre
@@ -175,6 +185,7 @@ export function useSandboxGit(
 ): UseSandboxGitResult {
   const { client, workspaceId } = useOpenGeni(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
+  const active = options.active ?? true;
   const repoPath = options.repoPath ?? "";
   const workspaceWide = options.repoPaths !== undefined;
   // Serialize the caller's array so inline values do not retrigger effects. An
@@ -183,10 +194,15 @@ export function useSandboxGit(
     options.repoPaths && options.repoPaths.length > 0 ? options.repoPaths : [repoPath],
   ).join("\u0000");
   const repoPaths = useMemo(() => repoPathsKey.split("\u0000"), [repoPathsKey]);
-  const staged = options.staged ?? false;
-  const capture = options.capture ?? null;
+  const comparison: SandboxGitComparison =
+    options.comparison ?? (options.staged ? "staged" : "working");
+  const hasAdvertisedRepoPaths = (options.repoPaths?.length ?? 0) > 0;
+  // New captures retain both working-tree and branch comparisons. Staged state
+  // remains live-only; legacy captures simply lack branchDiff and fall back via
+  // the workspace controller without inventing an empty branch comparison.
+  const capture = comparison === "staged" ? null : (options.capture ?? null);
   const isLive = options.liveness === "warm" || options.liveness === "draining";
-  const identityKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${repoPathsKey}\u0000${workspaceWide}\u0000${staged}`;
+  const identityKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${repoPathsKey}\u0000${workspaceWide}\u0000${comparison}`;
 
   const [diff, setDiff] = useState<SandboxGitFileDiff[]>([]);
   const [branch, setBranch] = useState<string | null>(null);
@@ -204,6 +220,7 @@ export function useSandboxGit(
   const refreshGenerationRef = useRef(0);
   const refreshAbortRef = useRef<AbortController | null>(null);
   const lastChangeRef = useRef(0);
+  const commandRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const refresh = useCallback(async () => {
     if (!sessionId) return;
@@ -214,17 +231,69 @@ export function useSandboxGit(
     setLoading(true);
     setError(null);
     try {
-      const statuses = await Promise.all(
-        repoPaths.map(async (root) => ({
-          root,
-          status: await client.gitStatus(
-            workspaceId,
-            sessionId,
-            { path: root },
-            { signal: refreshAbort.signal },
-          ),
-        })),
-      );
+      const diffRequest = (root: string) =>
+        client.gitDiff(
+          workspaceId,
+          sessionId,
+          {
+            path: root,
+            ...(comparison === "branch"
+              ? { fromRef: "origin/HEAD", includeUntracked: true }
+              : comparison === "working"
+                ? { fromRef: "HEAD", includeUntracked: true }
+                : { staged: true, includeUntracked: false }),
+          },
+          { signal: refreshAbort.signal },
+        );
+
+      // Capability-advertised roots are known repositories. Fetch status metadata
+      // and diff hunks together: both are independent Channel-A reads and each can
+      // take several seconds on a remote sandbox. The legacy root probe remains
+      // serial so a non-repository workspace never receives a failing git diff.
+      const prefetched = hasAdvertisedRepoPaths
+        ? await client
+            .gitReadBatch(
+              workspaceId,
+              sessionId,
+              {
+                requests: repoPaths.map((root) => ({
+                  status: { path: root },
+                  diff: {
+                    path: root,
+                    ...(comparison === "branch"
+                      ? { fromRef: "origin/HEAD", includeUntracked: true }
+                      : comparison === "working"
+                        ? { fromRef: "HEAD", includeUntracked: true }
+                        : { staged: true, includeUntracked: false }),
+                  },
+                })),
+              },
+              { signal: refreshAbort.signal },
+            )
+            .then((batch) =>
+              batch.results.map((item, index) => ({
+                root: repoPaths[index] ?? "",
+                status: item.status,
+                result: item.diff ?? {
+                  files: [],
+                  revision: item.status.revision,
+                },
+              })),
+            )
+        : null;
+      const statuses =
+        prefetched ??
+        (await Promise.all(
+          repoPaths.map(async (root) => ({
+            root,
+            status: await client.gitStatus(
+              workspaceId,
+              sessionId,
+              { path: root },
+              { signal: refreshAbort.signal },
+            ),
+          })),
+        ));
       if (refreshGenerationRef.current !== generation) return;
       const repositories = statuses.filter(({ status }) => status.isRepo);
       const roots = repositories.map(({ root }) => root);
@@ -239,19 +308,11 @@ export function useSandboxGit(
         setSource("live");
         return;
       }
+      const prefetchedByRoot = new Map(prefetched?.map(({ root, result }) => [root, result]));
       const results = await Promise.all(
         repositories.map(async ({ root }) => ({
           root,
-          result: await client.gitDiff(
-            workspaceId,
-            sessionId,
-            {
-              path: root,
-              staged,
-              includeUntracked: !staged,
-            },
-            { signal: refreshAbort.signal },
-          ),
+          result: prefetchedByRoot.get(root) ?? (await diffRequest(root)),
         })),
       );
       if (refreshGenerationRef.current !== generation) return;
@@ -273,15 +334,25 @@ export function useSandboxGit(
       if (refreshGenerationRef.current === generation) setLoading(false);
       if (refreshAbortRef.current === refreshAbort) refreshAbortRef.current = null;
     }
-  }, [client, workspaceId, sessionId, repoPaths, staged, workspaceWide]);
+  }, [
+    client,
+    workspaceId,
+    sessionId,
+    repoPaths,
+    hasAdvertisedRepoPaths,
+    workspaceWide,
+    comparison,
+  ]);
 
-  // Serve the diff from a capture (the cold/offline source). `staged` has no
-  // meaning here: the capture records the combined turn-end change surface vs HEAD.
+  // Serve the requested review scope from a capture when that scope exists.
   const seedFromCapture = useCallback(
     (manifest: WorkspaceCaptureManifest) => {
       const repositories = workspaceWide
         ? manifest.repos
         : ([repoForPath(manifest, repoPath)].filter(Boolean) as WorkspaceCaptureRepo[]);
+      if (comparison === "branch" && repositories.some((repo) => repo.branchDiff === undefined)) {
+        return;
+      }
       if (repositories.length === 0) {
         setIsRepo(false);
         setBranch(null);
@@ -301,16 +372,19 @@ export function useSandboxGit(
       setDiff((prev) =>
         mergeDiffs(
           prev,
-          repositories.flatMap((repo) =>
-            workspaceWide ? repo.diff.map((file) => qualifyDiff(repo.root, file)) : repo.diff,
-          ),
+          repositories.flatMap((repo) => {
+            const capturedDiff = comparison === "branch" ? (repo.branchDiff ?? []) : repo.diff;
+            return workspaceWide
+              ? capturedDiff.map((file) => qualifyDiff(repo.root, file))
+              : capturedDiff;
+          }),
         ),
       );
       sourceRef.current = "capture";
       setSource("capture");
       setError(null);
     },
-    [repoPath, workspaceWide],
+    [comparison, repoPath, workspaceWide],
   );
 
   // Source selection on mount / liveness / capture-revision change. Key on the
@@ -349,6 +423,10 @@ export function useSandboxGit(
     if (currentCapture && (identityChanged || !isLive || sourceRef.current !== "live")) {
       seedFromCapture(currentCapture);
     }
+    if (!active) {
+      if (!active) setLoading(false);
+      return;
+    }
     if (isLive || !currentCapture) {
       void refresh();
     }
@@ -357,25 +435,54 @@ export function useSandboxGit(
       refreshAbortRef.current = null;
       refreshGenerationRef.current += 1;
     };
-  }, [enabled, isLive, captureRevision, identityKey, refresh, seedFromCapture]);
+  }, [enabled, active, isLive, captureRevision, identityKey, refresh, seedFromCapture]);
 
-  // git.changed → re-fetch the LIVE diff. A git.changed only originates from a
-  // live box, so this both keeps warm sessions fresh and folds a cold box that
-  // just came up (unchanged from the pre-capture behavior).
+  // git.changed → re-fetch the LIVE diff. Agent tool completion is also an
+  // invalidation point because shell/apply-patch writes can bypass Channel-A and
+  // therefore emit no git.changed event. This is event-driven, never polling.
   const events = options.events;
   useEffect(() => {
-    if (!enabled || !events) return;
+    if (!enabled || !active || !events) {
+      if (commandRefreshTimerRef.current) {
+        clearTimeout(commandRefreshTimerRef.current);
+        commandRefreshTimerRef.current = null;
+      }
+      return;
+    }
     let latest = lastChangeRef.current;
+    let immediate = false;
+    let commandDelta = false;
     for (const event of events) {
-      if (event.type === "git.changed" && event.sequence > latest) {
+      if (event.sequence <= latest) continue;
+      if (event.type === "git.changed" || event.type === "agent.toolCall.output") {
         latest = event.sequence;
+        immediate = true;
+      } else if (event.type === "sandbox.command.output.delta") {
+        latest = event.sequence;
+        commandDelta = true;
       }
     }
     if (latest > lastChangeRef.current) {
       lastChangeRef.current = latest;
-      void refresh();
+      if (immediate) {
+        if (commandRefreshTimerRef.current) clearTimeout(commandRefreshTimerRef.current);
+        commandRefreshTimerRef.current = null;
+        void refresh();
+      } else if (commandDelta && !commandRefreshTimerRef.current) {
+        commandRefreshTimerRef.current = setTimeout(() => {
+          commandRefreshTimerRef.current = null;
+          void refresh();
+        }, 1_000);
+      }
     }
-  }, [enabled, events, refresh]);
+  }, [enabled, active, events, refresh]);
+
+  useEffect(
+    () => () => {
+      if (commandRefreshTimerRef.current) clearTimeout(commandRefreshTimerRef.current);
+    },
+    [],
+  );
 
   const identityMatches = enabled && stateIdentity === identityKey;
   const visibleRepoRoots = identityMatches ? repoRoots : [];

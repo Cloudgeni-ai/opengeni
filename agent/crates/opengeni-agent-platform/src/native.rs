@@ -262,11 +262,28 @@ impl ExecProcessGroup {
             crate::cgroup::raise_exec_oom_score_adj(child_pid);
         }
 
-        // Place the requested child AND the group anchor into a per-op memory leaf
-        // so they share one OOM fate, isolated from the control supervisor. The tiny
-        // window between spawn and this move is the accepted post-spawn billing
-        // window — pre_exec placement is async-signal-unsafe and deliberately not
-        // used. A no-op when `cgroups` is `None` (isolation unavailable / off Linux).
+        // Place the COMPLETE ordinary process group in one per-op memory leaf. A
+        // shell can fork between Command::spawn returning and post-spawn placement;
+        // moving only the direct child would leave that fast descendant billed to
+        // the supervisor. The cgroup manager stops the group, moves its direct
+        // roots, then drains same-group descendants from the supervisor leaf before
+        // resuming. Correctness does not depend on synchronous SIGSTOP delivery.
+        // This is a no-op when isolation is unavailable / off Linux.
+        #[cfg(target_os = "linux")]
+        let op_cgroup = if let Some(cg) = cgroups {
+            let pids: Vec<u32> = [anchor.id(), child.id()].into_iter().flatten().collect();
+            match cg.place_process_group(pgid, &pids) {
+                Ok(handle) => handle,
+                Err(error) => {
+                    let _ = terminate_unix_process_group(pgid);
+                    let _ = anchor.start_kill();
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
+        #[cfg(not(target_os = "linux"))]
         let op_cgroup = cgroups.and_then(|cg| {
             let pids: Vec<u32> = [anchor.id(), child.id()].into_iter().flatten().collect();
             cg.place_op(&pids)

@@ -201,7 +201,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
       <PageHeader
         icon={<LaptopIcon className="size-4" />}
         title="Machines"
-        description="Your own computers, enrolled as agent sandboxes. Run the install one-liner on a machine and it appears here — usable from any session alongside the managed sandbox."
+        description="Your own computers, connected as agent sandboxes. One agent can serve this workspace alongside any other OpenGeni workspaces or deployments already connected to the machine."
       />
 
       <div className="mt-5">
@@ -247,9 +247,10 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
       <Dialog open={enrollOpen} onOpenChange={setEnrollOpen}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>Enroll a machine</DialogTitle>
+            <DialogTitle>Connect a machine</DialogTitle>
             <DialogDescription>
-              Run a one-liner on the machine you want to share as an agent sandbox.
+              Run one command to install or update the agent and add this workspace. Existing
+              OpenGeni connections stay intact.
             </DialogDescription>
           </DialogHeader>
           {/* Gated on `enrollOpen` so the body mounts (and mints a fresh token)
@@ -358,7 +359,7 @@ function EnrollDialogBody({ workspaceId, origin }: { workspaceId: string; origin
         const message = err instanceof Error ? err.message : String(err);
         setError(message);
         setToken(null);
-        toast.error("Could not create an enroll token", { description: message });
+        toast.error("Could not create a connect command", { description: message });
       } finally {
         if (seq === mintSeq.current) {
           setMinting(false);
@@ -380,7 +381,7 @@ function EnrollDialogBody({ workspaceId, origin }: { workspaceId: string; origin
     if (!command) {
       return;
     }
-    void copyToClipboard(command, "Install command copied").then((ok) => {
+    void copyToClipboard(command, "Connect command copied").then((ok) => {
       if (ok) {
         setCopied(true);
       }
@@ -400,7 +401,7 @@ function EnrollDialogBody({ workspaceId, origin }: { workspaceId: string; origin
           onClick={() => setMode("token")}
         >
           <ArrowLeftIcon className="size-4" />
-          Back to one-click enroll
+          Back to one-command setup
         </Button>
         <EnrollmentDeviceFlow
           // The agent mints the real code via the device-flow start; until the
@@ -410,7 +411,7 @@ function EnrollDialogBody({ workspaceId, origin }: { workspaceId: string; origin
           verificationUri={verificationUri}
           installCommand={installCommand}
           phase={"pending" satisfies DeviceFlowPhase}
-          onCopyInstall={() => void copyToClipboard(installCommand, "Install command copied")}
+          onCopyInstall={() => void copyToClipboard(installCommand, "Connect command copied")}
           className="border-0 shadow-none"
         />
         <p className="text-center text-2xs text-fg-muted">
@@ -423,8 +424,8 @@ function EnrollDialogBody({ workspaceId, origin }: { workspaceId: string; origin
   return (
     <div className="flex flex-col gap-3">
       <p className="text-xs leading-4 text-fg-muted">
-        Run this on the machine you want to share. It enrolls instantly as an agent sandbox — no
-        approval step.
+        Run this once on the machine. It securely installs or updates the agent, adds this workspace
+        without removing any others, and keeps the machine online in the background.
       </p>
 
       <label className="flex items-start gap-2 rounded-md border border-border bg-bg/40 px-2.5 py-2 text-xs leading-4 text-fg">
@@ -448,18 +449,18 @@ function EnrollDialogBody({ workspaceId, origin }: { workspaceId: string; origin
       </label>
 
       <Notice tone="waiting" title="Secret — copy it now">
-        This command embeds a one-time enroll token that grants enrollment into this workspace until
-        it expires. Anyone who has it can enroll a machine here.
+        This command embeds a one-time token that can connect a machine to this workspace until it
+        expires. Anyone who has it can connect a machine here.
       </Notice>
 
       {minting ? (
         <Notice tone="muted" icon={<Loader2Icon className="size-4 animate-spin" />}>
-          Minting enroll token…
+          Preparing secure connect command…
         </Notice>
       ) : error ? (
         <Notice
           tone="failed"
-          title="Could not create an enroll token"
+          title="Could not create a connect command"
           action={
             <Button
               type="button"
@@ -501,7 +502,7 @@ function EnrollDialogBody({ workspaceId, origin }: { workspaceId: string; origin
             onClick={copyCommand}
           >
             {copied ? <CheckIcon className="size-4" /> : <CopyIcon className="size-4" />}
-            {copied ? "Copied" : "Copy install command"}
+            {copied ? "Copied" : "Copy connect command"}
           </Button>
         </>
       ) : null}

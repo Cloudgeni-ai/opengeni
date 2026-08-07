@@ -302,7 +302,7 @@ try {
     writeFile(
       join(consumerRoot, "presentation.tsx"),
       [
-        'import { ApprovalSurface, HumanInputForm, MessageTimeline, QueueSurface, createDefaultToolRegistry, type QueueSurfaceProps, type ToolRendererProps, type UseTurnQueueResult } from "@opengeni/react";',
+        'import { ApprovalSurface, HumanInputForm, MessageTimeline, QueueSurface, SessionChrome, createDefaultToolRegistry, type QueueSurfaceProps, type ToolRendererProps, type UseTurnQueueResult } from "@opengeni/react";',
         'import * as Composer from "@opengeni/react/composer";',
         'import { useMemo, useRef, useState } from "react";',
         "",
@@ -363,6 +363,7 @@ try {
         "",
         "  return (",
         "    <section>",
+        '      <SessionChrome queue={queueState} agentsSignal={{ count: 2, detail: "1 running" }} readOnly />',
         '      <MessageTimeline items={[{ kind: "tool-call", id: "tool-proof", turnId: "turn-proof", callId: "call-proof", name: "host.entity", arguments: { entityId: "entity-proof" }, output: { updated: true }, raw: null, status: "complete", occurredAt: "2026-07-23T00:00:00.000Z" }]} toolRegistry={toolRegistry} />',
         "      <QueueSurface queue={queueState} readOnly onRequestComposerFocus={requestComposerFocus} />",
         "      <ApprovalSurface",
@@ -398,7 +399,7 @@ try {
     ),
     writeFile(
       join(consumerRoot, "ssr.tsx"),
-      'import { renderToStaticMarkup } from "react-dom/server";\nimport { HostEmbeddedSurfaces } from "./presentation";\nconst markup = renderToStaticMarkup(<HostEmbeddedSurfaces />);\nfor (const expected of ["Open host entity", "Loading inputs…", "entity-proof", "What should change?", "Host model"]) { if (!markup.includes(expected)) throw new Error(`SSR output lost populated host surface: ${expected}`); }\nconsole.log(`SSR_OK bytes=${new TextEncoder().encode(markup).byteLength}`);\n',
+      'import { renderToStaticMarkup } from "react-dom/server";\nimport { HostEmbeddedSurfaces } from "./presentation";\nconst markup = renderToStaticMarkup(<HostEmbeddedSurfaces />);\nfor (const expected of ["2 agents", "1 running", "Open host entity", "Loading inputs…", "entity-proof", "What should change?", "Host model"]) { if (!markup.includes(expected)) throw new Error(`SSR output lost populated host surface: ${expected}`); }\nconsole.log(`SSR_OK bytes=${new TextEncoder().encode(markup).byteLength}`);\n',
     ),
     writeFile(
       join(consumerRoot, "runtime-proof.ts"),

@@ -44,6 +44,8 @@ export type WorkspaceDockProps = {
   /** Controlled collapsed state for hosts that expose their own dock toggle. */
   collapsed?: boolean | undefined;
   onCollapsedChange?: ((collapsed: boolean) => void) | undefined;
+  /** Keep the built-in collapse control when the host controls collapsed state. */
+  showCollapseControl?: boolean | undefined;
   /** A status accessory pinned to the right of the tab strip, left of the
    *  maximize/collapse controls (e.g. the machine-state chip). Renders in both
    *  the docked header and the full-screen overlay header. */
@@ -129,6 +131,7 @@ export function WorkspaceDock({
   onActiveTabChange,
   collapsed: collapsedProp,
   onCollapsedChange,
+  showCollapseControl = false,
   headerAccessory,
   mobileLeadingControl,
   autoSaveId = "og.session.dock",
@@ -401,7 +404,7 @@ export function WorkspaceDock({
               <Maximize2Icon className="size-3.5" />
             )}
           </ChromeButton>
-          {hostControlled ? null : (
+          {hostControlled && !showCollapseControl ? null : (
             <ChromeButton onClick={collapse} title="Collapse" label="Collapse dock">
               <PanelRightCloseIcon className="size-3.5" />
             </ChromeButton>

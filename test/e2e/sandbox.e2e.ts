@@ -59,17 +59,26 @@ describe("real Docker sandbox e2e", () => {
   async function waitForSettledToolOutput(
     sessionId: string,
     outputMarker: string,
+    options: { requireWorkspaceCapture?: boolean } = {},
   ): Promise<SessionEvent[]> {
     let events: SessionEvent[] = [];
     await waitFor(
       async () => {
         events = await sessionEvents(sessionId);
+        const toolOutputIndex = events.findIndex(
+          (event) =>
+            event.type === "agent.toolCall.output" &&
+            JSON.stringify(event.payload ?? {}).includes(outputMarker),
+        );
         const completedIndex = events.findIndex((event) => event.type === "turn.completed");
-        if (completedIndex < 0) return false;
-        const hasToolOutput = events
-          .slice(0, completedIndex)
-          .some((event) => event.type === "agent.toolCall.output");
-        if (!hasToolOutput) return false;
+        if (toolOutputIndex < 0 || completedIndex <= toolOutputIndex) return false;
+        if (options.requireWorkspaceCapture) {
+          const captureIndex = events.findIndex(
+            (event, index) =>
+              index > completedIndex && event.type === "workspace.revision.captured",
+          );
+          if (captureIndex < 0) return false;
+        }
         return events
           .slice(completedIndex + 1)
           .some(
@@ -86,6 +95,10 @@ describe("real Docker sandbox e2e", () => {
             `event types: ${events.map((event) => event.type).join(", ")}`,
             `tool outputs: ${events
               .filter((event) => event.type === "agent.toolCall.output")
+              .map((event) => JSON.stringify(event.payload ?? {}))
+              .join("\n")}`,
+            `turn failures: ${events
+              .filter((event) => event.type === "turn.failed")
               .map((event) => JSON.stringify(event.payload ?? {}))
               .join("\n")}`,
             `api logs:\n${api.logs().slice(-4_000)}`,
@@ -137,8 +150,29 @@ describe("real Docker sandbox e2e", () => {
     const settledEvents = await waitForSettledToolOutput(
       session.id,
       "workbench-capture-e2e-complete",
+      { requireWorkspaceCapture: true },
     );
     requireToolOutputMarker(settledEvents, "workbench-capture-e2e-complete");
+    const toolOutputIndex = settledEvents.findIndex(
+      (event) =>
+        event.type === "agent.toolCall.output" &&
+        JSON.stringify(event.payload ?? {}).includes("workbench-capture-e2e-complete"),
+    );
+    const completedIndex = settledEvents.findIndex((event) => event.type === "turn.completed");
+    const captureIndex = settledEvents.findIndex(
+      (event) => event.type === "workspace.revision.captured",
+    );
+    const idleIndex = settledEvents.findIndex(
+      (event, index) =>
+        index > completedIndex &&
+        event.type === "session.status.changed" &&
+        (event.payload as { status?: string }).status === "idle",
+    );
+    expect(toolOutputIndex).toBeGreaterThanOrEqual(0);
+    expect(completedIndex).toBeGreaterThan(toolOutputIndex);
+    expect(captureIndex).toBeGreaterThan(completedIndex);
+    expect(idleIndex).toBeGreaterThan(completedIndex);
+    expect(settledEvents.some((event) => event.type === "turn.failed")).toBe(false);
 
     let capture: GetWorkspaceCaptureResponse | null = null;
     await waitFor(

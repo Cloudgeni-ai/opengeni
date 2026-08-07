@@ -318,6 +318,22 @@ describe("structured human-input runtime boundary", () => {
     },
   };
 
+  test("workspace policy omits only the human-input tool while enabled control preserves it", () => {
+    const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: true });
+    const defaultTools = buildOpenGeniAgent(settings, []).tools.map((tool) => tool.name);
+    const enabledTools = buildOpenGeniAgent(settings, [], { humanInputEnabled: true }).tools.map(
+      (tool) => tool.name,
+    );
+    const disabledTools = buildOpenGeniAgent(settings, [], { humanInputEnabled: false }).tools.map(
+      (tool) => tool.name,
+    );
+
+    expect(defaultTools).toContain(HUMAN_INPUT_TOOL_NAME);
+    expect(enabledTools).toEqual(defaultTools);
+    expect(disabledTools).not.toContain(HUMAN_INPUT_TOOL_NAME);
+    expect(disabledTools).toEqual(defaultTools.filter((name) => name !== HUMAN_INPUT_TOOL_NAME));
+  });
+
   test("partitions human requests out of ordinary approval payloads", () => {
     const ordinary = {
       name: "dangerous_tool",
@@ -3338,7 +3354,12 @@ describe("runtime event normalization", () => {
     expect(command).toContain("glab) provider=gitlab; token_env=GITLAB_TOKEN ;;");
     expect(command).toContain("az) provider=azure_devops; token_env=AZURE_DEVOPS_EXT_PAT ;;");
     expect(command).toContain('GH_TOKEN) export GH_TOKEN="$token" ;;');
-    expect(command).toContain('GITLAB_TOKEN) export GITLAB_TOKEN="$token" ;;');
+    expect(command).toContain(
+      'glpat-*) unset GITLAB_ACCESS_TOKEN OAUTH_TOKEN GLAB_IS_OAUTH2; export GITLAB_TOKEN="$token" ;;',
+    );
+    expect(command).toContain(
+      '*) unset GITLAB_TOKEN GITLAB_ACCESS_TOKEN; export OAUTH_TOKEN="$token"; export GLAB_IS_OAUTH2=true ;;',
+    );
     expect(command).toContain('AZURE_DEVOPS_EXT_PAT) export AZURE_DEVOPS_EXT_PAT="$token" ;;');
 
     // Helper writes MUST come BEFORE the fetch that consumes them (order matters:

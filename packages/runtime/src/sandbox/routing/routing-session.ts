@@ -35,6 +35,7 @@ import {
   isExecSessionLostBanner,
   stripExecBanner,
 } from "../channel-a";
+import type { ChannelAExecArgs, ChannelAExecResult } from "../channel-a";
 import { parseExecBannerExitCode, parseExecBannerSessionId } from "../exec-banner";
 import { withSandboxProviderOperation } from "../provider-operation-gate";
 
@@ -76,6 +77,10 @@ export interface RoutableBackendSession {
   supportsPty?(): boolean;
   resolveExposedPort?(port: number): Promise<ExposedPortEndpoint>;
   serializeSessionState?(): Promise<unknown>;
+  /** Release op-stream replay retention only after the caller has durably
+   * accepted every settled result. Routing proxies aggregate this hook across
+   * every Connected Machine backend reached during their lifetime. */
+  finalizeOpStreamOps?(): Promise<void>;
   // The native-desktop control-plane surface (self-hosted / macOS): a backend that
   // drives the desktop NATIVELY (input inject + frame capture) instead of shelling
   // xdotool/scrot over `exec`. Optional like the rest — only a `SelfhostedSession`
@@ -499,6 +504,10 @@ export class RoutingSandboxSession implements RoutableBackendSession {
    * that exact resolved route so pointer movement can never redirect stdin,
    * polling, or process-group helpers to another box. */
   private readonly retainedProcesses = new Map<number, RetainedProcessRecord>();
+  /** Every backend whose settled op-stream results may still need a final ack.
+   * Keep old epoch targets too: a mid-turn swap must not orphan the machine the
+   * previous command actually ran on. */
+  private readonly opStreamBackends = new Set<RoutableBackendSession>();
 
   // The native-desktop control-plane ops (self-hosted / macOS). Declared as OPTIONAL
   // INSTANCE fields — NOT prototype methods — because their PRESENCE is the selection
@@ -520,6 +529,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   constructor(deps: RoutingSandboxSessionDeps) {
     this.deps = deps;
     this.maxFenceRetries = deps.maxFenceRetries ?? 3;
+    this.rememberOpStreamBackend(deps.defaultResolved?.session);
 
     // Conditionally expose the native-desktop surface. Presence = the computer-use
     // native/exec selection signal (isNativeDesktopSession duck-types on
@@ -547,6 +557,34 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           }
           return s.screenshot();
         });
+    }
+  }
+
+  private rememberOpStreamBackend(session: RoutableBackendSession | undefined): void {
+    if (typeof session?.finalizeOpStreamOps === "function") {
+      this.opStreamBackends.add(session);
+    }
+  }
+
+  /**
+   * Finalize every Connected Machine backend this stable proxy dispatched to.
+   * Callers own the durability point: worker turns invoke this after history is
+   * persisted; one-off API calls invoke it after their result has been accepted
+   * in memory. A failed backend stays registered so a later durability hook can
+   * retry it, while successful backends are forgotten immediately.
+   */
+  async finalizeOpStreamOps(): Promise<void> {
+    const failures: unknown[] = [];
+    for (const backend of [...this.opStreamBackends]) {
+      try {
+        await backend.finalizeOpStreamOps?.();
+        this.opStreamBackends.delete(backend);
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    if (failures.length > 0) {
+      throw new AggregateError(failures, "one or more routed op-stream finalizers failed");
     }
   }
 
@@ -601,6 +639,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       ...resolved,
       activeEpoch: pointer.activeEpoch,
     };
+    this.rememberOpStreamBackend(routed.session);
     this.cachedEpoch = pointer.activeEpoch;
     this.cachedSandboxId = pointer.activeSandboxId;
     this.cached = routed;
@@ -1197,6 +1236,20 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       // verdict) instead of letting the SDK mislabel it "Please try again".
       return this.renderSelfhostedFaultOrThrow(error);
     }
+  }
+
+  /** Channel-A control-plane reads must not contend with durable workspace
+   * capture admission, but provider sessions must receive only provider args. */
+  async execReadOnly(args: ChannelAExecArgs): Promise<ChannelAExecResult> {
+    return await this.dispatch("execReadOnly", false, async (s) => {
+      if (s.exec) {
+        return (await s.exec(args)) as ChannelAExecResult;
+      }
+      if (s.execCommand) {
+        return structuredExecResultFromBanner(await s.execCommand(args));
+      }
+      throw new RoutingUnsupportedError("execReadOnly", this.cached?.kind ?? "unknown");
+    });
   }
 
   async writeStdin(args: unknown): Promise<string> {

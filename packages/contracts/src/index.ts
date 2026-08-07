@@ -1290,6 +1290,9 @@ export const WorkspaceSettingsSchema = z
     // Default compaction strategy for NEW Codex sessions created in this
     // workspace. Absent ⇒ remote_v2. Non-Codex sessions always freeze portable.
     codexCompactionDefault: CodexCompactionMode.optional(),
+    // Whether agents may expose and invoke the built-in structured human-input
+    // tool. Absent preserves the historical enabled behavior.
+    agentHumanInputEnabled: z.boolean().optional(),
     // Optional Slack reaction invocation. Absent/invalid fails closed to the
     // disabled default via resolveWorkspaceSlackReactionSummonSettings.
     slackReactionSummon: WorkspaceSlackReactionSummonSettings.optional(),
@@ -1308,6 +1311,12 @@ export function resolveWorkspaceCodexCompactionDefault(settings: unknown): Codex
   const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
   if (!parsed.success) return "remote_v2";
   return parsed.data.codexCompactionDefault ?? "remote_v2";
+}
+
+/** Whether agents may request structured human input (enabled when unset). */
+export function resolveWorkspaceAgentHumanInputEnabled(settings: unknown): boolean {
+  const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
+  return parsed.success ? parsed.data.agentHumanInputEnabled !== false : true;
 }
 
 /**
@@ -1372,6 +1381,7 @@ export const UpdateWorkspaceSettingsRequest = z
     transcription: WorkspaceTranscriptionPolicy.optional(),
     maxNestedAgentDepth: NestedAgentDepthValue.nullable().optional(),
     codexCompactionDefault: CodexCompactionMode.optional(),
+    agentHumanInputEnabled: z.boolean().optional(),
     slackReactionSummon: WorkspaceSlackReactionSummonSettings.optional(),
   })
   .passthrough();
@@ -7183,6 +7193,18 @@ export const FsListResponse = z.object({
 });
 export type FsListResponse = z.infer<typeof FsListResponse>;
 
+/** Several independent directory listings served behind one Channel-A lease.
+ * The response order exactly matches `requests`; callers can paint a root and
+ * hydrate a bounded lazy-tree frontier without repeating provider attach work. */
+export const FsListBatchRequest = z.object({
+  requests: z.array(FsListRequest).min(1).max(16),
+});
+export type FsListBatchRequest = z.infer<typeof FsListBatchRequest>;
+export const FsListBatchResponse = z.object({
+  results: z.array(FsListResponse),
+});
+export type FsListBatchResponse = z.infer<typeof FsListBatchResponse>;
+
 export const FsEncoding = z.enum(["utf8", "base64"]);
 export type FsEncoding = z.infer<typeof FsEncoding>;
 export const FsReadRequest = z.object({
@@ -7351,6 +7373,27 @@ export const GitDiffResponse = z.object({
 });
 export type GitDiffResponse = z.infer<typeof GitDiffResponse>;
 
+/** One repository read unit: status metadata plus an optional comparison.
+ * Multiple units execute behind one Channel-A lease and preserve input order. */
+export const GitReadBatchItemRequest = z.object({
+  status: GitStatusRequest,
+  diff: GitDiffRequest.optional(),
+});
+export type GitReadBatchItemRequest = z.infer<typeof GitReadBatchItemRequest>;
+export const GitReadBatchRequest = z.object({
+  requests: z.array(GitReadBatchItemRequest).min(1).max(32),
+});
+export type GitReadBatchRequest = z.infer<typeof GitReadBatchRequest>;
+export const GitReadBatchItemResponse = z.object({
+  status: GitStatusResponse,
+  diff: GitDiffResponse.optional(),
+});
+export type GitReadBatchItemResponse = z.infer<typeof GitReadBatchItemResponse>;
+export const GitReadBatchResponse = z.object({
+  results: z.array(GitReadBatchItemResponse),
+});
+export type GitReadBatchResponse = z.infer<typeof GitReadBatchResponse>;
+
 // ─── Workbench v2 turn-end workspace capture ────────────
 // A capture is a point-in-time snapshot of the session workspace's CHANGES,
 // probed live off the box at turn end (detectRepos → gitStatus/gitDiff → fsRead
@@ -7382,10 +7425,10 @@ export const WorkspaceCaptureFile = z.object({
 });
 export type WorkspaceCaptureFile = z.infer<typeof WorkspaceCaptureFile>;
 
-// One repo discovered in the workspace. `diff` is `git diff HEAD` (combined
-// staged+unstaged tracked changes vs HEAD — the review diff); `status` is the
-// full porcelain file list (drives the rail glyphs incl. untracked, which the
-// HEAD diff omits). root "" = the workspace root repo.
+// One repo discovered in the workspace. `diff` is the working/index surface vs
+// HEAD; `branchDiff`, when available, is the complete current branch vs the
+// remote default branch and therefore retains committed agent work. `status`
+// is the full porcelain file list. root "" = the workspace root repo.
 export const WorkspaceCaptureRepo = z.object({
   root: z.string(),
   head: z.string().nullable(),
@@ -7395,6 +7438,7 @@ export const WorkspaceCaptureRepo = z.object({
   behind: z.number().int().nonnegative().default(0),
   status: z.array(GitFileStatus),
   diff: z.array(GitFileDiff),
+  branchDiff: z.array(GitFileDiff).optional(),
 });
 export type WorkspaceCaptureRepo = z.infer<typeof WorkspaceCaptureRepo>;
 

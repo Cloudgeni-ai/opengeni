@@ -61,6 +61,7 @@ base64 = { workspace = true }
 # Per-channel output digests in the op-stream Exit frame (byte-exact assembly
 # proof, PROTOCOL.md §Wire messages). Already a workspace dep (update cohorting).
 blake3 = { workspace = true }
+semver = { workspace = true }
 
 clap = { workspace = true }
 hostname = { workspace = true }

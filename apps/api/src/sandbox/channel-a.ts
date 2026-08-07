@@ -30,6 +30,7 @@ import type { Session } from "@opengeni/contracts";
 import {
   acquireLease,
   getSandboxSessionEnvelope,
+  getEnrollment,
   getSandbox,
   loadWorkspaceEnvironmentForRun,
   markWarmLeaseInstanceLost,
@@ -49,6 +50,7 @@ import {
   isProviderSandboxNotFoundError,
   SandboxChannelAService,
   NatsControlRpc,
+  NatsOpStreamTransport,
   ChannelAConflictError,
   ChannelANotFoundError,
   ChannelAUnsupportedError,
@@ -89,6 +91,97 @@ export type ChannelAHandle = {
   routingSession: RoutingSandboxSession;
   requestId: string;
 };
+
+/**
+ * Provider handles are lightweight references to a lease-owned sandbox, but
+ * reconstructing one is not free: Modal resume-by-id plus its first command can
+ * dominate a small Git/files read. Workspace panels issue several independent
+ * Channel-A requests together, so reuse the exact fenced handle briefly instead
+ * of making every request reattach to the same warm instance.
+ *
+ * The key includes the session, lease epoch, and immutable provider instance id.
+ * A rotation can therefore never inherit an old handle. Entries are bounded and
+ * expire opportunistically; eviction only drops local references and never
+ * terminates the lease-owned sandbox.
+ */
+const CHANNEL_A_HANDLE_CACHE_TTL_MS = 300_000;
+const CHANNEL_A_HANDLE_CACHE_MAX_ENTRIES = 64;
+type CachedEstablishedHandle = {
+  promise: Promise<EstablishedSandboxSession>;
+  lastUsedAt: number;
+};
+const establishedHandleCache = new Map<string, CachedEstablishedHandle>();
+
+function establishedHandleCacheKey(
+  workspaceId: string,
+  sessionId: string,
+  lease: LeaseSnapshot,
+): string {
+  return [workspaceId, sessionId, lease.leaseEpoch, lease.instanceId ?? ""].join("\u0000");
+}
+
+function pruneEstablishedHandleCache(now: number): void {
+  for (const [key, entry] of establishedHandleCache) {
+    if (now - entry.lastUsedAt > CHANNEL_A_HANDLE_CACHE_TTL_MS) {
+      establishedHandleCache.delete(key);
+    }
+  }
+  while (establishedHandleCache.size >= CHANNEL_A_HANDLE_CACHE_MAX_ENTRIES) {
+    const oldestKey = establishedHandleCache.keys().next().value as string | undefined;
+    if (oldestKey === undefined) break;
+    establishedHandleCache.delete(oldestKey);
+  }
+}
+
+async function establishCachedHandle(
+  key: string,
+  establish: () => Promise<EstablishedSandboxSession>,
+): Promise<EstablishedSandboxSession> {
+  const now = Date.now();
+  pruneEstablishedHandleCache(now);
+  const cached = establishedHandleCache.get(key);
+  if (cached) {
+    cached.lastUsedAt = now;
+    // Refresh insertion order so the bounded map evicts the least-recently used
+    // exact lease identity first.
+    establishedHandleCache.delete(key);
+    establishedHandleCache.set(key, cached);
+    return await cached.promise;
+  }
+
+  const promise = establish();
+  const entry: CachedEstablishedHandle = { promise, lastUsedAt: now };
+  establishedHandleCache.set(key, entry);
+  try {
+    return await promise;
+  } catch (error) {
+    if (establishedHandleCache.get(key) === entry) establishedHandleCache.delete(key);
+    throw error;
+  }
+}
+
+/** Reuse the exact lease-fenced provider handle across API-direct surfaces.
+ * Stream capability negotiation and the first Files/Changes reads commonly run
+ * back-to-back; sharing this handle avoids paying the same Modal resume twice. */
+export async function establishCachedChannelAHandle(
+  workspaceId: string,
+  sessionId: string,
+  lease: LeaseSnapshot,
+  establish: () => Promise<EstablishedSandboxSession>,
+): Promise<EstablishedSandboxSession> {
+  return await establishCachedHandle(
+    establishedHandleCacheKey(workspaceId, sessionId, lease),
+    establish,
+  );
+}
+
+function rememberEstablishedHandle(key: string, established: EstablishedSandboxSession): void {
+  pruneEstablishedHandleCache(Date.now());
+  establishedHandleCache.set(key, {
+    promise: Promise.resolve(established),
+    lastUsedAt: Date.now(),
+  });
+}
 
 /**
  * Run a Channel-A op against a live box, API-direct. Acquires an exact direct holder
@@ -169,7 +262,12 @@ export async function withChannelA<T>(
       leaseEpoch: lease?.leaseEpoch ?? session.activeEpoch,
       emit,
     });
-    return await fn({ service, lease, routingSession, requestId });
+    const result = await fn({ service, lease, routingSession, requestId });
+    // The direct request has accepted the result in memory. Finalize every
+    // Connected Machine backend the routing proxy reached so a mid-request
+    // route transition cannot leave completed output retained until TTL.
+    await routingSession.finalizeOpStreamOps().catch(() => undefined);
+    return result;
   };
 
   // A machine-targeted top-level session has an honest selfhosted HOME label.
@@ -190,6 +288,7 @@ export async function withChannelA<T>(
           message: "machine-home session points to an unavailable Connected Machine",
         });
       }
+      const enrollment = await getEnrollment(db, workspaceId, sandbox.enrollmentId);
       const built = await buildSelfhostedBackendSession({
         workspaceId,
         agentId: sandbox.enrollmentId,
@@ -200,6 +299,17 @@ export async function withChannelA<T>(
         workingDir: pointer.workingDir,
         timeoutMs: settings.sandboxSelfhostedControlTimeoutMs,
         execTimeoutMs: settings.sandboxSelfhostedExecTimeoutMs,
+        ...(settings.agentOpStreamEnabled === true &&
+        enrollment?.opStream === true &&
+        bus.getOpStreamConnection
+          ? {
+              opStream: {
+                transport: new NatsOpStreamTransport(
+                  async () => bus.getOpStreamConnection?.() ?? null,
+                ),
+              },
+            }
+          : {}),
       });
       established = {
         client: built.client,
@@ -271,6 +381,7 @@ export async function withChannelA<T>(
 
   let established: EstablishedSandboxSession | undefined;
   let leaseSnapshot: LeaseSnapshot = acquired.lease;
+  let establishedCacheKey: string | null = null;
 
   try {
     const envelope = await getSandboxSessionEnvelope(db, workspaceId, session.id);
@@ -303,6 +414,8 @@ export async function withChannelA<T>(
         });
         established = result.established;
         leaseSnapshot = result.lease;
+        establishedCacheKey = establishedHandleCacheKey(workspaceId, session.id, leaseSnapshot);
+        rememberEstablishedHandle(establishedCacheKey, established);
       } catch (error) {
         throw new HTTPException(409, {
           message: `sandbox not available (${error instanceof Error ? error.message : "spawn failed"})`,
@@ -323,17 +436,21 @@ export async function withChannelA<T>(
         });
       }
       leaseSnapshot = live;
+      establishedCacheKey = establishedHandleCacheKey(workspaceId, session.id, live);
       try {
-        established = await establishSandboxSessionFromEnvelope(settings, live.resumeState, {
-          sessionId: session.id,
-          recovery: "resume-only",
-          backendOverride: session.sandboxBackend,
-          environment,
-        });
+        established = await establishCachedChannelAHandle(workspaceId, session.id, live, () =>
+          establishSandboxSessionFromEnvelope(settings, live.resumeState, {
+            sessionId: session.id,
+            recovery: "resume-only",
+            backendOverride: session.sandboxBackend,
+            environment,
+          }),
+        );
       } catch (error) {
         if (!isProviderSandboxNotFoundError(session.sandboxBackend, error)) {
           throw error;
         }
+        establishedHandleCache.delete(establishedCacheKey);
         const marked = await markWarmLeaseInstanceLost(db, {
           accountId,
           workspaceId,

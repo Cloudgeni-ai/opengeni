@@ -213,6 +213,53 @@ pub enum CheckOutcome {
     Available(PendingUpdate),
 }
 
+/// The lightweight manifest-only outcome used when comparing independent
+/// enrolled deployments. Artifact bytes are fetched only after the caller picks
+/// the best verified plan.
+#[derive(Debug)]
+pub enum ManifestCheckOutcome {
+    /// No newer build for this channel/target, or outside the rollout cohort.
+    UpToDate(String),
+    /// A signed, gated release plan whose artifact has not been downloaded yet.
+    Available(PendingUpdatePlan),
+}
+
+/// A release selected from a verified signed manifest. The artifact row is
+/// covered by that manifest signature; [`Self::download`] performs the separate
+/// artifact minisign and sha256 gates.
+#[derive(Debug)]
+pub struct PendingUpdatePlan {
+    /// The version being offered.
+    pub version: String,
+    /// Whether the manifest forced this update.
+    pub force: bool,
+    artifact: UpdateArtifact,
+    pubkey: String,
+}
+
+impl PendingUpdatePlan {
+    /// Expected artifact size declared by the signed manifest.
+    #[must_use]
+    pub fn expected_size(&self) -> u64 {
+        self.artifact.size
+    }
+
+    /// Downloads and independently verifies the one selected artifact.
+    ///
+    /// # Errors
+    ///
+    /// Any artifact fetch, signature, or checksum failure.
+    pub fn download(&self, source: &dyn Source) -> UpdateResult<PendingUpdate> {
+        let bytes = fetch_and_verify_artifact(source, &self.artifact, &self.pubkey)?;
+        info!(version = %self.version, size = bytes.len(), "downloaded + verified the update artifact");
+        Ok(PendingUpdate {
+            version: self.version.clone(),
+            force: self.force,
+            bytes,
+        })
+    }
+}
+
 /// A verified, ready-to-install update. The bytes have already passed the minisign
 /// + sha256 + version gates; applying is the atomic swap.
 #[derive(Debug)]
@@ -266,6 +313,26 @@ impl PendingUpdate {
 /// artifact yields [`UpdateError::Signature`]; a wrong checksum
 /// [`UpdateError::Checksum`]; a downgrade [`UpdateError::VersionGate`].
 pub fn check_update(source: &dyn Source, config: &UpdateConfig) -> UpdateResult<CheckOutcome> {
+    match check_update_manifest(source, config)? {
+        ManifestCheckOutcome::UpToDate(reason) => Ok(CheckOutcome::UpToDate(reason)),
+        ManifestCheckOutcome::Available(plan) => {
+            Ok(CheckOutcome::Available(plan.download(source)?))
+        }
+    }
+}
+
+/// Fetches and verifies only the channel manifest, applies version/rollout gates,
+/// and returns the signed artifact plan for this target without downloading it.
+/// This lets a multi-deployment installation compare candidates cheaply and fetch
+/// only the chosen artifact.
+///
+/// # Errors
+///
+/// Any manifest fetch, signature, parse, target, or gate failure.
+pub fn check_update_manifest(
+    source: &dyn Source,
+    config: &UpdateConfig,
+) -> UpdateResult<ManifestCheckOutcome> {
     // 1. Discover: fetch the manifest + its detached signature, verify the
     //    manifest's OWN signature against the pinned key, then parse.
     let manifest_url = config.manifest_url();
@@ -290,7 +357,9 @@ pub fn check_update(source: &dyn Source, config: &UpdateConfig) -> UpdateResult<
         &manifest.min_supported,
         config.allow_same_version,
     ) {
-        return Ok(CheckOutcome::UpToDate(format!("no newer build: {e}")));
+        return Ok(ManifestCheckOutcome::UpToDate(format!(
+            "no newer build: {e}"
+        )));
     }
 
     // 3. Gate: staged-rollout cohort. A forced manifest overrides cohorting.
@@ -301,21 +370,20 @@ pub fn check_update(source: &dyn Source, config: &UpdateConfig) -> UpdateResult<
             manifest.rollout_percent,
         )
     {
-        return Ok(CheckOutcome::UpToDate(format!(
+        return Ok(ManifestCheckOutcome::UpToDate(format!(
             "version {} is staged at {}% and this agent is not yet in the cohort",
             manifest.version, manifest.rollout_percent
         )));
     }
 
-    // 4. Fetch + verify the artifact for this target.
-    let artifact = artifact_for_target(&manifest, &config.target)?;
-    let bytes = fetch_and_verify_artifact(source, artifact, &config.pubkey)?;
-    info!(version = %manifest.version, size = bytes.len(), "downloaded + verified the update artifact");
-
-    Ok(CheckOutcome::Available(PendingUpdate {
+    // 4. Select the signed artifact row. Download happens only after the caller
+    // compares every deployment's manifest and chooses one plan.
+    let artifact = artifact_for_target(&manifest, &config.target)?.clone();
+    Ok(ManifestCheckOutcome::Available(PendingUpdatePlan {
         version: manifest.version.clone(),
         force: manifest.force,
-        bytes,
+        artifact,
+        pubkey: config.pubkey.clone(),
     }))
 }
 
@@ -339,8 +407,8 @@ fn fetch_and_verify_artifact(
 
 /// Runs the boot health-gate result handling: on `Ok`, [`promote`] (delete the
 /// backup); on `Err`, [`rollback`] (restore the prior binary) and surface the
-/// failure. The caller supplies the actual health check (NATS ping + a structural
-/// self-op); this helper centralizes the promote-or-rollback decision so the
+/// failure. The caller supplies the actual health check; this helper centralizes
+/// the promote-or-rollback decision so the
 /// "a bad update must never brick the user's hardware" invariant lives in one place.
 ///
 /// # Errors

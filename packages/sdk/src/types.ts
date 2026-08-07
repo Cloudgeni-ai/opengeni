@@ -1587,6 +1587,8 @@ export type FsListResponse = {
   revision: number;
   truncated: boolean;
 };
+export type FsListBatchRequest = { requests: FsListRequest[] };
+export type FsListBatchResponse = { results: FsListResponse[] };
 export type FsReadRequest = {
   path: string;
   encoding?: FsEncoding;
@@ -1695,6 +1697,16 @@ export type GitDiffRequest = {
   maxBytesPerFile?: number;
 };
 export type GitDiffResponse = { files: GitFileDiff[]; revision: number };
+export type GitReadBatchItemRequest = {
+  status: GitStatusRequest;
+  diff?: GitDiffRequest;
+};
+export type GitReadBatchRequest = { requests: GitReadBatchItemRequest[] };
+export type GitReadBatchItemResponse = {
+  status: GitStatusResponse;
+  diff?: GitDiffResponse;
+};
+export type GitReadBatchResponse = { results: GitReadBatchItemResponse[] };
 export type GitLogRequest = {
   path?: string;
   ref?: string;
@@ -1755,6 +1767,9 @@ export type WorkspaceCaptureRepo = {
   behind: number;
   status: GitFileStatus[];
   diff: GitFileDiff[];
+  /** Current branch vs the remote default branch. Absent on legacy captures or
+   *  repositories whose remote default ref could not be resolved. */
+  branchDiff?: GitFileDiff[] | undefined;
 };
 export type WorkspaceCaptureDegradedReason =
   | "repository_discovery_command_failed"
@@ -2746,6 +2761,8 @@ export type WorkspaceSettings = {
   maxNestedAgentDepth?: number | null | undefined;
   /** Default for new Codex sessions; absent ⇒ remote_v2. */
   codexCompactionDefault?: "remote_v2" | "portable" | undefined;
+  /** Whether agents may invoke the built-in structured human-input tool. */
+  agentHumanInputEnabled?: boolean | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
   [key: string]: unknown;
 };
@@ -2777,6 +2794,7 @@ export type UpdateWorkspaceSettingsRequest = {
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
   codexCompactionDefault?: "remote_v2" | "portable" | undefined;
+  agentHumanInputEnabled?: boolean | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
   [key: string]: unknown;
 };
@@ -3541,6 +3559,8 @@ export type UploadFileInput = {
   contentType: string;
   data: FileUploadData;
   sha256?: string | undefined;
+  /** Optional deadline for the signed object-storage PUT. */
+  timeoutMs?: number | undefined;
 };
 
 // --- Documents -------------------------------------------------------------------

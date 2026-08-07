@@ -24,7 +24,8 @@ test("waitFor enforces its deadline when one predicate attempt never settles", a
 });
 
 describe("runCommand", () => {
-  test("times out the whole owned process group without leaking descendants", async () => {
+  // oxfmt-ignore
+  test.skipIf(process.platform !== "linux")("times out the whole owned process group without leaking descendants", async () => {
     const result = await runCommand(wrapperWithDescendantCommand(), { timeoutMs: 100 });
     const childPid = Number(result.stdout.match(/child:(\d+)/)?.[1]);
 
@@ -35,7 +36,8 @@ describe("runCommand", () => {
     expect(processIsAlive(childPid)).toBe(false);
   }, 15_000);
 
-  test("times out a descendant that creates its own process group and holds the output pipe", async () => {
+  // oxfmt-ignore
+  test.skipIf(process.platform !== "linux")("times out a descendant that creates its own process group and holds the output pipe", async () => {
     const result = await runCommand(wrapperWithDetachedDescendantCommand(), { timeoutMs: 100 });
     const childPid = Number(result.stdout.match(/child:(\d+)/)?.[1]);
 
@@ -54,7 +56,8 @@ describe("runCommand", () => {
     expect(result).toEqual({ stdout: "done\n", stderr: "", exitCode: 0, timedOut: false });
   });
 
-  test("fails closed instead of hanging when an exited command leaves an output pipe open", async () => {
+  // oxfmt-ignore
+  test.skipIf(process.platform !== "linux")("fails closed instead of hanging when an exited command leaves an output pipe open", async () => {
     const startedAt = Date.now();
     let failure: unknown;
     try {
@@ -80,7 +83,8 @@ describe("runCommand", () => {
 });
 
 describe("startProcess", () => {
-  test("stops the owned wrapper and its descendant process", async () => {
+  // oxfmt-ignore
+  test.skipIf(process.platform !== "linux")("stops the owned wrapper and its descendant process", async () => {
     const started = await startProcess(wrapperWithDescendantCommand());
     let startedLogs = started.logs();
     await waitFor(

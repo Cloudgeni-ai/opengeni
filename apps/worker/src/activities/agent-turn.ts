@@ -27,6 +27,7 @@ import {
   getCodexRotationSettings,
   getWorkspaceModelPolicy,
   getWorkspaceGrant,
+  getWorkspace,
   listCodexAccountStatuses,
   fetchCodexUsageForAccount,
   getSessionCodexState,
@@ -263,7 +264,6 @@ import {
 import { withFirstPartyTools } from "./goals";
 import {
   mergeRigDefaultVariableSetEnvironment,
-  resolveWorkspaceAgentInstructions,
   resolveWorkspacePackRuntime,
   resolveWorkspaceSkillLibraryRuntime,
   settingsWithPackSandboxImage,
@@ -353,6 +353,7 @@ import {
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   evaluateWorkspaceModelPolicy,
   readTurnExecutionPolicyV1,
+  resolveWorkspaceAgentHumanInputEnabled,
   resourceMountPath,
   type LatencyMode,
   type ResourceRef,
@@ -370,6 +371,21 @@ import { createHash, randomUUID } from "node:crypto";
 // this ceiling. Explicit rate limits retain the minute-granular fallback.
 export const PROVIDER_BACKPRESSURE_DELAY_MS = 60_000;
 const PROVIDER_CONNECTIVITY_BACKOFF_MS = [2_000, 5_000, 15_000, 30_000, 60_000] as const;
+
+export class WorkspaceHumanInputDisabledError extends Error {
+  constructor(kind: "resume" | "interruption") {
+    super(`Workspace policy rejects structured human-input ${kind}`);
+    this.name = "WorkspaceHumanInputDisabledError";
+  }
+}
+
+export function assertWorkspaceHumanInputAllowed(
+  enabled: boolean,
+  kind: "resume" | "interruption",
+  attempted: boolean,
+): void {
+  if (!enabled && attempted) throw new WorkspaceHumanInputDisabledError(kind);
+}
 
 /** Broad personal lookup is allowed only for a direct human/API command. */
 export function credentialSubjectIdForTurnInitiator(
@@ -838,6 +854,33 @@ export async function waitForTurnStreamCleanup(
   await waitForTurnFinalizerStep(providerCompleted, signal);
 }
 
+/**
+ * Terminal settlement closes the active attempt before turn finalization. The
+ * ordinary workspace admission therefore correctly returns `attempt_fenced`
+ * for the final attempt-qualified credential deletion. Retry only that exact
+ * settled-attempt case directly; every other fence/status and the direct
+ * deletion itself remain fail-closed.
+ */
+export async function clearAttemptCredentialsWithSettledFence(input: {
+  activityStatus: RunAgentTurnResult["status"] | "unknown";
+  runWorkspaceFencedClear: () => Promise<void>;
+  clearExactAttempt: () => Promise<void>;
+  onSettledAttemptFence: () => void;
+}): Promise<void> {
+  try {
+    await input.runWorkspaceFencedClear();
+  } catch (error) {
+    const settledAttemptFence =
+      error instanceof Error &&
+      error.name === "SandboxWorkspaceMutationFencedError" &&
+      (error as Error & { code?: unknown }).code === "attempt_fenced" &&
+      (input.activityStatus === "idle" || input.activityStatus === "failed");
+    if (!settledAttemptFence) throw error;
+    input.onSettledAttemptFence();
+    await input.clearExactAttempt();
+  }
+}
+
 function turnFinalizerCancellationSignal(
   temporalSignal: AbortSignal | undefined,
   activityStatus: RunAgentTurnResult["status"] | "unknown",
@@ -854,11 +897,44 @@ function compactionFailureReason(reason: string): string {
     : `compaction summarization failed: ${reason}`;
 }
 
+export type MandatoryHistoryPersistenceStage = "history_append" | "sandbox_envelope";
+
+/**
+ * Preserve the exact storage failure for the permission-controlled turn event
+ * while attaching only a stable, non-secret operation token to public worker
+ * diagnostics. Mandatory history failures remain terminal and never inherit a
+ * provider-retry classification from coincidental source text or status.
+ */
+export class MandatoryHistoryPersistenceError extends Error {
+  readonly name = "MandatoryHistoryPersistenceError";
+  readonly cause: unknown;
+
+  constructor(
+    readonly stage: MandatoryHistoryPersistenceStage,
+    cause: unknown,
+  ) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.cause = cause;
+  }
+}
+
+export async function runMandatoryHistoryPersistenceStep<T>(
+  stage: MandatoryHistoryPersistenceStage,
+  operation: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (cause) {
+    throw new MandatoryHistoryPersistenceError(stage, cause);
+  }
+}
+
 export type SafeErrorDiagnostic = {
   errorClass: "WorkerOperationError";
   errorCode: "worker_operation_failed";
   status?: number;
   origin: "worker";
+  historyPersistenceStage?: MandatoryHistoryPersistenceStage;
 };
 
 /**
@@ -874,10 +950,15 @@ export function safeErrorDiagnostic(error: unknown): SafeErrorDiagnostic {
     origin: "worker",
   };
   try {
-    if (error && typeof error === "object") {
+    let statusSource = error;
+    if (error instanceof MandatoryHistoryPersistenceError) {
+      diagnostic.historyPersistenceStage = error.stage;
+      statusSource = error.cause;
+    }
+    if (statusSource && typeof statusSource === "object") {
       const status = Number(
-        (error as { status?: unknown; statusCode?: unknown }).status ??
-          (error as { statusCode?: unknown }).statusCode,
+        (statusSource as { status?: unknown; statusCode?: unknown }).status ??
+          (statusSource as { statusCode?: unknown }).statusCode,
       );
       if (Number.isInteger(status) && status >= 100 && status <= 599) {
         diagnostic.status = status;
@@ -2338,6 +2419,34 @@ export function codexCredentialLeaseDeadlineExpired(
   );
 }
 
+type OpStreamFinalizer = {
+  finalizeOpStreamOps(): Promise<void>;
+};
+
+/** Release retained Connected Machine output only after the turn is durable. */
+export async function finalizeDurableTurnOpStreams(
+  sessions: readonly unknown[],
+  fallback: OpStreamFinalizer | null,
+): Promise<void> {
+  const candidates = new Set<OpStreamFinalizer>();
+  for (const session of sessions) {
+    const candidate = session as Partial<OpStreamFinalizer> | null;
+    if (typeof candidate?.finalizeOpStreamOps === "function") {
+      candidates.add(candidate as OpStreamFinalizer);
+    }
+  }
+  if (candidates.size === 0 && fallback) {
+    candidates.add(fallback);
+  }
+  for (const candidate of candidates) {
+    try {
+      await candidate.finalizeOpStreamOps();
+    } catch {
+      // The runner's retention TTL owns the fallback.
+    }
+  }
+}
+
 export function createRunAgentTurnActivity(services: () => Promise<ActivityServices>) {
   return async function runAgentTurn(input: RunAgentTurnInput): Promise<RunAgentTurnResult> {
     const {
@@ -2569,8 +2678,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       return resolvedSandbox;
     };
     // The machine-primary SelfhostedSession (the UNWRAPPED backend, not the
-    // routing proxy): held so the turn's completion can final-ack this turn's
-    // settled op-stream ops AFTER the results are durably persisted.
+    // routing proxy). Kept as a fallback finalizer; the routing proxy normally
+    // aggregates it together with every machine reached after a mid-turn swap.
     let machinePrimarySession: import("@opengeni/runtime").SelfhostedSession | null = null;
     let lazyOwnedSandbox: EstablishedSandboxSession | null = null;
     let turnSandboxProvisioner: TurnSandboxProvisioner<ResumedTurnSandbox> | null = null;
@@ -2579,6 +2688,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // THIS handle so a mid-turn sandbox_swap can never re-route those execs onto a
     // connected machine (the user's real computer).
     let setupBoxSession: unknown = null;
+    const finalizeTurnOpStreamOps = async (): Promise<void> => {
+      await finalizeDurableTurnOpStreams(
+        [lazyOwnedSandbox?.session, resolvedSandbox?.established.session],
+        machinePrimarySession,
+      );
+    };
     // A same-target API repair can replace the home provider while this turn is
     // alive. Keep setup/snapshot persistence on the rebound raw session while
     // preserving the SDK-owned routing proxy for eager turns. Lazy turns hold the
@@ -3118,6 +3233,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (!stream || !turnId) {
         return;
       }
+      const durableTurnId = turnId;
       try {
         const rawHistory = (stream.state as { history?: unknown[] }).history;
         if (Array.isArray(rawHistory)) {
@@ -3137,21 +3253,23 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const shouldAppendRows =
             rows.length > 0 && (!options.skipInputOnlyRows || hasModelOrToolProgress);
           if (shouldAppendRows) {
-            const appended = await appendSessionHistoryItems(db, {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId,
-              expectedExecutionGeneration: executionGeneration,
-              expectedAttemptId: input.attemptId,
-              modelToolOutputTruncationTokens: modelRunSettings.modelToolOutputTruncationTokens,
-              items: rows,
+            await runMandatoryHistoryPersistenceStep("history_append", async () => {
+              const appended = await appendSessionHistoryItems(db, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: durableTurnId,
+                expectedExecutionGeneration: executionGeneration,
+                expectedAttemptId: input.attemptId,
+                modelToolOutputTruncationTokens: modelRunSettings.modelToolOutputTruncationTokens,
+                items: rows,
+              });
+              if (!appended) {
+                throw new TurnAttemptFencedError(
+                  "turn execution generation was fenced while saving conversation history",
+                );
+              }
             });
-            if (!appended) {
-              throw new TurnAttemptFencedError(
-                "turn execution generation was fenced while saving conversation history",
-              );
-            }
           }
           if (shouldAppendRows || !options.skipInputOnlyRows) {
             persistedHistoryCount = nextWatermark;
@@ -3160,12 +3278,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
         const envelope = sandboxStateEntryFromRunState(stream.state);
         if (envelope) {
-          await upsertSandboxSessionEnvelope(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            envelope,
-          });
+          await runMandatoryHistoryPersistenceStep("sandbox_envelope", () =>
+            upsertSandboxSessionEnvelope(db, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              envelope,
+            }),
+          );
         }
       } catch (persistError) {
         console.error(
@@ -4172,15 +4292,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         attemptId: input.attemptId,
         executionGeneration: turn.executionGeneration,
       };
-      const [workspaceAgentInstructions, instructionPolicySnapshot, preferenceSnapshot] =
-        await Promise.all([
-          resolveWorkspaceAgentInstructions(db, input.workspaceId),
-          getOrCreateWorkspaceInstructionPolicySnapshot(db, governanceClaims),
-          getOrCreatePreferenceRegistrySnapshot(db, governanceClaims).catch((error) => {
-            if (error instanceof PreferenceRegistryInitiatorError) return null;
-            throw error;
-          }),
-        ]);
+      const [workspace, instructionPolicySnapshot, preferenceSnapshot] = await Promise.all([
+        getWorkspace(db, input.workspaceId),
+        getOrCreateWorkspaceInstructionPolicySnapshot(db, governanceClaims),
+        getOrCreatePreferenceRegistrySnapshot(db, governanceClaims).catch((error) => {
+          if (error instanceof PreferenceRegistryInitiatorError) return null;
+          throw error;
+        }),
+      ]);
+      if (!workspace) throw new Error(`Workspace not found: ${input.workspaceId}`);
+      const workspaceAgentInstructions = workspace.agentInstructions;
+      const agentHumanInputEnabled = resolveWorkspaceAgentHumanInputEnabled(workspace.settings);
+      assertWorkspaceHumanInputAllowed(agentHumanInputEnabled, "resume", humanInputResume !== null);
       const workspaceGovernance = renderWorkspaceGovernanceContext({
         instructionPolicy: instructionPolicySnapshot,
         preferences: preferenceSnapshot,
@@ -4836,7 +4959,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         undefined,
       );
       const establishPolicy: "eager" | "on-demand" =
-        lazyProvisionEnabled(settings) && !machinePrimary && runSettings.sandboxBackend !== "none"
+        lazyProvisionEnabled(settings) &&
+        !machinePrimary &&
+        runSettings.sandboxBackend !== "none" &&
+        // Resolved run credentials must be written to one exact leased sandbox
+        // before agent execution. A warm active pointer can bypass the lazy
+        // provisioner entirely, which previously skipped materialization.
+        !initialRunCredentialMaterial
           ? "on-demand"
           : "eager";
       // Computed exactly ONCE per turn and reused for BOTH the box manifest
@@ -5340,6 +5469,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 db,
                 settings,
                 bus,
+                opJournal,
                 onOp: machineOpObserver.observer,
                 onSandboxOperation: sandboxOperationObserver,
                 onHomeSandboxRebound,
@@ -5449,6 +5579,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 db,
                 settings,
                 bus,
+                opJournal,
                 onSandboxOperation: sandboxOperationObserver,
                 onHomeSandboxLost: publishSandboxLost,
                 onHomeSandboxRebound,
@@ -5669,6 +5800,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         latencyMode: turnExecutionPolicy.latencyMode,
         ...(serviceTier ? { serviceTier } : {}),
         ...(humanInputResume ? { humanInputResponse: humanInputResume } : {}),
+        humanInputEnabled: agentHumanInputEnabled,
         genesisTitleHint: isGenesisTurn,
         persistentSessionSettings: {
           titleIsSet: Boolean(session.title?.trim()),
@@ -6003,6 +6135,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             db,
             settings,
             bus,
+            opJournal,
             onOp: machineOpObserver.observer,
             onSandboxOperation: sandboxOperationObserver,
             onHomeSandboxLost: publishSandboxLost,
@@ -6473,6 +6606,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // its first-operation provisioner above.
           if (resolvedSandbox && !lazyOwnedSandbox && ownedEstablished) {
             const eagerSetupSession = setupBoxSession ?? ownedEstablished.session;
+            // `deferredSetup: true` below tells the runtime that the worker owns
+            // platform setup, so the runtime intentionally skips its credential
+            // session callback. Materialize host-managed run credentials here
+            // before any setup command (including provider login hooks), then
+            // decorate setup commands so they source the active generation.
+            await attachRunCredentialRenewal(
+              eagerSetupSession as RunCredentialCommandSession,
+              resolvedSandbox,
+            );
+            const eagerCredentialSetupSession = initialRunCredentialMaterial
+              ? withRunCredentialsSession(eagerSetupSession as object, input.sessionId)
+              : eagerSetupSession;
             await runWorkspaceMutationForSandbox(
               resolvedSandbox,
               "eagerOwnedSandboxSetup",
@@ -6480,7 +6625,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 await runOwnedSandboxSetup(
                   agent,
                   ownedEstablished.session as never,
-                  eagerSetupSession as never,
+                  eagerCredentialSetupSession as never,
                   {
                     settings: runSettings,
                     environment: sandboxEnvironment,
@@ -6927,6 +7072,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const approvals = runtime.serializeApprovals(stream.interruptions);
           const humanInputInterruptions =
             runtime.serializeHumanInputRequests?.(stream.interruptions) ?? [];
+          const latestWorkspace = await getWorkspace(db, input.workspaceId);
+          if (!latestWorkspace) throw new Error(`Workspace not found: ${input.workspaceId}`);
+          assertWorkspaceHumanInputAllowed(
+            resolveWorkspaceAgentHumanInputEnabled(latestWorkspace.settings),
+            "interruption",
+            humanInputInterruptions.length > 0,
+          );
           const humanInputRequests = await Promise.all(
             humanInputInterruptions.map(async (interruption) => {
               const id = stableHumanInputRequestId(
@@ -7002,25 +7154,21 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           ) {
             return claimedResult({ status: "cancelled" });
           }
+          // The interruption and its preceding tool results are now durable.
+          await finalizeTurnOpStreamOps();
           activityStatus = "requires_action";
           return claimedResult({ status: "requires_action" });
         }
 
         const finalOutput = String(stream.finalOutput ?? "");
-        await reconcileConversationTruth();
+        await reconcileConversationTruth({ requireDurable: true });
         // Op-stream durability fence: the tool outputs are now durably in the
         // history store (a redispatch would NOT re-execute them), so this
         // turn's settled ops may advance their acked frontier — journal persist
         // then wire final ack (licensing the runner to GC its retained
         // frames). Best-effort: a miss leaves the runner's retention TTL to
         // reap, never fails a completed turn.
-        if (machinePrimarySession) {
-          try {
-            await machinePrimarySession.finalizeOpStreamOps();
-          } catch {
-            // The runner's retention TTL owns the fallback.
-          }
-        }
+        await finalizeTurnOpStreamOps();
         if (
           !(await settle!({
             events: [
@@ -8320,18 +8468,38 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         const credentialSessionToClear = runCredentialSession;
         runCredentialSession = null;
         if (credentialSessionToClear) {
-          await runWorkspaceMutationForSandbox(
-            requireResolvedSandboxForMutation(
-              "Run credential cleanup has no exact sandbox lease target",
-            ),
-            "runCredentialAttemptClear",
-            async () =>
-              await clearRunCredentialsForAttempt(credentialSessionToClear, {
-                sessionId: input.sessionId,
-                attemptId: input.attemptId,
-                executionGeneration,
-              }),
-          );
+          const clearAttemptCredentials = async (): Promise<void> =>
+            await clearRunCredentialsForAttempt(credentialSessionToClear, {
+              sessionId: input.sessionId,
+              attemptId: input.attemptId,
+              executionGeneration,
+            });
+          await clearAttemptCredentialsWithSettledFence({
+            activityStatus,
+            runWorkspaceFencedClear: async () =>
+              await runWorkspaceMutationForSandbox(
+                requireResolvedSandboxForMutation(
+                  "Run credential cleanup has no exact sandbox lease target",
+                ),
+                "runCredentialAttemptClear",
+                clearAttemptCredentials,
+              ),
+            clearExactAttempt: clearAttemptCredentials,
+            onSettledAttemptFence: () => {
+              // Terminal settlement closes the active attempt before this finally
+              // runs, so the ordinary workspace admission correctly rejects it.
+              // The attempt-qualified delete is nevertheless successor-safe: it
+              // removes only this attempt/generation and clears the pointer only
+              // when it still names that exact generation. Finish that cleanup
+              // directly so a successful turn can continue into workspace capture,
+              // tool teardown, and lease release.
+              observability.info("retrying exact run credential cleanup after turn settlement", {
+                "opengeni.session_id": input.sessionId,
+                "opengeni.turn_id": turnId ?? "",
+                "opengeni.attempt_id": input.attemptId,
+              });
+            },
+          });
         }
         await drainAttemptOwnedSandboxWriters({
           // Normal turn completion owns the same process boundary as
@@ -8861,7 +9029,19 @@ export function agentRunFailurePayload(
   attempts?: number;
   retryOutcome?: string;
   database?: Record<string, string>;
+  historyPersistenceStage?: MandatoryHistoryPersistenceStage;
 } {
+  if (error instanceof MandatoryHistoryPersistenceError) {
+    const underlying = isSessionEventPersistenceError(error.cause)
+      ? agentRunFailurePayload(error.cause, options)
+      : {
+          error: error.cause instanceof Error ? error.cause.message : String(error.cause),
+        };
+    return {
+      ...underlying,
+      historyPersistenceStage: error.stage,
+    };
+  }
   const message = error instanceof Error ? error.message : String(error);
   const status =
     typeof error === "object" && error !== null

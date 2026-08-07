@@ -1,5 +1,22 @@
 # @opengeni/db
 
+## 0.28.8
+
+### Patch Changes
+
+- Updated dependencies [f8eb9f9]
+- Updated dependencies [200586a]
+- Updated dependencies [5dfb93d]
+- Updated dependencies [5dfb93d]
+  - @opengeni/config@0.12.0
+  - @opengeni/contracts@0.39.5
+
+## 0.28.7
+
+### Patch Changes
+
+- 377180c: Preserve the deployed migration 0172 bytes and move the connected-machine session default into a forward rolling migration.
+
 ## 0.28.6
 
 ### Patch Changes

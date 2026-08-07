@@ -113,7 +113,8 @@ describe("P1.2 ownership inversion — runAgentStream owned branch (unix_local, 
     expect(marker).toBe("KEYSTONE_P12"); // the tool hit OUR box
   });
 
-  test("host run credentials are seeded before the first agent command and remain off-manifest", async () => {
+  // oxfmt-ignore
+  test.skipIf(process.platform !== "linux")("host run credentials are seeded before the first agent command and remain off-manifest", async () => {
     const settings = localSettings();
     const client = createSandboxClientForBackend("local", settings) as unknown as {
       backendId: string;
@@ -201,7 +202,8 @@ describe("P1.2 ownership inversion — runAgentStream owned branch (unix_local, 
     expect(observedToken).toBe("ogd_initial_owned");
   });
 
-  test("legacy SDK-owned creation seeds host run credentials before the first command", async () => {
+  // oxfmt-ignore
+  test.skipIf(process.platform !== "linux")("legacy SDK-owned creation seeds host run credentials before the first command", async () => {
     const settings = localSettings();
     const rawClient = createSandboxClientForBackend("local", settings) as unknown as {
       backendId: string;

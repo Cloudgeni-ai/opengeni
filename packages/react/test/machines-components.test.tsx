@@ -216,7 +216,7 @@ describe("MachineCard — attach/swap affordance", () => {
 });
 
 describe("MachinesDashboard", () => {
-  test("empty state renders the enroll CTA", async () => {
+  test("empty state renders the connect CTA", async () => {
     let enrolled = false;
     const r = await renderComponent(
       <MachinesDashboard machines={[]} onEnroll={() => (enrolled = true)} />,
@@ -225,6 +225,7 @@ describe("MachinesDashboard", () => {
     expect(r.container.querySelector("[data-machines-empty]")).not.toBeNull();
     const cta = r.container.querySelector("[data-enroll-cta]") as HTMLButtonElement | null;
     expect(cta).not.toBeNull();
+    expect(cta?.textContent).toContain("Connect a machine");
     cta!.click();
     await flush();
     expect(enrolled).toBe(true);

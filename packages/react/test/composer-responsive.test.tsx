@@ -156,8 +156,10 @@ describe("container-responsive composer", () => {
     const root = mounted.container.querySelector<HTMLElement>(".og-composer");
     const trigger = mounted.container.querySelector<HTMLButtonElement>("[data-portal-source]");
     expect(root?.dataset.ogResponsiveBasis).toBe("container");
-    const [observer] = observersFor(root!);
-    expect(observersFor(root!)).toHaveLength(1);
+    const observed = observersFor(root!);
+    expect(observed).toHaveLength(1);
+    const observer = observed[0];
+    if (!observer) throw new Error("expected the composer resize observer to be registered");
 
     let inlineSize = 320;
     Object.defineProperty(root, "clientWidth", {
