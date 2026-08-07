@@ -172,6 +172,12 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
   connection: NativeConnection;
 }> {
   const settings = options.settings ?? getSettings();
+  if (options.role === "control") {
+    // The exported lower-level factory is itself poll-capable. Validate here so
+    // embedded hosts cannot bypass the reaper budget contract by omitting the
+    // higher-level service and its Schedule-registration lifecycle.
+    assertSandboxReaperActivityTimeout(settings);
+  }
   const observability =
     options.activityDependencies?.observability ??
     createObservability(settings, { component: `worker-${options.role}` });

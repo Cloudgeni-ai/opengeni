@@ -48,6 +48,15 @@ describe("embedded worker lifecycle contract", () => {
     ).rejects.toThrow("workflowBundle is valid only for the control worker role");
   });
 
+  test("every control-worker construction path rejects an unsafe reaper budget", async () => {
+    await expect(
+      createOpenGeniWorker({
+        role: "control",
+        settings: testSettings({ sandboxSnapshotTimeoutMs: 27 * 60_000 }),
+      }),
+    ).rejects.toThrow("must strictly exceed the prelude budget");
+  });
+
   test("construction failure closes the acquired connection and preserves the cause", async () => {
     let closes = 0;
     await expect(

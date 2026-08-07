@@ -273,10 +273,10 @@ describe("P2.1 reaper-tick warm metering + force-drain (real lease + RLS, spied 
 
     const result = await reapSandboxLeases();
 
-    // The viewer-only box is force-drained in this sweep. Provider teardown is
-    // globally bounded to one capture-bearing box per activity, so an older due
-    // drain may win first; later scheduled sweeps must eventually terminate this
-    // exact box. The turn-held box remains untouched throughout.
+    // The viewer-only box is force-drained in this sweep. Provider teardown uses
+    // a configuration-derived bounded batch, so unrelated due work may consume
+    // this sweep's capture budget; later scheduled sweeps must still terminate
+    // this exact box. The turn-held box remains untouched throughout.
     // (result.forceDrained is a global-across-workspaces count; we assert on THIS
     // workspace's specific boxes instead — the load-bearing invariant.)
     expect(result.forceDrained).toBeGreaterThanOrEqual(1);

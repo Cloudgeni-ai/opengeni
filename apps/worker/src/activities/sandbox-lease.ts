@@ -16,10 +16,12 @@
 //      recomputes refcounts + enters draining at refcount 0, and RETURNS the
 //      drainable rows (workspace, group, instance, epoch) whose drain grace has
 //      elapsed at refcount 0. DB-only — no provider call inside the sweep.
-//   2. For at most one drainable row per activity: resume/attach the provider
+//   2. For a configuration-derived bounded batch: resume/attach each provider
 //      box BY ID (off the lease's resume envelope, via createSandboxClientForBackend +
 //      establishSandboxSessionFromEnvelope), call the provider terminate, then
-//      confirmDrainCold (the CAS draining->cold under the epoch fence).
+//      confirmDrainCold (the CAS draining->cold under the epoch fence). The batch
+//      shrinks as the configured capture fence grows, and the activity starts no
+//      capture after its prelude budget is consumed.
 //
 // IDEMPOTENT + safe to run concurrently with itself: the drain CAS is guarded on
 // (draining AND refcount=0 AND lease_epoch=expected). If another sweep already
@@ -31,6 +33,7 @@
 // holder.
 
 import { randomUUID } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import {
   accrueWarmSeconds,
   adoptLegacyModalCheckpointArtifact,
@@ -105,7 +108,14 @@ import {
   type ModalCheckpointProviderBinding,
   type WorkspaceArchiveDescriptor,
 } from "@opengeni/runtime";
-import { sandboxReaperDrainableBatch } from "../sandbox-reaper-contract";
+import {
+  SANDBOX_REAPER_ACTIVITY_PRELUDE_BUDGET_MS,
+  sandboxReaperDrainableBatch,
+} from "../sandbox-reaper-contract";
+import {
+  sandboxReaperDrainCapacity,
+  sandboxReaperPreludeAllowsCapture,
+} from "../sandbox-reaper-timeout";
 import type { ActivityServices } from "./types";
 import { reconcilePendingParentSystemUpdates } from "./parent-wake";
 import {
@@ -225,6 +235,9 @@ export type SweepModalOrphansFn = (
 ) => Promise<number>;
 
 export type SandboxLeaseActivityOptions = {
+  /** Monotonic clock used only for the activity-wide capture admission budget.
+   * Tests inject a deterministic clock. */
+  monotonicNowMs?: () => number;
   /** Override the provider terminate (tests spy this; defaults to the real
    *  resume-by-id + provider stop()). */
   terminateBox?: TerminateBoxFn;
@@ -284,6 +297,7 @@ export function createSandboxLeaseActivities(
   services: () => Promise<ActivityServices>,
   options: SandboxLeaseActivityOptions = {},
 ) {
+  const monotonicNowMs = options.monotonicNowMs ?? (() => performance.now());
   const terminateBox: TerminateBoxFn = options.terminateBox ?? terminateProviderBox;
   const sweepModalOrphans: SweepModalOrphansFn =
     options.sweepModalOrphans ?? sweepModalOrphansForConfiguredBackend;
@@ -296,6 +310,7 @@ export function createSandboxLeaseActivities(
    * repairs the system-update outbox but can never terminate a box.
    */
   async function reapSandboxLeases(): Promise<ReapSandboxLeasesResult> {
+    const activityStartedAtMs = monotonicNowMs();
     const service = await services();
     const { db, settings, observability } = service;
     const parentUpdates = await reconcilePendingParentSystemUpdates(service, 100).catch((error) => {
@@ -399,22 +414,35 @@ export function createSandboxLeaseActivities(
     // (1) The DB-only cross-workspace sweep returns the drainable rows. Bound the
     // provider-facing batch so the activity timeout covers every admitted durable
     // capture fence instead of abandoning a later row in a large backlog.
-    const drainable: ReapDrainable[] = sandboxReaperDrainableBatch(
-      await reapStaleLeaseHoldersGlobal(db, {
-        viewerHolderTtlMs: settings.sandboxViewerHolderTtlMs,
-        // Dead-worker turn holders: a live holder is touched every 10s from the
-        // moment it is registered (resumeBoxForTurn's holder-liveness loop covers
-        // the whole warmup — waitForWarm/establish/display-stack — and the turn
-        // heartbeat covers the run), so NO live path is ever silent for more than
-        // one tick. The horizon is deliberately generous defense-in-depth (not a
-        // tuned guess about path lengths): a killed worker's frozen holder —
-        // which would otherwise pin refcount >= 1 FOREVER, so the lease never
-        // drains and the box dies at the provider hard-timeout UNPERSISTED —
-        // clears within ~12 minutes.
-        turnHolderTtlMs: settings.sandboxWarmingTimeoutMs + settings.sandboxLeaseTtlMs,
-        idleGraceMs: settings.sandboxIdleGraceMs,
-      }),
+    const drainableCandidates = await reapStaleLeaseHoldersGlobal(db, {
+      viewerHolderTtlMs: settings.sandboxViewerHolderTtlMs,
+      // Dead-worker turn holders: a live holder is touched every 10s from the
+      // moment it is registered (resumeBoxForTurn's holder-liveness loop covers
+      // the whole warmup — waitForWarm/establish/display-stack — and the turn
+      // heartbeat covers the run), so NO live path is ever silent for more than
+      // one tick. The horizon is deliberately generous defense-in-depth (not a
+      // tuned guess about path lengths): a killed worker's frozen holder —
+      // which would otherwise pin refcount >= 1 FOREVER, so the lease never
+      // drains and the box dies at the provider hard-timeout UNPERSISTED —
+      // clears within ~12 minutes.
+      turnHolderTtlMs: settings.sandboxWarmingTimeoutMs + settings.sandboxLeaseTtlMs,
+      idleGraceMs: settings.sandboxIdleGraceMs,
+    });
+    const drainCapacity = sandboxReaperDrainCapacity(settings);
+    const preludeAllowsCapture = sandboxReaperPreludeAllowsCapture(
+      activityStartedAtMs,
+      monotonicNowMs(),
     );
+    const drainable: ReapDrainable[] = preludeAllowsCapture
+      ? sandboxReaperDrainableBatch(drainableCandidates, drainCapacity)
+      : [];
+    if (!preludeAllowsCapture && drainableCandidates.length > 0) {
+      observability.warn("sandbox reaper: capture deferred after prelude budget", {
+        candidates: drainableCandidates.length,
+        drainCapacity,
+        preludeBudgetMs: SANDBOX_REAPER_ACTIVITY_PRELUDE_BUDGET_MS,
+      });
+    }
 
     let terminated = 0;
     let skipped = 0;

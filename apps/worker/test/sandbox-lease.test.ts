@@ -80,6 +80,7 @@ import {
   maybePersistWarmWorkspaceSnapshot,
   sandboxLeaseHolderIdForAttempt,
 } from "../src/sandbox-resume";
+import { SANDBOX_REAPER_ACTIVITY_PRELUDE_BUDGET_MS } from "../src/sandbox-reaper-contract";
 import type { ActivityServices } from "../src/activities/types";
 
 const MODAL_PROVIDER_BINDING = {
@@ -576,9 +577,9 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(warmingRow?.liveness).toBe("cold");
     expect(warmingRow?.instance_id).toBeNull();
 
-    // Provider-facing teardown admits one capture-bearing box per activity.
-    // Consecutive Schedule fires must therefore drain both due rows without
-    // abandoning either capture fence.
+    // Provider-facing teardown uses a configuration-derived bounded batch.
+    // Consecutive Schedule fires must drain both due rows even if unrelated
+    // global work consumes this sweep's capture capacity.
     for (let sweep = 0; sweep < 4; sweep += 1) {
       const warmingCreatedRow = await readRow(warmingCreated.workspaceId, warmingCreated.groupId);
       const drainRow = await readRow(drainable.workspaceId, drainable.groupId);
@@ -600,6 +601,36 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(drainRow?.liveness).toBe("cold");
     expect(drainRow?.instance_id).toBeNull();
     expect(terminated).toBeGreaterThanOrEqual(2);
+  }, 60_000);
+
+  test("(1a) a spent prelude budget defers every provider capture to the next sweep", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    await insertLease(ids, {
+      liveness: "draining",
+      refcount: 0,
+      leaseEpoch: 9,
+      expiresInMs: -1_000,
+      instanceId: "box-prelude-budget",
+      backend: "local",
+      resumeBackendId: "local",
+      resumeState: { backendId: "local", sessionState: {} },
+    });
+    const spy = makeTerminateSpy();
+    let clockReads = 0;
+    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(), {
+      terminateBox: spy.fn,
+      monotonicNowMs: () => {
+        clockReads += 1;
+        return clockReads === 1 ? 0 : SANDBOX_REAPER_ACTIVITY_PRELUDE_BUDGET_MS;
+      },
+    });
+
+    const result = await reapSandboxLeases();
+
+    expect(result.examined).toBe(0);
+    expect(spy.calls).toHaveLength(0);
+    expect((await readRow(ids.workspaceId, ids.groupId))?.liveness).toBe("draining");
   }, 60_000);
 
   test("(1b) persist-before-terminate: persistDrainSnapshot folds the /workspace archive onto the lease under the epoch fence", async () => {
