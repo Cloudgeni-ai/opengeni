@@ -1,5 +1,13 @@
 # @opengeni/config
 
+## 0.12.1
+
+### Patch Changes
+
+- 410835e: Promote the immutable OpenGeni connected-machine agent 0.1.12 release through the default stable install and update channel.
+- Updated dependencies [fed43cf]
+  - @opengeni/contracts@0.40.0
+
 ## 0.12.0
 
 ### Minor Changes
