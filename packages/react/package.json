@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/react",
-  "version": "0.46.6",
+  "version": "0.47.1",
   "description": "React hooks and styled components for OpenGeni: live session streaming, chat composer, message timeline, session status, and fleet views — token-themed (CSS variables), dark-first, built on Tailwind v4 + Radix + Motion.",
   "license": "Apache-2.0",
   "repository": {
@@ -14,7 +14,9 @@
     "styles"
   ],
   "type": "module",
-  "sideEffects": false,
+  "sideEffects": [
+    "**/*.css"
+  ],
   "main": "./src/index.ts",
   "module": "./src/index.ts",
   "types": "./src/index.ts",
@@ -50,10 +52,22 @@
     },
     "./styles.css": {
       "types": "./styles/index.d.ts",
+      "style": "./styles/index.css",
       "default": "./styles/index.css"
+    },
+    "./compiled.css": {
+      "types": "./styles/compiled.d.ts",
+      "style": "./styles/compiled.css",
+      "default": "./styles/compiled.css"
+    },
+    "./responsive.css": {
+      "types": "./styles/responsive.d.ts",
+      "style": "./styles/responsive.css",
+      "default": "./styles/responsive.css"
     },
     "./tokens.css": {
       "types": "./styles/tokens.d.ts",
+      "style": "./styles/tokens.css",
       "default": "./styles/tokens.css"
     }
   },
@@ -63,7 +77,9 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "bun ../../scripts/build-typescript-package.ts",
+    "build": "bun run build:css && bun ../../scripts/build-typescript-package.ts",
+    "build:css": "bun scripts/build-compiled-css.ts",
+    "check:css": "bun scripts/build-compiled-css.ts --check",
     "demo": "vite dev demo --port 3100",
     "demo:build": "vite build demo",
     "demo:build:deployed": "OPENGENI_REACT_DEMO_BASE=/react-demo/ OPENGENI_REACT_DEMO_OUT_DIR=../../../apps/web/dist/react-demo vite build demo",
@@ -101,6 +117,7 @@
     "@opengeni/agent-proto": "workspace:*",
     "@opengeni/contracts": "workspace:*",
     "@pierre/diffs": "^1.2.11",
+    "@tailwindcss/postcss": "4.2.4",
     "@tailwindcss/vite": "^4.2.4",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
@@ -110,9 +127,11 @@
     "@xterm/addon-web-links": "^0.12.0",
     "@xterm/addon-webgl": "^0.19.0",
     "@xterm/xterm": "^6.0.0",
+    "postcss": "8.5.19",
+    "postcss-selector-parser": "7.1.0",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
-    "tailwindcss": "^4.2.4",
+    "tailwindcss": "4.2.4",
     "tsup": "^8.5.0",
     "typescript": "7.0.2",
     "vite": "^8.0.9"

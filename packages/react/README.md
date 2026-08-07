@@ -51,20 +51,40 @@ can therefore implement only the methods used by each hook. A shared event feed
 also avoids requiring a client-owned event stream at runtime. Workspace-level
 Resume is an optional authority.
 
-The styled root surface uses Tailwind v4 and the package CSS entries:
+The styled root surface ships with ready-to-use CSS. Import it once; the host
+does not need Tailwind:
 
-The package ships TypeScript source plus two CSS entries. In your Tailwind v4
-entry CSS:
+```tsx
+import "@opengeni/react/compiled.css";
+```
+
+The compiled entry contains the package's Tailwind v4 utilities and tokens,
+omits global Preflight, and scopes every style rule to `.og-root`. Components
+put that class on their standalone roots, including portalled menus, dialogs,
+tooltips, and lightboxes. The low-specificity scope covers both the root element
+itself and its descendants, so utilities work in either shape without resetting
+the host document or globally registering Tailwind's `--tw-*` custom properties.
+Tailwind runtime variables are initialized per element only inside those roots.
+Independent package defaults inherit without replacing host `--og-*` values;
+derived defaults use scoped effective values so changing a base accent, radius,
+motion, or surface token updates its dependents at runtime.
+
+The original Tailwind v4 bridge remains available for hosts that intentionally
+want OpenGeni utilities compiled into their own Tailwind entry:
 
 ```css
 @import "tailwindcss";
 @import "@opengeni/react/styles.css";
+@import "@opengeni/react/responsive.css";
 @source "../node_modules/@opengeni/react/src";
 ```
 
-(`@source` lets Tailwind compile the utilities used inside the components.
-Consuming only the tokens without Tailwind? Import
-`@opengeni/react/tokens.css` and use the `--og-*` variables directly.)
+`@source` lets the host compiler discover utilities used inside the components.
+`responsive.css` is the small opt-in layout layer for
+`responsiveBasis="container"`; omit it when every composer keeps the historical
+viewport basis. `compiled.css` already contains that layer. Do not import both
+`compiled.css` and `styles.css`. Consuming only the tokens?
+Import `@opengeni/react/tokens.css` and use the `--og-*` variables directly.
 
 ### Product-compatible theming and density
 
@@ -76,6 +96,12 @@ SDK type utilities are also scoped against ordinary host resets such as
 `.app button { font: inherit }`; customize their public tokens instead of
 adding selector-specific overrides.
 
+Every portalled surface is an independent `.og-root`. Token-themed portal
+content copies the effective `--og-*` values from its trigger, preserving an
+enclosing light, compact, or rebranded theme even though it mounts under
+`<body>`; a standalone root with `data-og-theme` or `data-og-density` works
+directly as well.
+
 For a narrow product sidebar, opt into the supported compact preset:
 
 ```tsx
@@ -84,6 +110,27 @@ For a narrow product sidebar, opt into the supported compact preset:
   <ChatComposer {...composerProps} />
 </aside>
 ```
+
+Density and responsive measurement are separate opt-ins. By default,
+`ChatComposer` keeps its existing viewport breakpoints. An embed whose composer
+can be narrow inside a wide page should measure the composer instead:
+
+```tsx
+<aside data-og-theme="light" data-og-density="compact">
+  <ChatComposer {...composerProps} responsiveBasis="container" />
+</aside>
+```
+
+`responsiveBasis="container"` makes the composer root an inline-size query
+container. Input density, footer wrapping, command descriptions, paused labels,
+model controls, transcription status, and nested realtime controls then follow
+that root's actual width. Coarse-pointer target sizing remains a separate media
+feature, so a narrow mouse-driven panel stays compact while touch targets remain
+at least 44px. Composer-owned model and realtime menus keep their portal
+placement but copy the live root width with the existing theme tokens and never
+grow wider than that source container. Compound layouts can pass the same prop
+to `Composer.Root`. Hosts using the Tailwind source bridge import
+`@opengeni/react/responsive.css`; the ready-to-use `compiled.css` includes it.
 
 The preset is only a starting point. Override individual runtime tokens on the
 same ancestor without rebuilding Tailwind:
@@ -104,7 +151,8 @@ The type ramp is `--og-font-size-{xs,sm,base,md}` with matching
 `--og-line-height-*` tokens. Interactive chrome uses the semantic `control`,
 `menu`, `composer`, and `composer-wide` pairs. Model picker height, width,
 padding, and row-density tokens are grouped under `--og-model-picker-*` in
-`styles/tokens.css`. `ModelPolicyPicker` also exposes `contentClassName` and
+`styles/tokens.css`; realtime menu width uses `--og-realtime-menu-width`.
+`ModelPolicyPicker` also exposes `contentClassName` and
 `contentStyle` for exceptional surface-level customization; tokens are the
 recommended path.
 
@@ -238,6 +286,11 @@ containing only `api-key` and/or `access-key` with
 exposed as container environment variables. Local non-Kubernetes servers may
 instead use `OPENGENI_DEMO_API_KEY` and/or `OPENGENI_DEMO_ACCESS_KEY`.
 
+The container-responsive reference is `demo/composer-responsive.html`. It keeps
+the browser viewport wide while resizing one child composer through 280, 320,
+360, 420, 640, and 768px, with theme, density, paused, voice, model-menu, and
+slash-command states available from the harness controls.
+
 Microphone capture works on `localhost` or a secure HTTPS origin. A remote HTTP
 deployment cannot request microphone access. The live page exercises catalog
 loading, realtime-first creation, Codex Live, Gateway models, mute, recovery,
@@ -281,7 +334,7 @@ function CustomComposer({ sessionComposer, attachments, effectiveControl }) {
   });
 
   return (
-    <Composer.Root controller={controller}>
+    <Composer.Root controller={controller} responsiveBasis="container">
       <Composer.Frame>
         <Composer.CommandPalette />
         <Composer.Surface>

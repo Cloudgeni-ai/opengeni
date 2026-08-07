@@ -27,8 +27,8 @@
  *   types   ./src/index.ts        -> ./dist/index.d.ts
  *   exports["."]                   -> { types: ./dist/index.d.ts, import: ./dist/index.js }
  *
- * Any OTHER exports subpaths (e.g. @opengeni/react's "./styles.css" and
- * "./tokens.css", which ship raw CSS straight from styles/) are left untouched.
+ * Any OTHER exports subpaths (e.g. @opengeni/react's CSS entries, which ship
+ * straight from styles/) are left untouched.
  *
  * IDEMPOTENT: a package already on the dist form is left unchanged, so running
  * twice is a no-op.
@@ -45,7 +45,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { publishableWorkspacePackages, repoRoot, type PackageJson } from "./publishable-workspaces";
 
-type ExportsEntry = { types?: string; import?: string; default?: string } | string;
+type ExportsEntry = { types?: string; style?: string; import?: string; default?: string } | string;
 
 const restore = process.argv.includes("--restore");
 

@@ -330,7 +330,7 @@ export function UserMessageBody({ messageId, text, children, className }: UserMe
           aria-controls={contentId}
           aria-expanded={expanded}
           data-og-user-message-disclosure=""
-          className="mt-1.5 inline-flex min-h-7 items-center rounded-og-sm px-1.5 text-og-xs font-medium text-og-fg-muted outline-none transition-colors hover:bg-og-surface-3/60 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent/45 pointer-coarse:min-h-11"
+          className="mt-1.5 inline-flex min-h-7 items-center rounded-og-sm px-1.5 text-og-xs font-medium text-og-fg-muted outline-hidden transition-colors hover:bg-og-surface-3/60 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent/45 pointer-coarse:min-h-11"
           onClick={(event) => toggle(event.currentTarget)}
         >
           {expanded ? "Show less" : "Show more"}

@@ -266,10 +266,10 @@ export interface SelfhostedSessionDeps {
   /**
    * The EXEC process deadline — distinct from `timeoutMs`. A real command
    * (compile, test run, install) routinely outlives the short control timeout, so
-   * exec gets its own, much larger budget: the agent kills the child at this wall,
-   * and the wire waits `execTimeoutMs + SELFHOSTED_EXEC_REPLY_GRACE_MS`. Omitted ⇒
-   * falls back to `timeoutMs` (byte-identical to before this split), so any caller
-   * that does not opt in keeps today's behavior.
+   * a positive value asks the agent to kill the child at that wall; 0 means no
+   * duration deadline over op-stream. Omitted preserves the legacy `timeoutMs`
+   * fallback for older embedding callers; production settings always thread this
+   * field explicitly.
    */
   execTimeoutMs?: number;
   /** The clock the bounded control-op retry loop drives (sleep + jitter). Injected
@@ -347,7 +347,7 @@ export class SelfhostedSession {
   private readonly relay: SelfhostedRelayConfig;
   private readonly epoch: number;
   private readonly timeoutMs: number;
-  /** The exec process deadline (falls back to `timeoutMs` when unset). */
+  /** The exec process deadline (0 = none; omission is legacy embedding behavior). */
   private readonly execTimeoutMs: number | undefined;
   private readonly retryClock: SelfhostedRetryClock;
   private readonly onOp: SelfhostedOpObserver | undefined;
@@ -579,25 +579,25 @@ export class SelfhostedSession {
     }
   }
 
-  /** The effective clamped exec process deadline (ms): the exec-specific budget
-   *  when threaded, else the control timeout. Public so adapters that project a
+  /** The effective clamped exec process deadline (ms). 0 means no process
+   *  deadline; positive configured values are clamped to the wire-safe range.
+   *  Public so adapters that project a
    *  structured command receipt can report the exact deadline the agent enforces
    *  instead of repeating (and potentially drifting from) this normalization. */
   get effectiveExecDeadlineMs(): number {
-    // exec gets its OWN (much larger) deadline distinct from the short control
-    // timeout — a real command routinely outlives 30s. Falls back to `timeoutMs`
-    // when no exec deadline is threaded (unchanged for those callers).
-    return Math.max(
-      1,
-      Math.min(Math.trunc(this.execTimeoutMs ?? this.timeoutMs), SELFHOSTED_MAX_EXEC_TIMEOUT_MS),
-    );
+    // Production always threads the setting explicitly (default 0). Preserve the
+    // short control timeout only for structural/test callers that omit the newer
+    // exec field entirely, so old embedding code keeps a safe bounded legacy path.
+    const configured = Math.trunc(this.execTimeoutMs ?? this.timeoutMs);
+    if (configured <= 0) return 0;
+    return Math.min(configured, SELFHOSTED_MAX_EXEC_TIMEOUT_MS);
   }
 
   /** Channel-A `exec`: run a command on the machine and return its output. */
   async exec(args: SelfhostedExecArgs): Promise<SelfhostedExecResult> {
-    // Keep the process deadline inside the request/reply deadline. Previously the
-    // wire carried timeoutMs=0 (unbounded) while the caller stopped waiting after
-    // ~30s, leaving accepted work invisible and able to starve control liveness.
+    // 0 deliberately means no process deadline. That contract is safe only over
+    // op-stream: its liveness probes, replay, and cancellation do not depend on a
+    // request/reply timer or a monolithic response.
     const executionTimeoutMs = this.effectiveExecDeadlineMs;
     const requestedShell = args.shell?.trim();
     const execReq: ExecRequest = {
@@ -624,12 +624,19 @@ export class SelfhostedSession {
         return await this.execViaOpStream(this.opStreamClient, execReq, executionTimeoutMs);
       } catch (error) {
         // The transport had no live connection, or the runner refused the START
-        // itself (capability/downgrade race) — the op provably never ran, so
-        // the legacy monolithic exec (the permanent fallback wire form) is safe.
+        // itself (capability/downgrade race). The op provably never ran. A bounded
+        // command may use the legacy fallback; an unbounded command must not be
+        // launched onto a request/reply path that can stop waiting invisibly.
         if (!(error instanceof OpStreamUnavailableError)) {
           throw error;
         }
+        if (executionTimeoutMs === 0) {
+          throw unboundedExecRequiresOpStream(error);
+        }
       }
+    }
+    if (executionTimeoutMs === 0) {
+      throw unboundedExecRequiresOpStream();
     }
     return this.execLegacy(execReq, executionTimeoutMs);
   }
@@ -671,7 +678,7 @@ export class SelfhostedSession {
         opId,
         execReq,
         executionTimeoutMs,
-        executionTimeoutMs + SELFHOSTED_EXEC_REPLY_GRACE_MS,
+        executionTimeoutMs > 0 ? executionTimeoutMs + SELFHOSTED_EXEC_REPLY_GRACE_MS : 0,
       );
       const retries = outcome.heals + outcome.startRetries;
       this.emitOp({
@@ -748,7 +755,7 @@ export class SelfhostedSession {
    *  `exec()` result is left untouched for the Channel-A parsers. */
   async execCommand(args: SelfhostedExecArgs): Promise<string> {
     const result = await this.exec(args);
-    if (result.timedOut) {
+    if (result.timedOut && this.effectiveExecDeadlineMs > 0) {
       const hint = execDeadlineHint(Math.round(this.effectiveExecDeadlineMs / 1000));
       return result.output ? `${result.output}\n${hint}` : hint;
     }
@@ -1145,7 +1152,8 @@ export class SelfhostedSandboxClient {
     /** The control-op timeout threaded into every bound session. */
     timeoutMs?: number;
     /** The exec process deadline threaded into every bound session (distinct from
-     *  `timeoutMs`; falls back to it when unset). See SelfhostedSessionDeps.execTimeoutMs. */
+     *  `timeoutMs`; 0 means no duration deadline, while omission preserves the
+     *  legacy control-timeout fallback for older embedding callers). */
     execTimeoutMs?: number;
     /** The run's declared sandbox environment, threaded into every bound session's
      *  `state.manifest.environment` so the SDK's per-turn manifest-env delta is
@@ -1269,14 +1277,14 @@ export interface SelfhostedSessionBuild {
   workingDir?: string | null;
   /** The control-op timeout (ping/fs/desktop/pty). Absent ⇒ the 30s default. */
   timeoutMs?: number;
-  /** The exec process deadline, distinct from `timeoutMs`. Absent ⇒ falls back to
-   *  `timeoutMs` (a real turn threads the long exec budget here). */
+  /** The exec process deadline, distinct from `timeoutMs`. 0 = none; absence
+   *  preserves the control-timeout fallback for older embedding callers. */
   execTimeoutMs?: number;
   /** The per-op observer (out-of-band telemetry). Absent ⇒ no-op. */
   onOp?: SelfhostedOpObserver;
-  /** The op-stream exec transport (present = enabled for the session; the
-   *  worker injects it only when the runner advertised the capability AND the
-   *  server flag is on). Absent ⇒ the legacy exec, byte-identical to before. */
+  /** The op-stream exec transport (present when the runner advertises it and the
+   *  server flag is on). Required for an unbounded command; bounded commands may
+   *  use the legacy request/reply fallback. */
   opStream?: SelfhostedOpStreamDeps;
 }
 
@@ -1330,7 +1338,7 @@ function readAgentId(state: unknown): string | undefined {
 function execResultToChannelA(res: ExecResponse, execDeadlineMs: number): SelfhostedExecResult {
   const stdout = decoder.decode(res.stdout);
   let stderr = decoder.decode(res.stderr);
-  if (res.timedOut) {
+  if (res.timedOut && execDeadlineMs > 0) {
     // The agent killed the child at the exec deadline. Surface an actionable hint
     // on STDERR ONLY — stdout is left byte-exact because the structural Channel-A
     // surface parses command stdout (find/stat/git listings); a hint injected there
@@ -1345,6 +1353,18 @@ function execResultToChannelA(res: ExecResponse, execDeadlineMs: number): Selfho
     exitCode: res.exitCode,
     timedOut: res.timedOut,
   };
+}
+
+function unboundedExecRequiresOpStream(cause?: OpStreamUnavailableError): SelfhostedControlError {
+  const runnerUpgrade = cause?.unavailableKind === "runner" || cause === undefined;
+  return new SelfhostedControlError({
+    message: runnerUpgrade
+      ? "This Connected Machine does not advertise the streaming command protocol required for unbounded execution. Update and reconnect the OpenGeni agent, or explicitly configure a positive Connected Machine exec timeout for legacy compatibility. The command was not started."
+      : "The Connected Machine streaming channel is temporarily unavailable. OpenGeni did not fall back to an ambiguous request/reply command because unbounded execution is configured; the command was not started. Retry after the machine reconnects.",
+    code: runnerUpgrade ? ErrorCode.ERROR_CODE_UNSUPPORTED : ErrorCode.ERROR_CODE_STREAM,
+    reason: runnerUpgrade ? null : "agent_reconnecting",
+    retryable: !runnerUpgrade,
+  });
 }
 
 function channelKey(workspaceId: string, agentId: string, port: number): string {

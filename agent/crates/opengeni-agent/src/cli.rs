@@ -5,11 +5,10 @@
 //! * [`Command::Run`] — the DEFAULT, FOREGROUND run model: enroll-if-needed, then
 //!   dial the control plane and serve until stopped. The machine is online while
 //!   this runs and offline when it stops.
-//! * [`Command::Enroll`] — the device-flow enrollment only (print a user-code +
-//!   URL, poll to completion, persist credentials `0600`), then exit.
-//! * [`Command::Service`] — the opt-in always-on daemon path (systemd-user /
-//!   LaunchAgent / Windows Service). The default supported model is FOREGROUND
-//!   `run`; this is the explicit opt-in for a dedicated machine.
+//! * [`Command::Connect`] — add this machine to another OpenGeni workspace or
+//!   deployment without replacing any existing connection.
+//! * [`Command::Start`] — idempotently install, enable, and start the ordinary
+//!   always-on background service. `run` remains the explicit foreground mode.
 //! * [`Command::Update`] — check for and apply a signed self-update (minisign +
 //!   sha256 verify, atomic swap, rollback on a failed health gate).
 //! * [`Command::Uninstall`] — stop any service, remove the binary, and (with
@@ -38,14 +37,24 @@ pub enum Command {
     /// Enroll if needed, then dial the control plane and serve in the foreground
     /// (the default). The machine is online while this process runs.
     Run(RunArgs),
-    /// Run the device-flow enrollment only and persist credentials, then exit.
+    /// Connect this machine to an OpenGeni workspace. Repeat for as many
+    /// workspaces or deployments as you need; existing connections are retained.
+    Connect(EnrollArgs),
+    /// Backward-compatible spelling of `connect`.
+    #[command(hide = true)]
     Enroll(EnrollArgs),
-    /// Manage the OPT-IN always-on service (install/uninstall/start/stop/status).
-    ///
-    /// The default, supported run model is FOREGROUND `opengeni-agent run`. A
-    /// service (systemd user unit / macOS LaunchAgent / Windows Service) is for a
-    /// genuinely dedicated machine (a build box, a CI Mac mini) — install it only
-    /// if you want the agent to start on boot and run unattended.
+    /// List every workspace/deployment this machine is configured to serve.
+    Connections,
+    /// Stop serving and forget one local workspace/deployment connection.
+    Disconnect(DisconnectArgs),
+    /// Install if needed and keep the agent running in the background across
+    /// logouts and reboots. This is the normal post-connect command.
+    Start(StartArgs),
+    /// Stop the always-on background agent.
+    Stop(ServiceScopeArgs),
+    /// Show whether the background agent is installed and running.
+    Status(ServiceScopeArgs),
+    /// Advanced service management (install/uninstall/start/stop/status).
     Service(ServiceArgs),
     /// Check for and apply a signed self-update for this channel + target.
     Update(UpdateArgs),
@@ -110,7 +119,8 @@ pub struct EnrollArgs {
     #[arg(long)]
     pub machine_name: Option<String>,
 
-    /// Re-enroll even if credentials already exist on disk.
+    /// Refresh this exact deployment/workspace connection even if it already
+    /// exists. Other connections are never replaced.
     #[arg(long)]
     pub force: bool,
 
@@ -124,7 +134,14 @@ pub struct EnrollArgs {
     pub non_interactive: bool,
 }
 
-/// Arguments for the `service` subcommand (the opt-in always-on daemon).
+/// Arguments for `disconnect`.
+#[derive(Debug, clap::Args)]
+pub struct DisconnectArgs {
+    /// The connection id (or an unambiguous prefix) shown by `connections`.
+    pub connection: String,
+}
+
+/// Arguments for the advanced `service` subcommand.
 #[derive(Debug, clap::Args)]
 pub struct ServiceArgs {
     /// The service action to perform.
@@ -161,6 +178,23 @@ pub struct ServiceInstallArgs {
     /// dry-run so you can review exactly what would be installed.
     #[arg(long)]
     pub print: bool,
+
+    /// Restart an already-running service so a newly-installed binary or unit is
+    /// activated immediately. Without this, `install` is non-disruptive.
+    #[arg(long)]
+    pub restart: bool,
+}
+
+/// Arguments for the simple top-level `start` command.
+#[derive(Debug, Default, clap::Args)]
+pub struct StartArgs {
+    /// Install a system-wide service instead of the default per-user service.
+    #[arg(long)]
+    pub system: bool,
+
+    /// Restart an already-running service to activate a newly-installed binary.
+    #[arg(long)]
+    pub restart: bool,
 }
 
 /// Shared scope argument for the non-install service actions.
@@ -291,12 +325,51 @@ mod tests {
     }
 
     #[test]
+    fn connect_is_the_primary_multi_connection_command() {
+        let cli = Cli::parse_from([
+            "opengeni-agent",
+            "connect",
+            "--workspace-id",
+            "33333333-3333-3333-3333-333333333333",
+        ]);
+        assert!(matches!(cli.command, Some(Command::Connect(_))));
+    }
+
+    #[test]
+    fn connections_and_disconnect_parse() {
+        let list = Cli::parse_from(["opengeni-agent", "connections"]);
+        assert!(matches!(list.command, Some(Command::Connections)));
+        let remove = Cli::parse_from(["opengeni-agent", "disconnect", "abc123"]);
+        match remove.command {
+            Some(Command::Disconnect(args)) => assert_eq!(args.connection, "abc123"),
+            other => panic!("expected disconnect, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn service_subcommands_parse() {
         let cli = Cli::parse_from(["opengeni-agent", "service", "status"]);
         match cli.command {
             Some(Command::Service(args)) => assert_eq!(args.action.label(), "status"),
             other => panic!("expected service, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn simple_service_lifecycle_commands_parse() {
+        let start = Cli::parse_from(["opengeni-agent", "start", "--restart"]);
+        match start.command {
+            Some(Command::Start(args)) => assert!(args.restart),
+            other => panic!("expected start, got {other:?}"),
+        }
+        assert!(matches!(
+            Cli::parse_from(["opengeni-agent", "stop"]).command,
+            Some(Command::Stop(_))
+        ));
+        assert!(matches!(
+            Cli::parse_from(["opengeni-agent", "status"]).command,
+            Some(Command::Status(_))
+        ));
     }
 
     #[test]

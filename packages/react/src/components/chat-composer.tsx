@@ -29,6 +29,7 @@ import {
   useChatComposerController,
   type ChatComposerMessages,
   type ComposerControlLinks,
+  type ResponsiveBasis,
 } from "./composer";
 import {
   ComposerTranscriptionControl,
@@ -39,6 +40,11 @@ export { OPEN_WORKSTREAM_CONTROL_EVENT };
 
 export type ChatComposerProps = {
   composer: ComposerState;
+  /**
+   * Measurement surface for responsive chrome. Defaults to the historical
+   * viewport breakpoints; opt into `container` for narrow embedded panels.
+   */
+  responsiveBasis?: ResponsiveBasis | undefined;
   /** Canonical workstream control, separate from lifecycle status. */
   effectiveControl?: EffectiveSessionControl | null | undefined;
   /** Waiting prompts already ahead of a normal Send. */
@@ -91,6 +97,7 @@ export type ChatComposerProps = {
  */
 export function ChatComposer({
   composer,
+  responsiveBasis,
   effectiveControl,
   queuedAheadCount,
   canControlWorkspace,
@@ -140,7 +147,7 @@ export function ChatComposer({
   const stackActions = hasControls && Boolean(actionsStart);
 
   return (
-    <Root controller={controller} className={className}>
+    <Root controller={controller} responsiveBasis={responsiveBasis} className={className}>
       <Frame>
         <CommandPalette />
         <Surface>
@@ -152,7 +159,10 @@ export function ChatComposer({
           {controller.confirmState ? (
             <Confirmation />
           ) : (
-            <Footer className={stackActions ? "max-sm:flex-nowrap sm:flex-wrap" : undefined}>
+            <Footer
+              data-og-stack-actions={stackActions ? "" : undefined}
+              className={stackActions ? "max-sm:flex-nowrap sm:flex-wrap" : undefined}
+            >
               <LayoutGroup id="og-composer-footer">
                 {hasControls ? (
                   <Controls

@@ -437,8 +437,8 @@ export function TurnSummary({
               className={cn(
                 "size-3.5 shrink-0 text-og-fg-subtle transition-transform ease-og-in-out group-data-[state=open]:rotate-90",
                 settlePhase
-                  ? "duration-[var(--og-duration-disclose-settle)]"
-                  : "duration-[var(--og-duration-disclose)]",
+                  ? "duration-[var(--_og-duration-disclose-settle)]"
+                  : "duration-[var(--_og-duration-disclose)]",
               )}
             />
             {/* Completion is the quiet default and needs no repeated glyph. Failed,

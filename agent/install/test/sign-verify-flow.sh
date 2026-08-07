@@ -45,7 +45,7 @@ run_install() {
   _dest="$WORK/dest-$1"; rm -rf "$_dest"
   OPENGENI_INSTALL_BASE_URL="file://$WORK/mock" \
   OPENGENI_INSTALL_DIR="$_dest" \
-  OPENGENI_NO_RUN=1 \
+  OPENGENI_NO_SERVICE=1 \
     sh "$INSTALL_SH" </dev/null >"$WORK/log-$1" 2>&1
 }
 

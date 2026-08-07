@@ -372,7 +372,7 @@ export function WorkspaceDock({
             onClick={expand}
             title="Open workspace"
             aria-label="Open workspace"
-            className="absolute right-3 top-3 z-30 inline-flex size-11 items-center justify-center rounded-og-md border border-og-border bg-og-surface-1 text-og-fg-muted shadow-lg transition-colors hover:border-og-border-strong hover:text-og-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent"
+            className="absolute right-3 top-3 z-30 inline-flex size-11 items-center justify-center rounded-og-md border border-og-border bg-og-surface-1 text-og-fg-muted shadow-lg transition-colors hover:border-og-border-strong hover:text-og-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent"
             style={{ marginTop: "env(safe-area-inset-top)" }}
           >
             <ChevronsLeftRightIcon className="size-4" aria-hidden />
@@ -431,7 +431,7 @@ export function WorkspaceDock({
         </Panel>
 
         {!collapsed && (
-          <Separator className="group relative z-10 w-1.5 shrink-0 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent max-[1023px]:-mx-[19px] max-[1023px]:w-11 pointer-coarse:-mx-[19px] pointer-coarse:w-11">
+          <Separator className="group relative z-10 w-1.5 shrink-0 outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent max-[1023px]:-mx-[19px] max-[1023px]:w-11 pointer-coarse:-mx-[19px] pointer-coarse:w-11">
             <span className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-og-border transition-colors group-hover:bg-og-accent group-focus-visible:bg-og-accent group-data-[separator-state=dragging]:bg-og-accent" />
           </Separator>
         )}
@@ -508,7 +508,7 @@ function ChromeButton({
       onClick={onClick}
       title={title}
       aria-label={label}
-      className="inline-flex size-7 items-center justify-center rounded-og-sm p-1 transition-colors hover:bg-og-surface-2 hover:text-og-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent max-[1023px]:size-11 pointer-coarse:size-11"
+      className="inline-flex size-7 items-center justify-center rounded-og-sm p-1 transition-colors hover:bg-og-surface-2 hover:text-og-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent max-[1023px]:size-11 pointer-coarse:size-11"
     >
       {children}
     </button>
@@ -669,7 +669,7 @@ function DockChrome({
               onClick={() => onTab(tab.id)}
               onKeyDown={(event) => onTabKeyDown(event, index)}
               className={cn(
-                "flex min-h-7 shrink-0 items-center justify-center gap-1 rounded-og-sm px-2 py-1 text-og-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent max-[1023px]:min-h-11 max-[1023px]:min-w-11 pointer-coarse:min-h-11 pointer-coarse:min-w-11",
+                "flex min-h-7 shrink-0 items-center justify-center gap-1 rounded-og-sm px-2 py-1 text-og-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent max-[1023px]:min-h-11 max-[1023px]:min-w-11 pointer-coarse:min-h-11 pointer-coarse:min-w-11",
                 tab.id === current
                   ? "bg-og-accent-soft text-og-fg"
                   : "text-og-fg-subtle hover:text-og-fg",

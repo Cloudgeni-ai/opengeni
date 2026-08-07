@@ -1036,8 +1036,9 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await desktopPage.getByRole("button", { name: "Resume this workstream" }).click();
       await desktopPage.getByRole("button", { name: "Pause this workstream" }).waitFor();
       // The session record and lineage tree are independent reads. Navigation
-      // must not require one to block the other, so await the lineage-owned chip
-      // before asserting the settled control stack.
+      // must not require one to block the other, so await both independently
+      // owned chips before asserting the settled control stack.
+      await goalChip.waitFor();
       await agentsChip.waitFor();
 
       const boxes = await Promise.all([chrome.boundingBox(), composer.boundingBox()]);

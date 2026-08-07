@@ -64,6 +64,7 @@ export type {
   ComposerSubmitBlocker,
   ComposerSubmitMode,
   ComposerSurfaceProps,
+  ResponsiveBasis,
   UseChatComposerControllerOptions,
 } from "./components/composer";
 export { ComposerTranscriptionControl } from "./components/composer-transcription-control";

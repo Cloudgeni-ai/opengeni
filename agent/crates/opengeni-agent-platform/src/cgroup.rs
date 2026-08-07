@@ -12,7 +12,7 @@
 //! # What this module does (Linux, cgroup v2 only)
 //!
 //! Given a delegated cgroup v2 service cgroup (the hardened unit renders
-//! `Delegate=yes` + `MemoryHigh=` — see [`crate::service`]), it:
+//! `Delegate=yes` + `MemoryAccounting=yes` — see [`crate::service`]), it:
 //!
 //! 1. **Startup dance** ([`establish_oom_isolation`]). cgroup v2 forbids a cgroup
 //!    from holding member processes AND enabling controllers for its children (the
@@ -21,10 +21,14 @@
 //!    `<service>/cgroup.subtree_control`. Per-op cgroups are then
 //!    `<service>/op-<n>` siblings of `supervisor`, each with its own memory
 //!    accounting.
-//! 2. **Per-exec placement** ([`OpCgroups::place_op`]). After a child is spawned,
-//!    its PID and the #344 process-group anchor's PID are written into a fresh
-//!    `op-<n>` leaf (optionally capped by [`OpCgroupConfig`]). A memory blow-up in
-//!    that leaf is contained to the leaf; the supervisor in its own leaf survives.
+//! 2. **Per-exec placement** ([`OpCgroups::place_process_group`]). After a child is
+//!    spawned, the caller stops its process group, places the direct child + #344
+//!    process-group anchor, then drains every same-group process still inherited in
+//!    `supervisor` into the same fresh `op-<n>` leaf before resuming the group. The
+//!    drain does not assume that `killpg(SIGSTOP)` is synchronous: once a parent is
+//!    moved, every later child inherits the op leaf, and the scan continues until no
+//!    ordinary descendant remains in `supervisor`. A memory blow-up in the op leaf
+//!    is contained to that leaf; the supervisor in its own leaf survives.
 //! 3. **Teardown** ([`OpCgroupHandle`]). The op leaf is `rmdir`'d after the op's
 //!    process tree is reaped, tolerating a transient `EBUSY` with a bounded retry.
 //!
@@ -43,7 +47,9 @@
 //! honest-degradation posture the metrics reader uses for its `/proc` sources.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(target_os = "linux")]
+use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 
 /// The cgroup v2 unified mount on a standard systemd host.
@@ -56,6 +62,12 @@ const CGROUP2_MOUNT: &str = "/sys/fs/cgroup";
 #[cfg(target_os = "linux")]
 const SUPERVISOR_LEAF: &str = "supervisor";
 
+/// systemd-oomd reads this cgroup xattr directly. Attributes set by
+/// `ManagedOOMPreference=avoid` on the service cgroup are not inherited by the
+/// delegated child cgroup, so the agent must stamp the leaf before moving into it.
+#[cfg(target_os = "linux")]
+const SYSTEMD_OOMD_AVOID_XATTR: &str = "user.oomd_avoid";
+
 /// How many times [`OpCgroupHandle::teardown`] retries an `rmdir` that returns
 /// `EBUSY` (the op's processes are reaped a moment after the group is killed).
 #[cfg(target_os = "linux")]
@@ -64,6 +76,13 @@ const TEARDOWN_ATTEMPTS: u32 = 5;
 /// The delay between the bounded teardown `rmdir` retries.
 #[cfg(target_os = "linux")]
 const TEARDOWN_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Honest fallback when Linux exposes neither the delegated cgroup PID ceiling,
+/// `RLIMIT_NPROC`, nor the kernel PID namespace ceiling. Production normally
+/// derives the breaker from the first available host limit; this fallback is far
+/// above an ordinary spawn race (one shell + a few immediate children).
+#[cfg(target_os = "linux")]
+const PLACEMENT_PID_BREAKER_FALLBACK: usize = 256;
 
 /// Environment variable naming an optional per-op `memory.max` hard cap, in bytes.
 const OP_MEMORY_MAX_ENV: &str = "OPENGENI_AGENT_OP_MEMORY_MAX";
@@ -118,6 +137,9 @@ pub struct OpCgroups {
     service_dir: PathBuf,
     /// The per-op memory limits to stamp on each leaf.
     config: OpCgroupConfig,
+    /// Host-derived ceiling on cumulative supervisor-leaf PIDs drained during one
+    /// spawn. Crossing it means an active fork pathology, not normal concurrency.
+    placement_pid_breaker: usize,
     /// The next op-id; each `place_op` allocates a unique `op-<n>` sibling.
     next_op: AtomicU64,
     /// Guards the "log once" of the per-op placement fallback so a persistent
@@ -126,6 +148,118 @@ pub struct OpCgroups {
 }
 
 impl OpCgroups {
+    /// Stops an exec process group, places its direct members, then drains every
+    /// same-group process still inherited in the supervisor leaf into the same op
+    /// cgroup before resuming it.
+    ///
+    /// A `killpg(SIGSTOP)` return is not itself a barrier: delivery may still be
+    /// pending on another CPU. Correctness therefore comes from cgroup inheritance,
+    /// not signal timing. Direct roots move first; every later fork inherits their
+    /// op leaf. Any child forked before its parent moved remains visible in the
+    /// supervisor leaf and is moved by a later drain pass. The loop ends only when
+    /// no live ordinary member remains there. A repeated identical set means the
+    /// kernel refused every move, so isolation degrades loudly instead of spinning.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn place_process_group(
+        &self,
+        pgid: i32,
+        direct_pids: &[u32],
+    ) -> std::io::Result<Option<OpCgroupHandle>> {
+        signal_process_group(pgid, nix::sys::signal::Signal::SIGSTOP)?;
+
+        let Some(handle) = self.place_op(direct_pids) else {
+            signal_process_group(pgid, nix::sys::signal::Signal::SIGCONT)?;
+            return Ok(None);
+        };
+
+        let mut prior_members: Option<Vec<u32>> = None;
+        let mut drained_pids = 0usize;
+        loop {
+            let members = match self.supervisor_process_group_members(pgid) {
+                Ok(members) => members,
+                Err(error) => {
+                    self.note_fallback(format_args!(
+                        "cannot drain process-group {pgid} from the supervisor cgroup: {error}"
+                    ));
+                    break;
+                }
+            };
+            if members.is_empty() {
+                break;
+            }
+            if prior_members.as_ref() == Some(&members) {
+                self.note_fallback(format_args!(
+                    "process-group {pgid} cgroup drain made no progress for pids {members:?}"
+                ));
+                break;
+            }
+            prior_members = Some(members.clone());
+
+            let next_drained = drained_pids.saturating_add(members.len());
+            if next_drained > self.placement_pid_breaker {
+                let error = std::io::Error::other(format!(
+                    "process-group {pgid} cgroup drain exceeded the host-derived PID breaker of {} while containing an active fork storm",
+                    self.placement_pid_breaker
+                ));
+                tracing::warn!(
+                    group_id = pgid,
+                    drained_pids,
+                    pending_pids = members.len(),
+                    breaker = self.placement_pid_breaker,
+                    "terminating exec whose pre-containment fork storm tripped the cgroup placement breaker"
+                );
+                let _ = signal_process_group(pgid, nix::sys::signal::Signal::SIGKILL);
+                handle.teardown_best_effort();
+                return Err(error);
+            }
+            drained_pids = next_drained;
+
+            // A descendant may have forked before the direct child received its
+            // OOM bias. Re-stamp every discovered member; later descendants inherit
+            // from their corrected parent after it moves into the op leaf.
+            for pid in &members {
+                raise_exec_oom_score_adj(*pid);
+            }
+            self.place_pids_in(&handle.dir, &members);
+            if let Err(error) = signal_process_group(pgid, nix::sys::signal::Signal::SIGSTOP) {
+                let _ = signal_process_group(pgid, nix::sys::signal::Signal::SIGKILL);
+                handle.teardown_best_effort();
+                return Err(error);
+            }
+        }
+
+        if let Err(error) = signal_process_group(pgid, nix::sys::signal::Signal::SIGCONT) {
+            let _ = signal_process_group(pgid, nix::sys::signal::Signal::SIGKILL);
+            handle.teardown_best_effort();
+            return Err(error);
+        }
+        Ok(Some(handle))
+    }
+
+    /// Enumerates live members of `pgid` that still inherit the supervisor leaf.
+    #[cfg(target_os = "linux")]
+    fn supervisor_process_group_members(&self, pgid: i32) -> std::io::Result<Vec<u32>> {
+        let supervisor_procs = self.service_dir.join(SUPERVISOR_LEAF).join("cgroup.procs");
+        let contents = std::fs::read_to_string(supervisor_procs)?;
+        let mut members = Vec::new();
+        for raw in contents.split_whitespace() {
+            let Ok(member_pid) = raw.parse::<u32>() else {
+                continue;
+            };
+            let Ok(member_raw_pid) = i32::try_from(member_pid) else {
+                continue;
+            };
+            if nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(member_raw_pid)))
+                .is_ok_and(|member_pgid| member_pgid.as_raw() == pgid)
+            {
+                members.push(member_pid);
+            }
+        }
+        members.sort_unstable();
+        members.dedup();
+        Ok(members)
+    }
+
     /// Places one exec's processes into a fresh `op-<n>` memory leaf and returns a
     /// teardown handle. `pids` is the requested child plus the #344 group anchor —
     /// both are moved so the whole op shares one memory fate.
@@ -166,9 +300,15 @@ impl OpCgroups {
             }
         }
 
-        // Move the exec's processes into the leaf. cgroup.procs takes one PID per
-        // write; the tiny window between spawn and this move is the accepted
-        // post-spawn billing window (no async-signal-unsafe pre_exec tricks).
+        self.place_pids_in(&dir, pids);
+
+        Some(OpCgroupHandle { dir })
+    }
+
+    /// Moves each live PID into an existing operation leaf. `cgroup.procs` moves
+    /// the entire thread group and returns only after the migration is visible.
+    #[cfg(target_os = "linux")]
+    fn place_pids_in(&self, dir: &Path, pids: &[u32]) {
         let procs = dir.join("cgroup.procs");
         for pid in pids {
             if let Err(error) = std::fs::write(&procs, pid.to_string()) {
@@ -178,13 +318,12 @@ impl OpCgroups {
                 ));
             }
         }
-
-        Some(OpCgroupHandle { dir })
     }
 
     /// Non-Linux no-op: no manager is ever constructed off Linux, so this is never
     /// reached; it exists so the cross-platform exec path type-checks.
     #[cfg(not(target_os = "linux"))]
+    #[allow(clippy::unused_self)]
     pub(crate) fn place_op(&self, _pids: &[u32]) -> Option<OpCgroupHandle> {
         None
     }
@@ -259,9 +398,11 @@ impl OpCgroupHandle {
 #[cfg(not(target_os = "linux"))]
 impl OpCgroupHandle {
     #[allow(dead_code)]
+    #[allow(clippy::unused_async)]
     pub(crate) async fn teardown(self) {}
 
     #[allow(dead_code)]
+    #[allow(clippy::unused_self)]
     pub(crate) fn teardown_best_effort(&self) {}
 }
 
@@ -319,13 +460,23 @@ pub fn establish_oom_isolation(config: OpCgroupConfig) -> Option<Arc<OpCgroups>>
         return None;
     }
 
-    // 4. No-internal-processes dance: move ourselves into the supervisor leaf, then
-    //    delegate the memory controller to our children. Order matters — the
-    //    service cgroup must hold no member processes before subtree_control can
-    //    enable a controller.
+    // 4. No-internal-processes dance: create and PROTECT the supervisor leaf,
+    //    move ourselves into it, then delegate the memory controller to sibling
+    //    op leaves. `ManagedOOMPreference=avoid` lives as an xattr on the service
+    //    cgroup and is not inherited by this child. Stamping the actual leaf
+    //    before the move is load-bearing: without it systemd-oomd can select and
+    //    kill the supervisor while leaving command siblings alive.
     let supervisor_dir = service_dir.join(SUPERVISOR_LEAF);
     if let Err(error) = create_dir_idempotent(&supervisor_dir) {
         tracing::info!(%error, dir = %supervisor_dir.display(), "OOM cgroup isolation unavailable: cannot create the supervisor leaf; serving without per-op isolation");
+        return None;
+    }
+    if let Err(error) = xattr::set(&supervisor_dir, SYSTEMD_OOMD_AVOID_XATTR, b"1") {
+        tracing::warn!(
+            %error,
+            dir = %supervisor_dir.display(),
+            "OOM cgroup isolation unavailable: cannot protect the supervisor leaf from systemd-oomd; keeping the supervisor in the unit cgroup"
+        );
         return None;
     }
     if let Err(error) = std::fs::write(
@@ -343,15 +494,18 @@ pub fn establish_oom_isolation(config: OpCgroupConfig) -> Option<Arc<OpCgroups>>
         return None;
     }
 
+    let placement_pid_breaker = placement_pid_breaker(&service_dir);
     tracing::info!(
         service_cgroup = %service_dir.display(),
         memory_max = ?config.memory_max,
         memory_high = ?config.memory_high,
-        "established per-op OOM cgroup isolation: host execs run in memory sub-cgroups; the control supervisor is fate-isolated in its own leaf"
+        placement_pid_breaker,
+        "established per-op OOM cgroup isolation: host execs run in memory sub-cgroups; the protected control supervisor is fate-isolated in its own leaf"
     );
     Some(Arc::new(OpCgroups {
         service_dir,
         config,
+        placement_pid_breaker,
         next_op: AtomicU64::new(0),
         fallback_logged: AtomicBool::new(false),
     }))
@@ -364,6 +518,60 @@ pub fn establish_oom_isolation(config: OpCgroupConfig) -> Option<Arc<OpCgroups>>
 pub fn establish_oom_isolation(_config: OpCgroupConfig) -> Option<Arc<OpCgroups>> {
     tracing::debug!("per-op OOM cgroup isolation is Linux-only; running without it on this OS");
     None
+}
+
+/// Signals an owned process group. ESRCH is success: the group completed before
+/// the placement barrier and has nothing left to isolate or resume.
+#[cfg(target_os = "linux")]
+fn signal_process_group(pgid: i32, signal: nix::sys::signal::Signal) -> std::io::Result<()> {
+    use nix::errno::Errno;
+    use nix::sys::signal::killpg;
+    use nix::unistd::Pid;
+
+    match killpg(Pid::from_raw(pgid), signal) {
+        Ok(()) | Err(Errno::ESRCH) => Ok(()),
+        Err(error) => Err(std::io::Error::from(error)),
+    }
+}
+
+/// Derives a one-spawn fork-pathology breaker from the delegated service's PID
+/// ceiling, then the user's process rlimit, then the PID namespace ceiling. Half
+/// the available ceiling leaves the supervisor and unrelated work headroom. This
+/// breaker limits only the synchronous pre-containment drain; it does not limit a
+/// successfully-contained command's lifetime or eventual process count.
+#[cfg(target_os = "linux")]
+fn placement_pid_breaker(service_dir: &Path) -> usize {
+    let cgroup_ceiling = std::fs::read_to_string(service_dir.join("pids.max"))
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok());
+    let rlimit_ceiling = std::fs::read_to_string("/proc/self/limits")
+        .ok()
+        .and_then(|limits| parse_soft_process_limit(&limits));
+    let namespace_ceiling = std::fs::read_to_string("/proc/sys/kernel/pid_max")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok());
+    derive_placement_pid_breaker(cgroup_ceiling.or(rlimit_ceiling).or(namespace_ceiling))
+}
+
+/// Half a known host PID ceiling (at least one), or a generous fallback when the
+/// Linux host exposes no ceiling at all.
+#[cfg(target_os = "linux")]
+fn derive_placement_pid_breaker(pid_ceiling: Option<u64>) -> usize {
+    pid_ceiling.map_or(PLACEMENT_PID_BREAKER_FALLBACK, |ceiling| {
+        usize::try_from((ceiling / 2).max(1)).unwrap_or(usize::MAX)
+    })
+}
+
+/// Parses the soft `RLIMIT_NPROC` value from `/proc/self/limits`; `unlimited`
+/// deliberately falls through to the kernel PID namespace ceiling.
+#[cfg(target_os = "linux")]
+fn parse_soft_process_limit(limits: &str) -> Option<u64> {
+    let value = limits
+        .lines()
+        .find_map(|line| line.strip_prefix("Max processes"))?
+        .split_whitespace()
+        .next()?;
+    (value != "unlimited").then(|| value.parse().ok()).flatten()
 }
 
 /// Creates `dir`, treating an already-existing directory as success (a leaked leaf
@@ -507,6 +715,29 @@ mod tests {
         assert_eq!(op_cgroup_name(0), "op-0");
         assert_eq!(op_cgroup_name(42), "op-42");
         assert_ne!(op_cgroup_name(1), op_cgroup_name(2));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn placement_pid_breaker_scales_from_the_host_ceiling() {
+        assert_eq!(derive_placement_pid_breaker(Some(28_708)), 14_354);
+        assert_eq!(derive_placement_pid_breaker(Some(1)), 1);
+        assert_eq!(
+            derive_placement_pid_breaker(None),
+            PLACEMENT_PID_BREAKER_FALLBACK
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parses_finite_process_rlimit_and_skips_unlimited() {
+        let finite = "Limit                     Soft Limit           Hard Limit           Units\n\
+                      Max processes             95695                95695                processes\n";
+        assert_eq!(parse_soft_process_limit(finite), Some(95_695));
+
+        let unlimited = "Limit                     Soft Limit           Hard Limit           Units\n\
+                         Max processes             unlimited            unlimited            processes\n";
+        assert_eq!(parse_soft_process_limit(unlimited), None);
     }
 
     #[test]

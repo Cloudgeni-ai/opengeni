@@ -44,6 +44,7 @@ command-group = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = { workspace = true }
+xattr = { workspace = true }
 
 # macOS desktop backend: the leaf FFI crate that owns all Apple `unsafe` behind a
 # safe API. Optional + macOS-gated so non-macOS builds (and the default macOS

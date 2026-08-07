@@ -1,52 +1,120 @@
 ---
 name: opengeni-client
 audience: integration-agent
-description: Use when integrating a customer product, coding agent, generic automation agent, CLI, SDK, or backend service with the OpenGeni API. Covers managed API-key auth, configured/self-host bearer auth, workspace discovery, workspace-scoped sessions, choosing a session's compute target (a managed sandbox or an enrolled Connected Machine), machine enrollment (device-flow consent + headless enroll tokens), SSE/event replay, files, documents/search, schedules, GitHub repository resources, billing/limits handling, safe retries, and keeping client guidance aligned with the live OpenGeni service rather than stale docs.
+description: >-
+  Use when an external product, coding agent, CLI, backend, or automation uses a
+  standalone OpenGeni deployment through @opengeni/sdk or @opengeni/react.
+  Covers choosing between a stock-UI handoff, a headless product integration,
+  embedded React session surfaces, or the optional workbench; tenant-safe proxy
+  boundaries; workspace/session/turn instructions; events, uploads, tools,
+  realtime, compute targets, and schedules. Not for editing OpenGeni internals
+  or mounting the OpenGeni runtime in the customer's process.
 ---
 
 # OpenGeni Client
 
-This skill is for integration agents building customer products, CLIs, SDK wrappers, or automations against an OpenGeni API service.
+Use this skill when a customer's product and OpenGeni remain separate systems.
+That is the normal integration shape: the product owns its users and business
+UI, while a standalone OpenGeni deployment owns agent sessions and execution.
 
-Use this skill to help a customer-side agent or product consume OpenGeni as an API service. It is for client integration, not for editing OpenGeni internals.
+Do not interpret "embed" as "move OpenGeni into the product process." Advanced
+in-process router/core embedding is a separate infrastructure choice. Route that
+work to the repo-maintainer `opengeni` skill and `docs/embedding.md`.
 
-Code and live service behavior are the source of truth. Prefer `/v1/config/client`, `/v1/access/me`, contracts/OpenAPI when available, and live HTTP probes over memorized route lists. If the OpenGeni repo is available and exactness matters, inspect `packages/contracts/src/index.ts`, `apps/api/src/routes/`, and `apps/web/src/api.ts`.
+Do not confuse two meanings of "skill": this file teaches a customer's coding
+agent how to integrate OpenGeni; session `skills` are runtime capabilities or
+instructions attached to an OpenGeni agent. The former designs the integration.
+The latter is product data sent through the installed SDK contract.
 
-## Core Model
+Code and the live service are authoritative. Prefer `/v1/config/client`,
+`/v1/access/me`, the installed package types, and live probes over memorized
+route, model, tool, or backend lists. When source is available, verify exact
+behavior in `packages/sdk`, `packages/react`, contracts, and API routes.
 
-- Managed SaaS browser users sign up with email/password, then create OpenGeni product API keys.
-- Product API keys and configured/delegated tokens use `Authorization: Bearer <token>`.
-- The optional deployment shared key uses `x-opengeni-access-key` and is only an operator/edge boundary.
-- Workspace-scoped routes are canonical: `/v1/workspaces/:workspaceId/...`.
-- Old unscoped operational routes are intentionally removed, not soft-deprecated.
-- Resource ids never authorize by themselves; use the URL workspace plus credential grant.
-- Sessions and scheduled tasks are the current run primitives. Do not assume a first-class agent-definition API exists until the live service exposes one.
-- Every session picks a compute target at creation. Two co-equal kinds: a **Managed Sandbox** (a platform-owned ephemeral box, selected via the `sandboxBackend` enum and the `sandbox` placement union) or a **Connected Machine** (a user-owned machine enrolled into the workspace, addressed by `targetSandboxId` plus an optional per-session `workingDir`).
-- A Connected Machine is first-class *primary* compute, not a backend overlay: there is no phantom cloud box behind it, no OpenGeni credential is distributed to it (it uses its own git auth), repos are not cloned onto it, and the session runs directly under the chosen `workingDir` on the machine. `selfhosted` is the internal `sandboxBackend` enum value for such a machine — prefer the product term "Connected Machine" in client-facing copy.
-- Enrolling a machine is a client capability: an interactive device flow with a loud whole-machine consent step, or a headless enroll token for fleet/non-interactive enrollment. Gated by `enrollments:read` (list a workspace's machines) and `enrollments:manage` (approve/mint/revoke); `workspace:admin` is the super-wildcard over both.
+## Choose The Integration Shape First
 
-## Integration Workflow
+Pick the smallest surface that satisfies the product:
 
-1. Determine the API base URL and credential type.
-2. Fetch `/v1/config/client` to learn auth mode, model options, MCP providers, and upload capability.
-3. Call `/v1/access/me`; use `defaultWorkspaceId` or list/create workspaces if permissions allow.
-4. Create sessions under `/v1/workspaces/:workspaceId/sessions`, choosing the compute target: omit the sandbox fields for a managed sandbox (optionally pin `sandboxBackend` or the `sandbox` placement union), or set `targetSandboxId` (plus an optional `workingDir`) to run the session on an enrolled Connected Machine.
-5. Stream events from `/v1/workspaces/:workspaceId/sessions/:sessionId/events/stream` and replay from the event list after reconnects.
-6. Upload files through the workspace file upload flow before attaching file resources.
-7. Select MCP tools by configured id, such as OpenGeni, Files, or Document Search.
-8. Use workspace GitHub repository listings before attaching private GitHub App repositories.
-9. For Connected Machines: list a workspace's machines (and their metrics) before targeting one, swap a session's active machine after create when needed, and enroll new machines through the device-flow (with consent) or a headless enroll token.
-10. For recurring work, create scheduled tasks under the workspace and inspect run history.
-11. Treat 401/403/404/402/429 as product signals: re-authenticate, switch workspace, stop on missing permissions, top up credits, or back off.
+1. **Stock OpenGeni handoff** — link or deep-link into the OpenGeni web app.
+   The product keeps no agent UI.
+2. **Headless product integration (default)** — the product backend uses
+   `@opengeni/sdk`; the product renders its own UI and exposes tenant-scoped,
+   same-origin routes to its browser or mobile client.
+3. **React session integration** — compose `@opengeni/react/session` hooks and
+   pure projections into the product's UI. Add styled subpaths only for the
+   surfaces the product wants.
+4. **OpenGeni-rendered React experience** — mount the packaged composer,
+   timeline, realtime, or session chrome and import
+   `@opengeni/react/compiled.css` once. No Tailwind setup or source scan is
+   required. Override `--og-*` tokens only when branding is wanted.
+5. **Workbench integration** — mount the optional Changes/Files/Terminal/Desktop
+   workspace when the product genuinely exposes agent compute. It has optional
+   heavy peers and is not required for ordinary chat/session integration.
 
-If you build a React client with `@opengeni/react`, the root entrypoint is the clean sandbox-only default. The Connected-Machine UI — the machines dashboard, the enrollment device-flow/consent screens, and the machine status pills — lives under the `@opengeni/react/machines` subpath (the root still re-exports it for back-compat, deprecated per #144). Separately, the root-exported sandbox-surfacing components (`WorkspaceDock`, `SandboxTerminal`, `FileBrowser`, `DiffView`, `DesktopViewer`) pull heavy client deps (`@xterm/*`, `@novnc/novnc`, `@pierre/diffs`, `@uiw/react-codemirror`, `@codemirror/lang-*`) as optional peer dependencies you install only for the surfaces you mount.
+Read `references/product-integration-shapes.md` before designing the boundary.
+Read `references/api-workflows.md` for session, upload, retry, repository,
+machine, and schedule patterns.
 
-Read `references/api-workflows.md` for request shapes, retry guidance, and common client patterns.
+## Default Trust Boundary
+
+- Keep OpenGeni API keys and operator credentials on the product server.
+- Authenticate the product's user first, resolve their allowed OpenGeni
+  workspace/session server-side, and expose only the routes that product needs.
+- Use `@opengeni/sdk` instead of reconstructing event streaming, upload signing,
+  retries, or wire types by hand.
+- Use `proxySessionEventStream` for a same-origin browser SSE route. Structural
+  React client types let a host implement only the methods its mounted hooks use.
+- Direct browser access is valid only when the deployment's normal browser auth
+  or an explicitly accepted bearer/CORS design makes it safe. Never ship a
+  privileged shared API key in a browser bundle.
+
+The product owns external identity, tenant-to-workspace mapping, business
+entities, navigation, presentation, and product-specific admission. OpenGeni
+owns sessions, turns, durable event history, approvals, agent execution,
+selected tools/resources, files, realtime session state, and compute lifecycle.
+Link records by opaque IDs; do not copy one system's whole data model into the
+other.
+
+## Prompt And Context Contract
+
+Keep visible user text separate from system-level agent context:
+
+- Workspace `agentInstructions`: stable workspace-wide persona and behavior.
+- Session `instructions`: durable agent-type refinement for one session.
+- Turn `turnInstructions`: one exact submit-time context snapshot, such as the
+  current product route, selected entity, or viewport state.
+- `initialMessage` and later message text: user-visible timeline content.
+
+Do not hide business facts in a prompt when the agent should inspect them with
+an authorized product MCP tool. Prefer concise turn context plus canonical tool
+access. Never put secrets in any instruction scope.
+
+## Client Workflow
+
+1. Resolve API base URL, credential mode, and product user-to-workspace mapping.
+2. Read client config and access context.
+3. Create a session with a stable idempotency key; optionally preallocate its ID
+   when the product must persist a link before the first turn can run.
+4. Attach only canonical resources, skills, and tool selections the user may use.
+5. Stream/replay session events through the SDK; tolerate unknown additive event
+   types.
+6. Send visible text separately from `turnInstructions`.
+7. Use the SDK upload helper; it owns begin, signed storage PUT, and completion.
+8. Surface approvals, human-input requests, queue state, errors, credit limits,
+   and reconnect state as product state rather than generic chat text.
+9. Add realtime, Connected Machines, schedules, or the workbench only when the
+   product use case needs them.
 
 ## Guardrails
 
-- Never put raw OpenGeni API keys, deployment shared keys, Stripe secrets, GitHub App secrets, cookies, or customer data into generated skills, docs, examples, or logs.
-- Keep client examples generic and parameterized: `OPENGENI_API_BASE_URL`, `OPENGENI_API_KEY`, and `OPENGENI_WORKSPACE_ID`.
-- Do not tell customer agents to call Temporal, NATS, Postgres, the worker, or the sandbox directly.
-- Do not claim RLS, billing, GitHub, model, or sandbox behavior unless the deployed service or current source proves it.
-- When behavior is ambiguous, write a small HTTP probe or inspect live responses instead of guessing.
+- Workspace-scoped routes are canonical; resource IDs never authorize by
+  themselves.
+- Do not call Temporal, NATS, Postgres, workers, sandbox providers, object
+  storage APIs, or MCP transports as substitutes for the public SDK/API.
+- Do not claim auth, model, tool, billing, CORS, storage, or compute behavior
+  until the live deployment or current source proves it.
+- Keep examples generic and parameterized. Skills may name non-secret origins
+  and conventions, but credentials come from a secret manager or environment.
+- Generate a customer-specific skill only for stable facts their coding agents
+  repeatedly need. Keep it beside their integration code, point it at the SDK,
+  include a config/access smoke probe, and never paste secrets into it.

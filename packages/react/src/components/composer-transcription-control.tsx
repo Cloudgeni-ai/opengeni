@@ -224,7 +224,7 @@ export function ComposerTranscriptionControl({
                     "bg-og-surface-2/70 pl-2 pr-1 pointer-coarse:h-11",
                   )}
                 >
-                  <span className="max-w-44 truncate text-og-xs text-og-fg-muted max-sm:max-w-28">
+                  <span className="og-transcription-recovered-label max-w-44 truncate text-og-xs text-og-fg-muted max-sm:max-w-28">
                     {savedTranscript
                       ? (errorMessage ?? messages.recoveredTranscript)
                       : retrying
@@ -391,7 +391,7 @@ export function ComposerTranscriptionControl({
               <Tip tip={errorMessage}>
                 <span
                   aria-hidden="true"
-                  className="max-w-40 truncate text-og-xs text-og-status-failed max-sm:max-w-24"
+                  className="og-transcription-error-label max-w-40 truncate text-og-xs text-og-status-failed max-sm:max-w-24"
                 >
                   {errorMessage}
                 </span>

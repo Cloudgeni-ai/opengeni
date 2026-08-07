@@ -140,7 +140,25 @@ function DeliveryOnlyComposer() {
   );
 }
 
+function ContainerDeliveryOnlyComposer() {
+  const [value, setValue] = useState("hello");
+  const controller = Composer.useChatComposerController({
+    delivery: delivery(value, setValue),
+  });
+  return (
+    <Composer.Root controller={controller} responsiveBasis="container">
+      <Composer.Input />
+    </Composer.Root>
+  );
+}
+
 describe("compound composer framework", () => {
+  test("compound Root exposes the additive container basis", async () => {
+    mounted = await renderComponent(<ContainerDeliveryOnlyComposer />);
+    const root = mounted.container.querySelector(".og-composer");
+    expect(root?.getAttribute("data-og-responsive-basis")).toBe("container");
+  });
+
   test("existing preset slots can consume the safe composer context", async () => {
     function Harness() {
       const [value, setValue] = useState("hello");

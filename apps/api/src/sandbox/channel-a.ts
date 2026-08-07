@@ -30,6 +30,7 @@ import type { Session } from "@opengeni/contracts";
 import {
   acquireLease,
   getSandboxSessionEnvelope,
+  getEnrollment,
   getSandbox,
   loadWorkspaceEnvironmentForRun,
   markWarmLeaseInstanceLost,
@@ -49,6 +50,7 @@ import {
   isProviderSandboxNotFoundError,
   SandboxChannelAService,
   NatsControlRpc,
+  NatsOpStreamTransport,
   ChannelAConflictError,
   ChannelANotFoundError,
   ChannelAUnsupportedError,
@@ -169,7 +171,12 @@ export async function withChannelA<T>(
       leaseEpoch: lease?.leaseEpoch ?? session.activeEpoch,
       emit,
     });
-    return await fn({ service, lease, routingSession, requestId });
+    const result = await fn({ service, lease, routingSession, requestId });
+    // The direct request has accepted the result in memory. Finalize every
+    // Connected Machine backend the routing proxy reached so a mid-request
+    // route transition cannot leave completed output retained until TTL.
+    await routingSession.finalizeOpStreamOps().catch(() => undefined);
+    return result;
   };
 
   // A machine-targeted top-level session has an honest selfhosted HOME label.
@@ -190,6 +197,7 @@ export async function withChannelA<T>(
           message: "machine-home session points to an unavailable Connected Machine",
         });
       }
+      const enrollment = await getEnrollment(db, workspaceId, sandbox.enrollmentId);
       const built = await buildSelfhostedBackendSession({
         workspaceId,
         agentId: sandbox.enrollmentId,
@@ -200,6 +208,17 @@ export async function withChannelA<T>(
         workingDir: pointer.workingDir,
         timeoutMs: settings.sandboxSelfhostedControlTimeoutMs,
         execTimeoutMs: settings.sandboxSelfhostedExecTimeoutMs,
+        ...(settings.agentOpStreamEnabled === true &&
+        enrollment?.opStream === true &&
+        bus.getOpStreamConnection
+          ? {
+              opStream: {
+                transport: new NatsOpStreamTransport(
+                  async () => bus.getOpStreamConnection?.() ?? null,
+                ),
+              },
+            }
+          : {}),
       });
       established = {
         client: built.client,

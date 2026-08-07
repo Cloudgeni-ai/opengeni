@@ -47,11 +47,18 @@ export interface OpStreamTransport {
   publish(subject: string, payload: Uint8Array): Promise<void>;
 }
 
-/** Thrown when the transport has no live connection: the op-stream path is
- *  UNAVAILABLE (never silently degraded). The session catches this pre-start
- *  and falls back to the legacy exec — the op provably never started. */
+/** Thrown before OpStart when the stream transport is unavailable or the runner
+ *  does not support it. A bounded command may safely use legacy request/reply;
+ *  an unbounded command fails before execution because legacy has an outer wall. */
 export class OpStreamUnavailableError extends Error {
   readonly name = "OpStreamUnavailableError";
+
+  constructor(
+    message: string,
+    readonly unavailableKind: "transport" | "runner" = "transport",
+  ) {
+    super(message);
+  }
 }
 
 /**

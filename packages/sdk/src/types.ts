@@ -2746,6 +2746,8 @@ export type WorkspaceSettings = {
   maxNestedAgentDepth?: number | null | undefined;
   /** Default for new Codex sessions; absent ⇒ remote_v2. */
   codexCompactionDefault?: "remote_v2" | "portable" | undefined;
+  /** Whether agents may invoke the built-in structured human-input tool. */
+  agentHumanInputEnabled?: boolean | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
   [key: string]: unknown;
 };
@@ -2777,6 +2779,7 @@ export type UpdateWorkspaceSettingsRequest = {
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
   codexCompactionDefault?: "remote_v2" | "portable" | undefined;
+  agentHumanInputEnabled?: boolean | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
   [key: string]: unknown;
 };

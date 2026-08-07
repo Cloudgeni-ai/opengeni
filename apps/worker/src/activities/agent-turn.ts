@@ -27,6 +27,7 @@ import {
   getCodexRotationSettings,
   getWorkspaceModelPolicy,
   getWorkspaceGrant,
+  getWorkspace,
   listCodexAccountStatuses,
   fetchCodexUsageForAccount,
   getSessionCodexState,
@@ -263,7 +264,6 @@ import {
 import { withFirstPartyTools } from "./goals";
 import {
   mergeRigDefaultVariableSetEnvironment,
-  resolveWorkspaceAgentInstructions,
   resolveWorkspacePackRuntime,
   resolveWorkspaceSkillLibraryRuntime,
   settingsWithPackSandboxImage,
@@ -353,6 +353,7 @@ import {
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   evaluateWorkspaceModelPolicy,
   readTurnExecutionPolicyV1,
+  resolveWorkspaceAgentHumanInputEnabled,
   resourceMountPath,
   type LatencyMode,
   type ResourceRef,
@@ -370,6 +371,21 @@ import { createHash, randomUUID } from "node:crypto";
 // this ceiling. Explicit rate limits retain the minute-granular fallback.
 export const PROVIDER_BACKPRESSURE_DELAY_MS = 60_000;
 const PROVIDER_CONNECTIVITY_BACKOFF_MS = [2_000, 5_000, 15_000, 30_000, 60_000] as const;
+
+export class WorkspaceHumanInputDisabledError extends Error {
+  constructor(kind: "resume" | "interruption") {
+    super(`Workspace policy rejects structured human-input ${kind}`);
+    this.name = "WorkspaceHumanInputDisabledError";
+  }
+}
+
+export function assertWorkspaceHumanInputAllowed(
+  enabled: boolean,
+  kind: "resume" | "interruption",
+  attempted: boolean,
+): void {
+  if (!enabled && attempted) throw new WorkspaceHumanInputDisabledError(kind);
+}
 
 /** Broad personal lookup is allowed only for a direct human/API command. */
 export function credentialSubjectIdForTurnInitiator(
@@ -2338,6 +2354,34 @@ export function codexCredentialLeaseDeadlineExpired(
   );
 }
 
+type OpStreamFinalizer = {
+  finalizeOpStreamOps(): Promise<void>;
+};
+
+/** Release retained Connected Machine output only after the turn is durable. */
+export async function finalizeDurableTurnOpStreams(
+  sessions: readonly unknown[],
+  fallback: OpStreamFinalizer | null,
+): Promise<void> {
+  const candidates = new Set<OpStreamFinalizer>();
+  for (const session of sessions) {
+    const candidate = session as Partial<OpStreamFinalizer> | null;
+    if (typeof candidate?.finalizeOpStreamOps === "function") {
+      candidates.add(candidate as OpStreamFinalizer);
+    }
+  }
+  if (candidates.size === 0 && fallback) {
+    candidates.add(fallback);
+  }
+  for (const candidate of candidates) {
+    try {
+      await candidate.finalizeOpStreamOps();
+    } catch {
+      // The runner's retention TTL owns the fallback.
+    }
+  }
+}
+
 export function createRunAgentTurnActivity(services: () => Promise<ActivityServices>) {
   return async function runAgentTurn(input: RunAgentTurnInput): Promise<RunAgentTurnResult> {
     const {
@@ -2569,8 +2613,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       return resolvedSandbox;
     };
     // The machine-primary SelfhostedSession (the UNWRAPPED backend, not the
-    // routing proxy): held so the turn's completion can final-ack this turn's
-    // settled op-stream ops AFTER the results are durably persisted.
+    // routing proxy). Kept as a fallback finalizer; the routing proxy normally
+    // aggregates it together with every machine reached after a mid-turn swap.
     let machinePrimarySession: import("@opengeni/runtime").SelfhostedSession | null = null;
     let lazyOwnedSandbox: EstablishedSandboxSession | null = null;
     let turnSandboxProvisioner: TurnSandboxProvisioner<ResumedTurnSandbox> | null = null;
@@ -2579,6 +2623,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // THIS handle so a mid-turn sandbox_swap can never re-route those execs onto a
     // connected machine (the user's real computer).
     let setupBoxSession: unknown = null;
+    const finalizeTurnOpStreamOps = async (): Promise<void> => {
+      await finalizeDurableTurnOpStreams(
+        [lazyOwnedSandbox?.session, resolvedSandbox?.established.session],
+        machinePrimarySession,
+      );
+    };
     // A same-target API repair can replace the home provider while this turn is
     // alive. Keep setup/snapshot persistence on the rebound raw session while
     // preserving the SDK-owned routing proxy for eager turns. Lazy turns hold the
@@ -4172,15 +4222,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         attemptId: input.attemptId,
         executionGeneration: turn.executionGeneration,
       };
-      const [workspaceAgentInstructions, instructionPolicySnapshot, preferenceSnapshot] =
-        await Promise.all([
-          resolveWorkspaceAgentInstructions(db, input.workspaceId),
-          getOrCreateWorkspaceInstructionPolicySnapshot(db, governanceClaims),
-          getOrCreatePreferenceRegistrySnapshot(db, governanceClaims).catch((error) => {
-            if (error instanceof PreferenceRegistryInitiatorError) return null;
-            throw error;
-          }),
-        ]);
+      const [workspace, instructionPolicySnapshot, preferenceSnapshot] = await Promise.all([
+        getWorkspace(db, input.workspaceId),
+        getOrCreateWorkspaceInstructionPolicySnapshot(db, governanceClaims),
+        getOrCreatePreferenceRegistrySnapshot(db, governanceClaims).catch((error) => {
+          if (error instanceof PreferenceRegistryInitiatorError) return null;
+          throw error;
+        }),
+      ]);
+      if (!workspace) throw new Error(`Workspace not found: ${input.workspaceId}`);
+      const workspaceAgentInstructions = workspace.agentInstructions;
+      const agentHumanInputEnabled = resolveWorkspaceAgentHumanInputEnabled(workspace.settings);
+      assertWorkspaceHumanInputAllowed(agentHumanInputEnabled, "resume", humanInputResume !== null);
       const workspaceGovernance = renderWorkspaceGovernanceContext({
         instructionPolicy: instructionPolicySnapshot,
         preferences: preferenceSnapshot,
@@ -5340,6 +5393,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 db,
                 settings,
                 bus,
+                opJournal,
                 onOp: machineOpObserver.observer,
                 onSandboxOperation: sandboxOperationObserver,
                 onHomeSandboxRebound,
@@ -5449,6 +5503,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 db,
                 settings,
                 bus,
+                opJournal,
                 onSandboxOperation: sandboxOperationObserver,
                 onHomeSandboxLost: publishSandboxLost,
                 onHomeSandboxRebound,
@@ -5669,6 +5724,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         latencyMode: turnExecutionPolicy.latencyMode,
         ...(serviceTier ? { serviceTier } : {}),
         ...(humanInputResume ? { humanInputResponse: humanInputResume } : {}),
+        humanInputEnabled: agentHumanInputEnabled,
         genesisTitleHint: isGenesisTurn,
         persistentSessionSettings: {
           titleIsSet: Boolean(session.title?.trim()),
@@ -6003,6 +6059,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             db,
             settings,
             bus,
+            opJournal,
             onOp: machineOpObserver.observer,
             onSandboxOperation: sandboxOperationObserver,
             onHomeSandboxLost: publishSandboxLost,
@@ -6927,6 +6984,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const approvals = runtime.serializeApprovals(stream.interruptions);
           const humanInputInterruptions =
             runtime.serializeHumanInputRequests?.(stream.interruptions) ?? [];
+          const latestWorkspace = await getWorkspace(db, input.workspaceId);
+          if (!latestWorkspace) throw new Error(`Workspace not found: ${input.workspaceId}`);
+          assertWorkspaceHumanInputAllowed(
+            resolveWorkspaceAgentHumanInputEnabled(latestWorkspace.settings),
+            "interruption",
+            humanInputInterruptions.length > 0,
+          );
           const humanInputRequests = await Promise.all(
             humanInputInterruptions.map(async (interruption) => {
               const id = stableHumanInputRequestId(
@@ -7002,25 +7066,21 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           ) {
             return claimedResult({ status: "cancelled" });
           }
+          // The interruption and its preceding tool results are now durable.
+          await finalizeTurnOpStreamOps();
           activityStatus = "requires_action";
           return claimedResult({ status: "requires_action" });
         }
 
         const finalOutput = String(stream.finalOutput ?? "");
-        await reconcileConversationTruth();
+        await reconcileConversationTruth({ requireDurable: true });
         // Op-stream durability fence: the tool outputs are now durably in the
         // history store (a redispatch would NOT re-execute them), so this
         // turn's settled ops may advance their acked frontier — journal persist
         // then wire final ack (licensing the runner to GC its retained
         // frames). Best-effort: a miss leaves the runner's retention TTL to
         // reap, never fails a completed turn.
-        if (machinePrimarySession) {
-          try {
-            await machinePrimarySession.finalizeOpStreamOps();
-          } catch {
-            // The runner's retention TTL owns the fallback.
-          }
-        }
+        await finalizeTurnOpStreamOps();
         if (
           !(await settle!({
             events: [

@@ -1,14 +1,14 @@
 # Connected Machines (bring-your-own-compute)
 
 A **Connected Machine** is one of a session's compute targets — your own
-computer (a laptop, a workstation, a CI box, even a macOS machine) enrolled into
+computer (a laptop, a workstation, a CI box, even a macOS machine) connected to
 a workspace and driven by the agent directly. It is a **first-class, co-equal
 primary compute target**, not a backend variant layered on top of a managed
 box.
 
 This guide is embedder-facing: it shows how to create a session on a machine,
 discover the enrolled machines and their metrics, swap a session's active
-sandbox, enroll a machine (zero-click token or the interactive device flow), and
+sandbox, connect a machine (zero-click token or the interactive device flow), and
 revoke/detach — all through the typed [`@opengeni/sdk`](../packages/sdk/README.md)
 client. The matching UI ships in
 [`@opengeni/react/machines`](../packages/react/README.md).
@@ -144,16 +144,45 @@ const samples = await client.machineMetricsSeries(workspaceId, enrollmentId, {
 
 ## Control liveness and backpressure
 
-Machine liveness is independent of accepted host operations. The agent
-prioritizes heartbeats, answers `ping` outside its bounded host-work pool, and
-returns typed retryable `DRAINING` backpressure when that pool is full. A busy
-machine therefore remains online and diagnosable instead of turning saturation
-into an offline transition.
+Machine liveness is independent of accepted host operations. The supervisor
+answers `ping` and publishes heartbeats outside command execution. Production
+admission has no ordinary fixed concurrency or queue-wait limit: its only
+circuit breakers are derived from host file-descriptor and process headroom and
+sit above normal workloads (including 100 concurrent command requests). Linux
+puts the supervisor and each operation in separate cgroup-v2 leaves for fate
+isolation and accounting. Before moving itself, the supervisor stamps its own leaf
+with systemd-oomd's `user.oomd_avoid=1` marker; if that protection cannot be
+established, it stays in the already-protected unit cgroup. The generated systemd
+unit explicitly clears stale aggregate resource limits and enables accounting
+without a parent `MemoryHigh`; the default operation leaf has no memory maximum or
+throttle. At spawn, the agent stops the command's process group, moves its direct
+roots, then repeatedly drains any same-group descendants still inherited in the
+supervisor leaf into the same operation leaf before resuming it. Correctness does
+not depend on synchronous stop-signal delivery: after a parent moves, future
+children inherit its operation leaf. This closes the post-spawn fork race. A
+same-group fork storm that keeps creating escaped descendants during this tiny
+pre-containment window is terminated only after crossing a PID breaker derived
+from that machine's process ceiling; it cannot wedge command admission forever.
+Commands therefore have the same machine resources and authority as commands
+launched by an unrestricted local agent; the OS scheduler owns contention,
+while a pathological breaker trip is loud and typed.
 
-Exec requests carry a finite agent-side process deadline inside a slightly
-larger request/reply deadline. If that deadline or the connection generation
-ends, the agent cancels the accepted operation and terminates its POSIX process
-group or Windows Job Object, including ordinary descendants spawned by a shell.
+Operators can opt into local per-operation limits with
+`OPENGENI_AGENT_OP_MEMORY_MAX` and `OPENGENI_AGENT_OP_MEMORY_HIGH`; unset is the
+authoritative unlimited default. This policy is intentionally local today: one
+physical installation may serve unrelated deployments, so a workspace must not
+silently impose a machine-global cap on the others. Any future control-plane
+setting must either be connection-scoped or owned explicitly by the machine
+operator, remain `unlimited` by default, and never constrain the supervisor leaf
+or install an implicit service-wide `MemoryHigh`.
+
+Exec duration is unbounded by default. `timeout_ms=0` and op-stream
+`deadline_ms=0` schedule no process kill; a positive
+`OPENGENI_SANDBOX_SELFHOSTED_EXEC_TIMEOUT_MS` is an explicit operator choice.
+Pause/Steer/cancellation still terminates the exact POSIX process group or
+Windows Job Object, including ordinary descendants spawned by a shell. A
+connection blip detaches the stream without killing the command; replay collects
+the retained output after reconnect.
 The session shell capability also preserves an explicit `exec_command.shell`
 selection: OpenGeni sends that shell as direct argv, with the requested login or
 non-login semantics, instead of silently substituting the machine service's
@@ -168,20 +197,23 @@ backpressure nor a reply-size failure changes the machine's heartbeat state.
 The agent-facing `run_on` MCP tool is intentionally a one-off side channel to a
 specific enrolled machine and never changes the session's active route. Its
 `exec` receipt reports the exact `exitCode`, typed `timedOut`, and effective
-`deadlineMs`. A process killed at the deadline, or a response with no terminal
+`deadlineMs` (`0` means none). A process killed at an explicitly configured
+deadline, or a response with no terminal
 exit proof, is never reported as `ok: true`; a transport loss after dispatch is
 ambiguous and is not replayed. `run_on` uses the deployment's separate
 `OPENGENI_SANDBOX_SELFHOSTED_CONTROL_TIMEOUT_MS` and
-`OPENGENI_SANDBOX_SELFHOSTED_EXEC_TIMEOUT_MS` settings (30 seconds and 120
-seconds by default), while preserving the active sandbox pointer and epoch.
+`OPENGENI_SANDBOX_SELFHOSTED_EXEC_TIMEOUT_MS` settings (30 seconds and no exec
+deadline by default), while preserving the active sandbox pointer and epoch.
 
 ### Streaming exec (op-stream)
 
-Runners that advertise the `op_stream` capability can serve exec over the
-op-stream protocol instead of the monolithic request/reply, when the server
-also sets `OPENGENI_AGENT_OP_STREAM_ENABLED=true` (default off; the legacy
-exec remains the permanent fallback wire form and the only form for older
-runners). Output streams as sequenced, credit-flowed frames the runner retains
+Runners that advertise the `op_stream` capability serve exec over the
+op-stream protocol when `OPENGENI_AGENT_OP_STREAM_ENABLED=true` (default on).
+This is required for the default unbounded-duration mode. An older runner may
+still use legacy request/reply only when the deployment explicitly configures a
+positive exec timeout; otherwise OpenGeni refuses before starting the command
+instead of launching work whose caller can later disappear ambiguously. Output
+streams as sequenced, credit-flowed frames the runner retains
 for replay: a connection blip mid-command detaches instead of killing the
 child, and the server re-attaches and collects the complete output byte-exact
 (blake3-verified). Each exec carries a durable op id derived from the model's
@@ -191,6 +223,12 @@ already-running or completed op instead of re-running the command. The
 oversized-reply wall does not apply on this path; output is instead bounded by
 the runner's retention quotas, and exceeding them fails typed with exact
 counters, never silently truncated.
+
+The server's out-of-order frame stash is only a disposable replay cache, bounded
+in bytes to two negotiated flow windows per operation. Overflow drops that cache
+and re-attaches to the runner's authoritative retention log; it never limits or
+truncates command output. Completed stdout/stderr are assembled once for the
+tool result, and source frame references are then released.
 
 ## Swap the active sandbox
 
@@ -217,10 +255,35 @@ Validation (ownership, liveness, epoch fence) is server-side; a rejected target
 comes back as `swapped: false` with a `reason` rather than throwing. The next
 turn runs on whatever the pointer resolves to.
 
-## Enroll a machine
+## Connect a machine
 
 Enrollment turns a user's machine into a `selfhosted` sandbox in the workspace.
-There are two paths. Both require the caller to hold `enrollments:manage`.
+The machine agent is multi-connection: installing it once and connecting another
+workspace—even on a different OpenGeni deployment—adds an independent link and
+preserves all existing links. There are two enrollment paths. Both require the
+caller to hold `enrollments:manage`.
+
+The universal Machines-page one-liner securely installs or updates the binary,
+runs `opengeni-agent connect` for that deployment, and leaves the ordinary
+background service online. A same-version connection is additive and does not
+restart the process or interrupt existing commands. A real upgrade restarts once;
+subsequent connection files load live. `opengeni-agent run` is the explicit
+foreground alternative.
+
+Because the binary is shared, the current installer refuses to replace a newer
+installed agent with an older verified release from a lagging deployment. Set
+`OPENGENI_ALLOW_DOWNGRADE=1` only for an intentional rollback.
+Operators can inspect or remove local links with:
+
+```sh
+opengeni-agent connections
+opengeni-agent disconnect <connection-id-or-prefix>
+```
+
+`disconnect` stops only the local link. The enrollment remains visible offline
+in that workspace until a workspace administrator removes/revokes it. This is
+intentional: possessing the machine credential does not grant workspace-admin
+authority.
 
 ### Zero-click token (fleet / headless)
 
@@ -235,7 +298,8 @@ const { token, expiresAt, expiresInSeconds } =
 // Run on the machine (the installer dials OpenGeni and exchanges the token for
 // its own long-lived agent credentials — the token exchange happens on the
 // machine, not through this client):
-//   curl -fsSL https://…/install.sh | sh -s -- --token <token>
+//   OPENGENI_API_URL=https://… OPENGENI_ENROLL_TOKEN=<token> \
+//     sh -c 'curl -fsSL "$OPENGENI_API_URL/install.sh" | sh'
 ```
 
 `allowScreenControl` bakes the (optional) screen-control consent into the token;

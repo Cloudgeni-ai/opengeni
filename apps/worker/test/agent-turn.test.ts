@@ -33,6 +33,7 @@ import { testSettings } from "@opengeni/testing";
 import {
   acceptsPromptCacheKeyForTurn,
   agentRunFailurePayload,
+  assertWorkspaceHumanInputAllowed,
   assertModelResponseLatencyMode,
   assertPhysicalToolQuiescenceForCancellation,
   assertSessionAttemptQuiescenceRecoveryDurable,
@@ -50,6 +51,7 @@ import {
   ensureTurnModalRegistryImage,
   escapedMcpTimeoutRecoveryFailure,
   filterUnmaterializedSandboxFileDownloads,
+  finalizeDurableTurnOpStreams,
   historyRowsToAppend,
   hostedWebSearchForTurn,
   isLazySandboxProvisionRetryable,
@@ -87,12 +89,77 @@ import {
   waitForTurnFinalizerStep,
   waitForTurnStreamCleanup,
   TurnOperationCancelledError,
+  WorkspaceHumanInputDisabledError,
 } from "../src/activities/agent-turn";
 import { sandboxLeaseHolderIdForAttempt } from "../src/sandbox-resume";
 import { settingsWithPackSandboxImage } from "../src/activities/packs";
 import { startGitCredentialRenewalLoop } from "../src/activities/git-credential-renewal";
 
 const OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE = "openai-responses";
+
+describe("workspace structured human-input policy", () => {
+  test("disabled policy rejects forged interruptions before requires-action settlement", () => {
+    const settle = mock(() => undefined);
+    const attemptSettlement = () => {
+      assertWorkspaceHumanInputAllowed(false, "interruption", true);
+      settle();
+    };
+
+    expect(attemptSettlement).toThrow(WorkspaceHumanInputDisabledError);
+    expect(settle).not.toHaveBeenCalled();
+  });
+
+  test("disabled policy rejects stale resumes while enabled control preserves both paths", () => {
+    expect(() => assertWorkspaceHumanInputAllowed(false, "resume", true)).toThrow(
+      /policy rejects structured human-input resume/i,
+    );
+    expect(() => assertWorkspaceHumanInputAllowed(true, "resume", true)).not.toThrow();
+    expect(() => assertWorkspaceHumanInputAllowed(true, "interruption", true)).not.toThrow();
+    expect(() => assertWorkspaceHumanInputAllowed(false, "interruption", false)).not.toThrow();
+  });
+
+  // No-Claim: these pure boundary tests do not prove that a deployed worker has
+  // reloaded a workspace setting or that an already-pending request was repaired.
+});
+
+describe("Connected Machine durable stream finalization", () => {
+  test("finalizes every routed proxy once and does not bypass them for the raw fallback", async () => {
+    const calls: string[] = [];
+    const eagerProxy = {
+      finalizeOpStreamOps: async () => {
+        calls.push("eager");
+      },
+    };
+    const lazyProxy = {
+      finalizeOpStreamOps: async () => {
+        calls.push("lazy");
+        throw new Error("runner unreachable");
+      },
+    };
+    const fallback = {
+      finalizeOpStreamOps: async () => {
+        calls.push("fallback");
+      },
+    };
+
+    await finalizeDurableTurnOpStreams(
+      [lazyProxy, eagerProxy, lazyProxy, null, { finalizeOpStreamOps: "not-a-function" }],
+      fallback,
+    );
+
+    expect(calls).toEqual(["lazy", "eager"]);
+  });
+
+  test("uses the machine-primary fallback when no routing proxy exists", async () => {
+    let finalized = 0;
+    await finalizeDurableTurnOpStreams([null, undefined], {
+      finalizeOpStreamOps: async () => {
+        finalized += 1;
+      },
+    });
+    expect(finalized).toBe(1);
+  });
+});
 
 describe("disconnected MCP turn instructions", () => {
   test("warns the model without exposing an unbounded unavailable registry", () => {

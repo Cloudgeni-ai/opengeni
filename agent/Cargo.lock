@@ -1599,7 +1599,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "opengeni-agent"
-version = "0.1.9"
+version = "0.1.11"
 dependencies = [
  "async-nats",
  "async-trait",
@@ -1618,6 +1618,7 @@ dependencies = [
  "prost",
  "rand 0.8.6",
  "reqwest",
+ "semver",
  "serde",
  "serde_json",
  "tempfile",
@@ -1658,7 +1659,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-macos-ffi"
-version = "0.1.9"
+version = "0.1.11"
 dependencies = [
  "block2",
  "dispatch2",
@@ -1674,7 +1675,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-platform"
-version = "0.1.9"
+version = "0.1.11"
 dependencies = [
  "async-trait",
  "command-group",
@@ -1689,11 +1690,12 @@ dependencies = [
  "tokio",
  "tracing",
  "x11rb",
+ "xattr",
 ]
 
 [[package]]
 name = "opengeni-agent-proto"
-version = "0.1.9"
+version = "0.1.11"
 dependencies = [
  "prost",
  "prost-build",
@@ -1702,7 +1704,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-stream"
-version = "0.1.9"
+version = "0.1.11"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1719,7 +1721,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-update"
-version = "0.1.9"
+version = "0.1.11"
 dependencies = [
  "blake3",
  "hex",
@@ -1738,7 +1740,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-relay"
-version = "0.1.9"
+version = "0.1.11"
 dependencies = [
  "async-trait",
  "axum",
@@ -3400,6 +3402,16 @@ name = "x11rb-protocol"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ea6fc2961e4ef194dcbfe56bb845534d0dc8098940c7e5c012a258bfec6701bd"
+
+[[package]]
+name = "xattr"
+version = "1.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
+dependencies = [
+ "libc",
+ "rustix",
+]
 
 [[package]]
 name = "yoke"

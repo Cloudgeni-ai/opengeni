@@ -21,8 +21,9 @@
 //!    with `{ deviceCode }` until the state is `authorized` (carrying
 //!    [`EnrollmentCredentials`]), `denied`, `expired`, or `disabled`, honoring the
 //!    server's poll interval (the API rate-limits via HTTP 429, not `slow_down`).
-//! 4. The caller persists the returned credentials `0600` (see
-//!    [`crate::config::save_credentials`]).
+//! 4. The caller wraps the returned credentials in the deployment-aware local
+//!    connection identity and persists them owner-only (see
+//!    [`crate::config::save_connection`]).
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -46,8 +47,8 @@ const POLL_PATH: &str = "/v1/enrollments/device/poll";
 /// branch returns (spec §A2.3).
 const EXCHANGE_PATH: &str = "/v1/enrollments/token/exchange";
 /// The durable machine-identity seed file inside the config dir. This is separate
-/// from `credentials.json`: forced re-enrollment overwrites workspace credentials
-/// but must not rotate the machine's ed25519 identity.
+/// from the per-workspace connection documents: refreshing one workspace's
+/// credentials must not rotate the machine's ed25519 identity.
 const INSTALL_IDENTITY_FILE: &str = "machine-identity.ed25519";
 /// The serialized length of an ed25519 signing seed.
 const INSTALL_IDENTITY_SEED_LEN: usize = 32;

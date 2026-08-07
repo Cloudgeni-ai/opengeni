@@ -14,13 +14,13 @@
 //! * **Budgets** — every byte figure is derived from the measured
 //!   [`HostCapacity`] as a fraction with the old absolute defaults as FLOORS
 //!   (rule R), and the per-frame wire size is T-derived from the negotiated
-//!   NATS `max_payload` ([`Engine::set_negotiated_max_payload`]).
+//!   NATS `max_payload` (the smallest active link value wins).
 //! * **Spool ledger** — the global disk budget (PROTOCOL.md ruling M2): each
 //!   job reserves its per-op spool quota against the shared budget at start
 //!   and releases it at teardown; when the budget is short the op's quota is
 //!   clamped (loudly) rather than the op refused.
-//! * **Routing** — `op_id → mailbox` for wire-command delivery and the
-//!   broadcast [`Engine::detach_all`] a link fires on connection loss.
+//! * **Routing** — connection-scoped `op_id → mailbox` for wire-command
+//!   delivery. A lost link detaches only the jobs it owns.
 //!
 //! Lock discipline: every mutex here is a plain `std::sync::Mutex` held only
 //! for map/state operations — never across an `.await`, a spawn, or a hook.
@@ -39,7 +39,7 @@ use opengeni_agent_engine::registry::{
 use opengeni_agent_engine::retention::RetentionConfig;
 use opengeni_agent_engine::{Frame, HostCapacity, OpId};
 use opengeni_agent_platform::ContainedExec;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Notify};
 use tracing::{info, warn};
 
 use crate::job::{run_job, JobCommand, JobConfig, JobEnd, JobExit, JobHooks, JobParams};
@@ -47,6 +47,21 @@ use crate::job::{run_job, JobCommand, JobConfig, JobEnd, JobExit, JobHooks, JobP
 /// The admission-fairness origin for legacy request/reply work (legacy
 /// requests carry no session identity; they share one fairness domain).
 pub const LEGACY_ORIGIN: &str = "legacy";
+
+/// Builds the process-internal operation identity. The wire id remains unchanged;
+/// the local connection scope prevents unrelated OpenGeni deployments from
+/// colliding in the shared registry/admission/router.
+#[must_use]
+pub fn scoped_op_id(scope: &str, wire_op_id: &str) -> OpId {
+    OpId::new(format!("{scope}:{wire_op_id}"))
+}
+
+/// Namespaces an admission fairness origin for the same reason as
+/// [`scoped_op_id`].
+#[must_use]
+pub fn scoped_origin(scope: &str, origin: &str) -> String {
+    format!("{scope}:{origin}")
+}
 
 /// Commands queued to one job. A pipe diameter, not a limit (queue rule):
 /// senders block/backpressure, the pump drains every loop iteration.
@@ -233,6 +248,10 @@ pub struct Engine {
     spool_reserved: Mutex<u64>,
     /// T-derived per-frame data size (from the negotiated max_payload).
     max_frame_bytes: AtomicUsize,
+    /// Negotiated payload per active deployment link. The shared engine uses the
+    /// smallest active transport envelope so every emitted frame is publishable on
+    /// the link that owns it; removing a link recomputes the value.
+    transport_payloads: Mutex<HashMap<String, usize>>,
     /// Op frames dropped by the fire-and-forget publish path (bulk lane down
     /// or its channel full). Protocol-healed (gap-detect + replay), but per
     /// FAILURE-VISIBILITY healed faults are RECORDED — this feeds the
@@ -301,6 +320,7 @@ impl Engine {
             spool_root,
             spool_reserved: Mutex::new(0),
             max_frame_bytes: AtomicUsize::new(FALLBACK_FRAME_BYTES),
+            transport_payloads: Mutex::new(HashMap::new()),
             frames_dropped: AtomicU64::new(0),
             started: std::time::Instant::now(),
         })
@@ -350,12 +370,45 @@ impl Engine {
 
     /// Derives the per-frame data size from the connection's negotiated
     /// `max_payload` (rule T: query the external constraint, derive from it).
+    #[cfg(test)]
     pub fn set_negotiated_max_payload(&self, max_payload: usize) {
-        let frame = if max_payload > 2 * FRAME_ENVELOPE_MARGIN {
-            max_payload - FRAME_ENVELOPE_MARGIN
-        } else {
-            FALLBACK_FRAME_BYTES
-        };
+        self.set_link_max_payload("default", max_payload);
+    }
+
+    /// Records one active link's negotiated payload and derives the safe shared
+    /// frame size from the smallest active transport.
+    pub fn set_link_max_payload(&self, scope: &str, max_payload: usize) {
+        self.transport_payloads
+            .lock()
+            .expect("transport payloads lock")
+            .insert(scope.to_string(), max_payload);
+        self.recompute_frame_bytes();
+    }
+
+    /// Removes a disconnected link's transport envelope from the shared minimum.
+    pub fn clear_link_max_payload(&self, scope: &str) {
+        self.transport_payloads
+            .lock()
+            .expect("transport payloads lock")
+            .remove(scope);
+        self.recompute_frame_bytes();
+    }
+
+    fn recompute_frame_bytes(&self) {
+        let min_payload = self
+            .transport_payloads
+            .lock()
+            .expect("transport payloads lock")
+            .values()
+            .copied()
+            .min();
+        let frame = min_payload.map_or(FALLBACK_FRAME_BYTES, |max_payload| {
+            if max_payload > 2 * FRAME_ENVELOPE_MARGIN {
+                max_payload - FRAME_ENVELOPE_MARGIN
+            } else {
+                FALLBACK_FRAME_BYTES
+            }
+        });
         self.max_frame_bytes.store(frame, Ordering::Relaxed);
     }
 
@@ -659,19 +712,39 @@ impl Engine {
         self.registry.lock().expect("registry lock").counters()
     }
 
-    /// Broadcasts `Detach` to every live job — a link lost its connection.
-    /// Ops keep running and retaining output (op ⊥ connection); the server
-    /// re-attaches per op after reconnect.
-    pub fn detach_all(&self) {
+    /// Detaches only jobs owned by one deployment/workspace link. Other links
+    /// continue streaming uninterrupted when this transport reconnects.
+    pub async fn detach_scope(&self, scope: &str) {
+        let prefix = format!("{scope}:");
         let routes: Vec<mpsc::Sender<JobCommand>> = self
             .routes
             .lock()
             .expect("routes lock")
-            .values()
-            .cloned()
+            .iter()
+            .filter(|(op_id, _)| op_id.as_str().starts_with(&prefix))
+            .map(|(_, sender)| sender.clone())
             .collect();
+        let mut completions = Vec::with_capacity(routes.len());
         for sender in routes {
-            let _ = sender.try_send(JobCommand::Detach);
+            let completed = Arc::new(Notify::new());
+            if sender
+                .send(JobCommand::Detach {
+                    completed: Some(completed.clone()),
+                })
+                .await
+                .is_ok()
+            {
+                completions.push((sender, completed));
+            }
+        }
+        // FIFO mailbox ordering makes each receipt a hard generation fence:
+        // every earlier Ack/Attach has been handled and Detach has disabled
+        // emission before a successor bulk lane may become visible.
+        for (sender, completed) in completions {
+            tokio::select! {
+                () = completed.notified() => {}
+                () = sender.closed() => {}
+            }
         }
     }
 
@@ -840,18 +913,206 @@ mod tests {
         assert_eq!(engine.max_frame_bytes(), FALLBACK_FRAME_BYTES);
     }
 
+    #[test]
+    fn shared_frame_size_uses_smallest_active_connection() {
+        let (engine, _dir) = test_engine(AdmissionConfig::default());
+        engine.set_link_max_payload("large", 4 * 1024 * 1024);
+        engine.set_link_max_payload("small", 1024 * 1024);
+        assert_eq!(
+            engine.max_frame_bytes(),
+            1024 * 1024 - FRAME_ENVELOPE_MARGIN
+        );
+        engine.clear_link_max_payload("small");
+        assert_eq!(
+            engine.max_frame_bytes(),
+            4 * 1024 * 1024 - FRAME_ENVELOPE_MARGIN
+        );
+    }
+
+    #[test]
+    fn identical_wire_operation_ids_are_distinct_across_connections() {
+        let first = scoped_op_id("deployment-a", "call:0");
+        let second = scoped_op_id("deployment-b", "call:0");
+        assert_ne!(first, second);
+        assert_eq!(first.as_str(), "deployment-a:call:0");
+    }
+
+    #[tokio::test]
+    async fn detach_scope_waits_through_a_full_mailbox_for_the_pump_receipt() {
+        let (engine, _dir) = test_engine(AdmissionConfig::default());
+        let op = scoped_op_id("deployment-a", "slow-pump");
+        let (sender, mut receiver) = mpsc::channel(1);
+        engine
+            .routes
+            .lock()
+            .expect("routes lock")
+            .insert(op, sender.clone());
+
+        // Fill the mailbox so detach_scope must wait for pump capacity before
+        // it can even enqueue the generation fence.
+        sender
+            .send(JobCommand::Ack {
+                generation: 1,
+                acked_seq: 0,
+                credit_bytes: 0,
+                final_ack: false,
+            })
+            .await
+            .expect("prefill mailbox");
+
+        let detach = {
+            let engine = engine.clone();
+            tokio::spawn(async move { engine.detach_scope("deployment-a").await })
+        };
+        tokio::task::yield_now().await;
+        assert!(
+            !detach.is_finished(),
+            "a full pump mailbox must hold the generation fence"
+        );
+
+        assert!(matches!(
+            receiver.recv().await,
+            Some(JobCommand::Ack { .. })
+        ));
+        let completed = match receiver.recv().await {
+            Some(JobCommand::Detach {
+                completed: Some(completed),
+            }) => completed,
+            other => panic!("expected receipt-bearing detach, got {other:?}"),
+        };
+        tokio::task::yield_now().await;
+        assert!(
+            !detach.is_finished(),
+            "enqueue alone is not proof that the pump applied detach"
+        );
+
+        completed.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(1), detach)
+            .await
+            .expect("detach scope completes after the pump receipt")
+            .expect("detach task did not panic");
+    }
+
+    #[tokio::test]
+    async fn detach_scope_accepts_route_closure_as_terminal_proof() {
+        let (engine, _dir) = test_engine(AdmissionConfig::default());
+        let op = scoped_op_id("deployment-a", "dead-pump");
+        let (sender, receiver) = mpsc::channel(1);
+        engine
+            .routes
+            .lock()
+            .expect("routes lock")
+            .insert(op, sender);
+        drop(receiver);
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            engine.detach_scope("deployment-a"),
+        )
+        .await
+        .expect("a dead pump cannot strand generation teardown");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn detached_active_job_cannot_emit_into_a_successor_lane_before_reattach() {
+        let (engine, _dir) = test_engine(AdmissionConfig::default());
+        let op = scoped_op_id("deployment-a", "streaming-op");
+        let ticket = engine
+            .admit(&op, JobClass::Heavy, "o")
+            .await
+            .expect("admit");
+
+        // Mirrors the supervisor's shared bulk-lane cell: each emission reads
+        // whichever generation sender is currently installed.
+        let lane: Arc<RwLock<Option<mpsc::UnboundedSender<Frame>>>> = Arc::new(RwLock::new(None));
+        let (first_tx, mut first_rx) = mpsc::unbounded_channel();
+        *lane.write().expect("lane lock") = Some(first_tx);
+        let emit_lane = lane.clone();
+        let outcome = engine.start_job(
+            &op,
+            ticket,
+            Vec::new(),
+            None,
+            false,
+            || {
+                Ok::<_, std::io::Error>(sh(
+                    "i=0; while [ $i -lt 200 ]; do printf '%08d' $i; i=$((i+1)); sleep 0.005; done",
+                ))
+            },
+            move |frame| {
+                if let Some(sender) = emit_lane.read().expect("lane lock").as_ref() {
+                    let _ = sender.send(frame);
+                }
+            },
+            |_| Vec::new(),
+            |_, _| {},
+        );
+        let StartOutcome::Started(started) = outcome else {
+            panic!("fresh op must start");
+        };
+        started
+            .mailbox
+            .send(JobCommand::Attach {
+                generation: 1,
+                from_seq: 0,
+                window_bytes: 1 << 20,
+            })
+            .await
+            .expect("initial attach");
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), first_rx.recv())
+            .await
+            .expect("first generation emits in time")
+            .expect("first lane remains open");
+
+        engine.detach_scope("deployment-a").await;
+        let (successor_tx, mut successor_rx) = mpsc::unbounded_channel();
+        *lane.write().expect("lane lock") = Some(successor_tx);
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), successor_rx.recv(),)
+                .await
+                .is_err(),
+            "a detached old pump must not emit through the successor lane"
+        );
+
+        started
+            .mailbox
+            .send(JobCommand::Attach {
+                generation: 2,
+                from_seq: first.seq,
+                window_bytes: 1 << 20,
+            })
+            .await
+            .expect("successor attach");
+        let replayed = tokio::time::timeout(std::time::Duration::from_secs(2), successor_rx.recv())
+            .await
+            .expect("reattached generation emits in time")
+            .expect("successor lane remains open");
+        assert!(
+            replayed.seq > first.seq,
+            "successor resumes strictly after the acknowledged floor"
+        );
+
+        engine.cancel(&op);
+    }
+
     #[tokio::test]
     async fn default_admission_admits_immediately() {
         let (engine, _dir) = test_engine(AdmissionConfig::default());
-        for i in 0..64 {
+        let mut tickets = Vec::new();
+        for i in 0..100 {
             let op = OpId::new(format!("op-{i}"));
             let ticket = engine
                 .admit(&op, JobClass::Heavy, "origin")
                 .await
                 .expect("unbounded default admits");
-            // Hold nothing: drop immediately; the point is no queueing.
-            drop(ticket);
+            // Hold every ticket simultaneously: the normal default must support
+            // at least 100 concurrent agent operations without an artificial
+            // queue or fixed process-count gate.
+            tickets.push(ticket);
         }
+        assert_eq!(tickets.len(), 100);
     }
 
     #[tokio::test]
@@ -1033,13 +1294,13 @@ mod tests {
             })
             .await;
         for _ in 0..200 {
-            if !engine.route_command(&op, JobCommand::Detach) {
+            if !engine.route_command(&op, JobCommand::Detach { completed: None }) {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         assert!(
-            !engine.route_command(&op, JobCommand::Detach),
+            !engine.route_command(&op, JobCommand::Detach { completed: None }),
             "route removed once the pump task ends"
         );
     }
@@ -1201,7 +1462,7 @@ mod tests {
             "ledger share returned at the terminal record"
         );
         assert!(
-            engine.route_command(&op, JobCommand::Detach),
+            engine.route_command(&op, JobCommand::Detach { completed: None }),
             "the pump still lingers (route alive) after the early release"
         );
         // Normal teardown still works.

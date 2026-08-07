@@ -1,5 +1,32 @@
 # @opengeni/worker-bundle
 
+## 0.16.28
+
+### Patch Changes
+
+- b4123d4: Make Connected Machine command duration unbounded by default over replayable op-stream execution, preserve explicit positive deadlines for constrained deployments, wire and finalize streaming across direct and swapped machine routes, remove the generated service's aggregate memory throttle while retaining accounting and OOM isolation, and bound transient reordering memory by bytes without limiting command resources or output.
+- Updated dependencies [b4123d4]
+- Updated dependencies [b4123d4]
+- Updated dependencies [b4123d4]
+  - @opengeni/runtime@0.18.23
+  - @opengeni/config@0.11.6
+  - @opengeni/core@0.21.9
+  - @opengeni/db@0.28.8
+  - @opengeni/documents@0.5.17
+  - @opengeni/github@0.4.37
+  - @opengeni/storage@0.2.74
+  - @opengeni/events@0.3.87
+
+## 0.16.27
+
+### Patch Changes
+
+- Updated dependencies [377180c]
+  - @opengeni/db@0.28.7
+  - @opengeni/core@0.21.8
+  - @opengeni/documents@0.5.16
+  - @opengeni/events@0.3.86
+
 ## 0.16.26
 
 ### Patch Changes

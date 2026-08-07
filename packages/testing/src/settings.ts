@@ -42,7 +42,8 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     authAllowMetrics: false,
     publicBaseUrl: "http://127.0.0.1:3000",
     agentReleasesBaseUrl: "https://github.com/Cloudgeni-ai/opengeni/releases",
-    agentStableVersion: "0.1.9",
+    agentStableVersion: "0.1.11",
+    agentBetaVersion: undefined,
     productAccessMode: "local",
     billingMode: "disabled",
     entitlementsMode: "none",
@@ -218,10 +219,9 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     rigVerificationLeaseOwnershipEnabled: false,
     sandboxLazyProvisionEnabled: false,
     sandboxSelfhostedEnabled: false,
-    agentOpStreamEnabled: false,
-    // Mirror the production defaults for the split selfhosted op deadlines
-    // (config/src/index.ts): short control window, longer exec budget.
-    sandboxSelfhostedExecTimeoutMs: 120_000,
+    agentOpStreamEnabled: true,
+    // Mirror production: command duration is unbounded; control probes remain short.
+    sandboxSelfhostedExecTimeoutMs: 0,
     sandboxSelfhostedControlTimeoutMs: 30_000,
     enrollmentSigningSecret: undefined,
     selfhostedNatsUrl: undefined,

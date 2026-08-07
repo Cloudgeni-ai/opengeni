@@ -1282,7 +1282,7 @@ export function MessageTimeline({
                     className={cn(
                       // tabIndex=-1 is programmatic only — never paint a focus ring on
                       // the whole scroller (click + Shift used to flash a blue outline).
-                      "min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-6 sm:px-6 outline-none",
+                      "min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-6 sm:px-6 outline-hidden",
                       autoFollow && pinned && !hasNewer
                         ? "[overflow-anchor:none]"
                         : "[overflow-anchor:auto]",
@@ -2441,7 +2441,7 @@ function WorkerCompletionRow({
               onClick={() => onOpenSession(item.childSessionId)}
               className={cn(
                 "-my-0.5 -mr-1 inline-flex shrink-0 items-center gap-1 rounded-og-sm px-2 py-1 text-og-sm font-medium text-og-fg-muted pointer-coarse:py-2",
-                "outline-none transition-colors duration-150 hover:bg-og-surface-2 hover:text-og-fg",
+                "outline-hidden transition-colors duration-150 hover:bg-og-surface-2 hover:text-og-fg",
                 "focus-visible:ring-2 focus-visible:ring-og-accent",
               )}
             >
@@ -2457,7 +2457,7 @@ function WorkerCompletionRow({
                 type="button"
                 className={cn(
                   "group/wc -mx-1 inline-flex w-fit items-center gap-1 rounded-og-sm px-1 py-0.5 text-og-xs font-medium text-og-fg-subtle",
-                  "outline-none transition-colors duration-150 hover:text-og-fg-muted focus-visible:ring-2 focus-visible:ring-og-accent",
+                  "outline-hidden transition-colors duration-150 hover:text-og-fg-muted focus-visible:ring-2 focus-visible:ring-og-accent",
                 )}
               >
                 <ChevronRightIcon className="size-3 transition-transform duration-150 ease-og-in-out group-data-[state=open]/wc:rotate-90" />

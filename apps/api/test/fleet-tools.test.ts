@@ -52,6 +52,10 @@ let db: Database;
 const settings = testSettings({
   productAccessMode: "managed",
   sandboxSelfhostedEnabled: true,
+  // This fixture intentionally implements only the finite legacy request/reply
+  // protocol. Production's unbounded default requires the resumable op stream.
+  agentOpStreamEnabled: false,
+  sandboxSelfhostedExecTimeoutMs: 30_000,
   selfhostedRelayUrl: "wss://relay.example",
   publicBaseUrl: "https://app.example",
 });

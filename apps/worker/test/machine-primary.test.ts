@@ -111,6 +111,7 @@ describe("D1-lite — establishSelfhostedTurnSession binds the machine, no Modal
       {
         workspaceId: "ws-1",
         agentId: "enr_1",
+        opStream: false,
         epoch: 4,
         environment: env,
         workingDir: "/home/user/repo",
@@ -145,7 +146,14 @@ describe("D1-lite — establishSelfhostedTurnSession binds the machine, no Modal
   test("serializeSessionState round-trips {agentId} only (selfhosted is re-addressed, never snapshotted)", async () => {
     const established = await establishSelfhostedTurnSession(
       { db: null as never, settings: settings(), bus: undefined },
-      { workspaceId: "ws-1", agentId: "enr_xyz", epoch: 1, environment: {}, workingDir: null },
+      {
+        workspaceId: "ws-1",
+        agentId: "enr_xyz",
+        opStream: false,
+        epoch: 1,
+        environment: {},
+        workingDir: null,
+      },
     );
     const serialized = await (
       established.session as { serializeSessionState(): Promise<{ agentId: string }> }

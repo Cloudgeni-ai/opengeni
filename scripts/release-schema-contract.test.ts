@@ -198,18 +198,23 @@ describe("release schema contract", () => {
         (migrations.has("0178_permissioned_secret_reads.sql") ? 1 : 0) +
         (migrations.has("0179_slack_private_shortcut_delivery_gate.sql") ? 1 : 0) +
         (migrations.has("0180_retained_screenshot_lifecycle_fences.sql") ? 1 : 0) +
-        (migrations.has("0181_connected_machine_removal.sql") ? 1 : 0),
+        (migrations.has("0181_connected_machine_removal.sql") ? 1 : 0) +
+        (migrations.has("0182_connected_machine_remove_session_default.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "bef9b8266df4412e4a35df16521b66285faecfc0451b6898c52d1d4471ce76f9",
+      "7102df9f5f2da4825c2d2dd1a2e165afd8df256bc14465c904fcc89f06eeee83",
     );
-    expect(contract.latestMigration).toBe("0181_connected_machine_removal.sql");
+    expect(contract.latestMigration).toBe("0182_connected_machine_remove_session_default.sql");
     expect(migrations.get("0065_enrollment_credential_generation.sql")).toMatchObject({
       sha256: "2e25fa2dfb8a95a7a9ba1ef5aa9bd219755af998b3317bcdf4d7acc4f67264fe",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0181_connected_machine_removal.sql")).toMatchObject({
       sha256: "c933a0781ac3c78272c5049637e3718299382e93272ea04095077f8ce7148f0a",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0182_connected_machine_remove_session_default.sql")).toMatchObject({
+      sha256: "c15bd3b6d71f15be9e163481c3cb698d8f46620d655a72a5e56d193bc16310cd",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0180_retained_screenshot_lifecycle_fences.sql")).toMatchObject({
@@ -263,7 +268,7 @@ describe("release schema contract", () => {
       deploymentMode: "rolling",
     });
     expect(migrations.get("0172_retire_model_visible_github_token.sql")).toMatchObject({
-      sha256: "e16ecce0d4e067168590cd54086c85b2bb0d6e0f244976aa4190b942e5f76356",
+      sha256: "6e2123085f5574a046eaea7db7b5168540625d554771ee9e5639787bbde4c713",
       deploymentMode: "maintenance",
     });
     expect(

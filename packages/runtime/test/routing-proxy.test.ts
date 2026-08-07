@@ -114,6 +114,44 @@ function mutablePointer(initial: ActivePointer = { activeSandboxId: null, active
 }
 
 describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () => {
+  test("finalizes every machine backend reached across route epochs", async () => {
+    const finalized: string[] = [];
+    const first: RoutableBackendSession = {
+      async exec() {
+        return { stdout: "first", exitCode: 0 };
+      },
+      async finalizeOpStreamOps() {
+        finalized.push("first");
+      },
+    };
+    const second: RoutableBackendSession = {
+      async exec() {
+        return { stdout: "second", exitCode: 0 };
+      },
+      async finalizeOpStreamOps() {
+        finalized.push("second");
+      },
+    };
+    let pointer: ActivePointer = { activeSandboxId: "first", activeEpoch: 1 };
+    const proxy = new RoutingSandboxSession({
+      defaultResolved: { session: first, sandboxId: "first", kind: "selfhosted" },
+      readPointer: async () => pointer,
+      resolveActiveBackend: async () =>
+        pointer.activeSandboxId === "first"
+          ? { session: first, sandboxId: "first", kind: "selfhosted" }
+          : { session: second, sandboxId: "second", kind: "selfhosted" },
+    });
+
+    await proxy.exec({ cmd: "one" });
+    pointer = { activeSandboxId: "second", activeEpoch: 2 };
+    await proxy.exec({ cmd: "two" });
+    await proxy.finalizeOpStreamOps();
+
+    expect(finalized).toEqual(["first", "second"]);
+    await proxy.finalizeOpStreamOps();
+    expect(finalized).toEqual(["first", "second"]);
+  });
+
   test("observes each physical provider attempt without changing provider outcomes", async () => {
     const observations: Array<{
       backend: string;

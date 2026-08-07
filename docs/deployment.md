@@ -1313,12 +1313,17 @@ for other OS/arch assets and the self-update channel. Route these paths (and an
 optional `get.<domain>` host) to the `api` service in the ingress.
 
 `/agent/latest/<asset>` is a compatibility route backed by the immutable
-versioned release selected by `OPENGENI_AGENT_STABLE_VERSION` (default `0.1.9`).
+versioned release selected by `OPENGENI_AGENT_STABLE_VERSION` (default `0.1.11`).
 `OPENGENI_AGENT_RELEASES_BASE_URL` selects the archive origin. Promote or roll
 back the stable channel by changing the configured version only after the
 corresponding `agent-v<version>` release and its signed assets exist; never move
 or delete an agent release tag. A baked asset still takes precedence so a
 deployed control-plane image serves its release-coherent binary directly.
+The same deployment serves signed `/agent/stable/manifest.json` and
+`manifest.json.minisig` routes so an enrolled agent updates through a control
+plane it already trusts instead of depending on public DNS. Beta is independent
+and unavailable unless `OPENGENI_AGENT_BETA_VERSION` points at an existing signed
+immutable release.
 
 ### Enrolling a machine
 
