@@ -479,18 +479,21 @@ linuxDescribe("run credential sandbox lifecycle — real local box", () => {
         sessionId,
         attemptId: successorAttempt,
         executionGeneration: 2,
-        pruneOtherAttempts: true,
       },
     );
-    const versionCount = await session.exec({
+    const versionCountBeforeCleanup = await session.exec({
       cmd: `find ${runCredentialRoot(sessionId)}/versions -mindepth 1 -maxdepth 1 -type d | wc -l`,
     });
-    expect(versionCount.stdout.trim()).toBe("1");
+    expect(versionCountBeforeCleanup.stdout.trim()).toBe("2");
     await clearRunCredentialsForAttempt(session as never, {
       sessionId,
       attemptId: firstAttempt,
       executionGeneration: 1,
     });
+    const versionCountAfterCleanup = await session.exec({
+      cmd: `find ${runCredentialRoot(sessionId)}/versions -mindepth 1 -maxdepth 1 -type d | wc -l`,
+    });
+    expect(versionCountAfterCleanup.stdout.trim()).toBe("1");
     const wrapped = withRunCredentialsSession(session, sessionId);
     const result = await wrapped.exec({ cmd: `printf '%s' "$TOKEN"` });
     expect(result.stdout).toBe("successor-secret");
