@@ -1200,6 +1200,7 @@ describe("API component integration", () => {
       workspaceId: delegatedWorkspace.defaultWorkspaceId!,
       subjectId: "test:local-delegated-worker",
       permissions: ["workspace:read"],
+      principalKind: "service",
       sessionId,
       exp: Math.floor(Date.now() / 1000) + 60,
     });
@@ -4123,7 +4124,7 @@ describe("API component integration", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ initialMessage: "existing schedule target" }),
     });
-    expect(targetResponse.status).toBe(201);
+    expect(targetResponse.status).toBe(202);
     const target = (await targetResponse.json()) as { id: string };
 
     const createResponse = await app.request(workspacePath(workspaceId, "/scheduled-tasks"), {
@@ -4355,7 +4356,7 @@ describe("API component integration", () => {
       {
         kind: "file",
         fileId: upload.fileId,
-        mountPath: `files/${upload.fileId}`,
+        mountPath: `.opengeni/files/${upload.fileId}`,
       },
     ]);
     const initialEvents = await listSessionEvents(dbClient.db, workspaceId, session.id, 0, 10);
@@ -4368,7 +4369,7 @@ describe("API component integration", () => {
         {
           kind: "file",
           fileId: upload.fileId,
-          mountPath: `files/${upload.fileId}`,
+          mountPath: `.opengeni/files/${upload.fileId}`,
         },
       ],
     });
@@ -4411,7 +4412,7 @@ describe("API component integration", () => {
         {
           kind: "file",
           fileId: upload.fileId,
-          mountPath: `files/${upload.fileId}`,
+          mountPath: `.opengeni/files/${upload.fileId}`,
         },
       ],
     });
@@ -4426,7 +4427,7 @@ describe("API component integration", () => {
       {
         kind: "file",
         fileId: upload.fileId,
-        mountPath: `files/${upload.fileId}`,
+        mountPath: `.opengeni/files/${upload.fileId}`,
       },
     ]);
   });
@@ -4951,9 +4952,7 @@ describe("API component integration", () => {
 
     const connect = await app.request(beforeInfo.installUrl!);
     expect(connect.status).toBe(302);
-    expect(connect.headers.get("location")).toContain(
-      "https://github.com/apps/opengeni-test-app/installations/new",
-    );
+    expect(connect.headers.get("location")).toContain("https://github.com/login/oauth/authorize");
     const connectCookie = connect.headers.get("set-cookie")!.split(";", 1)[0]!;
     const setup = await app.request(
       `/v1/github/setup?installation_id=${installationId}&setup_action=install&state=${encodeURIComponent(initialState)}`,
@@ -7337,7 +7336,9 @@ describe("API component integration", () => {
       body: JSON.stringify({ name: `nokey-${crypto.randomUUID()}` }),
     });
     expect(createResponse.status).toBe(503);
-    expect(await createResponse.text()).toContain("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY");
+    const createError = (await createResponse.json()) as { error: { code: string } };
+    expect(createError.error.code).toBe("upstream_unavailable");
+    expect(JSON.stringify(createError)).not.toContain("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY");
 
     const sessionResponse = await app.request(workspacePath(workspaceId, "/sessions"), {
       method: "POST",
@@ -8114,7 +8115,7 @@ describe("API component integration", () => {
     };
 
     const first = await callMcpTool<McpMutationReceiptType>(mcp, "session_create", args);
-    const replay = await callMcpTool<McpMutationReceiptType>(mcp, "session_create", args);
+    const repaired = await callMcpTool<McpMutationReceiptType>(mcp, "session_create", args);
 
     expect(first).toMatchObject({
       operation: "session_create",
@@ -8123,14 +8124,33 @@ describe("API component integration", () => {
       idempotency: { status: "applied" },
       resource: { type: "session", state: "queued" },
     });
+    expect(repaired).toMatchObject({
+      operation: "session_create",
+      committed: true,
+      outcome: "repaired",
+      changed: true,
+      idempotency: { status: "applied" },
+      resource: { type: "session", id: first.resource.id, state: "queued" },
+    });
+    const claimed = await claimSessionWorkForAttempt(dbClient.db, grant.workspaceId, {
+      sessionId: first.resource.id,
+      workflowId: `session-${first.resource.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(claimed.action).toBe("claimed");
+    const replay = await callMcpTool<McpMutationReceiptType>(mcp, "session_create", args);
     expect(replay).toMatchObject({
       operation: "session_create",
       outcome: "replayed",
       changed: false,
       idempotency: { status: "replayed" },
-      resource: { type: "session", id: first.resource.id, state: "queued" },
+      resource: { type: "session", id: first.resource.id },
     });
     expect(JSON.stringify(first)).not.toContain(initialMessage);
+    expect(JSON.stringify(repaired)).not.toContain(initialMessage);
     expect(JSON.stringify(replay)).not.toContain(initialMessage);
     expect(await withWorkspaceCount(dbClient.db, grant.workspaceId, idempotencyKey)).toBe(1);
     expect(await requireSession(dbClient.db, grant.workspaceId, first.resource.id)).toMatchObject({
@@ -8304,15 +8324,20 @@ describe("API component integration", () => {
         firstPartyMcpTools: ["session_create"],
       },
     });
-    const inheritedChild = await callMcpTool<{
-      id: string;
-      parentSessionId: string | null;
-      firstPartyMcpPermissions: string[] | null;
-    }>(childMcp, "session_create", {
-      initialMessage: "inherit the manager boundary",
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
+    const inheritedChildReceipt = await callMcpTool<McpMutationReceiptType>(
+      childMcp,
+      "session_create",
+      {
+        initialMessage: "inherit the manager boundary",
+        model: "scripted-model",
+        sandboxBackend: "none",
+      },
+    );
+    const inheritedChild = await requireSession(
+      dbClient.db,
+      grant.workspaceId,
+      inheritedChildReceipt.resource.id,
+    );
     expect(inheritedChild.parentSessionId).toBe(managerSession.id);
     expect(inheritedChild.firstPartyMcpPermissions).toEqual([
       "workspace:read",
@@ -8683,7 +8708,9 @@ describe("API component integration", () => {
       },
     });
     expect(missingKey.status).toBe(503);
-    expect(await missingKey.text()).toContain("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY");
+    const missingKeyError = (await missingKey.json()) as { error: { code: string } };
+    expect(missingKeyError.error.code).toBe("upstream_unavailable");
+    expect(JSON.stringify(missingKeyError)).not.toContain("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY");
 
     const hostConnectionRef = {
       connectionId: "cloud-connection:github:1",
@@ -9142,7 +9169,7 @@ describe("API component integration", () => {
       },
     );
     expect(rejected.status).toBe(409);
-    expect(await rejected.text()).toContain("Cancelled session cannot accept work");
+    expect(await rejected.text()).toContain("Cancelled session subtree cannot accept work");
 
     const afterCredentials = await readStoredSessionMcpServer(dbClient.db, session.id, "crm", key);
     expect(afterCredentials?.headers).toEqual({
