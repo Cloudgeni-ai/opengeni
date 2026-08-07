@@ -23,7 +23,7 @@
 //!   clean going-offline.
 //! * [`cli`] — the `run` / `connect` / `connections` / `disconnect` / `service` /
 //!   `update` / `uninstall` surface.
-//! * [`service`] — the opt-in always-on service install/uninstall/status glue.
+//! * [`service`] — the ordinary background-service lifecycle glue.
 //! * [`update`] — the `update` subcommand wiring the self-update crate.
 //! * [`uninstall`] — the `uninstall` subcommand (remove binary/creds/enrollment).
 //!
@@ -137,6 +137,9 @@ async fn dispatch_command(cli: Cli) -> anyhow_lite::Result {
         }
         Command::Connections => list_connections(&api_url),
         Command::Disconnect(args) => disconnect(&args, &api_url),
+        Command::Start(args) => service::ensure_running(&args).map_err(string_err),
+        Command::Stop(args) => service::stop(&args).map_err(string_err),
+        Command::Status(args) => service::show_status(&args).map_err(string_err),
         Command::Service(args) => service::run(&args).map_err(string_err),
         Command::Update(args) => {
             // The updater is synchronous (download → verify → swap); run it on a

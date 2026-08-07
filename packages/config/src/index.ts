@@ -249,7 +249,13 @@ const SettingsSchema = z.object({
   agentStableVersion: z
     .string()
     .regex(/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u)
-    .default("0.1.10"),
+    .default("0.1.11"),
+  // Optional independent beta-channel pointer. When unset, the beta update
+  // manifest route is unavailable rather than silently serving stable.
+  agentBetaVersion: z
+    .string()
+    .regex(/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u)
+    .optional(),
   productAccessMode: ProductAccessMode.default("local"),
   billingMode: BillingMode.default("disabled"),
   entitlementsMode: EntitlementsMode.default("none"),
@@ -1752,6 +1758,7 @@ export function getSettings(): Settings {
     webBaseUrl: optional("OPENGENI_WEB_BASE_URL"),
     agentReleasesBaseUrl: optional("OPENGENI_AGENT_RELEASES_BASE_URL"),
     agentStableVersion: optional("OPENGENI_AGENT_STABLE_VERSION"),
+    agentBetaVersion: optional("OPENGENI_AGENT_BETA_VERSION"),
     productAccessMode: optional("OPENGENI_PRODUCT_ACCESS_MODE"),
     billingMode: optional("OPENGENI_BILLING_MODE"),
     entitlementsMode: optional("OPENGENI_ENTITLEMENTS_MODE"),

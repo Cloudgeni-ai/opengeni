@@ -150,8 +150,11 @@ admission has no ordinary fixed concurrency or queue-wait limit: its only
 circuit breakers are derived from host file-descriptor and process headroom and
 sit above normal workloads (including 100 concurrent command requests). Linux
 puts the supervisor and each operation in separate cgroup-v2 leaves for fate
-isolation and accounting. The generated systemd unit enables accounting without
-a parent `MemoryHigh`, and the default operation leaf has no memory maximum or
+isolation and accounting. Before moving itself, the supervisor stamps its own leaf
+with systemd-oomd's `user.oomd_avoid=1` marker; if that protection cannot be
+established, it stays in the already-protected unit cgroup. The generated systemd
+unit explicitly clears stale aggregate resource limits and enables accounting
+without a parent `MemoryHigh`; the default operation leaf has no memory maximum or
 throttle. At spawn, the agent stops the command's process group, moves its direct
 roots, then repeatedly drains any same-group descendants still inherited in the
 supervisor leaf into the same operation leaf before resuming it. Correctness does
@@ -166,10 +169,12 @@ while a pathological breaker trip is loud and typed.
 
 Operators can opt into local per-operation limits with
 `OPENGENI_AGENT_OP_MEMORY_MAX` and `OPENGENI_AGENT_OP_MEMORY_HIGH`; unset is the
-authoritative unlimited default. A future centrally managed per-machine memory
-policy must project onto these operation leaves (or a machine-scoped command
-parent), remain explicitly `unlimited` by default, and never constrain the
-supervisor leaf or install an implicit service-wide `MemoryHigh`.
+authoritative unlimited default. This policy is intentionally local today: one
+physical installation may serve unrelated deployments, so a workspace must not
+silently impose a machine-global cap on the others. Any future control-plane
+setting must either be connection-scoped or owned explicitly by the machine
+operator, remain `unlimited` by default, and never constrain the supervisor leaf
+or install an implicit service-wide `MemoryHigh`.
 
 Exec duration is unbounded by default. `timeout_ms=0` and op-stream
 `deadline_ms=0` schedule no process kill; a positive
@@ -258,11 +263,12 @@ workspace—even on a different OpenGeni deployment—adds an independent link a
 preserves all existing links. There are two enrollment paths. Both require the
 caller to hold `enrollments:manage`.
 
-The universal Machines-page one-liner installs or updates the binary and runs
-`opengeni-agent connect` for that deployment. A running v0.1.10+ foreground or
-service agent detects the new owner-only connection file automatically. When the
-command upgrades an older running process, restart that process once; subsequent
-connections load live.
+The universal Machines-page one-liner securely installs or updates the binary,
+runs `opengeni-agent connect` for that deployment, and leaves the ordinary
+background service online. A same-version connection is additive and does not
+restart the process or interrupt existing commands. A real upgrade restarts once;
+subsequent connection files load live. `opengeni-agent run` is the explicit
+foreground alternative.
 
 Because the binary is shared, the current installer refuses to replace a newer
 installed agent with an older verified release from a lagging deployment. Set

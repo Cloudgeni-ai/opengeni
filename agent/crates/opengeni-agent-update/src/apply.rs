@@ -18,8 +18,7 @@
 //! swap/rollback logic is unit-testable without being the live process.
 //!
 //! [`rollback`] restores the backup over the live path — the local safety net a
-//! crash-looping new binary triggers via the service manager's recovery action
-//! (`--restore-last-known-good`).
+//! failed post-swap startup preflight consumes immediately.
 
 use std::path::{Path, PathBuf};
 

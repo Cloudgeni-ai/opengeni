@@ -17,7 +17,7 @@ members = [
 # we lean on clippy::pedantic at the workspace level and silence only the few
 # lints that fight generated code or add no value here.
 [workspace.package]
-version = "0.1.10"
+version = "0.1.11"
 edition = "2021"
 rust-version = "1.82"
 license = "Apache-2.0"
@@ -71,6 +71,10 @@ hostname = "0.4"
 # workspace `unsafe_code = forbid` holds. Only the `fs` feature (statvfs) is
 # pulled; unix-only (cfg-gated at the call site).
 nix = { version = "0.29", default-features = false, features = ["fs", "process", "signal"] }
+# Safe extended-attribute access. On Linux the supervisor cgroup itself must carry
+# systemd-oomd's `user.oomd_avoid=1`; the unit-level attribute does not inherit
+# into the delegated child cgroup the agent moves into.
+xattr = "1.6.1"
 
 # M8 stream plane.
 # A real PTY (openpty/ConPTY) via a SAFE binding — no unsafe.

@@ -20,7 +20,7 @@ use crate::config;
 ///
 /// Returns a human-facing error string if a filesystem op fails.
 pub fn run(args: &UninstallArgs) -> Result<(), String> {
-    // Best-effort: stop + remove any opt-in service first.
+    // Best-effort: stop + remove the background service first.
     let service_args = ServiceArgs {
         action: ServiceAction::Uninstall(ServiceScopeArgs { system: false }),
     };

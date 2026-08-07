@@ -62,6 +62,12 @@ const CGROUP2_MOUNT: &str = "/sys/fs/cgroup";
 #[cfg(target_os = "linux")]
 const SUPERVISOR_LEAF: &str = "supervisor";
 
+/// systemd-oomd reads this cgroup xattr directly. Attributes set by
+/// `ManagedOOMPreference=avoid` on the service cgroup are not inherited by the
+/// delegated child cgroup, so the agent must stamp the leaf before moving into it.
+#[cfg(target_os = "linux")]
+const SYSTEMD_OOMD_AVOID_XATTR: &str = "user.oomd_avoid";
+
 /// How many times [`OpCgroupHandle::teardown`] retries an `rmdir` that returns
 /// `EBUSY` (the op's processes are reaped a moment after the group is killed).
 #[cfg(target_os = "linux")]
@@ -454,13 +460,23 @@ pub fn establish_oom_isolation(config: OpCgroupConfig) -> Option<Arc<OpCgroups>>
         return None;
     }
 
-    // 4. No-internal-processes dance: move ourselves into the supervisor leaf, then
-    //    delegate the memory controller to our children. Order matters — the
-    //    service cgroup must hold no member processes before subtree_control can
-    //    enable a controller.
+    // 4. No-internal-processes dance: create and PROTECT the supervisor leaf,
+    //    move ourselves into it, then delegate the memory controller to sibling
+    //    op leaves. `ManagedOOMPreference=avoid` lives as an xattr on the service
+    //    cgroup and is not inherited by this child. Stamping the actual leaf
+    //    before the move is load-bearing: without it systemd-oomd can select and
+    //    kill the supervisor while leaving command siblings alive.
     let supervisor_dir = service_dir.join(SUPERVISOR_LEAF);
     if let Err(error) = create_dir_idempotent(&supervisor_dir) {
         tracing::info!(%error, dir = %supervisor_dir.display(), "OOM cgroup isolation unavailable: cannot create the supervisor leaf; serving without per-op isolation");
+        return None;
+    }
+    if let Err(error) = xattr::set(&supervisor_dir, SYSTEMD_OOMD_AVOID_XATTR, b"1") {
+        tracing::warn!(
+            %error,
+            dir = %supervisor_dir.display(),
+            "OOM cgroup isolation unavailable: cannot protect the supervisor leaf from systemd-oomd; keeping the supervisor in the unit cgroup"
+        );
         return None;
     }
     if let Err(error) = std::fs::write(
@@ -484,7 +500,7 @@ pub fn establish_oom_isolation(config: OpCgroupConfig) -> Option<Arc<OpCgroups>>
         memory_max = ?config.memory_max,
         memory_high = ?config.memory_high,
         placement_pid_breaker,
-        "established per-op OOM cgroup isolation: host execs run in memory sub-cgroups; the control supervisor is fate-isolated in its own leaf"
+        "established per-op OOM cgroup isolation: host execs run in memory sub-cgroups; the protected control supervisor is fate-isolated in its own leaf"
     );
     Some(Arc::new(OpCgroups {
         service_dir,

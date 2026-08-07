@@ -1,21 +1,38 @@
-//! The opt-in service install/uninstall/start/stop/status handlers.
+//! Always-on service install/start/stop/status handlers.
 //!
-//! The default supported model is FOREGROUND `run`; this module provides the
-//! explicit opt-in service path. The cross-platform service mechanism lives in
+//! The normal post-connect model is the always-on background service; `run` is
+//! the explicit foreground mode. The cross-platform service mechanism lives in
 //! [`opengeni_agent_platform::service`] (one trait, cargo-unit-tested); this module
 //! is the thin binary-side glue that resolves the installed binary path, writes the
 //! rendered unit/plist, and drives the platform service tool (`systemctl` /
-//! `launchctl` / `sc.exe`). Linux is the concrete, live path; macOS/Windows write
-//! the definition + print the activation commands (structured + compiling, finished
-//! on their native runners).
+//! `launchctl` / `sc.exe`).
 
 use std::path::PathBuf;
 use std::process::Command;
 
 use opengeni_agent_platform::service::{self, ServiceBackend, ServiceScope, ServiceSpec};
-use tracing::{info, warn};
+use tracing::info;
 
-use crate::cli::{ServiceAction, ServiceArgs, ServiceInstallArgs, ServiceScopeArgs};
+use crate::cli::{ServiceAction, ServiceArgs, ServiceInstallArgs, ServiceScopeArgs, StartArgs};
+
+/// Idempotently installs, enables, and starts the ordinary background service.
+pub fn ensure_running(args: &StartArgs) -> Result<(), String> {
+    install(&ServiceInstallArgs {
+        system: args.system,
+        print: false,
+        restart: args.restart,
+    })
+}
+
+/// Stops the ordinary background service.
+pub fn stop(args: &ServiceScopeArgs) -> Result<(), String> {
+    lifecycle("stop", scope(args))
+}
+
+/// Prints the ordinary background service status.
+pub fn show_status(args: &ServiceScopeArgs) -> Result<(), String> {
+    status(scope(args))
+}
 
 /// Dispatches a `service` subcommand. Returns a human-facing result string on
 /// success or an error message on failure.
@@ -80,9 +97,9 @@ fn install(args: &ServiceInstallArgs) -> Result<(), String> {
     }
 
     match ServiceSpec::backend() {
-        ServiceBackend::Systemd => install_systemd(&spec),
-        ServiceBackend::Launchd => install_launchd(&spec),
-        ServiceBackend::WindowsScm => install_windows(&spec),
+        ServiceBackend::Systemd => install_systemd(&spec, args.restart),
+        ServiceBackend::Launchd => install_launchd(&spec, args.restart),
+        ServiceBackend::WindowsScm => install_windows(&spec, args.restart),
         ServiceBackend::Unsupported => Err(service::unsupported_backend().to_string()),
     }
 }
@@ -90,7 +107,7 @@ fn install(args: &ServiceInstallArgs) -> Result<(), String> {
 /// Linux: write the user (or system) unit, reload systemd, enable+start it, and —
 /// for a user unit — enable lingering so it survives logout / boots without a
 /// session. This is the concrete, testable live path.
-fn install_systemd(spec: &ServiceSpec) -> Result<(), String> {
+fn install_systemd(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
     let unit_path = service::systemd_unit_path(spec.scope, &home()?);
     let body = service::render_systemd_unit(spec);
     if let Some(parent) = unit_path.parent() {
@@ -102,15 +119,23 @@ fn install_systemd(spec: &ServiceSpec) -> Result<(), String> {
     match spec.scope {
         ServiceScope::User => {
             systemctl(&["--user", "daemon-reload"])?;
+            reset_systemd_aggregate_limits(ServiceScope::User)?;
             // Linger so the user service runs without an active login session.
             if let Ok(user) = std::env::var("USER") {
                 let _ = run_tool("loginctl", &["enable-linger", &user]);
             }
             systemctl(&["--user", "enable", "--now", service::ids::SYSTEMD_UNIT])?;
+            if restart {
+                systemctl(&["--user", "restart", service::ids::SYSTEMD_UNIT])?;
+            }
         }
         ServiceScope::System => {
             systemctl(&["daemon-reload"])?;
+            reset_systemd_aggregate_limits(ServiceScope::System)?;
             systemctl(&["enable", "--now", service::ids::SYSTEMD_UNIT])?;
+            if restart {
+                systemctl(&["restart", service::ids::SYSTEMD_UNIT])?;
+            }
         }
     }
     println!(
@@ -120,8 +145,31 @@ fn install_systemd(spec: &ServiceSpec) -> Result<(), String> {
     Ok(())
 }
 
+/// Clears obsolete whole-service resource properties left by early agent
+/// releases. Those properties include the supervisor itself and therefore break
+/// the current architecture. Optional operator policy belongs on per-operation
+/// leaves; the service aggregate is deliberately unlimited.
+fn reset_systemd_aggregate_limits(install_scope: ServiceScope) -> Result<(), String> {
+    let properties = [
+        "set-property",
+        service::ids::SYSTEMD_UNIT,
+        "MemoryHigh=infinity",
+        "MemoryMax=infinity",
+        "TasksMax=infinity",
+        "CPUQuota=",
+    ];
+    match install_scope {
+        ServiceScope::User => {
+            let mut args = vec!["--user"];
+            args.extend(properties);
+            systemctl(&args)
+        }
+        ServiceScope::System => systemctl(&properties),
+    }
+}
+
 /// macOS: write the LaunchAgent plist and bootstrap it into the user's GUI session.
-fn install_launchd(spec: &ServiceSpec) -> Result<(), String> {
+fn install_launchd(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
     let plist_path = service::launchd_plist_path(&home()?);
     let body = service::render_launchd_plist(spec);
     if let Some(parent) = plist_path.parent() {
@@ -131,16 +179,18 @@ fn install_launchd(spec: &ServiceSpec) -> Result<(), String> {
         .map_err(|e| format!("write {}: {e}", plist_path.display()))?;
     info!(path = %plist_path.display(), "wrote LaunchAgent plist");
 
-    // `launchctl bootstrap gui/$(id -u)` (modern) loads it into the GUI session so
-    // desktop/computer-use sees the screen. A non-fatal warning if launchctl is
-    // absent (the plist is written either way; the user can load it manually).
     let uid = unsafe_uid();
     let domain = format!("gui/{uid}");
-    if let Err(e) = run_tool(
-        "launchctl",
-        &["bootstrap", &domain, &plist_path.to_string_lossy()],
-    ) {
-        warn!(error = %e, "launchctl bootstrap failed; the plist is written — load it with `launchctl load`");
+    let target = format!("{domain}/{}", service::ids::LAUNCHD_LABEL);
+    if capture("launchctl", &["print", &target]).is_ok() {
+        if restart {
+            run_tool("launchctl", &["kickstart", "-k", &target])?;
+        }
+    } else {
+        run_tool(
+            "launchctl",
+            &["bootstrap", &domain, &plist_path.to_string_lossy()],
+        )?;
     }
     println!(
         "installed the opengeni-agent LaunchAgent at {}.",
@@ -153,8 +203,8 @@ fn install_launchd(spec: &ServiceSpec) -> Result<(), String> {
 /// hosts the SCM service via the windows-service crate on its native build. The
 /// `Result` return is uniform with the other backends (it only ever fails on the
 /// Windows build, where `sc.exe` can error).
-#[cfg_attr(not(windows), allow(clippy::unnecessary_wraps))]
-fn install_windows(spec: &ServiceSpec) -> Result<(), String> {
+#[cfg_attr(not(windows), allow(clippy::unnecessary_wraps, unused_variables))]
+fn install_windows(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
     // We invoke sc.exe with the rendered argument vectors. On non-Windows builds
     // this code is still compiled (so the surface never rots) but only runs on
     // Windows; the commands are exactly what `--print` shows.
@@ -162,17 +212,33 @@ fn install_windows(spec: &ServiceSpec) -> Result<(), String> {
     println!("{}", service::windows_recovery_command());
     #[cfg(windows)]
     {
-        run_tool(
-            "sc.exe",
-            &[
-                "create",
-                service::ids::WINDOWS_SERVICE,
-                "binPath=",
-                &format!("\"{}\" run", spec.binary_path.to_string_lossy()),
-                "start=",
-                "delayed-auto",
-            ],
-        )?;
+        let bin_path = format!("\"{}\" run", spec.binary_path.to_string_lossy());
+        let prior = capture("sc.exe", &["query", service::ids::WINDOWS_SERVICE]).ok();
+        if prior.is_some() {
+            run_tool(
+                "sc.exe",
+                &[
+                    "config",
+                    service::ids::WINDOWS_SERVICE,
+                    "binPath=",
+                    &bin_path,
+                    "start=",
+                    "delayed-auto",
+                ],
+            )?;
+        } else {
+            run_tool(
+                "sc.exe",
+                &[
+                    "create",
+                    service::ids::WINDOWS_SERVICE,
+                    "binPath=",
+                    &bin_path,
+                    "start=",
+                    "delayed-auto",
+                ],
+            )?;
+        }
         run_tool(
             "sc.exe",
             &[
@@ -184,10 +250,39 @@ fn install_windows(spec: &ServiceSpec) -> Result<(), String> {
                 "restart/5000/restart/5000/restart/5000",
             ],
         )?;
-        run_tool("sc.exe", &["start", service::ids::WINDOWS_SERVICE])?;
+        let was_running = prior
+            .as_deref()
+            .is_some_and(|output| output.contains("RUNNING"));
+        if restart && was_running {
+            run_tool("sc.exe", &["stop", service::ids::WINDOWS_SERVICE])?;
+            wait_for_windows_service_state("STOPPED")?;
+        }
+        if !was_running || restart {
+            run_tool("sc.exe", &["start", service::ids::WINDOWS_SERVICE])?;
+            wait_for_windows_service_state("RUNNING")?;
+        }
     }
     println!("registered the OpengeniAgent Windows Service.");
     Ok(())
+}
+
+/// `sc stop` returns while the service is still stopping. Starting immediately
+/// after that races the SCM and intermittently leaves an upgraded machine
+/// offline, so native Windows installs wait for the authoritative state.
+#[cfg(windows)]
+fn wait_for_windows_service_state(wanted: &str) -> Result<(), String> {
+    for _ in 0..100 {
+        if capture("sc.exe", &["query", service::ids::WINDOWS_SERVICE])
+            .is_ok_and(|output| output.contains(wanted))
+        {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    Err(format!(
+        "Windows Service {} did not reach {wanted} within 10 seconds",
+        service::ids::WINDOWS_SERVICE
+    ))
 }
 
 fn uninstall(install_scope: ServiceScope) -> Result<(), String> {
@@ -251,13 +346,21 @@ fn lifecycle(action: &str, install_scope: ServiceScope) -> Result<(), String> {
         }
         ServiceBackend::Launchd => {
             let uid = unsafe_uid();
+            let domain = format!("gui/{uid}");
             let target = format!("gui/{uid}/{}", service::ids::LAUNCHD_LABEL);
-            let lc_action = if action == "start" {
-                "kickstart"
+            if action == "start" {
+                if capture("launchctl", &["print", &target]).is_ok() {
+                    run_tool("launchctl", &["kickstart", &target])?;
+                } else {
+                    let plist = service::launchd_plist_path(&home()?);
+                    run_tool(
+                        "launchctl",
+                        &["bootstrap", &domain, &plist.to_string_lossy()],
+                    )?;
+                }
             } else {
-                "kill"
-            };
-            let _ = run_tool("launchctl", &[lc_action, "-k", &target]);
+                run_tool("launchctl", &["bootout", &target])?;
+            }
             println!("{action}ed the opengeni-agent LaunchAgent.");
             Ok(())
         }

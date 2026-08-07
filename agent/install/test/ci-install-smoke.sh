@@ -50,7 +50,7 @@ sed "s#^OPENGENI_MINISIGN_PUBKEY=.*#OPENGENI_MINISIGN_PUBKEY='$pub'#" install/in
 # Run the REAL (key-swapped) install in CI mode.
 OPENGENI_INSTALL_BASE_URL="file://$work/mock" \
 OPENGENI_INSTALL_DIR="$work/bin" \
-OPENGENI_NO_RUN=1 \
+OPENGENI_NO_SERVICE=1 \
   sh "$work/install.sh" </dev/null
 
 # Assert it installed. Linux copies the verified bytes unchanged. On macOS the
@@ -91,7 +91,7 @@ printf '%s\n' '#!/bin/sh' "printf '%s\\n' 'opengeni-agent 9.9.9'" > "$newer_inst
 chmod 0755 "$newer_installed"
 
 HOME="$newer_home" OPENGENI_INSTALL_BASE_URL="file://$work/mock" \
-OPENGENI_INSTALL_DIR="$newer_install_dir" OPENGENI_NO_RUN=1 \
+OPENGENI_INSTALL_DIR="$newer_install_dir" OPENGENI_NO_SERVICE=1 \
   sh "$work/install.sh" </dev/null
 [ "$("$newer_install_dir/opengeni-agent" --version)" = "opengeni-agent 9.9.9" ] || {
   echo "lagging installer replaced a newer installed agent" >&2
@@ -100,7 +100,7 @@ OPENGENI_INSTALL_DIR="$newer_install_dir" OPENGENI_NO_RUN=1 \
 echo "install-smoke OK: newer installed agent preserved"
 
 HOME="$newer_home" OPENGENI_INSTALL_BASE_URL="file://$work/mock" \
-OPENGENI_INSTALL_DIR="$newer_install_dir" OPENGENI_NO_RUN=1 OPENGENI_ALLOW_DOWNGRADE=1 \
+OPENGENI_INSTALL_DIR="$newer_install_dir" OPENGENI_NO_SERVICE=1 OPENGENI_ALLOW_DOWNGRADE=1 \
   sh "$work/install.sh" </dev/null
 [ "$("$newer_install_dir/opengeni-agent" --version)" = "$("$built" --version)" ] || {
   echo "explicit downgrade override did not install the verified candidate" >&2
@@ -112,7 +112,7 @@ echo "install-smoke OK: explicit downgrade override honored"
 echo TAMPER >> "$mock/$asset"
 ( cd "$mock" && sha256_line "$asset" > "$asset.sha256" )
 set +e
-OPENGENI_INSTALL_BASE_URL="file://$work/mock" OPENGENI_INSTALL_DIR="$work/bin2" OPENGENI_NO_RUN=1 sh "$work/install.sh" </dev/null
+OPENGENI_INSTALL_BASE_URL="file://$work/mock" OPENGENI_INSTALL_DIR="$work/bin2" OPENGENI_NO_SERVICE=1 sh "$work/install.sh" </dev/null
 rc=$?
 set -e
 [ "$rc" -eq 5 ] || { echo "tampered artifact NOT rejected (rc=$rc, expected 5)" >&2; exit 1; }

@@ -30,7 +30,7 @@ try {
 
   $env:OPENGENI_INSTALL_BASE_URL = "file://$($work -replace '\\','/')/mock"
   $env:OPENGENI_INSTALL_DIR = Join-Path $work 'bin'
-  $env:OPENGENI_NO_RUN = '1'
+  $env:OPENGENI_NO_SERVICE = '1'
   & pwsh -File $script
   if (-not (Test-Path (Join-Path $env:OPENGENI_INSTALL_DIR 'opengeni-agent.exe'))) {
     throw "install did not place the binary"

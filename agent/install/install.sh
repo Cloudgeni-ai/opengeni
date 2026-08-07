@@ -9,15 +9,15 @@
 # READ THIS BEFORE PIPING IT TO A SHELL. This script downloads the
 # `opengeni-agent` binary for your OS/arch, VERIFIES it two independent ways
 # (a minisign signature against a public key PINNED in this script's body, AND
-# a sha256 checksum), installs it to a per-user path, and then PRINTS the exact
-# command to connect + run it. It installs NO background service by default and
-# contains NO secrets. The pinned public key travels WITH this audited script,
+# a sha256 checksum), installs it to a per-user path, connects the requested
+# workspace, and leaves the agent running as an ordinary per-user background
+# service. It contains NO secrets. The pinned public key travels WITH this script,
 # so a compromised CDN or mirror cannot serve a binary that verifies.
 #
-# Run model: the default is a FOREGROUND `opengeni-agent run`,
-# tied to its own lifetime — the machine is online while it runs and offline
-# when it stops. An always-on service is an explicit opt-in
-# (`opengeni-agent service install`), never installed by this script.
+# Run model: the normal install uses `opengeni-agent start` so the machine stays
+# online across logouts and reboots. `opengeni-agent run` is the explicit
+# foreground mode. Re-running a same-version installer adds the new connection
+# without interrupting existing links or commands; a real upgrade restarts once.
 #
 # Environment overrides (all optional):
 #   OPENGENI_INSTALL_BASE_URL  Release asset base URL. Default:
@@ -41,13 +41,11 @@
 #                              device-approve step. The workspace is
 #                              encoded in the token; OPENGENI_WORKSPACE_ID is not
 #                              needed on this path.
-#   OPENGENI_NO_RUN=1          Do not start a foreground run; just print the
-#                              connect+run command (the default when stdin is not
-#                              a TTY, e.g. piped from curl).
+#   OPENGENI_NO_SERVICE=1      Save the connection without installing/starting a
+#                              background service (use `opengeni-agent run`).
 #   OPENGENI_API_URL           Control-plane API base URL for connection. Carried
-#                              into BOTH the non-interactive connect (forwarded as
-#                              --api-url below) and the interactive `connect`/`run`
-#                              (the agent reads $OPENGENI_API_URL via clap). Set it
+#                              into both non-interactive and device-flow `connect`
+#                              calls (the agent also reads it via clap). Set it
 #                              to target a specific deployment instead of the
 #                              api.opengeni.ai default.
 #   OPENGENI_WORKSPACE_ID      The workspace (UUID) an INTERACTIVE device-flow
@@ -124,6 +122,10 @@ OPENGENI_APP_NAME="OpenGeni Agent"
 # (a Developer-ID-signed + notarized .app zipped with its .app dir as the archive
 # root). Absent today → the installer assembles an ad-hoc bundle locally instead.
 OPENGENI_APP_BUNDLE_ASSET="OpenGeni-Agent.app.zip"
+# Set to 1 only when this invocation replaces an existing, different agent
+# version. Adding another workspace with the same binary remains live and does
+# not interrupt in-flight commands.
+OPENGENI_AGENT_WAS_UPGRADED=0
 
 log()  { printf '%s\n' "opengeni-install: $*" >&2; }
 err()  { printf '%s\n' "opengeni-install: ERROR: $*" >&2; }
@@ -156,6 +158,18 @@ release_version_gt() {
     }
     exit 1
   }'
+}
+
+# Record a genuine installed-version transition. This is intentionally called by
+# the parent shell after macOS bundle helpers return: command substitution runs
+# those helpers in a subshell, so a flag assigned inside them would be lost.
+mark_upgrade_if_changed() {
+  _policy_old="$1"
+  _policy_installed="$2"
+  _policy_new="$(agent_release_version "$_policy_installed" 2>/dev/null || true)"
+  if [ -n "$_policy_old" ] && [ -n "$_policy_new" ] && [ "$_policy_old" != "$_policy_new" ]; then
+    OPENGENI_AGENT_WAS_UPGRADED=1
+  fi
 }
 
 # Protect the single shared install path when a user connects through a deployment
@@ -659,7 +673,9 @@ main() {
   if [ "$os" = "Darwin" ] && bundle_asset_available; then
     log "prebuilt macOS bundle available; installing it (version: $VERSION) from $BASE_URL"
     install_dir="$(resolve_install_dir)"
+    _old_mac_version="$(agent_release_version "$HOME/Applications/$OPENGENI_APP_NAME.app/Contents/MacOS/opengeni-agent" 2>/dev/null || true)"
     dest="$(install_macos_prebuilt_bundle "$install_dir")"
+    mark_upgrade_if_changed "$_old_mac_version" "$dest"
     path_hint "$install_dir"
     finish "$dest"
     return 0
@@ -698,7 +714,9 @@ main() {
     # macOS: install the verified binary INSIDE an ad-hoc-signed app bundle and make
     # the CLI a symlink into it, so CLI + background app share ONE code-signing
     # identity (the anchor TCC grants attach to). See install_macos_local_bundle.
+    _old_mac_version="$(agent_release_version "$HOME/Applications/$OPENGENI_APP_NAME.app/Contents/MacOS/opengeni-agent" 2>/dev/null || true)"
     dest="$(install_macos_local_bundle "$bin_tmp" "$install_dir")"
+    mark_upgrade_if_changed "$_old_mac_version" "$dest"
   else
     # Linux: atomic install — chmod then rename into place so a re-install never
     # leaves a half-written binary on PATH.
@@ -707,6 +725,11 @@ main() {
     if should_keep_newer_agent "$dest" "$bin_tmp"; then
       rm -f "$bin_tmp"
     else
+      _old_version="$(agent_release_version "$dest" 2>/dev/null || true)"
+      _new_version="$(agent_release_version "$bin_tmp" 2>/dev/null || true)"
+      if [ -n "$_old_version" ] && [ -n "$_new_version" ] && [ "$_old_version" != "$_new_version" ]; then
+        OPENGENI_AGENT_WAS_UPGRADED=1
+      fi
       mv -f "$bin_tmp" "$dest" || die 2 "cannot install to $dest (try OPENGENI_SYSTEM=1 with sudo, or set OPENGENI_INSTALL_DIR)"
       log "installed verified binary to $dest"
     fi
@@ -725,9 +748,29 @@ path_hint() {
   esac
 }
 
-# Print the connect+run instructions, or connect non-interactively.
-# Per §23.0 the installer NEVER installs a service and only starts a foreground
-# run when explicitly asked on an interactive TTY.
+# Ensure the ordinary per-user daemon is installed and running. A same-version
+# additive connection never restarts it; a real binary upgrade activates once.
+# Minimal/container environments can opt out explicitly or fall back to `run`.
+start_background_agent() {
+  _service_bin="$1"
+  if [ "${OPENGENI_NO_SERVICE:-0}" = "1" ]; then
+    log "background service skipped (OPENGENI_NO_SERVICE=1); start with: $_service_bin run"
+    return 0
+  fi
+  if [ "$OPENGENI_AGENT_WAS_UPGRADED" = "1" ]; then
+    if "$_service_bin" start --restart; then
+      log "connected and running in the background (upgraded service activated)"
+      return 0
+    fi
+  elif "$_service_bin" start; then
+    log "connected and running in the background"
+    return 0
+  fi
+  log "could not install a background service on this host; connection is saved"
+  log "start the foreground agent with: $_service_bin run"
+}
+
+# Connect and leave the machine online in the background.
 finish() {
   _bin="$1"
   echo ""
@@ -745,8 +788,7 @@ finish() {
     else
       "$_bin" connect --token "$OPENGENI_ENROLL_TOKEN" --non-interactive
     fi
-    log "connected. Agents v0.1.10+ pick up future connections automatically. If this upgraded an older running agent, restart that process once."
-    log "Otherwise start the agent (foreground) with:  $_bin run"
+    start_background_agent "$_bin"
     return 0
   fi
 
@@ -771,20 +813,26 @@ finish() {
       _enroll_env="OPENGENI_API_URL=$OPENGENI_API_URL"
     fi
   fi
+  # A workspace-scoped web command can complete the device flow immediately even
+  # though the installer itself arrived over a pipe: the agent prints the code
+  # and polls while the user approves it in the browser.
+  if [ -n "${OPENGENI_WORKSPACE_ID:-}" ]; then
+    if [ -n "${OPENGENI_API_URL:-}" ]; then
+      "$_bin" --api-url "$OPENGENI_API_URL" connect --workspace-id "$OPENGENI_WORKSPACE_ID"
+    else
+      "$_bin" connect --workspace-id "$OPENGENI_WORKSPACE_ID"
+    fi
+    start_background_agent "$_bin"
+    return 0
+  fi
+
   printf '%s\n' "opengeni-agent installed."
   if [ -n "$_enroll_env" ]; then
-    printf '%s\n' "Next: $_enroll_env $_bin connect   (then: $_bin run)"
+    printf '%s\n' "Next: $_enroll_env $_bin connect && $_bin start"
   else
-    printf '%s\n' "Next: $_bin connect   (then: $_bin run)"
+    printf '%s\n' "Next: $_bin connect && $_bin start"
   fi
-  printf '%s\n' "Always-on service, uninstall, and more: $_bin --help"
-
-  # Only auto-start a foreground run when on a real TTY and not opted out.
-  if [ "${OPENGENI_NO_RUN:-0}" != "1" ] && [ -t 0 ]; then
-    printf '%s\n' ""
-    log "starting a foreground run (Ctrl-C to stop; set OPENGENI_NO_RUN=1 to skip)"
-    exec "$_bin" run
-  fi
+  printf '%s\n' "Status, foreground mode, uninstall, and more: $_bin --help"
 }
 
 # Run the installer — UNLESS sourced with OPENGENI_INSTALL_LIB=1, which lets the

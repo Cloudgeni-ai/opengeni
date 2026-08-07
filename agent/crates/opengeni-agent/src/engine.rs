@@ -1100,15 +1100,19 @@ mod tests {
     #[tokio::test]
     async fn default_admission_admits_immediately() {
         let (engine, _dir) = test_engine(AdmissionConfig::default());
-        for i in 0..64 {
+        let mut tickets = Vec::new();
+        for i in 0..100 {
             let op = OpId::new(format!("op-{i}"));
             let ticket = engine
                 .admit(&op, JobClass::Heavy, "origin")
                 .await
                 .expect("unbounded default admits");
-            // Hold nothing: drop immediately; the point is no queueing.
-            drop(ticket);
+            // Hold every ticket simultaneously: the normal default must support
+            // at least 100 concurrent agent operations without an artificial
+            // queue or fixed process-count gate.
+            tickets.push(ticket);
         }
+        assert_eq!(tickets.len(), 100);
     }
 
     #[tokio::test]
