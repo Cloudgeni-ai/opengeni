@@ -4,7 +4,7 @@
 
 ### Patch Changes
 
-- Updated dependencies [b7315b8]
+- Updated dependencies [74e7a31]
   - @opengeni/react@0.48.2
 
 ## 0.0.84
