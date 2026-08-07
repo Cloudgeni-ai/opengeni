@@ -14,12 +14,14 @@
 
 import { proxyActivities } from "@temporalio/workflow";
 import type * as activities from "../activities";
+import { SANDBOX_REAPER_ACTIVITY_TIMEOUT_MS } from "../sandbox-reaper-contract";
 
-// A short, bounded reaper activity. Unlike the 30-day agent turn, the sweep is a
-// fast DB pass + a handful of provider terminates; cap it well under the reaper
-// period so a wedged sweep is abandoned rather than blocking the next fire.
+// The activity must outlive the configured non-cancellable provider snapshot,
+// its durable capture fence, and settlement cleanup. Worker startup enforces the
+// shared contract before registering the Schedule. SKIP overlap prevents a slow
+// sweep from creating a competing owner.
 const reaperActivity = proxyActivities<Pick<typeof activities, "reapSandboxLeases">>({
-  startToCloseTimeout: "5 minutes",
+  startToCloseTimeout: SANDBOX_REAPER_ACTIVITY_TIMEOUT_MS,
   retry: { maximumAttempts: 1 },
 });
 
