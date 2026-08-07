@@ -7,6 +7,7 @@ import {
   createDb,
   createSession,
   submitHumanPromptInTransaction,
+  updateWorkspaceSettings,
   withWorkspaceSubjectRls,
   type DbClient,
 } from "@opengeni/db";
@@ -175,6 +176,59 @@ async function frozenFixture() {
 }
 
 describe("structured human-input HTTP surface (real PostgreSQL)", () => {
+  test("normal user messages remain accepted when agent human input is disabled", async () => {
+    const suffix = crypto.randomUUID();
+    const subjectId = `user:${suffix}`;
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `human-input-disabled-account-${suffix}`,
+      accountName: "Human input disabled",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `human-input-disabled-workspace-${suffix}`,
+      workspaceName: "Human input disabled",
+      subjectId,
+    });
+    const grant = access.workspaceGrants[0]!;
+    await updateWorkspaceSettings(client.db, grant.workspaceId!, {
+      agentHumanInputEnabled: false,
+    });
+    const session = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "Initial message",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const token = await signDelegatedAccessToken(DELEGATION_SECRET, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      subjectId,
+      permissions: ["sessions:read", "sessions:control"],
+      principalKind: "human_session",
+      exp: Math.floor(Date.now() / 1_000) + 3_600,
+    });
+
+    const response = await app.request(
+      `http://x/v1/workspaces/${grant.workspaceId}/sessions/${session.id}/events`,
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          type: "user.message",
+          clientEventId: crypto.randomUUID(),
+          payload: { text: "Ordinary user message" },
+        }),
+      },
+    );
+    expect(response.status).toBe(202);
+    expect(await response.json()).toMatchObject({
+      type: "user.message",
+      payload: { text: "Ordinary user message" },
+    });
+  });
+
   test("reads pending requests, rejects invalid responses, and signals one accepted settlement", async () => {
     const fixture = await frozenFixture();
     const base = `/v1/workspaces/${fixture.workspaceId}/sessions/${fixture.sessionId}`;
