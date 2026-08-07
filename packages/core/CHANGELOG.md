@@ -1,5 +1,12 @@
 # @opengeni/core
 
+## 0.21.16
+
+### Patch Changes
+
+- Updated dependencies [e1daf06]
+  - @opengeni/events@0.3.92
+
 ## 0.21.15
 
 ### Patch Changes

@@ -1,5 +1,14 @@
 # @opengeni/api-router
 
+## 0.23.7
+
+### Patch Changes
+
+- e1daf06: Preserve exact retained session-event payloads for explicit forensic full replay while keeping ordinary HTTP event reads byte-bounded through the existing projection.
+- Updated dependencies [e1daf06]
+  - @opengeni/events@0.3.92
+  - @opengeni/core@0.21.16
+
 ## 0.23.6
 
 ### Patch Changes
