@@ -143,7 +143,9 @@ function makeModalLikeExecOnlySession(
   root: string,
   options: {
     pathPrefix?: string;
-    beforeExec?: () => void | Promise<void>;
+    beforeExec?: (
+      args: Parameters<NonNullable<ChannelASession["execCommand"]>>[0],
+    ) => void | Promise<void>;
     env?: Record<string, string>;
   } = {},
 ): {
@@ -155,7 +157,7 @@ function makeModalLikeExecOnlySession(
   return {
     session: {
       execCommand: async (args) => {
-        await options.beforeExec?.();
+        await options.beforeExec?.(args);
         const child = Bun.spawn(["/bin/bash", "-c", args.cmd], {
           cwd: args.workdir ?? root,
           env: {
@@ -1465,6 +1467,13 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
 
     const surface = makeStockMacCommandSurface(root);
     const swaps = join(root, "swap-count");
+    type InitialProducer = "numstat" | "patch" | "untracked";
+    const enteredProducers = new Set<InitialProducer>();
+    let releaseInitialProducers!: () => void;
+    const allInitialProducersEntered = new Promise<void>((resolve) => {
+      releaseInitialProducers = resolve;
+    });
+    let victimInitializations = 0;
     writeFileSync(
       join(surface.bin, "cat"),
       [
@@ -1486,9 +1495,35 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
         OPENGENI_SWAP_OUTSIDE: outside,
         OPENGENI_SWAP_COUNT: swaps,
       },
-      beforeExec: () => {
-        rmSync(victim, { force: true });
-        writeFileSync(victim, safeContent);
+      beforeExec: async ({ cmd }) => {
+        const producer: InitialProducer | null = cmd.includes("diff --no-color -z --numstat")
+          ? "numstat"
+          : cmd.includes("diff --no-color -U")
+            ? "patch"
+            : cmd.includes("ls-files --others --exclude-standard")
+              ? "untracked"
+              : null;
+        if (!producer) return;
+
+        enteredProducers.add(producer);
+        if (enteredProducers.size === 3) releaseInitialProducers();
+        await Promise.race([
+          allInitialProducersEntered,
+          Bun.sleep(2_000).then(() => {
+            throw new Error(
+              `initial gitDiff producers did not overlap: ${[...enteredProducers].sort().join(",")}`,
+            );
+          }),
+        ]);
+
+        // Initialize the attack fixture exactly once, after all three initial
+        // provider operations are concurrently in flight but before the
+        // untracked producer opens its confined descriptors.
+        if (producer === "untracked" && victimInitializations === 0) {
+          victimInitializations += 1;
+          rmSync(victim, { force: true });
+          writeFileSync(victim, safeContent);
+        }
       },
     });
     const svc = new SandboxChannelAService({
@@ -1511,6 +1546,8 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
     expect(commands).toContain("shasum");
     expect(commands).toContain("lsof");
     expect(commands).toContain("stat -f %i");
+    expect([...enteredProducers].sort()).toEqual(["numstat", "patch", "untracked"]);
+    expect(victimInitializations).toBe(1);
     expect((await Bun.file(swaps).text()).length).toBeGreaterThan(0);
     expect(diff.files[0]?.hunks[0]?.lines.map((line) => line.text)).toEqual(["safe payload"]);
     expect(JSON.stringify(diff)).not.toContain(secretContent.trim());

@@ -881,11 +881,44 @@ function compactionFailureReason(reason: string): string {
     : `compaction summarization failed: ${reason}`;
 }
 
+export type MandatoryHistoryPersistenceStage = "history_append" | "sandbox_envelope";
+
+/**
+ * Preserve the exact storage failure for the permission-controlled turn event
+ * while attaching only a stable, non-secret operation token to public worker
+ * diagnostics. Mandatory history failures remain terminal and never inherit a
+ * provider-retry classification from coincidental source text or status.
+ */
+export class MandatoryHistoryPersistenceError extends Error {
+  readonly name = "MandatoryHistoryPersistenceError";
+  readonly cause: unknown;
+
+  constructor(
+    readonly stage: MandatoryHistoryPersistenceStage,
+    cause: unknown,
+  ) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.cause = cause;
+  }
+}
+
+export async function runMandatoryHistoryPersistenceStep<T>(
+  stage: MandatoryHistoryPersistenceStage,
+  operation: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (cause) {
+    throw new MandatoryHistoryPersistenceError(stage, cause);
+  }
+}
+
 export type SafeErrorDiagnostic = {
   errorClass: "WorkerOperationError";
   errorCode: "worker_operation_failed";
   status?: number;
   origin: "worker";
+  historyPersistenceStage?: MandatoryHistoryPersistenceStage;
 };
 
 /**
@@ -901,10 +934,15 @@ export function safeErrorDiagnostic(error: unknown): SafeErrorDiagnostic {
     origin: "worker",
   };
   try {
-    if (error && typeof error === "object") {
+    let statusSource = error;
+    if (error instanceof MandatoryHistoryPersistenceError) {
+      diagnostic.historyPersistenceStage = error.stage;
+      statusSource = error.cause;
+    }
+    if (statusSource && typeof statusSource === "object") {
       const status = Number(
-        (error as { status?: unknown; statusCode?: unknown }).status ??
-          (error as { statusCode?: unknown }).statusCode,
+        (statusSource as { status?: unknown; statusCode?: unknown }).status ??
+          (statusSource as { statusCode?: unknown }).statusCode,
       );
       if (Number.isInteger(status) && status >= 100 && status <= 599) {
         diagnostic.status = status;
@@ -3179,6 +3217,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (!stream || !turnId) {
         return;
       }
+      const durableTurnId = turnId;
       try {
         const rawHistory = (stream.state as { history?: unknown[] }).history;
         if (Array.isArray(rawHistory)) {
@@ -3198,21 +3237,23 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const shouldAppendRows =
             rows.length > 0 && (!options.skipInputOnlyRows || hasModelOrToolProgress);
           if (shouldAppendRows) {
-            const appended = await appendSessionHistoryItems(db, {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId,
-              expectedExecutionGeneration: executionGeneration,
-              expectedAttemptId: input.attemptId,
-              modelToolOutputTruncationTokens: modelRunSettings.modelToolOutputTruncationTokens,
-              items: rows,
+            await runMandatoryHistoryPersistenceStep("history_append", async () => {
+              const appended = await appendSessionHistoryItems(db, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: durableTurnId,
+                expectedExecutionGeneration: executionGeneration,
+                expectedAttemptId: input.attemptId,
+                modelToolOutputTruncationTokens: modelRunSettings.modelToolOutputTruncationTokens,
+                items: rows,
+              });
+              if (!appended) {
+                throw new TurnAttemptFencedError(
+                  "turn execution generation was fenced while saving conversation history",
+                );
+              }
             });
-            if (!appended) {
-              throw new TurnAttemptFencedError(
-                "turn execution generation was fenced while saving conversation history",
-              );
-            }
           }
           if (shouldAppendRows || !options.skipInputOnlyRows) {
             persistedHistoryCount = nextWatermark;
@@ -3221,12 +3262,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
         const envelope = sandboxStateEntryFromRunState(stream.state);
         if (envelope) {
-          await upsertSandboxSessionEnvelope(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            envelope,
-          });
+          await runMandatoryHistoryPersistenceStep("sandbox_envelope", () =>
+            upsertSandboxSessionEnvelope(db, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              envelope,
+            }),
+          );
         }
       } catch (persistError) {
         console.error(
@@ -8959,7 +9002,19 @@ export function agentRunFailurePayload(
   attempts?: number;
   retryOutcome?: string;
   database?: Record<string, string>;
+  historyPersistenceStage?: MandatoryHistoryPersistenceStage;
 } {
+  if (error instanceof MandatoryHistoryPersistenceError) {
+    const underlying = isSessionEventPersistenceError(error.cause)
+      ? agentRunFailurePayload(error.cause, options)
+      : {
+          error: error.cause instanceof Error ? error.cause.message : String(error.cause),
+        };
+    return {
+      ...underlying,
+      historyPersistenceStage: error.stage,
+    };
+  }
   const message = error instanceof Error ? error.message : String(error);
   const status =
     typeof error === "object" && error !== null

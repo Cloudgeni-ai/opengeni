@@ -59,6 +59,7 @@ import {
   isTransientProviderError,
   isWorkerShutdownCancellation,
   legacyTurnExecutionPolicyInput,
+  MandatoryHistoryPersistenceError,
   modelAttachmentInputPolicyForTurn,
   modelSupportsImageInputForTurn,
   recordCompletedModelCallBeforeOwnershipFences,
@@ -76,6 +77,7 @@ import {
   providerRecoveryResult,
   requiresSignedFileResourceDownloads,
   resolveActiveSandboxBackend,
+  runMandatoryHistoryPersistenceStep,
   safeErrorDiagnostic,
   sandboxDeadlineRotationRecoveryDelayMs,
   shouldRecoverCompactionProviderFailure,
@@ -536,6 +538,60 @@ describe("turn exact-content boundaries", () => {
     });
     expect(source.message).toContain(syntheticValue);
     expect(JSON.stringify(safeErrorDiagnostic(hostile))).not.toContain(syntheticValue);
+  });
+
+  test("mandatory history failure keeps exact internal content and exposes only a safe stage", async () => {
+    const source = Object.assign(new Error(`history write rejected; detail=${syntheticValue}`), {
+      status: 503,
+      responseBody: syntheticValue,
+    });
+    const error = await runMandatoryHistoryPersistenceStep("history_append", async () => {
+      throw source;
+    }).catch((caught) => caught);
+
+    expect(error).toBeInstanceOf(MandatoryHistoryPersistenceError);
+    expect((error as MandatoryHistoryPersistenceError).cause).toBe(source);
+    const failure = agentRunFailurePayload(error);
+    expect(failure).toEqual({
+      error: `history write rejected; detail=${syntheticValue}`,
+      historyPersistenceStage: "history_append",
+    });
+    const diagnostic = safeErrorDiagnostic(error);
+    expect(diagnostic).toEqual({
+      errorClass: "WorkerOperationError",
+      errorCode: "worker_operation_failed",
+      status: 503,
+      origin: "worker",
+      historyPersistenceStage: "history_append",
+    });
+    expect(JSON.stringify(diagnostic)).not.toContain(syntheticValue);
+  });
+
+  test("mandatory history barriers precede completion and terminal failure emits no completion", async () => {
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn.ts", import.meta.url),
+    ).text();
+    const completionPath = source.indexOf('const finalOutput = String(stream.finalOutput ?? "");');
+    const mandatoryBarrier = source.indexOf(
+      "await reconcileConversationTruth({ requireDurable: true });",
+      completionPath,
+    );
+    const successCompletion = source.indexOf('type: "turn.completed"', mandatoryBarrier);
+    expect(completionPath).toBeGreaterThan(-1);
+    expect(mandatoryBarrier).toBeGreaterThan(completionPath);
+    expect(successCompletion).toBeGreaterThan(mandatoryBarrier);
+
+    const failureClassifier = source.indexOf("const failure = agentRunFailurePayload(error");
+    const terminalFailureStart = source.indexOf('activityStatus = "failed";', failureClassifier);
+    const terminalFailureEnd = source.indexOf(
+      'turnMetricOutcome = "failed";',
+      terminalFailureStart,
+    );
+    const terminalFailureBlock = source.slice(terminalFailureStart, terminalFailureEnd);
+    expect(terminalFailureStart).toBeGreaterThan(failureClassifier);
+    expect(terminalFailureEnd).toBeGreaterThan(terminalFailureStart);
+    expect(terminalFailureBlock).toContain('type: "turn.failed"');
+    expect(terminalFailureBlock).not.toContain('type: "turn.completed"');
   });
 });
 
@@ -3410,6 +3466,13 @@ describe("transient provider error classifier", () => {
       },
     });
     expect(payload.retryable).toBeUndefined();
+
+    const mandatory = new MandatoryHistoryPersistenceError("sandbox_envelope", error);
+    expect(agentRunFailurePayload(mandatory)).toEqual({
+      ...payload,
+      historyPersistenceStage: "sandbox_envelope",
+    });
+    expect(agentRunFailurePayload(mandatory).retryable).toBeUndefined();
   });
 
   test("preserves an exact non-SQLSTATE persistence failure in the session payload", async () => {
