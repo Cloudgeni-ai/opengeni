@@ -80,11 +80,18 @@ spec:
           expr: |
             max by (node) (
               kube_pod_info{namespace="{{ .Release.Namespace }}", pod=~"{{ $fullName }}-.*"}
+              and on (namespace, pod)
+              (kube_pod_status_phase{namespace="{{ .Release.Namespace }}", phase="Running"} == 1)
             )
         - record: opengeni:node_exporter_instance:info
           expr: |
             max by (instance, node) (
               label_replace(node_uname_info, "node", "$1", "nodename", "(.+)")
+            )
+        - record: opengeni:kubelet_instance:info
+          expr: |
+            max by (job, instance, node) (
+              kubelet_node_name{metrics_path="/metrics"}
             )
         - record: opengeni:node_memory_psi_stall_ratio
           expr: |
@@ -306,6 +313,8 @@ spec:
           expr: |
             sum by (node, operation_type) (
               increase(kubelet_runtime_operations_errors_total[5m])
+              * on (job, instance) group_left (node)
+              opengeni:kubelet_instance:info
             ) > 0
             and on (node)
             opengeni:workload_node:present

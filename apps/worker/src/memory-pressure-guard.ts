@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { freemem, totalmem } from "node:os";
+import { posix } from "node:path";
 import type { Settings } from "@opengeni/config";
 import type { Observability } from "@opengeni/observability";
 
@@ -36,10 +37,25 @@ type GuardDependencies = {
   clearInterval?: typeof clearInterval;
 };
 
-const CGROUP_V2_CURRENT = "/sys/fs/cgroup/memory.current";
-const CGROUP_V2_MAX = "/sys/fs/cgroup/memory.max";
-const CGROUP_V1_CURRENT = "/sys/fs/cgroup/memory/memory.usage_in_bytes";
-const CGROUP_V1_MAX = "/sys/fs/cgroup/memory/memory.limit_in_bytes";
+type SnapshotDependencies = {
+  readText?: (path: string) => string | null;
+  hostTotalBytes?: () => number;
+  hostAvailableBytes?: () => number;
+  processRssBytes?: () => number;
+};
+
+export type ProcessCgroupMembership = {
+  v2Path: string | null;
+  v1MemoryPath: string | null;
+};
+
+export type CgroupMemoryFilePair = {
+  currentPath: string;
+  maxPath: string;
+};
+
+const CGROUP_V2_MOUNT = "/sys/fs/cgroup";
+const CGROUP_V1_MEMORY_MOUNT = "/sys/fs/cgroup/memory";
 
 export function parseLinuxMeminfo(
   value: string,
@@ -75,10 +91,65 @@ export function parseFiniteCgroupMemoryLimit(value: string): number | null {
   return parsed;
 }
 
-export function readTurnWorkerMemoryPressureSnapshot(): TurnWorkerMemoryPressureSnapshot {
-  const linux = parseLinuxMeminfo(readTextOrNull("/proc/meminfo") ?? "");
-  const hostTotalBytes = linux?.totalBytes ?? totalmem();
-  const hostAvailableBytes = linux?.availableBytes ?? freemem();
+export function parseProcessCgroupMembership(value: string): ProcessCgroupMembership {
+  let v2Path: string | null = null;
+  let v1MemoryPath: string | null = null;
+  for (const line of value.split("\n")) {
+    const firstSeparator = line.indexOf(":");
+    const secondSeparator = line.indexOf(":", firstSeparator + 1);
+    if (firstSeparator <= 0 || secondSeparator < 0) continue;
+    const hierarchyId = line.slice(0, firstSeparator);
+    const controllers = line.slice(firstSeparator + 1, secondSeparator);
+    const path = normalizeCgroupPath(line.slice(secondSeparator + 1));
+    if (!path) continue;
+    if (hierarchyId === "0" && controllers === "") {
+      v2Path = path;
+    }
+    if (controllers.split(",").includes("memory")) {
+      v1MemoryPath = path;
+    }
+  }
+  return { v2Path, v1MemoryPath };
+}
+
+export function cgroupMemoryFilePairs(membership: ProcessCgroupMembership): CgroupMemoryFilePair[] {
+  const pairs: CgroupMemoryFilePair[] = [];
+  const seen = new Set<string>();
+  const appendHierarchy = (
+    mount: string,
+    path: string | null,
+    currentFilename: string,
+    maxFilename: string,
+  ) => {
+    for (const candidate of cgroupAncestorPaths(path ?? "/")) {
+      const relative = candidate === "/" ? "" : candidate.slice(1);
+      const currentPath = posix.join(mount, relative, currentFilename);
+      const maxPath = posix.join(mount, relative, maxFilename);
+      const key = `${currentPath}\0${maxPath}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      pairs.push({ currentPath, maxPath });
+    }
+  };
+
+  appendHierarchy(CGROUP_V2_MOUNT, membership.v2Path, "memory.current", "memory.max");
+  appendHierarchy(
+    CGROUP_V1_MEMORY_MOUNT,
+    membership.v1MemoryPath,
+    "memory.usage_in_bytes",
+    "memory.limit_in_bytes",
+  );
+  return pairs;
+}
+
+export function readTurnWorkerMemoryPressureSnapshot(
+  dependencies: SnapshotDependencies = {},
+): TurnWorkerMemoryPressureSnapshot {
+  const readText = dependencies.readText ?? readTextOrNull;
+  const linux = parseLinuxMeminfo(readText("/proc/meminfo") ?? "");
+  const hostTotalBytes = linux?.totalBytes ?? (dependencies.hostTotalBytes ?? totalmem)();
+  const hostAvailableBytes =
+    linux?.availableBytes ?? (dependencies.hostAvailableBytes ?? freemem)();
   const scopes: TurnWorkerMemoryScopeSnapshot[] = [
     {
       scope: "host",
@@ -87,11 +158,11 @@ export function readTurnWorkerMemoryPressureSnapshot(): TurnWorkerMemoryPressure
     },
   ];
 
-  const cgroup = readCgroupMemoryScope();
+  const cgroup = readCgroupMemoryScope(readText);
   if (cgroup) scopes.push(cgroup);
 
   return {
-    processRssBytes: process.memoryUsage().rss,
+    processRssBytes: (dependencies.processRssBytes ?? (() => process.memoryUsage().rss))(),
     scopes,
   };
 }
@@ -257,20 +328,28 @@ export function createTurnWorkerMemoryPressureGuard(input: {
   };
 }
 
-function readCgroupMemoryScope(): TurnWorkerMemoryScopeSnapshot | null {
-  for (const [currentPath, maxPath] of [
-    [CGROUP_V2_CURRENT, CGROUP_V2_MAX],
-    [CGROUP_V1_CURRENT, CGROUP_V1_MAX],
-  ] as const) {
-    const currentRaw = readTextOrNull(currentPath);
-    const maxRaw = readTextOrNull(maxPath);
+function readCgroupMemoryScope(
+  readText: (path: string) => string | null,
+): TurnWorkerMemoryScopeSnapshot | null {
+  const membership = parseProcessCgroupMembership(readText("/proc/self/cgroup") ?? "");
+  let mostPressured: TurnWorkerMemoryScopeSnapshot | null = null;
+  for (const { currentPath, maxPath } of cgroupMemoryFilePairs(membership)) {
+    const currentRaw = readText(currentPath);
+    const maxRaw = readText(maxPath);
     if (currentRaw === null || maxRaw === null) continue;
     const current = Number(currentRaw.trim());
     const limit = parseFiniteCgroupMemoryLimit(maxRaw);
     if (!Number.isFinite(current) || current < 0 || limit === null) continue;
-    return { scope: "cgroup", usedBytes: current, limitBytes: limit };
+    const candidate = { scope: "cgroup" as const, usedBytes: current, limitBytes: limit };
+    if (
+      !mostPressured ||
+      candidate.usedBytes / candidate.limitBytes >
+        mostPressured.usedBytes / mostPressured.limitBytes
+    ) {
+      mostPressured = candidate;
+    }
   }
-  return null;
+  return mostPressured;
 }
 
 function readTextOrNull(path: string): string | null {
@@ -283,6 +362,23 @@ function readTextOrNull(path: string): string | null {
 
 function boundedRatio(value: number): number {
   return Math.round(Math.max(0, Math.min(value, 10)) * 1_000_000) / 1_000_000;
+}
+
+function normalizeCgroupPath(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("/") || trimmed.includes("\0")) return null;
+  if (trimmed.split("/").includes("..")) return null;
+  return posix.normalize(trimmed);
+}
+
+function cgroupAncestorPaths(path: string): string[] {
+  const ancestors: string[] = [];
+  let current = path;
+  while (true) {
+    ancestors.push(current);
+    if (current === "/") return ancestors;
+    current = posix.dirname(current);
+  }
 }
 
 function safeSetGauge(

@@ -75,8 +75,9 @@ The one turn worker uses Temporal's resource-based slot tuner. It admits more
 agent turns while whole-machine CPU stays below 80% and memory stays below 75%,
 up to 256 active turns; excess work remains durable in Temporal. This is a
 safety ceiling, not a reservation or a promise that 256 heavy turns fit. The
-worker also samples whole-host `MemAvailable` and any finite cgroup memory scope
-every five seconds after admission. If either scope remains at or above the 75%
+worker also samples whole-host `MemAvailable` and the most pressured finite
+process cgroup or ancestor every five seconds after admission. If either scope
+remains at or above the 75%
 target for 30 seconds, it requests the ordinary graceful worker drain so
 in-flight turns checkpoint and recover on replacement capacity. Override the
 cadence and sustained window with

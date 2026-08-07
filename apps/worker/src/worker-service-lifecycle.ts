@@ -23,7 +23,7 @@ export type WorkerRunTarget = {
 export type WorkerServiceLifecycle = {
   state(): WorkerLifecycleState;
   run(): Promise<void>;
-  drain(reason?: string): void;
+  drain(reason?: string): boolean;
   close(): Promise<void>;
 };
 
@@ -74,27 +74,37 @@ export function createWorkerServiceLifecycle(input: {
     },
     drain: (_reason = "host request") => {
       if (state === "draining" || state === "stopped" || state === "failed") {
-        return;
+        return true;
       }
+      const previousState = state;
+      safeLifecycleLog(() =>
+        input.observability.info("OpenGeni worker draining (graceful shutdown)", {
+          role: input.role,
+          errorClass: "WorkerLifecycleOperation",
+          errorCode: "worker_draining",
+          origin: "worker-lifecycle",
+        }),
+      );
       state = "draining";
-      input.observability.info("OpenGeni worker draining (graceful shutdown)", {
-        role: input.role,
-        errorClass: "WorkerLifecycleOperation",
-        errorCode: "worker_draining",
-        origin: "worker-lifecycle",
-      });
       try {
         input.worker.shutdown();
+        return true;
       } catch {
-        input.observability.warn("worker shutdown request failed", {
-          errorClass: "WorkerLifecycleOperationError",
-          errorCode: "worker_shutdown_request_failed",
-          origin: "worker-lifecycle",
-        });
+        state = previousState;
+        safeLifecycleLog(() =>
+          input.observability.warn("worker shutdown request failed", {
+            errorClass: "WorkerLifecycleOperationError",
+            errorCode: "worker_shutdown_request_failed",
+            origin: "worker-lifecycle",
+          }),
+        );
+        return false;
       }
     },
     close: async () => {
-      lifecycle.drain("service close");
+      if (!lifecycle.drain("service close")) {
+        throw new Error("worker shutdown request failed");
+      }
       if (runPromise) {
         await runPromise.catch(() => undefined);
       } else {
@@ -105,4 +115,12 @@ export function createWorkerServiceLifecycle(input: {
   };
 
   return lifecycle;
+}
+
+function safeLifecycleLog(log: () => void): void {
+  try {
+    log();
+  } catch {
+    // Telemetry cannot change worker lifecycle state or shutdown delivery.
+  }
 }

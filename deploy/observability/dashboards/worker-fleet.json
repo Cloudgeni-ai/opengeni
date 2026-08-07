@@ -815,7 +815,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (node, operation_type) (rate(kubelet_runtime_operations_errors_total[5m])) and on (node) opengeni:workload_node:present",
+          "expr": "sum by (node, operation_type) (rate(kubelet_runtime_operations_errors_total[5m]) * on (job, instance) group_left (node) opengeni:kubelet_instance:info) and on (node) opengeni:workload_node:present",
           "legendFormat": "{{node}} {{operation_type}} errors/s",
           "datasource": {
             "type": "prometheus",

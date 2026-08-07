@@ -42,6 +42,8 @@ const requiredRules = [
   "opengeni:sandbox_leases:fresh_max",
   "opengeni:sandbox_checkpoint_artifacts:fresh_max",
   "opengeni:workload_node:present",
+  "opengeni:node_exporter_instance:info",
+  "opengeni:kubelet_instance:info",
   "opengeni:node_memory_psi_stall_ratio",
   "opengeni:node_io_psi_stall_ratio",
   "opengeni:node_swap_out_pages_per_second",

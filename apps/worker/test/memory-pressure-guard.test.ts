@@ -1,12 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import { createObservability } from "@opengeni/observability";
 import {
+  cgroupMemoryFilePairs,
   createTurnWorkerMemoryPressureGuard,
   parseFiniteCgroupMemoryLimit,
   parseLinuxMeminfo,
+  parseProcessCgroupMembership,
+  readTurnWorkerMemoryPressureSnapshot,
   turnWorkerMemoryPressureGuardEnabled,
   type TurnWorkerMemoryPressureSnapshot,
 } from "../src/memory-pressure-guard";
+import { createWorkerServiceLifecycle } from "../src/worker-service-lifecycle";
 
 const GiB = 1024 ** 3;
 
@@ -65,6 +69,64 @@ describe("turn worker memory pressure guard", () => {
     expect(parseFiniteCgroupMemoryLimit("4294967296\n")).toBe(4 * GiB);
     expect(parseFiniteCgroupMemoryLimit("max\n")).toBeNull();
     expect(parseFiniteCgroupMemoryLimit("9223372036854771712\n")).toBeNull();
+  });
+
+  test("resolves v2 and v1 process cgroup paths from procfs without traversal", () => {
+    const membership = parseProcessCgroupMembership(
+      "0::/system.slice/opengeni-worker.service\n4:cpu,memory:/docker/worker\n",
+    );
+    expect(membership).toEqual({
+      v2Path: "/system.slice/opengeni-worker.service",
+      v1MemoryPath: "/docker/worker",
+    });
+    expect(cgroupMemoryFilePairs(membership).slice(0, 3)).toEqual([
+      {
+        currentPath: "/sys/fs/cgroup/system.slice/opengeni-worker.service/memory.current",
+        maxPath: "/sys/fs/cgroup/system.slice/opengeni-worker.service/memory.max",
+      },
+      {
+        currentPath: "/sys/fs/cgroup/system.slice/memory.current",
+        maxPath: "/sys/fs/cgroup/system.slice/memory.max",
+      },
+      {
+        currentPath: "/sys/fs/cgroup/memory.current",
+        maxPath: "/sys/fs/cgroup/memory.max",
+      },
+    ]);
+    expect(parseProcessCgroupMembership("0::/../../etc\n")).toEqual({
+      v2Path: null,
+      v1MemoryPath: null,
+    });
+  });
+
+  test("uses the most pressured finite process cgroup or ancestor", () => {
+    const files = new Map<string, string>([
+      ["/proc/meminfo", "MemTotal: 25165824 kB\nMemAvailable: 12582912 kB\n"],
+      ["/proc/self/cgroup", "0::/system.slice/opengeni-worker.service\n"],
+      ["/sys/fs/cgroup/system.slice/opengeni-worker.service/memory.current", String(3 * GiB)],
+      ["/sys/fs/cgroup/system.slice/opengeni-worker.service/memory.max", String(8 * GiB)],
+      ["/sys/fs/cgroup/system.slice/memory.current", String(Math.floor(3.2 * GiB))],
+      ["/sys/fs/cgroup/system.slice/memory.max", String(4 * GiB)],
+      ["/sys/fs/cgroup/memory.current", String(12 * GiB)],
+      ["/sys/fs/cgroup/memory.max", "max"],
+    ]);
+
+    expect(
+      readTurnWorkerMemoryPressureSnapshot({
+        readText: (path) => files.get(path) ?? null,
+        processRssBytes: () => 2 * GiB,
+      }),
+    ).toEqual({
+      processRssBytes: 2 * GiB,
+      scopes: [
+        { scope: "host", usedBytes: 12_582_912 * 1024, limitBytes: 25_165_824 * 1024 },
+        {
+          scope: "cgroup",
+          usedBytes: Math.floor(3.2 * GiB),
+          limitBytes: 4 * GiB,
+        },
+      ],
+    });
   });
 
   test("requires one sustained breach and requests the ordinary graceful drain exactly once", async () => {
@@ -307,5 +369,62 @@ describe("turn worker memory pressure guard", () => {
     guard.sampleNow();
     expect(drains).toBe(1);
     guard.close();
+  });
+
+  test("retries and records a lifecycle shutdown request that fails synchronously", async () => {
+    const observability = createObservability(
+      {
+        observabilityMetricsEnabled: true,
+        observabilityStructuredLogs: false,
+        observabilityOtlpEndpoint: undefined,
+        observabilityOtlpHeaders: "",
+        serviceName: "opengeni-test",
+        environment: "test",
+      } as never,
+      { component: "worker-turn" },
+    );
+    let shutdownAttempts = 0;
+    const lifecycle = createWorkerServiceLifecycle({
+      role: "turn",
+      observability,
+      worker: {
+        run: async () => undefined,
+        shutdown: () => {
+          shutdownAttempts += 1;
+          if (shutdownAttempts === 1) throw new Error("shutdown failed");
+        },
+      },
+      closeOwnedResources: async () => undefined,
+    });
+    let now = 0;
+    const guard = createTurnWorkerMemoryPressureGuard({
+      settings: {
+        turnWorkerConcurrencyMode: "resource-based",
+        turnWorkerTargetMemoryUsage: 0.75,
+        turnWorkerMemoryGuardIntervalMs: 60_000,
+        turnWorkerMemoryGuardSustainMs: 5_000,
+      },
+      observability,
+      drain: () => {
+        if (!lifecycle.drain("memory pressure guard")) {
+          throw new Error("worker shutdown request failed");
+        }
+      },
+      dependencies: { now: () => now, sample: () => snapshot({ hostUsedGiB: 20 }) },
+    });
+
+    now = 5_000;
+    guard.sampleNow();
+    expect(lifecycle.state()).toBe("starting");
+    expect(shutdownAttempts).toBe(1);
+    now = 10_000;
+    guard.sampleNow();
+    expect(lifecycle.state()).toBe("draining");
+    expect(shutdownAttempts).toBe(2);
+    expect(await observability.prometheusMetrics()).toMatch(
+      /opengeni_turn_worker_memory_guard_drain_failures_total\{[^}]*scope="host"[^}]*\} 1\b/,
+    );
+    guard.close();
+    await lifecycle.close();
   });
 });

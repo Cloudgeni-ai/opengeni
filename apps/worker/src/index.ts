@@ -733,7 +733,11 @@ export async function createOpenGeniWorkerService(
       memoryPressureGuard = createTurnWorkerMemoryPressureGuard({
         settings,
         observability,
-        drain: () => activeLifecycle.drain("memory pressure guard"),
+        drain: () => {
+          if (!activeLifecycle.drain("memory pressure guard")) {
+            throw new Error("worker shutdown request failed");
+          }
+        },
       });
     } catch (error) {
       await activeLifecycle.close();
@@ -747,7 +751,9 @@ export async function createOpenGeniWorkerService(
     connection: activeWorkerBundle.connection,
     state: activeLifecycle.state,
     run: activeLifecycle.run,
-    drain: activeLifecycle.drain,
+    drain: (reason) => {
+      activeLifecycle.drain(reason);
+    },
     close: activeLifecycle.close,
   };
 }
