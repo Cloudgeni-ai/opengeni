@@ -1,5 +1,13 @@
 # @opengeni/github
 
+## 0.4.37
+
+### Patch Changes
+
+- Updated dependencies [b43432e]
+- Updated dependencies [f92e953]
+  - @opengeni/config@0.11.6
+
 ## 0.4.36
 
 ### Patch Changes
