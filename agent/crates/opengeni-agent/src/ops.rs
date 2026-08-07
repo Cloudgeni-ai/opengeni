@@ -110,9 +110,6 @@ pub async fn serve_op_start_scoped<P: Platform>(
         ticket,
         stdin,
         deadline,
-        // Op-stream: retention (and its ledger share) survives to the final
-        // ack — post-exit replay is the point.
-        false,
         || platform.spawn_exec(&exec),
         frame_publisher(publish, request_id.clone()),
         |exit| wire_exit(exit).encode_to_vec(),

@@ -15,10 +15,10 @@
 //!   [`HostCapacity`] as a fraction with the old absolute defaults as FLOORS
 //!   (rule R), and the per-frame wire size is T-derived from the negotiated
 //!   NATS `max_payload` (the smallest active link value wins).
-//! * **Spool ledger** — the global disk budget (PROTOCOL.md ruling M2): each
-//!   job reserves its per-op spool quota against the shared budget at start
-//!   and releases it at teardown; when the budget is short the op's quota is
-//!   clamped (loudly) rather than the op refused.
+//! * **Spool ledger** — the global disk budget (PROTOCOL.md ruling M2) is
+//!   shared by every job and charged only for bytes actually spooled. Starting
+//!   many commands consumes no disk budget; concurrent writes cannot
+//!   oversubscribe it.
 //! * **Routing** — connection-scoped `op_id → mailbox` for wire-command
 //!   delivery. A lost link detaches only the jobs it owns.
 //!
@@ -36,7 +36,7 @@ use opengeni_agent_engine::admission::{
 use opengeni_agent_engine::registry::{
     BeginOutcome, CancelOutcome, OpRegistry, QueryAnswer, RegistryConfig, RegistryCounters,
 };
-use opengeni_agent_engine::retention::RetentionConfig;
+use opengeni_agent_engine::retention::{GlobalSpoolBudget, RetentionConfig};
 use opengeni_agent_engine::{Frame, HostCapacity, OpId};
 use opengeni_agent_platform::ContainedExec;
 use tokio::sync::{mpsc, oneshot, Notify};
@@ -81,7 +81,7 @@ const FALLBACK_FRAME_BYTES: usize = 128 * 1024;
 pub struct EngineBudgets {
     /// Per-op retention template (memory ring + spool quota + segment size).
     pub retention_per_op: RetentionConfig,
-    /// The global spool budget every per-op quota is reserved against (M2).
+    /// The global budget for actual retained spool bytes (M2).
     pub spool_budget_bytes: u64,
     /// Circuit breaker on a legacy adapter's assembled reply buffer: far above
     /// any publishable reply (the transport caps those at `max_payload`), it
@@ -193,32 +193,12 @@ impl Drop for AdmissionTicket {
     }
 }
 
-/// A job's share of the global spool ledger (M2). Idempotent release: the
-/// legacy adapter returns it early at the terminal record (no consumer is
-/// ever coming for a legacy op's spool frames), the task-end guard returns
-/// whatever remains, and a double release is a no-op.
-struct SpoolReservation {
-    engine: Arc<Engine>,
-    granted: AtomicU64,
-}
-
-impl SpoolReservation {
-    fn release(&self) {
-        let granted = self.granted.swap(0, Ordering::AcqRel);
-        if granted > 0 {
-            self.engine.release_spool(granted);
-        }
-    }
-}
-
-/// Owned by the pump task: route removal + spool release run on Drop, so a
-/// PANICKING pump still cleans up (design-review fold-in — previously the
-/// cleanup ran after `run_job().await` and a panic leaked the route and the
-/// reservation until restart).
+/// Owned by the pump task: route removal runs on Drop, so a PANICKING pump
+/// still cleans up. The retention log independently owns and releases its
+/// actual spool-byte charge.
 struct JobCleanup {
     engine: Arc<Engine>,
     op_id: OpId,
-    reservation: Arc<SpoolReservation>,
 }
 
 impl Drop for JobCleanup {
@@ -228,7 +208,6 @@ impl Drop for JobCleanup {
             .lock()
             .expect("routes lock")
             .remove(&self.op_id);
-        self.reservation.release();
     }
 }
 
@@ -245,7 +224,7 @@ pub struct Engine {
     budgets: RwLock<EngineBudgets>,
     capacity: RwLock<HostCapacity>,
     spool_root: PathBuf,
-    spool_reserved: Mutex<u64>,
+    spool_budget: Arc<GlobalSpoolBudget>,
     /// T-derived per-frame data size (from the negotiated max_payload).
     max_frame_bytes: AtomicUsize,
     /// Negotiated payload per active deployment link. The shared engine uses the
@@ -310,6 +289,7 @@ impl Engine {
         if let Some(v) = overrides.registry_tombstone_ttl_ms {
             registry.tombstone_ttl_ms = v;
         }
+        let spool_budget = Arc::new(GlobalSpoolBudget::new(budgets.spool_budget_bytes));
         Arc::new(Self {
             registry: Mutex::new(OpRegistry::new(registry)),
             admission: Mutex::new(AdmissionState::new(admission)),
@@ -318,7 +298,7 @@ impl Engine {
             budgets: RwLock::new(budgets),
             capacity: RwLock::new(capacity),
             spool_root,
-            spool_reserved: Mutex::new(0),
+            spool_budget,
             max_frame_bytes: AtomicUsize::new(FALLBACK_FRAME_BYTES),
             transport_payloads: Mutex::new(HashMap::new()),
             frames_dropped: AtomicU64::new(0),
@@ -346,6 +326,7 @@ impl Engine {
         if let Some(v) = overrides.retention_spool_max_bytes {
             budgets.retention_per_op.spool_max_bytes = v;
         }
+        self.spool_budget.set_max_bytes(budgets.spool_budget_bytes);
         *self.budgets.write().expect("budgets lock") = budgets;
         *self.capacity.write().expect("capacity lock") = capacity;
     }
@@ -519,43 +500,12 @@ impl Engine {
 
     /// Idempotently starts a job (ruling B1: a known id NEVER re-runs — the
     /// registry is consulted BEFORE `spawn` so a duplicate has no side
-    /// effects). On the fresh path: reserves spool against the global budget,
-    /// spawns the child via `spawn`, wires the pump hooks (engine lifecycle
-    /// bookkeeping composed in front of the caller's `on_exit`), and launches
-    /// the pump task. The admission ticket rides inside `on_exit`, releasing
-    /// at completion (linger is not running work). Route removal + spool
-    /// release live in a task-owned Drop guard, so even a panicking pump
-    /// cleans up.
-    ///
-    /// Reserves the op's spool quota against the global ledger (M2); a short
-    /// budget clamps the quota (loudly) rather than refusing the op.
-    fn reserve_op_spool(
-        self: &Arc<Self>,
-        op_id: &OpId,
-        retention: &mut RetentionConfig,
-    ) -> Arc<SpoolReservation> {
-        let granted = self.reserve_spool(retention.spool_max_bytes);
-        if granted < retention.spool_max_bytes {
-            warn!(
-                op = %op_id,
-                wanted = retention.spool_max_bytes,
-                granted,
-                "global spool budget short; op spool quota clamped"
-            );
-        }
-        retention.spool_max_bytes = granted;
-        Arc::new(SpoolReservation {
-            engine: self.clone(),
-            granted: AtomicU64::new(granted),
-        })
-    }
-
-    /// `release_spool_at_exit`: LEGACY ops set this — their spool ledger
-    /// share returns at the terminal record instead of task end, because no
-    /// consumer ever collects a legacy op's spool frames post-exit (duplicate
-    /// replies serve the stashed ENCODED reply); the lingering pump's spool
-    /// residue is already ack-trimmed to ~nothing. Op-stream ops keep their
-    /// reservation through the linger — post-exit replay is their whole point.
+    /// effects). On the fresh path: spawns the child via `spawn`, wires the
+    /// pump hooks (engine lifecycle bookkeeping composed in front of the
+    /// caller's `on_exit`), and launches the pump task. The admission ticket
+    /// rides inside `on_exit`, releasing at completion (linger is not running
+    /// work). Route removal lives in a task-owned Drop guard; the retention
+    /// log owns exact shared-spool charging and release.
     #[allow(clippy::too_many_arguments)] // the job seams are irreducible; a builder would just rename them
     pub fn start_job<E>(
         self: &Arc<Self>,
@@ -563,7 +513,6 @@ impl Engine {
         ticket: AdmissionTicket,
         stdin: Vec<u8>,
         deadline: Option<tokio::time::Instant>,
-        release_spool_at_exit: bool,
         spawn: impl FnOnce() -> Result<ContainedExec, E>,
         emit: impl Fn(Frame) + Send + 'static,
         encode_exit: impl Fn(&JobExit) -> Vec<u8> + Send + 'static,
@@ -601,14 +550,14 @@ impl Engine {
             }
         };
 
-        let mut retention = self.budgets().retention_per_op;
-        let reservation = self.reserve_op_spool(op_id, &mut retention);
+        let retention = self.budgets().retention_per_op;
 
         let (mailbox_tx, mailbox_rx) = mpsc::channel(JOB_MAILBOX_DEPTH);
         let params = JobParams {
             child,
             stdin,
             retention,
+            spool_budget: self.spool_budget.clone(),
             spool_dir: self.spool_root.join(op_dir_name(op_id)),
             deadline,
             config: JobConfig {
@@ -627,7 +576,6 @@ impl Engine {
             let id = op_id.clone();
             let exit_stash = handles.exit.clone();
             let watermark = handles.watermark.clone();
-            let exit_reservation = release_spool_at_exit.then(|| reservation.clone());
             JobHooks::new(emit, encode_exit, move |exit_seq, exit: &JobExit| {
                 let _ = exit_stash.set(exit.clone());
                 engine.registry.lock().expect("registry lock").complete(
@@ -635,9 +583,6 @@ impl Engine {
                     exit_seq.unwrap_or_else(|| watermark.load(Ordering::Relaxed)),
                     engine.now_ms(),
                 );
-                if let Some(reservation) = exit_reservation {
-                    reservation.release();
-                }
                 drop(ticket);
                 on_exit(exit_seq, exit);
             })
@@ -651,11 +596,10 @@ impl Engine {
         let cleanup = JobCleanup {
             engine: self.clone(),
             op_id: op_id.clone(),
-            reservation,
         };
         tokio::spawn(async move {
-            // Owned here so a PANIC in the pump still removes the route and
-            // returns the spool reservation on unwind (Drop guard).
+            // Owned here so a PANIC in the pump still removes the route. The
+            // RetentionLog drop separately releases actual spool bytes.
             let cleanup = cleanup;
             let end = run_job(params, mailbox_rx, hooks).await;
             if end == JobEnd::FinalAcked {
@@ -812,26 +756,6 @@ impl Engine {
                 "engine gc pass"
             );
         }
-    }
-
-    /// Reserves up to `want` spool bytes against the global budget, returning
-    /// the granted amount.
-    fn reserve_spool(&self, want: u64) -> u64 {
-        let budget = self
-            .budgets
-            .read()
-            .expect("budgets lock")
-            .spool_budget_bytes;
-        let mut reserved = self.spool_reserved.lock().expect("spool ledger lock");
-        let granted = want.min(budget.saturating_sub(*reserved));
-        *reserved += granted;
-        granted
-    }
-
-    /// Returns a job's spool reservation to the global budget.
-    fn release_spool(&self, granted: u64) {
-        let mut reserved = self.spool_reserved.lock().expect("spool ledger lock");
-        *reserved = reserved.saturating_sub(granted);
     }
 }
 
@@ -1034,7 +958,6 @@ mod tests {
             ticket,
             Vec::new(),
             None,
-            false,
             || {
                 Ok::<_, std::io::Error>(sh(
                     "i=0; while [ $i -lt 200 ]; do printf '%08d' $i; i=$((i+1)); sleep 0.005; done",
@@ -1209,7 +1132,6 @@ mod tests {
             ticket,
             Vec::new(),
             None,
-            false,
             || Ok::<_, std::io::Error>(sh("printf out; exit 4")),
             |_frame| {},
             |exit| format!("{exit:?}").into_bytes(),
@@ -1251,7 +1173,6 @@ mod tests {
             ticket2,
             Vec::new(),
             None,
-            false,
             || -> Result<ContainedExec, std::io::Error> { panic!("a known op id must not spawn") },
             |_| {},
             |_| Vec::new(),
@@ -1318,7 +1239,6 @@ mod tests {
             ticket,
             Vec::new(),
             None,
-            false,
             || Err(std::io::Error::other("no such program")),
             |_| {},
             |_| Vec::new(),
@@ -1334,8 +1254,7 @@ mod tests {
                 ..
             }
         ));
-        // Nothing reserved: the ledger only moves for launched jobs.
-        assert_eq!(*engine.spool_reserved.lock().expect("ledger"), 0);
+        assert_eq!(engine.spool_budget.used_bytes(), 0);
     }
 
     #[tokio::test]
@@ -1357,7 +1276,6 @@ mod tests {
             ticket,
             Vec::new(),
             None,
-            false,
             || -> Result<ContainedExec, std::io::Error> {
                 panic!("a tombstoned op must not spawn")
             },
@@ -1371,10 +1289,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn panicking_pump_still_cleans_up_route_and_ledger() {
-        // The emit hook panics on the first frame: the pump task unwinds and
-        // the task-owned Drop guard must still remove the route and return
-        // the spool reservation (design-review fold-in — previously the
-        // cleanup ran only on the normal path).
+        // The emit hook panics on the first frame: task and retention-log Drop
+        // guards must still remove the route and release actual spool bytes.
         let (engine, _dir) = test_engine(AdmissionConfig::default());
         let op = OpId::from("panicky");
         let ticket = engine
@@ -1386,7 +1302,6 @@ mod tests {
             ticket,
             Vec::new(),
             None,
-            false,
             || Ok::<_, std::io::Error>(sh("printf boom")),
             |_frame| panic!("emit hook panic (deliberate)"),
             |_| Vec::new(),
@@ -1409,26 +1324,18 @@ mod tests {
         let route_alive =
             |engine: &Arc<Engine>| engine.routes.lock().expect("routes lock").contains_key(&op);
         for _ in 0..500 {
-            if !route_alive(&engine) && *engine.spool_reserved.lock().expect("ledger") == 0 {
+            if !route_alive(&engine) && engine.spool_budget.used_bytes() == 0 {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         assert!(!route_alive(&engine), "route removed on the panic path");
-        assert_eq!(
-            *engine.spool_reserved.lock().expect("ledger"),
-            0,
-            "spool reservation returned on the panic path"
-        );
+        assert_eq!(engine.spool_budget.used_bytes(), 0);
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn legacy_jobs_release_their_ledger_share_at_exit() {
-        // release_spool_at_exit: the ledger share returns at the terminal
-        // record while the pump still lingers (route alive) — legacy ops
-        // never serve post-exit spool replay, so holding the share through
-        // the linger only starves new ops under connection churn.
+    async fn starting_a_job_does_not_reserve_its_theoretical_spool_quota() {
         let (engine, _dir) = test_engine(AdmissionConfig::default());
         let op = OpId::from("legacy-early-release");
         let ticket = engine
@@ -1441,7 +1348,6 @@ mod tests {
             ticket,
             Vec::new(),
             None,
-            true,
             || Ok::<_, std::io::Error>(sh("printf done")),
             |_frame| {},
             |_| Vec::new(),
@@ -1456,14 +1362,10 @@ mod tests {
             .await
             .expect("exit in time")
             .expect("exit delivered");
-        assert_eq!(
-            *engine.spool_reserved.lock().expect("ledger"),
-            0,
-            "ledger share returned at the terminal record"
-        );
+        assert_eq!(engine.spool_budget.used_bytes(), 0);
         assert!(
             engine.route_command(&op, JobCommand::Detach { completed: None }),
-            "the pump still lingers (route alive) after the early release"
+            "the pump still lingers (route alive) after exit"
         );
         // Normal teardown still works.
         let _ = started
@@ -1483,19 +1385,6 @@ mod tests {
                 final_ack: true,
             })
             .await;
-    }
-
-    #[test]
-    fn spool_reservation_clamps_to_the_global_budget() {
-        let (engine, _dir) = test_engine(AdmissionConfig::default());
-        let budget = engine.budgets().spool_budget_bytes;
-        let first = engine.reserve_spool(budget - 100);
-        assert_eq!(first, budget - 100);
-        let second = engine.reserve_spool(1000);
-        assert_eq!(second, 100, "clamped to the remaining budget");
-        engine.release_spool(first);
-        engine.release_spool(second);
-        assert_eq!(*engine.spool_reserved.lock().expect("ledger"), 0);
     }
 
     #[test]
