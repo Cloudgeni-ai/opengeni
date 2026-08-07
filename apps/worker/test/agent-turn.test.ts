@@ -33,6 +33,7 @@ import { testSettings } from "@opengeni/testing";
 import {
   acceptsPromptCacheKeyForTurn,
   agentRunFailurePayload,
+  assertWorkspaceHumanInputAllowed,
   assertModelResponseLatencyMode,
   assertPhysicalToolQuiescenceForCancellation,
   assertSessionAttemptQuiescenceRecoveryDurable,
@@ -88,12 +89,38 @@ import {
   waitForTurnFinalizerStep,
   waitForTurnStreamCleanup,
   TurnOperationCancelledError,
+  WorkspaceHumanInputDisabledError,
 } from "../src/activities/agent-turn";
 import { sandboxLeaseHolderIdForAttempt } from "../src/sandbox-resume";
 import { settingsWithPackSandboxImage } from "../src/activities/packs";
 import { startGitCredentialRenewalLoop } from "../src/activities/git-credential-renewal";
 
 const OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE = "openai-responses";
+
+describe("workspace structured human-input policy", () => {
+  test("disabled policy rejects forged interruptions before requires-action settlement", () => {
+    const settle = mock(() => undefined);
+    const attemptSettlement = () => {
+      assertWorkspaceHumanInputAllowed(false, "interruption", true);
+      settle();
+    };
+
+    expect(attemptSettlement).toThrow(WorkspaceHumanInputDisabledError);
+    expect(settle).not.toHaveBeenCalled();
+  });
+
+  test("disabled policy rejects stale resumes while enabled control preserves both paths", () => {
+    expect(() => assertWorkspaceHumanInputAllowed(false, "resume", true)).toThrow(
+      /policy rejects structured human-input resume/i,
+    );
+    expect(() => assertWorkspaceHumanInputAllowed(true, "resume", true)).not.toThrow();
+    expect(() => assertWorkspaceHumanInputAllowed(true, "interruption", true)).not.toThrow();
+    expect(() => assertWorkspaceHumanInputAllowed(false, "interruption", false)).not.toThrow();
+  });
+
+  // No-Claim: these pure boundary tests do not prove that a deployed worker has
+  // reloaded a workspace setting or that an already-pending request was repaired.
+});
 
 describe("Connected Machine durable stream finalization", () => {
   test("finalizes every routed proxy once and does not bypass them for the raw fallback", async () => {
