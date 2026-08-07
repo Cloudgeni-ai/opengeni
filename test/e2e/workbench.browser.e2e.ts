@@ -600,9 +600,7 @@ describe("workbench browser acceptance", () => {
         };
       });
       if (statusBounds.left < 0 || statusBounds.right > statusBounds.viewportWidth) {
-        throw new Error(
-          `Machine status escaped the viewport: ${JSON.stringify(statusBounds)}`,
-        );
+        throw new Error(`Machine status escaped the viewport: ${JSON.stringify(statusBounds)}`);
       }
       expect(
         await machineStatus.evaluate((element) => {
@@ -674,9 +672,7 @@ describe("workbench browser acceptance", () => {
       await page.goto(dockUrl(baseUrl, "connecting", "dark", "changes"), {
         waitUntil: "networkidle",
       });
-      const reconnecting = page
-        .getByRole("tabpanel", { name: "Changes" })
-        .getByRole("status");
+      const reconnecting = page.getByRole("tabpanel", { name: "Changes" }).getByRole("status");
       await reconnecting.getByText("Waking workspace", { exact: true }).waitFor();
       expect(await reconnecting.getAttribute("aria-live")).toBe("polite");
 
