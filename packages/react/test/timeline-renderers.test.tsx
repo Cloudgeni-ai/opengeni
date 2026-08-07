@@ -239,12 +239,70 @@ function toolItem(overrides: Partial<ToolCallItem>): ToolCallItem {
     name: "exec_command",
     arguments: {},
     output: undefined,
+    truncation: null,
     raw: undefined,
     status: "complete",
     occurredAt: new Date(0).toISOString(),
     ...overrides,
   };
 }
+
+describe("tool-output truncation disclosure", () => {
+  test("shows bounded delivery and non-retention facts only after expansion", async () => {
+    const item = toolItem({
+      arguments: { cmd: "incident-canary-telemetry" },
+      output: "bounded preview",
+      truncation: {
+        truncated: true,
+        surface: "browser_legacy_guard",
+        reason: "event_envelope_bytes_exceeded",
+        omittedBytes: 83_000,
+        fullEvidence: { available: false, reason: "not_retained" },
+      },
+    });
+    const r = await renderComponent(<ActivityRail items={[item]} bare />);
+    await flush();
+
+    expect(r.container.textContent).not.toContain("not_retained");
+    const disclosure = r.container.querySelector('[role="button"]');
+    expect(disclosure).not.toBeNull();
+    await act(async () => {
+      disclosure?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    expect(r.container.textContent).toContain("bounded preview");
+    expect(r.container.textContent).toContain("browser_legacy_guard");
+    expect(r.container.textContent).toContain("event_envelope_bytes_exceeded");
+    expect(r.container.textContent).toContain("not_retained");
+    expect(r.container.querySelector("[data-og-tool-output-truncation]")).not.toBeNull();
+
+    await r.unmount();
+  });
+
+  test("keeps the near-identical ordinary output free of truncation claims", async () => {
+    const item = toolItem({
+      arguments: { cmd: "incident-canary-telemetry" },
+      output: "bounded preview",
+    });
+    const r = await renderComponent(<ActivityRail items={[item]} bare />);
+    await flush();
+
+    const disclosure = r.container.querySelector('[role="button"]');
+    expect(disclosure).not.toBeNull();
+    await act(async () => {
+      disclosure?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    expect(r.container.textContent).toContain("bounded preview");
+    expect(r.container.textContent).not.toContain("browser_legacy_guard");
+    expect(r.container.textContent).not.toContain("not_retained");
+    expect(r.container.querySelector("[data-og-tool-output-truncation]")).toBeNull();
+
+    await r.unmount();
+  });
+});
 
 function fleetDecisionEventPayload(): Record<string, unknown> {
   return {

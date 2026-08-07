@@ -1,9 +1,10 @@
 import { CameraIcon, CameraOffIcon, ChevronRightIcon } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { createContext, useContext, useState, type ReactNode } from "react";
 import { cn } from "../lib/cn";
 import { stringifyPayload } from "../lib/format";
 import { useForcedDefaultOpen } from "./disclosure-context";
 import { useLightboxOptional } from "./screenshot-lightbox";
+import type { ToolCallTruncation } from "./types";
 
 /* ----------------------------------------------------------------------------
    Shared timeline primitives
@@ -36,6 +37,22 @@ export type DisclosureChip = {
   tone: "ok" | "bad" | "muted" | "interrupted";
   text: string;
 };
+
+const ToolCallTruncationContext = createContext<ToolCallTruncation | null>(null);
+
+export function ToolCallTruncationProvider({
+  value,
+  children,
+}: {
+  value: ToolCallTruncation | null;
+  children: ReactNode;
+}) {
+  return (
+    <ToolCallTruncationContext.Provider value={value}>
+      {children}
+    </ToolCallTruncationContext.Provider>
+  );
+}
 
 export type ActivityDisclosureProps = {
   icon: ReactNode;
@@ -129,7 +146,8 @@ export function ActivityDisclosure({
   // absent in normal app usage, where the row starts collapsed.
   const forcedDefaultOpen = useForcedDefaultOpen();
   const [open, setOpen] = useState(forcedDefaultOpen ?? false);
-  const hasBody = expandable && children != null;
+  const truncation = useContext(ToolCallTruncationContext);
+  const hasBody = expandable && (children != null || truncation != null);
 
   // The preview is detail-on-demand: it is suppressed once the row is open so a
   // path/stat shown in the body never also sits in the collapsed row.
@@ -235,8 +253,27 @@ export function ActivityDisclosure({
       {open ? (
         <div className="mb-2 ml-7 mt-1.5 flex flex-col gap-2 overflow-hidden animate-og-expand">
           {children}
+          {truncation ? <ToolCallTruncationNotice truncation={truncation} /> : null}
         </div>
       ) : null}
+    </div>
+  );
+}
+
+function ToolCallTruncationNotice({ truncation }: { truncation: ToolCallTruncation }) {
+  const fullEvidence = truncation.fullEvidence.available
+    ? "retained"
+    : (truncation.fullEvidence.reason ?? "unavailable");
+  return (
+    <div data-og-tool-output-truncation="" className="text-og-sm leading-5 text-og-fg-subtle">
+      Output bounded at <code className="font-og-mono">{truncation.surface}</code>
+      {truncation.omittedBytes != null && truncation.omittedBytes > 0
+        ? ` · ${truncation.omittedBytes.toLocaleString()} bytes omitted`
+        : null}
+      {" · reason "}
+      <code className="font-og-mono">{truncation.reason}</code>
+      {" · full evidence "}
+      <code className="font-og-mono">{fullEvidence}</code>
     </div>
   );
 }
