@@ -349,10 +349,22 @@ b64decode() {
 # edge's latest-pointer.
 asset_url() {
   _name="$1"
+  _base="${BASE_URL%/}"
+  # A pinned GitHub Release URL is already the asset directory. Keep the normal
+  # edge layout for every other base URL, but do not append it a second time to
+  # the documented direct-release fallback.
+  if [ "$VERSION" != "latest" ]; then
+    case "$_base" in
+      */releases/download/agent-v"$VERSION")
+        echo "$_base/$_name"
+        return
+        ;;
+    esac
+  fi
   if [ "$VERSION" = "latest" ]; then
-    echo "$BASE_URL/agent/latest/$_name"
+    echo "$_base/agent/latest/$_name"
   else
-    echo "$BASE_URL/agent/v$VERSION/$_name"
+    echo "$_base/agent/v$VERSION/$_name"
   fi
 }
 
