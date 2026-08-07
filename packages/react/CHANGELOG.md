@@ -1,5 +1,11 @@
 # @opengeni/react
 
+## 0.48.2
+
+### Patch Changes
+
+- 74e7a31: Cancel Modal commands that stall before provider yield without bypassing physical quiescence, and show the truthful stopping state while replacement work waits.
+
 ## 0.48.1
 
 ### Patch Changes
