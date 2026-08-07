@@ -7,7 +7,7 @@
 //! rendered unit/plist, and drives the platform service tool (`systemctl` /
 //! `launchctl` / `sc.exe`).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use opengeni_agent_platform::service::{self, ServiceBackend, ServiceScope, ServiceSpec};
@@ -122,7 +122,7 @@ fn install_systemd(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
             reset_systemd_aggregate_limits(ServiceScope::User)?;
             // Linger so the user service runs without an active login session.
             if let Ok(user) = std::env::var("USER") {
-                let _ = run_tool("loginctl", &["enable-linger", &user]);
+                let _ = run_tool_path(&systemd_tool("loginctl"), &["enable-linger", &user]);
             }
             systemctl(&["--user", "enable", "--now", service::ids::SYSTEMD_UNIT])?;
             if restart {
@@ -381,8 +381,8 @@ fn status(install_scope: ServiceScope) -> Result<(), String> {
         ServiceBackend::Systemd => {
             let unit = service::ids::SYSTEMD_UNIT;
             let out = match install_scope {
-                ServiceScope::User => capture("systemctl", &["--user", "is-active", unit]),
-                ServiceScope::System => capture("systemctl", &["is-active", unit]),
+                ServiceScope::User => capture_systemctl(&["--user", "is-active", unit]),
+                ServiceScope::System => capture_systemctl(&["is-active", unit]),
             };
             match out {
                 Ok(s) => println!("opengeni-agent service: {}", s.trim()),
@@ -426,32 +426,70 @@ fn scope_label(s: ServiceScope) -> &'static str {
 
 /// Runs `systemctl` with args, mapping a non-zero exit to an error string.
 fn systemctl(args: &[&str]) -> Result<(), String> {
-    run_tool("systemctl", args)
+    run_tool_path(&systemd_tool("systemctl"), args)
+}
+
+fn capture_systemctl(args: &[&str]) -> Result<String, String> {
+    capture_path(&systemd_tool("systemctl"), args)
+}
+
+/// Resolves systemd's own tools ahead of PATH. Agent command execution should
+/// preserve the user's PATH, but service lifecycle commands must not be hijacked
+/// by an unrelated user shim with the same name.
+fn systemd_tool(name: &str) -> PathBuf {
+    resolve_systemd_tool(
+        name,
+        &[
+            Path::new("/run/current-system/sw/bin"),
+            Path::new("/usr/bin"),
+            Path::new("/bin"),
+        ],
+    )
+}
+
+fn resolve_systemd_tool(name: &str, trusted_dirs: &[&Path]) -> PathBuf {
+    trusted_dirs
+        .iter()
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| PathBuf::from(name))
 }
 
 /// Runs an external tool, erroring on a non-zero exit or a spawn failure.
 fn run_tool(tool: &str, args: &[&str]) -> Result<(), String> {
+    run_tool_path(Path::new(tool), args)
+}
+
+fn run_tool_path(tool: &Path, args: &[&str]) -> Result<(), String> {
     let status = Command::new(tool)
         .args(args)
         .status()
-        .map_err(|e| format!("could not run {tool}: {e}"))?;
+        .map_err(|e| format!("could not run {}: {e}", tool.display()))?;
     if status.success() {
         Ok(())
     } else {
-        Err(format!("{tool} {args:?} exited with {status}"))
+        Err(format!("{} {args:?} exited with {status}", tool.display()))
     }
 }
 
 /// Runs an external tool and captures its stdout.
 fn capture(tool: &str, args: &[&str]) -> Result<String, String> {
+    capture_path(Path::new(tool), args)
+}
+
+fn capture_path(tool: &Path, args: &[&str]) -> Result<String, String> {
     let out = Command::new(tool)
         .args(args)
         .output()
-        .map_err(|e| format!("could not run {tool}: {e}"))?;
+        .map_err(|e| format!("could not run {}: {e}", tool.display()))?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
-        Err(format!("{tool} {args:?} exited with {}", out.status))
+        Err(format!(
+            "{} {args:?} exited with {}",
+            tool.display(),
+            out.status
+        ))
     }
 }
 
@@ -473,6 +511,7 @@ fn unsafe_uid() -> String {
 mod tests {
     use super::*;
     use crate::cli::ServiceScopeArgs;
+    use std::fs;
 
     #[test]
     fn scope_maps_system_flag() {
@@ -490,5 +529,30 @@ mod tests {
     fn scope_label_is_human_readable() {
         assert_eq!(scope_label(ServiceScope::User), "user");
         assert_eq!(scope_label(ServiceScope::System), "system");
+    }
+
+    #[test]
+    fn systemd_tool_prefers_the_os_binary_over_path_fallback() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let first = temp.path().join("nix-system");
+        let second = temp.path().join("usr-bin");
+        fs::create_dir_all(&first).expect("first trusted dir");
+        fs::create_dir_all(&second).expect("second trusted dir");
+        fs::write(second.join("systemctl"), b"real systemctl").expect("trusted tool");
+
+        assert_eq!(
+            resolve_systemd_tool("systemctl", &[&first, &second]),
+            second.join("systemctl")
+        );
+    }
+
+    #[test]
+    fn systemd_tool_uses_path_only_when_the_os_has_no_binary() {
+        let temp = tempfile::tempdir().expect("temp dir");
+
+        assert_eq!(
+            resolve_systemd_tool("systemctl", &[temp.path()]),
+            PathBuf::from("systemctl")
+        );
     }
 }
