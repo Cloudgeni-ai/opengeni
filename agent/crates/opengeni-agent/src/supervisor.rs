@@ -12,10 +12,11 @@
 //!    [`Platform`] and replying on the message's reply inbox.
 //! 3. **Heartbeats** every 5s on the events subject with a metrics sample so the
 //!    control plane can dead-detect a vanished agent (§10.6 cadence).
-//! 4. On **any disconnect**, sleeps a full-jitter [`Backoff::standard`] delay (a
-//!    ~30s FAST phase of ≤3s retries so a rolling-deploy blip recovers in
-//!    seconds, then exponential up to a 10s cap for a prolonged outage) before
-//!    reconnecting — NEVER a tight loop (the #1 outage cause). A reconnect
+//! 4. On an **unexpected disconnect**, sleeps a full-jitter [`Backoff::standard`]
+//!    delay (a ~30s FAST phase of ≤3s retries so a rolling-deploy blip recovers
+//!    in seconds, then exponential up to a 10s cap for a prolonged outage)
+//!    before reconnecting — NEVER a tight loop (the #1 outage cause). Expected
+//!    short-lived NATS credential rotation reconnects immediately. A reconnect
 //!    re-subscribes the RPC subject (a fresh subscription), which — together with
 //!    the ~5s heartbeat on this same connection — is what restores the machine's
 //!    `last_seen`/ping liveness the attach gate reads.
@@ -27,7 +28,7 @@
 //! NAT rebind). A deliberate stop is offline, not a blip (§23.0).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -104,6 +105,16 @@ fn message_is_authentication_denial(message: &str) -> bool {
         || lower.contains("auth violation")
 }
 
+/// NATS emits this server error when the intentionally short-lived user JWT
+/// reaches its expiry. The enrollment bearer remains valid and reconnecting
+/// mints a fresh user JWT, so this is planned credential rotation rather than
+/// an outage or an enrollment denial.
+fn message_is_expected_credential_rotation(message: &str) -> bool {
+    message
+        .to_ascii_lowercase()
+        .contains("user authentication expired")
+}
+
 /// A shared, atomically-updated epoch the dispatcher reads to fence stale ops.
 /// The supervisor bumps it whenever the control plane assigns a new epoch (on
 /// connect/resume), so an in-flight op resolved against an older generation is
@@ -162,6 +173,20 @@ impl ShutdownSignal {
     }
 }
 
+/// Why the current NATS connection generation ended.
+///
+/// Credential rotation is expected: the control plane deliberately issues
+/// short-lived NATS user JWTs and the agent reconnects with its durable
+/// enrollment bearer to mint the next one. It outranks a subsequent generic
+/// `Disconnected` event so the supervisor does not add outage backoff to a
+/// planned rotation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+enum TransportLossKind {
+    Disconnected = 1,
+    CredentialRotation = 2,
+}
+
 /// A level-triggered signal that one NATS client in the current connection
 /// generation lost its transport.
 ///
@@ -172,22 +197,43 @@ impl ShutdownSignal {
 /// latched flag closes the same missed-wakeup race as [`ShutdownSignal`].
 #[derive(Clone, Default)]
 struct TransportLossSignal {
-    lost: Arc<AtomicBool>,
+    kind: Arc<AtomicU8>,
     notify: Arc<Notify>,
 }
 
 impl TransportLossSignal {
-    fn request(&self) {
-        self.lost.store(true, Ordering::Release);
+    fn request(&self, kind: TransportLossKind) {
+        self.kind.fetch_max(kind as u8, Ordering::AcqRel);
         self.notify.notify_waiters();
     }
 
     fn is_requested(&self) -> bool {
-        self.lost.load(Ordering::Acquire)
+        self.kind().is_some()
+    }
+
+    fn kind(&self) -> Option<TransportLossKind> {
+        match self.kind.load(Ordering::Acquire) {
+            0 => None,
+            1 => Some(TransportLossKind::Disconnected),
+            2 => Some(TransportLossKind::CredentialRotation),
+            unexpected => {
+                debug_assert!(false, "unexpected transport-loss kind {unexpected}");
+                Some(TransportLossKind::Disconnected)
+            }
+        }
     }
 
     async fn notified(&self) {
         self.notify.notified().await;
+    }
+}
+
+fn transport_loss_outcome(lane: &'static str, signal: &TransportLossSignal) -> ConnectionOutcome {
+    match signal.kind() {
+        Some(TransportLossKind::CredentialRotation) => ConnectionOutcome::CredentialRotation,
+        Some(TransportLossKind::Disconnected) | None => {
+            ConnectionOutcome::Disconnected(format!("{lane} transport disconnected"))
+        }
     }
 }
 
@@ -499,6 +545,12 @@ impl<P: Platform + 'static> Supervisor<P> {
 
             match self.serve_one_connection(link, &mut backoff).await {
                 ConnectionOutcome::CleanShutdown => return,
+                ConnectionOutcome::CredentialRotation => {
+                    info!(
+                        connection_id = %link.connection_id,
+                        "NATS user credential rotated; reconnecting immediately"
+                    );
+                }
                 ConnectionOutcome::Disconnected(reason) => {
                     let delay = backoff.next_delay();
                     warn!(
@@ -603,7 +655,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                     // drop is RECORDED (FAILURE-VISIBILITY healed-fault rule).
                     publisher_engine.note_frame_dropped();
                     warn!(%error, "op frame publish failed (replay heals)");
-                    publisher_transport_lost.request();
+                    publisher_transport_lost.request(TransportLossKind::Disconnected);
                     break;
                 }
             }
@@ -666,12 +718,10 @@ impl<P: Platform + 'static> Supervisor<P> {
                 break ConnectionOutcome::CleanShutdown;
             }
             if control_transport_lost.is_requested() {
-                break ConnectionOutcome::Disconnected(
-                    "control transport disconnected".to_string(),
-                );
+                break transport_loss_outcome("control", &control_transport_lost);
             }
             if bulk_transport_lost.is_requested() {
-                break ConnectionOutcome::Disconnected("bulk transport disconnected".to_string());
+                break transport_loss_outcome("bulk", &bulk_transport_lost);
             }
             tokio::select! {
                 biased;
@@ -681,14 +731,10 @@ impl<P: Platform + 'static> Supervisor<P> {
                     break ConnectionOutcome::CleanShutdown;
                 }
                 () = control_transport_lost.notified() => {
-                    break ConnectionOutcome::Disconnected(
-                        "control transport disconnected".to_string(),
-                    );
+                    break transport_loss_outcome("control", &control_transport_lost);
                 }
                 () = bulk_transport_lost.notified() => {
-                    break ConnectionOutcome::Disconnected(
-                        "bulk transport disconnected".to_string(),
-                    );
+                    break transport_loss_outcome("bulk", &bulk_transport_lost);
                 }
                 // Heartbeat is deliberately ahead of inbound work in this biased
                 // select. A ready subscription can never starve the liveness tick.
@@ -739,22 +785,21 @@ impl<P: Platform + 'static> Supervisor<P> {
             }
         };
 
-        // A request/reply inbox belongs to this connection generation. Once the
-        // generation ends, accepted work cannot produce a useful reply and must
-        // not survive invisibly into the next generation. Aborting the JoinSet
-        // drops the legacy adapters; each orphaned job pump then cancels its
-        // child (mailbox-drop = cancel), releasing admission slots typed.
-        let snapshot = self.engine.admission_snapshot();
-        if snapshot.heavy_running + snapshot.light_running > 0 {
+        // Reply and op-start handshake tasks belong to this connection
+        // generation. Once it ends, they cannot publish a useful reply. This
+        // count deliberately excludes already-established op-stream jobs: those
+        // detach below, keep running, and replay after the next connection.
+        let generation_bound_tasks = rpc_tasks.len();
+        if generation_bound_tasks > 0 {
             let reason = match &outcome {
                 ConnectionOutcome::CleanShutdown => "shutdown",
+                ConnectionOutcome::CredentialRotation => "credential_rotation",
                 ConnectionOutcome::Disconnected(_) => "disconnect",
             };
-            warn!(
+            info!(
                 reason = reason,
-                heavy_running = snapshot.heavy_running,
-                light_running = snapshot.light_running,
-                "cancelling accepted control rpc work at connection-generation end"
+                generation_bound_tasks,
+                "ending generation-bound reply tasks; established op-stream jobs remain running"
             );
         }
         rpc_tasks.shutdown().await;
@@ -1011,7 +1056,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                     match event {
                         async_nats::Event::Disconnected => {
                             warn!(%connection_id, "nats event: disconnected");
-                            transport_lost.request();
+                            transport_lost.request(TransportLossKind::Disconnected);
                         }
                         async_nats::Event::Connected => {
                             info!(%connection_id, "nats event: connected");
@@ -1020,7 +1065,12 @@ impl<P: Platform + 'static> Supervisor<P> {
                             warn!(%connection_id, error = %e, "nats client error");
                         }
                         async_nats::Event::ServerError(e) => {
-                            warn!(%connection_id, error = %e, "nats server error");
+                            if message_is_expected_credential_rotation(&e.to_string()) {
+                                info!(%connection_id, "nats user credential expired as scheduled");
+                                transport_lost.request(TransportLossKind::CredentialRotation);
+                            } else {
+                                warn!(%connection_id, error = %e, "nats server error");
+                            }
                         }
                         other => debug!(%connection_id, ?other, "nats event"),
                     }
@@ -1387,6 +1437,9 @@ async fn publish_response(
 enum ConnectionOutcome {
     /// The connection dropped (transient); the supervisor backs off + reconnects.
     Disconnected(String),
+    /// The short-lived NATS user credential expired as designed. Reconnect with
+    /// the durable enrollment bearer immediately to mint its successor.
+    CredentialRotation,
     /// A clean shutdown was requested; the run loop should exit.
     CleanShutdown,
 }
@@ -1466,6 +1519,20 @@ mod tests {
         // A plain transport drop is NOT an auth denial.
         assert!(!message_is_authentication_denial("connection refused"));
         assert!(!message_is_authentication_denial("broken pipe"));
+    }
+
+    #[test]
+    fn recognizes_only_the_scheduled_nats_credential_expiry_event() {
+        assert!(message_is_expected_credential_rotation(
+            "User Authentication Expired"
+        ));
+        assert!(message_is_expected_credential_rotation(
+            "nats: user authentication expired"
+        ));
+        assert!(!message_is_expected_credential_rotation(
+            "Authorization Violation"
+        ));
+        assert!(!message_is_expected_credential_rotation("broken pipe"));
     }
 
     #[test]
@@ -1559,7 +1626,7 @@ mod tests {
             tokio::spawn(async move { signal.notified().await })
         };
         tokio::time::sleep(Duration::from_millis(50)).await;
-        signal.request();
+        signal.request(TransportLossKind::Disconnected);
         tokio::time::timeout(Duration::from_secs(1), waiter)
             .await
             .expect("a registered transport waiter wakes")
@@ -1569,6 +1636,20 @@ mod tests {
             signal.is_requested(),
             "transport loss remains visible to later loop-top checks"
         );
+        assert_eq!(signal.kind(), Some(TransportLossKind::Disconnected));
+    }
+
+    #[test]
+    fn credential_rotation_outranks_a_later_generic_disconnect() {
+        let signal = TransportLossSignal::default();
+        signal.request(TransportLossKind::CredentialRotation);
+        signal.request(TransportLossKind::Disconnected);
+
+        assert_eq!(signal.kind(), Some(TransportLossKind::CredentialRotation));
+        assert!(matches!(
+            transport_loss_outcome("control", &signal),
+            ConnectionOutcome::CredentialRotation
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

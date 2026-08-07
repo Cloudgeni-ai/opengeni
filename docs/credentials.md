@@ -67,5 +67,8 @@ Rules that hold across the table:
   revoke immediately denies the next NATS authorization/reconnect. A connection
   that already holds a callout-minted user JWT may remain live until that JWT
   expires; the control plane caps that residual interval at five minutes. A
+  healthy agent treats that expiry as scheduled credential rotation and
+  reconnects immediately with its durable enrollment bearer; it does not add
+  outage backoff or stop established op-stream commands. A
   re-enrollment atomically advances the row's credential generation, so the old
   `oge_` bearer can neither authenticate nor self-revoke the new generation.
