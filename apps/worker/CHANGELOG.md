@@ -1,5 +1,13 @@
 # @opengeni/worker-bundle
 
+## 0.16.35
+
+### Patch Changes
+
+- Updated dependencies [e1daf06]
+  - @opengeni/events@0.3.92
+  - @opengeni/core@0.21.16
+
 ## 0.16.34
 
 ### Patch Changes
