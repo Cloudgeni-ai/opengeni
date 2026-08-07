@@ -609,18 +609,19 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     expect(rawWrites).toBe(0);
   });
 
-  test("abort waits for an exec invocation that has not yielded its provider session yet", async () => {
+  test("abort cancels an exec invocation that has not yielded its provider session yet", async () => {
     const abort = new AbortController();
     const controller = createTurnToolCancellationController(abort.signal);
-    let releaseExec!: (output: string) => void;
+    let rejectExec!: (error: Error) => void;
     let execStarted!: () => void;
     const started = new Promise<void>((resolve) => {
       execStarted = resolve;
     });
-    const delayedOutput = new Promise<string>((resolve) => {
-      releaseExec = resolve;
+    const delayedOutput = new Promise<string>((_resolve, reject) => {
+      rejectExec = reject;
     });
     let firstExec = true;
+    const cancellationCommands: string[] = [];
     const exec = functionTool("exec_command", async (_context, rawInput) => {
       const cmd = String((JSON.parse(rawInput) as { cmd?: unknown }).cmd);
       if (firstExec) {
@@ -628,26 +629,32 @@ describe("turn sandbox-tool physical cancellation fence", () => {
         execStarted();
         return await delayedOutput;
       }
-      if (cmd.includes("command cat '/tmp/opengeni-turn-shell/")) {
-        return exited(0, "4300 4300\n");
-      }
-      if (cmd.includes("command kill -0")) return exited(0);
+      cancellationCommands.push(cmd);
       return exited(0);
     });
     const write = functionTool("write_stdin", async () => exited(130));
-    const wrapped = controller.wrapTools([exec, write]) as Array<
-      Extract<Tool<unknown>, { type: "function" }>
-    >;
+    let providerCancellations = 0;
+    const wrapped = controller.wrapTools([exec, write], {
+      supportsPty: () => true,
+      cancelPendingExecCommand: async () => {
+        providerCancellations += 1;
+        rejectExec(new Error("Modal command-router transport closed"));
+      },
+    }) as Array<Extract<Tool<unknown>, { type: "function" }>>;
 
-    const invocation = wrapped[0]!.invoke(runContext, JSON.stringify({ cmd: "sleep 60" }));
+    const invocation = wrapped[0]!
+      .invoke(runContext, JSON.stringify({ cmd: "sleep 60" }))
+      .catch((error) => error);
     await started;
     abort.abort(new Error("steered"));
-    const quiescence = controller.waitForQuiescence();
-    expect(await pendingAfterMicrotasks(quiescence)).toBe(true);
+    await controller.waitForQuiescence();
 
-    releaseExec(running(9));
-    await invocation;
-    await quiescence;
+    expect(await invocation).toBeInstanceOf(Error);
+    expect(providerCancellations).toBe(1);
+    expect(cancellationCommands).toHaveLength(1);
+    expect(cancellationCommands[0]).toContain(".cancelled");
+    expect(cancellationCommands[0]).toContain("command kill -TERM");
+    expect(cancellationCommands[0]).toContain("command kill -KILL");
   });
 
   test("matching lost-session banners unregister ordinary and cancellation-finalizer PTYs", async () => {
@@ -817,6 +824,11 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     const session = {
       supportsPty: () => true,
       exec: async (input: { cmd: string; tty?: boolean; yieldTimeMs?: number }) => {
+        if (input.cmd.includes("command : >")) {
+          signals.push("TERM", "KILL");
+          processAlive = false;
+          return { exitCode: 0, output: "" };
+        }
         if (input.cmd.includes("command cat '/tmp/opengeni-turn-shell/")) {
           return { exitCode: 0, output: "4400 4400\n" };
         }
@@ -869,6 +881,11 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     const session = {
       supportsPty: () => true,
       exec: async (input: { cmd: string; tty?: boolean; yieldTimeMs?: number }) => {
+        if (input.cmd.includes("command : >")) {
+          signals.push("TERM", "KILL");
+          processAlive = false;
+          return { exitCode: 0, output: "" };
+        }
         if (input.cmd.includes("command cat '/tmp/opengeni-turn-shell/")) {
           return { exitCode: 0, output: "4500 4500\n" };
         }

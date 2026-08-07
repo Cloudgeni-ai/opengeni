@@ -272,6 +272,7 @@ export function SessionChrome({
       queuedTurns: currentTurnId ? turns.filter((turn) => turn.id !== currentTurnId) : turns,
     };
   }, [composerSteering, queue.pendingByTurn, turns]);
+  const stopping = queue.stoppingPreviousAttempt;
   const canMutateQueue = !readOnly && composer !== undefined;
 
   const liveGoal =
@@ -307,14 +308,18 @@ export function SessionChrome({
         icon: <InboxIcon className="size-3" />,
       });
     }
-    if (steering) {
+    if (steering || stopping) {
       rows.push({
         id: "steering",
-        label: "Changing direction…",
-        detail: steering.text,
-        tone: "accent",
+        label: stopping
+          ? queue.effectiveControl?.state === "paused"
+            ? "Stopping current work…"
+            : "Stopping previous work…"
+          : "Changing direction…",
+        ...(steering?.text ? { detail: steering.text } : {}),
+        tone: stopping ? "waiting" : "accent",
         icon:
-          steering.phase === "submitting" ? (
+          steering?.phase === "submitting" || stopping ? (
             <Loader2Icon className="size-3 animate-og-spin" />
           ) : (
             <ZapIcon className="size-3" />
@@ -379,7 +384,17 @@ export function SessionChrome({
       });
     }
     return rows;
-  }, [agentsSignal, elapsed, goalState, incoming, queuedTurns, record, steering]);
+  }, [
+    agentsSignal,
+    elapsed,
+    goalState,
+    incoming,
+    queue.effectiveControl,
+    queuedTurns,
+    record,
+    steering,
+    stopping,
+  ]);
 
   const [activeUncontrolled, setActiveUncontrolled] = useState<SessionChromeSignalId | null>(
     defaultActive,
@@ -479,8 +494,11 @@ export function SessionChrome({
   const panelBody =
     active === "incoming" ? (
       <IncomingPanel inputs={incoming} onDismiss={onDismissIncoming} />
-    ) : active === "steering" && steering ? (
-      <SteeringPanel phase={steering.phase} text={steering.text} />
+    ) : active === "steering" && (steering || stopping) ? (
+      <SteeringPanel
+        phase={stopping ? "stopping" : (steering?.phase ?? "accepted")}
+        text={steering?.text}
+      />
     ) : active === "queue" ? (
       <QueuePanel
         turns={queuedTurns}
@@ -762,7 +780,13 @@ function IncomingPanel({
   );
 }
 
-function SteeringPanel({ phase, text }: { phase: "submitting" | "accepted"; text: string }) {
+function SteeringPanel({
+  phase,
+  text,
+}: {
+  phase: "submitting" | "accepted" | "stopping";
+  text?: string | undefined;
+}) {
   return (
     <div
       className="flex items-start gap-2 rounded-og-sm px-1.5 py-1"
@@ -771,18 +795,24 @@ function SteeringPanel({ phase, text }: { phase: "submitting" | "accepted"; text
       data-og-session-chrome-panel="steering"
     >
       <span className="mt-0.5 inline-flex size-5 shrink-0 items-center justify-center rounded-full bg-og-accent-soft text-og-accent">
-        {phase === "submitting" ? (
+        {phase === "submitting" || phase === "stopping" ? (
           <Loader2Icon className="size-3 animate-og-spin" aria-hidden="true" />
         ) : (
           <ZapIcon className="size-3" aria-hidden="true" />
         )}
       </span>
       <div className="min-w-0">
-        <p className="truncate text-og-xs font-medium leading-4 text-og-fg">{text}</p>
-        <p className="mt-0.5 text-[10px] leading-4 text-og-fg-muted">
+        {text ? (
+          <p className="truncate text-og-xs font-medium leading-4 text-og-fg">{text}</p>
+        ) : null}
+        <p className={cn(text && "mt-0.5", "text-[10px] leading-4 text-og-fg-muted")}>
           {phase === "submitting"
             ? "Sending your latest direction…"
-            : "Direction accepted. The agent will continue from it."}
+            : phase === "stopping"
+              ? text
+                ? "Direction saved. Waiting for the previous command to stop safely."
+                : "Waiting for the current command to stop safely."
+              : "Direction accepted. The agent will continue from it."}
         </p>
       </div>
     </div>

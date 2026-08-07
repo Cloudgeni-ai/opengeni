@@ -79,19 +79,27 @@ export function modalSandboxAttributionTags(
 }
 
 type MutableModalSnapshotSandbox = {
+  detach?: () => void;
   snapshotFilesystem?: (...args: unknown[]) => Promise<unknown>;
   snapshotDirectory?: (...args: unknown[]) => Promise<unknown>;
 };
 
 type MutableModalSandboxSession = {
-  modal?: { version?: () => string };
+  modal?: {
+    version?: () => string;
+    sandboxes?: {
+      fromId?: (sandboxId: string) => Promise<MutableModalSnapshotSandbox>;
+    };
+  };
   sandbox?: MutableModalSnapshotSandbox;
   state?: {
+    sandboxId?: string;
     manifest?: { root?: string };
     workspacePersistence?: string;
     snapshotFilesystemTimeoutMs?: number;
   };
   execCommand?: ChannelASession["execCommand"];
+  cancelPendingExecCommand?: () => Promise<void>;
   readFile?: ChannelASession["readFile"];
   listDir?: (args: { path: string; runAs?: string }) => Promise<SandboxDirectoryEntry[]>;
   persistWorkspace?: () => Promise<Uint8Array>;
@@ -106,6 +114,17 @@ type MutableModalSandboxSession = {
 const modalRetentionWrappedSessions = new WeakSet<object>();
 const modalFilesystemRetentionWrappedSandboxes = new WeakSet<object>();
 const modalDirectoryRetentionWrappedSandboxes = new WeakSet<object>();
+const MODAL_TURN_SHELL_MARKER = "/tmp/opengeni-turn-shell/";
+
+type ModalPendingExecStart = {
+  sandbox: MutableModalSnapshotSandbox | null;
+  cancellationRequested: boolean;
+};
+
+type ModalExecCancellationState = {
+  pending: Set<ModalPendingExecStart>;
+  cancellation: Promise<void> | null;
+};
 
 function modalWorkspaceRelativePath(path: string, workspaceRoot: string): string {
   if (!path.startsWith("/")) return path;
@@ -282,6 +301,83 @@ function installModalExecCompletionRecovery(session: MutableModalSandboxSession)
   };
 }
 
+function installModalPendingExecCancellation(session: MutableModalSandboxSession): void {
+  if (session.cancelPendingExecCommand) return;
+  if (
+    typeof session.execCommand !== "function" ||
+    typeof session.sandbox?.detach !== "function" ||
+    typeof session.modal?.sandboxes?.fromId !== "function" ||
+    !session.state?.sandboxId
+  ) {
+    return;
+  }
+  const state: ModalExecCancellationState = {
+    pending: new Set(),
+    cancellation: null,
+  };
+  const execCommand = session.execCommand.bind(session);
+  session.execCommand = async (args) => {
+    const command =
+      args && typeof args === "object" && typeof (args as { cmd?: unknown }).cmd === "string"
+        ? (args as { cmd: string }).cmd
+        : null;
+    if (!command?.includes(MODAL_TURN_SHELL_MARKER)) {
+      return await execCommand(args);
+    }
+
+    // A yielded ContainerProcess owns its command-router connection. Give each
+    // turn-owned start a separate handle so aborting a stuck TaskExecStart can
+    // never break stdin/control for an older, already-yielded command.
+    const pending: ModalPendingExecStart = {
+      sandbox: null,
+      cancellationRequested: false,
+    };
+    state.pending.add(pending);
+    try {
+      const sandbox = await session.modal!.sandboxes!.fromId!(session.state!.sandboxId!);
+      pending.sandbox = sandbox;
+      if (pending.cancellationRequested) {
+        sandbox.detach?.();
+        throw new Error("Modal exec start was cancelled before provider yield");
+      }
+      session.sandbox = sandbox;
+      return await execCommand(args);
+    } finally {
+      state.pending.delete(pending);
+    }
+  };
+
+  session.cancelPendingExecCommand = async () => {
+    if (!state.cancellation) {
+      state.cancellation = (async () => {
+        const pendingStarts = [...state.pending];
+        const detached = new Set<MutableModalSnapshotSandbox>();
+        for (const start of pendingStarts) {
+          start.cancellationRequested = true;
+          if (start.sandbox) {
+            start.sandbox.detach?.();
+            detached.add(start.sandbox);
+          }
+        }
+        // Keep the session usable for the token/PGID proof helper. Handles for
+        // already-yielded commands were removed from `pending` and stay open.
+        if (session.sandbox && detached.has(session.sandbox)) {
+          const replacement = await session.modal!.sandboxes!.fromId!(session.state!.sandboxId!);
+          if (session.sandbox && detached.has(session.sandbox)) {
+            session.sandbox = replacement;
+            installModalNativeSnapshotRetention(session);
+          } else {
+            replacement.detach?.();
+          }
+        }
+      })().finally(() => {
+        state.cancellation = null;
+      });
+    }
+    await state.cancellation;
+  };
+}
+
 /**
  * Bridge the pinned Agents Extensions Modal adapter to Modal 0.9's provider
  * contracts. The wrapper re-checks the private provider sandbox on every
@@ -297,6 +393,7 @@ export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T)
   installModalListDirCompatibility(mutable);
   installModalNativeSnapshotRetention(mutable);
   installModalExecCompletionRecovery(mutable);
+  installModalPendingExecCancellation(mutable);
 
   const persistWorkspace = mutable.persistWorkspace.bind(session);
   mutable.persistWorkspace = async () => {
