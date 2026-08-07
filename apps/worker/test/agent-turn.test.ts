@@ -86,6 +86,7 @@ import {
   shouldRunTurnEndWorkspacePersistence,
   stableHumanInputRequestId,
   structuredToolTransportForTurn,
+  lazyToolTransportForTurn,
   turnExecutionPolicyBillingIdentity,
   turnOperationCancellationFailure,
   unavailableMcpTurnInstructions,
@@ -3856,6 +3857,67 @@ describe("structuredToolTransportForTurn", () => {
   test("preserves hosted tool types for real Responses providers and the legacy path", () => {
     expect(structuredToolTransportForTurn(resolved("api-key"))).toBe(true);
     expect(structuredToolTransportForTurn(null)).toBe(true);
+  });
+});
+
+describe("lazyToolTransportForTurn", () => {
+  const resolved = (
+    kind: RegistryProviderKind,
+    api: ModelProviderApi,
+    options: { id?: string; builtin?: boolean; baseUrl?: string } = {},
+  ) =>
+    ({
+      provider: {
+        id: options.id ?? "registry",
+        kind,
+        api,
+        builtin: options.builtin ?? false,
+        ...(options.baseUrl ? { baseUrl: options.baseUrl } : {}),
+      },
+    }) as Parameters<typeof lazyToolTransportForTurn>[0];
+
+  test("keeps Codex on its pristine native transport", () => {
+    expect(lazyToolTransportForTurn(resolved("codex-subscription", "responses"))).toBe(
+      "codex_native",
+    );
+  });
+
+  test("uses native client search only for direct built-in OpenAI/Azure Responses", () => {
+    expect(
+      lazyToolTransportForTurn(resolved("api-key", "responses", { id: "openai", builtin: true })),
+    ).toBe("openai_native");
+    expect(
+      lazyToolTransportForTurn(
+        resolved("api-key", "responses", {
+          id: "azure",
+          builtin: true,
+          baseUrl: "https://example.openai.azure.com/openai/v1",
+        }),
+      ),
+    ).toBe("openai_native");
+    expect(lazyToolTransportForTurn(null)).toBe("openai_native");
+  });
+
+  test("contains a built-in OpenAI custom endpoint behind generic dispatch", () => {
+    expect(
+      lazyToolTransportForTurn(
+        resolved("api-key", "responses", {
+          id: "openai",
+          builtin: true,
+          baseUrl: "https://proxy.example.test/v1",
+        }),
+      ),
+    ).toBe("generic_dispatch");
+  });
+
+  test("contains Gateway and other providers behind generic dispatch", () => {
+    expect(lazyToolTransportForTurn(resolved("vercel-gateway-managed", "responses"))).toBe(
+      "generic_dispatch",
+    );
+    expect(lazyToolTransportForTurn(resolved("vercel-gateway-workspace", "responses"))).toBe(
+      "generic_dispatch",
+    );
+    expect(lazyToolTransportForTurn(resolved("api-key", "chat"))).toBe("generic_dispatch");
   });
 });
 

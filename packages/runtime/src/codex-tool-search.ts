@@ -344,12 +344,25 @@ function codexToolSearchExecutor(
   },
   mcpServerIds: ReadonlySet<string>,
 ): Tool[] {
-  const deferred = (args.availableTools ?? []).filter((tool) =>
+  return searchMcpTools(args.availableTools ?? [], args.toolCall?.arguments, mcpServerIds);
+}
+
+/**
+ * Search and byte-bound the currently authorized non-mandatory MCP function tools.
+ * Shared by native client tool search and OpenGeni's provider-neutral dispatcher;
+ * authorization still comes exclusively from the live `availableTools` snapshot.
+ */
+export function searchMcpTools(
+  availableTools: Tool[],
+  rawArguments: unknown,
+  mcpServerIds: ReadonlySet<string> = NO_MCP_SERVER_IDS,
+): Tool[] {
+  const searchable = availableTools.filter((tool) =>
     isSearchableMcpFunctionTool(tool, mcpServerIds),
   );
-  if (deferred.length === 0) return [];
-  const { query, limit } = parseSearchArgs(args.toolCall?.arguments);
-  const ranked = bm25RankTools(deferred, query, limit);
+  if (searchable.length === 0) return [];
+  const { query, limit } = parseSearchArgs(rawArguments);
+  const ranked = bm25RankTools(searchable, query, limit);
   const bounded: Tool[] = [];
   let disclosedBytes = 0;
   for (const tool of ranked) {

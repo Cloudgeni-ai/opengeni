@@ -66,6 +66,13 @@ import {
 } from "./mcp-network";
 import { normalizeProtocolJsonValue } from "./protocol-json";
 import {
+  LazyToolModelProvider,
+  installLazyToolRuntime,
+  lazyToolRuntimeForAgent,
+  restoreGenericDispatchHistoryItems,
+  type LazyToolTransport,
+} from "./lazy-tool-transport";
+import {
   Agent,
   AgentsError,
   connectMcpServers,
@@ -949,7 +956,7 @@ export function resolveTurnModel(
  * hits the default client (e.g. Azure) and a registry model 404s
  * ("deployment does not exist"); with it the name resolves back to the right
  * provider. Installed both as the run-scoped `Runner.config.modelProvider` (every
- * run in runAgentStream goes through `runScopedRunner(settings)`, built from the
+ * run in runAgentStream goes through `runScopedRunner(settings, agent)`, built from the
  * per-turn settings) and as the process default (see configureOpenAI). The
  * run-scoped instance is the load-bearing one: a `Runner` resolves string model
  * names against ITS OWN modelProvider, not the lazy global default, so each
@@ -1813,6 +1820,8 @@ export type BuildAgentOptions = {
   hostedWebSearch?: boolean;
   encryptedReasoning?: boolean;
   structuredToolTransport?: boolean;
+  /** Explicit provider-contained progressive tool-disclosure strategy. */
+  lazyToolTransport?: LazyToolTransport;
   // Whether this turn's resolved model accepts image input. This is derived
   // from ConfiguredModel.capabilities.inputModalities at the worker boundary.
   // False removes image-only sandbox tools and projects images out of each
@@ -2452,7 +2461,7 @@ export function buildOpenGeniAgent(
     if (options.inputFileMediaTypes) {
       agentInputFileMediaTypes.set(agent, options.inputFileMediaTypes);
     }
-    maybeInstallCodexToolSearch(agent, settings, options);
+    maybeInstallLazyToolTransport(agent, settings, options);
     applyMcpApprovalPolicy(
       agent,
       settings,
@@ -2559,7 +2568,7 @@ export function buildOpenGeniAgent(
   if (options.rigCredentialHookIds && options.rigCredentialHookIds.length > 0) {
     agentRigCredentialHooks.set(agent, sandboxLifecycleHooksForIds(options.rigCredentialHookIds));
   }
-  maybeInstallCodexToolSearch(agent, settings, options);
+  maybeInstallLazyToolTransport(agent, settings, options);
   applyMcpApprovalPolicy(
     agent,
     settings,
@@ -2570,49 +2579,62 @@ export function buildOpenGeniAgent(
 }
 
 /**
- * Enable Codex-CLI-style progressive MCP disclosure on a Codex turn when the
- * flag is on. Gated on `structuredToolTransport === false` — the same signal that
- * identifies a Codex-subscription turn (the ChatGPT backend that rejects hosted
- * tools) — so no non-Codex turn is ever touched. On qualifying turns it wraps
- * `getAllTools` (clone-survivingly — see {@link installCodexToolSearch}) to defer
- * selected non-mandatory MCP schemas and add the client tool_search tool. The
- * description combines live connector namespaces with selected server identities.
+ * Install the explicitly resolved progressive-disclosure transport. The legacy
+ * rollout flag remains only an on/off switch; provider selection never depends
+ * on the unrelated sandbox structured-tool Boolean.
+ *
+ * Codex stays on its existing native `defer_loading` implementation. Direct
+ * OpenAI/Azure keep full real tools in Runner's execution registry while a model
+ * wrapper omits searchable schemas from the provider request and native client
+ * tool_search discloses the same objects. Generic providers receive only stable
+ * ordinary tool_search/tool_invoke schemas; valid dispatcher calls are rewritten
+ * back to the real runtime tool before Runner handles approval and execution.
  */
-function maybeInstallCodexToolSearch(
+function maybeInstallLazyToolTransport(
   agent: Agent<any, any>,
   settings: Settings,
   options: BuildAgentOptions,
 ): void {
-  if (settings.codexToolSearchEnabled && options.structuredToolTransport === false) {
-    const mcpServers = options.mcpServers ?? [];
-    // `defer_loading:true` removes these MCP schemas from provider context until
-    // tool_search discloses a bounded match. Keep the compaction estimator on
-    // that same wire truth; otherwise a large deferred catalog can falsely trip
-    // compaction before the first real model request. OpenGeni remains eager.
-    for (const server of mcpServers) {
-      const registryId = server instanceof PrefixedMcpServer ? server.registryId : server.name;
-      if (registryId === "opengeni") continue;
-      (
-        server as MCPServer & {
-          deferModelToolSchemaAccounting?: () => void;
-        }
-      ).deferModelToolSchemaAccounting?.();
-    }
+  const transport = options.lazyToolTransport;
+  if (!transport) return;
+  const enabled =
+    transport === "codex_native" ? settings.codexToolSearchEnabled : settings.lazyToolSearchEnabled;
+  if (!enabled) return;
+
+  const mcpServers = options.mcpServers ?? [];
+  // Every transport removes non-mandatory MCP definitions from the provider's
+  // initial tool block. Keep proactive compaction accounting on that wire truth.
+  for (const server of mcpServers) {
+    const registryId = server instanceof PrefixedMcpServer ? server.registryId : server.name;
+    if (registryId === "opengeni") continue;
+    (
+      server as MCPServer & {
+        deferModelToolSchemaAccounting?: () => void;
+      }
+    ).deferModelToolSchemaAccounting?.();
+  }
+  // Prepared servers use a shared SDK lifecycle name; tool prefixes come from
+  // their registry identity. Preserve the fallback for embedded/test servers.
+  const mcpServerIds = new Set(
+    mcpServers.map((server) =>
+      server instanceof PrefixedMcpServer ? server.registryId : server.name,
+    ),
+  );
+
+  if (transport === "codex_native") {
     installCodexToolSearch(
       agent as unknown as Parameters<typeof installCodexToolSearch>[0],
       options.codexConnectorNamespaces ?? new Set<string>(),
-      // Prepared MCP servers are wrapped with PrefixedMcpServer. Its SDK-facing
-      // `name` is the shared lifecycle label, not the registry identity stamped
-      // into tool names; passing it here makes every live tool_search query miss
-      // Codex Apps (and any other selected MCP). Preserve a name fallback for
-      // embedded/test MCP implementations that do not carry the wrapper.
-      new Set(
-        mcpServers.map((server) =>
-          server instanceof PrefixedMcpServer ? server.registryId : server.name,
-        ),
-      ),
+      mcpServerIds,
     );
+    return;
   }
+  installLazyToolRuntime(
+    agent as unknown as Parameters<typeof installLazyToolRuntime>[0],
+    transport,
+    mcpServerIds,
+    settings.modelToolOutputTruncationTokens,
+  );
 }
 
 /** True when the unprefixed tool `name` requires approval under `policy`. */
@@ -5127,6 +5149,16 @@ export const normalizeComputerCallsFilter: CallModelInputFilter = ({ modelData }
   ) as unknown as AgentInputItem[],
 });
 
+/** Keep persisted generic-dispatch internals out of every provider request. */
+export const restoreLazyToolProviderHistoryFilter: CallModelInputFilter = ({ modelData }) => {
+  const input = restoreGenericDispatchHistoryItems(
+    modelData.input as unknown as Array<Record<string, unknown>>,
+  );
+  return input === modelData.input
+    ? modelData
+    : { ...modelData, input: input as unknown as AgentInputItem[] };
+};
+
 /**
  * Canonical Codex-style tool-result bound at the final model-input seam. The
  * identical pure normalizer also runs before conversation rows are persisted,
@@ -5473,6 +5505,7 @@ export function callModelInputFilterForSettings(
   options: ContextRobustnessFilterOptions = {},
 ): CallModelInputFilter | undefined {
   const filters: CallModelInputFilter[] = [
+    restoreLazyToolProviderHistoryFilter,
     normalizeComputerCallsFilter,
     boundModelToolOutputsFilterForSettings(settings),
   ];
@@ -5659,7 +5692,7 @@ export async function runAgentStream(
       session: agentSession,
       ...(sessionState ? { sessionState } : {}),
     } as SandboxRunConfig;
-    return await runScopedRunner(settings).run(agent, prepared.input, ownedRunOptions);
+    return await runScopedRunner(settings, agent).run(agent, prepared.input, ownedRunOptions);
   }
 
   const rawClient = overrides.sandboxClient ?? createSandboxClient(settings, environment);
@@ -5773,7 +5806,7 @@ export async function runAgentStream(
       ...(sandboxSessionState ? { sessionState: sandboxSessionState } : {}),
     } as SandboxRunConfig;
   }
-  return await runScopedRunner(settings).run(agent, prepared.input, runOptions);
+  return await runScopedRunner(settings, agent).run(agent, prepared.input, runOptions);
 }
 
 function appendSandboxFileDownloadFailureNote(
@@ -5814,11 +5847,18 @@ function appendSandboxFileDownloadFailureNote(
  * Runner inherits the SDK's default config for everything else, identical to the
  * default runner. setDefaultModelProvider remains only as a boot-time fallback.
  */
-function runScopedRunner(settings: Settings): Runner {
+function runScopedRunner(settings: Settings, agent: Agent<any, any>): Runner {
+  const baseProvider = new MultiProviderModelProvider(settings);
+  const lazyRuntime = lazyToolRuntimeForAgent(agent);
   return new Runner({
-    modelProvider: new MultiProviderModelProvider(settings),
+    modelProvider: lazyRuntime
+      ? new LazyToolModelProvider(baseProvider, lazyRuntime)
+      : baseProvider,
   });
 }
+
+export { restoreGenericDispatchHistoryItems } from "./lazy-tool-transport";
+export type { LazyToolTransport } from "./lazy-tool-transport";
 
 export { MaxTurnsExceededError } from "@openai/agents";
 

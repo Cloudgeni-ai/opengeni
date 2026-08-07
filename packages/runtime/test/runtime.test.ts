@@ -6867,6 +6867,39 @@ describe("provider item id stripping", () => {
     expect(preserved.id).toBe("cu_abc");
   });
 
+  test("callModelInputFilterForSettings always restores generic-dispatch provider history", async () => {
+    const originalArguments = JSON.stringify({
+      name: "connected_tools__weather",
+      arguments: { city: "Oslo" },
+    });
+    const internal = {
+      type: "function_call",
+      callId: "lazy-1",
+      name: "connected_tools__weather",
+      arguments: JSON.stringify({ city: "Oslo" }),
+      providerData: {
+        providerCall: "kept",
+        "opengeni.lazy_dispatch.v1": { version: 1, arguments: originalArguments },
+      },
+    };
+    const filter = callModelInputFilterForSettings(testSettings())!;
+    const result = await filter({
+      modelData: { input: [internal] as any },
+      agent: {} as any,
+      context: undefined,
+    });
+
+    expect(result.input[0]).toEqual({
+      type: "function_call",
+      callId: "lazy-1",
+      name: "tool_invoke",
+      arguments: originalArguments,
+      providerData: { providerCall: "kept" },
+    });
+    expect(internal.name).toBe("connected_tools__weather");
+    expect("opengeni.lazy_dispatch.v1" in internal.providerData).toBe(true);
+  });
+
   test("exports the deprecated view_image elision helper as an identity no-op", () => {
     const prefix = [
       { type: "message", role: "user", content: "inspect twice" },
@@ -7549,6 +7582,7 @@ describe("provider item id stripping", () => {
     });
     const agent = buildOpenGeniAgent(settings, [], {
       structuredToolTransport: false,
+      lazyToolTransport: "codex_native",
       mcpServers: [selectedMcp, mandatoryMcp],
     });
     const filter = contextRobustnessFilterForSettings(settings, {
@@ -7569,6 +7603,30 @@ describe("provider item id stripping", () => {
     ).resolves.toMatchObject({
       input: [{ type: "message", role: "user", content: "small" }],
     });
+  });
+
+  test("structured sandbox transport no longer selects a lazy-tool protocol", () => {
+    let schemaAccountingDeferred = false;
+    const selectedMcp = {
+      name: "selected",
+      cacheToolsList: true,
+      connect: async () => undefined,
+      close: async () => undefined,
+      listTools: async () => [],
+      callTool: async () => ({ content: [] }),
+      deferModelToolSchemaAccounting: () => {
+        schemaAccountingDeferred = true;
+      },
+    } as unknown as MCPServer;
+    buildOpenGeniAgent(
+      testSettings({ codexToolSearchEnabled: true, webSearchEnabled: false }),
+      [],
+      {
+        structuredToolTransport: false,
+        mcpServers: [selectedMcp],
+      },
+    );
+    expect(schemaAccountingDeferred).toBe(false);
   });
 
   test("callModelInputFilterForSettings observes an operator compaction request before each model call", async () => {
