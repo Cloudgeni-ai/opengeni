@@ -1,5 +1,11 @@
 # @opengeni/runtime
 
+## 0.18.26
+
+### Patch Changes
+
+- 909daef: Serialize SDK sandbox manifests once at the canonical lease-envelope field and normalize cross-realm provider JSON before persistence.
+
 ## 0.18.25
 
 ### Patch Changes
