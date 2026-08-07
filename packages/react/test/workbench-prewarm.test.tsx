@@ -696,6 +696,43 @@ describe("capture-driven default tab (Refinement 2)", () => {
     await hook.unmount();
   });
 
+  test("a missing remote default falls back to the live working tree", async () => {
+    const comparisons: Array<string | undefined> = [];
+    const diff = [fakeFileDiff({ path: "src/uncommitted.ts" })];
+    const { client } = coldClient({
+      getStreamCapabilities: async () => fakeCapabilities(),
+      getWorkspaceCapture: async () => ({ available: false }),
+      gitStatus: async () => ({
+        isRepo: true,
+        head: "local-only",
+        detached: false,
+        upstream: null,
+        ahead: 0,
+        behind: 0,
+        files: [],
+        revision: 1,
+      }),
+      gitDiff: async (_workspaceId, _sessionId, request) => {
+        comparisons.push(request?.fromRef);
+        if (request?.fromRef === "origin/HEAD") {
+          throw new Error("origin/HEAD is not configured");
+        }
+        return { files: diff, revision: 1 };
+      },
+    });
+    const hook = await renderTabsHook(client, { sessionId: SESSION_ID, events: [] });
+    await flush(60);
+
+    expect(comparisons).toContain("origin/HEAD");
+    expect(comparisons).toContain("HEAD");
+    expect(hook.result.current.defaultTab).toBe(WORKBENCH_TAB_CHANGES);
+    const changes = hook.result.current.tabs.find((tab) => tab.id === WORKBENCH_TAB_CHANGES);
+    expect(
+      (changes?.content as ReactElement<{ comparison: string }> | undefined)?.props.comparison,
+    ).toBe("working");
+    await hook.unmount();
+  });
+
   test("warm live Git outranks an empty prior capture", async () => {
     const { client } = coldClient({
       getStreamCapabilities: async () => fakeCapabilities(),

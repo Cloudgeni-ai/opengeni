@@ -459,23 +459,16 @@ export function useSandboxWorkspaceTabs(
     if (
       changesComparison === "branch" &&
       git.error &&
-      captureAvailable &&
-      !captureSupportsBranch &&
       storedChangesComparison?.sessionId !== sessionId
     ) {
-      // A failed live branch read must not hide a valid durable capture. Fall
-      // back once to the truthful captured working-tree scope and let Retry
-      // operate there; never label captured HEAD data as a branch comparison.
+      // `origin/HEAD` is not guaranteed on a newly initialized repository, a
+      // connected machine, or a clone whose remote was renamed. The implicit
+      // live default must not strand the whole Changes surface when its ordinary
+      // working-tree comparison is still valid. Fall back once; an explicit
+      // user-selected Branch view remains selected and surfaces its real error.
       setStoredChangesComparison({ sessionId, value: "working" });
     }
-  }, [
-    captureAvailable,
-    captureSupportsBranch,
-    changesComparison,
-    git.error,
-    sessionId,
-    storedChangesComparison?.sessionId,
-  ]);
+  }, [changesComparison, git.error, sessionId, storedChangesComparison?.sessionId]);
   // Token-derived xterm theme; re-derive on a `data-og-theme` flip. Generic — it
   // belongs in the package (an embedder's theme toggle drives it too).
   const [xtermTheme, setXtermTheme] = useState<XtermTheme | undefined>(undefined);
@@ -551,6 +544,10 @@ export function useSandboxWorkspaceTabs(
   const captureIsAuthoritative =
     !liveWorkspaceExpected && (liveness !== undefined || caps.error !== null);
   const captureUnavailable = captureState.fileCount === 0 || captureState.error !== null;
+  const implicitBranchFallbackPending =
+    changesComparison === "branch" &&
+    git.error !== null &&
+    storedChangesComparison?.sessionId !== sessionId;
   if (defaultTabRef.current.value === null) {
     if (initialTab && (!isWorkbenchSurface(initialTab) || surfaceSet.has(initialTab))) {
       defaultTabRef.current.value = initialTab;
@@ -593,9 +590,9 @@ export function useSandboxWorkspaceTabs(
         changesEnabled,
         filesEnabled,
       );
-    } else if (captureUnavailable && git.error) {
+    } else if (captureUnavailable && git.error && !implicitBranchFallbackPending) {
       // No capture and live Git failed: Files is the least surprising fallback
-      // and preserves the established no-capture degraded behavior.
+      // after the implicit branch-to-working fallback has also had its chance.
       defaultTabRef.current.value = sourceDrivenDefaultTab(false, changesEnabled, filesEnabled);
     }
   }
