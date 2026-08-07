@@ -1845,8 +1845,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
-    const raw = await c.req.json();
-    const payload = SteerSessionMessageRequest.parse(raw);
+    const payload = parseSteerSessionAdmission(await c.req.json().catch(() => null));
     const result = await acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
       text: payload.text,
       turnInstructions: payload.turnInstructions ?? null,
@@ -1870,8 +1869,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
-    const rawEvent = await c.req.json();
-    const event = ClientSessionEvent.parse(rawEvent);
+    const event = parseSessionEventAdmission(await c.req.json().catch(() => null));
     const refinedOperation =
       event.type === "user.approvalDecision"
         ? "session.approval.write"
@@ -3361,6 +3359,22 @@ export function sessionCreateErrorResponse(c: Context, error: unknown): Response
     );
   }
   throw error;
+}
+
+export function parseSessionEventAdmission(raw: unknown): ClientSessionEvent {
+  const parsed = ClientSessionEvent.safeParse(raw);
+  if (!parsed.success) {
+    throw new HTTPException(422, { message: "invalid session event" });
+  }
+  return parsed.data;
+}
+
+export function parseSteerSessionAdmission(raw: unknown): SteerSessionMessageRequest {
+  const parsed = SteerSessionMessageRequest.safeParse(raw);
+  if (!parsed.success) {
+    throw new HTTPException(422, { message: "invalid steer request" });
+  }
+  return parsed.data;
 }
 
 function zodErrorFields(error: ZodError): string {

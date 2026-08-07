@@ -2123,7 +2123,7 @@ describe("API component integration", () => {
     expect(session.tools).toEqual([{ kind: "mcp", id: "docs" }]);
   });
 
-  test("adds MCP tool refs on follow-up user messages", async () => {
+  test("rejects removed one-turn MCP tool overrides without mutating the session", async () => {
     const app = createApp({
       settings: testSettings({
         databaseUrl: services.databaseUrl,
@@ -2149,8 +2149,10 @@ describe("API component integration", () => {
     });
     const session = (await created.json()) as { id: string };
     await setSessionStatus(dbClient.db, workspaceId, session.id, "idle", null);
+    const before = await requireSession(dbClient.db, workspaceId, session.id);
+    const turnsBefore = await listSessionTurns(dbClient.db, workspaceId, session.id);
 
-    const accepted = await app.request(
+    const rejected = await app.request(
       workspacePath(workspaceId, `/sessions/${session.id}/events`),
       {
         method: "POST",
@@ -2164,50 +2166,21 @@ describe("API component integration", () => {
         headers: { "content-type": "application/json" },
       },
     );
-    expect(accepted.status).toBe(202);
-    const event = (await accepted.json()) as SessionEvent;
-    expect(event.payload).toEqual({
-      text: "search docs",
-      tools: [{ kind: "mcp", id: "docs" }],
-      delivery: "send",
-      initiator: { kind: "subject", subjectId: "dev", label: "Local dev" },
-    });
-    expect((await requireSession(dbClient.db, workspaceId, session.id)).tools).toEqual([
-      { kind: "mcp", id: "docs" },
-    ]);
-
-    await setSessionStatus(dbClient.db, workspaceId, session.id, "idle", null);
-    const duplicate = await app.request(
-      workspacePath(workspaceId, `/sessions/${session.id}/events`),
-      {
-        method: "POST",
-        body: JSON.stringify({
-          type: "user.message",
-          payload: { text: "again", tools: [{ kind: "mcp", id: "docs" }] },
-        }),
-        headers: { "content-type": "application/json" },
+    expect(rejected.status).toBe(422);
+    expect(await rejected.json()).toMatchObject({
+      error: {
+        status: 422,
+        code: "validation_failed",
+        message: "invalid session event",
+        retryable: false,
       },
-    );
-    expect(duplicate.status).toBe(202);
-    const currentSession = await requireSession(dbClient.db, workspaceId, session.id);
-    expect(currentSession.tools).toEqual([{ kind: "mcp", id: "docs" }]);
-    const turnIds = new Set(
-      (await listSessionTurns(dbClient.db, workspaceId, session.id)).map((turn) => turn.id),
-    );
-    const usage = await listUsageEvents(dbClient.db, {
-      accountId: currentSession.accountId,
-      workspaceId,
-      limit: 100,
     });
-    expect(
-      usage
-        .filter((usageEvent) => usageEvent.eventType === "agent_run.created")
-        .filter(
-          (usageEvent) =>
-            usageEvent.sourceResourceId === session.id ||
-            turnIds.has(usageEvent.sourceResourceId ?? ""),
-        ),
-    ).toHaveLength(3);
+    expect((await requireSession(dbClient.db, workspaceId, session.id)).tools).toEqual(
+      before.tools,
+    );
+    expect(await listSessionTurns(dbClient.db, workspaceId, session.id)).toHaveLength(
+      turnsBefore.length,
+    );
   });
 
   test("revives a failed session on a new user message but keeps cancelled terminal", async () => {
@@ -2364,7 +2337,7 @@ describe("API component integration", () => {
     expect(after).toBe(before + 1);
   });
 
-  test("queues concurrent follow-up user messages while merging session tools", async () => {
+  test("rejects concurrent removed one-turn tool overrides without partial mutation", async () => {
     const mcpServers = Array.from({ length: 12 }, (_, index) => ({
       id: `docs-${index}`,
       name: `Docs ${index}`,
@@ -2389,6 +2362,8 @@ describe("API component integration", () => {
     });
     const session = (await created.json()) as { id: string };
     await setSessionStatus(dbClient.db, workspaceId, session.id, "idle", null);
+    const before = await requireSession(dbClient.db, workspaceId, session.id);
+    const turnsBefore = await listSessionTurns(dbClient.db, workspaceId, session.id);
 
     const responses = await Promise.all(
       mcpServers.map((server) =>
@@ -2406,9 +2381,17 @@ describe("API component integration", () => {
       ),
     );
 
-    expect(responses.filter((response) => response.status === 202)).toHaveLength(mcpServers.length);
-    expect((await requireSession(dbClient.db, workspaceId, session.id)).tools).toHaveLength(
-      mcpServers.length,
+    expect(responses.every((response) => response.status === 422)).toBe(true);
+    expect(
+      (await Promise.all(responses.map((response) => response.json()))).every(
+        (body) => (body as { error?: { code?: string } }).error?.code === "validation_failed",
+      ),
+    ).toBe(true);
+    expect((await requireSession(dbClient.db, workspaceId, session.id)).tools).toEqual(
+      before.tools,
+    );
+    expect(await listSessionTurns(dbClient.db, workspaceId, session.id)).toHaveLength(
+      turnsBefore.length,
     );
   });
 
@@ -2442,6 +2425,14 @@ describe("API component integration", () => {
       },
     );
     expect(rejected.status).toBe(422);
+    expect(await rejected.json()).toMatchObject({
+      error: {
+        status: 422,
+        code: "validation_failed",
+        message: "invalid session event",
+        retryable: false,
+      },
+    });
   });
 
   test("returns client model and reasoning config", async () => {
