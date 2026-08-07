@@ -1290,6 +1290,9 @@ export const WorkspaceSettingsSchema = z
     // Default compaction strategy for NEW Codex sessions created in this
     // workspace. Absent ⇒ remote_v2. Non-Codex sessions always freeze portable.
     codexCompactionDefault: CodexCompactionMode.optional(),
+    // Whether agents may expose and invoke the built-in structured human-input
+    // tool. Absent preserves the historical enabled behavior.
+    agentHumanInputEnabled: z.boolean().optional(),
     // Optional Slack reaction invocation. Absent/invalid fails closed to the
     // disabled default via resolveWorkspaceSlackReactionSummonSettings.
     slackReactionSummon: WorkspaceSlackReactionSummonSettings.optional(),
@@ -1308,6 +1311,12 @@ export function resolveWorkspaceCodexCompactionDefault(settings: unknown): Codex
   const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
   if (!parsed.success) return "remote_v2";
   return parsed.data.codexCompactionDefault ?? "remote_v2";
+}
+
+/** Whether agents may request structured human input (enabled when unset). */
+export function resolveWorkspaceAgentHumanInputEnabled(settings: unknown): boolean {
+  const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
+  return parsed.success ? parsed.data.agentHumanInputEnabled !== false : true;
 }
 
 /**
@@ -1372,6 +1381,7 @@ export const UpdateWorkspaceSettingsRequest = z
     transcription: WorkspaceTranscriptionPolicy.optional(),
     maxNestedAgentDepth: NestedAgentDepthValue.nullable().optional(),
     codexCompactionDefault: CodexCompactionMode.optional(),
+    agentHumanInputEnabled: z.boolean().optional(),
     slackReactionSummon: WorkspaceSlackReactionSummonSettings.optional(),
   })
   .passthrough();

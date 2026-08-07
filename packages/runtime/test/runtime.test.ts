@@ -318,6 +318,22 @@ describe("structured human-input runtime boundary", () => {
     },
   };
 
+  test("workspace policy omits only the human-input tool while enabled control preserves it", () => {
+    const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: true });
+    const defaultTools = buildOpenGeniAgent(settings, []).tools.map((tool) => tool.name);
+    const enabledTools = buildOpenGeniAgent(settings, [], { humanInputEnabled: true }).tools.map(
+      (tool) => tool.name,
+    );
+    const disabledTools = buildOpenGeniAgent(settings, [], { humanInputEnabled: false }).tools.map(
+      (tool) => tool.name,
+    );
+
+    expect(defaultTools).toContain(HUMAN_INPUT_TOOL_NAME);
+    expect(enabledTools).toEqual(defaultTools);
+    expect(disabledTools).not.toContain(HUMAN_INPUT_TOOL_NAME);
+    expect(disabledTools).toEqual(defaultTools.filter((name) => name !== HUMAN_INPUT_TOOL_NAME));
+  });
+
   test("partitions human requests out of ordinary approval payloads", () => {
     const ordinary = {
       name: "dangerous_tool",

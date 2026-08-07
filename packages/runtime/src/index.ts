@@ -1773,6 +1773,8 @@ export type ConnectorActionPolicyHooks = {
 
 export type BuildAgentOptions = {
   model?: Model;
+  /** Attach the built-in structured human-input tool. Default: enabled. */
+  humanInputEnabled?: boolean;
   /** Settled response for the one internal human-input interruption resumed by this run. */
   humanInputResponse?: {
     requestId: string;
@@ -2355,31 +2357,34 @@ export function buildOpenGeniAgent(
   // [...agent.tools, ...capability.tools()]), so hosted web_search coexists with
   // both rather than overriding them.
   const hostedTools = hostedWebSearch ? [webSearchTool()] : [];
-  const humanInputTool = agentTool({
-    name: HUMAN_INPUT_TOOL_NAME,
-    description:
-      "Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, an optional Other value, multiple questions, explicit skip policy, and an optional expiry.",
-    parameters: RequestHumanInputToolInput,
-    needsApproval: true,
-    // A missing/mismatched durable response is a protocol integrity failure,
-    // not model-visible tool output the agent may reason past.
-    errorFunction: null,
-    execute: (_input, _context, details) => {
-      const settled = options.humanInputResponse;
-      if (!settled) {
-        throw new Error("Human-input tool resumed without a durable response");
-      }
-      const resumedCallId = details?.toolCall?.callId;
-      if (resumedCallId && resumedCallId !== settled.toolCallId) {
-        throw new Error("Human-input response does not belong to the resumed tool call");
-      }
-      return JSON.stringify({
-        requestId: settled.requestId,
-        ...settled.response,
-      });
-    },
-  });
-  const agentTools = [...hostedTools, humanInputTool];
+  const humanInputTool =
+    options.humanInputEnabled === false
+      ? null
+      : agentTool({
+          name: HUMAN_INPUT_TOOL_NAME,
+          description:
+            "Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, an optional Other value, multiple questions, explicit skip policy, and an optional expiry.",
+          parameters: RequestHumanInputToolInput,
+          needsApproval: true,
+          // A missing/mismatched durable response is a protocol integrity failure,
+          // not model-visible tool output the agent may reason past.
+          errorFunction: null,
+          execute: (_input, _context, details) => {
+            const settled = options.humanInputResponse;
+            if (!settled) {
+              throw new Error("Human-input tool resumed without a durable response");
+            }
+            const resumedCallId = details?.toolCall?.callId;
+            if (resumedCallId && resumedCallId !== settled.toolCallId) {
+              throw new Error("Human-input response does not belong to the resumed tool call");
+            }
+            return JSON.stringify({
+              requestId: settled.requestId,
+              ...settled.response,
+            });
+          },
+        });
+  const agentTools = humanInputTool ? [...hostedTools, humanInputTool] : hostedTools;
   const baseConfig = {
     name: "OpenGeni Agent",
     model: options.model ?? settings.openaiModel,
