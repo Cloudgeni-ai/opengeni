@@ -657,6 +657,76 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     expect(cancellationCommands[0]).toContain("command kill -KILL");
   });
 
+  test("abort also cancels a cleanup exec that stalls before provider yield", async () => {
+    const abort = new AbortController();
+    const controller = createTurnToolCancellationController(abort.signal);
+    let rejectOriginal!: (error: Error) => void;
+    let rejectCleanup!: (error: Error) => void;
+    let execStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      execStarted = resolve;
+    });
+    const original = new Promise<string>((_resolve, reject) => {
+      rejectOriginal = reject;
+    });
+    const cleanup = new Promise<string>((_resolve, reject) => {
+      rejectCleanup = reject;
+    });
+    let releaseCleanupCancellation!: () => void;
+    const cleanupCancellation = new Promise<void>((resolve) => {
+      releaseCleanupCancellation = resolve;
+    });
+    let markCleanupCancellationStarted!: () => void;
+    const cleanupCancellationStarted = new Promise<void>((resolve) => {
+      markCleanupCancellationStarted = resolve;
+    });
+    const cancellationCommands: string[] = [];
+    let execCalls = 0;
+    const exec = functionTool("exec_command", async (_context, rawInput) => {
+      execCalls += 1;
+      const cmd = String((JSON.parse(rawInput) as { cmd?: unknown }).cmd);
+      if (execCalls === 1) {
+        execStarted();
+        return await original;
+      }
+      cancellationCommands.push(cmd);
+      if (execCalls === 2) return await cleanup;
+      return exited(0);
+    });
+    const write = functionTool("write_stdin", async () => exited(130));
+    let providerCancellations = 0;
+    const wrapped = controller.wrapTools([exec, write], {
+      supportsPty: () => true,
+      cancelPendingExecCommand: async () => {
+        providerCancellations += 1;
+        if (providerCancellations === 1) {
+          rejectOriginal(new Error("original Modal command-router transport closed"));
+        } else if (providerCancellations === 2) {
+          rejectCleanup(new Error("cleanup Modal command-router transport closed"));
+          markCleanupCancellationStarted();
+          await cleanupCancellation;
+        }
+      },
+    }) as Array<Extract<Tool<unknown>, { type: "function" }>>;
+
+    const invocation = wrapped[0]!
+      .invoke(runContext, JSON.stringify({ cmd: "sleep 60" }))
+      .catch((error) => error);
+    await started;
+    abort.abort(new Error("steered"));
+    const quiescence = controller.waitForQuiescence();
+    await cleanupCancellationStarted;
+    expect(await pendingAfterMicrotasks(quiescence)).toBe(true);
+    releaseCleanupCancellation();
+    await quiescence;
+
+    expect(await invocation).toBeInstanceOf(Error);
+    expect(providerCancellations).toBe(2);
+    expect(cancellationCommands).toHaveLength(2);
+    expect(cancellationCommands[0]).toContain(".cancelled");
+    expect(cancellationCommands[1]).toContain(".cancelled");
+  });
+
   test("matching lost-session banners unregister ordinary and cancellation-finalizer PTYs", async () => {
     const ordinaryController = createTurnToolCancellationController();
     let ordinaryWrites = 0;

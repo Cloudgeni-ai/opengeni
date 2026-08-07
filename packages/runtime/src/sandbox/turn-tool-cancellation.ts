@@ -1224,11 +1224,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     // every other result retries and keeps quiescence closed.
     while (true) {
       try {
-        const output = await state.execInvoke(
-          state.runContext,
-          shellHelperInput(pendingShellCancellationCommand(state)),
-          undefined,
-        );
+        const output = await this.invokePendingShellCancellationCommand(state);
         if (typeof output === "string" && parseExecBannerExitCode(output) === 0) break;
       } catch {
         // A replacement command-router connection can itself fail transiently.
@@ -1239,6 +1235,44 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     // Transport settlement is still mandatory. Process-group absence does not
     // turn a pending provider promise into completion.
     await state.settledPromise;
+  }
+
+  private async invokePendingShellCancellationCommand(state: PendingShellStart): Promise<unknown> {
+    const observation = state
+      .execInvoke(
+        state.runContext,
+        shellHelperInput(pendingShellCancellationCommand(state)),
+        undefined,
+      )
+      .then(
+        (output) => ({ kind: "fulfilled" as const, output }),
+        (error: unknown) => ({ kind: "rejected" as const, error }),
+      );
+
+    let providerCancellation: Promise<void> | null = null;
+    let outcome = await Promise.race([observation, delay(SHELL_HELPER_YIELD_MS).then(() => null)]);
+    while (outcome === null && state.cancelProviderStart) {
+      // The proof helper uses the same Modal TaskExecStart transport as the
+      // command being cancelled. Rotate that isolated start too when it fails
+      // to return within its requested helper yield; otherwise the cleanup
+      // command can recreate the original pre-yield deadlock. The provider
+      // request is rejection-contained, while both it and `observation` remain
+      // inside the authoritative settlement fence.
+      if (!providerCancellation) {
+        const cancellation = state.cancelProviderStart().catch(() => undefined);
+        providerCancellation = cancellation;
+        void cancellation.then(() => {
+          if (providerCancellation === cancellation) providerCancellation = null;
+        });
+      }
+      await Promise.race([observation, providerCancellation, delay(SHELL_POLL_MS)]);
+      outcome = await Promise.race([observation, delay(SHELL_POLL_MS).then(() => null)]);
+    }
+
+    outcome ??= await observation;
+    if (providerCancellation) await providerCancellation;
+    if (outcome.kind === "rejected") throw outcome.error;
+    return outcome.output;
   }
 
   private registerRemoteExec(
