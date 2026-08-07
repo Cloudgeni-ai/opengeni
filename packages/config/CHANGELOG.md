@@ -1,12 +1,5 @@
 # @opengeni/config
 
-## 0.11.6
-
-### Patch Changes
-
-- b4123d4: Make Connected Machine command duration unbounded by default over replayable op-stream execution, preserve explicit positive deadlines for constrained deployments, wire and finalize streaming across direct and swapped machine routes, remove the generated service's aggregate memory throttle while retaining accounting and OOM isolation, and bound transient reordering memory by bytes without limiting command resources or output.
-- b4123d4: Let one Connected Machine agent retain and serve independent connections to multiple OpenGeni workspaces and deployments, with additive connection UX and connection-scoped runtime isolation.
-
 ## 0.11.5
 
 ### Patch Changes

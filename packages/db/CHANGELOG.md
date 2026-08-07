@@ -1,13 +1,5 @@
 # @opengeni/db
 
-## 0.28.8
-
-### Patch Changes
-
-- Updated dependencies [b4123d4]
-- Updated dependencies [b4123d4]
-  - @opengeni/config@0.11.6
-
 ## 0.28.7
 
 ### Patch Changes
