@@ -132,8 +132,13 @@ function normalizeObject(
   path: string,
 ): NormalizeResult {
   const descriptors = Object.getOwnPropertyDescriptors(value);
-  const output = Object.create(Object.getPrototypeOf(value)) as Record<string, unknown>;
-  let changed = false;
+  const prototype = Object.getPrototypeOf(value);
+  const hasForeignObjectPrototype = prototype !== Object.prototype && prototype !== null;
+  const output = Object.create(prototype === null ? null : Object.prototype) as Record<
+    string,
+    unknown
+  >;
+  let changed = hasForeignObjectPrototype;
 
   for (const [key, descriptor] of Object.entries(descriptors)) {
     const propertyPath = `${path}[${JSON.stringify(key)}]`;
@@ -162,5 +167,17 @@ function normalizeObject(
 
 function isPlainObject(value: object): value is Record<string, unknown> {
   const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
+  if (prototype === Object.prototype || prototype === null) return true;
+
+  // SDKs can return otherwise-plain JSON objects created in another JavaScript
+  // realm (for example a VM-backed sandbox provider). Their Object.prototype
+  // is not reference-equal to this realm's Object.prototype. Accept only the
+  // foreign realm's native Object prototype; class instances still fail.
+  if (Object.getPrototypeOf(prototype) !== null) return false;
+  const constructor = Object.getOwnPropertyDescriptor(prototype, "constructor")?.value;
+  return (
+    typeof constructor === "function" &&
+    constructor.name === "Object" &&
+    Function.prototype.toString.call(constructor).includes("[native code]")
+  );
 }
