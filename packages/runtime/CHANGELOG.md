@@ -1,11 +1,5 @@
 # @opengeni/runtime
 
-## 0.18.27
-
-### Patch Changes
-
-- b7315b8: Cancel Modal commands that stall before provider yield without bypassing physical quiescence, and show the truthful stopping state while replacement work waits.
-
 ## 0.18.26
 
 ### Patch Changes
