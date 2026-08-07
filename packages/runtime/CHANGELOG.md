@@ -1,15 +1,5 @@
 # @opengeni/runtime
 
-## 0.18.23
-
-### Patch Changes
-
-- b4123d4: Persist sandbox session state without the redundant hydrated provider manifest when the canonical serialized manifest is already present, so durable turn reconciliation remains JSON-safe.
-- b4123d4: Make Connected Machine command duration unbounded by default over replayable op-stream execution, preserve explicit positive deadlines for constrained deployments, wire and finalize streaming across direct and swapped machine routes, remove the generated service's aggregate memory throttle while retaining accounting and OOM isolation, and bound transient reordering memory by bytes without limiting command resources or output.
-- Updated dependencies [b4123d4]
-- Updated dependencies [b4123d4]
-  - @opengeni/config@0.11.6
-
 ## 0.18.22
 
 ### Patch Changes
