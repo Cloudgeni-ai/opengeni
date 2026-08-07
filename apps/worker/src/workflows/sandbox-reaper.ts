@@ -14,7 +14,7 @@
 
 import { proxyActivities } from "@temporalio/workflow";
 import type * as activities from "../activities";
-import { SANDBOX_REAPER_ACTIVITY_TIMEOUT_MS } from "./sandbox-reaper-contract";
+import { SANDBOX_REAPER_ACTIVITY_TIMEOUT_MS } from "../sandbox-reaper-contract";
 
 // The activity must outlive the configured non-cancellable provider snapshot,
 // its durable capture fence, and settlement cleanup. Worker startup enforces the

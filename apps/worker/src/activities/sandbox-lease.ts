@@ -16,8 +16,8 @@
 //      recomputes refcounts + enters draining at refcount 0, and RETURNS the
 //      drainable rows (workspace, group, instance, epoch) whose drain grace has
 //      elapsed at refcount 0. DB-only — no provider call inside the sweep.
-//   2. For each drainable row: resume/attach the provider box BY ID (off the
-//      lease's resume envelope, via createSandboxClientForBackend +
+//   2. For at most one drainable row per activity: resume/attach the provider
+//      box BY ID (off the lease's resume envelope, via createSandboxClientForBackend +
 //      establishSandboxSessionFromEnvelope), call the provider terminate, then
 //      confirmDrainCold (the CAS draining->cold under the epoch fence).
 //
@@ -105,6 +105,7 @@ import {
   type ModalCheckpointProviderBinding,
   type WorkspaceArchiveDescriptor,
 } from "@opengeni/runtime";
+import { sandboxReaperDrainableBatch } from "../sandbox-reaper-contract";
 import type { ActivityServices } from "./types";
 import { reconcilePendingParentSystemUpdates } from "./parent-wake";
 import {
@@ -395,21 +396,25 @@ export function createSandboxLeaseActivities(
       options.inspectHistoricalModalSandbox ?? inspectModalSandboxLifecycle,
     );
 
-    // (1) The DB-only cross-workspace sweep. Returns the drainable rows.
-    const drainable: ReapDrainable[] = await reapStaleLeaseHoldersGlobal(db, {
-      viewerHolderTtlMs: settings.sandboxViewerHolderTtlMs,
-      // Dead-worker turn holders: a live holder is touched every 10s from the
-      // moment it is registered (resumeBoxForTurn's holder-liveness loop covers
-      // the whole warmup — waitForWarm/establish/display-stack — and the turn
-      // heartbeat covers the run), so NO live path is ever silent for more than
-      // one tick. The horizon is deliberately generous defense-in-depth (not a
-      // tuned guess about path lengths): a killed worker's frozen holder —
-      // which would otherwise pin refcount >= 1 FOREVER, so the lease never
-      // drains and the box dies at the provider hard-timeout UNPERSISTED —
-      // clears within ~12 minutes.
-      turnHolderTtlMs: settings.sandboxWarmingTimeoutMs + settings.sandboxLeaseTtlMs,
-      idleGraceMs: settings.sandboxIdleGraceMs,
-    });
+    // (1) The DB-only cross-workspace sweep returns the drainable rows. Bound the
+    // provider-facing batch so the activity timeout covers every admitted durable
+    // capture fence instead of abandoning a later row in a large backlog.
+    const drainable: ReapDrainable[] = sandboxReaperDrainableBatch(
+      await reapStaleLeaseHoldersGlobal(db, {
+        viewerHolderTtlMs: settings.sandboxViewerHolderTtlMs,
+        // Dead-worker turn holders: a live holder is touched every 10s from the
+        // moment it is registered (resumeBoxForTurn's holder-liveness loop covers
+        // the whole warmup — waitForWarm/establish/display-stack — and the turn
+        // heartbeat covers the run), so NO live path is ever silent for more than
+        // one tick. The horizon is deliberately generous defense-in-depth (not a
+        // tuned guess about path lengths): a killed worker's frozen holder —
+        // which would otherwise pin refcount >= 1 FOREVER, so the lease never
+        // drains and the box dies at the provider hard-timeout UNPERSISTED —
+        // clears within ~12 minutes.
+        turnHolderTtlMs: settings.sandboxWarmingTimeoutMs + settings.sandboxLeaseTtlMs,
+        idleGraceMs: settings.sandboxIdleGraceMs,
+      }),
+    );
 
     let terminated = 0;
     let skipped = 0;
