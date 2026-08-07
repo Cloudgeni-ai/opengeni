@@ -104,6 +104,12 @@ config:
   OPENGENI_TURN_WORKER_MAX_CONCURRENT_TURNS: "256"
   OPENGENI_TURN_WORKER_TARGET_CPU_USAGE: "0.8"
   OPENGENI_TURN_WORKER_TARGET_MEMORY_USAGE: "0.75"
+  # The resource tuner closes new admission at the target. This continuous
+  # guard also catches memory retained by already-running, long-lived turns and
+  # requests the ordinary graceful worker checkpoint/drain after a sustained
+  # breach instead of letting the single node swap-thrash.
+  OPENGENI_TURN_WORKER_MEMORY_GUARD_INTERVAL_MS: "5000"
+  OPENGENI_TURN_WORKER_MEMORY_GUARD_SUSTAIN_MS: "30000"
   OPENGENI_AUTH_REQUIRED: "false"
   OPENGENI_AUTH_ALLOW_HEALTH: "true"
   OPENGENI_AUTH_ALLOW_METRICS: "false"

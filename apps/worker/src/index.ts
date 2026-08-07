@@ -67,6 +67,11 @@ import {
   createWorkerServiceLifecycle,
   type WorkerServiceLifecycle,
 } from "./worker-service-lifecycle";
+import {
+  createTurnWorkerMemoryPressureGuard,
+  turnWorkerMemoryPressureGuardEnabled,
+  type TurnWorkerMemoryPressureGuard,
+} from "./memory-pressure-guard";
 
 export {
   createHostExportPump,
@@ -584,6 +589,7 @@ export async function createOpenGeniWorkerService(
   let workerBundle: Awaited<ReturnType<typeof createOpenGeniWorker>> | undefined;
   const schedules: Array<{ close: () => Promise<void> }> = [];
   let httpServer: ReturnType<typeof startWorkerHttpServer> | undefined;
+  let memoryPressureGuard: TurnWorkerMemoryPressureGuard | undefined;
 
   try {
     const needsSignaler =
@@ -691,6 +697,7 @@ export async function createOpenGeniWorkerService(
     worker: activeWorkerBundle.worker,
     observability,
     closeOwnedResources: async () => {
+      memoryPressureGuard?.close();
       httpServer?.stop(true);
       await Promise.allSettled([
         activeWorkerBundle.connection.close(),
@@ -719,15 +726,35 @@ export async function createOpenGeniWorkerService(
       });
     },
   });
+  const activeLifecycle = lifecycle;
+
+  if (turnWorkerMemoryPressureGuardEnabled(options.role, settings)) {
+    try {
+      memoryPressureGuard = createTurnWorkerMemoryPressureGuard({
+        settings,
+        observability,
+        drain: () => {
+          if (!activeLifecycle.drain("memory pressure guard")) {
+            throw new Error("worker shutdown request failed");
+          }
+        },
+      });
+    } catch (error) {
+      await activeLifecycle.close();
+      throw error;
+    }
+  }
 
   return {
     role: options.role,
     worker: activeWorkerBundle.worker,
     connection: activeWorkerBundle.connection,
-    state: lifecycle.state,
-    run: lifecycle.run,
-    drain: lifecycle.drain,
-    close: lifecycle.close,
+    state: activeLifecycle.state,
+    run: activeLifecycle.run,
+    drain: (reason) => {
+      activeLifecycle.drain(reason);
+    },
+    close: activeLifecycle.close,
   };
 }
 

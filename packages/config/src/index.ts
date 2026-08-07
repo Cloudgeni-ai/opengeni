@@ -214,6 +214,8 @@ const SettingsSchema = z.object({
   turnWorkerMaxConcurrentTurns: z.coerce.number().int().positive().max(2_000).default(16),
   turnWorkerTargetCpuUsage: z.coerce.number().positive().max(1).default(0.8),
   turnWorkerTargetMemoryUsage: z.coerce.number().positive().max(0.8).default(0.75),
+  turnWorkerMemoryGuardIntervalMs: z.coerce.number().int().min(1_000).max(60_000).default(5_000),
+  turnWorkerMemoryGuardSustainMs: z.coerce.number().int().min(5_000).max(300_000).default(30_000),
   observabilityStructuredLogs: EnvBoolean.default(false),
   observabilityMetricsEnabled: EnvBoolean.default(true),
   observabilityOtlpEndpoint: z.string().url().optional(),
@@ -1742,6 +1744,8 @@ export function getSettings(): Settings {
     turnWorkerMaxConcurrentTurns: optional("OPENGENI_TURN_WORKER_MAX_CONCURRENT_TURNS"),
     turnWorkerTargetCpuUsage: optional("OPENGENI_TURN_WORKER_TARGET_CPU_USAGE"),
     turnWorkerTargetMemoryUsage: optional("OPENGENI_TURN_WORKER_TARGET_MEMORY_USAGE"),
+    turnWorkerMemoryGuardIntervalMs: optional("OPENGENI_TURN_WORKER_MEMORY_GUARD_INTERVAL_MS"),
+    turnWorkerMemoryGuardSustainMs: optional("OPENGENI_TURN_WORKER_MEMORY_GUARD_SUSTAIN_MS"),
     observabilityStructuredLogs: optional("OPENGENI_OBSERVABILITY_STRUCTURED_LOGS"),
     observabilityMetricsEnabled: optional("OPENGENI_OBSERVABILITY_METRICS_ENABLED"),
     observabilityOtlpEndpoint:

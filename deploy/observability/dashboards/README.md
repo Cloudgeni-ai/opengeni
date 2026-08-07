@@ -75,15 +75,23 @@ App series used here (non-exhaustive): `opengeni_stream_ttft_seconds`,
 `opengeni_sandbox_inventory_refresh_timestamp_seconds`,
 `opengeni_sandbox_checkpoint_artifacts`, `opengeni_sandbox_rotation_backlog`,
 `opengeni_sandbox_leases_expired_draining`, `opengeni_retained_processes_*`,
-`opengeni_model_call_duration_seconds`, and the prom-client defaults
+`opengeni_model_call_duration_seconds`,
+`opengeni_turn_worker_memory_guard_utilization_ratio`,
+`opengeni_turn_worker_memory_guard_target_ratio`,
+`opengeni_turn_worker_memory_guard_available_bytes`,
+`opengeni_turn_worker_memory_guard_process_rss_ratio`,
+`opengeni_turn_worker_memory_guard_breach_seconds`,
+`opengeni_turn_worker_memory_guard_drains_total`, and the prom-client defaults
 (`opengeni_process_resident_memory_bytes`).
 
-A few Worker Fleet panels read **cluster-infra** series from other exporters —
-`container_memory_working_set_bytes` (cAdvisor / kubelet) and
-`kube_pod_container_resource_limits` + `kube_horizontalpodautoscaler_*`
-(kube-state-metrics). If those exporters aren't present, only those panels are
-empty; every app-series panel still works, and the memory board falls back to the
-app-emitted RSS panel.
+Some Worker Fleet panels and recording rules also read **cluster-infra** series:
+container working sets from cAdvisor/kubelet; pod, phase, resource-limit, HPA,
+and node-readiness data from kube-state-metrics; memory/I/O PSI, swap, and node
+identity from node-exporter; and runtime errors plus instance-to-node identity
+from kubelet. If an exporter is absent, the dependent cluster panels and alerts
+are empty. The app-emitted memory-guard panels remain available without a
+container memory limit and expose both whole-host and effective finite-cgroup
+headroom directly from the turn worker.
 
 Sandbox inventory metrics are complete database projections emitted by whichever
 control replica executes the global reaper activity. Never sum those replicated/stale

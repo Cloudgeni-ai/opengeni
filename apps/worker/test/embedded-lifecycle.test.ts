@@ -210,6 +210,7 @@ describe("embedded worker lifecycle contract", () => {
     const logs: unknown[][] = [];
     const originalWarn = console.warn;
     const originalLog = console.log;
+    let shutdownAttempts = 0;
     console.warn = (...args: unknown[]) => warnings.push(args);
     console.log = (...args: unknown[]) => logs.push(args);
     const lifecycle = createWorkerServiceLifecycle({
@@ -218,14 +219,19 @@ describe("embedded worker lifecycle contract", () => {
       worker: {
         run: async () => undefined,
         shutdown: () => {
-          throw Object.assign(new Error(sentinel), { name: sentinel, code: sentinel });
+          shutdownAttempts += 1;
+          if (shutdownAttempts === 1) {
+            throw Object.assign(new Error(sentinel), { name: sentinel, code: sentinel });
+          }
         },
       },
       closeOwnedResources: async () => undefined,
     });
 
     try {
-      lifecycle.drain(sentinel);
+      expect(lifecycle.drain(sentinel)).toBe(false);
+      expect(lifecycle.state()).toBe("starting");
+      expect(lifecycle.drain(sentinel)).toBe(true);
       await lifecycle.close();
     } finally {
       console.warn = originalWarn;
@@ -236,6 +242,7 @@ describe("embedded worker lifecycle contract", () => {
     expect(rendered).toContain("worker_draining");
     expect(rendered).toContain("worker_shutdown_request_failed");
     expect(rendered).not.toContain(sentinel);
+    expect(shutdownAttempts).toBe(2);
   });
 
   test("workspace source uses source workflows while installed dist requires its bundle", async () => {
