@@ -209,7 +209,13 @@ jobs:
           rcodesign sign --for-notarization --p12-file /tmp/cert.p12 --p12-password "$APPLE_CERT_PASSWORD" \
             --code-signature-flags runtime "${{ matrix.asset }}"
           echo "$APPLE_ASC_KEY" > /tmp/asc.json
-          rcodesign notary-submit --api-key-path /tmp/asc.json --wait "${{ matrix.asset }}"
+          # Apple's notary service accepts distribution containers, not a raw
+          # Mach-O. Submit a temporary ZIP containing the exact signed binary;
+          # the published binary remains byte-for-byte the notarized payload.
+          NOTARY_ARCHIVE="${{ matrix.asset }}.notary.zip"
+          trap 'rm -f /tmp/cert.p12 /tmp/asc.json "$NOTARY_ARCHIVE"' EXIT
+          ditto -c -k --keepParent "${{ matrix.asset }}" "$NOTARY_ARCHIVE"
+          rcodesign notary-submit --api-key-path /tmp/asc.json --wait "$NOTARY_ARCHIVE"
 
       - name: macOS unsigned note (no creds)
         if: matrix.kind == 'macos' && steps.creds.outputs.has_macos != 'true'

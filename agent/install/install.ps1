@@ -101,8 +101,15 @@ function Get-Asset {
 }
 
 function Get-AssetUrl($name) {
-  if ($Version -eq 'latest') { return "$BaseUrl/agent/latest/$name" }
-  return "$BaseUrl/agent/v$Version/$name"
+  $base = $BaseUrl.TrimEnd('/')
+  # A pinned GitHub Release URL is already the asset directory. Keep the normal
+  # edge layout everywhere else without duplicating it on the documented
+  # direct-release fallback.
+  if ($Version -ne 'latest' -and $base.EndsWith("/releases/download/agent-v$Version")) {
+    return "$base/$name"
+  }
+  if ($Version -eq 'latest') { return "$base/agent/latest/$name" }
+  return "$base/agent/v$Version/$name"
 }
 
 function Invoke-Download($url, $out) {
