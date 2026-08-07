@@ -18,7 +18,7 @@ import {
   resolveTerminalFontFromReader,
   type TokenReader,
 } from "../src/lib/xterm-theme";
-import type { XtermTheme } from "../src/components/sandbox-terminal";
+import { clearTerminalBootStatus, type XtermTheme } from "../src/components/sandbox-terminal";
 
 const tick = () => new Promise<void>((r) => setTimeout(r, 0));
 
@@ -40,6 +40,12 @@ const ANSI_KEYS = [
   "brightCyan",
   "brightWhite",
 ] as const;
+
+test("wake cleanup erases the transient line and homes the live prompt", () => {
+  const writes: string[] = [];
+  clearTerminalBootStatus({ write: (data) => writes.push(data) });
+  expect(writes).toEqual(["\r\x1b[2K\x1b[2J\x1b[H"]);
+});
 
 // ── E1: renderer fallback ladder ─────────────────────────────────────────────
 describe("E1 renderer ladder (attachRenderer)", () => {

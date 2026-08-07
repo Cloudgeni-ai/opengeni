@@ -110,6 +110,13 @@ type XtermLike = {
 };
 type FitAddonLike = { fit: () => void };
 
+/** Clear the transient wake line and put the first live prompt at cell 1,1.
+ * `Terminal.clear()` removes scrollback but deliberately preserves the cursor,
+ * which lets the first PTY frame append to the old wake message. */
+export function clearTerminalBootStatus(term: Pick<XtermLike, "write">): void {
+  term.write("\r\x1b[2K\x1b[2J\x1b[H");
+}
+
 /** Debug seam (dev/evidence only, never a typed public API): a global hook the
  *  screenshot harness reads to probe the settled renderer tier + resolved font
  *  without mounting a real WebGL context in unit tests. */
@@ -416,7 +423,7 @@ export function SandboxTerminal({
     if (!booting) {
       if (bootActiveRef.current) {
         bootActiveRef.current = false;
-        if (!wroteFirehoseRef.current) term.clear();
+        if (!wroteFirehoseRef.current) clearTerminalBootStatus(term);
       }
       return;
     }
