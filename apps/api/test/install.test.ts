@@ -109,7 +109,7 @@ describe("get.<domain> install routes", () => {
     );
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe(
-      "https://github.com/Cloudgeni-ai/opengeni/releases/download/agent-v0.1.12/opengeni-agent-universal-apple-darwin",
+      "https://github.com/Cloudgeni-ai/opengeni/releases/download/agent-v0.1.13/opengeni-agent-universal-apple-darwin",
     );
   });
 
@@ -247,7 +247,7 @@ describe("get.<domain> install routes — baked binary serving", () => {
     );
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toContain(
-      "/releases/download/agent-v0.1.12/opengeni-agent-universal-apple-darwin",
+      "/releases/download/agent-v0.1.13/opengeni-agent-universal-apple-darwin",
     );
   });
 });
