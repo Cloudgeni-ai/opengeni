@@ -72,6 +72,7 @@ import {
   turnWorkerMemoryPressureGuardEnabled,
   type TurnWorkerMemoryPressureGuard,
 } from "./memory-pressure-guard";
+import { assertSandboxReaperActivityTimeout } from "./sandbox-reaper-timeout";
 
 export {
   createHostExportPump,
@@ -389,6 +390,7 @@ export async function registerSandboxReaperSchedule(
   settings: Settings,
   observability: Observability,
 ): Promise<{ registered: boolean; close: () => Promise<void> }> {
+  assertSandboxReaperActivityTimeout(settings);
   const connection = await Connection.connect(temporalConnectionOptions(settings));
   const temporal = new TemporalClient({ connection, namespace: settings.temporalNamespace });
   try {
