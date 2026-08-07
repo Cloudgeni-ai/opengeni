@@ -200,6 +200,31 @@ export function registerInstallRoutes(app: Hono, deps: ApiRouteDeps): void {
     return serveAsset(asset, `${releasesBase}/download/${stableAgentTag}/${asset}`);
   });
 
+  // Signed self-update channel manifests. Each deployment exposes its own
+  // immutable promotion pointer, so an enrolled machine never depends on the
+  // public get.opengeni.ai hostname. The manifest and signature are ordinary
+  // assets on the selected immutable agent release.
+  for (const [channel, version] of [
+    ["stable", deps.settings.agentStableVersion],
+    ["beta", deps.settings.agentBetaVersion],
+  ] as const) {
+    app.get(`/agent/${channel}/:manifestAsset`, (c) => {
+      const manifestAsset = c.req.param("manifestAsset");
+      if (manifestAsset !== "manifest.json" && manifestAsset !== "manifest.json.minisig") {
+        throw new HTTPException(404, { message: "update manifest asset not found" });
+      }
+      if (!version) {
+        throw new HTTPException(404, { message: `${channel} agent channel is not configured` });
+      }
+      return new Response(null, {
+        status: 302,
+        headers: {
+          location: `${releasesBase}/download/agent-v${version}/${manifestAsset}`,
+        },
+      });
+    });
+  }
+
   // The version segment is the literal `v<ver>` (e.g. `v1.2.3`) — Hono cannot bind
   // a param glued to a literal prefix, so the whole segment is the param and the
   // `v` prefix is validated/stripped here. The release tag is `agent-v<ver>`.
@@ -220,5 +245,10 @@ export function registerInstallRoutes(app: Hono, deps: ApiRouteDeps): void {
 export const installExactPaths: ReadonlySet<string> = new Set(Object.keys(TEXT_ASSETS));
 
 export function isInstallRedirectPath(path: string): boolean {
-  return path.startsWith("/agent/latest/") || path.startsWith("/agent/v");
+  return (
+    path.startsWith("/agent/latest/") ||
+    path.startsWith("/agent/v") ||
+    path.startsWith("/agent/stable/") ||
+    path.startsWith("/agent/beta/")
+  );
 }

@@ -109,7 +109,7 @@ describe("get.<domain> install routes", () => {
     );
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe(
-      "https://github.com/Cloudgeni-ai/opengeni/releases/download/agent-v0.1.10/opengeni-agent-universal-apple-darwin",
+      "https://github.com/Cloudgeni-ai/opengeni/releases/download/agent-v0.1.11/opengeni-agent-universal-apple-darwin",
     );
   });
 
@@ -137,6 +137,33 @@ describe("get.<domain> install routes", () => {
     );
   });
 
+  test("stable self-update manifest redirects to the configured immutable release", async () => {
+    const settings = testSettings({
+      agentReleasesBaseUrl: "https://mirror.example.com/rel/",
+      agentStableVersion: "1.4.2",
+    });
+    for (const asset of ["manifest.json", "manifest.json.minisig"]) {
+      const res = await appFor(settings).request(`/agent/stable/${asset}`);
+      expect(res.status).toBe(302);
+      expect(res.headers.get("location")).toBe(
+        `https://mirror.example.com/rel/download/agent-v1.4.2/${asset}`,
+      );
+    }
+  });
+
+  test("beta self-update manifest is explicit and fails closed when unconfigured", async () => {
+    const missing = await appFor(testSettings()).request("/agent/beta/manifest.json");
+    expect(missing.status).toBe(404);
+
+    const configured = await appFor(testSettings({ agentBetaVersion: "1.5.0" })).request(
+      "/agent/beta/manifest.json",
+    );
+    expect(configured.status).toBe(302);
+    expect(configured.headers.get("location")).toContain(
+      "/releases/download/agent-v1.5.0/manifest.json",
+    );
+  });
+
   test("rejects an asset name that is not the agent asset shape (no open redirect)", async () => {
     const res = await appFor(testSettings()).request("/agent/latest/..%2F..%2Fevil");
     expect(res.status).toBe(400);
@@ -158,6 +185,9 @@ describe("get.<domain> install routes", () => {
     // A binary-asset route is auth-exempt too (here the un-baked mac asset 302s).
     const redirect = await app.request("/agent/latest/opengeni-agent-universal-apple-darwin");
     expect(redirect.status).toBe(302);
+
+    const manifest = await app.request("/agent/stable/manifest.json");
+    expect(manifest.status).toBe(302);
 
     // A normal authenticated route is still gated (proves auth is actually on).
     const gated = await app.request("/v1/workspaces/ws_test/api-keys");
@@ -217,7 +247,7 @@ describe("get.<domain> install routes — baked binary serving", () => {
     );
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toContain(
-      "/releases/download/agent-v0.1.10/opengeni-agent-universal-apple-darwin",
+      "/releases/download/agent-v0.1.11/opengeni-agent-universal-apple-darwin",
     );
   });
 });

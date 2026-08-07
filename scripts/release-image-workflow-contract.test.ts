@@ -475,6 +475,11 @@ describe("release image workflow contract", () => {
     expect(agentRelease).not.toContain("softprops/action-gh-release@v2");
     expect(agentRelease).toContain("tag_name: agent-v${{ needs.guard.outputs.version }}");
     expect(agentRelease).toContain("OPENGENI_AGENT_STABLE_VERSION");
+    expect(agentRelease).toContain("Build and sign the stable update manifest");
+    expect(agentRelease).toContain("dist/manifest.json.minisig");
+    expect(agentRelease).toContain("rollout_percent 100");
+    expect(agentRelease).toContain("Require the release signing key");
+    expect(agentRelease).not.toContain("manifest publish is wired via");
     expect(agentRelease).not.toContain("gh release delete");
     expect(agentRelease).not.toContain("gh release create agent-latest");
     expect(agentRelease).not.toContain("releases/download/agent-latest");

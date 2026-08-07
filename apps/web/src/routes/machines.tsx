@@ -424,9 +424,8 @@ function EnrollDialogBody({ workspaceId, origin }: { workspaceId: string; origin
   return (
     <div className="flex flex-col gap-3">
       <p className="text-xs leading-4 text-fg-muted">
-        Run this on the machine you want to share. Agents v0.1.10+ add the workspace live within a
-        few seconds; if the command upgrades an older running agent, restart that agent once. Other
-        workspaces stay configured.
+        Run this once on the machine. It securely installs or updates the agent, adds this workspace
+        without removing any others, and keeps the machine online in the background.
       </p>
 
       <label className="flex items-start gap-2 rounded-md border border-border bg-bg/40 px-2.5 py-2 text-xs leading-4 text-fg">

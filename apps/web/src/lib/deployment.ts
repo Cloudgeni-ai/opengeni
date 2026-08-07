@@ -10,9 +10,10 @@ function originOf(baseUrl: string): string {
 }
 
 /**
- * The universal install-or-connect one-liner. The installer is idempotent and
- * `connect` adds only this deployment/workspace, so it is safe on a machine
- * already serving other OpenGeni instances.
+ * The universal install-or-connect one-liner. The installer is idempotent,
+ * `connect` adds only this deployment/workspace, and the agent is left running
+ * as the ordinary background service. It is safe on a machine already serving
+ * other OpenGeni instances.
  *
  * It ALWAYS bakes `OPENGENI_API_URL=${origin}` so the agent targets *this*
  * deployment rather than the hardcoded `api.opengeni.ai` default. Pass:

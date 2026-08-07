@@ -6,7 +6,7 @@
 #
 #   curl -fsSL https://get.opengeni.ai/uninstall.sh | sh
 #
-# Stops any opt-in service, removes the installed binary, and (only with
+# Stops the ordinary background service, removes the installed binary, and (only with
 # --purge / OPENGENI_PURGE=1) deletes the persisted enrollment credentials and
 # asks the control plane to deactivate the enrollment so the machine does not
 # linger as a ghost in the Machines dashboard. By default the credentials are
@@ -54,9 +54,9 @@ resolve_config_dir() {
 install_dir="$(resolve_install_dir)"
 bin="$install_dir/opengeni-agent"
 
-# Stop + remove any opt-in service first; the binary owns the per-OS teardown.
+# Stop + remove the background service first; the binary owns the per-OS teardown.
 if [ -x "$bin" ]; then
-  log "stopping + removing any opt-in service (no-op if none installed)"
+  log "stopping + removing the background service (no-op if none installed)"
   "$bin" service uninstall >/dev/null 2>&1 || true
 
   if [ "$PURGE" = "1" ]; then

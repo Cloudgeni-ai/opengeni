@@ -12,15 +12,18 @@
 
 use std::collections::BTreeSet;
 
-use opengeni_agent_update::{check_update, CheckOutcome, HttpSource, UpdateConfig};
+use opengeni_agent_update::{
+    check_update_manifest, finalize_update, HttpSource, ManifestCheckOutcome, UpdateConfig,
+    UpdateError, UpdateResult,
+};
+use semver::Version;
 use tracing::{info, warn};
 
 use crate::cli::UpdateArgs;
 use crate::config::{self, StoredConnection};
 use crate::enrollment::InstallIdentity;
 
-/// The default release base URL when neither the flag/env nor an enrolled value is
-/// present (mirrors the install scripts' default).
+/// Public fallback used only before the machine has any enrolled deployment.
 const DEFAULT_BASE_URL: &str = "https://get.opengeni.ai";
 
 /// Runs the `update` subcommand.
@@ -47,54 +50,130 @@ pub fn run(args: &UpdateArgs) -> Result<(), String> {
     )
     .map_err(|e| format!("could not load install identity: {e}"))?;
     let agent_id = install_identity.public_key_base64();
-    let base_url = args
-        .base_url
-        .clone()
-        .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
-
     let current_version = env!("CARGO_PKG_VERSION");
-    let config = UpdateConfig::new(base_url, channel, agent_id, current_version);
-
-    info!(
-        version = current_version,
-        channel = %config.channel,
-        "checking for a self-update"
-    );
+    let bases = resolve_update_bases(args.base_url.as_deref(), &connections);
     let source = HttpSource::new().map_err(|e| format!("update http source: {e}"))?;
-    let outcome =
-        check_update(&source, &config).map_err(|e| format!("update check failed: {e}"))?;
+    let mut best: Option<(String, opengeni_agent_update::PendingUpdatePlan)> = None;
+    let mut current_reasons = Vec::new();
+    let mut failures = Vec::new();
 
-    match outcome {
-        CheckOutcome::UpToDate(reason) => {
-            println!("opengeni-agent is up to date ({current_version}). {reason}");
-            Ok(())
-        }
-        CheckOutcome::Available(pending) => {
-            println!(
-                "a verified update is available: {current_version} -> {} ({} bytes).",
-                pending.version,
-                pending.size()
-            );
-            if args.check {
-                println!("(--check) not applying. Run `opengeni-agent update` to install it.");
-                return Ok(());
+    for base_url in &bases {
+        let config = UpdateConfig::new(base_url, &channel, &agent_id, current_version);
+        info!(
+            version = current_version,
+            channel = %config.channel,
+            update_origin = %base_url,
+            "checking a deployment for a self-update"
+        );
+        match check_update_manifest(&source, &config) {
+            Ok(ManifestCheckOutcome::Available(plan)) => {
+                let candidate = Version::parse(&plan.version)
+                    .map_err(|error| format!("verified update has invalid version: {error}"))?;
+                let replace = best.as_ref().is_none_or(|(_, current)| {
+                    Version::parse(&current.version).is_ok_and(|version| candidate > version)
+                });
+                if replace {
+                    best = Some((base_url.clone(), plan));
+                }
             }
-            // Apply to the running executable (atomic swap + retained backup). The
-            // boot health-gate + rollback run on the next start; the service manager
-            // (or the user's `run`) brings up the new binary, which re-dials NATS —
-            // a self-update is indistinguishable from a reconnect blip.
-            let backup = pending
-                .apply_running()
-                .map_err(|e| format!("failed to apply the update: {e}"))?;
-            warn!(backup = %backup.display(), version = %pending.version, "update applied; restart to run the new binary");
-            println!(
-                "update applied (v{}). The prior binary is kept at {} until the new \n\
-                 version passes its boot health-gate. Restart opengeni-agent to run it.",
-                pending.version,
-                backup.display()
-            );
-            Ok(())
+            Ok(ManifestCheckOutcome::UpToDate(reason)) => {
+                current_reasons.push(format!("{base_url}: {reason}"));
+            }
+            Err(error) => failures.push(format!("{base_url}: {error}")),
         }
+    }
+
+    let Some((selected_origin, plan)) = best else {
+        if !current_reasons.is_empty() {
+            println!("opengeni-agent is up to date ({current_version}).");
+            if !failures.is_empty() {
+                warn!(failures = ?failures, "some enrolled deployments could not serve an update manifest");
+            }
+            return Ok(());
+        }
+        return Err(format!(
+            "update check failed for every configured deployment: {}",
+            failures.join("; ")
+        ));
+    };
+
+    if !failures.is_empty() {
+        eprintln!(
+            "warning: could not check every enrolled deployment: {}",
+            failures.join("; ")
+        );
+    }
+
+    println!(
+        "a verified update is available from {selected_origin}: {current_version} -> {} ({} bytes).",
+        plan.version,
+        plan.expected_size()
+    );
+    if args.check {
+        println!("(--check) not applying. Run `opengeni-agent update` to install it.");
+        return Ok(());
+    }
+    let pending = plan
+        .download(&source)
+        .map_err(|error| format!("failed to download the selected update: {error}"))?;
+    let install_path = std::env::current_exe()
+        .map_err(|error| format!("could not resolve installed agent path: {error}"))?;
+    pending
+        .apply_running()
+        .map_err(|e| format!("failed to apply the update: {e}"))?;
+    finalize_update(
+        &install_path,
+        verify_installed_binary(&install_path, &pending.version),
+    )
+    .map_err(|error| {
+        format!("new binary failed its startup preflight and was rolled back: {error}")
+    })?;
+    info!(version = %pending.version, "update applied and startup preflight passed; prior binary removed");
+    println!(
+        "update applied and verified (v{}). Restart the agent to activate it.",
+        pending.version
+    );
+    Ok(())
+}
+
+/// Executes the newly-swapped binary through the smallest stable startup surface.
+/// If the loader, executable bit, CLI wiring, or embedded version is wrong, the
+/// updater rolls back atomically before reporting success.
+fn verify_installed_binary(install_path: &std::path::Path, version: &str) -> UpdateResult<()> {
+    let output = std::process::Command::new(install_path)
+        .arg("--version")
+        .output()
+        .map_err(|source| UpdateError::Io {
+            path: install_path.display().to_string(),
+            source,
+        })?;
+    let actual = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let expected = format!("opengeni-agent {version}");
+    if output.status.success() && actual == expected {
+        Ok(())
+    } else {
+        Err(UpdateError::HealthCheck(format!(
+            "expected {expected:?}, got status {} and stdout {actual:?}",
+            output.status
+        )))
+    }
+}
+
+/// Explicit overrides are singular. Otherwise every distinct enrolled deployment
+/// is a candidate source; the pinned signing key, not the deployment, decides
+/// which manifest/artifact is trusted.
+fn resolve_update_bases(explicit: Option<&str>, connections: &[StoredConnection]) -> Vec<String> {
+    if let Some(base) = explicit {
+        return vec![base.trim_end_matches('/').to_string()];
+    }
+    let bases: BTreeSet<_> = connections
+        .iter()
+        .map(|connection| connection.api_url.trim_end_matches('/').to_string())
+        .collect();
+    if bases.is_empty() {
+        vec![DEFAULT_BASE_URL.to_string()]
+    } else {
+        bases.into_iter().collect()
     }
 }
 
@@ -159,6 +238,35 @@ mod tests {
         assert_eq!(
             resolve_channel(Some("beta"), &connections),
             Ok("beta".to_string())
+        );
+    }
+
+    #[test]
+    fn update_sources_are_all_enrolled_deployments_and_deduplicated() {
+        let mut a = connection("stable");
+        a.api_url = "https://one.example/".to_string();
+        let mut duplicate = connection("stable");
+        duplicate.api_url = "https://one.example".to_string();
+        let mut b = connection("stable");
+        b.api_url = "https://two.example".to_string();
+        assert_eq!(
+            resolve_update_bases(None, &[a, duplicate, b]),
+            vec![
+                "https://one.example".to_string(),
+                "https://two.example".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn explicit_update_source_wins_and_empty_store_uses_public_fallback() {
+        assert_eq!(
+            resolve_update_bases(Some("https://mirror.example/"), &[connection("stable")]),
+            vec!["https://mirror.example".to_string()]
+        );
+        assert_eq!(
+            resolve_update_bases(None, &[]),
+            vec![DEFAULT_BASE_URL.to_string()]
         );
     }
 }
