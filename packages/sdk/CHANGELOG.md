@@ -1,5 +1,11 @@
 # @opengeni/sdk
 
+## 0.49.0
+
+### Minor Changes
+
+- bb9a346: Add token and cache coverage plus nullable provider-rate cost comparisons to Workspace Insights, preserving exact Gateway billing while keeping incomplete configured telemetry unpriced.
+
 ## 0.48.0
 
 ### Minor Changes

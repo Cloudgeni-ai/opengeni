@@ -1,5 +1,13 @@
 # @opengeni/config
 
+## 0.12.4
+
+### Patch Changes
+
+- bb9a346: Add token and cache coverage plus nullable provider-rate cost comparisons to Workspace Insights, preserving exact Gateway billing while keeping incomplete configured telemetry unpriced.
+- Updated dependencies [bb9a346]
+  - @opengeni/contracts@0.41.0
+
 ## 0.12.3
 
 ### Patch Changes

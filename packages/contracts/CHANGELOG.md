@@ -1,5 +1,11 @@
 # @opengeni/contracts
 
+## 0.41.0
+
+### Minor Changes
+
+- bb9a346: Add token and cache coverage plus nullable provider-rate cost comparisons to Workspace Insights, preserving exact Gateway billing while keeping incomplete configured telemetry unpriced.
+
 ## 0.40.0
 
 ### Minor Changes
