@@ -1,5 +1,23 @@
 # @opengeni/api-router
 
+## 0.23.0
+
+### Minor Changes
+
+- f8eb9f9: Serve signed stable and beta Connected Machine update manifests from each enrolled deployment, with explicit release promotion pointers.
+
+### Patch Changes
+
+- Updated dependencies [f8eb9f9]
+  - @opengeni/config@0.12.0
+  - @opengeni/core@0.21.10
+  - @opengeni/db@0.28.9
+  - @opengeni/documents@0.5.18
+  - @opengeni/github@0.4.38
+  - @opengeni/runtime@0.18.24
+  - @opengeni/storage@0.2.75
+  - @opengeni/events@0.3.88
+
 ## 0.22.9
 
 ### Patch Changes

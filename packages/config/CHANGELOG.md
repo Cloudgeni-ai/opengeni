@@ -1,5 +1,11 @@
 # @opengeni/config
 
+## 0.12.0
+
+### Minor Changes
+
+- f8eb9f9: Serve signed stable and beta Connected Machine update manifests from each enrolled deployment, with explicit release promotion pointers.
+
 ## 0.11.6
 
 ### Patch Changes
