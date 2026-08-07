@@ -1,5 +1,22 @@
 # @opengeni/worker-bundle
 
+## 0.16.30
+
+### Patch Changes
+
+- 86bd95c: Preserve committed-only workspace captures and load multi-repository Git changes in bounded batches.
+- 7ac558e: Continuously enforce resource-based turn-worker memory headroom through the existing graceful checkpoint and drain lifecycle.
+- Updated dependencies [7d13f51]
+- Updated dependencies [7ac558e]
+  - @opengeni/config@0.12.2
+  - @opengeni/core@0.21.11
+  - @opengeni/db@0.28.10
+  - @opengeni/documents@0.5.19
+  - @opengeni/github@0.4.39
+  - @opengeni/runtime@0.18.25
+  - @opengeni/storage@0.2.76
+  - @opengeni/events@0.3.89
+
 ## 0.16.29
 
 ### Patch Changes
