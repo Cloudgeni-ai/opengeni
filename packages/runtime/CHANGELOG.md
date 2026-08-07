@@ -1,5 +1,11 @@
 # @opengeni/runtime
 
+## 0.18.28
+
+### Patch Changes
+
+- a2099b1: Keep a stalled Modal cleanup-proof start and its provider cancellation inside the physical-quiescence fence until both settle.
+
 ## 0.18.27
 
 ### Patch Changes
