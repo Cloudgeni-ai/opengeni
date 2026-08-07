@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { OPENGENI_GATEWAY_MODELS } from "@opengeni/config";
 import * as opengeniDb from "@opengeni/db";
 import type { Database } from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
@@ -207,6 +208,89 @@ describe("recordAuthoritativeModelCallFact", () => {
       estimatedProviderCostMicros: 60_000,
       pricingSource: "configured_list_price",
     });
+  });
+
+  test("partial or malformed configured usage stays externally uncharged and unpriced", async () => {
+    const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
+    restores.push(() => recordSpy.mockRestore());
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
+      async () => {
+        throw new Error("credits must NOT be debited for an externally billed turn");
+      },
+    );
+    restores.push(() => debitSpy.mockRestore());
+
+    const usageCases = [
+      { sourceKey: "response-partial", usage: { inputTokens: 100, totalTokens: 100 } },
+      {
+        sourceKey: "response-malformed",
+        usage: { inputTokens: "invalid", outputTokens: 20, totalTokens: 20 },
+      },
+    ];
+    for (const usageCase of usageCases) {
+      const billing = await recordModelUsageAndDebitCredits(billedSettings(), db, {
+        accountId: ACCOUNT,
+        workspaceId: WORKSPACE,
+        sessionId: "sess-incomplete",
+        turnId: `turn-${usageCase.sourceKey}`,
+        turnAttemptId: `attempt-${usageCase.sourceKey}`,
+        model: "codex/gpt-5.6-sol",
+        externallyBilled: true,
+        usage: usageCase.usage,
+        sourceKey: usageCase.sourceKey,
+      });
+      expect(billing).toMatchObject({
+        billingPath: "external",
+        pricedCostMicros: 0,
+        estimatedProviderCostMicros: null,
+        pricingSource: null,
+      });
+    }
+
+    expect(recordSpy).toHaveBeenCalledTimes(2);
+    expect(recordSpy.mock.calls.map(([, input]) => input)).toEqual([
+      expect.objectContaining({ eventType: "model.cost", quantity: 0 }),
+      expect.objectContaining({ eventType: "model.cost", quantity: 0 }),
+    ]);
+    expect(debitSpy).not.toHaveBeenCalled();
+  });
+
+  test("Gateway exact cost remains known with malformed core token telemetry", async () => {
+    const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
+    restores.push(() => recordSpy.mockRestore());
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockResolvedValue({
+      balance: {
+        accountId: ACCOUNT,
+        balanceMicros: 1_000_000,
+        currency: "usd",
+        updatedAt: new Date().toISOString(),
+      },
+      debitedMicros: 5,
+    });
+    restores.push(() => debitSpy.mockRestore());
+
+    const billing = await recordModelUsageAndDebitCredits(billedSettings(), db, {
+      accountId: ACCOUNT,
+      workspaceId: WORKSPACE,
+      sessionId: "sess-gateway-incomplete",
+      turnId: "turn-gateway-incomplete",
+      turnAttemptId: "attempt-gateway-incomplete",
+      model: OPENGENI_GATEWAY_MODELS.deepseek.productId,
+      externallyBilled: false,
+      gatewayManaged: true,
+      gatewayBilling: { finalProvider: "baseten", inferenceCostUsd: "0.00000325" },
+      usage: { inputTokens: "invalid", outputTokens: 8, totalTokens: 8 },
+      sourceKey: "response-gateway-incomplete",
+    });
+
+    expect(billing).toMatchObject({
+      billingPath: "opengeni_credits",
+      pricedCostMicros: 5,
+      estimatedProviderCostMicros: 4,
+      pricingSource: "gateway_reported",
+      upstreamProvider: "baseten",
+    });
+    expect(debitSpy).toHaveBeenCalledTimes(1);
   });
 
   test("external usage stays uncharged and explicitly unpriced when no schedule exists", async () => {

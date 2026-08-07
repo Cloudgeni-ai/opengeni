@@ -9573,9 +9573,17 @@ export async function recordModelUsageAndDebitCredits(
           latencyMode: input.latencyMode ?? "standard",
         })
       : null;
+  const hasCompleteCoreTokenTelemetry =
+    normalizedUsage.telemetry.inputTokens !== null &&
+    normalizedUsage.telemetry.outputTokens !== null;
+  const estimatedProviderCostMicros = gatewayBilling
+    ? (pricingBreakdown?.providerCostMicros ?? null)
+    : hasCompleteCoreTokenTelemetry
+      ? (pricingBreakdown?.providerCostMicros ?? null)
+      : null;
   const pricingSource = gatewayBilling
     ? ("gateway_reported" as const)
-    : pricingBreakdown
+    : estimatedProviderCostMicros !== null
       ? ("configured_list_price" as const)
       : null;
   // An externally billed turn is paid outside OpenGeni, so it
@@ -9586,7 +9594,8 @@ export async function recordModelUsageAndDebitCredits(
   //     the API tokens:consume cap sum `model.tokens` with NO cost dimension, so
   //     any row would count against maxMonthlyTokensPerWorkspace);
   //   - record a `model.cost = 0` audit marker (harmless to the monthly cost cap);
-  //   - never look up pricing and never debit credits.
+  //   - optionally calculate a non-charging provider estimate for Insights when
+  //     core token telemetry is complete, but never debit credits.
   if (input.externallyBilled) {
     await recordUsageEvent(db, {
       accountId: input.accountId,
@@ -9604,7 +9613,7 @@ export async function recordModelUsageAndDebitCredits(
     return {
       billingPath: "external",
       pricedCostMicros: 0,
-      estimatedProviderCostMicros: pricingBreakdown?.providerCostMicros ?? null,
+      estimatedProviderCostMicros,
       pricingSource,
       normalizedUsage,
     };
@@ -9629,7 +9638,7 @@ export async function recordModelUsageAndDebitCredits(
     return {
       billingPath: "opengeni_credits",
       pricedCostMicros: 0,
-      estimatedProviderCostMicros: pricingBreakdown?.providerCostMicros ?? null,
+      estimatedProviderCostMicros,
       pricingSource,
       normalizedUsage,
       ...(gatewayBilling ? { upstreamProvider: gatewayBilling.finalProvider } : {}),
@@ -9682,7 +9691,7 @@ export async function recordModelUsageAndDebitCredits(
   return {
     billingPath: "opengeni_credits",
     pricedCostMicros: costMicros,
-    estimatedProviderCostMicros: pricingBreakdown.providerCostMicros,
+    estimatedProviderCostMicros,
     pricingSource,
     normalizedUsage,
     ...(gatewayBilling ? { upstreamProvider: gatewayBilling.finalProvider } : {}),
