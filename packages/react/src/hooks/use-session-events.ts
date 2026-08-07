@@ -341,7 +341,18 @@ export function useSessionEvents(
         const stream = client.streamEvents(workspaceId, sessionId, {
           after: streamResumeSequenceRef.current,
           signal: controller.signal,
-          beforeLive: async () => await reconcileSession(sessionId),
+          onOpen: () => {
+            // Reconciliation repairs projections, but it must not block reading
+            // the already-open SSE body. Otherwise live events accumulate in the
+            // browser and appear as one delayed burst after every reconciler ends.
+            void Promise.resolve()
+              .then(() => reconcileSession(sessionId))
+              .catch((cause) => {
+                if (isCurrent()) {
+                  setError(cause instanceof Error ? cause : new Error(String(cause)));
+                }
+              });
+          },
           onStateChange: (state) => {
             if (isCurrent()) {
               setConnectionState(state);

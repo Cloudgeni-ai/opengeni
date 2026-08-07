@@ -553,7 +553,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       ]);
       writeFileSync(
         join(realbin, "glab"),
-        "#!/usr/bin/env sh\nprintf 'GL=%s\\n' \"${GITLAB_TOKEN-unset}\"\n",
+        '#!/usr/bin/env sh\nprintf \'GL=%s\\nOAUTH=%s\\nOAUTH2=%s\\n\' "${GITLAB_TOKEN-unset}" "${OAUTH_TOKEN-unset}" "${GLAB_IS_OAUTH2-unset}"\n',
         { mode: 0o755 },
       );
 
@@ -627,7 +627,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         PATH: `${join(home, ".opengeni", "bin")}:${realbin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
       };
       expect(execFileSync("glab", [], { cwd: directRepo, env, encoding: "utf8" })).toBe(
-        "GL=direct-token\n",
+        "GL=unset\nOAUTH=direct-token\nOAUTH2=true\n",
       );
       expect(() =>
         execFileSync("glab", [], {

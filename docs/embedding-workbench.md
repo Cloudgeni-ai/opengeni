@@ -126,6 +126,13 @@ That is the whole integration. The dock paints instantly from the latest
 turn-end capture (no machine round-trip), then reconciles to live data when the
 box is warm, with no tab switch or layout shift in between.
 
+Live reconciliation batches the visible file-tree frontier into one
+`fs/list-batch` request and all repository status/diff reads into one
+`git/read-batch` request. Each batch acquires the session's Channel-A lease once
+and runs its independent reads concurrently, avoiding repeated provider attach
+and lease traffic as repository count or expanded folders grow. The individual
+`fs/list`, `git/status`, and `git/diff` methods remain available for point reads.
+
 Repository discovery walks the workspace filesystem without a fixed nesting
 depth, recognizes both ordinary `.git` directories and linked-worktree `.git`
 files, and prunes dependency/build residue. The walk is still bounded by a

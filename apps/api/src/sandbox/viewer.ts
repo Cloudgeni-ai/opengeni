@@ -74,6 +74,7 @@ import {
 } from "@opengeni/runtime/sandbox";
 import { relayConfigFromSettings } from "@opengeni/core";
 import { establishApiSandboxSpawner } from "./rematerialize";
+import { establishCachedChannelAHandle } from "./channel-a";
 
 /** The minimal services a viewer op needs: the DB + settings (lease cadence +
  *  the sandbox client construction the leaf reads from settings). The bus is
@@ -730,18 +731,22 @@ export async function mintDesktopStream(
     // SAME stable run-env the turn declares, so a later turn finds no env delta.
     const environment = await sessionAttachEnvironment(services, workspaceId, session);
     try {
+      const establish = () =>
+        (services.establishSandboxSession ?? establishSandboxSessionFromEnvelope)(
+          settings,
+          envelope,
+          {
+            sessionId: session.id,
+            recovery: "resume-only",
+            backendOverride: session.sandboxBackend,
+            environment,
+          },
+        );
       established = input.establish
         ? await input.establish(envelope)
-        : await (services.establishSandboxSession ?? establishSandboxSessionFromEnvelope)(
-            settings,
-            envelope,
-            {
-              sessionId: session.id,
-              recovery: "resume-only",
-              backendOverride: session.sandboxBackend,
-              environment,
-            },
-          );
+        : services.establishSandboxSession
+          ? await establish()
+          : await establishCachedChannelAHandle(workspaceId, session.id, lease, establish);
     } catch (error) {
       await retireMissingWarmLease(services, { accountId, workspaceId, session, lease }, error);
       return null;
@@ -955,18 +960,22 @@ export async function mintTerminalStream(
     // declares, so a later turn finds no manifest-env delta.
     const environment = await sessionAttachEnvironment(services, workspaceId, session);
     try {
+      const establish = () =>
+        (services.establishSandboxSession ?? establishSandboxSessionFromEnvelope)(
+          settings,
+          envelope,
+          {
+            sessionId: session.id,
+            recovery: "resume-only",
+            backendOverride: session.sandboxBackend,
+            environment,
+          },
+        );
       established = input.establish
         ? await input.establish(envelope)
-        : await (services.establishSandboxSession ?? establishSandboxSessionFromEnvelope)(
-            settings,
-            envelope,
-            {
-              sessionId: session.id,
-              recovery: "resume-only",
-              backendOverride: session.sandboxBackend,
-              environment,
-            },
-          );
+        : services.establishSandboxSession
+          ? await establish()
+          : await establishCachedChannelAHandle(workspaceId, session.id, lease, establish);
     } catch (error) {
       await retireMissingWarmLease(services, { accountId, workspaceId, session, lease }, error);
       return null;

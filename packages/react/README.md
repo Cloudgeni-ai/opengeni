@@ -529,8 +529,9 @@ capability document so every surface degrades to a reason instead of crashing.
   (`cold`/`warming`/`warm`), and acquires the viewer holder(s) that keep the box
   warm. Desktop attach is gated behind the un-redacted-pixel acknowledgment.
 - `useSandboxFiles` / `useSandboxGit` — the Pierre file tree + git status/diff
-  feeds (the synchronous `fs*`/`git*` SDK point queries plus `fs.changed` /
-  `git.changed` live notifications).
+  feeds. Initial and refresh reads use the SDK's batched file-frontier and
+  multi-repository Git queries behind one sandbox lease; `fs.changed` /
+  `git.changed` notifications keep the result live.
 - `useSandboxTerminal` / `useTerminalStream` — the read-only command-output
   firehose and the real interactive PTY over the minted `pty-ws` cell.
 - `useDesktopStream` — the noVNC socket, hot-swapped on box rollover via

@@ -993,7 +993,7 @@ describe("turn sandbox-tool cancellation against a real local process", () => {
     else process.env.OPENAI_AGENTS_PYTHON = originalPython;
   });
 
-  test.skipIf(Bun.which("git") === null)(
+  test.skipIf(process.platform !== "linux" || Bun.which("git") === null)(
     "explicit non-TTY execution exposes pipe descriptors and bypasses the Git pager",
     async () => {
       const python = Bun.which("python3");

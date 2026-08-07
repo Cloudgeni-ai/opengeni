@@ -29,6 +29,7 @@ import type {
   FileAsset,
   FileDownloadUrlResponse,
   FsListResponse,
+  FsListBatchResponse,
   FsReadResponse,
   FsWriteResponse,
   FsDeleteResponse,
@@ -36,6 +37,7 @@ import type {
   FsMkdirResponse,
   FsTreeNode,
   GitDiffResponse,
+  GitReadBatchResponse,
   GetWorkspaceCaptureResponse,
   GetWorkspaceCaptureFileResponse,
   GitStatusResponse,
@@ -1400,6 +1402,18 @@ export class MockOpenGeniClient implements SessionClientLike {
     return { root: dir(path, path, []), revision: 1, truncated: false };
   }
 
+  async fsListBatch(
+    workspaceId: string,
+    sessionId: string,
+    request: { requests: Array<{ path?: string }> },
+  ): Promise<FsListBatchResponse> {
+    return {
+      results: await Promise.all(
+        request.requests.map(async (item) => await this.fsList(workspaceId, sessionId, item)),
+      ),
+    };
+  }
+
   async fsRead(
     _workspaceId: string,
     _sessionId: string,
@@ -1577,6 +1591,26 @@ export class MockOpenGeniClient implements SessionClientLike {
         },
       ],
       revision: 1,
+    };
+  }
+
+  async gitReadBatch(
+    workspaceId: string,
+    sessionId: string,
+    request: {
+      requests: Array<{
+        status: { path?: string };
+        diff?: { staged?: boolean };
+      }>;
+    },
+  ): Promise<GitReadBatchResponse> {
+    return {
+      results: await Promise.all(
+        request.requests.map(async (item) => ({
+          status: await this.gitStatus(),
+          ...(item.diff ? { diff: await this.gitDiff(workspaceId, sessionId, item.diff) } : {}),
+        })),
+      ),
     };
   }
 

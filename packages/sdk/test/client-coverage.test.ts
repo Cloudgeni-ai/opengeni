@@ -27,7 +27,7 @@ type RecordedRequest = {
   signal: AbortSignal;
 };
 
-function recordingFetch(responder: (request: RecordedRequest) => Response): {
+function recordingFetch(responder: (request: RecordedRequest) => Response | Promise<Response>): {
   fetch: typeof fetch;
   requests: RecordedRequest[];
 } {
@@ -50,7 +50,7 @@ function recordingFetch(responder: (request: RecordedRequest) => Response): {
       signal: request.signal,
     };
     requests.push(recorded);
-    return responder(recorded);
+    return await responder(recorded);
   }) as typeof fetch;
   return { fetch: impl, requests };
 }
@@ -62,7 +62,7 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-function makeClient(responder: (request: RecordedRequest) => Response): {
+function makeClient(responder: (request: RecordedRequest) => Response | Promise<Response>): {
   client: OpenGeniClient;
   requests: RecordedRequest[];
 } {
@@ -109,6 +109,81 @@ function fakeTurn(overrides: Partial<SessionTurn>): SessionTurn {
     ...overrides,
   };
 }
+
+describe("OpenGeniClient Channel-A batches", () => {
+  test("uses one typed request for file frontiers and one for repository status+diff", async () => {
+    const listResult = {
+      root: {
+        name: "",
+        path: "",
+        type: "dir",
+        sizeBytes: null,
+        mtimeMs: null,
+        mode: null,
+        children: [],
+        truncated: false,
+      },
+      revision: 1,
+      truncated: false,
+    };
+    const status = {
+      isRepo: true,
+      head: "main",
+      detached: false,
+      upstream: "origin/main",
+      ahead: 0,
+      behind: 0,
+      files: [],
+      revision: 1,
+    };
+    const diff = { files: [], revision: 1 };
+    const { client, requests } = makeClient((request) =>
+      request.url.endsWith("/fs/list-batch")
+        ? jsonResponse({ results: [listResult, listResult] })
+        : jsonResponse({ results: [{ status, diff }] }),
+    );
+
+    await client.fsListBatch(WORKSPACE_ID, SESSION_ID, {
+      requests: [
+        { path: "", depth: 1 },
+        { path: "repositories", depth: 1 },
+      ],
+    });
+    await client.gitReadBatch(WORKSPACE_ID, SESSION_ID, {
+      requests: [
+        {
+          status: { path: "repositories/demo" },
+          diff: { path: "repositories/demo", fromRef: "origin/HEAD", includeUntracked: true },
+        },
+      ],
+    });
+
+    expect(requests.map((request) => request.url)).toEqual([
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/fs/list-batch`,
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/git/read-batch`,
+    ]);
+    expect(requests.map((request) => JSON.parse(request.body ?? "null"))).toEqual([
+      {
+        requests: [
+          { path: "", depth: 1 },
+          { path: "repositories", depth: 1 },
+        ],
+      },
+      {
+        requests: [
+          {
+            status: { path: "repositories/demo" },
+            diff: {
+              path: "repositories/demo",
+              fromRef: "origin/HEAD",
+              includeUntracked: true,
+            },
+          },
+        ],
+      },
+    ]);
+  });
+});
 
 describe("OpenGeniClient turn queue", () => {
   test("steerMessage performs one atomic server request", async () => {
@@ -464,6 +539,69 @@ describe("OpenGeniClient files", () => {
     expect(put.headers.authorization).toBeUndefined();
     expect(put.body).toBe("hello world");
     expect(requests[2]!.url).toContain(`/files/uploads/${UPLOAD_ID}/complete`);
+  });
+
+  test("uploadFile aborts a stalled signed PUT at the caller deadline", async () => {
+    const observed: { putSignal?: AbortSignal } = {};
+    const { client, requests } = makeClient(async (request) => {
+      if (request.url.endsWith("/files/uploads")) {
+        return jsonResponse(
+          {
+            fileId: FILE_ID,
+            uploadId: UPLOAD_ID,
+            putUrl: "https://storage.example.test/put/stalled",
+            requiredHeaders: {},
+            expiresAt: "",
+            maxSizeBytes: 1,
+          },
+          201,
+        );
+      }
+      if (request.url.startsWith("https://storage.example.test/")) {
+        observed.putSignal = request.signal;
+        return await new Promise<Response>(() => undefined);
+      }
+      throw new Error("complete must not run after a timed-out PUT");
+    });
+
+    const error = await client
+      .uploadFile(WORKSPACE_ID, {
+        filename: "stalled.txt",
+        contentType: "text/plain",
+        data: "x",
+        timeoutMs: 10,
+      })
+      .then(
+        () => null,
+        (caught: unknown) => caught,
+      );
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe("File upload timed out. Retry the upload.");
+    expect(observed.putSignal?.aborted).toBe(true);
+    expect(requests).toHaveLength(2);
+    expect(requests.some((request) => request.url.includes("/complete"))).toBe(false);
+  });
+
+  test("uploadFile rejects an invalid timeout before creating an upload", async () => {
+    const { client, requests } = makeClient(() => {
+      throw new Error("fetch must not run for invalid input");
+    });
+    const error = await client
+      .uploadFile(WORKSPACE_ID, {
+        filename: "invalid.txt",
+        contentType: "text/plain",
+        data: "x",
+        timeoutMs: 0,
+      })
+      .then(
+        () => null,
+        (caught: unknown) => caught,
+      );
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe("File upload timeout must be a positive number");
+    expect(requests).toHaveLength(0);
   });
 
   test("uploadFile preserves a caller-supplied checksum", async () => {

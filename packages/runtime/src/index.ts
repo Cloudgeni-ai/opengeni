@@ -7331,7 +7331,7 @@ function sandboxFileDownloadCommand(download: SandboxFileDownload, targetPath: s
     `  tmp=$(mktemp ${shellQuote(`${targetPath}.opengeni-download.XXXXXX`)})`,
     '  cleanup() { rm -f -- "$tmp"; }',
     "  trap cleanup EXIT",
-    `  curl --fail --location --silent --show-error --retry 3 --retry-delay 1 --output "$tmp" ${shellQuote(download.url)}`,
+    `  curl --fail --location --silent --show-error --connect-timeout 10 --max-time 120 --retry 3 --retry-delay 1 --retry-max-time 180 --output "$tmp" ${shellQuote(download.url)}`,
     '  if ! verify_attachment "$tmp"; then echo "Downloaded attachment failed size or SHA-256 verification" >&2; exit 74; fi',
     `  mv -f -- "$tmp" ${shellQuote(targetPath)}`,
     "  trap - EXIT",
@@ -8378,7 +8378,12 @@ function gitCredentialHelperCommandLines(
     '    if [ -n "$token" ]; then',
     '      case "$token_env" in',
     '        GH_TOKEN) export GH_TOKEN="$token" ;;',
-    '        GITLAB_TOKEN) export GITLAB_TOKEN="$token" ;;',
+    "        GITLAB_TOKEN)",
+    '          case "$token" in',
+    '            glpat-*) unset GITLAB_ACCESS_TOKEN OAUTH_TOKEN GLAB_IS_OAUTH2; export GITLAB_TOKEN="$token" ;;',
+    '            *) unset GITLAB_TOKEN GITLAB_ACCESS_TOKEN; export OAUTH_TOKEN="$token"; export GLAB_IS_OAUTH2=true ;;',
+    "          esac",
+    "          ;;",
     '        AZURE_DEVOPS_EXT_PAT) export AZURE_DEVOPS_EXT_PAT="$token" ;;',
     "      esac",
     "    fi",
@@ -8403,6 +8408,9 @@ function gitCredentialHelperCommandLines(
     '  chmod 0755 "$wrapper.tmp.$$"',
     '  mv -f "$wrapper.tmp.$$" "$wrapper"',
     "done",
+    "if [ -d /etc/profile.d ] && [ -w /etc/profile.d ]; then",
+    '  printf \'%s\\n\' \'case ":$PATH:" in *":${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}:"*) ;; *) export PATH="${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}:$PATH" ;; esac\' > /etc/profile.d/opengeni-git-cli.sh',
+    "fi",
   ];
 }
 
@@ -8541,7 +8549,7 @@ export function repositoryCloneCommand(
     '  rm -rf "$tmp"',
     // Fetch failures must not leak the pid-suffixed tmp clone beside the mount
     // (set -eu would exit before any cleanup).
-    '  if ! { git init "$tmp" >/dev/null && git -C "$tmp" remote add origin "$uri" && git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref" && git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; }; then',
+    '  if ! { git init "$tmp" >/dev/null && git -C "$tmp" remote add origin "$uri" && git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref" && git -C "$tmp" remote set-head origin "$ref" && git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; }; then',
     '    rm -rf "$tmp"',
     '    echo "Repository resource fetch failed for $target" >&2',
     "    exit 1",

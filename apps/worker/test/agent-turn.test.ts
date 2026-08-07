@@ -17,6 +17,7 @@ import {
   SandboxImageConflictError,
   SandboxLeaseRecoveryBlockedError,
   SandboxLeaseSupersededError,
+  SandboxWorkspaceMutationFencedError,
   SessionEventPersistenceError,
 } from "@opengeni/db";
 import {
@@ -40,6 +41,7 @@ import {
   classifyContextWindowOverflowError,
   credentialSubjectIdForTurnInitiator,
   classifyMcpTransportTimeoutError,
+  clearAttemptCredentialsWithSettledFence,
   codexCredentialLeaseDeadlineExpired,
   completedToolCallFromSdkEvent,
   computerToolModeForTurn,
@@ -58,6 +60,7 @@ import {
   isTransientProviderError,
   isWorkerShutdownCancellation,
   legacyTurnExecutionPolicyInput,
+  MandatoryHistoryPersistenceError,
   modelAttachmentInputPolicyForTurn,
   modelSupportsImageInputForTurn,
   recordCompletedModelCallBeforeOwnershipFences,
@@ -75,6 +78,7 @@ import {
   providerRecoveryResult,
   requiresSignedFileResourceDownloads,
   resolveActiveSandboxBackend,
+  runMandatoryHistoryPersistenceStep,
   safeErrorDiagnostic,
   sandboxDeadlineRotationRecoveryDelayMs,
   shouldRecoverCompactionProviderFailure,
@@ -561,6 +565,60 @@ describe("turn exact-content boundaries", () => {
     });
     expect(source.message).toContain(syntheticValue);
     expect(JSON.stringify(safeErrorDiagnostic(hostile))).not.toContain(syntheticValue);
+  });
+
+  test("mandatory history failure keeps exact internal content and exposes only a safe stage", async () => {
+    const source = Object.assign(new Error(`history write rejected; detail=${syntheticValue}`), {
+      status: 503,
+      responseBody: syntheticValue,
+    });
+    const error = await runMandatoryHistoryPersistenceStep("history_append", async () => {
+      throw source;
+    }).catch((caught) => caught);
+
+    expect(error).toBeInstanceOf(MandatoryHistoryPersistenceError);
+    expect((error as MandatoryHistoryPersistenceError).cause).toBe(source);
+    const failure = agentRunFailurePayload(error);
+    expect(failure).toEqual({
+      error: `history write rejected; detail=${syntheticValue}`,
+      historyPersistenceStage: "history_append",
+    });
+    const diagnostic = safeErrorDiagnostic(error);
+    expect(diagnostic).toEqual({
+      errorClass: "WorkerOperationError",
+      errorCode: "worker_operation_failed",
+      status: 503,
+      origin: "worker",
+      historyPersistenceStage: "history_append",
+    });
+    expect(JSON.stringify(diagnostic)).not.toContain(syntheticValue);
+  });
+
+  test("mandatory history barriers precede completion and terminal failure emits no completion", async () => {
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn.ts", import.meta.url),
+    ).text();
+    const completionPath = source.indexOf('const finalOutput = String(stream.finalOutput ?? "");');
+    const mandatoryBarrier = source.indexOf(
+      "await reconcileConversationTruth({ requireDurable: true });",
+      completionPath,
+    );
+    const successCompletion = source.indexOf('type: "turn.completed"', mandatoryBarrier);
+    expect(completionPath).toBeGreaterThan(-1);
+    expect(mandatoryBarrier).toBeGreaterThan(completionPath);
+    expect(successCompletion).toBeGreaterThan(mandatoryBarrier);
+
+    const failureClassifier = source.indexOf("const failure = agentRunFailurePayload(error");
+    const terminalFailureStart = source.indexOf('activityStatus = "failed";', failureClassifier);
+    const terminalFailureEnd = source.indexOf(
+      'turnMetricOutcome = "failed";',
+      terminalFailureStart,
+    );
+    const terminalFailureBlock = source.slice(terminalFailureStart, terminalFailureEnd);
+    expect(terminalFailureStart).toBeGreaterThan(failureClassifier);
+    expect(terminalFailureEnd).toBeGreaterThan(terminalFailureStart);
+    expect(terminalFailureBlock).toContain('type: "turn.failed"');
+    expect(terminalFailureBlock).not.toContain('type: "turn.completed"');
   });
 });
 
@@ -2853,6 +2911,88 @@ describe("worker shutdown preemption", () => {
   });
 });
 
+describe("settled run-credential finalization", () => {
+  for (const activityStatus of ["idle", "failed"] as const) {
+    test(`retries exact attempt cleanup after ${activityStatus} terminal settlement`, async () => {
+      const calls: string[] = [];
+      const fence = new SandboxWorkspaceMutationFencedError(
+        "attempt_fenced",
+        "terminal settlement closed the attempt",
+      );
+
+      await clearAttemptCredentialsWithSettledFence({
+        activityStatus,
+        runWorkspaceFencedClear: async () => {
+          calls.push("workspace-fenced");
+          throw fence;
+        },
+        onSettledAttemptFence: () => calls.push("observed"),
+        clearExactAttempt: async () => {
+          calls.push("exact-attempt-clear");
+        },
+      });
+
+      expect(calls).toEqual(["workspace-fenced", "observed", "exact-attempt-clear"]);
+    });
+  }
+
+  for (const [label, error, activityStatus] of [
+    ["wrong error name", Object.assign(new Error("fenced"), { code: "attempt_fenced" }), "idle"],
+    [
+      "wrong fence code",
+      new SandboxWorkspaceMutationFencedError("holder_fenced", "holder changed"),
+      "idle",
+    ],
+    [
+      "nonterminal activity",
+      new SandboxWorkspaceMutationFencedError("attempt_fenced", "attempt changed"),
+      "recovering",
+    ],
+  ] as const) {
+    test(`keeps ${label} fail-closed`, async () => {
+      let directClears = 0;
+      const caught = await clearAttemptCredentialsWithSettledFence({
+        activityStatus,
+        runWorkspaceFencedClear: async () => {
+          throw error;
+        },
+        onSettledAttemptFence: () => {
+          throw new Error("unexpected settled-fence callback");
+        },
+        clearExactAttempt: async () => {
+          directClears += 1;
+        },
+      }).catch((failure: unknown) => failure);
+
+      expect(caught).toBe(error);
+      expect(directClears).toBe(0);
+    });
+  }
+
+  test("keeps a direct exact-attempt deletion failure fail-closed", async () => {
+    const deletionFailure = new Error("exact credential deletion failed");
+    let settledFences = 0;
+    const caught = await clearAttemptCredentialsWithSettledFence({
+      activityStatus: "idle",
+      runWorkspaceFencedClear: async () => {
+        throw new SandboxWorkspaceMutationFencedError(
+          "attempt_fenced",
+          "terminal settlement closed the attempt",
+        );
+      },
+      onSettledAttemptFence: () => {
+        settledFences += 1;
+      },
+      clearExactAttempt: async () => {
+        throw deletionFailure;
+      },
+    }).catch((failure: unknown) => failure);
+
+    expect(caught).toBe(deletionFailure);
+    expect(settledFences).toBe(1);
+  });
+});
+
 describe("Codex credential lease deadline fence", () => {
   test("fails closed at the last database-confirmed expiry, including a missing deadline", () => {
     const now = Date.parse("2026-07-10T08:00:00.000Z");
@@ -3353,6 +3493,13 @@ describe("transient provider error classifier", () => {
       },
     });
     expect(payload.retryable).toBeUndefined();
+
+    const mandatory = new MandatoryHistoryPersistenceError("sandbox_envelope", error);
+    expect(agentRunFailurePayload(mandatory)).toEqual({
+      ...payload,
+      historyPersistenceStage: "sandbox_envelope",
+    });
+    expect(agentRunFailurePayload(mandatory).retryable).toBeUndefined();
   });
 
   test("preserves an exact non-SQLSTATE persistence failure in the session payload", async () => {

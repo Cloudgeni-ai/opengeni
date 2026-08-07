@@ -600,7 +600,13 @@ export function FileBrowser({
   // Retry lives next to the state it explains (the degraded/empty notice), so do
   // not render a second toolbar retry for the same failure.
   const showToolbar = supportsMutation || result.loading;
-  const usesVirtualTree = !showErrorEmpty && !showEmpty;
+  // Virtua caches the previous visible range when a lazy-expanded subtree is
+  // inserted in the middle of a short list. The spacer grows but later root
+  // siblings can remain unmounted until a scroll/resize (for example,
+  // `.bash_history` vanished after expanding `repositories/<repo>`). Small
+  // trees do not benefit from virtualization, so render them directly and keep
+  // Virtua only for genuinely large workspaces.
+  const usesVirtualTree = !showErrorEmpty && !showEmpty && renderItems.length > 500;
 
   // Render a SINGLE node row (no recursion — children are separate flat items the
   // virtualizer renders). Returns the row element; the caller assigns the key.
@@ -875,12 +881,6 @@ export function FileBrowser({
       {/* biome-ignore lint/a11y/noNoninteractiveTabindex: the tree owns keyboard nav */}
       <div
         ref={container.ref}
-        id={usesVirtualTree ? undefined : treeId}
-        role={usesVirtualTree ? undefined : "tree"}
-        aria-label={usesVirtualTree ? undefined : "Workspace files"}
-        aria-activedescendant={usesVirtualTree ? undefined : activeDescendantId}
-        tabIndex={usesVirtualTree ? undefined : 0}
-        aria-multiselectable={usesVirtualTree ? undefined : false}
         onFocus={(event) => {
           if ((event.target as HTMLElement).id === treeId && cursorIndex < 0) {
             const first = flatRows[0];
@@ -907,7 +907,7 @@ export function FileBrowser({
             : undefined
         }
         className={cn(
-          "flex min-h-0 min-w-0 flex-1 flex-col p-1 outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent",
+          "flex min-h-0 min-w-0 flex-1 flex-col p-1",
           dragOver === "" && "ring-1 ring-inset ring-og-accent",
         )}
         data-opengeni-file-tree
@@ -934,6 +934,22 @@ export function FileBrowser({
         ) : showEmpty ? (
           <div className="p-2 text-og-sm text-og-fg-subtle">
             {emptyState ?? "This directory is empty"}
+          </div>
+        ) : !usesVirtualTree ? (
+          <div
+            id={treeId}
+            role="tree"
+            aria-label="Workspace files"
+            aria-activedescendant={activeDescendantId}
+            aria-multiselectable={false}
+            tabIndex={0}
+            className="min-h-0 min-w-0 flex-1 overflow-auto outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent"
+          >
+            {renderItems.map((item) => (
+              <div key={itemKey(item)} className="min-w-0">
+                {renderItem(item)}
+              </div>
+            ))}
           </div>
         ) : (
           // Virtualized: only the rows in/near the viewport mount, so a 3k-node

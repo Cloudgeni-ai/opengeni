@@ -562,6 +562,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           id: event.id,
           turnId,
           serverId: typeof payload.serverId === "string" ? payload.serverId : null,
+          source: event.type === "tool.auth_needed" ? "tool" : "credential",
           providerDomain: stringValue(payload.providerDomain),
           connectionId: typeof payload.connectionId === "string" ? payload.connectionId : null,
           reason: authNeededReason(payload.reason),

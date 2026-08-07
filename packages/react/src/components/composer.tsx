@@ -1608,7 +1608,7 @@ function AttachmentChips({
   onRetry?: ((id: string) => void) | undefined;
 }) {
   return (
-    <div className="flex flex-wrap gap-2 border-b border-og-border px-3 py-2">
+    <div className="flex flex-wrap gap-2 px-3 py-2">
       {attachments.map((attachment) => {
         const failed = attachment.status === "failed";
         const statusText =

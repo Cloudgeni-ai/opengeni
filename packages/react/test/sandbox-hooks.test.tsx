@@ -19,6 +19,7 @@ import { useSandboxFiles } from "../src/hooks/use-sandbox-files";
 import { useSandboxGit } from "../src/hooks/use-sandbox-git";
 import { useSandboxTerminal } from "../src/hooks/use-sandbox-terminal";
 import { useSessionCapabilities } from "../src/hooks/use-session-capabilities";
+import type { SessionClientLike } from "../src/client";
 
 registerDom();
 
@@ -660,6 +661,7 @@ describe("useSandboxTerminal", () => {
 describe("useSandboxFiles", () => {
   test("lists the tree (depth 1) and overlays git status, expands lazily", async () => {
     const listCalls: string[] = [];
+    let batchCalls = 0;
     const client = fakeClient({
       gitStatus: async () => ({
         isRepo: true,
@@ -679,6 +681,16 @@ describe("useSandboxFiles", () => {
         ],
         revision: 1,
       }),
+      fsListBatch: async (workspaceId, sessionId, request, options) => {
+        batchCalls += 1;
+        return {
+          results: await Promise.all(
+            request.requests.map(
+              async (item) => await client.fsList(workspaceId, sessionId, item, options),
+            ),
+          ),
+        };
+      },
       fsList: async (_ws, _s, req) => {
         listCalls.push(req?.path ?? "");
         if ((req?.path ?? "") === "src") {
@@ -755,6 +767,7 @@ describe("useSandboxFiles", () => {
     expect(src?.children?.[0]?.name).toBe("app.ts");
     // The modified file carries the git-status overlay.
     expect(src?.children?.[0]?.status).toBe("modified");
+    expect(batchCalls).toBe(1);
     expect(listCalls).toContain("src");
     await hook.unmount();
   });
@@ -1270,28 +1283,44 @@ describe("useSandboxGit", () => {
     const statusRoots: string[] = [];
     const diffRoots: string[] = [];
     const includeUntracked: (boolean | undefined)[] = [];
+    let batchCalls = 0;
+    const gitStatus: SessionClientLike["gitStatus"] = async (_workspaceId, _sessionId, request) => {
+      const root = request?.path ?? "";
+      statusRoots.push(root);
+      return {
+        isRepo: true,
+        head: `${root}-main`,
+        detached: false,
+        upstream: null,
+        ahead: root === "api" ? 1 : 0,
+        behind: root === "web" ? 2 : 0,
+        files: [],
+        revision: 1,
+      };
+    };
+    const gitDiff: SessionClientLike["gitDiff"] = async (_workspaceId, _sessionId, request) => {
+      const root = request?.path ?? "";
+      diffRoots.push(root);
+      includeUntracked.push(request?.includeUntracked);
+      return {
+        files: [fakeFileDiff({ path: root === "api" ? "src/server.ts" : "src/app.tsx" })],
+        revision: 1,
+      };
+    };
     const client = fakeClient({
-      gitStatus: async (_workspaceId, _sessionId, request) => {
-        const root = request?.path ?? "";
-        statusRoots.push(root);
+      gitStatus,
+      gitDiff,
+      gitReadBatch: async (workspaceId, sessionId, request, options) => {
+        batchCalls += 1;
         return {
-          isRepo: true,
-          head: `${root}-main`,
-          detached: false,
-          upstream: null,
-          ahead: root === "api" ? 1 : 0,
-          behind: root === "web" ? 2 : 0,
-          files: [],
-          revision: 1,
-        };
-      },
-      gitDiff: async (_workspaceId, _sessionId, request) => {
-        const root = request?.path ?? "";
-        diffRoots.push(root);
-        includeUntracked.push(request?.includeUntracked);
-        return {
-          files: [fakeFileDiff({ path: root === "api" ? "src/server.ts" : "src/app.tsx" })],
-          revision: 1,
+          results: await Promise.all(
+            request.requests.map(async (item) => ({
+              status: await gitStatus(workspaceId, sessionId, item.status, options),
+              ...(item.diff
+                ? { diff: await gitDiff(workspaceId, sessionId, item.diff, options) }
+                : {}),
+            })),
+          ),
         };
       },
     });
@@ -1310,6 +1339,7 @@ describe("useSandboxGit", () => {
     expect(statusRoots).toEqual(["api", "web"]);
     expect(diffRoots).toEqual(["api", "web"]);
     expect(includeUntracked).toEqual([true, true]);
+    expect(batchCalls).toBe(1);
     expect(hook.result.current.repoCount).toBe(2);
     expect(hook.result.current.repoRoots).toEqual(["api", "web"]);
     expect(hook.result.current.branch).toBeNull();
