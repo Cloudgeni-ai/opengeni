@@ -11,7 +11,8 @@
 //       same (group, epoch, tick).
 //   (3) a 0-balance workspace force-drains its VIEWER-ONLY box on the reaper tick
 //       while a TURN-HELD box in the same workspace SURVIVES, and the freshly
-//       drained box is then terminated by the same sweep (CAS draining->cold).
+//       drained box remains admission-fenced until one bounded scheduled sweep
+//       terminates it (CAS draining->cold).
 //
 // pgvector/pgvector:pg16 (0000_initial does CREATE EXTENSION vector). The package
 // fns connect as opengeni_app (non-superuser → FORCE RLS applies; the warm-lease
@@ -272,14 +273,22 @@ describe("P2.1 reaper-tick warm metering + force-drain (real lease + RLS, spied 
 
     const result = await reapSandboxLeases();
 
-    // The viewer-only box was force-drained AND, with a 0ms grace, terminated +
-    // CASed cold in the same sweep. The turn-held box is untouched (spared).
+    // The viewer-only box is force-drained in this sweep. Provider teardown is
+    // globally bounded to one capture-bearing box per activity, so an older due
+    // drain may win first; later scheduled sweeps must eventually terminate this
+    // exact box. The turn-held box remains untouched throughout.
     // (result.forceDrained is a global-across-workspaces count; we assert on THIS
     // workspace's specific boxes instead — the load-bearing invariant.)
     expect(result.forceDrained).toBeGreaterThanOrEqual(1);
+    let viewerLiveness = await readLiveness(ws.workspaceId, viewerOnly);
+    expect(["draining", "cold"]).toContain(viewerLiveness);
+    for (let sweep = 0; sweep < 10 && viewerLiveness !== "cold"; sweep += 1) {
+      await reapSandboxLeases();
+      viewerLiveness = await readLiveness(ws.workspaceId, viewerOnly);
+    }
     expect(spy.calls.map((c) => c.group)).toContain(viewerOnly);
     expect(spy.calls.map((c) => c.group)).not.toContain(turnHeld);
-    expect(await readLiveness(ws.workspaceId, viewerOnly)).toBe("cold"); // drained → terminated → cold
+    expect(viewerLiveness).toBe("cold"); // bounded subsequent sweep: drained → terminated → cold
     expect(await readLiveness(ws.workspaceId, turnHeld)).toBe("warm"); // SPARED — a paying turn is never killed
   }, 90_000);
 });
