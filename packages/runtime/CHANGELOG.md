@@ -1,5 +1,15 @@
 # @opengeni/runtime
 
+## 0.18.24
+
+### Patch Changes
+
+- 200586a: Allow workspace administrators to disable structured agent human-input requests while preserving ordinary user messages.
+- Updated dependencies [f8eb9f9]
+- Updated dependencies [200586a]
+  - @opengeni/config@0.12.0
+  - @opengeni/contracts@0.39.5
+
 ## 0.18.23
 
 ### Patch Changes

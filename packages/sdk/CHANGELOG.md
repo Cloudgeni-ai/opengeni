@@ -1,5 +1,11 @@
 # @opengeni/sdk
 
+## 0.47.2
+
+### Patch Changes
+
+- 200586a: Allow workspace administrators to disable structured agent human-input requests while preserving ordinary user messages.
+
 ## 0.46.6
 
 ### Patch Changes
