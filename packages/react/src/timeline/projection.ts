@@ -21,6 +21,7 @@ import type {
   TimelineItem,
   TurnEndItem,
   ToolCallItem,
+  ToolCallTruncation,
   WorkerItem,
 } from "./types";
 
@@ -312,6 +313,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           name,
           arguments: args,
           output: undefined,
+          truncation: null,
           // The provider-native item drives the per-tool renderers (apply_patch
           // operation, computer_call action, web_search providerData, …).
           raw: payload.raw,
@@ -336,8 +338,14 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         }
         // An output carrying an explicit error flag (or an MCP isError result)
         // settles the tool to "failed" so the renderer can surface it loudly.
+        const truncation = toolCallTruncation(payload);
         target.status = isErrorOutput(payload) ? "failed" : "complete";
-        target.output = payload.output;
+        target.output = Object.prototype.hasOwnProperty.call(payload, "output")
+          ? payload.output
+          : truncation && typeof payload.preview === "string"
+            ? payload.preview
+            : payload.output;
+        target.truncation = truncation;
         break;
       }
 
@@ -1438,6 +1446,31 @@ function isErrorOutput(payload: Record<string, unknown>): boolean {
   return (
     !!output && typeof output === "object" && (output as { isError?: unknown }).isError === true
   );
+}
+
+function toolCallTruncation(payload: Record<string, unknown>): ToolCallTruncation | null {
+  const truncation = asRecord(payload.truncation);
+  const fullEvidence = asRecord(truncation.fullEvidence);
+  const surface = stringValue(truncation.surface);
+  const reason = stringValue(truncation.reason);
+  if (
+    truncation.truncated !== true ||
+    !surface ||
+    !reason ||
+    typeof fullEvidence.available !== "boolean"
+  ) {
+    return null;
+  }
+  return {
+    truncated: true,
+    surface,
+    reason,
+    omittedBytes: numberOrNull(truncation.omittedBytes),
+    fullEvidence: {
+      available: fullEvidence.available,
+      reason: stringValue(fullEvidence.reason) || null,
+    },
+  };
 }
 
 function findOpenCall(

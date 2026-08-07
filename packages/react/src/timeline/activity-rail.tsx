@@ -14,7 +14,7 @@ import { defaultToolRegistry } from "./tool-renderers";
 import { useEntranceAnimation, useEntranceAnimationLive } from "./entrance";
 import type { RetainedScreenshotLoader, ToolRegistry } from "./registry";
 import { useSeenActivityIds } from "./seen-activity-ids";
-import { BodyNote, PayloadBlock, ActivityDisclosure } from "./shared";
+import { BodyNote, PayloadBlock, ActivityDisclosure, ToolCallTruncationProvider } from "./shared";
 import { toolDisplayName } from "./tool-display-name";
 import type { ActivityItem, MemoryItem, ReasoningItem, SandboxItem, WorkerItem } from "./types";
 
@@ -152,7 +152,11 @@ function renderActivity(
       return <ReasoningRow item={item} />;
     case "tool-call": {
       const Renderer = toolRegistry.resolve(item);
-      return <Renderer item={item} loadRetainedScreenshot={loadRetainedScreenshot} />;
+      return (
+        <ToolCallTruncationProvider value={item.truncation ?? null}>
+          <Renderer item={item} loadRetainedScreenshot={loadRetainedScreenshot} />
+        </ToolCallTruncationProvider>
+      );
     }
     case "worker":
       return <WorkerRow item={item} onOpenSession={onOpenSession} />;

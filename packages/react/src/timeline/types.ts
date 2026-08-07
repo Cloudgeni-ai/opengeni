@@ -44,6 +44,23 @@ export type ReasoningItem = {
   occurredAt: string;
 };
 
+/**
+ * Bounded delivery metadata carried by a projected tool-output event. The
+ * canonical event remains unchanged; this fact only explains what the current
+ * timeline surface could render and whether separately retained full evidence
+ * exists.
+ */
+export type ToolCallTruncation = {
+  truncated: true;
+  surface: string;
+  reason: string;
+  omittedBytes: number | null;
+  fullEvidence: {
+    available: boolean;
+    reason: string | null;
+  };
+};
+
 export type ToolCallItem = {
   kind: "tool-call";
   id: string;
@@ -52,6 +69,7 @@ export type ToolCallItem = {
   name: string;
   arguments: unknown;
   output: unknown;
+  truncation?: ToolCallTruncation | null;
   /**
    * The provider-native tool item (`agent.toolCall.created.payload.raw`). Carries
    * `type` (e.g. `apply_patch_call`, `computer_call`, `hosted_tool_call`) and the

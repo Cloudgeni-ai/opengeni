@@ -805,6 +805,62 @@ describe("buildTimeline", () => {
     expect(second.output).toBe("resource {}");
   });
 
+  test("projects a bounded tool-output preview with truthful truncation metadata", () => {
+    reset();
+    const preview = '{"id":"call-1","output":"bounded preview"}';
+    const items = buildTimeline([
+      event("agent.toolCall.created", {
+        id: "call-1",
+        name: "exec_command",
+        arguments: { cmd: "incident-canary-telemetry" },
+      }),
+      event("agent.toolCall.output", {
+        id: "call-1",
+        preview,
+        truncation: {
+          truncated: true,
+          surface: "browser_legacy_guard",
+          reason: "event_envelope_bytes_exceeded",
+          omittedBytes: 83_000,
+          fullEvidence: { available: false, reason: "not_retained" },
+        },
+      }),
+    ]);
+
+    expect(items[0]).toMatchObject({
+      kind: "tool-call",
+      output: preview,
+      truncation: {
+        truncated: true,
+        surface: "browser_legacy_guard",
+        reason: "event_envelope_bytes_exceeded",
+        omittedBytes: 83_000,
+        fullEvidence: { available: false, reason: "not_retained" },
+      },
+    });
+  });
+
+  test("does not synthesize truncation metadata for an ordinary tool output", () => {
+    reset();
+    const items = buildTimeline([
+      event("agent.toolCall.created", {
+        id: "call-1",
+        name: "exec_command",
+        arguments: { cmd: "incident-canary-telemetry" },
+      }),
+      event("agent.toolCall.output", {
+        id: "call-1",
+        output: '{"id":"call-1","output":"bounded preview"}',
+      }),
+    ]);
+
+    expect(items[0]).toMatchObject({
+      kind: "tool-call",
+      output: '{"id":"call-1","output":"bounded preview"}',
+      truncation: null,
+    });
+  });
+
   test("a completed hosted web-search item settles without a separate output event", () => {
     reset();
     const items = buildTimeline([
