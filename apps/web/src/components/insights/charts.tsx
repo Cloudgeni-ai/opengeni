@@ -74,6 +74,7 @@ export function AreaChart(props: {
   valueDigits?: number;
   /** Soft y-axis floor for percentage charts */
   yMax?: number;
+  formatValue?: (value: number) => string;
 }) {
   const reduceMotion = useReducedMotion();
   const gradId = useId();
@@ -100,9 +101,12 @@ export function AreaChart(props: {
         return { x, y, value };
       });
       const line = smoothLine(points);
-      const first = points[0]!;
-      const last = points[points.length - 1]!;
-      const area = `${line} L${last.x},${padTop + innerH} L${first.x},${padTop + innerH} Z`;
+      const first = points[0];
+      const last = points[points.length - 1];
+      const area =
+        first && last
+          ? `${line} L${last.x},${padTop + innerH} L${first.x},${padTop + innerH} Z`
+          : "";
       return { series, points, line, area };
     });
   }, [props.series, innerH, innerW, max, padTop]);
@@ -119,6 +123,29 @@ export function AreaChart(props: {
     active == null ? null : padL + (active / Math.max(props.labels.length - 1, 1)) * innerW;
 
   const ticks = [0, 0.5, 1];
+  const formattedValue = (value: number) =>
+    props.formatValue
+      ? props.formatValue(value)
+      : `${props.valuePrefix ?? ""}${formatChartNumber(value, props.valueDigits)}${props.valueSuffix ?? ""}`;
+  const labelStride = Math.max(1, Math.ceil(props.labels.length / 6));
+  const visibleLabels = props.labels
+    .map((label, index) => ({ label, index }))
+    .filter(
+      ({ index }) => index === 0 || index === props.labels.length - 1 || index % labelStride === 0,
+    );
+
+  if (props.labels.length === 0 || props.series.every((series) => series.values.length === 0)) {
+    return (
+      <div
+        className={cn(
+          "grid min-h-40 place-items-center rounded-md border border-dashed border-border text-xs text-fg-subtle",
+          props.className,
+        )}
+      >
+        No usage in this window.
+      </div>
+    );
+  }
 
   return (
     <div className={cn("relative w-full", props.className)} onPointerLeave={() => setActive(null)}>
@@ -144,9 +171,7 @@ export function AreaChart(props: {
                     <span className="text-fg-muted">{series.label}</span>
                   </span>
                   <span className="font-mono tabular-nums text-fg">
-                    {props.valuePrefix}
-                    {formatChartNumber(series.values[active]!, props.valueDigits)}
-                    {props.valueSuffix}
+                    {formattedValue(series.values[active] ?? 0)}
                   </span>
                 </div>
               ))}
@@ -205,9 +230,7 @@ export function AreaChart(props: {
                 className="fill-fg-subtle"
                 style={{ fontSize: 10, fontFamily: "ui-monospace, monospace" }}
               >
-                {props.valuePrefix}
-                {formatChartNumber(label, props.valueDigits ?? (max >= 50 ? 0 : 0))}
-                {props.valueSuffix}
+                {formattedValue(label)}
               </text>
             </g>
           );
@@ -228,24 +251,36 @@ export function AreaChart(props: {
 
         {geometry.map(({ series, line, area, points }, index) => (
           <g key={series.id} className={series.className}>
-            <motion.path
-              d={area}
-              fill={`url(#${gradId}-${index})`}
-              initial={reduceMotion ? false : { opacity: 0 }}
-              animate={{ opacity: 1 }}
-              transition={{ duration: 0.7, delay: 0.08 + index * 0.06, ease: [0.22, 1, 0.36, 1] }}
-            />
-            <motion.path
-              d={line}
-              fill="none"
-              stroke="currentColor"
-              strokeWidth={2.25}
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              initial={reduceMotion ? false : { pathLength: 0, opacity: 0 }}
-              animate={{ pathLength: 1, opacity: 1 }}
-              transition={{ duration: 1, delay: index * 0.08, ease: [0.22, 1, 0.36, 1] }}
-            />
+            {points.length > 0 ? (
+              <>
+                <motion.path
+                  d={area}
+                  fill={`url(#${gradId}-${index})`}
+                  initial={reduceMotion ? false : { opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  transition={{
+                    duration: 0.7,
+                    delay: 0.08 + index * 0.06,
+                    ease: [0.22, 1, 0.36, 1],
+                  }}
+                />
+                <motion.path
+                  d={line}
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth={2.25}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  initial={reduceMotion ? false : { pathLength: 0, opacity: 0 }}
+                  animate={{ pathLength: 1, opacity: 1 }}
+                  transition={{
+                    duration: 1,
+                    delay: index * 0.08,
+                    ease: [0.22, 1, 0.36, 1],
+                  }}
+                />
+              </>
+            ) : null}
             {points.map((point, i) => (
               <circle
                 key={`${series.id}-x${point.x}`}
@@ -276,9 +311,9 @@ export function AreaChart(props: {
       </svg>
 
       <div className="mt-1 flex justify-between pl-9 pr-1">
-        {props.labels.map((label, index) => (
+        {visibleLabels.map(({ label, index }) => (
           <button
-            key={label}
+            key={`${label}-${index}`}
             type="button"
             onMouseEnter={() => setActive(index)}
             className={cn(

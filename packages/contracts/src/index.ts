@@ -2133,6 +2133,9 @@ export type InsightsRange = z.infer<typeof InsightsRange>;
 export const InsightsBillingPath = z.enum(["opengeni_credits", "external"]);
 export type InsightsBillingPath = z.infer<typeof InsightsBillingPath>;
 
+export const InsightsPricingSource = z.enum(["configured_list_price", "gateway_reported"]);
+export type InsightsPricingSource = z.infer<typeof InsightsPricingSource>;
+
 export const InsightsModelUsageRow = z.object({
   id: z.string().min(1),
   model: z.string().min(1),
@@ -2142,10 +2145,17 @@ export const InsightsModelUsageRow = z.object({
   inputTokens: z.number().nonnegative(),
   outputTokens: z.number().nonnegative(),
   cachedTokens: z.number().nonnegative(),
+  cacheInputTokens: z.number().nonnegative(),
   cacheWriteTokens: z.number().nonnegative(),
   reasoningTokens: z.number().nonnegative(),
+  totalTokens: z.number().nonnegative(),
+  tokenKnownCalls: z.number().int().nonnegative(),
+  cacheKnownCalls: z.number().int().nonnegative(),
   /** Priced OpenGeni credit $ for this model×provider (from model_call_facts). */
   creditUsd: z.number().nonnegative(),
+  /** Hypothetical provider-rate USD; never an OpenGeni charge. */
+  estimatedProviderUsd: z.number().nonnegative(),
+  estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
 });
 export type InsightsModelUsageRow = z.infer<typeof InsightsModelUsageRow>;
 
@@ -2153,9 +2163,19 @@ export const InsightsSeriesPoint = z.object({
   label: z.string().min(1),
   /** Day-bucketed sum of usage_events.model.cost (workspace-wide) or filtered facts when provider/model set. */
   modelCostUsd: z.number().nonnegative(),
+  /** Day-bucketed hypothetical provider-rate USD for calls with captured pricing. */
+  estimatedProviderUsd: z.number().nonnegative(),
+  estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
   warmSeconds: z.number().nonnegative(),
   inputTokens: z.number().nonnegative(),
+  outputTokens: z.number().nonnegative(),
   cachedTokens: z.number().nonnegative(),
+  cacheInputTokens: z.number().nonnegative(),
+  cacheWriteTokens: z.number().nonnegative(),
+  reasoningTokens: z.number().nonnegative(),
+  totalTokens: z.number().nonnegative(),
+  tokenKnownCalls: z.number().int().nonnegative(),
+  cacheKnownCalls: z.number().int().nonnegative(),
   cacheHitPct: z.number().int().min(0).max(100),
   calls: z.number().int().nonnegative(),
 });
@@ -2178,9 +2198,12 @@ export const InsightsSpendDriver = z.object({
   groupBy: z.enum(["root_session", "schedule"]),
   label: z.string().min(1),
   creditUsd: z.number().nonnegative(),
+  estimatedProviderUsd: z.number().nonnegative(),
+  estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
   tokens: z.number().nonnegative(),
   cacheHitPct: z.number().int().min(0).max(100),
   pctOfCreditUsd: z.number().int().min(0).max(100),
+  pctOfTokens: z.number().int().min(0).max(100),
   deltaUsdVsPrior: z.number(),
 });
 export type InsightsSpendDriver = z.infer<typeof InsightsSpendDriver>;
@@ -2227,11 +2250,38 @@ export const InsightsScheduleRow = z.object({
   fires: z.number().int().nonnegative(),
   /** Null when no facts carry scheduled_task_id for this window. */
   creditUsd: z.number().nonnegative().nullable(),
+  estimatedProviderUsd: z.number().nonnegative().nullable(),
+  estimatedProviderCostKnownCalls: z.number().int().nonnegative().nullable(),
   tokens: z.number().nonnegative().nullable(),
   cacheHitPct: z.number().int().min(0).max(100).nullable(),
   billing: InsightsBillingPath.nullable(),
 });
 export type InsightsScheduleRow = z.infer<typeof InsightsScheduleRow>;
+
+export const InsightsModelCallRow = z.object({
+  id: z.string().uuid(),
+  occurredAt: z.string().datetime(),
+  recordedAt: z.string().datetime(),
+  sessionId: z.string().uuid(),
+  sessionTitle: z.string(),
+  turnId: z.string().uuid(),
+  provider: z.string().min(1),
+  providerApi: z.string().min(1),
+  model: z.string().min(1),
+  billing: InsightsBillingPath,
+  inputTokens: z.number().nonnegative().nullable(),
+  outputTokens: z.number().nonnegative().nullable(),
+  cachedTokens: z.number().nonnegative().nullable(),
+  cacheWriteTokens: z.number().nonnegative().nullable(),
+  reasoningTokens: z.number().nonnegative().nullable(),
+  totalTokens: z.number().nonnegative().nullable(),
+  /** OpenGeni credit price for this call. External calls are always zero. */
+  creditUsd: z.number().nonnegative(),
+  /** Hypothetical provider-rate USD; null when historical pricing is unavailable. */
+  estimatedProviderUsd: z.number().nonnegative().nullable(),
+  pricingSource: InsightsPricingSource.nullable(),
+});
+export type InsightsModelCallRow = z.infer<typeof InsightsModelCallRow>;
 
 export const WorkspaceInsightsSnapshot = z.object({
   range: InsightsRange,
@@ -2239,6 +2289,9 @@ export const WorkspaceInsightsSnapshot = z.object({
   priorLabel: z.string().min(1),
   seriesLabel: z.string().min(1),
   cacheSeriesLabel: z.string().min(1),
+  windowStart: z.string().datetime(),
+  windowEnd: z.string().datetime(),
+  generatedAt: z.string().datetime(),
   /** All ranges/series are UTC. */
   timezone: z.literal("UTC"),
   models: z.array(InsightsModelUsageRow),
@@ -2248,6 +2301,7 @@ export const WorkspaceInsightsSnapshot = z.object({
   depth: z.array(InsightsDepthBucket),
   drivers: z.array(InsightsSpendDriver),
   schedules: z.array(InsightsScheduleRow),
+  recentCalls: z.array(InsightsModelCallRow),
   warmSeconds: z.number().nonnegative(),
   priorWarmSeconds: z.number().nonnegative(),
   warmGroups: z.array(InsightsWarmGroupRow),
@@ -2261,7 +2315,14 @@ export const WorkspaceInsightsSnapshot = z.object({
   /** Model-filterable credit $ from facts (equals workspace when unfiltered, ignoring late-reject drift). */
   creditUsd: z.number().nonnegative(),
   priorCreditUsd: z.number().nonnegative(),
+  /** Hypothetical provider-rate USD for calls whose historical price was captured. */
+  estimatedProviderUsd: z.number().nonnegative(),
+  priorEstimatedProviderUsd: z.number().nonnegative(),
+  estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
+  priorEstimatedProviderCostKnownCalls: z.number().int().nonnegative(),
+  modelCalls: z.number().int().nonnegative(),
   priorInputTokens: z.number().nonnegative(),
+  priorTotalTokens: z.number().nonnegative(),
   priorCacheHitPct: z.number().int().min(0).max(100),
   priorCalls: z.number().int().nonnegative(),
   /** Lifetime workspace topology (not scoped to the selected Insights range). */

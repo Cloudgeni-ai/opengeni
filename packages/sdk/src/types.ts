@@ -4269,6 +4269,8 @@ export type InsightsRange = "today" | "week" | "month" | "ytd";
 
 export type InsightsBillingPath = "opengeni_credits" | "external";
 
+export type InsightsPricingSource = "configured_list_price" | "gateway_reported";
+
 export type InsightsModelUsageRow = {
   id: string;
   model: string;
@@ -4278,17 +4280,32 @@ export type InsightsModelUsageRow = {
   inputTokens: number;
   outputTokens: number;
   cachedTokens: number;
+  cacheInputTokens: number;
   cacheWriteTokens: number;
   reasoningTokens: number;
+  totalTokens: number;
+  tokenKnownCalls: number;
+  cacheKnownCalls: number;
   creditUsd: number;
+  estimatedProviderUsd: number;
+  estimatedProviderCostKnownCalls: number;
 };
 
 export type InsightsSeriesPoint = {
   label: string;
   modelCostUsd: number;
+  estimatedProviderUsd: number;
+  estimatedProviderCostKnownCalls: number;
   warmSeconds: number;
   inputTokens: number;
+  outputTokens: number;
   cachedTokens: number;
+  cacheInputTokens: number;
+  cacheWriteTokens: number;
+  reasoningTokens: number;
+  totalTokens: number;
+  tokenKnownCalls: number;
+  cacheKnownCalls: number;
   cacheHitPct: number;
   calls: number;
 };
@@ -4308,9 +4325,12 @@ export type InsightsSpendDriver = {
   groupBy: "root_session" | "schedule";
   label: string;
   creditUsd: number;
+  estimatedProviderUsd: number;
+  estimatedProviderCostKnownCalls: number;
   tokens: number;
   cacheHitPct: number;
   pctOfCreditUsd: number;
+  pctOfTokens: number;
   deltaUsdVsPrior: number;
 };
 
@@ -4350,9 +4370,33 @@ export type InsightsScheduleRow = {
   name: string;
   fires: number;
   creditUsd: number | null;
+  estimatedProviderUsd: number | null;
+  estimatedProviderCostKnownCalls: number | null;
   tokens: number | null;
   cacheHitPct: number | null;
   billing: InsightsBillingPath | null;
+};
+
+export type InsightsModelCallRow = {
+  id: string;
+  occurredAt: string;
+  recordedAt: string;
+  sessionId: string;
+  sessionTitle: string;
+  turnId: string;
+  provider: string;
+  providerApi: string;
+  model: string;
+  billing: InsightsBillingPath;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cachedTokens: number | null;
+  cacheWriteTokens: number | null;
+  reasoningTokens: number | null;
+  totalTokens: number | null;
+  creditUsd: number;
+  estimatedProviderUsd: number | null;
+  pricingSource: InsightsPricingSource | null;
 };
 
 export type WorkspaceInsightsSnapshot = {
@@ -4361,6 +4405,9 @@ export type WorkspaceInsightsSnapshot = {
   priorLabel: string;
   seriesLabel: string;
   cacheSeriesLabel: string;
+  windowStart: string;
+  windowEnd: string;
+  generatedAt: string;
   timezone: "UTC";
   models: InsightsModelUsageRow[];
   facets: InsightsModelFacet[];
@@ -4368,6 +4415,7 @@ export type WorkspaceInsightsSnapshot = {
   depth: InsightsDepthBucket[];
   drivers: InsightsSpendDriver[];
   schedules: InsightsScheduleRow[];
+  recentCalls: InsightsModelCallRow[];
   warmSeconds: number;
   priorWarmSeconds: number;
   warmGroups: InsightsWarmGroupRow[];
@@ -4379,7 +4427,13 @@ export type WorkspaceInsightsSnapshot = {
   priorWorkspaceCreditUsd: number;
   creditUsd: number;
   priorCreditUsd: number;
+  estimatedProviderUsd: number;
+  priorEstimatedProviderUsd: number;
+  estimatedProviderCostKnownCalls: number;
+  priorEstimatedProviderCostKnownCalls: number;
+  modelCalls: number;
   priorInputTokens: number;
+  priorTotalTokens: number;
   priorCacheHitPct: number;
   priorCalls: number;
   goalsActive: number;

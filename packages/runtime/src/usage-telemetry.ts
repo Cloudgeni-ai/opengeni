@@ -41,6 +41,13 @@ export type ModelCallUsageTelemetry = {
 export type ModelCallUsageNormalization = {
   telemetry: ModelCallUsageTelemetry;
   totalTokens: number | null;
+  /** Complete normalized per-request usage for exact tiered pricing when available. */
+  requestUsageEntries?: Array<{
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+    inputTokensDetails?: { cached_tokens: number };
+  }>;
   /** Bounded field paths only; raw provider values are never retained. */
   rejectedFields: string[];
 };
@@ -142,6 +149,30 @@ export function normalizeModelCallUsage(
     requestEntries,
     ["outputTokensDetails", "output_tokens_details"],
   );
+  const normalizedRequestUsageEntries =
+    requestEntries.length > 0 &&
+    requestInputTokens.status === "complete" &&
+    requestOutputTokens.status === "complete"
+      ? requestEntries.map((entry) => {
+          const normalized = normalizeModelCallUsage({
+            inputTokens: entry.inputTokens ?? entry.input_tokens,
+            outputTokens: entry.outputTokens ?? entry.output_tokens,
+            totalTokens: entry.totalTokens ?? entry.total_tokens,
+            inputTokensDetails: entry.inputTokensDetails ?? entry.input_tokens_details,
+            outputTokensDetails: entry.outputTokensDetails ?? entry.output_tokens_details,
+          });
+          return {
+            inputTokens: normalized.telemetry.inputTokens!,
+            outputTokens: normalized.telemetry.outputTokens!,
+            totalTokens:
+              normalized.totalTokens ??
+              normalized.telemetry.inputTokens! + normalized.telemetry.outputTokens!,
+            ...(normalized.telemetry.cachedTokens === null
+              ? {}
+              : { inputTokensDetails: { cached_tokens: normalized.telemetry.cachedTokens } }),
+          };
+        })
+      : undefined;
 
   return {
     telemetry: {
@@ -167,6 +198,9 @@ export function normalizeModelCallUsage(
       ),
     },
     totalTokens,
+    ...(normalizedRequestUsageEntries
+      ? { requestUsageEntries: normalizedRequestUsageEntries }
+      : {}),
     rejectedFields: [...rejectedFields].slice(0, 32),
   };
 }
