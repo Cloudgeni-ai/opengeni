@@ -21,12 +21,14 @@ import {
   fakeAttachResponse,
   fakeCapabilities,
   fakeColdCapabilities,
+  fakeEvent,
   fakeFileDiff,
 } from "./sandbox-fixtures";
 import { OpenGeniProvider } from "../src/provider";
 import type { MachinesResponse } from "../src/types/machines";
 import {
   useSandboxWorkspaceTabs,
+  initialWorkspaceTab,
   type UseSandboxWorkspaceTabsOptions,
   type UseSandboxWorkspaceTabsResult,
   SandboxWorkspace,
@@ -622,6 +624,52 @@ describe("workbench prewarm gating (Refinement 1)", () => {
 // ── Refinement 2: capture-driven default tab ─────────────────────────────────
 
 describe("capture-driven default tab (Refinement 2)", () => {
+  test("committed-only capture signals default Changes while a truly empty capture defaults Files", async () => {
+    expect(
+      initialWorkspaceTab([
+        fakeEvent(1, "git.changed", {
+          head: "feature",
+          dirty: false,
+          ahead: 1,
+          behind: 0,
+          changedFileCount: 0,
+          reason: "commit",
+        }),
+        fakeEvent(2, "workspace.revision.captured", { stats: { fileCount: 0 } }),
+      ]),
+    ).toBe(WORKBENCH_TAB_CHANGES);
+    expect(
+      initialWorkspaceTab([
+        fakeEvent(1, "git.changed", {
+          head: "feature",
+          dirty: false,
+          ahead: 0,
+          behind: 0,
+          changedFileCount: 0,
+          reason: "worktree",
+        }),
+        fakeEvent(2, "workspace.revision.captured", { stats: { fileCount: 0 } }),
+      ]),
+    ).toBe(WORKBENCH_TAB_FILES);
+
+    const committedOnly = fakeManifest(0);
+    committedOnly.repos[0] = {
+      ...committedOnly.repos[0]!,
+      ahead: 1,
+      branchDiff: [fakeFileDiff({ path: "src/committed.ts" })],
+    };
+    const committedClient = coldClient({
+      getWorkspaceCapture: async () => captureAvailable(committedOnly),
+    });
+    const committedHook = await renderTabsHook(committedClient.client, {
+      sessionId: SESSION_ID,
+      events: [],
+    });
+    await flush();
+    expect(committedHook.result.current.defaultTab).toBe(WORKBENCH_TAB_CHANGES);
+    await committedHook.unmount();
+  });
+
   test("changes present → default Changes; empty → default Files", async () => {
     const withChanges = coldClient({
       getWorkspaceCapture: async () => captureAvailable(fakeManifest(2)),

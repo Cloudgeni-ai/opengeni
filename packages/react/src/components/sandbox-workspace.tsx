@@ -134,7 +134,19 @@ export function initialWorkspaceTab(
     bestSeq = event.sequence;
     bestFileCount = typeof stats?.fileCount === "number" ? stats.fileCount : 0;
   }
-  return bestFileCount > 0 ? WORKBENCH_TAB_CHANGES : WORKBENCH_TAB_FILES;
+  if (bestFileCount > 0) return WORKBENCH_TAB_CHANGES;
+
+  let latestGitSeq = -1;
+  let committedOnly = false;
+  for (const event of events ?? []) {
+    if (event.type !== "git.changed" || event.sequence > bestSeq) continue;
+    if (event.sequence <= latestGitSeq) continue;
+    const payload = event.payload as { ahead?: number; reason?: string } | null;
+    latestGitSeq = event.sequence;
+    committedOnly =
+      (typeof payload?.ahead === "number" && payload.ahead > 0) || payload?.reason === "commit";
+  }
+  return committedOnly ? WORKBENCH_TAB_CHANGES : WORKBENCH_TAB_FILES;
 }
 
 /**
@@ -543,7 +555,11 @@ export function useSandboxWorkspaceTabs(
   }
   const captureIsAuthoritative =
     !liveWorkspaceExpected && (liveness !== undefined || caps.error !== null);
-  const captureUnavailable = captureState.fileCount === 0 || captureState.error !== null;
+  const captureHasChanges =
+    (captureState.fileCount ?? 0) > 0 ||
+    (captureState.capture?.repos.some((repo) => (repo.branchDiff?.length ?? 0) > 0) ?? false);
+  const captureUnavailable =
+    (captureState.fileCount === 0 && !captureHasChanges) || captureState.error !== null;
   const implicitBranchFallbackPending =
     changesComparison === "branch" &&
     git.error !== null &&
@@ -563,7 +579,7 @@ export function useSandboxWorkspaceTabs(
       captureState.available
     ) {
       defaultTabRef.current.value = sourceDrivenDefaultTab(
-        captureState.fileCount > 0,
+        captureHasChanges,
         changesEnabled,
         filesEnabled,
       );
@@ -586,7 +602,7 @@ export function useSandboxWorkspaceTabs(
       // A warm live read failed but the durable capture is intact: retain an
       // immediate, deterministic review surface instead of hanging unresolved.
       defaultTabRef.current.value = sourceDrivenDefaultTab(
-        captureState.fileCount > 0,
+        captureHasChanges,
         changesEnabled,
         filesEnabled,
       );
