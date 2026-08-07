@@ -1,5 +1,12 @@
 # @opengeni/github
 
+## 0.4.40
+
+### Patch Changes
+
+- Updated dependencies [dec7ada]
+  - @opengeni/config@0.12.3
+
 ## 0.4.39
 
 ### Patch Changes
