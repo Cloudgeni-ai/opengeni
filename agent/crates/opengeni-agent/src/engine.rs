@@ -39,7 +39,7 @@ use opengeni_agent_engine::registry::{
 use opengeni_agent_engine::retention::RetentionConfig;
 use opengeni_agent_engine::{Frame, HostCapacity, OpId};
 use opengeni_agent_platform::ContainedExec;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Notify};
 use tracing::{info, warn};
 
 use crate::job::{run_job, JobCommand, JobConfig, JobEnd, JobExit, JobHooks, JobParams};
@@ -714,7 +714,7 @@ impl Engine {
 
     /// Detaches only jobs owned by one deployment/workspace link. Other links
     /// continue streaming uninterrupted when this transport reconnects.
-    pub fn detach_scope(&self, scope: &str) {
+    pub async fn detach_scope(&self, scope: &str) {
         let prefix = format!("{scope}:");
         let routes: Vec<mpsc::Sender<JobCommand>> = self
             .routes
@@ -724,8 +724,27 @@ impl Engine {
             .filter(|(op_id, _)| op_id.as_str().starts_with(&prefix))
             .map(|(_, sender)| sender.clone())
             .collect();
+        let mut completions = Vec::with_capacity(routes.len());
         for sender in routes {
-            let _ = sender.try_send(JobCommand::Detach);
+            let completed = Arc::new(Notify::new());
+            if sender
+                .send(JobCommand::Detach {
+                    completed: Some(completed.clone()),
+                })
+                .await
+                .is_ok()
+            {
+                completions.push((sender, completed));
+            }
+        }
+        // FIFO mailbox ordering makes each receipt a hard generation fence:
+        // every earlier Ack/Attach has been handled and Detach has disabled
+        // emission before a successor bulk lane may become visible.
+        for (sender, completed) in completions {
+            tokio::select! {
+                () = completed.notified() => {}
+                () = sender.closed() => {}
+            }
         }
     }
 
@@ -916,6 +935,166 @@ mod tests {
         let second = scoped_op_id("deployment-b", "call:0");
         assert_ne!(first, second);
         assert_eq!(first.as_str(), "deployment-a:call:0");
+    }
+
+    #[tokio::test]
+    async fn detach_scope_waits_through_a_full_mailbox_for_the_pump_receipt() {
+        let (engine, _dir) = test_engine(AdmissionConfig::default());
+        let op = scoped_op_id("deployment-a", "slow-pump");
+        let (sender, mut receiver) = mpsc::channel(1);
+        engine
+            .routes
+            .lock()
+            .expect("routes lock")
+            .insert(op, sender.clone());
+
+        // Fill the mailbox so detach_scope must wait for pump capacity before
+        // it can even enqueue the generation fence.
+        sender
+            .send(JobCommand::Ack {
+                generation: 1,
+                acked_seq: 0,
+                credit_bytes: 0,
+                final_ack: false,
+            })
+            .await
+            .expect("prefill mailbox");
+
+        let detach = {
+            let engine = engine.clone();
+            tokio::spawn(async move { engine.detach_scope("deployment-a").await })
+        };
+        tokio::task::yield_now().await;
+        assert!(
+            !detach.is_finished(),
+            "a full pump mailbox must hold the generation fence"
+        );
+
+        assert!(matches!(
+            receiver.recv().await,
+            Some(JobCommand::Ack { .. })
+        ));
+        let completed = match receiver.recv().await {
+            Some(JobCommand::Detach {
+                completed: Some(completed),
+            }) => completed,
+            other => panic!("expected receipt-bearing detach, got {other:?}"),
+        };
+        tokio::task::yield_now().await;
+        assert!(
+            !detach.is_finished(),
+            "enqueue alone is not proof that the pump applied detach"
+        );
+
+        completed.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(1), detach)
+            .await
+            .expect("detach scope completes after the pump receipt")
+            .expect("detach task did not panic");
+    }
+
+    #[tokio::test]
+    async fn detach_scope_accepts_route_closure_as_terminal_proof() {
+        let (engine, _dir) = test_engine(AdmissionConfig::default());
+        let op = scoped_op_id("deployment-a", "dead-pump");
+        let (sender, receiver) = mpsc::channel(1);
+        engine
+            .routes
+            .lock()
+            .expect("routes lock")
+            .insert(op, sender);
+        drop(receiver);
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            engine.detach_scope("deployment-a"),
+        )
+        .await
+        .expect("a dead pump cannot strand generation teardown");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn detached_active_job_cannot_emit_into_a_successor_lane_before_reattach() {
+        let (engine, _dir) = test_engine(AdmissionConfig::default());
+        let op = scoped_op_id("deployment-a", "streaming-op");
+        let ticket = engine
+            .admit(&op, JobClass::Heavy, "o")
+            .await
+            .expect("admit");
+
+        // Mirrors the supervisor's shared bulk-lane cell: each emission reads
+        // whichever generation sender is currently installed.
+        let lane: Arc<RwLock<Option<mpsc::UnboundedSender<Frame>>>> = Arc::new(RwLock::new(None));
+        let (first_tx, mut first_rx) = mpsc::unbounded_channel();
+        *lane.write().expect("lane lock") = Some(first_tx);
+        let emit_lane = lane.clone();
+        let outcome = engine.start_job(
+            &op,
+            ticket,
+            Vec::new(),
+            None,
+            false,
+            || {
+                Ok::<_, std::io::Error>(sh(
+                    "i=0; while [ $i -lt 200 ]; do printf '%08d' $i; i=$((i+1)); sleep 0.005; done",
+                ))
+            },
+            move |frame| {
+                if let Some(sender) = emit_lane.read().expect("lane lock").as_ref() {
+                    let _ = sender.send(frame);
+                }
+            },
+            |_| Vec::new(),
+            |_, _| {},
+        );
+        let StartOutcome::Started(started) = outcome else {
+            panic!("fresh op must start");
+        };
+        started
+            .mailbox
+            .send(JobCommand::Attach {
+                generation: 1,
+                from_seq: 0,
+                window_bytes: 1 << 20,
+            })
+            .await
+            .expect("initial attach");
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), first_rx.recv())
+            .await
+            .expect("first generation emits in time")
+            .expect("first lane remains open");
+
+        engine.detach_scope("deployment-a").await;
+        let (successor_tx, mut successor_rx) = mpsc::unbounded_channel();
+        *lane.write().expect("lane lock") = Some(successor_tx);
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), successor_rx.recv(),)
+                .await
+                .is_err(),
+            "a detached old pump must not emit through the successor lane"
+        );
+
+        started
+            .mailbox
+            .send(JobCommand::Attach {
+                generation: 2,
+                from_seq: first.seq,
+                window_bytes: 1 << 20,
+            })
+            .await
+            .expect("successor attach");
+        let replayed = tokio::time::timeout(std::time::Duration::from_secs(2), successor_rx.recv())
+            .await
+            .expect("reattached generation emits in time")
+            .expect("successor lane remains open");
+        assert!(
+            replayed.seq > first.seq,
+            "successor resumes strictly after the acknowledged floor"
+        );
+
+        engine.cancel(&op);
     }
 
     #[tokio::test]
@@ -1111,13 +1290,13 @@ mod tests {
             })
             .await;
         for _ in 0..200 {
-            if !engine.route_command(&op, JobCommand::Detach) {
+            if !engine.route_command(&op, JobCommand::Detach { completed: None }) {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         assert!(
-            !engine.route_command(&op, JobCommand::Detach),
+            !engine.route_command(&op, JobCommand::Detach { completed: None }),
             "route removed once the pump task ends"
         );
     }
@@ -1279,7 +1458,7 @@ mod tests {
             "ledger share returned at the terminal record"
         );
         assert!(
-            engine.route_command(&op, JobCommand::Detach),
+            engine.route_command(&op, JobCommand::Detach { completed: None }),
             "the pump still lingers (route alive) after the early release"
         );
         // Normal teardown still works.

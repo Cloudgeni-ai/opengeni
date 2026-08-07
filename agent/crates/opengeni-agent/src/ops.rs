@@ -963,13 +963,17 @@ mod tests {
         );
         let op = scoped_op_id("default", "op-replay");
         for _ in 0..500 {
-            if !rig.engine.route_command(&op, JobCommand::Detach) {
+            if !rig
+                .engine
+                .route_command(&op, JobCommand::Detach { completed: None })
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert!(
-            !rig.engine.route_command(&op, JobCommand::Detach),
+            !rig.engine
+                .route_command(&op, JobCommand::Detach { completed: None }),
             "pump ended after the final ack"
         );
         assert!(matches!(
