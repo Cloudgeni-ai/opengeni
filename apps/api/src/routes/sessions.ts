@@ -1563,6 +1563,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const projected = compact ? coalesceSessionEventDeltas(events) : events;
     const page = boundSessionEventHttpPage(projected, {
       direction,
+      eventProjection: mode === "forensic" && payloadMode === "full" ? "exact" : "bounded",
     });
     const hasMore = dbPage.hasMore || page.truncated;
     c.header("X-OpenGeni-Page-Bytes", String(page.bytes));

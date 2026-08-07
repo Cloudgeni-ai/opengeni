@@ -540,6 +540,31 @@ describe("session event transport envelopes", () => {
       "http_projection",
     );
   });
+
+  test("preserves canonical oversized payloads only for explicit exact HTTP pages", () => {
+    const payload = {
+      id: "forensic-call",
+      output: {
+        id: "forensic-call-oversized",
+        output: "界".repeat(Math.ceil((128 * 1024) / 3)),
+      },
+    };
+    const retained = event(90, payload);
+
+    const exact = boundSessionEventHttpPage([retained], {
+      direction: "after",
+      eventProjection: "exact",
+    });
+    expect(exact.events).toEqual([retained]);
+    expect(exact.events[0]?.payload).toEqual(payload);
+    expect(sessionEventPayloadTruncation(exact.events[0]?.payload)).toBeNull();
+
+    const bounded = boundSessionEventHttpPage([retained], { direction: "after" });
+    expect(bounded.events[0]?.payload).not.toEqual(payload);
+    expect(sessionEventPayloadTruncation(bounded.events[0]?.payload)?.surface).toBe(
+      "http_projection",
+    );
+  });
 });
 
 describe("workspace-control transport envelopes", () => {
