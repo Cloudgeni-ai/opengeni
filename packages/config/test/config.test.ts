@@ -181,7 +181,7 @@ describe("Docker workspace materialization", () => {
 
 describe("agent stable release selection", () => {
   test("uses an exact stable version and supports an explicit operator promotion", () => {
-    expect(withEnv({}, () => getSettings()).agentStableVersion).toBe("0.1.13");
+    expect(withEnv({}, () => getSettings()).agentStableVersion).toBe("0.1.14");
     expect(
       withEnv({ OPENGENI_AGENT_STABLE_VERSION: "1.4.2" }, () => getSettings()).agentStableVersion,
     ).toBe("1.4.2");
