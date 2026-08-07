@@ -231,8 +231,10 @@ describe("@opengeni/runtime/sandbox — agent-loop-free leaf (P0.2 guard)", () =
       },
     });
 
-    expect(
-      (entry?.sessionState as { providerState: { manifest: unknown } }).providerState.manifest,
-    ).toBe(providerManifest);
+    expect(entry).not.toBeNull();
+    const sessionState = (entry as Record<string, unknown>).sessionState as {
+      providerState: { manifest: unknown };
+    };
+    expect(sessionState.providerState.manifest).toBe(providerManifest);
   });
 });
