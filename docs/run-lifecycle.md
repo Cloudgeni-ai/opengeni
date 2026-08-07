@@ -733,6 +733,21 @@ explicit checkpoint/resume, not an automatic Temporal retry. A newer control
 revision, terminal state, or successor attempt wins instead of being
 overwritten.
 
+Resource-based turn workers use that exact graceful path as continuous memory
+headroom protection. Temporal's slot tuner closes new admission when its
+configured memory target is already exhausted, but an admitted long-running
+turn can retain native or external memory afterward. The worker therefore
+samples whole-host `MemAvailable` and any finite cgroup memory scope while it is
+running. If one scope stays at or above `OPENGENI_TURN_WORKER_TARGET_MEMORY_USAGE`
+for `OPENGENI_TURN_WORKER_MEMORY_GUARD_SUSTAIN_MS`, the worker stops polling via
+its ordinary lifecycle drain; the sampling cadence is
+`OPENGENI_TURN_WORKER_MEMORY_GUARD_INTERVAL_MS`. This is neither an activity
+timeout nor a hard kill: conversation truth, pending side-effect receipts, and
+outcome-unknown settlement retain the same authority described above, and a
+replacement worker recovers the same logical turn without replaying an
+ambiguous provider operation. Fixed-concurrency and control workers do not run
+the guard.
+
 **Ungraceful worker death is also survivable — bounded, never blind.** A hard
 kill (SIGKILL, OOM, node loss, a rollout whose grace period expired) never
 runs the graceful checkpoint; it surfaces to the session workflow as a

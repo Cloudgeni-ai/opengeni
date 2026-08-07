@@ -26,6 +26,8 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     turnWorkerMaxConcurrentTurns: 16,
     turnWorkerTargetCpuUsage: 0.8,
     turnWorkerTargetMemoryUsage: 0.75,
+    turnWorkerMemoryGuardIntervalMs: 5_000,
+    turnWorkerMemoryGuardSustainMs: 30_000,
     observabilityStructuredLogs: false,
     observabilityMetricsEnabled: true,
     observabilityOtlpEndpoint: undefined,

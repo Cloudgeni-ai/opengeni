@@ -129,7 +129,48 @@ describe("sandbox observability contract", () => {
       .flatMap(({ targets = [] }) => targets.map(({ expr = "" }) => expr))
       .join("\n");
     expect(expressions).toContain("opengeni:sandbox_leases:fresh_max");
+    for (const required of [
+      "opengeni_turn_worker_memory_guard_utilization_ratio",
+      "opengeni_turn_worker_memory_guard_target_ratio",
+      "opengeni_turn_worker_memory_guard_process_rss_ratio",
+      "opengeni:node_memory_psi_stall_ratio",
+      "opengeni:node_io_psi_stall_ratio",
+      "opengeni:node_swap_out_pages_per_second",
+      "kubelet_runtime_operations_errors_total",
+      "kube_node_status_condition",
+      "opengeni:workload_node:present",
+    ]) {
+      expect(expressions, `missing worker fleet signal ${required}`).toContain(required);
+    }
     expect(expressions).not.toMatch(/\bsum\s*(?:by\s*\([^)]*\))?\s*\(\s*opengeni_sandbox_leases\b/);
+  });
+
+  test("memory headroom and hosting-node alerts are part of the canonical safety catalog", async () => {
+    const source = await Bun.file(rulePath).text();
+    for (const required of [
+      "opengeni:workload_node:present",
+      "opengeni:node_exporter_instance:info",
+      "opengeni:node_memory_psi_stall_ratio",
+      "opengeni:node_io_psi_stall_ratio",
+      "opengeni:node_swap_out_pages_per_second",
+      "OpenGeniTurnWorkerMemoryHeadroomLow",
+      "OpenGeniTurnWorkerMemoryConsumesReserve",
+      "OpenGeniTurnWorkerMemoryGuardDraining",
+      "OpenGeniTurnWorkerMemoryGuardFailure",
+      "OpenGeniNodeMemoryPressureStalled",
+      "OpenGeniNodeIoPressureStalled",
+      "OpenGeniNodeSwapThrashing",
+      "OpenGeniNodeContainerRuntimeErrors",
+      "OpenGeniNodeNotReady",
+    ]) {
+      expect(source, `missing canonical rule ${required}`).toContain(required);
+    }
+    expect(source).toContain('pod=~"{{ $fullName }}-.*"');
+    expect(source).toContain("node_pressure_memory_stalled_seconds_total");
+    expect(source).toContain("node_pressure_io_stalled_seconds_total");
+    expect(source).toContain("node_vmstat_pswpout");
+    expect(source).toContain("kubelet_runtime_operations_errors_total");
+    expect(source).toContain('kube_node_status_condition{condition="Ready", status="true"}');
   });
 
   test("recording rules bind every inventory family to its exact refresh domain", async () => {
