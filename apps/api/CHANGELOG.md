@@ -1,5 +1,21 @@
 # @opengeni/api-router
 
+## 0.23.2
+
+### Patch Changes
+
+- ed969a4: Return typed validation errors for malformed session Send and Steer requests.
+- Updated dependencies [7d13f51]
+- Updated dependencies [7ac558e]
+  - @opengeni/config@0.12.2
+  - @opengeni/core@0.21.11
+  - @opengeni/db@0.28.10
+  - @opengeni/documents@0.5.19
+  - @opengeni/github@0.4.39
+  - @opengeni/runtime@0.18.25
+  - @opengeni/storage@0.2.76
+  - @opengeni/events@0.3.89
+
 ## 0.23.1
 
 ### Patch Changes

@@ -1,5 +1,11 @@
 # @opengeni/react
 
+## 0.48.1
+
+### Patch Changes
+
+- 86bd95c: Preserve committed-only workspace captures and load multi-repository Git changes in bounded batches.
+
 ## 0.48.0
 
 ### Minor Changes
