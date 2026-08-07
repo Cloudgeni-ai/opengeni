@@ -162,6 +162,40 @@ impl ShutdownSignal {
     }
 }
 
+/// A level-triggered signal that one NATS client in the current connection
+/// generation lost its transport.
+///
+/// async-nats may reconnect a client internally before a subscription or publish
+/// call surfaces the loss. That is not sufficient for this supervisor: control
+/// and bulk are a single logical generation, so either lane disconnecting must
+/// tear down both lanes and let the outer loop establish a fresh pair. The
+/// latched flag closes the same missed-wakeup race as [`ShutdownSignal`].
+#[derive(Clone, Default)]
+struct TransportLossSignal {
+    lost: Arc<AtomicBool>,
+    notify: Arc<Notify>,
+}
+
+impl TransportLossSignal {
+    fn request(&self) {
+        self.lost.store(true, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+
+    fn is_requested(&self) -> bool {
+        self.lost.load(Ordering::Acquire)
+    }
+
+    async fn notified(&self) {
+        self.notify.notified().await;
+    }
+}
+
+struct ConnectedNats {
+    client: async_nats::Client,
+    transport_lost: TransportLossSignal,
+}
+
 /// Public, immutable definition of one independently authenticated connection.
 /// The platform carries that connection's relay registrar while host-operation
 /// containment is shared underneath (for `NativePlatform`, the cgroup manager is
@@ -502,8 +536,11 @@ impl<P: Platform + 'static> Supervisor<P> {
             () = self.link_stop_notified(link) => return ConnectionOutcome::CleanShutdown,
             result = self.connect(link) => result,
         };
-        let client = match connect {
-            Ok(client) => client,
+        let ConnectedNats {
+            client,
+            transport_lost: control_transport_lost,
+        } = match connect {
+            Ok(connection) => connection,
             Err(e @ SupervisorError::Authentication(_)) => {
                 // A CLEAR auth denial (not a panic): log it loudly so the operator
                 // knows a re-enroll may be needed, then treat it as a (slow) retry —
@@ -547,13 +584,17 @@ impl<P: Platform + 'static> Supervisor<P> {
         // The BULK connection: op frames publish here so a saturated stream
         // can never head-of-line-block control liveness (invariant #4). Its
         // loss is a generation loss (conservative: detach + reconnect).
-        let bulk_client = match self.connect(link).await {
-            Ok(client) => client,
+        let ConnectedNats {
+            client: bulk_client,
+            transport_lost: bulk_transport_lost,
+        } = match self.connect(link).await {
+            Ok(connection) => connection,
             Err(e) => return ConnectionOutcome::Disconnected(format!("bulk dial failed: {e}")),
         };
         let (bulk_tx, mut bulk_rx) =
             tokio::sync::mpsc::channel::<(String, Vec<u8>)>(BULK_CHANNEL_DEPTH);
         let publisher_engine = self.engine.clone();
+        let publisher_transport_lost = bulk_transport_lost.clone();
         let publisher = tokio::spawn(async move {
             while let Some((subject, bytes)) = bulk_rx.recv().await {
                 if let Err(error) = bulk_client.publish(subject, bytes.into()).await {
@@ -562,6 +603,8 @@ impl<P: Platform + 'static> Supervisor<P> {
                     // drop is RECORDED (FAILURE-VISIBILITY healed-fault rule).
                     publisher_engine.note_frame_dropped();
                     warn!(%error, "op frame publish failed (replay heals)");
+                    publisher_transport_lost.request();
+                    break;
                 }
             }
         });
@@ -574,13 +617,25 @@ impl<P: Platform + 'static> Supervisor<P> {
             .set_link_max_payload(&link.connection_id, client.server_info().max_payload);
 
         let outcome = self
-            .serve_connection_generation(link, &client, subscription, ack_subscription)
+            .serve_connection_generation(
+                link,
+                &client,
+                subscription,
+                ack_subscription,
+                control_transport_lost,
+                bulk_transport_lost,
+            )
             .await;
 
         // Tear the bulk lane down with the generation: hooks see None and
         // drop frames until the next generation re-attaches consumers.
         *link.bulk_tx.write().expect("bulk lock") = None;
         publisher.abort();
+        if let Err(error) = publisher.await {
+            if !error.is_cancelled() {
+                warn!(%error, "bulk publisher task failed during generation teardown");
+            }
+        }
         outcome
     }
 
@@ -593,6 +648,8 @@ impl<P: Platform + 'static> Supervisor<P> {
         client: &async_nats::Client,
         mut subscription: async_nats::Subscriber,
         mut ack_subscription: async_nats::Subscriber,
+        control_transport_lost: TransportLossSignal,
+        bulk_transport_lost: TransportLossSignal,
     ) -> ConnectionOutcome {
         let mut heartbeat = tokio::time::interval(DEFAULT_HEARTBEAT);
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -608,12 +665,30 @@ impl<P: Platform + 'static> Supervisor<P> {
             if self.link_stop_requested(link) {
                 break ConnectionOutcome::CleanShutdown;
             }
+            if control_transport_lost.is_requested() {
+                break ConnectionOutcome::Disconnected(
+                    "control transport disconnected".to_string(),
+                );
+            }
+            if bulk_transport_lost.is_requested() {
+                break ConnectionOutcome::Disconnected("bulk transport disconnected".to_string());
+            }
             tokio::select! {
                 biased;
                 // Stop accepting work immediately. Accepted work is cancelled below
                 // before we announce going-offline and return.
                 () = self.link_stop_notified(link) => {
                     break ConnectionOutcome::CleanShutdown;
+                }
+                () = control_transport_lost.notified() => {
+                    break ConnectionOutcome::Disconnected(
+                        "control transport disconnected".to_string(),
+                    );
+                }
+                () = bulk_transport_lost.notified() => {
+                    break ConnectionOutcome::Disconnected(
+                        "bulk transport disconnected".to_string(),
+                    );
                 }
                 // Heartbeat is deliberately ahead of inbound work in this biased
                 // select. A ready subscription can never starve the liveness tick.
@@ -686,7 +761,10 @@ impl<P: Platform + 'static> Supervisor<P> {
 
         // The transport is gone: every live op detaches and keeps running
         // (op ⊥ connection — the server re-attaches per op after reconnect).
-        self.engine.detach_scope(&link.connection_id);
+        // Await every pump's FIFO completion receipt before returning this
+        // generation: a successor bulk lane must not become visible while an
+        // old pump can still emit through the shared sender cell.
+        self.engine.detach_scope(&link.connection_id).await;
         self.engine.clear_link_max_payload(&link.connection_id);
 
         if matches!(&outcome, ConnectionOutcome::CleanShutdown) {
@@ -909,10 +987,7 @@ impl<P: Platform + 'static> Supervisor<P> {
     /// as a connect error → [`SupervisorError::Connect`], which the supervise loop
     /// treats as a transient disconnect and backs off + retries with the SAME
     /// (possibly rotated, on re-enroll) bearer — never a panic.
-    async fn connect(
-        &self,
-        link: &WorkspaceLink<P>,
-    ) -> Result<async_nats::Client, SupervisorError> {
+    async fn connect(&self, link: &WorkspaceLink<P>) -> Result<ConnectedNats, SupervisorError> {
         if link.creds.nats_bearer.is_empty() {
             // No bearer means the control plane never minted one (an enrollment from
             // before the credential plane was configured). Surface a clear, typed
@@ -922,6 +997,8 @@ impl<P: Platform + 'static> Supervisor<P> {
             ));
         }
         let connection_id = link.connection_id.clone();
+        let transport_lost = TransportLossSignal::default();
+        let event_transport_lost = transport_lost.clone();
         let opts = async_nats::ConnectOptions::new()
             .token(link.creds.nats_bearer.clone())
             .name(format!("opengeni-agent/{}", link.creds.agent_id))
@@ -929,10 +1006,12 @@ impl<P: Platform + 'static> Supervisor<P> {
             .max_reconnects(Some(1))
             .event_callback(move |event| {
                 let connection_id = connection_id.clone();
+                let transport_lost = event_transport_lost.clone();
                 async move {
                     match event {
                         async_nats::Event::Disconnected => {
                             warn!(%connection_id, "nats event: disconnected");
+                            transport_lost.request();
                         }
                         async_nats::Event::Connected => {
                             info!(%connection_id, "nats event: connected");
@@ -948,7 +1027,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                 }
             });
 
-        async_nats::connect_with_options(link.creds.nats_urls.clone(), opts)
+        let client = async_nats::connect_with_options(link.creds.nats_urls.clone(), opts)
             .await
             .map_err(|e| {
                 if is_authentication_error(&e) {
@@ -956,7 +1035,11 @@ impl<P: Platform + 'static> Supervisor<P> {
                 } else {
                     SupervisorError::Connect(e.to_string())
                 }
-            })
+            })?;
+        Ok(ConnectedNats {
+            client,
+            transport_lost,
+        })
     }
 
     /// Publishes the connect [`Hello`] on the events subject and folds the
@@ -1466,6 +1549,202 @@ mod tests {
         assert!(signal.is_requested(), "request latches permanently");
     }
 
+    #[tokio::test]
+    async fn transport_loss_signal_latches_and_wakes_registered_waiters() {
+        let signal = TransportLossSignal::default();
+        assert!(!signal.is_requested(), "transport starts healthy");
+
+        let waiter = {
+            let signal = signal.clone();
+            tokio::spawn(async move { signal.notified().await })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        signal.request();
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("a registered transport waiter wakes")
+            .expect("waiter task did not panic");
+
+        assert!(
+            signal.is_requested(),
+            "transport loss remains visible to later loop-top checks"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn connected_nats_latches_transport_loss_after_server_exit() {
+        use opengeni_agent_platform::NativePlatform;
+
+        let Some(nats_bin) = it::find_nats_server() else {
+            eprintln!(
+                "SKIP connected_nats_latches_transport_loss_after_server_exit: no nats-server"
+            );
+            return;
+        };
+        let port = it::free_local_port();
+        let mut server = it::NatsServerGuard::spawn(&nats_bin, port);
+        let url = format!("nats://127.0.0.1:{port}");
+        let credentials = it::test_credentials(&url);
+        let platform = Arc::new(NativePlatform::new());
+        let link = WorkspaceLink::from_definition(SupervisorLink::new(
+            "transport-loss-test",
+            platform.clone(),
+            credentials.clone(),
+        ));
+        let supervisor = Supervisor::new(platform, credentials, "test-0.0.0");
+        let ConnectedNats {
+            client: _client,
+            transport_lost,
+        } = supervisor
+            .connect(&link)
+            .await
+            .expect("connect to local NATS");
+
+        server.stop();
+        if !transport_lost.is_requested() {
+            tokio::time::timeout(Duration::from_secs(5), transport_lost.notified())
+                .await
+                .expect("disconnect event should signal generation loss");
+        }
+        assert!(
+            transport_lost.is_requested(),
+            "a real NATS disconnect must remain latched"
+        );
+    }
+
+    /// A dead bulk lane must end the whole logical connection generation even
+    /// while control subscriptions and heartbeats remain healthy. This is the
+    /// split-generation regression: without the explicit signal branch the
+    /// generation stayed online indefinitely and every op-frame publish failed on
+    /// a closed channel.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bulk_transport_loss_ends_the_connection_generation() {
+        use opengeni_agent_platform::NativePlatform;
+
+        let Some(nats_bin) = it::find_nats_server() else {
+            eprintln!("SKIP bulk_transport_loss_ends_the_connection_generation: no nats-server");
+            return;
+        };
+        let port = it::free_local_port();
+        let _server = it::NatsServerGuard::spawn(&nats_bin, port);
+        let url = format!("nats://127.0.0.1:{port}");
+        let credentials = it::test_credentials(&url);
+        let platform = Arc::new(NativePlatform::new());
+        let link = WorkspaceLink::from_definition(SupervisorLink::new(
+            "bulk-loss-test",
+            platform.clone(),
+            credentials.clone(),
+        ));
+        let supervisor = Supervisor::new(platform, credentials, "test-0.0.0");
+        let ConnectedNats {
+            client: control_client,
+            transport_lost: control_transport_lost,
+        } = supervisor
+            .connect(&link)
+            .await
+            .expect("connect control lane");
+        let ConnectedNats {
+            client: bulk_client,
+            transport_lost: bulk_transport_lost,
+        } = supervisor.connect(&link).await.expect("connect bulk lane");
+        let subscription = control_client
+            .subscribe("agent.hx-test-ws.hx-test-agent.rpc".to_string())
+            .await
+            .expect("subscribe rpc");
+        let ack_subscription = control_client
+            .subscribe("agent.hx-test-ws.hx-test-agent.ack".to_string())
+            .await
+            .expect("subscribe ack");
+
+        let generation = supervisor.serve_connection_generation(
+            &link,
+            &control_client,
+            subscription,
+            ack_subscription,
+            control_transport_lost,
+            bulk_transport_lost,
+        );
+        let sever_bulk = async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            bulk_client
+                .force_reconnect()
+                .await
+                .expect("force only the bulk client to disconnect");
+        };
+        let (outcome, ()) = tokio::join!(generation, sever_bulk);
+
+        assert!(matches!(
+            outcome,
+            ConnectionOutcome::Disconnected(reason) if reason == "bulk transport disconnected"
+        ));
+    }
+
+    /// The symmetric half of the generation fence: a control-only disconnect
+    /// also ends the pair while the independently connected bulk client stays
+    /// alive.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn control_transport_loss_ends_the_connection_generation() {
+        use opengeni_agent_platform::NativePlatform;
+
+        let Some(nats_bin) = it::find_nats_server() else {
+            eprintln!("SKIP control_transport_loss_ends_the_connection_generation: no nats-server");
+            return;
+        };
+        let port = it::free_local_port();
+        let _server = it::NatsServerGuard::spawn(&nats_bin, port);
+        let url = format!("nats://127.0.0.1:{port}");
+        let credentials = it::test_credentials(&url);
+        let platform = Arc::new(NativePlatform::new());
+        let link = WorkspaceLink::from_definition(SupervisorLink::new(
+            "control-loss-test",
+            platform.clone(),
+            credentials.clone(),
+        ));
+        let supervisor = Supervisor::new(platform, credentials, "test-0.0.0");
+        let ConnectedNats {
+            client: control_client,
+            transport_lost: control_transport_lost,
+        } = supervisor
+            .connect(&link)
+            .await
+            .expect("connect control lane");
+        let ConnectedNats {
+            client: _bulk_client,
+            transport_lost: bulk_transport_lost,
+        } = supervisor.connect(&link).await.expect("connect bulk lane");
+        let subscription = control_client
+            .subscribe("agent.hx-test-ws.hx-test-agent.rpc".to_string())
+            .await
+            .expect("subscribe rpc");
+        let ack_subscription = control_client
+            .subscribe("agent.hx-test-ws.hx-test-agent.ack".to_string())
+            .await
+            .expect("subscribe ack");
+
+        let control_to_sever = control_client.clone();
+        let generation = supervisor.serve_connection_generation(
+            &link,
+            &control_client,
+            subscription,
+            ack_subscription,
+            control_transport_lost,
+            bulk_transport_lost,
+        );
+        let sever_control = async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            control_to_sever
+                .force_reconnect()
+                .await
+                .expect("force only the control client to disconnect");
+        };
+        let (outcome, ()) = tokio::join!(generation, sever_control);
+
+        assert!(matches!(
+            outcome,
+            ConnectionOutcome::Disconnected(reason) if reason == "control transport disconnected"
+        ));
+    }
+
     /// End-to-end regression test for the going-offline-on-clean-shutdown bug: a
     /// real supervisor over a real local nats-server must publish a `GoingOffline`
     /// event when a clean shutdown is requested DURING an active connection.
@@ -1846,12 +2125,16 @@ mod tests {
                     .expect("spawn nats-server");
                 Self(child)
             }
+
+            pub fn stop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
         }
 
         impl Drop for NatsServerGuard {
             fn drop(&mut self) {
-                let _ = self.0.kill();
-                let _ = self.0.wait();
+                self.stop();
             }
         }
 

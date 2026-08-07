@@ -97,7 +97,9 @@
      token. Keep the blue dark enough to preserve WCAG AA contrast. */
   --og-color-accent-deep: oklch(0.54 0.18 255);
   --og-color-accent-fg: oklch(0.985 0.005 260);
-  --og-color-accent-soft: color-mix(in oklch, var(--og-color-accent) 16%, transparent);
+  /* Legacy color-mix fallbacks stay in the base rule; supported values are
+     grouped below so processors do not repeat this selector for every token. */
+  --og-color-accent-soft: var(--og-color-accent);
 
   /* Status — muted so they inform without alarming --------------------------- */
   --og-color-status-queued: oklch(0.62 0.03 260);
@@ -107,8 +109,8 @@
   --og-color-status-failed: oklch(0.7 0.16 22);
   --og-color-status-cancelled: oklch(0.6 0.035 260);
   --og-color-danger: oklch(0.66 0.18 22);
-  --og-color-diff-add-bg: color-mix(in oklch, var(--og-color-status-idle) 14%, transparent);
-  --og-color-diff-del-bg: color-mix(in oklch, var(--og-color-status-failed) 14%, transparent);
+  --og-color-diff-add-bg: var(--og-color-status-idle);
+  --og-color-diff-del-bg: var(--og-color-status-failed);
 
   /* Elevation ----------------------------------------------------------------
      Dark surfaces barely cast shadows; elevation reads mostly from the
@@ -121,17 +123,17 @@
      brand edge via `focus-within:border-og-accent/60`; the old `0 0 0 1px`
      ring sat flush against that border and read as a doubled hairline, so the
      glow is now purely the diffuse outer halo. */
-  --og-shadow-glow: 0 0 24px color-mix(in oklch, var(--og-color-accent) 18%, transparent);
+  --og-shadow-glow: 0 0 24px var(--og-color-accent);
 
   /* Session chrome — override on `.og-session-chrome` (or an ancestor) to rebrand.
      Defaults stay quiet: soft surface, short motion, no gold shout. */
-  --og-session-chrome-surface: color-mix(in oklch, var(--og-color-surface-2) 82%, transparent);
-  --og-session-chrome-surface-open: color-mix(in oklch, var(--og-color-surface-2) 92%, transparent);
-  --og-session-chrome-border: color-mix(in oklch, var(--og-color-border) 85%, transparent);
+  --og-session-chrome-surface: var(--og-color-surface-2);
+  --og-session-chrome-surface-open: var(--og-color-surface-2);
+  --og-session-chrome-border: var(--og-color-border);
   --og-session-chrome-border-open: var(--og-color-border);
   /* Selected chip: solid lift vs open dock surface (not a faint wash). */
   --og-session-chrome-highlight: var(--og-color-surface-3);
-  --og-session-chrome-highlight-ring: color-mix(in oklch, var(--og-color-fg) 16%, transparent);
+  --og-session-chrome-highlight-ring: var(--og-color-fg);
   --og-session-chrome-shadow: 0 6px 22px -14px oklch(0 0 0 / 0.42);
   --og-session-chrome-shadow-open: 0 10px 28px -16px oklch(0 0 0 / 0.5);
   --og-session-chrome-radius: var(--og-radius-lg);
@@ -146,9 +148,23 @@
   --og-session-chrome-duration: 220ms;
   --og-session-chrome-crossfade-duration: 180ms;
   --og-session-chrome-ease: var(--og-ease-out);
-  --og-session-chrome-row-hover: color-mix(in oklch, var(--og-color-surface-3) 55%, transparent);
+  --og-session-chrome-row-hover: var(--og-color-surface-3);
 
   color-scheme: dark;
+}
+
+@supports (color: color-mix(in lab, red, red)) {
+  :root {
+    --og-color-accent-soft: color-mix(in oklch, var(--og-color-accent) 16%, transparent);
+    --og-color-diff-add-bg: color-mix(in oklch, var(--og-color-status-idle) 14%, transparent);
+    --og-color-diff-del-bg: color-mix(in oklch, var(--og-color-status-failed) 14%, transparent);
+    --og-shadow-glow: 0 0 24px color-mix(in oklch, var(--og-color-accent) 18%, transparent);
+    --og-session-chrome-surface: color-mix(in oklch, var(--og-color-surface-2) 82%, transparent);
+    --og-session-chrome-surface-open: color-mix(in oklch, var(--og-color-surface-2) 92%, transparent);
+    --og-session-chrome-border: color-mix(in oklch, var(--og-color-border) 85%, transparent);
+    --og-session-chrome-highlight-ring: color-mix(in oklch, var(--og-color-fg) 16%, transparent);
+    --og-session-chrome-row-hover: color-mix(in oklch, var(--og-color-surface-3) 55%, transparent);
+  }
 }
 
 /* One supported dense preset for embedded product panels. It changes only
@@ -199,7 +215,8 @@
   --og-color-accent-strong: oklch(0.48 0.19 255);
   --og-color-accent-deep: oklch(0.44 0.19 255);
   --og-color-accent-fg: oklch(0.985 0.005 260);
-  --og-color-accent-soft: color-mix(in oklch, var(--og-color-accent) 11%, transparent);
+  /* Match the dark-token fallback strategy without duplicating support rules. */
+  --og-color-accent-soft: var(--og-color-accent);
 
   --og-color-status-queued: oklch(0.55 0.03 260);
   /* Status letters are ordinary 11 px text, including over selected rows. */
@@ -211,23 +228,37 @@
   --og-color-status-failed: oklch(0.5 0.19 22);
   --og-color-status-cancelled: oklch(0.55 0.025 260);
   --og-color-danger: oklch(0.55 0.2 22);
-  --og-color-diff-add-bg: color-mix(in oklch, var(--og-color-status-idle) 12%, transparent);
-  --og-color-diff-del-bg: color-mix(in oklch, var(--og-color-status-failed) 12%, transparent);
+  --og-color-diff-add-bg: var(--og-color-status-idle);
+  --og-color-diff-del-bg: var(--og-color-status-failed);
 
   --og-shadow-sm: 0 1px 2px oklch(0.2 0.02 260 / 0.07);
   --og-shadow-md: 0 2px 8px oklch(0.2 0.02 260 / 0.09), 0 1px 2px oklch(0.2 0.02 260 / 0.06);
   --og-shadow-lg: 0 8px 28px oklch(0.2 0.02 260 / 0.13), 0 2px 8px oklch(0.2 0.02 260 / 0.07);
-  --og-shadow-glow: 0 0 20px color-mix(in oklch, var(--og-color-accent) 14%, transparent);
+  --og-shadow-glow: 0 0 20px var(--og-color-accent);
 
-  --og-session-chrome-surface: color-mix(in oklch, var(--og-color-surface-2) 88%, transparent);
+  --og-session-chrome-surface: var(--og-color-surface-2);
   --og-session-chrome-surface-open: var(--og-color-surface-2);
-  --og-session-chrome-border: color-mix(in oklch, var(--og-color-border) 90%, transparent);
+  --og-session-chrome-border: var(--og-color-border);
   --og-session-chrome-border-open: var(--og-color-border);
   --og-session-chrome-highlight: var(--og-color-surface-3);
-  --og-session-chrome-highlight-ring: color-mix(in oklch, var(--og-color-fg) 12%, transparent);
+  --og-session-chrome-highlight-ring: var(--og-color-fg);
   --og-session-chrome-shadow: 0 4px 16px -10px oklch(0.2 0.02 260 / 0.14);
   --og-session-chrome-shadow-open: 0 8px 22px -12px oklch(0.2 0.02 260 / 0.18);
-  --og-session-chrome-row-hover: color-mix(in oklch, var(--og-color-surface-3) 70%, transparent);
+  --og-session-chrome-row-hover: var(--og-color-surface-3);
 
   color-scheme: light;
+}
+
+@supports (color: color-mix(in lab, red, red)) {
+  [data-og-theme="light"],
+  .og-light {
+    --og-color-accent-soft: color-mix(in oklch, var(--og-color-accent) 11%, transparent);
+    --og-color-diff-add-bg: color-mix(in oklch, var(--og-color-status-idle) 12%, transparent);
+    --og-color-diff-del-bg: color-mix(in oklch, var(--og-color-status-failed) 12%, transparent);
+    --og-shadow-glow: 0 0 20px color-mix(in oklch, var(--og-color-accent) 14%, transparent);
+    --og-session-chrome-surface: color-mix(in oklch, var(--og-color-surface-2) 88%, transparent);
+    --og-session-chrome-border: color-mix(in oklch, var(--og-color-border) 90%, transparent);
+    --og-session-chrome-highlight-ring: color-mix(in oklch, var(--og-color-fg) 12%, transparent);
+    --og-session-chrome-row-hover: color-mix(in oklch, var(--og-color-surface-3) 70%, transparent);
+  }
 }
