@@ -588,15 +588,9 @@ describe("workbench browser acceptance", () => {
         fullPage: true,
       });
 
-      await page.getByRole("button", { name: "Machine: Live" }).click();
-      await page
-        .getByText("Production observability and deployment coordination machine — Stockholm 01", {
-          exact: true,
-        })
-        .waitFor();
-      const popoverContent = page.locator('[data-machine-state-popover][data-state="open"]');
-      await popoverContent.waitFor({ state: "visible" });
-      const popoverBounds = await popoverContent.evaluate((element) => {
+      const machineStatus = page.getByRole("status", { name: "Machine: Live" });
+      await machineStatus.waitFor({ state: "visible" });
+      const statusBounds = await machineStatus.evaluate((element) => {
         const rect = element.getBoundingClientRect();
         return {
           left: rect.left,
@@ -605,24 +599,24 @@ describe("workbench browser acceptance", () => {
           viewportWidth: window.innerWidth,
         };
       });
-      if (popoverBounds.left < 8 || popoverBounds.right > popoverBounds.viewportWidth - 8) {
+      if (statusBounds.left < 0 || statusBounds.right > statusBounds.viewportWidth) {
         throw new Error(
-          `Machine popover escaped its 8px viewport inset: ${JSON.stringify(popoverBounds)}`,
+          `Machine status escaped the viewport: ${JSON.stringify(statusBounds)}`,
         );
       }
       expect(
-        await popoverContent.evaluate((element) => {
+        await machineStatus.evaluate((element) => {
           const source = document.querySelector<HTMLElement>('[data-og-theme="light"]');
           const sourceStyle = source ? getComputedStyle(source) : null;
-          const portalStyle = getComputedStyle(element);
+          const statusStyle = getComputedStyle(element);
           const sourceBackground = sourceStyle?.getPropertyValue("--og-color-bg") ?? "";
           const sourceForeground = sourceStyle?.getPropertyValue("--og-color-fg") ?? "";
           return {
-            colorScheme: portalStyle.colorScheme,
+            colorScheme: statusStyle.colorScheme,
             hasTokens: sourceBackground.length > 0 && sourceForeground.length > 0,
             tokensMatch:
-              portalStyle.getPropertyValue("--og-color-bg") === sourceBackground &&
-              portalStyle.getPropertyValue("--og-color-fg") === sourceForeground,
+              statusStyle.getPropertyValue("--og-color-bg") === sourceBackground &&
+              statusStyle.getPropertyValue("--og-color-fg") === sourceForeground,
           };
         }),
       ).toEqual({ colorScheme: "light", hasTokens: true, tokensMatch: true });
@@ -680,7 +674,9 @@ describe("workbench browser acceptance", () => {
       await page.goto(dockUrl(baseUrl, "connecting", "dark", "changes"), {
         waitUntil: "networkidle",
       });
-      const reconnecting = page.getByRole("status");
+      const reconnecting = page
+        .getByRole("tabpanel", { name: "Changes" })
+        .getByRole("status");
       await reconnecting.getByText("Waking workspace", { exact: true }).waitFor();
       expect(await reconnecting.getAttribute("aria-live")).toBe("polite");
 
@@ -694,13 +690,15 @@ describe("workbench browser acceptance", () => {
       await page.goto(dockUrl(baseUrl, "connecting", "dark", "files"), {
         waitUntil: "networkidle",
       });
-      const waking = page.getByRole("status");
+      const waking = page.getByRole("tabpanel", { name: "Files" }).getByRole("status");
       await waking.getByText("Waking workspace", { exact: true }).waitFor();
 
       await page.goto(dockUrl(baseUrl, "empty", "dark", "files"), {
         waitUntil: "networkidle",
       });
-      await page.getByText("Working tree clean", { exact: true }).waitFor();
+      const cleanStatus = page.getByText("No uncommitted changes", { exact: true });
+      await cleanStatus.waitFor({ state: "attached" });
+      expect(await cleanStatus.textContent()).toBe("No uncommitted changes");
 
       await page.goto(dockUrl(baseUrl, "warm-live", "dark", "changes"), {
         waitUntil: "networkidle",

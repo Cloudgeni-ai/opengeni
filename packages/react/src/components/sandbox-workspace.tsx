@@ -986,7 +986,7 @@ function ChangesTabBody({
             aria-pressed={comparison === value}
             onClick={() => onComparisonChange(value)}
             className={cn(
-              "rounded-og-sm px-2 py-1 text-og-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent",
+              "rounded-og-sm px-2 py-1 text-og-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent max-[1023px]:min-h-11 pointer-coarse:min-h-11",
               comparison === value
                 ? "bg-og-surface-2 text-og-fg shadow-sm"
                 : "text-og-fg-muted hover:bg-og-surface-2 hover:text-og-fg",
