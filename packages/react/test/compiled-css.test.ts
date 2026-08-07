@@ -14,6 +14,7 @@ const packageRoot = join(import.meta.dir, "..");
 const compiledPath = join(packageRoot, "styles/compiled.css");
 const compiled = await readFile(compiledPath, "utf8");
 const effectiveTokens = await readFile(join(packageRoot, "styles/effective-tokens.css"), "utf8");
+const tokens = await readFile(join(packageRoot, "styles/tokens.css"), "utf8");
 const sourceBridge = await readFile(join(packageRoot, "styles/index.css"), "utf8");
 const parsed = parse(compiled);
 
@@ -121,6 +122,13 @@ function tokenRegistration(property: string) {
 describe("compiled CSS contract", () => {
   test("ships effective derived tokens through the Tailwind source bridge", () => {
     expect(sourceBridge).toContain('@import "./tokens.css";\n@import "./effective-tokens.css";');
+    expect(effectiveTokens).toContain("--_og-color-accent-soft: var(--og-color-accent-soft);");
+    expect(effectiveTokens).not.toContain("color-mix(");
+    expect(tokens.match(/@supports \(color: color-mix\(in lab, red, red\)\)/gu)).toHaveLength(2);
+    expect(tokens).toContain("--og-color-accent-soft: var(--og-color-accent);");
+    expect(tokens).toContain(
+      "--og-color-accent-soft: color-mix(in oklch, var(--og-color-accent) 16%, transparent);",
+    );
   });
 
   test("is deterministic, directive-free, scoped, and bounded", async () => {
@@ -180,8 +188,12 @@ describe("compiled CSS contract", () => {
       initialValue: "oklch(0.155 0.012 260)",
     });
     expect(tokenRegistration("--og-color-accent-soft")).toBeNull();
-    expect(effectiveTokens).toContain(
-      "--_og-color-accent-soft: var(--og-color-accent-soft, color-mix(in oklch, var(--og-color-accent) 16%, transparent))",
+    expect(effectiveTokens).toContain("--_og-color-accent-soft: var(--og-color-accent-soft);");
+    expect(compiled).toContain(
+      "--_og-color-accent-soft: var(--og-color-accent-soft, var(--og-color-accent));",
+    );
+    expect(compiled).toContain(
+      "--og-color-accent-soft: color-mix(in oklch, var(--og-color-accent) 16%, transparent);",
     );
     expect(compiled).toContain("background-color: var(--_og-color-accent-soft)");
     const effective = parse(effectiveTokens);

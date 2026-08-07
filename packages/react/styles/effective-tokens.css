@@ -4,24 +4,24 @@
 .og-density-compact,
 [data-og-theme="light"],
 .og-light {
-  --_og-duration-fast: var(--og-duration-fast, calc(120ms * var(--og-motion-inspect-scale)));
-  --_og-duration-base: var(--og-duration-base, calc(180ms * var(--og-motion-inspect-scale)));
-  --_og-duration-slow: var(--og-duration-slow, calc(320ms * var(--og-motion-inspect-scale)));
-  --_og-duration-disclose: var(--og-duration-disclose, calc(120ms * var(--og-motion-inspect-scale)));
-  --_og-duration-disclose-settle: var(--og-duration-disclose-settle, calc(820ms * var(--og-motion-inspect-scale)));
-  --_og-duration-stream: var(--og-duration-stream, calc(420ms * var(--og-motion-inspect-scale)));
-  --_og-duration-markdown-crystallize: var(--og-duration-markdown-crystallize, calc(480ms * var(--og-motion-inspect-scale)));
-  --_og-color-accent-soft: var(--og-color-accent-soft, color-mix(in oklch, var(--og-color-accent) 16%, transparent));
-  --_og-color-diff-add-bg: var(--og-color-diff-add-bg, color-mix(in oklch, var(--og-color-status-idle) 14%, transparent));
-  --_og-color-diff-del-bg: var(--og-color-diff-del-bg, color-mix(in oklch, var(--og-color-status-failed) 14%, transparent));
-  --_og-shadow-glow: var(--og-shadow-glow, 0 0 24px color-mix(in oklch, var(--og-color-accent) 18%, transparent));
-  --_og-session-chrome-surface: var(--og-session-chrome-surface, color-mix(in oklch, var(--og-color-surface-2) 82%, transparent));
-  --_og-session-chrome-surface-open: var(--og-session-chrome-surface-open, color-mix(in oklch, var(--og-color-surface-2) 92%, transparent));
-  --_og-session-chrome-border: var(--og-session-chrome-border, color-mix(in oklch, var(--og-color-border) 85%, transparent));
-  --_og-session-chrome-border-open: var(--og-session-chrome-border-open, var(--og-color-border));
-  --_og-session-chrome-highlight: var(--og-session-chrome-highlight, var(--og-color-surface-3));
-  --_og-session-chrome-highlight-ring: var(--og-session-chrome-highlight-ring, color-mix(in oklch, var(--og-color-fg) 16%, transparent));
-  --_og-session-chrome-radius: var(--og-session-chrome-radius, var(--og-radius-lg));
-  --_og-session-chrome-ease: var(--og-session-chrome-ease, var(--og-ease-out));
-  --_og-session-chrome-row-hover: var(--og-session-chrome-row-hover, color-mix(in oklch, var(--og-color-surface-3) 55%, transparent));
+  --_og-duration-fast: var(--og-duration-fast);
+  --_og-duration-base: var(--og-duration-base);
+  --_og-duration-slow: var(--og-duration-slow);
+  --_og-duration-disclose: var(--og-duration-disclose);
+  --_og-duration-disclose-settle: var(--og-duration-disclose-settle);
+  --_og-duration-stream: var(--og-duration-stream);
+  --_og-duration-markdown-crystallize: var(--og-duration-markdown-crystallize);
+  --_og-color-accent-soft: var(--og-color-accent-soft);
+  --_og-color-diff-add-bg: var(--og-color-diff-add-bg);
+  --_og-color-diff-del-bg: var(--og-color-diff-del-bg);
+  --_og-shadow-glow: var(--og-shadow-glow);
+  --_og-session-chrome-surface: var(--og-session-chrome-surface);
+  --_og-session-chrome-surface-open: var(--og-session-chrome-surface-open);
+  --_og-session-chrome-border: var(--og-session-chrome-border);
+  --_og-session-chrome-border-open: var(--og-session-chrome-border-open);
+  --_og-session-chrome-highlight: var(--og-session-chrome-highlight);
+  --_og-session-chrome-highlight-ring: var(--og-session-chrome-highlight-ring);
+  --_og-session-chrome-radius: var(--og-session-chrome-radius);
+  --_og-session-chrome-ease: var(--og-session-chrome-ease);
+  --_og-session-chrome-row-hover: var(--og-session-chrome-row-hover);
 }

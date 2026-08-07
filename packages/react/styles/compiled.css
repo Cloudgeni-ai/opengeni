@@ -4519,6 +4519,19 @@
 :where(.og-root) {
   color-scheme: var(--_og-color-scheme, dark);
 }
+@supports (color: color-mix(in lab, red, red)) {
+  :where(.og-root) {
+    --og-color-accent-soft: color-mix(in oklch, var(--og-color-accent) 16%, transparent);
+    --og-color-diff-add-bg: color-mix(in oklch, var(--og-color-status-idle) 14%, transparent);
+    --og-color-diff-del-bg: color-mix(in oklch, var(--og-color-status-failed) 14%, transparent);
+    --og-shadow-glow: 0 0 24px color-mix(in oklch, var(--og-color-accent) 18%, transparent);
+    --og-session-chrome-surface: color-mix(in oklch, var(--og-color-surface-2) 82%, transparent);
+    --og-session-chrome-surface-open: color-mix(in oklch, var(--og-color-surface-2) 92%, transparent);
+    --og-session-chrome-border: color-mix(in oklch, var(--og-color-border) 85%, transparent);
+    --og-session-chrome-highlight-ring: color-mix(in oklch, var(--og-color-fg) 16%, transparent);
+    --og-session-chrome-row-hover: color-mix(in oklch, var(--og-color-surface-3) 55%, transparent);
+  }
+}
 :where([data-og-density="compact"]):where(.og-root),:where([data-og-density="compact"]):has(:where(.og-root)),:where(.og-root) :where([data-og-density="compact"]),:where( .og-density-compact):where(.og-root),:where( .og-density-compact):has(:where(.og-root)),:where(.og-root) :where( .og-density-compact) {
   --og-font-size-xs: 10px;
   --og-line-height-xs: 1.5;
@@ -4560,9 +4573,6 @@
   --og-color-accent-deep: oklch(0.44 0.19 255);
   --og-color-accent-fg: oklch(0.985 0.005 260);
   --og-color-accent-soft: var(--og-color-accent);
-  @supports (color: color-mix(in lab, red, red)) {
-    --og-color-accent-soft: color-mix(in oklch, var(--og-color-accent) 11%, transparent);
-  }
   --og-color-status-queued: oklch(0.55 0.03 260);
   --og-color-status-running: oklch(0.48 0.13 80);
   --og-color-status-idle: oklch(0.49 0.13 155);
@@ -4571,43 +4581,34 @@
   --og-color-status-cancelled: oklch(0.55 0.025 260);
   --og-color-danger: oklch(0.55 0.2 22);
   --og-color-diff-add-bg: var(--og-color-status-idle);
-  @supports (color: color-mix(in lab, red, red)) {
-    --og-color-diff-add-bg: color-mix(in oklch, var(--og-color-status-idle) 12%, transparent);
-  }
   --og-color-diff-del-bg: var(--og-color-status-failed);
-  @supports (color: color-mix(in lab, red, red)) {
-    --og-color-diff-del-bg: color-mix(in oklch, var(--og-color-status-failed) 12%, transparent);
-  }
   --og-shadow-sm: 0 1px 2px oklch(0.2 0.02 260 / 0.07);
   --og-shadow-md: 0 2px 8px oklch(0.2 0.02 260 / 0.09), 0 1px 2px oklch(0.2 0.02 260 / 0.06);
   --og-shadow-lg: 0 8px 28px oklch(0.2 0.02 260 / 0.13), 0 2px 8px oklch(0.2 0.02 260 / 0.07);
   --og-shadow-glow: 0 0 20px var(--og-color-accent);
-  @supports (color: color-mix(in lab, red, red)) {
-    --og-shadow-glow: 0 0 20px color-mix(in oklch, var(--og-color-accent) 14%, transparent);
-  }
   --og-session-chrome-surface: var(--og-color-surface-2);
-  @supports (color: color-mix(in lab, red, red)) {
-    --og-session-chrome-surface: color-mix(in oklch, var(--og-color-surface-2) 88%, transparent);
-  }
   --og-session-chrome-surface-open: var(--og-color-surface-2);
   --og-session-chrome-border: var(--og-color-border);
-  @supports (color: color-mix(in lab, red, red)) {
-    --og-session-chrome-border: color-mix(in oklch, var(--og-color-border) 90%, transparent);
-  }
   --og-session-chrome-border-open: var(--og-color-border);
   --og-session-chrome-highlight: var(--og-color-surface-3);
   --og-session-chrome-highlight-ring: var(--og-color-fg);
-  @supports (color: color-mix(in lab, red, red)) {
-    --og-session-chrome-highlight-ring: color-mix(in oklch, var(--og-color-fg) 12%, transparent);
-  }
   --og-session-chrome-shadow: 0 4px 16px -10px oklch(0.2 0.02 260 / 0.14);
   --og-session-chrome-shadow-open: 0 8px 22px -12px oklch(0.2 0.02 260 / 0.18);
   --og-session-chrome-row-hover: var(--og-color-surface-3);
-  @supports (color: color-mix(in lab, red, red)) {
-    --og-session-chrome-row-hover: color-mix(in oklch, var(--og-color-surface-3) 70%, transparent);
-  }
   color-scheme: light;
   --_og-color-scheme: light;
+}
+@supports (color: color-mix(in lab, red, red)) {
+  :where([data-og-theme="light"]):where(.og-root),:where([data-og-theme="light"]):has(:where(.og-root)),:where(.og-root) :where([data-og-theme="light"]),:where( .og-light):where(.og-root),:where( .og-light):has(:where(.og-root)),:where(.og-root) :where( .og-light) {
+    --og-color-accent-soft: color-mix(in oklch, var(--og-color-accent) 11%, transparent);
+    --og-color-diff-add-bg: color-mix(in oklch, var(--og-color-status-idle) 12%, transparent);
+    --og-color-diff-del-bg: color-mix(in oklch, var(--og-color-status-failed) 12%, transparent);
+    --og-shadow-glow: 0 0 20px color-mix(in oklch, var(--og-color-accent) 14%, transparent);
+    --og-session-chrome-surface: color-mix(in oklch, var(--og-color-surface-2) 88%, transparent);
+    --og-session-chrome-border: color-mix(in oklch, var(--og-color-border) 90%, transparent);
+    --og-session-chrome-highlight-ring: color-mix(in oklch, var(--og-color-fg) 12%, transparent);
+    --og-session-chrome-row-hover: color-mix(in oklch, var(--og-color-surface-3) 70%, transparent);
+  }
 }
 :where(.og-root),:where( [data-og-density="compact"]):where(.og-root),:where( [data-og-density="compact"]):has(:where(.og-root)),:where(.og-root) :where( [data-og-density="compact"]),:where( .og-density-compact):where(.og-root),:where( .og-density-compact):has(:where(.og-root)),:where(.og-root) :where( .og-density-compact),:where( [data-og-theme="light"]):where(.og-root),:where( [data-og-theme="light"]):has(:where(.og-root)),:where(.og-root) :where( [data-og-theme="light"]),:where( .og-light):where(.og-root),:where( .og-light):has(:where(.og-root)),:where(.og-root) :where( .og-light) {
   --_og-duration-fast: var(--og-duration-fast, calc(120ms * var(--og-motion-inspect-scale)));
@@ -4618,45 +4619,18 @@
   --_og-duration-stream: var(--og-duration-stream, calc(420ms * var(--og-motion-inspect-scale)));
   --_og-duration-markdown-crystallize: var(--og-duration-markdown-crystallize, calc(480ms * var(--og-motion-inspect-scale)));
   --_og-color-accent-soft: var(--og-color-accent-soft, var(--og-color-accent));
-  @supports (color: color-mix(in lab, red, red)) {
-    --_og-color-accent-soft: var(--og-color-accent-soft, color-mix(in oklch, var(--og-color-accent) 16%, transparent));
-  }
   --_og-color-diff-add-bg: var(--og-color-diff-add-bg, var(--og-color-status-idle));
-  @supports (color: color-mix(in lab, red, red)) {
-    --_og-color-diff-add-bg: var(--og-color-diff-add-bg, color-mix(in oklch, var(--og-color-status-idle) 14%, transparent));
-  }
   --_og-color-diff-del-bg: var(--og-color-diff-del-bg, var(--og-color-status-failed));
-  @supports (color: color-mix(in lab, red, red)) {
-    --_og-color-diff-del-bg: var(--og-color-diff-del-bg, color-mix(in oklch, var(--og-color-status-failed) 14%, transparent));
-  }
   --_og-shadow-glow: var(--og-shadow-glow, 0 0 24px var(--og-color-accent));
-  @supports (color: color-mix(in lab, red, red)) {
-    --_og-shadow-glow: var(--og-shadow-glow, 0 0 24px color-mix(in oklch, var(--og-color-accent) 18%, transparent));
-  }
   --_og-session-chrome-surface: var(--og-session-chrome-surface, var(--og-color-surface-2));
-  @supports (color: color-mix(in lab, red, red)) {
-    --_og-session-chrome-surface: var(--og-session-chrome-surface, color-mix(in oklch, var(--og-color-surface-2) 82%, transparent));
-  }
   --_og-session-chrome-surface-open: var(--og-session-chrome-surface-open, var(--og-color-surface-2));
-  @supports (color: color-mix(in lab, red, red)) {
-    --_og-session-chrome-surface-open: var(--og-session-chrome-surface-open, color-mix(in oklch, var(--og-color-surface-2) 92%, transparent));
-  }
   --_og-session-chrome-border: var(--og-session-chrome-border, var(--og-color-border));
-  @supports (color: color-mix(in lab, red, red)) {
-    --_og-session-chrome-border: var(--og-session-chrome-border, color-mix(in oklch, var(--og-color-border) 85%, transparent));
-  }
   --_og-session-chrome-border-open: var(--og-session-chrome-border-open, var(--og-color-border));
   --_og-session-chrome-highlight: var(--og-session-chrome-highlight, var(--og-color-surface-3));
   --_og-session-chrome-highlight-ring: var(--og-session-chrome-highlight-ring, var(--og-color-fg));
-  @supports (color: color-mix(in lab, red, red)) {
-    --_og-session-chrome-highlight-ring: var(--og-session-chrome-highlight-ring, color-mix(in oklch, var(--og-color-fg) 16%, transparent));
-  }
   --_og-session-chrome-radius: var(--og-session-chrome-radius, var(--og-radius-lg));
   --_og-session-chrome-ease: var(--og-session-chrome-ease, var(--og-ease-out));
   --_og-session-chrome-row-hover: var(--og-session-chrome-row-hover, var(--og-color-surface-3));
-  @supports (color: color-mix(in lab, red, red)) {
-    --_og-session-chrome-row-hover: var(--og-session-chrome-row-hover, color-mix(in oklch, var(--og-color-surface-3) 55%, transparent));
-  }
 }
 @keyframes og-expand {
   from {
