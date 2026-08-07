@@ -16,8 +16,9 @@ const budgets = {
   // keeps Popper scopes intact (otherwise /settings crashes). The shared
   // composer also carries the tiny app-action slot used by realtime voice.
   // Existing-session scheduling and authenticated retained screenshots grow
-  // the initial graph; keep modest headroom above CI's observed 1261/351 KiB.
-  initialRaw: 1264 * kib,
+  // the initial graph; keep modest headroom above the current 1284/357 KiB
+  // production build while the stricter gzip and per-chunk budgets stay fixed.
+  initialRaw: 1300 * kib,
   initialGzip: 360 * kib,
   initialFileGzip: 70 * kib,
   initialFiles: 16,

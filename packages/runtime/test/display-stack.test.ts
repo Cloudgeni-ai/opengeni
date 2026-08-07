@@ -714,7 +714,8 @@ describe("P4.1 ensureDisplayStack — command sequence + flock-idempotency (fake
     expect(performance.now() - started).toBeLessThan(500);
   });
 
-  test("(8c) the in-box deadline kills a waiting flock tree before it can launch later", async () => {
+  // oxfmt-ignore
+  test.skipIf(process.platform !== "linux" || Bun.which("flock") === null)("(8c) the in-box deadline kills a waiting flock tree before it can launch later", async () => {
     const root = await mkdtemp(join(tmpdir(), "display-stack-timeout-"));
     const bin = join(root, "bin");
     const lock = join(root, "outer.lock");

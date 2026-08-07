@@ -908,6 +908,16 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await composer.waitFor();
       expect(await desktopPage.getByTestId("session-chrome").count()).toBe(1);
       expect(await desktopPage.getByTestId("session-chrome-agents").count()).toBe(1);
+      const [chromeBounds, composerBounds] = await Promise.all([
+        chrome.boundingBox(),
+        composer.locator("xpath=ancestor::*[@data-og-composer-id][1]").boundingBox(),
+      ]);
+      expect(chromeBounds).not.toBeNull();
+      expect(composerBounds).not.toBeNull();
+      expect(Math.abs((chromeBounds?.x ?? 0) - (composerBounds?.x ?? 0))).toBeLessThanOrEqual(1);
+      expect(
+        Math.abs((chromeBounds?.width ?? 0) - (composerBounds?.width ?? 0)),
+      ).toBeLessThanOrEqual(1);
 
       // Enter appends an ordinary human prompt to the one visible queue. The
       // inert workflow client keeps both rows waiting so the browser can inspect

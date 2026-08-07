@@ -391,7 +391,12 @@ export function useSessionEventTrigger(
         const stream = client.streamEvents(workspaceId, sessionId, {
           after: session.lastSequence,
           signal: controller.signal,
-          beforeLive: async () => await reconcileBeforeLiveRef.current?.(),
+          onOpen: () => {
+            // Start reconciliation without delaying consumption of live SSE.
+            void Promise.resolve()
+              .then(() => reconcileBeforeLiveRef.current?.())
+              .catch(() => undefined);
+          },
         });
         for await (const event of stream) {
           if (matchRef.current(event)) {

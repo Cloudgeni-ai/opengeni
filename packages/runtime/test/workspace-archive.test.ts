@@ -13,6 +13,8 @@ import {
   type WorkspaceTreeFingerprint,
 } from "../src/sandbox/workspace-archive";
 
+const linuxTest = test.skipIf(process.platform !== "linux");
+
 function fingerprintLine(fingerprint: WorkspaceTreeFingerprint): string {
   return [
     "OPENGENI_WORKSPACE_FINGERPRINT_V1",
@@ -160,7 +162,7 @@ describe("verified workspace archives", () => {
     });
   });
 
-  test("an explicit SDK mount fallback retains the real tar verification path", async () => {
+  linuxTest("an explicit SDK mount fallback retains the real tar verification path", async () => {
     const archive = new TextEncoder().encode("verified-mounted-workspace-tar");
     const fake = sessionWithFingerprints([stableTree, stableTree], archive);
     const excludedPath = "mount weird'quote";

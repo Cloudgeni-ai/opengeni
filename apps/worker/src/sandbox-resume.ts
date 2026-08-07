@@ -520,9 +520,23 @@ export async function maybePersistWarmWorkspaceSnapshot(
   }
   const persistable = session as {
     persistWorkspace?: () => Promise<Uint8Array | undefined>;
-    state?: { workspacePersistence?: unknown };
+    state?: {
+      workspacePersistence?: unknown;
+      providerState?: { workspacePersistence?: unknown };
+    };
   };
   if (typeof persistable.persistWorkspace !== "function") {
+    return false;
+  }
+  // Modal filesystem snapshots terminate the source sandbox. They are safe at
+  // controlled drain/rotation (force=true), but a periodic or turn-end warm
+  // checkpoint would kill the box while its lease still points at it. The next
+  // dock read or turn would then route to a dead provider instance. Let the
+  // drain reaper capture this backend instead.
+  const workspacePersistence =
+    persistable.state?.workspacePersistence ??
+    persistable.state?.providerState?.workspacePersistence;
+  if (!force && workspacePersistence === "snapshot_filesystem") {
     return false;
   }
   if (signal?.aborted) {
@@ -543,8 +557,8 @@ export async function maybePersistWarmWorkspaceSnapshot(
     }
     const instanceId = lease.instanceId;
     const nativeModalPersistence =
-      persistable.state?.workspacePersistence === "snapshot_filesystem" ||
-      persistable.state?.workspacePersistence === "snapshot_directory";
+      workspacePersistence === "snapshot_filesystem" ||
+      workspacePersistence === "snapshot_directory";
     const checkpointBinding = nativeModalPersistence
       ? await resolveModalCheckpointBindingBeforeCapture(settings, persistable, signal)
       : null;

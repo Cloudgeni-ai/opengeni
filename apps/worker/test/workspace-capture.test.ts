@@ -242,7 +242,30 @@ describe("workspace-capture — repository read authority", () => {
       "api",
     );
 
+    expect(result).toEqual({ complete: true, status, diff, branchDiff: diff });
+  });
+
+  test("branch comparison failure remains additive to an authoritative working-tree capture", async () => {
+    const diff = { files: [], revision: 4 };
+    const fromRefs: Array<string | undefined> = [];
+    const result = await readCaptureRepository(
+      {
+        gitStatus: async () => status,
+        gitDiff: (_request) => {
+          fromRefs.push(_request.fromRef);
+          if (_request.fromRef === "origin/HEAD") {
+            // A host adapter can throw before returning a promise. This must not
+            // turn a valid working-tree capture into a degraded revision.
+            throw new Error("origin/HEAD is not configured");
+          }
+          return Promise.resolve(diff);
+        },
+      },
+      "api",
+    );
+
     expect(result).toEqual({ complete: true, status, diff });
+    expect(fromRefs).toEqual(["HEAD", "origin/HEAD"]);
   });
 });
 

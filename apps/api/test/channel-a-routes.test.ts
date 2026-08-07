@@ -6,7 +6,7 @@ import { HTTPException } from "hono/http-exception";
 import { ChannelAUnavailableError } from "@opengeni/runtime/sandbox";
 import { mapChannelAError } from "../src/sandbox/channel-a";
 
-// P4.4 route-discipline guards for the 13 Channel-A structured-service routes (a
+// P4.4 route-discipline guards for all Channel-A structured-service routes (a
 // complement to the real-box runtime test + the docker e2e). The invariants the
 // spec mandates for every API-direct route:
 //
@@ -26,6 +26,10 @@ const channelASeam = readFileSync(resolve(here, "..", "src", "sandbox", "channel
 type RouteSpec = { path: string; permission: "files:read" | "files:write" | "terminal:attach" };
 const CHANNEL_A_ROUTES: RouteSpec[] = [
   { path: "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/list", permission: "files:read" },
+  {
+    path: "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/list-batch",
+    permission: "files:read",
+  },
   { path: "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/read", permission: "files:read" },
   { path: "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/write", permission: "files:write" },
   { path: "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/delete", permission: "files:write" },
@@ -33,6 +37,10 @@ const CHANNEL_A_ROUTES: RouteSpec[] = [
   { path: "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/mkdir", permission: "files:write" },
   { path: "/v1/workspaces/:workspaceId/sessions/:sessionId/git/status", permission: "files:read" },
   { path: "/v1/workspaces/:workspaceId/sessions/:sessionId/git/diff", permission: "files:read" },
+  {
+    path: "/v1/workspaces/:workspaceId/sessions/:sessionId/git/read-batch",
+    permission: "files:read",
+  },
   { path: "/v1/workspaces/:workspaceId/sessions/:sessionId/git/log", permission: "files:read" },
   { path: "/v1/workspaces/:workspaceId/sessions/:sessionId/git/show", permission: "files:read" },
   {

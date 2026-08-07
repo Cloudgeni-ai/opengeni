@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { sessionAuthorizationOperationForHttp } from "../src/routes/sessions";
 import type { SessionAuthorizationOperation } from "@opengeni/contracts";
+import { sessionAuthorizationOperationForHttp } from "../src/routes/sessions";
 
 const sessionId = "11111111-1111-4111-8111-111111111111";
 const root = `/v1/workspaces/22222222-2222-4222-8222-222222222222/sessions/${sessionId}`;
@@ -49,6 +49,7 @@ const cases: Array<[string, string, SessionAuthorizationOperation]> = [
   ["DELETE", "/viewers/viewer", "session.viewer.control"],
   ["POST", "/viewers/viewer/revoke", "session.viewer.control"],
   ["POST", "/fs/list", "session.files.read"],
+  ["POST", "/fs/list-batch", "session.files.read"],
   ["POST", "/fs/read", "session.files.read"],
   ["POST", "/fs/write", "session.files.write"],
   ["POST", "/fs/delete", "session.files.write"],
@@ -56,6 +57,7 @@ const cases: Array<[string, string, SessionAuthorizationOperation]> = [
   ["POST", "/fs/mkdir", "session.files.write"],
   ["POST", "/git/status", "session.git.read"],
   ["POST", "/git/diff", "session.git.read"],
+  ["POST", "/git/read-batch", "session.git.read"],
   ["POST", "/git/log", "session.git.read"],
   ["POST", "/git/show", "session.git.read"],
   ["GET", "/workspace/capture", "session.capture.read"],

@@ -56,6 +56,31 @@ function sequences(events: SessionEvent[]): number[] {
 const FAST = { reconnectDelayMs: 1, maxReconnectDelayMs: 2 };
 
 describe("streamSessionEvents", () => {
+  test("a non-blocking open observer cannot delay live event delivery", async () => {
+    let releaseReconciliation = (): void => undefined;
+    const reconciliation = new Promise<void>((resolve) => {
+      releaseReconciliation = resolve;
+    });
+    let reconciled = false;
+    const events = await collect(
+      streamSessionEvents(scriptedTransport([{ events: [makeEvent(1)] }]), {
+        reconnect: false,
+        onOpen: () => {
+          void reconciliation.then(() => {
+            reconciled = true;
+          });
+        },
+      }),
+    );
+
+    expect(sequences(events)).toEqual([1]);
+    expect(reconciled).toBe(false);
+    releaseReconciliation();
+    await reconciliation;
+    await Promise.resolve();
+    expect(reconciled).toBe(true);
+  });
+
   test("awaits authoritative reconciliation before reporting Live", async () => {
     let reconciled = false;
     const states: string[] = [];

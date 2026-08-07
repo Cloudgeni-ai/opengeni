@@ -1100,19 +1100,21 @@ function SessionChatPane(props: {
 
       {/* Compact session chrome above the composer — incoming, queue, goal,
           and agents as one dock. Hides entirely when there are no signals. */}
-      <div className="mx-auto mb-2 w-full max-w-3xl shrink-0 px-4 sm:px-6">
-        <SessionChrome
-          queue={props.queue}
-          composer={terminal ? undefined : composer}
-          goal={props.goal}
-          readOnly={terminal}
-          agentsSignal={agentsSignal}
-          agentsPanel={
-            props.agentNodes.length > 0 ? (
-              <SubagentTree workspaceId={props.session.workspaceId} nodes={props.agentNodes} />
-            ) : null
-          }
-        />
+      <div className="mb-2 w-full shrink-0 px-4 sm:px-6">
+        <div className="mx-auto w-full max-w-3xl">
+          <SessionChrome
+            queue={props.queue}
+            composer={terminal ? undefined : composer}
+            goal={props.goal}
+            readOnly={terminal}
+            agentsSignal={agentsSignal}
+            agentsPanel={
+              props.agentNodes.length > 0 ? (
+                <SubagentTree workspaceId={props.session.workspaceId} nodes={props.agentNodes} />
+              ) : null
+            }
+          />
+        </div>
       </div>
 
       <div className="shrink-0 px-4 pb-4 pt-1 sm:px-6">

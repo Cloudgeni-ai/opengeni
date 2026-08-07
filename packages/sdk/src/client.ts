@@ -163,6 +163,8 @@ import type {
   // Channel-A structured services (P4.4).
   FsListRequest,
   FsListResponse,
+  FsListBatchRequest,
+  FsListBatchResponse,
   FsReadRequest,
   FsReadResponse,
   FsWriteRequest,
@@ -177,6 +179,8 @@ import type {
   GitStatusResponse,
   GitDiffRequest,
   GitDiffResponse,
+  GitReadBatchRequest,
+  GitReadBatchResponse,
   GitLogRequest,
   GitLogResponse,
   GitShowRequest,
@@ -1778,6 +1782,22 @@ export class OpenGeniClient {
     );
   }
 
+  /** FileSystem: hydrate several independent directories behind one sandbox lease. */
+  async fsListBatch(
+    workspaceId: string,
+    sessionId: string,
+    request: FsListBatchRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<FsListBatchResponse> {
+    return await this.requestJson<FsListBatchResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/list-batch`,
+      request,
+      {},
+      options,
+    );
+  }
+
   /** FileSystem: read a file (text or base64; binary-safe, size-capped). */
   async fsRead(
     workspaceId: string,
@@ -1872,6 +1892,22 @@ export class OpenGeniClient {
     return await this.requestJson<GitDiffResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/git/diff`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  /** Git: read status and optional diffs for several repositories behind one sandbox lease. */
+  async gitReadBatch(
+    workspaceId: string,
+    sessionId: string,
+    request: GitReadBatchRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<GitReadBatchResponse> {
+    return await this.requestJson<GitReadBatchResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/git/read-batch`,
       request,
       {},
       options,
@@ -2813,19 +2849,29 @@ export class OpenGeniClient {
   async beginFileUpload(
     workspaceId: string,
     request: CreateFileUploadRequest,
+    options: OpenGeniRequestOptions = {},
   ): Promise<CreateFileUploadResponse> {
     return await this.requestJson<CreateFileUploadResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/files/uploads`,
       request,
+      {},
+      options,
     );
   }
 
   /** Step 3 of the upload flow: server verifies the object and marks it ready. */
-  async completeFileUpload(workspaceId: string, uploadId: string): Promise<FileAsset> {
+  async completeFileUpload(
+    workspaceId: string,
+    uploadId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<FileAsset> {
     const response = await this.requestJson<CompleteFileUploadResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/files/uploads/${uploadId}/complete`,
+      undefined,
+      {},
+      options,
     );
     return response.file;
   }
@@ -2836,6 +2882,30 @@ export class OpenGeniClient {
    * -> complete. Returns the ready `FileAsset`.
    */
   async uploadFile(workspaceId: string, input: UploadFileInput): Promise<FileAsset> {
+    if (
+      input.timeoutMs !== undefined &&
+      (!Number.isFinite(input.timeoutMs) || input.timeoutMs <= 0)
+    ) {
+      throw new Error("File upload timeout must be a positive number");
+    }
+    const withTimeout = async <T>(
+      timeoutMs: number,
+      operation: (signal: AbortSignal) => Promise<T>,
+    ): Promise<T> => {
+      const controller = new AbortController();
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const timedOut = new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => {
+          controller.abort();
+          reject(new Error("File upload timed out. Retry the upload."));
+        }, timeoutMs);
+      });
+      try {
+        return await Promise.race([operation(controller.signal), timedOut]);
+      } finally {
+        if (timeout !== undefined) clearTimeout(timeout);
+      }
+    };
     // Snapshot mutable inputs before hashing so the digest always describes the
     // exact bytes later sent to object storage. Copy Uint8Array views into a
     // Blob so byte offsets/shared buffers can't leak surrounding bytes.
@@ -2852,32 +2922,52 @@ export class OpenGeniClient {
           ? body.size
           : body.byteLength;
     const sha256 = input.sha256 ?? (await sha256ForUpload(body));
-    const upload = await this.beginFileUpload(workspaceId, {
-      filename: input.filename,
-      contentType: input.contentType,
-      sizeBytes,
-      sha256,
-    });
-    const putResponse = await this.fetchImpl(upload.putUrl, {
-      method: "PUT",
-      // Signed object-storage URLs carry their own short-lived authority.
-      // Browser cookies and HTTP auth must never accompany this cross-origin
-      // request: credentialed fetches are incompatible with wildcard CORS and
-      // can leak ambient credentials to a caller-selected storage endpoint.
-      credentials: "omit",
-      // The backend's requiredHeaders already carry the canonical lowercase
-      // `content-type` for every storage backend (Azure/S3/GCS). Do NOT also set
-      // a `Content-Type` key here: WHATWG Headers treats the two casings as the
-      // same header and comma-joins their values (e.g. "text/plain, text/plain"),
-      // which the object store persists verbatim and COMPLETE then rejects (422),
-      // and which breaks S3's presigned-URL signature.
-      headers: { ...upload.requiredHeaders },
-      body,
-    });
+    const upload = await withTimeout(
+      30_000,
+      async (signal) =>
+        await this.beginFileUpload(
+          workspaceId,
+          {
+            filename: input.filename,
+            contentType: input.contentType,
+            sizeBytes,
+            sha256,
+          },
+          { signal },
+        ),
+    );
+    // Give large valid uploads enough time at a conservative 256 KiB/s while
+    // still bounding an object-storage request that never settles.
+    const transferTimeoutMs =
+      input.timeoutMs ?? Math.max(120_000, Math.ceil(sizeBytes / (256 * 1024)) * 1_000);
+    const putResponse = await withTimeout(
+      transferTimeoutMs,
+      async (signal) =>
+        await this.fetchImpl(upload.putUrl, {
+          method: "PUT",
+          // Signed object-storage URLs carry their own short-lived authority.
+          // Browser cookies and HTTP auth must never accompany this cross-origin
+          // request: credentialed fetches are incompatible with wildcard CORS and
+          // can leak ambient credentials to a caller-selected storage endpoint.
+          credentials: "omit",
+          // The backend's requiredHeaders already carry the canonical lowercase
+          // `content-type` for every storage backend (Azure/S3/GCS). Do NOT also set
+          // a `Content-Type` key here: WHATWG Headers treats the two casings as the
+          // same header and comma-joins their values (e.g. "text/plain, text/plain"),
+          // which the object store persists verbatim and COMPLETE then rejects (422),
+          // and which breaks S3's presigned-URL signature.
+          headers: { ...upload.requiredHeaders },
+          body,
+          signal,
+        }),
+    );
     if (!putResponse.ok) {
       throw await apiErrorFromResponse(putResponse, { method: "PUT" });
     }
-    return await this.completeFileUpload(workspaceId, upload.uploadId);
+    return await withTimeout(
+      30_000,
+      async (signal) => await this.completeFileUpload(workspaceId, upload.uploadId, { signal }),
+    );
   }
 
   async getFile(workspaceId: string, fileId: string): Promise<FileAsset> {

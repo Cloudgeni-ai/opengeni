@@ -4,9 +4,12 @@
 
 ### Patch Changes
 
-- Updated dependencies [b4123d4]
-- Updated dependencies [b4123d4]
-  - @opengeni/config@0.11.6
+- Updated dependencies [f8eb9f9]
+- Updated dependencies [200586a]
+- Updated dependencies [5dfb93d]
+- Updated dependencies [5dfb93d]
+  - @opengeni/config@0.12.0
+  - @opengeni/contracts@0.39.5
 
 ## 0.28.7
 

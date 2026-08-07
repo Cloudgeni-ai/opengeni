@@ -168,6 +168,14 @@ fn resolve_update_bases(explicit: Option<&str>, connections: &[StoredConnection]
     }
     let bases: BTreeSet<_> = connections
         .iter()
+        // A pre-multi-connection credentials file did not persist its control-
+        // plane origin. `load_connections` keeps the caller/default URL only as
+        // a visibly unverified hint so the runtime transport remains usable.
+        // Never turn that hint into update authority: on a private deployment it
+        // is commonly the public default and would query the wrong server. The
+        // public signed channel remains the safe fallback until one explicit
+        // reconnect confirms the deployment origin.
+        .filter(|connection| !connection.legacy_origin)
         .map(|connection| connection.api_url.trim_end_matches('/').to_string())
         .collect();
     if bases.is_empty() {
@@ -267,6 +275,22 @@ mod tests {
         assert_eq!(
             resolve_update_bases(None, &[]),
             vec![DEFAULT_BASE_URL.to_string()]
+        );
+    }
+
+    #[test]
+    fn unverified_legacy_origin_is_never_an_update_source() {
+        let mut legacy = connection("stable");
+        legacy.api_url = "https://possibly-wrong.example".to_string();
+        legacy.legacy_origin = true;
+
+        assert_eq!(
+            resolve_update_bases(None, &[legacy.clone()]),
+            vec![DEFAULT_BASE_URL.to_string()]
+        );
+        assert_eq!(
+            resolve_update_bases(Some("https://operator.example/"), &[legacy]),
+            vec!["https://operator.example".to_string()]
         );
     }
 }

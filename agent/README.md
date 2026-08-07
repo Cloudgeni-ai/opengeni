@@ -98,9 +98,12 @@ An installation upgraded from the old single-connection file keeps that link
 online immediately. Because the old file did not record its deployment URL,
 `connections` labels the migrated origin unverified; running the exact
 deployment's connect command once confirms the origin and replaces only that
-legacy record. Self-update is binary-wide: matching per-connection channels are
-used automatically, while mixed `stable`/`beta` links require an explicit
-`opengeni-agent update --channel …` choice instead of silently picking one.
+legacy record. An unverified URL hint is never used as an update source; the
+signed public channel (or an explicit `update --base-url …`) remains the safe
+fallback until reconnect confirms it. Self-update is binary-wide: matching
+per-connection channels are used automatically, while mixed `stable`/`beta`
+links require an explicit `opengeni-agent update --channel …` choice instead of
+silently picking one.
 
 ## Wire protocol — single source of truth
 

@@ -4,8 +4,10 @@
 
 ### Patch Changes
 
-- b4123d4: Keep derived design tokens available through both the compiled stylesheet and the Tailwind source bridge while sharing compact public fallbacks, so SessionChrome retains its complete default presentation without duplicating color formulas in application bundles.
-- b4123d4: Let one Connected Machine agent retain and serve independent connections to multiple OpenGeni workspaces and deployments, with additive connection UX and connection-scoped runtime isolation.
+- 5dfb93d: Keep derived design tokens available through both the compiled stylesheet and the Tailwind source bridge while sharing compact public fallbacks, so SessionChrome retains its complete default presentation without duplicating color formulas in application bundles.
+- 5dfb93d: Let one Connected Machine agent retain and serve independent connections to multiple OpenGeni workspaces and deployments, with additive connection UX and connection-scoped runtime isolation.
+- Updated dependencies [200586a]
+  - @opengeni/sdk@0.47.1
 
 ## 0.47.0
 
