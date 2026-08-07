@@ -1,5 +1,12 @@
 # @opengeni/react
 
+## 0.47.1
+
+### Patch Changes
+
+- bf68b01: Keep derived design tokens available through both the compiled stylesheet and the Tailwind source bridge so SessionChrome retains its complete default presentation in every supported integration path.
+- f92e953: Let one Connected Machine agent retain and serve independent connections to multiple OpenGeni workspaces and deployments, with additive connection UX and connection-scoped runtime isolation.
+
 ## 0.47.0
 
 ### Minor Changes
