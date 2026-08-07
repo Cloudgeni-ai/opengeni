@@ -1,8 +1,6 @@
-//! The opt-in always-on service manager.
+//! The always-on service manager used by the ordinary post-connect `start` flow.
 //!
-//! FOREGROUND `opengeni-agent run` is the DEFAULT (the machine is online while it
-//! runs). A service is an EXPLICIT OPT-IN (`opengeni-agent service install`) for a
-//! genuinely dedicated machine — a build box, a CI Mac mini. This module is the
+//! `opengeni-agent run` remains the explicit foreground mode. This module is the
 //! cross-platform service mechanism behind one [`ServiceManager`] trait so the
 //! behavior is cargo-unit-tested ONCE, not duplicated in three shell dialects.
 //!
@@ -160,6 +158,11 @@ pub fn render_systemd_unit(spec: &ServiceSpec) -> String {
          Delegate=yes\n\
          ManagedOOMPreference=avoid\n\
          MemoryAccounting=yes\n\
+         # The service aggregate is intentionally unrestricted. Optional machine\n\
+         # policy is applied to command leaves, never to the control supervisor.\n\
+         MemoryHigh=infinity\n\
+         MemoryMax=infinity\n\
+         TasksMax=infinity\n\
          \n\
          [Install]\n\
          WantedBy={wanted_by}\n"
@@ -274,7 +277,7 @@ fn systemd_escape(s: &str) -> String {
 #[must_use]
 pub fn unsupported_backend() -> PlatformError {
     PlatformError::Unsupported(
-        "no supported service manager on this platform (use the foreground `run`)".to_string(),
+        "no supported service manager on this platform; use the foreground `run`".to_string(),
     )
 }
 
@@ -376,10 +379,16 @@ mod tests {
                     "{scope:?} unit [Service] must contain {directive}; got:\n{unit}"
                 );
             }
-            assert!(
-                !service_section.contains("MemoryHigh="),
-                "{scope:?} unit must not throttle the aggregate agent/command cgroup"
-            );
+            for directive in [
+                "MemoryHigh=infinity",
+                "MemoryMax=infinity",
+                "TasksMax=infinity",
+            ] {
+                assert!(
+                    service_section.contains(directive),
+                    "{scope:?} unit must explicitly leave the aggregate unrestricted with {directive}"
+                );
+            }
         }
     }
 

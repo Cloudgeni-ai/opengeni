@@ -207,6 +207,22 @@ else
 fi
 unset OPENGENI_ALLOW_DOWNGRADE
 
+echo "SIM 6: a macOS bundle version transition survives helper command substitution"
+OPENGENI_AGENT_WAS_UPGRADED=0
+mark_upgrade_if_changed "9.0.0" "$NEWER_AGENT"
+if [ "$OPENGENI_AGENT_WAS_UPGRADED" = "1" ]; then
+  ok "the parent shell records a genuine bundle upgrade"
+else
+  bad "the macOS upgrade restart signal was lost"
+fi
+OPENGENI_AGENT_WAS_UPGRADED=0
+mark_upgrade_if_changed "10.0.0" "$NEWER_AGENT"
+if [ "$OPENGENI_AGENT_WAS_UPGRADED" = "0" ]; then
+  ok "a same-version bundle install remains non-disruptive"
+else
+  bad "a same-version install was misclassified as an upgrade"
+fi
+
 echo ""
 echo "SIM RESULT: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

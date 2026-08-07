@@ -107,6 +107,13 @@ mod linux {
             self_unified.ends_with("/supervisor"),
             "supervisor must be fate-isolated in its own leaf, got {self_unified}"
         );
+        let oomd_avoid = xattr::get(service_dir.join("supervisor"), "user.oomd_avoid")
+            .expect("read supervisor oomd preference")
+            .expect("supervisor oomd preference must be present");
+        assert_eq!(
+            oomd_avoid, b"1",
+            "the actual supervisor leaf must be protected from systemd-oomd"
+        );
 
         // Run a real shell exec that IMMEDIATELY forks a descendant. Both publish
         // their PIDs and stay alive so the test catches a child that escaped into
