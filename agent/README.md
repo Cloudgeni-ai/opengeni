@@ -58,7 +58,9 @@ The agent reaches a user's machine via one trusted line and keeps itself current
   systemd user/system unit, macOS LaunchAgent, or Windows Service. Repeated `start`
   repairs the definition without disrupting a running same-version process;
   `start --restart` activates a real binary upgrade once. The generated service
-  preserves the installer's command `PATH`; `service install --print` is the dry run.
+  preserves the installer's command `PATH`; agent commands retain that normal
+  machine environment, while the lifecycle CLI resolves the operating system's
+  real systemd tools ahead of unrelated user shims. `service install --print` is the dry run.
   `opengeni-agent run` remains the explicit foreground mode.
 - **Pipelines** — `.github/workflows/agent-ci.yml` (fmt/clippy/test/build +
   install-smoke across ubuntu/macOS/Windows per PR) and `.github/workflows/agent-release.yml`
