@@ -1,5 +1,11 @@
 # @opengeni/worker-bundle
 
+## 0.16.30
+
+### Patch Changes
+
+- 86bd95c: Preserve committed-only workspace captures and load multi-repository Git changes in bounded batches.
+
 ## 0.16.29
 
 ### Patch Changes
