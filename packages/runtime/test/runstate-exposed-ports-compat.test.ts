@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { RunContext, RunState } from "@openai/agents-core";
+import { Manifest } from "@openai/agents/sandbox";
 import { testSettings } from "@opengeni/testing";
 import {
   buildOpenGeniAgent,
@@ -102,6 +103,7 @@ describe("RunState exposedPorts compatibility", () => {
         configuredExposedPorts: [3000, 6080],
         providerMarker: "kept",
       });
+      expect(sessionState.providerState).not.toHaveProperty("manifest");
     },
   );
 
@@ -134,6 +136,40 @@ describe("RunState exposedPorts compatibility", () => {
       configuredExposedPorts: [3000],
       exposedPorts,
     });
+    expect(sessionState.providerState).not.toHaveProperty("manifest");
+  });
+
+  test("serializes a live SDK Manifest once at the envelope boundary", async () => {
+    const manifest = new Manifest({
+      root: "/workspace",
+      entries: {},
+      environment: { TEST_VALUE: "manifest-ok" },
+    });
+    const envelope = await serializeEstablishedSandboxEnvelope({
+      client: {
+        backendId: "docker",
+        async serializeSessionState() {
+          return {
+            containerId: "container-manifest",
+            manifest,
+          };
+        },
+      },
+      session: {},
+      sessionState: { containerId: "container-manifest" },
+      instanceId: "container-manifest",
+      backendId: "docker",
+    } as never);
+
+    const sessionState = envelope?.sessionState as Record<string, unknown>;
+    expect(sessionState.manifest).toMatchObject({
+      version: 1,
+      root: "/workspace",
+      entries: {},
+      environment: { TEST_VALUE: { value: "manifest-ok" } },
+    });
+    expect(sessionState.manifest).not.toBe(manifest);
+    expect(sessionState.providerState).toEqual({ containerId: "container-manifest" });
   });
 
   test("historical lease-envelope arrays are not rehydrated as SDK exposedPorts", async () => {

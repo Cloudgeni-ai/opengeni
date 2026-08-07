@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { runInNewContext } from "node:vm";
 
 // P0.2 guard: @opengeni/runtime/sandbox is the agent-loop-free leaf. The API
 // imports resume-by-id + file/exec/port helpers from it WITHOUT pulling in the
@@ -177,5 +178,39 @@ describe("@opengeni/runtime/sandbox — agent-loop-free leaf (P0.2 guard)", () =
     });
     expect(entry).not.toBeNull();
     expect((entry as Record<string, unknown>).backendId).toBe("modal");
+
+    const foreignRealmEntry = sandboxStateEntryFromRunState(
+      runInNewContext(`({
+        _sandbox: {
+          currentAgentKey: "root",
+          sessionsByAgent: {
+            root: {
+              backendId: "docker",
+              sessionState: {
+                version: 1,
+                backendId: "docker",
+                manifest: { root: "/workspace" },
+                workspaceReady: true,
+                providerState: {
+                  manifest: { redundant: true },
+                  containerId: "container-1"
+                }
+              }
+            }
+          }
+        }
+      })`),
+    );
+    expect(foreignRealmEntry).toEqual({
+      backendId: "docker",
+      sessionState: {
+        version: 1,
+        backendId: "docker",
+        manifest: { root: "/workspace" },
+        workspaceReady: true,
+        providerState: { containerId: "container-1" },
+      },
+    });
+    expect(Object.getPrototypeOf(foreignRealmEntry)).toBe(Object.prototype);
   });
 });

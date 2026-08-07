@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { runInNewContext } from "node:vm";
 import {
   normalizeProtocolJsonValue,
   UnsupportedProtocolJsonValueError,
@@ -32,6 +33,20 @@ describe("normalizeProtocolJsonValue", () => {
   test("retains references for already-valid protocol JSON", () => {
     const input = { type: "message", content: [{ type: "output_text", text: "done" }] };
     expect(normalizeProtocolJsonValue(input)).toBe(input);
+  });
+
+  test("normalizes plain JSON objects received from another JavaScript realm", () => {
+    const input = runInNewContext('({ providerState: { manifest: { image: "node:22" } } })');
+
+    const normalized = normalizeProtocolJsonValue(input);
+
+    expect(normalized).toEqual({
+      providerState: { manifest: { image: "node:22" } },
+    });
+    expect(normalized).not.toBe(input);
+    expect(Object.getPrototypeOf(normalized)).toBe(Object.prototype);
+    expect(Object.getPrototypeOf(normalized.providerState)).toBe(Object.prototype);
+    expect(Object.getPrototypeOf(normalized.providerState.manifest)).toBe(Object.prototype);
   });
 
   test("rejects undefined array elements with their exact path", () => {

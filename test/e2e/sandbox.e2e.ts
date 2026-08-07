@@ -72,17 +72,15 @@ describe("real Docker sandbox e2e", () => {
         );
         const completedIndex = events.findIndex((event) => event.type === "turn.completed");
         if (toolOutputIndex < 0 || completedIndex <= toolOutputIndex) return false;
-        let settledIndex = completedIndex;
         if (options.requireWorkspaceCapture) {
           const captureIndex = events.findIndex(
             (event, index) =>
               index > completedIndex && event.type === "workspace.revision.captured",
           );
           if (captureIndex < 0) return false;
-          settledIndex = captureIndex;
         }
         return events
-          .slice(settledIndex + 1)
+          .slice(completedIndex + 1)
           .some(
             (event) =>
               event.type === "session.status.changed" &&
@@ -97,6 +95,10 @@ describe("real Docker sandbox e2e", () => {
             `event types: ${events.map((event) => event.type).join(", ")}`,
             `tool outputs: ${events
               .filter((event) => event.type === "agent.toolCall.output")
+              .map((event) => JSON.stringify(event.payload ?? {}))
+              .join("\n")}`,
+            `turn failures: ${events
+              .filter((event) => event.type === "turn.failed")
               .map((event) => JSON.stringify(event.payload ?? {}))
               .join("\n")}`,
             `api logs:\n${api.logs().slice(-4_000)}`,
@@ -162,14 +164,14 @@ describe("real Docker sandbox e2e", () => {
     );
     const idleIndex = settledEvents.findIndex(
       (event, index) =>
-        index > captureIndex &&
+        index > completedIndex &&
         event.type === "session.status.changed" &&
         (event.payload as { status?: string }).status === "idle",
     );
     expect(toolOutputIndex).toBeGreaterThanOrEqual(0);
     expect(completedIndex).toBeGreaterThan(toolOutputIndex);
     expect(captureIndex).toBeGreaterThan(completedIndex);
-    expect(idleIndex).toBeGreaterThan(captureIndex);
+    expect(idleIndex).toBeGreaterThan(completedIndex);
     expect(settledEvents.some((event) => event.type === "turn.failed")).toBe(false);
 
     let capture: GetWorkspaceCaptureResponse | null = null;

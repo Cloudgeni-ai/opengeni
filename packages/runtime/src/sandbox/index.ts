@@ -26,10 +26,12 @@ import {
   type SandboxBackend,
 } from "@opengeni/contracts";
 import type {
+  Manifest,
   SandboxClient,
   SandboxSessionLike,
   SandboxSessionState,
 } from "@openai/agents/sandbox";
+import { serializeManifestRecord } from "@openai/agents-core/sandbox/internal";
 import { PROVIDER_REGISTRY } from "./providers";
 import { SandboxConfigError, SandboxResumeStateUnavailableError } from "./errors";
 import { isProviderSandboxNotFoundError } from "./provider-errors";
@@ -42,6 +44,7 @@ import {
   type WorkspaceArchiveDescriptor,
 } from "./workspace-archive";
 import type { RuntimeMetricsHooks } from "../metrics";
+import { normalizeProtocolJsonValue } from "../protocol-json";
 import { runStateCompatibilityProvider, runStateExposedPortsRecord } from "./run-state-compat";
 
 // Re-export the config-owned environment/port helpers from the leaf so the
@@ -604,7 +607,32 @@ export function sandboxStateEntryFromRunState(state: unknown): Record<string, un
   if (!entry || !entry.sessionState) {
     return null;
   }
-  return entry as Record<string, unknown>;
+  const sessionState = entry.sessionState as Record<string, unknown>;
+  const normalizedEntry = {
+    ...entry,
+    sessionState: {
+      ...sessionState,
+      ...(sessionState.providerState && typeof sessionState.providerState === "object"
+        ? { providerState: providerStateWithoutDuplicateManifest(sessionState.providerState) }
+        : {}),
+    },
+  };
+  return normalizeProtocolJsonValue(normalizedEntry, '$["sandboxSessionEnvelope"]') as Record<
+    string,
+    unknown
+  >;
+}
+
+function providerStateWithoutDuplicateManifest(value: object): Record<string, unknown> {
+  const { manifest: _manifest, ...providerState } = value as Record<string, unknown>;
+  return providerState;
+}
+
+function serializeSdkManifestForEnvelope(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype === Object.prototype || prototype === null) return value;
+  return serializeManifestRecord(value as Manifest);
 }
 
 /**
@@ -1301,16 +1329,17 @@ export async function serializeEstablishedSandboxEnvelope(
     // rehydrates `{ ...providerState, manifest, snapshot?, exposedPorts?,
     // workspaceReady }`. So the FLAT serialized state must be nested under
     // `providerState` (and manifest/ports lifted), or sandboxId is dropped on the
-    // round-trip and resume() throws "requires a persisted sandboxId". We pull
-    // manifest/native endpoint records up but leave them in providerState too
-    // (harmless; the deserialize spreads providerState first, then overlays
-    // manifest/ports). configuredExposedPorts is provider configuration/state,
-    // not the SDK's port-keyed endpoint record, so it must never be lifted.
+    // round-trip and resume() throws "requires a persisted sandboxId". SDK-owned
+    // envelope fields are removed from providerState after lifting; providers can
+    // return live Manifest instances there, and deserialization overlays the
+    // authoritative manifest anyway. configuredExposedPorts is provider
+    // configuration/state, not the SDK's port-keyed endpoint record, so it must
+    // never be lifted.
     const flat = serialized as Record<string, unknown>;
-    const manifest = flat.manifest;
+    const manifest = serializeSdkManifestForEnvelope(flat.manifest);
     const exposedPorts = runStateExposedPortsRecord(flat.exposedPorts);
     const sessionState: Record<string, unknown> = {
-      providerState: flat,
+      providerState: providerStateWithoutDuplicateManifest(flat),
       ...(manifest !== undefined ? { manifest } : {}),
       ...(exposedPorts !== undefined ? { exposedPorts } : {}),
       workspaceReady: true,
