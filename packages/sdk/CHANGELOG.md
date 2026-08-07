@@ -1,5 +1,11 @@
 # @opengeni/sdk
 
+## 0.48.0
+
+### Minor Changes
+
+- fed43cf: Make embedded Files and Changes durable and responsive: capture complete branch comparisons, batch file-frontier and multi-repository Git reads behind one sandbox lease, preserve live stream responsiveness during reconciliation, harden portable sandbox reads, and polish the workbench's file tree, resizable panes, machine/terminal states, and embedded composer geometry.
+
 ## 0.47.1
 
 ### Patch Changes

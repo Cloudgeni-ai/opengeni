@@ -1,5 +1,23 @@
 # @opengeni/worker-bundle
 
+## 0.16.29
+
+### Patch Changes
+
+- fed43cf: Make embedded Files and Changes durable and responsive: capture complete branch comparisons, batch file-frontier and multi-repository Git reads behind one sandbox lease, preserve live stream responsiveness during reconciliation, harden portable sandbox reads, and polish the workbench's file tree, resizable panes, machine/terminal states, and embedded composer geometry.
+- Updated dependencies [fed43cf]
+- Updated dependencies [410835e]
+  - @opengeni/contracts@0.40.0
+  - @opengeni/runtime@0.18.24
+  - @opengeni/storage@0.2.75
+  - @opengeni/config@0.12.1
+  - @opengeni/core@0.21.10
+  - @opengeni/db@0.28.9
+  - @opengeni/documents@0.5.18
+  - @opengeni/events@0.3.88
+  - @opengeni/github@0.4.38
+  - @opengeni/observability@0.5.6
+
 ## 0.16.28
 
 ### Patch Changes
