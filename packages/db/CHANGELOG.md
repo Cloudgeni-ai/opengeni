@@ -1,5 +1,12 @@
 # @opengeni/db
 
+## 0.28.11
+
+### Patch Changes
+
+- Updated dependencies [dec7ada]
+  - @opengeni/config@0.12.3
+
 ## 0.28.10
 
 ### Patch Changes
