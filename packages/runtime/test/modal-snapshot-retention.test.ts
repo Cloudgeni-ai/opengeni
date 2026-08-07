@@ -284,6 +284,66 @@ describe("OpenGeni Modal 0.9 snapshot policy", () => {
     ]);
   });
 
+  test("rotates only the stuck turn exec-start transport", async () => {
+    const originalDetach = mock(() => {});
+    let rejectExec!: (error: Error) => void;
+    let markExecStarted!: () => void;
+    const execStarted = new Promise<void>((resolve) => {
+      markExecStarted = resolve;
+    });
+    const execResult = new Promise<string>((_resolve, reject) => {
+      rejectExec = reject;
+    });
+    const execCommand = mock(async () => {
+      markExecStarted();
+      return await execResult;
+    });
+    const dedicatedDetach = mock(() => {
+      rejectExec(new Error("command-router closed"));
+    });
+    const dedicated = { detach: dedicatedDetach };
+    const replacementDetach = mock(() => {});
+    const replacement = { detach: replacementDetach };
+    let attaches = 0;
+    const fromId = mock(async (_sandboxId: string) => {
+      attaches += 1;
+      return attaches === 1 ? dedicated : replacement;
+    });
+    const session = Object.assign(fakeSession("tar", { detach: originalDetach }), {
+      modal: {
+        version: () => "0.9.0",
+        sandboxes: { fromId },
+      },
+      state: {
+        ...fakeSession("tar").state,
+        sandboxId: "sb-exact",
+      },
+      execCommand,
+    });
+
+    installOpenGeniModalSnapshotPolicy(session);
+    const invocation = session
+      .execCommand({ cmd: "sleep 60 # /tmp/opengeni-turn-shell/exact-token" })
+      .catch((error) => error);
+    await execStarted;
+    const cancelPending = (
+      session as typeof session & {
+        cancelPendingExecCommand(): Promise<void>;
+      }
+    ).cancelPendingExecCommand;
+    const first = cancelPending();
+    const second = cancelPending();
+    await Promise.all([first, second]);
+
+    expect(await invocation).toBeInstanceOf(Error);
+    expect(fromId).toHaveBeenCalledTimes(2);
+    expect(fromId.mock.calls).toEqual([["sb-exact"], ["sb-exact"]]);
+    expect(originalDetach).not.toHaveBeenCalled();
+    expect(dedicatedDetach).toHaveBeenCalledTimes(1);
+    expect(session.sandbox).toBe(replacement);
+    expect(replacementDetach).not.toHaveBeenCalled();
+  });
+
   test("falls back to the exact lost-session result after typed completion cleanup fails", async () => {
     let call = 0;
     const writeStdin = mock(async () => {

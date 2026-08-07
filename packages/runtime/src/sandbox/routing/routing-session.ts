@@ -67,6 +67,7 @@ export interface RoutableBackendSession {
   execCommand?(args: unknown): Promise<string>;
   writeStdin?(args: unknown): Promise<string>;
   cancelExecCommand?(opId: string): Promise<boolean>;
+  cancelPendingExecCommand?(): Promise<void>;
   readFile?(args: unknown): Promise<string | Uint8Array>;
   writeFile?(args: unknown): Promise<unknown>;
   createEditor?(runAs?: string): unknown;
@@ -1332,6 +1333,15 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     return await this.dispatch("cancelExecCommand", false, async (session) => {
       if (!session.cancelExecCommand) return false;
       return await session.cancelExecCommand(opId);
+    });
+  }
+
+  async cancelPendingExecCommand(): Promise<void> {
+    await this.dispatch("cancelPendingExecCommand", false, async (session) => {
+      // Only Modal needs a command-router rotation. Other providers keep their
+      // ordinary marker helper path and must not be turned into a retry loop.
+      if (!session.cancelPendingExecCommand) return;
+      await session.cancelPendingExecCommand();
     });
   }
 

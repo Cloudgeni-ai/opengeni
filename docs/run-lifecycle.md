@@ -535,6 +535,17 @@ or malformed identity remains fail-closed. An explicit `tty:false` command keeps
 pipe-mode stdin/stdout/stderr and never receives terminal control bytes during
 cancellation; the same marker-bound process-group TERM/KILL proof remains
 authoritative. Omitting `tty` preserves the existing interactive default.
+Modal turn-owned exec starts use isolated command-router handles. If cancellation
+arrives before `TaskExecStart` returns a provider session id, the controller
+closes only that pending handle, reattaches the same sandbox for control, writes
+the invocation's randomized in-box tombstone, and terminates only a marker whose
+PID/PGID command line contains the same token. The wrapper publishes its marker
+before checking the tombstone, so a late accepted start cannot execute user code;
+the fence still waits for both exact process-group absence and the original
+provider promise to settle. Timeout, missing marker, and transport failure remain
+non-proof. The queue/chrome projection renders this period as stopping previous
+work (or current work under Pause), never as a first-step wait or a completed
+direction change.
 
 The direct receipt remains the preferred path. If its three Postgres attempts
 exhaust, `runAgentTurn` does not suppress the failure or infer a receipt from

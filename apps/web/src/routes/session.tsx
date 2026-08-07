@@ -1011,7 +1011,24 @@ function SessionChatPane(props: {
               onJumpToStart={() => void props.onJumpToStart()}
               onJumpToLatest={() => void props.onJumpToLatest()}
               emptyState={
-                props.initialLoading ? (
+                props.queue.stoppingPreviousAttempt ? (
+                  <EmptyState
+                    className="min-h-[24rem]"
+                    icon={
+                      <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
+                    }
+                    title={
+                      props.queue.effectiveControl?.state === "paused"
+                        ? "Stopping current work"
+                        : "Stopping previous work"
+                    }
+                    description={
+                      props.queue.effectiveControl?.state === "paused"
+                        ? "Waiting for the current command to stop safely. Queued work stays saved."
+                        : "Your direction is saved. It starts after the previous command stops safely."
+                    }
+                  />
+                ) : props.initialLoading ? (
                   // History is still fetching — a quiet shimmer, not the
                   // "waiting for the first step" copy (that's for NEW sessions).
                   <div className="grid min-h-[24rem] place-items-center text-sm">

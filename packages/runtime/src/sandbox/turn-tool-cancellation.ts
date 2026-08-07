@@ -71,6 +71,8 @@ type ActiveShellSession = {
 
 type CommandCancellationSession = {
   cancelExecCommand?(opId: string): Promise<boolean>;
+  /** Abort a provider exec-start transport before it returns a session id. */
+  cancelPendingExecCommand?(): Promise<void>;
   supportsPty?(): boolean;
   hasRetainedProcess?(providerSessionId: number): boolean;
   writeStdinForProcessMutation?(args: {
@@ -125,6 +127,19 @@ type ActiveRemoteExec = {
   settledPromise: Promise<void>;
   settle(): void;
   cancel(): Promise<void>;
+};
+
+type PendingShellStart = {
+  markerPath: string;
+  cancellationPath: string;
+  token: string;
+  runContext: Parameters<FunctionToolInvoke>[0];
+  execInvoke: FunctionToolInvoke;
+  cancelProviderStart: (() => Promise<void>) | null;
+  settled: boolean;
+  settledPromise: Promise<void>;
+  settle(): void;
+  cancellation: Promise<void> | null;
 };
 
 /**
@@ -309,6 +324,10 @@ function shellMarkerPath(token: string): string {
   return `${SHELL_MARKER_DIR}/${token}`;
 }
 
+function shellCancellationPath(markerPath: string): string {
+  return `${markerPath}.cancelled`;
+}
+
 function processInspectionCommandLines(): string[] {
   return [
     "__opengeni_process_group_id() {",
@@ -372,7 +391,17 @@ function cancellableGroupLeaderCommand(command: string, markerPath: string): str
 }
 
 export function cancellableShellCommand(command: string, markerPath: string): string {
-  const groupLeaderCommand = cancellableGroupLeaderCommand(command, markerPath);
+  const cancellationPath = shellCancellationPath(markerPath);
+  const groupLeaderCommand = cancellableGroupLeaderCommand(
+    [
+      // Publish identity before checking the exact per-invocation tombstone.
+      // Cancellation before provider yield therefore either blocks user code
+      // here or observes this marker and terminates this same process group.
+      `[ ! -e ${singleQuote(cancellationPath)} ] || exit 130`,
+      command,
+    ].join("\n"),
+    markerPath,
+  );
   return [
     ...processInspectionCommandLines(),
     '__opengeni_outer_pid="$$"',
@@ -384,6 +413,35 @@ export function cancellableShellCommand(command: string, markerPath: string): st
     `  exec "$__opengeni_setsid" /bin/sh -c ${singleQuote(groupLeaderCommand)}`,
     "fi",
     groupLeaderCommand,
+  ].join("\n");
+}
+
+function pendingShellCancellationCommand(state: PendingShellStart): string {
+  const marker = singleQuote(state.markerPath);
+  const cancellation = singleQuote(state.cancellationPath);
+  const markerDir = singleQuote(SHELL_MARKER_DIR);
+  const token = singleQuote(state.token);
+  return [
+    ...processInspectionCommandLines(),
+    "umask 077",
+    `command mkdir -p ${markerDir} || exit 76`,
+    `command : > ${cancellation} || exit 76`,
+    `__opengeni_marker=${marker}`,
+    `__opengeni_token=${token}`,
+    '[ -r "$__opengeni_marker" ] || exit 0',
+    'IFS=" " read -r __opengeni_pid __opengeni_pgid < "$__opengeni_marker" || exit 76',
+    'case "$__opengeni_pid:$__opengeni_pgid" in *[!0-9:]*|*:|:*) exit 76 ;; esac',
+    '[ "$__opengeni_pid" -gt 1 ] && [ "$__opengeni_pgid" -gt 1 ] || exit 76',
+    '__opengeni_args="$(__opengeni_process_args "$__opengeni_pid")" || { command rm -f "$__opengeni_marker"; exit 0; }',
+    'case "$__opengeni_args" in *"$__opengeni_token"*) ;; *) command rm -f "$__opengeni_marker"; exit 0 ;; esac',
+    '__opengeni_live_pgid="$(__opengeni_process_group_id "$__opengeni_pid")" || { command rm -f "$__opengeni_marker"; exit 0; }',
+    '[ "$__opengeni_live_pgid" = "$__opengeni_pgid" ] || { command rm -f "$__opengeni_marker"; exit 0; }',
+    'command kill -TERM "-$__opengeni_pgid" 2>/dev/null || true',
+    'command kill -0 "-$__opengeni_pgid" 2>/dev/null || { command rm -f "$__opengeni_marker"; exit 0; }',
+    'command kill -KILL "-$__opengeni_pgid" 2>/dev/null || true',
+    'command kill -0 "-$__opengeni_pgid" 2>/dev/null && exit 76',
+    'command rm -f "$__opengeni_marker"',
+    "exit 0",
   ].join("\n");
 }
 
@@ -487,6 +545,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   private reason: unknown;
   private readonly inFlight = new Set<Promise<unknown>>();
   private readonly shellSessions = new Map<number, ActiveShellSession>();
+  private readonly pendingShellStarts = new Set<PendingShellStart>();
   private readonly remoteExecs = new Set<ActiveRemoteExec>();
   private rawExecInvoke: FunctionToolInvoke | null = null;
   private rawWriteInvoke: FunctionToolInvoke | null = null;
@@ -633,6 +692,17 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
           : cappedYield(args.yieldTimeMs, TURN_EXEC_YIELD_MS),
         ...(args.maxOutputTokens !== undefined ? { max_output_tokens: args.maxOutputTokens } : {}),
       });
+      const pendingStart = useRemoteOpCancellation
+        ? null
+        : this.registerPendingShellStart({
+            markerPath,
+            token: markerPath.slice(markerPath.lastIndexOf("/") + 1),
+            runContext: lifecycleRunContext,
+            execInvoke: invokeExec,
+            cancelProviderStart: session.cancelPendingExecCommand
+              ? session.cancelPendingExecCommand.bind(session)
+              : null,
+          });
 
       let initialNative: Awaited<ReturnType<FunctionToolInvoke>>;
       try {
@@ -669,6 +739,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
             cancellation: null,
           });
         }
+        pendingStart?.settle();
         throw error;
       } finally {
         remoteExec?.settle();
@@ -693,6 +764,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
 
       const sessionId = parseExecBannerSessionId(initial);
       if (sessionId === null) {
+        pendingStart?.settle();
         if (!structured) return initial;
         if (initialResult.exitCode === null) {
           throw new Error("Sandbox command did not report a terminal exit code");
@@ -708,6 +780,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         } satisfies TurnSandboxCommandResult;
       }
       if (!invokeWrite) {
+        pendingStart?.settle();
         throw new Error("Sandbox lifecycle command yielded without stdin support");
       }
       const token = markerPath.slice(markerPath.lastIndexOf("/") + 1);
@@ -725,6 +798,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         cancellation: null,
       };
       this.shellSessions.set(sessionId, state);
+      pendingStart?.settle();
       const maxOutputTokens = args.maxOutputTokens ?? 20_000;
       const initialOutput = execOutput(initial);
       let output = initialOutput ? appendBoundedOutput("", initialOutput, maxOutputTokens) : "";
@@ -745,6 +819,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         if (typeof next !== "string") {
           throw new Error("Sandbox lifecycle stdin returned an invalid result");
         }
+        if (this.cancelled) throw cancellationError(this.reason);
         const nextOutput = execOutput(next);
         if (nextOutput) {
           output = appendBoundedOutput(output, nextOutput, maxOutputTokens);
@@ -829,6 +904,17 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                   tty: interactive,
                   yield_time_ms: cappedYield(parsed.yield_time_ms, TURN_EXEC_YIELD_MS),
                 });
+            const pendingStart = useRemoteOpCancellation
+              ? null
+              : this.registerPendingShellStart({
+                  markerPath,
+                  token,
+                  runContext,
+                  execInvoke: tool.invoke,
+                  cancelProviderStart: cancellationSession?.cancelPendingExecCommand
+                    ? cancellationSession.cancelPendingExecCommand.bind(cancellationSession)
+                    : null,
+                });
             let output: Awaited<ReturnType<FunctionToolInvoke>>;
             try {
               output = await runWithToolCallCorrelation(
@@ -865,11 +951,15 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                   cancellation: null,
                 });
               }
+              pendingStart?.settle();
               throw error;
             } finally {
               remoteExec?.settle();
             }
-            if (typeof output !== "string") return output;
+            if (typeof output !== "string") {
+              pendingStart?.settle();
+              return output;
+            }
             const sessionId = useRemoteOpCancellation ? null : parseExecBannerSessionId(output);
             if (sessionId !== null) {
               this.shellSessions.set(sessionId, {
@@ -886,6 +976,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                 cancellation: null,
               });
             }
+            pendingStart?.settle();
             return output;
           }),
       };
@@ -1050,9 +1141,11 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       // promise can physically settle; cancellation-before-start is tombstoned
       // by the runner and therefore cannot race into a late process spawn.
       const remoteCancellations = [...this.remoteExecs].map(async (exec) => await exec.cancel());
-      const inFlight = [...this.inFlight];
-      if (inFlight.length > 0 || remoteCancellations.length > 0) {
-        await Promise.allSettled([...inFlight, ...remoteCancellations]);
+      const pendingStartCancellations = [...this.pendingShellStarts].map(
+        async (start) => await this.cancelPendingShellStart(start),
+      );
+      if (remoteCancellations.length > 0 || pendingStartCancellations.length > 0) {
+        await Promise.all([...remoteCancellations, ...pendingStartCancellations]);
       }
 
       const sessions = [...this.shellSessions.values()];
@@ -1060,9 +1153,92 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         await Promise.all(sessions.map(async (session) => await this.cancelShellSession(session)));
       }
 
-      if (this.inFlight.size === 0 && this.shellSessions.size === 0 && this.remoteExecs.size === 0)
+      const inFlight = [...this.inFlight];
+      if (inFlight.length > 0) {
+        await Promise.allSettled(inFlight);
+      }
+
+      if (
+        this.inFlight.size === 0 &&
+        this.shellSessions.size === 0 &&
+        this.pendingShellStarts.size === 0 &&
+        this.remoteExecs.size === 0
+      )
         return;
     }
+  }
+
+  private registerPendingShellStart(input: {
+    markerPath: string;
+    token: string;
+    runContext: Parameters<FunctionToolInvoke>[0];
+    execInvoke: FunctionToolInvoke;
+    cancelProviderStart: (() => Promise<void>) | null;
+  }): PendingShellStart {
+    let resolveSettled!: () => void;
+    const settledPromise = new Promise<void>((resolve) => {
+      resolveSettled = resolve;
+    });
+    const entry: PendingShellStart = {
+      ...input,
+      cancellationPath: shellCancellationPath(input.markerPath),
+      settled: false,
+      settledPromise,
+      settle: () => {
+        if (entry.settled) return;
+        entry.settled = true;
+        resolveSettled();
+        this.pendingShellStarts.delete(entry);
+      },
+      cancellation: null,
+    };
+    this.pendingShellStarts.add(entry);
+    return entry;
+  }
+
+  private cancelPendingShellStart(state: PendingShellStart): Promise<void> {
+    state.cancellation ??= this.cancelPendingShellStartOnce(state).finally(() => {
+      state.cancellation = null;
+    });
+    return state.cancellation;
+  }
+
+  private async cancelPendingShellStartOnce(state: PendingShellStart): Promise<void> {
+    if (state.cancelProviderStart && !state.settled) {
+      // Modal rotates only the command-router transport, preserving the exact
+      // sandbox. That makes the lost TaskExecStart promise reject instead of
+      // retaining the turn forever. A failed rotation is ambiguous and retries.
+      while (!state.settled) {
+        try {
+          await state.cancelProviderStart();
+          break;
+        } catch {
+          await Promise.race([state.settledPromise, delay(SHELL_POLL_MS)]);
+        }
+      }
+    }
+
+    // The transport can be cancelled after Modal accepted the process. Publish
+    // the token-specific in-box tombstone first, then terminate only the PGID
+    // whose command line contains the same token. Exit 0 is exact absence;
+    // every other result retries and keeps quiescence closed.
+    while (true) {
+      try {
+        const output = await state.execInvoke(
+          state.runContext,
+          shellHelperInput(pendingShellCancellationCommand(state)),
+          undefined,
+        );
+        if (typeof output === "string" && parseExecBannerExitCode(output) === 0) break;
+      } catch {
+        // A replacement command-router connection can itself fail transiently.
+      }
+      await delay(SHELL_POLL_MS);
+    }
+
+    // Transport settlement is still mandatory. Process-group absence does not
+    // turn a pending provider promise into completion.
+    await state.settledPromise;
   }
 
   private registerRemoteExec(

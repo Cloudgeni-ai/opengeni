@@ -303,6 +303,48 @@ describe("SessionChrome", () => {
     expect(mounted.container.querySelector('[data-og-session-chrome-signal="queue"]')).toBeNull();
   });
 
+  test("shows accepted Steer as stopping while physical quiescence is pending", async () => {
+    const steeringTurn = fakeTurn({
+      prompt: "Use the corrected digest",
+      metadata: { delivery: "steer" },
+    });
+    mounted = await renderComponent(
+      <SessionChrome
+        queue={queue({ queue: [steeringTurn], stoppingPreviousAttempt: true })}
+        composer={composer()}
+      />,
+    );
+
+    const steeringChip = mounted.container.querySelector<HTMLButtonElement>(
+      '[data-og-session-chrome-signal="steering"]',
+    );
+    expect(steeringChip?.textContent).toContain("Stopping previous work");
+    expect(steeringChip?.textContent).not.toContain("Changing direction");
+
+    await act(async () => steeringChip?.click());
+    const steeringPanel = mounted.container.querySelector(
+      '[data-og-session-chrome-panel="steering"]',
+    );
+    expect(steeringPanel?.textContent).toContain("Direction saved");
+    expect(steeringPanel?.textContent).toContain("previous command to stop safely");
+    expect(steeringPanel?.textContent).not.toContain("agent will continue");
+  });
+
+  test("shows stopping even when no Steer is queued", async () => {
+    mounted = await renderComponent(
+      <SessionChrome queue={queue({ queue: [], stoppingPreviousAttempt: true })} />,
+    );
+
+    const stoppingChip = mounted.container.querySelector<HTMLButtonElement>(
+      '[data-og-session-chrome-signal="steering"]',
+    );
+    expect(stoppingChip?.textContent).toContain("Stopping previous work");
+    await act(async () => stoppingChip?.click());
+    expect(
+      mounted.container.querySelector('[data-og-session-chrome-panel="steering"]')?.textContent,
+    ).toContain("current command to stop safely");
+  });
+
   test("expands queue and reveals hover actions wired to queue APIs", async () => {
     const calls: string[] = [];
     const q = queue({
