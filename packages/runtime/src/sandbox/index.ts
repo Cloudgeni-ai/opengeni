@@ -604,7 +604,38 @@ export function sandboxStateEntryFromRunState(state: unknown): Record<string, un
   if (!entry || !entry.sessionState) {
     return null;
   }
-  return entry as Record<string, unknown>;
+  return sandboxEntryForPersistence(entry as Record<string, unknown>);
+}
+
+/**
+ * The Agents SDK session envelope carries its canonical serialized manifest at
+ * `sessionState.manifest`. Some provider serializers also repeat a hydrated
+ * `Manifest` instance at `sessionState.providerState.manifest`; the SDK restore
+ * path always overlays the canonical outer value, so the duplicate is neither
+ * read nor JSON-protocol-safe. Remove only that known redundant field before the
+ * envelope crosses OpenGeni's durable canonical-JSON boundary.
+ */
+function sandboxEntryForPersistence(entry: Record<string, unknown>): Record<string, unknown> {
+  const sessionState = entry.sessionState;
+  if (!isObjectRecord(sessionState) || !Object.hasOwn(sessionState, "manifest")) {
+    return entry;
+  }
+  const providerState = sessionState.providerState;
+  if (!isObjectRecord(providerState) || !Object.hasOwn(providerState, "manifest")) {
+    return entry;
+  }
+  const { manifest: _redundantManifest, ...canonicalProviderState } = providerState;
+  return {
+    ...entry,
+    sessionState: {
+      ...sessionState,
+      providerState: canonicalProviderState,
+    },
+  };
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 /**

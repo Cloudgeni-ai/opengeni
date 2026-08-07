@@ -178,4 +178,61 @@ describe("@opengeni/runtime/sandbox — agent-loop-free leaf (P0.2 guard)", () =
     expect(entry).not.toBeNull();
     expect((entry as Record<string, unknown>).backendId).toBe("modal");
   });
+
+  test("sandboxStateEntryFromRunState removes only the SDK's redundant hydrated manifest", async () => {
+    const { sandboxStateEntryFromRunState } = await import("../src/sandbox");
+    class HydratedManifest {
+      constructor(readonly root: string) {}
+    }
+    const providerManifest = new HydratedManifest("/workspace");
+    const sourceEntry = {
+      backendId: "docker",
+      currentAgentKey: "root",
+      sessionState: {
+        manifest: { version: 1, root: "/workspace", entries: {} },
+        providerState: {
+          containerId: "container-1",
+          manifest: providerManifest,
+        },
+      },
+    };
+
+    const entry = sandboxStateEntryFromRunState({
+      _sandbox: {
+        currentAgentKey: "root",
+        sessionsByAgent: { root: sourceEntry },
+      },
+    });
+
+    expect(entry).toEqual({
+      backendId: "docker",
+      currentAgentKey: "root",
+      sessionState: {
+        manifest: { version: 1, root: "/workspace", entries: {} },
+        providerState: { containerId: "container-1" },
+      },
+    });
+    expect(sourceEntry.sessionState.providerState.manifest).toBe(providerManifest);
+  });
+
+  test("sandboxStateEntryFromRunState preserves provider manifest without an outer replacement", async () => {
+    const { sandboxStateEntryFromRunState } = await import("../src/sandbox");
+    const providerManifest = { root: "/workspace" };
+    const entry = sandboxStateEntryFromRunState({
+      _sandbox: {
+        currentAgentKey: "root",
+        sessionsByAgent: {
+          root: {
+            backendId: "legacy",
+            currentAgentKey: "root",
+            sessionState: { providerState: { manifest: providerManifest } },
+          },
+        },
+      },
+    });
+
+    expect(
+      (entry?.sessionState as { providerState: { manifest: unknown } }).providerState.manifest,
+    ).toBe(providerManifest);
+  });
 });
