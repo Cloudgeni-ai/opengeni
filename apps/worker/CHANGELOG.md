@@ -1,5 +1,11 @@
 # @opengeni/worker-bundle
 
+## 0.16.34
+
+### Patch Changes
+
+- 1e0a768: Keep each sandbox-reaper activity alive through its durable provider-capture fence and cleanup with elapsed-prelude admission and configuration-derived multi-drain capacity.
+
 ## 0.16.33
 
 ### Patch Changes
