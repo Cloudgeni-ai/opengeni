@@ -16,10 +16,11 @@
 //      recomputes refcounts + enters draining at refcount 0, and RETURNS the
 //      drainable rows (workspace, group, instance, epoch) whose drain grace has
 //      elapsed at refcount 0. DB-only — no provider call inside the sweep.
-//   2. For at most one drainable row per activity: resume/attach the provider
-//      box BY ID (off the lease's resume envelope, via createSandboxClientForBackend +
-//      establishSandboxSessionFromEnvelope), call the provider terminate, then
-//      confirmDrainCold (the CAS draining->cold under the epoch fence).
+//   2. For a configuration-derived bounded batch of drainable rows: resume/attach
+//      the provider box BY ID (off the lease's resume envelope, via
+//      createSandboxClientForBackend + establishSandboxSessionFromEnvelope), call
+//      the provider terminate, then confirmDrainCold (the CAS draining->cold under
+//      the epoch fence).
 //
 // IDEMPOTENT + safe to run concurrently with itself: the drain CAS is guarded on
 // (draining AND refcount=0 AND lease_epoch=expected). If another sweep already
@@ -106,6 +107,7 @@ import {
   type WorkspaceArchiveDescriptor,
 } from "@opengeni/runtime";
 import { sandboxReaperDrainableBatch } from "../sandbox-reaper-contract";
+import { assertSandboxReaperActivityTimeout } from "../sandbox-reaper-timeout";
 import type { ActivityServices } from "./types";
 import { reconcilePendingParentSystemUpdates } from "./parent-wake";
 import {
@@ -296,8 +298,12 @@ export function createSandboxLeaseActivities(
    * repairs the system-update outbox but can never terminate a box.
    */
   async function reapSandboxLeases(): Promise<ReapSandboxLeasesResult> {
+    const activityStartedAtMs = Date.now();
     const service = await services();
     const { db, settings, observability } = service;
+    // Direct activity harnesses and embedded control workers fail closed too;
+    // Schedule ownership is not execution ownership on the shared control queue.
+    assertSandboxReaperActivityTimeout(settings);
     const parentUpdates = await reconcilePendingParentSystemUpdates(service, 100).catch((error) => {
       observability.warn("system-update outbox reconciliation failed", {
         error: error instanceof Error ? error.message : String(error),
@@ -399,22 +405,32 @@ export function createSandboxLeaseActivities(
     // (1) The DB-only cross-workspace sweep returns the drainable rows. Bound the
     // provider-facing batch so the activity timeout covers every admitted durable
     // capture fence instead of abandoning a later row in a large backlog.
+    const drainableCandidates = await reapStaleLeaseHoldersGlobal(db, {
+      viewerHolderTtlMs: settings.sandboxViewerHolderTtlMs,
+      // Dead-worker turn holders: a live holder is touched every 10s from the
+      // moment it is registered (resumeBoxForTurn's holder-liveness loop covers
+      // the whole warmup — waitForWarm/establish/display-stack — and the turn
+      // heartbeat covers the run), so NO live path is ever silent for more than
+      // one tick. The horizon is deliberately generous defense-in-depth (not a
+      // tuned guess about path lengths): a killed worker's frozen holder —
+      // which would otherwise pin refcount >= 1 FOREVER, so the lease never
+      // drains and the box dies at the provider hard-timeout UNPERSISTED —
+      // clears within ~12 minutes.
+      turnHolderTtlMs: settings.sandboxWarmingTimeoutMs + settings.sandboxLeaseTtlMs,
+      idleGraceMs: settings.sandboxIdleGraceMs,
+    });
+    const preludeElapsedMs = Math.max(0, Date.now() - activityStartedAtMs);
     const drainable: ReapDrainable[] = sandboxReaperDrainableBatch(
-      await reapStaleLeaseHoldersGlobal(db, {
-        viewerHolderTtlMs: settings.sandboxViewerHolderTtlMs,
-        // Dead-worker turn holders: a live holder is touched every 10s from the
-        // moment it is registered (resumeBoxForTurn's holder-liveness loop covers
-        // the whole warmup — waitForWarm/establish/display-stack — and the turn
-        // heartbeat covers the run), so NO live path is ever silent for more than
-        // one tick. The horizon is deliberately generous defense-in-depth (not a
-        // tuned guess about path lengths): a killed worker's frozen holder —
-        // which would otherwise pin refcount >= 1 FOREVER, so the lease never
-        // drains and the box dies at the provider hard-timeout UNPERSISTED —
-        // clears within ~12 minutes.
-        turnHolderTtlMs: settings.sandboxWarmingTimeoutMs + settings.sandboxLeaseTtlMs,
-        idleGraceMs: settings.sandboxIdleGraceMs,
-      }),
+      drainableCandidates,
+      sandboxArchiveCaptureTimeoutMs(settings),
+      preludeElapsedMs,
     );
+    if (drainableCandidates.length > 0 && drainable.length === 0) {
+      observability.warn("sandbox reaper: prelude consumed provider-drain time budget", {
+        preludeElapsedMs,
+        drainableCandidates: drainableCandidates.length,
+      });
+    }
 
     let terminated = 0;
     let skipped = 0;

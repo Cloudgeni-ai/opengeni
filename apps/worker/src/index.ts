@@ -72,7 +72,10 @@ import {
   turnWorkerMemoryPressureGuardEnabled,
   type TurnWorkerMemoryPressureGuard,
 } from "./memory-pressure-guard";
-import { assertSandboxReaperActivityTimeout } from "./sandbox-reaper-timeout";
+import {
+  assertSandboxReaperActivityTimeout,
+  assertSandboxReaperWorkerConfiguration,
+} from "./sandbox-reaper-timeout";
 
 export {
   createHostExportPump,
@@ -175,6 +178,10 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
   const observability =
     options.activityDependencies?.observability ??
     createObservability(settings, { component: `worker-${options.role}` });
+  // Every control worker polls the global control queue and can execute the
+  // reaper activity, even when another replica owns Schedule registration.
+  // Validate before any Temporal connection or worker starts polling.
+  assertSandboxReaperWorkerConfiguration(options.role, settings);
   if (options.role === "turn" && options.workflowBundle) {
     throw new Error("workflowBundle is valid only for the control worker role");
   }
