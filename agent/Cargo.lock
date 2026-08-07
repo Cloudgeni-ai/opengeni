@@ -1599,7 +1599,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "opengeni-agent"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "async-nats",
  "async-trait",
@@ -1659,7 +1659,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-macos-ffi"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "block2",
  "dispatch2",
@@ -1675,7 +1675,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-platform"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "async-trait",
  "command-group",
@@ -1695,7 +1695,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-proto"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "prost",
  "prost-build",
@@ -1704,7 +1704,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-stream"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1721,7 +1721,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-update"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "blake3",
  "hex",
@@ -1740,7 +1740,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-relay"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "async-trait",
  "axum",

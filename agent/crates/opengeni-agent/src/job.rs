@@ -57,7 +57,9 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use opengeni_agent_engine::flow::{AckOutcome, AttachOutcome, CreditFlow};
-use opengeni_agent_engine::retention::{RetentionConfig, RetentionError, RetentionLog};
+use opengeni_agent_engine::retention::{
+    GlobalSpoolBudget, RetentionConfig, RetentionError, RetentionLog,
+};
 use opengeni_agent_engine::{Channel, Frame, FrameBody};
 use opengeni_agent_platform::ContainedExec;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
@@ -139,9 +141,10 @@ pub struct JobParams {
     /// Bytes to feed the child's stdin; the handle is closed after writing
     /// (empty ⇒ closed immediately so a stdin-reading child never hangs).
     pub stdin: Vec<u8>,
-    /// Retention bounds for this op (the supervisor already reserved the op's
-    /// share of the global spool budget — ruling M2).
+    /// Retention bounds for this op.
     pub retention: RetentionConfig,
+    /// Machine-wide actual-byte disk-spool ledger (ruling M2).
+    pub spool_budget: Arc<GlobalSpoolBudget>,
     /// The op-private spool directory (created lazily on first spill; removed
     /// when the job task ends).
     pub spool_dir: PathBuf,
@@ -206,7 +209,8 @@ impl JobFailure {
     /// Maps a typed retention failure onto the job-failure form.
     fn from_retention(error: &RetentionError) -> Self {
         match error {
-            RetentionError::Overflow { retained_bytes, .. } => JobFailure::Overflow {
+            RetentionError::Overflow { retained_bytes, .. }
+            | RetentionError::GlobalSpoolExhausted { retained_bytes, .. } => JobFailure::Overflow {
                 retained_bytes: *retained_bytes,
             },
             // SpoolIo — and ReplayBelowFloor, which cannot come out of an
@@ -309,6 +313,7 @@ pub async fn run_job(
         mut child,
         stdin,
         retention,
+        spool_budget,
         spool_dir,
         deadline,
         config,
@@ -321,7 +326,11 @@ pub async fn run_job(
     spawn_stdin_writer(child.stdin.take(), stdin);
 
     let pump = Pump {
-        retention: RetentionLog::new(retention.clone(), spool_dir.clone()),
+        retention: RetentionLog::with_spool_budget(
+            retention.clone(),
+            spool_dir.clone(),
+            spool_budget,
+        ),
         retention_config: retention,
         flow: CreditFlow::new(),
         hooks,
@@ -984,6 +993,7 @@ mod tests {
                 child,
                 stdin: self.stdin,
                 retention: self.retention,
+                spool_budget: Arc::new(GlobalSpoolBudget::unlimited()),
                 spool_dir: dir.path().join("spool"),
                 deadline: self.deadline_after.map(|after| Instant::now() + after),
                 config: self.config,

@@ -18,14 +18,16 @@
 //! payoff). Spool segments are dropped whole once fully acked.
 //!
 //! Nothing here reads clocks or spawns tasks; disk I/O is plain `std::fs`
-//! against a caller-provided directory (the integration layer owns placement
-//! and the global spool budget: it reserves an op's quota before constructing
-//! the log — see PROTOCOL.md ruling M2 "global byte budget").
+//! against a caller-provided directory. The shared [`GlobalSpoolBudget`] is
+//! charged only when bytes actually spill to disk, never from a command's
+//! theoretical maximum (PROTOCOL.md ruling M2 "global byte budget").
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use crate::{Channel, Frame, FrameBody};
 
@@ -77,6 +79,23 @@ pub enum RetentionError {
         /// The configured per-op spool quota.
         spool_max_bytes: u64,
     },
+    /// The machine-wide actual-byte spool budget cannot hold this write.
+    /// Starting an op never causes this: it is returned only at the write
+    /// that would exceed the shared disk safety budget.
+    #[error(
+        "global spool budget exhausted: requested {requested_bytes} bytes with {used_bytes} of \
+         {spool_budget_bytes} already used"
+    )]
+    GlobalSpoolExhausted {
+        /// This op's projected retained record-cost bytes.
+        retained_bytes: u64,
+        /// Additional physical encoded bytes this write needs.
+        requested_bytes: u64,
+        /// Actual encoded bytes held by all spooled ops.
+        used_bytes: u64,
+        /// The current machine-wide spool safety budget.
+        spool_budget_bytes: u64,
+    },
     /// A spool read/write failed (including ENOSPC). Terminal and typed
     /// (invariant #1: a spool I/O error is never a silently dropped frame).
     #[error("spool i/o failure during {during}: {source}")]
@@ -118,6 +137,105 @@ fn record_cost(body: &FrameBody) -> u64 {
         .saturating_add(RECORD_OVERHEAD_BYTES)
 }
 
+/// Physical encoded bytes appended to the disk spool for one frame.
+fn disk_record_cost(body: &FrameBody) -> u64 {
+    u64::try_from(body.payload_len())
+        .unwrap_or(u64::MAX)
+        .saturating_add(RECORD_HEADER_LEN as u64)
+}
+
+/// Machine-wide spool accounting shared by every retention log.
+///
+/// The ledger tracks actual encoded bytes currently held by disk-backed
+/// logs. Merely starting a command costs nothing, so many quiet or normally
+/// acknowledged commands do not crowd one another out. Reservation is atomic:
+/// concurrent spills cannot oversubscribe the configured disk safety budget.
+#[derive(Debug)]
+pub struct GlobalSpoolBudget {
+    max_bytes: AtomicU64,
+    used_bytes: AtomicU64,
+}
+
+impl GlobalSpoolBudget {
+    /// Creates a shared ledger with the given maximum actual spool usage.
+    #[must_use]
+    pub fn new(max_bytes: u64) -> Self {
+        Self {
+            max_bytes: AtomicU64::new(max_bytes),
+            used_bytes: AtomicU64::new(0),
+        }
+    }
+
+    /// A ledger suitable for isolated unit tests and direct library callers.
+    #[must_use]
+    pub fn unlimited() -> Self {
+        Self::new(u64::MAX)
+    }
+
+    /// Updates the ceiling for future writes. Existing retained bytes remain
+    /// valid when a fresh capacity sample lowers the ceiling.
+    pub fn set_max_bytes(&self, max_bytes: u64) {
+        self.max_bytes.store(max_bytes, Ordering::Release);
+    }
+
+    /// Current ceiling in physical encoded bytes.
+    #[must_use]
+    pub fn max_bytes(&self) -> u64 {
+        self.max_bytes.load(Ordering::Acquire)
+    }
+
+    /// Actual encoded bytes currently charged by disk-backed logs.
+    #[must_use]
+    pub fn used_bytes(&self) -> u64 {
+        self.used_bytes.load(Ordering::Acquire)
+    }
+
+    fn try_reserve(&self, bytes: u64) -> Result<(), SpoolBudgetExhausted> {
+        if bytes == 0 {
+            return Ok(());
+        }
+        let mut used = self.used_bytes.load(Ordering::Acquire);
+        loop {
+            let max = self.max_bytes.load(Ordering::Acquire);
+            if bytes > max.saturating_sub(used) {
+                return Err(SpoolBudgetExhausted {
+                    requested: bytes,
+                    used,
+                    max,
+                });
+            }
+            match self.used_bytes.compare_exchange_weak(
+                used,
+                used + bytes,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(()),
+                Err(actual) => used = actual,
+            }
+        }
+    }
+
+    fn release(&self, bytes: u64) {
+        if bytes == 0 {
+            return;
+        }
+        let result = self
+            .used_bytes
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                used.checked_sub(bytes)
+            });
+        debug_assert!(result.is_ok(), "spool ledger release exceeds usage");
+    }
+}
+
+#[derive(Debug)]
+struct SpoolBudgetExhausted {
+    requested: u64,
+    used: u64,
+    max: u64,
+}
+
 /// Where the retained frames physically live.
 enum Mode {
     /// All retained frames are in memory, oldest-first.
@@ -142,6 +260,13 @@ pub struct RetentionLog {
     /// The op-private spool directory, held until the (at most one) spill;
     /// `None` once spooled.
     spool_dir_pending: Option<PathBuf>,
+    /// Shared actual-byte ledger and this log's currently charged physical
+    /// encoded bytes.
+    spool_budget: Arc<GlobalSpoolBudget>,
+    spool_charged_bytes: u64,
+    /// A spool create/write failure may leave a partial trailing record. Keep
+    /// successful earlier frames replayable, but never append behind it.
+    spool_failed: bool,
 }
 
 impl std::fmt::Debug for RetentionLog {
@@ -167,6 +292,16 @@ impl RetentionLog {
     /// lazily on first spill.
     #[must_use]
     pub fn new(config: RetentionConfig, spool_dir: PathBuf) -> Self {
+        Self::with_spool_budget(config, spool_dir, Arc::new(GlobalSpoolBudget::unlimited()))
+    }
+
+    /// Creates an empty log backed by a machine-wide actual-byte spool ledger.
+    #[must_use]
+    pub fn with_spool_budget(
+        config: RetentionConfig,
+        spool_dir: PathBuf,
+        spool_budget: Arc<GlobalSpoolBudget>,
+    ) -> Self {
         Self {
             config,
             mode: Mode::Memory(VecDeque::new()),
@@ -174,6 +309,9 @@ impl RetentionLog {
             floor: 0,
             retained_bytes: 0,
             spool_dir_pending: Some(spool_dir),
+            spool_budget,
+            spool_charged_bytes: 0,
+            spool_failed: false,
         }
     }
 
@@ -185,6 +323,12 @@ impl RetentionLog {
     /// frame; [`RetentionError::SpoolIo`] on any disk failure. Both are
     /// terminal for the op.
     pub fn append(&mut self, body: FrameBody) -> Result<u64, RetentionError> {
+        if self.spool_failed {
+            return Err(RetentionError::SpoolIo {
+                during: "append after prior spool failure",
+                source: std::io::Error::other("retention spool is unavailable"),
+            });
+        }
         let seq = self.next_seq;
         let len = record_cost(&body);
 
@@ -206,20 +350,33 @@ impl RetentionLog {
             }
         }
 
-        match &mut self.mode {
+        if matches!(self.mode, Mode::Spooled(_)) {
+            if self.retained_bytes + len > self.config.spool_max_bytes {
+                return Err(RetentionError::Overflow {
+                    retained_bytes: self.retained_bytes + len,
+                    memory_max_bytes: self.config.memory_max_bytes,
+                    spool_max_bytes: self.config.spool_max_bytes,
+                });
+            }
+            self.charge_spool(disk_record_cost(&body), self.retained_bytes + len)?;
+        }
+
+        let append_failure = match &mut self.mode {
             Mode::Memory(frames) => {
                 frames.push_back(Frame { seq, body });
+                None
             }
-            Mode::Spooled(spool) => {
-                if self.retained_bytes + len > self.config.spool_max_bytes {
-                    return Err(RetentionError::Overflow {
-                        retained_bytes: self.retained_bytes + len,
-                        memory_max_bytes: self.config.memory_max_bytes,
-                        spool_max_bytes: self.config.spool_max_bytes,
-                    });
-                }
-                spool.append(&Frame { seq, body }, self.config.spool_segment_bytes)?;
+            Mode::Spooled(spool) => spool
+                .append(&Frame { seq, body }, self.config.spool_segment_bytes)
+                .err()
+                .map(|error| (error, spool.charged_bytes_after_failure())),
+        };
+        if let Some((error, actual_bytes)) = append_failure {
+            self.spool_failed = true;
+            if let Some(actual_bytes) = actual_bytes {
+                self.reconcile_spool_charge(actual_bytes);
             }
+            return Err(error);
         }
 
         self.next_seq += 1;
@@ -237,7 +394,7 @@ impl RetentionLog {
         }
         // Never ack past what exists; clamp to the highest assigned seq.
         let acked_seq = acked_seq.min(self.next_seq.saturating_sub(1));
-        match &mut self.mode {
+        let spool_freed = match &mut self.mode {
             Mode::Memory(frames) => {
                 while let Some(front) = frames.front() {
                     if front.seq > acked_seq {
@@ -246,11 +403,16 @@ impl RetentionLog {
                     self.retained_bytes -= record_cost(&front.body);
                     frames.pop_front();
                 }
+                SpoolFreed::default()
             }
             Mode::Spooled(spool) => {
                 let freed = spool.free_through(acked_seq);
-                self.retained_bytes -= freed;
+                self.retained_bytes -= freed.retention_bytes;
+                freed
             }
+        };
+        if spool_freed.disk_bytes > 0 {
+            self.release_spool(spool_freed.disk_bytes);
         }
         self.floor = acked_seq;
     }
@@ -355,18 +517,92 @@ impl RetentionLog {
     /// Migrates all retained memory frames into a fresh spool. Called exactly
     /// once, on the first append that exceeds the memory caps.
     fn spill_to_spool(&mut self) -> Result<(), RetentionError> {
+        if self.retained_bytes > self.config.spool_max_bytes {
+            return Err(RetentionError::Overflow {
+                retained_bytes: self.retained_bytes,
+                memory_max_bytes: self.config.memory_max_bytes,
+                spool_max_bytes: self.config.spool_max_bytes,
+            });
+        }
+        let disk_bytes = match &self.mode {
+            Mode::Memory(frames) => frames
+                .iter()
+                .map(|frame| disk_record_cost(&frame.body))
+                .sum(),
+            Mode::Spooled(_) => 0,
+        };
+        self.charge_spool(disk_bytes, self.retained_bytes)?;
         let dir = self
             .spool_dir_pending
             .take()
             .expect("spill only happens once, dir must still be pending");
-        let mut spool = Spool::create(dir)?;
-        if let Mode::Memory(frames) = &mut self.mode {
-            for frame in frames.drain(..) {
-                spool.append(&frame, self.config.spool_segment_bytes)?;
+        let mut spool = match Spool::create(dir) {
+            Ok(spool) => spool,
+            Err(error) => {
+                self.spool_failed = true;
+                self.release_spool(disk_bytes);
+                return Err(error);
             }
+        };
+        let copy_failure = if let Mode::Memory(frames) = &self.mode {
+            let mut failure = None;
+            for frame in frames {
+                if let Err(error) = spool.append(frame, self.config.spool_segment_bytes) {
+                    failure = Some(error);
+                    break;
+                }
+            }
+            failure
+        } else {
+            None
+        };
+        if let Some(error) = copy_failure {
+            self.spool_failed = true;
+            if let Some(actual_bytes) = spool.charged_bytes_after_failure() {
+                self.reconcile_spool_charge(actual_bytes);
+            }
+            return Err(error);
         }
         self.mode = Mode::Spooled(spool);
         Ok(())
+    }
+
+    fn charge_spool(
+        &mut self,
+        bytes: u64,
+        projected_retained_bytes: u64,
+    ) -> Result<(), RetentionError> {
+        self.spool_budget.try_reserve(bytes).map_err(|exhausted| {
+            RetentionError::GlobalSpoolExhausted {
+                retained_bytes: projected_retained_bytes,
+                requested_bytes: exhausted.requested,
+                used_bytes: exhausted.used,
+                spool_budget_bytes: exhausted.max,
+            }
+        })?;
+        self.spool_charged_bytes = self.spool_charged_bytes.saturating_add(bytes);
+        Ok(())
+    }
+
+    fn release_spool(&mut self, bytes: u64) {
+        let released = bytes.min(self.spool_charged_bytes);
+        self.spool_charged_bytes -= released;
+        self.spool_budget.release(released);
+    }
+
+    fn reconcile_spool_charge(&mut self, actual_bytes: u64) {
+        debug_assert!(
+            actual_bytes <= self.spool_charged_bytes,
+            "spool wrote more physical bytes than it reserved"
+        );
+        self.release_spool(self.spool_charged_bytes.saturating_sub(actual_bytes));
+    }
+}
+
+impl Drop for RetentionLog {
+    fn drop(&mut self) {
+        self.spool_budget.release(self.spool_charged_bytes);
+        self.spool_charged_bytes = 0;
     }
 }
 
@@ -445,6 +681,15 @@ struct Spool {
     /// Open handle for the segment currently being appended.
     active: Option<(u64, fs::File, u64 /* bytes written */)>,
     index: VecDeque<FrameLoc>,
+    /// Physical bytes present per segment, including records whose logical
+    /// frames were acknowledged before the whole segment became deletable.
+    segment_sizes: HashMap<u64, u64>,
+}
+
+#[derive(Debug, Default)]
+struct SpoolFreed {
+    retention_bytes: u64,
+    disk_bytes: u64,
 }
 
 /// Record header: [seq: u64 LE][kind: u8][payload_len: u32 LE].
@@ -460,11 +705,28 @@ impl Spool {
             dir,
             active: None,
             index: VecDeque::new(),
+            segment_sizes: HashMap::new(),
         })
     }
 
     fn segment_path(&self, segment: u64) -> PathBuf {
         self.dir.join(format!("seg-{segment:08}.spool"))
+    }
+
+    /// Physical bytes this spool successfully committed plus any partial
+    /// trailing write in the active segment. Used only to reconcile a
+    /// reservation after I/O failure; stale pre-existing files are excluded.
+    fn charged_bytes_after_failure(&self) -> Option<u64> {
+        let committed = self.segment_sizes.values().copied().sum::<u64>();
+        let partial = if let Some((segment, _, written)) = &self.active {
+            fs::metadata(self.segment_path(*segment))
+                .ok()?
+                .len()
+                .saturating_sub(*written)
+        } else {
+            0
+        };
+        Some(committed.saturating_add(partial))
     }
 
     fn append(&mut self, frame: &Frame, segment_bytes: u64) -> Result<(), RetentionError> {
@@ -521,20 +783,21 @@ impl Spool {
             kind: RecordKind::of(&frame.body),
         });
         *written += record_len;
+        *self.segment_sizes.entry(*segment).or_default() += record_len;
         Ok(())
     }
 
     /// Frees every indexed frame with `seq <= acked_seq`; deletes segment
-    /// files whose every record is freed. Returns freed RECORD-cost bytes
-    /// (payload + [`RECORD_OVERHEAD_BYTES`] per frame) — the same denomination
-    /// `append` charged, so the ledger balances.
-    fn free_through(&mut self, acked_seq: u64) -> u64 {
-        let mut freed = 0u64;
+    /// files whose every record is freed. Returns logical retention bytes and
+    /// physical disk bytes actually removed; the shared disk ledger releases
+    /// only the latter.
+    fn free_through(&mut self, acked_seq: u64) -> SpoolFreed {
+        let mut freed = SpoolFreed::default();
         while let Some(front) = self.index.front() {
             if front.seq > acked_seq {
                 break;
             }
-            freed += front.payload_len + RECORD_OVERHEAD_BYTES;
+            freed.retention_bytes += front.payload_len + RECORD_OVERHEAD_BYTES;
             let seg = front.segment;
             self.index.pop_front();
             let segment_still_referenced =
@@ -547,7 +810,26 @@ impl Spool {
                 // Best-effort delete: a failed unlink only leaks disk, never
                 // correctness; the next free attempt will not retry (the index
                 // entries are gone) but op teardown removes the whole dir.
-                let _ = fs::remove_file(self.segment_path(seg));
+                if fs::remove_file(self.segment_path(seg)).is_ok() {
+                    freed.disk_bytes += self.segment_sizes.remove(&seg).unwrap_or(0);
+                }
+            }
+        }
+        // If every record in the active segment was acknowledged, close and
+        // remove it immediately. Otherwise an attached high-volume command
+        // could keep gigabytes of already-acked disk charged until teardown.
+        if self.index.is_empty() {
+            if let Some((active_segment, file, written)) = self.active.take() {
+                drop(file);
+                let path = self.segment_path(active_segment);
+                if fs::remove_file(&path).is_ok() {
+                    freed.disk_bytes += self.segment_sizes.remove(&active_segment).unwrap_or(0);
+                } else if let Ok(file) = fs::OpenOptions::new().append(true).open(path) {
+                    // Windows requires closing before unlink. If deletion
+                    // still fails, restore the append handle and retain the
+                    // disk charge rather than corrupting or undercounting it.
+                    self.active = Some((active_segment, file, written));
+                }
             }
         }
         freed
@@ -817,6 +1099,136 @@ mod tests {
         assert!(matches!(err, RetentionError::Overflow { .. }));
         // Nothing was silently dropped: the first frame is still replayable.
         assert_eq!(log.replay(0).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn shared_budget_charges_actual_spills_not_theoretical_quotas() {
+        let disk_record_bytes = 40 + RECORD_HEADER_LEN as u64;
+        let budget = Arc::new(GlobalSpoolBudget::new(2 * disk_record_bytes));
+        let dirs = (0..100)
+            .map(|_| tempfile::tempdir().unwrap())
+            .collect::<Vec<_>>();
+        let mut logs = dirs
+            .iter()
+            .map(|dir| {
+                RetentionLog::with_spool_budget(
+                    small_config(),
+                    dir.path().join("spool"),
+                    budget.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(budget.used_bytes(), 0, "100 idle logs reserve nothing");
+
+        let payload = [1u8; 40];
+        logs[0].append(data(&payload)).unwrap();
+        logs[1].append(data(&payload)).unwrap();
+        assert_eq!(budget.used_bytes(), 2 * disk_record_bytes);
+
+        let error = logs[2].append(data(&payload)).unwrap_err();
+        assert!(matches!(error, RetentionError::GlobalSpoolExhausted { .. }));
+
+        logs[0].ack(1);
+        assert_eq!(budget.used_bytes(), disk_record_bytes);
+        logs[2].append(data(&payload)).unwrap();
+        assert_eq!(budget.used_bytes(), 2 * disk_record_bytes);
+
+        drop(logs);
+        assert_eq!(
+            budget.used_bytes(),
+            0,
+            "log teardown releases its exact share"
+        );
+    }
+
+    #[test]
+    fn shared_budget_is_atomic_under_concurrent_writers() {
+        let budget = Arc::new(GlobalSpoolBudget::new(1_000));
+        let barrier = Arc::new(std::sync::Barrier::new(100));
+        let writers = (0..100)
+            .map(|_| {
+                let budget = budget.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    budget.try_reserve(100).is_ok()
+                })
+            })
+            .collect::<Vec<_>>();
+        let admitted = writers
+            .into_iter()
+            .map(|writer| writer.join().unwrap())
+            .filter(|admitted| *admitted)
+            .count();
+        assert_eq!(admitted, 10);
+        assert_eq!(budget.used_bytes(), 1_000);
+        budget.release(1_000);
+        assert_eq!(budget.used_bytes(), 0);
+    }
+
+    #[test]
+    fn shared_budget_releases_only_when_physical_segment_is_deleted() {
+        let budget = Arc::new(GlobalSpoolBudget::new(4096));
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = RetentionLog::with_spool_budget(
+            RetentionConfig {
+                spool_segment_bytes: 4096,
+                ..small_config()
+            },
+            dir.path().join("spool"),
+            budget.clone(),
+        );
+        let payload = [1u8; 40];
+        log.append(data(&payload)).unwrap();
+        log.append(data(&payload)).unwrap();
+        let two_records = 2 * (40 + RECORD_HEADER_LEN as u64);
+        assert_eq!(budget.used_bytes(), two_records);
+
+        log.ack(1);
+        assert_eq!(
+            budget.used_bytes(),
+            two_records,
+            "a partially live segment still occupies all of its disk bytes"
+        );
+        log.ack(2);
+        assert_eq!(budget.used_bytes(), 0);
+    }
+
+    #[test]
+    fn spool_create_failure_is_sticky_without_losing_memory_replay() {
+        let budget = Arc::new(GlobalSpoolBudget::new(4096));
+        let dir = tempfile::tempdir().unwrap();
+        let spool_path = dir.path().join("spool");
+        let one_record = usize::try_from(40 + RECORD_OVERHEAD_BYTES).unwrap();
+        let mut log = RetentionLog::with_spool_budget(
+            RetentionConfig {
+                memory_max_bytes: one_record,
+                ..small_config()
+            },
+            spool_path.clone(),
+            budget.clone(),
+        );
+        let payload = [1u8; 40];
+        log.append(data(&payload)).unwrap();
+        fs::write(&spool_path, b"blocks directory creation").unwrap();
+
+        assert!(matches!(
+            log.append(data(&payload)).unwrap_err(),
+            RetentionError::SpoolIo { .. }
+        ));
+        assert!(matches!(
+            log.append(FrameBody::Progress).unwrap_err(),
+            RetentionError::SpoolIo { .. }
+        ));
+        assert_eq!(log.replay(0).unwrap().len(), 1);
+        assert_eq!(
+            budget.used_bytes(),
+            0,
+            "a create failure writes no bytes and releases the reservation immediately"
+        );
+        drop(log);
+        assert_eq!(budget.used_bytes(), 0);
     }
 
     #[test]
