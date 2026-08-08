@@ -50,6 +50,7 @@ import {
   createModelResponseEventState,
   createTurnSandboxProvisioner,
   drainAttemptOwnedSandboxWriters,
+  releaseTurnSandboxAfterWriterDrain,
   emitModelCallUsage,
   ensureTurnModalRegistryImage,
   escapedMcpTimeoutRecoveryFailure,
@@ -2791,6 +2792,28 @@ describe("worker shutdown preemption", () => {
     await Promise.all([boundary, gitRefresh]);
     expect(steps.at(-1)).toBe("receipt");
     expect(receipts).toBe(1);
+  });
+
+  test("retries the proof-bearing turn release outside Temporal cancellation", async () => {
+    const proofFlags: boolean[] = [];
+    const delays: number[] = [];
+    await releaseTurnSandboxAfterWriterDrain(
+      {
+        release: async (options) => {
+          proofFlags.push(options?.workspaceWritersQuiesced === true);
+          if (proofFlags.length < 3) throw new Error("rollout connection reset");
+        },
+      },
+      {
+        maxAttempts: 3,
+        retryDelayMs: 25,
+        wait: async (delayMs) => {
+          delays.push(delayMs);
+        },
+      },
+    );
+    expect(proofFlags).toEqual([true, true, true]);
+    expect(delays).toEqual([25, 50]);
   });
 
   test("retries one immutable quiescence proof after receipt exhaustion", async () => {

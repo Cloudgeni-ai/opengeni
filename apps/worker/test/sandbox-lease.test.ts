@@ -2202,6 +2202,100 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     ).toMatchObject({ workspaceGeneration: 2 });
   }, 60_000);
 
+  test("(1b-release-settlement) eager turn release stays fenced until the exact writer-drained release", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const attempt = await freshWarmSnapshotAttempt(ids);
+    ids.groupId = attempt.sandboxGroupId;
+    const leaseId = await insertLease(ids, {
+      liveness: "warm",
+      refcount: 1,
+      turnHolders: 1,
+      leaseEpoch: 11,
+      expiresInMs: 600_000,
+      instanceId: "box-staged-release",
+      backend: "modal",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "box-staged-release" } },
+      },
+    });
+    await insertHolder(ids, leaseId, "turn", attempt.holderId, 0, attempt.sessionId);
+    const admission = await advanceWorkspaceGeneration(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      ...attempt,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 11,
+      expectedInstanceId: "box-staged-release",
+      operation: "providerPromiseLostSettlement",
+    });
+
+    // Temporal cancellation eagerly drops the holder to prevent a liveness
+    // leak. It has not proven provider writer quiescence, so the admission must
+    // remain the archive-capture fence.
+    expect(
+      await releaseLeaseHolder(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.groupId,
+        kind: "turn",
+        holderId: attempt.holderId,
+        idleGraceMs: 45_000,
+      }),
+    ).toEqual({ liveness: "draining", refcount: 0 });
+    const [stillFenced] = await admin<
+      { provider_outcome: string | null; settled_at: Date | null }[]
+    >`
+      select provider_outcome, settled_at
+      from sandbox_workspace_mutation_admissions
+      where id = ${admission.id}`;
+    expect(stillFenced).toEqual({ provider_outcome: null, settled_at: null });
+    expect(
+      await readWorkspaceArchiveCapturePreflight(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.groupId,
+        expectedEpoch: 11,
+        expectedInstanceId: "box-staged-release",
+        liveness: "draining",
+      }),
+    ).toBeNull();
+
+    // The activity's non-detachable writer drain is stronger authority. Its
+    // second idempotent release must work even though the holder is already
+    // gone, close only this exact turn's null-outcome admissions, and unblock
+    // generation-complete capture.
+    expect(
+      await releaseLeaseHolder(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.groupId,
+        kind: "turn",
+        holderId: attempt.holderId,
+        idleGraceMs: 45_000,
+        workspaceWritersQuiesced: true,
+      }),
+    ).toEqual({ liveness: "draining", refcount: 0 });
+    const [settled] = await admin<{ provider_outcome: string | null; settled_at: Date | null }[]>`
+      select provider_outcome, settled_at
+      from sandbox_workspace_mutation_admissions
+      where id = ${admission.id}`;
+    expect(settled?.provider_outcome).toBe("rejected");
+    expect(settled?.settled_at).not.toBeNull();
+    expect(
+      await readWorkspaceArchiveCapturePreflight(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.groupId,
+        expectedEpoch: 11,
+        expectedInstanceId: "box-staged-release",
+        liveness: "draining",
+      }),
+    ).toMatchObject({ workspaceGeneration: admission.workspaceGeneration });
+  }, 60_000);
+
   test("(1b-settlement-race) provider success settles once before a stale-route rejection", async () => {
     if (!available) return;
     const ids = await freshWorkspace();
