@@ -129,10 +129,11 @@ variable "aks" {
 }
 
 variable "aks_rollout" {
-  description = "Optional explicit guardrails for staged AKS changes. Existing-pool bounds compare expected_existing and desired rotation-sensitive settings with a refreshed live system-pool data source, then rotation compares observed count and quota evidence with that same live count."
+  description = "Optional explicit guardrails for staged AKS changes. Existing-pool bounds compare expected_existing and desired rotation-sensitive settings with a refreshed live system-pool data source, including an explicit fixed-to-autoscaled transition, then rotation compares observed count and quota evidence with that same live count."
   type = object({
     phase = optional(string, "direct")
     expected_existing = optional(object({
+      auto_scaling_enabled        = optional(bool, true)
       vm_size                     = optional(string)
       max_pods                    = optional(number)
       os_disk_size_gb             = optional(number)

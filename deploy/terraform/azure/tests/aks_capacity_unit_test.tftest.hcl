@@ -77,6 +77,35 @@ mock_provider "azurerm" {
   }
 }
 
+# Model the pre-transition state of an imported fixed system pool. Bounds
+# admission must prove this provider state exactly before enabling autoscaling.
+mock_provider "azurerm" {
+  alias = "fixed"
+
+  mock_data "azurerm_client_config" {
+    defaults = {
+      client_id       = "00000000-0000-0000-0000-000000000001"
+      object_id       = "00000000-0000-0000-0000-000000000002"
+      subscription_id = "00000000-0000-0000-0000-000000000003"
+      tenant_id       = "00000000-0000-0000-0000-000000000004"
+    }
+  }
+
+  mock_data "azurerm_kubernetes_cluster_node_pool" {
+    defaults = {
+      auto_scaling_enabled = false
+      max_count            = null
+      max_pods             = 30
+      min_count            = null
+      name                 = "system"
+      node_count           = 6
+      os_disk_size_gb      = 128
+      os_disk_type         = "Managed"
+      vm_size              = "Standard_D4ds_v4"
+    }
+  }
+}
+
 # Model the authoritative post-convergence refresh separately from the
 # imported count-four provider state above. The real operator refresh supplies
 # this state after phase 1; the alias keeps that transition deterministic in
@@ -213,6 +242,124 @@ run "direct_autoscaling_omits_node_count" {
     )
     error_message = "Autoscaled pools must omit node_count so provider state owns the live count."
   }
+}
+
+run "fixed_pool_can_enable_bounded_autoscaling_in_place" {
+  command = plan
+  providers = {
+    azurerm = azurerm.fixed
+  }
+
+  variables {
+    aks_existing_pool = true
+    aks = {
+      node_count                  = 6
+      vm_size                     = "Standard_D4ds_v4"
+      auto_scaling_enabled        = true
+      min_count                   = 3
+      max_count                   = 6
+      max_pods                    = 30
+      os_disk_size_gb             = 128
+      os_disk_type                = "Managed"
+      temporary_name_for_rotation = null
+    }
+
+    aks_rollout = {
+      phase = "bounds"
+      expected_existing = {
+        auto_scaling_enabled        = false
+        vm_size                     = "Standard_D4ds_v4"
+        max_pods                    = 30
+        os_disk_size_gb             = 128
+        os_disk_type                = "Managed"
+        temporary_name_for_rotation = null
+      }
+    }
+  }
+
+  assert {
+    condition = (
+      local.aks_existing_node_count == 6 &&
+      azurerm_kubernetes_cluster.this.default_node_pool[0].auto_scaling_enabled == true &&
+      azurerm_kubernetes_cluster.this.default_node_pool[0].min_count == 3 &&
+      azurerm_kubernetes_cluster.this.default_node_pool[0].max_count == 6 &&
+      local.aks_node_count_for_pool == null
+    )
+    error_message = "A fixed pool transition must bind live count six and configure only bounded autoscaling while omitting desired node_count."
+  }
+}
+
+run "fixed_pool_transition_rejects_a_false_live_count" {
+  command = plan
+  providers = {
+    azurerm = azurerm.fixed
+  }
+
+  variables {
+    aks_existing_pool = true
+    aks = {
+      node_count                  = 5
+      vm_size                     = "Standard_D4ds_v4"
+      auto_scaling_enabled        = true
+      min_count                   = 3
+      max_count                   = 6
+      max_pods                    = 30
+      os_disk_size_gb             = 128
+      os_disk_type                = "Managed"
+      temporary_name_for_rotation = null
+    }
+
+    aks_rollout = {
+      phase = "bounds"
+      expected_existing = {
+        auto_scaling_enabled        = false
+        vm_size                     = "Standard_D4ds_v4"
+        max_pods                    = 30
+        os_disk_size_gb             = 128
+        os_disk_type                = "Managed"
+        temporary_name_for_rotation = null
+      }
+    }
+  }
+
+  expect_failures = [
+    azurerm_kubernetes_cluster.this,
+  ]
+}
+
+run "fixed_pool_transition_rejects_stale_autoscaling_state" {
+  command = plan
+
+  variables {
+    aks_existing_pool = true
+    aks = {
+      node_count                  = 4
+      vm_size                     = "Standard_D4ds_v4"
+      auto_scaling_enabled        = true
+      min_count                   = 3
+      max_count                   = 4
+      max_pods                    = 30
+      os_disk_size_gb             = 128
+      os_disk_type                = "Managed"
+      temporary_name_for_rotation = null
+    }
+
+    aks_rollout = {
+      phase = "bounds"
+      expected_existing = {
+        auto_scaling_enabled        = false
+        vm_size                     = "Standard_D4ds_v4"
+        max_pods                    = 30
+        os_disk_size_gb             = 128
+        os_disk_type                = "Managed"
+        temporary_name_for_rotation = null
+      }
+    }
+  }
+
+  expect_failures = [
+    azurerm_kubernetes_cluster.this,
+  ]
 }
 
 run "bounds_rollout_preserves_existing_rotation_fields" {
