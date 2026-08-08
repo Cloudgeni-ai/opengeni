@@ -179,6 +179,45 @@ export async function establishCachedChannelAHandle(
   );
 }
 
+/**
+ * Run independent, side-effect-free Channel-A reads concurrently without
+ * releasing the direct-request holder while sibling provider commands are
+ * still settling. A typed temporary-unavailable failure is retried exactly
+ * once after every first attempt has settled; validation, conflict, not-found,
+ * and unknown failures are never replayed.
+ */
+export async function runConcurrentChannelAReads<T>(
+  operations: readonly (() => Promise<T>)[],
+): Promise<T[]> {
+  const values = new Array<T>(operations.length);
+  const first = await Promise.allSettled(
+    operations.map((operation) => Promise.resolve().then(operation)),
+  );
+  const retryIndexes: number[] = [];
+
+  for (const [index, result] of first.entries()) {
+    if (result.status === "fulfilled") {
+      values[index] = result.value;
+      continue;
+    }
+    if (!(result.reason instanceof ChannelAUnavailableError)) {
+      throw result.reason;
+    }
+    retryIndexes.push(index);
+  }
+
+  if (retryIndexes.length === 0) return values;
+
+  const retried = await Promise.allSettled(
+    retryIndexes.map((index) => Promise.resolve().then(operations[index]!)),
+  );
+  for (const [retryIndex, result] of retried.entries()) {
+    if (result.status === "rejected") throw result.reason;
+    values[retryIndexes[retryIndex]!] = result.value;
+  }
+  return values;
+}
+
 function rememberEstablishedHandle(key: string, established: EstablishedSandboxSession): void {
   pruneEstablishedHandleCache(Date.now());
   establishedHandleCache.set(key, {
