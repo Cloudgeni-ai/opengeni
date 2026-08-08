@@ -89,6 +89,7 @@ import {
   shouldRunTurnEndWorkspacePersistence,
   stableHumanInputRequestId,
   structuredToolTransportForTurn,
+  toolCallProducesRetainableSessionImage,
   lazyToolTransportForTurn,
   turnExecutionPolicyBillingIdentity,
   turnOperationCancellationFailure,
@@ -493,6 +494,13 @@ describe("turn exact-content boundaries", () => {
         },
       }),
     ).toBeNull();
+  });
+
+  test("retains intentional screenshot and view-image outputs, not incidental action frames", () => {
+    expect(toolCallProducesRetainableSessionImage("computer_screenshot")).toBe(true);
+    expect(toolCallProducesRetainableSessionImage("view_image")).toBe(true);
+    expect(toolCallProducesRetainableSessionImage("computer_click")).toBe(false);
+    expect(toolCallProducesRetainableSessionImage("computer_scroll")).toBe(false);
   });
 
   test("normalizes completed SDK tool results before the lossless receipt write", () => {

@@ -665,11 +665,14 @@ function ComputerCallRenderer({ item, loadRetainedScreenshot }: ToolRendererProp
       );
     }
     return (
-      <RetainedScreenshotDisclosure
+      <RetainedSessionImageDisclosure
         artifact={retained}
         load={loadRetainedScreenshot}
-        verb={verb}
-        countSuffix={countSuffix}
+        title={`${verb}${countSuffix}`}
+        caption={`${verb}${countSuffix}`}
+        noun="screenshot"
+        icon={<CameraIcon className={ICON_SIZE} />}
+        lightboxLabel="Screenshot"
         batched={batched}
         failed={isFailed}
         cancelled={isCancelled}
@@ -846,45 +849,56 @@ function retainedArtifactValue(artifact: RetainedArtifactReference): string {
   ].join("\0");
 }
 
-function RetainedScreenshotDisclosure({
+function RetainedSessionImageDisclosure({
   artifact,
   load,
-  verb,
-  countSuffix,
+  title,
+  caption,
+  noun,
+  icon,
+  lightboxLabel,
   batched,
   failed,
   cancelled,
 }: {
   artifact: RetainedArtifactReference;
   load: ToolRendererProps["loadRetainedScreenshot"];
-  verb: string;
-  countSuffix: string;
+  title: string;
+  caption: string;
+  noun: "image" | "screenshot";
+  icon: ReactNode;
+  lightboxLabel: string;
   batched: string | null;
   failed: boolean;
   cancelled: boolean;
 }) {
   const state = useRetainedImageObjectUrl(artifact, load);
 
-  const caption = `${verb}${countSuffix}`;
   return (
     <ActivityDisclosure
-      icon={<CameraIcon className={ICON_SIZE} />}
+      icon={icon}
       iconTone={failed ? "failed" : state.kind === "ready" ? "accent" : "muted"}
-      title={caption}
+      title={title}
       failed={failed}
       cancelled={cancelled}
       preview={
         state.kind === "loading"
-          ? "loading retained screenshot…"
+          ? `loading retained ${noun}…`
           : state.kind === "error"
-            ? "screenshot retrieval failed"
+            ? `${noun} retrieval failed`
             : state.kind === "unavailable"
-              ? `screenshot ${state.label}`
+              ? `${noun} ${state.label}`
               : undefined
       }
       media={
         state.kind === "ready" ? (
-          <Thumbnail src={state.url} caption={caption} />
+          <Thumbnail
+            src={state.url}
+            caption={caption}
+            alt={caption}
+            expandLabel={`Expand ${noun}`}
+            lightboxLabel={lightboxLabel}
+          />
         ) : state.kind === "loading" ? (
           <MediaSkeleton />
         ) : (
@@ -893,13 +907,23 @@ function RetainedScreenshotDisclosure({
       }
     >
       {state.kind === "ready" ? (
-        <ScreenshotFigure src={state.url} caption={caption} />
+        <ScreenshotFigure
+          src={state.url}
+          caption={caption}
+          alt={caption}
+          expandLabel={`Expand ${noun}`}
+          lightboxLabel={lightboxLabel}
+        />
       ) : state.kind === "loading" ? (
-        <BodyNote>Loading the retained screenshot…</BodyNote>
+        <BodyNote>Loading the retained {noun}…</BodyNote>
       ) : state.kind === "unavailable" ? (
-        <BodyNote>Screenshot {state.label}.</BodyNote>
+        <BodyNote>
+          {noun === "screenshot" ? "Screenshot" : "Image"} {state.label}.
+        </BodyNote>
       ) : (
-        <BodyNote tone="error">Screenshot retrieval failed: {state.message}</BodyNote>
+        <BodyNote tone="error">
+          {noun === "screenshot" ? "Screenshot" : "Image"} retrieval failed: {state.message}
+        </BodyNote>
       )}
       {batched ? <BodyNote>batched: {batched}</BodyNote> : null}
     </ActivityDisclosure>
@@ -1166,11 +1190,12 @@ const VIEW_IMAGE_ERRORS = [
   "unable to read image",
 ];
 
-function ViewImageRenderer({ item }: ToolRendererProps) {
+function ViewImageRenderer({ item, loadRetainedScreenshot }: ToolRendererProps) {
   const args = parseToolArgs(item.arguments);
   const path = typeof args.path === "string" ? args.path : "";
   const out = item.output;
   const text = typeof out === "string" ? out : "";
+  const retained = retainedScreenshotMetadata(out);
   const omittedMedia = mediaPreviewFact(out);
 
   if (item.status === "running") {
@@ -1190,6 +1215,45 @@ function ViewImageRenderer({ item }: ToolRendererProps) {
 
   const viewFailed = item.status === "failed";
   const viewCancelled = item.status === "cancelled";
+
+  if (retained) {
+    const title = `Viewed ${basename(path)}`;
+    if (!retained.available) {
+      const state =
+        retained.reason === "expired" || retained.reason === "deleted"
+          ? retained.reason
+          : "unavailable";
+      return (
+        <ActivityDisclosure
+          icon={<ImageIcon className={ICON_SIZE} />}
+          iconTone={viewFailed ? "failed" : "muted"}
+          title={`${title} · ${state}`}
+          failed={viewFailed}
+          cancelled={viewCancelled}
+          preview={`image ${state}`}
+          media={<MediaEmpty />}
+        >
+          <BodyNote tone={viewFailed ? "error" : undefined}>
+            Image {state}: {retained.reason.replaceAll("_", " ")}.
+          </BodyNote>
+        </ActivityDisclosure>
+      );
+    }
+    return (
+      <RetainedSessionImageDisclosure
+        artifact={retained}
+        load={loadRetainedScreenshot}
+        title={title}
+        caption={path || title}
+        noun="image"
+        icon={<ImageIcon className={ICON_SIZE} />}
+        lightboxLabel="Image"
+        batched={null}
+        failed={viewFailed}
+        cancelled={viewCancelled}
+      />
+    );
+  }
 
   const errMatch = VIEW_IMAGE_ERRORS.find((p) => text.includes(p));
   if (errMatch) {

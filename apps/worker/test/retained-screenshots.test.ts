@@ -4,8 +4,10 @@ import {
   collectRetainedScreenshotRunStateReceipts,
   compactRetainedScreenshotRunState,
   retainedScreenshotIdentity,
+  sdkEventContainsInlineImage,
   ScreenshotValidationError,
   typedScreenshotFromSdkEvent,
+  unavailableRetainedSessionImage,
   validateComputerScreenshot,
 } from "../src/activities/retained-screenshots";
 
@@ -33,6 +35,88 @@ describe("retained computer screenshots", () => {
       sizeBytes: PNG.byteLength,
       width: 1,
       height: 1,
+    });
+  });
+
+  test("extracts the Agents SDK input_image data URL used by view_image", () => {
+    const event = {
+      type: "run_item_stream_event",
+      item: {
+        id: "output-view-1",
+        type: "tool_call_output_item",
+        rawItem: { callId: "call-view-1", id: "output-view-1" },
+        output: [
+          {
+            type: "input_image",
+            image: `data:image/png;base64,${Buffer.from(PNG).toString("base64")}`,
+          },
+        ],
+      },
+    };
+    expect(sdkEventContainsInlineImage(event)).toBe(true);
+    expect(typedScreenshotFromSdkEvent(event)).toEqual({
+      callId: "call-view-1",
+      toolOutputId: "output-view-1",
+      bytes: PNG,
+      mediaType: "image/png",
+    });
+  });
+
+  test("uses the run item id when the live output raw item omits callId", () => {
+    const event = {
+      type: "run_item_stream_event",
+      item: {
+        id: "call-view-live",
+        type: "tool_call_output_item",
+        rawItem: {
+          type: "function_call_result",
+          output: [
+            {
+              type: "input_image",
+              image: `data:image/png;base64,${Buffer.from(PNG).toString("base64")}`,
+            },
+          ],
+        },
+        output: [
+          {
+            type: "input_image",
+            image: `data:image/png;base64,${Buffer.from(PNG).toString("base64")}`,
+          },
+        ],
+      },
+    };
+
+    expect(typedScreenshotFromSdkEvent(event)).toMatchObject({
+      callId: "call-view-live",
+      toolOutputId: "call-view-live",
+      mediaType: "image/png",
+    });
+  });
+
+  test("extracts the live SDK input_image URL wrapper", () => {
+    const event = {
+      type: "run_item_stream_event",
+      item: {
+        id: "output-view-url",
+        type: "tool_call_output_item",
+        rawItem: { callId: "call-view-url" },
+        output: [
+          {
+            type: "input_image",
+            image: {
+              url: `data:image/png;base64,${Buffer.from(PNG).toString("base64")}`,
+            },
+          },
+        ],
+      },
+    };
+
+    expect(sdkEventContainsInlineImage(event)).toBe(true);
+    expect(typedScreenshotFromSdkEvent(event)).toMatchObject({
+      callId: "call-view-url",
+      toolOutputId: "output-view-url",
+      bytes: PNG,
+      mediaType: "image/png",
     });
   });
 
@@ -86,6 +170,15 @@ describe("retained computer screenshots", () => {
         maxRangeBytes: 1024 * 1024,
       },
     } as const satisfies RetainedArtifactMetadata;
+    const unavailable = unavailableRetainedSessionImage({
+      ...identityInput,
+      reason: "pending",
+    });
+    expect(unavailable).toEqual({
+      available: false,
+      artifactId: identity.artifactId,
+      reason: "pending",
+    });
     const result = {
       type: "function_call_result",
       call_id: "call-1",
@@ -96,18 +189,27 @@ describe("retained computer screenshots", () => {
         },
       ],
     };
+    const directResult = {
+      type: "function_call_result",
+      call_id: "call-2",
+      output: `data:image/png;base64,${Buffer.from(PNG).toString("base64")}`,
+    };
     const serialized = JSON.stringify({
-      originalInput: [result],
+      originalInput: [result, directResult],
       generatedItems: [{ rawItem: result }],
       modelResponses: [{ output: [result] }],
       lastModelResponse: { output: [result] },
     });
     const compacted = compactRetainedScreenshotRunState(
       serialized,
-      new Map([["call-1", artifact]]),
+      new Map([
+        ["call-1", artifact],
+        ["call-2", artifact],
+      ]),
     );
     expect(compacted).not.toContain("base64");
     expect(compacted).not.toContain("objectKey");
     expect(collectRetainedScreenshotRunStateReceipts(compacted).get("call-1")).toEqual(artifact);
+    expect(collectRetainedScreenshotRunStateReceipts(compacted).get("call-2")).toEqual(artifact);
   });
 });

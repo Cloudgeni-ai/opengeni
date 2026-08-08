@@ -78,32 +78,131 @@ export function typedScreenshotFromSdkEvent(event: unknown): TypedScreenshotTool
   if (streamEvent.type !== "run_item_stream_event") return null;
   const item = streamEvent.item;
   if (!item || item.type !== "tool_call_output_item") return null;
-  const output = item.output;
-  if (!output || typeof output !== "object" || Array.isArray(output)) return null;
-  const outputRecord = output as Record<string, unknown>;
-  if (
-    outputRecord.type !== "image" ||
-    !outputRecord.image ||
-    typeof outputRecord.image !== "object"
-  ) {
-    return null;
-  }
-  const image = outputRecord.image as Record<string, unknown>;
-  if (!(image.data instanceof Uint8Array) || typeof image.mediaType !== "string") return null;
+  const image = imageBytesFromSdkToolOutput(item.output);
+  if (!image) return null;
   const raw =
     item.rawItem && typeof item.rawItem === "object" && !Array.isArray(item.rawItem)
       ? (item.rawItem as Record<string, unknown>)
       : {};
-  const callId = raw.callId ?? raw.call_id;
+  // Live Agents SDK results can carry the call identity only on the run-item
+  // wrapper; reconciled history later copies it into `rawItem`. Use the same
+  // fallback as the canonical completed-call extractor so both paths agree.
+  const callId = raw.callId ?? raw.call_id ?? item.id;
   if (typeof callId !== "string" || callId.length === 0) return null;
   const toolOutputId = raw.id ?? item.id ?? callId;
   if (typeof toolOutputId !== "string" || toolOutputId.length === 0) return null;
   return {
     callId,
     toolOutputId,
-    bytes: image.data,
+    bytes: image.bytes,
     mediaType: image.mediaType,
   };
+}
+
+/** Does this SDK result still contain inline bytes that persistence must replace? */
+export function sdkEventContainsInlineImage(event: unknown): boolean {
+  if (!event || typeof event !== "object") return false;
+  const streamEvent = event as { type?: unknown; item?: { type?: unknown; output?: unknown } };
+  return (
+    streamEvent.type === "run_item_stream_event" &&
+    streamEvent.item?.type === "tool_call_output_item" &&
+    toolOutputContainsInlineImage(streamEvent.item.output)
+  );
+}
+
+function imageBytesFromSdkToolOutput(
+  output: unknown,
+): { bytes: Uint8Array; mediaType: string } | null {
+  if (typeof output === "string") return decodeInlinePngDataUrl(output);
+  if (Array.isArray(output)) {
+    for (const entry of output) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+      const record = entry as Record<string, unknown>;
+      if (record.type !== "input_image") continue;
+      const decoded = imageBytesFromSdkImageSource(
+        record.image ?? record.image_url ?? record.imageUrl,
+      );
+      if (decoded) return decoded;
+    }
+    return null;
+  }
+  if (!output || typeof output !== "object") return null;
+  const outputRecord = output as Record<string, unknown>;
+  if (
+    outputRecord.type !== "image" ||
+    !outputRecord.image ||
+    typeof outputRecord.image !== "object" ||
+    Array.isArray(outputRecord.image)
+  ) {
+    return null;
+  }
+  return imageBytesFromSdkImageSource(outputRecord.image);
+}
+
+function imageBytesFromSdkImageSource(
+  source: unknown,
+): { bytes: Uint8Array; mediaType: string } | null {
+  const direct = decodeInlinePngDataUrl(source);
+  if (direct) return direct;
+  if (!source || typeof source !== "object" || Array.isArray(source)) return null;
+  const image = source as Record<string, unknown>;
+  const fromUrl = decodeInlinePngDataUrl(image.url);
+  if (fromUrl) return fromUrl;
+  return image.data instanceof Uint8Array && typeof image.mediaType === "string"
+    ? { bytes: image.data, mediaType: image.mediaType }
+    : null;
+}
+
+function sdkImageSourceContainsInlineImage(source: unknown): boolean {
+  if (typeof source === "string") return source.startsWith("data:image/png;base64,");
+  if (!source || typeof source !== "object" || Array.isArray(source)) return false;
+  const image = source as Record<string, unknown>;
+  return (
+    (typeof image.url === "string" && image.url.startsWith("data:image/png;base64,")) ||
+    (image.data instanceof Uint8Array && typeof image.mediaType === "string")
+  );
+}
+
+function toolOutputContainsInlineImage(output: unknown): boolean {
+  if (typeof output === "string") return output.startsWith("data:image/");
+  if (Array.isArray(output)) {
+    return output.some((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+      const record = entry as Record<string, unknown>;
+      return (
+        record.type === "input_image" &&
+        sdkImageSourceContainsInlineImage(record.image ?? record.image_url ?? record.imageUrl)
+      );
+    });
+  }
+  if (!output || typeof output !== "object") return false;
+  const record = output as Record<string, unknown>;
+  return record.type === "image" && sdkImageSourceContainsInlineImage(record.image);
+}
+
+function decodeInlinePngDataUrl(value: unknown): { bytes: Uint8Array; mediaType: string } | null {
+  if (typeof value !== "string") return null;
+  const prefix = "data:image/png;base64,";
+  if (!value.startsWith(prefix)) return null;
+  const encoded = value.slice(prefix.length);
+  const maxEncodedLength = Math.ceil(COMPUTER_SCREENSHOT_MAX_BYTES / 3) * 4;
+  if (
+    encoded.length === 0 ||
+    encoded.length > maxEncodedLength ||
+    encoded.length % 4 !== 0 ||
+    !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)
+  ) {
+    return null;
+  }
+  const padding = encoded.endsWith("==") ? 2 : encoded.endsWith("=") ? 1 : 0;
+  const decodedLength = (encoded.length / 4) * 3 - padding;
+  if (decodedLength <= 0 || decodedLength > COMPUTER_SCREENSHOT_MAX_BYTES) {
+    return null;
+  }
+  const decoded = Buffer.from(encoded, "base64");
+  if (decoded.byteLength !== decodedLength) return null;
+  const bytes = new Uint8Array(decoded.buffer, decoded.byteOffset, decoded.byteLength);
+  return { bytes, mediaType: "image/png" };
 }
 
 /** Validate the complete canonical PNG and derive exact integrity metadata. */
@@ -304,6 +403,19 @@ export function retainedScreenshotIdentity(input: {
   };
 }
 
+/** Deterministic fail-closed receipt installed before retention can perform I/O. */
+export function unavailableRetainedSessionImage(input: {
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+  toolCallId: string;
+  toolOutputId: string;
+  reason: RetainedOutputUnavailableReason;
+}): RetainedArtifactMetadata {
+  const identity = retainedScreenshotIdentity(input);
+  return unavailable(identity.artifactId, input.reason);
+}
+
 export async function retainComputerScreenshot(input: {
   db: Database;
   objectStorage: ObjectStorage | null;
@@ -454,7 +566,11 @@ export function compactRetainedScreenshotHistory(
   return history.map((item) => {
     const callId = historyCallId(item);
     const receipt = callId ? receiptsByCallId.get(callId) : undefined;
-    if (!receipt || !Array.isArray(item.output)) return item;
+    if (!receipt) return item;
+    if (typeof item.output === "string" && item.output.startsWith("data:image/")) {
+      return { ...item, output: { type: RETAINED_IMAGE_MARKER, artifact: receipt } };
+    }
+    if (!Array.isArray(item.output)) return item;
     let changed = false;
     const output = item.output.map((entry) => {
       if (!isInlineImageContent(entry)) return entry;
@@ -475,7 +591,13 @@ export function collectRetainedScreenshotReceipts(
 ): Map<string, RetainedArtifactMetadata> {
   for (const item of history) {
     const callId = historyCallId(item);
-    if (!callId || !Array.isArray(item.output)) continue;
+    if (!callId) continue;
+    const direct = retainedReceiptFromDirectOutput(item.output);
+    if (direct) {
+      target.set(callId, direct);
+      continue;
+    }
+    if (!Array.isArray(item.output)) continue;
     for (const entry of item.output) {
       const receipt = retainedReceiptFromImageContent(entry);
       if (receipt) {
@@ -576,9 +698,7 @@ async function materializeRetainedScreenshotHistoryWithCache(
   cache: Map<string, string>,
 ): Promise<Array<Record<string, unknown>>> {
   const now = input.now ?? new Date();
-  const materializeEntry = async (entry: unknown): Promise<unknown> => {
-    const receipt = retainedReceiptFromImageContent(entry);
-    if (!receipt) return entry;
+  const dataUrlForReceipt = async (receipt: RetainedArtifactMetadata): Promise<string> => {
     if (!receipt.available) {
       throw new RetainedScreenshotUnavailableError(receipt.artifactId, receipt.reason);
     }
@@ -623,11 +743,22 @@ async function materializeRetainedScreenshotHistoryWithCache(
       dataUrl = `data:${validated.mediaType};base64,${Buffer.from(validated.bytes).toString("base64")}`;
       cache.set(receipt.artifactId, dataUrl);
     }
+    return dataUrl;
+  };
+  const materializeEntry = async (entry: unknown): Promise<unknown> => {
+    const receipt = retainedReceiptFromImageContent(entry);
+    if (!receipt) return entry;
+    const dataUrl = await dataUrlForReceipt(receipt);
     return { ...(entry as Record<string, unknown>), image: dataUrl };
   };
 
   const materialized: Array<Record<string, unknown>> = [];
   for (const item of input.history) {
+    const directReceipt = retainedReceiptFromDirectOutput(item.output);
+    if (directReceipt) {
+      materialized.push({ ...item, output: await dataUrlForReceipt(directReceipt) });
+      continue;
+    }
     if (!Array.isArray(item.output)) {
       materialized.push(item);
       continue;
@@ -812,7 +943,18 @@ function retainedReceiptFromImageContent(entry: unknown): RetainedArtifactMetada
   if (!image || typeof image !== "object" || Array.isArray(image)) return null;
   const marker = image as Record<string, unknown>;
   if (marker.type !== RETAINED_IMAGE_MARKER) return null;
-  const parsed = RetainedArtifactMetadataSchema.safeParse(marker.artifact);
+  return retainedReceipt(marker.artifact);
+}
+
+function retainedReceiptFromDirectOutput(output: unknown): RetainedArtifactMetadata | null {
+  if (!output || typeof output !== "object" || Array.isArray(output)) return null;
+  const marker = output as Record<string, unknown>;
+  if (marker.type !== RETAINED_IMAGE_MARKER) return null;
+  return retainedReceipt(marker.artifact);
+}
+
+function retainedReceipt(value: unknown): RetainedArtifactMetadata | null {
+  const parsed = RetainedArtifactMetadataSchema.safeParse(value);
   if (!parsed.success) return null;
   return parsed.data.available && parsed.data.kind !== "computer_screenshot" ? null : parsed.data;
 }

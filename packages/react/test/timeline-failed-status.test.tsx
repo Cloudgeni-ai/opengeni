@@ -670,6 +670,65 @@ describe("ComputerCallRenderer — failed status (flagged fix)", () => {
     expect(r.container.querySelector("img")).toBeNull();
     await r.unmount();
   });
+
+  test("view_image loads a newly retained session image instead of claiming it was omitted", async () => {
+    const item = toolItem({
+      name: "view_image",
+      arguments: JSON.stringify({ path: "/workspace/generated-images/dog.png" }),
+      output: {
+        available: true,
+        artifactId: "22222222-2222-4222-8222-222222222222",
+        kind: "computer_screenshot",
+        contentType: "image/png",
+        originalBytes: 4,
+        sha256: "b".repeat(64),
+        retainedAt: "2026-08-08T00:00:00.000Z",
+        dimensions: { width: 1, height: 1 },
+        retention: {
+          policy: "session_screenshot",
+          expiresAt: "2026-09-07T00:00:00.000Z",
+        },
+        retrieval: {
+          method: "GET",
+          path: "/v1/workspaces/w/sessions/s/artifacts/22222222-2222-4222-8222-222222222222/content",
+          acceptRanges: "bytes",
+          maxRangeBytes: 1024 * 1024,
+        },
+      },
+      status: "complete",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const createDescriptor = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
+    const revokeDescriptor = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      value: () => "blob:retained-view-image",
+    });
+    Object.defineProperty(URL, "revokeObjectURL", {
+      configurable: true,
+      value: () => undefined,
+    });
+    try {
+      const r = await renderComponent(
+        <Renderer
+          item={item}
+          loadRetainedScreenshot={async () => Uint8Array.of(0x89, 0x50, 0x4e, 0x47)}
+        />,
+      );
+      await flush();
+      await flush();
+
+      expect(r.container.textContent).toContain("Viewed dog.png");
+      expect(r.container.textContent).not.toContain("not retained");
+      expect(r.container.querySelector('img[src="blob:retained-view-image"]')).not.toBeNull();
+      await r.unmount();
+    } finally {
+      if (createDescriptor) Object.defineProperty(URL, "createObjectURL", createDescriptor);
+      else Reflect.deleteProperty(URL, "createObjectURL");
+      if (revokeDescriptor) Object.defineProperty(URL, "revokeObjectURL", revokeDescriptor);
+      else Reflect.deleteProperty(URL, "revokeObjectURL");
+    }
+  });
 });
 
 /* ---- Regression: read-only and rejected paths are unaffected -------------- */

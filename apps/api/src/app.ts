@@ -249,12 +249,18 @@ export function createAppComposition(deps: AppDependencies): {
       "Accept",
       "Authorization",
       "Content-Type",
+      "Range",
       "X-OpenGeni-Access-Key",
       "X-OpenGeni-Api-Contract",
       "X-OpenGeni-Correlation-Id",
       "X-OpenGeni-Subject",
     ],
-    exposeHeaders: ["X-OpenGeni-Api-Contract", "X-OpenGeni-Correlation-Id"],
+    exposeHeaders: [
+      "Accept-Ranges",
+      "Content-Range",
+      "X-OpenGeni-Api-Contract",
+      "X-OpenGeni-Correlation-Id",
+    ],
   };
   const publicApiCors = cors({
     ...corsHeaders,

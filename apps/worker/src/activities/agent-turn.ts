@@ -343,8 +343,10 @@ import {
   compactRetainedScreenshotRunState,
   materializeRetainedScreenshotHistory,
   materializeRetainedScreenshotRunState,
+  sdkEventContainsInlineImage,
   retainComputerScreenshot,
   typedScreenshotFromSdkEvent,
+  unavailableRetainedSessionImage,
 } from "./retained-screenshots";
 import {
   assertGeneratedImageHistoryRetained,
@@ -3544,7 +3546,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         compactRetainedScreenshotRunState(serialized, retainedScreenshotReceiptsByCallId),
         generatedImageReceiptsByProviderItemId,
       );
-    const computerScreenshotCallIds = new Set<string>();
+    // Explicit image-producing tools cross the durable session-media boundary.
+    // Incidental frames returned by click/scroll actions remain unretained; an
+    // intentional computer_screenshot or view_image result must never be lost
+    // when the event/history sanitizer removes its inline bytes.
+    const retainedSessionImageCallIds = new Set<string>();
     const materializeScreenshotHistory = async (history: Array<Record<string, unknown>>) => {
       collectRetainedScreenshotReceipts(history, retainedScreenshotReceiptsByCallId);
       return await materializeRetainedScreenshotHistory({
@@ -7352,18 +7358,51 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 );
               }
               currentToolBatchCallIds.add(pendingToolCall.callId);
-              if (pendingToolCall.callName === "computer_screenshot") {
-                computerScreenshotCallIds.add(pendingToolCall.callId);
+              if (toolCallProducesRetainableSessionImage(pendingToolCall.callName)) {
+                retainedSessionImageCallIds.add(pendingToolCall.callId);
               }
             }
             const completedToolCall = completedToolCallFromSdkEvent(durableSdkEvent);
             if (completedToolCall) {
               const typedScreenshot = typedScreenshotFromSdkEvent(durableSdkEvent);
               if (
+                retainedSessionImageCallIds.has(completedToolCall.callId) &&
+                sdkEventContainsInlineImage(durableSdkEvent) &&
+                !typedScreenshot
+              ) {
+                retainedScreenshotMetadata = unavailableRetainedSessionImage({
+                  sessionId: input.sessionId,
+                  turnId: activeTurnId,
+                  attemptId: input.attemptId,
+                  toolCallId: completedToolCall.callId,
+                  toolOutputId: completedToolCall.callId,
+                  reason: "unsupported",
+                });
+                retainedScreenshotReceiptsByCallId.set(
+                  completedToolCall.callId,
+                  retainedScreenshotMetadata,
+                );
+              }
+              if (
                 typedScreenshot &&
                 typedScreenshot.callId === completedToolCall.callId &&
-                computerScreenshotCallIds.has(completedToolCall.callId)
+                retainedSessionImageCallIds.has(completedToolCall.callId)
               ) {
+                // Install a compact deterministic fallback before database or
+                // object-storage I/O. Unexpected retention failure can then
+                // reconcile/serialize without leaking inline bytes.
+                retainedScreenshotMetadata = unavailableRetainedSessionImage({
+                  sessionId: input.sessionId,
+                  turnId: activeTurnId,
+                  attemptId: input.attemptId,
+                  toolCallId: typedScreenshot.callId,
+                  toolOutputId: typedScreenshot.toolOutputId,
+                  reason: "pending",
+                });
+                retainedScreenshotReceiptsByCallId.set(
+                  completedToolCall.callId,
+                  retainedScreenshotMetadata,
+                );
                 retainedScreenshotMetadata = await retainComputerScreenshot({
                   db,
                   objectStorage,
@@ -7466,7 +7505,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 currentToolBatchCompletedCallIds = new Set<string>();
               }
               for (const callId of stableToolCallIdsToClear) {
-                computerScreenshotCallIds.delete(callId);
+                retainedSessionImageCallIds.delete(callId);
               }
             }
           }
@@ -9928,6 +9967,11 @@ export function pendingToolCallFromSdkEvent(event: unknown): {
     callName: typeof raw.name === "string" ? raw.name : null,
     callItem,
   };
+}
+
+/** Tools whose intentional visual result must survive inline-media sanitization. */
+export function toolCallProducesRetainableSessionImage(name: string | null): boolean {
+  return name === "computer_screenshot" || name === "view_image";
 }
 
 export function completedToolCallFromSdkEvent(event: unknown): {

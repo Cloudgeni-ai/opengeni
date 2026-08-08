@@ -408,7 +408,7 @@ describe("API helpers", () => {
         headers: {
           origin,
           "access-control-request-method": "GET",
-          "access-control-request-headers": "authorization",
+          "access-control-request-headers": "authorization,range",
         },
       });
 
@@ -417,6 +417,7 @@ describe("API helpers", () => {
     expect(external.headers.get("access-control-allow-origin")).toBe("*");
     expect(external.headers.get("access-control-allow-credentials")).toBeNull();
     expect(external.headers.get("access-control-allow-headers")).toContain("Authorization");
+    expect(external.headers.get("access-control-allow-headers")).toContain("Range");
 
     const externalResponse = await app.request("http://localhost/v1/config/client", {
       headers: { origin: "https://product.example" },
@@ -424,6 +425,12 @@ describe("API helpers", () => {
     expect(externalResponse.status).toBe(200);
     expect(externalResponse.headers.get("access-control-allow-origin")).toBe("*");
     expect(externalResponse.headers.get("access-control-allow-credentials")).toBeNull();
+    expect(externalResponse.headers.get("access-control-expose-headers")).toContain(
+      "Accept-Ranges",
+    );
+    expect(externalResponse.headers.get("access-control-expose-headers")).toContain(
+      "Content-Range",
+    );
 
     const trusted = await preflight("http://localhost:5173");
     expect(trusted.status).toBe(204);
