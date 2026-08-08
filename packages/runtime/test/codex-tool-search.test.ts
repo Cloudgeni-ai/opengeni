@@ -33,6 +33,7 @@ function connectorTool(name: string, description: string, props: string[] = []):
     type: "function",
     name: `codex_apps__${name}`,
     description,
+    isEnabled: async () => true,
     parameters: {
       type: "object",
       properties: Object.fromEntries(props.map((p) => [p, { type: "string" }])),
@@ -391,6 +392,95 @@ describe("tool_search RunState replay", () => {
     expect((resumed.input as RunState<any, any>).toString()).toContain(
       "codex_apps__gmail_send_email",
     );
+  });
+
+  test("accepts a still-authorized historical tool from the current catalog", async () => {
+    const deferred = connectorTool("gmail_send_email", "Send mail", ["to"]);
+    let executions = 0;
+    const search = toolSearchTool({
+      execution: "client",
+      execute: async () => {
+        executions += 1;
+        return [deferred];
+      },
+    }) as unknown as Tool;
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
+    agent.getAllTools = async () => [deferred, search];
+    const state = new RunState(new RunContext(), "hello", agent, null);
+    const call = {
+      type: "tool_search_call" as const,
+      call_id: "search-rebind",
+      status: "completed" as const,
+      execution: "client" as const,
+      arguments: { query: "send mail" },
+    };
+    const output = {
+      type: "tool_search_output" as const,
+      call_id: "search-rebind",
+      status: "completed" as const,
+      execution: "client" as const,
+      tools: [
+        {
+          type: "function" as const,
+          name: deferred.name,
+          description: deferred.description,
+          parameters: deferred.parameters,
+        },
+      ],
+    };
+    (state as unknown as { _generatedItems: unknown[] })._generatedItems = [
+      new RunToolSearchCallItem(call, agent),
+      new RunToolSearchOutputItem(output, agent),
+    ];
+
+    const resumed = await restoreInterruptedRunState(agent, state.toString());
+
+    expect(executions).toBe(0);
+    expect(resumed.toString()).toContain(deferred.name);
+  });
+
+  test("keeps the SDK default execute-and-validate behavior opt-in", async () => {
+    const deferred = connectorTool("gmail_send_email", "Send mail", ["to"]);
+    let executions = 0;
+    const search = toolSearchTool({
+      execution: "client",
+      execute: async () => {
+        executions += 1;
+        return [deferred];
+      },
+    }) as unknown as Tool;
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
+    agent.getAllTools = async () => [deferred, search];
+    const state = new RunState(new RunContext(), "hello", agent, null);
+    const call = {
+      type: "tool_search_call" as const,
+      call_id: "search-default",
+      status: "completed" as const,
+      execution: "client" as const,
+      arguments: { query: "send mail" },
+    };
+    const output = {
+      type: "tool_search_output" as const,
+      call_id: "search-default",
+      status: "completed" as const,
+      execution: "client" as const,
+      tools: [
+        {
+          type: "function" as const,
+          name: deferred.name,
+          description: deferred.description,
+          parameters: deferred.parameters,
+        },
+      ],
+    };
+    (state as unknown as { _generatedItems: unknown[] })._generatedItems = [
+      new RunToolSearchCallItem(call, agent),
+      new RunToolSearchOutputItem(output, agent),
+    ];
+
+    await RunState.fromString(agent, state.toString());
+
+    expect(executions).toBe(1);
   });
 });
 

@@ -46,7 +46,7 @@ export function PhoneFrame({
             </span>
             <span className="min-w-0 flex-1 truncate text-sm font-medium">MCP O…</span>
             <span className="shrink-0 rounded-full border border-border px-2 py-0.5 text-2xs text-fg-muted">
-              on jorgebot
+              production
             </span>
           </div>
 

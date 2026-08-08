@@ -43,7 +43,7 @@ export const PROVIDER_REGISTRY: Record<SandboxBackend, ProviderRegistration> = {
 // boot-time backendId assertion to construct each client without tripping
 // validateCredentials. The SDK client constructors are pure option-stores (the
 // underlying provider SDK is required lazily at create()/resume() time, never at
-// construction — verified against the pinned @openai/agents-extensions 0.13.3), so this is
+// construction — verified against the pinned @openai/agents-extensions 0.14.3), so this is
 // safe with no provider peer dep installed and no network.
 const ASSERTION_STUB_SETTINGS = {
   dockerImage: "opengeni-sandbox:local",

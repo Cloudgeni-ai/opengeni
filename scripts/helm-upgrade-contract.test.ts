@@ -120,6 +120,7 @@ describe("Helm database upgrade contract", () => {
     expect(values).toContain("path: /traffic-readyz");
     expect(values).toContain("OPENGENI_TURN_WORKER_CONCURRENCY_MODE: resource-based");
     expect(values).toContain('OPENGENI_TURN_WORKER_MAX_CONCURRENT_TURNS: "256"');
+    expect(values).toContain('OPENGENI_TURN_WORKER_EMERGENCY_MEMORY_USAGE: "0.9"');
     for (const tier of ["presentation", "execution", "control", "durable"]) {
       expect(defaults).toContain(`    ${tier}:`);
     }
@@ -134,5 +135,34 @@ describe("Helm database upgrade contract", () => {
     expect(natsEdge).not.toContain("targetPort: monitor");
     expect(minioEdge).toContain("targetPort: api");
     expect(minioEdge).not.toContain("targetPort: console");
+  });
+
+  test("keeps the managed turn-worker floor HA without reserving peak memory", async () => {
+    const values = Bun.YAML.parse(
+      await source("deploy/helm/opengeni/values.azure-managed.example.yaml"),
+    ) as {
+      worker: {
+        turns: {
+          replicaCount: number;
+          strategy: { rollingUpdate: { maxSurge: number; maxUnavailable: number } };
+          resources: { requests: { memory: string }; limits: { memory: string } };
+          autoscaling: { minReplicas: number; maxReplicas: number };
+        };
+      };
+      config: Record<string, string>;
+    };
+
+    expect(values.worker.turns).toMatchObject({
+      replicaCount: 2,
+      strategy: { rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } },
+      resources: { requests: { memory: "1Gi" }, limits: { memory: "4Gi" } },
+      autoscaling: { minReplicas: 2, maxReplicas: 20 },
+    });
+    expect(values.config).toMatchObject({
+      OPENGENI_TURN_WORKER_CONCURRENCY_MODE: "resource-based",
+      OPENGENI_TURN_WORKER_MAX_CONCURRENT_TURNS: "32",
+      OPENGENI_TURN_WORKER_TARGET_MEMORY_USAGE: "0.75",
+      OPENGENI_TURN_WORKER_EMERGENCY_MEMORY_USAGE: "0.9",
+    });
   });
 });

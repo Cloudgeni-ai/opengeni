@@ -14,6 +14,9 @@ export type TurnWorkerMemoryScopeSnapshot = {
 
 export type TurnWorkerMemoryPressureSnapshot = {
   processRssBytes: number;
+  processHeapUsedBytes: number;
+  processExternalBytes: number;
+  processArrayBuffersBytes: number;
   scopes: TurnWorkerMemoryScopeSnapshot[];
 };
 
@@ -26,6 +29,7 @@ type GuardSettings = Pick<
   Settings,
   | "turnWorkerConcurrencyMode"
   | "turnWorkerTargetMemoryUsage"
+  | "turnWorkerEmergencyMemoryUsage"
   | "turnWorkerMemoryGuardIntervalMs"
   | "turnWorkerMemoryGuardSustainMs"
 >;
@@ -35,13 +39,17 @@ type GuardDependencies = {
   sample?: () => TurnWorkerMemoryPressureSnapshot;
   setInterval?: typeof setInterval;
   clearInterval?: typeof clearInterval;
+  gc?: () => void;
 };
 
 type SnapshotDependencies = {
   readText?: (path: string) => string | null;
   hostTotalBytes?: () => number;
   hostAvailableBytes?: () => number;
-  processRssBytes?: () => number;
+  processMemoryUsage?: () => Pick<
+    NodeJS.MemoryUsage,
+    "rss" | "heapUsed" | "external" | "arrayBuffers"
+  >;
 };
 
 export type ProcessCgroupMembership = {
@@ -150,20 +158,23 @@ export function readTurnWorkerMemoryPressureSnapshot(
   const hostTotalBytes = linux?.totalBytes ?? (dependencies.hostTotalBytes ?? totalmem)();
   const hostAvailableBytes =
     linux?.availableBytes ?? (dependencies.hostAvailableBytes ?? freemem)();
-  const scopes: TurnWorkerMemoryScopeSnapshot[] = [
-    {
-      scope: "host",
-      usedBytes: Math.max(0, hostTotalBytes - Math.min(hostTotalBytes, hostAvailableBytes)),
-      limitBytes: hostTotalBytes,
-    },
-  ];
-
+  const host = {
+    scope: "host" as const,
+    usedBytes: Math.max(0, hostTotalBytes - Math.min(hostTotalBytes, hostAvailableBytes)),
+    limitBytes: hostTotalBytes,
+  };
   const cgroup = readCgroupMemoryScope(readText);
-  if (cgroup) scopes.push(cgroup);
+  // A finite process cgroup is the pod's actual admission boundary. Host
+  // pressure includes unrelated workloads and must not make every replica
+  // drain simultaneously; use it only when no finite cgroup authority exists.
+  const processMemory = (dependencies.processMemoryUsage ?? process.memoryUsage)();
 
   return {
-    processRssBytes: (dependencies.processRssBytes ?? (() => process.memoryUsage().rss))(),
-    scopes,
+    processRssBytes: processMemory.rss,
+    processHeapUsedBytes: processMemory.heapUsed,
+    processExternalBytes: processMemory.external,
+    processArrayBuffersBytes: processMemory.arrayBuffers,
+    scopes: [cgroup ?? host],
   };
 }
 
@@ -184,7 +195,9 @@ export function createTurnWorkerMemoryPressureGuard(input: {
   const sample = input.dependencies?.sample ?? readTurnWorkerMemoryPressureSnapshot;
   const schedule = input.dependencies?.setInterval ?? setInterval;
   const cancel = input.dependencies?.clearInterval ?? clearInterval;
+  const collectGarbage = input.dependencies?.gc ?? (() => Bun.gc(false));
   const breachStartedAt = new Map<TurnWorkerMemoryScope, number>();
+  let lastGcAt = Number.NEGATIVE_INFINITY;
   let drainRequested = false;
   let closed = false;
 
@@ -224,6 +237,20 @@ export function createTurnWorkerMemoryPressureGuard(input: {
       utilizationRatio: number;
       breachSeconds: number;
     }> = [];
+    for (const [kind, value] of [
+      ["rss", snapshot.processRssBytes],
+      ["heap_used", snapshot.processHeapUsedBytes],
+      ["external", snapshot.processExternalBytes],
+      ["array_buffers", snapshot.processArrayBuffersBytes],
+    ] as const) {
+      safeSetGauge(input.observability, {
+        name: "opengeni_turn_worker_process_memory_bytes",
+        help: "Turn-worker process memory by runtime-reported category.",
+        labels: { kind },
+        value: Number.isFinite(value) && value >= 0 ? value : 0,
+      });
+    }
+    let shouldCollectGarbage = false;
     for (const scope of validScopes) {
       const utilizationRatio = scope.usedBytes / scope.limitBytes;
       const processRssRatio = snapshot.processRssBytes / scope.limitBytes;
@@ -235,9 +262,15 @@ export function createTurnWorkerMemoryPressureGuard(input: {
       });
       safeSetGauge(input.observability, {
         name: "opengeni_turn_worker_memory_guard_target_ratio",
-        help: "Configured memory utilization target enforced by the turn-worker pressure guard.",
+        help: "Memory admission target enforced by the Temporal resource tuner.",
         labels: { scope: scope.scope },
         value: input.settings.turnWorkerTargetMemoryUsage,
+      });
+      safeSetGauge(input.observability, {
+        name: "opengeni_turn_worker_memory_guard_emergency_ratio",
+        help: "Emergency memory threshold enforced by the turn-worker pressure guard.",
+        labels: { scope: scope.scope },
+        value: input.settings.turnWorkerEmergencyMemoryUsage,
       });
       safeSetGauge(input.observability, {
         name: "opengeni_turn_worker_memory_guard_available_bytes",
@@ -251,12 +284,13 @@ export function createTurnWorkerMemoryPressureGuard(input: {
         labels: { scope: scope.scope },
         value: processRssRatio,
       });
+      shouldCollectGarbage ||= processRssRatio >= input.settings.turnWorkerTargetMemoryUsage;
 
-      if (utilizationRatio < input.settings.turnWorkerTargetMemoryUsage) {
+      if (utilizationRatio < input.settings.turnWorkerEmergencyMemoryUsage) {
         breachStartedAt.delete(scope.scope);
         safeSetGauge(input.observability, {
           name: "opengeni_turn_worker_memory_guard_breach_seconds",
-          help: "Seconds the turn-worker memory target has remained continuously breached.",
+          help: "Seconds the turn-worker emergency threshold has remained continuously breached.",
           labels: { scope: scope.scope },
           value: 0,
         });
@@ -269,7 +303,7 @@ export function createTurnWorkerMemoryPressureGuard(input: {
       const breachSeconds = breachMs / 1_000;
       safeSetGauge(input.observability, {
         name: "opengeni_turn_worker_memory_guard_breach_seconds",
-        help: "Seconds the turn-worker memory target has remained continuously breached.",
+        help: "Seconds the turn-worker emergency threshold has remained continuously breached.",
         labels: { scope: scope.scope },
         value: breachSeconds,
       });
@@ -278,7 +312,46 @@ export function createTurnWorkerMemoryPressureGuard(input: {
       }
     }
 
-    if (drainRequested || sustainedBreaches.length === 0) return;
+    // Large request buffers can become unreachable well before JSC's ordinary
+    // heap trigger notices native/external pressure. Nudge an asynchronous GC
+    // at most once per sustain window before escalating to a worker drain.
+    const sustainedBreachesHadGcOpportunity =
+      sustainedBreaches.length > 0 &&
+      sustainedBreaches.every(({ scope }) => {
+        const breachStarted = breachStartedAt.get(scope);
+        return breachStarted !== undefined && lastGcAt >= breachStarted && lastGcAt < observedAt;
+      });
+    let collectedGarbageThisSample = false;
+    if (
+      shouldCollectGarbage &&
+      observedAt - lastGcAt >= input.settings.turnWorkerMemoryGuardSustainMs &&
+      (sustainedBreaches.length === 0 || !sustainedBreachesHadGcOpportunity)
+    ) {
+      lastGcAt = observedAt;
+      try {
+        collectGarbage();
+        collectedGarbageThisSample = true;
+        safeIncrementCounter(input.observability, {
+          name: "opengeni_turn_worker_memory_guard_gc_total",
+          help: "Proactive garbage-collection nudges under process memory pressure.",
+        });
+      } catch {
+        safeIncrementCounter(input.observability, {
+          name: "opengeni_turn_worker_memory_guard_gc_failures_total",
+          help: "Proactive memory-pressure garbage-collection nudges that failed.",
+        });
+      }
+    }
+
+    // The nudge is asynchronous. Give it one sampling interval to make the
+    // reclaimed RSS visible before deciding that process recycling is needed.
+    if (
+      (collectedGarbageThisSample && !sustainedBreachesHadGcOpportunity) ||
+      drainRequested ||
+      sustainedBreaches.length === 0
+    ) {
+      return;
+    }
 
     const primaryBreach = sustainedBreaches.sort(
       (left, right) => right.utilizationRatio - left.utilizationRatio,
@@ -295,7 +368,7 @@ export function createTurnWorkerMemoryPressureGuard(input: {
       errorClass: "WorkerLifecycleOperation",
       errorCode: "worker_draining",
       origin: "worker-lifecycle",
-      reason: `memory pressure (${primaryBreach.scope}, ${boundedRatio(primaryBreach.utilizationRatio)} >= ${input.settings.turnWorkerTargetMemoryUsage}, ${primaryBreach.breachSeconds}s)`,
+      reason: `memory pressure (${primaryBreach.scope}, ${boundedRatio(primaryBreach.utilizationRatio)} >= ${input.settings.turnWorkerEmergencyMemoryUsage}, ${primaryBreach.breachSeconds}s)`,
     });
     try {
       input.drain();

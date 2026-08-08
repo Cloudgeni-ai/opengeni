@@ -238,10 +238,21 @@ spec:
             max by (instance, scope) (opengeni_turn_worker_memory_guard_target_ratio)
           for: 30s
           labels:
+            severity: warning
+          annotations:
+            summary: A resource-based turn worker reached its admission target
+            description: Temporal should stop admitting more work while HPA or queued capacity absorbs load. This is backpressure, not a restart condition.
+        - alert: OpenGeniTurnWorkerMemoryEmergency
+          expr: |
+            max by (instance, scope) (opengeni_turn_worker_memory_guard_utilization_ratio)
+            >= on (instance, scope)
+            max by (instance, scope) (opengeni_turn_worker_memory_guard_emergency_ratio)
+          for: 30s
+          labels:
             severity: critical
           annotations:
-            summary: A resource-based turn worker exhausted its configured memory headroom
-            description: The continuous host/cgroup guard remains above its memory target. The worker should stop new admission and enter the ordinary graceful checkpoint/drain path.
+            summary: A turn worker crossed its emergency memory threshold
+            description: Admission already stopped, but in-flight work retained enough memory to enter the last-resort graceful drain window.
         - alert: OpenGeniTurnWorkerMemoryConsumesReserve
           expr: |
             max by (instance, scope) (opengeni_turn_worker_memory_guard_process_rss_ratio)
@@ -255,7 +266,7 @@ spec:
             severity: warning
           annotations:
             summary: One turn worker RSS consumes more than the configured memory reserve
-            description: The worker process alone is larger than the headroom reserved for all remaining host or cgroup work. Reduce per-turn retention or isolate the worker before pressure reaches the hard drain target.
+            description: The worker process alone is larger than the headroom reserved above ordinary admission. Reduce per-turn retention or isolate the worker before pressure reaches the emergency threshold.
         - alert: OpenGeniTurnWorkerMemoryGuardDraining
           expr: sum(increase(opengeni_turn_worker_memory_guard_drains_total[10m])) > 0
           labels:

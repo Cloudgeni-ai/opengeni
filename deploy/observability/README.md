@@ -82,6 +82,7 @@ kubectl label namespace opengeni opengeni.ai/monitoring=enabled --overwrite
 helm upgrade --install opengeni-observability deploy/observability \
   --namespace observability \
   --set-string "opengeni.sourceRevision=$(git rev-parse HEAD)" \
+  --set-string "kube-prometheus-stack.grafana.podAnnotations.opengeni\.ai/source-revision=$(git rev-parse HEAD)" \
   --set-string kube-prometheus-stack.prometheus.prometheusSpec.externalLabels.environment=self-hosted \
   --wait --timeout 20m
 ```
@@ -114,7 +115,7 @@ It verifies:
 - the bundled Grafana, kube-state-metrics, and node-exporter ServiceMonitors
   carry the same discovery label and have healthy live targets;
 - required rules are declared and loaded by the live Prometheus API;
-- Grafana is healthy and its dashboard provisioner has received the exact files.
+- Grafana is healthy and its finite startup provisioner has copied the exact files.
 
 `--skip-live-apis` is available only for object-level diagnostics; it is an
 explicit verification gap, not proof that Prometheus or Grafana consumed the
@@ -160,7 +161,10 @@ explicit CRD and ownership plan.
   authenticated ingress in an environment overlay; do not expose them
   anonymously.
 - The bundled Grafana dashboard sidecar reads ConfigMaps only in its own
-  namespace. It does not receive cluster-wide Secret access.
+  namespace, runs once as an init container, and does not receive cluster-wide
+  Secret access. The source-revision pod annotation restarts Grafana on each
+  chart revision so dashboard and datasource updates are loaded without an
+  always-resident Kubernetes watcher.
 - Stable dashboard UIDs are intentional. UI edits to provisioned dashboards
   are not authoritative and may be overwritten by the next reconciliation.
 - Treat a `kube-prometheus-stack` version change, regenerated `Chart.lock`,

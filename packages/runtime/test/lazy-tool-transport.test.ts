@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   Agent,
+  MemorySession,
   RunState,
   Runner,
   Usage,
@@ -128,6 +129,7 @@ async function runStreamed(
   });
   const result = await runner.run(agent, "What is the weather?", {
     stream: true,
+    historyOwnership: "external",
     maxTurns: 8,
     toolNotFoundBehavior: "return_error_to_model",
   });
@@ -135,6 +137,140 @@ async function runStreamed(
   await result.completed;
   return result;
 }
+
+describe("application-owned Agents SDK history", () => {
+  test("keeps projected model views separate while borrowing durable input unchanged", async () => {
+    const model = new CapturingModel();
+    const agent = new Agent({
+      name: "external-history-test",
+      instructions: "Answer briefly.",
+      model: "scripted",
+    });
+    const runner = new Runner({ modelProvider: providerFor(model) });
+    const input = [
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "durable-original" }],
+      },
+    ] as any;
+
+    const result = await runner.run(agent, input, {
+      historyOwnership: "external",
+      callModelInputFilter: ({ modelData }) => ({
+        ...modelData,
+        input: modelData.input.map((item, index) =>
+          index === 0
+            ? {
+                ...(item as any),
+                content: [{ type: "input_text", text: "wire-only-view" }],
+              }
+            : item,
+        ),
+      }),
+    });
+
+    expect(input[0].content[0].text).toBe("durable-original");
+    expect((model.requests[0]!.input[0] as any).content[0].text).toBe("wire-only-view");
+    expect(((result.state as any)._originalInput[0] as any).content[0].text).toBe(
+      "durable-original",
+    );
+    expect((result.state as any)._currentTurnSessionHistoryTransactionInputItems).toBeUndefined();
+  });
+
+  test("fails closed when mixed with SDK or server-owned conversation state", async () => {
+    const model = new CapturingModel();
+    const agent = new Agent({
+      name: "external-history-conflict-test",
+      instructions: "Answer briefly.",
+      model: "scripted",
+    });
+    const runner = new Runner({ modelProvider: providerFor(model) });
+
+    await expect(
+      runner.run(agent, "hello", {
+        historyOwnership: "external",
+        session: new MemorySession(),
+      }),
+    ).rejects.toThrow("External history ownership cannot be combined");
+    await expect(
+      runner.run(agent, "hello", {
+        historyOwnership: "external",
+        previousResponseId: "response-1",
+      }),
+    ).rejects.toThrow("External history ownership cannot be combined");
+    expect(model.requests).toHaveLength(0);
+  });
+
+  test("leaves default SDK Session behavior intact", async () => {
+    const model = new CapturingModel();
+    const agent = new Agent({
+      name: "sdk-history-default-test",
+      instructions: "Answer briefly.",
+      model: "scripted",
+    });
+    const runner = new Runner({ modelProvider: providerFor(model) });
+    const session = new MemorySession();
+
+    await runner.run(agent, "session-owned", { session });
+
+    expect(JSON.stringify(await session.getItems())).toContain("session-owned");
+    expect(model.requests).toHaveLength(1);
+  });
+
+  test("can retain only the latest raw response without losing history or usage", async () => {
+    let executions = 0;
+    const agent = agentWith(
+      weatherTool({
+        execute: ({ city }) => {
+          executions += 1;
+          return `sunny:${city}`;
+        },
+      }),
+    );
+    const model = new ScriptedStreamingModel([
+      [
+        {
+          type: "function_call",
+          callId: "retained-response-call",
+          name: WEATHER_TOOL,
+          arguments: JSON.stringify({ city: "Oslo" }),
+        },
+      ],
+      [finalMessage("complete")],
+    ]);
+    const result = await new Runner({ modelProvider: providerFor(model) }).run(
+      agent,
+      "Check Oslo",
+      {
+        stream: true,
+        historyOwnership: "external",
+        modelResponseRetention: "last",
+        maxTurns: 4,
+      },
+    );
+    for await (const _event of result.toStream()) void _event;
+    await result.completed;
+
+    expect(executions).toBe(1);
+    expect(result.rawResponses).toHaveLength(1);
+    expect(result.rawResponses[0]!.output).toEqual([finalMessage("complete")]);
+    expect((result.state as any)._modelResponseCount).toBe(2);
+    expect(result.state.usage.requests).toBe(2);
+    expect(result.history.some((item) => item.type === "function_call")).toBe(true);
+    expect(result.history.some((item) => item.type === "function_call_result")).toBe(true);
+    expect(JSON.parse(result.state.toString()).modelResponses).toHaveLength(1);
+  });
+
+  test("rejects an unknown raw-response retention policy", async () => {
+    const runner = new Runner({ modelProvider: providerFor(new CapturingModel()) });
+    await expect(
+      runner.run(new Agent({ name: "invalid-retention", instructions: "Answer." }), "hello", {
+        modelResponseRetention: "invalid" as never,
+      }),
+    ).rejects.toThrow("modelResponseRetention must be either 'all' or 'last'");
+  });
+});
 
 function serializedFunction(toolValue: Tool) {
   if (toolValue.type !== "function") throw new Error("expected function tool");
@@ -283,6 +419,8 @@ describe("generic lazy tool dispatch", () => {
     const firstRunner = new Runner({ modelProvider });
     const first = await firstRunner.run(agent, "Check Berlin", {
       stream: true,
+      historyOwnership: "external",
+      modelResponseRetention: "last",
       maxTurns: 8,
       toolNotFoundBehavior: "return_error_to_model",
     });
@@ -303,6 +441,8 @@ describe("generic lazy tool dispatch", () => {
     const resumedRunner = new Runner({ modelProvider });
     const resumed = await resumedRunner.run(agent, resumedState, {
       stream: true,
+      historyOwnership: "external",
+      modelResponseRetention: "last",
       maxTurns: 8,
       toolNotFoundBehavior: "return_error_to_model",
     });

@@ -238,8 +238,14 @@ export function repairHistoryProtocolItems<T extends HistoryItem>(items: readonl
   }
 
   const paired =
-    dropped.size === 0 ? items.slice() : items.filter((_item, index) => !dropped.has(index));
-  return paired.map(stripInternalModelMetadata);
+    dropped.size === 0 ? (items as T[]) : items.filter((_item, index) => !dropped.has(index));
+  let projected: T[] | null = null;
+  for (const [index, item] of paired.entries()) {
+    const next = stripInternalModelMetadata(item);
+    if (next !== item && projected === null) projected = paired.slice(0, index);
+    projected?.push(next);
+  }
+  return projected ?? paired;
 }
 
 /**
@@ -511,7 +517,7 @@ export function serializedRunStateHasOpaqueProviderArtifact(serialized: string):
  * Normalize `computer_call` items so each carries EXACTLY ONE of the two
  * mutually-exclusive action fields the provider accepts.
  *
- * The OpenAI Agents SDK 0.11.6 `computer_call` schema (protocol.mjs) carries
+ * The OpenAI Agents SDK 0.14.3 `computer_call` schema (protocol.mjs) carries
  * BOTH the legacy singular `action` and the GA batched `actions`, each
  * `.optional()`, and only requires "at least one" (its superRefine errors only
  * when both are absent). The Azure computer-use endpoint is stricter: it
@@ -543,20 +549,22 @@ export function serializedRunStateHasOpaqueProviderArtifact(serialized: string):
 export function normalizeComputerCallActions<T extends HistoryItem>(items: readonly T[]): T[] {
   let changed = false;
   const out = items.map((item) => {
-    if (itemType(item) !== "computer_call") {
-      return item;
-    }
-    const record = item as Record<string, unknown>;
-    const hasAction = record.action !== undefined && record.action !== null;
-    const hasActions = Array.isArray(record.actions) && (record.actions as unknown[]).length > 0;
-    if (hasAction && hasActions) {
-      changed = true;
-      const { action: _droppedAction, ...rest } = record;
-      return rest as unknown as T;
-    }
-    return item;
+    const normalized = normalizeComputerCallAction(item);
+    changed ||= normalized !== item;
+    return normalized;
   });
-  return changed ? out : items.slice();
+  return changed ? out : (items as T[]);
+}
+
+/** Per-item form used by the run-local memoized wire projector. */
+export function normalizeComputerCallAction<T extends HistoryItem>(item: T): T {
+  if (itemType(item) !== "computer_call") return item;
+  const record = item as Record<string, unknown>;
+  const hasAction = record.action !== undefined && record.action !== null;
+  const hasActions = Array.isArray(record.actions) && (record.actions as unknown[]).length > 0;
+  if (!hasAction || !hasActions) return item;
+  const { action: _droppedAction, ...rest } = record;
+  return rest as T;
 }
 
 /**

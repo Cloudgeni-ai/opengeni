@@ -276,7 +276,18 @@
         {
           "refId": "B",
           "expr": "max by (instance, scope) (opengeni_turn_worker_memory_guard_target_ratio)",
-          "legendFormat": "{{instance}} {{scope}} drain target",
+          "legendFormat": "{{instance}} {{scope}} admission target",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "max by (instance, scope) (opengeni_turn_worker_memory_guard_emergency_ratio)",
+          "legendFormat": "{{instance}} {{scope}} emergency threshold",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"

@@ -17,7 +17,7 @@ export interface ObservabilityStackPlan {
   appReleaseName: string;
   environment: string;
   chartPath: "deploy/observability";
-  chartVersion: "0.1.1";
+  chartVersion: "0.1.3";
   kubePrometheusStackVersion: "87.16.1";
   valuesFiles: string[];
   applicationValuesFile: "deploy/observability/opengeni.values.example.yaml";
@@ -91,8 +91,9 @@ export function observabilityStackPlanFor(
     profile === "production" ? "deploy/observability/values.production.example.yaml" : null;
   const valuesFiles = profileValues ? [profileValues] : [];
   const valuesArgs = valuesFiles.map((path) => ` --values ${path}`).join("");
-  const sourceRevision =
-    '"opengeni.sourceRevision=${OPENGENI_SOURCE_REVISION:-$(git rev-parse HEAD)}"';
+  const revisionExpression = "${OPENGENI_SOURCE_REVISION:-$(git rev-parse HEAD)}";
+  const sourceRevision = `"opengeni.sourceRevision=${revisionExpression}"`;
+  const grafanaSourceRevision = `"kube-prometheus-stack.grafana.podAnnotations.opengeni\\.ai/source-revision=${revisionExpression}"`;
 
   return {
     profile,
@@ -102,7 +103,7 @@ export function observabilityStackPlanFor(
     appReleaseName,
     environment,
     chartPath: "deploy/observability",
-    chartVersion: "0.1.1",
+    chartVersion: "0.1.3",
     kubePrometheusStackVersion: "87.16.1",
     valuesFiles,
     applicationValuesFile: "deploy/observability/opengeni.values.example.yaml",
@@ -113,7 +114,7 @@ export function observabilityStackPlanFor(
       `kubectl label namespace ${namespace} opengeni.ai/monitoring=enabled --overwrite`,
       `kubectl create namespace ${appNamespace} --dry-run=client -o yaml | kubectl apply -f -`,
       `kubectl label namespace ${appNamespace} opengeni.ai/monitoring=enabled --overwrite`,
-      `helm upgrade --install ${releaseName} deploy/observability --namespace ${namespace}${valuesArgs} --set-string kube-prometheus-stack.prometheus.prometheusSpec.externalLabels.environment=${environment} --set-string ${sourceRevision} --wait --timeout 20m`,
+      `helm upgrade --install ${releaseName} deploy/observability --namespace ${namespace}${valuesArgs} --set-string kube-prometheus-stack.prometheus.prometheusSpec.externalLabels.environment=${environment} --set-string ${sourceRevision} --set-string ${grafanaSourceRevision} --wait --timeout 20m`,
     ],
     verifyCommands: [
       `bun run deployment:observability-verify -- --namespace ${namespace} --release ${releaseName} --app-namespace ${appNamespace}`,

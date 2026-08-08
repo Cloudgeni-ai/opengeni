@@ -24,9 +24,13 @@ import {
   sumUsageQuantity,
   type Database,
 } from "@opengeni/db";
-import type { ActivityServices, MaybeContinueGoalInput, MaybeContinueGoalResult } from "./types";
+import type {
+  ControlActivityServices,
+  MaybeContinueGoalInput,
+  MaybeContinueGoalResult,
+} from "./types";
 
-export function createGoalActivities(services: () => Promise<ActivityServices>) {
+export function createGoalActivities(services: () => Promise<ControlActivityServices>) {
   async function enqueueGoalRetryWake(input: MaybeContinueGoalInput): Promise<void> {
     const { db } = await services();
     await enqueueSessionWorkflowWakeIfRunnable(db, {

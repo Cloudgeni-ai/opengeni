@@ -1,6 +1,6 @@
 # Dependency Upgrade Log
 
-**Date:** 2026-07-14 (updated 2026-07-30)
+**Date:** 2026-07-14 (updated 2026-08-08)
 **Project:** OpenGeni  
 **Language:** TypeScript  
 **Manifests:** `package.json`, `packages/runtime/package.json`,
@@ -14,6 +14,23 @@ the root resolution contract now pins patched transitive releases so production
 does not ship advisories hidden behind older dependency trees.
 
 ## Updates
+
+### OpenAI Agents JS: 0.13.3 → 0.14.3
+
+- Upgraded every direct `@openai/agents`, `@openai/agents-core`, and
+  `@openai/agents-extensions` declaration together. The resolved
+  `@openai/agents-openai` and `@openai/agents-realtime` packages are also
+  0.14.3; the runtime keeps the compatible OpenAI client at 6.47.0.
+- Rebased OpenGeni's exact-resume sandbox patch without widening it: Blaxel,
+  Daytona, E2B, and Runloop still expose `resumeExact()` and never silently
+  replace a missing provider sandbox on that path.
+- Upstream source: `openai/openai-agents-js` tag `v0.14.3`, commit
+  `94a3edc3e5318fdbc4ceb045df4dad934ca4ab2b`.
+- Re-ran the provider fault matrix after the upgrade. The release fixes several
+  stream-usage, cancellation, refusal, tool-identity, and session-transaction
+  defects, but it does not remove the runner's repeated full-history clones or
+  validate every Responses terminal failure shape. Those remain application
+  hardening work, not assumptions attributed to the dependency upgrade.
 
 ### OpenAI Agents JS: 0.11.6 → 0.13.3
 
@@ -70,6 +87,21 @@ The root override map binds the dependency graph to patched stable releases of
 
 ## Validation
 
+- [x] OpenAI Agents JS 0.14.3 frozen install and dependency-tree convergence
+- [x] Typecheck (23 projects)
+- [x] Full suite after rebasing the provider-neutral image-generation release
+  (6,743 passed, 29 explicitly gated live-service tests skipped, 0 failed,
+  37,287 assertions across 638 files)
+- [x] Focused provider/recovery/worker/deployment suite (628 passed, 0 failed)
+- [x] Native Linux API and worker image builds
+- [x] Deterministic model-input, process-RSS, long-turn, and observability-series
+  memory gates: 16.17x lower model-input peak delta for an identical 8,000-item
+  wire history; 33.8% lower long-turn peak delta and 46.0% lower settled delta
+  with an identical 17.7 MB wire fingerprint and no slowdown; 18.9–27.0%
+  process-bundle RSS reduction; 3.86x projected Prometheus head-series reduction
+  with all application metrics retained
+- [x] Minimal ad-hoc live Codex-subscription, Azure Responses, Fireworks Chat,
+  and pinned Kimi Gateway probes
 - [x] Typecheck (19 projects)
 - [x] Provider unit tests
 - [x] Full real-database suite (2,953 passed, 3 explicitly gated live-service
@@ -77,12 +109,11 @@ The root override map binds the dependency graph to patched stable releases of
 - [x] Dependency audit (0 vulnerabilities)
 - [ ] Production Codex-subscription canary and post-cutover continuity proof
 
-The zero-advisory result above is the 2026-07-14 release receipt. On
-2026-07-30, `bun audit` reported 17 advisories in pre-existing unrelated
-dependency paths (`better-auth`, `sharp`, `axios`, `postcss`, `fast-uri`,
-`@hono/node-server`, and `body-parser`); Modal 0.9.0 introduced none. Those
-updates require their own compatibility review and are not silently bundled
-into the sandbox protocol cutover.
+The zero-advisory result above is the 2026-07-14 release receipt. On 2026-08-08,
+`bun audit` reported 37 advisories in pre-existing unrelated dependency paths.
+The advisory IDs and severities are identical to current `origin/main`; this
+upgrade introduced none. Those updates require their own compatibility review
+and are not silently bundled into this runtime cutover.
 
 ## Commands
 

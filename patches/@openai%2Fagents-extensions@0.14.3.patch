@@ -15,7 +15,7 @@ index e2dccf6b67a01d9c7f9f6d12d9716ed3a36241f8..a5027031e230f862c34a1a284e86ab34
  }
  export {};
 diff --git a/dist/sandbox/blaxel/sandbox.js b/dist/sandbox/blaxel/sandbox.js
-index 75a9f5cffd20a50213b914c95a9c08ab0d8e03a1..f1d371c51c2f9658fd4c77726ef5054cc3afb2d9 100644
+index 99cd2cf7ced30b5cab0bdcb82eb3225a08a191e1..14b5e20d7d50cb67470cdea4502faeec47f76be9 100644
 --- a/dist/sandbox/blaxel/sandbox.js
 +++ b/dist/sandbox/blaxel/sandbox.js
 @@ -643,7 +643,7 @@ class BlaxelSandboxClient {
@@ -24,10 +24,10 @@ index 75a9f5cffd20a50213b914c95a9c08ab0d8e03a1..f1d371c51c2f9658fd4c77726ef5054c
      }
 -    async resume(state) {
 +    async resume(state, options = {}) {
+         (0, shared_1.assertRemoteSandboxSessionStateCanResume)(state);
          const SandboxInstance = await loadBlaxelSandboxClass();
          let sandbox;
-         try {
-@@ -655,9 +655,21 @@ class BlaxelSandboxClient {
+@@ -656,9 +656,21 @@ class BlaxelSandboxClient {
                  provider: 'blaxel',
                  details: { sandboxName: state.sandboxName },
              });
@@ -49,7 +49,7 @@ index 75a9f5cffd20a50213b914c95a9c08ab0d8e03a1..f1d371c51c2f9658fd4c77726ef5054c
              return await this.recreateFromState(state);
          }
          if (state.ownsSandbox) {
-@@ -677,6 +689,9 @@ class BlaxelSandboxClient {
+@@ -678,6 +690,9 @@ class BlaxelSandboxClient {
          await session.rehydrateActiveMountPathsFromManifest();
          return session;
      }
@@ -57,10 +57,10 @@ index 75a9f5cffd20a50213b914c95a9c08ab0d8e03a1..f1d371c51c2f9658fd4c77726ef5054c
 +        return await this.resume(state, { recreateIfMissing: false });
 +    }
      async recreateFromState(state) {
-         const session = await this.create(state.manifest, {
-             image: state.image,
+         const manifest = state.manifest;
+         const session = await this.create((0, shared_1.manifestWithMaterializedEnvironmentReferences)(manifest, state.environment), {
 diff --git a/dist/sandbox/blaxel/sandbox.mjs b/dist/sandbox/blaxel/sandbox.mjs
-index 8cfe8a9fa5ece567809b29eb9e662d6f570eded0..d3bc7cf1571182f615a21e7d356d8d45972625b3 100644
+index f891a40cfd99ac073f022335e120aaf7b3a730a3..25fc0f872e84453e7c64bcb14b9d5fbbc6ef26f6 100644
 --- a/dist/sandbox/blaxel/sandbox.mjs
 +++ b/dist/sandbox/blaxel/sandbox.mjs
 @@ -606,7 +606,7 @@ export class BlaxelSandboxClient {
@@ -69,10 +69,10 @@ index 8cfe8a9fa5ece567809b29eb9e662d6f570eded0..d3bc7cf1571182f615a21e7d356d8d45
      }
 -    async resume(state) {
 +    async resume(state, options = {}) {
+         assertRemoteSandboxSessionStateCanResume(state);
          const SandboxInstance = await loadBlaxelSandboxClass();
          let sandbox;
-         try {
-@@ -618,9 +618,21 @@ export class BlaxelSandboxClient {
+@@ -619,9 +619,21 @@ export class BlaxelSandboxClient {
                  provider: 'blaxel',
                  details: { sandboxName: state.sandboxName },
              });
@@ -94,7 +94,7 @@ index 8cfe8a9fa5ece567809b29eb9e662d6f570eded0..d3bc7cf1571182f615a21e7d356d8d45
              return await this.recreateFromState(state);
          }
          if (state.ownsSandbox) {
-@@ -640,6 +652,9 @@ export class BlaxelSandboxClient {
+@@ -641,6 +653,9 @@ export class BlaxelSandboxClient {
          await session.rehydrateActiveMountPathsFromManifest();
          return session;
      }
@@ -102,8 +102,8 @@ index 8cfe8a9fa5ece567809b29eb9e662d6f570eded0..d3bc7cf1571182f615a21e7d356d8d45
 +        return await this.resume(state, { recreateIfMissing: false });
 +    }
      async recreateFromState(state) {
-         const session = await this.create(state.manifest, {
-             image: state.image,
+         const manifest = state.manifest;
+         const session = await this.create(manifestWithMaterializedEnvironmentReferences(manifest, state.environment), {
 diff --git a/dist/sandbox/daytona/sandbox.d.ts b/dist/sandbox/daytona/sandbox.d.ts
 index 8374847c4a8064b1f17ae45771732c5f13cceb5d..393a532dc98e80c91c621fb3e3206f39247ab0de 100644
 --- a/dist/sandbox/daytona/sandbox.d.ts
@@ -121,19 +121,19 @@ index 8374847c4a8064b1f17ae45771732c5f13cceb5d..393a532dc98e80c91c621fb3e3206f39
  }
  export {};
 diff --git a/dist/sandbox/daytona/sandbox.js b/dist/sandbox/daytona/sandbox.js
-index ebb08cc7e1c58d71db672793dda2842a340e837d..99c15e0383ff9b9f27a951c47fe778c1186dee72 100644
+index 68517e721ad21e35205abd513803f4ae71b7c251..787fc1371cfc427a17f868bb72254f7030a2c03b 100644
 --- a/dist/sandbox/daytona/sandbox.js
 +++ b/dist/sandbox/daytona/sandbox.js
-@@ -738,7 +738,7 @@ class DaytonaSandboxClient {
+@@ -751,7 +751,7 @@ class DaytonaSandboxClient {
              target: (0, shared_1.readOptionalString)(state, 'target'),
          };
      }
 -    async resume(state) {
 +    async resume(state, options = {}) {
+         (0, shared_1.assertRemoteSandboxSessionStateCanResume)(state);
          const client = await createDaytonaClient({
              ...this.options,
-             apiKey: state.apiKey ?? this.options.apiKey,
-@@ -756,6 +756,9 @@ class DaytonaSandboxClient {
+@@ -770,6 +770,9 @@ class DaytonaSandboxClient {
                  provider: 'daytona',
                  details: { sandboxId: state.sandboxId },
              });
@@ -143,7 +143,7 @@ index ebb08cc7e1c58d71db672793dda2842a340e837d..99c15e0383ff9b9f27a951c47fe778c1
              return await this.recreateFromPersistedState(client, state);
          }
          const session = new DaytonaSandboxSession({
-@@ -767,6 +770,9 @@ class DaytonaSandboxClient {
+@@ -781,6 +784,9 @@ class DaytonaSandboxClient {
          await session.rematerializeMountEntries();
          return session;
      }
@@ -154,19 +154,19 @@ index ebb08cc7e1c58d71db672793dda2842a340e837d..99c15e0383ff9b9f27a951c47fe778c1
          const sandbox = await (0, shared_1.withProviderError)('DaytonaSandboxClient', 'daytona', 'create sandbox', async () => await client.create({
              ...(state.sandboxSnapshotName
 diff --git a/dist/sandbox/daytona/sandbox.mjs b/dist/sandbox/daytona/sandbox.mjs
-index f3e700556ad3560379ed16a67fddf5fd24760817..2def2268c78a46446577bbcdb34d513148a52d46 100644
+index cd691f2246a96425f6cdf03894aeff7bc73c0cee..805200a1ae980e09395c437d7fd662a2b0bcecfe 100644
 --- a/dist/sandbox/daytona/sandbox.mjs
 +++ b/dist/sandbox/daytona/sandbox.mjs
-@@ -701,7 +701,7 @@ export class DaytonaSandboxClient {
+@@ -714,7 +714,7 @@ export class DaytonaSandboxClient {
              target: readOptionalString(state, 'target'),
          };
      }
 -    async resume(state) {
 +    async resume(state, options = {}) {
+         assertRemoteSandboxSessionStateCanResume(state);
          const client = await createDaytonaClient({
              ...this.options,
-             apiKey: state.apiKey ?? this.options.apiKey,
-@@ -719,6 +719,9 @@ export class DaytonaSandboxClient {
+@@ -733,6 +733,9 @@ export class DaytonaSandboxClient {
                  provider: 'daytona',
                  details: { sandboxId: state.sandboxId },
              });
@@ -176,7 +176,7 @@ index f3e700556ad3560379ed16a67fddf5fd24760817..2def2268c78a46446577bbcdb34d5131
              return await this.recreateFromPersistedState(client, state);
          }
          const session = new DaytonaSandboxSession({
-@@ -730,6 +733,9 @@ export class DaytonaSandboxClient {
+@@ -744,6 +747,9 @@ export class DaytonaSandboxClient {
          await session.rematerializeMountEntries();
          return session;
      }
@@ -187,7 +187,7 @@ index f3e700556ad3560379ed16a67fddf5fd24760817..2def2268c78a46446577bbcdb34d5131
          const sandbox = await withProviderError('DaytonaSandboxClient', 'daytona', 'create sandbox', async () => await client.create({
              ...(state.sandboxSnapshotName
 diff --git a/dist/sandbox/e2b/sandbox.d.ts b/dist/sandbox/e2b/sandbox.d.ts
-index 397c9f7809a4e78843db14e8a16385f659a6cf1f..ba9b2f5c881f564a29d83eaa2966aa2f70553e94 100644
+index 8d02fff468300317388d5f4dc2b9d9bdafd72abe..b85cd52bf840ec3e4f64672ae491363953ae44f2 100644
 --- a/dist/sandbox/e2b/sandbox.d.ts
 +++ b/dist/sandbox/e2b/sandbox.d.ts
 @@ -166,6 +166,9 @@ export declare class E2BSandboxClient implements SandboxClient<E2BSandboxClientO
@@ -202,7 +202,7 @@ index 397c9f7809a4e78843db14e8a16385f659a6cf1f..ba9b2f5c881f564a29d83eaa2966aa2f
  }
  export {};
 diff --git a/dist/sandbox/e2b/sandbox.js b/dist/sandbox/e2b/sandbox.js
-index ccf3b1262ac248ff2f3eb178a18759ede5c53ef6..8e69ce267147788c8212735a3d24a0f74cd00405 100644
+index a383d0a56ab09709dfdf20984a483940a34060b7..276133da390e35799827c385fbad257a3dbf5e82 100644
 --- a/dist/sandbox/e2b/sandbox.js
 +++ b/dist/sandbox/e2b/sandbox.js
 @@ -616,7 +616,7 @@ class E2BSandboxClient {
@@ -211,10 +211,10 @@ index ccf3b1262ac248ff2f3eb178a18759ede5c53ef6..8e69ce267147788c8212735a3d24a0f7
      }
 -    async resume(state) {
 +    async resume(state, options = {}) {
+         (0, shared_1.assertRemoteSandboxSessionStateCanResume)(state);
          const Sandbox = await loadE2BSandboxClass(state.sandboxType);
          const connect = Sandbox.connect ?? Sandbox.resume;
-         if (connect) {
-@@ -634,14 +634,23 @@ class E2BSandboxClient {
+@@ -635,9 +635,15 @@ class E2BSandboxClient {
                      provider: 'e2b',
                      details: { sandboxId: state.sandboxId },
                  });
@@ -227,10 +227,12 @@ index ccf3b1262ac248ff2f3eb178a18759ede5c53ef6..8e69ce267147788c8212735a3d24a0f7
 +        else if (options.recreateIfMissing === false) {
 +            throw new agents_core_1.UserError('E2BSandboxClient cannot exactly resume because the installed E2B SDK exposes no connect or resume operation.');
 +        }
-         return await this.create(state.manifest, {
+         const manifest = state.manifest;
+         const session = await this.create((0, shared_1.manifestWithMaterializedEnvironmentReferences)(manifest, state.environment), {
              ...stateToCreateOptions(state),
-             env: state.environment,
-         });
+@@ -646,6 +652,9 @@ class E2BSandboxClient {
+         session.state.manifest = manifest;
+         return session;
      }
 +    async resumeExact(state) {
 +        return await this.resume(state, { recreateIfMissing: false });
@@ -239,7 +241,7 @@ index ccf3b1262ac248ff2f3eb178a18759ede5c53ef6..8e69ce267147788c8212735a3d24a0f7
  exports.E2BSandboxClient = E2BSandboxClient;
  function validateOptions(options) {
 diff --git a/dist/sandbox/e2b/sandbox.mjs b/dist/sandbox/e2b/sandbox.mjs
-index 769abca8cf0bd3b528eab42e991c8e1494e47f3d..349c5f10c4b752feb5776f74dda07589e28a7d89 100644
+index 6453de1e106fddcfe030beabf0056122dbe18566..ed17d24f7090696b15fadc826d719d80fda57a64 100644
 --- a/dist/sandbox/e2b/sandbox.mjs
 +++ b/dist/sandbox/e2b/sandbox.mjs
 @@ -579,7 +579,7 @@ export class E2BSandboxClient {
@@ -248,10 +250,10 @@ index 769abca8cf0bd3b528eab42e991c8e1494e47f3d..349c5f10c4b752feb5776f74dda07589
      }
 -    async resume(state) {
 +    async resume(state, options = {}) {
+         assertRemoteSandboxSessionStateCanResume(state);
          const Sandbox = await loadE2BSandboxClass(state.sandboxType);
          const connect = Sandbox.connect ?? Sandbox.resume;
-         if (connect) {
-@@ -597,14 +597,23 @@ export class E2BSandboxClient {
+@@ -598,9 +598,15 @@ export class E2BSandboxClient {
                      provider: 'e2b',
                      details: { sandboxId: state.sandboxId },
                  });
@@ -264,10 +266,12 @@ index 769abca8cf0bd3b528eab42e991c8e1494e47f3d..349c5f10c4b752feb5776f74dda07589
 +        else if (options.recreateIfMissing === false) {
 +            throw new UserError('E2BSandboxClient cannot exactly resume because the installed E2B SDK exposes no connect or resume operation.');
 +        }
-         return await this.create(state.manifest, {
+         const manifest = state.manifest;
+         const session = await this.create(manifestWithMaterializedEnvironmentReferences(manifest, state.environment), {
              ...stateToCreateOptions(state),
-             env: state.environment,
-         });
+@@ -609,6 +615,9 @@ export class E2BSandboxClient {
+         session.state.manifest = manifest;
+         return session;
      }
 +    async resumeExact(state) {
 +        return await this.resume(state, { recreateIfMissing: false });
@@ -291,7 +295,7 @@ index 99e9131d49c18987c997adf493795a648cd8f261..7484dd5d704ca3b22b095eaffdf43b28
  }
  export {};
 diff --git a/dist/sandbox/runloop/sandbox.js b/dist/sandbox/runloop/sandbox.js
-index 0918e99b5306e1b5fecd37aff4416d3617c9073a..d4ca98e457bccad4b12cbe3245aa90aee62b586a 100644
+index a2d4b2f7d9f6286f2c14a1758a53bc51048f418b..4ec21a7c7f6ea998dca5f399582577750feb4aef 100644
 --- a/dist/sandbox/runloop/sandbox.js
 +++ b/dist/sandbox/runloop/sandbox.js
 @@ -844,7 +844,7 @@ class RunloopSandboxClient {
@@ -300,10 +304,10 @@ index 0918e99b5306e1b5fecd37aff4416d3617c9073a..d4ca98e457bccad4b12cbe3245aa90ae
      }
 -    async resume(state) {
 +    async resume(state, options = {}) {
+         (0, shared_1.assertRemoteSandboxSessionStateCanResume)(state);
          const resumeState = {
              ...state,
-             baseUrl: this.options.baseUrl,
-@@ -881,6 +881,9 @@ class RunloopSandboxClient {
+@@ -882,6 +882,9 @@ class RunloopSandboxClient {
                  provider: 'runloop',
                  details: { devboxId: resumeState.devboxId },
              });
@@ -313,8 +317,8 @@ index 0918e99b5306e1b5fecd37aff4416d3617c9073a..d4ca98e457bccad4b12cbe3245aa90ae
              assertRunloopResumeRecreateSecretRefsTrusted(resumeState, this.options);
              const recreateOptions = {
                  blueprintName: this.options.blueprintName,
-@@ -903,6 +906,9 @@ class RunloopSandboxClient {
-             return await this.create(resumeState.manifest, recreateOptions);
+@@ -907,6 +910,9 @@ class RunloopSandboxClient {
+             return session;
          }
      }
 +    async resumeExact(state) {
@@ -324,7 +328,7 @@ index 0918e99b5306e1b5fecd37aff4416d3617c9073a..d4ca98e457bccad4b12cbe3245aa90ae
  exports.RunloopSandboxClient = RunloopSandboxClient;
  async function createRunloopClient(options) {
 diff --git a/dist/sandbox/runloop/sandbox.mjs b/dist/sandbox/runloop/sandbox.mjs
-index d5caab92aa6b78c130aaa3912e6ee818ee79982e..a180a8ccb040cf41426ffa31bca68a593e1709ab 100644
+index 41969fcc87d854f799f4819442f863ad4b8c4f5a..e067e448504e7d9bb842942d977082f928d29688 100644
 --- a/dist/sandbox/runloop/sandbox.mjs
 +++ b/dist/sandbox/runloop/sandbox.mjs
 @@ -801,7 +801,7 @@ export class RunloopSandboxClient {
@@ -333,10 +337,10 @@ index d5caab92aa6b78c130aaa3912e6ee818ee79982e..a180a8ccb040cf41426ffa31bca68a59
      }
 -    async resume(state) {
 +    async resume(state, options = {}) {
+         assertRemoteSandboxSessionStateCanResume(state);
          const resumeState = {
              ...state,
-             baseUrl: this.options.baseUrl,
-@@ -838,6 +838,9 @@ export class RunloopSandboxClient {
+@@ -839,6 +839,9 @@ export class RunloopSandboxClient {
                  provider: 'runloop',
                  details: { devboxId: resumeState.devboxId },
              });
@@ -346,8 +350,8 @@ index d5caab92aa6b78c130aaa3912e6ee818ee79982e..a180a8ccb040cf41426ffa31bca68a59
              assertRunloopResumeRecreateSecretRefsTrusted(resumeState, this.options);
              const recreateOptions = {
                  blueprintName: this.options.blueprintName,
-@@ -860,6 +863,9 @@ export class RunloopSandboxClient {
-             return await this.create(resumeState.manifest, recreateOptions);
+@@ -864,6 +867,9 @@ export class RunloopSandboxClient {
+             return session;
          }
      }
 +    async resumeExact(state) {

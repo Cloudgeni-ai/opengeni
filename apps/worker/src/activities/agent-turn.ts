@@ -288,7 +288,7 @@ import {
   startActivityHeartbeat,
 } from "./streaming";
 import type {
-  ActivityServices,
+  TurnActivityServices as ActivityServices,
   EscapedMcpTimeoutRecoveryDetail,
   RunAgentTurnInput,
   RunAgentTurnResult,
@@ -4898,6 +4898,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               withCodex(() =>
                 summarizeForCompaction(s, m, {
                   client: resolvedModel.client,
+                  provider: resolvedModel.provider,
                   api: resolvedModel.provider.api,
                   model: turnExecutionPolicy.upstreamModelId,
                   maxOutputTokens: SUMMARY_BUFFER_TOKENS,
@@ -4962,6 +4963,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 }
                 return requestRemoteCompactionV2(s, m, {
                   client: resolvedModel.client,
+                  provider: resolvedModel.provider,
                   model: turnExecutionPolicy.upstreamModelId,
                   systemInstructions: remoteCompactionInstructions,
                   onUsage: recordCompactionUsage,

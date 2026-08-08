@@ -50,6 +50,7 @@ const requiredRules = [
   "OpenGeniSandboxCreateFailureRatio",
   "OpenGeniSandboxInventoryProjectionStale",
   "OpenGeniTurnWorkerMemoryHeadroomLow",
+  "OpenGeniTurnWorkerMemoryEmergency",
   "OpenGeniTurnWorkerMemoryConsumesReserve",
   "OpenGeniTurnWorkerMemoryGuardDraining",
   "OpenGeniTurnWorkerMemoryGuardFailure",
@@ -373,7 +374,10 @@ function verifyDashboardSidecarFiles(
       "cat",
       `${sidecarDirectory.replace(/\/$/, "")}/${filename}`,
     ]);
-    assert(rendered === content, `Grafana dashboard sidecar file ${filename} differs from source`);
+    assert(
+      rendered === content,
+      `Grafana provisioned dashboard file ${filename} differs from source`,
+    );
   }
 }
 
@@ -480,7 +484,7 @@ function parseArgs(values: string[]): Args {
     appNamespace: "opengeni",
     grafanaNamespace: "observability",
     grafanaPodSelector: "app.kubernetes.io/name=grafana",
-    grafanaSidecarContainer: "grafana-sc-dashboard",
+    grafanaSidecarContainer: "grafana",
     grafanaDashboardDirectory: "/tmp/dashboards/OpenGeni",
     skipLiveApis: false,
   };

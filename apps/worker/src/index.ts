@@ -31,12 +31,9 @@ import {
 import { NativeConnection, Worker, type WorkflowBundleOption } from "@temporalio/worker";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { ensureModalRegistryImage } from "@opengeni/runtime";
-import {
-  createControlActivities,
-  createTurnActivities,
-  type ActivityDependencies,
-} from "./activities";
+import type { createControlActivities } from "./activities-control";
+import type { createTurnActivities } from "./activities-turn";
+import type { ActivityDependencies } from "./activities/types";
 import type {
   InspectSessionAttemptActivity,
   SignalCodexCapacityWorkflow,
@@ -59,6 +56,7 @@ import {
   SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_TYPE,
 } from "@opengeni/core";
 import {
+  CONTROL_WORKER_MAX_CACHED_WORKFLOWS,
   CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
   CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS,
   turnWorkerConcurrencyLogFields,
@@ -149,6 +147,18 @@ export function temporalWorkflowExecutionNotFound(error: unknown): boolean {
   return isGrpcServiceError(error) && error.code === 5;
 }
 
+/** Load exactly one role's activity graph. Exported for embedded hosts and the
+ * process-RSS conformance benchmark; construction remains side-effect free
+ * until an activity first resolves its injected services. */
+export async function createDefaultWorkerActivities(
+  role: OpenGeniWorkerRole,
+  dependencies: ActivityDependencies = {},
+) {
+  return role === "control"
+    ? (await import("./activities-control")).createControlActivities(dependencies)
+    : (await import("./activities-turn")).createTurnActivities(dependencies);
+}
+
 type WorkerWorkflowDefinition =
   | { workflowBundle: WorkflowBundleOption }
   | { workflowsPath: string };
@@ -198,6 +208,7 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
   // Otherwise this is a no-op unless the registry secret + logical ref are both
   // set. Memoized in the provider, so it runs once per process.
   if (options.role === "turn") {
+    const { ensureModalRegistryImage } = await import("@opengeni/runtime/sandbox");
     await retryStartupDependency(
       "Modal private-registry image",
       () => ensureModalRegistryImage(settings),
@@ -218,13 +229,14 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
         },
       ),
     async (connection) => {
+      const activityDependencies = {
+        ...options.activityDependencies,
+        settings,
+        observability,
+      };
       const activities =
         options.activities ??
-        (options.role === "control" ? createControlActivities : createTurnActivities)({
-          ...options.activityDependencies,
-          settings,
-          observability,
-        });
+        (await createDefaultWorkerActivities(options.role, activityDependencies));
       const workflowDefinition =
         options.role === "control"
           ? options.workflowBundle
@@ -258,6 +270,9 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
         ...(options.role === "control"
           ? {
               ...workflowDefinition,
+              reuseV8Context: true,
+              workflowThreadPoolSize: 1,
+              maxCachedWorkflows: CONTROL_WORKER_MAX_CACHED_WORKFLOWS,
               maxConcurrentWorkflowTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS,
               maxConcurrentActivityTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
             }
@@ -270,6 +285,9 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
           ...sharedWorkerOptions,
           ...workflowDefinition,
           taskQueue: sandboxLifecycleTaskQueue(settings.temporalTaskQueue),
+          reuseV8Context: true,
+          workflowThreadPoolSize: 1,
+          maxCachedWorkflows: CONTROL_WORKER_MAX_CACHED_WORKFLOWS,
           maxConcurrentWorkflowTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS,
           maxConcurrentActivityTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
         });
@@ -801,6 +819,7 @@ export async function createOpenGeniWorkerService(
             }),
         maxConcurrentWorkflowTaskExecutions:
           options.role === "control" ? CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS : 0,
+        maxCachedWorkflows: options.role === "control" ? CONTROL_WORKER_MAX_CACHED_WORKFLOWS : 0,
         httpPort: options.http === false ? null : settings.workerHttpPort,
       });
     },

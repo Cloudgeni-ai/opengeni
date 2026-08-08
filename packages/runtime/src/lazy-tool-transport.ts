@@ -1,7 +1,6 @@
 import {
   tool as agentTool,
   toolSearchTool,
-  type AgentInputItem,
   type Model,
   type ModelProvider,
   type ModelRequest,
@@ -324,24 +323,30 @@ export function restoreGenericDispatchHistory(input: ModelRequest["input"]): Mod
   if (!Array.isArray(input)) return input;
   let changed = false;
   const restoredInput = input.map((candidate) => {
-    if (!isRecord(candidate) || candidate.type !== "function_call") return candidate;
-    const providerData = isRecord(candidate.providerData) ? candidate.providerData : undefined;
-    const marker = providerData?.[DISPATCH_MARKER_KEY];
-    if (!isRecord(marker) || marker.version !== 1 || typeof marker.arguments !== "string") {
-      return candidate;
-    }
-    changed = true;
-    const restored = {
-      ...candidate,
-      name: TOOL_INVOKE_NAME,
-      arguments: marker.arguments,
-    } as Record<string, unknown>;
-    const cleanProviderData = restoredProviderData(providerData);
-    if (cleanProviderData) restored.providerData = cleanProviderData;
-    else delete restored.providerData;
-    return restored as AgentInputItem;
+    const restored = restoreGenericDispatchHistoryItem(candidate);
+    changed ||= restored !== candidate;
+    return restored;
   });
   return changed ? restoredInput : input;
+}
+
+/** Per-item form used by the run-local memoized wire projector. */
+export function restoreGenericDispatchHistoryItem<T>(candidate: T): T {
+  if (!isRecord(candidate) || candidate.type !== "function_call") return candidate;
+  const providerData = isRecord(candidate.providerData) ? candidate.providerData : undefined;
+  const marker = providerData?.[DISPATCH_MARKER_KEY];
+  if (!isRecord(marker) || marker.version !== 1 || typeof marker.arguments !== "string") {
+    return candidate;
+  }
+  const restored = {
+    ...candidate,
+    name: TOOL_INVOKE_NAME,
+    arguments: marker.arguments,
+  } as Record<string, unknown>;
+  const cleanProviderData = restoredProviderData(providerData);
+  if (cleanProviderData) restored.providerData = cleanProviderData;
+  else delete restored.providerData;
+  return restored as T;
 }
 
 /** Restore every historical generic-dispatch call to its provider-visible transcript. */

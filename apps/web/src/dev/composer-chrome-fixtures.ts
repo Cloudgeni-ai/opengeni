@@ -191,7 +191,7 @@ function galleryGoalRecord(overrides: Partial<SessionGoal> = {}): SessionGoal {
     workspaceId: GALLERY_WORKSPACE_ID,
     sessionId: GALLERY_SESSION_ID,
     status: "active",
-    text: "Make Linear activation on the live jorgebot OpenGeni deployment operational end-to-end",
+    text: "Make Linear activation on the live OpenGeni deployment operational end-to-end",
     successCriteria: "Linear issues sync and activate from the live deployment",
     evidence: null,
     rationale: null,
@@ -476,7 +476,7 @@ export function chromeScenarios(): ChromeScenario[] {
         ],
       }),
       goal: galleryGoal({
-        text: "Implement and harden the X XMCP credential readiness path end-to-end on jorgebot",
+        text: "Implement and harden the X XMCP credential readiness path end-to-end in production",
         createdAt: isoMinutesAgo(3 * 24 * 60 + 16 * 60),
         updatedAt: new Date(FIXED_NOW).toISOString(),
         continuation: {

@@ -1,4 +1,4 @@
-import type { ActivityServices } from "./types";
+import type { ControlActivityServices } from "./types";
 import { reconcilePendingSessionWorkflowWakes } from "./parent-wake";
 
 const BATCH_SIZE = 1_000;
@@ -16,7 +16,7 @@ export type DispatchSessionWorkflowWakesResult = {
  * acknowledgement path used by immediate delivery. This is a repair path, not
  * an eligibility scan: producers have already decided what must be delivered.
  */
-export function createWorkflowWakeActivities(services: () => Promise<ActivityServices>) {
+export function createWorkflowWakeActivities(services: () => Promise<ControlActivityServices>) {
   return {
     async dispatchSessionWorkflowWakes(): Promise<DispatchSessionWorkflowWakesResult> {
       const service = await services();

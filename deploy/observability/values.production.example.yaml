@@ -11,11 +11,11 @@ kube-prometheus-stack:
       retentionSize: 40GB
       resources:
         requests:
-          cpu: 1
-          memory: 2Gi
+          cpu: 500m
+          memory: 512Mi
         limits:
-          cpu: 4
-          memory: 4Gi
+          cpu: 2
+          memory: 1Gi
       storageSpec:
         volumeClaimTemplate:
           spec:
@@ -30,10 +30,10 @@ kube-prometheus-stack:
       resources:
         requests:
           cpu: 100m
-          memory: 256Mi
+          memory: 64Mi
         limits:
           cpu: 500m
-          memory: 512Mi
+          memory: 128Mi
       storage:
         volumeClaimTemplate:
           spec:
@@ -50,11 +50,11 @@ kube-prometheus-stack:
       passwordKey: admin-password
     resources:
       requests:
-        cpu: 250m
-        memory: 512Mi
+        cpu: 100m
+        memory: 128Mi
       limits:
-        cpu: 1
-        memory: 1Gi
+        cpu: 500m
+        memory: 384Mi
     persistence:
       enabled: true
       type: pvc

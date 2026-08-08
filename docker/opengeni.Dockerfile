@@ -1,4 +1,4 @@
-FROM oven/bun:1.3.13 AS base
+FROM oven/bun:1.3.14 AS base
 
 WORKDIR /app
 
@@ -55,6 +55,7 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends ffmpeg \
   && rm -rf /var/lib/apt/lists/*
 USER bun
+RUN bun scripts/build-runtime-processes.ts api
 # "The agent ships inside the control-plane": the SIGNED per-SHA opengeni-agent
 # Linux musl binaries (+ .sha256/.minisig) are staged into agent/install/baked/ by
 # the CI step scripts/bake-agent.sh BEFORE this build, and arrive in the image via
@@ -66,7 +67,7 @@ USER bun
 # GitHub Release (the public archive + install.sh fallback). No Dockerfile change is
 # needed to switch between the two: it is purely whether the baked files are present.
 EXPOSE 8000
-CMD ["bun", "run", "--cwd", "apps/api", "start"]
+CMD ["bun", "apps/api/dist/process/index.js"]
 
 FROM base AS worker
 # The docker sandbox backend needs the Docker CLI to talk to the mounted host
@@ -86,7 +87,8 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 ENV OPENAI_AGENTS_PYTHON=/usr/bin/python3
 USER bun
-CMD ["bun", "run", "--cwd", "apps/worker", "start"]
+RUN bun scripts/build-runtime-processes.ts worker
+CMD ["bun", "apps/worker/dist/process/index.js"]
 
 FROM base AS web-build
 ARG OPENGENI_DEPLOYMENT_REVISION=dev
