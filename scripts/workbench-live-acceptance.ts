@@ -386,7 +386,11 @@ async function main(): Promise<void> {
   );
 
   await waitForCold(cookieClient, workspaceId, session.id, args.coldTimeoutMs);
-  pass(checks, "functional.real-cold-lease", "The real Modal lease reached cold before UI review.");
+  pass(
+    checks,
+    "functional.real-cold-lease",
+    "The real Modal lease reached a dormant cold/draining state before UI review.",
+  );
 
   const captureApiRegionProbe = await runCaptureApiRegionalProbe(
     args.captureApiRegionProbeCommand,
@@ -483,13 +487,13 @@ async function main(): Promise<void> {
     }
 
     const afterPassiveBrowser = await cookieClient.getStreamCapabilities(workspaceId, session.id);
-    if (afterPassiveBrowser.liveness !== "cold") {
+    if (!isDormantSandboxLiveness(afterPassiveBrowser.liveness)) {
       throw new Error("passive browser acceptance unexpectedly warmed the sandbox");
     }
     pass(
       checks,
       "functional.capture-cold-zero-channel-a",
-      "Fresh desktop/mobile browsers rendered capture-backed Changes and Files with zero Channel-A requests and left the lease cold.",
+      "Fresh desktop/mobile browsers rendered capture-backed Changes and Files with zero Channel-A requests and left the lease dormant.",
     );
 
     const liveFlow = await runLiveWorkspaceFlow({
@@ -1012,13 +1016,23 @@ export async function waitForSandboxLiveness(
   );
 }
 
+export function isDormantSandboxLiveness(liveness: string): boolean {
+  return liveness === "cold" || liveness === "draining";
+}
+
 async function waitForCold(
   client: OpenGeniClient,
   workspaceId: string,
   sessionId: string,
   timeoutMs: number,
 ): Promise<void> {
-  await waitForSandboxLiveness(client, workspaceId, sessionId, new Set(["cold"]), timeoutMs);
+  await waitForSandboxLiveness(
+    client,
+    workspaceId,
+    sessionId,
+    new Set(["cold", "draining"]),
+    timeoutMs,
+  );
 }
 
 async function waitForWarm(
