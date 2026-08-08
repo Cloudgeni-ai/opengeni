@@ -113,7 +113,7 @@ describe("useSessionCapabilities", () => {
     await hook.unmount();
   });
 
-  test("desktop attach 409 surfaces an acknowledgment requirement (consent prompt)", async () => {
+  test("desktop attach 409 surfaces an acknowledgment requirement", async () => {
     const client = fakeClient({
       getStreamCapabilities: async () => fakeCapabilities(),
       attachViewer: async () => {

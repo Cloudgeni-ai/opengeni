@@ -252,7 +252,8 @@ function emptyWarmIntents(sessionId: string): SessionWarmIntents {
 /**
  * Build the workbench tabs + the machine-chip model for one session. This is the
  * dock "brain": capability negotiation, capture-backed cold reads, prewarm
- * flags, desktop consent, and the xterm theme observer — all package-local.
+ * flags, automatic desktop acknowledgment, and the xterm theme observer — all
+ * package-local.
  */
 export function useSandboxWorkspaceTabs(
   options: UseSandboxWorkspaceTabsOptions,
@@ -510,6 +511,7 @@ export function useSandboxWorkspaceTabs(
         kind: "error",
         message: `Could not start the desktop stream: ${error instanceof Error ? error.message : String(error)}`,
       });
+      throw error instanceof Error ? error : new Error(String(error));
     }
   }
 
@@ -518,6 +520,15 @@ export function useSandboxWorkspaceTabs(
   function rewarmDesktop() {
     if (!watchDesktop) requestWarmIntent("watchDesktop");
     caps.renegotiate();
+  }
+
+  // A previously acknowledged desktop attaches immediately on mount. A first
+  // view waits for the automatic acknowledgment callback above, which then
+  // engages the holder without an avoidable attach-before-ack 409.
+  function activateDesktop() {
+    const desktop = capabilities?.DesktopStream;
+    if (desktop?.requiresAcknowledgment && !desktop.acknowledged) return;
+    rewarmDesktop();
   }
 
   const dirtyCount = git.diff.length;
@@ -712,7 +723,8 @@ export function useSandboxWorkspaceTabs(
       });
     }
 
-    // Desktop — capability-gated + consent-gated.
+    // Desktop — capability-gated; mounting the selected tab automatically
+    // engages the viewer and records any required acknowledgment.
     if (desktopAdvertised) {
       list.push({
         id: WORKBENCH_TAB_DESKTOP,
@@ -724,10 +736,12 @@ export function useSandboxWorkspaceTabs(
         ) : undefined,
         content: (
           <DesktopViewer
+            key={sessionId}
             capability={capabilities?.DesktopStream ?? null}
             viewerCapReached={caps.viewerCapReached}
             watching={watchDesktop}
-            onAcknowledge={() => void acknowledgeAndWatch()}
+            onActivate={activateDesktop}
+            onAcknowledge={acknowledgeAndWatch}
             onWarm={rewarmDesktop}
             className="h-full"
           />

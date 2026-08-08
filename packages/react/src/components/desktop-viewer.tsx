@@ -28,22 +28,26 @@ export type DesktopViewerProps = {
    *  Defaults to `new WebSocket(url)`. Mirrors `rfbFactory`. */
   webSocketFactory?: DesktopWebSocketFactory | undefined;
   /**
-   * Consent gate for the un-redacted (and possibly shared) pixel plane. Rendered
-   * BEFORE connecting whenever the desktop requires acknowledgment that hasn't
-   * been given. Call `onAccept` to record consent (the host wires it to
-   * `client.acknowledgeStream` + a re-negotiate). When omitted, a default
-   * banner is shown.
+   * @deprecated Desktop acknowledgment is automatic. Retained as an ignored
+   * compatibility prop so existing embedders keep compiling.
    */
   renderConsentGate?: ((onAccept: () => void, shared: boolean) => ReactNode) | undefined;
-  /** Called when the default consent gate's accept button is pressed. */
-  onAcknowledge?: (() => void) | undefined;
   /**
-   * Whether the host has the viewer attach engaged (i.e. the user has opted into
-   * watching — the parent's `watchDesktop`/`attachDesktop`). Drives the
-   * cold-state behaviour: when watching, a cold-but-warmable lease AUTO-WARMS
-   * (and re-warms when the box drains) instead of dead-ending. When omitted we
-   * infer it from a recorded consent (the default gate's accept), so the
-   * component still self-heals after the first acknowledgment.
+   * Called once when the viewer mounts. Hosts use this to engage the desktop
+   * holder immediately when the Desktop tab opens.
+   */
+  onActivate?: (() => void) | undefined;
+  /**
+   * Called automatically when the server requires acknowledgment of the
+   * un-redacted (and possibly shared) pixel plane. The viewer shows its ordinary
+   * opening state while this completes; no click-through gate is rendered.
+   */
+  onAcknowledge?: (() => void | Promise<void>) | undefined;
+  /**
+   * Whether the host has the viewer attach engaged. Drives the cold-state
+   * behaviour: when watching, a cold-but-warmable lease AUTO-WARMS (and re-warms
+   * when the box drains) instead of dead-ending. Mounting the viewer counts as
+   * watching when this is omitted.
    */
   watching?: boolean | undefined;
   /**
@@ -51,8 +55,7 @@ export type DesktopViewerProps = {
    * already been recorded — only the box drained). The host wires this to
    * "engage the viewer attach + re-negotiate". Called automatically when a
    * watched desktop is found cold-but-warmable, and behind the manual retry on
-   * the warming notice. Distinct from `onAcknowledge`, which is the FIRST,
-   * consent-bearing warm.
+   * the warming notice. Distinct from the automatic acknowledgment request.
    */
   onWarm?: (() => void) | undefined;
   /** Shown when transport is null (headless backend / degraded / disabled). */
@@ -75,13 +78,14 @@ export type DesktopViewerProps = {
 /**
  * The derived desktop surface state. A single source of truth so the overlay,
  * the scrim, the auto-warm effect, and the watchdog all agree. Priority order
- * (highest first): viewer-cap → unavailable → consent → warming → connect-failed
- * → error → connecting → connected.
+ * (highest first): viewer-cap → unavailable → acknowledgment-error → warming →
+ * connect-failed → error → opening/connecting → connected.
  */
 type DesktopUiState =
   | "viewer_cap" // 429 — the per-session live-viewer limit is reached.
   | "unavailable" // genuinely unsupported (headless/policy/os/backend/not-provisioned).
-  | "consent" // un-redacted/shared plane needs acknowledgment first.
+  | "acknowledgment_error" // automatic un-redacted/shared acknowledgment failed.
+  | "opening" // acknowledgment or viewer attach is in flight.
   | "warming" // cold-but-warmable: box not running yet (we auto-warm + spin).
   | "connecting" // url is live, RFB negotiating/handshaking (we spin, with a watchdog).
   | "connect_failed" // watchdog fired: url present but never connected.
@@ -122,10 +126,11 @@ function isHardUnavailable(reason: CapabilityUnavailableReason | null): boolean 
  * reason).
  *
  * Warming: a cold-but-warmable lease (`reason: "lease_cold"`) is NOT a dead end.
- * When the user is watching (consented), the viewer asks the host to (re)warm
- * the box (`onWarm`) and shows a "Warming…" spinner; if the box later drains to
- * cold it re-warms. Genuinely-unavailable surfaces (headless/policy/os/backend)
- * keep a clear, static unavailable notice.
+ * When the viewer is mounted, it asks the host to engage the desktop and records
+ * any required acknowledgment automatically. A cold-but-warmable box then
+ * (re)warms through `onWarm`; if it later drains to cold it re-warms.
+ * Genuinely-unavailable surfaces (headless/policy/os/backend) keep a clear,
+ * static unavailable notice.
  */
 export function DesktopViewer({
   capability,
@@ -134,7 +139,7 @@ export function DesktopViewer({
   scaleViewport,
   rfbFactory,
   webSocketFactory,
-  renderConsentGate,
+  onActivate,
   onAcknowledge,
   watching,
   onWarm,
@@ -146,7 +151,13 @@ export function DesktopViewer({
   className,
 }: DesktopViewerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const [consented, setConsented] = useState(false);
+  const onActivateRef = useRef(onActivate);
+  const onAcknowledgeRef = useRef(onAcknowledge);
+  onActivateRef.current = onActivate;
+  onAcknowledgeRef.current = onAcknowledge;
+  const acknowledgmentAttemptedRef = useRef(false);
+  const [acknowledgmentError, setAcknowledgmentError] = useState<Error | null>(null);
+  const [acknowledgmentRetryNonce, setAcknowledgmentRetryNonce] = useState(0);
   // Local control state when not externally controlled. The server gate
   // (`capability.mode`) is the hard ceiling — a read-only deployment can never
   // be flipped to interactive regardless of this toggle.
@@ -156,16 +167,16 @@ export function DesktopViewer({
   const wantControl = externallyControlled ? interactive : takeControl;
   const inControl = Boolean(wantControl) && serverAllowsControl;
 
-  // Whether the host has the viewer attach engaged. Prefer the explicit prop;
-  // fall back to a locally-recorded consent so the component still self-heals
-  // (auto-warms / re-warms) once the user has accepted the gate at least once.
-  const isWatching = watching ?? consented;
+  // Mounting this component means the Desktop surface is being viewed. A host
+  // may still pass its holder state explicitly while the activation callback
+  // flips that state on the first mount.
+  const isWatching = watching ?? true;
 
   // ── Decide the rendered state (before touching the stream hook) ─────────────
   const transportNull = !capability || capability.transport === null;
   const reason = capability?.reason ?? null;
-  const needsAck =
-    capability?.requiresAcknowledgment === true && capability.acknowledged !== true && !consented;
+  const needsAcknowledgment =
+    capability?.requiresAcknowledgment === true && capability.acknowledged !== true;
   // No live address yet on an otherwise-live transport (post-ack, mid-warm).
   const noLiveAddress = Boolean(capability) && !transportNull && !capability!.url;
 
@@ -176,9 +187,45 @@ export function DesktopViewer({
   // Genuinely-unavailable: transport null for a HARD reason (not lease_cold).
   const hardUnavailable = transportNull && isHardUnavailable(reason);
 
-  const accept = () => {
-    setConsented(true);
-    onAcknowledge?.();
+  // Selecting Desktop mounts the viewer, which is itself the user's intent to
+  // open it. Engage the holder immediately — no separate "watch" click.
+  useEffect(() => {
+    onActivateRef.current?.();
+  }, []);
+
+  // Preserve the server-side acknowledgment/audit contract without making the
+  // user click through a disclosure card. One automatic attempt runs for each
+  // unacknowledged episode; a genuine request failure gets an explicit retry.
+  useEffect(() => {
+    if (!needsAcknowledgment) {
+      acknowledgmentAttemptedRef.current = false;
+      setAcknowledgmentError(null);
+      return;
+    }
+    if (acknowledgmentAttemptedRef.current) return;
+    acknowledgmentAttemptedRef.current = true;
+    setAcknowledgmentError(null);
+    const acknowledge = onAcknowledgeRef.current;
+    if (!acknowledge) {
+      setAcknowledgmentError(new Error("Desktop acknowledgment is not configured."));
+      return;
+    }
+    let active = true;
+    void Promise.resolve()
+      .then(() => acknowledge())
+      .catch((cause) => {
+        if (!active) return;
+        setAcknowledgmentError(cause instanceof Error ? cause : new Error(String(cause)));
+      });
+    return () => {
+      active = false;
+    };
+  }, [needsAcknowledgment, acknowledgmentRetryNonce]);
+
+  const retryAcknowledgment = () => {
+    acknowledgmentAttemptedRef.current = false;
+    setAcknowledgmentError(null);
+    setAcknowledgmentRetryNonce((nonce) => nonce + 1);
   };
 
   // Release control WITHOUT ever swallowing a key the desktop needs. Esc, and
@@ -218,7 +265,8 @@ export function DesktopViewer({
   // Do NOT open a socket while the viewer-cap (429) notice is showing — the slot
   // is already exhausted, so connecting would only burn a doomed attempt (and in
   // tests leak an unhandled ws error from the never-resolving tunnel URL).
-  const connectCapability = !transportNull && !needsAck && !viewerCapReached ? capability : null;
+  const connectCapability =
+    !transportNull && !needsAcknowledgment && !viewerCapReached ? capability : null;
   const stream = useDesktopStream({
     capability: connectCapability,
     containerRef,
@@ -238,21 +286,19 @@ export function DesktopViewer({
 
   // ── AUTO-WARM ───────────────────────────────────────────────────────────────
   // When the user is watching and the desktop is cold-but-warmable, ask the host
-  // to (re)warm the box. This covers BOTH (a) the user just accepted consent and
+  // to (re)warm the box. This covers BOTH (a) the desktop was just opened and
   // (b) a previously-warm box that drained back to cold under a live viewer. We
   // fire once per distinct cold episode (keyed on the lease epoch + url) so we
   // don't spam the attach while a single warm is in flight. `onWarm` is the
-  // no-re-ack path; if the host only wired `onAcknowledge` (no `onWarm`), the
-  // first warm still rides consent and subsequent drains fall back to it.
+  // no-re-ack path; acknowledgment remains a separate automatic request.
   const warmKeyRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!isWatching || !coldWarmable || needsAck || viewerCapReached) {
+    if (!isWatching || !coldWarmable || needsAcknowledgment || viewerCapReached) {
       // Reset the de-dupe once we leave the cold episode so a future drain warms.
       if (!coldWarmable) warmKeyRef.current = null;
       return;
     }
-    const warm = onWarm ?? onAcknowledge;
-    if (!warm) return;
+    if (!onWarm) return;
     // Key the de-dupe on the cell fields available to the viewer: while cold,
     // `reason`/`url`/`expiresAt` are stable, so we warm exactly once; once the box
     // warms the cell changes (url+expiresAt minted) and `coldWarmable` flips false,
@@ -260,10 +306,10 @@ export function DesktopViewer({
     const key = `${capability?.reason ?? ""}:${capability?.url ?? ""}:${capability?.expiresAt ?? ""}`;
     if (warmKeyRef.current === key) return; // already kicked this episode.
     warmKeyRef.current = key;
-    warm();
+    onWarm();
     // capability identity is the trigger; leaseEpoch/expiresAt key the episode.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isWatching, coldWarmable, needsAck, viewerCapReached, capability, onWarm, onAcknowledge]);
+  }, [isWatching, coldWarmable, needsAcknowledgment, viewerCapReached, capability, onWarm]);
 
   // ── TAB RE-ATTACH ───────────────────────────────────────────────────────────
   // The "stuck Watching, never connects" bug: the RFB socket never (re)fires when
@@ -331,7 +377,8 @@ export function DesktopViewer({
   let uiState: DesktopUiState;
   if (viewerCapReached) uiState = "viewer_cap";
   else if (hardUnavailable) uiState = "unavailable";
-  else if (needsAck && !isWatching) uiState = "consent";
+  else if (acknowledgmentError) uiState = "acknowledgment_error";
+  else if (needsAcknowledgment) uiState = "opening";
   else if (coldWarmable) uiState = "warming";
   else if (connected) uiState = "connected";
   else if (stream.error) uiState = "error";
@@ -340,7 +387,7 @@ export function DesktopViewer({
 
   // An overlay blocks the surface for every state except connected; the toggle
   // and the live scrim are suppressed under an overlay.
-  const overlayShown = uiState !== "connected" && uiState !== "connecting";
+  const overlayShown = uiState !== "connected" && uiState !== "connecting" && uiState !== "opening";
   const showToggle = showControlToggle && !overlayShown;
 
   let overlay: ReactNode = null;
@@ -358,11 +405,11 @@ export function DesktopViewer({
         renderUnavailable?.(reason) ??
         defaultNotice("Desktop unavailable", unavailableCopy(reason));
       break;
-    case "consent":
-      overlay = renderConsentGate ? (
-        renderConsentGate(accept, capability?.shared ?? false)
-      ) : (
-        <DefaultConsentGate shared={capability?.shared ?? false} onAccept={accept} />
+    case "acknowledgment_error":
+      overlay = defaultNotice(
+        "Couldn’t open desktop",
+        acknowledgmentError?.message ?? "The desktop acknowledgment failed.",
+        retryAcknowledgment,
       );
       break;
     case "warming":
@@ -382,6 +429,7 @@ export function DesktopViewer({
         reconnect,
       );
       break;
+    case "opening":
     case "connecting":
     case "connected":
       overlay = null;
@@ -420,7 +468,7 @@ export function DesktopViewer({
           rectangle before the first framebuffer paints. Only shown in the
           `connecting` UI-state (every other non-connected state has an explicit
           overlay). A spinner + transitional copy makes it feel live. */}
-      {uiState === "connecting" && (
+      {(uiState === "opening" || uiState === "connecting") && (
         <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-3 text-og-fg-subtle">
           <span className="relative flex items-center justify-center">
             <MonitorIcon className="size-8 opacity-30" strokeWidth={1.5} />
@@ -429,7 +477,9 @@ export function DesktopViewer({
               strokeWidth={1.25}
             />
           </span>
-          <span className="text-og-sm">Connecting to the desktop…</span>
+          <span className="text-og-sm">
+            {uiState === "opening" ? "Opening the desktop…" : "Connecting to the desktop…"}
+          </span>
         </div>
       )}
 
@@ -626,28 +676,6 @@ function WarmingNotice({ onRetry }: { onRetry?: (() => void) | undefined }) {
           Taking too long? Retry
         </button>
       )}
-    </div>
-  );
-}
-
-function DefaultConsentGate({ shared, onAccept }: { shared: boolean; onAccept: () => void }) {
-  return (
-    <div className="max-w-sm rounded-og-lg border border-og-border bg-og-bg p-4 text-center text-og-base text-og-fg">
-      <div className="mb-1 font-medium">Watch the live desktop?</div>
-      <p className="mb-3 text-og-sm text-og-fg-subtle">
-        The desktop pixel stream is <strong>un-redacted</strong> — it can show secrets the agent
-        prints on screen.
-        {shared
-          ? " This sandbox is shared: you'll also see other sessions' agents on the same screen."
-          : ""}
-      </p>
-      <button
-        type="button"
-        onClick={onAccept}
-        className="rounded-og-sm bg-og-accent px-3 py-1.5 text-og-sm font-medium text-og-accent-fg pointer-coarse:min-h-11"
-      >
-        I understand — show the desktop
-      </button>
     </div>
   );
 }

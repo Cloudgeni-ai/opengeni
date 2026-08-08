@@ -527,7 +527,8 @@ capability document so every surface degrades to a reason instead of crashing.
 - `useSessionCapabilities(sessionId, { attachDesktop?, attachTerminal?, attachFiles? })`
   — negotiates the per-session capability doc, tracks lease liveness
   (`cold`/`warming`/`warm`), and acquires the viewer holder(s) that keep the box
-  warm. Desktop attach is gated behind the un-redacted-pixel acknowledgment.
+  warm. Opening `DesktopViewer` engages the desktop immediately and records any
+  required un-redacted/shared acknowledgment automatically before attaching.
 - `useSandboxFiles` / `useSandboxGit` — the Pierre file tree + git status/diff
   feeds. Initial and refresh reads use the SDK's batched file-frontier and
   multi-repository Git queries behind one sandbox lease; `fs.changed` /
