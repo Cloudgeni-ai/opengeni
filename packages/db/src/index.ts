@@ -340,11 +340,14 @@ export {
   withWorkspaceRls,
   withWorkspaceSubjectRls,
   withWorkspaceUsageLock,
+  withSandboxProviderReadLock,
+  SandboxProviderReadLockUnavailableError,
   type CreateDbOptions,
   type Database,
   type DbClient,
   type RlsContext,
   type RlsStrategy,
+  type SandboxProviderReadLockIdentity,
   type UserLookup,
 } from "./database";
 import {

@@ -144,6 +144,103 @@ export async function rawRows<T extends Record<string, unknown>>(
   throw new Error("Unsupported database execute() result shape");
 }
 
+export type SandboxProviderReadLockIdentity = {
+  workspaceId: string;
+  sandboxGroupId: string;
+  leaseEpoch: number;
+  instanceId: string;
+};
+
+export class SandboxProviderReadLockUnavailableError extends Error {
+  constructor() {
+    super("Sandbox provider reads are temporarily busy. Retry the request.");
+    this.name = "SandboxProviderReadLockUnavailableError";
+  }
+}
+
+const SANDBOX_PROVIDER_READ_LOCK_WAIT_MS = 15_000;
+const SANDBOX_PROVIDER_READ_LOCK_POLL_MAX_MS = 200;
+
+function sandboxProviderReadLockKey(identity: SandboxProviderReadLockIdentity): string {
+  return [
+    "sandbox-provider-read",
+    identity.workspaceId,
+    identity.sandboxGroupId,
+    identity.leaseEpoch,
+    identity.instanceId,
+  ].join(":");
+}
+
+async function waitForSandboxProviderReadLockPoll(
+  delayMs: number,
+  signal?: AbortSignal | undefined,
+): Promise<void> {
+  if (signal?.aborted) {
+    throw signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+  }
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const cleanup = () => signal?.removeEventListener("abort", abort);
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve();
+    };
+    const abort = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      cleanup();
+      reject(signal?.reason ?? new DOMException("The operation was aborted", "AbortError"));
+    };
+    timer = setTimeout(finish, delayMs);
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+  });
+}
+
+/**
+ * Cross-process exclusive boundary for one exact live provider instance's
+ * API-direct read request. Modal accepts concurrent commands from one attached
+ * handle, but independent API replicas reconstruct different handles; issuing
+ * overlapping command groups through those handles can make an otherwise valid
+ * read fail transiently. Keep concurrency inside one batched request while
+ * serializing only separate requests that target the same lease identity.
+ *
+ * The callback intentionally runs while one transaction-pinned DB connection
+ * holds the advisory lock. The direct lease holder separately prevents drain,
+ * and the abort-aware bounded poll prevents a disconnected HTTP request from
+ * occupying the connection indefinitely.
+ */
+export async function withSandboxProviderReadLock<T>(
+  db: Database,
+  identity: SandboxProviderReadLockIdentity,
+  signal: AbortSignal | undefined,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const key = sandboxProviderReadLockKey(identity);
+  const deadline = Date.now() + SANDBOX_PROVIDER_READ_LOCK_WAIT_MS;
+  return await db.transaction(async (lockedDb) => {
+    let pollMs = 20;
+    while (true) {
+      if (signal?.aborted) {
+        throw signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+      }
+      const [row] = await rawRows<{ acquired: boolean }>(
+        lockedDb,
+        sql`select pg_try_advisory_xact_lock(hashtextextended(${key}, 0)) as acquired`,
+      );
+      if (row?.acquired === true) return await fn();
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) throw new SandboxProviderReadLockUnavailableError();
+      await waitForSandboxProviderReadLockPoll(Math.min(pollMs, remainingMs), signal);
+      pollMs = Math.min(pollMs * 2, SANDBOX_PROVIDER_READ_LOCK_POLL_MAX_MS);
+    }
+  });
+}
+
 export function createDb(databaseUrl: string, options: CreateDbOptions = {}): DbClient {
   // `prepare: false` is REQUIRED for Azure Database for PostgreSQL Flexible
   // Server's transaction-pooling PgBouncer: postgres-js's default named prepared

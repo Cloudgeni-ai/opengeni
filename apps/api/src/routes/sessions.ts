@@ -146,6 +146,7 @@ import { z, ZodError } from "zod";
 import {
   runConcurrentChannelAReads,
   withChannelA,
+  withChannelARead,
   type ChannelAContext,
   type ChannelAHandle,
 } from "../sandbox/channel-a";
@@ -2631,14 +2632,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/fs/list", async (c) => {
     const ctx = await channelAPreamble(c, "files:read");
     const req = await parseChannelABody(c, FsListRequest);
-    const out = await withChannelA(channelAServices, ctx, ({ service }) => service.fsList(req));
+    const out = await withChannelARead(channelAServices, ctx, ({ service }) => service.fsList(req));
     return c.json(out);
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/fs/list-batch", async (c) => {
     const ctx = await channelAPreamble(c, "files:read");
     const req = await parseChannelABody(c, FsListBatchRequest);
-    const out = await withChannelA(channelAServices, ctx, async ({ service }) => ({
+    const out = await withChannelARead(channelAServices, ctx, async ({ service }) => ({
       results: await runConcurrentChannelAReads(
         req.requests.map((request) => async () => await service.fsList(request)),
       ),
@@ -2649,7 +2650,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/fs/read", async (c) => {
     const ctx = await channelAPreamble(c, "files:read");
     const req = await parseChannelABody(c, FsReadRequest);
-    const out = await withChannelA(channelAServices, ctx, ({ service }) => service.fsRead(req));
+    const out = await withChannelARead(channelAServices, ctx, ({ service }) => service.fsRead(req));
     return c.json(out);
   });
 
@@ -2685,21 +2686,25 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/git/status", async (c) => {
     const ctx = await channelAPreamble(c, "files:read");
     const req = await parseChannelABody(c, GitStatusRequest);
-    const out = await withChannelA(channelAServices, ctx, ({ service }) => service.gitStatus(req));
+    const out = await withChannelARead(channelAServices, ctx, ({ service }) =>
+      service.gitStatus(req),
+    );
     return c.json(out);
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/git/diff", async (c) => {
     const ctx = await channelAPreamble(c, "files:read");
     const req = await parseChannelABody(c, GitDiffRequest);
-    const out = await withChannelA(channelAServices, ctx, ({ service }) => service.gitDiff(req));
+    const out = await withChannelARead(channelAServices, ctx, ({ service }) =>
+      service.gitDiff(req),
+    );
     return c.json(out);
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/git/read-batch", async (c) => {
     const ctx = await channelAPreamble(c, "files:read");
     const req = await parseChannelABody(c, GitReadBatchRequest);
-    const out = await withChannelA(channelAServices, ctx, async ({ service }) => {
+    const out = await withChannelARead(channelAServices, ctx, async ({ service }) => {
       type StatusResult = Awaited<ReturnType<typeof service.gitStatus>>;
       type DiffResult = Awaited<ReturnType<typeof service.gitDiff>>;
       type ReadResult =
@@ -2750,14 +2755,16 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/git/log", async (c) => {
     const ctx = await channelAPreamble(c, "files:read");
     const req = await parseChannelABody(c, GitLogRequest);
-    const out = await withChannelA(channelAServices, ctx, ({ service }) => service.gitLog(req));
+    const out = await withChannelARead(channelAServices, ctx, ({ service }) => service.gitLog(req));
     return c.json(out);
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/git/show", async (c) => {
     const ctx = await channelAPreamble(c, "files:read");
     const req = await parseChannelABody(c, GitShowRequest);
-    const out = await withChannelA(channelAServices, ctx, ({ service }) => service.gitShow(req));
+    const out = await withChannelARead(channelAServices, ctx, ({ service }) =>
+      service.gitShow(req),
+    );
     return c.json(out);
   });
 
