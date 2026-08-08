@@ -349,20 +349,39 @@ export async function runConcurrentChannelAReads<T>(
   return values;
 }
 
-/** Retry a side-effect-free Channel-A read once, but only after the caller has
- * discarded and freshly re-established its provider handle. Provider commands
- * are not replayed for validation/conflict/unknown errors, and mutation routes
- * never call this helper. */
+type ChannelAReadRecoveryOptions = {
+  /** Modal may expose one more stale command-router route after the first
+   * successful handle rebuild. Keep this closed and statically bounded. */
+  maxFreshHandleRetries?: 1 | 2;
+  /** Never start another provider attempt after the originating request ends. */
+  waitSignal?: AbortSignal | undefined;
+};
+
+/** Retry a side-effect-free Channel-A read only after the caller has discarded
+ * and freshly re-established its provider handle. The ordinary provider-neutral
+ * contract allows one retry; Modal opts into one additional rebuild because a
+ * command-router rollover can outlive the first replacement handle. Provider
+ * commands are never replayed for validation/conflict/unknown errors, mutation
+ * routes never call this helper, and request cancellation stops recovery before
+ * another provider command begins. */
 export async function runChannelAReadWithFreshHandleRetry<T>(
   run: () => Promise<T>,
-  refreshHandle: () => Promise<void>,
+  refreshHandle: (attempt: 1 | 2) => Promise<void>,
+  options: ChannelAReadRecoveryOptions = {},
 ): Promise<T> {
-  try {
-    return await run();
-  } catch (error) {
-    if (!(error instanceof ChannelAUnavailableError)) throw error;
-    await refreshHandle();
-    return await run();
+  const maxFreshHandleRetries = options.maxFreshHandleRetries ?? 1;
+  for (let retries = 0; ; retries += 1) {
+    options.waitSignal?.throwIfAborted();
+    try {
+      return await run();
+    } catch (error) {
+      if (!(error instanceof ChannelAUnavailableError) || retries >= maxFreshHandleRetries) {
+        throw error;
+      }
+      options.waitSignal?.throwIfAborted();
+      const attempt = retries === 0 ? 1 : 2;
+      await refreshHandle(attempt);
+    }
   }
 }
 
@@ -832,69 +851,80 @@ async function withChannelAOperation<T>(
     // A failed attempt leaves the advisory-lock transaction before refresh;
     // the retry acquires a new transaction/lock against the same fenced lease.
     return readOnly
-      ? await runChannelAReadWithFreshHandleRetry(runProviderOperation, async () => {
-          const refreshStartedAt = performance.now();
-          const observeRefresh = (outcome: "ok" | "failed"): void => {
-            if (!services.observability) return;
-            const attributes = {
-              sandboxLeaseKey: sandboxLeaseTelemetryKey(workspaceId, sandboxGroupId),
-              backend: session.sandboxBackend,
-              reason: "provider_handle_unavailable",
-              outcome,
-              durationMs: Math.max(0, Math.round(performance.now() - refreshStartedAt)),
+      ? await runChannelAReadWithFreshHandleRetry(
+          runProviderOperation,
+          async (attempt) => {
+            const refreshStartedAt = performance.now();
+            const observeRefresh = (outcome: "ok" | "failed"): void => {
+              if (!services.observability) return;
+              const attributes = {
+                sandboxLeaseKey: sandboxLeaseTelemetryKey(workspaceId, sandboxGroupId),
+                backend: session.sandboxBackend,
+                reason: "provider_handle_unavailable",
+                outcome,
+                attempt,
+                durationMs: Math.max(0, Math.round(performance.now() - refreshStartedAt)),
+              };
+              try {
+                services.observability.incrementCounter({
+                  name: "opengeni_channel_a_handle_refresh_total",
+                  help: "Channel-A provider handles rebuilt after a typed temporary-unavailable read.",
+                  labels: { backend: session.sandboxBackend, outcome },
+                });
+              } catch {
+                // Metrics can never alter lease or provider authority.
+              }
+              try {
+                if (outcome === "ok") {
+                  services.observability.info(
+                    "Channel-A provider handle refresh completed",
+                    attributes,
+                  );
+                } else {
+                  services.observability.warn(
+                    "Channel-A provider handle refresh failed",
+                    attributes,
+                  );
+                }
+              } catch {
+                // Logs can never alter lease or provider authority.
+              }
             };
             try {
-              services.observability.incrementCounter({
-                name: "opengeni_channel_a_handle_refresh_total",
-                help: "Channel-A provider handles rebuilt after a typed temporary-unavailable read.",
-                labels: { backend: session.sandboxBackend, outcome },
-              });
-            } catch {
-              // Metrics can never alter lease or provider authority.
-            }
-            try {
-              if (outcome === "ok") {
-                services.observability.info(
-                  "Channel-A provider handle refresh completed",
-                  attributes,
-                );
-              } else {
-                services.observability.warn("Channel-A provider handle refresh failed", attributes);
+              if (establishedCacheKey) {
+                evictEstablishedHandle(establishedCacheKey, establishedCacheKind);
               }
-            } catch {
-              // Logs can never alter lease or provider authority.
+              await dropEstablishedHandle(established);
+              // This request still owns its direct holder, so the exact live identity
+              // should be stable. Revalidate it before rebuilding the provider handle.
+              const live = await readLease(db, workspaceId, sandboxGroupId);
+              if (
+                !live ||
+                live.liveness !== "warm" ||
+                live.leaseEpoch !== leaseSnapshot.leaseEpoch ||
+                live.instanceId !== leaseSnapshot.instanceId
+              ) {
+                throw new HTTPException(409, {
+                  message: `sandbox lease changed while refreshing its provider handle; retry`,
+                });
+              }
+              const refreshed = await establishAttachedLiveHandle(live, "none");
+              established = refreshed.established;
+              establishedCacheKey = refreshed.cacheKey;
+              establishedCacheKind = "read";
+              leaseSnapshot = live;
+              rememberEstablishedHandle(refreshed.cacheKey, refreshed.established, "read");
+              observeRefresh("ok");
+            } catch (error) {
+              observeRefresh("failed");
+              throw error;
             }
-          };
-          try {
-            if (establishedCacheKey) {
-              evictEstablishedHandle(establishedCacheKey, establishedCacheKind);
-            }
-            await dropEstablishedHandle(established);
-            // This request still owns its direct holder, so the exact live identity
-            // should be stable. Revalidate it before rebuilding the provider handle.
-            const live = await readLease(db, workspaceId, sandboxGroupId);
-            if (
-              !live ||
-              live.liveness !== "warm" ||
-              live.leaseEpoch !== leaseSnapshot.leaseEpoch ||
-              live.instanceId !== leaseSnapshot.instanceId
-            ) {
-              throw new HTTPException(409, {
-                message: `sandbox lease changed while refreshing its provider handle; retry`,
-              });
-            }
-            const refreshed = await establishAttachedLiveHandle(live, "none");
-            established = refreshed.established;
-            establishedCacheKey = refreshed.cacheKey;
-            establishedCacheKind = "read";
-            leaseSnapshot = live;
-            rememberEstablishedHandle(refreshed.cacheKey, refreshed.established, "read");
-            observeRefresh("ok");
-          } catch (error) {
-            observeRefresh("failed");
-            throw error;
-          }
-        })
+          },
+          {
+            maxFreshHandleRetries: session.sandboxBackend === "modal" ? 2 : 1,
+            ...(ctx.waitSignal ? { waitSignal: ctx.waitSignal } : {}),
+          },
+        )
       : await runProviderOperation();
   } catch (error) {
     // A read wrapper carries no yielded process state and is safe to discard.

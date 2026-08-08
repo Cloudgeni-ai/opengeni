@@ -4,7 +4,11 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HTTPException } from "hono/http-exception";
 import { SandboxProviderReadLockUnavailableError } from "@opengeni/db";
-import { ChannelAUnavailableError, ChannelAValidationError } from "@opengeni/runtime/sandbox";
+import {
+  ChannelAConflictError,
+  ChannelAUnavailableError,
+  ChannelAValidationError,
+} from "@opengeni/runtime/sandbox";
 import {
   channelAOperationFailureDiagnostic,
   isChannelAHandleCacheEntryFresh,
@@ -345,25 +349,26 @@ describe("P4.4 Channel-A route discipline", () => {
     expect(channelASeam).toContain("lastUsedAtMonotonicMs");
   });
 
-  test("side-effect-free reads rebuild before one typed unavailable retry", async () => {
+  test("Modal reads rebuild across a second rollover unavailable result", async () => {
     const order: string[] = [];
     let calls = 0;
     const value = await runChannelAReadWithFreshHandleRetry(
       async () => {
         calls += 1;
         order.push(`run:${calls}`);
-        if (calls === 1) throw new ChannelAUnavailableError("stale provider channel");
+        if (calls <= 2) throw new ChannelAUnavailableError("provider rollover still settling");
         return "fresh";
       },
-      async () => {
-        order.push("refresh");
+      async (attempt) => {
+        order.push(`refresh:${attempt}`);
       },
+      { maxFreshHandleRetries: 2 },
     );
     expect(value).toBe("fresh");
-    expect(order).toEqual(["run:1", "refresh", "run:2"]);
+    expect(order).toEqual(["run:1", "refresh:1", "run:2", "refresh:2", "run:3"]);
   });
 
-  test("fresh-handle recovery neither retries twice nor replays non-transient errors", async () => {
+  test("provider-neutral recovery defaults to one retry and never replays non-transient errors", async () => {
     let unavailableCalls = 0;
     await expect(
       runChannelAReadWithFreshHandleRetry(
@@ -392,6 +397,88 @@ describe("P4.4 Channel-A route discipline", () => {
     ).rejects.toBe(validation);
     expect(validationCalls).toBe(1);
     expect(refreshCalls).toBe(0);
+
+    let mixedCalls = 0;
+    let mixedRefreshes = 0;
+    const conflict = new ChannelAConflictError("lease changed");
+    await expect(
+      runChannelAReadWithFreshHandleRetry(
+        async () => {
+          mixedCalls += 1;
+          if (mixedCalls === 1) {
+            throw new ChannelAUnavailableError("provider rollover started");
+          }
+          throw conflict;
+        },
+        async () => {
+          mixedRefreshes += 1;
+        },
+        { maxFreshHandleRetries: 2 },
+      ),
+    ).rejects.toBe(conflict);
+    expect(mixedCalls).toBe(2);
+    expect(mixedRefreshes).toBe(1);
+  });
+
+  test("Modal recovery stops after exactly two fresh handles", async () => {
+    const refreshAttempts: number[] = [];
+    let calls = 0;
+    await expect(
+      runChannelAReadWithFreshHandleRetry(
+        async () => {
+          calls += 1;
+          throw new ChannelAUnavailableError("provider remains unavailable");
+        },
+        async (attempt) => {
+          refreshAttempts.push(attempt);
+        },
+        { maxFreshHandleRetries: 2 },
+      ),
+    ).rejects.toBeInstanceOf(ChannelAUnavailableError);
+    expect(calls).toBe(3);
+    expect(refreshAttempts).toEqual([1, 2]);
+  });
+
+  test("request cancellation prevents another handle refresh or provider command", async () => {
+    const controller = new AbortController();
+    const cancelled = new DOMException("request ended", "AbortError");
+    let runs = 0;
+    let refreshes = 0;
+    await expect(
+      runChannelAReadWithFreshHandleRetry(
+        async () => {
+          runs += 1;
+          controller.abort(cancelled);
+          throw new ChannelAUnavailableError("provider unavailable during disconnect");
+        },
+        async () => {
+          refreshes += 1;
+        },
+        { maxFreshHandleRetries: 2, waitSignal: controller.signal },
+      ),
+    ).rejects.toBe(cancelled);
+    expect(runs).toBe(1);
+    expect(refreshes).toBe(0);
+
+    const duringRefresh = new AbortController();
+    const cancelledDuringRefresh = new DOMException("request ended during refresh", "AbortError");
+    runs = 0;
+    refreshes = 0;
+    await expect(
+      runChannelAReadWithFreshHandleRetry(
+        async () => {
+          runs += 1;
+          throw new ChannelAUnavailableError("provider unavailable");
+        },
+        async () => {
+          refreshes += 1;
+          duringRefresh.abort(cancelledDuringRefresh);
+        },
+        { maxFreshHandleRetries: 2, waitSignal: duringRefresh.signal },
+      ),
+    ).rejects.toBe(cancelledDuringRefresh);
+    expect(runs).toBe(1);
+    expect(refreshes).toBe(1);
   });
 
   test("transport failures evict disposable reads but preserve process-capable wrappers", () => {
