@@ -95,6 +95,7 @@ import {
   normalizeSdkEvent,
   normalizeProtocolJsonValue,
   projectHistoryForProvider,
+  restoreGenericDispatchHistoryItems,
   sanitizeHistoryItemsForModel,
   projectModelInputForCapabilities,
   appendPersistentSessionSettings,
@@ -143,6 +144,7 @@ import {
   type BackendUnresolvableCode,
   type EstablishedSandboxSession,
   type GitCredentialTokenWriterSession,
+  type LazyToolTransport,
   type NormalizedRunCredentialMaterial,
   type RunCredentialCommandSession,
   type ToolspaceTokenWriterSession,
@@ -2039,6 +2041,36 @@ export function structuredToolTransportForTurn(
   return !["codex-subscription", "vercel-gateway-managed", "vercel-gateway-workspace"].includes(
     resolvedModel.provider.kind,
   );
+}
+
+/**
+ * Progressive tool disclosure is universal for supported OpenGeni turns; only
+ * its contained transport differs. Codex keeps its native path, built-in direct
+ * OpenAI/Azure Responses use native client tool search, and every other ordinary
+ * function-calling provider uses OpenGeni's stable search/invoke dispatcher.
+ */
+export function lazyToolTransportForTurn(
+  resolvedModel: {
+    provider: {
+      id: string;
+      kind: RegistryProviderKind;
+      api: ModelProviderApi;
+      builtin: boolean;
+      baseUrl?: string | undefined;
+    };
+  } | null,
+): LazyToolTransport {
+  if (!resolvedModel) return "openai_native";
+  const provider = resolvedModel.provider;
+  if (provider.kind === "codex-subscription") return "codex_native";
+  const isDirectBuiltinResponses =
+    provider.builtin &&
+    provider.api === "responses" &&
+    (provider.id === "azure" || (provider.id === "openai" && provider.baseUrl === undefined));
+  if (isDirectBuiltinResponses) {
+    return "openai_native";
+  }
+  return "generic_dispatch";
 }
 
 /**
@@ -4355,6 +4387,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       );
       const supportsImageInput = modelSupportsImageInputForTurn(resolvedModel);
       const providerApi = resolvedModel?.provider.api ?? "responses";
+      const lazyToolTransport = lazyToolTransportForTurn(resolvedModel);
       const modelInputPolicy = modelAttachmentInputPolicyForTurn(resolvedModel);
       const attachmentProjector = createModelHistoryAttachmentProjector(
         db,
@@ -4365,7 +4398,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const modelHistoryProjector = async (items: Array<Record<string, unknown>>) =>
         projectModelInputForCapabilities(await attachmentProjector(items), modelInputPolicy);
       const compactionModelHistoryProjector = async (items: Array<Record<string, unknown>>) =>
-        await modelHistoryProjector(projectHistoryForProvider(items, providerApi));
+        await modelHistoryProjector(
+          projectHistoryForProvider(restoreGenericDispatchHistoryItems(items), providerApi),
+        );
       // Bind the provider/model catalog's context policy to every model-facing
       // path for this turn. In particular, Codex subscription turns must not
       // inherit the deployment's OpenAI/Azure mode or 1.05M context defaults:
@@ -5858,6 +5893,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // session's MCP allow-list; the effective context window drives the
         // compaction threshold.
         hostedWebSearch,
+        lazyToolTransport,
         supportsImageInput,
         inputFileMediaTypes: modelInputPolicy.inputFileMediaTypes,
         ...(resolvedModel

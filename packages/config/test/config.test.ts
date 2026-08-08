@@ -108,6 +108,21 @@ describe("Codex progressive tool disclosure", () => {
   });
 });
 
+describe("provider-neutral progressive tool disclosure", () => {
+  test("is enabled by default and has an independent emergency opt-out", () => {
+    expect(withEnv({}, () => getSettings()).lazyToolSearchEnabled).toBe(true);
+    const settings = withEnv(
+      {
+        OPENGENI_LAZY_TOOL_SEARCH_ENABLED: "false",
+        OPENGENI_CODEX_TOOL_SEARCH_ENABLED: "true",
+      },
+      () => getSettings(),
+    );
+    expect(settings.lazyToolSearchEnabled).toBe(false);
+    expect(settings.codexToolSearchEnabled).toBe(true);
+  });
+});
+
 describe("Google Drive integration settings", () => {
   test("loads the split localhost browser and API origins", () => {
     const settings = withEnv(

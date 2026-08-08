@@ -420,6 +420,7 @@ describe("tool_search tool wiring", () => {
     const apps = makeServer("codex_apps");
     const agent = buildOpenGeniAgent(testSettings({ codexToolSearchEnabled: true }), [], {
       structuredToolTransport: false,
+      lazyToolTransport: "codex_native",
       mcpServers: [opengeni, apps],
     });
 
@@ -453,6 +454,7 @@ describe("tool_search tool wiring", () => {
     );
     const agent = buildOpenGeniAgent(testSettings({ codexToolSearchEnabled: true }), [], {
       structuredToolTransport: false,
+      lazyToolTransport: "codex_native",
       mcpServers: [apps],
     });
 
