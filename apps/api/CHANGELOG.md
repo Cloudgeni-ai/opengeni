@@ -1,5 +1,16 @@
 # @opengeni/api-router
 
+## 0.23.11
+
+### Patch Changes
+
+- 5806484: Serialize separate read-only Modal Channel-A requests across API replicas while preserving concurrent reads inside each batch.
+- Updated dependencies [5806484]
+  - @opengeni/db@0.28.15
+  - @opengeni/core@0.21.20
+  - @opengeni/documents@0.5.24
+  - @opengeni/events@0.3.95
+
 ## 0.23.10
 
 ### Patch Changes
