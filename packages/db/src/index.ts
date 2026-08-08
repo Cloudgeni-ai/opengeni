@@ -325,8 +325,6 @@ import {
   withWorkspaceRls,
   withWorkspaceSubjectRls,
   withWorkspaceUsageLock,
-  withSandboxProviderReadLock,
-  SandboxProviderReadLockUnavailableError,
   type Database,
 } from "./database";
 export {
