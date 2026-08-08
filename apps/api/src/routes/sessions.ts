@@ -2686,14 +2686,18 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/git/status", async (c) => {
     const ctx = await channelAPreamble(c, "files:read");
     const req = await parseChannelABody(c, GitStatusRequest);
-    const out = await withChannelARead(channelAServices, ctx, ({ service }) => service.gitStatus(req));
+    const out = await withChannelARead(channelAServices, ctx, ({ service }) =>
+      service.gitStatus(req),
+    );
     return c.json(out);
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/git/diff", async (c) => {
     const ctx = await channelAPreamble(c, "files:read");
     const req = await parseChannelABody(c, GitDiffRequest);
-    const out = await withChannelARead(channelAServices, ctx, ({ service }) => service.gitDiff(req));
+    const out = await withChannelARead(channelAServices, ctx, ({ service }) =>
+      service.gitDiff(req),
+    );
     return c.json(out);
   });
 
@@ -2758,7 +2762,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/git/show", async (c) => {
     const ctx = await channelAPreamble(c, "files:read");
     const req = await parseChannelABody(c, GitShowRequest);
-    const out = await withChannelARead(channelAServices, ctx, ({ service }) => service.gitShow(req));
+    const out = await withChannelARead(channelAServices, ctx, ({ service }) =>
+      service.gitShow(req),
+    );
     return c.json(out);
   });
 
