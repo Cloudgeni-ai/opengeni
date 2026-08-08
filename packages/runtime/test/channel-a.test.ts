@@ -1180,6 +1180,54 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
     expect(hunk.lines.some((l) => l.type === "context")).toBe(true);
   });
 
+  test("git diff joins every nested provider read before surfacing a failure", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-channel-a-settle-"));
+    temporaryRoots.push(root);
+    runFixtureCommand(
+      root,
+      [
+        "git init -q",
+        "git config user.email t@t.io",
+        "git config user.name t",
+        "git config commit.gpgsign false",
+        "printf 'base\\n' > file.txt",
+        "git add file.txt",
+        "git commit -q -m base",
+        "printf 'changed\\n' > file.txt",
+      ].join(" && "),
+    );
+
+    const modalLike = makeModalLikeExecOnlySession(root);
+    const execCommand = modalLike.session.execCommand!;
+    let siblingSettled = false;
+    modalLike.session.execCommand = async (args) => {
+      const running = execCommand(args);
+      if (args.cmd.includes("diff --no-color -U3")) {
+        await Bun.sleep(25);
+        const output = await running;
+        siblingSettled = true;
+        return output;
+      }
+      const output = await running;
+      return args.cmd.includes("diff --no-color -z --numstat")
+        ? output.replace("__OPENGENI_GIT_CHUNK_V1__", "__OPENGENI_GIT_CHUNK_INVALID__")
+        : output;
+    };
+
+    const svc = new SandboxChannelAService({ session: modalLike.session, workspaceRoot: root });
+    await expect(
+      svc.gitDiff({
+        path: "",
+        staged: false,
+        includeUntracked: false,
+        pathspec: [],
+        contextLines: 3,
+        maxBytesPerFile: 512 * 1024,
+      }),
+    ).rejects.toBeInstanceOf(ChannelAUnavailableError);
+    expect(siblingSettled).toBe(true);
+  });
+
   test("workspace-review diff includes bounded text, binary, and oversized untracked files", async () => {
     const { svc } = await makeRepoWithStagedChange();
     await svc.fsWrite({

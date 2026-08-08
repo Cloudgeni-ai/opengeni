@@ -143,7 +143,12 @@ import {
   GatewayRealtimeBrokerError,
 } from "../gateway-realtime";
 import { z, ZodError } from "zod";
-import { withChannelA, type ChannelAContext, type ChannelAHandle } from "../sandbox/channel-a";
+import {
+  runConcurrentChannelAReads,
+  withChannelA,
+  type ChannelAContext,
+  type ChannelAHandle,
+} from "../sandbox/channel-a";
 import { negotiateCapabilities } from "@opengeni/runtime/sandbox";
 import type { Context, Hono, MiddlewareHandler } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -2634,10 +2639,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const ctx = await channelAPreamble(c, "files:read");
     const req = await parseChannelABody(c, FsListBatchRequest);
     const out = await withChannelA(channelAServices, ctx, async ({ service }) => ({
-      results: await Promise.all(
-        req.requests.map((request) =>
-          Promise.resolve().then(async () => await service.fsList(request)),
-        ),
+      results: await runConcurrentChannelAReads(
+        req.requests.map((request) => async () => await service.fsList(request)),
       ),
     }));
     return c.json(out);
@@ -2696,20 +2699,51 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/git/read-batch", async (c) => {
     const ctx = await channelAPreamble(c, "files:read");
     const req = await parseChannelABody(c, GitReadBatchRequest);
-    const out = await withChannelA(channelAServices, ctx, async ({ service }) => ({
-      results: await Promise.all(
-        req.requests.map(async (request) => {
+    const out = await withChannelA(channelAServices, ctx, async ({ service }) => {
+      type StatusResult = Awaited<ReturnType<typeof service.gitStatus>>;
+      type DiffResult = Awaited<ReturnType<typeof service.gitDiff>>;
+      type ReadResult =
+        | { requestIndex: number; kind: "status"; value: StatusResult }
+        | { requestIndex: number; kind: "diff"; value: DiffResult };
+      const operations: Array<() => Promise<ReadResult>> = [];
+      req.requests.forEach((request, requestIndex) => {
+        operations.push(async () => ({
+          requestIndex,
+          kind: "status" as const,
+          value: await service.gitStatus(request.status),
+        }));
+        if (request.diff) {
           const diffRequest = request.diff;
-          const [status, diff] = await Promise.all([
-            Promise.resolve().then(async () => await service.gitStatus(request.status)),
-            diffRequest
-              ? Promise.resolve().then(async () => await service.gitDiff(diffRequest))
-              : Promise.resolve(undefined),
-          ]);
+          operations.push(async () => ({
+            requestIndex,
+            kind: "diff" as const,
+            value: await service.gitDiff(diffRequest),
+          }));
+        }
+      });
+
+      const reads = await runConcurrentChannelAReads(operations);
+      const statuses = new Map<number, StatusResult>();
+      const diffs = new Map<number, DiffResult>();
+      for (const read of reads) {
+        if (read.kind === "status") statuses.set(read.requestIndex, read.value);
+        else diffs.set(read.requestIndex, read.value);
+      }
+
+      return {
+        results: req.requests.map((request, requestIndex) => {
+          const status = statuses.get(requestIndex);
+          if (!status) {
+            throw new Error(`Workspace Git batch omitted status result ${requestIndex}.`);
+          }
+          const diff = request.diff ? diffs.get(requestIndex) : undefined;
+          if (request.diff && !diff) {
+            throw new Error(`Workspace Git batch omitted diff result ${requestIndex}.`);
+          }
           return { status, ...(diff ? { diff } : {}) };
         }),
-      ),
-    }));
+      };
+    });
     return c.json(out);
   });
 

@@ -3,8 +3,8 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HTTPException } from "hono/http-exception";
-import { ChannelAUnavailableError } from "@opengeni/runtime/sandbox";
-import { mapChannelAError } from "../src/sandbox/channel-a";
+import { ChannelAUnavailableError, ChannelAValidationError } from "@opengeni/runtime/sandbox";
+import { mapChannelAError, runConcurrentChannelAReads } from "../src/sandbox/channel-a";
 
 // P4.4 route-discipline guards for all Channel-A structured-service routes (a
 // complement to the real-box runtime test + the docker e2e). The invariants the
@@ -162,6 +162,56 @@ describe("P4.4 Channel-A route discipline", () => {
     expect((mapped as HTTPException).message).toBe(
       "Workspace files are temporarily unavailable. Retry.",
     );
+  });
+
+  test("concurrent reads settle before one bounded transient retry", async () => {
+    let transientCalls = 0;
+    let siblingSettled = false;
+    const values = await runConcurrentChannelAReads([
+      async () => {
+        transientCalls += 1;
+        if (transientCalls === 1) {
+          throw new ChannelAUnavailableError("temporary provider wake race");
+        }
+        expect(siblingSettled).toBe(true);
+        return "recovered";
+      },
+      async () => {
+        await Bun.sleep(5);
+        siblingSettled = true;
+        return "sibling";
+      },
+    ]);
+
+    expect(values).toEqual(["recovered", "sibling"]);
+    expect(transientCalls).toBe(2);
+  });
+
+  test("both concurrent batch routes use the settled read helper", () => {
+    for (const route of ["fs/list-batch", "git/read-batch"]) {
+      const body = handlerBody(
+        sessionsRoute,
+        "post",
+        `/v1/workspaces/:workspaceId/sessions/:sessionId/${route}`,
+      );
+      expect(body).toContain("runConcurrentChannelAReads(");
+      expect(body).not.toContain("Promise.all(");
+    }
+  });
+
+  test("near-identical non-transient reads are never retried", async () => {
+    let calls = 0;
+    const failure = new ChannelAValidationError("bad path");
+    await expect(
+      runConcurrentChannelAReads([
+        async () => {
+          calls += 1;
+          throw failure;
+        },
+        async () => "sibling",
+      ]),
+    ).rejects.toBe(failure);
+    expect(calls).toBe(1);
   });
 
   test("the seam never signals Temporal / routes through a worker (API-direct only)", () => {
