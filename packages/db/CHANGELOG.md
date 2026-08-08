@@ -1,5 +1,11 @@
 # @opengeni/db
 
+## 0.28.15
+
+### Patch Changes
+
+- 5806484: Serialize separate read-only Modal Channel-A requests across API replicas while preserving concurrent reads inside each batch.
+
 ## 0.28.14
 
 ### Patch Changes
