@@ -1,5 +1,11 @@
 # @opengeni/api-router
 
+## 0.23.15
+
+### Patch Changes
+
+- 4903fef: Recover side-effect-free Modal Channel-A reads through one additional cancel-aware fresh-handle rebuild when a provider command-router rollover outlives the first replacement handle.
+
 ## 0.23.14
 
 ### Patch Changes
