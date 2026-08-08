@@ -1,5 +1,14 @@
 # @opengeni/api-router
 
+## 0.23.10
+
+### Patch Changes
+
+- b59e5bd: Wait for concurrent structured sandbox reads to settle and retry only typed transient failures once.
+- Updated dependencies [b59e5bd]
+  - @opengeni/runtime@0.18.31
+  - @opengeni/core@0.21.19
+
 ## 0.23.9
 
 ### Patch Changes

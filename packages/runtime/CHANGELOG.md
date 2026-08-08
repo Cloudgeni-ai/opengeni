@@ -1,5 +1,11 @@
 # @opengeni/runtime
 
+## 0.18.31
+
+### Patch Changes
+
+- b59e5bd: Wait for concurrent structured sandbox reads to settle and retry only typed transient failures once.
+
 ## 0.18.30
 
 ### Patch Changes
