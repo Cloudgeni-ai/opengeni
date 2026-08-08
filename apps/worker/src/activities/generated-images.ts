@@ -17,7 +17,7 @@ import {
 } from "@opengeni/db";
 import type { ObjectHead, ObjectStorage } from "@opengeni/storage";
 import { createHash } from "node:crypto";
-import { validateComputerScreenshot } from "./retained-screenshots";
+import { ScreenshotValidationError, validateRetainableSessionImage } from "./retained-screenshots";
 
 const GENERATED_IMAGE_MARKER = "generated_image";
 const UPLOAD_INTENT_TTL_MS = 60 * 60_000;
@@ -196,48 +196,24 @@ export function validateGeneratedImage(input: {
   bytes: Uint8Array;
   declaredMediaType?: string;
 }): ValidatedGeneratedImage {
-  const { bytes } = input;
-  if (bytes.byteLength === 0 || bytes.byteLength > GENERATED_IMAGE_MAX_BYTES) {
-    throw new GeneratedImageValidationError("generated image byte size is invalid");
-  }
-  let identity: Pick<ValidatedGeneratedImage, "mediaType" | "extension" | "width" | "height">;
-  if (isPng(bytes)) {
-    const png = validateComputerScreenshot(
-      { bytes, mediaType: "image/png" },
+  try {
+    return validateRetainableSessionImage(
+      {
+        bytes: input.bytes,
+        ...(input.declaredMediaType ? { declaredMediaType: input.declaredMediaType } : {}),
+      },
       {
         maxBytes: GENERATED_IMAGE_MAX_BYTES,
         maxDimension: COMPUTER_SCREENSHOT_MAX_DIMENSION,
         maxPixels: COMPUTER_SCREENSHOT_MAX_PIXELS,
       },
     );
-    identity = {
-      mediaType: "image/png",
-      extension: "png",
-      width: png.width,
-      height: png.height,
-    };
-  } else if (isJpeg(bytes)) {
-    const dimensions = jpegDimensions(bytes);
-    identity = { mediaType: "image/jpeg", extension: "jpg", ...dimensions };
-  } else if (isWebp(bytes)) {
-    const dimensions = webpDimensions(bytes);
-    identity = { mediaType: "image/webp", extension: "webp", ...dimensions };
-  } else {
-    throw new GeneratedImageValidationError("generated image format is unsupported");
+  } catch (error) {
+    if (error instanceof ScreenshotValidationError) {
+      throw new GeneratedImageValidationError(error.message);
+    }
+    throw error;
   }
-  assertImageDimensions(identity.width, identity.height);
-  if (
-    input.declaredMediaType &&
-    canonicalDeclaredMediaType(input.declaredMediaType) !== identity.mediaType
-  ) {
-    throw new GeneratedImageValidationError("generated image MIME does not match its bytes");
-  }
-  return {
-    bytes,
-    ...identity,
-    sizeBytes: bytes.byteLength,
-    sha256: createHash("sha256").update(bytes).digest("hex"),
-  };
 }
 
 type GeneratedImageIdentityInput = {
@@ -861,130 +837,6 @@ function assertStoredGeneratedImageHead(
   }
 }
 
-function canonicalDeclaredMediaType(value: string): string {
-  return value.split(";", 1)[0]!.trim().toLowerCase();
-}
-
-function isPng(bytes: Uint8Array): boolean {
-  return (
-    bytes.byteLength >= 8 &&
-    bytes[0] === 0x89 &&
-    bytes[1] === 0x50 &&
-    bytes[2] === 0x4e &&
-    bytes[3] === 0x47 &&
-    bytes[4] === 0x0d &&
-    bytes[5] === 0x0a &&
-    bytes[6] === 0x1a &&
-    bytes[7] === 0x0a
-  );
-}
-
-function isJpeg(bytes: Uint8Array): boolean {
-  return bytes.byteLength >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8;
-}
-
-function jpegDimensions(bytes: Uint8Array): { width: number; height: number } {
-  if (bytes[bytes.length - 2] !== 0xff || bytes[bytes.length - 1] !== 0xd9) {
-    throw new GeneratedImageValidationError("generated JPEG is truncated or has trailing bytes");
-  }
-  let offset = 2;
-  while (offset + 4 <= bytes.length) {
-    if (bytes[offset] !== 0xff) {
-      throw new GeneratedImageValidationError("generated JPEG marker table is invalid");
-    }
-    while (bytes[offset] === 0xff) offset += 1;
-    const marker = bytes[offset++];
-    if (marker === undefined) break;
-    if (marker === 0xd9) break;
-    if (marker === 0xda) break;
-    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
-    if (offset + 2 > bytes.length) break;
-    const length = readUint16Be(bytes, offset);
-    if (length < 2 || offset + length > bytes.length) {
-      throw new GeneratedImageValidationError("generated JPEG segment is invalid");
-    }
-    if (JPEG_SOF_MARKERS.has(marker)) {
-      if (length < 7) throw new GeneratedImageValidationError("generated JPEG frame is invalid");
-      return {
-        height: readUint16Be(bytes, offset + 3),
-        width: readUint16Be(bytes, offset + 5),
-      };
-    }
-    offset += length;
-  }
-  throw new GeneratedImageValidationError("generated JPEG has no supported frame header");
-}
-
-const JPEG_SOF_MARKERS = new Set([
-  0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf,
-]);
-
-function isWebp(bytes: Uint8Array): boolean {
-  return bytes.byteLength >= 20 && ascii(bytes, 0, 4) === "RIFF" && ascii(bytes, 8, 4) === "WEBP";
-}
-
-function webpDimensions(bytes: Uint8Array): { width: number; height: number } {
-  if (readUint32Le(bytes, 4) + 8 !== bytes.byteLength) {
-    throw new GeneratedImageValidationError("generated WebP RIFF length is invalid");
-  }
-  let offset = 12;
-  while (offset + 8 <= bytes.length) {
-    const type = ascii(bytes, offset, 4);
-    const length = readUint32Le(bytes, offset + 4);
-    const data = offset + 8;
-    const next = data + length + (length & 1);
-    if (next > bytes.length)
-      throw new GeneratedImageValidationError("generated WebP chunk is truncated");
-    if (type === "VP8X") {
-      if (length < 10) throw new GeneratedImageValidationError("generated WebP VP8X is invalid");
-      return {
-        width: 1 + readUint24Le(bytes, data + 4),
-        height: 1 + readUint24Le(bytes, data + 7),
-      };
-    }
-    if (type === "VP8 ") {
-      if (
-        length < 10 ||
-        bytes[data + 3] !== 0x9d ||
-        bytes[data + 4] !== 0x01 ||
-        bytes[data + 5] !== 0x2a
-      ) {
-        throw new GeneratedImageValidationError("generated WebP VP8 frame is invalid");
-      }
-      return {
-        width: readUint16Le(bytes, data + 6) & 0x3fff,
-        height: readUint16Le(bytes, data + 8) & 0x3fff,
-      };
-    }
-    if (type === "VP8L") {
-      if (length < 5 || bytes[data] !== 0x2f) {
-        throw new GeneratedImageValidationError("generated WebP VP8L frame is invalid");
-      }
-      const bits = readUint32Le(bytes, data + 1);
-      return {
-        width: 1 + (bits & 0x3fff),
-        height: 1 + ((bits >>> 14) & 0x3fff),
-      };
-    }
-    offset = next;
-  }
-  throw new GeneratedImageValidationError("generated WebP has no image frame");
-}
-
-function assertImageDimensions(width: number, height: number): void {
-  if (
-    !Number.isSafeInteger(width) ||
-    !Number.isSafeInteger(height) ||
-    width <= 0 ||
-    height <= 0 ||
-    width > COMPUTER_SCREENSHOT_MAX_DIMENSION ||
-    height > COMPUTER_SCREENSHOT_MAX_DIMENSION ||
-    width * height > COMPUTER_SCREENSHOT_MAX_PIXELS
-  ) {
-    throw new GeneratedImageValidationError("generated image dimensions exceed policy");
-  }
-}
-
 function uuidFromDigest(digest: string, startByte: number): string {
   const source = Buffer.from(digest, "hex");
   const bytes = Uint8Array.from(source.subarray(startByte, startByte + 16));
@@ -992,32 +844,6 @@ function uuidFromDigest(digest: string, startByte: number): string {
   bytes[8] = (bytes[8]! & 0x3f) | 0x80;
   const hex = Buffer.from(bytes).toString("hex");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
-
-function readUint16Be(bytes: Uint8Array, offset: number): number {
-  return (bytes[offset]! << 8) | bytes[offset + 1]!;
-}
-
-function readUint16Le(bytes: Uint8Array, offset: number): number {
-  return bytes[offset]! | (bytes[offset + 1]! << 8);
-}
-
-function readUint24Le(bytes: Uint8Array, offset: number): number {
-  return bytes[offset]! | (bytes[offset + 1]! << 8) | (bytes[offset + 2]! << 16);
-}
-
-function readUint32Le(bytes: Uint8Array, offset: number): number {
-  return (
-    (bytes[offset]! |
-      (bytes[offset + 1]! << 8) |
-      (bytes[offset + 2]! << 16) |
-      (bytes[offset + 3]! << 24)) >>>
-    0
-  );
-}
-
-function ascii(bytes: Uint8Array, offset: number, length: number): string {
-  return String.fromCharCode(...bytes.subarray(offset, offset + length));
 }
 
 function base64Sextet(code: number): number {

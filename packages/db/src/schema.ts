@@ -2495,6 +2495,10 @@ export const retainedScreenshotArtifacts = pgTable(
       "retained_screenshot_artifacts_dimensions_chk",
       sql`${table.width} between 1 and 16384 and ${table.height} between 1 and 16384 and (${table.width}::bigint * ${table.height}::bigint) <= 67108864`,
     ),
+    mediaTypeValid: check(
+      "retained_screenshot_artifacts_media_type_v2_chk",
+      sql`${table.mediaType} in ('image/png', 'image/jpeg', 'image/webp')`,
+    ),
   }),
 );
 

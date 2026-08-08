@@ -851,10 +851,10 @@ wrong one is the classic mistake.
    absent, matching their JSON wire meaning; arrays and every other non-JSON
    graph fail closed with the exact offending path. Historical inline image and
    screenshot items remain backward-compatible model history. New
-   `computer_screenshot` typed PNG bytes are validated and retained before
-   persistence; every new history copy receives the deterministic bounded
-   artifact receipt (or an explicit unavailable fact), never the provider object
-   key or re-encoded base64 source.
+   `computer_screenshot` and `view_image` typed PNG/JPEG/WebP bytes are validated
+   and retained before persistence; every new history copy receives the
+   deterministic bounded artifact receipt (or an explicit unavailable fact),
+   never the provider object key or re-encoded base64 source.
    New generated images follow the same no-inline-byte rule but are permanent
    workspace files: native hosted base64 is retained before serialization and
    adapter tools return the same compact `generated_image` receipt. A later

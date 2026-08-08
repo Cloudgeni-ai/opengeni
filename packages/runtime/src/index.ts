@@ -1983,17 +1983,17 @@ export type BuildAgentOptions = {
   //   API has no such field, so registry "chat" providers turn it off.
   //   Default: settings.openaiReasoningEncryptedContent.
   // - structuredToolTransport: whether the backend supports the Responses
-  //   STRUCTURED/HOSTED sandbox-tool transport — the hosted `apply_patch` tool
-  //   type and structured `view_image` output. The SDK's sandbox capabilities
+  //   HOSTED sandbox-tool transport — notably the hosted `apply_patch` tool.
+  //   The SDK's sandbox capabilities
   //   pick hosted-vs-function purely from the bound model instance's constructor
   //   name (supportsApplyPatchTransport / supportsStructuredToolOutputTransport).
   //   Our codex turns run the OpenAIResponsesModel — which the SDK reads as
   //   hosted-capable — but route it to the ChatGPT/Codex backend, which REJECTS
   //   the hosted `apply_patch` type ("Unsupported tool type: apply_patch",
-  //   verified live). Set false for that backend so filesystem emits the
-  //   function `apply_patch` + text `view_image` variants it accepts. Default
-  //   true (let the SDK decide from the model instance) — non-codex paths are
-  //   byte-for-byte unchanged.
+  //   verified live). Gateway routes also use ordinary function tools. When
+  //   false, OpenGeni keeps function `apply_patch` and converts successful
+  //   `view_image` data URLs back into typed input_image content when the
+  //   selected model has a proven image-input wire.
   hostedWebSearch?: boolean;
   /** Stable provider-specific image-generation transport for this turn. */
   imageGeneration?:
@@ -3131,9 +3131,9 @@ function withExecOpCorrelation(tools: Tool<unknown>[]): Tool<unknown>[] {
 }
 
 /**
- * Codex accepts ordinary FUNCTION tools but also accepts `input_image` content
- * inside a function_call_output (the same transport used by codex-rs
- * view_image). The SDK filesystem capability unnecessarily couples this choice
+ * Codex and reviewed Responses-compatible Gateway routes accept ordinary
+ * FUNCTION tools plus `input_image` content inside a function_call_output. The
+ * SDK filesystem capability unnecessarily couples this choice
  * to hosted apply_patch support; when hosted tools are disabled it degrades
  * view_image to a giant text data URL, charging roughly one token per four
  * base64 characters. Re-wrap only successful data-URL results as a structured
@@ -3196,11 +3196,10 @@ export function buildAgentCapabilities(
   if (toolCancellation) options.onToolCancellationFence?.(toolCancellation);
   // The `filesystem()` capability picks hosted-vs-function tool variants from the
   // bound model instance (supportsApplyPatchTransport / structured tool output).
-  // When the caller declares the backend does NOT support that structured/hosted
-  // transport (codex → the ChatGPT backend rejects the hosted `apply_patch` type),
+  // When the caller declares the backend does NOT support hosted sandbox tools,
   // neutralize this capability's model binding so tools() falls to the function
-  // `apply_patch` + text `view_image` variants the backend accepts — the SDK
-  // handles their function_call round-trip natively, so no reimplementation.
+  // variants. Successful view_image data URLs are restored to typed image
+  // results below; text-only/unproven wires remove the image tool entirely.
   // Scoped to filesystem: shell() is always a function-tool transport.
   const configureFilesystemTools = (tools: Tool<unknown>[]): Tool<unknown>[] => {
     const transportTools =
@@ -5503,7 +5502,16 @@ function memoizedInputItemProjectionFilter(
   };
 }
 
-const IMAGE_CONTENT_TYPES = new Set(["image", "input_image", "image_url", "computer_screenshot"]);
+const IMAGE_CONTENT_TYPES = new Set([
+  "image",
+  "input_image",
+  "image_url",
+  "computer_screenshot",
+  // Compact durable marker used for a direct function-image result before
+  // attempt-local artifact materialization. Text-only wires project it out
+  // without reading the retained object back into RAM.
+  "retained_artifact",
+]);
 const FILE_CONTENT_TYPES = new Set(["file", "input_file"]);
 const IMAGE_OMITTED_TEXT =
   "[Image content omitted because the selected model does not support image input.]";

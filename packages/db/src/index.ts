@@ -4188,7 +4188,7 @@ export type PrepareRetainedScreenshotArtifactInput = {
   settlementKey: string;
   toolCallId: string;
   toolOutputId: string;
-  mediaType: "image/png";
+  mediaType: "image/png" | "image/jpeg" | "image/webp";
   sizeBytes: number;
   sha256: string;
   width: number;

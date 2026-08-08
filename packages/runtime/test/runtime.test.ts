@@ -6990,6 +6990,20 @@ describe("provider item id stripping", () => {
           { type: "input_image", image: "data:image/png;base64,PREVIEW" },
         ],
       },
+      {
+        type: "function_call",
+        callId: "retained-direct-1",
+        name: "view_image",
+        arguments: '{"path":"/tmp/retained.png"}',
+      },
+      {
+        type: "function_call_result",
+        callId: "retained-direct-1",
+        output: {
+          type: "retained_artifact",
+          artifact: { available: false, artifactId: "placeholder", reason: "pending" },
+        },
+      },
       { type: "computer_call", callId: "computer-1", actions: [{ type: "screenshot" }] },
       {
         type: "computer_call_result",
@@ -7007,6 +7021,7 @@ describe("provider item id stripping", () => {
     const projected = projectModelInputForImageSupport(input, false);
 
     expect(JSON.stringify(projected)).not.toContain("data:image");
+    expect(JSON.stringify(projected)).not.toContain("retained_artifact");
     expect(projected.some((item) => item.name === "view_image")).toBe(true);
     expect(projected.some((item) => item.type === "computer_call")).toBe(false);
     expect(projected.find((item) => item.callId === "view-1" && "output" in item)).toEqual({

@@ -3341,6 +3341,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // remains the final call/result pairing guard for every other reconcile.
     let persistedHistoryCount = 0;
     const retainedScreenshotReceiptsByCallId = new Map<string, RetainedArtifactMetadata>();
+    // Set from the resolved provider wire before any model history is prepared.
+    // Text-only/chat wires keep compact receipts and must never allocate image
+    // bytes merely for the following request-local projection to remove them.
+    let modelCanReceiveRetainedSessionImages = true;
     const generatedImageReceiptsByProviderItemId = new Map<string, GeneratedImageReceipt>();
     const generatedImageReceiptsByArtifactId = new Map<string, GeneratedImageReceipt>();
     let generatedImageMaterializationCache: {
@@ -3357,7 +3361,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       }
       const file = await requireFile(db, input.workspaceId, receipt.artifact.artifactId);
       const downloadStorage = objectStorageForSandboxDownloads(modelRunSettings, objectStorage);
-      const signed = await downloadStorage.createGetUrl({ key: file.objectKey });
+      const signed = await downloadStorage.createGetUrl({
+        key: file.objectKey,
+      });
       return {
         file,
         download: {
@@ -3553,6 +3559,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     const retainedSessionImageCallIds = new Set<string>();
     const materializeScreenshotHistory = async (history: Array<Record<string, unknown>>) => {
       collectRetainedScreenshotReceipts(history, retainedScreenshotReceiptsByCallId);
+      if (!modelCanReceiveRetainedSessionImages) return history;
       return await materializeRetainedScreenshotHistory({
         db,
         objectStorage,
@@ -3564,13 +3571,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     const materializeScreenshotRunState = async (serialized: string) => {
       collectRetainedScreenshotRunStateReceipts(serialized, retainedScreenshotReceiptsByCallId);
       collectGeneratedImageRunStateArtifactReceipts(serialized, generatedImageReceiptsByArtifactId);
-      const withScreenshots = await materializeRetainedScreenshotRunState({
-        db,
-        objectStorage,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        serialized,
-      });
+      const withScreenshots = modelCanReceiveRetainedSessionImages
+        ? await materializeRetainedScreenshotRunState({
+            db,
+            objectStorage,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            serialized,
+          })
+        : serialized;
       return projectGeneratedImageRunStateForModel(
         compactGeneratedImageRunState(withScreenshots, generatedImageReceiptsByProviderItemId),
       );
@@ -4715,7 +4724,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         capabilitySettings,
         turnExecutionPolicy.productModelId,
       );
-      const supportsImageInput = modelSupportsImageInputForTurn(resolvedModel);
       const providerApi = resolvedModel?.provider.api ?? "responses";
       const nativeImageProviderBinding =
         providerApi === "responses"
@@ -4723,6 +4731,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           : null;
       const lazyToolTransport = lazyToolTransportForTurn(resolvedModel);
       const modelInputPolicy = modelAttachmentInputPolicyForTurn(resolvedModel);
+      // Use the proven wire capability, not the catalogue modality alone. Chat
+      // providers may advertise vision, but OpenGeni intentionally has no typed
+      // image transport for that wire yet; exposing view_image there would turn
+      // pixels into a multi-megabyte text/base64 function result.
+      const supportsImageInput = modelInputPolicy.supportsImageInput;
+      modelCanReceiveRetainedSessionImages = supportsImageInput;
       const attachmentProjector = createModelHistoryAttachmentProjector(
         db,
         input.workspaceId,
@@ -6336,15 +6350,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 runSettings.openaiReasoningEncryptedContent,
               contextWindowTokens:
                 resolvedModel.configured.contextWindowTokens ?? runSettings.contextWindowTokens,
-              // The ChatGPT/Codex backend rejects the SDK's HOSTED sandbox tools —
-              // the `apply_patch` tool type ("Unsupported tool type: apply_patch")
-              // and structured tool output — which the OpenAIResponsesModel the SDK
-              // binds would otherwise select. Tell buildAgent to emit the function
-              // `apply_patch` + text `view_image` variants the backend accepts. Only
-              // the codex-subscription provider needs this; every other backend
-              // (built-in OpenAI/Azure = real hosted support; registry "chat"
-              // providers = the SDK's own ChatCompletions detection) keeps the SDK
-              // default.
+              // The ChatGPT/Codex backend rejects the SDK's HOSTED apply_patch
+              // tool. Gateway Responses routes likewise expose ordinary function
+              // tools, not OpenAI-hosted sandbox tools. Tell buildAgent to use
+              // function apply_patch and wrap successful view_image results as
+              // typed input_image content. Chat wires have no proven typed image
+              // result transport and therefore receive no view_image tool.
               structuredToolTransport: structuredToolTransportForTurn(resolvedModel),
               // EXPLICIT computer-use tool transport, derived from the resolved provider's
               // authoritative wire identity (codex → function-image, chat → disabled,
