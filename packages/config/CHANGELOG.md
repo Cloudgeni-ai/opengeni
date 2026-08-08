@@ -1,5 +1,15 @@
 # @opengeni/config
 
+## 0.12.6
+
+### Patch Changes
+
+- e2edfbc: Add provider-aware image generation with permanent verified artifacts,
+  prompt-cache-safe history, sandbox materialization, and SDK/React rendering.
+- Updated dependencies [e2edfbc]
+  - @opengeni/codex@0.2.14
+  - @opengeni/contracts@0.41.2
+
 ## 0.12.5
 
 ### Patch Changes

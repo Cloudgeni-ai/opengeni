@@ -1,5 +1,14 @@
 # @opengeni/codex
 
+## 0.2.14
+
+### Patch Changes
+
+- e2edfbc: Add provider-aware image generation with permanent verified artifacts,
+  prompt-cache-safe history, sandbox materialization, and SDK/React rendering.
+- Updated dependencies [e2edfbc]
+  - @opengeni/network@0.2.1
+
 ## 0.2.13
 
 ### Patch Changes

@@ -1,5 +1,12 @@
 # @opengeni/sdk
 
+## 0.49.3
+
+### Patch Changes
+
+- e2edfbc: Add provider-aware image generation with permanent verified artifacts,
+  prompt-cache-safe history, sandbox materialization, and SDK/React rendering.
+
 ## 0.49.0
 
 ### Minor Changes
