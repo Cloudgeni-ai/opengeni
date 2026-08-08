@@ -2167,6 +2167,194 @@ export const fileUploads = pgTable(
   }),
 );
 
+/** Permanent generated-image correlation; canonical bytes stay in `files`. */
+export const generatedImageArtifacts = pgTable(
+  "generated_image_artifacts",
+  {
+    artifactId: uuid("artifact_id").primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id").references(() => sessions.id, { onDelete: "set null" }),
+    // Turn/attempt foreign keys are installed by the migration; those tables
+    // are declared later in this monolithic schema module.
+    turnId: uuid("turn_id"),
+    attemptId: uuid("attempt_id"),
+    uploadId: uuid("upload_id").references(() => fileUploads.id, {
+      onDelete: "set null",
+    }),
+    settlementKey: text("settlement_key").notNull(),
+    toolCallId: text("tool_call_id").notNull(),
+    sourceStrategy: text("source_strategy").$type<"native_hosted" | "provider_adapter">().notNull(),
+    providerId: text("provider_id").notNull(),
+    providerBindingHash: text("provider_binding_hash").notNull(),
+    providerItemId: text("provider_item_id"),
+    status: text("status").$type<"pending" | "ready">().notNull().default("pending"),
+    mediaType: text("media_type").notNull(),
+    sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
+    sha256: text("sha256").notNull(),
+    width: integer("width").notNull(),
+    height: integer("height").notNull(),
+    sandboxPath: text("sandbox_path").notNull(),
+    readyAt: timestamp("ready_at", { withTimezone: true }),
+    lastError: text("last_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    settlementKey: uniqueIndex("generated_image_artifacts_settlement_key_uq").on(
+      table.workspaceId,
+      table.settlementKey,
+    ),
+    sessionCreated: index("generated_image_artifacts_session_created_idx").on(
+      table.workspaceId,
+      table.sessionId,
+      table.createdAt,
+      table.artifactId,
+    ),
+    providerItem: uniqueIndex("generated_image_artifacts_provider_item_uq")
+      .on(table.workspaceId, table.providerId, table.providerBindingHash, table.providerItemId)
+      .where(sql`${table.providerItemId} is not null`),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+      name: "generated_image_artifacts_workspace_account_fk",
+    }).onDelete("cascade"),
+    workspaceFile: foreignKey({
+      columns: [table.workspaceId, table.artifactId],
+      foreignColumns: [files.workspaceId, files.id],
+      name: "generated_image_artifacts_workspace_file_fk",
+    }).onDelete("cascade"),
+    sourceStrategyValid: check(
+      "generated_image_artifacts_source_strategy_chk",
+      sql`${table.sourceStrategy} in ('native_hosted', 'provider_adapter')`,
+    ),
+    sourceShapeValid: check(
+      "generated_image_artifacts_source_shape_chk",
+      sql`(${table.sourceStrategy} = 'native_hosted' and ${table.providerItemId} is not null)
+        or (${table.sourceStrategy} = 'provider_adapter' and ${table.providerItemId} is null)`,
+    ),
+    statusValid: check(
+      "generated_image_artifacts_status_chk",
+      sql`${table.status} in ('pending', 'ready')`,
+    ),
+    readyShapeValid: check(
+      "generated_image_artifacts_ready_shape_chk",
+      sql`(${table.status} = 'ready') = (${table.readyAt} is not null)`,
+    ),
+    mediaTypeValid: check(
+      "generated_image_artifacts_media_type_chk",
+      sql`${table.mediaType} in ('image/png', 'image/jpeg', 'image/webp')`,
+    ),
+    sizeValid: check(
+      "generated_image_artifacts_size_chk",
+      sql`${table.sizeBytes} > 0 and ${table.sizeBytes} <= 67108864`,
+    ),
+    sha256Valid: check(
+      "generated_image_artifacts_sha256_chk",
+      sql`${table.sha256} ~ '^[0-9a-f]{64}$'`,
+    ),
+    bindingHashValid: check(
+      "generated_image_artifacts_binding_hash_chk",
+      sql`${table.providerBindingHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+    identityBoundsValid: check(
+      "generated_image_artifacts_identity_bounds_chk",
+      sql`${table.settlementKey} ~ '^[0-9a-f]{64}$'
+        and octet_length(${table.toolCallId}) between 1 and 512
+        and octet_length(${table.providerId}) between 1 and 128
+        and (${table.providerItemId} is null or octet_length(${table.providerItemId}) between 1 and 512)
+        and (${table.lastError} is null or octet_length(${table.lastError}) <= 16384)`,
+    ),
+    dimensionsValid: check(
+      "generated_image_artifacts_dimensions_chk",
+      sql`${table.width} between 1 and 16384 and ${table.height} between 1 and 16384 and (${table.width}::bigint * ${table.height}::bigint) <= 67108864`,
+    ),
+    sandboxPathValid: check(
+      "generated_image_artifacts_sandbox_path_chk",
+      sql`${table.sandboxPath} ~ '^/workspace/generated-images/generated-image-[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\\.(png|jpg|webp)$'`,
+    ),
+  }),
+);
+
+/** Paid non-native generation admission; prevents ambiguous automatic replay. */
+export const imageGenerationOperations = pgTable(
+  "image_generation_operations",
+  {
+    id: uuid("id").primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id").references(() => sessions.id, {
+      onDelete: "cascade",
+    }),
+    turnId: uuid("turn_id"),
+    attemptId: uuid("attempt_id"),
+    operationKey: text("operation_key").notNull(),
+    toolCallId: text("tool_call_id").notNull(),
+    providerId: text("provider_id").notNull(),
+    providerBindingHash: text("provider_binding_hash").notNull(),
+    modelId: text("model_id").notNull(),
+    requestDigest: text("request_digest").notNull(),
+    expectedArtifactId: uuid("expected_artifact_id").notNull(),
+    status: text("status")
+      .$type<"prepared" | "provider_started" | "completed" | "outcome_unknown">()
+      .notNull()
+      .default("prepared"),
+    providerStartedAt: timestamp("provider_started_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    lastError: text("last_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    operationKey: uniqueIndex("image_generation_operations_operation_key_uq").on(
+      table.workspaceId,
+      table.operationKey,
+    ),
+    sessionCreated: index("image_generation_operations_session_created_idx").on(
+      table.workspaceId,
+      table.sessionId,
+      table.createdAt,
+      table.id,
+    ),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+      name: "image_generation_operations_workspace_account_fk",
+    }).onDelete("cascade"),
+    statusValid: check(
+      "image_generation_operations_status_chk",
+      sql`${table.status} in ('prepared', 'provider_started', 'completed', 'outcome_unknown')`,
+    ),
+    digestValid: check(
+      "image_generation_operations_digest_chk",
+      sql`${table.operationKey} ~ '^[0-9a-f]{64}$'
+        and ${table.providerBindingHash} ~ '^[0-9a-f]{64}$'
+        and ${table.requestDigest} ~ '^[0-9a-f]{64}$'`,
+    ),
+    identityBoundsValid: check(
+      "image_generation_operations_identity_bounds_chk",
+      sql`octet_length(${table.toolCallId}) between 1 and 512
+        and octet_length(${table.providerId}) between 1 and 128
+        and octet_length(${table.modelId}) between 1 and 256
+        and (${table.lastError} is null or octet_length(${table.lastError}) <= 16384)`,
+    ),
+    stateValid: check(
+      "image_generation_operations_state_chk",
+      sql`(${table.status} = 'prepared' and ${table.providerStartedAt} is null and ${table.completedAt} is null)
+        or (${table.status} in ('provider_started', 'outcome_unknown') and ${table.providerStartedAt} is not null and ${table.completedAt} is null)
+        or (${table.status} = 'completed' and ${table.providerStartedAt} is not null and ${table.completedAt} is not null)`,
+    ),
+  }),
+);
+
 /** Exact pending/ready byte accounting for retained computer screenshots. */
 export const workspaceScreenshotQuotas = pgTable(
   "workspace_screenshot_quotas",
@@ -2207,7 +2395,9 @@ export const retainedScreenshotArtifacts = pgTable(
     workspaceId: uuid("workspace_id")
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
-    sessionId: uuid("session_id").references(() => sessions.id, { onDelete: "set null" }),
+    sessionId: uuid("session_id").references(() => sessions.id, {
+      onDelete: "set null",
+    }),
     // Turn/attempt foreign keys are installed by migrations 0140/0176.
     // Those tables are declared later in this monolithic schema module, so
     // referencing them here would create an eager initialization cycle.

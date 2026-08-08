@@ -203,12 +203,13 @@ describe("release schema contract", () => {
         (migrations.has("0183_model_call_provider_cost_estimates.sql") ? 1 : 0) +
         (migrations.has("0184_sandbox_drain_teardown_fence.sql") ? 1 : 0) +
         (migrations.has("0185_temporal_schedule_cleanup_outbox.sql") ? 1 : 0) +
-        (migrations.has("0186_sandbox_capture_provider_contract.sql") ? 1 : 0),
+        (migrations.has("0186_sandbox_capture_provider_contract.sql") ? 1 : 0) +
+        (migrations.has("0187_generated_image_artifacts.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "d054128a1991b1ab367044bba8c1c6002e4ceeb19a28dc0ae70c5bb4798d6576",
+      "8fed72465a405aa736e49d87275588015a3a25a83e79c798e93e9d8d22c7c4ec",
     );
-    expect(contract.latestMigration).toBe("0186_sandbox_capture_provider_contract.sql");
+    expect(contract.latestMigration).toBe("0187_generated_image_artifacts.sql");
     expect(migrations.get("0065_enrollment_credential_generation.sql")).toMatchObject({
       sha256: "2e25fa2dfb8a95a7a9ba1ef5aa9bd219755af998b3317bcdf4d7acc4f67264fe",
       deploymentMode: "rolling",
@@ -235,6 +236,10 @@ describe("release schema contract", () => {
     });
     expect(migrations.get("0186_sandbox_capture_provider_contract.sql")).toMatchObject({
       sha256: "fc7d8d0eeba1800727f4f0f72020fac50290c629d9819f5b608d33f8b6af6bce",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0187_generated_image_artifacts.sql")).toMatchObject({
+      sha256: "d29994ffbe9bb0bd4f048341c11ccd3c12ffd559ba8052535ea4b60df4f7543b",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0180_retained_screenshot_lifecycle_fences.sql")).toMatchObject({

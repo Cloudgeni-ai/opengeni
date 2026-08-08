@@ -36,3 +36,8 @@ the required dispatcher methods, and Bun's native `fetch` does not provide a
 portable guarantee that an Undici `dispatcher` is honored. This package does not
 follow redirects; each caller must make a manual redirect decision and call the
 transport again so every hop is independently resolved and pinned.
+
+The package also exports `readJsonBase64Field` for provider APIs that return
+large binary artifacts inside JSON. It validates declared and streamed limits,
+decodes canonical base64 incrementally, and avoids retaining the JSON envelope
+or encoded string. Callers remain responsible for validating the decoded media.

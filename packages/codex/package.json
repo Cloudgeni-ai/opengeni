@@ -41,6 +41,7 @@
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
+    "@opengeni/network": "workspace:*",
     "zod": "^4.2.1"
   },
   "devDependencies": {

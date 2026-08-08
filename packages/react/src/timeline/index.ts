@@ -56,6 +56,7 @@ export type {
 export { createToolRegistry, rawTypeOf } from "./registry";
 export type {
   CreateToolRegistryOptions,
+  RetainedArtifactLoader,
   RetainedScreenshotLoader,
   ToolRegistry,
   ToolRegistryEntry,

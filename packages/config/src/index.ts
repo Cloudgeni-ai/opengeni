@@ -385,6 +385,8 @@ const SettingsSchema = z.object({
   // Gateway models below are added to the managed-credit catalog. Workspace
   // Gateway keys use the encrypted connection broker and never this secret.
   vercelAiGatewayApiKey: z.string().optional(),
+  /** Image adapter route; native hosted providers ignore this model. */
+  imageGenerationModel: z.string().trim().min(1).max(256).default("openai/gpt-image-2"),
   // Native composer voice input (browser MediaRecorder → API transcription).
   // Provider credentials stay server-side; ClientConfig only projects availability
   // and hard ceilings. Selection happens once before audio is sent — never retry
@@ -1242,6 +1244,10 @@ export const ModelCapabilitiesV1Schema = z
       webSearch: CapabilityStateV1Schema,
       xSearch: CapabilityStateV1Schema,
       codeExecution: CapabilityStateV1Schema,
+      imageGeneration: CapabilityStateV1Schema.default({
+        upstream: "unknown",
+        runnable: false,
+      }),
     }),
     inputModalities: z.array(ModelModalityV1).min(1),
     /** Exact MIME types accepted as typed `input_file`; `text/*` is allowed. */
@@ -1847,6 +1853,7 @@ export function getSettings(): Settings {
     openaiModel: optional("OPENGENI_OPENAI_MODEL"),
     openaiAllowedModels: optional("OPENGENI_OPENAI_ALLOWED_MODELS"),
     vercelAiGatewayApiKey: optional("OPENGENI_VERCEL_AI_GATEWAY_API_KEY"),
+    imageGenerationModel: optional("OPENGENI_IMAGE_GENERATION_MODEL"),
     voiceInputMaxDurationSeconds: optional("OPENGENI_VOICE_INPUT_MAX_DURATION_SECONDS"),
     voiceInputMaxSizeBytes: optional("OPENGENI_VOICE_INPUT_MAX_SIZE_BYTES"),
     voiceInputResumableEnabled: optional("OPENGENI_VOICE_INPUT_RESUMABLE_ENABLED"),
@@ -2387,7 +2394,12 @@ function normalizeCapabilities(capabilities: ModelCapabilitiesV1): ModelCapabili
 
 function legacyModelCapabilities(
   settings: Settings,
-  input: { reasoningEffort: boolean; hostedWebSearch: boolean; vision?: boolean },
+  input: {
+    reasoningEffort: boolean;
+    hostedWebSearch: boolean;
+    hostedImageGeneration?: boolean;
+    vision?: boolean;
+  },
 ): ModelCapabilitiesV1 {
   const reasoningEfforts = input.reasoningEffort ? configuredAllowedReasoningEfforts(settings) : [];
   return normalizeCapabilities({
@@ -2407,6 +2419,10 @@ function legacyModelCapabilities(
       },
       xSearch: { upstream: "unknown", runnable: false },
       codeExecution: { upstream: "unknown", runnable: false },
+      imageGeneration: {
+        upstream: input.hostedImageGeneration ? "supported" : "unknown",
+        runnable: input.hostedImageGeneration ?? false,
+      },
     },
     inputModalities: input.vision ? ["text", "image"] : ["text"],
     inputFileMediaTypes: [
@@ -2637,6 +2653,35 @@ function builtinPromptCachingForModel(
   return slug.startsWith("gpt-5.6-")
     ? { upstream: "supported", runnable: true, mode: "implicit" }
     : undefined;
+}
+
+/** Reviewed direct-OpenAI text models that accept the hosted image tool. */
+function builtinHostedImageGenerationForModel(settings: Settings, modelId: string): boolean {
+  return (
+    settings.openaiProvider === "openai" &&
+    isDirectOpenAiApiBaseUrl(settings.openaiBaseUrl) &&
+    ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"].includes(modelId)
+  );
+}
+
+/** Undefined and the exact public OpenAI v1 endpoint are the same direct route. */
+export function isDirectOpenAiApiBaseUrl(baseUrl: string | undefined): boolean {
+  if (baseUrl === undefined) return true;
+  try {
+    const parsed = new URL(baseUrl);
+    return (
+      parsed.protocol === "https:" &&
+      parsed.hostname === "api.openai.com" &&
+      parsed.port === "" &&
+      parsed.username === "" &&
+      parsed.password === "" &&
+      parsed.search === "" &&
+      parsed.hash === "" &&
+      parsed.pathname.replace(/\/+$/, "") === "/v1"
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -3079,6 +3124,7 @@ export function configuredModels(settings: Settings): ConfiguredModel[] {
         ...legacyModelCapabilities(settings, {
           reasoningEffort: true,
           hostedWebSearch: settings.webSearchEnabled,
+          hostedImageGeneration: builtinHostedImageGenerationForModel(settings, id),
           vision: id.startsWith("gpt-5.6-"),
         }),
         ...(builtinPromptCachingForModel(id)

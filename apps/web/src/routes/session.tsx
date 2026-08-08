@@ -61,6 +61,7 @@ import {
 import { coerceReasoningEffortForModel, findPickerRow } from "@/lib/model-policy";
 import { resolveSessionComposerModel } from "@/lib/session-model";
 import { mergeSessionContextProjection } from "@/lib/session-pins";
+import { createWorkspaceRetainedArtifactLoader } from "@/lib/retained-artifact-loader";
 import { createSessionRetainedScreenshotLoader } from "@/lib/retained-screenshot-loader";
 import {
   firstPartySessionToolOptions,
@@ -583,6 +584,10 @@ function SessionChatPane(props: {
       ),
     [context.client, props.session.id, props.session.workspaceId],
   );
+  const loadRetainedArtifact = useMemo(
+    () => createWorkspaceRetainedArtifactLoader(context.client, props.session.workspaceId),
+    [context.client, props.session.workspaceId],
+  );
   const terminal = isTerminalSessionStatus(props.session.status);
   const agentsSignal = useMemo(() => {
     const agents = props.agentNodes;
@@ -1001,6 +1006,7 @@ function SessionChatPane(props: {
               onReconnect={props.onReconnect}
               resolveProviderLogo={props.resolveProviderLogo}
               loadRetainedScreenshot={loadRetainedScreenshot}
+              loadRetainedArtifact={loadRetainedArtifact}
               hasOlder={props.hasOlder}
               loadingOlder={props.loadingOlder}
               onLoadOlder={() => void props.onLoadOlder()}

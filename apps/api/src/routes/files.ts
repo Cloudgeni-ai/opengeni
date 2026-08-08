@@ -8,6 +8,7 @@ import {
   RETAINED_OUTPUT_MAX_PAGE_BYTES,
   RetainedArtifactMetadataSchema,
   retainedArtifactReferenceFromFile,
+  retainedGeneratedImageReferenceFromFile,
   retainedScreenshotReferenceFromFile,
   resolveRetainedOutputRange,
   type RetainedArtifactMetadata,
@@ -19,10 +20,12 @@ import {
   completeFileUpload,
   createFileUpload,
   getFileUpload,
+  getGeneratedImageArtifact,
   getRetainedFileArtifact,
   getRetainedScreenshotArtifact,
   requireFile,
   type RetainedFileArtifact,
+  type GeneratedImageArtifact,
   type RetainedScreenshotArtifact,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
@@ -270,18 +273,18 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "files:read");
     const artifactId = retainedArtifactId(c.req.param("artifactId"));
-    const artifact = await getRetainedFileArtifact(db, workspaceId, artifactId);
+    const artifact = await getWorkspaceArtifact(db, workspaceId, artifactId);
     if (!artifact) {
       return c.json(retainedArtifactUnavailable(artifactId, "deleted"), 404);
     }
-    return c.json(retainedArtifactMetadata(artifact));
+    return c.json(artifact.metadata);
   });
 
   app.get("/v1/workspaces/:workspaceId/artifacts/:artifactId/content", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "files:read");
     const artifactId = retainedArtifactId(c.req.param("artifactId"));
-    const artifact = await getRetainedFileArtifact(db, workspaceId, artifactId);
+    const artifact = await getWorkspaceArtifact(db, workspaceId, artifactId);
     if (!artifact) {
       return c.json(retainedArtifactUnavailable(artifactId, "deleted"), 404);
     }
@@ -291,7 +294,7 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
       objectStorage,
       artifactId,
       artifact.file,
-      retainedArtifactMetadata(artifact),
+      artifact.metadata,
     );
   });
 
@@ -493,6 +496,33 @@ function retainedArtifactMetadata(artifact: RetainedFileArtifact): RetainedArtif
     return retainedArtifactUnavailable(file.id, "pending");
   }
   return retainedArtifactUnavailable(file.id, "unsupported");
+}
+
+async function getWorkspaceArtifact(
+  db: ApiRouteDeps["db"],
+  workspaceId: string,
+  artifactId: string,
+): Promise<{ file: RetainedFileArtifact["file"]; metadata: RetainedArtifactMetadata } | null> {
+  const generated = await getGeneratedImageArtifact(db, workspaceId, artifactId);
+  if (generated) {
+    return { file: generated.file, metadata: retainedGeneratedImageMetadata(generated) };
+  }
+  const artifact = await getRetainedFileArtifact(db, workspaceId, artifactId);
+  return artifact ? { file: artifact.file, metadata: retainedArtifactMetadata(artifact) } : null;
+}
+
+function retainedGeneratedImageMetadata(
+  artifact: GeneratedImageArtifact,
+): RetainedArtifactMetadata {
+  if (artifact.status === "ready") {
+    const reference = retainedGeneratedImageReferenceFromFile({
+      ...artifact.file,
+      width: artifact.width,
+      height: artifact.height,
+    });
+    if (reference) return reference;
+  }
+  return retainedArtifactUnavailable(artifact.artifactId, "pending");
 }
 
 function retainedScreenshotMetadata(

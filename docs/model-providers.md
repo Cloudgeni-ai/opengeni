@@ -227,7 +227,7 @@ The catalog describes:
 
 - reasoning efforts, default, and whether reasoning is required;
 - function calling and structured output;
-- hosted web search, X search, and code execution;
+- hosted web search, X search, code execution, and image generation;
 - input and output modalities;
 - SSE, Responses WebSocket, and realtime-audio transports; and
 - standard, priority, and fast latency modes.
@@ -242,6 +242,11 @@ provider support for X search or Responses WebSocket remains `runnable: false`
 until OpenGeni has the request, recovery, and billing contracts to use it
 safely. Capability metadata also never authorizes an OpenGeni tool; tool
 discovery and authorization remain independent.
+
+Hosted image generation is runnable only for reviewed direct OpenAI Responses
+models. Connected Codex and workspace Gateway routes instead expose the same
+provider-neutral client tool through separate paid-operation adapters. See
+[`image-generation.md`](image-generation.md).
 
 ### Native web search is a runtime capability
 

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { OpenAIChatCompletionsModel, OpenAIResponsesModel } from "@openai/agents";
+import { OpenAIChatCompletionsModel, OpenAIResponsesModel, RunContext } from "@openai/agents";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import {
@@ -147,16 +147,36 @@ describe("Vercel AI Gateway request fence", () => {
       {
         model: "moonshotai/kimi-k3",
         input: [
-          { type: "function_call", call_id: "a", name: "alpha", arguments: "{}" },
-          { type: "function_call", call_id: "b", name: "beta", arguments: "{}" },
+          {
+            type: "function_call",
+            call_id: "a",
+            name: "alpha",
+            arguments: "{}",
+          },
+          {
+            type: "function_call",
+            call_id: "b",
+            name: "beta",
+            arguments: "{}",
+          },
           { type: "function_call_output", call_id: "a", output: "done" },
         ],
       },
       {
         model: "deepseek/deepseek-v4-flash-0731",
         input: [
-          { type: "function_call", call_id: "a", name: "alpha", arguments: "{}" },
-          { type: "function_call", call_id: "b", name: "beta", arguments: "{}" },
+          {
+            type: "function_call",
+            call_id: "a",
+            name: "alpha",
+            arguments: "{}",
+          },
+          {
+            type: "function_call",
+            call_id: "b",
+            name: "beta",
+            arguments: "{}",
+          },
           { type: "function_call_output", call_id: "a", output: "one" },
           { type: "function_call_output", call_id: "b", output: "two" },
         ],
@@ -250,7 +270,10 @@ describe("pinned Responses large-output boundary", () => {
       output: Array.from({ length: 10_000 }, (_, index): Record<string, unknown> => {
         if (index % 3 === 0) return { type: "input_text", text: `text-${index}` };
         if (index % 3 === 1) {
-          return { type: "input_image", image: `data:image/png;base64,a${index}` };
+          return {
+            type: "input_image",
+            image: `data:image/png;base64,a${index}`,
+          };
         }
         return {
           type: "input_file",
@@ -714,6 +737,61 @@ function webSearchHostedTools(
 }
 
 describe("multi-provider gating in buildOpenGeniAgent", () => {
+  test("selects exactly one image transport without changing the stable tool intent", async () => {
+    const settings = multiProviderSettings();
+    const native = buildOpenGeniAgent(settings, [], {
+      imageGeneration: { kind: "native_hosted" },
+    });
+    const nativeImageTools = native.tools.filter(
+      (tool) =>
+        tool.type === "hosted_tool" &&
+        (tool.providerData as { type?: unknown } | undefined)?.type === "image_generation",
+    );
+    expect(nativeImageTools).toHaveLength(1);
+    expect(
+      native.tools.some((tool) => tool.type === "function" && tool.name === "generate_image"),
+    ).toBe(false);
+
+    const calls: Array<{ prompt: string; toolCallId: string }> = [];
+    const adapter = buildOpenGeniAgent(settings, [], {
+      imageGeneration: {
+        kind: "provider_adapter",
+        execute: async (input, context) => {
+          calls.push({ ...input, ...context });
+          return {
+            type: "generated_image",
+            artifact: { artifactId: "artifact-1" },
+          };
+        },
+      },
+    });
+    expect(
+      adapter.tools.some(
+        (tool) =>
+          tool.type === "hosted_tool" &&
+          (tool.providerData as { type?: unknown } | undefined)?.type === "image_generation",
+      ),
+    ).toBe(false);
+    const tool = adapter.tools.find(
+      (candidate) => candidate.type === "function" && candidate.name === "generate_image",
+    );
+    if (!tool || tool.type !== "function") throw new Error("generate_image tool missing");
+    const output = await tool.invoke(
+      new RunContext(),
+      JSON.stringify({ prompt: "a blue sphere" }),
+      {
+        toolCall: {
+          type: "function_call",
+          callId: "call-image-1",
+          name: "generate_image",
+          arguments: "{}",
+        },
+      },
+    );
+    expect(calls).toEqual([{ prompt: "a blue sphere", toolCallId: "call-image-1" }]);
+    expect(output).toEqual({ type: "generated_image", artifact: { artifactId: "artifact-1" } });
+  });
+
   test("a resolved chat provider turn: no web_search tool, no encrypted reasoning, no server store", () => {
     const settings = multiProviderSettings();
     const resolved = resolveTurnModel(settings, FIREWORKS_MODEL)!;
@@ -945,7 +1023,13 @@ describe("MultiProviderModelProvider — routes a model NAME to its provider (th
       label: "Codex (ChatGPT subscription)",
       api: "responses" as const,
       baseUrl: "https://chatgpt.com/backend-api",
-      models: [{ id: "codex/gpt-5.6-sol", label: "gpt-5.6-sol", reasoningEffort: true }],
+      models: [
+        {
+          id: "codex/gpt-5.6-sol",
+          label: "gpt-5.6-sol",
+          reasoningEffort: true,
+        },
+      ],
     };
     // The codex turn's OWN settings (codex provider injected).
     const codexSettings = multiProviderSettings({

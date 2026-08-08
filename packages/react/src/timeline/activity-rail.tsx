@@ -12,7 +12,7 @@ import { cn } from "../lib/cn";
 import { truncate } from "../lib/format";
 import { defaultToolRegistry } from "./tool-renderers";
 import { useEntranceAnimation, useEntranceAnimationLive } from "./entrance";
-import type { RetainedScreenshotLoader, ToolRegistry } from "./registry";
+import type { RetainedArtifactLoader, RetainedScreenshotLoader, ToolRegistry } from "./registry";
 import { useSeenActivityIds } from "./seen-activity-ids";
 import { BodyNote, PayloadBlock, ActivityDisclosure, ToolCallTruncationProvider } from "./shared";
 import { toolDisplayName } from "./tool-display-name";
@@ -44,6 +44,8 @@ export type ActivityRailProps = {
    */
   onMemoryClick?: ((memoryId: string) => void) | undefined;
   loadRetainedScreenshot?: RetainedScreenshotLoader | undefined;
+  /** Resolve permanent generated-image receipts through the authenticated host SDK. */
+  loadRetainedArtifact?: RetainedArtifactLoader | undefined;
   /** Drop the left rule + indent (used inside a folded turn summary). */
   bare?: boolean | undefined;
   className?: string | undefined;
@@ -67,6 +69,7 @@ export function ActivityRail({
   onOpenSession,
   onMemoryClick,
   loadRetainedScreenshot,
+  loadRetainedArtifact,
   bare,
   className,
 }: ActivityRailProps) {
@@ -120,6 +123,7 @@ export function ActivityRail({
           onOpenSession,
           onMemoryClick,
           loadRetainedScreenshot,
+          loadRetainedArtifact,
         );
         return (
           <div
@@ -146,6 +150,7 @@ function renderActivity(
   onOpenSession: ((sessionId: string) => void) | undefined,
   onMemoryClick: ((memoryId: string) => void) | undefined,
   loadRetainedScreenshot: RetainedScreenshotLoader | undefined,
+  loadRetainedArtifact: RetainedArtifactLoader | undefined,
 ) {
   switch (item.kind) {
     case "reasoning":
@@ -154,7 +159,11 @@ function renderActivity(
       const Renderer = toolRegistry.resolve(item);
       return (
         <ToolCallTruncationProvider value={item.truncation ?? null}>
-          <Renderer item={item} loadRetainedScreenshot={loadRetainedScreenshot} />
+          <Renderer
+            item={item}
+            loadRetainedScreenshot={loadRetainedScreenshot}
+            loadRetainedArtifact={loadRetainedArtifact}
+          />
         </ToolCallTruncationProvider>
       );
     }

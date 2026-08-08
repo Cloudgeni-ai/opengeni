@@ -65,6 +65,7 @@ import {
   MandatoryHistoryPersistenceError,
   modelAttachmentInputPolicyForTurn,
   modelSupportsImageInputForTurn,
+  openAiHostedImageProviderBindingForTurn,
   recordCompletedModelCallBeforeOwnershipFences,
   modelUsageSourceKey,
   modelResponseContextSignal,
@@ -474,6 +475,24 @@ describe("turn exact-content boundaries", () => {
     expect(Object.hasOwn(pending!.callItem.providerData as object, "optional")).toBe(false);
     expect(Object.hasOwn(rawItem, "status")).toBe(true);
     expect(Object.hasOwn(rawItem.providerData, "optional")).toBe(true);
+  });
+
+  test("does not register a hosted image as a pending function call", () => {
+    expect(
+      pendingToolCallFromSdkEvent({
+        type: "run_item_stream_event",
+        item: {
+          type: "tool_call_item",
+          rawItem: {
+            type: "hosted_tool_call",
+            id: "ig_1",
+            name: "image_generation_call",
+            status: "completed",
+            output: "opaque",
+          },
+        },
+      }),
+    ).toBeNull();
   });
 
   test("normalizes completed SDK tool results before the lossless receipt write", () => {
@@ -3971,6 +3990,76 @@ describe("hostedWebSearchForTurn (provider support)", () => {
   test("applies the deployment capability gate to the legacy built-in path", () => {
     expect(hostedWebSearchForTurn(null, true)).toBe(true);
     expect(hostedWebSearchForTurn(null, false)).toBe(false);
+  });
+});
+
+describe("openAiHostedImageProviderBindingForTurn", () => {
+  const direct = {
+    provider: {
+      id: "openai",
+      kind: "api-key" as const,
+      builtin: true,
+      baseUrl: undefined,
+    },
+    configured: {
+      capabilities: { hostedTools: { imageGeneration: { runnable: true } } },
+    },
+  };
+
+  test("enables only the first-party OpenAI Responses endpoint", () => {
+    const settings = testSettings({
+      openaiProvider: "openai",
+      openaiApiKey: "direct-key",
+      openaiBaseUrl: undefined,
+    });
+    const binding = openAiHostedImageProviderBindingForTurn(settings, direct);
+    expect(binding?.providerId).toBe("openai");
+    expect(binding?.providerBindingHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(
+      openAiHostedImageProviderBindingForTurn(
+        { ...settings, openaiBaseUrl: "https://api.openai.com/v1/" },
+        {
+          provider: { ...direct.provider, baseUrl: "https://api.openai.com/v1" },
+          configured: direct.configured,
+        },
+      ),
+    ).toEqual(binding);
+    expect(
+      openAiHostedImageProviderBindingForTurn(settings, {
+        provider: { ...direct.provider, baseUrl: "https://proxy.example/v1" },
+        configured: direct.configured,
+      }),
+    ).toBeNull();
+  });
+
+  test("fails closed when the selected text model does not declare the hosted image tool", () => {
+    const settings = testSettings({
+      openaiProvider: "openai",
+      openaiApiKey: "direct-key",
+      openaiBaseUrl: undefined,
+    });
+    expect(
+      openAiHostedImageProviderBindingForTurn(settings, {
+        ...direct,
+        configured: {
+          capabilities: { hostedTools: { imageGeneration: { runnable: false } } },
+        },
+      }),
+    ).toBeNull();
+    expect(openAiHostedImageProviderBindingForTurn(settings, null)).toBeNull();
+  });
+
+  test("never assumes a custom legacy base URL supports the hosted image tool", () => {
+    expect(
+      openAiHostedImageProviderBindingForTurn(
+        testSettings({
+          openaiProvider: "openai",
+          openaiApiKey: "direct-key",
+          openaiBaseUrl: "https://proxy.example/v1",
+        }),
+        null,
+      ),
+    ).toBeNull();
   });
 });
 

@@ -68,6 +68,7 @@ import {
   type NoticeItem,
   type TimelineGroup,
   type TimelineItem,
+  type RetainedArtifactLoader,
   type RetainedScreenshotLoader,
   type ToolRegistry,
   type TurnSummaryOptions,
@@ -146,6 +147,8 @@ export type MessageTimelineProps = {
   toolRegistry?: ToolRegistry | undefined;
   /** Resolve opaque retained screenshot receipts through the authenticated host SDK. */
   loadRetainedScreenshot?: RetainedScreenshotLoader | undefined;
+  /** Resolve permanent generated-image receipts through the authenticated host SDK. */
+  loadRetainedArtifact?: RetainedArtifactLoader | undefined;
   /**
    * Display name of the session's active compute target (Connected Machine or
    * cloud sandbox). When set, exec_command collapsed previews prefix `on {label}`.
@@ -292,6 +295,7 @@ export function MessageTimeline({
   resolveProviderLogo,
   toolRegistry = defaultToolRegistry,
   loadRetainedScreenshot,
+  loadRetainedArtifact,
   computeLabel = null,
   turnSummary,
   autoFollow = true,
@@ -1346,6 +1350,7 @@ export function MessageTimeline({
                                 resolveProviderLogo,
                                 toolRegistry,
                                 loadRetainedScreenshot,
+                                loadRetainedArtifact,
                                 turnSummary,
                               ]}
                             >
@@ -1359,6 +1364,7 @@ export function MessageTimeline({
                                   resolveProviderLogo={resolveProviderLogo}
                                   toolRegistry={toolRegistry}
                                   loadRetainedScreenshot={loadRetainedScreenshot}
+                                  loadRetainedArtifact={loadRetainedArtifact}
                                   turnSummary={turnSummary}
                                   foldLiveCluster={isAgentProgress(next)}
                                   trailingAgentText={trailingAgentTextAfterTurn(group, next)}
@@ -1703,6 +1709,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
   resolveProviderLogo,
   toolRegistry,
   loadRetainedScreenshot,
+  loadRetainedArtifact,
   turnSummary,
   insideTurn = false,
   nestClusterChips = false,
@@ -1720,6 +1727,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
   resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
   toolRegistry: ToolRegistry;
   loadRetainedScreenshot?: RetainedScreenshotLoader | undefined;
+  loadRetainedArtifact?: RetainedArtifactLoader | undefined;
   turnSummary?: TurnSummaryOptions | undefined;
   /** A completed cluster of a still-RUNNING turn (not the live tail) folds
       behind a neutral chip — the one place activity without an outcome still
@@ -1794,6 +1802,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
               onMemoryClick={onMemoryClick}
               toolRegistry={toolRegistry}
               loadRetainedScreenshot={loadRetainedScreenshot}
+              loadRetainedArtifact={loadRetainedArtifact}
               bare
             />
           );
@@ -1816,6 +1825,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
               onMemoryClick={onMemoryClick}
               toolRegistry={toolRegistry}
               loadRetainedScreenshot={loadRetainedScreenshot}
+              loadRetainedArtifact={loadRetainedArtifact}
               bare
             />
           </TurnSummary>
@@ -1842,6 +1852,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
                 onMemoryClick={onMemoryClick}
                 toolRegistry={toolRegistry}
                 loadRetainedScreenshot={loadRetainedScreenshot}
+                loadRetainedArtifact={loadRetainedArtifact}
                 bare
               />
             </TurnRailFrame>
@@ -1869,6 +1880,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
               resolveProviderLogo,
               toolRegistry,
               loadRetainedScreenshot,
+              loadRetainedArtifact,
               turnSummary,
             ]}
           >
@@ -1881,6 +1893,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
               resolveProviderLogo={resolveProviderLogo}
               toolRegistry={toolRegistry}
               loadRetainedScreenshot={loadRetainedScreenshot}
+              loadRetainedArtifact={loadRetainedArtifact}
               turnSummary={turnSummary}
               insideTurn
               nestClusterChips={nestClusters}

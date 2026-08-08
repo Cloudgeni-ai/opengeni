@@ -167,6 +167,9 @@ import {
   resolveTurnExecutionPolicyV1,
   OPENGENI_GATEWAY_MODELS,
   OPENGENI_GATEWAY_PROVIDER_ID,
+  WORKSPACE_GATEWAY_PROVIDER_ID,
+  isDirectOpenAiApiBaseUrl,
+  resolveModelProvider,
   type ModelUsageInput,
   type ModelProviderApi,
   type RegistryProviderKind,
@@ -343,6 +346,26 @@ import {
   retainComputerScreenshot,
   typedScreenshotFromSdkEvent,
 } from "./retained-screenshots";
+import {
+  assertGeneratedImageHistoryRetained,
+  collectGeneratedImageReceipts,
+  collectGeneratedImageArtifactReceipts,
+  collectGeneratedImageRunStateArtifactReceipts,
+  compactGeneratedImageHistory,
+  compactGeneratedImageRunState,
+  compactGeneratedImageSdkEvent,
+  generatedImageFromSdkEvent,
+  generatedImagesFromHistory,
+  isCompletedGeneratedImageSdkEvent,
+  projectGeneratedImageHistoryForModel,
+  projectGeneratedImageRunStateForModel,
+  retainGeneratedImage,
+  type GeneratedImageReceipt,
+  type GeneratedImageOutput,
+} from "./generated-images";
+import { executeGatewayImageGeneration } from "./gateway-image-generation";
+import { executeCodexImageGeneration } from "./codex-image-generation";
+import { imageProviderBindingHash } from "./image-generation-operation";
 import { captureWorkspaceRevision, openFreshWorkspaceCaptureSession } from "./workspace-capture";
 import type { ChannelASession } from "@opengeni/runtime/sandbox";
 import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
@@ -2119,6 +2142,39 @@ export function hostedWebSearchForTurn(
   return resolvedModel?.configured.hostedWebSearch ?? deploymentWebSearchEnabled;
 }
 
+/** Direct OpenAI hosted image IDs are reusable only by the exact API credential. */
+export function openAiHostedImageProviderBindingForTurn(
+  settings: Pick<Settings, "openaiProvider" | "openaiApiKey" | "openaiBaseUrl">,
+  resolvedModel: {
+    provider: {
+      id: string;
+      kind: RegistryProviderKind;
+      builtin: boolean;
+      baseUrl?: string | undefined;
+    };
+    configured: {
+      capabilities: {
+        hostedTools: { imageGeneration: { runnable: boolean } };
+      };
+    };
+  } | null,
+): { providerId: string; providerBindingHash: string } | null {
+  if (!resolvedModel?.configured.capabilities.hostedTools.imageGeneration.runnable) return null;
+  const providerId = resolvedModel.provider.id;
+  const isDirectOpenAi =
+    resolvedModel.provider.builtin &&
+    resolvedModel.provider.id === "openai" &&
+    isDirectOpenAiApiBaseUrl(resolvedModel.provider.baseUrl) &&
+    settings.openaiProvider === "openai" &&
+    isDirectOpenAiApiBaseUrl(settings.openaiBaseUrl);
+  const bindingIdentity = isDirectOpenAi ? settings.openaiApiKey : null;
+  if (!bindingIdentity) return null;
+  return {
+    providerId,
+    providerBindingHash: imageProviderBindingHash(providerId, bindingIdentity),
+  };
+}
+
 /** Exact model-catalog modality gate; null preserves the legacy built-in path. */
 export function modelSupportsImageInputForTurn(
   resolvedModel: {
@@ -2144,7 +2200,10 @@ export function modelAttachmentInputPolicyForTurn(
   resolvedModel: {
     provider: { api: ModelProviderApi };
     configured: {
-      capabilities?: { inputModalities: string[]; inputFileMediaTypes?: string[] };
+      capabilities?: {
+        inputModalities: string[];
+        inputFileMediaTypes?: string[];
+      };
     };
   } | null,
 ): ModelAttachmentInputPolicy {
@@ -3280,6 +3339,170 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // remains the final call/result pairing guard for every other reconcile.
     let persistedHistoryCount = 0;
     const retainedScreenshotReceiptsByCallId = new Map<string, RetainedArtifactMetadata>();
+    const generatedImageReceiptsByProviderItemId = new Map<string, GeneratedImageReceipt>();
+    const generatedImageReceiptsByArtifactId = new Map<string, GeneratedImageReceipt>();
+    let generatedImageMaterializationCache: {
+      instanceId: string;
+      fileIds: Set<string>;
+    } | null = null;
+    const materializeGeneratedImage = async (receipt: GeneratedImageReceipt): Promise<boolean> => {
+      if (modelRunSettings.sandboxBackend === "none") return false;
+      try {
+        if (!objectStorage) {
+          throw new Error("Generated image sandbox materialization requires object storage");
+        }
+        const sandbox =
+          resolvedSandbox ?? (turnSandboxProvisioner ? await turnSandboxProvisioner.get() : null);
+        const sessionForDownload = setupBoxSession;
+        if (!sandbox || !sessionForDownload) {
+          throw new Error("Generated image could not acquire the active sandbox");
+        }
+        const file = await requireFile(db, input.workspaceId, receipt.artifact.artifactId);
+        const cacheable = sandbox.established.backendId !== "selfhosted";
+        if (generatedImageMaterializationCache?.instanceId !== sandbox.established.instanceId) {
+          const fileIds =
+            cacheable && sandboxGroupId
+              ? await getMaterializedSandboxFileResources(db, {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sandboxGroupId,
+                  expectedEpoch: sandbox.leaseEpoch,
+                  instanceId: sandbox.established.instanceId,
+                })
+              : new Set<string>();
+          generatedImageMaterializationCache = {
+            instanceId: sandbox.established.instanceId,
+            fileIds,
+          };
+        }
+        if (generatedImageMaterializationCache.fileIds.has(file.id)) return true;
+        const downloadStorage = objectStorageForSandboxDownloads(modelRunSettings, objectStorage);
+        const signed = await downloadStorage.createGetUrl({
+          key: file.objectKey,
+        });
+        const runAs = sandboxRunAs(modelRunSettings);
+        const materialized = await runWorkspaceMutationForSandbox(
+          sandbox,
+          "generatedImageMaterialization",
+          async () =>
+            await materializeSandboxFileDownloads(
+              sessionForDownload as ToolspaceTokenWriterSession,
+              [
+                {
+                  fileId: file.id,
+                  mountPath: "generated-images",
+                  filename: file.safeFilename,
+                  url: signed.url,
+                  expiresAt: signed.expiresAt,
+                  sizeBytes: file.sizeBytes,
+                  ...(file.sha256 ? { sha256: file.sha256 } : {}),
+                },
+              ],
+              {
+                onRuntimeEvent: async (event) => {
+                  await publish?.([{ type: event.type, payload: event.payload }], true);
+                },
+                ...(runAs ? { runAs } : {}),
+                ...(toolCancellationFenceRef.current
+                  ? {
+                      commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
+                        toolCancellationFenceRef.current,
+                      ),
+                    }
+                  : {}),
+              },
+            ),
+        );
+        if (materialized.failures.length > 0) {
+          throw new Error(materialized.failures[0]!.reason);
+        }
+        generatedImageMaterializationCache.fileIds.add(file.id);
+        if (cacheable && sandboxGroupId) {
+          await markSandboxFileResourcesMaterialized(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sandboxGroupId,
+            expectedEpoch: sandbox.leaseEpoch,
+            instanceId: sandbox.established.instanceId,
+            fileIds: [file.id],
+          });
+        }
+        return true;
+      } catch (error) {
+        // Generation and permanent retention are already durable. Never turn a
+        // transient sandbox copy failure into a replay of paid provider work;
+        // the unmarked resource is retried on the next turn.
+        observability.warn("Generated image sandbox materialization deferred", {
+          errorClass: error instanceof Error ? error.name : "UnknownError",
+          errorCode: "generated_image_materialization_deferred",
+          origin: "worker",
+        });
+        return false;
+      }
+    };
+    let nativeImageGenerationRetention: {
+      providerId: string;
+      providerBindingHash: string;
+      sessionId: string;
+      turnId: string;
+      attemptId: string;
+    } | null = null;
+    const retainNativeGeneratedImage = async (
+      output: GeneratedImageOutput,
+    ): Promise<GeneratedImageReceipt> => {
+      if (output.providerItemId) {
+        const existing = generatedImageReceiptsByProviderItemId.get(output.providerItemId);
+        if (existing) return existing;
+      }
+      const context = nativeImageGenerationRetention;
+      if (!context || !output.providerItemId) {
+        throw new Error("Native generated image arrived without provider retention identity");
+      }
+      const retained = await retainGeneratedImage({
+        db,
+        objectStorage,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: context.sessionId,
+        turnId: context.turnId,
+        attemptId: context.attemptId,
+        sourceStrategy: "native_hosted",
+        providerId: context.providerId,
+        providerBindingHash: context.providerBindingHash,
+        output,
+      });
+      generatedImageReceiptsByProviderItemId.set(output.providerItemId, retained.receipt);
+      generatedImageReceiptsByArtifactId.set(
+        retained.receipt.artifact.artifactId,
+        retained.receipt,
+      );
+      await materializeGeneratedImage(retained.receipt);
+      return retained.receipt;
+    };
+    const retainNativeGeneratedImagesFromHistory = async (
+      history: Array<Record<string, unknown>>,
+    ): Promise<void> => {
+      collectGeneratedImageReceipts(history, generatedImageReceiptsByProviderItemId);
+      collectGeneratedImageArtifactReceipts(history, generatedImageReceiptsByArtifactId);
+      for (const output of generatedImagesFromHistory(
+        history,
+        generatedImageReceiptsByProviderItemId,
+      )) {
+        if (
+          !output.providerItemId ||
+          generatedImageReceiptsByProviderItemId.has(output.providerItemId)
+        ) {
+          continue;
+        }
+        await retainNativeGeneratedImage(output);
+      }
+      assertGeneratedImageHistoryRetained(history, generatedImageReceiptsByProviderItemId);
+    };
+    const compactMediaRunState = (serialized: string): string =>
+      compactGeneratedImageRunState(
+        compactRetainedScreenshotRunState(serialized, retainedScreenshotReceiptsByCallId),
+        generatedImageReceiptsByProviderItemId,
+      );
     const computerScreenshotCallIds = new Set<string>();
     const materializeScreenshotHistory = async (history: Array<Record<string, unknown>>) => {
       collectRetainedScreenshotReceipts(history, retainedScreenshotReceiptsByCallId);
@@ -3293,13 +3516,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     };
     const materializeScreenshotRunState = async (serialized: string) => {
       collectRetainedScreenshotRunStateReceipts(serialized, retainedScreenshotReceiptsByCallId);
-      return await materializeRetainedScreenshotRunState({
+      collectGeneratedImageRunStateArtifactReceipts(serialized, generatedImageReceiptsByArtifactId);
+      const withScreenshots = await materializeRetainedScreenshotRunState({
         db,
         objectStorage,
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
         serialized,
       });
+      return projectGeneratedImageRunStateForModel(
+        compactGeneratedImageRunState(withScreenshots, generatedImageReceiptsByProviderItemId),
+      );
     };
     let providerArtifactCandidates: Awaited<
       ReturnType<typeof turnInput>
@@ -3322,9 +3549,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       try {
         const rawHistory = (stream.state as { history?: unknown[] }).history;
         if (Array.isArray(rawHistory)) {
-          const durableHistory = compactRetainedScreenshotHistory(
-            rawHistory as Array<Record<string, unknown>>,
-            retainedScreenshotReceiptsByCallId,
+          const typedHistory = rawHistory as Array<Record<string, unknown>>;
+          await retainNativeGeneratedImagesFromHistory(typedHistory);
+          const durableHistory = compactGeneratedImageHistory(
+            compactRetainedScreenshotHistory(typedHistory, retainedScreenshotReceiptsByCallId),
+            generatedImageReceiptsByProviderItemId,
           );
           const { rows, nextWatermark, nextPosition } = historyRowsToAppend(
             durableHistory,
@@ -3584,9 +3813,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           inputs,
           {
             onAppend: ({ durationSeconds }) =>
-              recordSessionEventAppendLatency(observability, { durationSeconds }),
+              recordSessionEventAppendLatency(observability, {
+                durationSeconds,
+              }),
             onPublish: ({ durationSeconds }) =>
-              recordSessionEventPublishLatency(observability, { durationSeconds }),
+              recordSessionEventPublishLatency(observability, {
+                durationSeconds,
+              }),
           },
         );
         if (inputs.length > 0 && !appended.accepted) {
@@ -3650,10 +3883,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         const runState = inputSettlement.runState
           ? {
               ...inputSettlement.runState,
-              serializedRunState: compactRetainedScreenshotRunState(
-                inputSettlement.runState.serializedRunState,
-                retainedScreenshotReceiptsByCallId,
-              ),
+              serializedRunState: compactMediaRunState(inputSettlement.runState.serializedRunState),
             }
           : undefined;
         const result = await applySessionTurnSettlement(db, input.workspaceId, {
@@ -4440,6 +4670,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       );
       const supportsImageInput = modelSupportsImageInputForTurn(resolvedModel);
       const providerApi = resolvedModel?.provider.api ?? "responses";
+      const nativeImageProviderBinding =
+        providerApi === "responses"
+          ? openAiHostedImageProviderBindingForTurn(capabilitySettings, resolvedModel)
+          : null;
       const lazyToolTransport = lazyToolTransportForTurn(resolvedModel);
       const modelInputPolicy = modelAttachmentInputPolicyForTurn(resolvedModel);
       const attachmentProjector = createModelHistoryAttachmentProjector(
@@ -4450,9 +4684,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       );
       const modelHistoryProjector = async (items: Array<Record<string, unknown>>) =>
         projectModelInputForCapabilities(await attachmentProjector(items), modelInputPolicy);
+      const generatedImageHistoryProjector = async (
+        items: Array<Record<string, unknown>>,
+      ): Promise<Array<Record<string, unknown>>> => {
+        collectGeneratedImageReceipts(items, generatedImageReceiptsByProviderItemId);
+        collectGeneratedImageArtifactReceipts(items, generatedImageReceiptsByArtifactId);
+        return projectGeneratedImageHistoryForModel(items);
+      };
       const compactionModelHistoryProjector = async (items: Array<Record<string, unknown>>) =>
         await modelHistoryProjector(
-          projectHistoryForProvider(restoreGenericDispatchHistoryItems(items), providerApi),
+          projectHistoryForProvider(
+            await generatedImageHistoryProjector(restoreGenericDispatchHistoryItems(items)),
+            providerApi,
+          ),
         );
       // Bind the provider/model catalog's context policy to every model-facing
       // path for this turn. In particular, Codex subscription turns must not
@@ -5778,7 +6022,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
 
                 return await withCodexAppsRequestAuthorization(
                   db,
-                  { workspaceId: input.workspaceId, credentialId: codexAppsCredentialId },
+                  {
+                    workspaceId: input.workspaceId,
+                    credentialId: codexAppsCredentialId,
+                  },
                   async () => await use(snapshot),
                 );
               },
@@ -5855,6 +6102,87 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             }
           : {};
       const hostedWebSearch = hostedWebSearchForTurn(resolvedModel, runSettings.webSearchEnabled);
+      const imageGenerationOption: Pick<BuildAgentOptions, "imageGeneration"> = (() => {
+        // Never expose a paid image operation unless its permanent artifact can
+        // be committed. Failing after provider execution would leave an
+        // unrecoverable outcome-unknown operation with no user-visible image.
+        if (!objectStorage) return {};
+        if (nativeImageProviderBinding) {
+          nativeImageGenerationRetention = {
+            ...nativeImageProviderBinding,
+            sessionId: input.sessionId,
+            turnId: turn.id,
+            attemptId: input.attemptId,
+          };
+          return { imageGeneration: { kind: "native_hosted" } };
+        }
+
+        if (resolvedModel?.provider.kind === "codex-subscription") {
+          const codexImageContext = codexContext;
+          const codexImageCredentialId = effectiveCodexCredentialId;
+          if (!codexImageContext || !codexImageCredentialId) {
+            throw new CodexReloginRequired(
+              "Codex image generation requires a connected subscription account",
+            );
+          }
+          return {
+            imageGeneration: {
+              kind: "provider_adapter",
+              execute: async ({ prompt }, { toolCallId }) => {
+                const receipt = await executeCodexImageGeneration({
+                  db,
+                  objectStorage,
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  turnId: turn.id,
+                  attemptId: input.attemptId,
+                  toolCallId,
+                  prompt,
+                  credentialId: codexImageCredentialId,
+                  codexContext: codexImageContext,
+                  ...(runtimeCancellationSignal ? { abortSignal: runtimeCancellationSignal } : {}),
+                });
+                generatedImageReceiptsByArtifactId.set(receipt.artifact.artifactId, receipt);
+                await materializeGeneratedImage(receipt);
+                return receipt;
+              },
+            },
+          };
+        }
+
+        const gatewayResolution = resolveModelProvider(
+          capabilitySettings,
+          WORKSPACE_GATEWAY_PROVIDER_ID,
+        );
+        const gateway = gatewayResolution?.provider;
+        if (gateway?.kind !== "vercel-gateway-workspace" || !gateway.apiKey) return {};
+        const gatewayApiKey = gateway.apiKey;
+        return {
+          imageGeneration: {
+            kind: "provider_adapter",
+            execute: async ({ prompt }, { toolCallId }) => {
+              const receipt = await executeGatewayImageGeneration({
+                db,
+                objectStorage,
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: turn.id,
+                attemptId: input.attemptId,
+                apiKey: gatewayApiKey,
+                modelId: capabilitySettings.imageGenerationModel,
+                prompt,
+                toolCallId,
+                ...(runtimeCancellationSignal ? { abortSignal: runtimeCancellationSignal } : {}),
+              });
+              generatedImageReceiptsByArtifactId.set(receipt.artifact.artifactId, receipt);
+              await materializeGeneratedImage(receipt);
+              return receipt;
+            },
+          },
+        };
+      })();
       const serviceTier = serviceTierForLatencyMode(
         turnExecutionPolicy.providerId,
         turnExecutionPolicy.latencyMode,
@@ -5948,6 +6276,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // session's MCP allow-list; the effective context window drives the
         // compaction threshold.
         hostedWebSearch,
+        ...imageGenerationOption,
         lazyToolTransport,
         supportsImageInput,
         inputFileMediaTypes: modelInputPolicy.inputFileMediaTypes,
@@ -6534,7 +6863,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             "fileMaterialization",
             async () =>
               await materializeSandboxFileDownloads(
-                setupBoxSession as any,
+                setupBoxSession as ToolspaceTokenWriterSession,
                 downloadsToMaterialize,
                 {
                   onRuntimeEvent: async (event) => {
@@ -6587,10 +6916,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           ...(unavailableSandboxFilesNote ? { unavailableSandboxFilesNote } : {}),
           ...(runCredentialsNote ? { runCredentialsNote } : {}),
           providerApi,
+          projectCanonicalHistory: generatedImageHistoryProjector,
           materializeModelHistory: materializeScreenshotHistory,
           materializeSerializedRunState: materializeScreenshotRunState,
           projectModelHistory: modelHistoryProjector,
         });
+        for (const receipt of generatedImageReceiptsByArtifactId.values()) {
+          await materializeGeneratedImage(receipt);
+        }
         runInput = prepared.input;
         providerArtifactCandidates = prepared.providerArtifactCandidates;
         // Slice index = the length of the model-facing (active) history this turn
@@ -6852,6 +7185,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             let stableToolCallIdsToClear: string[] | null = null;
             let completedCurrentToolBatch = false;
             let retainedScreenshotMetadata: RetainedArtifactMetadata | null = null;
+            const generatedImage = generatedImageFromSdkEvent(next.value);
+            if (isCompletedGeneratedImageSdkEvent(next.value) && !generatedImage) {
+              throw new Error(
+                "Completed native image item could not cross the retained-artifact boundary",
+              );
+            }
+            const generatedImageReceipt = generatedImage
+              ? await retainNativeGeneratedImage(generatedImage)
+              : null;
             const responseResult = await processModelResponseTerminalEvent({
               event: next.value,
               state: modelResponseState,
@@ -6886,6 +7228,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               ...(resolvedModel?.provider.id ? { providerId: resolvedModel.provider.id } : {}),
             });
             if (responseResult.status === "processed") {
+              const rawStreamHistory = (stream.state as { history?: unknown[] }).history;
+              if (Array.isArray(rawStreamHistory)) {
+                // The completed image item is normally retained from its own
+                // run-item event above. Scan once at the terminal response as
+                // a compatibility backstop before reconciliation can persist
+                // provider bytes. Never rescan history for every token delta.
+                await retainNativeGeneratedImagesFromHistory(
+                  rawStreamHistory as Array<Record<string, unknown>>,
+                );
+              }
               streamSawPerResponseUsage ||= responseResult.usageReported;
               currentToolBatchCallIds = new Set<string>();
               currentToolBatchCompletedCallIds = new Set<string>();
@@ -6905,7 +7257,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 // conversation context preserved for the post-top-up resume.
                 let serializedRunState: string | null = null;
                 try {
-                  serializedRunState = String(stream.state.toString());
+                  serializedRunState = compactMediaRunState(String(stream.state.toString()));
                 } catch {
                   serializedRunState = null;
                 }
@@ -6915,7 +7267,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 );
               }
             }
-            const pendingToolCall = pendingToolCallFromSdkEvent(next.value);
+            const durableSdkEvent = generatedImageReceipt
+              ? compactGeneratedImageSdkEvent(next.value, generatedImageReceipt)
+              : next.value;
+            const pendingToolCall = pendingToolCallFromSdkEvent(durableSdkEvent);
             if (pendingToolCall) {
               const registered = await registerPendingSessionToolCall(db, {
                 accountId: input.accountId,
@@ -6939,9 +7294,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 computerScreenshotCallIds.add(pendingToolCall.callId);
               }
             }
-            const completedToolCall = completedToolCallFromSdkEvent(next.value);
+            const completedToolCall = completedToolCallFromSdkEvent(durableSdkEvent);
             if (completedToolCall) {
-              const typedScreenshot = typedScreenshotFromSdkEvent(next.value);
+              const typedScreenshot = typedScreenshotFromSdkEvent(durableSdkEvent);
               if (
                 typedScreenshot &&
                 typedScreenshot.callId === completedToolCall.callId &&
@@ -7012,7 +7367,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               }
             }
             const normalized = normalizeSdkEvent(
-              next.value,
+              durableSdkEvent as typeof next.value,
               retainedScreenshotMetadata
                 ? {
                     toolOutputOverride: retainedScreenshotMetadata,
@@ -7236,7 +7591,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               sessionStatus: "requires_action",
               activeTurnId,
               runState: {
-                serializedRunState: stream.state.toString(),
+                serializedRunState: compactMediaRunState(stream.state.toString()),
                 pendingApprovals: approvals,
                 humanInputRequests: humanInputRequests.map(
                   ({ isNew: _isNew, ...request }) => request,
@@ -7488,7 +7843,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     sandboxGroupId: error.sandboxGroupId,
                     leaseEpoch: error.leaseEpoch,
                     ...(rotationPending
-                      ? { rotationReason: fencedLease?.rotationReason ?? "operator" }
+                      ? {
+                          rotationReason: fencedLease?.rotationReason ?? "operator",
+                        }
                       : {}),
                     ...(lifecycleTransition ? { transitionReason: error.reason } : {}),
                   },
@@ -8407,9 +8764,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // truth, recover this SAME accepted turn, then let the workflow re-claim
       // it after a pacing delay. This is independent of goal state and never
       // relies on a synthetic continuation prompt.
-      const failure = agentRunFailurePayload(error, { isCodexTurn }) as ReturnType<
-        typeof agentRunFailurePayload
-      >;
+      const failure = agentRunFailurePayload(error, {
+        isCodexTurn,
+      }) as ReturnType<typeof agentRunFailurePayload>;
       if (isSessionEventPersistenceError(error)) {
         // Preserve the exact source message in the internal runtime diagnostic;
         // SQLSTATE/catalog facts remain separate classification attributes.
@@ -9493,6 +9850,10 @@ export function pendingToolCallFromSdkEvent(event: unknown): {
     return null;
   }
   const raw = item.rawItem as Record<string, unknown>;
+  // The hosted image call is a complete provider fact carried by one item; it
+  // never receives a separate function result and therefore must not enter the
+  // pending function-call ledger.
+  if (raw.type === "hosted_tool_call" && raw.name === "image_generation_call") return null;
   const callId = raw.callId ?? raw.call_id ?? raw.id;
   const callType = raw.type;
   if (typeof callId !== "string" || callId.length === 0 || typeof callType !== "string") {

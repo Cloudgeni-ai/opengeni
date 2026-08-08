@@ -28,13 +28,14 @@ import {
   TerminalIcon,
   WrenchIcon,
 } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { stringifyPayload, tryParseJson } from "../lib/format";
 import { useTimelineComputeLabel } from "./compute-label";
 import {
   applyPatchOpsFromToolItem,
   controlCaret,
   execTruncated,
+  generatedImageReceipt,
   isExecSessionLostBanner,
   looksBinary,
   mediaPreviewFact,
@@ -756,6 +757,95 @@ function ComputerCallRenderer({ item, loadRetainedScreenshot }: ToolRendererProp
   );
 }
 
+type RetainedImageState =
+  | { kind: "loading" }
+  | { kind: "ready"; url: string }
+  | { kind: "unavailable"; label: string }
+  | { kind: "error"; message: string };
+
+function useRetainedImageObjectUrl(
+  artifact: RetainedArtifactReference,
+  load: ToolRendererProps["loadRetainedArtifact"],
+): RetainedImageState {
+  const [state, setState] = useState<RetainedImageState>({ kind: "loading" });
+  // Function outputs are commonly serialized JSON. Parsing them creates a new
+  // object on every render, so depend on the immutable wire value rather than
+  // object identity; otherwise the loader can refetch after its own setState.
+  const artifactValue = retainedArtifactValue(artifact);
+  const stableArtifactRef = useRef({ value: artifactValue, artifact });
+  if (stableArtifactRef.current.value !== artifactValue) {
+    stableArtifactRef.current = { value: artifactValue, artifact };
+  }
+  const stableArtifact = stableArtifactRef.current.artifact;
+  useEffect(() => {
+    if (!load) {
+      setState({ kind: "unavailable", label: "retrieval is not configured" });
+      return;
+    }
+    const controller = new AbortController();
+    let objectUrl: string | null = null;
+    setState({ kind: "loading" });
+    void load(stableArtifact, controller.signal)
+      .then((source) => {
+        if (controller.signal.aborted) return;
+        if (!source) {
+          setState({ kind: "unavailable", label: "bytes are unavailable" });
+          return;
+        }
+        if (!(source instanceof Uint8Array)) {
+          if (!source.url.trim()) {
+            setState({ kind: "unavailable", label: "URL is unavailable" });
+            return;
+          }
+          setState({ kind: "ready", url: source.url });
+          return;
+        }
+        objectUrl = URL.createObjectURL(
+          new Blob([source as unknown as BlobPart], { type: stableArtifact.contentType }),
+        );
+        setState({ kind: "ready", url: objectUrl });
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        const status =
+          error && typeof error === "object" && "status" in error
+            ? Number((error as { status?: unknown }).status)
+            : null;
+        setState(
+          status === 404
+            ? { kind: "unavailable", label: "deleted" }
+            : status === 410
+              ? { kind: "unavailable", label: "expired or unavailable" }
+              : { kind: "error", message: "retrieval failed" },
+        );
+      });
+    return () => {
+      controller.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [stableArtifact, load]);
+  return state;
+}
+
+function retainedArtifactValue(artifact: RetainedArtifactReference): string {
+  return [
+    artifact.artifactId,
+    artifact.kind,
+    artifact.contentType,
+    artifact.originalBytes,
+    artifact.sha256,
+    artifact.retainedAt,
+    artifact.dimensions?.width ?? "",
+    artifact.dimensions?.height ?? "",
+    artifact.retention.policy,
+    artifact.retention.expiresAt ?? "",
+    artifact.retrieval.method,
+    artifact.retrieval.path,
+    artifact.retrieval.acceptRanges,
+    artifact.retrieval.maxRangeBytes,
+  ].join("\0");
+}
+
 function RetainedScreenshotDisclosure({
   artifact,
   load,
@@ -773,53 +863,7 @@ function RetainedScreenshotDisclosure({
   failed: boolean;
   cancelled: boolean;
 }) {
-  const [state, setState] = useState<
-    | { kind: "loading" }
-    | { kind: "ready"; url: string }
-    | { kind: "unavailable"; label: string }
-    | { kind: "error"; message: string }
-  >({ kind: "loading" });
-
-  useEffect(() => {
-    if (!load) {
-      setState({ kind: "unavailable", label: "retrieval is not configured" });
-      return;
-    }
-    const controller = new AbortController();
-    let objectUrl: string | null = null;
-    setState({ kind: "loading" });
-    void load(artifact, controller.signal)
-      .then((bytes) => {
-        if (controller.signal.aborted) return;
-        if (!bytes) {
-          setState({ kind: "unavailable", label: "bytes are unavailable" });
-          return;
-        }
-        objectUrl = URL.createObjectURL(new Blob([Uint8Array.from(bytes)], { type: "image/png" }));
-        setState({ kind: "ready", url: objectUrl });
-      })
-      .catch((error: unknown) => {
-        if (controller.signal.aborted) return;
-        const status =
-          error && typeof error === "object" && "status" in error
-            ? Number((error as { status?: unknown }).status)
-            : null;
-        setState(
-          status === 404
-            ? { kind: "unavailable", label: "deleted" }
-            : status === 410
-              ? { kind: "unavailable", label: "expired or unavailable" }
-              : {
-                  kind: "error",
-                  message: "retrieval failed",
-                },
-        );
-      });
-    return () => {
-      controller.abort();
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-    };
-  }, [artifact, load]);
+  const state = useRetainedImageObjectUrl(artifact, load);
 
   const caption = `${verb}${countSuffix}`;
   return (
@@ -858,6 +902,102 @@ function RetainedScreenshotDisclosure({
         <BodyNote tone="error">Screenshot retrieval failed: {state.message}</BodyNote>
       )}
       {batched ? <BodyNote>batched: {batched}</BodyNote> : null}
+    </ActivityDisclosure>
+  );
+}
+
+function GeneratedImageRenderer({ item, loadRetainedArtifact }: ToolRendererProps) {
+  const args = parseToolArgs(item.arguments);
+  const prompt = typeof args.prompt === "string" ? args.prompt : "";
+  const raw =
+    item.raw && typeof item.raw === "object" && !Array.isArray(item.raw)
+      ? (item.raw as Record<string, unknown>)
+      : null;
+  // Function tools settle through agent.toolCall.output; OpenAI's hosted image
+  // call is already complete on agent.toolCall.created and carries the compact
+  // receipt in raw.output. Both paths deliberately converge on one renderer.
+  const receipt = generatedImageReceipt(item.output) ?? generatedImageReceipt(raw?.output);
+  if (item.status === "running") {
+    return (
+      <ActivityDisclosure
+        icon={<ImageIcon className={ICON_SIZE} />}
+        iconTone="running"
+        title="Generating image"
+        running
+        preview={<RunningPreview>{truncatePreview(prompt, 72) || "creating…"}</RunningPreview>}
+        media={<MediaSkeleton />}
+      >
+        {prompt ? <BodyNote>{prompt}</BodyNote> : null}
+      </ActivityDisclosure>
+    );
+  }
+  if (!receipt) return <GenericRenderer item={item} />;
+  return (
+    <GeneratedImageDisclosure
+      receipt={receipt}
+      load={loadRetainedArtifact}
+      prompt={prompt}
+      failed={item.status === "failed"}
+      cancelled={item.status === "cancelled"}
+    />
+  );
+}
+
+function GeneratedImageDisclosure({
+  receipt,
+  load,
+  prompt,
+  failed,
+  cancelled,
+}: {
+  receipt: NonNullable<ReturnType<typeof generatedImageReceipt>>;
+  load: ToolRendererProps["loadRetainedArtifact"];
+  prompt: string;
+  failed: boolean;
+  cancelled: boolean;
+}) {
+  const state = useRetainedImageObjectUrl(receipt.artifact, load);
+  const dimensions = receipt.artifact.dimensions!;
+  const title = failed ? "Image generation failed" : "Generated image";
+  const caption = prompt || `Generated image · ${dimensions.width}×${dimensions.height}`;
+  return (
+    <ActivityDisclosure
+      icon={<ImageIcon className={ICON_SIZE} />}
+      iconTone={failed ? "failed" : state.kind === "ready" ? "accent" : "muted"}
+      title={title}
+      failed={failed}
+      cancelled={cancelled}
+      preview={
+        state.kind === "loading"
+          ? "loading image…"
+          : state.kind === "error"
+            ? "image retrieval failed"
+            : state.kind === "unavailable"
+              ? `image ${state.label}`
+              : truncatePreview(prompt, 88) || `${dimensions.width}×${dimensions.height}`
+      }
+      media={
+        state.kind === "ready" ? (
+          <Thumbnail src={state.url} caption={caption} alt={caption} />
+        ) : state.kind === "loading" ? (
+          <MediaSkeleton />
+        ) : (
+          <MediaEmpty />
+        )
+      }
+    >
+      {state.kind === "ready" ? (
+        <ScreenshotFigure src={state.url} caption={caption} alt={caption} />
+      ) : state.kind === "loading" ? (
+        <BodyNote>Loading the generated image…</BodyNote>
+      ) : state.kind === "unavailable" ? (
+        <BodyNote>Image {state.label}.</BodyNote>
+      ) : (
+        <BodyNote tone="error">Image retrieval failed.</BodyNote>
+      )}
+      <BodyNote>
+        {dimensions.width}×{dimensions.height} · {receipt.sandboxPath}
+      </BodyNote>
     </ActivityDisclosure>
   );
 }
@@ -1935,7 +2075,6 @@ const BASE_ENTRIES: ToolRegistryEntry[] = [
   // truth and is consulted first by the registry.
   { match: "rawType", type: "apply_patch_call", render: ApplyPatchRenderer },
   { match: "rawType", type: "computer_call", render: ComputerCallRenderer },
-  { match: "rawType", type: "hosted_tool_call", render: WebSearchRenderer },
   { match: "rawType", type: "tool_search_call", render: ToolSearchRenderer },
   // First-party sandbox + MCP tools resolve by name (exact or MCP leaf).
   { match: "name", name: "exec_command", render: ExecRenderer },
@@ -1955,6 +2094,8 @@ const BASE_ENTRIES: ToolRegistryEntry[] = [
   { match: "name", name: "computer_keypress", render: ComputerCallRenderer },
   { match: "name", name: "computer_drag", render: ComputerCallRenderer },
   { match: "name", name: "web_search_call", render: WebSearchRenderer },
+  { match: "name", name: "image_generation_call", render: GeneratedImageRenderer },
+  { match: "name", name: "generate_image", render: GeneratedImageRenderer },
   { match: "name", name: "tool_search", render: ToolSearchRenderer },
   { match: "name", name: "view_image", render: ViewImageRenderer },
   { match: "name", name: "environment_set_variable", render: SecretSetRenderer },

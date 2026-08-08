@@ -466,7 +466,10 @@ intentional changes should regenerate those snapshots and review the diff.
 - `MessageTimeline` — the session timeline with stick-to-bottom scrolling, a
   "jump to latest" affordance, streaming caret, collapsible activity clusters,
   and worker cards (wire `onOpenSession` to drill into a worker). Pass
-  `renderMessageText` to plug a markdown renderer.
+  `renderMessageText` to plug a markdown renderer. Pass
+  `loadRetainedArtifact` to render permanent generated-image receipts; a loader
+  may return verified bytes or a short-lived signed URL. The stock web app uses
+  the URL path to avoid copying multi-megabyte images into JavaScript memory.
 - `UserMessageBody` — the shared lossless rendered-height disclosure for
   already-sent user text. Use it inside a custom `renderMessageText` user branch
   so attachments and voice identity remain outside the clipped Markdown region.

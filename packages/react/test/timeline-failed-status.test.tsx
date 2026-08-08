@@ -509,6 +509,62 @@ describe("ComputerCallRenderer — failed status (flagged fix)", () => {
     }
   });
 
+  test("serialized image receipt loads its permanent signed source exactly once", async () => {
+    const receipt = {
+      type: "generated_image",
+      artifact: {
+        available: true,
+        artifactId: "33333333-3333-4333-8333-333333333333",
+        kind: "generated_image",
+        contentType: "image/png",
+        originalBytes: 1024,
+        sha256: "c".repeat(64),
+        retainedAt: "2026-08-08T00:00:00.000Z",
+        dimensions: { width: 1024, height: 1024 },
+        retention: { policy: "workspace_file", expiresAt: null },
+        retrieval: {
+          method: "GET",
+          path: "/v1/workspaces/11111111-1111-4111-8111-111111111111/artifacts/33333333-3333-4333-8333-333333333333/content",
+          acceptRanges: "bytes",
+          maxRangeBytes: 1024 * 1024,
+        },
+      },
+      sandboxPath:
+        "/workspace/generated-images/generated-image-33333333-3333-4333-8333-333333333333.png",
+    };
+    const item = toolItem({
+      name: "generate_image",
+      output: JSON.stringify(receipt),
+      raw: {
+        type: "function_call",
+        name: "generate_image",
+        status: "completed",
+      },
+      status: "complete",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    let loads = 0;
+    const r = await renderComponent(
+      <Renderer
+        item={item}
+        loadRetainedArtifact={async () => {
+          loads += 1;
+          return { url: "https://objects.example/generated.png?signature=test" };
+        }}
+      />,
+    );
+    await flush();
+    await flush();
+
+    expect(loads).toBe(1);
+    expect(r.container.textContent).toContain("Generated image");
+    expect(
+      r.container.querySelector('img[src="https://objects.example/generated.png?signature=test"]'),
+    ).not.toBeNull();
+    expect(r.container.textContent).not.toContain("base64");
+    await r.unmount();
+  });
+
   test("retained screenshot loader 404 and 410 states stay truthful and image-free", async () => {
     for (const [status, label] of [
       [404, "deleted"],

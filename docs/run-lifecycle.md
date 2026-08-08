@@ -851,13 +851,22 @@ wrong one is the classic mistake.
    persistence; every new history copy receives the deterministic bounded
    artifact receipt (or an explicit unavailable fact), never the provider object
    key or re-encoded base64 source.
+   New generated images follow the same no-inline-byte rule but are permanent
+   workspace files: native hosted base64 is retained before serialization and
+   adapter tools return the same compact `generated_image` receipt. A later
+   model request projects that receipt to a deterministic artifact fact without
+   provider identity, signed URLs, object keys, or base64. See
+   [`image-generation.md`](image-generation.md).
 2. **`agent_run_states` — requires-action resume only.** The serialized SDK `RunState`
    blob is an opaque, SDK-version-gated process checkpoint. Its one legitimate
    job is resuming a turn that paused mid-flight for a human approval or
    structured-input tool call (`requires_action`); neither a half-finished tool
    approval nor an unanswered tool call can be represented as plain history
    items. Before the blob is written, every copy of a retained screenshot tool
-   result inside the RunState is compacted to the same retry-stable receipt.
+   result and generated-image result inside the RunState is compacted to its
+   retry-stable receipt. On SDK resume, generated-image hosted items are
+   temporarily projected to the same provider-neutral artifact fact used by
+   ordinary history; the durable checkpoint stays compact.
    The blob is written only for those cases.
    Historical sandbox envelopes receive one exact-path compatibility repair before
    SDK validation: invalid non-record `exposedPorts` values are removed only from
@@ -901,6 +910,15 @@ late PUT racing parent deletion is compensated by deleting the now-unowned key.
 Authenticated session artifact routes expose sanitized metadata and one bounded
 range at a time, and the SDK verifies assembled length and SHA before React
 renders an object URL.
+
+Generated images have a separate permanent workspace-file lifecycle. Adapter
+provider calls first cross a durable prepared/provider-started fence; after the
+provider may have run, recovery may finish an existing deterministic upload but
+must not repeat generation. Native hosted generation stays inside the ordinary
+model-call crash boundary. Successful bytes are validated and retained once,
+then materialized into the active sandbox from object storage. A sandbox-copy
+failure never invalidates the permanent artifact or replays paid work. Canonical:
+[`image-generation.md`](image-generation.md).
 
 Structured human input adds a durable control checkpoint, not a fourth memory
 store. When the built-in `request_human_input` tool interrupts a run, the same

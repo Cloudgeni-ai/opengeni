@@ -1,5 +1,13 @@
-import { normalizeMcpOutput, type GitFileDiff, type RetainedArtifactMetadata } from "@opengeni/sdk";
+import {
+  normalizeMcpOutput,
+  parseGeneratedImageReceipt,
+  type GeneratedImageReceipt,
+  type GitFileDiff,
+  type RetainedArtifactMetadata,
+} from "@opengeni/sdk";
 import { tryParseJson } from "../lib/format";
+
+export type { GeneratedImageReceipt };
 
 /* ----------------------------------------------------------------------------
    Pure parsers for the provider-native tool shapes that the timeline renders.
@@ -569,6 +577,11 @@ export function retainedScreenshotMetadata(out: unknown): RetainedArtifactMetada
     (value.retention as Record<string, unknown>).policy === "session_screenshot"
     ? (value as unknown as RetainedArtifactMetadata)
     : null;
+}
+
+/** Parse the closed permanent generated-image receipt from native/function tools. */
+export function generatedImageReceipt(out: unknown): GeneratedImageReceipt | null {
+  return parseGeneratedImageReceipt(out);
 }
 
 export type TimelineMediaPreview = {

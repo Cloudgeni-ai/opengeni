@@ -33,6 +33,7 @@ import {
   sessionEventMediaPreview,
   sessionEventMediaPreviewFromDataUrl,
   signDelegatedAccessToken,
+  GenerateImageToolInput,
   RequestHumanInputToolInput,
   type GitCredentialProvider,
   type GitCredentialTransport,
@@ -105,6 +106,7 @@ import {
   // it returns a { type: 'hosted_tool', providerData: { type: 'web_search' } }
   // descriptor the OpenAI Responses model serializes into request.tools[].
   webSearchTool,
+  imageGenerationTool,
   // The SDK's V4A-diff applier — the apply_patch host the filesystem capability's
   // editor uses. The agent-loop-free sandbox leaf cannot import it (it lives behind
   // the `@openai/agents` root the leaf forbids), so the barrel imports it here and
@@ -1818,6 +1820,13 @@ export type BuildAgentOptions = {
   //   true (let the SDK decide from the model instance) — non-codex paths are
   //   byte-for-byte unchanged.
   hostedWebSearch?: boolean;
+  /** Stable provider-specific image-generation transport for this turn. */
+  imageGeneration?:
+    | { kind: "native_hosted" }
+    | {
+        kind: "provider_adapter";
+        execute: (input: { prompt: string }, context: { toolCallId: string }) => Promise<unknown>;
+      };
   encryptedReasoning?: boolean;
   structuredToolTransport?: boolean;
   /** Explicit provider-contained progressive tool-disclosure strategy. */
@@ -2365,7 +2374,28 @@ export function buildOpenGeniAgent(
   // with the sandbox capability tools (prepareSandboxAgent: tools =
   // [...agent.tools, ...capability.tools()]), so hosted web_search coexists with
   // both rather than overriding them.
-  const hostedTools = hostedWebSearch ? [webSearchTool()] : [];
+  const hostedTools: Tool[] = hostedWebSearch ? [webSearchTool()] : [];
+  if (options.imageGeneration?.kind === "native_hosted") {
+    hostedTools.push(imageGenerationTool({ model: "gpt-image-2" }));
+  }
+  const providerImageGenerationTool =
+    options.imageGeneration?.kind === "provider_adapter"
+      ? agentTool({
+          name: "generate_image",
+          description:
+            "Generate exactly one image from the requested visual description. Use this when the user asks to create an image. The result is a permanent image artifact and its exact sandbox path. Do not call it repeatedly unless the user requested multiple distinct images.",
+          parameters: GenerateImageToolInput,
+          errorFunction: null,
+          execute: async (input, _context, details) => {
+            const toolCallId = details?.toolCall?.callId;
+            if (!toolCallId) throw new Error("Image-generation tool call has no durable identity");
+            if (options.imageGeneration?.kind !== "provider_adapter") {
+              throw new Error("Image-generation adapter changed during execution");
+            }
+            return await options.imageGeneration.execute(input, { toolCallId });
+          },
+        })
+      : null;
   const humanInputTool =
     options.humanInputEnabled === false
       ? null
@@ -2393,7 +2423,11 @@ export function buildOpenGeniAgent(
             });
           },
         });
-  const agentTools = humanInputTool ? [...hostedTools, humanInputTool] : hostedTools;
+  const agentTools = [
+    ...hostedTools,
+    ...(providerImageGenerationTool ? [providerImageGenerationTool] : []),
+    ...(humanInputTool ? [humanInputTool] : []),
+  ];
   const baseConfig = {
     name: "OpenGeni Agent",
     model: options.model ?? settings.openaiModel,
