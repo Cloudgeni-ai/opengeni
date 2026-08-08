@@ -1,5 +1,11 @@
 # @opengeni/observability
 
+## 0.5.12
+
+### Patch Changes
+
+- e627d88: Keep known-cold sandbox views passive, fence delayed live-read invalidations across draining transitions, and expose bounded structural Channel-A failure diagnostics without leaking provider details.
+
 ## 0.5.11
 
 ### Patch Changes

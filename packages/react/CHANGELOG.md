@@ -1,5 +1,11 @@
 # @opengeni/react
 
+## 0.49.4
+
+### Patch Changes
+
+- e627d88: Keep known-cold sandbox views passive, fence delayed live-read invalidations across draining transitions, and expose bounded structural Channel-A failure diagnostics without leaking provider details.
+
 ## 0.49.3
 
 ### Patch Changes
