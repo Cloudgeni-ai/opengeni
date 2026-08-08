@@ -1,5 +1,11 @@
 # @opengeni/db
 
+## 0.28.14
+
+### Patch Changes
+
+- 81a51ac: Settle abandoned turn workspace admissions only after the exact attempt's physical writers drain, while preserving eager cancellation holder release and late sandbox provisioning safety. Add privacy-preserving sandbox lease correlation keys to rendered lifecycle logs.
+
 ## 0.28.13
 
 ### Patch Changes

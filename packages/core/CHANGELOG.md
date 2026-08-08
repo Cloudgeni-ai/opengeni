@@ -1,5 +1,15 @@
 # @opengeni/core
 
+## 0.21.18
+
+### Patch Changes
+
+- Updated dependencies [81a51ac]
+  - @opengeni/db@0.28.14
+  - @opengeni/observability@0.5.9
+  - @opengeni/documents@0.5.23
+  - @opengeni/events@0.3.94
+
 ## 0.21.17
 
 ### Patch Changes
