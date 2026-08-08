@@ -28,6 +28,7 @@ import {
   clampCompactionThresholdRatio,
   decideCompaction,
   estimateCompleteModelInput,
+  estimateCompleteModelInputTokens,
   estimateItemTokenBreakdown,
   estimateItemTokens,
   estimateOpaqueEncryptedTokens,
@@ -462,6 +463,45 @@ describe("complete outgoing model-input accounting", () => {
       providerRequestFootprint: prior,
     });
     expect(estimate.tokens).toBe(10_100);
+  });
+
+  test("decision-only accounting matches the detailed estimator without retaining prior input", () => {
+    const prior = {
+      input: [user("question"), assistant("answer"), call("c1")],
+      instructionsTokens: 100,
+      toolSchemaTokens: 200,
+    };
+    const current = {
+      input: [...prior.input, result("c1", "界🙂".repeat(2_000))],
+      instructionsTokens: 140,
+      toolSchemaTokens: 225,
+    };
+    const provider = { revision: 4, totalTokens: 12_345 };
+    const detailed = estimateCompleteModelInput({
+      current,
+      provider,
+      providerRequestFootprint: prior,
+    });
+    const decisionOnly = estimateCompleteModelInputTokens({
+      currentInput: current.input,
+      currentInstructionsTokens: current.instructionsTokens,
+      currentToolSchemaTokens: current.toolSchemaTokens,
+      provider,
+      previousRequest: {
+        instructionsTokens: prior.instructionsTokens,
+        toolSchemaTokens: prior.toolSchemaTokens,
+      },
+    });
+    expect(decisionOnly).toBe(detailed.tokens);
+    expect(
+      estimateCompleteModelInputTokens({
+        currentInput: [user("no model response yet")],
+        currentInstructionsTokens: 1,
+        currentToolSchemaTokens: 2,
+        provider,
+        previousRequest: { instructionsTokens: 1, toolSchemaTokens: 2 },
+      }),
+    ).toBeNull();
   });
 });
 

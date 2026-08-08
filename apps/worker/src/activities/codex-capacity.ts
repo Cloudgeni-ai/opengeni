@@ -16,7 +16,7 @@ import {
   selectCodexCredentialLeaseForTurn,
 } from "./codex-rotation";
 import type {
-  ActivityServices,
+  ControlActivityServices,
   GetCodexCapacityWaitInput,
   ReconcileCodexCapacityWaitInput,
   ReconcileCodexCapacityWaitResult,
@@ -24,10 +24,10 @@ import type {
 
 type CodexCapacitySignalServices = {
   signalCodexCapacityWorkflow?:
-    | NonNullable<ActivityServices["signalCodexCapacityWorkflow"]>
+    | NonNullable<ControlActivityServices["signalCodexCapacityWorkflow"]>
     | null
     | undefined;
-  wakeSessionWorkflow: ActivityServices["wakeSessionWorkflow"];
+  wakeSessionWorkflow: ControlActivityServices["wakeSessionWorkflow"];
 };
 
 /**
@@ -74,7 +74,7 @@ export async function signalCodexCapacityWakeTargets(
 
 /** Repair a commit/signal crash edge by redelivering every pending revision. */
 export async function signalPendingCodexCapacityWakeTargets(
-  services: CodexCapacitySignalServices & { db: ActivityServices["db"] },
+  services: CodexCapacitySignalServices & { db: ControlActivityServices["db"] },
   workspaceId: string,
 ): Promise<void> {
   const targets = await listPendingCodexCapacityWakeTargets(services.db, workspaceId).catch(
@@ -130,7 +130,7 @@ export function codexCapacityDecision(
 }
 
 async function refreshCapacityMetadata(
-  services: ActivityServices,
+  services: ControlActivityServices,
   workspaceId: string,
 ): Promise<void> {
   const accounts = await listCodexAccountStatuses(services.db, workspaceId).catch(() => []);
@@ -151,7 +151,7 @@ async function refreshCapacityMetadata(
   );
 }
 
-export function createCodexCapacityActivities(services: () => Promise<ActivityServices>) {
+export function createCodexCapacityActivities(services: () => Promise<ControlActivityServices>) {
   async function getCodexCapacityWait(input: GetCodexCapacityWaitInput) {
     const { db } = await services();
     const waiter = await getCodexCapacityWaitForSession(db, input.workspaceId, input.sessionId);

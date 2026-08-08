@@ -28,7 +28,7 @@ describe("observability deployment plan", () => {
     });
 
     expect(plan.chartPath).toBe("deploy/observability");
-    expect(plan.chartVersion).toBe("0.1.1");
+    expect(plan.chartVersion).toBe("0.1.3");
     expect(plan.kubePrometheusStackVersion).toBe("87.16.1");
     expect(plan.valuesFiles).toEqual(["deploy/observability/values.production.example.yaml"]);
     expect(plan.installCommands.slice(0, 2)).toEqual([
@@ -46,6 +46,11 @@ describe("observability deployment plan", () => {
         (command) =>
           command.includes("helm upgrade --install opengeni-observability") &&
           command.includes("environment=prod-us"),
+      ),
+    ).toBe(true);
+    expect(
+      plan.installCommands.some((command) =>
+        command.includes("grafana.podAnnotations.opengeni\\.ai/source-revision="),
       ),
     ).toBe(true);
     expect(plan.installCommands.some((command) => command.includes("deploy/helm/opengeni"))).toBe(

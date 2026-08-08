@@ -98,7 +98,7 @@ import {
   type ModalCheckpointProviderBinding,
   type ProviderWorkspaceCapturePolicy,
   type WorkspaceArchiveDescriptor,
-} from "@opengeni/runtime";
+} from "@opengeni/runtime/sandbox";
 import {
   SANDBOX_REAPER_ACTIVITY_HEARTBEAT_INTERVAL_MS,
   SANDBOX_REAPER_CHILD_DISPATCH_LIMIT,
@@ -107,7 +107,7 @@ import {
 } from "../sandbox-reaper-contract";
 import { CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES } from "../concurrency";
 import { assertSandboxDrainInputTiming, sandboxDrainTiming } from "../sandbox-reaper-timeout";
-import type { ActivityServices } from "./types";
+import type { ControlActivityServices as ActivityServices } from "./types";
 import { reconcilePendingParentSystemUpdates } from "./parent-wake";
 import {
   recordCreditBalanceGauges,

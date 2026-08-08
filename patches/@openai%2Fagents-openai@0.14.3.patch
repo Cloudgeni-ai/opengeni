@@ -1,0 +1,394 @@
+diff --git a/dist/openaiResponsesModel.d.ts b/dist/openaiResponsesModel.d.ts
+index 8b7a52373fc2c7347ae695677110618559735aa3..4409b137299f15ddb459a5201eb1ec879894d31c 100644
+--- a/dist/openaiResponsesModel.d.ts
++++ b/dist/openaiResponsesModel.d.ts
+@@ -49,6 +49,7 @@ export declare class OpenAIResponsesModel implements Model {
+     constructor(client: OpenAIClient, model: string);
+     getRetryAdvice(args: ModelRetryAdviceRequest): ModelRetryAdvice | undefined;
+     protected _fetchResponse(request: ModelRequest, stream: false): Promise<OpenAI.Responses.Response>;
++    protected _getInputItems(input: ModelRequest['input']): OpenAI.Responses.ResponseInputItem[];
+     protected _buildResponsesCreateRequest(request: ModelRequest, stream: boolean): BuiltResponsesCreateRequest;
+     /**
+      * Get a response from the OpenAI model using the Responses API.
+diff --git a/dist/openaiResponsesModel.js b/dist/openaiResponsesModel.js
+index 07012f1f42b1e29b0daf915ac965e7e79142ffb7..67b49b785b52de3e982b9e27f21bc2463568b684 100644
+--- a/dist/openaiResponsesModel.js
++++ b/dist/openaiResponsesModel.js
+@@ -2262,14 +2262,55 @@ function convertToOutputItem(items) {
+ }
+ const TERMINAL_RESPONSES_STREAM_EVENT_TYPES = new Set([
+     'response.completed',
++    'response.done',
+     'response.failed',
+     'response.incomplete',
+     'response.error',
++    'error',
++]);
++const SUCCESSFUL_RESPONSES_STREAM_EVENT_TYPES = new Set([
++    'response.completed',
++    'response.done',
+ ]);
+ function isTerminalResponsesStreamEventType(eventType) {
+     return (typeof eventType === 'string' &&
+         TERMINAL_RESPONSES_STREAM_EVENT_TYPES.has(eventType));
+ }
++function assertSuccessfulResponsesTerminalEvent(event) {
++    const eventType = event?.type;
++    const response = event?.response;
++    const responseStatus = response?.status;
++    if (SUCCESSFUL_RESPONSES_STREAM_EVENT_TYPES.has(eventType) &&
++        (responseStatus === undefined || responseStatus === 'completed')) {
++        return;
++    }
++    const incompleteReason = response?.incomplete_details?.reason;
++    const safeReason = incompleteReason === 'max_output_tokens' || incompleteReason === 'content_filter'
++        ? incompleteReason
++        : undefined;
++    const safeEventType = TERMINAL_RESPONSES_STREAM_EVENT_TYPES.has(eventType)
++        ? eventType
++        : 'response.non_completed';
++    throw new agents_core_1.ModelBehaviorError(`Responses request terminated unsuccessfully (${safeEventType}${safeReason ? `: ${safeReason}` : ''}).`);
++}
++function reconstructedTerminalResponse(event, completedOutputItemsByIndex) {
++    const response = event.response;
++    if (Array.isArray(response.output) && response.output.length > 0) {
++        return response;
++    }
++    if (completedOutputItemsByIndex.size === 0) {
++        return response;
++    }
++    const output = [];
++    for (let index = 0; index < completedOutputItemsByIndex.size; index += 1) {
++        const item = completedOutputItemsByIndex.get(index);
++        if (!item) {
++            throw new agents_core_1.ModelBehaviorError('Responses stream contained sparse output_item.done indices.');
++        }
++        output.push(item);
++    }
++    return { ...response, output };
++}
+ function getOpenAIResponseRequestId(response) {
+     const requestId = response
+         ?._request_id;
+@@ -2345,6 +2386,16 @@ class OpenAIResponsesModel {
+     _shouldEmitRawModelEvent(_event) {
+         return true;
+     }
++    /**
++     * @internal
++     * Converts the protocol input into the Responses wire representation.
++     * Kept as a protected seam so applications with immutable, append-only
++     * history can reuse an already-converted prefix without changing the
++     * request contract.
++     */
++    _getInputItems(input) {
++        return getInputItems(input);
++    }
+     /**
+      * @internal
+      */
+@@ -2419,7 +2470,7 @@ class OpenAIResponsesModel {
+         return response;
+     }
+     _buildResponsesCreateRequest(request, stream) {
+-        const input = getInputItems(request.input);
++        const input = this._getInputItems(request.input);
+         const prompt = getPrompt(request.prompt);
+         // When a prompt template already declares a model, skip sending the agent's default model.
+         // If the caller explicitly requests an override, include the resolved model name in the request.
+@@ -2540,6 +2591,12 @@ class OpenAIResponsesModel {
+     async getResponse(request) {
+         const response = await (0, agents_core_1.withResponseSpan)(async (span) => {
+             const response = await this._fetchResponse(request, false);
++            if (response?.status !== undefined && response.status !== 'completed') {
++                assertSuccessfulResponsesTerminalEvent({
++                    type: response.status === 'incomplete' ? 'response.incomplete' : response.status === 'failed' ? 'response.failed' : 'response.non_completed',
++                    response,
++                });
++            }
+             if (request.tracing) {
+                 span.spanData.response_id = response.id;
+                 span.spanData._input = request.input;
+@@ -2576,7 +2633,10 @@ class OpenAIResponsesModel {
+             }
+             const response = await this._fetchResponse(request, true);
+             let finalResponse;
++            let terminalEvent;
++            let emitTerminalRawModelEvent = false;
+             const outputItemsByIndex = new Map();
++            const completedOutputItemsByIndex = new Map();
+             for await (const event of response) {
+                 const eventType = event.type;
+                 const shouldEmitRawModelEvent = this._shouldEmitRawModelEvent(event);
+@@ -2587,6 +2647,16 @@ class OpenAIResponsesModel {
+                         outputItemsByIndex.set(outputItemAdded.output_index, outputItemAdded.item);
+                     }
+                 }
++                if (eventType === 'response.output_item.done') {
++                    const outputItemDone = event;
++                    if (typeof outputItemDone.output_index !== 'number' || !outputItemDone.item) {
++                        throw new agents_core_1.ModelBehaviorError('Responses stream emitted output_item.done without an indexed item.');
++                    }
++                    if (completedOutputItemsByIndex.has(outputItemDone.output_index)) {
++                        throw new agents_core_1.ModelBehaviorError('Responses stream emitted a duplicate output_item.done index.');
++                    }
++                    completedOutputItemsByIndex.set(outputItemDone.output_index, outputItemDone.item);
++                }
+                 if (eventType === 'response.created') {
+                     yield {
+                         type: 'response_started',
+@@ -2596,22 +2666,11 @@ class OpenAIResponsesModel {
+                     };
+                 }
+                 else if (isTerminalResponsesStreamEventType(eventType)) {
+-                    const terminalEvent = event;
+-                    finalResponse = terminalEvent.response;
+-                    const { response, ...remainingEvent } = terminalEvent;
+-                    const { output: _output, usage: _usage, id, ...remainingResponse } = response;
+-                    const responseForSDKOutput = this._getResponseForSDKOutput(response);
+-                    yield {
+-                        type: 'response_done',
+-                        response: {
+-                            id: id,
+-                            requestId: getOpenAIResponseRequestId(response),
+-                            output: this._convertResponseOutputItems(responseForSDKOutput.output),
+-                            usage: this._getStreamedResponseUsage(response),
+-                            providerData: remainingResponse,
+-                        },
+-                        providerData: remainingEvent,
+-                    };
++                    assertSuccessfulResponsesTerminalEvent(event);
++                    terminalEvent = event;
++                    finalResponse = reconstructedTerminalResponse(event, completedOutputItemsByIndex);
++                    emitTerminalRawModelEvent = shouldEmitRawModelEvent;
++                    break;
+                 }
+                 else if (eventType === 'response.output_text.delta') {
+                     const { delta, ...remainingEvent } = event;
+@@ -2638,6 +2697,32 @@ class OpenAIResponsesModel {
+                     };
+                 }
+             }
++            if (!terminalEvent || !finalResponse) {
++                throw new agents_core_1.ModelBehaviorError('Responses stream ended without a terminal event.');
++            }
++            const { response: _terminalResponse, ...remainingEvent } = terminalEvent;
++            const { output: _output, usage: _usage, id, ...remainingResponse } = finalResponse;
++            const responseForSDKOutput = this._getResponseForSDKOutput(finalResponse);
++            yield {
++                type: 'response_done',
++                response: {
++                    id: id,
++                    requestId: getOpenAIResponseRequestId(finalResponse),
++                    output: this._convertResponseOutputItems(responseForSDKOutput.output),
++                    usage: this._getStreamedResponseUsage(finalResponse),
++                    providerData: remainingResponse,
++                },
++                providerData: remainingEvent,
++            };
++            if (emitTerminalRawModelEvent) {
++                yield {
++                    type: 'model',
++                    event: { ...terminalEvent, response: finalResponse },
++                    providerData: {
++                        rawModelEventSource: rawModelEvents_1.OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE,
++                    },
++                };
++            }
+             if (request.tracing && span && finalResponse) {
+                 span.spanData.response_id = finalResponse.id;
+                 span.spanData._response = finalResponse;
+diff --git a/dist/openaiResponsesModel.mjs b/dist/openaiResponsesModel.mjs
+index 3bc6e0a9335690a97120570c4d6355ac4447caf3..57889914542217a8ad595631d32b7eda062281dc 100644
+--- a/dist/openaiResponsesModel.mjs
++++ b/dist/openaiResponsesModel.mjs
+@@ -1,4 +1,4 @@
+-import { Usage, withResponseSpan, createResponseSpan, setCurrentSpan, resetCurrentSpan, UserError, } from '@openai/agents-core';
++import { Usage, withResponseSpan, createResponseSpan, setCurrentSpan, resetCurrentSpan, UserError, ModelBehaviorError, } from '@openai/agents-core';
+ import OpenAI from 'openai';
+ import logger from "./logger.mjs";
+ import { OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE } from "./rawModelEvents.mjs";
+@@ -2253,14 +2253,55 @@ function convertToOutputItem(items) {
+ export { getToolChoice, convertTool, getInputItems, convertToOutputItem };
+ const TERMINAL_RESPONSES_STREAM_EVENT_TYPES = new Set([
+     'response.completed',
++    'response.done',
+     'response.failed',
+     'response.incomplete',
+     'response.error',
++    'error',
++]);
++const SUCCESSFUL_RESPONSES_STREAM_EVENT_TYPES = new Set([
++    'response.completed',
++    'response.done',
+ ]);
+ function isTerminalResponsesStreamEventType(eventType) {
+     return (typeof eventType === 'string' &&
+         TERMINAL_RESPONSES_STREAM_EVENT_TYPES.has(eventType));
+ }
++function assertSuccessfulResponsesTerminalEvent(event) {
++    const eventType = event?.type;
++    const response = event?.response;
++    const responseStatus = response?.status;
++    if (SUCCESSFUL_RESPONSES_STREAM_EVENT_TYPES.has(eventType) &&
++        (responseStatus === undefined || responseStatus === 'completed')) {
++        return;
++    }
++    const incompleteReason = response?.incomplete_details?.reason;
++    const safeReason = incompleteReason === 'max_output_tokens' || incompleteReason === 'content_filter'
++        ? incompleteReason
++        : undefined;
++    const safeEventType = TERMINAL_RESPONSES_STREAM_EVENT_TYPES.has(eventType)
++        ? eventType
++        : 'response.non_completed';
++    throw new ModelBehaviorError(`Responses request terminated unsuccessfully (${safeEventType}${safeReason ? `: ${safeReason}` : ''}).`);
++}
++function reconstructedTerminalResponse(event, completedOutputItemsByIndex) {
++    const response = event.response;
++    if (Array.isArray(response.output) && response.output.length > 0) {
++        return response;
++    }
++    if (completedOutputItemsByIndex.size === 0) {
++        return response;
++    }
++    const output = [];
++    for (let index = 0; index < completedOutputItemsByIndex.size; index += 1) {
++        const item = completedOutputItemsByIndex.get(index);
++        if (!item) {
++            throw new ModelBehaviorError('Responses stream contained sparse output_item.done indices.');
++        }
++        output.push(item);
++    }
++    return { ...response, output };
++}
+ function getOpenAIResponseRequestId(response) {
+     const requestId = response
+         ?._request_id;
+@@ -2336,6 +2377,16 @@ export class OpenAIResponsesModel {
+     _shouldEmitRawModelEvent(_event) {
+         return true;
+     }
++    /**
++     * @internal
++     * Converts the protocol input into the Responses wire representation.
++     * Kept as a protected seam so applications with immutable, append-only
++     * history can reuse an already-converted prefix without changing the
++     * request contract.
++     */
++    _getInputItems(input) {
++        return getInputItems(input);
++    }
+     /**
+      * @internal
+      */
+@@ -2410,7 +2461,7 @@ export class OpenAIResponsesModel {
+         return response;
+     }
+     _buildResponsesCreateRequest(request, stream) {
+-        const input = getInputItems(request.input);
++        const input = this._getInputItems(request.input);
+         const prompt = getPrompt(request.prompt);
+         // When a prompt template already declares a model, skip sending the agent's default model.
+         // If the caller explicitly requests an override, include the resolved model name in the request.
+@@ -2531,6 +2582,12 @@ export class OpenAIResponsesModel {
+     async getResponse(request) {
+         const response = await withResponseSpan(async (span) => {
+             const response = await this._fetchResponse(request, false);
++            if (response?.status !== undefined && response.status !== 'completed') {
++                assertSuccessfulResponsesTerminalEvent({
++                    type: response.status === 'incomplete' ? 'response.incomplete' : response.status === 'failed' ? 'response.failed' : 'response.non_completed',
++                    response,
++                });
++            }
+             if (request.tracing) {
+                 span.spanData.response_id = response.id;
+                 span.spanData._input = request.input;
+@@ -2567,7 +2624,10 @@ export class OpenAIResponsesModel {
+             }
+             const response = await this._fetchResponse(request, true);
+             let finalResponse;
++            let terminalEvent;
++            let emitTerminalRawModelEvent = false;
+             const outputItemsByIndex = new Map();
++            const completedOutputItemsByIndex = new Map();
+             for await (const event of response) {
+                 const eventType = event.type;
+                 const shouldEmitRawModelEvent = this._shouldEmitRawModelEvent(event);
+@@ -2578,6 +2638,16 @@ export class OpenAIResponsesModel {
+                         outputItemsByIndex.set(outputItemAdded.output_index, outputItemAdded.item);
+                     }
+                 }
++                if (eventType === 'response.output_item.done') {
++                    const outputItemDone = event;
++                    if (typeof outputItemDone.output_index !== 'number' || !outputItemDone.item) {
++                        throw new ModelBehaviorError('Responses stream emitted output_item.done without an indexed item.');
++                    }
++                    if (completedOutputItemsByIndex.has(outputItemDone.output_index)) {
++                        throw new ModelBehaviorError('Responses stream emitted a duplicate output_item.done index.');
++                    }
++                    completedOutputItemsByIndex.set(outputItemDone.output_index, outputItemDone.item);
++                }
+                 if (eventType === 'response.created') {
+                     yield {
+                         type: 'response_started',
+@@ -2587,22 +2657,11 @@ export class OpenAIResponsesModel {
+                     };
+                 }
+                 else if (isTerminalResponsesStreamEventType(eventType)) {
+-                    const terminalEvent = event;
+-                    finalResponse = terminalEvent.response;
+-                    const { response, ...remainingEvent } = terminalEvent;
+-                    const { output: _output, usage: _usage, id, ...remainingResponse } = response;
+-                    const responseForSDKOutput = this._getResponseForSDKOutput(response);
+-                    yield {
+-                        type: 'response_done',
+-                        response: {
+-                            id: id,
+-                            requestId: getOpenAIResponseRequestId(response),
+-                            output: this._convertResponseOutputItems(responseForSDKOutput.output),
+-                            usage: this._getStreamedResponseUsage(response),
+-                            providerData: remainingResponse,
+-                        },
+-                        providerData: remainingEvent,
+-                    };
++                    assertSuccessfulResponsesTerminalEvent(event);
++                    terminalEvent = event;
++                    finalResponse = reconstructedTerminalResponse(event, completedOutputItemsByIndex);
++                    emitTerminalRawModelEvent = shouldEmitRawModelEvent;
++                    break;
+                 }
+                 else if (eventType === 'response.output_text.delta') {
+                     const { delta, ...remainingEvent } = event;
+@@ -2629,6 +2688,32 @@ export class OpenAIResponsesModel {
+                     };
+                 }
+             }
++            if (!terminalEvent || !finalResponse) {
++                throw new ModelBehaviorError('Responses stream ended without a terminal event.');
++            }
++            const { response: _terminalResponse, ...remainingEvent } = terminalEvent;
++            const { output: _output, usage: _usage, id, ...remainingResponse } = finalResponse;
++            const responseForSDKOutput = this._getResponseForSDKOutput(finalResponse);
++            yield {
++                type: 'response_done',
++                response: {
++                    id: id,
++                    requestId: getOpenAIResponseRequestId(finalResponse),
++                    output: this._convertResponseOutputItems(responseForSDKOutput.output),
++                    usage: this._getStreamedResponseUsage(finalResponse),
++                    providerData: remainingResponse,
++                },
++                providerData: remainingEvent,
++            };
++            if (emitTerminalRawModelEvent) {
++                yield {
++                    type: 'model',
++                    event: { ...terminalEvent, response: finalResponse },
++                    providerData: {
++                        rawModelEventSource: OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE,
++                    },
++                };
++            }
+             if (request.tracing && span && finalResponse) {
+                 span.spanData.response_id = finalResponse.id;
+                 span.spanData._response = finalResponse;

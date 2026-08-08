@@ -57,6 +57,12 @@ networkPolicy:
     # podSelector: {}
 
 config:
+  # Bun uses mimalloc. Immediate decommit returns unused native JSON/network
+  # arenas to Linux instead of retaining a long turn's peak RSS indefinitely.
+  # Set PURGE_DELAY=-1 to restore allocator-default retention if throughput on
+  # a particular host matters more than resident memory.
+  MIMALLOC_PURGE_DELAY: "0"
+  MIMALLOC_PURGE_DECOMMITS: "1"
   OPENGENI_SERVICE_NAME: opengeni
   OPENGENI_ENVIRONMENT: production
   OPENGENI_DEPLOYMENT_REVISION: dev

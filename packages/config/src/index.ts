@@ -232,6 +232,10 @@ const SettingsSchema = z.object({
   turnWorkerMaxConcurrentTurns: z.coerce.number().int().positive().max(2_000).default(16),
   turnWorkerTargetCpuUsage: z.coerce.number().positive().max(1).default(0.8),
   turnWorkerTargetMemoryUsage: z.coerce.number().positive().max(0.8).default(0.75),
+  // Admission and emergency recovery are deliberately separate control loops.
+  // The Temporal tuner stops polling at the lower target; only genuine danger
+  // may invoke the disruptive graceful-drain fallback.
+  turnWorkerEmergencyMemoryUsage: z.coerce.number().min(0.85).max(0.95).default(0.9),
   turnWorkerMemoryGuardIntervalMs: z.coerce.number().int().min(1_000).max(60_000).default(5_000),
   turnWorkerMemoryGuardSustainMs: z.coerce.number().int().min(5_000).max(300_000).default(30_000),
   observabilityStructuredLogs: EnvBoolean.default(false),
@@ -1784,6 +1788,7 @@ export function getSettings(): Settings {
     turnWorkerMaxConcurrentTurns: optional("OPENGENI_TURN_WORKER_MAX_CONCURRENT_TURNS"),
     turnWorkerTargetCpuUsage: optional("OPENGENI_TURN_WORKER_TARGET_CPU_USAGE"),
     turnWorkerTargetMemoryUsage: optional("OPENGENI_TURN_WORKER_TARGET_MEMORY_USAGE"),
+    turnWorkerEmergencyMemoryUsage: optional("OPENGENI_TURN_WORKER_EMERGENCY_MEMORY_USAGE"),
     turnWorkerMemoryGuardIntervalMs: optional("OPENGENI_TURN_WORKER_MEMORY_GUARD_INTERVAL_MS"),
     turnWorkerMemoryGuardSustainMs: optional("OPENGENI_TURN_WORKER_MEMORY_GUARD_SUSTAIN_MS"),
     observabilityStructuredLogs: optional("OPENGENI_OBSERVABILITY_STRUCTURED_LOGS"),

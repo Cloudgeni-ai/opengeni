@@ -23,20 +23,33 @@ import {
 import {
   createTurnToolCancellationController,
   establishSandboxSessionFromEnvelope,
-  runRigSetupHook,
   sandboxCommandExitCode,
   sandboxCommandOutput,
   serializeEstablishedSandboxEnvelope,
   tagModalSandbox,
   terminateManagedSandboxSession,
   type EstablishedSandboxSession,
-  type SandboxLifecycleCommandRunner,
+  type TurnSandboxCommandArgs,
   type TurnSandboxCommandSession,
-} from "@opengeni/runtime";
+} from "@opengeni/runtime/sandbox";
 import type { Context } from "@temporalio/activity";
-import type { ActivityServices } from "./types";
-import { settingsWithRigImage } from "./packs";
+import type { ControlActivityServices } from "./types";
+import { settingsWithRigImage } from "./sandbox-images";
 import { currentActivityContext } from "./streaming";
+
+type RigSetupHook = typeof import("@opengeni/runtime").runRigSetupHook;
+let rigSetupHookPromise: Promise<RigSetupHook> | null = null;
+
+async function runRigSetupHook(...args: Parameters<RigSetupHook>): Promise<void> {
+  rigSetupHookPromise ??= import("@opengeni/runtime").then((runtime) => runtime.runRigSetupHook);
+  const hook = await rigSetupHookPromise;
+  await hook(...args);
+}
+
+type SandboxLifecycleCommandRunner = (
+  session: TurnSandboxCommandSession,
+  args: TurnSandboxCommandArgs,
+) => Promise<unknown>;
 
 export type RigVerificationWorkflowInput =
   | { workspaceId: string; changeId: string; versionId?: never }
@@ -329,9 +342,9 @@ export class RigVerificationLeaseUnavailableError extends Error {
  */
 export async function runWithOwnedRigVerificationSandbox<T>(
   input: {
-    settings: ActivityServices["settings"];
+    settings: ControlActivityServices["settings"];
     db: Database;
-    observability: ActivityServices["observability"];
+    observability: ControlActivityServices["observability"];
     accountId: string;
     workspaceId: string;
     sandboxGroupId: string;
@@ -786,7 +799,7 @@ async function withRigVerificationActivityLifecycle<T>(
   }
 }
 
-export function createRigVerificationActivities(services: () => Promise<ActivityServices>) {
+export function createRigVerificationActivities(services: () => Promise<ControlActivityServices>) {
   return {
     verifyRigChange: (input: { workspaceId: string; changeId: string }) =>
       withRigVerificationActivityLifecycle(async (lifecycle) => {

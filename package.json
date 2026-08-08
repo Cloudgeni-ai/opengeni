@@ -49,6 +49,11 @@
     "test:worker-restart-control": "OPENGENI_REQUIRE_REAL_DB=1 bun test --timeout 300000 ./test/integration/worker-restart.integration.ts",
     "test:ui-session-control": "bun test packages/react/test/chat-composer-controls.test.tsx packages/react/test/hooks.test.tsx packages/react/test/queue-surface.test.tsx apps/web/src/App.test.ts && bun scripts/run-browser-e2e.ts ./test/e2e/session-pins.browser.e2e.ts",
     "bench:session-control": "bun scripts/bench-session-control.ts",
+    "bench:model-input-memory": "bun scripts/bench-model-input-memory.ts",
+    "bench:long-turn-memory": "bun scripts/bench-long-turn-memory.ts",
+    "bench:process-memory": "bun scripts/bench-process-memory.ts",
+    "bench:observability-series": "bun scripts/bench-observability-series.ts",
+    "build:runtime-processes": "bun scripts/build-runtime-processes.ts",
     "canary:session-event-ordering": "bun scripts/canary-session-event-ordering.ts",
     "release:schema-contract": "bun scripts/release-schema-contract.ts",
     "release:bom": "bun scripts/release-bom.ts",
@@ -74,7 +79,7 @@
     "image:build:api": "docker build --platform ${OPENGENI_IMAGE_PLATFORM:-linux/amd64} -f docker/opengeni.Dockerfile --target api -t opengeni-api:local .",
     "image:build:worker": "docker build --platform ${OPENGENI_IMAGE_PLATFORM:-linux/amd64} -f docker/opengeni.Dockerfile --target worker -t opengeni-worker:local .",
     "image:build:web": "docker build --platform ${OPENGENI_IMAGE_PLATFORM:-linux/amd64} -f docker/opengeni.Dockerfile --target web -t opengeni-web:local .",
-    "build": "bun run build:packages && cd apps/api && bun run build && cd ../worker && bun run build && cd ../web && bun run build",
+    "build": "bun run build:packages && cd apps/api && bun run build && cd ../worker && bun run build && cd ../web && bun run build && cd ../.. && bun run build:runtime-processes",
     "build:packages": "bun scripts/build-publishable-packages.ts",
     "closure-guard": "bun run build:packages && bun scripts/publish-closure-guard.ts",
     "test:publish-consumer": "bun scripts/test-publish-consumer.ts",
@@ -107,6 +112,7 @@
   "devDependencies": {
     "@axe-core/playwright": "4.10.2",
     "@changesets/cli": "^2.31.0",
+    "@openai/agents": "0.14.3",
     "@opengeni/agent-proto": "workspace:*",
     "@opengeni/api-router": "workspace:*",
     "@opengeni/config": "workspace:*",
@@ -154,6 +160,8 @@
   "packageManager": "bun@1.3.14",
   "patchedDependencies": {
     "modal@0.9.0": "patches/modal@0.9.0.patch",
-    "@openai/agents-extensions@0.13.3": "patches/@openai%2Fagents-extensions@0.13.3.patch"
+    "@openai/agents-extensions@0.14.3": "patches/@openai%2Fagents-extensions@0.14.3.patch",
+    "@openai/agents-openai@0.14.3": "patches/@openai%2Fagents-openai@0.14.3.patch",
+    "@openai/agents-core@0.14.3": "patches/@openai%2Fagents-core@0.14.3.patch"
   }
 }

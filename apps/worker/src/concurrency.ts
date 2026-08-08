@@ -15,10 +15,10 @@ export type TurnWorkerConcurrencyOptions = Pick<
 >;
 
 /**
- * Ordinary multi-worker deployments keep a fixed per-process ceiling so HPA or
- * an operator owns horizontal capacity. The single-machine profile selects the
- * resource tuner instead: Temporal admits activity slots while whole-system CPU
- * and memory remain below the configured targets, then stops polling more work.
+ * Fixed profiles keep a per-process ceiling. Resource-aware profiles retain a
+ * hard per-process maximum while Temporal meters new activity admission against
+ * cgroup/host CPU and memory. The ramp lets usage become visible before a burst
+ * can reserve the entire ceiling.
  */
 export function turnWorkerConcurrencyOptions(
   settings: TurnWorkerConcurrencySettings,
@@ -38,7 +38,7 @@ export function turnWorkerConcurrencyOptions(
       activityTaskSlotOptions: {
         minimumSlots: 1,
         maximumSlots: settings.turnWorkerMaxConcurrentTurns,
-        rampThrottle: "50ms",
+        rampThrottle: "250ms",
       },
     },
   };
@@ -61,3 +61,9 @@ export function turnWorkerConcurrencyLogFields(settings: TurnWorkerConcurrencySe
 
 export const CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES = 32;
 export const CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS = 40;
+// Session workflows finish at idle boundaries and replay from durable history.
+// Bound sticky VM state explicitly: the SDK otherwise derives this from the
+// host heap limit (roughly 600 cached workflows/GiB), which is far above this
+// process's actual concurrent workflow-task capacity and permanently retains
+// idle workflow state in every control replica.
+export const CONTROL_WORKER_MAX_CACHED_WORKFLOWS = 64;

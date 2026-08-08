@@ -18,7 +18,7 @@ import { publishDurableSessionEvents } from "@opengeni/events";
 import { deliverFailedChildTurnToParent, notifyParentOfChildIdle } from "./parent-wake";
 import { recordTurnsQueuedGauge } from "../observability-metrics";
 import type {
-  ActivityServices,
+  ControlActivityServices,
   ExpireSessionHumanInputInput,
   ExpireSessionHumanInputResult,
   PeekSessionWorkInput,
@@ -62,7 +62,7 @@ export type SessionStateActivityOverrides = Partial<{
 export const WORKER_DEATH_MAX_REDISPATCHES = 3;
 
 export function createSessionStateActivities(
-  services: () => Promise<ActivityServices>,
+  services: () => Promise<ControlActivityServices>,
   overrides: SessionStateActivityOverrides = {},
 ) {
   const settleSessionAttemptInterruptionsFn =
@@ -388,8 +388,8 @@ export function createSessionStateActivities(
 }
 
 async function refreshQueuedTurnsGauge(
-  db: ActivityServices["db"],
-  observability: ActivityServices["observability"],
+  db: ControlActivityServices["db"],
+  observability: ControlActivityServices["observability"],
   countQueuedTurnsFn: typeof countQueuedTurns,
   recordTurnsQueuedGaugeFn: typeof recordTurnsQueuedGauge,
 ): Promise<void> {

@@ -395,6 +395,7 @@ describe("structured human-input runtime boundary", () => {
         },
         agent: { name: "reviewer" },
         toolName: "dangerous_tool",
+        functionToolStateKey: '["bare","dangerous_tool"]',
       },
     ]);
     expect(Object.hasOwn(rawItem, "status")).toBe(true);
@@ -7208,6 +7209,58 @@ describe("provider item id stripping", () => {
     expect(JSON.stringify(model.requests[0]?.input)).not.toContain("data:image");
     expect(JSON.stringify(result.state.history)).toContain("data:image");
     expect(JSON.stringify(input)).toContain("data:image");
+  });
+
+  test("external history ownership borrows frozen input without mutating it", async () => {
+    const settings = testSettings({
+      sandboxBackend: "none",
+      webSearchEnabled: false,
+      openaiProviderItemIds: "strip",
+      modelToolOutputTruncationTokens: 100,
+    });
+    const model = new ScriptedModel("done");
+    const agent = buildOpenGeniAgent(settings, [], {
+      model,
+      supportsImageInput: true,
+      hostedWebSearch: false,
+    });
+    const input = [
+      {
+        id: "computer-provider-id",
+        type: "computer_call",
+        callId: "computer-1",
+        action: { type: "screenshot" },
+        actions: [{ type: "screenshot" }],
+      },
+      {
+        type: "computer_call_result",
+        callId: "computer-1",
+        output: { type: "computer_screenshot", data: "image" },
+      },
+      {
+        type: "function_call_result",
+        callId: "large-result",
+        output: { type: "text", text: "x".repeat(100_000) },
+      },
+    ] as Array<Record<string, unknown>>;
+    const freeze = (value: unknown): void => {
+      if (!value || typeof value !== "object" || Object.isFrozen(value)) return;
+      for (const nested of Object.values(value as Record<string, unknown>)) freeze(nested);
+      Object.freeze(value);
+    };
+    freeze(input);
+    const original = JSON.stringify(input);
+
+    const result = await runAgentStream(agent, { input: input as any }, settings);
+    for await (const event of result.toStream()) void event;
+    await result.completed;
+
+    expect((result.state as any)._originalInput[0]).toBe(input[0]);
+    expect(JSON.stringify(input)).toBe(original);
+    const wire = model.requests[0]!.input as unknown as Array<Record<string, unknown>>;
+    expect(wire[0]).not.toHaveProperty("id");
+    expect(wire[0]).not.toHaveProperty("action");
+    expect(JSON.stringify(wire[2])).toContain("tokens truncated");
   });
 
   test("callModelInputFilterForSettings preserves screenshot history prefixes across successive calls", async () => {

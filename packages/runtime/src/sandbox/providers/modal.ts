@@ -279,7 +279,7 @@ function installModalNativeSnapshotRetention(session: MutableModalSandboxSession
       throw new Error("Modal native workspace capture requires a durable request id");
     }
     // Own both timeout and caller id at the provider boundary. The wrapper
-    // around persistWorkspace temporarily disables Agents SDK 0.13.3's second,
+    // around persistWorkspace temporarily disables Agents SDK 0.14.3's second,
     // outer timeout; otherwise an old timed-out caller can later delete the same
     // idempotent Image after a recovered caller has already published it.
     const timeoutMs = modalDirectorySnapshotTimeouts.get(session);

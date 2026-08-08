@@ -41,12 +41,12 @@ import {
 } from "./common";
 import { withFirstPartyTools } from "./goals";
 import type {
-  ActivityServices,
+  ControlActivityServices,
   DispatchScheduledTaskRunInput,
   DispatchScheduledTaskRunResult,
 } from "./types";
 
-export function createScheduledTaskActivities(services: () => Promise<ActivityServices>) {
+export function createScheduledTaskActivities(services: () => Promise<ControlActivityServices>) {
   return {
     dispatchScheduledTaskRun: async (
       input: DispatchScheduledTaskRunInput,
@@ -537,7 +537,7 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
 
 async function scheduledRunAdmissionDenial(
   settings: Settings,
-  db: ActivityServices["db"],
+  db: ControlActivityServices["db"],
   accountId: string,
   workspaceId: string,
   requestedAgentRuns: number,

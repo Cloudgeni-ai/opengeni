@@ -1,9 +1,47 @@
 import { describe, expect, test } from "bun:test";
-import { buildModelResolver, CODEX_FALLBACK_MODEL_SLUGS, normalizeCodexRequestBody } from "../src";
+import {
+  buildModelResolver,
+  CODEX_FALLBACK_MODEL_SLUGS,
+  normalizeCodexRequestBody,
+  normalizedCodexRequestBody,
+} from "../src";
 
 const identity = (s: string): string => s;
 
 describe("normalizeCodexRequestBody", () => {
+  test("copy-on-write form preserves a retained source graph", () => {
+    const changedItem = Object.freeze({
+      type: "tool_search_call",
+      id: "ts_1",
+      call_id: "call_1",
+      arguments: '{"query":"x"}',
+    });
+    const unchangedItem = Object.freeze({ type: "message", role: "user", content: [] });
+    const source = Object.freeze({
+      model: "namespace/gpt-5.6-sol",
+      stream: false,
+      max_output_tokens: 100,
+      reasoning: Object.freeze({ effort: "minimal" }),
+      input: Object.freeze([changedItem, unchangedItem]),
+    });
+
+    const normalized = normalizedCodexRequestBody(source, identity);
+    const normalizedInput = normalized.input as Array<Record<string, unknown>>;
+
+    expect(source.reasoning.effort).toBe("minimal");
+    expect(source.input[0]).toBe(changedItem);
+    expect(changedItem.id).toBe("ts_1");
+    expect(changedItem.arguments).toBe('{"query":"x"}');
+    expect(normalized.reasoning).toEqual({ effort: "low" });
+    expect(normalizedInput[0]).toEqual({
+      type: "tool_search_call",
+      call_id: "call_1",
+      arguments: { query: "x" },
+    });
+    expect(normalizedInput[0]).not.toBe(changedItem);
+    expect(normalizedInput[1]).toBe(unchangedItem);
+  });
+
   test("forces store:false + stream:true and strips max token fields", () => {
     const body = normalizeCodexRequestBody(
       { model: "gpt-5.6-sol", stream: false, max_output_tokens: 1000, max_completion_tokens: 2000 },

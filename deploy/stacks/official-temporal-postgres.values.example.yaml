@@ -55,9 +55,55 @@ server:
             maxConns: 20
             maxIdleConns: 20
             maxConnLifetime: 1h
+  # Bound the workflow-state cache by estimated serialized bytes rather than
+  # the upstream 128,000-entry default. Eviction only discards a local cache;
+  # durable workflow history remains in PostgreSQL and is reloaded on demand.
+  dynamicConfig:
+    history.cacheSizeBasedLimit:
+      - value: true
+        constraints: {}
+    history.hostLevelCacheMaxSizeBytes:
+      - value: 134217728
+        constraints: {}
+    history.cacheTTL:
+      - value: 10m
+        constraints: {}
+    history.cacheBackgroundEvict:
+      - value:
+          Enabled: true
+          LoopInterval: 1m
+          MaxEntryPerCall: 4096
+        constraints: {}
+    history.enableHostLevelEventsCache:
+      - value: true
+        constraints: {}
+    history.eventsHostLevelCacheMaxSizeBytes:
+      - value: 67108864
+        constraints: {}
+    history.eventsCacheTTL:
+      - value: 10m
+        constraints: {}
+  history:
+    resources:
+      requests:
+        memory: 768Mi
+      limits:
+        memory: 1280Mi
+    additionalEnv:
+      - name: GOMEMLIMIT
+        value: 768MiB
   metrics:
     annotations:
       enabled: true
+    serviceMonitor:
+      enabled: false
+      interval: 30s
+      additionalLabels:
+        opengeni.ai/monitoring: enabled
+      metricRelabelings:
+        - action: drop
+          sourceLabels: [__name__]
+          regex: ".*latency.*_bucket"
 
 web:
   enabled: false
@@ -66,3 +112,6 @@ schema:
   useHelmHooks: true
   backoffLimit: 100
   ttlSecondsAfterFinished: 86400
+
+admintools:
+  enabled: false
