@@ -1,5 +1,27 @@
 # @opengeni/api-router
 
+## 0.23.13
+
+### Patch Changes
+
+- e2edfbc: Add provider-aware image generation with permanent verified artifacts,
+  prompt-cache-safe history, sandbox materialization, and SDK/React rendering.
+- 7f70d33: Bound long-running service memory, upgrade the OpenAI Agents SDK to 0.14.3, and preserve exact provider, streaming, and durable-resume semantics.
+- Updated dependencies [e2edfbc]
+- Updated dependencies [7f70d33]
+  - @opengeni/codex@0.2.14
+  - @opengeni/config@0.12.6
+  - @opengeni/contracts@0.41.2
+  - @opengeni/db@0.28.16
+  - @opengeni/network@0.2.1
+  - @opengeni/runtime@0.18.33
+  - @opengeni/core@0.21.22
+  - @opengeni/documents@0.5.25
+  - @opengeni/github@0.4.43
+  - @opengeni/storage@0.2.80
+  - @opengeni/events@0.3.96
+  - @opengeni/observability@0.5.11
+
 ## 0.23.12
 
 ### Patch Changes
