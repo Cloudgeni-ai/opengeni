@@ -81,6 +81,25 @@ export type ChannelAServices = {
   observability?: Observability | undefined;
 };
 
+export type ChannelAOperation =
+  | "fs.list"
+  | "fs.list-batch"
+  | "fs.read"
+  | "fs.write"
+  | "fs.delete"
+  | "fs.move"
+  | "fs.mkdir"
+  | "git.status"
+  | "git.diff"
+  | "git.read-batch"
+  | "git.log"
+  | "git.show"
+  | "terminal.exec"
+  | "terminal.pty.open"
+  | "terminal.pty.write"
+  | "terminal.pty.resize"
+  | "terminal.pty.close";
+
 export type ChannelAContext = {
   accountId: string;
   workspaceId: string;
@@ -89,6 +108,27 @@ export type ChannelAContext = {
   subjectId: string;
   /** Cancel lifecycle waiting when the originating HTTP request disconnects. */
   waitSignal?: AbortSignal | undefined;
+  /** Bounded route identity for metrics and safe operator diagnostics. */
+  operation?: ChannelAOperation | undefined;
+};
+
+export type ChannelAOperationFailureReason =
+  | "request_cancelled"
+  | "provider_read_busy"
+  | "provider_unavailable"
+  | "lifecycle_conflict"
+  | "request_rejected"
+  | "unexpected";
+
+export type ChannelAOperationFailureDiagnostic = {
+  reason: ChannelAOperationFailureReason;
+  status: number;
+  errorCode:
+    | "sandbox_channel_a_cancelled"
+    | "sandbox_channel_a_provider_busy"
+    | "sandbox_channel_a_provider_unavailable"
+    | "sandbox_channel_a_lifecycle_conflict"
+    | "sandbox_channel_a_operation_failed";
 };
 
 // The live op surface handed to a route's callback: the service + the live lease
@@ -417,6 +457,8 @@ async function withChannelAOperation<T>(
   const sandboxGroupId = session.sandboxGroupId;
   const requestId = crypto.randomUUID();
   const holderId = `direct:${requestId}`;
+  const operationStartedAt = performance.now();
+  const operation = ctx.operation ?? (readOnly ? "read" : "mutation");
   const leaseTtlMs = settings.sandboxLeaseTtlMs;
 
   // The STABLE run-environment used by both a cloud home and a machine home.
@@ -483,6 +525,7 @@ async function withChannelAOperation<T>(
   if (session.sandboxBackend === "selfhosted") {
     let established: EstablishedSandboxSession | undefined;
     try {
+      ctx.waitSignal?.throwIfAborted();
       const pointer = await readActiveSandbox(db, workspaceId, session.id);
       if (!pointer?.activeSandboxId) {
         throw new HTTPException(409, {
@@ -547,7 +590,16 @@ async function withChannelAOperation<T>(
       );
       return await runEstablished(routed, null);
     } catch (error) {
-      throw mapChannelAError(error);
+      observeChannelAOperationFailure(services, {
+        workspaceId,
+        sandboxGroupId,
+        backend: session.sandboxBackend,
+        operation,
+        durationMs: performance.now() - operationStartedAt,
+        error,
+        waitSignal: ctx.waitSignal,
+      });
+      throw mapChannelAError(error, ctx.waitSignal);
     } finally {
       await dropEstablishedHandle(established);
     }
@@ -564,36 +616,61 @@ async function withChannelAOperation<T>(
     });
   };
 
-  // Acquire exact request authority; the cold->warming CAS spawns the box when cold.
-  const acquired = await acquireLease(db, {
-    accountId,
-    workspaceId,
-    sandboxGroupId,
-    kind: "direct",
-    holderId,
-    subjectId: session.id,
-    backend: session.sandboxBackend,
-    os: session.sandboxOs,
-    leaseTtlMs,
-    warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
-    captureWaitMs: sandboxLifecycleTransitionWaitMs(settings),
-    ...(ctx.waitSignal ? { waitSignal: ctx.waitSignal } : {}),
-  });
+  // Acquire exact request authority; the cold->warming CAS spawns the box when
+  // cold. This wait is request-abort aware and must pass through the same typed
+  // cancellation/diagnostic seam as provider execution below.
+  let acquired: Awaited<ReturnType<typeof acquireLease>>;
+  let acquisitionMayHaveCommitted = false;
+  try {
+    ctx.waitSignal?.throwIfAborted();
+    acquisitionMayHaveCommitted = true;
+    acquired = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId,
+      kind: "direct",
+      holderId,
+      subjectId: session.id,
+      backend: session.sandboxBackend,
+      os: session.sandboxOs,
+      leaseTtlMs,
+      warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
+      captureWaitMs: sandboxLifecycleTransitionWaitMs(settings),
+      ...(ctx.waitSignal ? { waitSignal: ctx.waitSignal } : {}),
+    });
+    // Close the commit/abort race before any provider handle is established.
+    // The catch below drops an exact holder committed just before disconnect.
+    ctx.waitSignal?.throwIfAborted();
 
-  if (acquired.role === "blocked") {
-    await release();
-    throw new HTTPException(409, {
-      message: `sandbox recovery ${acquired.lease.recovery.restore.status} at epoch ${acquired.lease.leaseEpoch}`,
+    if (acquired.role === "blocked") {
+      throw new HTTPException(409, {
+        message: `sandbox recovery ${acquired.lease.recovery.restore.status} at epoch ${acquired.lease.leaseEpoch}`,
+      });
+    }
+    if (acquired.role === "fenced") {
+      throw new HTTPException(409, {
+        message:
+          acquired.reason === "superseded"
+            ? `sandbox lease superseded (epoch ${acquired.lease.leaseEpoch}); retry`
+            : `sandbox lifecycle transition in progress (${acquired.reason}, epoch ${acquired.lease.leaseEpoch}, backend ${acquired.lease.backend}, instance ${acquired.lease.instanceId ?? "none"}); retry`,
+      });
+    }
+  } catch (error) {
+    // Release is idempotent. If acquisition committed before the request was
+    // cancelled, this removes that exact direct holder; a transient DB failure
+    // must not overwrite the original structural error (holder TTL is the final
+    // cleanup fence).
+    if (acquisitionMayHaveCommitted) await release().catch(() => undefined);
+    observeChannelAOperationFailure(services, {
+      workspaceId,
+      sandboxGroupId,
+      backend: session.sandboxBackend,
+      operation,
+      durationMs: performance.now() - operationStartedAt,
+      error,
+      waitSignal: ctx.waitSignal,
     });
-  }
-  if (acquired.role === "fenced") {
-    await release();
-    throw new HTTPException(409, {
-      message:
-        acquired.reason === "superseded"
-          ? `sandbox lease superseded (epoch ${acquired.lease.leaseEpoch}); retry`
-          : `sandbox lifecycle transition in progress (${acquired.reason}, epoch ${acquired.lease.leaseEpoch}, backend ${acquired.lease.backend}, instance ${acquired.lease.instanceId ?? "none"}); retry`,
-    });
+    throw mapChannelAError(error, ctx.waitSignal);
   }
 
   let established: EstablishedSandboxSession | undefined;
@@ -827,7 +904,16 @@ async function withChannelAOperation<T>(
     if (establishedCacheKey && shouldEvictChannelAHandleAfterError(error, establishedCacheKind)) {
       evictEstablishedHandle(establishedCacheKey, establishedCacheKind);
     }
-    throw mapChannelAError(error);
+    observeChannelAOperationFailure(services, {
+      workspaceId,
+      sandboxGroupId,
+      backend: session.sandboxBackend,
+      operation,
+      durationMs: performance.now() - operationStartedAt,
+      error,
+      waitSignal: ctx.waitSignal,
+    });
+    throw mapChannelAError(error, ctx.waitSignal);
   } finally {
     await release();
     await dropEstablishedHandle(established);
@@ -836,8 +922,13 @@ async function withChannelAOperation<T>(
 
 /** Map the service's typed errors to HTTP status (the §5.3 matrix). Re-throws an
  *  already-HTTPException unchanged. */
-export function mapChannelAError(error: unknown): unknown {
+export function mapChannelAError(error: unknown, waitSignal?: AbortSignal): unknown {
   if (error instanceof HTTPException) return error;
+  if (isChannelARequestCancellation(error, waitSignal))
+    return new HTTPException(499 as never, {
+      message: "request cancelled",
+      cause: error,
+    });
   if (
     error instanceof SandboxResumeIdentityMismatchError ||
     error instanceof SandboxResumeIdentityUnavailableError
@@ -856,6 +947,133 @@ export function mapChannelAError(error: unknown): unknown {
   if (error instanceof ChannelAUnsupportedError)
     return new HTTPException(409, { message: error.message });
   return error;
+}
+
+export function isChannelARequestCancellation(error: unknown, waitSignal?: AbortSignal): boolean {
+  if (waitSignal?.aborted !== true) return false;
+  const isSignalReason = waitSignal.reason !== undefined && error === waitSignal.reason;
+  const isAbortError =
+    (error instanceof DOMException && error.name === "AbortError") ||
+    (error instanceof Error && error.name === "AbortError");
+  return isSignalReason || isAbortError;
+}
+
+/** Structural classification only: exact provider exception text, codes, URLs,
+ * and identifiers never cross the telemetry boundary. */
+export function channelAOperationFailureDiagnostic(
+  error: unknown,
+  waitSignal?: AbortSignal,
+): ChannelAOperationFailureDiagnostic {
+  if (isChannelARequestCancellation(error, waitSignal)) {
+    return {
+      reason: "request_cancelled",
+      status: 499,
+      errorCode: "sandbox_channel_a_cancelled",
+    };
+  }
+  if (error instanceof SandboxProviderReadLockUnavailableError) {
+    return {
+      reason: "provider_read_busy",
+      status: 503,
+      errorCode: "sandbox_channel_a_provider_busy",
+    };
+  }
+  if (error instanceof ChannelAUnavailableError) {
+    return {
+      reason: "provider_unavailable",
+      status: 503,
+      errorCode: "sandbox_channel_a_provider_unavailable",
+    };
+  }
+  if (
+    error instanceof SandboxResumeIdentityMismatchError ||
+    error instanceof SandboxResumeIdentityUnavailableError ||
+    (error instanceof HTTPException && error.status === 409)
+  ) {
+    return {
+      reason: "lifecycle_conflict",
+      status: 409,
+      errorCode: "sandbox_channel_a_lifecycle_conflict",
+    };
+  }
+  if (
+    error instanceof ChannelAValidationError ||
+    error instanceof ChannelANotFoundError ||
+    error instanceof ChannelAConflictError ||
+    error instanceof ChannelAUnsupportedError
+  ) {
+    const mapped = mapChannelAError(error, waitSignal);
+    return {
+      reason: "request_rejected",
+      status: mapped instanceof HTTPException ? mapped.status : 500,
+      errorCode: "sandbox_channel_a_operation_failed",
+    };
+  }
+  if (error instanceof HTTPException) {
+    return {
+      reason: error.status >= 500 ? "unexpected" : "request_rejected",
+      status: error.status,
+      errorCode: "sandbox_channel_a_operation_failed",
+    };
+  }
+  return {
+    reason: "unexpected",
+    status: 500,
+    errorCode: "sandbox_channel_a_operation_failed",
+  };
+}
+
+function observeChannelAOperationFailure(
+  services: ChannelAServices,
+  input: {
+    workspaceId: string;
+    sandboxGroupId: string;
+    backend: string;
+    operation: string;
+    durationMs: number;
+    error: unknown;
+    waitSignal?: AbortSignal | undefined;
+  },
+): void {
+  if (!services.observability) return;
+  const diagnostic = channelAOperationFailureDiagnostic(input.error, input.waitSignal);
+  const attributes = {
+    sandboxLeaseKey: sandboxLeaseTelemetryKey(input.workspaceId, input.sandboxGroupId),
+    backend: input.backend,
+    op: input.operation,
+    outcome: "failed",
+    reason: diagnostic.reason,
+    status: diagnostic.status,
+    durationMs: Math.max(0, Math.round(input.durationMs)),
+    errorClass: "SandboxChannelAOperationError",
+    errorCode: diagnostic.errorCode,
+    origin: "api",
+  } as const;
+  try {
+    services.observability.incrementCounter({
+      name: "opengeni_channel_a_operation_failures_total",
+      help: "Channel-A failures by bounded operation and structural reason.",
+      labels: {
+        backend: input.backend,
+        op: input.operation,
+        reason: diagnostic.reason,
+        status: String(diagnostic.status),
+      },
+    });
+  } catch {
+    // Metrics can never alter request or lease settlement.
+  }
+  try {
+    if (diagnostic.reason === "request_cancelled") {
+      services.observability.info("Channel-A request cancelled", attributes);
+    } else if (diagnostic.reason === "request_rejected") {
+      services.observability.debug("Channel-A request rejected", attributes);
+    } else {
+      services.observability.warn("Channel-A operation failed", attributes);
+    }
+  } catch {
+    // Logs can never alter request or lease settlement.
+  }
 }
 
 // Drop a transiently-established, NON-OWNED handle WITHOUT terminating the box.

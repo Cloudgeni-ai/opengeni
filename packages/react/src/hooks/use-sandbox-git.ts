@@ -1,5 +1,6 @@
 import type {
   GitFileDiff,
+  SessionCapabilities,
   SessionEvent,
   WorkspaceCaptureManifest,
   WorkspaceCaptureRepo,
@@ -29,7 +30,7 @@ export type UseSandboxGitOptions = ClientOverride & {
   active?: boolean | undefined;
   /** Lease liveness ("warm" | "draining" | "cold"). When NOT warm, the diff is
    *  served from the capture (cold/offline) instead of a live `gitDiff` RPC. */
-  liveness?: string | undefined;
+  liveness?: SessionCapabilities["liveness"] | undefined;
   /** The latest turn-end capture (from `useWorkspaceCapture`). Seeds the diff
    *  immediately; a warm box reconciles live and leaves this durable review
    *  surface in place if the live request is temporarily unavailable. */
@@ -211,6 +212,9 @@ export function useSandboxGit(
   // `liveness` is optional for compatibility with direct hook consumers. Only
   // an explicit lifecycle value is subject to the warm-only provider fence.
   const acceptsEventReads = options.liveness === undefined || isLive;
+  const acceptsEventReadsRef = useRef(acceptsEventReads);
+  acceptsEventReadsRef.current = acceptsEventReads;
+  const livenessKnown = options.liveness !== undefined;
   const identityKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${repoPathsKey}\u0000${workspaceWide}\u0000${comparison}`;
 
   const [diff, setDiff] = useState<SandboxGitFileDiff[]>([]);
@@ -455,7 +459,7 @@ export function useSandboxGit(
       if (!active) setLoading(false);
       return;
     }
-    if (isLive || !currentCapture) {
+    if (isLive || (!livenessKnown && !currentCapture)) {
       void refresh();
     }
     return () => {
@@ -463,7 +467,16 @@ export function useSandboxGit(
       refreshAbortRef.current = null;
       refreshGenerationRef.current += 1;
     };
-  }, [enabled, active, isLive, captureRevision, identityKey, refresh, seedFromCapture]);
+  }, [
+    enabled,
+    active,
+    isLive,
+    livenessKnown,
+    captureRevision,
+    identityKey,
+    refresh,
+    seedFromCapture,
+  ]);
 
   // git.changed → re-fetch the LIVE diff. Agent tool completion is also an
   // invalidation point because shell/apply-patch writes can bypass Channel-A and
@@ -508,11 +521,11 @@ export function useSandboxGit(
       if (immediate) {
         if (commandRefreshTimerRef.current) clearTimeout(commandRefreshTimerRef.current);
         commandRefreshTimerRef.current = null;
-        void refresh();
+        if (acceptsEventReadsRef.current) void refresh();
       } else if (commandDelta && !commandRefreshTimerRef.current) {
         commandRefreshTimerRef.current = setTimeout(() => {
           commandRefreshTimerRef.current = null;
-          void refresh();
+          if (acceptsEventReadsRef.current) void refresh();
         }, 1_000);
       }
     }

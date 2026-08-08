@@ -7,6 +7,7 @@ import type {
   GitFileStatusCode,
   GitStatusResponse,
   OpenGeniRequestOptions,
+  SessionCapabilities,
   SessionEvent,
   WorkspaceCaptureManifest,
 } from "@opengeni/sdk";
@@ -88,12 +89,12 @@ export type UseSandboxFilesOptions = ClientOverride & {
   active?: boolean | undefined;
   /** Repository roots advertised by capabilities, relative to the workspace. */
   repoPaths?: readonly string[] | undefined;
-  /** The lease liveness ("cold" | "warm" | "draining"). The structured FileSystem
+  /** The lease liveness. The structured FileSystem
    *  capability is advertised even on a COLD box, so the mount-time list can race
    *  the box: it lists before the box is warm, gets an empty/errored result, and
    *  (with no `fs.changed` event) never re-lists. Passing liveness re-lists when
    *  the box first becomes warm, so the tree populates as soon as the box is up. */
-  liveness?: string | undefined;
+  liveness?: SessionCapabilities["liveness"] | undefined;
   /** The latest turn-end workspace capture (from `useWorkspaceCapture`). The tree
    *  paints immediately from this durable index, then a warm box reconciles live
    *  in place. If that live read fails, the capture remains a truthful read-only
@@ -492,6 +493,9 @@ export function useSandboxFiles(
   // `liveness` predates this hook option. Preserve legacy embedders that omit it;
   // an explicit lifecycle value, however, must pass the warm-only provider fence.
   const acceptsEventReads = options.liveness === undefined || isLive;
+  const acceptsEventReadsRef = useRef(acceptsEventReads);
+  acceptsEventReadsRef.current = acceptsEventReads;
+  const livenessKnown = options.liveness !== undefined;
   const identityKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${rootPath}\u0000${repoPathsKey}`;
 
   const [tree, setTree] = useState<FileTreeNode[]>([]);
@@ -516,6 +520,7 @@ export function useSandboxFiles(
   const refreshGenerationRef = useRef(0);
   const refreshAbortRef = useRef<AbortController | null>(null);
   const identityAbortRef = useRef(new AbortController());
+  const eventReadAbortRef = useRef(new AbortController());
   const identityGenerationRef = useRef(0);
   const lastSeqRef = useRef(0);
   const pendingParentsRef = useRef<Set<string>>(new Set());
@@ -850,20 +855,18 @@ export function useSandboxFiles(
   // of a parent that isn't loaded (collapsed/unmounted) is a no-op — there's
   // nothing visible to update, and it re-lists fresh when the user expands it.
   const reconcilePath = useCallback(
-    async (path: string) => {
+    async (path: string, requestSignal?: AbortSignal) => {
       if (!sessionId) return;
       const identityGeneration = identityGenerationRef.current;
       const identitySignal = identityAbortRef.current.signal;
+      const signal = requestSignal
+        ? AbortSignal.any([identitySignal, requestSignal])
+        : identitySignal;
       // Skip parents that aren't currently loaded/expanded in the tree (nothing
       // visible to update; they re-list fresh on the next expand).
       if (!parentIsLoaded(treeRef.current, path)) return;
       try {
-        const listed = await client.fsList(
-          workspaceId,
-          sessionId,
-          { path, depth: 1 },
-          { signal: identitySignal },
-        );
+        const listed = await client.fsList(workspaceId, sessionId, { path, depth: 1 }, { signal });
         if (identityGenerationRef.current !== identityGeneration) return;
         const children = (listed.root.children ?? []).map((node) => fsNodeToTree(node));
         if (path === "") setTree((prev) => applyStatus(mergeRootChildren(prev, children)));
@@ -1081,7 +1084,8 @@ export function useSandboxFiles(
   //   • any box WITH a capture → paint instantly from the durable capture index;
   //     a holder-confirmed warm box then reconciles live in place.
   //   • if that live reconciliation fails, keep the capture visible and read-only.
-  //   • cold box with NO capture → best-effort live list (status quo — never worse).
+  //   • legacy callers that omit liveness and have no capture retain their live
+  //     fallback; an explicitly cold/draining lease never wakes from a passive mount.
   // Key the seed on the capture's REVISION (a primitive), not the manifest object
   // — a consumer passing a fresh object each render (or a new revision) must not
   // spin the effect. The latest manifest is read from a ref at run time.
@@ -1096,6 +1100,8 @@ export function useSandboxFiles(
     refreshAbortRef.current?.abort();
     refreshAbortRef.current = null;
     refreshGenerationRef.current += 1;
+    eventReadAbortRef.current.abort();
+    eventReadAbortRef.current = new AbortController();
     const identityChanged = previousIdentityRef.current !== identityKey;
     previousIdentityRef.current = identityKey;
     if (identityChanged || !enabled) {
@@ -1139,53 +1145,69 @@ export function useSandboxFiles(
       }
       return;
     }
-    if (isLive || !currentCapture) {
+    if (isLive || (!livenessKnown && !currentCapture)) {
       void refresh();
     }
     return () => {
       refreshAbortRef.current?.abort();
       refreshAbortRef.current = null;
       refreshGenerationRef.current += 1;
+      eventReadAbortRef.current.abort();
     };
-  }, [enabled, active, isLive, captureRevision, identityKey, refresh, seedFromCapture]);
+  }, [
+    enabled,
+    active,
+    isLive,
+    livenessKnown,
+    captureRevision,
+    identityKey,
+    refresh,
+    seedFromCapture,
+  ]);
 
   // Re-pull JUST the git-status overlay and re-tint the existing tree in place —
   // no fs re-list, no collapse. This is all a `git.changed` (commit/stage/checkout)
   // needs: the tree SHAPE is unchanged, only the tints move.
-  const refreshGitOverlay = useCallback(async () => {
-    if (!sessionId) return;
-    const identityGeneration = identityGenerationRef.current;
-    const identitySignal = identityAbortRef.current.signal;
-    setGitLoading(true);
-    try {
-      const batch = await client.gitReadBatch(
-        workspaceId,
-        sessionId,
-        { requests: repoPaths.map((root) => ({ status: { path: root } })) },
-        { signal: identitySignal },
-      );
-      const statuses = batch.results.map((result, index) => ({
-        root: repoPaths[index] ?? "",
-        status: result.status,
-      }));
-      if (identityGenerationRef.current !== identityGeneration) return;
-      const overlay = new Map<string, FileTreeStatus>();
-      for (const { root, status } of statuses) {
-        for (const file of status.files) {
-          const code = file.worktree ?? file.index;
-          const mapped = code ? GIT_STATUS_TO_TREE[code] : undefined;
-          if (mapped) overlay.set(qualifyStatusPath(root, file.path), mapped);
+  const refreshGitOverlay = useCallback(
+    async (requestSignal?: AbortSignal) => {
+      if (!sessionId) return;
+      const identityGeneration = identityGenerationRef.current;
+      const identitySignal = identityAbortRef.current.signal;
+      const signal = requestSignal
+        ? AbortSignal.any([identitySignal, requestSignal])
+        : identitySignal;
+      setGitLoading(true);
+      try {
+        const batch = await client.gitReadBatch(
+          workspaceId,
+          sessionId,
+          { requests: repoPaths.map((root) => ({ status: { path: root } })) },
+          { signal },
+        );
+        const statuses = batch.results.map((result, index) => ({
+          root: repoPaths[index] ?? "",
+          status: result.status,
+        }));
+        if (identityGenerationRef.current !== identityGeneration) return;
+        const overlay = new Map<string, FileTreeStatus>();
+        for (const { root, status } of statuses) {
+          for (const file of status.files) {
+            const code = file.worktree ?? file.index;
+            const mapped = code ? GIT_STATUS_TO_TREE[code] : undefined;
+            if (mapped) overlay.set(qualifyStatusPath(root, file.path), mapped);
+          }
         }
+        statusRef.current = overlay;
+        setGitSummary(summarizeStatuses(statuses));
+        setTree((prev) => applyStatus(prev));
+      } catch {
+        /* a non-repo box has no overlay — leave the tree untinted */
+      } finally {
+        if (identityGenerationRef.current === identityGeneration) setGitLoading(false);
       }
-      statusRef.current = overlay;
-      setGitSummary(summarizeStatuses(statuses));
-      setTree((prev) => applyStatus(prev));
-    } catch {
-      /* a non-repo box has no overlay — leave the tree untinted */
-    } finally {
-      if (identityGenerationRef.current === identityGeneration) setGitLoading(false);
-    }
-  }, [client, workspaceId, sessionId, repoPaths, applyStatus]);
+    },
+    [client, workspaceId, sessionId, repoPaths, applyStatus],
+  );
 
   // Auto-reconcile on fs/git change notifications — TARGETED, never a root
   // collapse-reload, and de-duped against our OWN mutations.
@@ -1288,6 +1310,12 @@ export function useSandboxFiles(
     debounceRef.current = setTimeout(() => {
       debounceRef.current = null;
       if (identityGenerationRef.current !== identityGeneration) return;
+      if (!acceptsEventReadsRef.current) {
+        pendingParentsRef.current = new Set();
+        pendingGitRef.current = false;
+        pendingAgentToolRef.current = false;
+        return;
+      }
       if (sawCommandDelta) {
         lastCommandRefreshAtRef.current = Date.now();
         setContentRevision((revision) => revision + 1);
@@ -1300,11 +1328,12 @@ export function useSandboxFiles(
       pendingAgentToolRef.current = false;
       // Reconcile the changed directories and Git overlay concurrently. Both are
       // independent remote reads; applyStatus makes their completion order safe.
+      const eventReadSignal = eventReadAbortRef.current.signal;
       void (async () => {
         const paths = wantAgentTool ? loadedDirectoryPaths(treeRef.current) : [...parents];
         await Promise.all([
-          wantGit ? refreshGitOverlay() : Promise.resolve(),
-          Promise.all(paths.map((path) => reconcilePath(path))),
+          wantGit ? refreshGitOverlay(eventReadSignal) : Promise.resolve(),
+          Promise.all(paths.map((path) => reconcilePath(path, eventReadSignal))),
         ]);
       })();
     }, delay);
@@ -1325,6 +1354,7 @@ export function useSandboxFiles(
     () => () => {
       refreshAbortRef.current?.abort();
       identityAbortRef.current.abort();
+      eventReadAbortRef.current.abort();
       identityGenerationRef.current += 1;
       if (debounceRef.current) clearTimeout(debounceRef.current);
     },

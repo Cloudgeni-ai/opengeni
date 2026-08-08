@@ -363,6 +363,81 @@ describe("observability", () => {
     expect(JSON.parse(observed[1]!)).not.toHaveProperty("sandboxLeaseKey");
   });
 
+  test("public diagnostics retain safe operation fields and validated lease correlation", () => {
+    const sentinel = "DIAGNOSTIC_PRIVATE_SENTINEL_6a44f8";
+    const observed: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => observed.push(String(message));
+    try {
+      const obs = createObservability(settings, { component: "api", now: () => 1 });
+      obs.warn("Channel-A operation failed", {
+        errorClass: "SandboxChannelAOperationError",
+        errorCode: "sandbox_channel_a_provider_unavailable",
+        origin: "api",
+        status: 503,
+        backend: "modal",
+        op: "git.read-batch",
+        reason: "provider_unavailable",
+        outcome: "failed",
+        durationMs: 812,
+        sandboxLeaseKey: "slk_0123456789abcdef0123456789abcdef",
+        workspaceId: sentinel,
+        error: sentinel,
+      });
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    expect(observed).toHaveLength(1);
+    expect(observed[0]).not.toContain(sentinel);
+    expect(JSON.parse(observed[0]!)).toMatchObject({
+      message: "Channel-A operation failed",
+      errorClass: "SandboxChannelAOperationError",
+      errorCode: "sandbox_channel_a_provider_unavailable",
+      origin: "api",
+      status: 503,
+      backend: "modal",
+      op: "git.read-batch",
+      reason: "provider_unavailable",
+      outcome: "failed",
+      durationMs: 812,
+      sandboxLeaseKey: "slk_0123456789abcdef0123456789abcdef",
+    });
+    expect(JSON.parse(observed[0]!)).not.toHaveProperty("workspaceId");
+    expect(JSON.parse(observed[0]!)).not.toHaveProperty("error");
+  });
+
+  test("Channel-A diagnostics reject unreviewed operational values", () => {
+    const sentinel = "DIAGNOSTIC_VALUE_SENTINEL_58c2";
+    const observed: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => observed.push(String(message));
+    try {
+      const obs = createObservability(settings, { component: "api", now: () => 1 });
+      obs.warn("Channel-A operation failed", {
+        errorClass: "SandboxChannelAOperationError",
+        errorCode: "sandbox_channel_a_operation_failed",
+        backend: sentinel,
+        op: sentinel,
+        outcome: sentinel,
+        reason: sentinel,
+        durationMs: -1,
+        sandboxLeaseKey: `slk_${sentinel}`,
+      });
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    const parsed = JSON.parse(observed[0]!);
+    expect(observed[0]).not.toContain(sentinel);
+    expect(parsed).not.toHaveProperty("backend");
+    expect(parsed).not.toHaveProperty("op");
+    expect(parsed).not.toHaveProperty("outcome");
+    expect(parsed).not.toHaveProperty("reason");
+    expect(parsed).not.toHaveProperty("durationMs");
+    expect(parsed).not.toHaveProperty("sandboxLeaseKey");
+  });
+
   test("public diagnostics reject syntactically valid secret-shaped classes and codes", () => {
     const sentinel = "SECRET_SENTINEL_123";
     const SecretSentinelError = class SECRET_SENTINEL_123 extends Error {};
