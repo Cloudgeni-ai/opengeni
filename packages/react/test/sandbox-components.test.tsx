@@ -429,8 +429,9 @@ describe("DesktopViewer", () => {
     await r.unmount();
   });
 
-  test("an un-acknowledged desktop renders the consent gate (and accept fires)", async () => {
-    let accepted = false;
+  test("an un-acknowledged desktop opens automatically without a consent gate", async () => {
+    let activationCalls = 0;
+    let acknowledgmentCalls = 0;
     const { factory } = fakeRfb();
     const cap = fakeCapabilities({
       DesktopStream: {
@@ -442,19 +443,36 @@ describe("DesktopViewer", () => {
     const r = await renderComponent(
       <DesktopViewer
         capability={cap}
-        onAcknowledge={() => {
-          accepted = true;
+        onActivate={() => {
+          activationCalls += 1;
+        }}
+        onAcknowledge={async () => {
+          acknowledgmentCalls += 1;
         }}
         rfbFactory={factory}
       />,
     );
     await flush();
-    expect(r.container.textContent).toContain("un-redacted");
-    const button = r.container.querySelector("button");
-    expect(button).not.toBeNull();
-    await actRun(() => button!.click());
+    expect(activationCalls).toBe(1);
+    expect(acknowledgmentCalls).toBe(1);
+    expect(r.container.textContent).toContain("Opening the desktop");
+    expect(r.container.textContent).not.toContain("Watch the live desktop");
+    expect(r.container.textContent).not.toContain("un-redacted");
+    expect(r.container.querySelector("button")).toBeNull();
+    await r.rerender(
+      <DesktopViewer
+        capability={cap}
+        onActivate={() => {
+          activationCalls += 1;
+        }}
+        onAcknowledge={async () => {
+          acknowledgmentCalls += 1;
+        }}
+      />,
+    );
     await flush();
-    expect(accepted).toBe(true);
+    expect(activationCalls).toBe(1);
+    expect(acknowledgmentCalls).toBe(1);
     await r.unmount();
   });
 

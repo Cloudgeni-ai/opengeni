@@ -1191,7 +1191,9 @@ async function runLiveWorkspaceFlow(input: {
         throw new Error("staging Modal session has no Desktop tab");
       await desktopTab.click();
       const consent = page.getByRole("button", { name: "I understand — show the desktop" });
-      if ((await consent.count()) === 1) await consent.click();
+      if ((await consent.count()) !== 0) {
+        throw new Error("Desktop still renders the removed confirmation step");
+      }
       const desktop = page.locator('[data-opengeni-desktop][data-ui-state="connected"]');
       await desktop.waitFor({ timeout: 60_000 });
       const pixelSurface = await page

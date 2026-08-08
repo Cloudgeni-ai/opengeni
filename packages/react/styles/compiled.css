@@ -741,9 +741,6 @@
 :where(.og-root).mb-2\.5,:where(.og-root) .mb-2\.5 {
     margin-bottom: calc(var(--spacing) * 2.5);
   }
-:where(.og-root).mb-3,:where(.og-root) .mb-3 {
-    margin-bottom: calc(var(--spacing) * 3);
-  }
 :where(.og-root).ml-0\.5,:where(.og-root) .ml-0\.5 {
     margin-left: calc(var(--spacing) * 0.5);
   }

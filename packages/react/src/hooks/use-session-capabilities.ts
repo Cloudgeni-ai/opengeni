@@ -84,7 +84,8 @@ export type UseSessionCapabilitiesResult = {
   error: Error | null;
   /**
    * 409 from the desktop attach: the un-redacted (or shared) plane needs explicit
-   * acknowledgment before a viewer holder is granted. Drives the consent prompt.
+   * acknowledgment before a viewer holder is granted. The workbench uses this
+   * to complete acknowledgment automatically while Desktop is opening.
    */
   acknowledgmentRequired: "unredacted" | "shared" | null;
   /** 429 from the desktop attach: the per-session viewer cap is reached. */
@@ -149,8 +150,8 @@ function rotationsFrom(events: SessionEvent[]): StreamUrlRotatedPayload[] {
  *
  * Degradation is a value, never a crash: an unsupported surface comes back
  * `available:false`/`transport:null` + a `reason`; the components render the
- * reason-aware empty state. 409 (consent) and 429 (viewer cap) are surfaced as
- * typed signals, not thrown.
+ * reason-aware empty state. 409 (acknowledgment) and 429 (viewer cap) are
+ * surfaced as typed signals, not thrown.
  */
 export function useSessionCapabilities(
   sessionId: string | null | undefined,
@@ -308,8 +309,8 @@ export function useSessionCapabilities(
         // attach serves BOTH live planes — the desktop pixel stream AND the
         // interactive terminal (ttyd pty-ws) ride the same warm box and the same
         // holder; the response folds the minted address for each requested plane.
-        // The consent gate (409) and the viewer cap (429) surface as typed signals
-        // rather than throwing — the tabs degrade gracefully.
+        // The acknowledgment requirement (409) and viewer cap (429) surface as
+        // typed signals rather than throwing — the tabs degrade gracefully.
         //
         // KEY: the handshake (getStreamCapabilities) NEVER spins up a cold box, so
         // on a cold/warming lease the desktop cell comes back transport:null and
@@ -393,8 +394,8 @@ export function useSessionCapabilities(
             if (cause instanceof OpenGeniApiError) {
               if (cause.status === 409) {
                 // The un-redacted/shared consent gate is a DESKTOP requirement. A
-                // terminal-only warm attach needs no consent, so a 409 there is not
-                // a consent prompt — the terminal just stays on the read-only
+                // terminal-only warm attach needs no acknowledgment, so a 409 there
+                // is not a desktop-open signal — the terminal stays on the read-only
                 // firehose. Only raise the consent requirement when the desktop was
                 // the (or a) reason we attached.
                 if (wantDesktopAttach) {
