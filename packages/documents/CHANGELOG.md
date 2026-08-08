@@ -1,5 +1,17 @@
 # @opengeni/documents
 
+## 0.5.25
+
+### Patch Changes
+
+- 7f70d33: Bound long-running service memory, upgrade the OpenAI Agents SDK to 0.14.3, and preserve exact provider, streaming, and durable-resume semantics.
+- Updated dependencies [e2edfbc]
+- Updated dependencies [7f70d33]
+  - @opengeni/config@0.12.6
+  - @opengeni/contracts@0.41.2
+  - @opengeni/db@0.28.16
+  - @opengeni/storage@0.2.80
+
 ## 0.5.24
 
 ### Patch Changes
