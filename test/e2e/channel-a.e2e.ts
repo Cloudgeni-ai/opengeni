@@ -91,7 +91,7 @@ describe("Channel-A structured services e2e (real Docker box, API-direct)", () =
   }, 60_000);
 
   test("fs.write then fs.read round-trips text API-direct", async () => {
-    const write = await channelA("/fs/write", {
+    const write = await channelAOk("/fs/write", {
       path: "channel-a.txt",
       content: "hello from channel-a\n",
     });
@@ -100,7 +100,7 @@ describe("Channel-A structured services e2e (real Docker box, API-direct)", () =
     expect(wb.path).toBe("channel-a.txt");
     expect(wb.revision).toBeGreaterThanOrEqual(1);
 
-    const read = await channelA("/fs/read", { path: "channel-a.txt" });
+    const read = await channelAOk("/fs/read", { path: "channel-a.txt" });
     expect(read.status).toBe(200);
     const rb = (await read.json()) as { content: string; encoding: string; isBinary: boolean };
     expect(rb.content).toBe("hello from channel-a\n");
@@ -110,22 +110,22 @@ describe("Channel-A structured services e2e (real Docker box, API-direct)", () =
 
   test("fs.write then fs.read round-trips a binary file (base64)", async () => {
     const bytes = Buffer.from([0x00, 0x01, 0x02, 0xff, 0xfe]);
-    const write = await channelA("/fs/write", {
+    const write = await channelAOk("/fs/write", {
       path: "blob.bin",
       encoding: "base64",
       content: bytes.toString("base64"),
     });
     expect(write.status).toBe(200);
-    const read = await channelA("/fs/read", { path: "blob.bin", encoding: "base64" });
+    const read = await channelAOk("/fs/read", { path: "blob.bin", encoding: "base64" });
     const rb = (await read.json()) as { content: string; isBinary: boolean };
     expect(rb.isBinary).toBe(true);
     expect(Buffer.from(rb.content, "base64").equals(bytes)).toBe(true);
   }, 60_000);
 
   test("fs.list returns a coherent tree of a known directory", async () => {
-    await channelA("/fs/write", { path: "tree/a.txt", content: "a" });
-    await channelA("/fs/write", { path: "tree/sub/b.txt", content: "b" });
-    const list = await channelA("/fs/list", { path: "tree", depth: 3 });
+    await channelAOk("/fs/write", { path: "tree/a.txt", content: "a" });
+    await channelAOk("/fs/write", { path: "tree/sub/b.txt", content: "b" });
+    const list = await channelAOk("/fs/list", { path: "tree", depth: 3 });
     expect(list.status).toBe(200);
     const body = (await list.json()) as {
       root: { path: string; children?: { path: string; type: string; children?: unknown[] }[] };
@@ -142,27 +142,37 @@ describe("Channel-A structured services e2e (real Docker box, API-direct)", () =
     expect(paths).toContain("tree/a.txt");
     expect(paths).toContain("tree/sub");
     expect(paths).toContain("tree/sub/b.txt");
+
+    const batch = await channelAOk("/fs/list-batch", {
+      requests: [
+        { path: "tree", depth: 1 },
+        { path: "tree/sub", depth: 1 },
+      ],
+    });
+    expect(batch.status).toBe(200);
+    const batched = (await batch.json()) as { results: { root: { path: string } }[] };
+    expect(batched.results.map((result) => result.root.path)).toEqual(["tree", "tree/sub"]);
   }, 60_000);
 
   test("git status + diff on a staged change parse into structured hunks", async () => {
     // Build a repo with a staged modification via terminal exec + fs.write.
-    await channelA("/terminal/exec", {
+    await channelAOk("/terminal/exec", {
       command:
-        "git init -q && git config user.email t@t.io && git config user.name t && git config commit.gpgsign false",
-      cwd: "repo",
+        "mkdir -p repo && git -C repo init -q && git -C repo config user.email t@t.io && git -C repo config user.name t && git -C repo config commit.gpgsign false",
+      cwd: "",
     });
-    await channelA("/fs/write", { path: "repo/code.txt", content: "alpha\nbeta\ngamma\n" });
-    await channelA("/terminal/exec", {
+    await channelAOk("/fs/write", { path: "repo/code.txt", content: "alpha\nbeta\ngamma\n" });
+    await channelAOk("/terminal/exec", {
       command: "git add code.txt && git commit -q -m base",
       cwd: "repo",
     });
-    await channelA("/fs/write", {
+    await channelAOk("/fs/write", {
       path: "repo/code.txt",
       content: "alpha\nbeta CHANGED\ngamma\ndelta\n",
     });
-    await channelA("/terminal/exec", { command: "git add code.txt", cwd: "repo" });
+    await channelAOk("/terminal/exec", { command: "git add code.txt", cwd: "repo" });
 
-    const status = await channelA("/git/status", { path: "repo" });
+    const status = await channelAOk("/git/status", { path: "repo" });
     expect(status.status).toBe(200);
     const sb = (await status.json()) as {
       isRepo: boolean;
@@ -171,7 +181,7 @@ describe("Channel-A structured services e2e (real Docker box, API-direct)", () =
     expect(sb.isRepo).toBe(true);
     expect(sb.files.some((f) => f.path === "code.txt" && f.index === "modified")).toBe(true);
 
-    const diff = await channelA("/git/diff", { path: "repo", staged: true });
+    const diff = await channelAOk("/git/diff", { path: "repo", staged: true });
     expect(diff.status).toBe(200);
     const db = (await diff.json()) as {
       files: {
@@ -187,10 +197,26 @@ describe("Channel-A structured services e2e (real Docker box, API-direct)", () =
     const lines = file!.hunks.flatMap((h) => h.lines);
     expect(lines.some((l) => l.type === "add" && l.newNo !== null && l.oldNo === null)).toBe(true);
     expect(lines.some((l) => l.type === "del")).toBe(true);
+
+    const batch = await channelAOk("/git/read-batch", {
+      requests: [
+        { status: { path: "repo" }, diff: { path: "repo", staged: true } },
+        { status: { path: "" } },
+      ],
+    });
+    expect(batch.status).toBe(200);
+    const batched = (await batch.json()) as {
+      results: { status: { isRepo: boolean }; diff?: { files: { path: string }[] } }[];
+    };
+    expect(batched.results).toHaveLength(2);
+    expect(batched.results[0]?.status.isRepo).toBe(true);
+    expect(batched.results[0]?.diff?.files.some((entry) => entry.path === "code.txt")).toBe(true);
+    expect(batched.results[1]?.status.isRepo).toBe(false);
+    expect(batched.results[1]?.diff).toBeUndefined();
   }, 120_000);
 
   test("terminal exec 'echo $DISPLAY' streams output + a sandbox.command.output.delta", async () => {
-    const res = await channelA("/terminal/exec", {
+    const res = await channelAOk("/terminal/exec", {
       command: "echo display=$DISPLAY; echo channel_a_terminal_marker",
       cwd: "",
     });
@@ -236,10 +262,22 @@ describe("Channel-A structured services e2e (real Docker box, API-direct)", () =
       body: JSON.stringify(body),
     });
   }
+
+  async function channelAOk(suffix: string, body: unknown): Promise<Response> {
+    const response = await channelA(suffix, body);
+    if (!response.ok) {
+      throw new Error(
+        `Channel-A ${suffix} failed with HTTP ${response.status}: ${await response.text()}`,
+      );
+    }
+    return response;
+  }
 });
 
 async function sessionEvents(sessionId: string): Promise<{ type: string; payload: unknown }[]> {
-  const response = await fetch(apiPath(`/sessions/${sessionId}/events?limit=400`));
+  const response = await fetch(
+    apiPath(`/sessions/${sessionId}/events?mode=forensic&payloadMode=full&limit=400`),
+  );
   expect(response.ok).toBe(true);
   return (await response.json()) as { type: string; payload: unknown }[];
 }

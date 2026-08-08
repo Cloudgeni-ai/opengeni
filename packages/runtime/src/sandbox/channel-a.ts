@@ -287,6 +287,23 @@ const US = String.fromCharCode(0x1f); // \x1f unit sep — git-log field separat
 const RS = String.fromCharCode(0x1e); // \x1e record sep — git-log record separator
 const SELFHOSTED_VIRTUAL_ROOT = "/workspace";
 
+/**
+ * Preserve Promise.all's ordered values and failure propagation without
+ * allowing one rejected provider read to return while already-started siblings
+ * are still running. A caller may release sandbox ownership as soon as its
+ * method settles, so every concurrent read layer must join all of its children.
+ */
+async function settleConcurrentReads<const T extends readonly unknown[]>(reads: {
+  readonly [K in keyof T]: Promise<T[K]>;
+}): Promise<T> {
+  const settled = await Promise.allSettled(reads);
+  const rejected = settled.find(
+    (result): result is PromiseRejectedResult => result.status === "rejected",
+  );
+  if (rejected) throw rejected.reason;
+  return settled.map((result) => (result as PromiseFulfilledResult<unknown>).value) as unknown as T;
+}
+
 export class SandboxChannelAService {
   private readonly session: ChannelASession;
   private readonly workspaceRoot: string;
@@ -1274,7 +1291,7 @@ export class SandboxChannelAService {
     // Capture tracked metadata, the complete ordinary patch, and all untracked
     // after-images concurrently. A normal review now completes in one provider
     // round; oversized captures retain the exact per-file fallback below.
-    const [numstat, combinedPatch, combinedUntracked] = await Promise.all([
+    const [numstat, combinedPatch, combinedUntracked] = await settleConcurrentReads([
       this.readConfinedCommandBytes(
         repo,
         gitCommand(
@@ -1381,7 +1398,7 @@ export class SandboxChannelAService {
               };
             }),
           )
-        : Promise.all(stats.map(readTrackedFile));
+        : settleConcurrentReads(stats.map(readTrackedFile));
 
     const shapeUntrackedSnapshot = (snapshot: CombinedUntrackedSnapshot): GitFileDiff => {
       let { sampled, sizeBytes, lineCount } = snapshot;
@@ -1513,14 +1530,17 @@ export class SandboxChannelAService {
               "Workspace Git metadata exceeded the safe capture limit. Retry with a narrower path.",
             );
           }
-          return Promise.all(
+          return settleConcurrentReads(
             decodeGitMetadataUtf8(listing.bytes).split(NUL).filter(Boolean).map(readUntrackedFile),
           );
         })();
       }
     }
 
-    const [files, untrackedFiles] = await Promise.all([trackedFilesPromise, untrackedFilesPromise]);
+    const [files, untrackedFiles] = await settleConcurrentReads([
+      trackedFilesPromise,
+      untrackedFilesPromise,
+    ]);
     files.push(...untrackedFiles);
     return { files, revision: this.revision };
   }
