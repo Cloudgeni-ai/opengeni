@@ -21,7 +21,7 @@ import {
   applyGitAuthPointerEnvironment,
   hasGitCredentialRepositorySelection,
   hasGitHubRepositorySelection,
-  sandboxArchiveCaptureTimeoutMs,
+  sandboxLifecycleTransitionWaitMs,
   stableSandboxEnvironmentForRun,
   type Settings,
 } from "@opengeni/config";
@@ -51,6 +51,8 @@ import {
   SandboxChannelAService,
   NatsControlRpc,
   NatsOpStreamTransport,
+  SandboxResumeIdentityMismatchError,
+  SandboxResumeIdentityUnavailableError,
   ChannelAConflictError,
   ChannelANotFoundError,
   ChannelAUnsupportedError,
@@ -79,6 +81,8 @@ export type ChannelAContext = {
   session: Session;
   // The principal that drives the op (for emit attribution + pty opened_by).
   subjectId: string;
+  /** Cancel lifecycle waiting when the originating HTTP request disconnects. */
+  waitSignal?: AbortSignal | undefined;
 };
 
 // The live op surface handed to a route's callback: the service + the live lease
@@ -319,7 +323,13 @@ export async function withChannelA<T>(
         backendId: "selfhosted",
       };
       const routed = wrapChannelABoxWithRouting(
-        { db, settings, bus, ...(onSandboxOperation ? { onSandboxOperation } : {}) },
+        {
+          db,
+          settings,
+          bus,
+          ...(onSandboxOperation ? { onSandboxOperation } : {}),
+          ...(ctx.waitSignal ? { waitSignal: ctx.waitSignal } : {}),
+        },
         {
           accountId,
           workspaceId,
@@ -363,7 +373,8 @@ export async function withChannelA<T>(
     os: session.sandboxOs,
     leaseTtlMs,
     warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
-    captureWaitMs: sandboxArchiveCaptureTimeoutMs(settings),
+    captureWaitMs: sandboxLifecycleTransitionWaitMs(settings),
+    ...(ctx.waitSignal ? { waitSignal: ctx.waitSignal } : {}),
   });
 
   if (acquired.role === "blocked") {
@@ -375,7 +386,10 @@ export async function withChannelA<T>(
   if (acquired.role === "fenced") {
     await release();
     throw new HTTPException(409, {
-      message: `sandbox lease superseded (epoch ${acquired.lease.leaseEpoch}); retry`,
+      message:
+        acquired.reason === "superseded"
+          ? `sandbox lease superseded (epoch ${acquired.lease.leaseEpoch}); retry`
+          : `sandbox lifecycle transition in progress (${acquired.reason}, epoch ${acquired.lease.leaseEpoch}, backend ${acquired.lease.backend}, instance ${acquired.lease.instanceId ?? "none"}); retry`,
     });
   }
 
@@ -476,7 +490,13 @@ export async function withChannelA<T>(
     // routing may be dormant, but its direct mutation admission is mandatory for
     // every persistable provider write.
     const routed = wrapChannelABoxWithRouting(
-      { db, settings, bus, ...(onSandboxOperation ? { onSandboxOperation } : {}) },
+      {
+        db,
+        settings,
+        bus,
+        ...(onSandboxOperation ? { onSandboxOperation } : {}),
+        ...(ctx.waitSignal ? { waitSignal: ctx.waitSignal } : {}),
+      },
       {
         accountId,
         workspaceId,
@@ -504,6 +524,11 @@ export async function withChannelA<T>(
  *  already-HTTPException unchanged. */
 export function mapChannelAError(error: unknown): unknown {
   if (error instanceof HTTPException) return error;
+  if (
+    error instanceof SandboxResumeIdentityMismatchError ||
+    error instanceof SandboxResumeIdentityUnavailableError
+  )
+    return new HTTPException(409, { message: error.message });
   if (error instanceof ChannelAUnavailableError)
     return new HTTPException(503, { message: error.message });
   if (error instanceof ChannelAValidationError)

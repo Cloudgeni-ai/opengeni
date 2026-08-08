@@ -49,7 +49,7 @@
     },
     "apps/api": {
       "name": "@opengeni/api-router",
-      "version": "0.23.1",
+      "version": "0.23.6",
       "dependencies": {
         "@aws-sdk/client-s3": "^3.1044.0",
         "@aws-sdk/s3-request-presigner": "^3.1044.0",
@@ -130,7 +130,7 @@
     },
     "apps/worker": {
       "name": "@opengeni/worker-bundle",
-      "version": "0.16.29",
+      "version": "0.16.34",
       "dependencies": {
         "@opengeni/agent-proto": "workspace:*",
         "@opengeni/codex": "workspace:*",
@@ -159,7 +159,7 @@
     },
     "examples/northstar-support": {
       "name": "@opengeni/example-northstar-support",
-      "version": "0.0.83",
+      "version": "0.0.86",
       "dependencies": {
         "@modelcontextprotocol/sdk": "^1.29.0",
         "@opengeni/react": "workspace:*",
@@ -205,7 +205,7 @@
     },
     "packages/config": {
       "name": "@opengeni/config",
-      "version": "0.12.1",
+      "version": "0.12.4",
       "dependencies": {
         "@opengeni/codex": "workspace:*",
         "@opengeni/contracts": "workspace:*",
@@ -218,7 +218,7 @@
     },
     "packages/contracts": {
       "name": "@opengeni/contracts",
-      "version": "0.40.0",
+      "version": "0.41.0",
       "dependencies": {
         "@noble/hashes": "^1.8.0",
         "zod": "^4.2.1",
@@ -230,7 +230,7 @@
     },
     "packages/core": {
       "name": "@opengeni/core",
-      "version": "0.21.10",
+      "version": "0.21.15",
       "dependencies": {
         "@modelcontextprotocol/sdk": "^1.29.0",
         "@opengeni/codex": "workspace:*",
@@ -252,7 +252,7 @@
     },
     "packages/db": {
       "name": "@opengeni/db",
-      "version": "0.28.9",
+      "version": "0.28.12",
       "dependencies": {
         "@opengeni/codex": "workspace:*",
         "@opengeni/config": "workspace:*",
@@ -281,7 +281,7 @@
     },
     "packages/documents": {
       "name": "@opengeni/documents",
-      "version": "0.5.18",
+      "version": "0.5.21",
       "dependencies": {
         "@llamaindex/liteparse": "^1.5.3",
         "@opengeni/config": "workspace:*",
@@ -299,7 +299,7 @@
     },
     "packages/events": {
       "name": "@opengeni/events",
-      "version": "0.3.88",
+      "version": "0.3.91",
       "dependencies": {
         "@opengeni/contracts": "workspace:*",
         "@opengeni/db": "workspace:*",
@@ -312,7 +312,7 @@
     },
     "packages/github": {
       "name": "@opengeni/github",
-      "version": "0.4.38",
+      "version": "0.4.41",
       "dependencies": {
         "@opengeni/config": "workspace:*",
         "@opengeni/contracts": "workspace:*",
@@ -336,7 +336,7 @@
     },
     "packages/observability": {
       "name": "@opengeni/observability",
-      "version": "0.5.6",
+      "version": "0.5.7",
       "dependencies": {
         "@opengeni/contracts": "workspace:*",
         "prom-client": "^15.1.3",
@@ -359,7 +359,7 @@
     },
     "packages/react": {
       "name": "@opengeni/react",
-      "version": "0.48.0",
+      "version": "0.49.0",
       "dependencies": {
         "@bufbuild/protobuf": "^2.2.0",
         "@dnd-kit/core": "6.3.1",
@@ -446,7 +446,7 @@
     },
     "packages/runtime": {
       "name": "@opengeni/runtime",
-      "version": "0.18.24",
+      "version": "0.18.29",
       "dependencies": {
         "@modelcontextprotocol/sdk": "1.29.0",
         "@noble/hashes": "^1.8.0",
@@ -471,7 +471,7 @@
     },
     "packages/sdk": {
       "name": "@opengeni/sdk",
-      "version": "0.48.0",
+      "version": "0.49.0",
       "devDependencies": {
         "@opengeni/codex": "workspace:*",
         "@opengeni/contracts": "workspace:*",
@@ -483,7 +483,7 @@
     },
     "packages/storage": {
       "name": "@opengeni/storage",
-      "version": "0.2.75",
+      "version": "0.2.78",
       "dependencies": {
         "@aws-sdk/client-s3": "^3.1044.0",
         "@aws-sdk/s3-request-presigner": "^3.1044.0",
@@ -519,6 +519,10 @@
         "typescript": "7.0.2",
       },
     },
+  },
+  "patchedDependencies": {
+    "modal@0.9.0": "patches/modal@0.9.0.patch",
+    "@openai/agents-extensions@0.13.3": "patches/@openai%2Fagents-extensions@0.13.3.patch",
   },
   "overrides": {
     "@grpc/grpc-js": "1.14.4",
@@ -2249,7 +2253,7 @@
 
     "forwarded": ["forwarded@0.2.0", "", {}, "sha512-buRG0fpBtRHSTCOASe6hD258tEubFoRLb4ZNA6NxMVHNw2gOcwHo9wyablzMzOA5z9xA9L1KNjk/Nt6MT9aYow=="],
 
-    "framer-motion": ["framer-motion@12.40.0", "", { "dependencies": { "motion-dom": "^12.40.0", "motion-utils": "^12.39.0", "tslib": "^2.4.0" }, "peerDependencies": { "@emotion/is-prop-valid": "*", "react": "^18.0.0 || ^19.0.0", "react-dom": "^18.0.0 || ^19.0.0" }, "optionalPeers": ["@emotion/is-prop-valid", "react", "react-dom"] }, "sha512-uaBd3qC1v3KQqBEjwTUd183K6PbS+j0yR9w9VmEOLWA/tnUcSn8Xa3uck7t4dgpDoUss8xQTcj8W2L07lrnLFg=="],
+    "framer-motion": ["framer-motion@12.43.0", "", { "dependencies": { "motion-dom": "^12.43.0", "motion-utils": "^12.39.0", "tslib": "^2.4.0" }, "peerDependencies": { "@emotion/is-prop-valid": "*", "react": "^18.0.0 || ^19.0.0", "react-dom": "^18.0.0 || ^19.0.0" }, "optionalPeers": ["@emotion/is-prop-valid", "react", "react-dom"] }, "sha512-1eaL3RvR/kAlbG7UYcpMptEyzPoENO0c6w7ZnB3/hh2vSAz/6uGAFn6fdoqTBguNstf3MsFhJHsD/0DHiclG+g=="],
 
     "fresh": ["fresh@2.0.0", "", {}, "sha512-Rx/WycZ60HOaqLKAi6cHRKKI7zxWbJ31MhntmtwMoaTeF7XFH9hhBp8vITaMidfljRQ6eYWCKkaTK+ykVJHP2A=="],
 
@@ -2603,9 +2607,9 @@
 
     "modal": ["modal@0.9.0", "", { "dependencies": { "cbor-x": "^1.6.0", "long": "^5.3.1", "nice-grpc": "^2.1.12", "protobufjs": "^7.5.0", "smol-toml": "^1.3.3", "uuid": "^11.1.0" } }, "sha512-kCXcdJkhbJorf/q/6T9Wdlg6in9JmRnCNQnV6rVBMyeqNV/iXI6BYk4IzY4cvZ6dbauNeDMjk/Q08cbxvoIaXg=="],
 
-    "motion": ["motion@12.40.0", "", { "dependencies": { "framer-motion": "^12.40.0", "tslib": "^2.4.0" }, "peerDependencies": { "@emotion/is-prop-valid": "*", "react": "^18.0.0 || ^19.0.0", "react-dom": "^18.0.0 || ^19.0.0" }, "optionalPeers": ["@emotion/is-prop-valid", "react", "react-dom"] }, "sha512-yjrHUrBFW6kQvjJwRsoiPSAhC5tRwRqNGJWmiJ4CrGnbKp0V88AdzkhBmDoqIsIPfarOe0Uddd37Xq43/gIocA=="],
+    "motion": ["motion@12.43.0", "", { "dependencies": { "framer-motion": "^12.43.0", "tslib": "^2.4.0" }, "peerDependencies": { "@emotion/is-prop-valid": "*", "react": "^18.0.0 || ^19.0.0", "react-dom": "^18.0.0 || ^19.0.0" }, "optionalPeers": ["@emotion/is-prop-valid", "react", "react-dom"] }, "sha512-BQgQbSa9Hn3/mtbib0MK53y6JSANa+YKUKlaYnWzAVDH424RYQ5LVpV3pNiWH00BA2z4ojsSdMzqT7g2FQwjuQ=="],
 
-    "motion-dom": ["motion-dom@12.40.0", "", { "dependencies": { "motion-utils": "^12.39.0" } }, "sha512-HxU3ZaBwNPVQUBQf1xxgq+7JrPNZvjLVxgbpEZL7RrWJnsxOf0/OM+yrHG9ogLQ31Do/r57Oz2gQWPK+6q62mg=="],
+    "motion-dom": ["motion-dom@12.43.0", "", { "dependencies": { "motion-utils": "^12.39.0" } }, "sha512-azKON4d9S65PEoFUiQTMTgPheEmzf2QngdRc50AKfJp9Q9mmcBVw22c8eMq9k8kxOFHdL7+WZY7N/5F/lwiDag=="],
 
     "motion-utils": ["motion-utils@12.39.0", "", {}, "sha512-8nadJAJjTtqRkmRF36FoJTrywK9nnFmnPwnSMyxaOCU7GDjN9RTMJIxx9De8ErM+vpPhMccr/6fo5WciyQLnMQ=="],
 
@@ -3205,8 +3209,6 @@
 
     "@openai/agents-openai/openai": ["openai@6.47.0", "", { "peerDependencies": { "@aws-sdk/credential-provider-node": ">=3.972.0 <4", "@smithy/hash-node": ">=4.3.0 <5", "@smithy/signature-v4": ">=5.4.0 <6", "ws": "^8.18.0", "zod": "^3.25 || ^4.0" }, "optionalPeers": ["@aws-sdk/credential-provider-node", "@smithy/hash-node", "@smithy/signature-v4", "ws", "zod"] }, "sha512-xYr+R9woSzWxVxeiqkkNbHhv89tZDEI6eBMbrdPnv3poh+mijHvbhS35a+3o6xHa411/ns8j5ENY3So9DCXWYw=="],
 
-    "@opengeni/react/motion": ["motion@12.43.0", "", { "dependencies": { "framer-motion": "^12.43.0", "tslib": "^2.4.0" }, "peerDependencies": { "@emotion/is-prop-valid": "*", "react": "^18.0.0 || ^19.0.0", "react-dom": "^18.0.0 || ^19.0.0" }, "optionalPeers": ["@emotion/is-prop-valid", "react", "react-dom"] }, "sha512-BQgQbSa9Hn3/mtbib0MK53y6JSANa+YKUKlaYnWzAVDH424RYQ5LVpV3pNiWH00BA2z4ojsSdMzqT7g2FQwjuQ=="],
-
     "@opengeni/runtime/openai": ["openai@6.47.0", "", { "peerDependencies": { "@aws-sdk/credential-provider-node": ">=3.972.0 <4", "@smithy/hash-node": ">=4.3.0 <5", "@smithy/signature-v4": ">=5.4.0 <6", "ws": "^8.18.0", "zod": "^3.25 || ^4.0" }, "optionalPeers": ["@aws-sdk/credential-provider-node", "@smithy/hash-node", "@smithy/signature-v4", "ws", "zod"] }, "sha512-xYr+R9woSzWxVxeiqkkNbHhv89tZDEI6eBMbrdPnv3poh+mijHvbhS35a+3o6xHa411/ns8j5ENY3So9DCXWYw=="],
 
     "@rolldown/binding-wasm32-wasi/@emnapi/core": ["@emnapi/core@1.11.1", "", { "dependencies": { "@emnapi/wasi-threads": "1.2.2", "tslib": "^2.4.0" } }, "sha512-RSvbQmHzdKzNsLYa/wHrbc3KN4sYLKAdPZxqiM2HATqv/SBk2/ENSHpvXGaLOMcsAyz0poEGqkmmKYG3OWiJEQ=="],
@@ -3269,8 +3271,6 @@
 
     "micromatch/picomatch": ["picomatch@2.3.2", "", {}, "sha512-V7+vQEJ06Z+c5tSye8S+nHUfI51xoXIXjHQ99cQtKUkQqqO1kO/KCJUfZXuB47h/YBlDhah2H3hdUGXn8ie0oA=="],
 
-    "opengeni-web/motion": ["motion@12.43.0", "", { "dependencies": { "framer-motion": "^12.43.0", "tslib": "^2.4.0" }, "peerDependencies": { "@emotion/is-prop-valid": "*", "react": "^18.0.0 || ^19.0.0", "react-dom": "^18.0.0 || ^19.0.0" }, "optionalPeers": ["@emotion/is-prop-valid", "react", "react-dom"] }, "sha512-BQgQbSa9Hn3/mtbib0MK53y6JSANa+YKUKlaYnWzAVDH424RYQ5LVpV3pNiWH00BA2z4ojsSdMzqT7g2FQwjuQ=="],
-
     "p-locate/p-limit": ["p-limit@2.3.0", "", { "dependencies": { "p-try": "^2.0.0" } }, "sha512-//88mFWSJx8lxCzwdAABTJL2MyWB12+eIY7MDL2SqLmAkeKU9qxRvWuSyTjm3FUmpBEMuFfckAIqEaVGUDxb6w=="],
 
     "parse-entities/@types/unist": ["@types/unist@2.0.11", "", {}, "sha512-CmBKiL6NNo/OqgmMn95Fk9Whlp2mtvIv+KNpQKN2F4SjvrEesubTRWGYSg+BnWZOnlCaSTU1sMpsBOzgbYhnsA=="],
@@ -3327,8 +3327,6 @@
 
     "@jsonjoy.com/fs-snapshot/@jsonjoy.com/util/@jsonjoy.com/codegen": ["@jsonjoy.com/codegen@17.67.0", "", { "peerDependencies": { "tslib": "2" } }, "sha512-idnkUplROpdBOV0HMcwhsCUS5TRUi9poagdGs70A6S4ux9+/aPuKbh8+UYRTLYQHtXvAdNfQWXDqZEx5k4Dj2Q=="],
 
-    "@opengeni/react/motion/framer-motion": ["framer-motion@12.43.0", "", { "dependencies": { "motion-dom": "^12.43.0", "motion-utils": "^12.39.0", "tslib": "^2.4.0" }, "peerDependencies": { "@emotion/is-prop-valid": "*", "react": "^18.0.0 || ^19.0.0", "react-dom": "^18.0.0 || ^19.0.0" }, "optionalPeers": ["@emotion/is-prop-valid", "react", "react-dom"] }, "sha512-1eaL3RvR/kAlbG7UYcpMptEyzPoENO0c6w7ZnB3/hh2vSAz/6uGAFn6fdoqTBguNstf3MsFhJHsD/0DHiclG+g=="],
-
     "@tanstack/router-plugin/chokidar/readdirp": ["readdirp@5.0.0", "", {}, "sha512-9u/XQ1pvrQtYyMpZe7DXKv2p5CNvyVwzUB6uhLAnQwHMSgKMBR62lc7AHljaeteeHXn11XTAaLLUVZYVZyuRBQ=="],
 
     "cytoscape-fcose/cose-base/layout-base": ["layout-base@2.0.1", "", {}, "sha512-dp3s92+uNI1hWIpPGH3jK2kxE2lMjdXdr+DH8ynZHpd6PUlH6x6cbuXnoMmiNumznqaNO31xu9e79F0uuZ0JFg=="],
@@ -3339,8 +3337,6 @@
 
     "form-data/mime-types/mime-db": ["mime-db@1.52.0", "", {}, "sha512-sPU4uV7dYlvtWJxwwxHD0PuihVNiE7TyAbQ5SWxDCB9mUYvOgroQOwYQQOKPJ8CIbE+1ETVlOoK1UC2nU3gYvg=="],
 
-    "opengeni-web/motion/framer-motion": ["framer-motion@12.43.0", "", { "dependencies": { "motion-dom": "^12.43.0", "motion-utils": "^12.39.0", "tslib": "^2.4.0" }, "peerDependencies": { "@emotion/is-prop-valid": "*", "react": "^18.0.0 || ^19.0.0", "react-dom": "^18.0.0 || ^19.0.0" }, "optionalPeers": ["@emotion/is-prop-valid", "react", "react-dom"] }, "sha512-1eaL3RvR/kAlbG7UYcpMptEyzPoENO0c6w7ZnB3/hh2vSAz/6uGAFn6fdoqTBguNstf3MsFhJHsD/0DHiclG+g=="],
-
     "teeny-request/https-proxy-agent/agent-base": ["agent-base@6.0.2", "", { "dependencies": { "debug": "4" } }, "sha512-RZNwNclF7+MS/8bDg70amg32dyeZGZxiDuQmZxKLAlQjr3jGyLx+4Kkk58UO7D2QdgFIQCovuSuZESne6RG6XQ=="],
 
     "@aws-crypto/sha1-browser/@smithy/util-utf8/@smithy/util-buffer-from/@smithy/is-array-buffer": ["@smithy/is-array-buffer@2.2.0", "", { "dependencies": { "tslib": "^2.6.2" } }, "sha512-GGP3O9QFD24uGeAXYUjwSTXARoqpZykHadOmA8G5vfJPK0/DC67qa//0qvqrJzL1xc8WQWX7/yc7fwudjPHPhA=="],
@@ -3348,9 +3344,5 @@
     "@aws-crypto/sha256-browser/@smithy/util-utf8/@smithy/util-buffer-from/@smithy/is-array-buffer": ["@smithy/is-array-buffer@2.2.0", "", { "dependencies": { "tslib": "^2.6.2" } }, "sha512-GGP3O9QFD24uGeAXYUjwSTXARoqpZykHadOmA8G5vfJPK0/DC67qa//0qvqrJzL1xc8WQWX7/yc7fwudjPHPhA=="],
 
     "@aws-crypto/util/@smithy/util-utf8/@smithy/util-buffer-from/@smithy/is-array-buffer": ["@smithy/is-array-buffer@2.2.0", "", { "dependencies": { "tslib": "^2.6.2" } }, "sha512-GGP3O9QFD24uGeAXYUjwSTXARoqpZykHadOmA8G5vfJPK0/DC67qa//0qvqrJzL1xc8WQWX7/yc7fwudjPHPhA=="],
-
-    "@opengeni/react/motion/framer-motion/motion-dom": ["motion-dom@12.43.0", "", { "dependencies": { "motion-utils": "^12.39.0" } }, "sha512-azKON4d9S65PEoFUiQTMTgPheEmzf2QngdRc50AKfJp9Q9mmcBVw22c8eMq9k8kxOFHdL7+WZY7N/5F/lwiDag=="],
-
-    "opengeni-web/motion/framer-motion/motion-dom": ["motion-dom@12.43.0", "", { "dependencies": { "motion-utils": "^12.39.0" } }, "sha512-azKON4d9S65PEoFUiQTMTgPheEmzf2QngdRc50AKfJp9Q9mmcBVw22c8eMq9k8kxOFHdL7+WZY7N/5F/lwiDag=="],
   }
 }

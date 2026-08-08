@@ -200,12 +200,15 @@ describe("release schema contract", () => {
         (migrations.has("0180_retained_screenshot_lifecycle_fences.sql") ? 1 : 0) +
         (migrations.has("0181_connected_machine_removal.sql") ? 1 : 0) +
         (migrations.has("0182_connected_machine_remove_session_default.sql") ? 1 : 0) +
-        (migrations.has("0183_model_call_provider_cost_estimates.sql") ? 1 : 0),
+        (migrations.has("0183_model_call_provider_cost_estimates.sql") ? 1 : 0) +
+        (migrations.has("0184_sandbox_drain_teardown_fence.sql") ? 1 : 0) +
+        (migrations.has("0185_temporal_schedule_cleanup_outbox.sql") ? 1 : 0) +
+        (migrations.has("0186_sandbox_capture_provider_contract.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "93f88f53cb420a72b990ffe435f38ddbd31da158f87f4707777e26dff5245971",
+      "d054128a1991b1ab367044bba8c1c6002e4ceeb19a28dc0ae70c5bb4798d6576",
     );
-    expect(contract.latestMigration).toBe("0183_model_call_provider_cost_estimates.sql");
+    expect(contract.latestMigration).toBe("0186_sandbox_capture_provider_contract.sql");
     expect(migrations.get("0065_enrollment_credential_generation.sql")).toMatchObject({
       sha256: "2e25fa2dfb8a95a7a9ba1ef5aa9bd219755af998b3317bcdf4d7acc4f67264fe",
       deploymentMode: "rolling",
@@ -220,6 +223,18 @@ describe("release schema contract", () => {
     });
     expect(migrations.get("0183_model_call_provider_cost_estimates.sql")).toMatchObject({
       sha256: "2cb087b69996c62e8836f2d65c9e2af3fb580fe1822d327600bf40e3a6977d64",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0184_sandbox_drain_teardown_fence.sql")).toMatchObject({
+      sha256: "fa757f718fe7239df60514768f8b50abb1905bba5f928adda5001bad4927634e",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0185_temporal_schedule_cleanup_outbox.sql")).toMatchObject({
+      sha256: "801c2848adbc4c58a701bd1e7039b4c9b4fb4beb0a49b950585a5c79b536fd9d",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0186_sandbox_capture_provider_contract.sql")).toMatchObject({
+      sha256: "fc7d8d0eeba1800727f4f0f72020fac50290c629d9819f5b608d33f8b6af6bce",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0180_retained_screenshot_lifecycle_fences.sql")).toMatchObject({

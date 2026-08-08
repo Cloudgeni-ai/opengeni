@@ -14,7 +14,11 @@ import {
 import { CAPABILITY_DESCRIPTORS } from "../capabilities";
 import { SandboxChannelAService, type ChannelASession } from "../channel-a";
 import { SandboxConfigError } from "../errors";
-import type { ProviderRegistration } from "./types";
+import {
+  REPEATABLE_CONFIGURED_WORKSPACE_CAPTURE,
+  providerWorkspacePersistence,
+  type ProviderRegistration,
+} from "./types";
 
 export type { ModalCheckpointProviderBinding } from "@opengeni/contracts";
 
@@ -84,6 +88,10 @@ type MutableModalSnapshotSandbox = {
   snapshotDirectory?: (...args: unknown[]) => Promise<unknown>;
 };
 
+type ModalWorkspaceCaptureOptions = {
+  requestId: string;
+};
+
 type MutableModalSandboxSession = {
   modal?: {
     version?: () => string;
@@ -102,7 +110,7 @@ type MutableModalSandboxSession = {
   cancelPendingExecCommand?: () => Promise<void>;
   readFile?: ChannelASession["readFile"];
   listDir?: (args: { path: string; runAs?: string }) => Promise<SandboxDirectoryEntry[]>;
-  persistWorkspace?: () => Promise<Uint8Array>;
+  persistWorkspace?: (options?: ModalWorkspaceCaptureOptions) => Promise<Uint8Array>;
   writeStdin?: (args: {
     sessionId: number;
     chars?: string;
@@ -114,6 +122,8 @@ type MutableModalSandboxSession = {
 const modalRetentionWrappedSessions = new WeakSet<object>();
 const modalFilesystemRetentionWrappedSandboxes = new WeakSet<object>();
 const modalDirectoryRetentionWrappedSandboxes = new WeakSet<object>();
+const modalSnapshotRequestIds = new WeakMap<object, string>();
+const modalDirectorySnapshotTimeouts = new WeakMap<object, number | undefined>();
 const MODAL_TURN_SHELL_MARKER = "/tmp/opengeni-turn-shell/";
 
 type ModalPendingExecStart = {
@@ -241,9 +251,14 @@ function installModalNativeSnapshotRetention(session: MutableModalSandboxSession
       if (legacyParams !== undefined && typeof legacyParams !== "number") {
         throw new Error("Unexpected Modal snapshot_filesystem adapter call shape");
       }
+      const requestId = modalSnapshotRequestIds.get(session);
+      if (!requestId) {
+        throw new Error("Modal native workspace capture requires a durable request id");
+      }
       return await snapshotFilesystem.call(sandbox, {
         ...(legacyParams === undefined ? {} : { timeoutMs: legacyParams }),
         ttlMs: null,
+        snapshotId: requestId,
       });
     };
     modalFilesystemRetentionWrappedSandboxes.add(sandbox);
@@ -259,11 +274,19 @@ function installModalNativeSnapshotRetention(session: MutableModalSandboxSession
     if (typeof path !== "string" || legacyParams !== undefined) {
       throw new Error("Unexpected Modal snapshot_directory adapter call shape");
     }
+    const requestId = modalSnapshotRequestIds.get(session);
+    if (!requestId) {
+      throw new Error("Modal native workspace capture requires a durable request id");
+    }
+    // Own both timeout and caller id at the provider boundary. The wrapper
+    // around persistWorkspace temporarily disables Agents SDK 0.13.3's second,
+    // outer timeout; otherwise an old timed-out caller can later delete the same
+    // idempotent Image after a recovered caller has already published it.
+    const timeoutMs = modalDirectorySnapshotTimeouts.get(session);
     return await snapshotDirectory.call(sandbox, path, {
-      ...(session.state?.snapshotFilesystemTimeoutMs === undefined
-        ? {}
-        : { timeoutMs: session.state.snapshotFilesystemTimeoutMs }),
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
       ttlMs: null,
+      snapshotId: requestId,
     });
   };
   modalDirectoryRetentionWrappedSandboxes.add(sandbox);
@@ -396,10 +419,52 @@ export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T)
   installModalPendingExecCancellation(mutable);
 
   const persistWorkspace = mutable.persistWorkspace.bind(session);
-  mutable.persistWorkspace = async () => {
+  mutable.persistWorkspace = async (options?: ModalWorkspaceCaptureOptions) => {
     assertPinnedModalSdk(mutable);
     installModalNativeSnapshotRetention(mutable);
-    return await persistWorkspace();
+    if (
+      (mutable.state?.workspacePersistence === "snapshot_filesystem" ||
+        mutable.state?.workspacePersistence === "snapshot_directory") &&
+      (!options ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+          options.requestId,
+        ))
+    ) {
+      throw new Error("Modal native workspace capture requires a valid UUID request id");
+    }
+    const nativePersistence =
+      mutable.state?.workspacePersistence === "snapshot_filesystem" ||
+      mutable.state?.workspacePersistence === "snapshot_directory";
+    if (options && nativePersistence) {
+      modalSnapshotRequestIds.set(session, options.requestId);
+    }
+    const directoryTimeout =
+      mutable.state?.workspacePersistence === "snapshot_directory"
+        ? mutable.state.snapshotFilesystemTimeoutMs
+        : undefined;
+    const directoryTimeoutWasPresent =
+      mutable.state?.workspacePersistence === "snapshot_directory" &&
+      Object.hasOwn(mutable.state, "snapshotFilesystemTimeoutMs");
+    if (mutable.state?.workspacePersistence === "snapshot_directory") {
+      modalDirectorySnapshotTimeouts.set(session, directoryTimeout);
+      // The wrapped provider call above owns this exact timeout. Disable the
+      // SDK's lossy late-result deletion race for the duration of this exclusive
+      // capture, then restore the serialized session field byte-for-byte.
+      delete mutable.state.snapshotFilesystemTimeoutMs;
+    }
+    try {
+      return await persistWorkspace();
+    } finally {
+      modalSnapshotRequestIds.delete(session);
+      if (mutable.state?.workspacePersistence === "snapshot_directory") {
+        if (directoryTimeoutWasPresent) {
+          Reflect.set(mutable.state, "snapshotFilesystemTimeoutMs", directoryTimeout);
+        } else {
+          delete mutable.state.snapshotFilesystemTimeoutMs;
+        }
+        modalDirectorySnapshotTimeouts.delete(session);
+      }
+    }
   };
   modalRetentionWrappedSessions.add(session);
   return session;
@@ -443,6 +508,19 @@ export class OpenGeniModalSandboxClient extends ModalSandboxClient {
 
 export const modalProvider: ProviderRegistration = {
   backend: "modal",
+  exactResumeMode: "ordinary",
+  instanceIdFields: ["sandboxId"],
+  workspaceCapturePolicy(state) {
+    const persistence = providerWorkspacePersistence(state);
+    if (persistence === "snapshot_filesystem" || persistence === "snapshot_directory") {
+      return {
+        takeover: "same_request",
+        strategy: "configured",
+        liveInstance: "preserved",
+      };
+    }
+    return REPEATABLE_CONFIGURED_WORKSPACE_CAPTURE;
+  },
   descriptor: CAPABILITY_DESCRIPTORS.modal,
   validateCredentials(settings) {
     // both-or-neither (preserves existing validation at config validateSettings).

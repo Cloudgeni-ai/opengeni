@@ -13,7 +13,12 @@ export {
   scheduledTaskFireWorkflow,
   type ScheduledTaskFireWorkflowInput,
 } from "./workflows/scheduled-tasks";
-export { sandboxReaperWorkflow } from "./workflows/sandbox-reaper";
+export {
+  sandboxDrainWorkflow,
+  sandboxReaperMaintenanceWorkflow,
+  sandboxReaperWorkflow,
+  sandboxReaperWorkflowV2,
+} from "./workflows/sandbox-reaper";
 export { fileUploadReaperWorkflow } from "./workflows/file-upload-reaper";
 export { sessionWorkflowWakeDispatcherWorkflow } from "./workflows/workflow-wake";
 export {

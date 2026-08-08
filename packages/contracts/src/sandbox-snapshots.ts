@@ -6,6 +6,14 @@ export type WorkspaceTreeFingerprint = {
   entryCount: number;
   fileCount: number;
   totalFileBytes: number;
+  /**
+   * Absent means the original deterministic GNU-tar projection used by remote
+   * sandboxes. Host-backed Local/Docker sessions use the Agents SDK's portable
+   * archive projection, which intentionally contains directories and regular
+   * files only. Keeping the discriminator in the descriptor makes restores
+   * stable when a Docker image changes and preserves old descriptor behavior.
+   */
+  projection?: "sdk_local_archive_v1";
 };
 
 export type TarWorkspaceArchiveDescriptor = {
@@ -114,7 +122,8 @@ export function parseWorkspaceArchiveDescriptor(value: unknown): WorkspaceArchiv
       !SHA256.test(workspace.sha256) ||
       !nonnegativeInteger(workspace.entryCount) ||
       !nonnegativeInteger(workspace.fileCount) ||
-      !nonnegativeInteger(workspace.totalFileBytes)
+      !nonnegativeInteger(workspace.totalFileBytes) ||
+      (workspace.projection !== undefined && workspace.projection !== "sdk_local_archive_v1")
     ) {
       return null;
     }

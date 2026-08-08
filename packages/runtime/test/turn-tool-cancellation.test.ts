@@ -894,7 +894,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     const session = {
       supportsPty: () => true,
       exec: async (input: { cmd: string; tty?: boolean; yieldTimeMs?: number }) => {
-        if (input.cmd.includes("command : >")) {
+        if (input.cmd.includes(": >")) {
           signals.push("TERM", "KILL");
           processAlive = false;
           return { exitCode: 0, output: "" };
@@ -951,7 +951,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     const session = {
       supportsPty: () => true,
       exec: async (input: { cmd: string; tty?: boolean; yieldTimeMs?: number }) => {
-        if (input.cmd.includes("command : >")) {
+        if (input.cmd.includes(": >")) {
           signals.push("TERM", "KILL");
           processAlive = false;
           return { exitCode: 0, output: "" };

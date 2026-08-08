@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { access } from "node:fs/promises";
 import {
   CAPABILITY_DESCRIPTORS,
   DESKTOP_STREAM_PORT,
@@ -9,10 +10,13 @@ import { testSettings } from "@opengeni/testing";
 import {
   PROVIDER_REGISTRY,
   SandboxConfigError,
+  SandboxExactResumeInstanceUnavailableError,
   assertDescriptorRegistryInvariants,
   assertProviderRegistryInvariants,
   createSandboxClient,
   negotiateCapabilities,
+  prepareProviderForTeardownAfterCapture,
+  providerWorkspaceCapturePolicy,
   sandboxBackendForSdkBackendId,
   sdkBackendIdForSandboxBackend,
   selectBackend,
@@ -69,6 +73,64 @@ describe("provider registry — descriptor invariants + backendId assertion", ()
     expect(sandboxBackendForSdkBackendId("unknown-provider")).toBeNull();
     expect(sandboxBackendForSdkBackendId("toString")).toBeNull();
   });
+
+  test("every provider declares exact crash-safe workspace capture semantics", () => {
+    expect(
+      providerWorkspaceCapturePolicy("modal", {
+        sessionState: { providerState: { workspacePersistence: "snapshot_filesystem" } },
+      }),
+    ).toEqual({ takeover: "same_request", strategy: "configured", liveInstance: "preserved" });
+    expect(
+      providerWorkspaceCapturePolicy("modal", {
+        state: { workspacePersistence: "snapshot_directory" },
+      }),
+    ).toEqual({ takeover: "same_request", strategy: "configured", liveInstance: "preserved" });
+    expect(providerWorkspaceCapturePolicy("runloop", {})).toEqual({
+      takeover: "parallel_read",
+      strategy: "portable_tar",
+      liveInstance: "preserved",
+    });
+    for (const backend of ["e2b", "vercel"] as const) {
+      expect(
+        providerWorkspaceCapturePolicy(backend, {
+          sessionState: { providerState: { workspacePersistence: "snapshot" } },
+        }),
+      ).toEqual({
+        takeover: "parallel_read",
+        strategy: "portable_tar",
+        liveInstance: "preserved",
+      });
+    }
+    for (const backend of [
+      "docker",
+      "local",
+      "modal",
+      "daytona",
+      "e2b",
+      "blaxel",
+      "cloudflare",
+      "vercel",
+    ] as const) {
+      expect(providerWorkspaceCapturePolicy(backend, {})).toEqual({
+        takeover: "parallel_read",
+        strategy: "configured",
+        liveInstance: "preserved",
+      });
+    }
+    expect(providerWorkspaceCapturePolicy("none", {})).toBeNull();
+    expect(providerWorkspaceCapturePolicy("selfhosted", {})).toBeNull();
+    expect(providerWorkspaceCapturePolicy("unknown", {})).toBeNull();
+  });
+
+  test("Vercel teardown suppresses only its redundant post-publication snapshot", () => {
+    const snapshotSession = { state: { workspacePersistence: "snapshot", sandboxId: "box" } };
+    prepareProviderForTeardownAfterCapture("vercel", snapshotSession);
+    expect(snapshotSession.state).toEqual({ workspacePersistence: "tar", sandboxId: "box" });
+
+    const tarSession = { state: { workspacePersistence: "tar", sandboxId: "box" } };
+    prepareProviderForTeardownAfterCapture("vercel", tarSession);
+    expect(tarSession.state).toEqual({ workspacePersistence: "tar", sandboxId: "box" });
+  });
 });
 
 describe("createSandboxClient — per-backend matrix construction", () => {
@@ -86,6 +148,7 @@ describe("createSandboxClient — per-backend matrix construction", () => {
       expect((client as { backendId?: unknown }).backendId).toBe(
         CAPABILITY_DESCRIPTORS[backend].backendId,
       );
+      expect(typeof (client as { resumeExact?: unknown }).resumeExact).toBe("function");
     });
   }
 
@@ -126,6 +189,71 @@ describe("createSandboxClient — per-backend matrix construction", () => {
       }),
     ) as { options?: Record<string, unknown> };
     expect(client.options?.workspaceBaseDir).toBe("/var/lib/opengeni/docker-workspaces");
+    expect(client.options?.snapshot).toMatchObject({ type: "noop" });
+  });
+
+  test("local disables SDK-local snapshots in favor of the durable archive ledger", () => {
+    const client = createSandboxClient(testSettings({ sandboxBackend: "local" })) as {
+      options?: Record<string, unknown>;
+    };
+    expect(client.options?.snapshot).toMatchObject({ type: "noop" });
+  });
+
+  test("docker network decoration preserves the non-replacing exact-resume path", () => {
+    const client = createSandboxClient(
+      testSettings({
+        sandboxBackend: "docker",
+        dockerNetwork: "opengeni-test-network",
+      }),
+    ) as { resumeExact?: unknown };
+
+    expect(typeof client.resumeExact).toBe("function");
+  });
+
+  test("local exact resume never restores or creates a replacement workspace", async () => {
+    const client = createSandboxClient(testSettings({ sandboxBackend: "local" })) as {
+      create: () => Promise<{
+        state: { workspaceRootPath: string };
+        exec: (input: { cmd: string }) => Promise<{ exitCode: number; stdout: string }>;
+        delete: () => Promise<void>;
+      }>;
+      serializeSessionState: (state: unknown) => Promise<Record<string, unknown>>;
+      deserializeSessionState: (state: Record<string, unknown>) => Promise<unknown>;
+      resumeExact: (state: unknown) => Promise<{ state: unknown }>;
+    };
+    const created = await client.create();
+    const state = created.state;
+    try {
+      expect(
+        await created.exec({ cmd: "printf 'local-exact-proof' > /workspace/exact.txt" }),
+      ).toMatchObject({ exitCode: 0 });
+      const serialized = await client.serializeSessionState(state);
+      expect(serialized).toMatchObject({
+        workspaceRootPath: state.workspaceRootPath,
+        snapshotSpec: { type: "noop" },
+        snapshot: null,
+      });
+      const deserialized = await client.deserializeSessionState(serialized);
+      const resumed = (await client.resumeExact(deserialized)) as {
+        state: unknown;
+        exec: (input: { cmd: string }) => Promise<{ exitCode: number; stdout: string }>;
+      };
+      expect(resumed.state).toBe(deserialized);
+      expect(await resumed.exec({ cmd: "cat /workspace/exact.txt" })).toMatchObject({
+        exitCode: 0,
+        stdout: "local-exact-proof",
+      });
+
+      await created.delete();
+      await expect(client.resumeExact(deserialized)).rejects.toBeInstanceOf(
+        SandboxExactResumeInstanceUnavailableError,
+      );
+      await expect(access(state.workspaceRootPath)).rejects.toBeDefined();
+    } finally {
+      // The owned session's delete is idempotent for an already-removed path and
+      // keeps failures from leaking a temporary local workspace.
+      await created.delete().catch(() => undefined);
+    }
   });
 
   test("docker rejects a relative workspace base directory", () => {
@@ -190,15 +318,43 @@ describe("createSandboxClient — per-backend matrix construction", () => {
     // runloop keep-alive lives under timeouts.keepAliveTimeoutMs (ms), NOT a
     // top-level idleTimeoutMs like modal.
     const runloop = createSandboxClient(
-      testSettings({ sandboxBackend: "runloop", runloopApiKey: "k", runloopKeepAliveSeconds: 60 }),
-    ) as { options?: { timeouts?: { keepAliveTimeoutMs?: number } } };
+      testSettings({
+        sandboxBackend: "runloop",
+        runloopApiKey: "k",
+        runloopKeepAliveSeconds: 60,
+        sandboxSnapshotTimeoutMs: 12_345,
+      }),
+    ) as {
+      options?: { timeouts?: { keepAliveTimeoutMs?: number; snapshotTimeoutMs?: number } };
+    };
     expect(runloop.options?.timeouts?.keepAliveTimeoutMs).toBe(60_000);
+    expect(runloop.options?.timeouts?.snapshotTimeoutMs).toBe(12_345);
+
+    // Blaxel's workspace archive is a remote tar operation with its own exact
+    // millisecond timeout; it must not outlive the capture claim by default.
+    const blaxel = createSandboxClient(
+      testSettings({
+        sandboxBackend: "blaxel",
+        blaxelApiKey: "k",
+        sandboxSnapshotTimeoutMs: 23_456,
+      }),
+    ) as { options?: { timeouts?: { workspaceTarTimeoutMs?: number } } };
+    expect(blaxel.options?.timeouts?.workspaceTarTimeoutMs).toBe(23_456);
 
     // e2b `timeout` is in SECONDS (SDK ×1000 internally), not ms.
     const e2b = createSandboxClient(
       testSettings({ sandboxBackend: "e2b", e2bApiKey: "k", e2bTimeoutSeconds: 120 }),
     ) as { options?: { timeout?: number } };
     expect(e2b.options?.timeout).toBe(120);
+
+    const cloudflare = createSandboxClient(
+      testSettings({
+        sandboxBackend: "cloudflare",
+        cloudflareWorkerUrl: "https://worker.example.com",
+        sandboxSnapshotTimeoutMs: 34_567,
+      }),
+    ) as { options?: { timeouts?: { requestTimeoutMs?: number } } };
+    expect(cloudflare.options?.timeouts?.requestTimeoutMs).toBe(34_567);
   });
 });
 

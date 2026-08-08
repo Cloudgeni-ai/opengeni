@@ -20,6 +20,54 @@ export type WorkerRunTarget = {
   shutdown(): void;
 };
 
+/** One process may poll several disjoint Temporal queues, but it still has one
+ * host lifecycle. Start and stop every poller as a unit; a failed poller drains
+ * its siblings and preserves the original failure. */
+export function combineWorkerRunTargets(targets: readonly WorkerRunTarget[]): WorkerRunTarget {
+  if (targets.length === 0) {
+    throw new Error("a worker service requires at least one Temporal poller");
+  }
+  let runPromise: Promise<void> | undefined;
+  const shutdown = (): void => {
+    let firstError: unknown;
+    for (const target of targets) {
+      try {
+        target.shutdown();
+      } catch (error) {
+        firstError ??= error;
+      }
+    }
+    if (firstError !== undefined) throw firstError;
+  };
+  return {
+    run: () => {
+      runPromise ??= (async () => {
+        const runs = targets.map((target) => {
+          try {
+            return target.run();
+          } catch (error) {
+            return Promise.reject(error);
+          }
+        });
+        try {
+          await Promise.all(runs);
+        } catch (error) {
+          try {
+            shutdown();
+          } catch {
+            // Preserve the poller failure. Every sibling still received its
+            // shutdown request even when one request itself failed.
+          }
+          await Promise.allSettled(runs);
+          throw error;
+        }
+      })();
+      return runPromise;
+    },
+    shutdown,
+  };
+}
+
 export type WorkerServiceLifecycle = {
   state(): WorkerLifecycleState;
   run(): Promise<void>;

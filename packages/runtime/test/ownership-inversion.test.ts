@@ -475,6 +475,24 @@ describe("P1.2 isProviderSandboxNotFoundError (per-backend NotFound discriminato
     ).toBe(true);
   });
 
+  test("Cloudflare's exact stopped-sandbox grammar is terminal, generic path failures are not", () => {
+    expect(
+      isProviderSandboxNotFoundError(
+        "cloudflare",
+        new Error("Cloudflare sandbox cf-box.1 is no longer running."),
+      ),
+    ).toBe(true);
+    expect(
+      isProviderSandboxNotFoundError(
+        "cloudflare",
+        new Error("Cloudflare sandbox route /workspace/file is no longer running."),
+      ),
+    ).toBe(false);
+    expect(
+      isProviderSandboxNotFoundError("cloudflare", new Error("sandbox is no longer running")),
+    ).toBe(false);
+  });
+
   test("unix_local's exact missing-workspace proof is NotFound for both backend ID shapes", () => {
     const missingWorkspace = new Error(
       "UnixLocal sandbox workspace is unavailable and no local snapshot could be restored.",
@@ -495,6 +513,21 @@ describe("P1.2 isProviderSandboxNotFoundError (per-backend NotFound discriminato
         ),
       ),
     ).toBe(false);
+  });
+
+  test("Docker's exact missing-container/workspace proof is terminal only on resume", () => {
+    const missingResources = new Error(
+      "Docker sandbox resources are unavailable and no local snapshot could be restored.",
+    );
+    expect(isProviderSandboxNotFoundError("docker", missingResources)).toBe(true);
+    expect(isProviderSandboxGoneDuringRoutedOperation("docker", missingResources)).toBe(false);
+    expect(
+      isProviderSandboxNotFoundError(
+        "docker",
+        new Error("Docker sandbox resources are temporarily unavailable."),
+      ),
+    ).toBe(false);
+    expect(isProviderSandboxNotFoundError("local", missingResources)).toBe(false);
   });
 
   test("transient typed evidence dominates nested NotFound prose", () => {

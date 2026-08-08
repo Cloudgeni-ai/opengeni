@@ -147,6 +147,54 @@ export const SandboxBackend = z.enum([
 ]);
 export type SandboxBackend = z.infer<typeof SandboxBackend>;
 
+// OpenGeni-owned identity carried beside the provider's opaque SDK envelope.
+// Provider serializers intentionally use different keys (`sandboxId`,
+// `devboxId`, `sandboxName`, ...); durable lease logic must not need to learn a
+// new provider's private state shape. Existing envelopes remain readable via
+// the legacy keys below, while every newly-serialized envelope carries this
+// stable field.
+export const OPENGENI_SANDBOX_PROVIDER_INSTANCE_ID_FIELD = "opengeniProviderInstanceId" as const;
+export const SANDBOX_PROVIDER_INSTANCE_ID_FIELDS_BY_BACKEND = {
+  docker: ["containerId"],
+  modal: ["sandboxId"],
+  local: ["workspaceRootPath"],
+  none: [],
+  daytona: ["sandboxId"],
+  runloop: ["devboxId"],
+  e2b: ["sandboxId"],
+  // A Blaxel name is reusable after deletion. The SDK persists a canonical
+  // metadata identity (name + creation timestamp + workspace) specifically to
+  // distinguish a later sandbox created under the same name.
+  blaxel: ["sandboxIdentity"],
+  cloudflare: ["sandboxId"],
+  vercel: ["sandboxId"],
+  selfhosted: ["agentId"],
+} as const satisfies Record<SandboxBackend, readonly string[]>;
+export const LEGACY_SANDBOX_PROVIDER_INSTANCE_ID_FIELDS = [
+  "sandboxId",
+  "devboxId",
+  "sandboxName",
+  "sandboxIdentity",
+  "containerId",
+  "workspaceRootPath",
+  "agentId",
+] as const;
+
+/**
+ * Durable proof that a provider may replace an execution wrapper without
+ * replacing the workspace OpenGeni owns. This is intentionally narrower than
+ * generic provider resume: only a provider adapter that can prove the same
+ * continuity key may consume it, and only a cold->warming owner or teardown
+ * claimant may authorize that replacement.
+ */
+export type SandboxProviderContinuityRecovery = {
+  version: 1;
+  backend: SandboxBackend;
+  kind: "docker_workspace";
+  sourceInstanceId: string;
+  continuityKey: string;
+};
+
 // OS axis. Only "linux" is reachable in v1; macos/windows are seam placeholders.
 export const SandboxOs = z.enum(["linux", "macos", "windows"]);
 export type SandboxOs = z.infer<typeof SandboxOs>;

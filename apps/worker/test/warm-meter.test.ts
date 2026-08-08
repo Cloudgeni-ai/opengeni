@@ -257,7 +257,7 @@ describe("P2.1 reaper-tick warm metering + force-drain (real lease + RLS, spied 
       sandboxOwnershipEnabled: true,
       webSearchEnabled: false,
       billingMode: "stripe", // enable balance enforcement
-      sandboxIdleGraceMs: 0, // drain grace already elapsed → terminate same sweep
+      sandboxIdleGraceMs: 0, // drain grace already elapsed once the next inventory runs
     });
     const spy = makeTerminateSpy();
     const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(settings), {
@@ -273,10 +273,9 @@ describe("P2.1 reaper-tick warm metering + force-drain (real lease + RLS, spied 
 
     const result = await reapSandboxLeases();
 
-    // The viewer-only box is force-drained in this sweep. Provider teardown uses
-    // a configuration-derived bounded batch, so unrelated due work may consume
-    // this sweep's capture budget; later scheduled sweeps must still terminate
-    // this exact box. The turn-held box remains untouched throughout.
+    // The viewer-only box is force-drained by post-dispatch maintenance. Its
+    // exact provider child starts on the next bounded inventory tick; the
+    // turn-held box remains untouched throughout.
     // (result.forceDrained is a global-across-workspaces count; we assert on THIS
     // workspace's specific boxes instead — the load-bearing invariant.)
     expect(result.forceDrained).toBeGreaterThanOrEqual(1);

@@ -17,7 +17,11 @@
 // noVNC 200, WS 101 + RFB banner, OCR'd a secret off the framebuffer) + the
 // gVisor harness (V2 PASSED live on Modal: XTEST input read-back under runsc).
 
-import { DESKTOP_STREAM_PORT } from "@opengeni/contracts";
+import {
+  DESKTOP_STREAM_PORT,
+  LEGACY_SANDBOX_PROVIDER_INSTANCE_ID_FIELDS,
+  OPENGENI_SANDBOX_PROVIDER_INSTANCE_ID_FIELD,
+} from "@opengeni/contracts";
 import { parseExecResponseBanner } from "./exec-banner";
 
 // Re-export under the canonical name the module spec uses (STREAM_PORT) while
@@ -465,14 +469,13 @@ function stableSandboxIdentity(
   const state = asRecord(readSessionState(session));
   const providerState = state ? asRecord(state.providerState) : null;
   const candidates = [sessionRecord, state, providerState];
+  // Use the same provider-neutral identity vocabulary as durable envelopes and
+  // the reaper. This keeps display-stack serialization stable for providers
+  // whose SDK identity is not named `sandboxId` (for example Runloop devboxId
+  // and Blaxel sandboxName) while retaining compatibility with existing SDKs.
   const fields = [
-    "sandboxId",
-    "instanceId",
-    "agentId",
-    "hostId",
-    "containerId",
-    "id",
-    "workspaceRootPath",
+    OPENGENI_SANDBOX_PROVIDER_INSTANCE_ID_FIELD,
+    ...LEGACY_SANDBOX_PROVIDER_INSTANCE_ID_FIELDS,
   ];
   for (const candidate of candidates) {
     if (!candidate) continue;

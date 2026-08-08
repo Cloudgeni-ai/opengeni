@@ -1,10 +1,30 @@
 import { VercelSandboxClient } from "@openai/agents-extensions/sandbox/vercel";
 import { CAPABILITY_DESCRIPTORS } from "../capabilities";
 import { SandboxConfigError } from "../errors";
-import type { ProviderRegistration } from "./types";
+import {
+  REPEATABLE_CONFIGURED_WORKSPACE_CAPTURE,
+  REPEATABLE_PORTABLE_TAR_WORKSPACE_CAPTURE,
+  providerWorkspacePersistence,
+  type ProviderRegistration,
+} from "./types";
 
 export const vercelProvider: ProviderRegistration = {
   backend: "vercel",
+  exactResumeMode: "ordinary",
+  instanceIdFields: ["sandboxId"],
+  workspaceCapturePolicy: (state) =>
+    providerWorkspacePersistence(state) === "snapshot"
+      ? REPEATABLE_PORTABLE_TAR_WORKSPACE_CAPTURE
+      : REPEATABLE_CONFIGURED_WORKSPACE_CAPTURE,
+  prepareForTeardownAfterCapture(session) {
+    const state = (session as { state?: { workspacePersistence?: unknown } } | null)?.state;
+    if (state?.workspacePersistence === "snapshot") {
+      // Vercel close() otherwise takes a second native snapshot before stop.
+      // The portable tar is already durable, so suppress that unledgered,
+      // identity-adjacent side effect on this disposable resumed handle only.
+      state.workspacePersistence = "tar";
+    }
+  },
   descriptor: CAPABILITY_DESCRIPTORS.vercel,
   validateCredentials(settings) {
     // Vercel needs the access token + the project/team it scopes to.

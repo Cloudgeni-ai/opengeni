@@ -9,7 +9,8 @@
 //   attach  -> acquireLease(kind:'viewer') under FOR UPDATE + cold->warming CAS.
 //              spawner role  -> establish the box in-process + commitWarmingToWarm.
 //              attached/rearmed -> the holder alone keeps the box warm.
-//              fenced -> release + surface a 409 (a newer epoch re-established it).
+//              lifecycle claim -> wait for settlement; true epoch supersession
+//              -> release + surface a 409.
 //   heartbeat -> heartbeatLeaseHolder (epoch-fenced) refreshes the holder TTL.
 //   detach  -> releaseLeaseHolder (idempotent); the reaper (P1.3) stop()s the
 //              box at refcount 0 past the drain grace.
@@ -24,7 +25,7 @@ import {
   hasGitCredentialRepositorySelection,
   hasGitHubRepositorySelection,
   resolveStreamTokenSecret,
-  sandboxArchiveCaptureTimeoutMs,
+  sandboxLifecycleTransitionWaitMs,
   stableSandboxEnvironmentForRun,
 } from "@opengeni/config";
 import type { Settings } from "@opengeni/config";
@@ -62,6 +63,8 @@ import {
   exposeStreamPort,
   desktopCapableBackend,
   NatsControlRpc,
+  SandboxResumeIdentityMismatchError,
+  SandboxResumeIdentityUnavailableError,
   SelfhostedSandboxClient,
   TERMINAL_STREAM_PORT,
   DisplayStackUnsupportedError,
@@ -179,7 +182,14 @@ export async function sessionAttachEnvironment(
  */
 export async function attachViewer(
   services: ViewerServices,
-  input: { accountId: string; workspaceId: string; session: Session; viewerId?: string },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    session: Session;
+    viewerId?: string;
+    /** Cancel lifecycle waiting when the originating HTTP request disconnects. */
+    waitSignal?: AbortSignal;
+  },
 ): Promise<ViewerAttachResult> {
   const { db, settings } = services;
   const { accountId, workspaceId, session } = input;
@@ -211,7 +221,8 @@ export async function attachViewer(
       os: session.sandboxOs,
       leaseTtlMs,
       warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
-      captureWaitMs: sandboxArchiveCaptureTimeoutMs(settings),
+      captureWaitMs: sandboxLifecycleTransitionWaitMs(settings),
+      ...(input.waitSignal ? { waitSignal: input.waitSignal } : {}),
     });
   } catch (error) {
     if (error instanceof SandboxViewerAdmissionBlockedError) {
@@ -237,7 +248,10 @@ export async function attachViewer(
   if (acquired.role === "fenced") {
     await release();
     throw new HTTPException(409, {
-      message: `sandbox lease superseded (epoch ${acquired.lease.leaseEpoch}); re-read capabilities and re-attach`,
+      message:
+        acquired.reason === "superseded"
+          ? `sandbox lease superseded (epoch ${acquired.lease.leaseEpoch}); re-read capabilities and re-attach`
+          : `sandbox lifecycle transition in progress (${acquired.reason}, epoch ${acquired.lease.leaseEpoch}, backend ${acquired.lease.backend}, instance ${acquired.lease.instanceId ?? "none"}); retry`,
     });
   }
 
@@ -361,6 +375,12 @@ export async function attachViewer(
         throw new HTTPException(409, {
           message: `sandbox instance was lost; retry to restore it`,
         });
+      }
+      if (
+        error instanceof SandboxResumeIdentityMismatchError ||
+        error instanceof SandboxResumeIdentityUnavailableError
+      ) {
+        throw new HTTPException(409, { message: error.message });
       }
       throw error;
     } finally {

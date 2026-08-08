@@ -67,6 +67,7 @@
     "deployment:temporal-values": "bun scripts/deployment-temporal-values.ts",
     "deployment:conformance": "bun scripts/deployment-conformance.ts",
     "deployment:connected-machine-load": "bun scripts/operator/connected-machine-load-profile.ts",
+    "operator:sandbox-reaper-hold": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; bun scripts/operator/sandbox-reaper-hold.ts",
     "acceptance:workbench-live": "bun scripts/workbench-live-acceptance.ts",
     "check:generated-fonts": "bun scripts/generate-noto-jp-loader.ts --check",
     "check:observability-render": "bun scripts/check-observability-render.ts",
@@ -150,5 +151,9 @@
     "vite": "8.1.4",
     "ws": "8.21.1"
   },
-  "packageManager": "bun@1.3.14"
+  "packageManager": "bun@1.3.14",
+  "patchedDependencies": {
+    "modal@0.9.0": "patches/modal@0.9.0.patch",
+    "@openai/agents-extensions@0.13.3": "patches/@openai%2Fagents-extensions@0.13.3.patch"
+  }
 }

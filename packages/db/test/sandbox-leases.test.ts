@@ -4,18 +4,22 @@ import { createHash } from "node:crypto";
 import postgres from "postgres";
 import {
   acquireLease,
+  acquireSandboxLeaseReaperHold,
   advanceWorkspaceGenerationForDirectRequest,
   adoptLegacyModalCheckpointArtifact,
   beginSandboxRematerialization,
+  claimTemporalScheduleCleanups,
   claimWorkspaceArchiveCapture,
   commitWarmingToWarm,
   confirmDrainCold,
   createDb,
+  deleteWorkspaceIfQuiescent,
   failSandboxRematerialization,
   failWarmingToCold,
   getMaterializedSandboxFileResources,
   heartbeatLeaseHolder,
   markSandboxFileResourcesMaterialized,
+  markSandboxCheckpointArtifactDeletePending,
   markSandboxRestoreVerifying,
   markWarmLeaseInstanceLost,
   claimSandboxCheckpointArtifactsForGc,
@@ -24,15 +28,20 @@ import {
   readWorkspaceArchiveCapturePreflight,
   recordWarmingSandboxCreated,
   registerSandboxCheckpointArtifact,
+  releaseSandboxLeaseReaperHold,
   reapStaleLeaseHolders,
   reapStaleLeaseHoldersGlobal,
   reArmDrainingLease,
   releaseWorkspaceArchiveCapture,
   releaseLeaseHolder,
+  replaceWorkspaceArchiveCaptureAfterProof,
+  requestDueSandboxRotationsGlobal,
   touchLeaseHolder,
+  workspaceArchiveCaptureDeadlineElapsed,
   SandboxCheckpointArtifactRegistrationConflictError,
   SandboxImageConflictError,
   SandboxRigConflictError,
+  settleTemporalScheduleCleanup,
   type Database,
   type DbClient,
 } from "../src/index";
@@ -181,6 +190,9 @@ async function assertExpiredDrainFence(
     leaseTtlMs: 45_000,
   });
   expect(successor.role).toBe("fenced");
+  if (successor.role === "fenced") {
+    expect(successor.reason).toBe("provider_recovery_in_progress");
+  }
   const [successorHolder] = await admin<{ n: number }[]>`
     select count(*)::int as n
     from sandbox_lease_holders h
@@ -190,7 +202,7 @@ async function assertExpiredDrainFence(
       and h.holder_id = ${`successor-${suffix}`}`;
   expect(successorHolder?.n).toBe(0);
 
-  // The standalone re-arm seam has the same grace-window fence as acquireLease.
+  // The standalone re-arm seam honors the same attributed-drain fence.
   const explicitRearm = await reArmDrainingLease(db, {
     accountId: ids.accountId,
     workspaceId: ids.workspaceId,
@@ -299,6 +311,194 @@ afterAll(async () => {
 }, 180_000);
 
 describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
+  test("(0-delete) workspace deletion atomically refuses live leases and returns durable schedule cleanup ids", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const [{ id: siblingWorkspaceId } = { id: "" }] = await admin<{ id: string }[]>`
+      insert into workspaces (account_id, name)
+      values (${accountId}, 'sibling')
+      returning id`;
+    await admin`
+      insert into workspace_inference_controls (workspace_id, account_id)
+      values (${siblingWorkspaceId}, ${accountId})`;
+    const temporalScheduleId = `workspace-delete-${crypto.randomUUID()}`;
+    await admin`
+      insert into scheduled_tasks (
+        account_id, workspace_id, name, schedule, temporal_schedule_id, agent_config
+      ) values (
+        ${accountId}, ${workspaceId}, 'delete fixture',
+        ${admin.json({ type: "interval", everySeconds: 60 })},
+        ${temporalScheduleId},
+        ${admin.json({ prompt: "fixture", resources: [], tools: [], metadata: {} })}
+      )`;
+
+    const warming = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "workspace-delete-owner",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    expect(warming.role).toBe("spawner");
+    expect(await deleteWorkspaceIfQuiescent(db, { accountId, workspaceId })).toEqual({
+      status: "live_sandboxes",
+    });
+
+    await releaseLeaseHolder(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "workspace-delete-owner",
+      idleGraceMs: 0,
+    });
+    await failWarmingToCold(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: warming.lease.leaseEpoch,
+    });
+
+    // These are nonterminal execution states too. Deletion must not erase the
+    // recoverable turn merely because it is between worker attempts or waiting
+    // for provider capacity.
+    const recoveringSessionId = crypto.randomUUID();
+    await admin`
+      insert into sessions (
+        id, account_id, workspace_id, status, initial_message, model,
+        sandbox_backend, sandbox_group_id, temporal_workflow_id, tool_policy
+      ) values (
+        ${recoveringSessionId}, ${accountId}, ${workspaceId}, 'recovering',
+        'workspace deletion fixture', 'test-model', 'modal', ${recoveringSessionId},
+        ${`session-${recoveringSessionId}`},
+        jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
+      )`;
+    expect(await deleteWorkspaceIfQuiescent(db, { accountId, workspaceId })).toEqual({
+      status: "active_sessions",
+    });
+    await admin`
+      update sessions set status = 'waiting_capacity' where id = ${recoveringSessionId}`;
+    expect(await deleteWorkspaceIfQuiescent(db, { accountId, workspaceId })).toEqual({
+      status: "active_sessions",
+    });
+    await admin`update sessions set status = 'idle' where id = ${recoveringSessionId}`;
+
+    // Aggregate counters are projections. A raw ownership receipt must still
+    // fence deletion even if those counters are corrupt/stale at zero.
+    const rawHolderId = crypto.randomUUID();
+    await admin`
+      insert into sandbox_lease_holders (
+        account_id, workspace_id, lease_id, kind, holder_id
+      ) values (
+        ${accountId}, ${workspaceId}, ${warming.lease.id}, 'direct', ${rawHolderId}
+      )`;
+    expect(await deleteWorkspaceIfQuiescent(db, { accountId, workspaceId })).toEqual({
+      status: "live_sandboxes",
+    });
+    await admin`
+      delete from sandbox_lease_holders
+      where lease_id = ${warming.lease.id} and holder_id = ${rawHolderId}`;
+
+    // A provider/admission transaction can already own the lease while waiting
+    // for this workspace's FK parent. Deletion must refuse immediately instead
+    // of creating a parent->child / child->parent deadlock.
+    let lockAcquired!: () => void;
+    let releaseLock!: () => void;
+    const acquiredLock = new Promise<void>((resolve) => {
+      lockAcquired = resolve;
+    });
+    const releaseHeldLock = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+    const blocker = admin.begin(async (tx) => {
+      await tx`select id from sandbox_leases where id = ${warming.lease.id} for update`;
+      lockAcquired();
+      await releaseHeldLock;
+    });
+    await acquiredLock;
+    try {
+      const startedAt = Date.now();
+      expect(await deleteWorkspaceIfQuiescent(db, { accountId, workspaceId })).toEqual({
+        status: "live_sandboxes",
+      });
+      expect(Date.now() - startedAt).toBeLessThan(2_000);
+    } finally {
+      releaseLock();
+      await blocker;
+    }
+
+    const deleted = await deleteWorkspaceIfQuiescent(db, { accountId, workspaceId });
+    expect(deleted.status).toBe("deleted");
+    if (deleted.status !== "deleted") throw new Error("workspace deletion did not commit");
+    const cleanup = deleted.temporalScheduleCleanups[0];
+    if (!cleanup) throw new Error("workspace deletion omitted its Temporal cleanup receipt");
+    expect(cleanup).toEqual({
+      id: cleanup.id,
+      accountId,
+      workspaceId,
+      temporalScheduleId,
+      claimId: cleanup.claimId,
+      attemptCount: 1,
+    });
+    expect(cleanup.id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(cleanup.claimId).toMatch(/^[0-9a-f-]{36}$/);
+    const [workspaceCount] = await admin<{ count: number }[]>`
+      select count(*)::int as count from workspaces where id = ${workspaceId}`;
+    const [scheduleCount] = await admin<{ count: number }[]>`
+      select count(*)::int as count from scheduled_tasks where workspace_id = ${workspaceId}`;
+    expect(workspaceCount?.count).toBe(0);
+    expect(scheduleCount?.count).toBe(0);
+
+    // The receipt intentionally survives the workspace FK cascade. A stale
+    // process cannot settle it; a failed exact owner releases it, and another
+    // replica can immediately reclaim the same external schedule.
+    const [cleanupCount] = await admin<{ count: number }[]>`
+      select count(*)::int as count
+      from temporal_schedule_cleanup_outbox where id = ${cleanup.id}`;
+    expect(cleanupCount?.count).toBe(1);
+    expect(
+      await settleTemporalScheduleCleanup(db, {
+        id: cleanup.id,
+        claimId: crypto.randomUUID(),
+      }),
+    ).toBe(false);
+    expect(
+      await settleTemporalScheduleCleanup(db, {
+        id: cleanup.id,
+        claimId: cleanup.claimId,
+        error: "simulated Temporal outage",
+      }),
+    ).toBe(true);
+    await admin`
+      update temporal_schedule_cleanup_outbox
+      set next_attempt_at = now() - interval '1 second'
+      where id = ${cleanup.id}`;
+    const successorClaimId = crypto.randomUUID();
+    const reclaimed = await claimTemporalScheduleCleanups(db, {
+      claimId: successorClaimId,
+      limit: 1,
+      claimSeconds: 15,
+    });
+    expect(reclaimed).toEqual([
+      {
+        id: cleanup.id,
+        accountId,
+        workspaceId,
+        temporalScheduleId,
+        claimId: successorClaimId,
+        attemptCount: 2,
+      },
+    ]);
+    expect(
+      await settleTemporalScheduleCleanup(db, {
+        id: cleanup.id,
+        claimId: successorClaimId,
+      }),
+    ).toBe(true);
+  }, 60_000);
+
   test("(0) lease_epoch is an integer column returning a JS number (the spike C1a fix)", async () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
@@ -314,6 +514,86 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     const row = await readRow(workspaceId, groupId);
     expect(row?.epoch_type).toBe("integer");
     expect(typeof row?.lease_epoch).toBe("number");
+  }, 60_000);
+
+  test("(0-constraint) archive capture receipts cannot be partially populated through SQL NULL semantics", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "partial-capture-constraint",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+
+    const captureId = crypto.randomUUID();
+    await admin`
+      update sandbox_leases set
+        archive_capture_id = ${captureId}::uuid,
+        archive_capture_generation = workspace_generation,
+        archive_capture_started_at = now(),
+        archive_capture_deadline_at = now() + interval '1 minute'
+      where workspace_id = ${workspaceId}
+        and sandbox_group_id = ${groupId}`;
+
+    const corruptions = [
+      () => admin`
+        update sandbox_leases set archive_capture_operation_id = null
+        where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`,
+      () => admin`
+        update sandbox_leases set archive_capture_provider_request_id = null
+        where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`,
+      () => admin`
+        update sandbox_leases set archive_capture_attempt = null
+        where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`,
+      () => admin`
+        update sandbox_leases set archive_capture_generation = null
+        where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`,
+      () => admin`
+        update sandbox_leases set archive_capture_started_at = null
+        where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`,
+      () => admin`
+        update sandbox_leases set archive_capture_deadline_at = null
+        where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`,
+    ];
+    for (const corrupt of corruptions) {
+      let failure: unknown;
+      try {
+        await corrupt();
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toMatchObject({ code: "23514" });
+    }
+
+    await admin`
+      update sandbox_leases set
+        archive_capture_id = null,
+        archive_capture_generation = null,
+        archive_capture_started_at = null,
+        archive_capture_deadline_at = null
+      where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+
+    let rotationFailure: unknown;
+    try {
+      await admin`
+        update sandbox_leases set rotation_requested_at = now(), rotation_reason = null
+        where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+    } catch (error) {
+      rotationFailure = error;
+    }
+    expect(rotationFailure).toMatchObject({ code: "23514" });
+
+    const [lease] = await admin<
+      Array<{ archive_capture_id: string | null; rotation_requested_at: Date | null }>
+    >`
+      select archive_capture_id, rotation_requested_at from sandbox_leases
+      where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+    expect(lease?.archive_capture_id).toBeNull();
+    expect(lease?.rotation_requested_at).toBeNull();
   }, 60_000);
 
   test("(0a) maintenance fence rejects markerless legacy transitions and acquisition inserts", async () => {
@@ -1478,6 +1758,1320 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     expect(reap.drained.find((d) => d.sandboxGroupId === groupId)?.instanceId).toBe("box");
   }, 60_000);
 
+  test("(3-availability) an expired resumable drain re-arms until teardown is durably claimed", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "availability-owner",
+      backend: "runloop",
+      leaseTtlMs: 45_000,
+    });
+    await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 0,
+      instanceId: "devbox-availability",
+      resumeBackendId: "runloop",
+      resumeState: {
+        backendId: "runloop",
+        sessionState: { providerState: { devboxId: "devbox-availability" } },
+      },
+      leaseTtlMs: 45_000,
+    });
+    await releaseLeaseHolder(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "availability-owner",
+      idleGraceMs: 0,
+    });
+    await admin`
+      update sandbox_leases set expires_at = now() - interval '1 second'
+      where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+
+    const resumed = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "availability-successor",
+      backend: "runloop",
+      leaseTtlMs: 45_000,
+    });
+
+    expect(resumed.role).toBe("rearmed");
+    expect(resumed.lease.liveness).toBe("warm");
+    expect(resumed.lease.instanceId).toBe("devbox-availability");
+    expect(resumed.lease.refcount).toBe(1);
+  }, 60_000);
+
+  test("(3-availability) the stable provider identity re-arms opaque provider state", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "stable-identity-owner",
+      backend: "runloop",
+      leaseTtlMs: 45_000,
+    });
+    await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 0,
+      instanceId: "future-provider-instance",
+      resumeBackendId: "runloop",
+      resumeState: {
+        backendId: "runloop",
+        opengeniProviderInstanceId: "future-provider-instance",
+        sessionState: { providerState: { privateProviderAddress: "opaque" } },
+      },
+      leaseTtlMs: 45_000,
+    });
+    await releaseLeaseHolder(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "stable-identity-owner",
+      idleGraceMs: 0,
+    });
+
+    expect(
+      await reArmDrainingLease(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        leaseTtlMs: 45_000,
+      }),
+    ).toEqual({ rearmed: true });
+    expect((await readLease(db, workspaceId, groupId))?.liveness).toBe("warm");
+  }, 60_000);
+
+  test("(3-availability) arbitrary provider config is not mistaken for a resumable identity", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "invalid-identity-owner",
+      backend: "runloop",
+      leaseTtlMs: 45_000,
+    });
+    await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 0,
+      instanceId: "unaddressable-provider-instance",
+      resumeBackendId: "runloop",
+      resumeState: {
+        backendId: "runloop",
+        sessionState: {
+          providerState: {
+            blueprintName: "config-is-not-identity",
+            id: "unaddressable-provider-instance",
+          },
+        },
+      },
+      leaseTtlMs: 45_000,
+    });
+    await releaseLeaseHolder(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "invalid-identity-owner",
+      idleGraceMs: 0,
+    });
+
+    const admission = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "invalid-identity-successor",
+      backend: "runloop",
+      leaseTtlMs: 45_000,
+    });
+    expect(admission.role).toBe("fenced");
+    if (admission.role === "fenced") {
+      expect(admission.reason).toBe("provider_recovery_in_progress");
+    }
+    expect(
+      await reArmDrainingLease(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        leaseTtlMs: 45_000,
+      }),
+    ).toEqual({ rearmed: false });
+
+    await admin`
+      update sandbox_leases set resume_state = ${admin.json({
+        backendId: "runloop",
+        opengeniProviderInstanceId: "unaddressable-provider-instance",
+        sessionState: { providerState: { devboxId: "devbox-stale" } },
+      })}
+      where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+    const reverseMismatch = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "reverse-mismatched-identity-successor",
+      backend: "runloop",
+      leaseTtlMs: 45_000,
+    });
+    expect(reverseMismatch).toMatchObject({
+      role: "fenced",
+      reason: "provider_recovery_in_progress",
+    });
+    expect(
+      await reArmDrainingLease(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        leaseTtlMs: 45_000,
+      }),
+    ).toEqual({ rearmed: false });
+  }, 60_000);
+
+  test("(3-availability) a stale envelope identity cannot re-arm another attributed instance", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "mismatched-identity-owner",
+      backend: "runloop",
+      leaseTtlMs: 45_000,
+    });
+    await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 0,
+      instanceId: "devbox-authoritative",
+      resumeBackendId: "runloop",
+      resumeState: {
+        backendId: "runloop",
+        opengeniProviderInstanceId: "devbox-stale",
+        sessionState: { providerState: { devboxId: "devbox-authoritative" } },
+      },
+      leaseTtlMs: 45_000,
+    });
+    await releaseLeaseHolder(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "mismatched-identity-owner",
+      idleGraceMs: 0,
+    });
+
+    const admission = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "mismatched-identity-successor",
+      backend: "runloop",
+      leaseTtlMs: 45_000,
+    });
+    expect(admission.role).toBe("fenced");
+    if (admission.role === "fenced") {
+      expect(admission.reason).toBe("provider_recovery_in_progress");
+    }
+    expect(
+      await reArmDrainingLease(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        leaseTtlMs: 45_000,
+      }),
+    ).toEqual({ rearmed: false });
+  }, 60_000);
+
+  test("(3-availability) persisted provider identity without authoritative instance fails closed", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    await admin`
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, backend,
+        instance_id, resume_backend_id, resume_state, expires_at
+      ) values (
+        ${accountId}, ${workspaceId}, ${groupId}, 'draining', 'runloop',
+        null, 'runloop', ${admin.json({
+          backendId: "runloop",
+          opengeniProviderInstanceId: "devbox-unattributed",
+          sessionState: { providerState: { devboxId: "devbox-unattributed" } },
+        })}, now() - interval '1 second'
+      )`;
+
+    const admission = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "missing-authoritative-instance-successor",
+      backend: "runloop",
+      leaseTtlMs: 45_000,
+    });
+    expect(admission).toMatchObject({
+      role: "fenced",
+      reason: "provider_recovery_in_progress",
+    });
+    expect(
+      await reArmDrainingLease(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        leaseTtlMs: 45_000,
+      }),
+    ).toEqual({ rearmed: false });
+  }, 60_000);
+
+  test("(3-availability) the providerless backend can re-arm without an instance identity", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    await admin`
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, backend, expires_at
+      ) values (
+        ${accountId}, ${workspaceId}, ${groupId}, 'draining', 'none',
+        now() - interval '1 second'
+      )`;
+
+    const admission = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "providerless-successor",
+      backend: "none",
+      leaseTtlMs: 45_000,
+    });
+    expect(admission).toMatchObject({ role: "rearmed", lease: { liveness: "warm" } });
+  }, 60_000);
+
+  test("(3-claim) acquisition waits behind the exact teardown claim, then re-arms without an error", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "claim-owner",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 0,
+      instanceId: "sb-claim-wait",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "sb-claim-wait" } },
+      },
+      leaseTtlMs: 45_000,
+    });
+    await releaseLeaseHolder(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "claim-owner",
+      idleGraceMs: 0,
+    });
+    const draining = await readLease(db, workspaceId, groupId);
+    const captureId = crypto.randomUUID();
+    const claimed = await claimWorkspaceArchiveCapture(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      captureId,
+      expectedEpoch: draining!.leaseEpoch,
+      expectedInstanceId: "sb-claim-wait",
+      liveness: "draining",
+      captureTimeoutMs: 1_000,
+      minIntervalMs: 0,
+    });
+    expect(claimed.status).toBe("claimed");
+    if (claimed.status !== "claimed") throw new Error("expected teardown capture claim");
+    expect(claimed.lease.rotationReason).toBe("teardown_claim");
+
+    let settled = false;
+    const waiting = acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "claim-successor",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+      captureWaitMs: 1_000,
+    }).finally(() => {
+      settled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(settled).toBe(false);
+    const [holderBeforeRelease] = await admin<{ count: number }[]>`
+      select count(*)::int as count from sandbox_lease_holders h
+      join sandbox_leases l on l.id = h.lease_id
+      where l.workspace_id = ${workspaceId}
+        and l.sandbox_group_id = ${groupId}
+        and h.holder_id = 'claim-successor'`;
+    expect(holderBeforeRelease?.count).toBe(0);
+
+    expect(
+      await releaseWorkspaceArchiveCapture(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        captureId,
+        expectedEpoch: draining!.leaseEpoch,
+        expectedInstanceId: "sb-claim-wait",
+      }),
+    ).toBe(true);
+    const acquired = await waiting;
+    expect(acquired.role).toBe("rearmed");
+    expect(acquired.lease.instanceId).toBe("sb-claim-wait");
+    expect(acquired.lease.rotationReason).toBeNull();
+  }, 60_000);
+
+  test("(3-hold) an exact bounded operator hold blocks every reaper ownership point but not re-attach", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "hold-owner",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    await recordWarmingSandboxCreated(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 0,
+      instanceId: "sb-held",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "sb-held" } },
+      },
+      leaseTtlMs: 45_000,
+    });
+    expect(
+      await acquireSandboxLeaseReaperHold(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        expectedEpoch: 0,
+        expectedInstanceId: "sb-held",
+        holdId: crypto.randomUUID(),
+        ttlMs: 60_000,
+        providerDeadlineHeadroomMs: 60_000,
+        reason: "warming is not a stable preservation point",
+      }),
+    ).toMatchObject({ status: "not_live" });
+    const committed = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 0,
+      instanceId: "sb-held",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "sb-held" } },
+      },
+      leaseTtlMs: 45_000,
+    });
+    const epoch = committed.lease!.leaseEpoch;
+    await releaseLeaseHolder(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "hold-owner",
+      idleGraceMs: 0,
+    });
+
+    const holdId = crypto.randomUUID();
+    const held = await acquireSandboxLeaseReaperHold(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: epoch,
+      expectedInstanceId: "sb-held",
+      holdId,
+      ttlMs: 60_000,
+      providerDeadlineHeadroomMs: 60_000,
+      reason: "exact operator preservation",
+    });
+    expect(held.status).toBe("held");
+    if (held.status !== "held") throw new Error("expected exact reaper hold");
+    expect(held.renewed).toBe(false);
+    expect(held.lease.reaperHold).toMatchObject({
+      id: holdId,
+      reason: "exact operator preservation",
+    });
+    expect(
+      await acquireSandboxLeaseReaperHold(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        expectedEpoch: epoch,
+        expectedInstanceId: "sb-held",
+        holdId,
+        ttlMs: 120_000,
+        providerDeadlineHeadroomMs: 60_000,
+        reason: "exact operator preservation",
+      }),
+    ).toMatchObject({ status: "held", renewed: true });
+    expect(
+      await acquireSandboxLeaseReaperHold(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        expectedEpoch: epoch,
+        expectedInstanceId: "sb-held",
+        holdId: crypto.randomUUID(),
+        ttlMs: 60_000,
+        providerDeadlineHeadroomMs: 60_000,
+        reason: "competing operator",
+      }),
+    ).toMatchObject({ status: "held_by_other" });
+
+    const globalSweep = await reapStaleLeaseHoldersGlobal(db, {
+      viewerHolderTtlMs: 1,
+      turnHolderTtlMs: 1,
+      idleGraceMs: 0,
+    });
+    expect(
+      globalSweep.some(
+        (target) => target.workspaceId === workspaceId && target.sandboxGroupId === groupId,
+      ),
+    ).toBe(false);
+    const scopedSweep = await reapStaleLeaseHolders(db, {
+      workspaceId,
+      viewerHolderTtlMs: 1,
+      turnHolderTtlMs: 1,
+      idleGraceMs: 0,
+    });
+    expect(scopedSweep.drained.some((target) => target.sandboxGroupId === groupId)).toBe(false);
+
+    const blockedClaim = await claimWorkspaceArchiveCapture(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      captureId: crypto.randomUUID(),
+      expectedEpoch: epoch,
+      expectedInstanceId: "sb-held",
+      liveness: "draining",
+      captureTimeoutMs: 60_000,
+      minIntervalMs: 0,
+    });
+    expect(blockedClaim.status).toBe("reaper_held");
+    expect(
+      await confirmDrainCold(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        expectedEpoch: epoch,
+      }),
+    ).toEqual({ wentCold: false });
+
+    // Migration trigger protection is the rolling-deploy backstop for old
+    // workers that do not know the hold columns.
+    const oldCaptureId = crypto.randomUUID();
+    let oldCaptureError: unknown;
+    try {
+      await admin`
+        update sandbox_leases set
+          archive_capture_id = ${oldCaptureId}::uuid,
+          archive_capture_generation = workspace_generation,
+          archive_capture_started_at = now(),
+          archive_capture_deadline_at = now() + interval '1 minute'
+        where workspace_id = ${workspaceId}
+          and sandbox_group_id = ${groupId}`;
+    } catch (error) {
+      oldCaptureError = error;
+    }
+    expect(oldCaptureError).toMatchObject({ code: "55000" });
+    let oldColdCommitError: unknown;
+    try {
+      await admin`
+        update sandbox_leases set liveness = 'cold'
+        where workspace_id = ${workspaceId}
+          and sandbox_group_id = ${groupId}`;
+    } catch (error) {
+      oldColdCommitError = error;
+    }
+    expect(oldColdCommitError).toMatchObject({ code: "55000" });
+
+    expect(
+      await releaseSandboxLeaseReaperHold(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        expectedEpoch: epoch,
+        expectedInstanceId: "sb-held",
+        holdId: crypto.randomUUID(),
+      }),
+    ).toBe(false);
+
+    // A holder arrival wins availability without waiting for hold expiry.
+    const rearmed = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "hold-successor",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    expect(rearmed.role).toBe("rearmed");
+    expect(rearmed.lease.instanceId).toBe("sb-held");
+    expect(rearmed.lease.reaperHold?.id).toBe(holdId);
+    await releaseLeaseHolder(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "hold-successor",
+      idleGraceMs: 0,
+    });
+
+    expect(
+      await releaseSandboxLeaseReaperHold(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        expectedEpoch: epoch,
+        expectedInstanceId: "sb-held",
+        holdId,
+      }),
+    ).toBe(true);
+    const captureId = crypto.randomUUID();
+    const claimed = await claimWorkspaceArchiveCapture(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      captureId,
+      expectedEpoch: epoch,
+      expectedInstanceId: "sb-held",
+      liveness: "draining",
+      captureTimeoutMs: 60_000,
+      minIntervalMs: 0,
+    });
+    expect(claimed.status).toBe("claimed");
+    expect(
+      await acquireSandboxLeaseReaperHold(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        expectedEpoch: epoch,
+        expectedInstanceId: "sb-held",
+        holdId: crypto.randomUUID(),
+        ttlMs: 60_000,
+        providerDeadlineHeadroomMs: 60_000,
+        reason: "too late",
+      }),
+    ).toMatchObject({ status: "teardown_in_progress" });
+    await releaseWorkspaceArchiveCapture(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      captureId,
+      expectedEpoch: epoch,
+      expectedInstanceId: "sb-held",
+    });
+
+    const expiringHoldId = crypto.randomUUID();
+    expect(
+      await acquireSandboxLeaseReaperHold(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        expectedEpoch: epoch,
+        expectedInstanceId: "sb-held",
+        holdId: expiringHoldId,
+        ttlMs: 60_000,
+        providerDeadlineHeadroomMs: 60_000,
+        reason: "bounded expiry proof",
+      }),
+    ).toMatchObject({ status: "held" });
+    await admin`
+      update sandbox_leases set reaper_hold_until = now() - interval '1 millisecond'
+      where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+    const afterExpiry = await claimWorkspaceArchiveCapture(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      captureId: crypto.randomUUID(),
+      expectedEpoch: epoch,
+      expectedInstanceId: "sb-held",
+      liveness: "draining",
+      captureTimeoutMs: 60_000,
+      minIntervalMs: 0,
+    });
+    expect(afterExpiry.status).toBe("claimed");
+    if (afterExpiry.status !== "claimed") throw new Error("expected capture after hold expiry");
+    expect(
+      await confirmDrainCold(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        expectedEpoch: epoch,
+        expectedCaptureId: afterExpiry.claim.id,
+      }),
+    ).toEqual({ wentCold: true });
+    expect((await readLease(db, workspaceId, groupId))?.reaperHold).toBeNull();
+  }, 60_000);
+
+  test("(3-hold-rotation) an admitted provider-deadline rotation cannot be cancelled by a late hold", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "rotation-hold-owner",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    const committed = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 0,
+      instanceId: "sb-held-rotation",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "sb-held-rotation" } },
+      },
+      leaseTtlMs: 45_000,
+    });
+    const epoch = committed.lease!.leaseEpoch;
+    await admin`
+      update sandbox_leases set
+        provider_created_at = now() - interval '23 hours',
+        provider_deadline_at = now() + interval '1 minute'
+      where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+    expect(
+      await acquireSandboxLeaseReaperHold(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        expectedEpoch: epoch,
+        expectedInstanceId: "sb-held-rotation",
+        holdId: crypto.randomUUID(),
+        ttlMs: 30_000,
+        providerDeadlineHeadroomMs: 60_000,
+        reason: "would consume provider-deadline headroom",
+      }),
+    ).toMatchObject({ status: "provider_deadline_conflict" });
+    await requestDueSandboxRotationsGlobal(db, 60 * 60_000, 500);
+    expect((await readLease(db, workspaceId, groupId))?.rotationReason).toBe("provider_deadline");
+
+    expect(
+      await acquireSandboxLeaseReaperHold(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        expectedEpoch: epoch,
+        expectedInstanceId: "sb-held-rotation",
+        holdId: crypto.randomUUID(),
+        ttlMs: 60_000,
+        providerDeadlineHeadroomMs: 60_000,
+        reason: "deadline inspection",
+      }),
+    ).toMatchObject({ status: "rotation_in_progress" });
+    expect((await readLease(db, workspaceId, groupId))?.rotationReason).toBe("provider_deadline");
+  }, 60_000);
+
+  test("(3-rolling) an old writer clearing the capture cannot reopen provider admission", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    await admin`
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, refcount,
+        instance_id, backend, lease_epoch, resume_backend_id, resume_state, expires_at
+      ) values (
+        ${accountId}, ${workspaceId}, ${groupId}, 'draining', 0,
+        'sb-rolling-fence', 'modal', 8, 'modal',
+        jsonb_build_object(
+          'backendId', 'modal',
+          'opengeniProviderInstanceId', 'sb-rolling-fence'
+        ),
+        now() - interval '1 second'
+      )`;
+    const captureId = crypto.randomUUID();
+    const claim = await claimWorkspaceArchiveCapture(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      captureId,
+      expectedEpoch: 8,
+      expectedInstanceId: "sb-rolling-fence",
+      liveness: "draining",
+      captureTimeoutMs: 60_000,
+      minIntervalMs: 0,
+    });
+    expect(claim.status).toBe("claimed");
+    if (claim.status !== "claimed") throw new Error("expected teardown capture claim");
+    expect(claim.lease.rotationReason).toBe("teardown_claim");
+
+    // Exact pre-fix publication behavior: the old statement clears only the
+    // archive gate before its provider terminate call. The migration marker
+    // must survive because old code does not know how to clear it.
+    await admin`
+      update sandbox_leases set
+        archive_capture_id = null,
+        archive_capture_generation = null,
+        archive_capture_started_at = null,
+        archive_capture_deadline_at = null
+      where workspace_id = ${workspaceId}
+        and sandbox_group_id = ${groupId}
+        and archive_capture_id = ${captureId}::uuid`;
+
+    const fenced = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "rolling-successor",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    expect(fenced.role).toBe("fenced");
+    if (fenced.role === "fenced") {
+      expect(fenced.reason).toBe("rotation_in_progress");
+      expect(fenced.lease.rotationReason).toBe("teardown_claim");
+    }
+    const [holder] = await admin<{ count: number }[]>`
+      select count(*)::int as count from sandbox_lease_holders h
+      join sandbox_leases l on l.id = h.lease_id
+      where l.workspace_id = ${workspaceId}
+        and l.sandbox_group_id = ${groupId}
+        and h.holder_id = 'rolling-successor'`;
+    expect(holder?.count).toBe(0);
+
+    expect(
+      await confirmDrainCold(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        expectedEpoch: 8,
+      }),
+    ).toMatchObject({ wentCold: true });
+  }, 60_000);
+
+  test("(3-claim-cancel) cancelling a transition wait registers no holder", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    await admin`
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, refcount,
+        instance_id, backend, lease_epoch, resume_backend_id, resume_state, expires_at
+      ) values (
+        ${accountId}, ${workspaceId}, ${groupId}, 'draining', 0,
+        'sb-cancel-wait', 'modal', 4, 'modal',
+        jsonb_build_object(
+          'backendId', 'modal',
+          'sessionState', jsonb_build_object(
+            'providerState', jsonb_build_object('sandboxId', 'sb-cancel-wait')
+          )
+        ),
+        now() - interval '1 second'
+      )`;
+    const captureId = crypto.randomUUID();
+    const claim = await claimWorkspaceArchiveCapture(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      captureId,
+      expectedEpoch: 4,
+      expectedInstanceId: "sb-cancel-wait",
+      liveness: "draining",
+      captureTimeoutMs: 1_000,
+      minIntervalMs: 0,
+    });
+    expect(claim.status).toBe("claimed");
+    if (claim.status !== "claimed") throw new Error("expected teardown capture claim");
+    expect(claim.lease.rotationReason).toBe("teardown_claim");
+    const controller = new AbortController();
+    const waiting = acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "cancelled-successor",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+      captureWaitMs: 1_000,
+      waitSignal: controller.signal,
+    });
+    setTimeout(() => controller.abort(new Error("operator cancelled transition")), 25);
+    await expect(waiting).rejects.toThrow("operator cancelled transition");
+    const [holder] = await admin<{ count: number }[]>`
+      select count(*)::int as count from sandbox_lease_holders h
+      join sandbox_leases l on l.id = h.lease_id
+      where l.workspace_id = ${workspaceId}
+        and l.sandbox_group_id = ${groupId}
+        and h.holder_id = 'cancelled-successor'`;
+    expect(holder?.count).toBe(0);
+    await releaseWorkspaceArchiveCapture(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      captureId,
+      expectedEpoch: 4,
+      expectedInstanceId: "sb-cancel-wait",
+    });
+  }, 60_000);
+
+  test("(3-claim-cas) snapshot publication retains teardown ownership and stale claimants cannot cold it", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "claim-cas-owner",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 0,
+      instanceId: "sb-claim-cas",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "sb-claim-cas" } },
+      },
+      leaseTtlMs: 45_000,
+    });
+    await releaseLeaseHolder(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "claim-cas-owner",
+      idleGraceMs: 0,
+    });
+    const draining = await readLease(db, workspaceId, groupId);
+    const captureId = crypto.randomUUID();
+    const claim = await claimWorkspaceArchiveCapture(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      captureId,
+      expectedEpoch: draining!.leaseEpoch,
+      expectedInstanceId: "sb-claim-cas",
+      liveness: "draining",
+      captureTimeoutMs: 60_000,
+      minIntervalMs: 0,
+    });
+    expect(claim.status).toBe("claimed");
+    if (claim.status !== "claimed") throw new Error("expected teardown capture claim");
+    expect(claim.lease.rotationReason).toBe("teardown_claim");
+    const archive = Buffer.from("CLAIM_RETENTION_ARCHIVE").toString("base64");
+    const persisted = await persistDrainSnapshotRaw(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: draining!.leaseEpoch,
+      expectedInstanceId: "sb-claim-cas",
+      expectedWorkspaceGeneration: 0,
+      captureId,
+      workspaceArchive: archive,
+      workspaceArchiveMeta: archiveDescriptor(archive, 1_900_000_000_000),
+    });
+    expect(persisted.wrote).toBe(true);
+    const publishedLease = await readLease(db, workspaceId, groupId);
+    expect(publishedLease?.archiveCapture?.id).toBe(captureId);
+    expect(publishedLease?.archiveCapture?.publishedAt).toBeInstanceOf(Date);
+    // Publication makes the teardown claim irreversible. A generic release can
+    // no longer reopen admission after the workspace is safely archived.
+    expect(
+      await releaseWorkspaceArchiveCapture(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        captureId,
+        expectedEpoch: draining!.leaseEpoch,
+        expectedInstanceId: "sb-claim-cas",
+      }),
+    ).toBe(false);
+
+    const unowned = await confirmDrainCold(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: draining!.leaseEpoch,
+    });
+    expect(unowned.wentCold).toBe(false);
+    expect((await readLease(db, workspaceId, groupId))?.archiveCapture?.id).toBe(captureId);
+
+    const stale = await confirmDrainCold(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: draining!.leaseEpoch,
+      expectedCaptureId: crypto.randomUUID(),
+    });
+    expect(stale.wentCold).toBe(false);
+    expect((await readLease(db, workspaceId, groupId))?.liveness).toBe("draining");
+
+    const exact = await confirmDrainCold(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: draining!.leaseEpoch,
+      expectedCaptureId: captureId,
+    });
+    expect(exact.wentCold).toBe(true);
+    const cold = await readLease(db, workspaceId, groupId);
+    expect(cold?.liveness).toBe("cold");
+    expect(cold?.archiveCapture).toBeNull();
+    expect(cold?.rotationReason).toBeNull();
+  }, 60_000);
+
+  test("(3-rolling-claim) a legacy cold commit cannot erase a newer drain claim", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "rolling-claim-owner",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 0,
+      instanceId: "sb-rolling-claim",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "sb-rolling-claim" } },
+      },
+      leaseTtlMs: 45_000,
+    });
+    await releaseLeaseHolder(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "rolling-claim-owner",
+      idleGraceMs: 0,
+    });
+    const draining = await readLease(db, workspaceId, groupId);
+    const captureId = crypto.randomUUID();
+    expect(
+      await claimWorkspaceArchiveCapture(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        captureId,
+        expectedEpoch: draining!.leaseEpoch,
+        expectedInstanceId: "sb-rolling-claim",
+        liveness: "draining",
+        captureTimeoutMs: 60_000,
+        minIntervalMs: 0,
+      }),
+    ).toMatchObject({ status: "claimed" });
+
+    const legacy = postgres(shared!.appUrl, { max: 1 });
+    try {
+      await expect(
+        legacy.begin(async (tx) => {
+          await tx`select set_config('opengeni.account_id', ${accountId}, true)`;
+          await tx`select set_config('opengeni.workspace_id', ${workspaceId}, true)`;
+          await tx`
+            update sandbox_leases set
+              liveness = 'cold', instance_id = null, lease_epoch = lease_epoch + 1,
+              archive_capture_id = null, archive_capture_generation = null,
+              archive_capture_started_at = null, archive_capture_deadline_at = null
+            where workspace_id = ${workspaceId}
+              and sandbox_group_id = ${groupId}
+          `;
+        }),
+      ).rejects.toMatchObject({ code: "55000" });
+    } finally {
+      await legacy.end();
+    }
+    expect((await readLease(db, workspaceId, groupId))?.archiveCapture?.id).toBe(captureId);
+    expect(
+      await confirmDrainCold(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        expectedEpoch: draining!.leaseEpoch,
+        expectedCaptureId: captureId,
+      }),
+    ).toEqual({ wentCold: true });
+  }, 60_000);
+
+  test("(3-claim-retry) generic captures wait for their deadline and preserve late-result lineage", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "claim-retry-owner",
+      backend: "runloop",
+      leaseTtlMs: 45_000,
+    });
+    await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 0,
+      instanceId: "sb-claim-retry",
+      resumeBackendId: "runloop",
+      resumeState: {
+        backendId: "runloop",
+        sessionState: { providerState: { devboxId: "sb-claim-retry" } },
+      },
+      leaseTtlMs: 45_000,
+    });
+    await releaseLeaseHolder(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "claim-retry-owner",
+      idleGraceMs: 0,
+    });
+    const draining = await readLease(db, workspaceId, groupId);
+    const operationId = crypto.randomUUID();
+    const firstCaptureId = operationId;
+    const first = await claimWorkspaceArchiveCapture(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      captureId: firstCaptureId,
+      operationId,
+      attempt: 1,
+      expectedEpoch: draining!.leaseEpoch,
+      expectedInstanceId: "sb-claim-retry",
+      liveness: "draining",
+      captureTimeoutMs: 60_000,
+      minIntervalMs: 0,
+    });
+    expect(first.status).toBe("claimed");
+    if (first.status !== "claimed") throw new Error("generic capture was not claimed");
+    expect(first.claim.providerReplaySafe).toBe(false);
+    expect(
+      await workspaceArchiveCaptureDeadlineElapsed(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        captureId: firstCaptureId,
+        expectedEpoch: draining!.leaseEpoch,
+        expectedInstanceId: "sb-claim-retry",
+      }),
+    ).toBe(false);
+
+    // A different operation has no proof that the unexpired owner is terminal.
+    expect(
+      await replaceWorkspaceArchiveCaptureAfterProof(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        priorCaptureId: firstCaptureId,
+        captureId: crypto.randomUUID(),
+        operationId: crypto.randomUUID(),
+        attempt: 1,
+        expectedEpoch: draining!.leaseEpoch,
+        expectedInstanceId: "sb-claim-retry",
+        captureTimeoutMs: 60_000,
+      }),
+    ).toBeNull();
+
+    // Even the right operation cannot replay the same attempt as a successor.
+    expect(
+      await replaceWorkspaceArchiveCaptureAfterProof(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        priorCaptureId: firstCaptureId,
+        captureId: crypto.randomUUID(),
+        operationId,
+        attempt: 1,
+        expectedEpoch: draining!.leaseEpoch,
+        expectedInstanceId: "sb-claim-retry",
+        captureTimeoutMs: 60_000,
+      }),
+    ).toBeNull();
+
+    const secondCaptureId = crypto.randomUUID();
+    expect(
+      await replaceWorkspaceArchiveCaptureAfterProof(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        priorCaptureId: firstCaptureId,
+        captureId: secondCaptureId,
+        operationId,
+        attempt: 2,
+        expectedEpoch: draining!.leaseEpoch,
+        expectedInstanceId: "sb-claim-retry",
+        captureTimeoutMs: 60_000,
+      }),
+    ).toBeNull();
+
+    await admin`
+      update sandbox_leases
+      set archive_capture_started_at = now() - interval '2 minutes',
+          archive_capture_deadline_at = now() - interval '1 minute'
+      where workspace_id = ${workspaceId}
+        and sandbox_group_id = ${groupId}`;
+    expect(
+      await workspaceArchiveCaptureDeadlineElapsed(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        captureId: firstCaptureId,
+        expectedEpoch: draining!.leaseEpoch,
+        expectedInstanceId: "sb-claim-retry",
+      }),
+    ).toBe(true);
+
+    // Expiry does not let the same logical operation replay an equal/older
+    // attempt under a new physical request identity.
+    expect(
+      await replaceWorkspaceArchiveCaptureAfterProof(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        priorCaptureId: firstCaptureId,
+        captureId: crypto.randomUUID(),
+        operationId,
+        attempt: 1,
+        expectedEpoch: draining!.leaseEpoch,
+        expectedInstanceId: "sb-claim-retry",
+        captureTimeoutMs: 60_000,
+      }),
+    ).toBeNull();
+
+    const second = await replaceWorkspaceArchiveCaptureAfterProof(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      priorCaptureId: firstCaptureId,
+      captureId: secondCaptureId,
+      operationId,
+      attempt: 2,
+      expectedEpoch: draining!.leaseEpoch,
+      expectedInstanceId: "sb-claim-retry",
+      captureTimeoutMs: 60_000,
+    });
+    expect(second).toMatchObject({
+      id: secondCaptureId,
+      operationId,
+      providerRequestId: first.claim.providerRequestId,
+      providerReplaySafe: false,
+      attempt: 2,
+      leaseEpoch: draining!.leaseEpoch,
+    });
+
+    const archive = Buffer.from("SUCCESSOR_CAPTURE_ARCHIVE").toString("base64");
+    const stalePublication = await persistDrainSnapshotRaw(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: draining!.leaseEpoch,
+      expectedInstanceId: "sb-claim-retry",
+      expectedWorkspaceGeneration: 0,
+      captureId: firstCaptureId,
+      workspaceArchive: archive,
+      workspaceArchiveMeta: archiveDescriptor(archive, 1_900_000_000_001),
+    });
+    expect(stalePublication.wrote).toBe(false);
+    expect(
+      await releaseWorkspaceArchiveCapture(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        captureId: firstCaptureId,
+        expectedEpoch: draining!.leaseEpoch,
+        expectedInstanceId: "sb-claim-retry",
+      }),
+    ).toBe(false);
+
+    // The old callback is accepted only through the stable provider-operation
+    // lineage. This repairs a lost callback without replaying a generic
+    // provider request and settles the currently owning successor receipt.
+    const latePublication = await persistDrainSnapshotRaw(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: draining!.leaseEpoch,
+      expectedInstanceId: "sb-claim-retry",
+      expectedWorkspaceGeneration: 0,
+      captureId: firstCaptureId,
+      providerRequestId: first.claim.providerRequestId,
+      workspaceArchive: archive,
+      workspaceArchiveMeta: archiveDescriptor(archive, 1_900_000_000_001),
+    });
+    expect(latePublication.wrote).toBe(true);
+    expect(
+      await confirmDrainCold(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        expectedEpoch: draining!.leaseEpoch,
+        expectedCaptureId: firstCaptureId,
+      }),
+    ).toMatchObject({ wentCold: false });
+    expect(
+      await confirmDrainCold(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        expectedEpoch: draining!.leaseEpoch,
+        expectedCaptureId: secondCaptureId,
+      }),
+    ).toMatchObject({ wentCold: true });
+  }, 60_000);
+
   test("(3a) releasing a completed direct request settles its abandoned null-outcome admission", async () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
@@ -1927,13 +3521,28 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     const ARCHIVE_B64 = Buffer.from(
       'MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"im-snap-xyz"}',
     ).toString("base64");
-    const persisted = await persistDrainSnapshot(db, {
+    const captureId = crypto.randomUUID();
+    expect(
+      await claimWorkspaceArchiveCapture(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        captureId,
+        expectedEpoch: epoch,
+        expectedInstanceId: "sb-live",
+        liveness: "draining",
+        captureTimeoutMs: 60_000,
+        minIntervalMs: 0,
+      }),
+    ).toMatchObject({ status: "claimed" });
+    const persisted = await persistDrainSnapshotRaw(db, {
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
       expectedEpoch: epoch,
       expectedInstanceId: "sb-live",
       expectedWorkspaceGeneration: 0,
+      captureId,
       workspaceArchive: ARCHIVE_B64,
       workspaceArchiveMeta: archiveDescriptor(ARCHIVE_B64, 1_900_000_000_000),
     });
@@ -1945,6 +3554,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       workspaceId,
       sandboxGroupId: groupId,
       expectedEpoch: epoch,
+      expectedCaptureId: captureId,
     });
     expect(cold.wentCold).toBe(true);
 
@@ -2102,6 +3712,322 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (retry.role === "blocked") {
       expect(retry.code).toBe("restore_unrecoverable");
     }
+  }, 60_000);
+
+  test("(8b) a provider-loss cold commit adopts the exact late capture callback", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const acquired = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "late-provider-capture",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    expect(acquired.role).toBe("spawner");
+    const instanceId = "sb-late-provider-capture";
+    const committed = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: acquired.lease.leaseEpoch,
+      instanceId,
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: {
+          providerState: { sandboxId: instanceId, workspacePersistence: "tar" },
+        },
+      },
+      leaseTtlMs: 45_000,
+    });
+    expect(committed.committed).toBe(true);
+    await releaseLeaseHolder(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "late-provider-capture",
+      idleGraceMs: 0,
+    });
+    const source = await readLease(db, workspaceId, groupId);
+    expect(source?.liveness).toBe("draining");
+    const captureId = crypto.randomUUID();
+    const claim = await claimWorkspaceArchiveCapture(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      captureId,
+      operationId: captureId,
+      attempt: 1,
+      expectedEpoch: source!.leaseEpoch,
+      expectedInstanceId: instanceId,
+      liveness: "draining",
+      captureTimeoutMs: 60_000,
+      minIntervalMs: 0,
+    });
+    expect(claim.status).toBe("claimed");
+    if (claim.status !== "claimed") throw new Error("late capture fixture was not claimed");
+    expect(claim.claim.providerReplaySafe).toBe(false);
+
+    const cold = await confirmDrainCold(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: source!.leaseEpoch,
+      expectedCaptureId: captureId,
+      providerMissingBeforeCapture: true,
+    });
+    expect(cold.wentCold).toBe(true);
+    const beforeCallback = await readLease(db, workspaceId, groupId);
+    expect(beforeCallback?.recovery.restore.status).toBe("unrecoverable");
+    expect(beforeCallback?.recovery.lateArchiveCapture).toMatchObject({
+      captureId,
+      providerRequestId: claim.claim.providerRequestId,
+      sourceLeaseId: source!.id,
+      sourceLeaseEpoch: source!.leaseEpoch,
+      sourceInstanceId: instanceId,
+      sourceWorkspaceGeneration: 0,
+    });
+    const blocked = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "blocked-before-late-callback",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    expect(blocked).toMatchObject({ role: "blocked", code: "restore_unrecoverable" });
+
+    const archive = Buffer.from("LATE_PROVIDER_CAPTURE_ARCHIVE").toString("base64");
+    const descriptor = archiveDescriptor(archive, 1_900_000_000_111);
+    const published = await persistDrainSnapshotRaw(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedLeaseId: source!.id,
+      expectedEpoch: source!.leaseEpoch,
+      expectedInstanceId: instanceId,
+      expectedWorkspaceGeneration: 0,
+      captureId,
+      providerRequestId: claim.claim.providerRequestId,
+      workspaceArchive: archive,
+      workspaceArchiveMeta: descriptor,
+    });
+    expect(published).toEqual({ wrote: true, archiveRevision: descriptor.revision });
+    const repaired = await readLease(db, workspaceId, groupId);
+    expect(repaired).toMatchObject({
+      liveness: "cold",
+      leaseEpoch: source!.leaseEpoch + 1,
+      archiveGeneration: 0,
+      archiveComplete: true,
+    });
+    expect(repaired?.recovery).toMatchObject({
+      archive: { status: "available", current: { revision: descriptor.revision } },
+      restore: { status: "pending", selectedRevision: descriptor.revision },
+      workspace: { status: "not_ready" },
+    });
+    expect(repaired?.recovery.lateArchiveCapture).toBeUndefined();
+
+    // The one-shot receipt cannot mutate a later state a second time.
+    expect(
+      await persistDrainSnapshotRaw(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        expectedLeaseId: source!.id,
+        expectedEpoch: source!.leaseEpoch,
+        expectedInstanceId: instanceId,
+        expectedWorkspaceGeneration: 0,
+        captureId,
+        providerRequestId: claim.claim.providerRequestId,
+        workspaceArchive: archive,
+        workspaceArchiveMeta: descriptor,
+      }),
+    ).toEqual({ wrote: false, archiveRevision: null });
+    const successor = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "spawn-after-late-callback",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    expect(successor.role).toBe("spawner");
+  }, 60_000);
+
+  test("(8c) a late native checkpoint atomically supersedes an older recoverable archive", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const acquired = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "late-native-capture",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    expect(acquired.role).toBe("spawner");
+    const instanceId = "sb-late-native-capture";
+    const priorArchive = Buffer.from("PRIOR_RECOVERABLE_ARCHIVE").toString("base64");
+    const priorDescriptor = archiveDescriptor(priorArchive, 1_900_000_000_100);
+    const committed = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: acquired.lease.leaseEpoch,
+      instanceId,
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: {
+          providerState: {
+            sandboxId: instanceId,
+            workspacePersistence: "snapshot_filesystem",
+          },
+          workspaceArchive: priorArchive,
+          workspaceArchiveMeta: priorDescriptor,
+          workspaceArchiveAt: priorDescriptor.capturedAt,
+        },
+      },
+      leaseTtlMs: 45_000,
+    });
+    expect(committed.committed).toBe(true);
+    // The fixture starts with a provider-restored, generation-complete archive.
+    // Production reaches the same state through rematerialization verification.
+    await admin`
+      update sandbox_leases
+      set archive_generation = workspace_generation
+      where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+    await releaseLeaseHolder(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "late-native-capture",
+      idleGraceMs: 0,
+    });
+    const source = await readLease(db, workspaceId, groupId);
+    expect(source).toMatchObject({ liveness: "draining", archiveComplete: true });
+
+    const operationId = crypto.randomUUID();
+    const claim = await claimWorkspaceArchiveCapture(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      captureId: operationId,
+      operationId,
+      attempt: 1,
+      expectedEpoch: source!.leaseEpoch,
+      expectedInstanceId: instanceId,
+      liveness: "draining",
+      captureTimeoutMs: 60_000,
+      minIntervalMs: 0,
+      providerReplaySafe: true,
+      takeoverSafe: true,
+    });
+    expect(claim.status).toBe("claimed");
+    if (claim.status !== "claimed") throw new Error("native capture fixture was not claimed");
+    expect(claim.claim.providerReplaySafe).toBe(true);
+
+    const imageId = "im-late-native-capture";
+    const nativeBytes = Buffer.from(
+      `MODAL_SANDBOX_FS_SNAPSHOT_V1\n${JSON.stringify({
+        snapshot_id: imageId,
+        workspace_persistence: "snapshot_filesystem",
+      })}`,
+    );
+    const nativeArchive = nativeBytes.toString("base64");
+    const nativeSha = createHash("sha256").update(nativeBytes).digest("hex");
+    const capturedAtMs = 1_900_000_000_200;
+    const nativeDescriptor = {
+      version: 2 as const,
+      kind: "provider_snapshot" as const,
+      revision: `wa2:${capturedAtMs}:${nativeSha}`,
+      archiveSha256: nativeSha,
+      archiveBytes: nativeBytes.length,
+      capturedAt: new Date(capturedAtMs).toISOString(),
+      provider: "modal_snapshot_filesystem" as const,
+      snapshotId: imageId,
+      workspacePersistence: "snapshot_filesystem",
+    };
+    const binding = {
+      version: 1,
+      serverUrl: "https://modal.test",
+      workspaceName: "late-native-workspace",
+      environment: "main",
+    };
+    const candidate = await registerSandboxCheckpointArtifact(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      sourceLeaseId: claim.claim.leaseId,
+      sourceLeaseEpoch: claim.claim.leaseEpoch,
+      sourceInstanceId: claim.claim.instanceId,
+      sourceWorkspaceGeneration: claim.claim.workspaceGeneration,
+      providerBindingKey: JSON.stringify(binding),
+      providerBinding: binding,
+      workspaceArchive: nativeArchive,
+      workspaceArchiveMeta: nativeDescriptor,
+    });
+
+    expect(
+      await confirmDrainCold(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        expectedEpoch: source!.leaseEpoch,
+        expectedCaptureId: claim.claim.id,
+        providerMissingBeforeCapture: true,
+      }),
+    ).toEqual({ wentCold: true });
+    const beforeCallback = await readLease(db, workspaceId, groupId);
+    expect(beforeCallback?.recovery).toMatchObject({
+      archive: { status: "available", current: { revision: priorDescriptor.revision } },
+      restore: { status: "pending", selectedRevision: priorDescriptor.revision },
+      lateArchiveCapture: { providerRequestId: operationId },
+    });
+
+    expect(
+      await persistDrainSnapshotRaw(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        expectedLeaseId: source!.id,
+        expectedEpoch: source!.leaseEpoch,
+        expectedInstanceId: instanceId,
+        expectedWorkspaceGeneration: 0,
+        captureId: claim.claim.id,
+        providerRequestId: claim.claim.providerRequestId,
+        workspaceArchive: nativeArchive,
+        workspaceArchiveMeta: nativeDescriptor,
+        checkpointArtifactId: candidate.id,
+      }),
+    ).toEqual({ wrote: true, archiveRevision: nativeDescriptor.revision });
+
+    const repaired = await readLease(db, workspaceId, groupId);
+    expect(repaired).toMatchObject({
+      liveness: "cold",
+      currentCheckpointArtifactId: candidate.id,
+      archiveComplete: true,
+      recovery: {
+        archive: {
+          status: "available",
+          current: { revision: nativeDescriptor.revision },
+          previous: { revision: priorDescriptor.revision },
+        },
+        restore: { status: "pending", selectedRevision: nativeDescriptor.revision },
+      },
+    });
+    expect(repaired?.recovery.lateArchiveCapture).toBeUndefined();
+    const [artifact] = await admin<Array<{ state: string }>>`
+      select state from sandbox_checkpoint_artifacts where id = ${candidate.id}`;
+    expect(artifact?.state).toBe("current");
   }, 60_000);
 
   // IMAGE IS SHARED STATE (B3): the lease stamps the image the box runs; a resume with
@@ -3151,6 +5077,179 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     }
   }, 60_000);
 
+  test("(22c) checkpoint GC cannot delete the exact native snapshot owned by an active capture receipt", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const acquired = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "capture-owned-checkpoint",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    expect(acquired.role).toBe("spawner");
+    const providerStarted = new Date();
+    expect(
+      (
+        await recordWarmingSandboxCreated(db, {
+          accountId,
+          workspaceId,
+          sandboxGroupId: groupId,
+          expectedEpoch: acquired.lease.leaseEpoch,
+          instanceId: "sb-capture-owned-checkpoint",
+          resumeBackendId: "modal",
+          resumeState: { backendId: "modal", sessionState: {} },
+          providerCreatedAt: providerStarted,
+          providerDeadlineAt: new Date(providerStarted.getTime() + 86_400_000),
+          leaseTtlMs: 45_000,
+        })
+      ).recorded,
+    ).toBe(true);
+    const committed = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: acquired.lease.leaseEpoch,
+      instanceId: "sb-capture-owned-checkpoint",
+      resumeBackendId: "modal",
+      resumeState: { backendId: "modal", sessionState: {} },
+      leaseTtlMs: 45_000,
+    });
+    expect(committed.committed).toBe(true);
+    await releaseLeaseHolder(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "capture-owned-checkpoint",
+      idleGraceMs: 0,
+    });
+
+    const captureId = crypto.randomUUID();
+    const operationId = crypto.randomUUID();
+    const capture = await claimWorkspaceArchiveCapture(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      captureId,
+      operationId,
+      expectedEpoch: committed.lease!.leaseEpoch,
+      expectedInstanceId: "sb-capture-owned-checkpoint",
+      liveness: "draining",
+      captureTimeoutMs: 60_000,
+      minIntervalMs: 0,
+    });
+    expect(capture.status).toBe("claimed");
+    if (capture.status !== "claimed") throw new Error("Expected exact capture claim");
+
+    const providerImageId = "im-capture-owned-checkpoint";
+    const bytes = Buffer.from(
+      `MODAL_SANDBOX_FS_SNAPSHOT_V1\n${JSON.stringify({
+        snapshot_id: providerImageId,
+        workspace_persistence: "snapshot_filesystem",
+      })}`,
+    );
+    const sha = createHash("sha256").update(bytes).digest("hex");
+    const capturedAtMs = 1_900_000_100_000;
+    const binding = {
+      version: 1,
+      serverUrl: "https://modal.test",
+      workspaceName: "workspace",
+      environment: "main",
+    };
+    const candidate = await registerSandboxCheckpointArtifact(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      sourceLeaseId: capture.claim.leaseId,
+      sourceLeaseEpoch: capture.claim.leaseEpoch,
+      sourceInstanceId: capture.claim.instanceId,
+      sourceWorkspaceGeneration: capture.claim.workspaceGeneration,
+      providerBindingKey: JSON.stringify(binding),
+      providerBinding: binding,
+      workspaceArchive: bytes.toString("base64"),
+      workspaceArchiveMeta: {
+        version: 2,
+        kind: "provider_snapshot",
+        revision: `wa2:${capturedAtMs}:${sha}`,
+        archiveSha256: sha,
+        archiveBytes: bytes.length,
+        capturedAt: new Date(capturedAtMs).toISOString(),
+        provider: "modal_snapshot_filesystem",
+        snapshotId: providerImageId,
+        workspacePersistence: "snapshot_filesystem",
+      },
+    });
+    expect(
+      await markSandboxCheckpointArtifactDeletePending(db, {
+        accountId,
+        workspaceId,
+        artifactId: candidate.id,
+        reason: "publication outcome pending recovery",
+      }),
+    ).toBe(true);
+
+    // The capture claim keeps this exact source object out of GC. A successor
+    // replay can therefore reclaim the predecessor's pessimistic handoff and
+    // publish the same provider image without taking another snapshot.
+    const recoveredPublication = await persistDrainSnapshotRaw(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: capture.claim.leaseEpoch,
+      expectedInstanceId: capture.claim.instanceId,
+      expectedWorkspaceGeneration: capture.claim.workspaceGeneration,
+      captureId,
+      workspaceArchive: bytes.toString("base64"),
+      workspaceArchiveMeta: {
+        version: 2,
+        kind: "provider_snapshot",
+        revision: `wa2:${capturedAtMs}:${sha}`,
+        archiveSha256: sha,
+        archiveBytes: bytes.length,
+        capturedAt: new Date(capturedAtMs).toISOString(),
+        provider: "modal_snapshot_filesystem",
+        snapshotId: providerImageId,
+        workspacePersistence: "snapshot_filesystem",
+      },
+      checkpointArtifactId: candidate.id,
+    });
+    expect(recoveredPublication).toEqual({
+      wrote: true,
+      archiveRevision: `wa2:${capturedAtMs}:${sha}`,
+    });
+    expect(await readLease(db, workspaceId, groupId)).toMatchObject({
+      archiveCapture: { id: captureId, publishedAt: expect.any(Date) },
+      currentCheckpointArtifactId: candidate.id,
+    });
+
+    const protectedClaims = await claimSandboxCheckpointArtifactsForGc(db, {
+      claimId: crypto.randomUUID(),
+      limit: 500,
+      claimTtlMs: 60_000,
+    });
+    expect(protectedClaims.some((claim) => claim.id === candidate.id)).toBe(false);
+
+    expect(
+      await releaseWorkspaceArchiveCapture(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        captureId,
+        expectedEpoch: capture.claim.leaseEpoch,
+        expectedInstanceId: capture.claim.instanceId,
+      }),
+    ).toBe(false);
+    const collectibleClaims = await claimSandboxCheckpointArtifactsForGc(db, {
+      claimId: crypto.randomUUID(),
+      limit: 500,
+      claimTtlMs: 60_000,
+    });
+    expect(collectibleClaims.some((claim) => claim.id === candidate.id)).toBe(false);
+  }, 60_000);
+
   test("(23) native checkpoint publication rotates durable artifact ownership and exposes only the evicted object to GC", async () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
@@ -3190,15 +5289,6 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     });
     expect(committed.committed).toBe(true);
     const epoch = committed.lease!.leaseEpoch;
-    await releaseLeaseHolder(db, {
-      accountId,
-      workspaceId,
-      sandboxGroupId: groupId,
-      kind: "turn",
-      holderId: "checkpoint-owner",
-      idleGraceMs: 45_000,
-    });
-
     const binding = {
       version: 1,
       serverUrl: "https://modal.test",
@@ -3207,7 +5297,19 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     };
     const bindingKey = JSON.stringify(binding);
     const artifacts: string[] = [];
+    const sourceLeaseId = committed.lease!.id;
+    let currentEpoch = epoch;
+    let currentInstanceId = "sb-checkpoint";
+    let currentHolderId = "checkpoint-owner";
     for (let index = 1; index <= 3; index += 1) {
+      await releaseLeaseHolder(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        kind: "turn",
+        holderId: currentHolderId,
+        idleGraceMs: 45_000,
+      });
       const capturedAtMs = 1_900_000_000_000 + index;
       const bytes = Buffer.from(
         `MODAL_SANDBOX_FS_SNAPSHOT_V1\n${JSON.stringify({
@@ -3234,8 +5336,8 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
             accountId,
             workspaceId,
             sandboxGroupId: groupId,
-            expectedEpoch: epoch,
-            expectedInstanceId: "sb-checkpoint",
+            expectedEpoch: currentEpoch,
+            expectedInstanceId: currentInstanceId,
             expectedWorkspaceGeneration: 0,
             workspaceArchive: archive,
           } as never),
@@ -3245,8 +5347,8 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
             accountId,
             workspaceId,
             sandboxGroupId: groupId,
-            expectedEpoch: epoch,
-            expectedInstanceId: "sb-checkpoint",
+            expectedEpoch: currentEpoch,
+            expectedInstanceId: currentInstanceId,
             expectedWorkspaceGeneration: 0,
             workspaceArchive: archive,
             workspaceArchiveMeta: descriptor,
@@ -3257,9 +5359,9 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
         accountId,
         workspaceId,
         sandboxGroupId: groupId,
-        sourceLeaseId: committed.lease!.id,
-        sourceLeaseEpoch: epoch,
-        sourceInstanceId: "sb-checkpoint",
+        sourceLeaseId,
+        sourceLeaseEpoch: currentEpoch,
+        sourceInstanceId: currentInstanceId,
         sourceWorkspaceGeneration: 0,
         providerBindingKey: bindingKey,
         providerBinding: binding,
@@ -3286,9 +5388,9 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
           accountId,
           workspaceId,
           sandboxGroupId: groupId,
-          sourceLeaseId: committed.lease!.id,
-          sourceLeaseEpoch: epoch,
-          sourceInstanceId: "sb-checkpoint",
+          sourceLeaseId,
+          sourceLeaseEpoch: currentEpoch,
+          sourceInstanceId: currentInstanceId,
           sourceWorkspaceGeneration: 0,
           providerBindingKey: bindingKey,
           providerBinding: binding,
@@ -3302,9 +5404,9 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
             accountId,
             workspaceId,
             sandboxGroupId: groupId,
-            sourceLeaseId: committed.lease!.id,
-            sourceLeaseEpoch: epoch,
-            sourceInstanceId: "sb-checkpoint",
+            sourceLeaseId,
+            sourceLeaseEpoch: currentEpoch,
+            sourceInstanceId: currentInstanceId,
             sourceWorkspaceGeneration: 0,
             providerBindingKey: bindingKey,
             providerBinding: { ...binding, workspaceName: "different-workspace" },
@@ -3325,9 +5427,9 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
             accountId,
             workspaceId,
             sandboxGroupId: groupId,
-            sourceLeaseId: committed.lease!.id,
-            sourceLeaseEpoch: epoch,
-            sourceInstanceId: "sb-checkpoint",
+            sourceLeaseId,
+            sourceLeaseEpoch: currentEpoch,
+            sourceInstanceId: currentInstanceId,
             sourceWorkspaceGeneration: 0,
             providerBindingKey: bindingKey,
             providerBinding: binding,
@@ -3344,18 +5446,110 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
         ).rejects.toThrow(SandboxCheckpointArtifactRegistrationConflictError);
       }
       artifacts.push(candidate.id);
-      const persisted = await persistDrainSnapshot(db, {
+      const drainCaptureId = crypto.randomUUID();
+      const claim = await claimWorkspaceArchiveCapture(db, {
         accountId,
         workspaceId,
         sandboxGroupId: groupId,
-        expectedEpoch: epoch,
-        expectedInstanceId: "sb-checkpoint",
+        captureId: drainCaptureId,
+        expectedEpoch: currentEpoch,
+        expectedInstanceId: currentInstanceId,
+        liveness: "draining",
+        captureTimeoutMs: 60_000,
+        minIntervalMs: 0,
+      });
+      expect(claim.status).toBe("claimed");
+      const persisted = await persistDrainSnapshotRaw(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        expectedEpoch: currentEpoch,
+        expectedInstanceId: currentInstanceId,
         expectedWorkspaceGeneration: 0,
+        captureId: drainCaptureId,
         workspaceArchive: archive,
         workspaceArchiveMeta: descriptor,
         checkpointArtifactId: candidate.id,
       });
       expect(persisted.wrote).toBe(true);
+
+      const cold = await confirmDrainCold(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        expectedEpoch: currentEpoch,
+        expectedCaptureId: drainCaptureId,
+      });
+      expect(cold.wentCold).toBe(true);
+      if (index === 3) continue;
+
+      currentHolderId = `checkpoint-owner-${index + 1}`;
+      const successor = await acquireLease(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        kind: "turn",
+        holderId: currentHolderId,
+        backend: "modal",
+        leaseTtlMs: 45_000,
+      });
+      expect(successor.role).toBe("spawner");
+      currentEpoch = successor.lease.leaseEpoch;
+      const rematerializationId = crypto.randomUUID();
+      const begun = await beginSandboxRematerialization(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        expectedEpoch: currentEpoch,
+        rematerializationId,
+      });
+      expect(begun.status).toBe("started");
+      currentInstanceId = `sb-checkpoint-restored-${index}`;
+      const restored = await recordWarmingSandboxCreated(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        expectedEpoch: currentEpoch,
+        rematerializationId,
+        instanceId: currentInstanceId,
+        resumeBackendId: "modal",
+        resumeState: {
+          backendId: "modal",
+          sessionState: { providerState: { sandboxId: currentInstanceId } },
+        },
+        leaseTtlMs: 45_000,
+      });
+      expect(restored.recorded).toBe(true);
+      expect(
+        (
+          await markSandboxRestoreVerifying(db, {
+            accountId,
+            workspaceId,
+            sandboxGroupId: groupId,
+            expectedEpoch: currentEpoch,
+            rematerializationId,
+          })
+        ).wrote,
+      ).toBe(true);
+      const warm = await commitWarmingToWarm(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        expectedEpoch: currentEpoch,
+        instanceId: currentInstanceId,
+        resumeBackendId: "modal",
+        resumeState: {
+          backendId: "modal",
+          sessionState: { providerState: { sandboxId: currentInstanceId } },
+        },
+        rematerialization: {
+          id: rematerializationId,
+          verifiedRevision: descriptor.revision,
+        },
+        leaseTtlMs: 45_000,
+      });
+      expect(warm.committed).toBe(true);
+      currentEpoch = warm.lease!.leaseEpoch;
     }
 
     const [evictedArtifactId, previousArtifactId, currentArtifactId] = artifacts;
@@ -3374,13 +5568,6 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       [previousArtifactId]: "previous",
       [currentArtifactId]: "current",
     });
-    const cold = await confirmDrainCold(db, {
-      accountId,
-      workspaceId,
-      sandboxGroupId: groupId,
-      expectedEpoch: epoch,
-    });
-    expect(cold.wentCold).toBe(true);
     const successor = await acquireLease(db, {
       accountId,
       workspaceId,
@@ -3417,5 +5604,278 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       claimTtlMs: 60_000,
     });
     expect(claims.map((claim) => claim.id)).toEqual([evictedArtifactId]);
+  }, 60_000);
+
+  test("(23) Docker continuity serializes restart ownership and preserves the workspace across retry", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const workspaceRootPath = "/var/lib/opengeni/docker-workspaces/exact-continuity";
+    const envelope = (containerId: string) => ({
+      backendId: "docker",
+      opengeniProviderInstanceId: containerId,
+      sessionState: {
+        providerState: {
+          containerId,
+          workspaceRootPath,
+          workspaceRootOwned: true,
+          snapshot: null,
+        },
+      },
+    });
+
+    const initial = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "docker-initial",
+      backend: "docker",
+      leaseTtlMs: 45_000,
+    });
+    expect(initial.role).toBe("spawner");
+    const warm = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: initial.lease.leaseEpoch,
+      instanceId: "docker-old",
+      resumeBackendId: "docker",
+      resumeState: envelope("docker-old"),
+      leaseTtlMs: 45_000,
+    });
+    expect(warm.committed).toBe(true);
+
+    const lost = await markWarmLeaseInstanceLost(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: warm.lease!.leaseEpoch,
+      expectedInstanceId: "docker-old",
+    });
+    expect(lost.status).toBe("marked");
+    if (lost.status !== "marked") throw new Error("Docker loss fixture was stale");
+    expect(lost.lease.liveness).toBe("cold");
+    expect(lost.lease.recovery.restore.status).toBe("pending");
+    expect(lost.lease.recovery.continuity).toEqual({
+      version: 1,
+      backend: "docker",
+      kind: "docker_workspace",
+      sourceInstanceId: "docker-old",
+      continuityKey: workspaceRootPath,
+    });
+    expect(lost.lease.resumeState).toMatchObject(envelope("docker-old"));
+
+    const elected = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "docker-recovery",
+      backend: "docker",
+      leaseTtlMs: 45_000,
+    });
+    expect(elected.role).toBe("spawner");
+    const continuity = elected.lease.recovery.continuity!;
+    const wrongRecord = await recordWarmingSandboxCreated(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: elected.lease.leaseEpoch,
+      instanceId: "docker-new",
+      resumeBackendId: "docker",
+      resumeState: envelope("docker-new"),
+      continuityRecovery: { ...continuity, continuityKey: `${workspaceRootPath}-wrong` },
+      leaseTtlMs: 45_000,
+    });
+    expect(wrongRecord.recorded).toBe(false);
+    const recorded = await recordWarmingSandboxCreated(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: elected.lease.leaseEpoch,
+      instanceId: "docker-new",
+      resumeBackendId: "docker",
+      resumeState: envelope("docker-new"),
+      continuityRecovery: continuity,
+      leaseTtlMs: 45_000,
+    });
+    expect(recorded.recorded).toBe(true);
+
+    const omittedReceipt = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: elected.lease.leaseEpoch,
+      instanceId: "docker-new",
+      resumeBackendId: "docker",
+      resumeState: envelope("docker-new"),
+      leaseTtlMs: 45_000,
+    });
+    expect(omittedReceipt).toMatchObject({ committed: false, reason: "continuity_mismatch" });
+    const adopted = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: elected.lease.leaseEpoch,
+      instanceId: "docker-new",
+      resumeBackendId: "docker",
+      resumeState: envelope("docker-new"),
+      continuityRecovery: continuity,
+      leaseTtlMs: 45_000,
+    });
+    expect(adopted.committed).toBe(true);
+    expect(adopted.lease?.recovery.continuity).toBeUndefined();
+
+    const secondLoss = await markWarmLeaseInstanceLost(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: adopted.lease!.leaseEpoch,
+      expectedInstanceId: "docker-new",
+    });
+    expect(secondLoss.status).toBe("marked");
+    if (secondLoss.status !== "marked") throw new Error("second Docker loss fixture was stale");
+    const retryOwner = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "docker-retry",
+      backend: "docker",
+      leaseTtlMs: 45_000,
+    });
+    expect(retryOwner.role).toBe("spawner");
+    const retryContinuity = retryOwner.lease.recovery.continuity!;
+    const retryRecord = await recordWarmingSandboxCreated(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: retryOwner.lease.leaseEpoch,
+      instanceId: "docker-retry-wrapper",
+      resumeBackendId: "docker",
+      resumeState: envelope("docker-retry-wrapper"),
+      continuityRecovery: retryContinuity,
+      leaseTtlMs: 45_000,
+    });
+    expect(retryRecord.recorded).toBe(true);
+    await failWarmingToCold(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: retryOwner.lease.leaseEpoch,
+    });
+    const retryCold = await readLease(db, workspaceId, groupId);
+    expect(retryCold?.liveness).toBe("cold");
+    expect(retryCold?.recovery.continuity).toEqual({
+      ...retryContinuity,
+      sourceInstanceId: "docker-retry-wrapper",
+    });
+    expect(retryCold?.resumeState).toMatchObject(envelope("docker-retry-wrapper"));
+  }, 60_000);
+
+  test("(24) Docker continuity remains authoritative while a verified archive is selected as fallback", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const workspaceRootPath = "/var/lib/opengeni/docker-workspaces/archive-fallback";
+    const archive = Buffer.from("older-verified-fallback").toString("base64");
+    const descriptor = archiveDescriptor(archive, Date.parse("2031-01-02T03:04:05.000Z"));
+    const envelope = (containerId: string) => ({
+      backendId: "docker",
+      opengeniProviderInstanceId: containerId,
+      sessionState: {
+        providerState: {
+          containerId,
+          workspaceRootPath,
+          workspaceRootOwned: true,
+          snapshot: null,
+        },
+        workspaceArchive: archive,
+        workspaceArchiveMeta: descriptor,
+      },
+    });
+    const initial = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "docker-archive-initial",
+      backend: "docker",
+      leaseTtlMs: 45_000,
+    });
+    const warm = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: initial.lease.leaseEpoch,
+      instanceId: "docker-archive-old",
+      resumeBackendId: "docker",
+      resumeState: envelope("docker-archive-old"),
+      leaseTtlMs: 45_000,
+    });
+    expect(warm.committed).toBe(true);
+    await admin`
+      update sandbox_leases set archive_generation = workspace_generation
+      where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+    const lost = await markWarmLeaseInstanceLost(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: warm.lease!.leaseEpoch,
+      expectedInstanceId: "docker-archive-old",
+    });
+    expect(lost.status).toBe("marked");
+    const elected = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "docker-archive-recovery",
+      backend: "docker",
+      leaseTtlMs: 45_000,
+    });
+    expect(elected.role).toBe("spawner");
+    const continuity = elected.lease.recovery.continuity!;
+    const rematerializationId = crypto.randomUUID();
+    const begun = await beginSandboxRematerialization(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: elected.lease.leaseEpoch,
+      rematerializationId,
+    });
+    expect(begun.status).toBe("started");
+    if (begun.status !== "started") throw new Error("fallback selection was blocked");
+    expect(begun.lease.recovery.continuity).toEqual(continuity);
+    const recorded = await recordWarmingSandboxCreated(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: elected.lease.leaseEpoch,
+      rematerializationId,
+      instanceId: "docker-archive-new",
+      resumeBackendId: "docker",
+      resumeState: envelope("docker-archive-new"),
+      continuityRecovery: continuity,
+      leaseTtlMs: 45_000,
+    });
+    expect(recorded.recorded).toBe(true);
+    const adopted = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: elected.lease.leaseEpoch,
+      instanceId: "docker-archive-new",
+      resumeBackendId: "docker",
+      resumeState: envelope("docker-archive-new"),
+      continuityRecovery: continuity,
+      leaseTtlMs: 45_000,
+    });
+    expect(adopted.committed).toBe(true);
+    expect(adopted.lease?.recovery).toMatchObject({
+      archive: { status: "available" },
+      restore: { status: "not_required" },
+      workspace: { status: "ready" },
+    });
+    expect(adopted.lease?.recovery.continuity).toBeUndefined();
   }, 60_000);
 });

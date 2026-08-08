@@ -1,10 +1,16 @@
 import { RunloopSandboxClient } from "@openai/agents-extensions/sandbox/runloop";
 import { CAPABILITY_DESCRIPTORS } from "../capabilities";
 import { SandboxConfigError } from "../errors";
-import type { ProviderRegistration } from "./types";
+import { REPEATABLE_PORTABLE_TAR_WORKSPACE_CAPTURE, type ProviderRegistration } from "./types";
 
 export const runloopProvider: ProviderRegistration = {
   backend: "runloop",
+  exactResumeMode: "custom",
+  instanceIdFields: ["devboxId"],
+  // The SDK otherwise creates a non-idempotent native disk snapshot whose
+  // provider artifact has no OpenGeni outcome ledger. Lifecycle capture uses
+  // the inherited unique-path tar primitive instead.
+  workspaceCapturePolicy: () => REPEATABLE_PORTABLE_TAR_WORKSPACE_CAPTURE,
   descriptor: CAPABILITY_DESCRIPTORS.runloop,
   validateCredentials(settings) {
     if (!settings.runloopApiKey) {
@@ -22,11 +28,17 @@ export const runloopProvider: ProviderRegistration = {
     if (settings.runloopBaseUrl) options.baseUrl = settings.runloopBaseUrl;
     if (settings.runloopBlueprintName) options.blueprintName = settings.runloopBlueprintName;
     if (settings.runloopBlueprintId) options.blueprintId = settings.runloopBlueprintId;
-    // Runloop's keep-alive lives under the timeouts bag (keepAliveTimeoutMs),
-    // NOT a top-level field — the units differ from Modal's idleTimeoutMs.
-    if (settings.runloopKeepAliveSeconds) {
-      options.timeouts = { keepAliveTimeoutMs: settings.runloopKeepAliveSeconds * 1000 };
-    }
+    // Keep the provider-native snapshot request inside the same immutable
+    // budget as OpenGeni's durable capture claim. The outer lifecycle timeout
+    // remains the final fence; this prevents an abandoned SDK request from
+    // needlessly running past it when Runloop supports an exact operation knob.
+    // Runloop keep-alive also lives in this bag (ms), not at Modal's top level.
+    options.timeouts = {
+      snapshotTimeoutMs: settings.sandboxSnapshotTimeoutMs,
+      ...(settings.runloopKeepAliveSeconds
+        ? { keepAliveTimeoutMs: settings.runloopKeepAliveSeconds * 1000 }
+        : {}),
+    };
     return new RunloopSandboxClient(options);
   },
 };

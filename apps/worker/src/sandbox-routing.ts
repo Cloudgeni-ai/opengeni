@@ -14,7 +14,7 @@
 // target lookup), and the selfhosted ControlRpc built over the events bus's NATS
 // request/reply connection.
 
-import { sandboxArchiveCaptureTimeoutMs, type Settings } from "@opengeni/config";
+import { sandboxLifecycleTransitionWaitMs, type Settings } from "@opengeni/config";
 import {
   advanceWorkspaceGenerationForRetainedProcess,
   advanceWorkspaceGeneration,
@@ -45,6 +45,7 @@ import {
   RoutingBackendRecoveryRequiredError,
   RoutingSandboxSession,
   resolveModalCheckpointProviderBindingForSession,
+  sandboxProviderInstanceIdFromEnvelope,
   sandboxBackendForSdkBackendId,
   verifySandboxExecReadiness,
   type ControlRpc,
@@ -100,6 +101,8 @@ export type RoutingWiringServices = {
     established: EstablishedSandboxSession;
     leaseEpoch: number;
   }) => void;
+  /** Cancel bounded capture waits with the owning turn activity. */
+  waitSignal?: AbortSignal;
 };
 
 /** Worker-turn routing may final-ack streamed command output, so it must always
@@ -262,27 +265,7 @@ function homeRouteRecoveryError(
 export function providerIdentityFromResumeState(
   resumeState: Record<string, unknown>,
 ): string | null {
-  const sessionState =
-    resumeState.sessionState && typeof resumeState.sessionState === "object"
-      ? (resumeState.sessionState as Record<string, unknown>)
-      : null;
-  const providerState =
-    sessionState?.providerState && typeof sessionState.providerState === "object"
-      ? (sessionState.providerState as Record<string, unknown>)
-      : null;
-  for (const field of [
-    "sandboxId",
-    "instanceId",
-    "id",
-    "hostId",
-    "containerId",
-    "workspaceRootPath",
-    "agentId",
-  ]) {
-    const value = providerState?.[field];
-    if (typeof value === "string" && value.length > 0) return value;
-  }
-  return null;
+  return sandboxProviderInstanceIdFromEnvelope(resumeState);
 }
 
 /**
@@ -448,7 +431,8 @@ function beforePersistableHomeMutation(
       expectedEpoch: backend.leaseEpoch,
       expectedInstanceId: backend.providerInstanceId,
       operation: op,
-      captureWaitMs: sandboxArchiveCaptureTimeoutMs(services.settings),
+      captureWaitMs: sandboxLifecycleTransitionWaitMs(services.settings),
+      ...(services.waitSignal ? { waitSignal: services.waitSignal } : {}),
     });
     return { admission, providerBinding };
   };
@@ -583,7 +567,8 @@ function beforeRetainedProcessMutation(
       sessionId: ids.sessionId,
       processId: process.id,
       operation: op,
-      captureWaitMs: sandboxArchiveCaptureTimeoutMs(services.settings),
+      captureWaitMs: sandboxLifecycleTransitionWaitMs(services.settings),
+      ...(services.waitSignal ? { waitSignal: services.waitSignal } : {}),
     });
 }
 
