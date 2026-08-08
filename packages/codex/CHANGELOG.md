@@ -1,5 +1,15 @@
 # @opengeni/codex
 
+## 0.2.14
+
+### Patch Changes
+
+- e2edfbc: Add provider-aware image generation with permanent verified artifacts,
+  prompt-cache-safe history, sandbox materialization, and SDK/React rendering.
+- 7f70d33: Bound long-running service memory, upgrade the OpenAI Agents SDK to 0.14.3, and preserve exact provider, streaming, and durable-resume semantics.
+- Updated dependencies [e2edfbc]
+  - @opengeni/network@0.2.1
+
 ## 0.2.13
 
 ### Patch Changes
