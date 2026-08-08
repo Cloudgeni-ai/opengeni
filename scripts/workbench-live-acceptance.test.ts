@@ -17,6 +17,7 @@ import {
   captureApiRegionalProbeEnvironment,
   controlCancellationDurationMs,
   fixturePrompt,
+  isDormantSandboxLiveness,
   isExpectedBrowserCancellation,
   maskKnownPublicEvidenceValues,
   openWorkspaceIfCollapsed,
@@ -686,6 +687,13 @@ describe("workbench live acceptance preflight", () => {
 
     expect(calls).toBe(2);
     expect(signals).toHaveLength(2);
+  });
+
+  test("accepts holderless draining as dormant without admitting a warm sandbox", () => {
+    expect(isDormantSandboxLiveness("cold")).toBe(true);
+    expect(isDormantSandboxLiveness("draining")).toBe(true);
+    expect(isDormantSandboxLiveness("warming")).toBe(false);
+    expect(isDormantSandboxLiveness("warm")).toBe(false);
   });
 
   test("requires interactive scopes only from the dedicated canary principal", () => {
