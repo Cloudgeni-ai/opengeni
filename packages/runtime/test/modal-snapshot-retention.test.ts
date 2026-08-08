@@ -98,6 +98,24 @@ describe("OpenGeni Modal 0.9 snapshot policy", () => {
     expect(callerOwnedSnapshotIds).toHaveLength(2);
   });
 
+  test("the pinned Modal patch replaces a rotated command-router transport in place", async () => {
+    // ContainerProcess and Agents' active-process table retain this client
+    // object. Replacing only the outer Sandbox wrapper would strand yielded
+    // exec/PTY processes, so the patch must swap this object's channel + stub.
+    const source = await readFile(fileURLToPath(import.meta.resolve("modal")), "utf8");
+    expect(source).toContain("createTransport(routerUrl)");
+    expect(source).toContain("const attemptedJwt = this.jwt;");
+    expect(source).toContain("if (this.jwt !== failedJwt)");
+    expect(source).toContain(
+      "const replacement = routerChanged ? this.createTransport(resp.url) : null;",
+    );
+    expect(source).toContain("this.channel = replacement.channel;");
+    expect(source).toContain("this.stub = replacement.stub;");
+    expect(source).toContain("previousChannel?.close();");
+    expect(source).toContain("Task router URL changed during session; transport replaced");
+    expect(source).not.toContain('this.logger.warn("Task router URL changed during session");');
+  });
+
   test("the runtime resolves the exact supported Modal SDK", () => {
     const modal = new ModalClient({
       tokenId: "test-token-id",

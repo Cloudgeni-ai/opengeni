@@ -1,8 +1,193 @@
 diff --git a/dist/index.cjs b/dist/index.cjs
-index e1794ee4e42d61ebb0c35654318fe5c84a946b04..7698cc32f0ce496e2c724832f30f11b3ce21b749 100644
+index e1794ee4e42d61ebb0c35654318fe5c84a946b04..decf3777c34f4e76a58e5d0f0273529c2b9419c1 100644
 --- a/dist/index.cjs
 +++ b/dist/index.cjs
-@@ -64658,7 +64658,7 @@ var Sandbox2 = class _Sandbox {
+@@ -61900,6 +61900,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+   jwtExp;
+   jwtRefreshLock = Promise.resolve();
+   logger;
++  profile;
+   closed = false;
+   static async tryInit(serverClient, taskId, sandboxId, isV2, logger2, profile) {
+     let resp;
+@@ -61928,9 +61929,41 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+       "url",
+       resp.url
+     );
+-    const url = new URL(resp.url);
++    const client = new _TaskCommandRouterClientImpl(
++      serverClient,
++      taskId,
++      sandboxId,
++      isV2,
++      resp.url,
++      resp.jwt,
++      logger2,
++      profile
++    );
++    logger2.debug(
++      "Successfully initialized command router client",
++      "task_id",
++      taskId
++    );
++    return client;
++  }
++  constructor(serverClient, taskId, sandboxId, isV2, serverUrl, jwt, logger2, profile) {
++    this.serverClient = serverClient;
++    this.taskId = taskId;
++    this.sandboxId = sandboxId;
++    this.isV2 = isV2;
++    this.serverUrl = serverUrl;
++    this.jwt = jwt;
++    this.jwtExp = parseJwtExpiration(jwt, logger2);
++    this.logger = logger2;
++    this.profile = profile;
++    const transport = this.createTransport(serverUrl);
++    this.channel = transport.channel;
++    this.stub = transport.stub;
++  }
++  createTransport(routerUrl) {
++    const url = new URL(routerUrl);
+     if (url.protocol !== "https:") {
+-      throw new Error(`Task router URL must be https, got: ${resp.url}`);
++      throw new Error(`Task router URL must be https, got: ${routerUrl}`);
+     }
+     const host = url.hostname;
+     const port = url.port ? parseInt(url.port) : 443;
+@@ -61944,8 +61977,8 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+       "grpc.keepalive_permit_without_calls": 1
+     };
+     let channel;
+-    if (isLocalhost(profile)) {
+-      logger2.warn(
++    if (isLocalhost(this.profile)) {
++      this.logger.warn(
+         "Using insecure TLS (skip certificate verification) for task command router"
+       );
+       channel = (0, import_nice_grpc11.createChannel)(
+@@ -61960,40 +61993,16 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+         channelConfig
+       );
+     }
+-    const client = new _TaskCommandRouterClientImpl(
+-      serverClient,
+-      taskId,
+-      sandboxId,
+-      isV2,
+-      resp.url,
+-      resp.jwt,
+-      channel,
+-      logger2
+-    );
+-    logger2.debug(
+-      "Successfully initialized command router client",
+-      "task_id",
+-      taskId
+-    );
+-    return client;
+-  }
+-  constructor(serverClient, taskId, sandboxId, isV2, serverUrl, jwt, channel, logger2) {
+-    this.serverClient = serverClient;
+-    this.taskId = taskId;
+-    this.sandboxId = sandboxId;
+-    this.isV2 = isV2;
+-    this.serverUrl = serverUrl;
+-    this.jwt = jwt;
+-    this.jwtExp = parseJwtExpiration(jwt, logger2);
+-    this.logger = logger2;
+-    this.channel = channel;
+     const self = this;
+     const factory = (0, import_nice_grpc11.createClientFactory)().use(timeoutMiddleware).use(async function* authMiddleware(call, options) {
+       options.metadata ??= new import_nice_grpc11.Metadata();
+       options.metadata.set("authorization", `Bearer ${self.jwt}`);
+       return yield* call.next(call.request, options);
+     });
+-    this.stub = factory.create(TaskCommandRouterDefinition, channel);
++    return {
++      channel,
++      stub: factory.create(TaskCommandRouterDefinition, channel)
++    };
+   }
+   close() {
+     if (this.closed) {
+@@ -62229,15 +62238,15 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+       throw err;
+     }
+   }
+-  async refreshJwt() {
++  async refreshJwt(failedJwt) {
+     let error;
+     this.jwtRefreshLock = this.jwtRefreshLock.then(async () => {
+       if (this.closed) {
+         return;
+       }
+-      if (this.jwtExp !== null && this.jwtExp - Date.now() / 1e3 > 30) {
++      if (this.jwt !== failedJwt) {
+         this.logger.debug(
+-          "Skipping JWT refresh because expiration is far enough in the future",
++          "Skipping JWT refresh because another request already refreshed it",
+           "task_id",
+           this.taskId
+         );
+@@ -62250,11 +62259,24 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+           this.sandboxId,
+           this.isV2
+         );
+-        if (resp.url !== this.serverUrl) {
+-          this.logger.warn("Task router URL changed during session");
++        if (this.closed) {
++          return;
+         }
++        const routerChanged = resp.url !== this.serverUrl;
++        const replacement = routerChanged ? this.createTransport(resp.url) : null;
++        const previousChannel = routerChanged ? this.channel : null;
+         this.jwt = resp.jwt;
+         this.jwtExp = parseJwtExpiration(resp.jwt, this.logger);
++        if (replacement) {
++          this.serverUrl = resp.url;
++          this.channel = replacement.channel;
++          this.stub = replacement.stub;
++          try {
++            previousChannel?.close();
++          } catch {
++          }
++          this.logger.warn("Task router URL changed during session; transport replaced");
++        }
+       } catch (err) {
+         error = err;
+       }
+@@ -62265,11 +62287,12 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+     }
+   }
+   async callWithAuthRetry(func) {
++    const attemptedJwt = this.jwt;
+     try {
+       return await func();
+     } catch (err) {
+       if (err instanceof import_nice_grpc11.ClientError && err.code === import_nice_grpc11.Status.UNAUTHENTICATED) {
+-        await this.refreshJwt();
++        await this.refreshJwt(attemptedJwt);
+         return await func();
+       }
+       throw err;
+@@ -62291,6 +62314,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+     while (true) {
+       try {
+         const timeoutMs = deadline !== null ? Math.max(0, deadline - Date.now()) : void 0;
++        const attemptedJwt = this.jwt;
+         const request = TaskExecStdioReadRequest.create({
+           taskId,
+           execId,
+@@ -62312,7 +62336,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+           return;
+         } catch (err) {
+           if (err instanceof import_nice_grpc11.ClientError && err.code === import_nice_grpc11.Status.UNAUTHENTICATED && !didAuthRetry) {
+-            await this.refreshJwt();
++            await this.refreshJwt(attemptedJwt);
+             didAuthRetry = true;
+             continue;
+           }
+@@ -64658,7 +64682,7 @@ var Sandbox2 = class _Sandbox {
      const [taskId, commandRouterClient] = await this.#getCommandRouter();
      const request = TaskSnapshotFilesystemRequest.create({
        taskId,
@@ -11,7 +196,7 @@ index e1794ee4e42d61ebb0c35654318fe5c84a946b04..7698cc32f0ce496e2c724832f30f11b3
        ttlSeconds: wireTtlSeconds
      });
      const response = await commandRouterClient.snapshotFilesystem(request, {
-@@ -64778,7 +64778,7 @@ var Sandbox2 = class _Sandbox {
+@@ -64778,7 +64802,7 @@ var Sandbox2 = class _Sandbox {
      const request = buildTaskSnapshotDirectoryRequestProto(
        taskId,
        path2,
@@ -81,10 +266,195 @@ index 9b2f092b923c931edd32b39aeb7af55ec1c9ec1b..4ad4fd812241dd29387fe29a35e898d4
       * Overall budget for the snapshot call, in milliseconds. Defaults to
       * 55000. If it elapses before a snapshot completes, the call is cancelled
 diff --git a/dist/index.js b/dist/index.js
-index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..4b499115699f18d62db53fefa168f32b17e14440 100644
+index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..21f6b419054b56b9f64ade77f779828b1c83832a 100644
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -64586,7 +64586,7 @@ var Sandbox2 = class _Sandbox {
+@@ -61828,6 +61828,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+   jwtExp;
+   jwtRefreshLock = Promise.resolve();
+   logger;
++  profile;
+   closed = false;
+   static async tryInit(serverClient, taskId, sandboxId, isV2, logger2, profile) {
+     let resp;
+@@ -61856,9 +61857,41 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+       "url",
+       resp.url
+     );
+-    const url = new URL(resp.url);
++    const client = new _TaskCommandRouterClientImpl(
++      serverClient,
++      taskId,
++      sandboxId,
++      isV2,
++      resp.url,
++      resp.jwt,
++      logger2,
++      profile
++    );
++    logger2.debug(
++      "Successfully initialized command router client",
++      "task_id",
++      taskId
++    );
++    return client;
++  }
++  constructor(serverClient, taskId, sandboxId, isV2, serverUrl, jwt, logger2, profile) {
++    this.serverClient = serverClient;
++    this.taskId = taskId;
++    this.sandboxId = sandboxId;
++    this.isV2 = isV2;
++    this.serverUrl = serverUrl;
++    this.jwt = jwt;
++    this.jwtExp = parseJwtExpiration(jwt, logger2);
++    this.logger = logger2;
++    this.profile = profile;
++    const transport = this.createTransport(serverUrl);
++    this.channel = transport.channel;
++    this.stub = transport.stub;
++  }
++  createTransport(routerUrl) {
++    const url = new URL(routerUrl);
+     if (url.protocol !== "https:") {
+-      throw new Error(`Task router URL must be https, got: ${resp.url}`);
++      throw new Error(`Task router URL must be https, got: ${routerUrl}`);
+     }
+     const host = url.hostname;
+     const port = url.port ? parseInt(url.port) : 443;
+@@ -61872,8 +61905,8 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+       "grpc.keepalive_permit_without_calls": 1
+     };
+     let channel;
+-    if (isLocalhost(profile)) {
+-      logger2.warn(
++    if (isLocalhost(this.profile)) {
++      this.logger.warn(
+         "Using insecure TLS (skip certificate verification) for task command router"
+       );
+       channel = createChannel2(
+@@ -61888,40 +61921,16 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+         channelConfig
+       );
+     }
+-    const client = new _TaskCommandRouterClientImpl(
+-      serverClient,
+-      taskId,
+-      sandboxId,
+-      isV2,
+-      resp.url,
+-      resp.jwt,
+-      channel,
+-      logger2
+-    );
+-    logger2.debug(
+-      "Successfully initialized command router client",
+-      "task_id",
+-      taskId
+-    );
+-    return client;
+-  }
+-  constructor(serverClient, taskId, sandboxId, isV2, serverUrl, jwt, channel, logger2) {
+-    this.serverClient = serverClient;
+-    this.taskId = taskId;
+-    this.sandboxId = sandboxId;
+-    this.isV2 = isV2;
+-    this.serverUrl = serverUrl;
+-    this.jwt = jwt;
+-    this.jwtExp = parseJwtExpiration(jwt, logger2);
+-    this.logger = logger2;
+-    this.channel = channel;
+     const self = this;
+     const factory = createClientFactory2().use(timeoutMiddleware).use(async function* authMiddleware(call, options) {
+       options.metadata ??= new Metadata2();
+       options.metadata.set("authorization", `Bearer ${self.jwt}`);
+       return yield* call.next(call.request, options);
+     });
+-    this.stub = factory.create(TaskCommandRouterDefinition, channel);
++    return {
++      channel,
++      stub: factory.create(TaskCommandRouterDefinition, channel)
++    };
+   }
+   close() {
+     if (this.closed) {
+@@ -62157,15 +62166,15 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+       throw err;
+     }
+   }
+-  async refreshJwt() {
++  async refreshJwt(failedJwt) {
+     let error;
+     this.jwtRefreshLock = this.jwtRefreshLock.then(async () => {
+       if (this.closed) {
+         return;
+       }
+-      if (this.jwtExp !== null && this.jwtExp - Date.now() / 1e3 > 30) {
++      if (this.jwt !== failedJwt) {
+         this.logger.debug(
+-          "Skipping JWT refresh because expiration is far enough in the future",
++          "Skipping JWT refresh because another request already refreshed it",
+           "task_id",
+           this.taskId
+         );
+@@ -62178,11 +62187,24 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+           this.sandboxId,
+           this.isV2
+         );
+-        if (resp.url !== this.serverUrl) {
+-          this.logger.warn("Task router URL changed during session");
++        if (this.closed) {
++          return;
+         }
++        const routerChanged = resp.url !== this.serverUrl;
++        const replacement = routerChanged ? this.createTransport(resp.url) : null;
++        const previousChannel = routerChanged ? this.channel : null;
+         this.jwt = resp.jwt;
+         this.jwtExp = parseJwtExpiration(resp.jwt, this.logger);
++        if (replacement) {
++          this.serverUrl = resp.url;
++          this.channel = replacement.channel;
++          this.stub = replacement.stub;
++          try {
++            previousChannel?.close();
++          } catch {
++          }
++          this.logger.warn("Task router URL changed during session; transport replaced");
++        }
+       } catch (err) {
+         error = err;
+       }
+@@ -62193,11 +62215,12 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+     }
+   }
+   async callWithAuthRetry(func) {
++    const attemptedJwt = this.jwt;
+     try {
+       return await func();
+     } catch (err) {
+       if (err instanceof ClientError10 && err.code === Status10.UNAUTHENTICATED) {
+-        await this.refreshJwt();
++        await this.refreshJwt(attemptedJwt);
+         return await func();
+       }
+       throw err;
+@@ -62219,6 +62242,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+     while (true) {
+       try {
+         const timeoutMs = deadline !== null ? Math.max(0, deadline - Date.now()) : void 0;
++        const attemptedJwt = this.jwt;
+         const request = TaskExecStdioReadRequest.create({
+           taskId,
+           execId,
+@@ -62240,7 +62264,7 @@ var TaskCommandRouterClientImpl = class _TaskCommandRouterClientImpl {
+           return;
+         } catch (err) {
+           if (err instanceof ClientError10 && err.code === Status10.UNAUTHENTICATED && !didAuthRetry) {
+-            await this.refreshJwt();
++            await this.refreshJwt(attemptedJwt);
+             didAuthRetry = true;
+             continue;
+           }
+@@ -64586,7 +64610,7 @@ var Sandbox2 = class _Sandbox {
      const [taskId, commandRouterClient] = await this.#getCommandRouter();
      const request = TaskSnapshotFilesystemRequest.create({
        taskId,
@@ -93,7 +463,7 @@ index 83068162e5c4b650f1046bcaf3ba8b4f9f73b7b9..4b499115699f18d62db53fefa168f32b
        ttlSeconds: wireTtlSeconds
      });
      const response = await commandRouterClient.snapshotFilesystem(request, {
-@@ -64706,7 +64706,7 @@ var Sandbox2 = class _Sandbox {
+@@ -64706,7 +64730,7 @@ var Sandbox2 = class _Sandbox {
      const request = buildTaskSnapshotDirectoryRequestProto(
        taskId,
        path2,

@@ -451,6 +451,18 @@ describe("API helpers", () => {
     expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/control`)).toBe(
       "/v1/workspaces/:workspaceId/sessions/:id/:controlAction",
     );
+    expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/git/read-batch`)).toBe(
+      "/v1/workspaces/:workspaceId/sessions/:id/git/:operation",
+    );
+    expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/fs/read`)).toBe(
+      "/v1/workspaces/:workspaceId/sessions/:id/fs/:operation",
+    );
+    expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/terminal/exec`)).toBe(
+      "/v1/workspaces/:workspaceId/sessions/:id/terminal/:operation",
+    );
+    expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/terminal/pty/resize`)).toBe(
+      "/v1/workspaces/:workspaceId/sessions/:id/terminal/pty/:action",
+    );
     expect(routeLabel(`/v1/workspaces/${workspace}/control-events/stream`)).toBe(
       "/v1/workspaces/:workspaceId/control-events/stream",
     );

@@ -62,6 +62,7 @@ import {
   type LeaseSnapshot,
 } from "@opengeni/db";
 import { sandboxWarmRateMicrosPerSecond } from "@opengeni/config";
+import { sandboxLeaseTelemetryKey } from "@opengeni/observability";
 import {
   // Normal drain teardown builds the client and resumes the envelope directly:
   // a live box gets its /workspace persisted before termination, while a gone
@@ -127,6 +128,8 @@ import {
   recordTurnsQueuedGauge,
 } from "../observability-metrics";
 import { providerIdentityFromResumeState } from "../sandbox-routing";
+
+export { sandboxLeaseTelemetryKey } from "@opengeni/observability";
 
 export type ReapSandboxLeasesResult = {
   /** Stale viewer holders + warming-death rows the sweep touched is folded into
@@ -395,22 +398,6 @@ export function sandboxDrainCaptureId(operationId: string, attempt: number): str
   bytes[8] = (bytes[8]! & 0x3f) | 0x80;
   const hex = bytes.toString("hex");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
-
-/**
- * Stable, non-reversible correlation key for one logical sandbox lease. Public
- * telemetry intentionally drops workspace/group identifiers; this key lets an
- * operator correlate repeated reaper attempts without publishing either UUID.
- * The domain separator makes the digest unusable as a generic identifier hash.
- */
-export function sandboxLeaseTelemetryKey(workspaceId: string, sandboxGroupId: string): string {
-  return `slk_${createHash("sha256")
-    .update("opengeni:sandbox-lease-telemetry:v1\0")
-    .update(workspaceId)
-    .update("\0")
-    .update(sandboxGroupId)
-    .digest("hex")
-    .slice(0, 32)}`;
 }
 
 function sandboxDrainActivityAttempt(): number {

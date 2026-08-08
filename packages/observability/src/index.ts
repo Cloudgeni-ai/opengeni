@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { collectDefaultMetrics, Counter, Gauge, Histogram, Registry } from "prom-client";
 import { SandboxBackend } from "@opengeni/contracts";
 
@@ -27,6 +28,23 @@ export type Span = {
 };
 
 export type MetricLabels = Record<string, AttributeValue>;
+
+/**
+ * Stable, non-reversible correlation key for one logical sandbox lease. Public
+ * telemetry intentionally drops workspace/group identifiers; this key lets an
+ * operator correlate API, worker, and reaper failures without publishing
+ * either UUID. The domain separator prevents reuse as a generic identifier
+ * digest.
+ */
+export function sandboxLeaseTelemetryKey(workspaceId: string, sandboxGroupId: string): string {
+  return `slk_${createHash("sha256")
+    .update("opengeni:sandbox-lease-telemetry:v1\0")
+    .update(workspaceId)
+    .update("\0")
+    .update(sandboxGroupId)
+    .digest("hex")
+    .slice(0, 32)}`;
+}
 
 /**
  * Stable selectors shared by OpenGeni's runtime metrics and optional

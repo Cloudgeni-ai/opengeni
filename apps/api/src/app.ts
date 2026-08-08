@@ -946,6 +946,23 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
     label: "/v1/workspaces/:workspaceId/inference-control",
   },
   {
+    pattern:
+      /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/fs\/(list|list-batch|read|write|delete|move|mkdir)$/,
+    label: "/v1/workspaces/:workspaceId/sessions/:id/fs/:operation",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/git\/(status|diff|read-batch|log|show)$/,
+    label: "/v1/workspaces/:workspaceId/sessions/:id/git/:operation",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/terminal\/(exec|pty)$/,
+    label: "/v1/workspaces/:workspaceId/sessions/:id/terminal/:operation",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/terminal\/pty\/(write|resize|close)$/,
+    label: "/v1/workspaces/:workspaceId/sessions/:id/terminal/pty/:action",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/events\/stream$/,
     label: "/v1/workspaces/:workspaceId/sessions/:id/events/stream",
   },
