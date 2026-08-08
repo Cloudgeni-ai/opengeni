@@ -11,7 +11,7 @@ The personal connection must never be substituted with the workspace bot, and th
 
 ## Provider identity and deployment prerequisites
 
-`JorgeBot` is not configured anywhere in this repository. Slack renders the message author from the OAuth principal and renders `Sent using @…` from Slack app/provider metadata. If Slack currently displays `JorgeBot`, an authorized Slack app administrator must update the existing app rather than adding generated text or changing message payloads:
+No deployment-specific bot identity is configured in this repository. Slack renders the message author from the OAuth principal and renders `Sent using @…` from Slack app/provider metadata. If Slack displays an outdated identity, an authorized Slack app administrator must update the existing app rather than adding generated text or changing message payloads:
 
 1. Set the Slack app name to exactly `OpenGeni`.
 2. Set the bot user display name to exactly `OpenGeni`.

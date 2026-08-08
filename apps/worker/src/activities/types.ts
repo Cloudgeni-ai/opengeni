@@ -64,13 +64,13 @@ export type InspectSessionAttemptActivity = (input: {
   activityId: string;
 }) => Promise<"pending" | "settled">;
 
-export type ActivityServices = {
+/** Services shared by both Temporal worker roles. Keep this graph free of the
+ * agent runtime and document parser so each process can load only its role. */
+export type SharedActivityServices = {
   settings: Settings;
   db: Database;
   bus: EventBus;
-  runtime: OpenGeniRuntime;
   objectStorage: ObjectStorage | null;
-  documentServices: DocumentServices;
   observability: Observability;
   wakeSessionWorkflow: WakeSessionWorkflowSignal | null;
   /** Durable signalWithStart fallback used only after the activity's direct
@@ -116,6 +116,21 @@ export type ActivityServices = {
   connectionCredentials?: ConnectionCredentialsPort | null;
 };
 
+/** Control workers own short database and maintenance activities. Document
+ * parsing is resolved lazily by the indexing activity itself. */
+export type ControlActivityServices = SharedActivityServices;
+
+/** Turn workers own the model loop and never construct document parsers. */
+export type TurnActivityServices = SharedActivityServices & {
+  runtime: OpenGeniRuntime;
+};
+
+/** Full test/embedded harness retained as a source-compatible superset. */
+export type ActivityServices = ControlActivityServices &
+  TurnActivityServices & {
+    documentServices: DocumentServices;
+  };
+
 export type CodexCapacityWaitRef = {
   waiterId: string;
   generation: number;
@@ -142,6 +157,8 @@ export type ReconcileCodexCapacityWaitResult =
   | { action: "resumed" | "paused" | "superseded" | "stale" };
 
 export type ActivityDependencies = Partial<ActivityServices>;
+export type ControlActivityDependencies = Partial<ControlActivityServices>;
+export type TurnActivityDependencies = Partial<TurnActivityServices>;
 
 export type RunAgentTurnInput = {
   accountId: string;

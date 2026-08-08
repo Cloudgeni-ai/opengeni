@@ -1,4 +1,4 @@
-import { getDocument, indexDocumentNow } from "@opengeni/documents";
+import type { DocumentServices } from "@opengeni/documents";
 import { configuredStaticUsageLimits } from "@opengeni/config";
 import {
   getBillingBalance,
@@ -8,15 +8,25 @@ import {
   sumUsageQuantity,
   withWorkspaceUsageLock,
 } from "@opengeni/db";
-import type { ActivityServices, IndexDocumentInput } from "./types";
+import type { ControlActivityServices, IndexDocumentInput } from "./types";
 
-export function createDocumentActivities(services: () => Promise<ActivityServices>) {
+export function createDocumentActivities(
+  services: () => Promise<ControlActivityServices>,
+  resolveDocumentServices?: () => Promise<DocumentServices>,
+) {
   return {
     indexDocument: async (input: IndexDocumentInput) => {
-      const { settings, db, objectStorage, documentServices } = await services();
+      const { settings, db, objectStorage } = await services();
       if (!objectStorage) {
         throw new Error("object storage is not configured");
       }
+      if (!resolveDocumentServices) {
+        throw new Error("document services are not configured");
+      }
+      const [{ getDocument, indexDocumentNow }, documentServices] = await Promise.all([
+        import("@opengeni/documents"),
+        resolveDocumentServices(),
+      ]);
       const context = await rlsContextForWorkspace(db, input.workspaceId);
       if (context.accountId !== input.accountId) {
         throw new Error("document account/workspace authority mismatch");

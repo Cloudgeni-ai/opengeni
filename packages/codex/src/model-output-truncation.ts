@@ -167,7 +167,13 @@ export function boundModelToolOutputItems<T extends ModelHistoryItem>(
   items: readonly T[],
   policyTokens = DEFAULT_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
 ): T[] {
-  return items.map((item) => boundModelToolOutputItem(item, policyTokens));
+  let bounded: T[] | null = null;
+  for (const [index, item] of items.entries()) {
+    const next = boundModelToolOutputItem(item, policyTokens);
+    if (next !== item && bounded === null) bounded = items.slice(0, index);
+    bounded?.push(next);
+  }
+  return bounded ?? (items as T[]);
 }
 
 function boundToolOutputValue(output: unknown, budgetTokens: number): unknown {

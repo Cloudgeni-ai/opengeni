@@ -316,6 +316,7 @@ describe("turn worker concurrency", () => {
     expect(settings.turnWorkerMaxConcurrentTurns).toBe(16);
     expect(settings.turnWorkerTargetCpuUsage).toBe(0.8);
     expect(settings.turnWorkerTargetMemoryUsage).toBe(0.75);
+    expect(settings.turnWorkerEmergencyMemoryUsage).toBe(0.9);
     expect(settings.turnWorkerMemoryGuardIntervalMs).toBe(5_000);
     expect(settings.turnWorkerMemoryGuardSustainMs).toBe(30_000);
   });
@@ -327,6 +328,7 @@ describe("turn worker concurrency", () => {
         OPENGENI_TURN_WORKER_MAX_CONCURRENT_TURNS: "256",
         OPENGENI_TURN_WORKER_TARGET_CPU_USAGE: "0.85",
         OPENGENI_TURN_WORKER_TARGET_MEMORY_USAGE: "0.8",
+        OPENGENI_TURN_WORKER_EMERGENCY_MEMORY_USAGE: "0.94",
         OPENGENI_TURN_WORKER_MEMORY_GUARD_INTERVAL_MS: "2500",
         OPENGENI_TURN_WORKER_MEMORY_GUARD_SUSTAIN_MS: "15000",
       },
@@ -336,6 +338,7 @@ describe("turn worker concurrency", () => {
     expect(settings.turnWorkerMaxConcurrentTurns).toBe(256);
     expect(settings.turnWorkerTargetCpuUsage).toBe(0.85);
     expect(settings.turnWorkerTargetMemoryUsage).toBe(0.8);
+    expect(settings.turnWorkerEmergencyMemoryUsage).toBe(0.94);
     expect(settings.turnWorkerMemoryGuardIntervalMs).toBe(2_500);
     expect(settings.turnWorkerMemoryGuardSustainMs).toBe(15_000);
   });
@@ -347,6 +350,8 @@ describe("turn worker concurrency", () => {
       { OPENGENI_TURN_WORKER_MAX_CONCURRENT_TURNS: "2001" },
       { OPENGENI_TURN_WORKER_TARGET_CPU_USAGE: "1.1" },
       { OPENGENI_TURN_WORKER_TARGET_MEMORY_USAGE: "0.81" },
+      { OPENGENI_TURN_WORKER_EMERGENCY_MEMORY_USAGE: "0.84" },
+      { OPENGENI_TURN_WORKER_EMERGENCY_MEMORY_USAGE: "0.96" },
       { OPENGENI_TURN_WORKER_MEMORY_GUARD_INTERVAL_MS: "999" },
       { OPENGENI_TURN_WORKER_MEMORY_GUARD_SUSTAIN_MS: "4999" },
     ]) {

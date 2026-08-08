@@ -23,6 +23,9 @@ function snapshot(input: {
 }): TurnWorkerMemoryPressureSnapshot {
   return {
     processRssBytes: (input.rssGiB ?? 1) * GiB,
+    processHeapUsedBytes: 256 * 1024 ** 2,
+    processExternalBytes: 64 * 1024 ** 2,
+    processArrayBuffersBytes: 32 * 1024 ** 2,
     scopes: [
       {
         scope: "host",
@@ -114,12 +117,19 @@ describe("turn worker memory pressure guard", () => {
     expect(
       readTurnWorkerMemoryPressureSnapshot({
         readText: (path) => files.get(path) ?? null,
-        processRssBytes: () => 2 * GiB,
+        processMemoryUsage: () => ({
+          rss: 2 * GiB,
+          heapUsed: 512 * 1024 ** 2,
+          external: 128 * 1024 ** 2,
+          arrayBuffers: 64 * 1024 ** 2,
+        }),
       }),
     ).toEqual({
       processRssBytes: 2 * GiB,
+      processHeapUsedBytes: 512 * 1024 ** 2,
+      processExternalBytes: 128 * 1024 ** 2,
+      processArrayBuffersBytes: 64 * 1024 ** 2,
       scopes: [
-        { scope: "host", usedBytes: 12_582_912 * 1024, limitBytes: 25_165_824 * 1024 },
         {
           scope: "cgroup",
           usedBytes: Math.floor(3.2 * GiB),
@@ -148,6 +158,7 @@ describe("turn worker memory pressure guard", () => {
       settings: {
         turnWorkerConcurrencyMode: "resource-based",
         turnWorkerTargetMemoryUsage: 0.75,
+        turnWorkerEmergencyMemoryUsage: 0.9,
         turnWorkerMemoryGuardIntervalMs: 60_000,
         turnWorkerMemoryGuardSustainMs: 30_000,
       },
@@ -159,7 +170,7 @@ describe("turn worker memory pressure guard", () => {
     });
 
     now = 1_000;
-    current = snapshot({ hostUsedGiB: 19, rssGiB: 10 });
+    current = snapshot({ hostUsedGiB: 22, rssGiB: 10 });
     guard.sampleNow();
     now = 30_999;
     guard.sampleNow();
@@ -175,6 +186,70 @@ describe("turn worker memory pressure guard", () => {
     );
     expect(metrics).toMatch(
       /opengeni_turn_worker_memory_guard_process_rss_ratio\{[^}]*scope="host"[^}]*\}/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_turn_worker_memory_guard_target_ratio\{[^}]*scope="host"[^}]*\} 0\.75\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_turn_worker_memory_guard_emergency_ratio\{[^}]*scope="host"[^}]*\} 0\.9\b/,
+    );
+    guard.close();
+  });
+
+  test("nudges GC at bounded cadence and gives it one sample before emergency drain", async () => {
+    const observability = createObservability(
+      {
+        observabilityMetricsEnabled: true,
+        observabilityStructuredLogs: false,
+        observabilityOtlpEndpoint: undefined,
+        observabilityOtlpHeaders: "",
+        serviceName: "opengeni-test",
+        environment: "test",
+      } as never,
+      { component: "worker-turn" },
+    );
+    let now = 0;
+    let collections = 0;
+    let drains = 0;
+    const guard = createTurnWorkerMemoryPressureGuard({
+      settings: {
+        turnWorkerConcurrencyMode: "resource-based",
+        turnWorkerTargetMemoryUsage: 0.75,
+        turnWorkerEmergencyMemoryUsage: 0.9,
+        turnWorkerMemoryGuardIntervalMs: 60_000,
+        turnWorkerMemoryGuardSustainMs: 10_000,
+      },
+      observability,
+      drain: () => {
+        drains += 1;
+      },
+      dependencies: {
+        now: () => now,
+        gc: () => {
+          collections += 1;
+        },
+        sample: () =>
+          snapshot({
+            hostUsedGiB: 12,
+            cgroupUsedGiB: 3.7,
+            cgroupLimitGiB: 4,
+            rssGiB: 3.2,
+          }),
+      },
+    });
+
+    expect(collections).toBe(1);
+    expect(drains).toBe(0);
+    now = 9_999;
+    guard.sampleNow();
+    expect(collections).toBe(1);
+    expect(drains).toBe(0);
+    now = 10_000;
+    guard.sampleNow();
+    expect(collections).toBe(1);
+    expect(drains).toBe(1);
+    expect(await observability.prometheusMetrics()).toMatch(
+      /opengeni_turn_worker_memory_guard_gc_total\{[^}]*\} 1\b/,
     );
     guard.close();
   });
@@ -203,6 +278,7 @@ describe("turn worker memory pressure guard", () => {
       settings: {
         turnWorkerConcurrencyMode: "resource-based",
         turnWorkerTargetMemoryUsage: 0.75,
+        turnWorkerEmergencyMemoryUsage: 0.9,
         turnWorkerMemoryGuardIntervalMs: 60_000,
         turnWorkerMemoryGuardSustainMs: 10_000,
       },
@@ -224,7 +300,7 @@ describe("turn worker memory pressure guard", () => {
     now = 20_000;
     current = snapshot({
       hostUsedGiB: 12,
-      cgroupUsedGiB: 3.5,
+      cgroupUsedGiB: 3.7,
       cgroupLimitGiB: 4,
       rssGiB: 3,
     });
@@ -252,7 +328,7 @@ describe("turn worker memory pressure guard", () => {
     );
     let now = 0;
     let current = snapshot({
-      hostUsedGiB: 20,
+      hostUsedGiB: 22,
       cgroupUsedGiB: 2,
       cgroupLimitGiB: 4,
     });
@@ -261,6 +337,7 @@ describe("turn worker memory pressure guard", () => {
       settings: {
         turnWorkerConcurrencyMode: "resource-based",
         turnWorkerTargetMemoryUsage: 0.75,
+        turnWorkerEmergencyMemoryUsage: 0.9,
         turnWorkerMemoryGuardIntervalMs: 60_000,
         turnWorkerMemoryGuardSustainMs: 10_000,
       },
@@ -274,7 +351,7 @@ describe("turn worker memory pressure guard", () => {
     now = 6_000;
     current = snapshot({
       hostUsedGiB: 12,
-      cgroupUsedGiB: 3.5,
+      cgroupUsedGiB: 3.7,
       cgroupLimitGiB: 4,
     });
     guard.sampleNow();
@@ -306,6 +383,7 @@ describe("turn worker memory pressure guard", () => {
       settings: {
         turnWorkerConcurrencyMode: "resource-based",
         turnWorkerTargetMemoryUsage: 0.75,
+        turnWorkerEmergencyMemoryUsage: 0.9,
         turnWorkerMemoryGuardIntervalMs: 60_000,
         turnWorkerMemoryGuardSustainMs: 10_000,
       },
@@ -317,7 +395,7 @@ describe("turn worker memory pressure guard", () => {
         now: () => now,
         sample: () => {
           if (failSample) throw new Error("sample unavailable");
-          return snapshot({ hostUsedGiB: 20 });
+          return snapshot({ hostUsedGiB: 22 });
         },
       },
     });
@@ -355,6 +433,7 @@ describe("turn worker memory pressure guard", () => {
       settings: {
         turnWorkerConcurrencyMode: "resource-based",
         turnWorkerTargetMemoryUsage: 0.75,
+        turnWorkerEmergencyMemoryUsage: 0.9,
         turnWorkerMemoryGuardIntervalMs: 60_000,
         turnWorkerMemoryGuardSustainMs: 5_000,
       },
@@ -362,7 +441,7 @@ describe("turn worker memory pressure guard", () => {
       drain: () => {
         drains += 1;
       },
-      dependencies: { now: () => now, sample: () => snapshot({ hostUsedGiB: 20 }) },
+      dependencies: { now: () => now, sample: () => snapshot({ hostUsedGiB: 22 }) },
     });
 
     now = 5_000;
@@ -401,6 +480,7 @@ describe("turn worker memory pressure guard", () => {
       settings: {
         turnWorkerConcurrencyMode: "resource-based",
         turnWorkerTargetMemoryUsage: 0.75,
+        turnWorkerEmergencyMemoryUsage: 0.9,
         turnWorkerMemoryGuardIntervalMs: 60_000,
         turnWorkerMemoryGuardSustainMs: 5_000,
       },
@@ -410,7 +490,7 @@ describe("turn worker memory pressure guard", () => {
           throw new Error("worker shutdown request failed");
         }
       },
-      dependencies: { now: () => now, sample: () => snapshot({ hostUsedGiB: 20 }) },
+      dependencies: { now: () => now, sample: () => snapshot({ hostUsedGiB: 22 }) },
     });
 
     now = 5_000;

@@ -1,0 +1,1057 @@
+diff --git a/node_modules/@openai/agents-core/.bun-tag-1a92431e4f62cd51 b/.bun-tag-1a92431e4f62cd51
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/dist/index.d.ts b/dist/index.d.ts
+index 21b58188472152339a1747df5cfe8dd256356cd1..5e99f9b77eba9314cb576d351200f078cec34b44 100644
+--- a/dist/index.d.ts
++++ b/dist/index.d.ts
+@@ -26,10 +26,10 @@ export { setDefaultModelProvider } from './providers';
+ export { retryPolicies } from './runner/modelRetry';
+ export { RunResult, StreamedRunResult } from './result';
+ export { IndividualRunOptions, NonStreamRunOptions, run, RunConfig, Runner, StreamRunOptions, } from './run';
+-export type { ModelInputData, CallModelInputFilter, CallModelInputFilterArgs, ToolErrorFormatter, ToolErrorFormatterArgs, ToolExecutionConfig, ToolNameCollisionPolicy, ToolNotFoundBehavior, ToolErrorKind, ReasoningItemIdPolicy, RunErrorData, RunErrorHandler, RunErrorHandlerInput, RunErrorHandlerResult, RunErrorHandlers, RunErrorKind, } from './run';
++export type { ModelInputData, CallModelInputFilter, CallModelInputFilterArgs, ToolErrorFormatter, ToolErrorFormatterArgs, ToolExecutionConfig, ToolNameCollisionPolicy, ToolNotFoundBehavior, ToolErrorKind, HistoryOwnership, ModelResponseRetention, ReasoningItemIdPolicy, RunErrorData, RunErrorHandler, RunErrorHandlerInput, RunErrorHandlerResult, RunErrorHandlers, RunErrorKind, } from './run';
+ export { RunContext } from './runContext';
+ export type { AgentToolInvocation } from './agentToolInvocation';
+-export { RunState } from './runState';
++export { RunState, type ClientToolSearchRehydration, type RunStateDeserializationOptions, } from './runState';
+ export type { TracingConfig } from './tracing';
+ export { HostedTool, attachClientToolSearchExecutor, ComputerTool, computerTool, ShellTool, shellTool, ApplyPatchTool, applyPatchTool, HostedMCPTool, hostedMcpTool, FunctionTool, FunctionToolResult, FunctionToolTimeoutBehavior, ToolTimeoutErrorFunction, Tool, tool, toolNamespace, invokeFunctionTool, getClientToolSearchExecutor, getToolSearchRuntimeToolKey, ToolExecuteArgument, ToolEnabledFunction, ToolOptionsWithGuardrails, ToolAllowedCaller, ToolAllowedCallers, } from './tool';
+ export type { ClientToolSearchExecutor, ClientToolSearchExecutorArgs, ClientToolSearchExecutorResult, ComputerOnSafetyCheckFunction, ComputerSafetyCheck, ComputerSafetyCheckResult, ShellToolEnvironment, ShellToolLocalEnvironment, ShellToolLocalSkill, ShellToolHostedEnvironment, ShellToolContainerAutoEnvironment, ShellToolContainerReferenceEnvironment, ShellToolContainerSkill, ShellToolSkillReference, ShellToolInlineSkill, ShellToolInlineSkillSource, ShellToolContainerNetworkPolicy, ShellToolContainerNetworkPolicyAllowlist, ShellToolContainerNetworkPolicyDisabled, ShellToolContainerNetworkPolicyDomainSecret, ToolInputParameters, ToolOutputSchema, ToolOptions, ToolNamespaceOptions, ToolOutputCustomData, FunctionToolCustomDataContext, FunctionToolCustomDataExtractor, ComputerToolCustomDataContext, ComputerToolCustomDataExtractor, ApplyPatchToolCustomDataContext, ApplyPatchToolCustomDataExtractor, } from './tool';
+diff --git a/dist/run.d.ts b/dist/run.d.ts
+index 7863d754f4d6a5e1bfb99b8cde39417796533741..67b753db052d409f58097afb1a4c074d0591fe1e 100644
+--- a/dist/run.d.ts
++++ b/dist/run.d.ts
+@@ -53,6 +53,17 @@ export type ToolErrorFormatter<TContext = unknown> = (args: ToolErrorFormatterAr
+  * SDK-side execution settings for local tool calls.
+  */
+ export type ToolNotFoundBehavior = 'raise_error' | 'return_error_to_model';
++/**
++ * Selects the owner of conversation history supplied to a run.
++ *
++ * - `sdk` preserves the default Session and server-continuation behavior.
++ * - `external` borrows explicit application-owned history as immutable input.
++ *   It avoids deep history/session snapshots while preserving RunState
++ *   interruption/resume state. Callers and input filters must not mutate it.
++ */
++export type HistoryOwnership = 'sdk' | 'external';
++/** Controls how many raw ModelResponse objects a run retains. */
++export type ModelResponseRetention = 'all' | 'last';
+ /**
+  * Configures settings for the entire agent run.
+  */
+@@ -152,6 +163,18 @@ export type RunConfig = {
+      * system instructions or input items that will be sent to the model.
+      */
+     callModelInputFilter?: CallModelInputFilter;
++    /**
++     * Selects SDK-managed or explicit application-owned conversation history.
++     * External ownership cannot be combined with Session, session callbacks,
++     * previousResponseId, or conversationId. The supplied history is borrowed
++     * immutable input; callers and filters must return projections, not mutate it.
++     */
++    historyOwnership?: HistoryOwnership;
++    /**
++     * Retain every raw model response (default) or only the latest one.
++     * Generated items, aggregate usage, model behavior, and recovery remain complete.
++     */
++    modelResponseRetention?: ModelResponseRetention;
+     /**
+      * Formats tool error messages that are returned to the model.
+      * Returning `undefined` falls back to the SDK default message.
+@@ -174,6 +197,8 @@ type SharedRunOptions<TContext = undefined, TAgent extends Agent<any, any> = Age
+     session?: Session;
+     sessionInputCallback?: SessionInputCallback;
+     callModelInputFilter?: CallModelInputFilter;
++    historyOwnership?: HistoryOwnership;
++    modelResponseRetention?: ModelResponseRetention;
+     toolErrorFormatter?: ToolErrorFormatter;
+     reasoningItemIdPolicy?: ReasoningItemIdPolicy;
+     tracing?: TracingConfig;
+diff --git a/dist/run.js b/dist/run.js
+index 030a757c3b8a6037ec1e5a1b9dd81233983512a1..70cd19c3da3752eaee34e4a0f20132939fe9ed42 100644
+--- a/dist/run.js
++++ b/dist/run.js
+@@ -99,6 +99,20 @@ class LazyDefaultModelProvider {
+ function isNoopTrace(trace) {
+     return trace instanceof traces_1.NoopTrace || trace?.traceId === utils_1.NOOP_TRACE_OR_SPAN_ID;
+ }
++function resolveHistoryOwnership(value) {
++    const resolved = value ?? 'sdk';
++    if (resolved !== 'sdk' && resolved !== 'external') {
++        throw new errors_1.UserError("historyOwnership must be either 'sdk' or 'external'.");
++    }
++    return resolved;
++}
++function resolveModelResponseRetention(value) {
++    const resolved = value ?? 'all';
++    if (resolved !== 'all' && resolved !== 'last') {
++        throw new errors_1.UserError("modelResponseRetention must be either 'all' or 'last'.");
++    }
++    return resolved;
++}
+ async function run(agent, input, options) {
+     const runner = getDefaultRunner();
+     if (options?.stream) {
+@@ -142,6 +156,8 @@ class Runner extends lifecycle_1.RunHooks {
+             toolNameCollisionPolicy: (0, runConfig_1.validateToolNameCollisionPolicy)(config.toolNameCollisionPolicy),
+             sessionInputCallback: config.sessionInputCallback,
+             callModelInputFilter: config.callModelInputFilter,
++            historyOwnership: resolveHistoryOwnership(config.historyOwnership),
++            modelResponseRetention: resolveModelResponseRetention(config.modelResponseRetention),
+             toolErrorFormatter: config.toolErrorFormatter,
+             reasoningItemIdPolicy: config.reasoningItemIdPolicy,
+         };
+@@ -188,6 +204,8 @@ class Runner extends lifecycle_1.RunHooks {
+         const sessionInputCallback = resolvedOptions.sessionInputCallback ?? this.config.sessionInputCallback;
+         // Likewise allow callers to override callModelInputFilter on individual runs.
+         const callModelInputFilter = resolvedOptions.callModelInputFilter ?? this.config.callModelInputFilter;
++        const historyOwnership = resolveHistoryOwnership(resolvedOptions.historyOwnership ?? this.config.historyOwnership);
++        const modelResponseRetention = resolveModelResponseRetention(resolvedOptions.modelResponseRetention ?? this.config.modelResponseRetention);
+         // Per-run callback can override runner-level tool error formatting defaults.
+         const toolErrorFormatter = resolvedOptions.toolErrorFormatter ?? this.config.toolErrorFormatter;
+         const reasoningItemIdPolicy = resolvedOptions.reasoningItemIdPolicy ??
+@@ -210,6 +228,8 @@ class Runner extends lifecycle_1.RunHooks {
+             ...resolvedOptions,
+             sessionInputCallback,
+             callModelInputFilter,
++            historyOwnership,
++            modelResponseRetention,
+             toolErrorFormatter,
+             reasoningItemIdPolicy,
+             toolExecution,
+@@ -235,24 +255,39 @@ class Runner extends lifecycle_1.RunHooks {
+         // When the server tracks conversation history we defer to it for previous turns so local session
+         // persistence can focus solely on the new delta being generated in this process.
+         const session = effectiveOptions.session;
++        if (historyOwnership === 'external' &&
++            (session !== undefined ||
++                sessionInputCallback !== undefined ||
++                serverManagesConversation)) {
++            throw new errors_1.UserError('External history ownership cannot be combined with Session, sessionInputCallback, previousResponseId, or conversationId.');
++        }
+         let provisionalSessionHistoryTransactionSessionId;
+         let provisionalSessionHistoryTransactionInputItems;
+         if (resumingFromState) {
+             const resumedState = input;
+-            const hadSessionBinding = resumedState._currentTurnSessionHistoryTransactionSessionId !==
+-                undefined;
+-            const portableInputItems = resumedState._currentTurnSessionHistoryTransactionInputItems;
++            if (historyOwnership === 'external' &&
++                (resumedState._currentTurnSessionHistoryTransactionSessionId !== undefined ||
++                    resumedState._pendingSessionHistoryTransaction !== undefined ||
++                    resumedState._pendingLegacyCompactionSessionItems !== undefined)) {
++                throw new errors_1.UserError('External history ownership cannot resume RunState that is bound to SDK Session persistence.');
++            }
+             resumedState.setReasoningItemIdPolicy(reasoningItemIdPolicy);
+-            await (0, sessionPersistence_1.prepareSessionHistoryTransactionsForRun)(session, resumedState, {
+-                serverManagesConversation,
+-            });
+-            if (!hadSessionBinding) {
+-                provisionalSessionHistoryTransactionSessionId =
+-                    resumedState._currentTurnSessionHistoryTransactionSessionId;
+-                provisionalSessionHistoryTransactionInputItems = portableInputItems;
++            resumedState.setModelResponseRetention(modelResponseRetention);
++            if (historyOwnership !== 'external') {
++                const hadSessionBinding = resumedState._currentTurnSessionHistoryTransactionSessionId !==
++                    undefined;
++                const portableInputItems = resumedState._currentTurnSessionHistoryTransactionInputItems;
++                await (0, sessionPersistence_1.prepareSessionHistoryTransactionsForRun)(session, resumedState, {
++                    serverManagesConversation,
++                });
++                if (!hadSessionBinding) {
++                    provisionalSessionHistoryTransactionSessionId =
++                        resumedState._currentTurnSessionHistoryTransactionSessionId;
++                    provisionalSessionHistoryTransactionInputItems = portableInputItems;
++                }
+             }
+         }
+-        const sessionPersistence = (0, sessionPersistence_1.createSessionPersistenceTracker)({
++        const sessionPersistence = historyOwnership === 'external' ? undefined : (0, sessionPersistence_1.createSessionPersistenceTracker)({
+             session,
+             hasCallModelInputFilter,
+             persistInput: sessionPersistence_1.saveStreamInputToSession,
+@@ -454,7 +489,10 @@ class Runner extends lifecycle_1.RunHooks {
+                     ? options.context
+                     : new runContext_1.RunContext(options.context), input, startingAgent, options.maxTurns === undefined
+                     ? constants_1.DEFAULT_MAX_TURNS
+-                    : options.maxTurns);
++                    : options.maxTurns, {
++                    historyOwnership: options.historyOwnership,
++                    modelResponseRetention: options.modelResponseRetention,
++                });
+             if (isResumedState) {
+                 state._agentToolInvocation = undefined;
+                 if (options.maxTurns !== undefined) {
+@@ -546,7 +584,7 @@ class Runner extends lifecycle_1.RunHooks {
+             let persistenceCheckpoint;
+             let approvedToolCheckpointCompacted = false;
+             let approvedToolCheckpointRequiresLocalInputCompaction = isResumedState && hasPersistedToolOutput(state);
+-            let approvedToolCheckpointModelResponseCount = state._modelResponses.length;
++            let approvedToolCheckpointModelResponseCount = state._modelResponseCount;
+             let completedResultPersisted = false;
+             const completeResult = (result) => {
+                 completedResult = result;
+@@ -554,7 +592,7 @@ class Runner extends lifecycle_1.RunHooks {
+             };
+             const persistNonStreamingResult = async (result) => {
+                 const hasUnpersistedItems = result.newItems.length > state._currentTurnPersistedItemCount;
+-                const modelResponseAdvanced = result.rawResponses.length > approvedToolCheckpointModelResponseCount;
++                const modelResponseAdvanced = result.state._modelResponseCount > approvedToolCheckpointModelResponseCount;
+                 const persistenceOptions = approvedToolCheckpointRequiresLocalInputCompaction
+                     ? approvedToolCheckpointCompacted &&
+                         !hasUnpersistedItems &&
+@@ -663,7 +701,7 @@ class Runner extends lifecycle_1.RunHooks {
+                             });
+                             approvedToolCheckpointCompacted = true;
+                             approvedToolCheckpointModelResponseCount =
+-                                approvedToolResult.rawResponses.length;
++                                approvedToolResult.state._modelResponseCount;
+                         }
+                         if (options.signal?.aborted) {
+                             persistenceCheckpoint = new result_1.RunResult(state);
+@@ -743,7 +781,9 @@ class Runner extends lifecycle_1.RunHooks {
+                         sessionTurnInputUpdate?.(sessionPreparedTurnInput, preparedSandboxAgent.turnInput);
+                         const artifacts = await (0, modelPreparation_1.prepareAgentArtifacts)(state, preparedSandboxAgent.executionAgent, options.toolNameCollisionPolicy);
+                         const preparedCall = await this.#prepareModelCall(state, preparedSandboxAgent.executionAgent, options, artifacts, preparedSandboxAgent.turnInput, serverConversationTracker, sessionInputUpdate);
+-                        (0, sessionPersistence_1.captureSessionHistoryTransactionInputItems)(options.session, state, getSessionInputForPersistence?.());
++                        if (options.historyOwnership !== 'external') {
++                            (0, sessionPersistence_1.captureSessionHistoryTransactionInputItems)(options.session, state, getSessionInputForPersistence?.());
++                        }
+                         await guardrailTracker.throwIfError();
+                         state._lastTurnResponse = await (0, modelRetry_1.getResponseWithRetry)(preparedCall.model, {
+                             systemInstructions: preparedCall.modelInput.instructions,
+@@ -772,7 +812,7 @@ class Runner extends lifecycle_1.RunHooks {
+                                 allTurnItems: preparedCall.turnInput,
+                             });
+                         }
+-                        state._modelResponses.push(state._lastTurnResponse);
++                        state.recordModelResponse(state._lastTurnResponse);
+                         state._context.usage.add(state._lastTurnResponse.usage);
+                         recordUsage(state._lastTurnResponse.usage);
+                         state._noActiveAgentRun = false;
+@@ -960,7 +1000,7 @@ class Runner extends lifecycle_1.RunHooks {
+         let suppressStreamInputPersistence = false;
+         let approvedToolCheckpointCompacted = false;
+         let approvedToolCheckpointRequiresLocalInputCompaction = isResumedState && hasPersistedToolOutput(result.state);
+-        let approvedToolCheckpointModelResponseCount = result.rawResponses.length;
++        let approvedToolCheckpointModelResponseCount = result.state._modelResponseCount;
+         let currentTurnSpan;
+         const parentUsageRecorder = (0, usageTracking_1.getRunnerParentUsageRecorder)(this);
+         const recordUsage = (usage) => {
+@@ -971,7 +1011,7 @@ class Runner extends lifecycle_1.RunHooks {
+         (0, usageTracking_1.setRunStateUsageRecorder)(result.state, recordUsage);
+         const saveStreamResultWithCompactionOwnership = async (overrideOptions) => {
+             const hasUnpersistedItems = result.newItems.length > result.state._currentTurnPersistedItemCount;
+-            const modelResponseAdvanced = result.rawResponses.length > approvedToolCheckpointModelResponseCount;
++            const modelResponseAdvanced = result.state._modelResponseCount > approvedToolCheckpointModelResponseCount;
+             const persistenceOptions = overrideOptions ??
+                 (approvedToolCheckpointRequiresLocalInputCompaction
+                     ? approvedToolCheckpointCompacted &&
+@@ -1104,7 +1144,7 @@ class Runner extends lifecycle_1.RunHooks {
+                         });
+                         approvedToolCheckpointCompacted = true;
+                         approvedToolCheckpointModelResponseCount =
+-                            result.rawResponses.length;
++                            result.state._modelResponseCount;
+                     }
+                     // Don't reset counter here - resolveInterruptedTurn already adjusted it via rewind logic
+                     // The counter will be reset when _currentTurn is incremented (starting a new turn)
+@@ -1190,7 +1230,9 @@ class Runner extends lifecycle_1.RunHooks {
+                     sessionTurnInputUpdate?.(sessionPreparedTurnInput, preparedSandboxAgent.turnInput);
+                     const artifacts = await (0, modelPreparation_1.prepareAgentArtifacts)(result.state, preparedSandboxAgent.executionAgent, options.toolNameCollisionPolicy);
+                     const preparedCall = await this.#prepareModelCall(result.state, preparedSandboxAgent.executionAgent, options, artifacts, preparedSandboxAgent.turnInput, serverConversationTracker, sessionInputUpdate);
+-                    (0, sessionPersistence_1.captureSessionHistoryTransactionInputItems)(options.session, result.state, getStreamInputForPersistence?.());
++                    if (options.historyOwnership !== 'external') {
++                        (0, sessionPersistence_1.captureSessionHistoryTransactionInputItems)(options.session, result.state, getStreamInputForPersistence?.());
++                    }
+                     await guardrailTracker.throwIfError();
+                     // Initial request and session-persistence ordering remain unchanged.
+                     // Once a logical turn is established, do not start another model
+@@ -1326,7 +1368,7 @@ class Runner extends lifecycle_1.RunHooks {
+                     if (serverConversationTracker) {
+                         result.state.setConversationContext(serverConversationTracker.conversationId, serverConversationTracker.previousResponseId);
+                     }
+-                    result.state._modelResponses.push(result.state._lastTurnResponse);
++                    result.state.recordModelResponse(result.state._lastTurnResponse);
+                     const processedResponse = await (0, modelOutputs_1.processModelResponseAsync)(result.state._lastTurnResponse, currentAgent, preparedCall.tools, preparedCall.handoffs, result.state, [...preparedCall.turnInput, ...result.state._generatedItems], options.toolNotFoundBehavior, {
+                         allowPromptSuppliedTools: preparedCall.allowPromptSuppliedTools,
+                     });
+@@ -1473,7 +1515,10 @@ class Runner extends lifecycle_1.RunHooks {
+                     ? options.context
+                     : new runContext_1.RunContext(options.context), input, agent, options.maxTurns === undefined
+                     ? constants_1.DEFAULT_MAX_TURNS
+-                    : options.maxTurns);
++                    : options.maxTurns, {
++                    historyOwnership: options.historyOwnership,
++                    modelResponseRetention: options.modelResponseRetention,
++                });
+             if (isResumedState) {
+                 state._agentToolInvocation = undefined;
+                 if (options.maxTurns !== undefined) {
+@@ -1587,7 +1632,7 @@ class Runner extends lifecycle_1.RunHooks {
+             !(artifacts.toolsExplicitlyProvided &&
+                 artifacts.serializedTools.length === 0 &&
+                 artifacts.serializedHandoffs.length === 0);
+-        const { modelInput, sourceItems, persistedItems, filterApplied } = await (0, conversation_1.applyCallModelInputFilter)(state._currentAgent, options.callModelInputFilter, state._context, turnInput, systemInstructions);
++        const { modelInput, sourceItems, persistedItems, filterApplied } = await (0, conversation_1.applyCallModelInputFilter)(state._currentAgent, options.callModelInputFilter, state._context, turnInput, systemInstructions, { historyOwnership: options.historyOwnership });
+         // Persist normalized clones so session history mirrors the exact model payload. An empty array
+         // is intentional when a filter removes everything.
+         sessionInputUpdate?.(sourceItems, persistedItems);
+diff --git a/dist/run.mjs b/dist/run.mjs
+index 20a7ddd8049b4404585cee04fa32eec2a8453103..a0e839fd23efa24a5d2fc2382d6690de6bf638de 100644
+--- a/dist/run.mjs
++++ b/dist/run.mjs
+@@ -59,6 +59,20 @@ class LazyDefaultModelProvider {
+ function isNoopTrace(trace) {
+     return trace instanceof NoopTrace || trace?.traceId === NOOP_TRACE_OR_SPAN_ID;
+ }
++function resolveHistoryOwnership(value) {
++    const resolved = value ?? 'sdk';
++    if (resolved !== 'sdk' && resolved !== 'external') {
++        throw new UserError("historyOwnership must be either 'sdk' or 'external'.");
++    }
++    return resolved;
++}
++function resolveModelResponseRetention(value) {
++    const resolved = value ?? 'all';
++    if (resolved !== 'all' && resolved !== 'last') {
++        throw new UserError("modelResponseRetention must be either 'all' or 'last'.");
++    }
++    return resolved;
++}
+ export async function run(agent, input, options) {
+     const runner = getDefaultRunner();
+     if (options?.stream) {
+@@ -102,6 +116,8 @@ export class Runner extends RunHooks {
+             toolNameCollisionPolicy: validateToolNameCollisionPolicy(config.toolNameCollisionPolicy),
+             sessionInputCallback: config.sessionInputCallback,
+             callModelInputFilter: config.callModelInputFilter,
++            historyOwnership: resolveHistoryOwnership(config.historyOwnership),
++            modelResponseRetention: resolveModelResponseRetention(config.modelResponseRetention),
+             toolErrorFormatter: config.toolErrorFormatter,
+             reasoningItemIdPolicy: config.reasoningItemIdPolicy,
+         };
+@@ -148,6 +164,8 @@ export class Runner extends RunHooks {
+         const sessionInputCallback = resolvedOptions.sessionInputCallback ?? this.config.sessionInputCallback;
+         // Likewise allow callers to override callModelInputFilter on individual runs.
+         const callModelInputFilter = resolvedOptions.callModelInputFilter ?? this.config.callModelInputFilter;
++        const historyOwnership = resolveHistoryOwnership(resolvedOptions.historyOwnership ?? this.config.historyOwnership);
++        const modelResponseRetention = resolveModelResponseRetention(resolvedOptions.modelResponseRetention ?? this.config.modelResponseRetention);
+         // Per-run callback can override runner-level tool error formatting defaults.
+         const toolErrorFormatter = resolvedOptions.toolErrorFormatter ?? this.config.toolErrorFormatter;
+         const reasoningItemIdPolicy = resolvedOptions.reasoningItemIdPolicy ??
+@@ -170,6 +188,8 @@ export class Runner extends RunHooks {
+             ...resolvedOptions,
+             sessionInputCallback,
+             callModelInputFilter,
++            historyOwnership,
++            modelResponseRetention,
+             toolErrorFormatter,
+             reasoningItemIdPolicy,
+             toolExecution,
+@@ -195,24 +215,39 @@ export class Runner extends RunHooks {
+         // When the server tracks conversation history we defer to it for previous turns so local session
+         // persistence can focus solely on the new delta being generated in this process.
+         const session = effectiveOptions.session;
++        if (historyOwnership === 'external' &&
++            (session !== undefined ||
++                sessionInputCallback !== undefined ||
++                serverManagesConversation)) {
++            throw new UserError('External history ownership cannot be combined with Session, sessionInputCallback, previousResponseId, or conversationId.');
++        }
+         let provisionalSessionHistoryTransactionSessionId;
+         let provisionalSessionHistoryTransactionInputItems;
+         if (resumingFromState) {
+             const resumedState = input;
+-            const hadSessionBinding = resumedState._currentTurnSessionHistoryTransactionSessionId !==
+-                undefined;
+-            const portableInputItems = resumedState._currentTurnSessionHistoryTransactionInputItems;
++            if (historyOwnership === 'external' &&
++                (resumedState._currentTurnSessionHistoryTransactionSessionId !== undefined ||
++                    resumedState._pendingSessionHistoryTransaction !== undefined ||
++                    resumedState._pendingLegacyCompactionSessionItems !== undefined)) {
++                throw new UserError('External history ownership cannot resume RunState that is bound to SDK Session persistence.');
++            }
+             resumedState.setReasoningItemIdPolicy(reasoningItemIdPolicy);
+-            await prepareSessionHistoryTransactionsForRun(session, resumedState, {
+-                serverManagesConversation,
+-            });
+-            if (!hadSessionBinding) {
+-                provisionalSessionHistoryTransactionSessionId =
+-                    resumedState._currentTurnSessionHistoryTransactionSessionId;
+-                provisionalSessionHistoryTransactionInputItems = portableInputItems;
++            resumedState.setModelResponseRetention(modelResponseRetention);
++            if (historyOwnership !== 'external') {
++                const hadSessionBinding = resumedState._currentTurnSessionHistoryTransactionSessionId !==
++                    undefined;
++                const portableInputItems = resumedState._currentTurnSessionHistoryTransactionInputItems;
++                await prepareSessionHistoryTransactionsForRun(session, resumedState, {
++                    serverManagesConversation,
++                });
++                if (!hadSessionBinding) {
++                    provisionalSessionHistoryTransactionSessionId =
++                        resumedState._currentTurnSessionHistoryTransactionSessionId;
++                    provisionalSessionHistoryTransactionInputItems = portableInputItems;
++                }
+             }
+         }
+-        const sessionPersistence = createSessionPersistenceTracker({
++        const sessionPersistence = historyOwnership === 'external' ? undefined : createSessionPersistenceTracker({
+             session,
+             hasCallModelInputFilter,
+             persistInput: saveStreamInputToSession,
+@@ -414,7 +449,10 @@ export class Runner extends RunHooks {
+                     ? options.context
+                     : new RunContext(options.context), input, startingAgent, options.maxTurns === undefined
+                     ? DEFAULT_MAX_TURNS
+-                    : options.maxTurns);
++                    : options.maxTurns, {
++                    historyOwnership: options.historyOwnership,
++                    modelResponseRetention: options.modelResponseRetention,
++                });
+             if (isResumedState) {
+                 state._agentToolInvocation = undefined;
+                 if (options.maxTurns !== undefined) {
+@@ -506,7 +544,7 @@ export class Runner extends RunHooks {
+             let persistenceCheckpoint;
+             let approvedToolCheckpointCompacted = false;
+             let approvedToolCheckpointRequiresLocalInputCompaction = isResumedState && hasPersistedToolOutput(state);
+-            let approvedToolCheckpointModelResponseCount = state._modelResponses.length;
++            let approvedToolCheckpointModelResponseCount = state._modelResponseCount;
+             let completedResultPersisted = false;
+             const completeResult = (result) => {
+                 completedResult = result;
+@@ -514,7 +552,7 @@ export class Runner extends RunHooks {
+             };
+             const persistNonStreamingResult = async (result) => {
+                 const hasUnpersistedItems = result.newItems.length > state._currentTurnPersistedItemCount;
+-                const modelResponseAdvanced = result.rawResponses.length > approvedToolCheckpointModelResponseCount;
++                const modelResponseAdvanced = result.state._modelResponseCount > approvedToolCheckpointModelResponseCount;
+                 const persistenceOptions = approvedToolCheckpointRequiresLocalInputCompaction
+                     ? approvedToolCheckpointCompacted &&
+                         !hasUnpersistedItems &&
+@@ -623,7 +661,7 @@ export class Runner extends RunHooks {
+                             });
+                             approvedToolCheckpointCompacted = true;
+                             approvedToolCheckpointModelResponseCount =
+-                                approvedToolResult.rawResponses.length;
++                                approvedToolResult.state._modelResponseCount;
+                         }
+                         if (options.signal?.aborted) {
+                             persistenceCheckpoint = new RunResult(state);
+@@ -703,7 +741,9 @@ export class Runner extends RunHooks {
+                         sessionTurnInputUpdate?.(sessionPreparedTurnInput, preparedSandboxAgent.turnInput);
+                         const artifacts = await prepareAgentArtifacts(state, preparedSandboxAgent.executionAgent, options.toolNameCollisionPolicy);
+                         const preparedCall = await this.#prepareModelCall(state, preparedSandboxAgent.executionAgent, options, artifacts, preparedSandboxAgent.turnInput, serverConversationTracker, sessionInputUpdate);
+-                        captureSessionHistoryTransactionInputItems(options.session, state, getSessionInputForPersistence?.());
++                        if (options.historyOwnership !== 'external') {
++                            captureSessionHistoryTransactionInputItems(options.session, state, getSessionInputForPersistence?.());
++                        }
+                         await guardrailTracker.throwIfError();
+                         state._lastTurnResponse = await getResponseWithRetry(preparedCall.model, {
+                             systemInstructions: preparedCall.modelInput.instructions,
+@@ -732,7 +772,7 @@ export class Runner extends RunHooks {
+                                 allTurnItems: preparedCall.turnInput,
+                             });
+                         }
+-                        state._modelResponses.push(state._lastTurnResponse);
++                        state.recordModelResponse(state._lastTurnResponse);
+                         state._context.usage.add(state._lastTurnResponse.usage);
+                         recordUsage(state._lastTurnResponse.usage);
+                         state._noActiveAgentRun = false;
+@@ -920,7 +960,7 @@ export class Runner extends RunHooks {
+         let suppressStreamInputPersistence = false;
+         let approvedToolCheckpointCompacted = false;
+         let approvedToolCheckpointRequiresLocalInputCompaction = isResumedState && hasPersistedToolOutput(result.state);
+-        let approvedToolCheckpointModelResponseCount = result.rawResponses.length;
++        let approvedToolCheckpointModelResponseCount = result.state._modelResponseCount;
+         let currentTurnSpan;
+         const parentUsageRecorder = getRunnerParentUsageRecorder(this);
+         const recordUsage = (usage) => {
+@@ -931,7 +971,7 @@ export class Runner extends RunHooks {
+         setRunStateUsageRecorder(result.state, recordUsage);
+         const saveStreamResultWithCompactionOwnership = async (overrideOptions) => {
+             const hasUnpersistedItems = result.newItems.length > result.state._currentTurnPersistedItemCount;
+-            const modelResponseAdvanced = result.rawResponses.length > approvedToolCheckpointModelResponseCount;
++            const modelResponseAdvanced = result.state._modelResponseCount > approvedToolCheckpointModelResponseCount;
+             const persistenceOptions = overrideOptions ??
+                 (approvedToolCheckpointRequiresLocalInputCompaction
+                     ? approvedToolCheckpointCompacted &&
+@@ -1064,7 +1104,7 @@ export class Runner extends RunHooks {
+                         });
+                         approvedToolCheckpointCompacted = true;
+                         approvedToolCheckpointModelResponseCount =
+-                            result.rawResponses.length;
++                            result.state._modelResponseCount;
+                     }
+                     // Don't reset counter here - resolveInterruptedTurn already adjusted it via rewind logic
+                     // The counter will be reset when _currentTurn is incremented (starting a new turn)
+@@ -1150,7 +1190,9 @@ export class Runner extends RunHooks {
+                     sessionTurnInputUpdate?.(sessionPreparedTurnInput, preparedSandboxAgent.turnInput);
+                     const artifacts = await prepareAgentArtifacts(result.state, preparedSandboxAgent.executionAgent, options.toolNameCollisionPolicy);
+                     const preparedCall = await this.#prepareModelCall(result.state, preparedSandboxAgent.executionAgent, options, artifacts, preparedSandboxAgent.turnInput, serverConversationTracker, sessionInputUpdate);
+-                    captureSessionHistoryTransactionInputItems(options.session, result.state, getStreamInputForPersistence?.());
++                    if (options.historyOwnership !== 'external') {
++                        captureSessionHistoryTransactionInputItems(options.session, result.state, getStreamInputForPersistence?.());
++                    }
+                     await guardrailTracker.throwIfError();
+                     // Initial request and session-persistence ordering remain unchanged.
+                     // Once a logical turn is established, do not start another model
+@@ -1286,7 +1328,7 @@ export class Runner extends RunHooks {
+                     if (serverConversationTracker) {
+                         result.state.setConversationContext(serverConversationTracker.conversationId, serverConversationTracker.previousResponseId);
+                     }
+-                    result.state._modelResponses.push(result.state._lastTurnResponse);
++                    result.state.recordModelResponse(result.state._lastTurnResponse);
+                     const processedResponse = await processModelResponseAsync(result.state._lastTurnResponse, currentAgent, preparedCall.tools, preparedCall.handoffs, result.state, [...preparedCall.turnInput, ...result.state._generatedItems], options.toolNotFoundBehavior, {
+                         allowPromptSuppliedTools: preparedCall.allowPromptSuppliedTools,
+                     });
+@@ -1433,7 +1475,10 @@ export class Runner extends RunHooks {
+                     ? options.context
+                     : new RunContext(options.context), input, agent, options.maxTurns === undefined
+                     ? DEFAULT_MAX_TURNS
+-                    : options.maxTurns);
++                    : options.maxTurns, {
++                    historyOwnership: options.historyOwnership,
++                    modelResponseRetention: options.modelResponseRetention,
++                });
+             if (isResumedState) {
+                 state._agentToolInvocation = undefined;
+                 if (options.maxTurns !== undefined) {
+@@ -1547,7 +1592,7 @@ export class Runner extends RunHooks {
+             !(artifacts.toolsExplicitlyProvided &&
+                 artifacts.serializedTools.length === 0 &&
+                 artifacts.serializedHandoffs.length === 0);
+-        const { modelInput, sourceItems, persistedItems, filterApplied } = await applyCallModelInputFilter(state._currentAgent, options.callModelInputFilter, state._context, turnInput, systemInstructions);
++        const { modelInput, sourceItems, persistedItems, filterApplied } = await applyCallModelInputFilter(state._currentAgent, options.callModelInputFilter, state._context, turnInput, systemInstructions, { historyOwnership: options.historyOwnership });
+         // Persist normalized clones so session history mirrors the exact model payload. An empty array
+         // is intentional when a filter removes everything.
+         sessionInputUpdate?.(sourceItems, persistedItems);
+diff --git a/dist/runState.d.ts b/dist/runState.d.ts
+index 9bbf67c71a80f110ab841d4553397633a6df4faf..9c5e34ace523d844174f5792659d83d8de0e4863 100644
+--- a/dist/runState.d.ts
++++ b/dist/runState.d.ts
+@@ -53,6 +53,17 @@ import type { AgentToolInvocation } from './agentToolInvocation';
+  */
+ export declare const CURRENT_SCHEMA_VERSION: "1.17";
+ type ContextOverrideStrategy = 'merge' | 'replace';
++export type ClientToolSearchRehydration = 'execute' | 'preserve_history';
++export type RunStateDeserializationOptions = {
++    /**
++     * Controls how serialized client tool_search outputs recover executable tools.
++     * `execute` preserves the default SDK behavior and reruns each custom search
++     * callback. `preserve_history` never reruns historical callbacks and instead
++     * rebinds matching tools from the current configured agent catalog. Historical
++     * tools that are no longer configured remain history only.
++     */
++    clientToolSearchRehydration?: ClientToolSearchRehydration;
++};
+ declare const pendingSessionHistoryTransactionSchema: z.ZodObject<{
+     operationId: z.ZodString;
+     transactionKind: z.ZodEnum<{
+@@ -4224,6 +4235,10 @@ export declare class RunState<TContext, TAgent extends Agent<any, any>> {
+      * Responses from the model so far.
+      */
+     _modelResponses: ModelResponse[];
++    /** Monotonic response count, independent of raw-response retention. */
++    _modelResponseCount: number;
++    /** Active raw-response retention policy for this run. */
++    _modelResponseRetention: 'all' | 'last';
+     /**
+      * Conversation identifier when the server manages conversation history.
+      */
+@@ -4383,7 +4398,10 @@ export declare class RunState<TContext, TAgent extends Agent<any, any>> {
+      * Persisted sandbox session metadata for sandbox-agent resume.
+      */
+     _sandbox: z.infer<typeof sandboxStateSchema> | undefined;
+-    constructor(context: RunContext<TContext>, originalInput: string | AgentInputItem[], startingAgent: TAgent, maxTurns: number | null);
++    constructor(context: RunContext<TContext>, originalInput: string | AgentInputItem[], startingAgent: TAgent, maxTurns: number | null, options?: {
++        historyOwnership?: 'sdk' | 'external';
++        modelResponseRetention?: 'all' | 'last';
++    });
+     /**
+      * Updates server-managed conversation identifiers as a single operation.
+      */
+@@ -4392,6 +4410,8 @@ export declare class RunState<TContext, TAgent extends Agent<any, any>> {
+      * Updates runtime options for converting run items into turn input.
+      */
+     setReasoningItemIdPolicy(policy?: ReasoningItemIdPolicy): void;
++    setModelResponseRetention(retention: 'all' | 'last'): void;
++    recordModelResponse(response: ModelResponse): void;
+     /**
+      * Updates the agent span associated with the current run.
+      */
+@@ -4511,8 +4531,8 @@ export declare class RunState<TContext, TAgent extends Agent<any, any>> {
+      * This method is used to deserialize a run state from a string that was serialized using the
+      * `toString` method.
+      */
+-    static fromString<TContext, TAgent extends Agent<any, any>>(initialAgent: TAgent, str: string): Promise<RunState<TContext, TAgent>>;
+-    static fromStringWithContext<TContext, TAgent extends Agent<any, any>>(initialAgent: TAgent, str: string, context: RunContext<TContext>, options?: {
++    static fromString<TContext, TAgent extends Agent<any, any>>(initialAgent: TAgent, str: string, options?: RunStateDeserializationOptions): Promise<RunState<TContext, TAgent>>;
++    static fromStringWithContext<TContext, TAgent extends Agent<any, any>>(initialAgent: TAgent, str: string, context: RunContext<TContext>, options?: RunStateDeserializationOptions & {
+         contextStrategy?: ContextOverrideStrategy;
+     }): Promise<RunState<TContext, TAgent>>;
+ }
+diff --git a/dist/runState.js b/dist/runState.js
+index deb9514cf094157893778976e2ef03e7fefe0965..ba0c9a02595cce37566e1697295c47ecf768ae66 100644
+--- a/dist/runState.js
++++ b/dist/runState.js
+@@ -500,6 +500,15 @@ class RunState {
+      * Responses from the model so far.
+      */
+     _modelResponses;
++    /**
++     * Monotonic number of model responses observed, independent of retention.
++     */
++    _modelResponseCount;
++    /**
++     * Controls whether raw response history retains every response or only the
++     * latest response. Generated items and aggregate usage are unaffected.
++     */
++    _modelResponseRetention;
+     /**
+      * Conversation identifier when the server manages conversation history.
+      */
+@@ -661,11 +670,17 @@ class RunState {
+      * Persisted sandbox session metadata for sandbox-agent resume.
+      */
+     _sandbox = undefined;
+-    constructor(context, originalInput, startingAgent, maxTurns) {
++    constructor(context, originalInput, startingAgent, maxTurns, options = {}) {
+         this._context = context;
+         this._agentToolInvocation = undefined;
+-        this._originalInput = structuredClone(originalInput);
++        this._originalInput = options.historyOwnership === 'external' && Array.isArray(originalInput)
++            ? [...originalInput]
++            : options.historyOwnership === 'external'
++                ? originalInput
++                : structuredClone(originalInput);
+         this._modelResponses = [];
++        this._modelResponseCount = 0;
++        this._modelResponseRetention = options.modelResponseRetention ?? 'all';
+         this._currentAgentSpan = undefined;
+         this._currentAgent = startingAgent;
+         this.#startingAgent = startingAgent;
+@@ -706,6 +721,26 @@ class RunState {
+     setReasoningItemIdPolicy(policy) {
+         this._reasoningItemIdPolicy = policy;
+     }
++    setModelResponseRetention(retention) {
++        this._modelResponseRetention = retention;
++        if (retention === 'last' && this._modelResponses.length > 1) {
++            this._modelResponses.splice(0, this._modelResponses.length - 1);
++        }
++    }
++    recordModelResponse(response) {
++        this._modelResponseCount += 1;
++        if (this._modelResponseRetention === 'last') {
++            if (this._modelResponses.length === 0) {
++                this._modelResponses.push(response);
++            }
++            else {
++                this._modelResponses[0] = response;
++                this._modelResponses.length = 1;
++            }
++            return;
++        }
++        this._modelResponses.push(response);
++    }
+     /**
+      * Updates the agent span associated with the current run.
+      */
+@@ -1040,13 +1075,16 @@ class RunState {
+      * This method is used to deserialize a run state from a string that was serialized using the
+      * `toString` method.
+      */
+-    static async fromString(initialAgent, str) {
+-        return buildRunStateFromString(initialAgent, str);
++    static async fromString(initialAgent, str, options = {}) {
++        return buildRunStateFromString(initialAgent, str, {
++            clientToolSearchRehydration: options.clientToolSearchRehydration,
++        });
+     }
+     static async fromStringWithContext(initialAgent, str, context, options = {}) {
+         return buildRunStateFromString(initialAgent, str, {
+             contextOverride: context,
+             contextStrategy: options.contextStrategy,
++            clientToolSearchRehydration: options.clientToolSearchRehydration,
+         });
+     }
+ }
+@@ -1837,6 +1875,19 @@ function selectSerializedRuntimeTools(args) {
+     const callId = (0, toolSearch_1.resolveToolSearchCallId)(toolSearchCall);
+     throw new errors_1.UserError(`RunState cannot resume custom client tool_search call ${callId} for agent ${agent.name} because the registered execute callback returned runtime tools [${formatRuntimeToolKeys(actualRuntimeToolKeys)}] but the serialized state expects [${formatRuntimeToolKeys(expectedRuntimeToolKeys)}].`);
+ }
++function selectConfiguredRuntimeTools(expectedRuntimeToolKeys, availableTools) {
++    const availableToolsByKey = new Map();
++    for (const tool of availableTools) {
++        const runtimeToolKey = (0, tool_1.getToolSearchRuntimeRoutingKey)(tool);
++        if (runtimeToolKey) {
++            availableToolsByKey.set(runtimeToolKey, tool);
++        }
++    }
++    return [...expectedRuntimeToolKeys].flatMap((runtimeToolKey) => {
++        const tool = availableToolsByKey.get(runtimeToolKey);
++        return tool ? [tool] : [];
++    });
++}
+ async function getConfiguredAgentTools(args) {
+     const { agent, context, configuredToolsByAgent } = args;
+     const existing = configuredToolsByAgent.get(agent);
+@@ -2074,6 +2125,11 @@ function assertDeferredFunctionCallProvenance(args) {
+     }
+ }
+ async function rehydrateToolSearchRuntimeTools(state, options) {
++    const clientToolSearchRehydration = options.clientToolSearchRehydration ?? 'execute';
++    if (clientToolSearchRehydration !== 'execute' &&
++        clientToolSearchRehydration !== 'preserve_history') {
++        throw new errors_1.UserError("clientToolSearchRehydration must be either 'execute' or 'preserve_history'.");
++    }
+     const deferredFunctionCallExpectations = assertUnambiguousFunctionCallIds(state, options.agentMap, options.serializedProcessedResponse);
+     const configuredToolsByAgent = new Map();
+     const capabilitySnapshotsByAgent = new Map();
+@@ -2204,6 +2260,14 @@ async function rehydrateToolSearchRuntimeTools(state, options) {
+         const pendingCall = occurrencesByOutput.get(item).pendingCall;
+         const toolSearchTool = (0, toolSearch_2.getClientToolSearchHelper)(snapshot.availableTools);
+         const hasCustomExecutor = Boolean(toolSearchTool && (0, tool_1.getClientToolSearchExecutor)(toolSearchTool));
++        if (clientToolSearchRehydration === 'preserve_history') {
++            rehydrationRecords.set(item, {
++                pendingCall,
++                expectedRuntimeToolKeys,
++                runtimeTools: selectConfiguredRuntimeTools(expectedRuntimeToolKeys, snapshot.availableTools),
++            });
++            continue;
++        }
+         if (expectedRuntimeToolKeys.size === 0) {
+             rehydrationRecords.set(item, {
+                 pendingCall,
+@@ -2408,6 +2472,8 @@ async function buildRunStateFromJson(initialAgent, stateJson, options = {}) {
+     state._currentStep = stateJson.currentStep;
+     state._originalInput = stateJson.originalInput;
+     state._modelResponses = stateJson.modelResponses.map(deserializeModelResponse);
++    state._modelResponseCount = state._modelResponses.length;
++    state._modelResponseRetention = 'all';
+     state._lastTurnResponse = stateJson.lastModelResponse
+         ? deserializeModelResponse(stateJson.lastModelResponse)
+         : undefined;
+@@ -2436,6 +2502,7 @@ async function buildRunStateFromJson(initialAgent, stateJson, options = {}) {
+     const capabilitySnapshotsByAgent = await rehydrateToolSearchRuntimeTools(state, {
+         agentMap,
+         schemaVersion,
++        clientToolSearchRehydration: options.clientToolSearchRehydration,
+         serializedProcessedResponse: stateJson.lastProcessedResponse,
+         prepareCurrentAgentForLegacyApprovals: !schemaVersionSupportsV116State(schemaVersion) &&
+             shouldRestoreSerializedContext &&
+diff --git a/dist/runState.mjs b/dist/runState.mjs
+index fcba32246b7f942a5777aa38ae4663fb2c1a9df4..7ed6e3752214f43ebdaaf90ddbdf237ca685ae1d 100644
+--- a/dist/runState.mjs
++++ b/dist/runState.mjs
+@@ -455,6 +455,15 @@ export class RunState {
+      * Responses from the model so far.
+      */
+     _modelResponses;
++    /**
++     * Monotonic number of model responses observed, independent of retention.
++     */
++    _modelResponseCount;
++    /**
++     * Controls whether raw response history retains every response or only the
++     * latest response. Generated items and aggregate usage are unaffected.
++     */
++    _modelResponseRetention;
+     /**
+      * Conversation identifier when the server manages conversation history.
+      */
+@@ -616,11 +625,17 @@ export class RunState {
+      * Persisted sandbox session metadata for sandbox-agent resume.
+      */
+     _sandbox = undefined;
+-    constructor(context, originalInput, startingAgent, maxTurns) {
++    constructor(context, originalInput, startingAgent, maxTurns, options = {}) {
+         this._context = context;
+         this._agentToolInvocation = undefined;
+-        this._originalInput = structuredClone(originalInput);
++        this._originalInput = options.historyOwnership === 'external' && Array.isArray(originalInput)
++            ? [...originalInput]
++            : options.historyOwnership === 'external'
++                ? originalInput
++                : structuredClone(originalInput);
+         this._modelResponses = [];
++        this._modelResponseCount = 0;
++        this._modelResponseRetention = options.modelResponseRetention ?? 'all';
+         this._currentAgentSpan = undefined;
+         this._currentAgent = startingAgent;
+         this.#startingAgent = startingAgent;
+@@ -661,6 +676,26 @@ export class RunState {
+     setReasoningItemIdPolicy(policy) {
+         this._reasoningItemIdPolicy = policy;
+     }
++    setModelResponseRetention(retention) {
++        this._modelResponseRetention = retention;
++        if (retention === 'last' && this._modelResponses.length > 1) {
++            this._modelResponses.splice(0, this._modelResponses.length - 1);
++        }
++    }
++    recordModelResponse(response) {
++        this._modelResponseCount += 1;
++        if (this._modelResponseRetention === 'last') {
++            if (this._modelResponses.length === 0) {
++                this._modelResponses.push(response);
++            }
++            else {
++                this._modelResponses[0] = response;
++                this._modelResponses.length = 1;
++            }
++            return;
++        }
++        this._modelResponses.push(response);
++    }
+     /**
+      * Updates the agent span associated with the current run.
+      */
+@@ -995,13 +1030,16 @@ export class RunState {
+      * This method is used to deserialize a run state from a string that was serialized using the
+      * `toString` method.
+      */
+-    static async fromString(initialAgent, str) {
+-        return buildRunStateFromString(initialAgent, str);
++    static async fromString(initialAgent, str, options = {}) {
++        return buildRunStateFromString(initialAgent, str, {
++            clientToolSearchRehydration: options.clientToolSearchRehydration,
++        });
+     }
+     static async fromStringWithContext(initialAgent, str, context, options = {}) {
+         return buildRunStateFromString(initialAgent, str, {
+             contextOverride: context,
+             contextStrategy: options.contextStrategy,
++            clientToolSearchRehydration: options.clientToolSearchRehydration,
+         });
+     }
+ }
+@@ -1791,6 +1829,19 @@ function selectSerializedRuntimeTools(args) {
+     const callId = resolveToolSearchCallId(toolSearchCall);
+     throw new UserError(`RunState cannot resume custom client tool_search call ${callId} for agent ${agent.name} because the registered execute callback returned runtime tools [${formatRuntimeToolKeys(actualRuntimeToolKeys)}] but the serialized state expects [${formatRuntimeToolKeys(expectedRuntimeToolKeys)}].`);
+ }
++function selectConfiguredRuntimeTools(expectedRuntimeToolKeys, availableTools) {
++    const availableToolsByKey = new Map();
++    for (const tool of availableTools) {
++        const runtimeToolKey = getToolSearchRuntimeRoutingKey(tool);
++        if (runtimeToolKey) {
++            availableToolsByKey.set(runtimeToolKey, tool);
++        }
++    }
++    return [...expectedRuntimeToolKeys].flatMap((runtimeToolKey) => {
++        const tool = availableToolsByKey.get(runtimeToolKey);
++        return tool ? [tool] : [];
++    });
++}
+ async function getConfiguredAgentTools(args) {
+     const { agent, context, configuredToolsByAgent } = args;
+     const existing = configuredToolsByAgent.get(agent);
+@@ -2028,6 +2079,11 @@ function assertDeferredFunctionCallProvenance(args) {
+     }
+ }
+ async function rehydrateToolSearchRuntimeTools(state, options) {
++    const clientToolSearchRehydration = options.clientToolSearchRehydration ?? 'execute';
++    if (clientToolSearchRehydration !== 'execute' &&
++        clientToolSearchRehydration !== 'preserve_history') {
++        throw new UserError("clientToolSearchRehydration must be either 'execute' or 'preserve_history'.");
++    }
+     const deferredFunctionCallExpectations = assertUnambiguousFunctionCallIds(state, options.agentMap, options.serializedProcessedResponse);
+     const configuredToolsByAgent = new Map();
+     const capabilitySnapshotsByAgent = new Map();
+@@ -2158,6 +2214,14 @@ async function rehydrateToolSearchRuntimeTools(state, options) {
+         const pendingCall = occurrencesByOutput.get(item).pendingCall;
+         const toolSearchTool = getClientToolSearchHelper(snapshot.availableTools);
+         const hasCustomExecutor = Boolean(toolSearchTool && getClientToolSearchExecutor(toolSearchTool));
++        if (clientToolSearchRehydration === 'preserve_history') {
++            rehydrationRecords.set(item, {
++                pendingCall,
++                expectedRuntimeToolKeys,
++                runtimeTools: selectConfiguredRuntimeTools(expectedRuntimeToolKeys, snapshot.availableTools),
++            });
++            continue;
++        }
+         if (expectedRuntimeToolKeys.size === 0) {
+             rehydrationRecords.set(item, {
+                 pendingCall,
+@@ -2362,6 +2426,8 @@ async function buildRunStateFromJson(initialAgent, stateJson, options = {}) {
+     state._currentStep = stateJson.currentStep;
+     state._originalInput = stateJson.originalInput;
+     state._modelResponses = stateJson.modelResponses.map(deserializeModelResponse);
++    state._modelResponseCount = state._modelResponses.length;
++    state._modelResponseRetention = 'all';
+     state._lastTurnResponse = stateJson.lastModelResponse
+         ? deserializeModelResponse(stateJson.lastModelResponse)
+         : undefined;
+@@ -2390,6 +2456,7 @@ async function buildRunStateFromJson(initialAgent, stateJson, options = {}) {
+     const capabilitySnapshotsByAgent = await rehydrateToolSearchRuntimeTools(state, {
+         agentMap,
+         schemaVersion,
++        clientToolSearchRehydration: options.clientToolSearchRehydration,
+         serializedProcessedResponse: stateJson.lastProcessedResponse,
+         prepareCurrentAgentForLegacyApprovals: !schemaVersionSupportsV116State(schemaVersion) &&
+             shouldRestoreSerializedContext &&
+diff --git a/dist/runner/conversation.d.ts b/dist/runner/conversation.d.ts
+index 5e864ffbc632d2a0fff910297a323cee33111bb5..378603366576b5f940efb2b8b5dbd30c3f0c441a 100644
+--- a/dist/runner/conversation.d.ts
++++ b/dist/runner/conversation.d.ts
+@@ -34,11 +34,14 @@ export type FilterApplicationResult = {
+     persistedItems: AgentInputItem[];
+     filterApplied: boolean;
+ };
++export type CallModelInputApplicationOptions = {
++    historyOwnership?: 'sdk' | 'external';
++};
+ /**
+  * Applies the optional callModelInputFilter and returns the filtered input alongside the original
+  * items so downstream tracking and session persistence stay in sync with what the model saw.
+  */
+-export declare function applyCallModelInputFilter<TContext>(agent: Agent<TContext, AgentOutputType>, callModelInputFilter: CallModelInputFilter<any> | undefined, context: RunContext<TContext>, inputItems: AgentInputItem[], systemInstructions: string | undefined): Promise<FilterApplicationResult>;
++export declare function applyCallModelInputFilter<TContext>(agent: Agent<TContext, AgentOutputType>, callModelInputFilter: CallModelInputFilter<any> | undefined, context: RunContext<TContext>, inputItems: AgentInputItem[], systemInstructions: string | undefined, options?: CallModelInputApplicationOptions): Promise<FilterApplicationResult>;
+ /**
+  * Tracks which items have already been sent to or received from the Responses API when the caller
+  * supplies `conversationId`/`previousResponseId`. This ensures we only send the delta each turn.
+diff --git a/dist/runner/conversation.js b/dist/runner/conversation.js
+index d46c7789ca38cd08b3ac8ee635298ab848335c6a..332285d5ddc74a27bcbd69d3a839c6228c1c0879 100644
+--- a/dist/runner/conversation.js
++++ b/dist/runner/conversation.js
+@@ -12,7 +12,7 @@ Object.defineProperty(exports, "getTurnInput", { enumerable: true, get: function
+  * Applies the optional callModelInputFilter and returns the filtered input alongside the original
+  * items so downstream tracking and session persistence stay in sync with what the model saw.
+  */
+-async function applyCallModelInputFilter(agent, callModelInputFilter, context, inputItems, systemInstructions) {
++async function applyCallModelInputFilter(agent, callModelInputFilter, context, inputItems, systemInstructions, options = {}) {
+     const cloneInputItems = (items, map) => items.map((item) => {
+         const cloned = structuredClone(item);
+         if (map && cloned && typeof cloned === 'object') {
+@@ -22,15 +22,25 @@ async function applyCallModelInputFilter(agent, callModelInputFilter, context, i
+     });
+     // Record the relationship between the cloned array passed to filters and the original inputs.
+     const cloneMap = new WeakMap();
+-    // Always create a deep copy so downstream mutations inside filters cannot affect
+-    // the cached turn state.
+-    const clonedBaseInput = cloneInputItems(inputItems, cloneMap);
++    // Application-owned history is a borrowed immutable view: copy only its array
++    // boundary. SDK ownership preserves the defensive deep-clone behavior.
++    const clonedBaseInput = options.historyOwnership === 'external'
++        ? [...inputItems]
++        : cloneInputItems(inputItems, cloneMap);
+     const base = {
+         input: clonedBaseInput,
+         instructions: systemInstructions,
+     };
+     if (!callModelInputFilter) {
+         const normalizedInput = (0, items_1.deduplicateAgentInputItemsPreferringLatest)(clonedBaseInput);
++        if (options.historyOwnership === 'external') {
++            return {
++                modelInput: { ...base, input: normalizedInput },
++                sourceItems: [],
++                persistedItems: [],
++                filterApplied: false,
++            };
++        }
+         return {
+             modelInput: { ...base, input: normalizedInput },
+             sourceItems: normalizedInput.map((item) => cloneMap.get(item) ?? item),
+@@ -47,6 +57,20 @@ async function applyCallModelInputFilter(agent, callModelInputFilter, context, i
+         if (!result || !Array.isArray(result.input)) {
+             throw new errors_1.UserError('callModelInputFilter must return a ModelInputData object with an input array.');
+         }
++        const normalizedInput = (0, items_1.deduplicateAgentInputItemsPreferringLatest)(result.input);
++        if (options.historyOwnership === 'external') {
++            return {
++                modelInput: {
++                    input: normalizedInput,
++                    instructions: typeof result.instructions === 'undefined'
++                        ? systemInstructions
++                        : result.instructions,
++                },
++                sourceItems: [],
++                persistedItems: [],
++                filterApplied: true,
++            };
++        }
+         const normalizedBaseSources = (0, items_1.deduplicateAgentInputItemsPreferringLatest)(clonedBaseInput).map((item) => cloneMap.get(item) ?? item);
+         const originalPool = (0, items_1.buildAgentInputPool)(normalizedBaseSources);
+         const fallbackOriginals = normalizedBaseSources.filter((item) => item && typeof item === 'object');
+@@ -66,7 +90,6 @@ async function applyCallModelInputFilter(agent, callModelInputFilter, context, i
+             }
+             return next;
+         };
+-        const normalizedInput = (0, items_1.deduplicateAgentInputItemsPreferringLatest)(result.input);
+         const consumedExactClones = new WeakSet();
+         const injectedExactCloneIndexes = new Set();
+         // Preserve a pointer to the original object backing each filtered clone so downstream
+diff --git a/dist/runner/conversation.mjs b/dist/runner/conversation.mjs
+index 773f1fc48bf8758d642bd51f8c062efbf08f5c45..3540413d2bdac08df13084f0b98545bc13eb50b4 100644
+--- a/dist/runner/conversation.mjs
++++ b/dist/runner/conversation.mjs
+@@ -7,7 +7,7 @@ export { getTurnInput } from "./items.mjs";
+  * Applies the optional callModelInputFilter and returns the filtered input alongside the original
+  * items so downstream tracking and session persistence stay in sync with what the model saw.
+  */
+-export async function applyCallModelInputFilter(agent, callModelInputFilter, context, inputItems, systemInstructions) {
++export async function applyCallModelInputFilter(agent, callModelInputFilter, context, inputItems, systemInstructions, options = {}) {
+     const cloneInputItems = (items, map) => items.map((item) => {
+         const cloned = structuredClone(item);
+         if (map && cloned && typeof cloned === 'object') {
+@@ -17,15 +17,25 @@ export async function applyCallModelInputFilter(agent, callModelInputFilter, con
+     });
+     // Record the relationship between the cloned array passed to filters and the original inputs.
+     const cloneMap = new WeakMap();
+-    // Always create a deep copy so downstream mutations inside filters cannot affect
+-    // the cached turn state.
+-    const clonedBaseInput = cloneInputItems(inputItems, cloneMap);
++    // Application-owned history is a borrowed immutable view: copy only its array
++    // boundary. SDK ownership preserves the defensive deep-clone behavior.
++    const clonedBaseInput = options.historyOwnership === 'external'
++        ? [...inputItems]
++        : cloneInputItems(inputItems, cloneMap);
+     const base = {
+         input: clonedBaseInput,
+         instructions: systemInstructions,
+     };
+     if (!callModelInputFilter) {
+         const normalizedInput = deduplicateAgentInputItemsPreferringLatest(clonedBaseInput);
++        if (options.historyOwnership === 'external') {
++            return {
++                modelInput: { ...base, input: normalizedInput },
++                sourceItems: [],
++                persistedItems: [],
++                filterApplied: false,
++            };
++        }
+         return {
+             modelInput: { ...base, input: normalizedInput },
+             sourceItems: normalizedInput.map((item) => cloneMap.get(item) ?? item),
+@@ -42,6 +52,20 @@ export async function applyCallModelInputFilter(agent, callModelInputFilter, con
+         if (!result || !Array.isArray(result.input)) {
+             throw new UserError('callModelInputFilter must return a ModelInputData object with an input array.');
+         }
++        const normalizedInput = deduplicateAgentInputItemsPreferringLatest(result.input);
++        if (options.historyOwnership === 'external') {
++            return {
++                modelInput: {
++                    input: normalizedInput,
++                    instructions: typeof result.instructions === 'undefined'
++                        ? systemInstructions
++                        : result.instructions,
++                },
++                sourceItems: [],
++                persistedItems: [],
++                filterApplied: true,
++            };
++        }
+         const normalizedBaseSources = deduplicateAgentInputItemsPreferringLatest(clonedBaseInput).map((item) => cloneMap.get(item) ?? item);
+         const originalPool = buildAgentInputPool(normalizedBaseSources);
+         const fallbackOriginals = normalizedBaseSources.filter((item) => item && typeof item === 'object');
+@@ -61,7 +85,6 @@ export async function applyCallModelInputFilter(agent, callModelInputFilter, con
+             }
+             return next;
+         };
+-        const normalizedInput = deduplicateAgentInputItemsPreferringLatest(result.input);
+         const consumedExactClones = new WeakSet();
+         const injectedExactCloneIndexes = new Set();
+         // Preserve a pointer to the original object backing each filtered clone so downstream

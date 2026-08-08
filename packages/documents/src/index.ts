@@ -25,9 +25,8 @@ import {
 } from "@opengeni/db";
 import * as schema from "@opengeni/db/schema";
 import type { ObjectStorage } from "@opengeni/storage";
-import { LiteParse } from "@llamaindex/liteparse";
 import { and, asc, desc, eq, inArray, or, sql, type SQL } from "drizzle-orm";
-import OpenAI from "openai";
+import type OpenAI from "openai";
 
 export const DEFAULT_DOCUMENT_PARSER = "liteparse";
 export const DEFAULT_DOCUMENT_EMBEDDING_MODEL = "text-embedding-3-large";
@@ -218,6 +217,7 @@ export class LiteParseDocumentParser implements DocumentParser {
 
   private async parseWithLiteParse(bytes: Uint8Array): Promise<string> {
     return await this.enqueueParse(async () => {
+      const { LiteParse } = await import("@llamaindex/liteparse");
       const parser = new LiteParse({ ocrEnabled: true, numWorkers: 1 });
       const result = await parser.parse(Buffer.from(bytes), true);
       const text = typeof result?.text === "string" ? result.text : "";
@@ -264,7 +264,7 @@ export class RecursiveTextChunker implements DocumentChunker {
 }
 
 export class OpenAIEmbeddingProvider implements DocumentEmbedder {
-  private client: OpenAI | null = null;
+  private clientPromise: Promise<OpenAI> | null = null;
   private readonly apiKey: string | undefined;
   private readonly baseURL: string | undefined;
 
@@ -294,7 +294,9 @@ export class OpenAIEmbeddingProvider implements DocumentEmbedder {
     const out: number[][] = [];
     for (let start = 0; start < texts.length; start += 64) {
       const batch = texts.slice(start, start + 64);
-      const response = await this.openai().embeddings.create({
+      const response = await (
+        await this.openai()
+      ).embeddings.create({
         model: this.model,
         input: batch,
         dimensions: this.dimensions,
@@ -314,17 +316,20 @@ export class OpenAIEmbeddingProvider implements DocumentEmbedder {
     return embedding;
   }
 
-  private openai(): OpenAI {
+  private async openai(): Promise<OpenAI> {
     if (!this.apiKey) {
       throw new Error("OpenAI document embeddings require an API key");
     }
-    this.client ??= new OpenAI({
-      apiKey: this.apiKey,
-      ...(this.baseURL ? { baseURL: this.baseURL } : {}),
-      ...(this.defaultQuery ? { defaultQuery: this.defaultQuery } : {}),
-      ...(this.defaultHeaders ? { defaultHeaders: this.defaultHeaders } : {}),
-    });
-    return this.client;
+    this.clientPromise ??= import("openai").then(
+      ({ default: OpenAIClient }) =>
+        new OpenAIClient({
+          apiKey: this.apiKey,
+          ...(this.baseURL ? { baseURL: this.baseURL } : {}),
+          ...(this.defaultQuery ? { defaultQuery: this.defaultQuery } : {}),
+          ...(this.defaultHeaders ? { defaultHeaders: this.defaultHeaders } : {}),
+        }),
+    );
+    return await this.clientPromise;
   }
 }
 
@@ -410,7 +415,7 @@ const CURATION_SYSTEM_PROMPT = [
 ].join(" ");
 
 export class OpenAICurationProvider implements DocumentCurator {
-  private client: OpenAI | null = null;
+  private clientPromise: Promise<OpenAI> | null = null;
   private readonly apiKey: string | undefined;
   private readonly baseURL: string | undefined;
   private readonly defaultHeaders: Record<string, string> | undefined;
@@ -432,7 +437,9 @@ export class OpenAICurationProvider implements DocumentCurator {
   }
 
   async curate(input: DocumentCurationInput): Promise<DocumentCurationOutcome> {
-    const response = await this.openai().chat.completions.create({
+    const response = await (
+      await this.openai()
+    ).chat.completions.create({
       model: this.model,
       response_format: { type: "json_object" },
       messages: [
@@ -455,17 +462,20 @@ export class OpenAICurationProvider implements DocumentCurator {
     return parseCurationOutcome(raw, input.bases);
   }
 
-  private openai(): OpenAI {
+  private async openai(): Promise<OpenAI> {
     if (!this.apiKey) {
       throw new Error("OpenAI document curation requires an API key");
     }
-    this.client ??= new OpenAI({
-      apiKey: this.apiKey,
-      ...(this.baseURL ? { baseURL: this.baseURL } : {}),
-      ...(this.defaultQuery ? { defaultQuery: this.defaultQuery } : {}),
-      ...(this.defaultHeaders ? { defaultHeaders: this.defaultHeaders } : {}),
-    });
-    return this.client;
+    this.clientPromise ??= import("openai").then(
+      ({ default: OpenAIClient }) =>
+        new OpenAIClient({
+          apiKey: this.apiKey,
+          ...(this.baseURL ? { baseURL: this.baseURL } : {}),
+          ...(this.defaultQuery ? { defaultQuery: this.defaultQuery } : {}),
+          ...(this.defaultHeaders ? { defaultHeaders: this.defaultHeaders } : {}),
+        }),
+    );
+    return await this.clientPromise;
   }
 }
 

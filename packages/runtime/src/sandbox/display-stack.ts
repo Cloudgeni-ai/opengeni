@@ -808,7 +808,7 @@ async function interruptProviderProcess(
   if (providerSessionId === null || typeof session.writeStdin !== "function") return;
   try {
     // This is an advisory provider-level interrupt. The marker/PGID cleanup
-    // below remains authoritative because Modal 0.13.3 ignores AbortSignal.
+    // below remains authoritative because the Agents SDK 0.14.3 Modal adapter ignores AbortSignal.
     await beforeDeadline(
       session.writeStdin({
         sessionId: providerSessionId,

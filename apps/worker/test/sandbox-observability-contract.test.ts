@@ -132,6 +132,7 @@ describe("sandbox observability contract", () => {
     for (const required of [
       "opengeni_turn_worker_memory_guard_utilization_ratio",
       "opengeni_turn_worker_memory_guard_target_ratio",
+      "opengeni_turn_worker_memory_guard_emergency_ratio",
       "opengeni_turn_worker_memory_guard_process_rss_ratio",
       "opengeni:node_memory_psi_stall_ratio",
       "opengeni:node_io_psi_stall_ratio",
@@ -156,6 +157,7 @@ describe("sandbox observability contract", () => {
       "opengeni:node_io_psi_stall_ratio",
       "opengeni:node_swap_out_pages_per_second",
       "OpenGeniTurnWorkerMemoryHeadroomLow",
+      "OpenGeniTurnWorkerMemoryEmergency",
       "OpenGeniTurnWorkerMemoryConsumesReserve",
       "OpenGeniTurnWorkerMemoryGuardDraining",
       "OpenGeniTurnWorkerMemoryGuardFailure",

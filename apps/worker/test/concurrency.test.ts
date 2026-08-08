@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  CONTROL_WORKER_MAX_CACHED_WORKFLOWS,
   CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
   CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS,
   turnWorkerConcurrencyLogFields,
@@ -27,6 +28,10 @@ describe("worker concurrency contract", () => {
     });
     expect(CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES).toBe(32);
     expect(CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS).toBe(40);
+    expect(CONTROL_WORKER_MAX_CACHED_WORKFLOWS).toBe(64);
+    expect(CONTROL_WORKER_MAX_CACHED_WORKFLOWS).toBeGreaterThanOrEqual(
+      CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS,
+    );
   });
 
   test("lets one worker fill a machine within system resource targets", () => {
@@ -44,7 +49,7 @@ describe("worker concurrency contract", () => {
         activityTaskSlotOptions: {
           minimumSlots: 1,
           maximumSlots: 256,
-          rampThrottle: "50ms",
+          rampThrottle: "250ms",
         },
       },
     });

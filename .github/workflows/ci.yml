@@ -665,6 +665,7 @@ jobs:
           helm template opengeni-observability deploy/observability \
             --namespace observability \
             --set-string opengeni.sourceRevision=ci \
+            --set-string 'kube-prometheus-stack.grafana.podAnnotations.opengeni\.ai/source-revision=ci' \
             >/tmp/opengeni-observability-rendered.yaml
           bun run check:observability-render -- \
             --manifest /tmp/opengeni-observability-rendered.yaml \
@@ -673,6 +674,7 @@ jobs:
             --namespace observability \
             --values deploy/observability/values.production.example.yaml \
             --set-string opengeni.sourceRevision=ci \
+            --set-string 'kube-prometheus-stack.grafana.podAnnotations.opengeni\.ai/source-revision=ci' \
             >/tmp/opengeni-observability-production-rendered.yaml
           bun run check:observability-render -- \
             --manifest /tmp/opengeni-observability-production-rendered.yaml \

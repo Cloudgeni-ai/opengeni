@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -27,7 +28,12 @@ import type { ApiRouteDeps } from "@opengeni/core";
 // The committed install artifacts, resolved relative to this module so the API
 // (run from source under /app via bun) locates the sibling agent/install/ dir at
 // runtime. apps/api/src/routes -> ../../../../agent/install.
-const INSTALL_DIR = new URL("../../../../agent/install/", import.meta.url);
+const INSTALL_DIR =
+  [
+    new URL("./assets/agent-install/", import.meta.url),
+    new URL("../../../../agent/install/", import.meta.url),
+  ].find((candidate) => existsSync(candidate)) ??
+  new URL("../../../../agent/install/", import.meta.url);
 
 // The baked release-binary dir (a sibling of the committed scripts). The build's
 // signing step writes the per-SHA Linux musl binaries + their `.sha256`/`.minisig`

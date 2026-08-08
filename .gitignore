@@ -11,6 +11,7 @@ node_modules/
 .turbo/
 .vite/
 coverage/
+tmp/
 *.tsbuildinfo
 bun.lockb
 *.traineddata

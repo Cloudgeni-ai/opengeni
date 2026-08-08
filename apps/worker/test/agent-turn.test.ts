@@ -1297,7 +1297,7 @@ describe("production model-response usage callback authority", () => {
       },
     };
     // These are the exact two terminal event shapes emitted, in order, by the
-    // repository-pinned @openai/agents-openai 0.13.3 stream implementation.
+    // repository-pinned @openai/agents-openai 0.14.3 stream implementation.
     const normalizedTerminal = new RunRawModelStreamEvent({
       type: "response_done",
       response: {

@@ -650,6 +650,11 @@ export type ProviderContextTokenSignal = {
   totalTokens: number;
 };
 
+export type PreviousModelRequestAccounting = {
+  instructionsTokens: number;
+  toolSchemaTokens: number;
+};
+
 export type CompleteModelInputEstimate = {
   tokens: number;
   source: "provider_plus_local";
@@ -703,6 +708,44 @@ export function estimateCompleteModelInput(input: {
     toolSchemaTokens,
     appendedAfterModelTokens,
   };
+}
+
+/**
+ * Hot-path compaction decision. The provider already counted the preceding
+ * complete request, so only the suffix added after its newest model item plus
+ * positive instructions/tool growth can change the next decision. Unlike the
+ * diagnostic estimator above, this never scans or serializes the full history
+ * and never retains the preceding input graph.
+ */
+export function estimateCompleteModelInputTokens(input: {
+  currentInput: readonly CompactionItem[];
+  currentInstructionsTokens: number;
+  currentToolSchemaTokens: number;
+  provider: ProviderContextTokenSignal;
+  previousRequest: PreviousModelRequestAccounting;
+}): number | null {
+  let lastModelGeneratedIndex = -1;
+  for (let index = input.currentInput.length - 1; index >= 0; index -= 1) {
+    if (isModelGeneratedItem(input.currentInput[index])) {
+      lastModelGeneratedIndex = index;
+      break;
+    }
+  }
+  if (lastModelGeneratedIndex === -1) return null;
+  const appendedAfterModelTokens = estimateTokens(
+    input.currentInput.slice(lastModelGeneratedIndex + 1),
+  );
+  const instructionGrowth = Math.max(
+    0,
+    input.currentInstructionsTokens - input.previousRequest.instructionsTokens,
+  );
+  const toolSchemaGrowth = Math.max(
+    0,
+    input.currentToolSchemaTokens - input.previousRequest.toolSchemaTokens,
+  );
+  return (
+    input.provider.totalTokens + appendedAfterModelTokens + instructionGrowth + toolSchemaGrowth
+  );
 }
 
 export function itemsAfterLastModelGeneratedItem(

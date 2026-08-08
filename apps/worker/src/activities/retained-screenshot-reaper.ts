@@ -6,7 +6,7 @@ import {
   type RetainedScreenshotMaintenanceClaim,
 } from "@opengeni/db";
 import type { ObjectHead, ObjectStorage } from "@opengeni/storage";
-import type { ActivityServices } from "./types";
+import type { ControlActivityServices } from "./types";
 
 export const RETAINED_SCREENSHOT_PENDING_GRACE_MS = 15 * 60 * 1_000;
 export const RETAINED_SCREENSHOT_CLAIM_TIMEOUT_MS = 10 * 60 * 1_000;
@@ -38,7 +38,7 @@ export type RetainedScreenshotMaintenanceActivityOptions = {
  * object delete.
  */
 export function createRetainedScreenshotMaintenanceActivities(
-  services: () => Promise<ActivityServices>,
+  services: () => Promise<ControlActivityServices>,
   options: RetainedScreenshotMaintenanceActivityOptions = {},
 ) {
   const pendingGraceMs = options.pendingGraceMs ?? RETAINED_SCREENSHOT_PENDING_GRACE_MS;

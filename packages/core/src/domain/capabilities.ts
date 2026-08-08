@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -1207,10 +1208,14 @@ function preferredSocialConnection(
 }
 
 async function discoverBundledSkills(): Promise<CapabilityCatalogItem[]> {
-  const skillsDir = new URL(
-    "../../../../packages/runtime/src/bundled_hashicorp_terraform_skills/",
-    import.meta.url,
-  );
+  const skillsDir = [
+    new URL("./assets/runtime/bundled_hashicorp_terraform_skills/", import.meta.url),
+    new URL(
+      "../../../../packages/runtime/src/bundled_hashicorp_terraform_skills/",
+      import.meta.url,
+    ),
+  ].find((candidate) => existsSync(candidate));
+  if (!skillsDir) return [];
   try {
     const entries = await readdir(skillsDir, { withFileTypes: true });
     const skills = await Promise.all(

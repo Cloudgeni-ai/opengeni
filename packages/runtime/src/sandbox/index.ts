@@ -194,6 +194,24 @@ export {
   type EnsureDisplayStackResult,
 } from "./display-stack";
 
+export {
+  sandboxCommandExitCode,
+  sandboxCommandOutput,
+  sandboxCommandStdout,
+  sandboxCommandStillRunning,
+} from "./command-result";
+
+export {
+  createTurnToolCancellationController,
+  TurnSandboxCommandCancelledError,
+} from "./turn-tool-cancellation";
+export type {
+  TurnSandboxCommandArgs,
+  TurnSandboxCommandSession,
+  TurnToolCancellationController,
+  TurnToolCancellationFence,
+} from "./turn-tool-cancellation";
+
 // The Channel-B REAL PTY terminal-server launcher (P5.t). Exec-launched,
 // flock-idempotent twin of ensureDisplayStack; brings up ttyd PTY-over-websocket
 // (bash -l per ws client) on 7681 over the SAME tunnel the desktop noVNC uses.
@@ -962,7 +980,7 @@ export async function terminateManagedSandboxSession(
       : undefined;
 
   // Mirror the Agents SDK's provider-neutral cleanupSandboxSession contract.
-  // 0.13.3 does not publicly export that helper, so this agent-loop-free leaf
+  // Agents SDK 0.14.3 does not publicly export that helper, so this agent-loop-free leaf
   // keeps the same small sequence locally. Prefer the live session lifecycle:
   // it owns registered pre-stop hooks and provider cleanup semantics. The
   // state-only client.delete contract is a fallback when no session teardown

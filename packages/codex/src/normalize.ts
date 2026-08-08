@@ -116,6 +116,32 @@ export function normalizeCodexRequestBody(
 }
 
 /**
+ * Copy-on-write form for model clients that may retain converted input items.
+ * Only records the mutable normalizer can touch are copied; large content,
+ * tools, and unchanged protocol items remain shared immutable values.
+ */
+export function normalizedCodexRequestBody(
+  body: Readonly<Record<string, unknown>>,
+  resolveModel: (slug: string) => string,
+): Record<string, unknown> {
+  const projected: Record<string, unknown> = { ...body };
+  if (body.reasoning && typeof body.reasoning === "object" && !Array.isArray(body.reasoning)) {
+    projected.reasoning = { ...(body.reasoning as Record<string, unknown>) };
+  }
+  if (Array.isArray(body.input)) {
+    projected.input = body.input.map((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+      const record = item as Record<string, unknown>;
+      return "id" in record ||
+        (record.type === "tool_search_call" && typeof record.arguments === "string")
+        ? { ...record }
+        : item;
+    });
+  }
+  return normalizeCodexRequestBody(projected, resolveModel);
+}
+
+/**
  * Build a longest-prefix model resolver. Catalog slugs come from GET /models
  * (api-client.ts). One leading `namespace/` segment is stripped first; an
  * unknown slug returns the fallback (caller should log — spec §1.4 step 4).

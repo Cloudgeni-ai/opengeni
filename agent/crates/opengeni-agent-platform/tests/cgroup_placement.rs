@@ -5,7 +5,7 @@
 //! and the fast descendant land in one `op-<n>` memory leaf with
 //! `oom_score_adj=500` while the supervisor (this process) stays in the
 //! `supervisor` leaf. This is the live regression proof for the post-spawn fork
-//! race observed on jorgebot.
+//! race observed in production.
 //!
 //! # Why it is environment-gated
 //!

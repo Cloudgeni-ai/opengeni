@@ -2,13 +2,15 @@ interface Args {
   out: string | null;
 }
 
-const args = parseArgs(process.argv.slice(2));
-const values = renderTemporalValues(process.env);
+if (import.meta.main) {
+  const args = parseArgs(process.argv.slice(2));
+  const values = renderTemporalValues(process.env);
 
-if (args.out) {
-  await Bun.write(args.out, values);
-} else {
-  process.stdout.write(values);
+  if (args.out) {
+    await Bun.write(args.out, values);
+  } else {
+    process.stdout.write(values);
+  }
 }
 
 export function renderTemporalValues(env: Record<string, string | undefined>): string {
@@ -26,6 +28,26 @@ export function renderTemporalValues(env: Record<string, string | undefined>): s
     env.TEMPORAL_POSTGRES_VISIBILITY_DATABASE?.trim() || "temporal_visibility";
   const createDatabase = booleanEnv(env, "TEMPORAL_POSTGRES_CREATE_DATABASE", true);
   const shards = positiveIntegerEnv(env, "TEMPORAL_NUM_HISTORY_SHARDS", "128");
+  const historyCacheMaxBytes = positiveIntegerEnv(
+    env,
+    "TEMPORAL_HISTORY_CACHE_MAX_BYTES",
+    "134217728",
+  );
+  const historyCacheTtl = durationEnv(env, "TEMPORAL_HISTORY_CACHE_TTL", "10m");
+  const eventsCacheMaxBytes = positiveIntegerEnv(
+    env,
+    "TEMPORAL_EVENTS_CACHE_MAX_BYTES",
+    "67108864",
+  );
+  const eventsCacheTtl = durationEnv(env, "TEMPORAL_EVENTS_CACHE_TTL", "10m");
+  const historyGoMemoryLimit = goMemoryLimitEnv(env, "TEMPORAL_HISTORY_GOMEMLIMIT", "768MiB");
+  const historyMemoryRequest = kubernetesQuantityEnv(
+    env,
+    "TEMPORAL_HISTORY_MEMORY_REQUEST",
+    "768Mi",
+  );
+  const historyMemoryLimit = kubernetesQuantityEnv(env, "TEMPORAL_HISTORY_MEMORY_LIMIT", "1280Mi");
+  const serviceMonitorEnabled = booleanEnv(env, "TEMPORAL_SERVICE_MONITOR_ENABLED", false);
   const tlsEnabled = booleanEnv(env, "TEMPORAL_POSTGRES_TLS_ENABLED", false);
   const tlsCaFile = env.TEMPORAL_POSTGRES_TLS_CA_FILE?.trim();
   const tlsCaConfigMapName = env.TEMPORAL_POSTGRES_TLS_CA_CONFIG_MAP_NAME?.trim();
@@ -77,9 +99,57 @@ ${tlsCaMount}  replicaCount: 1
             maxConns: 20
             maxIdleConns: 20
             maxConnLifetime: 1h${tlsYaml}
+  dynamicConfig:
+    history.cacheSizeBasedLimit:
+      - value: true
+        constraints: {}
+    history.hostLevelCacheMaxSizeBytes:
+      - value: ${yamlScalar(historyCacheMaxBytes)}
+        constraints: {}
+    history.cacheTTL:
+      - value: ${yamlScalar(historyCacheTtl)}
+        constraints: {}
+    history.cacheBackgroundEvict:
+      - value:
+          Enabled: true
+          LoopInterval: 1m
+          MaxEntryPerCall: 4096
+        constraints: {}
+    # A single host-level event cache avoids multiplying a 512 KiB cache by
+    # every acquired history shard. Events remain durable in PostgreSQL.
+    history.enableHostLevelEventsCache:
+      - value: true
+        constraints: {}
+    history.eventsHostLevelCacheMaxSizeBytes:
+      - value: ${yamlScalar(eventsCacheMaxBytes)}
+        constraints: {}
+    history.eventsCacheTTL:
+      - value: ${yamlScalar(eventsCacheTtl)}
+        constraints: {}
+  history:
+    resources:
+      requests:
+        memory: ${yamlScalar(historyMemoryRequest)}
+      limits:
+        memory: ${yamlScalar(historyMemoryLimit)}
+    additionalEnv:
+      - name: GOMEMLIMIT
+        value: ${yamlScalar(historyGoMemoryLimit)}
   metrics:
     annotations:
       enabled: true
+    serviceMonitor:
+      enabled: ${yamlScalar(String(serviceMonitorEnabled))}
+      interval: 30s
+      additionalLabels:
+        opengeni.ai/monitoring: enabled
+      metricRelabelings:
+        # Temporal emits the same 20-bucket latency histogram for hundreds of
+        # label combinations. Sum/count preserve rates and mean latency while
+        # the unused buckets account for most of its Prometheus footprint.
+        - action: drop
+          sourceLabels: [__name__]
+          regex: ".*latency.*_bucket"
 
 web:
   enabled: false
@@ -89,7 +159,11 @@ schema:
   backoffLimit: 100
   ttlSecondsAfterFinished: 86400
 
-${tlsCaMount ? `admintools:\n${tlsCaMount}` : ""}`;
+admintools:
+  # The schema hooks bring their own admin-tools image. Keeping an idle shell
+  # deployment consumes memory without serving runtime traffic.
+  enabled: false
+${tlsCaMount}`;
 }
 
 function parseArgs(rawArgs: string[]): Args {
@@ -136,6 +210,42 @@ function booleanEnv(
   if (/^(1|true|yes)$/i.test(raw)) return true;
   if (/^(0|false|no)$/i.test(raw)) return false;
   throw new Error(`${name} must be true or false`);
+}
+
+function durationEnv(
+  env: Record<string, string | undefined>,
+  name: string,
+  fallback: string,
+): string {
+  const value = env[name]?.trim() || fallback;
+  if (!/^[1-9][0-9]*(?:ms|s|m|h)$/.test(value)) {
+    throw new Error(`${name} must be a positive duration such as 10m`);
+  }
+  return value;
+}
+
+function goMemoryLimitEnv(
+  env: Record<string, string | undefined>,
+  name: string,
+  fallback: string,
+): string {
+  const value = env[name]?.trim() || fallback;
+  if (!/^[1-9][0-9]*(?:B|KiB|MiB|GiB|KB|MB|GB)$/.test(value)) {
+    throw new Error(`${name} must be a positive Go memory limit such as 1152MiB`);
+  }
+  return value;
+}
+
+function kubernetesQuantityEnv(
+  env: Record<string, string | undefined>,
+  name: string,
+  fallback: string,
+): string {
+  const value = env[name]?.trim() || fallback;
+  if (!/^[1-9][0-9]*(?:Ki|Mi|Gi|K|M|G)$/.test(value)) {
+    throw new Error(`${name} must be a positive Kubernetes memory quantity such as 512Mi`);
+  }
+  return value;
 }
 
 function renderCaMount(

@@ -6,7 +6,7 @@ import {
   purgeExpiredTranscriptionRecordings,
 } from "@opengeni/db";
 import type { ObjectStorage } from "@opengeni/storage";
-import type { ActivityServices } from "./types";
+import type { ControlActivityServices } from "./types";
 
 export const FILE_UPLOAD_CLEANUP_GRACE_MS = 60 * 60 * 1_000;
 export const FILE_UPLOAD_CLEANUP_CLAIM_TIMEOUT_MS = 10 * 60 * 1_000;
@@ -72,7 +72,7 @@ export type FileUploadReaperActivityOptions = {
  * settled terminally. One provider failure never aborts the rest of the batch.
  */
 export function createFileUploadReaperActivities(
-  services: () => Promise<ActivityServices>,
+  services: () => Promise<ControlActivityServices>,
   options: FileUploadReaperActivityOptions = {},
 ) {
   const graceMs = options.graceMs ?? FILE_UPLOAD_CLEANUP_GRACE_MS;

@@ -122,7 +122,7 @@ export class SandboxProviderContinuityUnavailableError extends Error {
 // available in the installed @openai/agents-extensions. Per the P0.3 ruling we
 // NEVER fake a build body; if a provider cannot be constructed we register the
 // descriptor and make build() throw this. (As of @openai/agents-extensions
-// 0.11.6 every provider ships a concrete client, so this is currently unused —
+// 0.14.3 every provider ships a concrete client, so this is currently unused —
 // it is the documented contract for a future drop that loses a provider.)
 export class SandboxProviderUnavailableError extends Error {
   readonly backend: SandboxBackend | string;

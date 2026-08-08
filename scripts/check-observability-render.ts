@@ -56,12 +56,182 @@ const grafanaDeployment = exactlyOne(
   ),
   "Grafana Deployment",
 );
-const deploymentContainers = (grafanaDeployment.spec?.template?.spec?.containers ?? []) as Array<{
-  name?: string;
-  env?: Array<{ name?: string; value?: string }>;
-}>;
-assertSidecar(deploymentContainers, "grafana-sc-dashboard");
-assertSidecar(deploymentContainers, "grafana-sc-datasources");
+const grafanaPodSpec = (grafanaDeployment.spec?.template?.spec ?? {}) as {
+  containers?: Array<{
+    name?: string;
+    env?: Array<{ name?: string; value?: string }>;
+  }>;
+  initContainers?: Array<{
+    name?: string;
+    env?: Array<{ name?: string; value?: string }>;
+  }>;
+};
+const deploymentContainers = grafanaPodSpec.containers ?? [];
+const initContainers = grafanaPodSpec.initContainers ?? [];
+assert(
+  grafanaDeployment.spec?.template?.metadata?.annotations?.["opengeni.ai/source-revision"] ===
+    args.sourceRevision,
+  "Grafana pod must roll with the dashboard source revision",
+);
+assert(
+  !deploymentContainers.some((container) => container.name === "grafana-sc-dashboard"),
+  "Grafana dashboard discovery must not retain a steady sidecar",
+);
+assert(
+  !deploymentContainers.some((container) => container.name === "grafana-sc-datasources"),
+  "Grafana datasource discovery must not retain a steady sidecar",
+);
+assertInitCollector(initContainers, "grafana-init-sc-dashboard");
+assertInitCollector(initContainers, "grafana-init-sc-datasources");
+
+const serviceMonitors = resources.filter(
+  (resource) => resource.kind === "ServiceMonitor",
+) as Resource[];
+const apiServerMonitor = serviceMonitorEndingIn(serviceMonitors, "-apiserver");
+assertMetricRetention(apiServerMonitor, "/metrics", "apiserver_request_total", true);
+assertMetricRetention(
+  apiServerMonitor,
+  "/metrics",
+  "apiserver_request_duration_seconds_bucket",
+  false,
+  { le: "0.1" },
+);
+
+const kubeletMonitor = serviceMonitorEndingIn(serviceMonitors, "-kubelet");
+assertMetricRetention(
+  kubeletMonitor,
+  "/metrics/cadvisor",
+  "container_memory_working_set_bytes",
+  true,
+);
+assertMetricRetention(kubeletMonitor, "/metrics/cadvisor", "container_memory_kernel_usage", false);
+assertMetricRetention(
+  kubeletMonitor,
+  "/metrics",
+  "kubelet_runtime_operations_duration_seconds_bucket",
+  true,
+  { le: "1" },
+);
+assertMetricRetention(
+  kubeletMonitor,
+  "/metrics/probes",
+  "prober_probe_duration_seconds_bucket",
+  false,
+  { le: "1" },
+);
+
+const nodeExporterMonitor = exactlyOne(
+  serviceMonitors.filter(
+    (resource) =>
+      resource.metadata?.labels?.["app.kubernetes.io/name"] === "prometheus-node-exporter",
+  ),
+  "node-exporter ServiceMonitor",
+);
+assertMetricRetention(
+  nodeExporterMonitor,
+  "/metrics",
+  "node_pressure_memory_stalled_seconds_total",
+  true,
+);
+assertMetricRetention(nodeExporterMonitor, "/metrics", "node_network_carrier_changes_total", false);
+
+const grafanaMonitor = exactlyOne(
+  serviceMonitors.filter(
+    (resource) => resource.metadata?.labels?.["app.kubernetes.io/name"] === "grafana",
+  ),
+  "Grafana ServiceMonitor",
+);
+assertMetricRetention(grafanaMonitor, "/metrics", "grafana_build_info", true);
+assertMetricRetention(grafanaMonitor, "/metrics", "grafana_feature_toggles_info", false);
+
+const referencedMetrics = collectReferencedMetrics(resources);
+const kubeStateMetricsDeployment = exactlyOne(
+  resources.filter(
+    (resource) =>
+      resource.kind === "Deployment" &&
+      resource.metadata?.labels?.["app.kubernetes.io/name"] === "kube-state-metrics",
+  ),
+  "kube-state-metrics Deployment",
+);
+const kubeStateArgs = (kubeStateMetricsDeployment.spec?.template?.spec?.containers?.[0]?.args ??
+  []) as string[];
+const allowlistArgument = kubeStateArgs.find((value) => value.startsWith("--metric-allowlist="));
+assert(allowlistArgument, "kube-state-metrics must render an explicit metric allowlist");
+const kubeStateAllowlist = new Set(
+  allowlistArgument.slice("--metric-allowlist=".length).split(","),
+);
+for (const metric of referencedMetrics) {
+  if (metric.startsWith("kube_") && !metric.includes(":")) {
+    assert(
+      kubeStateAllowlist.has(metric),
+      `kube-state-metrics allowlist would remove referenced metric ${metric}`,
+    );
+  }
+}
+
+const prometheusMonitor = serviceMonitorEndingIn(serviceMonitors, "-prometheus");
+const alertmanagerMonitor = serviceMonitorEndingIn(serviceMonitors, "-alertmanager");
+const operatorMonitor = exactlyOne(
+  serviceMonitors.filter(
+    (resource) =>
+      resource.metadata?.labels?.["app.kubernetes.io/component"] === "prometheus-operator",
+  ),
+  "Prometheus Operator ServiceMonitor",
+);
+assertMetricRetention(
+  prometheusMonitor,
+  "/metrics",
+  "reloader_last_reload_successful",
+  true,
+  {},
+  "reloader-web",
+);
+assertMetricRetention(
+  alertmanagerMonitor,
+  "/metrics",
+  "reloader_last_reload_successful",
+  true,
+  {},
+  "reloader-web",
+);
+for (const monitor of [
+  apiServerMonitor,
+  kubeletMonitor,
+  nodeExporterMonitor,
+  grafanaMonitor,
+  prometheusMonitor,
+  alertmanagerMonitor,
+  operatorMonitor,
+]) {
+  assertMetricRetention(monitor, "/metrics", "go_memstats_heap_alloc_bytes", true);
+  assertMetricRetention(monitor, "/metrics", "process_open_fds", true);
+}
+for (const metric of referencedMetrics) {
+  const histogramLabels = metric.endsWith("_bucket") ? { le: "+Inf" } : {};
+  if (/^(?:apiserver_|aggregator_)/.test(metric) && !metric.includes(":")) {
+    assertMetricRetention(apiServerMonitor, "/metrics", metric, true, histogramLabels);
+  }
+  if (/^(?:kubelet_|storage_operation_|volume_manager_)/.test(metric)) {
+    assertMetricRetention(kubeletMonitor, "/metrics", metric, true, histogramLabels);
+  }
+  if (metric.startsWith("container_") && metric !== "container_state") {
+    assertMetricRetention(kubeletMonitor, "/metrics/cadvisor", metric, true);
+  }
+  if (metric.startsWith("node_") && !metric.includes(":")) {
+    assertMetricRetention(nodeExporterMonitor, "/metrics", metric, true);
+  }
+  if (metric.startsWith("grafana_")) {
+    assertMetricRetention(grafanaMonitor, "/metrics", metric, true, histogramLabels);
+  }
+  if (metric.startsWith("prometheus_operator_")) {
+    assertMetricRetention(operatorMonitor, "/metrics", metric, true, histogramLabels);
+  } else if (metric.startsWith("prometheus_") && !metric.includes(":")) {
+    assertMetricRetention(prometheusMonitor, "/metrics", metric, true, histogramLabels);
+  }
+  if (metric.startsWith("alertmanager_")) {
+    assertMetricRetention(alertmanagerMonitor, "/metrics", metric, true, histogramLabels);
+  }
+}
 
 const prometheus = exactlyOne(
   resources.filter((resource) => resource.kind === "Prometheus"),
@@ -132,18 +302,127 @@ console.log(
   }),
 );
 
-function assertSidecar(
+function assertInitCollector(
   candidateContainers: Array<{
     name?: string;
     env?: Array<{ name?: string; value?: string }>;
   }>,
   name: string,
 ): void {
-  const sidecar = candidateContainers.find((container) => container.name === name);
-  assert(sidecar, `missing Grafana sidecar ${name}`);
-  const environment = new Map((sidecar.env ?? []).map((entry) => [entry.name, entry.value]));
+  const collector = candidateContainers.find((container) => container.name === name);
+  assert(collector, `missing Grafana init collector ${name}`);
+  const environment = new Map((collector.env ?? []).map((entry) => [entry.name, entry.value]));
   assert(environment.get("RESOURCE") === "configmap", `${name} must read ConfigMaps only`);
   assert(environment.get("NAMESPACE") !== "ALL", `${name} must not watch every namespace`);
+  assert(environment.get("METHOD") === "LIST", `${name} must perform one finite list`);
+}
+
+function serviceMonitorEndingIn(monitors: Resource[], suffix: string): Resource {
+  return exactlyOne(
+    monitors.filter((resource) => resource.metadata?.name?.endsWith(suffix)),
+    `${suffix} ServiceMonitor`,
+  );
+}
+
+function assertMetricRetention(
+  serviceMonitor: Resource,
+  path: string,
+  metricName: string,
+  expected: boolean,
+  labels: Record<string, string> = {},
+  endpointPort?: string,
+): void {
+  const endpoints = (serviceMonitor.spec?.endpoints ?? []) as Array<{
+    path?: string;
+    port?: string;
+    metricRelabelings?: Array<{
+      action?: string;
+      regex?: string;
+      separator?: string;
+      sourceLabels?: string[];
+    }>;
+  }>;
+  const endpoint = endpoints.find(
+    (candidate) =>
+      (candidate.path ?? "/metrics") === path &&
+      (endpointPort === undefined || candidate.port === endpointPort),
+  );
+  assert(endpoint, `${serviceMonitor.metadata?.name} has no ${path} endpoint`);
+  const sample = { __name__: metricName, ...labels };
+  let retained = true;
+  for (const rule of endpoint.metricRelabelings ?? []) {
+    const value = (rule.sourceLabels ?? [])
+      .map((label) => sample[label as keyof typeof sample] ?? "")
+      .join(rule.separator ?? ";");
+    const matches = new RegExp(`^(?:${rule.regex ?? "(.*)"})$`).test(value);
+    if (rule.action === "drop" && matches) {
+      retained = false;
+      break;
+    }
+    if (rule.action === "keep" && !matches) {
+      retained = false;
+      break;
+    }
+  }
+  assert(
+    retained === expected,
+    `${serviceMonitor.metadata?.name} ${path} must ${expected ? "retain" : "drop"} ${metricName}`,
+  );
+}
+
+function collectReferencedMetrics(renderedResources: Resource[]): Set<string> {
+  const expressions: string[] = [];
+  for (const resource of renderedResources) {
+    if (resource.kind === "PrometheusRule") {
+      const groups = (resource.spec?.groups ?? []) as Array<{
+        rules?: Array<{ expr?: string }>;
+      }>;
+      for (const group of groups) {
+        for (const rule of group.rules ?? []) {
+          if (typeof rule.expr === "string") expressions.push(rule.expr);
+        }
+      }
+    }
+    if (resource.kind === "ConfigMap") {
+      for (const [filename, source] of Object.entries(resource.data ?? {})) {
+        if (!filename.endsWith(".json")) continue;
+        collectDashboardQueries(JSON.parse(source), expressions);
+      }
+    }
+  }
+
+  const metrics = new Set<string>();
+  for (const expression of expressions) {
+    for (const match of expression.matchAll(/\b([A-Za-z_:][A-Za-z0-9_:]*)\s*(?=\{|\[)/g)) {
+      if (match[1]) metrics.add(match[1]);
+    }
+    for (const match of expression.matchAll(/label_values\(\s*([A-Za-z_:][A-Za-z0-9_:]*)/g)) {
+      if (match[1]) metrics.add(match[1]);
+    }
+    // Also capture bare platform metric selectors (for example `kube_job_failed
+    // == 1`) that have neither a label matcher nor a range selector.
+    for (const match of expression.matchAll(
+      /(?<![A-Za-z0-9_:])((?:alertmanager|aggregator|apiserver|container|grafana|kube|kubelet|node|prometheus|prometheus_operator|storage_operation|volume_manager)_[A-Za-z0-9_:]+)\b/g,
+    )) {
+      if (match[1]) metrics.add(match[1]);
+    }
+  }
+  return metrics;
+}
+
+function collectDashboardQueries(value: unknown, expressions: string[]): void {
+  if (Array.isArray(value)) {
+    for (const entry of value) collectDashboardQueries(entry, expressions);
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  for (const [key, entry] of Object.entries(value)) {
+    if ((key === "expr" || key === "query") && typeof entry === "string") {
+      expressions.push(entry);
+    } else {
+      collectDashboardQueries(entry, expressions);
+    }
+  }
 }
 
 function exactlyOne(values: Resource[], description: string): Resource {

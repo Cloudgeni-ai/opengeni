@@ -8,6 +8,7 @@ import {
   AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
   OPENGENI_GATEWAY_MODELS,
   collectSandboxEnvironment,
+  configuredProviders,
   firstPartyMcpBaseUrl,
   gatewayRequestPolicyForUpstreamModel,
   resolveFirstPartyDelegationSecret,
@@ -66,10 +67,12 @@ import {
   type McpRequestReplayInfo,
 } from "./mcp-network";
 import { normalizeProtocolJsonValue } from "./protocol-json";
+import { AppendOnlyOpenAIResponsesModel } from "./append-only-responses-model";
 import {
   LazyToolModelProvider,
   installLazyToolRuntime,
   lazyToolRuntimeForAgent,
+  restoreGenericDispatchHistoryItem,
   restoreGenericDispatchHistoryItems,
   type LazyToolTransport,
 } from "./lazy-tool-transport";
@@ -77,13 +80,12 @@ import {
   Agent,
   AgentsError,
   connectMcpServers,
-  OpenAIProvider,
   setDefaultModelProvider,
   MaxTurnsExceededError,
   MCPServerStreamableHttp,
   // Provider-bound Model instances. Both are re-exported from
   // @openai/agents-openai via `export * from '@openai/agents-openai'` in
-  // @openai/agents' index (0.11.6), so the multi-provider routing imports them
+  // @openai/agents' index, so the multi-provider routing imports them
   // from the same entrypoint as the rest of the SDK rather than reaching into
   // the openai subpackage. OpenAIChatCompletionsModel speaks /v1/chat/completions
   // (the registry "chat" wire API, e.g. Fireworks); OpenAIResponsesModel speaks
@@ -91,18 +93,18 @@ import {
   // model id to a specific OpenAI client, which is what routes a turn to its
   // provider without touching the global default client.
   OpenAIChatCompletionsModel,
-  OpenAIResponsesModel,
   RunState,
   isOpenAIResponsesRawModelStreamEvent,
   run,
   Runner,
+  Usage,
   setDefaultOpenAIClient,
   setDefaultOpenAIKey,
   setOpenAIResponsesTransport,
   setTracingDisabled,
   tool as agentTool,
   // Hosted web_search tool factory. Re-exported from @openai/agents-openai via
-  // `export * from '@openai/agents-openai'` in @openai/agents' index (0.11.6);
+  // `export * from '@openai/agents-openai'` in @openai/agents' index;
   // it returns a { type: 'hosted_tool', providerData: { type: 'web_search' } }
   // descriptor the OpenAI Responses model serializes into request.tools[].
   webSearchTool,
@@ -121,6 +123,7 @@ import {
   type MCPToolErrorFunction,
   type Model,
   type ModelRequest,
+  type ModelResponse,
   type ModelProvider,
   type RunStreamEvent,
   type SerializedTool,
@@ -157,20 +160,29 @@ import {
   CODEX_APPS_MCP_URL,
   CODEX_MODEL_ID_PREFIX,
   CODEX_ORIGINATOR,
+  CODEX_REQUEST_BODY_NORMALIZED_HEADER,
+  CODEX_REQUEST_CALLER_STREAM_HEADER,
+  CODEX_REQUEST_ID_HEADER,
+  CODEX_REQUEST_MODEL_HEADER,
   CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS,
-  boundModelToolOutputItems,
+  boundModelToolOutputItem,
+  codexRequestStorage,
   codexAppsSanitizingFetch,
   codexSubscriptionFetch,
+  normalizedCodexRequestBody,
+  opaqueProviderArtifactFingerprints,
 } from "@opengeni/codex";
 import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, posix as posixPath, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
-  computerCallNormalizingFetch,
+  normalizeComputerCallAction,
   normalizeComputerCallActions,
   repairHistoryProtocolItems,
+  rewriteComputerCallsToActionsOnly,
+  rewriteEmptyComputerCallOutputImageUrls,
   sanitizeHistoryItemsForModel,
 } from "./history-sanitizer";
 import { installCodexToolSearch } from "./codex-tool-search";
@@ -182,11 +194,10 @@ import {
   buildRemoteCompactionV2PromptInput,
   extractRemoteCompactionV2OutputItem,
   compactionThresholdTokens,
-  estimateCompleteModelInput,
+  estimateCompleteModelInputTokens,
   estimateSerializedValueTokens,
   hasModelGeneratedItem,
   renderCompactionPromptInputForChat,
-  type CompleteModelInputFootprint,
   type ProviderContextTokenSignal,
 } from "./context-compaction";
 import {
@@ -203,6 +214,12 @@ import {
   type RunCredentialSessionReady,
 } from "./sandbox";
 import { runWithToolCallCorrelation } from "./sandbox/op-correlation";
+import {
+  sandboxCommandExitCode,
+  sandboxCommandOutput,
+  sandboxCommandStillRunning,
+  sandboxCommandStdout,
+} from "./sandbox/command-result";
 import { shellToolspacePath } from "./sandbox/toolspace-token";
 import {
   createTurnToolCancellationController,
@@ -216,6 +233,7 @@ import { computerUse, type ComputerToolMode } from "./sandbox-computer";
 import type { RuntimeMetricsHooks } from "./metrics";
 import { workspaceSkills, type WorkspaceSkillSearchPath } from "./workspace-skills";
 import { appendWorkspaceGovernance } from "./workspace-governance";
+import { ReplayableJsonOpenAI, type ModelJsonRequestPolicy } from "./replayable-json-body";
 
 // The Agents SDK's debug namespaces can otherwise serialize complete model
 // inputs/outputs and tool arguments/results. These getters read process.env on
@@ -252,6 +270,12 @@ export type {
   TurnToolCancellationController,
   TurnToolCancellationFence,
 } from "./sandbox/turn-tool-cancellation";
+export {
+  sandboxCommandExitCode,
+  sandboxCommandOutput,
+  sandboxCommandStillRunning,
+  sandboxCommandStdout,
+};
 
 // P4.3 computer-use surface (the agent's :0 driver). Re-exported from the barrel
 // so callers (the worker, live proofs) reach SandboxComputer/ComputerUseCapability
@@ -342,6 +366,7 @@ export {
   opaqueEncryptedContentLength,
   estimateNativeImageTokens,
   estimateCompleteModelInput,
+  estimateCompleteModelInputTokens,
   estimateSerializedValueTokens,
   hasModelGeneratedItem,
   renderCompactionPromptInputForChat,
@@ -653,24 +678,22 @@ export function buildOpenAIClientFromSettings(
   if (settings.openaiProvider === "azure") {
     const baseURL = settings.azureOpenaiBaseUrl ?? azureDeploymentBaseUrl(settings);
     const apiKey = settings.azureOpenaiApiKey ?? settings.azureOpenaiAdToken ?? "azure-ad-token";
-    return new OpenAI({
-      apiKey,
-      baseURL,
-      maxRetries: settings.openaiMaxRetries,
-      defaultQuery: azureOpenAIDefaultQuery(settings, baseURL),
-      defaultHeaders:
-        settings.azureOpenaiAdToken && !settings.azureOpenaiApiKey
-          ? { Authorization: `Bearer ${settings.azureOpenaiAdToken}` }
-          : undefined,
-      // Rewrite every outbound /responses computer_call to the ACTIONS-ONLY shape
-      // the GA Azure computer tool accepts. This is the lowest reachable
-      // seam — below the SDK responses converter, which always re-synthesizes BOTH
-      // `action` and `actions` (rejected 400 "exactly one of action or actions").
-      // See computerCallNormalizingFetch / rewriteComputerCallsToActionsOnly.
-      fetch: computerCallNormalizingFetch(instrumentedModelFetch(providerId, globalThis.fetch)),
-    });
+    return new ReplayableJsonOpenAI(
+      {
+        apiKey,
+        baseURL,
+        maxRetries: settings.openaiMaxRetries,
+        defaultQuery: azureOpenAIDefaultQuery(settings, baseURL),
+        defaultHeaders:
+          settings.azureOpenaiAdToken && !settings.azureOpenaiApiKey
+            ? { Authorization: `Bearer ${settings.azureOpenaiAdToken}` }
+            : undefined,
+        fetch: instrumentedModelFetch(providerId, globalThis.fetch),
+      },
+      { modelRequestPolicy: azureModelRequestPolicy },
+    );
   }
-  return new OpenAI({
+  return new ReplayableJsonOpenAI({
     apiKey: settings.openaiApiKey ?? process.env.OPENAI_API_KEY,
     ...(settings.openaiBaseUrl ? { baseURL: settings.openaiBaseUrl } : {}),
     maxRetries: settings.openaiMaxRetries,
@@ -709,37 +732,42 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
         // per-workspace token from the Codex request context at call time.
         // The provider id is constant ("codex-subscription"), so one cached client serves
         // every workspace without baking a token into it.
-        new OpenAI({
-          apiKey: provider.apiKey ?? "codex-subscription",
-          ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
-          // Codex transport owns exactly one explicit 401 refresh/retry. Blind
-          // SDK retries on network/5xx/partial streams can replay provider work
-          // or external tool side effects without a durable checkpoint.
-          maxRetries: 0,
-          // The Codex transport owns finer headers/idle/whole deadlines and
-          // emits typed durable evidence. Keep the SDK's opaque envelope beyond
-          // that whole-response budget so `Request timed out.` cannot win first.
-          timeout: CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS,
-          fetch: codexSubscriptionFetch(instrumentedModelFetch(provider.id, globalThis.fetch)),
-        })
+        new ReplayableJsonOpenAI(
+          {
+            apiKey: provider.apiKey ?? "codex-subscription",
+            ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
+            // Codex transport owns exactly one explicit 401 refresh/retry. Blind
+            // SDK retries on network/5xx/partial streams can replay provider work
+            // or external tool side effects without a durable checkpoint.
+            maxRetries: 0,
+            // Codex transport owns finer headers/idle/whole deadlines and emits
+            // typed durable evidence. Keep the SDK envelope beyond that budget.
+            timeout: CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS,
+            fetch: codexSubscriptionFetch(instrumentedModelFetch(provider.id, globalThis.fetch)),
+          },
+          { modelRequestPolicy: modelRequestPolicyForProvider(provider) },
+        )
       : // ResolvedModelProvider.apiKey is already the resolved key (configuredProviders
         // ran resolveProviderApiKey at config time, collapsing apiKey/apiKeyEnv), so it
         // is passed straight through here rather than re-resolved.
-        new OpenAI({
-          ...(provider.apiKey ? { apiKey: provider.apiKey } : {}),
-          ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
-          // Gateway routing is deliberately fail-closed. Avoid SDK replay after
-          // a request may have reached the one pinned endpoint.
-          maxRetries: gatewayProvider ? 0 : settings.openaiMaxRetries,
-          ...(provider.defaultQuery ? { defaultQuery: provider.defaultQuery } : {}),
-          ...(provider.defaultHeaders ? { defaultHeaders: provider.defaultHeaders } : {}),
-          fetch: gatewayProvider
-            ? vercelGatewayRoutingFetch(
-                provider.kind as "vercel-gateway-managed" | "vercel-gateway-workspace",
-                instrumentedModelFetch(provider.id, globalThis.fetch),
-              )
-            : instrumentedModelFetch(provider.id, globalThis.fetch),
-        });
+        new ReplayableJsonOpenAI(
+          {
+            ...(provider.apiKey ? { apiKey: provider.apiKey } : {}),
+            ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
+            // Gateway routing is deliberately fail-closed. Avoid SDK replay after
+            // a request may have reached the one pinned endpoint.
+            maxRetries: gatewayProvider ? 0 : settings.openaiMaxRetries,
+            ...(provider.defaultQuery ? { defaultQuery: provider.defaultQuery } : {}),
+            ...(provider.defaultHeaders ? { defaultHeaders: provider.defaultHeaders } : {}),
+            fetch: gatewayProvider
+              ? vercelGatewayRoutingFetch(
+                  provider.kind as "vercel-gateway-managed" | "vercel-gateway-workspace",
+                  instrumentedModelFetch(provider.id, globalThis.fetch),
+                )
+              : instrumentedModelFetch(provider.id, globalThis.fetch),
+          },
+          { modelRequestPolicy: modelRequestPolicyForProvider(provider) },
+        );
   if (!workspaceGateway) {
     providerClientCache.set(provider.id, client);
   }
@@ -763,6 +791,8 @@ export class WorkspaceGatewayUnavailableError extends Error {
  * parallel execution, model, and provider route. Partial or ambiguous batches
  * stay untouched and fail closed upstream.
  */
+const GATEWAY_REQUEST_BODY_NORMALIZED_HEADER = "x-opengeni-gateway-request-body-normalized";
+
 function pairKimiParallelFunctionCallResults(body: Record<string, unknown>): void {
   const input = body.input;
   if (!Array.isArray(input)) return;
@@ -833,10 +863,36 @@ function pairKimiParallelFunctionCallResults(body: Record<string, unknown>): voi
   }
 }
 
+/** Apply the complete reviewed Gateway request policy to an SDK-owned object. */
+export function normalizeVercelGatewayRequestBody(body: Record<string, unknown>): void {
+  const model = typeof body.model === "string" ? body.model : "";
+  const policy = gatewayRequestPolicyForUpstreamModel(model);
+  if (!policy) {
+    throw new Error("Model request is not in the approved catalogue");
+  }
+  const providerOptions =
+    body.providerOptions &&
+    typeof body.providerOptions === "object" &&
+    !Array.isArray(body.providerOptions)
+      ? { ...(body.providerOptions as Record<string, unknown>) }
+      : {};
+  providerOptions.gateway = {
+    only: [...policy.gateway.only],
+    order: [...policy.gateway.only],
+    ...(policy.gateway.caching === "auto" ? { caching: "auto" } : {}),
+  };
+  body.providerOptions = providerOptions;
+  if (model === OPENGENI_GATEWAY_MODELS.kimi.upstreamModelId) {
+    pairKimiParallelFunctionCallResults(body);
+  }
+}
+
 /**
- * Inject the reviewed route after SDK serialization, replacing any caller
- * gateway options. Only the ordered, reviewed endpoint providers are allowed;
- * no model fallback list is sent. Unknown models/body shapes fail before I/O.
+ * Compatibility fallback for callers that did not apply the object-stage
+ * request policy. Inject the reviewed route from the serialized body and
+ * replace any caller gateway options. Only the ordered, reviewed endpoint
+ * providers are allowed; no model fallback list is sent. Unknown models/body
+ * shapes fail before I/O.
  */
 export function vercelGatewayRoutingFetch(
   kind: Extract<
@@ -849,43 +905,34 @@ export function vercelGatewayRoutingFetch(
     if (!isModelCallFetch(input)) {
       return await inner(input, init);
     }
-    if (typeof init?.body !== "string") {
-      throw new Error("Model request could not be prepared");
-    }
-    let body: Record<string, unknown>;
-    try {
-      const parsed = JSON.parse(init.body) as unknown;
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        throw new Error("invalid body");
+    const headers = new Headers(init?.headers);
+    const bodyAlreadyNormalized = headers.get(GATEWAY_REQUEST_BODY_NORMALIZED_HEADER) === "1";
+    headers.delete(GATEWAY_REQUEST_BODY_NORMALIZED_HEADER);
+    let nextInit: RequestInit = { ...init, headers };
+    if (!bodyAlreadyNormalized) {
+      if (typeof init?.body !== "string") {
+        throw new Error("Model request could not be prepared");
       }
-      body = parsed as Record<string, unknown>;
-    } catch {
-      throw new Error("Model request could not be prepared");
+      try {
+        const parsed = JSON.parse(init.body) as unknown;
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          throw new Error("invalid body");
+        }
+        const body = parsed as Record<string, unknown>;
+        normalizeVercelGatewayRequestBody(body);
+        nextInit = { ...nextInit, body: JSON.stringify(body) };
+      } catch (error) {
+        if (error instanceof Error && error.message.includes("approved catalogue")) throw error;
+        throw new Error("Model request could not be prepared", { cause: error });
+      }
     }
-    const model = typeof body.model === "string" ? body.model : "";
-    const policy = gatewayRequestPolicyForUpstreamModel(model);
-    if (!policy) {
-      throw new Error("Model request is not in the approved catalogue");
-    }
-    const providerOptions =
-      body.providerOptions &&
-      typeof body.providerOptions === "object" &&
-      !Array.isArray(body.providerOptions)
-        ? { ...(body.providerOptions as Record<string, unknown>) }
-        : {};
-    providerOptions.gateway = {
-      only: [...policy.gateway.only],
-      order: [...policy.gateway.only],
-      ...(policy.gateway.caching === "auto" ? { caching: "auto" } : {}),
-    };
-    body.providerOptions = providerOptions;
-    if (model === OPENGENI_GATEWAY_MODELS.kimi.upstreamModelId) {
-      pairKimiParallelFunctionCallResults(body);
-    }
-    const response = await inner(input, { ...init, body: JSON.stringify(body) });
+    const response = await inner(input, nextInit);
     if (response.ok) {
       return response;
     }
+    // The public error below replaces the upstream response. Cancel its unread
+    // body now so buffered bytes and the connection are not retained until GC.
+    await response.body?.cancel().catch(() => undefined);
     const message =
       kind === "vercel-gateway-workspace" && (response.status === 401 || response.status === 403)
         ? "Your Gateway connection needs attention. Reconnect it in workspace Settings."
@@ -898,15 +945,110 @@ export function vercelGatewayRoutingFetch(
   }) as typeof fetch;
 }
 
+function azureModelRequestPolicy({
+  body,
+}: {
+  body: Readonly<Record<string, unknown>>;
+}): ReturnType<ModelJsonRequestPolicy> {
+  const input = body.input;
+  if (!Array.isArray(input)) return undefined;
+  const containsComputerProtocol = input.some(
+    (item) =>
+      item &&
+      typeof item === "object" &&
+      ((item as Record<string, unknown>).type === "computer_call" ||
+        (item as Record<string, unknown>).type === "computer_call_output"),
+  );
+  if (!containsComputerProtocol) return undefined;
+  const projectedInput = input.map((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+    const record = item as Record<string, unknown>;
+    if (record.type === "computer_call") return { ...record };
+    if (
+      record.type === "computer_call_output" &&
+      record.output &&
+      typeof record.output === "object" &&
+      !Array.isArray(record.output)
+    ) {
+      return { ...record, output: { ...(record.output as Record<string, unknown>) } };
+    }
+    return item;
+  });
+  const projectedBody: Record<string, unknown> = { ...body, input: projectedInput };
+  const changedComputerCalls = rewriteComputerCallsToActionsOnly(projectedBody);
+  const changedScreenshots = rewriteEmptyComputerCallOutputImageUrls(projectedBody);
+  return changedComputerCalls || changedScreenshots ? { body: projectedBody } : undefined;
+}
+
 /**
- * Bind a model id to a provider's OpenAI client as an @openai/agents `Model`
- * instance, choosing the wire API by the provider's declared `api`: the "chat"
- * providers (e.g. Fireworks) get an OpenAIChatCompletionsModel that speaks
- * /v1/chat/completions, the "responses" providers (built-in OpenAI/Azure) get
- * an OpenAIResponsesModel that speaks /v1/responses. Passing this Model into
- * the agent is what routes a turn to its provider without mutating the global
- * default client.
+ * One object-stage request policy for both Responses and Chat Completions.
+ * Transport wrappers only authenticate, route, observe, and translate errors;
+ * they never need to parse and re-stringify an owned model request.
  */
+export function modelRequestPolicyForProvider(
+  provider: ResolvedModelProvider,
+): ModelJsonRequestPolicy {
+  return ({ path, body }) => {
+    if (provider.id === "azure") {
+      return azureModelRequestPolicy({ body });
+    }
+    if (provider.kind === "codex-subscription") {
+      if (!(path.split("?", 1)[0] ?? path).endsWith("/responses")) {
+        throw new Error("Subscription models require the Responses API");
+      }
+      const fallbackModel = typeof body.model === "string" ? body.model : provider.id;
+      const callerWantsStream = body.stream === true;
+      const context = codexRequestStorage.getStore();
+      if (!context) throw new CodexSubscriptionUnavailableError(fallbackModel);
+
+      const normalizedBody = normalizedCodexRequestBody(body, context.resolveModel);
+      const requestId = context.nextRequestId?.() ?? randomUUID();
+      context.onRequestOpaqueArtifacts?.({
+        requestId,
+        fingerprints: opaqueProviderArtifactFingerprints(normalizedBody.input),
+      });
+      return {
+        body: normalizedBody,
+        headers: {
+          [CODEX_REQUEST_BODY_NORMALIZED_HEADER]: "1",
+          [CODEX_REQUEST_CALLER_STREAM_HEADER]: callerWantsStream ? "1" : "0",
+          [CODEX_REQUEST_MODEL_HEADER]:
+            typeof normalizedBody.model === "string" ? normalizedBody.model : fallbackModel,
+          [CODEX_REQUEST_ID_HEADER]: requestId,
+        },
+      };
+    }
+    if (
+      provider.kind === "vercel-gateway-managed" ||
+      provider.kind === "vercel-gateway-workspace"
+    ) {
+      const projectedBody: Record<string, unknown> = {
+        ...body,
+        ...(body.model === OPENGENI_GATEWAY_MODELS.kimi.upstreamModelId && Array.isArray(body.input)
+          ? { input: [...body.input] }
+          : {}),
+      };
+      normalizeVercelGatewayRequestBody(projectedBody);
+      return {
+        body: projectedBody,
+        headers: { [GATEWAY_REQUEST_BODY_NORMALIZED_HEADER]: "1" },
+      };
+    }
+    return undefined;
+  };
+}
+
+export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
+  constructor(
+    client: OpenAI,
+    model: string,
+    protected readonly provider: ResolvedModelProvider,
+  ) {
+    super(client, model);
+  }
+}
+
+/** Bind a model id to the provider's declared wire API and owned client. */
 export function buildModelInstance(
   provider: ResolvedModelProvider,
   client: OpenAI,
@@ -914,7 +1056,7 @@ export function buildModelInstance(
 ): Model {
   return provider.api === "chat"
     ? new OpenAIChatCompletionsModel(client, modelId)
-    : new OpenAIResponsesModel(client, modelId);
+    : new OpenGeniResponsesModel(client, modelId, provider);
 }
 
 /**
@@ -968,8 +1110,6 @@ export function resolveTurnModel(
  * SDK default provider for a model that is in no provider's allow-list.
  */
 export class MultiProviderModelProvider implements ModelProvider {
-  private fallback: OpenAIProvider | undefined;
-
   constructor(private readonly settings: Settings) {}
 
   async getModel(modelName?: string): Promise<Model> {
@@ -1000,7 +1140,7 @@ export class MultiProviderModelProvider implements ModelProvider {
       // provider — which it does ONLY for a workspace with an *active* connected
       // Codex subscription. If it did not resolve, the subscription is not
       // connected for this workspace, so the codex provider is absent. Falling
-      // through to the built-in OpenAIProvider below would ship `codex/<slug>` to
+      // through to the built-in Responses fallback below would ship `codex/<slug>` to
       // the global default (Azure) client as a deployment name and surface a
       // misleading "DeploymentNotFound" 404. Throw a clear, user-actionable error
       // instead; it propagates through the worker's agentRunFailurePayload as the
@@ -1010,11 +1150,17 @@ export class MultiProviderModelProvider implements ModelProvider {
         throw new CodexSubscriptionUnavailableError(modelName);
       }
     }
-    // A non-codex model in no provider's allow-list falls back to the SDK's
-    // default OpenAIProvider, which uses the global default client/key
-    // configureOpenAI set up (the built-in OpenAI/Azure provider).
-    this.fallback ??= new OpenAIProvider();
-    return this.fallback.getModel(modelName);
+    // Preserve the legacy unlisted-model fallback, but bind it through the same
+    // typed request-policy model as every configured Responses call. This keeps
+    // Azure wire normalization at the object stage instead of reintroducing a
+    // JSON parse/stringify transport wrapper on the fallback path.
+    const builtin = configuredProviders(this.settings)[0];
+    if (!builtin) throw new Error("Built-in model provider is unavailable");
+    return new OpenGeniResponsesModel(
+      buildProviderClient(builtin, this.settings),
+      modelName ?? this.settings.openaiModel,
+      builtin,
+    );
   }
 }
 
@@ -1180,6 +1326,7 @@ export async function summarizeForCompaction(
   input: Array<Record<string, unknown>>,
   options: {
     client?: OpenAI;
+    provider?: ResolvedModelProvider;
     api?: ModelProviderApi;
     maxOutputTokens?: number;
     model?: string;
@@ -1191,6 +1338,8 @@ export async function summarizeForCompaction(
   const client = options.client ?? buildOpenAIClientFromSettings(settings);
   const api = options.api ?? "responses";
   const model = options.model ?? settings.openaiModel;
+  const provider = options.provider ?? configuredProviders(settings)[0];
+  if (!provider) throw new Error("Built-in model provider is unavailable");
   const maxTokens = options.maxOutputTokens ?? SUMMARY_BUFFER_TOKENS;
   if (api === "chat") {
     const transcript = renderCompactionPromptInputForChat(input);
@@ -1240,7 +1389,7 @@ export async function summarizeForCompaction(
   };
   let response: unknown;
   try {
-    response = await new CompactionResponsesModel(client, model).fetchResponse(request);
+    response = await new CompactionResponsesModel(client, model, provider).fetchResponse(request);
   } catch (error) {
     throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
   }
@@ -1400,6 +1549,7 @@ export async function requestRemoteCompactionV2(
   input: Array<Record<string, unknown>>,
   options: {
     client: OpenAI;
+    provider?: ResolvedModelProvider;
     model: string;
     /**
      * Exact agent system instructions for this session/turn. Required and
@@ -1442,9 +1592,13 @@ export async function requestRemoteCompactionV2(
   };
   let response: unknown;
   try {
-    response = await new CompactionResponsesModel(options.client, options.model).fetchResponse(
-      request,
-    );
+    const provider = options.provider ?? configuredProviders(settings)[0];
+    if (!provider) throw new Error("Built-in model provider is unavailable");
+    response = await new CompactionResponsesModel(
+      options.client,
+      options.model,
+      provider,
+    ).fetchResponse(request);
   } catch (error) {
     throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
   }
@@ -1708,9 +1862,30 @@ export function extractResponseOutputText(response: unknown): string {
  * request conversion and Responses transport without manufacturing a runner
  * trace solely to satisfy that wrapper.
  */
-class CompactionResponsesModel extends OpenAIResponsesModel {
-  fetchResponse(request: ModelRequest) {
-    return this._fetchResponse(request, false);
+class CompactionResponsesModel extends OpenGeniResponsesModel {
+  async fetchResponse(request: ModelRequest): Promise<ModelResponse> {
+    if (this.provider.kind !== "codex-subscription") {
+      return (await this._fetchResponse(request, false)) as unknown as ModelResponse;
+    }
+    // Codex is streaming-only. Use the SDK's normal streaming adapter so its
+    // terminal reducer, output reconstruction, and failure checks remain the
+    // single protocol implementation; only collect the final ModelResponse.
+    let response: ModelResponse | undefined;
+    for await (const event of this.getStreamedResponse(request)) {
+      if (event.type === "response_done") {
+        response = {
+          usage: Usage.fromJSON(
+            event.response.usage as NonNullable<Parameters<typeof Usage.fromJSON>[0]>,
+          ),
+          output: event.response.output,
+          responseId: event.response.id,
+          ...(event.response.requestId ? { requestId: event.response.requestId } : {}),
+          ...(event.response.providerData ? { providerData: event.response.providerData } : {}),
+        };
+      }
+    }
+    if (!response) throw new Error("Compaction response ended without a terminal response");
+    return response;
   }
 }
 
@@ -4610,6 +4785,28 @@ function publicMcpLifecycleError(
   return lifecycleError;
 }
 
+function logPublicMcpLifecycleFailure(error: Error): void {
+  // Agents SDK 0.14.3 deliberately reduces tool errors to their JavaScript
+  // type when tool-data logging is disabled. Emit our already-sanitized error
+  // once at the boundary so operators retain stable code/server/status fields
+  // without exposing the exact transport failure returned to the caller.
+  const structured = error as Error & {
+    code?: string;
+    serverId?: string;
+    status?: number;
+    retryable?: boolean;
+    origin?: string;
+  };
+  console.warn("[mcp] lifecycle operation failed", error, {
+    name: error.name,
+    ...(structured.code === undefined ? {} : { code: structured.code }),
+    ...(structured.serverId === undefined ? {} : { serverId: structured.serverId }),
+    ...(structured.status === undefined ? {} : { status: structured.status }),
+    ...(structured.retryable === undefined ? {} : { retryable: structured.retryable }),
+    ...(structured.origin === undefined ? {} : { origin: structured.origin }),
+  });
+}
+
 /** @internal Exported for exact SDK-boundary conformance tests. */
 export class PrefixedMcpServer implements MCPServer {
   readonly cacheToolsList: boolean;
@@ -4661,6 +4858,7 @@ export class PrefixedMcpServer implements MCPServer {
         recoverySafeSetup: this.recoverySafeSetup,
       });
       this.lifecycleFailures.connect = { phase: "connect", publicError, exactError };
+      logPublicMcpLifecycleFailure(publicError);
       throw publicError;
     }
   }
@@ -4674,6 +4872,7 @@ export class PrefixedMcpServer implements MCPServer {
       const exactError = exactMcpLifecycleError(error);
       const publicError = publicMcpLifecycleError(exactError, "close", this.registryId);
       this.lifecycleFailures.close = { phase: "close", publicError, exactError };
+      logPublicMcpLifecycleFailure(publicError);
       throw publicError;
     }
   }
@@ -4861,75 +5060,21 @@ export type PrepareInputOptions = {
   sandboxClient?: unknown;
 };
 
-type SerializedGeneratedRunItem = {
-  type?: unknown;
-  rawItem?: unknown;
-};
-
 /**
- * Restore an interrupted SDK run without asking today's tool-search callback to
- * reproduce yesterday's disclosure. The Agents SDK otherwise executes every
- * historical client tool_search while deserializing and rejects the saved state
- * when the current catalogue differs.
- *
- * The temporary JSON copy hides only the historical output schemas from that SDK
- * rehydration hook. The returned RunState receives the exact saved raw items
- * again before it is observed or serialized; execution remains `client`, the
- * durable blob is untouched, and no search is rerun.
+ * Restore immutable provider history while deriving executable tools only from
+ * the current authorized agent catalog. Historical client tool-search callbacks
+ * are never rerun: they may depend on a changed external catalog and are not an
+ * authority for the resumed process. The SDK still rebinds exact routed tool
+ * identities that remain configured, while missing historical tools stay inert
+ * history and any actually pending unresolved tool fails closed.
  */
 export async function restoreInterruptedRunState(
   agent: Agent<any, any>,
   serializedRunState: string,
 ): Promise<RunState<any, any>> {
-  let parsed: { generatedItems?: SerializedGeneratedRunItem[] };
-  try {
-    parsed = JSON.parse(serializedRunState) as {
-      generatedItems?: SerializedGeneratedRunItem[];
-    };
-  } catch {
-    // Preserve the SDK's established typed parse error.
-    return await RunState.fromString(agent, serializedRunState);
-  }
-  if (!parsed || typeof parsed !== "object") {
-    return await RunState.fromString(agent, serializedRunState);
-  }
-  const generatedItems = parsed.generatedItems;
-  if (!Array.isArray(generatedItems)) {
-    return await RunState.fromString(agent, serializedRunState);
-  }
-
-  const savedOutputs = new Map<number, unknown>();
-  for (const [index, item] of generatedItems.entries()) {
-    if (
-      item?.type !== "tool_search_output_item" ||
-      !item.rawItem ||
-      typeof item.rawItem !== "object"
-    ) {
-      continue;
-    }
-    const rawItem = item.rawItem as Record<string, unknown>;
-    if (rawItem.execution === "server" || !Array.isArray(rawItem.tools)) {
-      continue;
-    }
-    savedOutputs.set(index, rawItem);
-    item.rawItem = { ...rawItem, tools: [] };
-  }
-
-  if (savedOutputs.size === 0) {
-    return await RunState.fromString(agent, serializedRunState);
-  }
-
-  const state = await RunState.fromString(agent, JSON.stringify(parsed));
-  const restoredItems = (
-    state as unknown as {
-      _generatedItems: Array<{ rawItem?: unknown }>;
-    }
-  )._generatedItems;
-  for (const [index, rawItem] of savedOutputs) {
-    if (!restoredItems[index]) throw new Error("RunState tool_search output index changed");
-    restoredItems[index].rawItem = rawItem;
-  }
-  return state;
+  return await RunState.fromString(agent, serializedRunState, {
+    clientToolSearchRehydration: "preserve_history",
+  });
 }
 
 export async function prepareRunInput(
@@ -5157,16 +5302,21 @@ export const TOOLSPACE_PROGRAMMATIC_DIRECTIVE =
  * fragility without adding information. Pairing fields (`call_id`/`callId`)
  * are separate properties and stay untouched; items are cloned, never mutated.
  */
-export const stripProviderItemIdsFilter: CallModelInputFilter = ({ modelData }) => ({
-  ...modelData,
-  input: modelData.input.map((item) => {
-    if (item && typeof item === "object" && "id" in item) {
-      const { id: _id, ...rest } = item as Record<string, unknown>;
-      return rest as AgentInputItem;
-    }
-    return item;
-  }),
-});
+export const stripProviderItemIdsFilter: CallModelInputFilter = ({ modelData }) => {
+  let projected: AgentInputItem[] | null = null;
+  for (const [index, item] of modelData.input.entries()) {
+    const next = stripProviderItemId(item);
+    if (next !== item && projected === null) projected = modelData.input.slice(0, index);
+    projected?.push(next);
+  }
+  return projected ? { ...modelData, input: projected } : modelData;
+};
+
+function stripProviderItemId(item: AgentInputItem): AgentInputItem {
+  if (!item || typeof item !== "object" || !("id" in item)) return item;
+  const { id: _id, ...rest } = item as Record<string, unknown>;
+  return rest as AgentInputItem;
+}
 
 /**
  * callModelInputFilter that normalizes every `computer_call` carrying BOTH
@@ -5175,7 +5325,7 @@ export const stripProviderItemIdsFilter: CallModelInputFilter = ({ modelData }) 
  * both with `400 Computer call input must include exactly one of `action` or
  * `actions``; and (live-proven against gpt-5.6-sol's GA computer tool) it also
  * rejects the `action`-only form, accepting ONLY the batched plural `actions`.
- * The SDK 0.11.6 schema allows both, so a freshly-emitted
+ * The SDK 0.14.3 schema allows both, so a freshly-emitted
  * screenshot call carries the redundant pair. This filter runs before EVERY
  * model call — the turn-start history replay AND every mid-turn follow-up — so
  * it covers the just-emitted (non-replayed) computer_call on the same turn,
@@ -5205,13 +5355,13 @@ export const restoreLazyToolProviderHistoryFilter: CallModelInputFilter = ({ mod
  * so this is a live-turn defense rather than a request-only alternate history.
  */
 export function boundModelToolOutputsFilterForSettings(settings: Settings): CallModelInputFilter {
-  return ({ modelData }) => ({
-    ...modelData,
-    input: boundModelToolOutputItems(
-      modelData.input as unknown as Array<Record<string, unknown>>,
-      settings.modelToolOutputTruncationTokens,
-    ) as unknown as AgentInputItem[],
-  });
+  return memoizedInputItemProjectionFilter(
+    (item) =>
+      boundModelToolOutputItem(
+        item as unknown as Record<string, unknown>,
+        settings.modelToolOutputTruncationTokens,
+      ) as unknown as AgentInputItem,
+  );
 }
 
 function estimateAgentToolSchemaTokens(agent: Agent<any, any>): number {
@@ -5249,18 +5399,16 @@ export function contextRobustnessFilterForSettings(
   const thresholdTokens = compactionThresholdTokens(settings);
   let previousRequest: {
     revision: number;
-    footprint: CompleteModelInputFootprint;
+    instructionsTokens: number;
+    toolSchemaTokens: number;
   } | null = null;
   let requestRevision = 0;
   return async ({ modelData, agent }) => {
     const input = modelData.input;
     if (options.throwOnCompactionNeeded) {
       const reported = options.contextCompactionSignal?.();
-      const current: CompleteModelInputFootprint = {
-        input: input as unknown as Array<Record<string, unknown>>,
-        instructionsTokens: estimateSerializedValueTokens(modelData.instructions ?? ""),
-        toolSchemaTokens: estimateAgentToolSchemaTokens(agent),
-      };
+      const instructionsTokens = estimateSerializedValueTokens(modelData.instructions ?? "");
+      const toolSchemaTokens = estimateAgentToolSchemaTokens(agent);
       // Stream consumption can lag the SDK's background model loop. A provider
       // usage signal is safe only when its response revision belongs to the
       // immediately preceding request. Never attach a delayed response count to
@@ -5270,7 +5418,7 @@ export function contextRobustnessFilterForSettings(
         reported &&
         previousRequest &&
         reported.revision === previousRequest.revision &&
-        hasModelGeneratedItem(current.input)
+        hasModelGeneratedItem(input as unknown as Array<Record<string, unknown>>)
           ? reported
           : null;
       // Without an exact provider response bound to the immediately preceding
@@ -5278,13 +5426,19 @@ export function contextRobustnessFilterForSettings(
       // decision. Let the provider accept the request or return its typed
       // context-window error, which the worker already compacts and retries.
       const signalTokens = boundProvider
-        ? estimateCompleteModelInput({
-            current,
+        ? (estimateCompleteModelInputTokens({
+            currentInput: input as unknown as Array<Record<string, unknown>>,
+            currentInstructionsTokens: instructionsTokens,
+            currentToolSchemaTokens: toolSchemaTokens,
             provider: boundProvider,
-            providerRequestFootprint: previousRequest!.footprint,
-          }).tokens
+            previousRequest: previousRequest!,
+          }) ?? 0)
         : 0;
-      previousRequest = { revision: ++requestRevision, footprint: current };
+      previousRequest = {
+        revision: ++requestRevision,
+        instructionsTokens,
+        toolSchemaTokens,
+      };
       if (await options.contextCompactionRequested?.()) {
         throw new CompactionNeededError({
           signalTokens,
@@ -5301,7 +5455,7 @@ export function contextRobustnessFilterForSettings(
         });
       }
     }
-    return { ...modelData, input };
+    return modelData.input === input ? modelData : { ...modelData, input };
   };
 }
 
@@ -5316,6 +5470,36 @@ function composeCallModelInputFilters(filters: CallModelInputFilter[]): CallMode
       modelData = await filter({ ...args, modelData });
     }
     return modelData;
+  };
+}
+
+/**
+ * Memoize immutable protocol-item projections for one run. The SDK rebuilds the
+ * input array before each call but reuses item identities; caching by identity
+ * avoids cloning/bounding the whole historical prefix hundreds of times while
+ * still returning a fresh array only when at least one item differs on wire.
+ */
+function memoizedInputItemProjectionFilter(
+  project: (item: AgentInputItem) => AgentInputItem,
+): CallModelInputFilter {
+  const cache = new WeakMap<object, AgentInputItem>();
+  return ({ modelData }) => {
+    let projected: AgentInputItem[] | null = null;
+    for (const [index, item] of modelData.input.entries()) {
+      let next = item;
+      if (item && typeof item === "object") {
+        const cached = cache.get(item);
+        if (cached) {
+          next = cached;
+        } else {
+          next = project(item);
+          cache.set(item, next);
+        }
+      }
+      if (next !== item && projected === null) projected = modelData.input.slice(0, index);
+      projected?.push(next);
+    }
+    return projected ? { ...modelData, input: projected } : modelData;
   };
 }
 
@@ -5544,16 +5728,23 @@ export function callModelInputFilterForSettings(
   settings: Settings,
   options: ContextRobustnessFilterOptions = {},
 ): CallModelInputFilter | undefined {
-  const filters: CallModelInputFilter[] = [
-    restoreLazyToolProviderHistoryFilter,
-    normalizeComputerCallsFilter,
+  return composeCallModelInputFilters([
+    baseModelInputFilterForSettings(settings),
     boundModelToolOutputsFilterForSettings(settings),
-  ];
-  if (settings.openaiProviderItemIds === "strip") {
-    filters.push(stripProviderItemIdsFilter);
-  }
-  filters.push(contextRobustnessFilterForSettings(settings, options));
-  return composeCallModelInputFilters(filters);
+    contextRobustnessFilterForSettings(settings, options),
+  ]);
+}
+
+/** Rules that normalize history but do not impose final bounds/accounting. */
+function baseModelInputFilterForSettings(settings: Settings): CallModelInputFilter {
+  const stripProviderIds = settings.openaiProviderItemIds === "strip";
+  return memoizedInputItemProjectionFilter((source) => {
+    let item = restoreGenericDispatchHistoryItem(source);
+    item = normalizeComputerCallAction(
+      item as unknown as Record<string, unknown>,
+    ) as unknown as AgentInputItem;
+    return stripProviderIds ? stripProviderItemId(item) : item;
+  });
 }
 
 export async function runAgentStream(
@@ -5698,7 +5889,7 @@ export async function runAgentStream(
     );
     const ownedFilter = composeCallModelInputFilters(
       [
-        callModelInputFilterForSettings(settings),
+        baseModelInputFilterForSettings(settings),
         genesisTitleInputFilter,
         overrides.callModelInputFilter,
         // A caller filter may synthesize model input. Re-apply the idempotent
@@ -5724,6 +5915,8 @@ export async function runAgentStream(
     const ownedRunOptions: Parameters<typeof run>[2] = {
       stream: true,
       maxTurns: settings.agentMaxModelCallsPerTurn,
+      historyOwnership: "external",
+      modelResponseRetention: "last",
       callModelInputFilter: ownedFilter,
       ...(overrides.signal ? { signal: overrides.signal } : {}),
     };
@@ -5811,12 +6004,12 @@ export async function runAgentStream(
   // Apply the built-in per-call filters (computer-call normalization, optional
   // provider-id stripping, output bounds), then any per-turn filter, the model's
   // modality projection, and finally context accounting over the exact payload
-  // that can reach the provider. The SDK invokes filters on a deep request clone;
-  // OpenGeni does not pass an SDK session here and reconciles durable conversation
-  // truth from the untouched run-state history.
+  // that can reach the provider. External ownership gives the SDK a borrowed,
+  // immutable history view; every filter below is copy-on-write. OpenGeni does not
+  // pass an SDK session and reconciles durable truth from the untouched input.
   const callModelInputFilter = composeCallModelInputFilters(
     [
-      callModelInputFilterForSettings(settings),
+      baseModelInputFilterForSettings(settings),
       genesisTitleInputFilter,
       overrides.callModelInputFilter,
       boundModelToolOutputsFilterForSettings(settings),
@@ -5837,6 +6030,8 @@ export async function runAgentStream(
   const runOptions: Parameters<typeof run>[2] = {
     stream: true,
     maxTurns: settings.agentMaxModelCallsPerTurn,
+    historyOwnership: "external",
+    modelResponseRetention: "last",
     // Built-in per-call guard chain: normalize computer calls, optionally strip
     // provider ids, trim to the input budget on the client-compaction path, and
     // raise the proactive compaction signal. This runs for turn-start replay AND
@@ -9086,62 +9281,6 @@ export function azureCliLoginCommand(): string {
   ].join("\n");
 }
 
-export function sandboxCommandExitCode(result: unknown): number | null {
-  if (typeof result === "string") {
-    const match = result.match(/Process exited with code (-?\d+)/);
-    return match ? Number(match[1]) : null;
-  }
-  if (!result || typeof result !== "object") {
-    return null;
-  }
-  const candidate = result as {
-    exitCode?: unknown;
-    exit_code?: unknown;
-    code?: unknown;
-    status?: unknown;
-  };
-  for (const value of [candidate.exitCode, candidate.exit_code, candidate.code, candidate.status]) {
-    if (typeof value === "number") {
-      return value;
-    }
-  }
-  return null;
-}
-
-export function sandboxCommandOutput(result: unknown): string {
-  if (typeof result === "string") {
-    const outputIndex = result.indexOf("Output:");
-    return outputIndex >= 0 ? result.slice(outputIndex + "Output:".length).trim() : result.trim();
-  }
-  if (!result || typeof result !== "object") {
-    return "";
-  }
-  const candidate = result as {
-    output?: unknown;
-    stdout?: unknown;
-    stderr?: unknown;
-  };
-  return [candidate.output, candidate.stderr, candidate.stdout]
-    .filter((value): value is string => typeof value === "string" && value.length > 0)
-    .join("\n");
-}
-
-/**
- * Return the command's stdout body exactly once. `sandboxCommandOutput()` is a
- * human-readable aggregate and deliberately joins output/stderr/stdout; it is
- * unsafe for machine-parsed output because a provider adapter may preserve the
- * same body in both `output` and `stdout`.
- */
-export function sandboxCommandStdout(result: unknown): string {
-  if (typeof result === "string") return sandboxCommandOutput(result);
-  if (!result || typeof result !== "object") return "";
-  const candidate = result as { output?: unknown; stdout?: unknown };
-  if (typeof candidate.stdout === "string" && candidate.stdout.length > 0) {
-    return candidate.stdout;
-  }
-  return typeof candidate.output === "string" ? candidate.output : "";
-}
-
 function assertSandboxCommandSucceeded(result: unknown, operation: string): void {
   const output = sandboxCommandOutput(result);
   if (sandboxCommandStillRunning(result)) {
@@ -9158,17 +9297,6 @@ function assertSandboxCommandSucceeded(result: unknown, operation: string): void
   if (exitCode === null) {
     throw new Error(output || `${operation} did not return a command exit code`);
   }
-}
-
-export function sandboxCommandStillRunning(result: unknown): boolean {
-  if (typeof result === "string") {
-    return /Process running with session ID \d+/u.test(result);
-  }
-  if (!result || typeof result !== "object") {
-    return false;
-  }
-  const candidate = result as { sessionId?: unknown; session_id?: unknown };
-  return typeof candidate.sessionId === "number" || typeof candidate.session_id === "number";
 }
 
 function hasAzureServicePrincipal(environment: Record<string, string>): boolean {
@@ -9252,6 +9380,7 @@ function bundledSkillsDir(): string {
   const moduleDir = dirname(fileURLToPath(import.meta.url));
   const packaged =
     [
+      join(moduleDir, "assets", "runtime", "bundled_hashicorp_terraform_skills"),
       join(moduleDir, "bundled_hashicorp_terraform_skills"),
       join(moduleDir, "..", "src", "bundled_hashicorp_terraform_skills"),
     ].find((candidate) => existsSync(candidate)) ??
