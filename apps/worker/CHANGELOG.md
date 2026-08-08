@@ -1,5 +1,24 @@
 # @opengeni/worker-bundle
 
+## 0.16.36
+
+### Patch Changes
+
+- 2727236: Make sandbox draining crash-safe with durable capture and teardown ownership, idempotent Modal snapshots, scoped operator holds, parallel Temporal reaping, exact lifecycle errors, and verified Local/Docker workspace recovery.
+- c8eb465: Add explicit provider-contained lazy-tool transports: preserve Codex native search, use native client tool search for direct OpenAI/Azure Responses, and use a cache-stable ordinary search/invoke dispatcher for other function-calling providers.
+- Updated dependencies [2727236]
+- Updated dependencies [c8eb465]
+  - @opengeni/config@0.12.5
+  - @opengeni/contracts@0.41.1
+  - @opengeni/core@0.21.17
+  - @opengeni/db@0.28.13
+  - @opengeni/runtime@0.18.30
+  - @opengeni/documents@0.5.22
+  - @opengeni/github@0.4.42
+  - @opengeni/storage@0.2.79
+  - @opengeni/events@0.3.93
+  - @opengeni/observability@0.5.8
+
 ## 0.16.35
 
 ### Patch Changes

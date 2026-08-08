@@ -1,5 +1,11 @@
 # @opengeni/contracts
 
+## 0.41.1
+
+### Patch Changes
+
+- 2727236: Make sandbox draining crash-safe with durable capture and teardown ownership, idempotent Modal snapshots, scoped operator holds, parallel Temporal reaping, exact lifecycle errors, and verified Local/Docker workspace recovery.
+
 ## 0.41.0
 
 ### Minor Changes
