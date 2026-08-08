@@ -143,6 +143,37 @@ const PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS = new Map<string, RegExp>([
   ["sandboxLeaseKey", /^slk_[0-9a-f]{32}$/],
 ]);
 
+const PUBLIC_CHANNEL_A_OPERATIONS = new Set([
+  "fs.list",
+  "fs.list-batch",
+  "fs.read",
+  "fs.write",
+  "fs.delete",
+  "fs.move",
+  "fs.mkdir",
+  "git.status",
+  "git.diff",
+  "git.read-batch",
+  "git.log",
+  "git.show",
+  "terminal.exec",
+  "terminal.pty.open",
+  "terminal.pty.write",
+  "terminal.pty.resize",
+  "terminal.pty.close",
+  "read",
+  "mutation",
+]);
+
+const PUBLIC_CHANNEL_A_FAILURE_REASONS = new Set([
+  "request_cancelled",
+  "provider_read_busy",
+  "provider_unavailable",
+  "lifecycle_conflict",
+  "request_rejected",
+  "unexpected",
+]);
+
 /**
  * Public diagnostic values are protocol constants, never values inferred from
  * an exception's name, constructor, code, message, or enumerable properties.
@@ -169,6 +200,7 @@ const PUBLIC_TELEMETRY_ERROR_CLASSES = new Set([
   "OAuthOperationError",
   "RunCredentialRenewalOperationError",
   "RunStateCompatibilityError",
+  "SandboxChannelAOperationError",
   "SnapshotOperationError",
   "StartupDependencyError",
   "TelemetryExportError",
@@ -216,6 +248,11 @@ const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
   "otlp_export_failed",
   "payment_required",
   "provider_verification_failed",
+  "sandbox_channel_a_cancelled",
+  "sandbox_channel_a_lifecycle_conflict",
+  "sandbox_channel_a_operation_failed",
+  "sandbox_channel_a_provider_busy",
+  "sandbox_channel_a_provider_unavailable",
   "screenshot_capture_failed",
   "session_event_live_publish_failed",
   "session_workflow_wake_failed",
@@ -729,7 +766,10 @@ function cleanAttributes(attributes: Attributes): Record<string, string | number
 
 function projectPublicTelemetryAttributes(attributes: Attributes): Attributes {
   if ("errorClass" in attributes || "errorCode" in attributes) {
-    return projectPublicDiagnosticAttributes(attributes);
+    return {
+      ...projectPublicChannelADiagnosticAttributes(attributes),
+      ...projectPublicDiagnosticAttributes(attributes),
+    };
   }
   return Object.fromEntries(
     Object.entries(attributes).filter(([key, value]) => {
@@ -739,6 +779,31 @@ function projectPublicTelemetryAttributes(attributes: Attributes): Attributes {
       return typeof value === "string" && pattern?.test(value) === true;
     }),
   );
+}
+
+function projectPublicChannelADiagnosticAttributes(attributes: Attributes): Attributes {
+  if (attributes.errorClass !== "SandboxChannelAOperationError") return {};
+  const backend = attributes.backend;
+  const op = attributes.op;
+  const outcome = attributes.outcome;
+  const reason = attributes.reason;
+  const durationMs = attributes.durationMs;
+  const sandboxLeaseKey = attributes.sandboxLeaseKey;
+  return {
+    ...(typeof backend === "string" && SANDBOX_OPERATION_BACKENDS.has(backend) ? { backend } : {}),
+    ...(typeof op === "string" && PUBLIC_CHANNEL_A_OPERATIONS.has(op) ? { op } : {}),
+    ...(outcome === "failed" ? { outcome } : {}),
+    ...(typeof reason === "string" && PUBLIC_CHANNEL_A_FAILURE_REASONS.has(reason)
+      ? { reason }
+      : {}),
+    ...(typeof durationMs === "number" && Number.isFinite(durationMs) && durationMs >= 0
+      ? { durationMs }
+      : {}),
+    ...(typeof sandboxLeaseKey === "string" &&
+    PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS.get("sandboxLeaseKey")?.test(sandboxLeaseKey)
+      ? { sandboxLeaseKey }
+      : {}),
+  };
 }
 
 function projectPublicDiagnosticAttributes(attributes: Attributes): Attributes {

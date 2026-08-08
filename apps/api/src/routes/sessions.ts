@@ -149,6 +149,7 @@ import {
   withChannelARead,
   type ChannelAContext,
   type ChannelAHandle,
+  type ChannelAOperation,
 } from "../sandbox/channel-a";
 import { negotiateCapabilities } from "@opengeni/runtime/sandbox";
 import type { Context, Hono, MiddlewareHandler } from "hono";
@@ -2579,12 +2580,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   // FS uses files:read for reads, files:write for mutations; Git is read-only
   // (rides files:read); Terminal exec + PTY ride terminal:attach.
 
-  type ChannelARouteCtx = {
-    accountId: string;
-    workspaceId: string;
-    session: Session;
-    subjectId: string;
+  type ChannelARouteCtx = ChannelAContext & {
     waitSignal: AbortSignal;
+    operation: ChannelAOperation;
   };
 
   // Shared preamble: grant BEFORE parse, ownership gate, session lookup. Returns
@@ -2592,6 +2590,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   async function channelAPreamble(
     c: Context,
     permission: "files:read" | "files:write" | "terminal:attach",
+    operation: ChannelAOperation,
   ): Promise<ChannelARouteCtx> {
     const workspaceId = c.req.param("workspaceId") ?? "";
     const grant = await requireAccessGrant(c, deps, workspaceId, permission);
@@ -2607,6 +2606,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       session,
       subjectId: grant.subjectId,
       waitSignal: c.req.raw.signal,
+      operation,
     };
   }
 
@@ -2626,14 +2626,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
   // ── FileSystem ──────────────────────────────────────────────────────────
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/fs/list", async (c) => {
-    const ctx = await channelAPreamble(c, "files:read");
+    const ctx = await channelAPreamble(c, "files:read", "fs.list");
     const req = await parseChannelABody(c, FsListRequest);
     const out = await withChannelARead(channelAServices, ctx, ({ service }) => service.fsList(req));
     return c.json(out);
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/fs/list-batch", async (c) => {
-    const ctx = await channelAPreamble(c, "files:read");
+    const ctx = await channelAPreamble(c, "files:read", "fs.list-batch");
     const req = await parseChannelABody(c, FsListBatchRequest);
     const out = await withChannelARead(channelAServices, ctx, async ({ service }) => ({
       results: await runConcurrentChannelAReads(
@@ -2644,35 +2644,35 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/fs/read", async (c) => {
-    const ctx = await channelAPreamble(c, "files:read");
+    const ctx = await channelAPreamble(c, "files:read", "fs.read");
     const req = await parseChannelABody(c, FsReadRequest);
     const out = await withChannelARead(channelAServices, ctx, ({ service }) => service.fsRead(req));
     return c.json(out);
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/fs/write", async (c) => {
-    const ctx = await channelAPreamble(c, "files:write");
+    const ctx = await channelAPreamble(c, "files:write", "fs.write");
     const req = await parseChannelABody(c, FsWriteRequest);
     const out = await withChannelA(channelAServices, ctx, ({ service }) => service.fsWrite(req));
     return c.json(out);
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/fs/delete", async (c) => {
-    const ctx = await channelAPreamble(c, "files:write");
+    const ctx = await channelAPreamble(c, "files:write", "fs.delete");
     const req = await parseChannelABody(c, FsDeleteRequest);
     const out = await withChannelA(channelAServices, ctx, ({ service }) => service.fsDelete(req));
     return c.json(out);
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/fs/move", async (c) => {
-    const ctx = await channelAPreamble(c, "files:write");
+    const ctx = await channelAPreamble(c, "files:write", "fs.move");
     const req = await parseChannelABody(c, FsMoveRequest);
     const out = await withChannelA(channelAServices, ctx, ({ service }) => service.fsMove(req));
     return c.json(out);
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/fs/mkdir", async (c) => {
-    const ctx = await channelAPreamble(c, "files:write");
+    const ctx = await channelAPreamble(c, "files:write", "fs.mkdir");
     const req = await parseChannelABody(c, FsMkdirRequest);
     const out = await withChannelA(channelAServices, ctx, ({ service }) => service.fsMkdir(req));
     return c.json(out);
@@ -2680,7 +2680,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
   // ── Git (read-only) ─────────────────────────────────────────────────────
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/git/status", async (c) => {
-    const ctx = await channelAPreamble(c, "files:read");
+    const ctx = await channelAPreamble(c, "files:read", "git.status");
     const req = await parseChannelABody(c, GitStatusRequest);
     const out = await withChannelARead(channelAServices, ctx, ({ service }) =>
       service.gitStatus(req),
@@ -2689,7 +2689,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/git/diff", async (c) => {
-    const ctx = await channelAPreamble(c, "files:read");
+    const ctx = await channelAPreamble(c, "files:read", "git.diff");
     const req = await parseChannelABody(c, GitDiffRequest);
     const out = await withChannelARead(channelAServices, ctx, ({ service }) =>
       service.gitDiff(req),
@@ -2698,7 +2698,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/git/read-batch", async (c) => {
-    const ctx = await channelAPreamble(c, "files:read");
+    const ctx = await channelAPreamble(c, "files:read", "git.read-batch");
     const req = await parseChannelABody(c, GitReadBatchRequest);
     const out = await withChannelARead(channelAServices, ctx, async ({ service }) => {
       type StatusResult = Awaited<ReturnType<typeof service.gitStatus>>;
@@ -2749,14 +2749,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/git/log", async (c) => {
-    const ctx = await channelAPreamble(c, "files:read");
+    const ctx = await channelAPreamble(c, "files:read", "git.log");
     const req = await parseChannelABody(c, GitLogRequest);
     const out = await withChannelARead(channelAServices, ctx, ({ service }) => service.gitLog(req));
     return c.json(out);
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/git/show", async (c) => {
-    const ctx = await channelAPreamble(c, "files:read");
+    const ctx = await channelAPreamble(c, "files:read", "git.show");
     const req = await parseChannelABody(c, GitShowRequest);
     const out = await withChannelARead(channelAServices, ctx, ({ service }) =>
       service.gitShow(req),
@@ -2823,7 +2823,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
   // ── Terminal: synchronous exec ────────────────────────────────────────────
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/exec", async (c) => {
-    const ctx = await channelAPreamble(c, "terminal:attach");
+    const ctx = await channelAPreamble(c, "terminal:attach", "terminal.exec");
     const req = await parseChannelABody(c, TerminalExecRequest);
     const out = await withChannelA(channelAServices, ctx, ({ service }) =>
       service.terminalExec(req),
@@ -2833,7 +2833,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
   // ── Terminal: interactive PTY control (output rides A1) ───────────────────
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/pty", async (c) => {
-    const ctx = await channelAPreamble(c, "terminal:attach");
+    const ctx = await channelAPreamble(c, "terminal:attach", "terminal.pty.open");
     const req = await parseChannelABody(c, PtyOpenRequest);
     if (ctx.session.sandboxBackend === "selfhosted" || ctx.session.activeSandboxId !== null) {
       throw new HTTPException(409, {
@@ -2942,7 +2942,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/pty/write", async (c) => {
-    const ctx = await channelAPreamble(c, "terminal:attach");
+    const ctx = await channelAPreamble(c, "terminal:attach", "terminal.pty.write");
     const req = await parseChannelABody(c, PtyWriteRequest);
     const pty = await getOpenPtySession(db, {
       workspaceId: ctx.workspaceId,
@@ -3006,7 +3006,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/pty/resize", async (c) => {
-    const ctx = await channelAPreamble(c, "terminal:attach");
+    const ctx = await channelAPreamble(c, "terminal:attach", "terminal.pty.resize");
     const req = await parseChannelABody(c, PtyResizeRequest);
     const pty = await getOpenPtySession(db, {
       workspaceId: ctx.workspaceId,
@@ -3038,7 +3038,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/pty/close", async (c) => {
-    const ctx = await channelAPreamble(c, "terminal:attach");
+    const ctx = await channelAPreamble(c, "terminal:attach", "terminal.pty.close");
     const req = await parseChannelABody(c, PtyCloseRequest);
     const pty = await getOpenPtySession(db, {
       workspaceId: ctx.workspaceId,

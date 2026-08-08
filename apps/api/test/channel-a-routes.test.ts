@@ -3,10 +3,13 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HTTPException } from "hono/http-exception";
+import { SandboxProviderReadLockUnavailableError } from "@opengeni/db";
 import { ChannelAUnavailableError, ChannelAValidationError } from "@opengeni/runtime/sandbox";
 import {
+  channelAOperationFailureDiagnostic,
   isChannelAHandleCacheEntryFresh,
   isChannelAProcessHandleCacheEntryFresh,
+  isChannelARequestCancellation,
   mapChannelAError,
   runChannelAReadWithFreshHandleRetry,
   runConcurrentChannelAReads,
@@ -33,75 +36,93 @@ const channelASeam = readFileSync(resolve(here, "..", "src", "sandbox", "channel
 type RouteSpec = {
   path: string;
   permission: "files:read" | "files:write" | "terminal:attach";
+  operation: string;
 };
 const CHANNEL_A_ROUTES: RouteSpec[] = [
   {
     path: "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/list",
     permission: "files:read",
+    operation: "fs.list",
   },
   {
     path: "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/list-batch",
     permission: "files:read",
+    operation: "fs.list-batch",
   },
   {
     path: "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/read",
     permission: "files:read",
+    operation: "fs.read",
   },
   {
     path: "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/write",
     permission: "files:write",
+    operation: "fs.write",
   },
   {
     path: "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/delete",
     permission: "files:write",
+    operation: "fs.delete",
   },
   {
     path: "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/move",
     permission: "files:write",
+    operation: "fs.move",
   },
   {
     path: "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/mkdir",
     permission: "files:write",
+    operation: "fs.mkdir",
   },
   {
     path: "/v1/workspaces/:workspaceId/sessions/:sessionId/git/status",
     permission: "files:read",
+    operation: "git.status",
   },
   {
     path: "/v1/workspaces/:workspaceId/sessions/:sessionId/git/diff",
     permission: "files:read",
+    operation: "git.diff",
   },
   {
     path: "/v1/workspaces/:workspaceId/sessions/:sessionId/git/read-batch",
     permission: "files:read",
+    operation: "git.read-batch",
   },
   {
     path: "/v1/workspaces/:workspaceId/sessions/:sessionId/git/log",
     permission: "files:read",
+    operation: "git.log",
   },
   {
     path: "/v1/workspaces/:workspaceId/sessions/:sessionId/git/show",
     permission: "files:read",
+    operation: "git.show",
   },
   {
     path: "/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/exec",
     permission: "terminal:attach",
+    operation: "terminal.exec",
   },
   {
     path: "/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/pty",
     permission: "terminal:attach",
+    operation: "terminal.pty.open",
   },
   {
     path: "/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/pty/write",
     permission: "terminal:attach",
+    operation: "terminal.pty.write",
   },
   {
     path: "/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/pty/resize",
     permission: "terminal:attach",
+    operation: "terminal.pty.resize",
   },
   {
     path: "/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/pty/close",
     permission: "terminal:attach",
+    operation: "terminal.pty.close",
   },
 ];
 
@@ -129,7 +150,7 @@ function handlerBody(source: string, method: string, path: string): string {
 }
 
 describe("P4.4 Channel-A route discipline", () => {
-  test("all 13 routes are registered", () => {
+  test("all 17 routes are registered", () => {
     for (const route of CHANNEL_A_ROUTES) {
       expect(
         routeRegex("post", route.path).test(sessionsRoute),
@@ -153,6 +174,7 @@ describe("P4.4 Channel-A route discipline", () => {
       }
       // the correct permission is passed to the preamble.
       expect(body).toContain(`"${route.permission}"`);
+      expect(body).toContain(`"${route.operation}"`);
     });
   }
 
@@ -202,6 +224,49 @@ describe("P4.4 Channel-A route discipline", () => {
     expect((mapped as HTTPException).message).toBe(
       "Workspace files are temporarily unavailable. Retry.",
     );
+  });
+
+  test("request aborts map to a distinct 499 cancellation diagnostic", () => {
+    const controller = new AbortController();
+    const abort = new DOMException("client disconnected", "AbortError");
+    controller.abort(abort);
+    expect(isChannelARequestCancellation(abort, controller.signal)).toBe(true);
+    expect(channelAOperationFailureDiagnostic(abort, controller.signal)).toEqual({
+      reason: "request_cancelled",
+      status: 499,
+      errorCode: "sandbox_channel_a_cancelled",
+    });
+    const mapped = mapChannelAError(abort, controller.signal);
+    expect(mapped).toBeInstanceOf(HTTPException);
+    expect((mapped as HTTPException).status).toBe(499);
+    expect((mapped as HTTPException).message).toBe("request cancelled");
+  });
+
+  test("an unrelated provider AbortError is not misreported as a client cancellation", () => {
+    const abort = new DOMException("provider aborted", "AbortError");
+    const liveRequest = new AbortController();
+    expect(isChannelARequestCancellation(abort, liveRequest.signal)).toBe(false);
+    expect(channelAOperationFailureDiagnostic(abort, liveRequest.signal)).toEqual({
+      reason: "unexpected",
+      status: 500,
+      errorCode: "sandbox_channel_a_operation_failed",
+    });
+    expect(mapChannelAError(abort, liveRequest.signal)).toBe(abort);
+  });
+
+  test("provider contention and provider unavailability remain distinguishable", () => {
+    expect(
+      channelAOperationFailureDiagnostic(new SandboxProviderReadLockUnavailableError()),
+    ).toEqual({
+      reason: "provider_read_busy",
+      status: 503,
+      errorCode: "sandbox_channel_a_provider_busy",
+    });
+    expect(channelAOperationFailureDiagnostic(new ChannelAUnavailableError("temporary"))).toEqual({
+      reason: "provider_unavailable",
+      status: 503,
+      errorCode: "sandbox_channel_a_provider_unavailable",
+    });
   });
 
   test("concurrent reads settle before one bounded transient retry", async () => {
