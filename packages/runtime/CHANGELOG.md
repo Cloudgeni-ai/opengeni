@@ -1,5 +1,11 @@
 # @opengeni/runtime
 
+## 0.18.32
+
+### Patch Changes
+
+- 56f612b: Isolate read handles from process-capable handles, replace Modal's transport in place when its command-router URL rotates, rebuild the exact lease-fenced handle once for side-effect-free reads after a typed provider outage, and correlate handle recovery safely across API and reaper logs.
+
 ## 0.18.31
 
 ### Patch Changes

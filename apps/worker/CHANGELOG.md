@@ -1,5 +1,15 @@
 # @opengeni/worker-bundle
 
+## 0.16.40
+
+### Patch Changes
+
+- 56f612b: Isolate read handles from process-capable handles, replace Modal's transport in place when its command-router URL rotates, rebuild the exact lease-fenced handle once for side-effect-free reads after a typed provider outage, and correlate handle recovery safely across API and reaper logs.
+- Updated dependencies [56f612b]
+  - @opengeni/observability@0.5.10
+  - @opengeni/runtime@0.18.32
+  - @opengeni/core@0.21.21
+
 ## 0.16.39
 
 ### Patch Changes
