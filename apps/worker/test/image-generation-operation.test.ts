@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   executeImageGenerationOperation,
   ImageGenerationOutcomeUnknownError,
+  ImageGenerationRetentionFailedError,
   imageGenerationOperationIdentity,
   imageProviderBindingHash,
   type ExecuteImageGenerationOperationInput,
@@ -77,6 +78,7 @@ function operationPorts(
     retain: async () => ({ receipt, artifact: {} as never }),
     complete: async () => ({ status: "completed" }) as never,
     markOutcomeUnknown: async () => ({ status: "outcome_unknown" }) as never,
+    markRetentionFailed: async () => ({ status: "retention_failed" }) as never,
     recover: async () => null,
     ...overrides,
   };
@@ -199,39 +201,76 @@ describe("image generation paid-operation fence", () => {
     expect(generateCalls.count).toBe(0);
   });
 
-  test("fences provider or retention failures as outcome-unknown", async () => {
-    for (const failure of ["provider", "retention"] as const) {
-      const generateCalls = { count: 0 };
-      let fenced = 0;
-      const input = executionInput(generateCalls);
-      await expect(
-        executeImageGenerationOperation(
-          {
-            ...input,
-            generate:
-              failure === "provider"
-                ? async () => {
-                    generateCalls.count += 1;
-                    throw new Error("provider failed ambiguously");
-                  }
-                : input.generate,
+  test("fences an ambiguous provider failure without entering retention", async () => {
+    const generateCalls = { count: 0 };
+    let ambiguousFences = 0;
+    let retentionFences = 0;
+    await expect(
+      executeImageGenerationOperation(
+        {
+          ...executionInput(generateCalls),
+          generate: async () => {
+            generateCalls.count += 1;
+            throw new Error("provider failed ambiguously");
           },
-          operationPorts({
-            retain:
-              failure === "retention"
-                ? async () => {
-                    throw new Error("retention failed");
-                  }
-                : operationPorts().retain,
-            markOutcomeUnknown: async () => {
-              fenced += 1;
-              return { status: "outcome_unknown" } as never;
-            },
+        },
+        operationPorts({
+          markOutcomeUnknown: async () => {
+            ambiguousFences += 1;
+            return { status: "outcome_unknown" } as never;
+          },
+          markRetentionFailed: async () => {
+            retentionFences += 1;
+            return { status: "retention_failed" } as never;
+          },
+        }),
+      ),
+    ).rejects.toThrow("provider failed ambiguously");
+    expect(generateCalls.count).toBe(1);
+    expect(ambiguousFences).toBe(1);
+    expect(retentionFences).toBe(0);
+  });
+
+  test("records a known provider success separately when durable retention fails", async () => {
+    const generateCalls = { count: 0 };
+    let ambiguousFences = 0;
+    let retentionFences = 0;
+    await expect(
+      executeImageGenerationOperation(
+        executionInput(generateCalls),
+        operationPorts({
+          retain: async () => {
+            throw new Error("retention failed");
+          },
+          markOutcomeUnknown: async () => {
+            ambiguousFences += 1;
+            return { status: "outcome_unknown" } as never;
+          },
+          markRetentionFailed: async () => {
+            retentionFences += 1;
+            return { status: "retention_failed" } as never;
+          },
+        }),
+      ),
+    ).rejects.toBeInstanceOf(ImageGenerationRetentionFailedError);
+    expect(generateCalls.count).toBe(1);
+    expect(ambiguousFences).toBe(0);
+    expect(retentionFences).toBe(1);
+  });
+
+  test("never replays a known-success operation whose output could not be recovered", async () => {
+    const generateCalls = { count: 0 };
+    await expect(
+      executeImageGenerationOperation(
+        executionInput(generateCalls),
+        operationPorts({
+          prepare: async () => ({
+            operation: { status: "retention_failed" } as never,
+            created: false,
           }),
-        ),
-      ).rejects.toThrow("failed");
-      expect(generateCalls.count).toBe(1);
-      expect(fenced).toBe(1);
-    }
+        }),
+      ),
+    ).rejects.toBeInstanceOf(ImageGenerationRetentionFailedError);
+    expect(generateCalls.count).toBe(0);
   });
 });

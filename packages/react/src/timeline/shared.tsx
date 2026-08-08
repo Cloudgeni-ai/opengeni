@@ -98,6 +98,8 @@ export type ActivityDisclosureProps = {
   cancelled?: boolean | undefined;
   /** When false the row is a static line (no expand affordance). */
   expandable?: boolean | undefined;
+  /** Seed this individual disclosure open; user interaction still owns it afterwards. */
+  defaultOpen?: boolean | undefined;
   children?: ReactNode | undefined;
 };
 
@@ -126,6 +128,7 @@ export function ActivityDisclosure({
   failed,
   cancelled,
   expandable = true,
+  defaultOpen,
   children,
 }: ActivityDisclosureProps) {
   // `failed` takes precedence over `cancelled` when both are set (shouldn't happen, but be safe).
@@ -145,7 +148,7 @@ export function ActivityDisclosure({
   // An ancestor may seed the initial open state (screenshot instrumentation);
   // absent in normal app usage, where the row starts collapsed.
   const forcedDefaultOpen = useForcedDefaultOpen();
-  const [open, setOpen] = useState(forcedDefaultOpen ?? false);
+  const [open, setOpen] = useState(defaultOpen ?? forcedDefaultOpen ?? false);
   const truncation = useContext(ToolCallTruncationContext);
   const hasBody = expandable && (children != null || truncation != null);
 
@@ -202,7 +205,7 @@ export function ActivityDisclosure({
       )}
       {/* The right gutter carries at most ONE signal: the media thumbnail, else a
           terse settle chip (hidden once expanded — the body owns the detail). */}
-      {media ? (
+      {media && !open ? (
         <span className="ml-auto flex shrink-0 items-center gap-2 pl-2">{media}</span>
       ) : chip && !open ? (
         <span className="ml-auto shrink-0 pl-2">
@@ -504,10 +507,14 @@ export function Thumbnail({
   src,
   caption,
   alt = "screenshot",
+  expandLabel = "Expand screenshot",
+  lightboxLabel = "Screenshot",
 }: {
   src: string;
   caption?: string | undefined;
   alt?: string;
+  expandLabel?: string | undefined;
+  lightboxLabel?: string | undefined;
 }) {
   const lightbox = useLightboxOptional();
   const [failed, setFailed] = useState(false);
@@ -535,7 +542,7 @@ export function Thumbnail({
       type="button"
       onClick={(event) => {
         event.stopPropagation();
-        lightbox.open(src, caption, event.currentTarget);
+        lightbox.open(src, caption, event.currentTarget, lightboxLabel);
       }}
       onKeyDown={(event) => {
         if (event.key === "Enter" || event.key === " ") {
@@ -547,7 +554,7 @@ export function Thumbnail({
         "group/thumb relative inline-flex overflow-hidden bg-og-bg outline-hidden",
         "focus-visible:ring-2 focus-visible:ring-og-accent",
       )}
-      aria-label="Expand screenshot"
+      aria-label={expandLabel}
     >
       {img}
     </button>
@@ -564,10 +571,14 @@ export function ScreenshotFigure({
   src,
   caption,
   alt = "screenshot",
+  expandLabel = "Expand screenshot",
+  lightboxLabel = "Screenshot",
 }: {
   src: string;
   caption?: string | undefined;
   alt?: string;
+  expandLabel?: string | undefined;
+  lightboxLabel?: string | undefined;
 }) {
   const lightbox = useLightboxOptional();
   const [failed, setFailed] = useState(false);
@@ -591,9 +602,9 @@ export function ScreenshotFigure({
       ) : lightbox ? (
         <button
           type="button"
-          onClick={(event) => lightbox.open(src, caption, event.currentTarget)}
+          onClick={(event) => lightbox.open(src, caption, event.currentTarget, lightboxLabel)}
           className={surface}
-          aria-label="Expand screenshot"
+          aria-label={expandLabel}
         >
           {img}
         </button>

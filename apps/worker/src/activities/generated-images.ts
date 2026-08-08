@@ -649,6 +649,18 @@ export function generatedImageReceiptFromUnknown(value: unknown): GeneratedImage
       return null;
     }
   }
+  // Function-tool results are durably normalized to the Agents SDK's typed
+  // text envelope. Unwrap that canonical transport shape before validating the
+  // closed receipt; otherwise a later turn sees the path in model history but
+  // cannot discover the artifact that must be copied into its sandbox.
+  if (
+    isRecord(value) &&
+    value.type === "text" &&
+    typeof value.text === "string" &&
+    value.text.length <= 4_096
+  ) {
+    return generatedImageReceiptFromUnknown(value.text);
+  }
   const parsed = GeneratedImageReceiptSchema.safeParse(value);
   return parsed.success ? parsed.data : null;
 }

@@ -10,7 +10,8 @@ export type ImageGenerationOperationStatus =
   | "prepared"
   | "provider_started"
   | "completed"
-  | "outcome_unknown";
+  | "outcome_unknown"
+  | "retention_failed";
 
 export type ImageGenerationOperation = {
   id: string;
@@ -201,6 +202,33 @@ export async function markImageGenerationOperationOutcomeUnknown(
   });
 }
 
+/** Provider completed, but its bytes could not be durably retained. Never replay the paid call. */
+export async function markImageGenerationOperationRetentionFailed(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    operationId: string;
+    operationKey: string;
+    error: string;
+  },
+): Promise<ImageGenerationOperation> {
+  return await mutateImageGenerationOperation(db, input, async (tx, current) => {
+    if (current.status !== "provider_started") return current;
+    const [row] = await tx
+      .update(schema.imageGenerationOperations)
+      .set({
+        status: "retention_failed",
+        lastError: input.error.slice(0, 4_096),
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.imageGenerationOperations.id, current.id))
+      .returning();
+    if (!row) throw new Error("Failed to record generated image retention failure");
+    return mapImageGenerationOperation(row);
+  });
+}
+
 export async function completeImageGenerationOperation(
   db: Database,
   input: {
@@ -212,7 +240,11 @@ export async function completeImageGenerationOperation(
 ): Promise<ImageGenerationOperation> {
   return await mutateImageGenerationOperation(db, input, async (tx, current) => {
     if (current.status === "completed") return current;
-    if (current.status !== "provider_started" && current.status !== "outcome_unknown") {
+    if (
+      current.status !== "provider_started" &&
+      current.status !== "outcome_unknown" &&
+      current.status !== "retention_failed"
+    ) {
       throw new Error("Image generation operation did not reach the provider");
     }
     const [artifact] = await tx

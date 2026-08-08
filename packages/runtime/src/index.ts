@@ -5026,6 +5026,12 @@ export type RunAgentStreamOptions = {
   sandboxClient?: unknown;
   sandboxEnvironment?: Record<string, string>;
   onRuntimeEvent?: (event: NormalizedRuntimeEvent) => Promise<void> | void;
+  /**
+   * Called after a newly created/resumed SDK-owned sandbox has completed its
+   * platform setup, but before the session is released to the first agent
+   * operation. Hosts use this for durable, session-scoped artifact hydration.
+   */
+  onSandboxSessionReady?: (session: SandboxSessionLike) => Promise<void> | void;
   contextCompactionSignal?: () => ProviderContextTokenSignal | null | undefined;
   contextCompactionRequested?: () => boolean | Promise<boolean>;
   // Host-managed git credential renewal registration. Called only after the
@@ -5766,7 +5772,7 @@ export async function runAgentStream(
   const gitCredentialBindings = gitCredentialBindingsForAgent(agent);
   const toolspaceTokenSeed = toolspaceTokenSeedForAgent(agent);
   const legacyRigSetup = rigSetupDescriptorForAgent(agent);
-  const client = toolspaceClient
+  const lifecycleClient = toolspaceClient
     ? withSandboxLifecycleHooks(
         toolspaceClient,
         [
@@ -5797,6 +5803,10 @@ export async function runAgentStream(
         },
       )
     : undefined;
+  const client =
+    lifecycleClient && overrides.onSandboxSessionReady
+      ? withSandboxSessionReady(lifecycleClient, overrides.onSandboxSessionReady)
+      : lifecycleClient;
   const sandboxSessionState = prepared.sandboxSessionState;
   // Apply the built-in per-call filters (computer-call normalization, optional
   // provider-id stripping, output bounds), then any per-turn filter, the model's
@@ -6357,6 +6367,69 @@ export function withSandboxFileDownloads(
       ? {
           resume: async (state: SandboxSessionState) =>
             await wrapSession(await client.resume!(state)),
+        }
+      : {}),
+    ...(client.delete
+      ? {
+          delete: async (state: SandboxSessionState) => await client.delete!(state),
+        }
+      : {}),
+    ...(client.serializeSessionState
+      ? {
+          serializeSessionState: async (state: SandboxSessionState, options) =>
+            await client.serializeSessionState!(state, options),
+        }
+      : {}),
+    ...(client.canPersistOwnedSessionState
+      ? {
+          canPersistOwnedSessionState: async (state: SandboxSessionState) =>
+            await client.canPersistOwnedSessionState!(state),
+        }
+      : {}),
+    ...(client.canReusePreservedOwnedSession
+      ? {
+          canReusePreservedOwnedSession: async (state: SandboxSessionState) =>
+            await client.canReusePreservedOwnedSession!(state),
+        }
+      : {}),
+    ...(client.deserializeSessionState
+      ? {
+          deserializeSessionState: async (state: Record<string, unknown>) =>
+            await client.deserializeSessionState!(state),
+        }
+      : {}),
+  };
+}
+
+/**
+ * Observe each real SDK-owned sandbox exactly once, after all inner client
+ * decorators have completed and before the SDK can issue its first operation.
+ */
+export function withSandboxSessionReady(
+  client: SandboxClient,
+  callback: (session: SandboxSessionLike) => Promise<void> | void,
+): SandboxClient {
+  const completed = new WeakSet<object>();
+  const ready = async <T extends SandboxSessionLike>(session: T): Promise<T> => {
+    if (typeof session === "object" && session !== null && !completed.has(session)) {
+      await callback(session);
+      completed.add(session);
+    }
+    return session;
+  };
+  return {
+    backendId: client.backendId,
+    ...(client.supportsDefaultOptions !== undefined
+      ? { supportsDefaultOptions: client.supportsDefaultOptions }
+      : {}),
+    ...(client.create
+      ? {
+          create: async (...args: any[]) => await ready(await (client.create as any)(...args)),
+        }
+      : {}),
+    ...(client.resume
+      ? {
+          resume: async (state: SandboxSessionState) => await ready(await client.resume!(state)),
         }
       : {}),
     ...(client.delete

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { Agent, RunContext, RunState } from "@openai/agents-core";
 import {
   assertGeneratedImageHistoryRetained,
+  collectGeneratedImageArtifactReceipts,
   compactGeneratedImageHistory,
   compactGeneratedImageRunState,
   compactGeneratedImageSdkEvent,
@@ -327,6 +328,12 @@ describe("generated image retention boundary", () => {
   test("parses only the closed permanent receipt shape", () => {
     expect(generatedImageReceiptFromUnknown(receipt)).toEqual(receipt);
     expect(generatedImageReceiptFromUnknown(JSON.stringify(receipt))).toEqual(receipt);
+    expect(
+      generatedImageReceiptFromUnknown({
+        type: "text",
+        text: JSON.stringify(receipt),
+      }),
+    ).toEqual(receipt);
     expect(generatedImageReceiptFromUnknown({ ...receipt, extra: true })).toBeNull();
     expect(
       generatedImageReceiptFromUnknown({
@@ -341,6 +348,19 @@ describe("generated image retention boundary", () => {
           "/workspace/generated-images/generated-image-44444444-4444-4444-8444-444444444444.png",
       }),
     ).toBeNull();
+  });
+
+  test("discovers adapter receipts in canonical function-tool result envelopes", () => {
+    const collected = collectGeneratedImageArtifactReceipts([
+      {
+        type: "function_call_result",
+        name: "generate_image",
+        callId: "call_image",
+        status: "completed",
+        output: { type: "text", text: JSON.stringify(receipt) },
+      },
+    ]);
+    expect(collected.get(receipt.artifact.artifactId)).toEqual(receipt);
   });
 
   test("projects native receipts to one stable provider-neutral model fact", () => {

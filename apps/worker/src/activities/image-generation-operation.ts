@@ -3,8 +3,10 @@ import {
   completeImageGenerationOperation,
   getGeneratedImageArtifact,
   markImageGenerationOperationOutcomeUnknown,
+  markImageGenerationOperationRetentionFailed,
   prepareImageGenerationOperation,
   type Database,
+  type ImageGenerationOperationStatus,
 } from "@opengeni/db";
 import type { ObjectStorage } from "@opengeni/storage";
 import { createHash } from "node:crypto";
@@ -27,12 +29,26 @@ export class ImageGenerationOutcomeUnknownError extends Error {
   }
 }
 
+export class ImageGenerationRetentionFailedError extends Error {
+  constructor(
+    readonly operationId: string,
+    cause?: unknown,
+  ) {
+    super(
+      "The image was generated, but OpenGeni could not save it. The paid provider request was not repeated.",
+      cause === undefined ? undefined : { cause },
+    );
+    this.name = "ImageGenerationRetentionFailedError";
+  }
+}
+
 export type ImageGenerationOperationPorts = {
   prepare: typeof prepareImageGenerationOperation;
   begin: typeof beginImageGenerationOperation;
   retain: typeof retainGeneratedImage;
   complete: typeof completeImageGenerationOperation;
   markOutcomeUnknown: typeof markImageGenerationOperationOutcomeUnknown;
+  markRetentionFailed: typeof markImageGenerationOperationRetentionFailed;
   recover: typeof recoverCompletedImage;
 };
 
@@ -42,6 +58,7 @@ const imageGenerationOperationPorts: ImageGenerationOperationPorts = {
   retain: retainGeneratedImage,
   complete: completeImageGenerationOperation,
   markOutcomeUnknown: markImageGenerationOperationOutcomeUnknown,
+  markRetentionFailed: markImageGenerationOperationRetentionFailed,
   recover: recoverCompletedImage,
 };
 
@@ -105,7 +122,7 @@ export async function executeImageGenerationOperation(
       operationKey: identity.operationKey,
     });
     if (recovered) return recovered;
-    throw new ImageGenerationOutcomeUnknownError(identity.operationId);
+    throw unrecoveredOperationError(prepared.operation.status, identity.operationId);
   }
 
   const begun = await ports.begin(input.db, {
@@ -121,11 +138,26 @@ export async function executeImageGenerationOperation(
       operationKey: identity.operationKey,
     });
     if (recovered) return recovered;
-    throw new ImageGenerationOutcomeUnknownError(identity.operationId);
+    throw unrecoveredOperationError(begun.operation.status, identity.operationId);
+  }
+
+  let output: GeneratedImageOutput;
+  try {
+    output = await input.generate();
+  } catch (error) {
+    await ports
+      .markOutcomeUnknown(input.db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        operationId: identity.operationId,
+        operationKey: identity.operationKey,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      .catch(() => undefined);
+    throw error;
   }
 
   try {
-    const output = await input.generate();
     if (output.toolCallId !== input.toolCallId || output.providerItemId !== null) {
       throw new Error("Client image provider returned a mismatched operation identity");
     }
@@ -151,7 +183,7 @@ export async function executeImageGenerationOperation(
     return retained.receipt;
   } catch (error) {
     await ports
-      .markOutcomeUnknown(input.db, {
+      .markRetentionFailed(input.db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         operationId: identity.operationId,
@@ -159,8 +191,17 @@ export async function executeImageGenerationOperation(
         error: error instanceof Error ? error.message : String(error),
       })
       .catch(() => undefined);
-    throw error;
+    throw new ImageGenerationRetentionFailedError(identity.operationId, error);
   }
+}
+
+function unrecoveredOperationError(
+  status: ImageGenerationOperationStatus,
+  operationId: string,
+): Error {
+  return status === "retention_failed"
+    ? new ImageGenerationRetentionFailedError(operationId)
+    : new ImageGenerationOutcomeUnknownError(operationId);
 }
 
 export function imageProviderBindingHash(providerId: string, credentialIdentity: string): string {

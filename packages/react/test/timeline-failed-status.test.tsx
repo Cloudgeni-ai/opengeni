@@ -561,6 +561,13 @@ describe("ComputerCallRenderer — failed status (flagged fix)", () => {
     expect(
       r.container.querySelector('img[src="https://objects.example/generated.png?signature=test"]'),
     ).not.toBeNull();
+    expect(
+      r.container.querySelectorAll(
+        'img[src="https://objects.example/generated.png?signature=test"]',
+      ),
+    ).toHaveLength(1);
+    expect(r.container.textContent).toContain("1024×1024");
+    expect(r.container.textContent).toContain(receipt.sandboxPath);
     expect(r.container.textContent).not.toContain("base64");
     await r.unmount();
   });

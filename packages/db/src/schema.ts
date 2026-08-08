@@ -2304,7 +2304,9 @@ export const imageGenerationOperations = pgTable(
     requestDigest: text("request_digest").notNull(),
     expectedArtifactId: uuid("expected_artifact_id").notNull(),
     status: text("status")
-      .$type<"prepared" | "provider_started" | "completed" | "outcome_unknown">()
+      .$type<
+        "prepared" | "provider_started" | "completed" | "outcome_unknown" | "retention_failed"
+      >()
       .notNull()
       .default("prepared"),
     providerStartedAt: timestamp("provider_started_at", { withTimezone: true }),
@@ -2331,7 +2333,7 @@ export const imageGenerationOperations = pgTable(
     }).onDelete("cascade"),
     statusValid: check(
       "image_generation_operations_status_chk",
-      sql`${table.status} in ('prepared', 'provider_started', 'completed', 'outcome_unknown')`,
+      sql`${table.status} in ('prepared', 'provider_started', 'completed', 'outcome_unknown', 'retention_failed')`,
     ),
     digestValid: check(
       "image_generation_operations_digest_chk",
@@ -2349,7 +2351,7 @@ export const imageGenerationOperations = pgTable(
     stateValid: check(
       "image_generation_operations_state_chk",
       sql`(${table.status} = 'prepared' and ${table.providerStartedAt} is null and ${table.completedAt} is null)
-        or (${table.status} in ('provider_started', 'outcome_unknown') and ${table.providerStartedAt} is not null and ${table.completedAt} is null)
+        or (${table.status} in ('provider_started', 'outcome_unknown', 'retention_failed') and ${table.providerStartedAt} is not null and ${table.completedAt} is null)
         or (${table.status} = 'completed' and ${table.providerStartedAt} is not null and ${table.completedAt} is not null)`,
     ),
   }),

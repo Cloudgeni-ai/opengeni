@@ -3345,19 +3345,69 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       instanceId: string;
       fileIds: Set<string>;
     } | null = null;
-    const materializeGeneratedImage = async (receipt: GeneratedImageReceipt): Promise<boolean> => {
-      if (modelRunSettings.sandboxBackend === "none") return false;
+    // Legacy ownership mode lets the Agents SDK create the sandbox inside
+    // run(). Keep that exact session once the runtime exposes it so an image
+    // generated later in the same model/tool loop can be copied immediately.
+    let sdkOwnedSandboxSession: ToolspaceTokenWriterSession | null = null;
+    const prepareGeneratedImageDownload = async (receipt: GeneratedImageReceipt) => {
+      if (!objectStorage) {
+        throw new Error("Generated image sandbox materialization requires object storage");
+      }
+      const file = await requireFile(db, input.workspaceId, receipt.artifact.artifactId);
+      const downloadStorage = objectStorageForSandboxDownloads(modelRunSettings, objectStorage);
+      const signed = await downloadStorage.createGetUrl({ key: file.objectKey });
+      return {
+        file,
+        download: {
+          fileId: file.id,
+          mountPath: "generated-images",
+          filename: file.safeFilename,
+          url: signed.url,
+          expiresAt: signed.expiresAt,
+          sizeBytes: file.sizeBytes,
+          ...(file.sha256 ? { sha256: file.sha256 } : {}),
+        } satisfies SandboxFileDownload,
+      };
+    };
+    const writeGeneratedImageDownload = async (
+      sessionForDownload: ToolspaceTokenWriterSession,
+      download: SandboxFileDownload,
+    ): Promise<void> => {
+      const runAs = sandboxRunAs(modelRunSettings);
+      const materialized = await materializeSandboxFileDownloads(sessionForDownload, [download], {
+        onRuntimeEvent: async (event) => {
+          await publish?.([{ type: event.type, payload: event.payload }], true);
+        },
+        ...(runAs ? { runAs } : {}),
+        ...(toolCancellationFenceRef.current
+          ? {
+              commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
+                toolCancellationFenceRef.current,
+              ),
+            }
+          : {}),
+      });
+      if (materialized.failures.length > 0) {
+        throw new Error(materialized.failures[0]!.reason);
+      }
+    };
+    const warnGeneratedImageMaterializationDeferred = (error: unknown): void => {
+      // Generation and permanent retention are already durable. Never turn a
+      // transient sandbox copy failure into a replay of paid provider work;
+      // an unmaterialized resource is retried on the next real sandbox.
+      observability.warn("Generated image sandbox materialization deferred", {
+        errorClass: error instanceof Error ? error.name : "UnknownError",
+        errorCode: "generated_image_materialization_deferred",
+        origin: "worker",
+      });
+    };
+    const materializeGeneratedImageInSandbox = async (
+      receipt: GeneratedImageReceipt,
+      sandbox: ResumedTurnSandbox,
+      sessionForDownload: unknown,
+    ): Promise<boolean> => {
       try {
-        if (!objectStorage) {
-          throw new Error("Generated image sandbox materialization requires object storage");
-        }
-        const sandbox =
-          resolvedSandbox ?? (turnSandboxProvisioner ? await turnSandboxProvisioner.get() : null);
-        const sessionForDownload = setupBoxSession;
-        if (!sandbox || !sessionForDownload) {
-          throw new Error("Generated image could not acquire the active sandbox");
-        }
-        const file = await requireFile(db, input.workspaceId, receipt.artifact.artifactId);
+        const { file, download } = await prepareGeneratedImageDownload(receipt);
         const cacheable = sandbox.established.backendId !== "selfhosted";
         if (generatedImageMaterializationCache?.instanceId !== sandbox.established.instanceId) {
           const fileIds =
@@ -3376,46 +3426,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           };
         }
         if (generatedImageMaterializationCache.fileIds.has(file.id)) return true;
-        const downloadStorage = objectStorageForSandboxDownloads(modelRunSettings, objectStorage);
-        const signed = await downloadStorage.createGetUrl({
-          key: file.objectKey,
-        });
-        const runAs = sandboxRunAs(modelRunSettings);
-        const materialized = await runWorkspaceMutationForSandbox(
+        await runWorkspaceMutationForSandbox(
           sandbox,
           "generatedImageMaterialization",
           async () =>
-            await materializeSandboxFileDownloads(
+            await writeGeneratedImageDownload(
               sessionForDownload as ToolspaceTokenWriterSession,
-              [
-                {
-                  fileId: file.id,
-                  mountPath: "generated-images",
-                  filename: file.safeFilename,
-                  url: signed.url,
-                  expiresAt: signed.expiresAt,
-                  sizeBytes: file.sizeBytes,
-                  ...(file.sha256 ? { sha256: file.sha256 } : {}),
-                },
-              ],
-              {
-                onRuntimeEvent: async (event) => {
-                  await publish?.([{ type: event.type, payload: event.payload }], true);
-                },
-                ...(runAs ? { runAs } : {}),
-                ...(toolCancellationFenceRef.current
-                  ? {
-                      commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
-                        toolCancellationFenceRef.current,
-                      ),
-                    }
-                  : {}),
-              },
+              download,
             ),
         );
-        if (materialized.failures.length > 0) {
-          throw new Error(materialized.failures[0]!.reason);
-        }
         generatedImageMaterializationCache.fileIds.add(file.id);
         if (cacheable && sandboxGroupId) {
           await markSandboxFileResourcesMaterialized(db, {
@@ -3429,16 +3448,38 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
         return true;
       } catch (error) {
-        // Generation and permanent retention are already durable. Never turn a
-        // transient sandbox copy failure into a replay of paid provider work;
-        // the unmarked resource is retried on the next turn.
-        observability.warn("Generated image sandbox materialization deferred", {
-          errorClass: error instanceof Error ? error.name : "UnknownError",
-          errorCode: "generated_image_materialization_deferred",
-          origin: "worker",
-        });
+        warnGeneratedImageMaterializationDeferred(error);
         return false;
       }
+    };
+    const materializeGeneratedImageInOwnedSdkSession = async (
+      receipt: GeneratedImageReceipt,
+      sessionForDownload: unknown,
+    ): Promise<boolean> => {
+      try {
+        const { download } = await prepareGeneratedImageDownload(receipt);
+        await writeGeneratedImageDownload(
+          sessionForDownload as ToolspaceTokenWriterSession,
+          download,
+        );
+        return true;
+      } catch (error) {
+        warnGeneratedImageMaterializationDeferred(error);
+        return false;
+      }
+    };
+    const materializeGeneratedImage = async (receipt: GeneratedImageReceipt): Promise<boolean> => {
+      if (modelRunSettings.sandboxBackend === "none") return false;
+      // Never allocate a cloud sandbox merely because durable history contains
+      // an image. If this turn later needs one, its ready hook copies every
+      // known receipt before releasing the first operation.
+      if (resolvedSandbox && setupBoxSession) {
+        return await materializeGeneratedImageInSandbox(receipt, resolvedSandbox, setupBoxSession);
+      }
+      if (sdkOwnedSandboxSession) {
+        return await materializeGeneratedImageInOwnedSdkSession(receipt, sdkOwnedSandboxSession);
+      }
+      return false;
     };
     let nativeImageGenerationRetention: {
       providerId: string;
@@ -6530,6 +6571,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               startLeaseHeartbeat(provisioned, activeSandboxBackend ?? groupBoxBackend);
               setupBoxSession = provisioned.established.session;
               resolvedSandbox = provisioned;
+              // `get()` does not release the first routed sandbox operation
+              // until this hook returns. Materialize durable generated images
+              // here so that operation can use their advertised paths without
+              // racing a best-effort background copy.
+              for (const receipt of generatedImageReceiptsByArtifactId.values()) {
+                await materializeGeneratedImageInSandbox(
+                  receipt,
+                  provisioned,
+                  provisioned.established.session,
+                );
+              }
             },
             onFailed: async (error) => {
               await publish?.(
@@ -7142,6 +7194,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                         },
                       }
                     : {}),
+                }
+              : {}),
+            ...(modelRunSettings.sandboxBackend !== "none"
+              ? {
+                  onSandboxSessionReady: async (sandboxSession: ToolspaceTokenWriterSession) => {
+                    sdkOwnedSandboxSession = sandboxSession;
+                    for (const receipt of generatedImageReceiptsByArtifactId.values()) {
+                      await materializeGeneratedImageInOwnedSdkSession(receipt, sandboxSession);
+                    }
+                  },
                 }
               : {}),
             contextCompactionSignal: () => modelResponseContextSignal(modelResponseState),

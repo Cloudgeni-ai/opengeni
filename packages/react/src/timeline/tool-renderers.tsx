@@ -965,6 +965,7 @@ function GeneratedImageDisclosure({
       icon={<ImageIcon className={ICON_SIZE} />}
       iconTone={failed ? "failed" : state.kind === "ready" ? "accent" : "muted"}
       title={title}
+      defaultOpen={!failed && !cancelled}
       failed={failed}
       cancelled={cancelled}
       preview={
@@ -978,7 +979,13 @@ function GeneratedImageDisclosure({
       }
       media={
         state.kind === "ready" ? (
-          <Thumbnail src={state.url} caption={caption} alt={caption} />
+          <Thumbnail
+            src={state.url}
+            caption={caption}
+            alt={caption}
+            expandLabel="Expand generated image"
+            lightboxLabel="Generated image"
+          />
         ) : state.kind === "loading" ? (
           <MediaSkeleton />
         ) : (
@@ -987,7 +994,13 @@ function GeneratedImageDisclosure({
       }
     >
       {state.kind === "ready" ? (
-        <ScreenshotFigure src={state.url} caption={caption} alt={caption} />
+        <ScreenshotFigure
+          src={state.url}
+          caption={caption}
+          alt={caption}
+          expandLabel="Expand generated image"
+          lightboxLabel="Generated image"
+        />
       ) : state.kind === "loading" ? (
         <BodyNote>Loading the generated image…</BodyNote>
       ) : state.kind === "unavailable" ? (

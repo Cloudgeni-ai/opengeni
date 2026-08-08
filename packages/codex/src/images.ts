@@ -1,12 +1,27 @@
 import { CODEX_CLIENT_VERSION, CODEX_ORIGINATOR, CODEX_RESPONSES_BASE } from "./constants";
 import type { CodexRequestContext, CodexTokenSnapshot } from "./request-context";
 import type { FetchLike } from "./fetch";
-import { readJsonBase64Field, readResponseTextBounded } from "@opengeni/network";
+import { pinnedFetch, readJsonBase64Field, readResponseTextBounded } from "@opengeni/network";
 
 const CODEX_IMAGE_MODEL = "gpt-image-2";
 const CODEX_IMAGE_RESPONSE_MAX_BYTES = 90 * 1024 * 1024;
 const CODEX_IMAGE_ERROR_MAX_BYTES = 64 * 1024;
 const CODEX_IMAGE_MAX_BYTES = 64 * 1024 * 1024;
+const CODEX_IMAGE_REQUEST_TIMEOUT_MS = 5 * 60_000;
+
+const codexImageFetch: FetchLike = async (input, init) =>
+  await pinnedFetch(
+    input,
+    init,
+    {
+      environment: "production",
+      integrationsAllowPrivateNetworkTargets: false,
+    },
+    {
+      label: "Codex image generation",
+      requireHttpsOutsideLocalTest: true,
+    },
+  );
 
 export type CodexGeneratedImage = {
   bytes: Uint8Array;
@@ -23,6 +38,13 @@ export class CodexImageApiError extends Error {
   }
 }
 
+export class CodexImageRequestTimeoutError extends Error {
+  constructor(readonly timeoutMs: number) {
+    super(`Codex image generation timed out after ${Math.ceil(timeoutMs / 1_000)} seconds`);
+    this.name = "CodexImageRequestTimeoutError";
+  }
+}
+
 /**
  * Execute Codex's standalone, client-side image tool against the same
  * ChatGPT/Codex account as the owning model turn. Only a definitive 401 is
@@ -35,8 +57,22 @@ export async function generateCodexSubscriptionImage(input: {
   context: Pick<CodexRequestContext, "clientVersion" | "getToken" | "refresh">;
   abortSignal?: AbortSignal;
   fetch?: FetchLike;
+  /** Internal test/host override; one absolute budget covers auth retry and body streaming. */
+  requestTimeoutMs?: number;
 }): Promise<CodexGeneratedImage> {
-  const fetchImpl = input.fetch ?? globalThis.fetch;
+  const fetchImpl = input.fetch ?? codexImageFetch;
+  const timeoutMs = input.requestTimeoutMs ?? CODEX_IMAGE_REQUEST_TIMEOUT_MS;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
+    throw new RangeError("Codex image request timeout must be a positive safe integer");
+  }
+  const deadline = new AbortController();
+  const timer = setTimeout(
+    () => deadline.abort(new CodexImageRequestTimeoutError(timeoutMs)),
+    timeoutMs,
+  );
+  const signal = input.abortSignal
+    ? AbortSignal.any([input.abortSignal, deadline.signal])
+    : deadline.signal;
   const request = async (auth: CodexTokenSnapshot): Promise<Response> => {
     const headers = codexImageHeaders(auth, input.context.clientVersion, input.turnId);
     return await fetchImpl(`${CODEX_RESPONSES_BASE}/images/generations`, {
@@ -50,39 +86,60 @@ export async function generateCodexSubscriptionImage(input: {
         quality: "auto",
         size: "auto",
       }),
-      ...(input.abortSignal ? { signal: input.abortSignal } : {}),
+      signal,
     });
   };
 
-  let response = await request(await input.context.getToken());
-  if (response.status === 401) {
-    await response.body?.cancel().catch(() => undefined);
-    response = await request(await input.context.refresh());
-  }
-  if (!response.ok) {
-    const detail = await readResponseTextBounded(
-      response,
-      CODEX_IMAGE_ERROR_MAX_BYTES,
-      "Codex image error",
-      input.abortSignal ? { signal: input.abortSignal } : {},
-    ).catch(() => "");
-    throw new CodexImageApiError(
-      response.status,
-      detail
-        ? `Codex image generation failed (${response.status}): ${boundedErrorMessage(detail)}`
-        : `Codex image generation failed (${response.status})`,
-    );
-  }
+  const operation = (async (): Promise<CodexGeneratedImage> => {
+    let response = await request(await input.context.getToken());
+    if (response.status === 401) {
+      await response.body?.cancel().catch(() => undefined);
+      response = await request(await input.context.refresh());
+    }
+    if (!response.ok) {
+      const detail = await readResponseTextBounded(
+        response,
+        CODEX_IMAGE_ERROR_MAX_BYTES,
+        "Codex image error",
+        { signal },
+      ).catch(() => "");
+      throw new CodexImageApiError(
+        response.status,
+        detail
+          ? `Codex image generation failed (${response.status}): ${boundedErrorMessage(detail)}`
+          : `Codex image generation failed (${response.status})`,
+      );
+    }
 
-  const bytes = await readJsonBase64Field(response, {
-    fieldName: "b64_json",
-    shape: "string",
-    maxResponseBytes: CODEX_IMAGE_RESPONSE_MAX_BYTES,
-    maxDecodedBytes: CODEX_IMAGE_MAX_BYTES,
-    label: "Codex image generation",
-    ...(input.abortSignal ? { signal: input.abortSignal } : {}),
+    const bytes = await readJsonBase64Field(response, {
+      fieldName: "b64_json",
+      shape: "string",
+      maxResponseBytes: CODEX_IMAGE_RESPONSE_MAX_BYTES,
+      maxDecodedBytes: CODEX_IMAGE_MAX_BYTES,
+      label: "Codex image generation",
+      signal,
+    });
+    return { bytes, declaredMediaType: "image/png" };
+  })();
+  let removeAbortListener = (): void => undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+    removeAbortListener = () => signal.removeEventListener("abort", onAbort);
   });
-  return { bytes, declaredMediaType: "image/png" };
+  try {
+    // The race is the backstop for credential resolvers and injected transports
+    // that do not observe AbortSignal. Promise.race attaches a rejection handler
+    // to the losing operation, so it cannot become an unhandled rejection.
+    return await Promise.race([operation, aborted]);
+  } finally {
+    removeAbortListener();
+    clearTimeout(timer);
+  }
 }
 
 function codexImageHeaders(

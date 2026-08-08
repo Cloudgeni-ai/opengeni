@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   CODEX_RESPONSES_BASE,
   CodexImageApiError,
+  CodexImageRequestTimeoutError,
   generateCodexSubscriptionImage,
   type CodexTokenSnapshot,
 } from "../src";
@@ -97,6 +98,78 @@ describe("generateCodexSubscriptionImage", () => {
       } satisfies Partial<CodexImageApiError>),
     );
     expect(calls).toBe(1);
+  });
+
+  test("bounds the whole paid request without retrying a lost provider connection", async () => {
+    let calls = 0;
+    await expect(
+      generateCodexSubscriptionImage({
+        prompt: "a blue sphere",
+        turnId: "turn-1",
+        context: {
+          clientVersion: "0.145.0",
+          getToken: async () => token("access"),
+          refresh: async () => token("fresh"),
+        },
+        requestTimeoutMs: 10,
+        fetch: async (_input, init) => {
+          calls += 1;
+          return await new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), {
+              once: true,
+            });
+          });
+        },
+      }),
+    ).rejects.toBeInstanceOf(CodexImageRequestTimeoutError);
+    expect(calls).toBe(1);
+  });
+
+  test("bounds credential resolution inside the same absolute deadline", async () => {
+    let calls = 0;
+    await expect(
+      generateCodexSubscriptionImage({
+        prompt: "a blue sphere",
+        turnId: "turn-1",
+        context: {
+          clientVersion: "0.145.0",
+          getToken: async () => await new Promise<CodexTokenSnapshot>(() => undefined),
+          refresh: async () => token("fresh"),
+        },
+        requestTimeoutMs: 10,
+        fetch: async () => {
+          calls += 1;
+          return Response.json({ data: [{ b64_json: "aW1hZ2U=" }] });
+        },
+      }),
+    ).rejects.toBeInstanceOf(CodexImageRequestTimeoutError);
+    expect(calls).toBe(0);
+  });
+
+  test("preserves caller cancellation instead of misreporting it as a timeout", async () => {
+    const controller = new AbortController();
+    const cancelled = new Error("turn cancelled");
+    const operation = generateCodexSubscriptionImage({
+      prompt: "a blue sphere",
+      turnId: "turn-1",
+      context: {
+        clientVersion: "0.145.0",
+        getToken: async () => token("access"),
+        refresh: async () => token("fresh"),
+      },
+      abortSignal: controller.signal,
+      requestTimeoutMs: 1_000,
+      fetch: async (_input, init) => {
+        if (init?.signal?.aborted) throw init.signal.reason;
+        return await new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), {
+            once: true,
+          });
+        });
+      },
+    });
+    controller.abort(cancelled);
+    await expect(operation).rejects.toBe(cancelled);
   });
 
   test("rejects oversized declared responses before reading the body", async () => {

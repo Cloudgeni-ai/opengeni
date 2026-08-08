@@ -19,7 +19,7 @@ import { usePortalTokenStyle } from "../lib/use-portal-token-style";
    -------------------------------------------------------------------------- */
 
 type LightboxController = {
-  open: (src: string, caption?: string, source?: HTMLElement | null) => void;
+  open: (src: string, caption?: string, source?: HTMLElement | null, label?: string) => void;
 };
 
 const LightboxContext = createContext<LightboxController | null>(null);
@@ -59,14 +59,21 @@ export function LightboxProvider({ children }: { children: ReactNode }) {
 }
 
 function LightboxRoot({ children }: { children: ReactNode }) {
-  const [state, setState] = useState<{ src: string; caption?: string } | null>(null);
+  const [state, setState] = useState<{
+    src: string;
+    caption?: string;
+    label: string;
+  } | null>(null);
   const [tokenSource, setTokenSource] = useState<HTMLElement | null>(null);
   const portalStyle = usePortalTokenStyle(tokenSource);
 
-  const open = useCallback((src: string, caption?: string, source?: HTMLElement | null) => {
-    setTokenSource(source ?? null);
-    setState(caption ? { src, caption } : { src });
-  }, []);
+  const open = useCallback(
+    (src: string, caption?: string, source?: HTMLElement | null, label = "Screenshot") => {
+      setTokenSource(source ?? null);
+      setState(caption ? { src, caption, label } : { src, label });
+    },
+    [],
+  );
 
   const close = useCallback(() => {
     setState(null);
@@ -95,7 +102,7 @@ function LightboxRoot({ children }: { children: ReactNode }) {
               <Dialog.Content
                 asChild
                 forceMount
-                aria-label="Screenshot"
+                aria-label={state.label}
                 onOpenAutoFocus={(event) => event.preventDefault()}
               >
                 <motion.div
@@ -117,7 +124,10 @@ function LightboxRoot({ children }: { children: ReactNode }) {
                   className="og-root fixed inset-0 z-50 flex items-center justify-center p-6 sm:p-12"
                   style={portalStyle}
                 >
-                  <Dialog.Title className="sr-only">Screenshot</Dialog.Title>
+                  <Dialog.Title className="sr-only">{state.label}</Dialog.Title>
+                  <Dialog.Description className="sr-only">
+                    {state.caption ?? `Expanded ${state.label.toLowerCase()}`}
+                  </Dialog.Description>
                   {/* The figure is one self-contained object: image, caption, and
                       its own close control. The close button anchors to a wrapper
                       sized to the IMAGE (w-fit), so it hugs the real top-right
@@ -128,7 +138,7 @@ function LightboxRoot({ children }: { children: ReactNode }) {
                       {/* A plain <img>: this SDK is framework-agnostic, with no host Image component. */}
                       <img
                         src={state.src}
-                        alt={state.caption ?? "Screenshot"}
+                        alt={state.caption ?? state.label}
                         className="min-h-0 max-h-[82vh] w-auto max-w-full rounded-og-md border border-white/10 object-contain shadow-og-lg"
                       />
                       <Dialog.Close
