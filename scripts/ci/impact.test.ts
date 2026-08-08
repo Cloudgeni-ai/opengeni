@@ -1,0 +1,337 @@
+import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+
+import {
+  assertRootTestDependencyMapComplete,
+  createImpactPlan,
+  parseGitNameStatus,
+} from "./impact";
+import { explicitBunTestPath } from "./run-test-shard";
+import { sanitizedTestEnvironment } from "./run-unit-shard";
+import {
+  assertTestTierMapComplete,
+  deterministicFileBatches,
+  deterministicShards,
+  discoverTestFiles,
+  fileUsesProcessGlobalTestState,
+  integrationShardWeights,
+  OPT_IN_TESTS,
+  typecheckProjects,
+  usesBrowserRunner,
+} from "./workspace";
+
+describe("fail-closed change impact", () => {
+  test("documentation-only changes retain every non-runtime public guard", () => {
+    const plan = createImpactPlan(["docs/toolchain.md", "README.md"]);
+    expect(plan.mode).toBe("docs");
+    expect(plan.typecheckProjects).toEqual([]);
+    expect(plan.unitTests).toEqual([]);
+    expect(plan.integrationTests).toEqual([]);
+    expect(plan.e2eTests).toEqual([]);
+    expect(plan.buildPackages).toEqual([]);
+    expect(plan.guards).toEqual(["format", "docs-refs", "generated-fonts", "public-hygiene"]);
+  });
+
+  test.each([
+    "bun.lock",
+    ".bun-version",
+    ".github/workflows/ci.yml",
+    ".dockerignore",
+    "scripts/ci/workspace.ts",
+    "scripts/release-publish.sh",
+    "packages/db/drizzle/0042_example.sql",
+    "packages/agent-proto/src/gen/opengeni_agent.ts",
+    "unknown/new-root.ts",
+    "test/integration/new-unmapped.integration.ts",
+  ])("%s activates the full safety net", (path) => {
+    const plan = createImpactPlan([path]);
+    expect(plan.mode).toBe("full");
+    expect(plan.unitTests.length).toBeGreaterThan(100);
+    expect(plan.typecheckProjects).toEqual(typecheckProjects());
+    expect(plan.guards).toContain("public-hygiene");
+    expect(plan.reasons.some((reason) => reason.path === path)).toBe(true);
+  });
+
+  test("empty and invalid change sets fail closed", () => {
+    for (const changed of [[], ["../outside.ts"], ["/absolute.ts"], ["bad\\path.ts"]]) {
+      expect(createImpactPlan(changed).mode).toBe("full");
+    }
+  });
+
+  test("a package change selects the package, reverse dependents, and linked outputs", () => {
+    const sdk = createImpactPlan(["packages/sdk/src/client.ts"]);
+    expect(sdk.mode).toBe("focused");
+    expect(sdk.affectedPackages).toEqual(
+      expect.arrayContaining(["@opengeni/sdk", "@opengeni/react", "opengeni-web"]),
+    );
+    expect(sdk.typecheckProjects).toContain("packages/sdk");
+    expect(sdk.unitTests).toContain("packages/sdk/test/client.test.ts");
+    expect(sdk.e2eTests).toEqual([]);
+    expect(sdk.buildPackages).toEqual(expect.arrayContaining(["@opengeni/sdk", "@opengeni/react"]));
+
+    const react = createImpactPlan(["packages/react/src/index.ts"]);
+    expect(react.buildPackages).toEqual(
+      expect.arrayContaining(["@opengeni/sdk", "@opengeni/react"]),
+    );
+  });
+
+  test("root test mappings and tier ownership are complete", () => {
+    expect(() => assertRootTestDependencyMapComplete()).not.toThrow();
+    expect(() => assertTestTierMapComplete()).not.toThrow();
+    const tests = discoverTestFiles();
+    expect(tests.integration.length).toBeGreaterThan(0);
+    expect(tests.e2e).toEqual([]);
+    expect(tests.e2e).not.toContain("test/e2e/codex-overview.e2e.ts");
+    expect(OPT_IN_TESTS["test/e2e/codex-overview.e2e.ts"]).toContain("browser-acceptance");
+    expect(tests.e2e).not.toContain("test/e2e/opstream-runner.e2e.ts");
+  });
+
+  test("full plans exhaustively own discovered tests and buildable projects", () => {
+    const plan = createImpactPlan([], { forceFull: true });
+    const tests = discoverTestFiles();
+    expect(plan.unitTests).toEqual(tests.unit);
+    expect(plan.integrationTests).toEqual(tests.integration);
+    expect(plan.e2eTests).toEqual(tests.e2e);
+    expect(plan.typecheckProjects).toEqual(typecheckProjects());
+    expect(plan.typecheckProjects).toEqual(
+      expect.arrayContaining(["scripts/ci", "scripts/operator", "scripts/release"]),
+    );
+    expect(plan.buildPackages).toEqual(
+      expect.arrayContaining(["@opengeni/sdk", "@opengeni/react"]),
+    );
+  });
+
+  test("renames and copies retain both dependency boundaries", () => {
+    expect(
+      parseGitNameStatus(
+        "R100\0packages/sdk/src/old.ts\0packages/react/src/new.tsx\0C087\0packages/db/src/a.ts\0packages/core/src/b.ts\0",
+      ),
+    ).toEqual([
+      "packages/core/src/b.ts",
+      "packages/db/src/a.ts",
+      "packages/react/src/new.tsx",
+      "packages/sdk/src/old.ts",
+    ]);
+    expect(() => parseGitNameStatus("R100\0packages/sdk/src/old.ts\0")).toThrow(
+      "missing destination",
+    );
+  });
+});
+
+describe("deterministic bounded execution", () => {
+  test("shards are deterministic, disjoint, and exhaustive", () => {
+    const files = discoverTestFiles().unit.slice(0, 31);
+    const first = deterministicShards(process.cwd(), files, 4);
+    const second = deterministicShards(process.cwd(), [...files].reverse(), 4);
+    expect(second).toEqual(first);
+    expect(first.flat().sort()).toEqual([...files].sort());
+    expect(new Set(first.flat()).size).toBe(files.length);
+  });
+
+  test("batching rejects unsafe sizes and preserves order", () => {
+    expect(deterministicFileBatches(["a", "b", "c"], 2)).toEqual([["a", "b"], ["c"]]);
+    expect(() => deterministicFileBatches(["a"], 0)).toThrow("positive integer");
+  });
+
+  test("process-global tests are isolated and custom suffixes are explicit", () => {
+    expect(fileUsesProcessGlobalTestState(process.cwd(), "apps/web/src/App.test.ts")).toBe(true);
+    expect(fileUsesProcessGlobalTestState(process.cwd(), "packages/sdk/test/client.test.ts")).toBe(
+      false,
+    );
+    expect(explicitBunTestPath("test/integration/api.integration.ts")).toBe(
+      "./test/integration/api.integration.ts",
+    );
+    expect(explicitBunTestPath("./test/e2e/browser.e2e.ts")).toBe("./test/e2e/browser.e2e.ts");
+  });
+
+  test("browser runner selection includes ordinary and named browser suites", () => {
+    expect(usesBrowserRunner("test/e2e/browser.e2e.ts")).toBe(true);
+    expect(usesBrowserRunner("test/e2e/codex-overview.e2e.ts")).toBe(true);
+    expect(usesBrowserRunner("test/e2e/queue-surface.browser.e2e.ts")).toBe(true);
+    expect(usesBrowserRunner("test/e2e/sandbox.e2e.ts")).toBe(false);
+  });
+
+  test("test environments scrub ambient OpenGeni state and preserve only fail-closed DB intent", () => {
+    expect(
+      sanitizedTestEnvironment({
+        PATH: "/bin",
+        OPENGENI_API_KEY: "secret",
+        OPENGENI_REQUIRE_REAL_DB: "1",
+      }),
+    ).toEqual({
+      PATH: "/bin",
+      NODE_ENV: "test",
+      OPENGENI_TEST_HERMETIC: "1",
+      OPENGENI_REQUIRE_REAL_DB: "1",
+    });
+    expect(sanitizedTestEnvironment({ OPENGENI_OTHER: "value" })).toEqual({
+      NODE_ENV: "test",
+      OPENGENI_TEST_HERMETIC: "1",
+    });
+  });
+
+  test("missing or stale timing evidence falls back to source-byte planning", () => {
+    const resolution = integrationShardWeights(process.cwd());
+    expect(resolution.mode).toBe("source-bytes");
+    expect(resolution.weights).toBeNull();
+    expect(resolution.profileSha256).toBeNull();
+    expect(resolution.reason.length).toBeGreaterThan(0);
+  });
+
+  test("one-file runners preserve canonical serial Bun semantics", () => {
+    for (const path of ["scripts/ci/run-unit-shard.ts", "scripts/ci/run-test-shard.ts"]) {
+      const source = readFileSync(path, "utf8");
+      expect(source).not.toContain('"--parallel=1"');
+      expect(source).not.toContain('"--isolate"');
+      expect(source).toContain("--max-concurrency=${budget.concurrency}");
+    }
+  });
+});
+
+function requiredResult(
+  input: Record<string, { result: string }>,
+  options: {
+    event: "pull_request" | "push" | "schedule" | "workflow_dispatch";
+    mode: "docs" | "focused" | "full";
+    unit: number;
+    integration: number;
+    build: number;
+  },
+): boolean {
+  const result = spawnSync(
+    "jq",
+    [
+      "-e",
+      "--arg",
+      "event",
+      options.event,
+      "--arg",
+      "mode",
+      options.mode,
+      "--argjson",
+      "unit",
+      String(options.unit),
+      "--argjson",
+      "integration",
+      String(options.integration),
+      "--argjson",
+      "build",
+      String(options.build),
+      "-f",
+      "scripts/ci/required-results.jq",
+    ],
+    { input: JSON.stringify(input), encoding: "utf8" },
+  );
+  return result.status === 0;
+}
+
+describe("workflow fail-closed contracts", () => {
+  test("required-results accepts exact selected/skipped topology and rejects missing success", () => {
+    const full = {
+      plan: { result: "success" },
+      "source-contracts": { result: "success" },
+      "unit-shards": { result: "success" },
+      "unit-safety": { result: "skipped" },
+      "integration-shards": { result: "success" },
+      "test-suite": { result: "success" },
+      "browser-acceptance": { result: "success" },
+      "package-contracts": { result: "success" },
+      deployment: { result: "success" },
+      images: { result: "success" },
+    };
+    expect(
+      requiredResult(full, {
+        event: "pull_request",
+        mode: "full",
+        unit: 1,
+        integration: 1,
+        build: 1,
+      }),
+    ).toBe(true);
+    expect(
+      requiredResult(
+        { ...full, "integration-shards": { result: "failure" } },
+        {
+          event: "pull_request",
+          mode: "full",
+          unit: 1,
+          integration: 1,
+          build: 1,
+        },
+      ),
+    ).toBe(false);
+    expect(
+      requiredResult(
+        {
+          ...full,
+          "unit-shards": { result: "skipped" },
+          "unit-safety": { result: "skipped" },
+          "integration-shards": { result: "skipped" },
+          "test-suite": { result: "skipped" },
+          "browser-acceptance": { result: "skipped" },
+          "package-contracts": { result: "skipped" },
+          deployment: { result: "skipped" },
+          images: { result: "skipped" },
+        },
+        {
+          event: "pull_request",
+          mode: "docs",
+          unit: 0,
+          integration: 0,
+          build: 0,
+        },
+      ),
+    ).toBe(true);
+  });
+
+  test("CI preserves trusted admission while planning candidate jobs from the exact head", () => {
+    const ci = readFileSync(".github/workflows/ci.yml", "utf8");
+    const admission = ci.slice(ci.indexOf("  automation-admission:"), ci.indexOf("  plan:"));
+    expect(admission).toContain("ref: ${{ github.sha }}");
+    expect(admission).toContain("bun-version: 1.3.14");
+    expect(admission).not.toContain("bun-version-file: .bun-version");
+    expect(ci).toContain("  plan:\n    name: Explain change impact");
+    expect(ci).toContain(
+      "ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}",
+    );
+    expect(ci).toContain("bun-version-file: .bun-version");
+    expect(ci).toContain('bun scripts/ci/impact.ts --base "$BASE_SHA" --head "$HEAD_SHA"');
+    expect(ci).toContain("bun scripts/ci/impact.ts --full --output impact-plan.json");
+  });
+
+  test("CI retains exact aggregate names and every current release/image lane", () => {
+    const ci = readFileSync(".github/workflows/ci.yml", "utf8");
+    expect(ci).toContain("name: Typecheck and unit tests");
+    expect(ci).toContain("name: Workload image builds");
+    expect(ci).toContain("name: Admit automation Version PR");
+    expect(ci).toContain("name: Report exact-head automation CI");
+    expect(ci).toContain("name: Deployment artifacts");
+    expect(ci).toContain("name: Browser and visual acceptance");
+    expect(ci).toContain("name: Real-service and recovery tests");
+    expect(ci).toContain("name: Package and bundle contracts");
+    expect(ci).toContain("api_digest: ${{ steps.api_image.outputs.digest }}");
+    expect(ci).toContain("worker_digest: ${{ steps.worker_image.outputs.digest }}");
+    expect(ci).toContain("web_digest: ${{ steps.web_image.outputs.digest }}");
+    expect(ci).toContain("relay_digest: ${{ steps.relay_image.outputs.digest }}");
+    expect(ci).toContain("sandbox_digest: ${{ steps.sandbox_image.outputs.digest }}");
+    expect(ci).toContain("dogfood-images-${{ github.sha }}");
+  });
+
+  test("selected CI work is profiled and memory bounded", () => {
+    const ci = readFileSync(".github/workflows/ci.yml", "utf8");
+    for (const script of [
+      "run-typecheck-plan.ts",
+      "run-guards-plan.ts",
+      "run-unit-shard.ts",
+      "run-test-shard.ts",
+      "run-build-plan.ts",
+    ]) {
+      expect(ci).toContain(`scripts/ci/${script}`);
+    }
+    expect(ci.match(/scripts\/ci\/profile-command\.ts/g)?.length ?? 0).toBeGreaterThanOrEqual(6);
+    expect(ci).toContain("scripts/ci/required-results.jq");
+    expect(ci).toContain("scripts/ci/resource-budget.test.ts");
+    expect(ci).toContain("scripts/ci/profile-command.test.ts");
+  });
+});

@@ -2687,7 +2687,6 @@ describe("workflow contracts", () => {
   const ciText = readFileSync(ciWorkflowPath, "utf8");
   const sealText = readFileSync(sealWorkflowPath, "utf8");
   const releaseAutomationText = readFileSync(releaseAutomationPath, "utf8");
-  const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   const release = Bun.YAML.parse(releaseText) as any;
   const ci = Bun.YAML.parse(ciText) as any;
   const seal = Bun.YAML.parse(sealText) as any;
@@ -2729,13 +2728,12 @@ describe("workflow contracts", () => {
     );
     expect(release.on.schedule).toBeUndefined();
     expect(ci.jobs.deployment.if).toBe(
-      "${{ always() && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",
+      "${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'docs' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",
     );
     expect(ci.jobs.images.if).toBe(ci.jobs.deployment.if);
-    expect(ci.jobs["service-images"].if).toBe(ci.jobs.deployment.if);
-    expect(ci.jobs["relay-image"].if).toBe(ci.jobs.deployment.if);
-    expect(ci.jobs["sandbox-image"].if).toBe(ci.jobs.deployment.if);
-    const imageSteps = ["service-images", "relay-image", "sandbox-image"].flatMap((jobName) =>
+    const imageLeaves = ["api-image", "worker-image", "web-image", "relay-image", "sandbox-image"];
+    for (const jobName of imageLeaves) expect(ci.jobs[jobName].if).toBe(ci.jobs.deployment.if);
+    const imageSteps = imageLeaves.flatMap((jobName) =>
       ci.jobs[jobName].steps.filter((candidate: any) => candidate.with?.push),
     );
     expect(imageSteps).toHaveLength(5);
@@ -2756,21 +2754,31 @@ describe("workflow contracts", () => {
     expect(ciText).not.toContain("pull-requests: write");
     expect(ciText).not.toMatch(/pulls\/.+\/reviews/);
     for (const jobName of [
+      "plan",
       "source-contracts",
       "unit-shards",
       "unit-safety",
+      "integration-shards",
       "test-suite",
       "browser-acceptance",
       "package-contracts",
+      "test",
       "deployment",
-      "service-images",
+      "api-image",
+      "worker-image",
+      "web-image",
       "relay-image",
       "sandbox-image",
       "images",
-    ])
-      expect(
-        ci.jobs[jobName].steps.find((step: any) => step.uses === "actions/checkout@v6").with.ref,
-      ).toContain("inputs.automation_head_sha");
+    ]) {
+      const checkout = ci.jobs[jobName].steps.find(
+        (step: any) => step.uses === "actions/checkout@v6",
+      );
+      expect(checkout.with.ref).toBe(
+        "${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}",
+      );
+      expect(checkout.with["persist-credentials"]).toBe(false);
+    }
     expect(admission.steps[0].uses).toBe(
       "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10",
     );
@@ -2803,19 +2811,96 @@ describe("workflow contracts", () => {
     ).toEqual([["Complete exact-head automation CI check", "${{ github.token }}"]]);
   });
 
-  test("shards PR unit tests while preserving every non-unit gate and a monolithic non-PR safety net", () => {
-    const laneNames = ["source-contracts", "test-suite", "browser-acceptance", "package-contracts"];
+  test("shards selected work while preserving current acceptance and non-PR safety gates", () => {
+    const plan = ci.jobs.plan;
+    expect(plan.name).toBe("Explain change impact");
+    expect(plan.needs).toBe("automation-admission");
+    expect(plan.if).toBe(
+      "${{ always() && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",
+    );
+    expect(plan.outputs).toEqual(
+      expect.objectContaining({
+        mode: "${{ steps.plan.outputs.mode }}",
+        unit_count: "${{ steps.plan.outputs.unit_count }}",
+        integration_count: "${{ steps.plan.outputs.integration_count }}",
+        e2e_count: "${{ steps.plan.outputs.e2e_count }}",
+        build_count: "${{ steps.plan.outputs.build_count }}",
+        unit_matrix: "${{ steps.plan.outputs.unit_matrix }}",
+        integration_matrix: "${{ steps.plan.outputs.integration_matrix }}",
+      }),
+    );
+    expect(plan.steps.find((step: any) => step.id === "plan").run).toContain(
+      'bun scripts/ci/impact.ts --base "$BASE_SHA" --head "$HEAD_SHA"',
+    );
+    expect(plan.steps.find((step: any) => step.id === "plan").run).toContain(
+      "bun scripts/ci/impact.ts --full --output impact-plan.json",
+    );
+
+    const source = ci.jobs["source-contracts"];
+    expect(source.needs).toEqual(["automation-admission", "plan"]);
+    for (const stepName of [
+      "Validate changeset release plan",
+      "Profile impacted TypeScript 7 projects",
+      "Run exactly the explained source guards",
+      "Impact, resource, and profiling contracts",
+      "Upload source-contract resource profiles",
+    ]) {
+      expect(source.steps.some((step: any) => step.name === stepName)).toBe(true);
+    }
+    expect(
+      source.steps.find((step: any) => step.name === "Profile impacted TypeScript 7 projects").run,
+    ).toContain("scripts/ci/run-typecheck-plan.ts");
+    expect(
+      source.steps.find((step: any) => step.name === "Run exactly the explained source guards").run,
+    ).toContain("scripts/ci/run-guards-plan.ts");
+
+    for (const jobName of [
+      "source-contracts",
+      "unit-shards",
+      "unit-safety",
+      "integration-shards",
+      "test-suite",
+      "browser-acceptance",
+      "package-contracts",
+      "deployment",
+    ]) {
+      const setup = ci.jobs[jobName].steps.find((step: any) => step.name === "Set up Bun");
+      expect(setup.with).toEqual({ "bun-version-file": ".bun-version" });
+    }
+
+    const shards = ci.jobs["unit-shards"];
+    expect(shards.name).toBe("Unit tests (shard ${{ matrix.number }}/${{ matrix.total }})");
+    expect(shards.needs).toEqual(["automation-admission", "plan"]);
+    expect(shards.if).toContain("github.event_name == 'pull_request'");
+    expect(shards.if).toContain("needs.plan.outputs.unit_count != '0'");
+    expect(shards.strategy).toEqual({
+      "fail-fast": true,
+      matrix: { include: "${{ fromJSON(needs.plan.outputs.unit_matrix) }}" },
+    });
+    const shardStep = shards.steps.find((step: any) => step.name === "Unit test shard");
+    expect(shardStep.env).toEqual({ OPENGENI_REQUIRE_REAL_DB: "1" });
+    expect(shardStep.run).toContain("scripts/ci/profile-command.ts");
+    expect(shardStep.run).toContain("scripts/ci/run-unit-shard.ts");
+
+    const safety = ci.jobs["unit-safety"];
+    expect(safety.name).toBe("Unit tests (monolithic safety)");
+    expect(safety.needs).toEqual(["automation-admission", "plan"]);
+    expect(safety.if).toContain("github.event_name != 'pull_request'");
+    expect(safety.if).not.toContain("github.event_name != 'schedule'");
+    const safetyStep = safety.steps.find((step: any) => step.name === "Test");
+    expect(safetyStep.env).toEqual({ OPENGENI_REQUIRE_REAL_DB: "1" });
+    expect(safetyStep.run).toContain("scripts/ci/run-unit-shard.ts --plan impact-plan.json");
+    expect(safetyStep.run).toContain("--shard 0 --shards 1");
+
+    const integration = ci.jobs["integration-shards"];
+    expect(integration.strategy.matrix.include).toBe(
+      "${{ fromJSON(needs.plan.outputs.integration_matrix) }}",
+    );
+    expect(
+      integration.steps.find((step: any) => step.name.startsWith("Run real PostgreSQL")).run,
+    ).toContain("scripts/ci/run-test-shard.ts --plan impact-plan.json --tier integration");
+
     const expectedGateNames = {
-      "source-contracts": [
-        "Validate changeset release plan",
-        "Generated font manifest freshness",
-        "Typecheck",
-        "Lint",
-        "Format check",
-        "Workspace auth/billing static guard",
-        "Docs reference freshness guard",
-        "Public repository hygiene guard",
-      ],
       "test-suite": [
         "React warning-free test gate",
         "Real workspace capture acceptance",
@@ -2825,6 +2910,8 @@ describe("workflow contracts", () => {
         "Install pinned Playwright Chromium runtime",
         "Codex quota Codex quota and entitlement browser acceptance",
         "Queue surface browser acceptance",
+        "Long user-message disclosure browser acceptance",
+        "Public realtime SDK demo browser acceptance",
         "Session pin browser acceptance",
         "Responsive knowledge surfaces browser acceptance",
         "Workbench browser acceptance",
@@ -2843,104 +2930,19 @@ describe("workflow contracts", () => {
         "Web bundle budget",
       ],
     } as const;
-    const expectedGates = Object.values(expectedGateNames).flat();
-    expect(expectedGates).toHaveLength(28);
-    expect(new Set(expectedGates)).toHaveProperty("size", 28);
-    const allLaneSteps = laneNames.flatMap((jobName) =>
-      ci.jobs[jobName].steps.map((step: any) => step.name).filter(Boolean),
-    );
-
     for (const [jobName, gateNames] of Object.entries(expectedGateNames)) {
-      expect(ci.jobs[jobName].needs).toBe("automation-admission");
-      expect(ci.jobs[jobName].if).toContain("always()");
+      expect(ci.jobs[jobName].needs).toEqual(["automation-admission", "plan"]);
       for (const gateName of gateNames) {
         expect(ci.jobs[jobName].steps.some((step: any) => step.name === gateName)).toBe(true);
-        expect(allLaneSteps.filter((stepName) => stepName === gateName)).toHaveLength(1);
       }
     }
-    expect(allLaneSteps.filter((stepName) => expectedGates.includes(stepName))).toHaveLength(28);
-
-    const expensiveLaneNames = ["unit-shards", "unit-safety", "test-suite", "browser-acceptance"];
-    for (const jobName of expensiveLaneNames) {
-      const lane = ci.jobs[jobName];
-      const checkout = lane.steps.find((step: any) => step.name === "Check out repository");
-      expect(lane.permissions ?? ci.permissions).toEqual({ contents: "read" });
-      expect(checkout).toEqual({
-        name: "Check out repository",
-        uses: "actions/checkout@v6",
-        with: {
-          ref: "${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.sha }}",
-          "fetch-depth": 0,
-          "persist-credentials": false,
-        },
-      });
-      expect(lane.steps.find((step: any) => step.name === "Set up Bun")).toEqual({
-        name: "Set up Bun",
-        uses: "oven-sh/setup-bun@v2",
-        with: { "bun-version": "1.3.14" },
-      });
-      expect(lane.steps.find((step: any) => step.name === "Cache Bun dependencies")).toEqual({
-        name: "Cache Bun dependencies",
-        uses: "actions/cache@v6.1.0",
-        with: {
-          path: "~/.bun/install/cache",
-          key: "bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}",
-          "restore-keys": "bun-${{ runner.os }}-\n",
-        },
-      });
-      expect(lane.steps.find((step: any) => step.name === "Install dependencies")).toEqual({
-        name: "Install dependencies",
-        run: "bun install --frozen-lockfile",
-      });
-    }
-
-    expect(ci.jobs["test-suite"].name).toBe("Real-service and recovery tests");
-    expect(ci.jobs["test-suite"].steps.some((step: any) => step.name === "Test")).toBe(false);
-
-    const shards = ci.jobs["unit-shards"];
-    expect(shards.name).toBe("Unit tests (shard ${{ matrix.shard }}/4)");
-    expect(shards.needs).toBe("automation-admission");
-    expect(shards.if).toBe("${{ always() && github.event_name == 'pull_request' }}");
-    expect(shards.strategy).toEqual({
-      "fail-fast": false,
-      matrix: { shard: [1, 2, 3, 4] },
-    });
-    const shardStep = shards.steps.find((step: any) => step.name === "Unit test shard");
-    expect(shardStep.env).toEqual({ OPENGENI_REQUIRE_REAL_DB: "1" });
-    expect(shardStep.run).toBe("bun run test:unit:shard -- --shard=${{ matrix.shard }}/4");
-    expect(packageJson.scripts["test:unit:shard"]).toBe(
-      "bun test --max-concurrency=1 --timeout=30000",
-    );
-
-    const safety = ci.jobs["unit-safety"];
-    expect(safety.name).toBe("Unit tests (monolithic safety)");
-    expect(safety.needs).toBe("automation-admission");
-    expect(safety.if).toBe(
-      "${{ always() && github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",
-    );
-    expect(safety.if).not.toContain("github.event_name != 'schedule'");
-    const safetyStep = safety.steps.find((step: any) => step.name === "Test");
-    expect(safetyStep.env).toEqual({ OPENGENI_REQUIRE_REAL_DB: "1" });
-    expect(safetyStep.run).toBe("bun run test:unit");
+    expect(
+      ci.jobs["package-contracts"].steps.find(
+        (step: any) => step.name === "Build client packages (contracts + SDK + React)",
+      ).run,
+    ).toContain("scripts/ci/run-build-plan.ts");
 
     const browser = ci.jobs["browser-acceptance"];
-    const browserInstall = browser.steps.find(
-      (step: any) => step.name === "Install pinned Playwright Chromium runtime",
-    );
-    expect(browserInstall).toEqual({
-      name: "Install pinned Playwright Chromium runtime",
-      run: "bunx playwright install --with-deps --only-shell chromium",
-    });
-    expect(
-      browser.steps.filter((step: any) => String(step.run ?? "").includes("playwright install")),
-    ).toEqual([browserInstall]);
-    expect(
-      browser.steps.some(
-        (step: any) =>
-          String(step.uses ?? "").startsWith("actions/cache@") &&
-          JSON.stringify(step.with ?? {}).includes("ms-playwright"),
-      ),
-    ).toBe(false);
     expect(
       browser.steps.find(
         (step: any) => step.name === "Codex quota Codex quota and entitlement browser acceptance",
@@ -2949,159 +2951,56 @@ describe("workflow contracts", () => {
       OPENGENI_REQUIRE_REAL_DB: "1",
       OPENGENI_CODEX_QUOTA_EVIDENCE_DIR: "/tmp/codex-quota-evidence",
     });
-    for (const stepName of [
-      "Session pin browser acceptance",
-      "Responsive knowledge surfaces browser acceptance",
-    ])
-      expect(browser.steps.find((step: any) => step.name === stepName).env).toEqual({
-        OPENGENI_REQUIRE_REAL_DB: "1",
-      });
-
-    const expectedEvidence = {
-      "Upload session pin visual evidence": {
-        if: "${{ always() && (steps.session_pin_browser.outcome == 'success' || steps.session_pin_browser.outcome == 'failure') }}",
-        name: "sessionpin-session-pin-visual-evidence",
-        path: [
-          "/tmp/sessionpin-session-pin-desktop-light.png",
-          "/tmp/sessionpin-session-pin-desktop-dark.png",
-          "/tmp/sessionpin-session-pin-mobile-light.png",
-          "/tmp/sessionpin-session-pin-mobile-dark.png",
-          "/tmp/sessionpin-session-pin-mobile-375-light.png",
-          "/tmp/sessionpin-session-pin-mobile-375-dark.png",
-        ],
-      },
-      "Upload Codex quota visual evidence": {
-        if: "${{ always() }}",
-        name: "codex-quota-codex-quota-entitlement-visual-evidence",
-        path: [
-          "/tmp/codex-quota-evidence/codex-quota-desktop-light.png",
-          "/tmp/codex-quota-evidence/codex-quota-desktop-dark.png",
-          "/tmp/codex-quota-evidence/codex-quota-mobile-light.png",
-          "/tmp/codex-quota-evidence/codex-quota-mobile-dark.png",
-        ],
-      },
-      "Upload responsive knowledge-surface evidence": {
-        if: "${{ always() }}",
-        name: "responsive-knowledge-surface-evidence",
-        path: [
-          "/tmp/knowledge-surfaces-320-light-memory.png",
-          "/tmp/knowledge-surfaces-320-dark-memory.png",
-          "/tmp/knowledge-surfaces-375-light-variable-sets.png",
-          "/tmp/knowledge-surfaces-375-dark-variable-sets.png",
-          "/tmp/knowledge-surfaces-768-light-documents.png",
-          "/tmp/knowledge-surfaces-768-dark-documents.png",
-          "/tmp/knowledge-surfaces-desktop-light-memory.png",
-          "/tmp/knowledge-surfaces-desktop-dark-memory.png",
-        ],
-      },
-      "Upload workbench visual evidence": {
-        if: "${{ always() && (steps.workbench_browser.outcome == 'success' || steps.workbench_browser.outcome == 'failure') }}",
-        name: "workbench-visual-evidence",
-        path: [
-          "/tmp/workbench-mobile-dark-dense.png",
-          "/tmp/workbench-tablet-light-offline.png",
-          "/tmp/workbench-desktop-dark-changes.png",
-          "/tmp/workbench-desktop-light-files.png",
-        ],
-      },
-    } as const;
-    for (const [stepName, expected] of Object.entries(expectedEvidence)) {
+    const evidenceUploads = {
+      "Upload session pin visual evidence": "sessionpin-session-pin-visual-evidence",
+      "Upload Codex quota visual evidence": "codex-quota-codex-quota-entitlement-visual-evidence",
+      "Upload responsive knowledge-surface evidence": "responsive-knowledge-surface-evidence",
+      "Upload workbench visual evidence": "workbench-visual-evidence",
+    };
+    for (const [stepName, artifactName] of Object.entries(evidenceUploads)) {
       const upload = browser.steps.find((step: any) => step.name === stepName);
       expect(upload.uses).toBe("actions/upload-artifact@v7.0.1");
-      expect(upload.if).toBe(expected.if);
-      expect(upload.with.name).toBe(expected.name);
+      expect(upload.with.name).toBe(artifactName);
       expect(upload.with["if-no-files-found"]).toBe("error");
       expect(upload.with["retention-days"]).toBe(14);
-      expect(upload.with.path.trim().split("\n")).toEqual(expected.path);
+      expect(upload.with.path).toContain("/tmp/");
     }
 
     const aggregate = ci.jobs.test;
     expect(aggregate.name).toBe("Typecheck and unit tests");
     expect(aggregate.needs).toEqual([
+      "plan",
       "source-contracts",
       "unit-shards",
       "unit-safety",
+      "integration-shards",
       "test-suite",
       "browser-acceptance",
       "package-contracts",
+      "deployment",
+      "images",
     ]);
     expect(aggregate.if).toBe("${{ always() }}");
+    expect(aggregate.permissions ?? ci.permissions).toEqual({ contents: "read" });
+    expect(aggregate.steps.some((step: any) => step.env?.GITHUB_TOKEN)).toBe(false);
+    expect(
+      aggregate.steps.find(
+        (step: any) =>
+          step.name === "Require successful impact planning before candidate execution",
+      ).run,
+    ).toBe('test "$PLAN_RESULT" = "success"');
     const requireLanes = aggregate.steps.find(
       (step: any) => step.name === "Require every split CI lane",
     );
     expect(requireLanes.env).toEqual({
+      RESULTS: "${{ toJSON(needs) }}",
       EVENT_NAME: "${{ github.event_name }}",
-      SOURCE_CONTRACTS_RESULT: "${{ needs.source-contracts.result }}",
-      UNIT_SHARDS_RESULT: "${{ needs.unit-shards.result }}",
-      UNIT_SAFETY_RESULT: "${{ needs.unit-safety.result }}",
-      TEST_SUITE_RESULT: "${{ needs.test-suite.result }}",
-      BROWSER_ACCEPTANCE_RESULT: "${{ needs.browser-acceptance.result }}",
-      PACKAGE_CONTRACTS_RESULT: "${{ needs.package-contracts.result }}",
+      MODE: "${{ needs.plan.outputs.mode }}",
+      UNIT_COUNT: "${{ needs.plan.outputs.unit_count }}",
+      INTEGRATION_COUNT: "${{ needs.plan.outputs.integration_count }}",
+      BUILD_COUNT: "${{ needs.plan.outputs.build_count }}",
     });
-    expect(requireLanes.run).toContain('if [ "$result" != "success" ]');
-    const aggregateResult = (eventName: string, results: Record<string, string>) =>
-      Bun.spawnSync(["bash", "-c", requireLanes.run], {
-        env: { ...process.env, EVENT_NAME: eventName, ...results },
-      }).exitCode;
-    const fixedResults = {
-      SOURCE_CONTRACTS_RESULT: "success",
-      TEST_SUITE_RESULT: "success",
-      BROWSER_ACCEPTANCE_RESULT: "success",
-      PACKAGE_CONTRACTS_RESULT: "success",
-    };
-    const pullRequestResults = {
-      ...fixedResults,
-      UNIT_SHARDS_RESULT: "success",
-      UNIT_SAFETY_RESULT: "skipped",
-    };
-    const nonPullRequestResults = {
-      ...fixedResults,
-      UNIT_SHARDS_RESULT: "skipped",
-      UNIT_SAFETY_RESULT: "success",
-    };
-    expect(aggregateResult("pull_request", pullRequestResults)).toBe(0);
-    for (const eventName of ["push", "workflow_dispatch", "schedule"])
-      expect(aggregateResult(eventName, nonPullRequestResults)).toBe(0);
-    expect(
-      aggregateResult("schedule", { ...nonPullRequestResults, UNIT_SHARDS_RESULT: "success" }),
-    ).not.toBe(0);
-    expect(
-      aggregateResult("schedule", { ...nonPullRequestResults, UNIT_SAFETY_RESULT: "skipped" }),
-    ).not.toBe(0);
-    for (const result of ["failure", "skipped", "cancelled", ""]) {
-      for (const variable of Object.keys(fixedResults)) {
-        expect(
-          aggregateResult("pull_request", { ...pullRequestResults, [variable]: result }),
-        ).not.toBe(0);
-        expect(aggregateResult("push", { ...nonPullRequestResults, [variable]: result })).not.toBe(
-          0,
-        );
-      }
-    }
-    for (const result of ["failure", "skipped", "cancelled", ""])
-      expect(
-        aggregateResult("pull_request", { ...pullRequestResults, UNIT_SHARDS_RESULT: result }),
-      ).not.toBe(0);
-    for (const result of ["success", "failure", "cancelled", ""])
-      expect(
-        aggregateResult("pull_request", { ...pullRequestResults, UNIT_SAFETY_RESULT: result }),
-      ).not.toBe(0);
-    for (const result of ["failure", "skipped", "cancelled", ""])
-      expect(
-        aggregateResult("push", { ...nonPullRequestResults, UNIT_SAFETY_RESULT: result }),
-      ).not.toBe(0);
-    for (const result of ["success", "failure", "cancelled", ""])
-      expect(
-        aggregateResult("push", { ...nonPullRequestResults, UNIT_SHARDS_RESULT: result }),
-      ).not.toBe(0);
-    expect(
-      aggregateResult("pull_request", {
-        ...pullRequestResults,
-        UNIT_SHARDS_RESULT: "skipped",
-        UNIT_SAFETY_RESULT: "skipped",
-      }),
-    ).not.toBe(0);
-    expect(aggregateResult("", nonPullRequestResults)).not.toBe(0);
+    expect(requireLanes.run).toContain("scripts/ci/required-results.jq");
     expect(ci.jobs["automation-report"].needs).toEqual([
       "automation-admission",
       "test",

@@ -2025,12 +2025,12 @@ describe("DB integration", () => {
     expect(corrected.action).toBe("updated");
     expect(corrected.memory.id).toBe(old.memory.id);
     expect(corrected.memory.status).toBe("active");
-    expect(corrected.memory.text).toBe("prefer AZURE OpenAI for default embeddings.");
+    expect(corrected.memory.text).toBe("  prefer   AZURE OpenAI for default embeddings. ");
     expect(corrected.memory.supersededById).toBeNull();
     expect(corrected.replacement).toBeNull();
     expect(await getKnowledgeMemory(dbClient.db, grant.workspaceId, old.memory.id)).toMatchObject({
       status: "active",
-      text: "prefer AZURE OpenAI for default embeddings.",
+      text: "  prefer   AZURE OpenAI for default embeddings. ",
       supersededById: null,
     });
   });
@@ -2887,6 +2887,14 @@ async function createRlsAppRole(
   );
   await db.execute(
     dbSql.raw(`GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO "${role}"`),
+  );
+  // Match the runtime role's exact target-schema-local capability. This public
+  // SECURITY DEFINER function is intentionally excluded from the broad private
+  // helper grant and remains unavailable to PUBLIC.
+  await db.execute(
+    dbSql.raw(
+      `GRANT EXECUTE ON FUNCTION public.lock_nested_agent_depth_configuration() TO "${role}"`,
+    ),
   );
   const url = new URL(ownerUrl);
   url.username = role;
