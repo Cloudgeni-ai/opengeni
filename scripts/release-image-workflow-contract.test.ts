@@ -34,6 +34,15 @@ function ghApiCommands(source: string): string[] {
 }
 
 describe("release image workflow contract", () => {
+  test("stages Bun dependency patches before the workload image frozen install", async () => {
+    const dockerfile = await readFile(resolve(root, "docker/opengeni.Dockerfile"), "utf8");
+    const patchCopy = dockerfile.indexOf("COPY patches patches");
+    const frozenInstall = dockerfile.indexOf("RUN bun install --frozen-lockfile");
+
+    expect(patchCopy).toBeGreaterThan(-1);
+    expect(frozenInstall).toBeGreaterThan(patchCopy);
+  });
+
   test("coalesces mutable Version-PR work without cancelling immutable publication", async () => {
     const [release, ci] = await Promise.all([workflow("release.yml"), workflow("ci.yml")]);
     const versionProjection = release.slice(
