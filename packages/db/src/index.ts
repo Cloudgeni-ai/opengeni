@@ -29312,6 +29312,11 @@ export async function releaseLeaseHolder(
     kind: LeaseHolderKind;
     holderId: string;
     idleGraceMs: number;
+    /** The caller has crossed the non-detachable physical boundary for this
+     * exact turn holder: every admitted attempt-owned workspace writer has
+     * resolved, rejected, or been physically quiesced. A cancellation listener
+     * that merely prevents a holder leak must leave this false. */
+    workspaceWritersQuiesced?: boolean;
   },
 ): Promise<{ liveness: SandboxLeaseLiveness; refcount: number } | null> {
   if (input.kind === "process") {
@@ -29325,25 +29330,33 @@ export async function releaseLeaseHolder(
         const tx = txRaw as unknown as Database;
         // A direct request reaches this release seam only after its provider
         // operation has resolved, rejected, or been physically quiesced by the
-        // Channel-A cancellation fence. If the ordinary settlement callback
-        // failed after that physical boundary (for example, its worker was
-        // interrupted during a rollout), leaving a null-outcome admission here
-        // would block archive capture forever after the request holder leaves.
+        // Channel-A cancellation fence. A turn may use the same repair only
+        // after its caller explicitly proves the stronger attempt-writer drain;
+        // the eager cancellation listener drops the holder before that boundary
+        // and therefore must not settle an admission.
+        //
+        // If the ordinary settlement callback failed after the physical
+        // boundary (for example, later finalizer housekeeping threw), leaving a
+        // null-outcome admission here would block archive capture forever after
+        // the request holder leaves.
         //
         // Lock admission -> lease, the same suffix used by mutation settlement
         // and retained-process promotion. Taking the lease first recreates the
         // admission/lease deadlock this fallback exists to recover. A promoted
         // process has provider_outcome='retained' and is deliberately untouched;
         // its non-TTL process holder remains the only settlement authority.
-        if (input.kind === "direct") {
+        const settleAbandonedAdmissions =
+          input.kind === "direct" ||
+          (input.kind === "turn" && input.workspaceWritersQuiesced === true);
+        if (settleAbandonedAdmissions) {
           await tx.execute(sql`
             select id
             from sandbox_workspace_mutation_admissions
             where account_id = ${input.accountId}
               and workspace_id = ${input.workspaceId}
               and sandbox_group_id = ${input.sandboxGroupId}
-              and actor_kind = 'direct'
-              and holder_kind = 'direct'
+              and actor_kind = ${input.kind}
+              and holder_kind = ${input.kind}
               and holder_id = ${input.holderId}
               and provider_outcome is null
               and settled_at is null
@@ -29356,8 +29369,8 @@ export async function releaseLeaseHolder(
             where account_id = ${input.accountId}
               and workspace_id = ${input.workspaceId}
               and sandbox_group_id = ${input.sandboxGroupId}
-              and actor_kind = 'direct'
-              and holder_kind = 'direct'
+              and actor_kind = ${input.kind}
+              and holder_kind = ${input.kind}
               and holder_id = ${input.holderId}
               and provider_outcome is null
               and settled_at is null

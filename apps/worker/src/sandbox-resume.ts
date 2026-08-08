@@ -176,9 +176,11 @@ export type ResumedTurnSandbox = {
   established: EstablishedSandboxSession;
   /** The lease_epoch this turn holds; the heartbeat/fence token. */
   leaseEpoch: number;
-  /** Idempotent release: deletes this holder row and (if refcount hits 0 with no
-   *  turn holders) CASes warm->draining. NEVER stops the box. Safe to call once. */
-  release: () => Promise<void>;
+  /** Staged idempotent release. The ordinary form immediately prevents a
+   * holder/timer leak. The quiesced form may be called later—even after the
+   * ordinary form—to repair null-outcome admissions only after every exact
+   * attempt-owned workspace writer has physically drained. NEVER stops the box. */
+  release: (options?: { workspaceWritersQuiesced?: boolean }) => Promise<void>;
 };
 
 export class SandboxWarmingTimeoutError extends Error {
@@ -715,37 +717,74 @@ export async function resumeBoxForTurn(
   // It is also bound directly to the logical attempt signal: an uninterruptible
   // provider promise must never keep its private warmup timer and holder alive
   // after Temporal has abandoned the activity.
-  let released = false;
+  let releaseStarted = false;
+  let holderRelease: Promise<void> | null = null;
+  let quiescedRelease: Promise<void> | null = null;
   let holderLivenessTimer: ReturnType<typeof setInterval> | undefined;
   let cancellationListener: (() => void) | undefined;
-  const release = async (): Promise<void> => {
-    if (released) {
-      return;
+  const release = (options?: { workspaceWritersQuiesced?: boolean }): Promise<void> => {
+    const writersQuiesced = options?.workspaceWritersQuiesced === true;
+    // First invocation synchronously closes every in-memory liveness source.
+    // A later quiesced invocation is still allowed to enter the DB: cancellation
+    // commonly wins this race and drops the holder before the physical writer
+    // drain can prove that abandoned turn admissions are safe to settle.
+    if (!releaseStarted) {
+      releaseStarted = true;
+      if (cancellationListener) {
+        cancellationSignal?.removeEventListener("abort", cancellationListener);
+        cancellationListener = undefined;
+      }
+      if (holderLivenessTimer) {
+        clearInterval(holderLivenessTimer);
+        holderLivenessTimer = undefined;
+      }
     }
-    released = true;
-    if (cancellationListener) {
-      cancellationSignal?.removeEventListener("abort", cancellationListener);
-      cancellationListener = undefined;
+    const persistRelease = async (workspaceWritersQuiesced: boolean): Promise<void> => {
+      await releaseLeaseHolder(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.sandboxGroupId,
+        kind,
+        holderId,
+        idleGraceMs: settings.sandboxIdleGraceMs,
+        ...(workspaceWritersQuiesced ? { workspaceWritersQuiesced: true } : {}),
+      });
+    };
+    if (writersQuiesced) {
+      if (!quiescedRelease) {
+        // Serialize behind an eager cancellation release when one exists. Its
+        // failure is intentionally swallowed only as a predecessor: this exact
+        // idempotent proof-bearing call retries both holder deletion and
+        // admission settlement in one transaction.
+        const predecessor = holderRelease;
+        const attempt = (predecessor ? predecessor.catch(() => undefined) : Promise.resolve()).then(
+          async () => await persistRelease(true),
+        );
+        const tracked = attempt.catch((error) => {
+          if (quiescedRelease === tracked) quiescedRelease = null;
+          throw error;
+        });
+        quiescedRelease = tracked;
+        holderRelease = tracked;
+      }
+      return quiescedRelease;
     }
-    if (holderLivenessTimer) {
-      clearInterval(holderLivenessTimer);
-      holderLivenessTimer = undefined;
+    if (!holderRelease) {
+      const attempt = persistRelease(false);
+      const tracked = attempt.catch((error) => {
+        if (holderRelease === tracked) holderRelease = null;
+        throw error;
+      });
+      holderRelease = tracked;
     }
-    await releaseLeaseHolder(db, {
-      accountId: ids.accountId,
-      workspaceId: ids.workspaceId,
-      sandboxGroupId: ids.sandboxGroupId,
-      kind,
-      holderId,
-      idleGraceMs: settings.sandboxIdleGraceMs,
-    });
+    return holderRelease;
   };
   const cancellationError = (): Error =>
     cancellationSignal?.reason instanceof Error
       ? cancellationSignal.reason
       : new Error("Sandbox resume was cancelled with its owning turn attempt");
   const throwIfReleasedOrCancelled = (): void => {
-    if (released || cancellationSignal?.aborted) {
+    if (releaseStarted || cancellationSignal?.aborted) {
       throw cancellationError();
     }
   };
@@ -778,9 +817,11 @@ export async function resumeBoxForTurn(
 
   if (cancellationSignal) {
     cancellationListener = () => {
-      // release() flips `released` and clears the timer synchronously before its
-      // first await. The detached rejection handler is intentional: the outer
-      // turn owns diagnostics, while this listener owns leak prevention.
+      // release() flips `releaseStarted` and clears the timer synchronously
+      // before its first await. This eager form deliberately carries no writer-
+      // quiescence proof; the outer turn supplies that second stage after its
+      // physical drain. The detached rejection handler is intentional: the
+      // outer turn owns diagnostics, while this listener owns leak prevention.
       void release().catch(() => undefined);
     };
     cancellationSignal.addEventListener("abort", cancellationListener, { once: true });

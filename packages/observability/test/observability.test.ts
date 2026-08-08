@@ -340,6 +340,29 @@ describe("observability", () => {
     expect(JSON.parse(observed[0]!)).not.toHaveProperty("arbitraryDiagnostic");
   });
 
+  test("public structured logs admit only validated opaque sandbox correlation keys", () => {
+    const observed: string[] = [];
+    const originalLog = console.log;
+    console.log = (message?: unknown) => observed.push(String(message));
+    try {
+      const obs = createObservability(settings, { component: "worker", now: () => 1 });
+      obs.info("valid", {
+        sandboxLeaseKey: "slk_0123456789abcdef0123456789abcdef",
+        workspaceId: "workspace-must-not-leak",
+      });
+      obs.info("invalid", { sandboxLeaseKey: "raw-workspace-or-group-id" });
+    } finally {
+      console.log = originalLog;
+    }
+
+    expect(JSON.parse(observed[0]!)).toMatchObject({
+      message: "valid",
+      sandboxLeaseKey: "slk_0123456789abcdef0123456789abcdef",
+    });
+    expect(JSON.parse(observed[0]!)).not.toHaveProperty("workspaceId");
+    expect(JSON.parse(observed[1]!)).not.toHaveProperty("sandboxLeaseKey");
+  });
+
   test("public diagnostics reject syntactically valid secret-shaped classes and codes", () => {
     const sentinel = "SECRET_SENTINEL_123";
     const SecretSentinelError = class SECRET_SENTINEL_123 extends Error {};

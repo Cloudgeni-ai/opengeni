@@ -809,6 +809,37 @@ export async function drainAttemptOwnedSandboxWriters(input: {
   await input.runCredentialRenewal?.stop();
 }
 
+/** Persist the exact turn's second-stage release only after the caller has
+ * crossed the physical writer boundary. This wait is intentionally independent
+ * of Temporal cancellation: it is a short idempotent DB transaction that closes
+ * the durable archive-capture fence. Bounded retries cover a rollout connection
+ * reset without turning ordinary finalizer housekeeping into lifecycle state. */
+export async function releaseTurnSandboxAfterWriterDrain(
+  sandbox: Pick<ResumedTurnSandbox, "release">,
+  options: {
+    maxAttempts?: number;
+    retryDelayMs?: number;
+    wait?: (delayMs: number) => Promise<void>;
+  } = {},
+): Promise<void> {
+  const maxAttempts = Math.max(1, options.maxAttempts ?? 3);
+  const retryDelayMs = Math.max(0, options.retryDelayMs ?? 50);
+  const wait = options.wait ?? sleep;
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      await sandbox.release({ workspaceWritersQuiesced: true });
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt < maxAttempts) {
+        await wait(retryDelayMs * attempt);
+      }
+    }
+  }
+  throw lastError;
+}
+
 /**
  * Await a finalizer operation only while this Temporal activity still owns its
  * execution window. Once Pause/Steer cancellation arrives, the operation keeps
@@ -2707,6 +2738,25 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // run. null when the flag is off (byte-for-byte the legacy build-and-discard
     // path) OR when the backend is "none". Released + dropped in `finally`.
     let resolvedSandbox: ResumedTurnSandbox | null = null;
+    let attemptWritersDrained = false;
+    const lateSandboxesAwaitingWriterDrain = new Set<ResumedTurnSandbox>();
+    const releaseLateSandbox = async (sandbox: ResumedTurnSandbox): Promise<void> => {
+      lateSandboxesAwaitingWriterDrain.add(sandbox);
+      // Drop the holder/timer immediately, but keep its null-outcome admissions
+      // fenced until the shared attempt writer drain completes. The staged
+      // release serializes a later proof-bearing call behind this one.
+      await sandbox.release().catch(() => undefined);
+      if (!attemptWritersDrained) return;
+      try {
+        await releaseTurnSandboxAfterWriterDrain(sandbox);
+        lateSandboxesAwaitingWriterDrain.delete(sandbox);
+      } catch (error) {
+        console.error(
+          "late sandbox quiesced release failed (turn outcome unaffected)",
+          safeErrorDiagnostic(error),
+        );
+      }
+    };
     const requireResolvedSandboxForMutation = (message: string): ResumedTurnSandbox => {
       if (!resolvedSandbox) throw new Error(message);
       return resolvedSandbox;
@@ -5594,7 +5644,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               managedOwnership!.holderId,
             ),
             sandboxResumeSignal,
-            async (lateSandbox) => await lateSandbox.release(),
+            releaseLateSandbox,
           );
           setupBoxSession = resolvedSandbox.established.session;
           // Durable box-lifecycle events (sandbox-file-persistence observability):
@@ -6167,7 +6217,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               );
             },
             disposeResult: async (provisioned) => {
-              await provisioned.release().catch(() => undefined);
+              await releaseLateSandbox(provisioned);
             },
           },
         );
@@ -8565,6 +8615,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           toolspaceTokenRenewal: toolspaceRenewalToStop,
           runCredentialRenewal: runRenewalToStop,
         });
+        attemptWritersDrained = true;
         if (acknowledgeQuiescence) {
           // A cancellation before sandbox-backed capabilities exist still has
           // no tool controller to drain. Sandbox agent construction fails closed
@@ -8873,17 +8924,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // while the box is still solidly alive, instead of racing the turn-end
             // teardown that was killing 100% of captures on real Modal desktop boxes.
           }
-          const sandboxToRelease = resolvedSandbox;
-          resolvedSandbox = null; // drop ownership now; the exact-holder release may finish later
-          await waitForTurnFinalizerStep(
-            sandboxToRelease.release().catch((releaseError) => {
-              console.error(
-                "sandbox lease release failed (turn outcome unaffected)",
-                safeErrorDiagnostic(releaseError),
-              );
-            }),
-            finalizerSignal,
-          );
         }
       } catch (error) {
         finalizationError ??= error;
@@ -8892,9 +8932,42 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           safeErrorDiagnostic(error),
         );
       } finally {
-        // If fallible finalization exited before the ordinary exact-holder
-        // release, the resume signal is the unconditional last line of defense.
-        // Normal finalization already removed its listener in release().
+        // The writer drain is the only authority that licenses settling an
+        // abandoned turn admission. Keep this second-stage release outside all
+        // later housekeeping so an event/cache/capture/recording failure cannot
+        // strand a null-outcome admission forever. Do not race it against
+        // Temporal cancellation: the eager listener may already have dropped
+        // the holder, and this idempotent proof-bearing pass still must run.
+        stopLeaseHeartbeat();
+        const sandboxReleaseTargets = new Set(lateSandboxesAwaitingWriterDrain);
+        lateSandboxesAwaitingWriterDrain.clear();
+        if (resolvedSandbox) {
+          sandboxReleaseTargets.add(resolvedSandbox);
+          resolvedSandbox = null;
+        }
+        if (attemptWritersDrained) {
+          for (const sandboxToRelease of sandboxReleaseTargets) {
+            try {
+              await releaseTurnSandboxAfterWriterDrain(sandboxToRelease);
+            } catch (releaseError) {
+              finalizationError ??= releaseError;
+              console.error(
+                "sandbox lease quiesced release failed (turn outcome unaffected)",
+                safeErrorDiagnostic(releaseError),
+              );
+            }
+          }
+        } else {
+          // No proof exists. Ensure every late result still receives the eager
+          // leak-prevention release while preserving its admissions as a
+          // fail-closed archive-capture fence.
+          for (const sandboxToRelease of sandboxReleaseTargets) {
+            await sandboxToRelease.release().catch(() => undefined);
+          }
+        }
+        // Close provisioning after consuming the currently known targets. A
+        // provider result that races in later is routed through releaseLateSandbox;
+        // targets already released above synchronously removed their listener.
         if (!sandboxResumeController.signal.aborted) {
           sandboxResumeController.abort(
             cancellationSignal?.reason ?? new Error("TURN_ATTEMPT_FINALIZED"),

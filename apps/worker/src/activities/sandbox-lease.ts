@@ -397,6 +397,22 @@ export function sandboxDrainCaptureId(operationId: string, attempt: number): str
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
+/**
+ * Stable, non-reversible correlation key for one logical sandbox lease. Public
+ * telemetry intentionally drops workspace/group identifiers; this key lets an
+ * operator correlate repeated reaper attempts without publishing either UUID.
+ * The domain separator makes the digest unusable as a generic identifier hash.
+ */
+export function sandboxLeaseTelemetryKey(workspaceId: string, sandboxGroupId: string): string {
+  return `slk_${createHash("sha256")
+    .update("opengeni:sandbox-lease-telemetry:v1\0")
+    .update(workspaceId)
+    .update("\0")
+    .update(sandboxGroupId)
+    .digest("hex")
+    .slice(0, 32)}`;
+}
+
 function sandboxDrainActivityAttempt(): number {
   try {
     const attempt = Context.current().info.attempt;
@@ -543,6 +559,7 @@ export function createSandboxLeaseActivities(
       } catch (error) {
         const lease = await readLease(db, row.workspaceId, row.sandboxGroupId).catch(() => null);
         const details = {
+          sandboxLeaseKey: sandboxLeaseTelemetryKey(row.workspaceId, row.sandboxGroupId),
           workspaceId: row.workspaceId,
           sandboxGroupId: row.sandboxGroupId,
           leaseEpoch: row.leaseEpoch,
