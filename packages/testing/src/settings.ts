@@ -87,6 +87,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     openaiApiKey: "test-openai-key",
     openaiBaseUrl: undefined,
     openaiModel: "scripted-model",
+    imageGenerationModel: "openai/gpt-image-2",
     openaiAllowedModels: "scripted-model,gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna",
     voiceInputMaxDurationSeconds: 60,
     voiceInputMaxSizeBytes: 25 * 1024 * 1024,

@@ -3447,6 +3447,7 @@ export type FileAsset = {
 export const RETAINED_OUTPUT_DEFAULT_PAGE_BYTES = 256 * 1024;
 export const RETAINED_OUTPUT_MAX_PAGE_BYTES = 1024 * 1024;
 export const COMPUTER_SCREENSHOT_MAX_BYTES = 32 * 1024 * 1024;
+export const GENERATED_IMAGE_MAX_BYTES = 64 * 1024 * 1024;
 
 export type RetainedOutputKind =
   | "tool_result"
@@ -3454,6 +3455,7 @@ export type RetainedOutputKind =
   | "internal_update"
   | "event_media"
   | "computer_screenshot"
+  | "generated_image"
   | "file";
 
 export type RetainedOutputUnavailableReason =
@@ -3497,6 +3499,12 @@ export type RetainedArtifactUnavailable = {
 
 export type RetainedArtifactMetadata = RetainedArtifactReference | RetainedArtifactUnavailable;
 
+export type GeneratedImageReceipt = {
+  type: "generated_image";
+  artifact: RetainedArtifactReference;
+  sandboxPath: string;
+};
+
 export type RetainedArtifactContentOptions = {
   /** One RFC-style bytes range, for example `bytes=1048576-2097151`. */
   range?: string | undefined;
@@ -3512,16 +3520,23 @@ export type RetainedArtifactContent = {
   acceptRanges: "bytes";
 };
 
-export type RetainedScreenshotDownloadOptions = {
+export type RetainedArtifactDownloadOptions = {
   signal?: AbortSignal | undefined;
   /** Retry transient range failures; bounded to 0..3, default 2. */
   maxRetries?: number | undefined;
 };
 
+export type RetainedScreenshotDownloadOptions = RetainedArtifactDownloadOptions;
+
 export type RetainedScreenshotDownload = {
   metadata: RetainedArtifactMetadata;
   /** Null when metadata truth says the screenshot is unavailable. */
   bytes: Uint8Array | null;
+};
+
+export type RetainedArtifactDownload = {
+  artifact: RetainedArtifactReference;
+  bytes: Uint8Array;
 };
 
 export type CreateFileUploadRequest = {

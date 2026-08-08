@@ -68,6 +68,7 @@ import {
   type NoticeItem,
   type TimelineGroup,
   type TimelineItem,
+  type RetainedArtifactLoader,
   type RetainedScreenshotLoader,
   type ToolRegistry,
   type TurnSummaryOptions,
@@ -146,6 +147,8 @@ export type MessageTimelineProps = {
   toolRegistry?: ToolRegistry | undefined;
   /** Resolve opaque retained screenshot receipts through the authenticated host SDK. */
   loadRetainedScreenshot?: RetainedScreenshotLoader | undefined;
+  /** Resolve permanent generated-image receipts through the authenticated host SDK. */
+  loadRetainedArtifact?: RetainedArtifactLoader | undefined;
   /**
    * Display name of the session's active compute target (Connected Machine or
    * cloud sandbox). When set, exec_command collapsed previews prefix `on {label}`.
@@ -292,6 +295,7 @@ export function MessageTimeline({
   resolveProviderLogo,
   toolRegistry = defaultToolRegistry,
   loadRetainedScreenshot,
+  loadRetainedArtifact,
   computeLabel = null,
   turnSummary,
   autoFollow = true,
@@ -1346,6 +1350,7 @@ export function MessageTimeline({
                                 resolveProviderLogo,
                                 toolRegistry,
                                 loadRetainedScreenshot,
+                                loadRetainedArtifact,
                                 turnSummary,
                               ]}
                             >
@@ -1359,6 +1364,7 @@ export function MessageTimeline({
                                   resolveProviderLogo={resolveProviderLogo}
                                   toolRegistry={toolRegistry}
                                   loadRetainedScreenshot={loadRetainedScreenshot}
+                                  loadRetainedArtifact={loadRetainedArtifact}
                                   turnSummary={turnSummary}
                                   foldLiveCluster={isAgentProgress(next)}
                                   trailingAgentText={trailingAgentTextAfterTurn(group, next)}
@@ -1703,6 +1709,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
   resolveProviderLogo,
   toolRegistry,
   loadRetainedScreenshot,
+  loadRetainedArtifact,
   turnSummary,
   insideTurn = false,
   nestClusterChips = false,
@@ -1720,6 +1727,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
   resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
   toolRegistry: ToolRegistry;
   loadRetainedScreenshot?: RetainedScreenshotLoader | undefined;
+  loadRetainedArtifact?: RetainedArtifactLoader | undefined;
   turnSummary?: TurnSummaryOptions | undefined;
   /** A completed cluster of a still-RUNNING turn (not the live tail) folds
       behind a neutral chip — the one place activity without an outcome still
@@ -1754,13 +1762,16 @@ const TimelineGroupView = memo(function TimelineGroupView({
   const activityShouldFold =
     group.kind === "activity" &&
     Boolean(group.outcome || (foldLiveCluster && clusterIsSettled(group)));
+  const containsGeneratedImage = timelineGroupContainsGeneratedImage(group);
   // Latch live→folded so a top-level shell that was already mounted open can
   // start the settle beat without remounting bare rail → wrapper.
   const liveActivitySettle = useLiveSettleFold(activityShouldFold && !insideTurn);
   const turnDefaultOpen =
     !insideTurn &&
     group.kind === "turn" &&
-    (group.outcome === "failed" || timelineGroupContainsAuthNeeded(group));
+    (group.outcome === "failed" ||
+      timelineGroupContainsAuthNeeded(group) ||
+      containsGeneratedImage);
   // activity-* → turn-* remount: carry resting state so settleFold does not
   // re-open a chip the reader already watched collapse.
   if (group.kind === "turn" && foldMemory && !insideTurn) {
@@ -1785,7 +1796,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
         // settled closed pre-wrap was showing as a CHIP, so mounting it closed
         // is both the stable height and the honest state — force-opening it
         // was the "already-collapsed cluster auto-expands at the end" reopen.
-        const useNestedChip = nestClusterChips && activityShouldFold;
+        const useNestedChip = nestClusterChips && activityShouldFold && !containsGeneratedImage;
         if (!useNestedChip) {
           return (
             <ActivityRail
@@ -1794,6 +1805,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
               onMemoryClick={onMemoryClick}
               toolRegistry={toolRegistry}
               loadRetainedScreenshot={loadRetainedScreenshot}
+              loadRetainedArtifact={loadRetainedArtifact}
               bare
             />
           );
@@ -1816,6 +1828,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
               onMemoryClick={onMemoryClick}
               toolRegistry={toolRegistry}
               loadRetainedScreenshot={loadRetainedScreenshot}
+              loadRetainedArtifact={loadRetainedArtifact}
               bare
             />
           </TurnSummary>
@@ -1842,6 +1855,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
                 onMemoryClick={onMemoryClick}
                 toolRegistry={toolRegistry}
                 loadRetainedScreenshot={loadRetainedScreenshot}
+                loadRetainedArtifact={loadRetainedArtifact}
                 bare
               />
             </TurnRailFrame>
@@ -1869,6 +1883,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
               resolveProviderLogo,
               toolRegistry,
               loadRetainedScreenshot,
+              loadRetainedArtifact,
               turnSummary,
             ]}
           >
@@ -1881,6 +1896,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
               resolveProviderLogo={resolveProviderLogo}
               toolRegistry={toolRegistry}
               loadRetainedScreenshot={loadRetainedScreenshot}
+              loadRetainedArtifact={loadRetainedArtifact}
               turnSummary={turnSummary}
               insideTurn
               nestClusterChips={nestClusters}
@@ -1982,6 +1998,20 @@ function timelineGroupContainsAuthNeeded(group: TimelineGroup): boolean {
       return false;
     case "turn":
       return group.groups.some(timelineGroupContainsAuthNeeded);
+  }
+}
+
+/** Generated images are primary user-visible output, not incidental activity. */
+function timelineGroupContainsGeneratedImage(group: TimelineGroup): boolean {
+  switch (group.kind) {
+    case "item":
+      return false;
+    case "activity":
+      return group.items.some(
+        (item) => item.kind === "tool-call" && item.name === "generate_image",
+      );
+    case "turn":
+      return group.groups.some(timelineGroupContainsGeneratedImage);
   }
 }
 

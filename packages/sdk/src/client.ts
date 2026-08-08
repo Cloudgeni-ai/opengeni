@@ -112,6 +112,9 @@ import type {
   ReasoningEffort,
   RetainedScreenshotDownload,
   RetainedScreenshotDownloadOptions,
+  RetainedArtifactDownload,
+  RetainedArtifactDownloadOptions,
+  RetainedArtifactReference,
   RetainedArtifactContent,
   RetainedArtifactContentOptions,
   RetainedArtifactMetadata,
@@ -232,6 +235,7 @@ import type {
   SocialConnection,
   SocialOAuthStartRequest,
 } from "./types";
+import { parseRetainedGeneratedImageReference } from "./retained-artifacts";
 import type {
   ActivateWorkspaceInstructionPolicyRequest,
   CreateWorkspaceInstructionPolicyDraftRequest,
@@ -3026,6 +3030,29 @@ export class OpenGeniClient {
     );
   }
 
+  /** Assemble one permanent generated-image receipt from bounded authenticated ranges. */
+  async downloadRetainedArtifact(
+    workspaceId: string,
+    artifact: RetainedArtifactReference,
+    options: RetainedArtifactDownloadOptions = {},
+  ): Promise<RetainedArtifactDownload> {
+    assertRetainedGeneratedImageReceipt(workspaceId, artifact);
+    const bytes = await this.downloadRetainedArtifactBytes(artifact, options);
+    return { artifact, bytes };
+  }
+
+  /** Mint a short-lived, zero-copy browser source for a validated generated image. */
+  async createRetainedArtifactDownloadUrl(
+    workspaceId: string,
+    artifact: RetainedArtifactReference,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<FileDownloadUrlResponse> {
+    assertRetainedGeneratedImageReceipt(workspaceId, artifact);
+    const download = await this.createFileDownloadUrl(workspaceId, artifact.artifactId, options);
+    assertSafeArtifactDownloadUrl(download);
+    return download;
+  }
+
   /** Assemble one retained screenshot from bounded authenticated API ranges. */
   async downloadRetainedScreenshot(
     workspaceId: string,
@@ -3033,10 +3060,6 @@ export class OpenGeniClient {
     artifactId: string,
     options: RetainedScreenshotDownloadOptions = {},
   ): Promise<RetainedScreenshotDownload> {
-    const maxRetries = options.maxRetries ?? 2;
-    if (!Number.isInteger(maxRetries) || maxRetries < 0 || maxRetries > 3) {
-      throw new RangeError("retained screenshot maxRetries must be an integer from 0 to 3");
-    }
     const metadata = await this.getSessionRetainedArtifact(workspaceId, sessionId, artifactId);
     if (!metadata.available) return { metadata, bytes: null };
     if (
@@ -3048,10 +3071,22 @@ export class OpenGeniClient {
     ) {
       throw new OpenGeniApiError(502, "retained screenshot metadata is invalid");
     }
-    const bytes = new Uint8Array(metadata.originalBytes);
-    const pageBytes = Math.min(metadata.retrieval.maxRangeBytes, RETAINED_OUTPUT_MAX_PAGE_BYTES);
+    const bytes = await this.downloadRetainedArtifactBytes(metadata, options);
+    return { metadata, bytes };
+  }
+
+  private async downloadRetainedArtifactBytes(
+    artifact: RetainedArtifactReference,
+    options: RetainedArtifactDownloadOptions,
+  ): Promise<Uint8Array> {
+    const maxRetries = options.maxRetries ?? 2;
+    if (!Number.isInteger(maxRetries) || maxRetries < 0 || maxRetries > 3) {
+      throw new RangeError("retained artifact maxRetries must be an integer from 0 to 3");
+    }
+    const bytes = new Uint8Array(artifact.originalBytes);
+    const pageBytes = Math.min(artifact.retrieval.maxRangeBytes, RETAINED_OUTPUT_MAX_PAGE_BYTES);
     if (!Number.isSafeInteger(pageBytes) || pageBytes <= 0) {
-      throw new OpenGeniApiError(502, "retained screenshot range metadata is invalid");
+      throw new OpenGeniApiError(502, "retained artifact range metadata is invalid");
     }
     for (let start = 0; start < bytes.byteLength; start += pageBytes) {
       options.signal?.throwIfAborted();
@@ -3059,7 +3094,7 @@ export class OpenGeniClient {
       let page: RetainedArtifactContent | null = null;
       for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
         try {
-          page = await this.getSessionRetainedArtifactContent(workspaceId, sessionId, artifactId, {
+          page = await this.getRetainedArtifactContentAtPath(artifact.retrieval.path, {
             range: `bytes=${start}-${end}`,
             ...(options.signal ? { signal: options.signal } : {}),
           });
@@ -3074,22 +3109,22 @@ export class OpenGeniClient {
           }
         }
       }
-      if (!page) throw new OpenGeniApiError(502, "retained screenshot range retry exhausted");
+      if (!page) throw new OpenGeniApiError(502, "retained artifact range retry exhausted");
       const expectedLength = end - start + 1;
       if (
         page.status !== 206 ||
-        page.contentType !== metadata.contentType ||
+        page.contentType !== artifact.contentType ||
         page.contentLength !== expectedLength ||
-        page.contentRange !== `bytes ${start}-${end}/${metadata.originalBytes}`
+        page.contentRange !== `bytes ${start}-${end}/${artifact.originalBytes}`
       ) {
-        throw new OpenGeniApiError(502, "retained screenshot range response is invalid");
+        throw new OpenGeniApiError(502, "retained artifact range response is invalid");
       }
       bytes.set(page.bytes, start);
     }
-    if ((await sha256Hex(bytes)) !== metadata.sha256) {
-      throw new OpenGeniApiError(502, "retained screenshot checksum mismatch");
+    if ((await sha256Hex(bytes)) !== artifact.sha256) {
+      throw new OpenGeniApiError(502, "retained artifact checksum mismatch");
     }
-    return { metadata, bytes };
+    return bytes;
   }
 
   private async getRetainedArtifactContentAtPath(
@@ -3155,10 +3190,14 @@ export class OpenGeniClient {
   async createFileDownloadUrl(
     workspaceId: string,
     fileId: string,
+    options: OpenGeniRequestOptions = {},
   ): Promise<FileDownloadUrlResponse> {
     return await this.requestJson<FileDownloadUrlResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/files/${fileId}/download-url`,
+      undefined,
+      {},
+      options,
     );
   }
 
@@ -4233,6 +4272,35 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
 
 async function cancelResponseBody(response: Response, reason: string): Promise<void> {
   await response.body?.cancel(reason).catch(() => undefined);
+}
+
+function assertRetainedGeneratedImageReceipt(
+  workspaceId: string,
+  artifact: RetainedArtifactReference,
+): void {
+  if (!parseRetainedGeneratedImageReference(artifact, workspaceId)) {
+    throw new OpenGeniApiError(502, "retained generated image receipt is invalid");
+  }
+}
+
+function assertSafeArtifactDownloadUrl(value: FileDownloadUrlResponse): void {
+  if (
+    !value ||
+    typeof value.url !== "string" ||
+    typeof value.expiresAt !== "string" ||
+    !Number.isFinite(Date.parse(value.expiresAt))
+  ) {
+    throw new OpenGeniApiError(502, "retained artifact download URL is invalid");
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value.url);
+  } catch {
+    throw new OpenGeniApiError(502, "retained artifact download URL is invalid");
+  }
+  if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) {
+    throw new OpenGeniApiError(502, "retained artifact download URL is unsafe");
+  }
 }
 
 function parseBoundedContentLength(value: string | null): number | null {

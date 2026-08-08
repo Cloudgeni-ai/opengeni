@@ -100,6 +100,7 @@ import {
   sandboxRunAs,
   toolspaceTokenSeedCommand,
   withSandboxFileDownloads,
+  withSandboxSessionReady,
   withSandboxLifecycleHooks,
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
@@ -3124,6 +3125,36 @@ describe("runtime event normalization", () => {
     } as any);
 
     expect(sessions).toHaveLength(2);
+  });
+
+  test("runs sandbox-ready hydration before exposing an SDK-owned session", async () => {
+    const order: string[] = [];
+    const session = { state: { manifest: new Manifest({ root: "/workspace" }) } };
+    const client = withSandboxSessionReady(
+      {
+        backendId: "docker",
+        create: async () => {
+          order.push("create");
+          return session as any;
+        },
+        resume: async () => {
+          order.push("resume");
+          return session as any;
+        },
+        delete: async () => {
+          order.push("delete");
+        },
+      } as any,
+      async (readySession) => {
+        expect(readySession).toBe(session as any);
+        order.push("hydrate");
+      },
+    );
+
+    expect(await client.create!()).toBe(session as any);
+    expect(await client.resume!(session.state as any)).toBe(session as any);
+    await client.delete!(session.state as any);
+    expect(order).toEqual(["create", "hydrate", "resume", "delete"]);
   });
 
   test("keeps exact repository transport URIs in git repo manifest entries", () => {

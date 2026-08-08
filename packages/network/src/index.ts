@@ -4,6 +4,8 @@ import { Agent, fetch as undiciFetchImpl, request as undiciRequestImpl } from "u
 import { lookup as nodeLookup } from "node:dns/promises";
 import { isIP } from "node:net";
 
+export * from "./json-base64";
+
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
 export type DnsAddress = {

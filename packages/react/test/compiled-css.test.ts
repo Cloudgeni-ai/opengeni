@@ -255,7 +255,7 @@ describe("compiled CSS contract", () => {
     expect(fileBrowser).toContain('<AlertDialog.Overlay className="og-root');
     expect(lightbox.match(/style=\{portalStyle\}/gu)?.length).toBe(2);
     expect(
-      timelineShared.match(/lightbox\.open\(src, caption, event\.currentTarget\)/gu)?.length,
+      timelineShared.match(/lightbox\.open\(src, caption, event\.currentTarget/gu)?.length,
     ).toBe(2);
     expect(
       selectorsForUtility("fixed").some((selector) =>

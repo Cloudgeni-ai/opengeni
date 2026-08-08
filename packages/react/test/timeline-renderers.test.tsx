@@ -594,6 +594,77 @@ describe("MessageTimeline — settled turn folding", () => {
     await r.unmount();
   });
 
+  test("keeps generated images visible as primary output with image-specific lightbox copy", async () => {
+    resetTimelineEvents();
+    const artifactId = "33333333-3333-4333-8333-333333333333";
+    const receipt = {
+      type: "generated_image",
+      artifact: {
+        available: true,
+        artifactId,
+        kind: "generated_image",
+        contentType: "image/png",
+        originalBytes: 1024,
+        sha256: "c".repeat(64),
+        retainedAt: "2026-08-08T00:00:00.000Z",
+        dimensions: { width: 1024, height: 1024 },
+        retention: { policy: "workspace_file", expiresAt: null },
+        retrieval: {
+          method: "GET",
+          path: `/v1/workspaces/11111111-1111-4111-8111-111111111111/artifacts/${artifactId}/content`,
+          acceptRanges: "bytes",
+          maxRangeBytes: 1024 * 1024,
+        },
+      },
+      sandboxPath: `/workspace/generated-images/generated-image-${artifactId}.png`,
+    };
+    const events = [
+      timelineEvent("user.message", { text: "Generate a teal sphere" }),
+      timelineEvent("turn.started", { triggerEventId: "timeline-evt-1" }),
+      timelineEvent("agent.toolCall.created", {
+        id: "call-image-1",
+        name: "generate_image",
+        arguments: { prompt: "A glossy teal sphere" },
+        raw: {
+          type: "function_call",
+          name: "generate_image",
+          status: "completed",
+        },
+      }),
+      timelineEvent("agent.toolCall.output", { id: "call-image-1", output: receipt }),
+      timelineEvent("agent.message.completed", { text: "Generated the image." }),
+      timelineEvent("turn.completed", {}),
+    ];
+    const r = await renderComponent(
+      <MessageTimeline
+        events={events}
+        loadRetainedArtifact={async () => ({
+          url: "https://objects.example/generated.png?signature=test",
+        })}
+      />,
+    );
+    await flush();
+    await flush();
+
+    expect(turnSummaryTrigger(r.container)?.getAttribute("aria-expanded")).toBe("true");
+    const generatedRow = Array.from(r.container.querySelectorAll('[role="button"]')).find(
+      (element) =>
+        element.hasAttribute("aria-expanded") && element.textContent?.includes("Generated image"),
+    );
+    expect(generatedRow?.getAttribute("aria-expanded")).toBe("true");
+    expect(r.container.querySelectorAll("img")).toHaveLength(1);
+    expect(r.container.textContent).toContain("1024×1024");
+    expect(r.container.textContent).toContain(receipt.sandboxPath);
+
+    const expand = r.container.querySelector(
+      'button[aria-label="Expand generated image"]',
+    ) as HTMLButtonElement | null;
+    expect(expand).not.toBeNull();
+    expect(r.container.querySelector('button[aria-label="Expand screenshot"]')).toBeNull();
+
+    await r.unmount();
+  });
+
   test("settled turn renders one top-level chip, final answer, and folded narration", async () => {
     resetTimelineEvents();
     const events = [

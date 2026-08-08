@@ -80,6 +80,7 @@ export type TurnInputOptions = {
   unavailableSandboxFilesNote?: string;
   runCredentialsNote?: string;
   providerApi: HistoryProviderApi;
+  projectCanonicalHistory?: ModelHistoryAttachmentProjector;
   materializeModelHistory?: ModelHistoryAttachmentProjector;
   materializeSerializedRunState?: (serialized: string) => Promise<string>;
   projectModelHistory?: ModelHistoryAttachmentProjector;
@@ -421,6 +422,7 @@ export async function turnInput(
       joinInternalContext(internalContext, attachmentContext),
       fileAttachments.map((attachment) => attachment.resource),
       options.providerApi,
+      options.projectCanonicalHistory,
       options.materializeModelHistory,
       options.projectModelHistory,
     );
@@ -438,6 +440,7 @@ export async function turnInput(
       internalContext,
       [],
       options.providerApi,
+      options.projectCanonicalHistory,
       options.materializeModelHistory,
       options.projectModelHistory,
     );
@@ -521,13 +524,17 @@ async function messageInput(
   internalContext: string | undefined,
   currentAttachmentRefs: FileResourceRef[] = [],
   providerApi: HistoryProviderApi = "responses",
+  projectCanonicalHistory?: ModelHistoryAttachmentProjector,
   materializeModelHistory?: ModelHistoryAttachmentProjector,
   projectModelHistory?: ModelHistoryAttachmentProjector,
 ): Promise<PreparedTurnInput> {
   const stored = await getActiveSessionHistoryItems(db, trigger.workspaceId, trigger.sessionId);
   const envelope = await getSandboxSessionEnvelope(db, trigger.workspaceId, trigger.sessionId);
   const canonicalView = projectRejectedProviderArtifacts(stored);
-  const providerView = projectHistoryForProvider(canonicalView, providerApi);
+  const canonicalProviderView = projectCanonicalHistory
+    ? await projectCanonicalHistory(canonicalView)
+    : canonicalView;
+  const providerView = projectHistoryForProvider(canonicalProviderView, providerApi);
   const referencedHistory = withCurrentUserAttachmentRefs(providerView, currentAttachmentRefs);
   const materializedHistory = materializeModelHistory
     ? await materializeModelHistory(referencedHistory)

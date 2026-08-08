@@ -332,6 +332,8 @@ export {
 } from "./timeline";
 export type {
   CreateToolRegistryOptions,
+  RetainedArtifactLoader,
+  RetainedScreenshotLoader,
   ToolRegistry,
   ToolRegistryEntry,
   ToolRenderer,

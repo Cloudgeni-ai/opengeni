@@ -10,6 +10,7 @@ import { ClientResumableVoiceInputConfig } from "./transcription-recordings";
 
 export * from "./slack-bot-scopes";
 export * from "./connector-destinations";
+export * from "./image-generation";
 
 export {
   CreateWorkspaceArtifactRequest,
@@ -71,6 +72,7 @@ export {
   COMPUTER_SCREENSHOT_MAX_PIXELS,
   COMPUTER_SCREENSHOT_RETENTION_MS,
   COMPUTER_SCREENSHOT_WORKSPACE_QUOTA_BYTES,
+  GENERATED_IMAGE_MAX_BYTES,
   RETAINED_OUTPUT_DEFAULT_PAGE_BYTES,
   RETAINED_OUTPUT_MAX_PAGE_BYTES,
   RETAINED_OUTPUT_RECEIPT_MAX_BYTES,
@@ -81,6 +83,7 @@ export {
   RetainedOutputKind,
   RetainedOutputUnavailableReason,
   retainedArtifactReferenceFromFile,
+  retainedGeneratedImageReferenceFromFile,
   retainedScreenshotReferenceFromFile,
   retainedOutputUnavailable,
   resolveRetainedOutputRange,
@@ -88,6 +91,7 @@ export {
   type RetainedArtifactFileInput,
   type RetainedArtifactMetadata,
   type RetainedArtifactReference,
+  type RetainedGeneratedImageArtifactInput,
   type RetainedScreenshotArtifactInput,
   type RetainedArtifactUnavailable,
   type RetainedOutputAvailableEvidence,

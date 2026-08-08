@@ -6,6 +6,7 @@ import {
   RetainedArtifactReferenceSchema,
   RetainedOutputEvidenceSchema,
   retainedArtifactReferenceFromFile,
+  retainedGeneratedImageReferenceFromFile,
   resolveRetainedOutputRange,
   validateRetainedOutputEvidence,
 } from "../src/retained-output";
@@ -101,10 +102,34 @@ describe("retained-output evidence", () => {
       contentType: "text/plain",
       retention: { policy: "workspace_file", expiresAt: null },
     });
-    expect(RetainedArtifactReferenceSchema.parse(reference)).toEqual(reference);
+    expect(reference).not.toBeNull();
+    expect(RetainedArtifactReferenceSchema.parse(reference!)).toEqual(reference);
     expect(retainedArtifactReferenceFromFile({ ...file, status: "pending_upload" })).toBeNull();
     expect(retainedArtifactReferenceFromFile({ ...file, sha256: null })).toBeNull();
     expect(retainedArtifactReferenceFromFile({ ...file, sha256: "A".repeat(64) })).toBeNull();
+  });
+
+  test("mints a permanent generated-image receipt with exact dimensions", () => {
+    const reference = retainedGeneratedImageReferenceFromFile({
+      id: ARTIFACT_ID,
+      workspaceId: WORKSPACE_ID,
+      status: "ready",
+      contentType: "image/png",
+      sizeBytes: 1024,
+      sha256: "b".repeat(64),
+      updatedAt: "2026-08-08T00:00:00.000Z",
+      width: 1024,
+      height: 1024,
+    });
+
+    expect(reference).toMatchObject({
+      available: true,
+      kind: "generated_image",
+      dimensions: { width: 1024, height: 1024 },
+      retention: { policy: "workspace_file", expiresAt: null },
+    });
+    if (!reference) throw new Error("expected a ready image to mint a retained artifact reference");
+    expect(RetainedArtifactReferenceSchema.parse(reference)).toEqual(reference);
   });
 
   test("represents authenticated unavailable artifact metadata without a provider location", () => {

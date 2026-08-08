@@ -15,6 +15,8 @@ export const COMPUTER_SCREENSHOT_MAX_PIXELS = 67_108_864;
 export const COMPUTER_SCREENSHOT_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 /** Hard workspace reservation across pending + ready screenshot artifacts. */
 export const COMPUTER_SCREENSHOT_WORKSPACE_QUOTA_BYTES = 5 * 1024 * 1024 * 1024;
+/** Generated images are permanent workspace files, never inline history blobs. */
+export const GENERATED_IMAGE_MAX_BYTES = 64 * 1024 * 1024;
 
 const encoder = new TextEncoder();
 const LOWERCASE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -31,6 +33,7 @@ export const RetainedOutputKind = z.enum([
   "internal_update",
   "event_media",
   "computer_screenshot",
+  "generated_image",
   "file",
 ]);
 export type RetainedOutputKind = z.infer<typeof RetainedOutputKind>;
@@ -116,14 +119,47 @@ export const RetainedArtifactReferenceSchema = z
       });
     }
 
-    if (value.kind === "computer_screenshot") {
+    if (value.kind === "computer_screenshot" || value.kind === "generated_image") {
       if (!value.dimensions) {
         ctx.addIssue({
           code: "custom",
           path: ["dimensions"],
-          message: "computer screenshot receipts require exact dimensions",
+          message: `${value.kind} receipts require exact dimensions`,
+        });
+      } else if (
+        value.dimensions.width * value.dimensions.height >
+        COMPUTER_SCREENSHOT_MAX_PIXELS
+      ) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["dimensions"],
+          message: `${value.kind} dimensions exceed the pixel limit`,
         });
       }
+    }
+
+    if (value.kind === "generated_image") {
+      if (value.retention.policy !== "workspace_file" || !workspaceMatch || sessionMatch) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["retention"],
+          message: "generated images require permanent workspace-file retrieval",
+        });
+      }
+      if (
+        !["image/png", "image/jpeg", "image/webp"].includes(value.contentType) ||
+        value.originalBytes <= 0 ||
+        value.originalBytes > GENERATED_IMAGE_MAX_BYTES
+      ) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["contentType"],
+          message: "generated image media metadata is invalid",
+        });
+      }
+    }
+
+    if (value.kind === "computer_screenshot") {
       if (value.retention.policy !== "session_screenshot" || !sessionMatch) {
         ctx.addIssue({
           code: "custom",
@@ -190,6 +226,11 @@ export type RetainedScreenshotArtifactInput = RetainedArtifactFileInput & {
   expiresAt: string;
 };
 
+export type RetainedGeneratedImageArtifactInput = RetainedArtifactFileInput & {
+  width: number;
+  height: number;
+};
+
 /**
  * Convert a ready, integrity-addressed workspace file into the only available
  * retained-output receipt shape. Invalid, pending, or checksum-less files fail
@@ -244,6 +285,42 @@ export function retainedScreenshotReferenceFromFile(
     retrieval: {
       method: "GET" as const,
       path: `/v1/workspaces/${file.workspaceId}/sessions/${file.sessionId}/artifacts/${file.id}/content`,
+      acceptRanges: "bytes" as const,
+      maxRangeBytes: RETAINED_OUTPUT_MAX_PAGE_BYTES,
+    },
+  };
+  const parsed = RetainedArtifactReferenceSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+/** Build the permanent workspace receipt for one validated generated image. */
+export function retainedGeneratedImageReferenceFromFile(
+  file: RetainedGeneratedImageArtifactInput,
+): RetainedArtifactReference | null {
+  if (
+    file.status !== "ready" ||
+    !file.sha256 ||
+    file.sizeBytes <= 0 ||
+    file.sizeBytes > GENERATED_IMAGE_MAX_BYTES
+  ) {
+    return null;
+  }
+  const value = {
+    available: true as const,
+    artifactId: file.id,
+    kind: "generated_image" as const,
+    contentType: canonicalRetainedContentType(file.contentType),
+    originalBytes: file.sizeBytes,
+    sha256: file.sha256,
+    retainedAt: file.updatedAt,
+    dimensions: { width: file.width, height: file.height },
+    retention: {
+      policy: "workspace_file" as const,
+      expiresAt: null,
+    },
+    retrieval: {
+      method: "GET" as const,
+      path: `/v1/workspaces/${file.workspaceId}/artifacts/${file.id}/content`,
       acceptRanges: "bytes" as const,
       maxRangeBytes: RETAINED_OUTPUT_MAX_PAGE_BYTES,
     },

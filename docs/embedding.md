@@ -791,6 +791,14 @@ approvals. Hooks outside that baseline export exact structural refinements:
 used by the mounted hooks; it does not stub workspace administration, billing,
 rig, connected-machine, or unrelated workbench APIs.
 
+Generated-image timeline rows carry a compact permanent artifact receipt. A
+host using the styled `MessageTimeline` can pass `loadRetainedArtifact`; the
+stock web implementation calls the SDK's
+`createRetainedArtifactDownloadUrl`, preserving the host's authenticated
+workspace boundary while avoiding a full browser byte copy. A custom timeline
+may instead call `downloadRetainedArtifact`, which verifies bounded ranges and
+SHA-256. See [`image-generation.md`](image-generation.md).
+
 Repository selection is also host-composable. `CreateSessionRequest.resources`
 accepts the canonical provider-qualified `ResourceRef[]`, including several
 providers, repositories, and credential bindings in one session. The stock web

@@ -33,6 +33,7 @@ import {
   sessionEventMediaPreview,
   sessionEventMediaPreviewFromDataUrl,
   signDelegatedAccessToken,
+  GenerateImageToolInput,
   RequestHumanInputToolInput,
   type GitCredentialProvider,
   type GitCredentialTransport,
@@ -105,6 +106,7 @@ import {
   // it returns a { type: 'hosted_tool', providerData: { type: 'web_search' } }
   // descriptor the OpenAI Responses model serializes into request.tools[].
   webSearchTool,
+  imageGenerationTool,
   // The SDK's V4A-diff applier — the apply_patch host the filesystem capability's
   // editor uses. The agent-loop-free sandbox leaf cannot import it (it lives behind
   // the `@openai/agents` root the leaf forbids), so the barrel imports it here and
@@ -1818,6 +1820,13 @@ export type BuildAgentOptions = {
   //   true (let the SDK decide from the model instance) — non-codex paths are
   //   byte-for-byte unchanged.
   hostedWebSearch?: boolean;
+  /** Stable provider-specific image-generation transport for this turn. */
+  imageGeneration?:
+    | { kind: "native_hosted" }
+    | {
+        kind: "provider_adapter";
+        execute: (input: { prompt: string }, context: { toolCallId: string }) => Promise<unknown>;
+      };
   encryptedReasoning?: boolean;
   structuredToolTransport?: boolean;
   /** Explicit provider-contained progressive tool-disclosure strategy. */
@@ -2365,7 +2374,28 @@ export function buildOpenGeniAgent(
   // with the sandbox capability tools (prepareSandboxAgent: tools =
   // [...agent.tools, ...capability.tools()]), so hosted web_search coexists with
   // both rather than overriding them.
-  const hostedTools = hostedWebSearch ? [webSearchTool()] : [];
+  const hostedTools: Tool[] = hostedWebSearch ? [webSearchTool()] : [];
+  if (options.imageGeneration?.kind === "native_hosted") {
+    hostedTools.push(imageGenerationTool({ model: "gpt-image-2" }));
+  }
+  const providerImageGenerationTool =
+    options.imageGeneration?.kind === "provider_adapter"
+      ? agentTool({
+          name: "generate_image",
+          description:
+            "Generate exactly one image from the requested visual description. Use this when the user asks to create an image. The result is a permanent image artifact and its exact sandbox path. Do not call it repeatedly unless the user requested multiple distinct images.",
+          parameters: GenerateImageToolInput,
+          errorFunction: null,
+          execute: async (input, _context, details) => {
+            const toolCallId = details?.toolCall?.callId;
+            if (!toolCallId) throw new Error("Image-generation tool call has no durable identity");
+            if (options.imageGeneration?.kind !== "provider_adapter") {
+              throw new Error("Image-generation adapter changed during execution");
+            }
+            return await options.imageGeneration.execute(input, { toolCallId });
+          },
+        })
+      : null;
   const humanInputTool =
     options.humanInputEnabled === false
       ? null
@@ -2393,7 +2423,11 @@ export function buildOpenGeniAgent(
             });
           },
         });
-  const agentTools = humanInputTool ? [...hostedTools, humanInputTool] : hostedTools;
+  const agentTools = [
+    ...hostedTools,
+    ...(providerImageGenerationTool ? [providerImageGenerationTool] : []),
+    ...(humanInputTool ? [humanInputTool] : []),
+  ];
   const baseConfig = {
     name: "OpenGeni Agent",
     model: options.model ?? settings.openaiModel,
@@ -4992,6 +5026,12 @@ export type RunAgentStreamOptions = {
   sandboxClient?: unknown;
   sandboxEnvironment?: Record<string, string>;
   onRuntimeEvent?: (event: NormalizedRuntimeEvent) => Promise<void> | void;
+  /**
+   * Called after a newly created/resumed SDK-owned sandbox has completed its
+   * platform setup, but before the session is released to the first agent
+   * operation. Hosts use this for durable, session-scoped artifact hydration.
+   */
+  onSandboxSessionReady?: (session: SandboxSessionLike) => Promise<void> | void;
   contextCompactionSignal?: () => ProviderContextTokenSignal | null | undefined;
   contextCompactionRequested?: () => boolean | Promise<boolean>;
   // Host-managed git credential renewal registration. Called only after the
@@ -5732,7 +5772,7 @@ export async function runAgentStream(
   const gitCredentialBindings = gitCredentialBindingsForAgent(agent);
   const toolspaceTokenSeed = toolspaceTokenSeedForAgent(agent);
   const legacyRigSetup = rigSetupDescriptorForAgent(agent);
-  const client = toolspaceClient
+  const lifecycleClient = toolspaceClient
     ? withSandboxLifecycleHooks(
         toolspaceClient,
         [
@@ -5763,6 +5803,10 @@ export async function runAgentStream(
         },
       )
     : undefined;
+  const client =
+    lifecycleClient && overrides.onSandboxSessionReady
+      ? withSandboxSessionReady(lifecycleClient, overrides.onSandboxSessionReady)
+      : lifecycleClient;
   const sandboxSessionState = prepared.sandboxSessionState;
   // Apply the built-in per-call filters (computer-call normalization, optional
   // provider-id stripping, output bounds), then any per-turn filter, the model's
@@ -6323,6 +6367,69 @@ export function withSandboxFileDownloads(
       ? {
           resume: async (state: SandboxSessionState) =>
             await wrapSession(await client.resume!(state)),
+        }
+      : {}),
+    ...(client.delete
+      ? {
+          delete: async (state: SandboxSessionState) => await client.delete!(state),
+        }
+      : {}),
+    ...(client.serializeSessionState
+      ? {
+          serializeSessionState: async (state: SandboxSessionState, options) =>
+            await client.serializeSessionState!(state, options),
+        }
+      : {}),
+    ...(client.canPersistOwnedSessionState
+      ? {
+          canPersistOwnedSessionState: async (state: SandboxSessionState) =>
+            await client.canPersistOwnedSessionState!(state),
+        }
+      : {}),
+    ...(client.canReusePreservedOwnedSession
+      ? {
+          canReusePreservedOwnedSession: async (state: SandboxSessionState) =>
+            await client.canReusePreservedOwnedSession!(state),
+        }
+      : {}),
+    ...(client.deserializeSessionState
+      ? {
+          deserializeSessionState: async (state: Record<string, unknown>) =>
+            await client.deserializeSessionState!(state),
+        }
+      : {}),
+  };
+}
+
+/**
+ * Observe each real SDK-owned sandbox exactly once, after all inner client
+ * decorators have completed and before the SDK can issue its first operation.
+ */
+export function withSandboxSessionReady(
+  client: SandboxClient,
+  callback: (session: SandboxSessionLike) => Promise<void> | void,
+): SandboxClient {
+  const completed = new WeakSet<object>();
+  const ready = async <T extends SandboxSessionLike>(session: T): Promise<T> => {
+    if (typeof session === "object" && session !== null && !completed.has(session)) {
+      await callback(session);
+      completed.add(session);
+    }
+    return session;
+  };
+  return {
+    backendId: client.backendId,
+    ...(client.supportsDefaultOptions !== undefined
+      ? { supportsDefaultOptions: client.supportsDefaultOptions }
+      : {}),
+    ...(client.create
+      ? {
+          create: async (...args: any[]) => await ready(await (client.create as any)(...args)),
+        }
+      : {}),
+    ...(client.resume
+      ? {
+          resume: async (state: SandboxSessionState) => await ready(await client.resume!(state)),
         }
       : {}),
     ...(client.delete

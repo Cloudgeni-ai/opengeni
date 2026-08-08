@@ -28,6 +28,11 @@ export type { SseMessage } from "./sse";
 export { normalizeMcpOutput } from "./mcp-output";
 export type { NormalizedMcpOutput } from "./mcp-output";
 export {
+  generatedImageSandboxPathMatches,
+  parseGeneratedImageReceipt,
+  parseRetainedGeneratedImageReference,
+} from "./retained-artifacts";
+export {
   CodexRealtimeMicrophoneError,
   acquireCodexRealtimeMicrophone,
   codexRealtimeMicrophoneHealthy,
@@ -453,8 +458,11 @@ export type {
   ProductAccessMode,
   LatencyMode,
   ReasoningEffort,
+  GeneratedImageReceipt,
   RetainedArtifactContent,
   RetainedArtifactContentOptions,
+  RetainedArtifactDownload,
+  RetainedArtifactDownloadOptions,
   RetainedArtifactMetadata,
   RetainedArtifactReference,
   RetainedArtifactUnavailable,
