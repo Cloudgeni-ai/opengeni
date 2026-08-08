@@ -1,5 +1,11 @@
 # @opengeni/react
 
+## 0.49.2
+
+### Patch Changes
+
+- bdac906: Open the live desktop automatically when its viewer mounts instead of requiring a confirmation click.
+
 ## 0.49.1
 
 ### Patch Changes
