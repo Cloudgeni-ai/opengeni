@@ -645,7 +645,7 @@ export type MintDesktopStreamInput = {
   session: Session;
   /** The viewer holder id the scoped token is minted for. */
   viewerId: string;
-  /** The live lease (must be warm/draining — the box is up). A selfhosted-active
+  /** The live lease (must be holder-confirmed warm). A selfhosted-active
    *  session may have no Modal group lease; omit and the selfhosted branch handles it. */
   lease?: LeaseSnapshot;
   /** The epoch the CALLER last observed the URL minted under. When the live
@@ -737,7 +737,7 @@ export async function mintDesktopStream(
 
   // GATE 2: the box must be live (the handshake never spins one up — a cold box
   // returns lease_cold; the viewer-attach path warms it first, then mints).
-  if (!lease || (lease.liveness !== "warm" && lease.liveness !== "draining")) {
+  if (!lease || lease.liveness !== "warm") {
     return null;
   }
 
@@ -899,7 +899,7 @@ export type MintTerminalStreamInput = {
   session: Session;
   /** The viewer holder / principal id the scoped token is minted for. */
   viewerId: string;
-  /** The live lease (must be warm/draining — the box is up). A selfhosted-active
+  /** The live lease (must be holder-confirmed warm). A selfhosted-active
    *  session may have no Modal group lease; omit and the selfhosted branch handles it. */
   lease?: LeaseSnapshot;
   /** Test seam: override how the box is re-established by id (see
@@ -967,7 +967,7 @@ export async function mintTerminalStream(
   }
 
   // GATE 2: the box must be live (the handshake never spins one up).
-  if (!lease || (lease.liveness !== "warm" && lease.liveness !== "draining")) {
+  if (!lease || lease.liveness !== "warm") {
     return null;
   }
 

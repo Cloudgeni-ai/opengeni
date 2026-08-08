@@ -7,10 +7,12 @@ import {
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
+import { sandboxAcceptsLiveIo } from "../lib/sandbox-liveness";
 import { usePageLiveActivity } from "./internal";
 
-// "on-demand" is the boxless-benign resting state: the lease is cold and NOTHING
-// asked to warm a box (no viewer/consent action, no files-tab warm). Under lazy
+// "on-demand" is the boxless-benign resting state: the lease is not currently
+// holder-backed and NOTHING asked to warm a box (no viewer/consent action, no
+// files-tab warm). Under lazy
 // provisioning a chat-only turn never creates a box, so this is the correct calm
 // terminal state — NOT an error. It is distinct from "cold", which now means "a
 // warm-up is genuinely in flight" (a viewer attach was requested) and therefore
@@ -274,7 +276,7 @@ export function useSessionCapabilities(
           .then((caps) => {
             if (cancelled) return;
             settle(caps);
-            if (caps.liveness === "warm" || caps.liveness === "draining") {
+            if (sandboxAcceptsLiveIo(caps.liveness)) {
               setState("ready");
               return;
             }
@@ -419,16 +421,16 @@ export function useSessionCapabilities(
         }
 
         // Whether ANYTHING asked to warm a box this negotiation. Only then is a
-        // cold lease "warming in flight" — worth polling, and worth surfacing a
+        // non-warm lease "warming in flight" — worth polling, and worth surfacing a
         // stall as an error. With no warm-up requested a cold lease is the benign
         // boxless resting state (below), never an error.
         const warmUpRequested = wantDesktopAttach || wantTerminalAttach || wantFilesAttach;
-        if (caps.liveness === "warm" || caps.liveness === "draining" || localViewerId) {
+        if (sandboxAcceptsLiveIo(caps.liveness) || localViewerId) {
           setState("ready");
           startHeartbeat(caps);
         } else if (warmUpRequested) {
           // A warm-up is genuinely in flight (a viewer attach was requested) but the
-          // box isn't warm yet — poll until it warms, with the patience deadline so a
+          // box isn't holder-confirmed warm yet — poll until it is, with the deadline so a
           // real stall surfaces as an error.
           setState("cold");
           pollUntilWarm();

@@ -12,6 +12,7 @@ import type {
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type ClientOverride, useOpenGeni } from "../provider";
+import { sandboxAcceptsLiveIo } from "../lib/sandbox-liveness";
 
 /** The git-status overlay a file row may carry (tints modified files in the tree). */
 export type FileTreeStatus = "added" | "modified" | "deleted" | "renamed" | "untracked";
@@ -487,7 +488,10 @@ export function useSandboxFiles(
   ].join("\u0000");
   const repoPaths = useMemo(() => repoPathsKey.split("\u0000"), [repoPathsKey]);
   const capture = options.capture ?? null;
-  const isLive = options.liveness === "warm" || options.liveness === "draining";
+  const isLive = sandboxAcceptsLiveIo(options.liveness);
+  // `liveness` predates this hook option. Preserve legacy embedders that omit it;
+  // an explicit lifecycle value, however, must pass the warm-only provider fence.
+  const acceptsEventReads = options.liveness === undefined || isLive;
   const identityKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${rootPath}\u0000${repoPathsKey}`;
 
   const [tree, setTree] = useState<FileTreeNode[]>([]);
@@ -1075,7 +1079,7 @@ export function useSandboxFiles(
 
   // Initial paint + reset on identity change. Source selection:
   //   • any box WITH a capture → paint instantly from the durable capture index;
-  //     a warm/draining box then reconciles live in place.
+  //     a holder-confirmed warm box then reconciles live in place.
   //   • if that live reconciliation fails, keep the capture visible and read-only.
   //   • cold box with NO capture → best-effort live list (status quo — never worse).
   // Key the seed on the capture's REVISION (a primitive), not the manifest object
@@ -1197,13 +1201,20 @@ export function useSandboxFiles(
 
   useEffect(() => {
     if (!enabled || !events) return;
-    // An inactive tab must not replay the entire historical event log when it is
-    // opened. Keep its cursor current without performing any reconciliation;
-    // only events that arrive while Files is visible should trigger live reads.
-    if (!active) {
+    // An inactive tab or holderless draining/cold lease must not replay the
+    // historical log into live provider reads. The capture already includes
+    // those events; a later warm transition performs one authoritative refresh.
+    if (!active || !acceptsEventReads) {
       for (const event of events) {
         if (event.sequence > lastSeqRef.current) lastSeqRef.current = event.sequence;
       }
+      if (debounceRef.current) {
+        clearTimeout(debounceRef.current);
+        debounceRef.current = null;
+      }
+      pendingParentsRef.current = new Set();
+      pendingGitRef.current = false;
+      pendingAgentToolRef.current = false;
       return;
     }
     let sawNew = false;
@@ -1297,10 +1308,10 @@ export function useSandboxFiles(
         ]);
       })();
     }, delay);
-  }, [enabled, active, events, reconcilePath, refreshGitOverlay]);
+  }, [enabled, active, acceptsEventReads, events, reconcilePath, refreshGitOverlay]);
 
   useEffect(() => {
-    if (active) return;
+    if (active && acceptsEventReads) return;
     if (debounceRef.current) {
       clearTimeout(debounceRef.current);
       debounceRef.current = null;
@@ -1308,7 +1319,7 @@ export function useSandboxFiles(
     pendingParentsRef.current = new Set();
     pendingGitRef.current = false;
     pendingAgentToolRef.current = false;
-  }, [active]);
+  }, [active, acceptsEventReads]);
 
   useEffect(
     () => () => {

@@ -372,6 +372,79 @@ describe("workbench prewarm gating (Refinement 1)", () => {
     await hook.unmount();
   });
 
+  test("a draining capture replays historical events with zero live Files or Git reads", async () => {
+    const historicalEvents = [
+      fakeEvent(1, "git.changed", { revision: 3 }),
+      fakeEvent(2, "fs.changed", {
+        changes: [{ path: "app.py", kind: "modified", isDir: false, sizeBytes: 10 }],
+        source: "agent",
+        revision: 3,
+        leaseEpoch: 1,
+      }),
+      fakeEvent(3, "agent.toolCall.output", {}),
+      fakeEvent(4, "sandbox.command.output.delta", { stream: "stdout", chunk: "done\n" }),
+    ];
+
+    for (const initialTab of [WORKBENCH_TAB_CHANGES, WORKBENCH_TAB_FILES]) {
+      const reads = {
+        fsList: 0,
+        fsListBatch: 0,
+        gitStatus: 0,
+        gitDiff: 0,
+        gitReadBatch: 0,
+      };
+      const { client, spy } = coldClient({
+        getStreamCapabilities: async () => fakeCapabilities({ liveness: "draining" }),
+        fsList: async () => {
+          reads.fsList += 1;
+          throw new Error("draining review must not list the provider filesystem");
+        },
+        fsListBatch: async () => {
+          reads.fsListBatch += 1;
+          throw new Error("draining review must not batch-list the provider filesystem");
+        },
+        gitStatus: async () => {
+          reads.gitStatus += 1;
+          throw new Error("draining review must not query provider Git status");
+        },
+        gitDiff: async () => {
+          reads.gitDiff += 1;
+          throw new Error("draining review must not query a provider Git diff");
+        },
+        gitReadBatch: async () => {
+          reads.gitReadBatch += 1;
+          throw new Error("draining review must not batch-read provider Git");
+        },
+      });
+      const hook = await renderTabsHook(client, {
+        sessionId: SESSION_ID,
+        events: historicalEvents,
+        initialTab,
+      });
+
+      // Cross the command-delta debounce window too: neither immediate nor
+      // delayed historical invalidation may escape the capture boundary.
+      await flush(1_150);
+      expect(reads).toEqual({
+        fsList: 0,
+        fsListBatch: 0,
+        gitStatus: 0,
+        gitDiff: 0,
+        gitReadBatch: 0,
+      });
+      expect(spy.attachCalls).toBe(0);
+      const changes = hook.result.current.tabs.find((tab) => tab.id === WORKBENCH_TAB_CHANGES);
+      const files = hook.result.current.tabs.find((tab) => tab.id === WORKBENCH_TAB_FILES);
+      expect(
+        (changes!.content as ReactElement<{ git: { source: string | null } }>).props.git.source,
+      ).toBe("capture");
+      expect(
+        (files!.content as ReactElement<{ files: { source: string | null } }>).props.files.source,
+      ).toBe("capture");
+      await hook.unmount();
+    }
+  });
+
   test("a cold dock mount browsing capture-served surfaces warms NO box", async () => {
     const { client, spy } = coldClient();
     const hook = await renderTabsHook(client, { sessionId: SESSION_ID, events: [] });

@@ -2108,9 +2108,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       settings.sandboxDesktopEnabled &&
       !streamTokenDegraded(settings) &&
       acknowledged &&
-      (session.activeSandboxId != null ||
-        lease?.liveness === "warm" ||
-        lease?.liveness === "draining");
+      (session.activeSandboxId != null || lease?.liveness === "warm");
     if (desktopUnlocked) {
       desktopStream = await mintDesktopStream(
         { db, settings, bus },
@@ -2137,9 +2135,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const terminalUnlocked =
       settings.sandboxTerminalEnabled &&
       !streamTokenDegraded(settings) &&
-      (session.activeSandboxId != null ||
-        lease?.liveness === "warm" ||
-        lease?.liveness === "draining");
+      (session.activeSandboxId != null || lease?.liveness === "warm");
     if (terminalUnlocked) {
       terminalStream = await mintTerminalStream(
         { db, settings, bus },

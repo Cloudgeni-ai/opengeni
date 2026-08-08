@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import type { MachineState } from "@opengeni/sdk";
 import type { SessionCapabilitiesState } from "./use-session-capabilities";
+import { sandboxAcceptsLiveIo } from "../lib/sandbox-liveness";
 
 /** The one truthful machine indicator. Honest staleness beats
  *  fake liveness: a cold/asleep box reads "offline — as of <time>", never "live". */
@@ -53,7 +54,7 @@ export function formatAsOf(capturedAt: string, now: number): string {
  * it; the whole point is a deterministic, testable projection).
  *
  * Precedence:
- *   1. warm/draining lease → **live** (a warm box always wins).
+ *   1. warm lease → **live** (a holder-confirmed box always wins).
  *   2. actively warming (negotiating, wake-on-edit, or a reconnecting/enrolling
  *      machine) → **waking**.
  *   3. everything else (a cold/asleep box, a self-hosted machine that's offline,
@@ -64,8 +65,9 @@ export function deriveMachineChip(input: DeriveMachineChipInput): MachineChip {
   const asOf = input.capturedAt ?? null;
   const offlineLabel = asOf ? `Offline — as of ${formatAsOf(asOf, now)}` : "Offline";
 
-  // 1. A warm (or draining) lease is live regardless of anything else.
-  if (input.liveness === "warm" || input.liveness === "draining") {
+  // 1. Only holder-confirmed warm is live. Draining is teardown-owned and may
+  // already have lost its provider instance, so it uses the capture-backed label.
+  if (sandboxAcceptsLiveIo(input.liveness)) {
     return { state: "live", label: "Live", asOf: null };
   }
 

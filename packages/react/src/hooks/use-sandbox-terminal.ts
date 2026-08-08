@@ -7,6 +7,7 @@ import type {
 import { OpenGeniApiError } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
+import { sandboxAcceptsLiveIo } from "../lib/sandbox-liveness";
 
 export type TerminalChunk = {
   /** Stable key (the source event id) so the xterm writer tracks a written-cursor. */
@@ -107,9 +108,9 @@ export function useSandboxTerminal(
   // projection is the single source of truth for what's written). The open is
   // gated on a WARM box: opening on a cold/warming lease races the box (the PTY
   // exec-session is created on a box that the next op may not resume), which is
-  // exactly the "session not found" terminal failure; we wait for warm/draining.
+  // exactly the "session not found" terminal failure; we wait for warm.
   const openInFlight = useRef(false);
-  const boxWarm = liveness === undefined || liveness === "warm" || liveness === "draining";
+  const boxWarm = liveness === undefined || sandboxAcceptsLiveIo(liveness);
   useEffect(() => {
     if (!interactive || !sessionId || ptyFilter || !boxWarm) {
       setOpenError(null);

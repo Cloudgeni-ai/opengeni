@@ -20,7 +20,7 @@ export interface NegotiationContext {
   sessionId: string;
   backend: SandboxBackend;
   os: SandboxOs;
-  /** Current lease liveness; cold means nothing is provisioned yet. */
+  /** Current lease liveness; only warm proves a holder-backed live provider. */
   liveness: "cold" | "warming" | "warm" | "draining";
   /** The lease epoch echoed on viewer heartbeats (the split-brain fence). */
   leaseEpoch: number;
@@ -264,7 +264,7 @@ export function negotiateCapabilities(ctx: NegotiationContext): SessionCapabilit
     if (ptyCapable && ctx.terminalEnabled === false) {
       transport = "sse-events";
       reason = "disabled_by_policy";
-    } else if (ptyCapable && ctx.liveness === "cold" && !ctx.terminalStream) {
+    } else if (ptyCapable && ctx.liveness !== "warm" && !ctx.terminalStream) {
       transport = "sse-events";
       reason = "lease_cold";
     }
@@ -319,7 +319,7 @@ export function negotiateCapabilities(ctx: NegotiationContext): SessionCapabilit
       // reason rather than crashing the API.
       available = false;
       reason = "disabled_by_policy";
-    } else if (ctx.liveness === "cold" && !ctx.desktopStream) {
+    } else if (ctx.liveness !== "warm" && !ctx.desktopStream) {
       // A PRESENT minted pixel url (ctx.desktopStream) is ITSELF proof of liveness:
       // the box (Modal-warm OR selfhosted-online) actually served the noVNC port,
       // so a cold MODAL-GROUP lease liveness must NOT degrade it. lease_cold only

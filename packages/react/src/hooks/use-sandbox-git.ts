@@ -6,6 +6,7 @@ import type {
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type ClientOverride, useOpenGeni } from "../provider";
+import { sandboxAcceptsLiveIo } from "../lib/sandbox-liveness";
 
 export type UseSandboxGitOptions = ClientOverride & {
   /** Live event log (usually `useSessionEvents().events`) — drives auto-refresh
@@ -206,7 +207,10 @@ export function useSandboxGit(
   // remains live-only; legacy captures simply lack branchDiff and fall back via
   // the workspace controller without inventing an empty branch comparison.
   const capture = comparison === "staged" ? null : (options.capture ?? null);
-  const isLive = options.liveness === "warm" || options.liveness === "draining";
+  const isLive = sandboxAcceptsLiveIo(options.liveness);
+  // `liveness` is optional for compatibility with direct hook consumers. Only
+  // an explicit lifecycle value is subject to the warm-only provider fence.
+  const acceptsEventReads = options.liveness === undefined || isLive;
   const identityKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${repoPathsKey}\u0000${workspaceWide}\u0000${comparison}`;
 
   const [diff, setDiff] = useState<SandboxGitFileDiff[]>([]);
@@ -466,7 +470,20 @@ export function useSandboxGit(
   // therefore emit no git.changed event. This is event-driven, never polling.
   const events = options.events;
   useEffect(() => {
-    if (!enabled || !active || !events) {
+    if (!enabled || !events) {
+      if (commandRefreshTimerRef.current) {
+        clearTimeout(commandRefreshTimerRef.current);
+        commandRefreshTimerRef.current = null;
+      }
+      return;
+    }
+    // Historical events describe the capture we already loaded. Inactive tabs
+    // and holderless draining/cold leases advance the cursor without issuing
+    // provider I/O; becoming warm performs one authoritative reconcile above.
+    if (!active || !acceptsEventReads) {
+      for (const event of events) {
+        if (event.sequence > lastChangeRef.current) lastChangeRef.current = event.sequence;
+      }
       if (commandRefreshTimerRef.current) {
         clearTimeout(commandRefreshTimerRef.current);
         commandRefreshTimerRef.current = null;
@@ -499,7 +516,7 @@ export function useSandboxGit(
         }, 1_000);
       }
     }
-  }, [enabled, active, events, refresh]);
+  }, [enabled, active, acceptsEventReads, events, refresh]);
 
   useEffect(
     () => () => {
