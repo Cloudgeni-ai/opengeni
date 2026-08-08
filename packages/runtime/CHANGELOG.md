@@ -1,5 +1,13 @@
 # @opengeni/runtime
 
+## 0.18.30
+
+### Patch Changes
+
+- c8eb465: Add explicit provider-contained lazy-tool transports: preserve Codex native search, use native client tool search for direct OpenAI/Azure Responses, and use a cache-stable ordinary search/invoke dispatcher for other function-calling providers.
+- Updated dependencies [c8eb465]
+  - @opengeni/config@0.12.5
+
 ## 0.18.29
 
 ### Patch Changes
