@@ -4,7 +4,14 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HTTPException } from "hono/http-exception";
 import { ChannelAUnavailableError, ChannelAValidationError } from "@opengeni/runtime/sandbox";
-import { mapChannelAError, runConcurrentChannelAReads } from "../src/sandbox/channel-a";
+import {
+  isChannelAHandleCacheEntryFresh,
+  isChannelAProcessHandleCacheEntryFresh,
+  mapChannelAError,
+  runChannelAReadWithFreshHandleRetry,
+  runConcurrentChannelAReads,
+  shouldEvictChannelAHandleAfterError,
+} from "../src/sandbox/channel-a";
 
 // P4.4 route-discipline guards for all Channel-A structured-service routes (a
 // complement to the real-box runtime test + the docker e2e). The invariants the
@@ -23,26 +30,59 @@ const here = dirname(fileURLToPath(import.meta.url));
 const sessionsRoute = readFileSync(resolve(here, "..", "src", "routes", "sessions.ts"), "utf8");
 const channelASeam = readFileSync(resolve(here, "..", "src", "sandbox", "channel-a.ts"), "utf8");
 
-type RouteSpec = { path: string; permission: "files:read" | "files:write" | "terminal:attach" };
+type RouteSpec = {
+  path: string;
+  permission: "files:read" | "files:write" | "terminal:attach";
+};
 const CHANNEL_A_ROUTES: RouteSpec[] = [
-  { path: "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/list", permission: "files:read" },
+  {
+    path: "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/list",
+    permission: "files:read",
+  },
   {
     path: "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/list-batch",
     permission: "files:read",
   },
-  { path: "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/read", permission: "files:read" },
-  { path: "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/write", permission: "files:write" },
-  { path: "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/delete", permission: "files:write" },
-  { path: "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/move", permission: "files:write" },
-  { path: "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/mkdir", permission: "files:write" },
-  { path: "/v1/workspaces/:workspaceId/sessions/:sessionId/git/status", permission: "files:read" },
-  { path: "/v1/workspaces/:workspaceId/sessions/:sessionId/git/diff", permission: "files:read" },
+  {
+    path: "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/read",
+    permission: "files:read",
+  },
+  {
+    path: "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/write",
+    permission: "files:write",
+  },
+  {
+    path: "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/delete",
+    permission: "files:write",
+  },
+  {
+    path: "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/move",
+    permission: "files:write",
+  },
+  {
+    path: "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/mkdir",
+    permission: "files:write",
+  },
+  {
+    path: "/v1/workspaces/:workspaceId/sessions/:sessionId/git/status",
+    permission: "files:read",
+  },
+  {
+    path: "/v1/workspaces/:workspaceId/sessions/:sessionId/git/diff",
+    permission: "files:read",
+  },
   {
     path: "/v1/workspaces/:workspaceId/sessions/:sessionId/git/read-batch",
     permission: "files:read",
   },
-  { path: "/v1/workspaces/:workspaceId/sessions/:sessionId/git/log", permission: "files:read" },
-  { path: "/v1/workspaces/:workspaceId/sessions/:sessionId/git/show", permission: "files:read" },
+  {
+    path: "/v1/workspaces/:workspaceId/sessions/:sessionId/git/log",
+    permission: "files:read",
+  },
+  {
+    path: "/v1/workspaces/:workspaceId/sessions/:sessionId/git/show",
+    permission: "files:read",
+  },
   {
     path: "/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/exec",
     permission: "terminal:attach",
@@ -199,7 +239,7 @@ describe("P4.4 Channel-A route discipline", () => {
     }
   });
 
-  test("every provider-backed point read uses the cross-replica read seam", () => {
+  test("every side-effect-free point read uses the coordinated recovery seam", () => {
     for (const route of [
       "fs/list",
       "fs/list-batch",
@@ -227,6 +267,76 @@ describe("P4.4 Channel-A route discipline", () => {
       expect(body).toContain("withChannelA(");
       expect(body).not.toContain("withChannelARead(");
     }
+  });
+
+  test("read and process wrappers are isolated and idle-bounded", () => {
+    const lastUsedAt = 1_000;
+    expect(isChannelAHandleCacheEntryFresh(lastUsedAt, lastUsedAt + 299_999)).toBe(true);
+    expect(isChannelAHandleCacheEntryFresh(lastUsedAt, lastUsedAt + 300_000)).toBe(false);
+    expect(isChannelAProcessHandleCacheEntryFresh(lastUsedAt, lastUsedAt + 299_999)).toBe(true);
+    expect(isChannelAProcessHandleCacheEntryFresh(lastUsedAt, lastUsedAt + 300_000)).toBe(false);
+    expect(channelASeam).toContain("establishedReadHandleCache");
+    expect(channelASeam).toContain("establishedProcessHandleCache");
+    expect(channelASeam).toContain("lastUsedAtMonotonicMs");
+  });
+
+  test("side-effect-free reads rebuild before one typed unavailable retry", async () => {
+    const order: string[] = [];
+    let calls = 0;
+    const value = await runChannelAReadWithFreshHandleRetry(
+      async () => {
+        calls += 1;
+        order.push(`run:${calls}`);
+        if (calls === 1) throw new ChannelAUnavailableError("stale provider channel");
+        return "fresh";
+      },
+      async () => {
+        order.push("refresh");
+      },
+    );
+    expect(value).toBe("fresh");
+    expect(order).toEqual(["run:1", "refresh", "run:2"]);
+  });
+
+  test("fresh-handle recovery neither retries twice nor replays non-transient errors", async () => {
+    let unavailableCalls = 0;
+    await expect(
+      runChannelAReadWithFreshHandleRetry(
+        async () => {
+          unavailableCalls += 1;
+          throw new ChannelAUnavailableError("provider still unavailable");
+        },
+        async () => undefined,
+      ),
+    ).rejects.toBeInstanceOf(ChannelAUnavailableError);
+    expect(unavailableCalls).toBe(2);
+
+    let validationCalls = 0;
+    let refreshCalls = 0;
+    const validation = new ChannelAValidationError("bad path");
+    await expect(
+      runChannelAReadWithFreshHandleRetry(
+        async () => {
+          validationCalls += 1;
+          throw validation;
+        },
+        async () => {
+          refreshCalls += 1;
+        },
+      ),
+    ).rejects.toBe(validation);
+    expect(validationCalls).toBe(1);
+    expect(refreshCalls).toBe(0);
+  });
+
+  test("transport failures evict disposable reads but preserve process-capable wrappers", () => {
+    const unavailable = new ChannelAUnavailableError("provider transport unavailable");
+    expect(shouldEvictChannelAHandleAfterError(unavailable, "read")).toBe(true);
+    expect(shouldEvictChannelAHandleAfterError(unavailable, "process")).toBe(false);
+    expect(shouldEvictChannelAHandleAfterError(unavailable, "none")).toBe(false);
+    expect(
+      shouldEvictChannelAHandleAfterError(new ChannelAValidationError("bad path"), "read"),
+    ).toBe(false);
   });
 
   test("near-identical non-transient reads are never retried", async () => {

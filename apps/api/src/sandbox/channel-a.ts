@@ -43,7 +43,11 @@ import {
   type LeaseSnapshot,
 } from "@opengeni/db";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
-import { sandboxOperationMetricObserver, type Observability } from "@opengeni/observability";
+import {
+  sandboxLeaseTelemetryKey,
+  sandboxOperationMetricObserver,
+  type Observability,
+} from "@opengeni/observability";
 import { HTTPException } from "hono/http-exception";
 
 import {
@@ -110,13 +114,30 @@ export type ChannelAHandle = {
  * expire opportunistically; eviction only drops local references and never
  * terminates the lease-owned sandbox.
  */
-const CHANNEL_A_HANDLE_CACHE_TTL_MS = 300_000;
+// Read/viewer handles and process-capable handles deliberately have separate
+// caches. The pinned Modal patch rotates a handle's command-router transport in
+// place, while a typed read failure below still gets one fresh-handle fallback.
+// Periodically rebuilding a healthy hot read handle would add multi-second
+// stalls, so both caches keep the pre-existing five-minute IDLE lifetime.
+//
+// Modal and Unix/Docker SDK sessions retain yielded exec/PTY process objects in
+// a process-local map; rebuilding the wrapper cannot reconstruct those objects
+// from the numeric provider session id. Reads therefore never enter or evict
+// the process cache merely to refresh their own transport.
+const CHANNEL_A_READ_HANDLE_CACHE_IDLE_TTL_MS = 5 * 60_000;
+const CHANNEL_A_PROCESS_HANDLE_CACHE_IDLE_TTL_MS = 5 * 60_000;
 const CHANNEL_A_HANDLE_CACHE_MAX_ENTRIES = 64;
-type CachedEstablishedHandle = {
+type CachedReadHandle = {
   promise: Promise<EstablishedSandboxSession>;
-  lastUsedAt: number;
+  lastUsedAtMonotonicMs: number;
 };
-const establishedHandleCache = new Map<string, CachedEstablishedHandle>();
+type CachedProcessHandle = {
+  promise: Promise<EstablishedSandboxSession>;
+  lastUsedAtMonotonicMs: number;
+};
+export type EstablishedHandleCacheKind = "read" | "process" | "none";
+const establishedReadHandleCache = new Map<string, CachedReadHandle>();
+const establishedProcessHandleCache = new Map<string, CachedProcessHandle>();
 
 function establishedHandleCacheKey(
   workspaceId: string,
@@ -126,42 +147,98 @@ function establishedHandleCacheKey(
   return [workspaceId, sessionId, lease.leaseEpoch, lease.instanceId ?? ""].join("\u0000");
 }
 
-function pruneEstablishedHandleCache(now: number): void {
-  for (const [key, entry] of establishedHandleCache) {
-    if (now - entry.lastUsedAt > CHANNEL_A_HANDLE_CACHE_TTL_MS) {
-      establishedHandleCache.delete(key);
+export function isChannelAHandleCacheEntryFresh(
+  lastUsedAtMonotonicMs: number,
+  nowMonotonicMs: number,
+  idleTtlMs = CHANNEL_A_READ_HANDLE_CACHE_IDLE_TTL_MS,
+): boolean {
+  return nowMonotonicMs - lastUsedAtMonotonicMs < idleTtlMs;
+}
+
+export function isChannelAProcessHandleCacheEntryFresh(
+  lastUsedAtMonotonicMs: number,
+  nowMonotonicMs: number,
+  idleTtlMs = CHANNEL_A_PROCESS_HANDLE_CACHE_IDLE_TTL_MS,
+): boolean {
+  return nowMonotonicMs - lastUsedAtMonotonicMs < idleTtlMs;
+}
+
+function pruneEstablishedReadHandleCache(nowMonotonicMs: number): void {
+  for (const [key, entry] of establishedReadHandleCache) {
+    if (!isChannelAHandleCacheEntryFresh(entry.lastUsedAtMonotonicMs, nowMonotonicMs)) {
+      establishedReadHandleCache.delete(key);
     }
-  }
-  while (establishedHandleCache.size >= CHANNEL_A_HANDLE_CACHE_MAX_ENTRIES) {
-    const oldestKey = establishedHandleCache.keys().next().value as string | undefined;
-    if (oldestKey === undefined) break;
-    establishedHandleCache.delete(oldestKey);
   }
 }
 
-async function establishCachedHandle(
+function pruneEstablishedProcessHandleCache(nowMonotonicMs: number): void {
+  for (const [key, entry] of establishedProcessHandleCache) {
+    if (!isChannelAProcessHandleCacheEntryFresh(entry.lastUsedAtMonotonicMs, nowMonotonicMs)) {
+      establishedProcessHandleCache.delete(key);
+    }
+  }
+}
+
+function enforceEstablishedHandleCacheSize<T>(cache: Map<string, T>): void {
+  while (cache.size > CHANNEL_A_HANDLE_CACHE_MAX_ENTRIES) {
+    const oldestKey = cache.keys().next().value as string | undefined;
+    if (oldestKey === undefined) break;
+    cache.delete(oldestKey);
+  }
+}
+
+async function establishCachedReadHandle(
   key: string,
   establish: () => Promise<EstablishedSandboxSession>,
 ): Promise<EstablishedSandboxSession> {
-  const now = Date.now();
-  pruneEstablishedHandleCache(now);
-  const cached = establishedHandleCache.get(key);
+  const now = performance.now();
+  pruneEstablishedReadHandleCache(now);
+  const cached = establishedReadHandleCache.get(key);
   if (cached) {
-    cached.lastUsedAt = now;
+    cached.lastUsedAtMonotonicMs = now;
     // Refresh insertion order so the bounded map evicts the least-recently used
     // exact lease identity first.
-    establishedHandleCache.delete(key);
-    establishedHandleCache.set(key, cached);
+    establishedReadHandleCache.delete(key);
+    establishedReadHandleCache.set(key, cached);
     return await cached.promise;
   }
 
   const promise = establish();
-  const entry: CachedEstablishedHandle = { promise, lastUsedAt: now };
-  establishedHandleCache.set(key, entry);
+  const entry: CachedReadHandle = { promise, lastUsedAtMonotonicMs: now };
+  establishedReadHandleCache.set(key, entry);
+  enforceEstablishedHandleCacheSize(establishedReadHandleCache);
   try {
     return await promise;
   } catch (error) {
-    if (establishedHandleCache.get(key) === entry) establishedHandleCache.delete(key);
+    if (establishedReadHandleCache.get(key) === entry) establishedReadHandleCache.delete(key);
+    throw error;
+  }
+}
+
+async function establishCachedProcessHandle(
+  key: string,
+  establish: () => Promise<EstablishedSandboxSession>,
+): Promise<EstablishedSandboxSession> {
+  const now = performance.now();
+  pruneEstablishedProcessHandleCache(now);
+  const cached = establishedProcessHandleCache.get(key);
+  if (cached) {
+    cached.lastUsedAtMonotonicMs = now;
+    establishedProcessHandleCache.delete(key);
+    establishedProcessHandleCache.set(key, cached);
+    return await cached.promise;
+  }
+
+  const promise = establish();
+  const entry: CachedProcessHandle = { promise, lastUsedAtMonotonicMs: now };
+  establishedProcessHandleCache.set(key, entry);
+  enforceEstablishedHandleCacheSize(establishedProcessHandleCache);
+  try {
+    return await promise;
+  } catch (error) {
+    if (establishedProcessHandleCache.get(key) === entry) {
+      establishedProcessHandleCache.delete(key);
+    }
     throw error;
   }
 }
@@ -175,7 +252,19 @@ export async function establishCachedChannelAHandle(
   lease: LeaseSnapshot,
   establish: () => Promise<EstablishedSandboxSession>,
 ): Promise<EstablishedSandboxSession> {
-  return await establishCachedHandle(
+  return await establishCachedReadHandle(
+    establishedHandleCacheKey(workspaceId, sessionId, lease),
+    establish,
+  );
+}
+
+async function establishCachedChannelAProcessHandle(
+  workspaceId: string,
+  sessionId: string,
+  lease: LeaseSnapshot,
+  establish: () => Promise<EstablishedSandboxSession>,
+): Promise<EstablishedSandboxSession> {
+  return await establishCachedProcessHandle(
     establishedHandleCacheKey(workspaceId, sessionId, lease),
     establish,
   );
@@ -220,12 +309,63 @@ export async function runConcurrentChannelAReads<T>(
   return values;
 }
 
-function rememberEstablishedHandle(key: string, established: EstablishedSandboxSession): void {
-  pruneEstablishedHandleCache(Date.now());
-  establishedHandleCache.set(key, {
+/** Retry a side-effect-free Channel-A read once, but only after the caller has
+ * discarded and freshly re-established its provider handle. Provider commands
+ * are not replayed for validation/conflict/unknown errors, and mutation routes
+ * never call this helper. */
+export async function runChannelAReadWithFreshHandleRetry<T>(
+  run: () => Promise<T>,
+  refreshHandle: () => Promise<void>,
+): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    if (!(error instanceof ChannelAUnavailableError)) throw error;
+    await refreshHandle();
+    return await run();
+  }
+}
+
+export function shouldEvictChannelAHandleAfterError(
+  error: unknown,
+  cacheKind: EstablishedHandleCacheKind,
+): boolean {
+  return error instanceof ChannelAUnavailableError && cacheKind === "read";
+}
+
+function evictEstablishedHandle(key: string, cacheKind: EstablishedHandleCacheKind): void {
+  if (cacheKind === "read") establishedReadHandleCache.delete(key);
+  if (cacheKind === "process") establishedProcessHandleCache.delete(key);
+}
+
+function evictAllEstablishedHandles(key: string): void {
+  establishedReadHandleCache.delete(key);
+  establishedProcessHandleCache.delete(key);
+}
+
+function rememberEstablishedHandle(
+  key: string,
+  established: EstablishedSandboxSession,
+  cacheKind: Exclude<EstablishedHandleCacheKind, "none">,
+): void {
+  const now = performance.now();
+  if (cacheKind === "read") {
+    pruneEstablishedReadHandleCache(now);
+    establishedReadHandleCache.delete(key);
+    establishedReadHandleCache.set(key, {
+      promise: Promise.resolve(established),
+      lastUsedAtMonotonicMs: now,
+    });
+    enforceEstablishedHandleCacheSize(establishedReadHandleCache);
+    return;
+  }
+  pruneEstablishedProcessHandleCache(now);
+  establishedProcessHandleCache.delete(key);
+  establishedProcessHandleCache.set(key, {
     promise: Promise.resolve(established),
-    lastUsedAt: Date.now(),
+    lastUsedAtMonotonicMs: now,
   });
+  enforceEstablishedHandleCacheSize(establishedProcessHandleCache);
 }
 
 /**
@@ -247,7 +387,9 @@ export async function withChannelA<T>(
 
 /** Read-only API-direct seam. Separate requests for the same exact live Modal
  * instance are serialized across API replicas; each request's batched reads
- * remain concurrent behind that one distributed boundary. */
+ * remain concurrent behind that one distributed boundary. A typed temporary
+ * provider-channel failure gets one retry only after rebuilding the exact
+ * lease-fenced handle. */
 export async function withChannelARead<T>(
   services: ChannelAServices,
   ctx: ChannelAContext,
@@ -457,6 +599,56 @@ async function withChannelAOperation<T>(
   let established: EstablishedSandboxSession | undefined;
   let leaseSnapshot: LeaseSnapshot = acquired.lease;
   let establishedCacheKey: string | null = null;
+  let establishedCacheKind: EstablishedHandleCacheKind = "none";
+  const requestedCacheKind: Exclude<EstablishedHandleCacheKind, "none"> = readOnly
+    ? "read"
+    : "process";
+
+  const establishAttachedLiveHandle = async (
+    live: LeaseSnapshot,
+    cacheKind: EstablishedHandleCacheKind,
+  ): Promise<{ established: EstablishedSandboxSession; cacheKey: string }> => {
+    const cacheKey = establishedHandleCacheKey(workspaceId, session.id, live);
+    const establish = () =>
+      establishSandboxSessionFromEnvelope(settings, live.resumeState, {
+        sessionId: session.id,
+        recovery: "resume-only",
+        backendOverride: session.sandboxBackend,
+        environment,
+      });
+    try {
+      const attached =
+        cacheKind === "read"
+          ? await establishCachedChannelAHandle(workspaceId, session.id, live, establish)
+          : cacheKind === "process"
+            ? await establishCachedChannelAProcessHandle(workspaceId, session.id, live, establish)
+            : await establish();
+      return { established: attached, cacheKey };
+    } catch (error) {
+      if (!isProviderSandboxNotFoundError(session.sandboxBackend, error)) throw error;
+      // The exact provider instance is definitively gone, so neither a read nor
+      // a process wrapper for that lease identity may survive locally.
+      evictAllEstablishedHandles(cacheKey);
+      const marked = await markWarmLeaseInstanceLost(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId,
+        expectedEpoch: live.leaseEpoch,
+        expectedInstanceId: live.instanceId!,
+      });
+      if (marked.status === "marked") {
+        await appendAndPublishEvents(db, bus, workspaceId, session.id, [
+          {
+            type: "sandbox.box.lost",
+            payload: { sandboxId: live.instanceId },
+          },
+        ]);
+      }
+      throw new HTTPException(409, {
+        message: `sandbox instance was lost; retry to restore it`,
+      });
+    }
+  };
 
   try {
     const envelope = await getSandboxSessionEnvelope(db, workspaceId, session.id);
@@ -490,7 +682,8 @@ async function withChannelAOperation<T>(
         established = result.established;
         leaseSnapshot = result.lease;
         establishedCacheKey = establishedHandleCacheKey(workspaceId, session.id, leaseSnapshot);
-        rememberEstablishedHandle(establishedCacheKey, established);
+        establishedCacheKind = requestedCacheKind;
+        rememberEstablishedHandle(establishedCacheKey, established, establishedCacheKind);
       } catch (error) {
         throw new HTTPException(409, {
           message: `sandbox not available (${error instanceof Error ? error.message : "spawn failed"})`,
@@ -511,82 +704,129 @@ async function withChannelAOperation<T>(
         });
       }
       leaseSnapshot = live;
-      establishedCacheKey = establishedHandleCacheKey(workspaceId, session.id, live);
-      try {
-        established = await establishCachedChannelAHandle(workspaceId, session.id, live, () =>
-          establishSandboxSessionFromEnvelope(settings, live.resumeState, {
-            sessionId: session.id,
-            recovery: "resume-only",
-            backendOverride: session.sandboxBackend,
-            environment,
-          }),
-        );
-      } catch (error) {
-        if (!isProviderSandboxNotFoundError(session.sandboxBackend, error)) {
-          throw error;
-        }
-        establishedHandleCache.delete(establishedCacheKey);
-        const marked = await markWarmLeaseInstanceLost(db, {
-          accountId,
-          workspaceId,
-          sandboxGroupId,
-          expectedEpoch: live.leaseEpoch,
-          expectedInstanceId: live.instanceId,
-        });
-        if (marked.status === "marked") {
-          await appendAndPublishEvents(db, bus, workspaceId, session.id, [
-            {
-              type: "sandbox.box.lost",
-              payload: { sandboxId: live.instanceId },
-            },
-          ]);
-        }
-        throw new HTTPException(409, {
-          message: `sandbox instance was lost; retry to restore it`,
-        });
-      }
+      const attached = await establishAttachedLiveHandle(live, requestedCacheKind);
+      established = attached.established;
+      establishedCacheKey = attached.cacheKey;
+      establishedCacheKind = requestedCacheKind;
     }
 
-    // Route every call through the same proxy, even when hot-swap is disabled:
-    // routing may be dormant, but its direct mutation admission is mandatory for
-    // every persistable provider write.
-    const routed = wrapChannelABoxWithRouting(
-      {
-        db,
-        settings,
-        bus,
-        ...(onSandboxOperation ? { onSandboxOperation } : {}),
-        ...(ctx.waitSignal ? { waitSignal: ctx.waitSignal } : {}),
-      },
-      {
-        accountId,
-        workspaceId,
-        sessionId: session.id,
-        homeLease: {
-          sandboxGroupId,
-          leaseEpoch: leaseSnapshot.leaseEpoch,
-          instanceId: leaseSnapshot.instanceId!,
-          backend: session.sandboxBackend,
-        },
-        directRequest: { requestId, holderId },
-      },
-      established,
-    );
-    const run = async () => await runEstablished(routed, leaseSnapshot);
-    return readOnly && session.sandboxBackend === "modal"
-      ? await withSandboxProviderReadLock(
+    const runProviderOperation = async (): Promise<T> => {
+      // Route every call through the same proxy, even when hot-swap is disabled:
+      // routing may be dormant, but its direct mutation admission is mandatory for
+      // every persistable provider write.
+      const routed = wrapChannelABoxWithRouting(
+        {
           db,
-          {
-            workspaceId,
+          settings,
+          bus,
+          ...(onSandboxOperation ? { onSandboxOperation } : {}),
+          ...(ctx.waitSignal ? { waitSignal: ctx.waitSignal } : {}),
+        },
+        {
+          accountId,
+          workspaceId,
+          sessionId: session.id,
+          homeLease: {
             sandboxGroupId,
             leaseEpoch: leaseSnapshot.leaseEpoch,
             instanceId: leaseSnapshot.instanceId!,
+            backend: session.sandboxBackend,
           },
-          ctx.waitSignal,
-          run,
-        )
-      : await run();
+          directRequest: { requestId, holderId },
+        },
+        established!,
+      );
+      const run = async () => await runEstablished(routed, leaseSnapshot);
+      return readOnly && session.sandboxBackend === "modal"
+        ? await withSandboxProviderReadLock(
+            db,
+            {
+              workspaceId,
+              sandboxGroupId,
+              leaseEpoch: leaseSnapshot.leaseEpoch,
+              instanceId: leaseSnapshot.instanceId!,
+            },
+            ctx.waitSignal,
+            run,
+          )
+        : await run();
+    };
+
+    // A failed attempt leaves the advisory-lock transaction before refresh;
+    // the retry acquires a new transaction/lock against the same fenced lease.
+    return readOnly
+      ? await runChannelAReadWithFreshHandleRetry(runProviderOperation, async () => {
+          const refreshStartedAt = performance.now();
+          const observeRefresh = (outcome: "ok" | "failed"): void => {
+            if (!services.observability) return;
+            const attributes = {
+              sandboxLeaseKey: sandboxLeaseTelemetryKey(workspaceId, sandboxGroupId),
+              backend: session.sandboxBackend,
+              reason: "provider_handle_unavailable",
+              outcome,
+              durationMs: Math.max(0, Math.round(performance.now() - refreshStartedAt)),
+            };
+            try {
+              services.observability.incrementCounter({
+                name: "opengeni_channel_a_handle_refresh_total",
+                help: "Channel-A provider handles rebuilt after a typed temporary-unavailable read.",
+                labels: { backend: session.sandboxBackend, outcome },
+              });
+            } catch {
+              // Metrics can never alter lease or provider authority.
+            }
+            try {
+              if (outcome === "ok") {
+                services.observability.info(
+                  "Channel-A provider handle refresh completed",
+                  attributes,
+                );
+              } else {
+                services.observability.warn("Channel-A provider handle refresh failed", attributes);
+              }
+            } catch {
+              // Logs can never alter lease or provider authority.
+            }
+          };
+          try {
+            if (establishedCacheKey) {
+              evictEstablishedHandle(establishedCacheKey, establishedCacheKind);
+            }
+            await dropEstablishedHandle(established);
+            // This request still owns its direct holder, so the exact live identity
+            // should be stable. Revalidate it before rebuilding the provider handle.
+            const live = await readLease(db, workspaceId, sandboxGroupId);
+            if (
+              !live ||
+              live.liveness !== "warm" ||
+              live.leaseEpoch !== leaseSnapshot.leaseEpoch ||
+              live.instanceId !== leaseSnapshot.instanceId
+            ) {
+              throw new HTTPException(409, {
+                message: `sandbox lease changed while refreshing its provider handle; retry`,
+              });
+            }
+            const refreshed = await establishAttachedLiveHandle(live, "none");
+            established = refreshed.established;
+            establishedCacheKey = refreshed.cacheKey;
+            establishedCacheKind = "read";
+            leaseSnapshot = live;
+            rememberEstablishedHandle(refreshed.cacheKey, refreshed.established, "read");
+            observeRefresh("ok");
+          } catch (error) {
+            observeRefresh("failed");
+            throw error;
+          }
+        })
+      : await runProviderOperation();
   } catch (error) {
+    // A read wrapper carries no yielded process state and is safe to discard.
+    // A mutation/terminal wrapper may own the SDK's only local process object;
+    // retain it after an ambiguous transport failure so a later control call
+    // can use the in-place provider transport recovery without losing the PTY.
+    if (establishedCacheKey && shouldEvictChannelAHandleAfterError(error, establishedCacheKind)) {
+      evictEstablishedHandle(establishedCacheKey, establishedCacheKind);
+    }
     throw mapChannelAError(error);
   } finally {
     await release();
