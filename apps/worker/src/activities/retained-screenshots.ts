@@ -43,6 +43,18 @@ export type ValidatedScreenshot = {
   height: number;
 };
 
+export type RetainableSessionImageMediaType = "image/png" | "image/jpeg" | "image/webp";
+
+export type ValidatedSessionImage = {
+  bytes: Uint8Array;
+  mediaType: RetainableSessionImageMediaType;
+  extension: "png" | "jpg" | "webp";
+  sizeBytes: number;
+  sha256: string;
+  width: number;
+  height: number;
+};
+
 export class ScreenshotValidationError extends Error {
   constructor(
     readonly reason: "invalid_content" | "oversized" | "unsupported",
@@ -102,7 +114,10 @@ export function typedScreenshotFromSdkEvent(event: unknown): TypedScreenshotTool
 /** Does this SDK result still contain inline bytes that persistence must replace? */
 export function sdkEventContainsInlineImage(event: unknown): boolean {
   if (!event || typeof event !== "object") return false;
-  const streamEvent = event as { type?: unknown; item?: { type?: unknown; output?: unknown } };
+  const streamEvent = event as {
+    type?: unknown;
+    item?: { type?: unknown; output?: unknown };
+  };
   return (
     streamEvent.type === "run_item_stream_event" &&
     streamEvent.item?.type === "tool_call_output_item" &&
@@ -113,7 +128,7 @@ export function sdkEventContainsInlineImage(event: unknown): boolean {
 function imageBytesFromSdkToolOutput(
   output: unknown,
 ): { bytes: Uint8Array; mediaType: string } | null {
-  if (typeof output === "string") return decodeInlinePngDataUrl(output);
+  if (typeof output === "string") return decodeInlineImageDataUrl(output);
   if (Array.isArray(output)) {
     for (const entry of output) {
       if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
@@ -142,11 +157,11 @@ function imageBytesFromSdkToolOutput(
 function imageBytesFromSdkImageSource(
   source: unknown,
 ): { bytes: Uint8Array; mediaType: string } | null {
-  const direct = decodeInlinePngDataUrl(source);
+  const direct = decodeInlineImageDataUrl(source);
   if (direct) return direct;
   if (!source || typeof source !== "object" || Array.isArray(source)) return null;
   const image = source as Record<string, unknown>;
-  const fromUrl = decodeInlinePngDataUrl(image.url);
+  const fromUrl = decodeInlineImageDataUrl(image.url);
   if (fromUrl) return fromUrl;
   return image.data instanceof Uint8Array && typeof image.mediaType === "string"
     ? { bytes: image.data, mediaType: image.mediaType }
@@ -154,11 +169,11 @@ function imageBytesFromSdkImageSource(
 }
 
 function sdkImageSourceContainsInlineImage(source: unknown): boolean {
-  if (typeof source === "string") return source.startsWith("data:image/png;base64,");
+  if (typeof source === "string") return source.startsWith("data:image/");
   if (!source || typeof source !== "object" || Array.isArray(source)) return false;
   const image = source as Record<string, unknown>;
   return (
-    (typeof image.url === "string" && image.url.startsWith("data:image/png;base64,")) ||
+    (typeof image.url === "string" && image.url.startsWith("data:image/")) ||
     (image.data instanceof Uint8Array && typeof image.mediaType === "string")
   );
 }
@@ -180,11 +195,12 @@ function toolOutputContainsInlineImage(output: unknown): boolean {
   return record.type === "image" && sdkImageSourceContainsInlineImage(record.image);
 }
 
-function decodeInlinePngDataUrl(value: unknown): { bytes: Uint8Array; mediaType: string } | null {
+function decodeInlineImageDataUrl(value: unknown): { bytes: Uint8Array; mediaType: string } | null {
   if (typeof value !== "string") return null;
-  const prefix = "data:image/png;base64,";
-  if (!value.startsWith(prefix)) return null;
-  const encoded = value.slice(prefix.length);
+  const match = /^data:(image\/(?:png|jpeg|webp));base64,/u.exec(value);
+  if (!match?.[1]) return null;
+  const mediaType = match[1] as RetainableSessionImageMediaType;
+  const encoded = value.slice(match[0].length);
   const maxEncodedLength = Math.ceil(COMPUTER_SCREENSHOT_MAX_BYTES / 3) * 4;
   if (
     encoded.length === 0 ||
@@ -199,10 +215,17 @@ function decodeInlinePngDataUrl(value: unknown): { bytes: Uint8Array; mediaType:
   if (decodedLength <= 0 || decodedLength > COMPUTER_SCREENSHOT_MAX_BYTES) {
     return null;
   }
+  const lastSextet = base64Sextet(encoded.charCodeAt(encoded.length - padding - 1));
+  if (
+    (padding === 2 && (lastSextet & 0x0f) !== 0) ||
+    (padding === 1 && (lastSextet & 0x03) !== 0)
+  ) {
+    return null;
+  }
   const decoded = Buffer.from(encoded, "base64");
   if (decoded.byteLength !== decodedLength) return null;
   const bytes = new Uint8Array(decoded.buffer, decoded.byteOffset, decoded.byteLength);
-  return { bytes, mediaType: "image/png" };
+  return { bytes, mediaType };
 }
 
 /** Validate the complete canonical PNG and derive exact integrity metadata. */
@@ -374,6 +397,73 @@ export function validateComputerScreenshot(
   };
 }
 
+/** Validate a durable view_image/computer image from bytes, never from its claimed MIME alone. */
+export function validateRetainableSessionImage(
+  input: { bytes: Uint8Array; declaredMediaType?: string },
+  limits: {
+    maxBytes?: number;
+    maxDimension?: number;
+    maxPixels?: number;
+  } = {},
+): ValidatedSessionImage {
+  const maxBytes = limits.maxBytes ?? COMPUTER_SCREENSHOT_MAX_BYTES;
+  const maxDimension = limits.maxDimension ?? COMPUTER_SCREENSHOT_MAX_DIMENSION;
+  const maxPixels = limits.maxPixels ?? COMPUTER_SCREENSHOT_MAX_PIXELS;
+  if (input.bytes.byteLength === 0) {
+    throw new ScreenshotValidationError("invalid_content", "session image is empty");
+  }
+  if (input.bytes.byteLength > maxBytes) {
+    throw new ScreenshotValidationError("oversized", `session image exceeds ${maxBytes} bytes`);
+  }
+
+  let identity: Pick<ValidatedSessionImage, "mediaType" | "extension" | "width" | "height">;
+  if (isPng(input.bytes)) {
+    const png = validateComputerScreenshot(
+      { bytes: input.bytes, mediaType: "image/png" },
+      { maxBytes, maxDimension, maxPixels },
+    );
+    identity = {
+      mediaType: "image/png",
+      extension: "png",
+      width: png.width,
+      height: png.height,
+    };
+  } else if (isJpeg(input.bytes)) {
+    identity = {
+      mediaType: "image/jpeg",
+      extension: "jpg",
+      ...jpegDimensions(input.bytes),
+    };
+  } else if (isWebp(input.bytes)) {
+    identity = {
+      mediaType: "image/webp",
+      extension: "webp",
+      ...webpDimensions(input.bytes),
+    };
+  } else {
+    throw new ScreenshotValidationError("unsupported", "session image format is unsupported");
+  }
+  assertImageDimensions(identity.width, identity.height, {
+    maxDimension,
+    maxPixels,
+  });
+  if (
+    input.declaredMediaType &&
+    canonicalMediaType(input.declaredMediaType) !== identity.mediaType
+  ) {
+    throw new ScreenshotValidationError(
+      "invalid_content",
+      "session image MIME does not match its bytes",
+    );
+  }
+  return {
+    bytes: input.bytes,
+    ...identity,
+    sizeBytes: input.bytes.byteLength,
+    sha256: createHash("sha256").update(input.bytes).digest("hex"),
+  };
+}
+
 export function retainedScreenshotIdentity(input: {
   sessionId: string;
   turnId: string;
@@ -436,9 +526,12 @@ export async function retainComputerScreenshot(input: {
     toolCallId: input.output.callId,
     toolOutputId: input.output.toolOutputId,
   });
-  let screenshot: ValidatedScreenshot;
+  let screenshot: ValidatedSessionImage;
   try {
-    screenshot = validateComputerScreenshot(input.output);
+    screenshot = validateRetainableSessionImage({
+      bytes: input.output.bytes,
+      declaredMediaType: input.output.mediaType,
+    });
   } catch (error) {
     if (error instanceof ScreenshotValidationError) {
       return unavailable(identity.artifactId, error.reason);
@@ -451,7 +544,7 @@ export async function retainComputerScreenshot(input: {
   const retentionExpiresAt = new Date(
     now.getTime() + (input.retentionMs ?? COMPUTER_SCREENSHOT_RETENTION_MS),
   );
-  const objectKey = `workspaces/${input.workspaceId}/files/${identity.artifactId}/retained/computer-screenshot.png`;
+  const objectKey = `workspaces/${input.workspaceId}/files/${identity.artifactId}/retained/session-image.${screenshot.extension}`;
   let prepared: RetainedScreenshotArtifact;
   try {
     prepared = (
@@ -568,7 +661,10 @@ export function compactRetainedScreenshotHistory(
     const receipt = callId ? receiptsByCallId.get(callId) : undefined;
     if (!receipt) return item;
     if (typeof item.output === "string" && item.output.startsWith("data:image/")) {
-      return { ...item, output: { type: RETAINED_IMAGE_MARKER, artifact: receipt } };
+      return {
+        ...item,
+        output: { type: RETAINED_IMAGE_MARKER, artifact: receipt },
+      };
     }
     if (!Array.isArray(item.output)) return item;
     let changed = false;
@@ -726,9 +822,9 @@ async function materializeRetainedScreenshotHistoryWithCache(
       const bytes = await input.objectStorage.getFileBytes(artifact.file).catch(() => null);
       if (!bytes)
         throw new RetainedScreenshotUnavailableError(receipt.artifactId, "missing_storage");
-      const validated = validateComputerScreenshot({
+      const validated = validateRetainableSessionImage({
         bytes,
-        mediaType: artifact.mediaType,
+        declaredMediaType: artifact.mediaType,
       });
       if (
         validated.sizeBytes !== artifact.sizeBytes ||
@@ -756,7 +852,10 @@ async function materializeRetainedScreenshotHistoryWithCache(
   for (const item of input.history) {
     const directReceipt = retainedReceiptFromDirectOutput(item.output);
     if (directReceipt) {
-      materialized.push({ ...item, output: await dataUrlForReceipt(directReceipt) });
+      materialized.push({
+        ...item,
+        output: await dataUrlForReceipt(directReceipt),
+      });
       continue;
     }
     if (!Array.isArray(item.output)) {
@@ -913,7 +1012,7 @@ async function verifyReadyArtifact(
   try {
     assertStoredScreenshotHead(await storage.headFile(artifact.file), {
       sizeBytes: artifact.sizeBytes,
-      mediaType: "image/png",
+      mediaType: artifact.mediaType as RetainableSessionImageMediaType,
       sha256: artifact.sha256,
     });
     return true;
@@ -924,7 +1023,7 @@ async function verifyReadyArtifact(
 
 function assertStoredScreenshotHead(
   head: ObjectHead,
-  expected: Pick<ValidatedScreenshot, "sizeBytes" | "mediaType" | "sha256">,
+  expected: Pick<ValidatedSessionImage, "sizeBytes" | "mediaType" | "sha256">,
 ): void {
   if (head.ContentLength !== expected.sizeBytes) {
     throw new Error("retained screenshot object size mismatch");
@@ -965,13 +1064,182 @@ function isInlineImageContent(entry: unknown): boolean {
   return (
     record.type === "input_image" &&
     typeof record.image === "string" &&
-    record.image.startsWith("data:image/png;base64,")
+    record.image.startsWith("data:image/")
   );
 }
 
 function historyCallId(item: Record<string, unknown>): string | null {
   const value = item.callId ?? item.call_id;
   return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function canonicalMediaType(value: string): string {
+  return value.split(";", 1)[0]!.trim().toLowerCase();
+}
+
+function isPng(bytes: Uint8Array): boolean {
+  return (
+    bytes.byteLength >= PNG_SIGNATURE.byteLength &&
+    PNG_SIGNATURE.every((byte, index) => bytes[index] === byte)
+  );
+}
+
+function isJpeg(bytes: Uint8Array): boolean {
+  return bytes.byteLength >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8;
+}
+
+function jpegDimensions(bytes: Uint8Array): { width: number; height: number } {
+  if (bytes[bytes.length - 2] !== 0xff || bytes[bytes.length - 1] !== 0xd9) {
+    throw new ScreenshotValidationError(
+      "invalid_content",
+      "session JPEG is truncated or has trailing bytes",
+    );
+  }
+  let offset = 2;
+  while (offset + 4 <= bytes.length) {
+    if (bytes[offset] !== 0xff) {
+      throw new ScreenshotValidationError(
+        "invalid_content",
+        "session JPEG marker table is invalid",
+      );
+    }
+    while (bytes[offset] === 0xff) offset += 1;
+    const marker = bytes[offset++];
+    if (marker === undefined || marker === 0xd9 || marker === 0xda) break;
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+    if (offset + 2 > bytes.length) break;
+    const length = readUint16Be(bytes, offset);
+    if (length < 2 || offset + length > bytes.length) {
+      throw new ScreenshotValidationError("invalid_content", "session JPEG segment is invalid");
+    }
+    if (JPEG_SOF_MARKERS.has(marker)) {
+      if (length < 7) {
+        throw new ScreenshotValidationError("invalid_content", "session JPEG frame is invalid");
+      }
+      return {
+        height: readUint16Be(bytes, offset + 3),
+        width: readUint16Be(bytes, offset + 5),
+      };
+    }
+    offset += length;
+  }
+  throw new ScreenshotValidationError(
+    "invalid_content",
+    "session JPEG has no supported frame header",
+  );
+}
+
+const JPEG_SOF_MARKERS = new Set([
+  0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf,
+]);
+
+function isWebp(bytes: Uint8Array): boolean {
+  return bytes.byteLength >= 20 && ascii(bytes, 0, 4) === "RIFF" && ascii(bytes, 8, 4) === "WEBP";
+}
+
+function webpDimensions(bytes: Uint8Array): { width: number; height: number } {
+  if (readUint32Le(bytes, 4) + 8 !== bytes.byteLength) {
+    throw new ScreenshotValidationError("invalid_content", "session WebP RIFF length is invalid");
+  }
+  let offset = 12;
+  while (offset + 8 <= bytes.length) {
+    const type = ascii(bytes, offset, 4);
+    const length = readUint32Le(bytes, offset + 4);
+    const data = offset + 8;
+    const next = data + length + (length & 1);
+    if (next > bytes.length) {
+      throw new ScreenshotValidationError("invalid_content", "session WebP chunk is truncated");
+    }
+    if (type === "VP8X") {
+      if (length < 10) {
+        throw new ScreenshotValidationError("invalid_content", "session WebP VP8X is invalid");
+      }
+      return {
+        width: 1 + readUint24Le(bytes, data + 4),
+        height: 1 + readUint24Le(bytes, data + 7),
+      };
+    }
+    if (type === "VP8 ") {
+      if (
+        length < 10 ||
+        bytes[data + 3] !== 0x9d ||
+        bytes[data + 4] !== 0x01 ||
+        bytes[data + 5] !== 0x2a
+      ) {
+        throw new ScreenshotValidationError("invalid_content", "session WebP VP8 frame is invalid");
+      }
+      return {
+        width: readUint16Le(bytes, data + 6) & 0x3fff,
+        height: readUint16Le(bytes, data + 8) & 0x3fff,
+      };
+    }
+    if (type === "VP8L") {
+      if (length < 5 || bytes[data] !== 0x2f) {
+        throw new ScreenshotValidationError(
+          "invalid_content",
+          "session WebP VP8L frame is invalid",
+        );
+      }
+      const bits = readUint32Le(bytes, data + 1);
+      return {
+        width: 1 + (bits & 0x3fff),
+        height: 1 + ((bits >>> 14) & 0x3fff),
+      };
+    }
+    offset = next;
+  }
+  throw new ScreenshotValidationError("invalid_content", "session WebP has no image frame");
+}
+
+function assertImageDimensions(
+  width: number,
+  height: number,
+  limits: { maxDimension: number; maxPixels: number },
+): void {
+  if (
+    !Number.isSafeInteger(width) ||
+    !Number.isSafeInteger(height) ||
+    width <= 0 ||
+    height <= 0 ||
+    width > limits.maxDimension ||
+    height > limits.maxDimension ||
+    width * height > limits.maxPixels
+  ) {
+    throw new ScreenshotValidationError("oversized", "session image dimensions exceed policy");
+  }
+}
+
+function readUint16Be(bytes: Uint8Array, offset: number): number {
+  return (bytes[offset]! << 8) | bytes[offset + 1]!;
+}
+
+function readUint16Le(bytes: Uint8Array, offset: number): number {
+  return bytes[offset]! | (bytes[offset + 1]! << 8);
+}
+
+function readUint24Le(bytes: Uint8Array, offset: number): number {
+  return bytes[offset]! | (bytes[offset + 1]! << 8) | (bytes[offset + 2]! << 16);
+}
+
+function readUint32Le(bytes: Uint8Array, offset: number): number {
+  return (
+    (bytes[offset]! |
+      (bytes[offset + 1]! << 8) |
+      (bytes[offset + 2]! << 16) |
+      (bytes[offset + 3]! << 24)) >>>
+    0
+  );
+}
+
+function ascii(bytes: Uint8Array, offset: number, length: number): string {
+  return String.fromCharCode(...bytes.subarray(offset, offset + length));
+}
+
+function base64Sextet(code: number): number {
+  if (code >= 0x41 && code <= 0x5a) return code - 0x41;
+  if (code >= 0x61 && code <= 0x7a) return code - 0x61 + 26;
+  if (code >= 0x30 && code <= 0x39) return code - 0x30 + 52;
+  return code === 0x2b ? 62 : 63;
 }
 
 function readUint32(bytes: Uint8Array, offset: number): number {

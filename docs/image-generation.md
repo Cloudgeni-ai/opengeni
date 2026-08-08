@@ -41,6 +41,22 @@ are available. Generation currently accepts one bounded text prompt and
 returns one image. Editing, masks, and reference-image inputs are not silently
 emulated.
 
+The selected text provider does not change the generated-image artifact or UI
+contract. Current route availability is:
+
+| Text-model route | Generation transport | Existing image/view input |
+| --- | --- | --- |
+| Direct reviewed OpenAI Responses | Native hosted tool | Typed Responses image input |
+| Connected Codex subscription | Codex image adapter | Typed function-image results |
+| Managed or workspace Gateway Responses | Workspace Gateway image adapter | Typed image input only for catalogued vision models |
+| Other registry Responses providers | Workspace Gateway image adapter | Typed image input only when the model declares it |
+| Registry Chat providers | Workspace Gateway image adapter | Disabled until OpenGeni has a proven typed Chat image wire |
+
+“Workspace Gateway image adapter” requires that workspace's Gateway key; the
+managed OpenGeni text-model credential is not reused for separately billed
+image generation. Text-only models can still create images through the adapter,
+but never receive pixel-bearing `view_image` or computer tools.
+
 ## Durable operation and artifact boundary
 
 Adapter-backed generation is a paid, side-effecting operation. Before calling
@@ -95,3 +111,10 @@ Browsers receive only the compact receipt in the timeline. The SDK validates
 its closed shape and either verifies bounded range downloads or mints a
 short-lived file download URL. The stock React renderer uses the signed URL so
 multi-megabyte images do not make a second full JavaScript byte copy.
+
+Filesystem `view_image` and computer screenshots use the separate
+session-retained-image lifecycle. PNG, JPEG, and WebP are signature-validated,
+stored without inline base64, and rendered through authenticated artifact
+retrieval. Other SDK-recognized image formats are not promoted to that durable
+contract; they remain unsupported rather than being silently transcoded or sent
+to providers whose accepted MIME set is unknown.

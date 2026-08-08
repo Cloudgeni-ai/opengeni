@@ -9,6 +9,7 @@ import {
   typedScreenshotFromSdkEvent,
   unavailableRetainedSessionImage,
   validateComputerScreenshot,
+  validateRetainableSessionImage,
 } from "../src/activities/retained-screenshots";
 
 const PNG = Uint8Array.from(
@@ -17,6 +18,16 @@ const PNG = Uint8Array.from(
     "base64",
   ),
 );
+
+const JPEG = Uint8Array.from([
+  0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0x03, 0x00, 0x02, 0x03, 0x01, 0x11, 0x00, 0x02,
+  0x11, 0x00, 0x03, 0x11, 0x00, 0xff, 0xd9,
+]);
+
+const WEBP = Uint8Array.from([
+  0x52, 0x49, 0x46, 0x46, 0x16, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38, 0x58,
+  0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x02, 0x00, 0x00,
+]);
 
 describe("retained computer screenshots", () => {
   test("extracts the SDK typed image and validates exact PNG facts", () => {
@@ -29,7 +40,10 @@ describe("retained computer screenshots", () => {
         output: { type: "image", image: { data: PNG, mediaType: "image/png" } },
       },
     });
-    expect(output).toMatchObject({ callId: "call-1", toolOutputId: "output-1" });
+    expect(output).toMatchObject({
+      callId: "call-1",
+      toolOutputId: "output-1",
+    });
     expect(validateComputerScreenshot(output!)).toMatchObject({
       mediaType: "image/png",
       sizeBytes: PNG.byteLength,
@@ -60,6 +74,36 @@ describe("retained computer screenshots", () => {
       bytes: PNG,
       mediaType: "image/png",
     });
+  });
+
+  test("retains the common JPEG and WebP formats returned by the Agents SDK view_image tool", () => {
+    for (const [mediaType, bytes, extension] of [
+      ["image/jpeg", JPEG, "jpg"],
+      ["image/webp", WEBP, "webp"],
+    ] as const) {
+      const event = {
+        type: "run_item_stream_event",
+        item: {
+          id: `output-${extension}`,
+          type: "tool_call_output_item",
+          rawItem: { callId: `call-${extension}`, id: `output-${extension}` },
+          output: [
+            {
+              type: "input_image",
+              image: `data:${mediaType};base64,${Buffer.from(bytes).toString("base64")}`,
+            },
+          ],
+        },
+      };
+      const extracted = typedScreenshotFromSdkEvent(event);
+      expect(extracted).toMatchObject({ bytes, mediaType });
+      expect(
+        validateRetainableSessionImage({
+          bytes: extracted!.bytes,
+          declaredMediaType: mediaType,
+        }),
+      ).toMatchObject({ mediaType, extension, width: 2, height: 3 });
+    }
   });
 
   test("uses the run item id when the live output raw item omits callId", () => {
@@ -162,7 +206,10 @@ describe("retained computer screenshots", () => {
       sha256: "a".repeat(64),
       retainedAt: "2026-07-31T00:00:00.000Z",
       dimensions: { width: 1, height: 1 },
-      retention: { policy: "session_screenshot", expiresAt: "2026-08-30T00:00:00.000Z" },
+      retention: {
+        policy: "session_screenshot",
+        expiresAt: "2026-08-30T00:00:00.000Z",
+      },
       retrieval: {
         method: "GET",
         path: `/v1/workspaces/${identityInput.sessionId}/sessions/${identityInput.sessionId}/artifacts/${identity.artifactId}/content`,
