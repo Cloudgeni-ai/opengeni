@@ -3,7 +3,11 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HTTPException } from "hono/http-exception";
-import { ChannelAUnavailableError, ChannelAValidationError } from "@opengeni/runtime/sandbox";
+import {
+  ChannelAConflictError,
+  ChannelAUnavailableError,
+  ChannelAValidationError,
+} from "@opengeni/runtime/sandbox";
 import {
   isChannelAHandleCacheEntryFresh,
   isChannelAProcessHandleCacheEntryFresh,
@@ -280,14 +284,14 @@ describe("P4.4 Channel-A route discipline", () => {
     expect(channelASeam).toContain("lastUsedAtMonotonicMs");
   });
 
-  test("side-effect-free reads rebuild before one typed unavailable retry", async () => {
+  test("side-effect-free reads rebuild across a second rollover unavailable result", async () => {
     const order: string[] = [];
     let calls = 0;
     const value = await runChannelAReadWithFreshHandleRetry(
       async () => {
         calls += 1;
         order.push(`run:${calls}`);
-        if (calls === 1) throw new ChannelAUnavailableError("stale provider channel");
+        if (calls <= 2) throw new ChannelAUnavailableError("provider rollover still settling");
         return "fresh";
       },
       async () => {
@@ -295,10 +299,10 @@ describe("P4.4 Channel-A route discipline", () => {
       },
     );
     expect(value).toBe("fresh");
-    expect(order).toEqual(["run:1", "refresh", "run:2"]);
+    expect(order).toEqual(["run:1", "refresh", "run:2", "refresh", "run:3"]);
   });
 
-  test("fresh-handle recovery neither retries twice nor replays non-transient errors", async () => {
+  test("fresh-handle recovery is bounded and never replays non-transient errors", async () => {
     let unavailableCalls = 0;
     await expect(
       runChannelAReadWithFreshHandleRetry(
@@ -309,7 +313,7 @@ describe("P4.4 Channel-A route discipline", () => {
         async () => undefined,
       ),
     ).rejects.toBeInstanceOf(ChannelAUnavailableError);
-    expect(unavailableCalls).toBe(2);
+    expect(unavailableCalls).toBe(3);
 
     let validationCalls = 0;
     let refreshCalls = 0;
@@ -327,6 +331,26 @@ describe("P4.4 Channel-A route discipline", () => {
     ).rejects.toBe(validation);
     expect(validationCalls).toBe(1);
     expect(refreshCalls).toBe(0);
+
+    let mixedCalls = 0;
+    let mixedRefreshes = 0;
+    const conflict = new ChannelAConflictError("lease changed");
+    await expect(
+      runChannelAReadWithFreshHandleRetry(
+        async () => {
+          mixedCalls += 1;
+          if (mixedCalls === 1) {
+            throw new ChannelAUnavailableError("provider rollover started");
+          }
+          throw conflict;
+        },
+        async () => {
+          mixedRefreshes += 1;
+        },
+      ),
+    ).rejects.toBe(conflict);
+    expect(mixedCalls).toBe(2);
+    expect(mixedRefreshes).toBe(1);
   });
 
   test("transport failures evict disposable reads but preserve process-capable wrappers", () => {

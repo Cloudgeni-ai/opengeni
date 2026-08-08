@@ -309,20 +309,29 @@ export async function runConcurrentChannelAReads<T>(
   return values;
 }
 
-/** Retry a side-effect-free Channel-A read once, but only after the caller has
- * discarded and freshly re-established its provider handle. Provider commands
- * are not replayed for validation/conflict/unknown errors, and mutation routes
- * never call this helper. */
+/** Retry a side-effect-free Channel-A read at most twice, but only after the
+ * caller has discarded and freshly re-established its provider handle.
+ *
+ * Modal's command-router rollover can outlive the first replacement handle: a
+ * request may rebuild successfully, then receive one more typed unavailable
+ * result while the provider finishes the route transition. A second fresh
+ * handle is therefore allowed for reads only. Provider commands are never
+ * replayed for validation/conflict/unknown errors, and mutation routes never
+ * call this helper. */
 export async function runChannelAReadWithFreshHandleRetry<T>(
   run: () => Promise<T>,
   refreshHandle: () => Promise<void>,
 ): Promise<T> {
-  try {
-    return await run();
-  } catch (error) {
-    if (!(error instanceof ChannelAUnavailableError)) throw error;
-    await refreshHandle();
-    return await run();
+  const maxFreshHandleRetries = 2;
+  for (let retry = 0; ; retry += 1) {
+    try {
+      return await run();
+    } catch (error) {
+      if (!(error instanceof ChannelAUnavailableError) || retry >= maxFreshHandleRetries) {
+        throw error;
+      }
+      await refreshHandle();
+    }
   }
 }
 
