@@ -1,5 +1,12 @@
 # @opengeni/core
 
+## 0.21.23
+
+### Patch Changes
+
+- Updated dependencies [e627d88]
+  - @opengeni/observability@0.5.12
+
 ## 0.21.22
 
 ### Patch Changes

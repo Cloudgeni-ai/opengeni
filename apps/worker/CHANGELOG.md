@@ -1,5 +1,13 @@
 # @opengeni/worker-bundle
 
+## 0.16.42
+
+### Patch Changes
+
+- Updated dependencies [e627d88]
+  - @opengeni/observability@0.5.12
+  - @opengeni/core@0.21.23
+
 ## 0.16.41
 
 ### Patch Changes

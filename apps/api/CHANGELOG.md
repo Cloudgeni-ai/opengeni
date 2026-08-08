@@ -1,5 +1,14 @@
 # @opengeni/api-router
 
+## 0.23.14
+
+### Patch Changes
+
+- e627d88: Keep known-cold sandbox views passive, fence delayed live-read invalidations across draining transitions, and expose bounded structural Channel-A failure diagnostics without leaking provider details.
+- Updated dependencies [e627d88]
+  - @opengeni/observability@0.5.12
+  - @opengeni/core@0.21.23
+
 ## 0.23.13
 
 ### Patch Changes
