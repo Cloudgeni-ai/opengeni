@@ -118,6 +118,13 @@ const PUBLIC_TELEMETRY_ATTRIBUTE_KEYS = new Set([
   "retainedOutputKind",
 ]);
 
+/** Opaque correlation fields require both a reviewed name and a closed value
+ * grammar. Merely adding one to the ordinary allow-list would let an unrelated
+ * caller accidentally publish a raw identifier under that name. */
+const PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS = new Map<string, RegExp>([
+  ["sandboxLeaseKey", /^slk_[0-9a-f]{32}$/],
+]);
+
 /**
  * Public diagnostic values are protocol constants, never values inferred from
  * an exception's name, constructor, code, message, or enumerable properties.
@@ -707,9 +714,12 @@ function projectPublicTelemetryAttributes(attributes: Attributes): Attributes {
     return projectPublicDiagnosticAttributes(attributes);
   }
   return Object.fromEntries(
-    Object.entries(attributes).filter(
-      ([key, value]) => value !== undefined && PUBLIC_TELEMETRY_ATTRIBUTE_KEYS.has(key),
-    ),
+    Object.entries(attributes).filter(([key, value]) => {
+      if (value === undefined) return false;
+      if (PUBLIC_TELEMETRY_ATTRIBUTE_KEYS.has(key)) return true;
+      const pattern = PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS.get(key);
+      return typeof value === "string" && pattern?.test(value) === true;
+    }),
   );
 }
 

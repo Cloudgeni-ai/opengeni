@@ -77,6 +77,7 @@ import {
 } from "@opengeni/testing";
 import {
   createSandboxLeaseActivities,
+  sandboxLeaseTelemetryKey,
   type SweepModalOrphansFn,
   type TerminateBoxFn,
 } from "../src/activities/sandbox-lease";
@@ -95,6 +96,18 @@ const MODAL_PROVIDER_BINDING = {
     environment: "test",
   },
 };
+
+test("sandbox lease telemetry keys are stable, scoped, and contain no raw identifiers", () => {
+  const workspaceId = "c77bf2b8-3d09-4963-a40d-30588f5139f7";
+  const groupId = "9725b1c3-0d87-44a8-aa63-f6cbee2a1bc9";
+  const key = sandboxLeaseTelemetryKey(workspaceId, groupId);
+
+  expect(key).toMatch(/^slk_[0-9a-f]{32}$/);
+  expect(key).toBe(sandboxLeaseTelemetryKey(workspaceId, groupId));
+  expect(key).not.toContain(workspaceId);
+  expect(key).not.toContain(groupId);
+  expect(key).not.toBe(sandboxLeaseTelemetryKey(workspaceId, crypto.randomUUID()));
+});
 
 // Swap process.env for the duration of a getSettings() parse (mirrors the
 // @opengeni/config test harness; getSettings reads process.env, not an arg).
