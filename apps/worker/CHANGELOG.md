@@ -1,5 +1,25 @@
 # @opengeni/worker-bundle
 
+## 0.16.41
+
+### Patch Changes
+
+- e2edfbc: Add provider-aware image generation with permanent verified artifacts,
+  prompt-cache-safe history, sandbox materialization, and SDK/React rendering.
+- Updated dependencies [e2edfbc]
+  - @opengeni/codex@0.2.14
+  - @opengeni/config@0.12.6
+  - @opengeni/contracts@0.41.2
+  - @opengeni/db@0.28.16
+  - @opengeni/network@0.2.1
+  - @opengeni/runtime@0.18.33
+  - @opengeni/core@0.21.22
+  - @opengeni/documents@0.5.25
+  - @opengeni/github@0.4.43
+  - @opengeni/storage@0.2.80
+  - @opengeni/events@0.3.96
+  - @opengeni/observability@0.5.11
+
 ## 0.16.40
 
 ### Patch Changes
