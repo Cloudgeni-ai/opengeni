@@ -1,5 +1,11 @@
 # @opengeni/react
 
+## 0.49.1
+
+### Patch Changes
+
+- bdbdf5c: Render bounded tool-output previews with explicit delivery and full-evidence truncation facts.
+
 ## 0.49.0
 
 ### Patch Changes
