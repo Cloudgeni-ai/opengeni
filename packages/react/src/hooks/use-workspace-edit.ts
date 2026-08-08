@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
+import { sandboxAcceptsLiveIo } from "../lib/sandbox-liveness";
 
 /**
  * The wake-on-edit state machine. This hook owns the logic and the UI renders
@@ -73,7 +74,7 @@ export type UseWorkspaceEditResult = {
 };
 
 function isLive(liveness: string | undefined): boolean {
-  return liveness === "warm" || liveness === "draining";
+  return sandboxAcceptsLiveIo(liveness);
 }
 
 /**

@@ -81,6 +81,32 @@ describe("useSessionCapabilities", () => {
     await hook.unmount();
   });
 
+  test("a draining lease without intent stays on-demand and never polls or attaches", async () => {
+    let capabilityCalls = 0;
+    let attachCalls = 0;
+    const client = fakeClient({
+      getStreamCapabilities: async () => {
+        capabilityCalls += 1;
+        return fakeCapabilities({ liveness: "draining" });
+      },
+      attachViewer: async () => {
+        attachCalls += 1;
+        return fakeAttachResponse();
+      },
+    });
+    const hook = await renderHook(
+      () => useSessionCapabilities(SESSION_ID, { ...ctx, client, warmingPollMs: 20 }),
+      undefined,
+    );
+    await flush(120);
+
+    expect(hook.result.current.state).toBe("on-demand");
+    expect(hook.result.current.capabilities?.liveness).toBe("draining");
+    expect(capabilityCalls).toBe(1);
+    expect(attachCalls).toBe(0);
+    await hook.unmount();
+  });
+
   test("a cold lease WITH a warm-up in flight polls toward warm (then ready)", async () => {
     let calls = 0;
     const client = fakeClient({
@@ -257,34 +283,38 @@ describe("useSessionCapabilities", () => {
     await hook.unmount();
   });
 
-  test("attachFiles warms even a COLD box — wake-on-edit cold-creates (Refinement 1)", async () => {
-    // Edit intent legitimately spins a cold box up (that IS the wake). The old
-    // "keep-warm-only-if-already-warm" guard is gone: attachFiles now attaches on a
-    // cold lease, minting a holder with desktop:false (no un-redacted consent gate).
-    let attachCalls = 0;
-    let attachOpts: { desktop?: boolean } | null = null;
-    const client = fakeClient({
-      getStreamCapabilities: async () => fakeColdCapabilities(),
-      attachViewer: async (_w: string, _s: string, opts: { desktop?: boolean }) => {
-        attachCalls += 1;
-        attachOpts = opts;
-        return fakeAttachResponse();
-      },
-      heartbeatViewer: async () => ({ alive: true }),
-      detachViewer: async () => {},
-    });
-    const hook = await renderHook(
-      () => useSessionCapabilities(SESSION_ID, { ...ctx, client, attachFiles: true }),
-      undefined,
-    );
-    await flush();
-    expect(attachCalls).toBe(1);
-    expect(attachOpts).not.toBeNull();
-    expect((attachOpts as unknown as { desktop?: boolean }).desktop).toBe(false);
-    // A holder was minted → the box is live, not resting on the benign on-demand state.
-    expect(hook.result.current.state).toBe("ready");
-    await hook.unmount();
-  });
+  test.each(["cold", "draining"] as const)(
+    "attachFiles explicitly reacquires a %s box for wake-on-edit",
+    async (liveness) => {
+      // Edit intent legitimately acquires a holder (that IS the wake), including
+      // across teardown. Passive review stays capture-backed; this explicit path
+      // asks the server to cold-create or safely re-arm before returning warm.
+      let attachCalls = 0;
+      let attachOpts: { desktop?: boolean } | null = null;
+      const client = fakeClient({
+        getStreamCapabilities: async () =>
+          liveness === "cold" ? fakeColdCapabilities() : fakeCapabilities({ liveness: "draining" }),
+        attachViewer: async (_w: string, _s: string, opts: { desktop?: boolean }) => {
+          attachCalls += 1;
+          attachOpts = opts;
+          return fakeAttachResponse();
+        },
+        heartbeatViewer: async () => ({ alive: true }),
+        detachViewer: async () => {},
+      });
+      const hook = await renderHook(
+        () => useSessionCapabilities(SESSION_ID, { ...ctx, client, attachFiles: true }),
+        undefined,
+      );
+      await flush();
+      expect(attachCalls).toBe(1);
+      expect(attachOpts).not.toBeNull();
+      expect((attachOpts as unknown as { desktop?: boolean }).desktop).toBe(false);
+      // A holder was minted → the box is live, not resting on the benign on-demand state.
+      expect(hook.result.current.state).toBe("ready");
+      await hook.unmount();
+    },
+  );
 
   test("no attach intent: a cold session NEVER calls attachViewer — browsing is free (Refinement 1)", async () => {
     // With no desktop/terminal/edit intent, a cold lease must warm nothing: reviewing
@@ -518,6 +548,36 @@ describe("useSandboxTerminal", () => {
     await flush();
     expect(opened).toBe(false);
     expect(hook.result.current.write).toBeNull();
+    await hook.unmount();
+  });
+
+  test("interactive mode does not open a PTY until a draining lease becomes warm", async () => {
+    let opens = 0;
+    const client = fakeClient({
+      terminalPtyOpen: async () => {
+        opens += 1;
+        return { ptyId: "opened-1", streamVia: "sse-events" as const, supportsInput: true };
+      },
+      terminalPtyClose: async () => {},
+    });
+    const hook = await renderHook(
+      (props: { liveness: string }) =>
+        useSandboxTerminal(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: [],
+          interactive: true,
+          liveness: props.liveness,
+        }),
+      { liveness: "draining" },
+    );
+    await flush();
+    expect(opens).toBe(0);
+
+    await hook.rerender({ liveness: "warm" });
+    await flush();
+    expect(opens).toBe(1);
+    expect(hook.result.current.activePtyId).toBe("opened-1");
     await hook.unmount();
   });
 

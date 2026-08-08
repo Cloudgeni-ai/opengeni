@@ -4,6 +4,7 @@ import { cn } from "../lib/cn";
 import { useTerminalStream } from "../hooks/use-terminal-stream";
 import type { UseSandboxTerminalResult } from "../hooks/use-sandbox-terminal";
 import { resolveTerminalFont, xtermThemeFromTokens } from "../lib/xterm-theme";
+import { sandboxAcceptsLiveIo } from "../lib/sandbox-liveness";
 import { attachRenderer, type RendererLoaders, type RendererTier } from "../lib/xterm-renderer";
 
 /**
@@ -236,7 +237,7 @@ export function SandboxTerminal({
   // Boot-in-terminal: after the user focuses a not-yet-warm box, show styled
   // status lines INSIDE xterm instead of an overlay — but only when there is no
   // firehose transcript to show yet (otherwise the projected output is shown).
-  const warm = liveness === "warm" || liveness === "draining";
+  const warm = sandboxAcceptsLiveIo(liveness);
   const booting =
     activated &&
     !ptyMode &&

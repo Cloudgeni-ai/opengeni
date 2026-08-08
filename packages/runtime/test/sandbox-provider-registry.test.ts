@@ -460,6 +460,18 @@ describe("negotiateCapabilities — coherent doc, degrades as a value", () => {
     expect(caps.DesktopStream.reason).toBe("lease_cold");
   });
 
+  test.each(["warming", "draining"] as const)(
+    "%s lease without a minted stream remains non-live",
+    (liveness) => {
+      const caps = negotiateCapabilities({ ...base, backend: "modal", liveness });
+      expect(caps.DesktopStream.transport).toBeNull();
+      expect(caps.DesktopStream.reason).toBe("lease_cold");
+      expect(caps.Terminal.transport).toBe("sse-events");
+      expect(caps.Terminal.reason).toBe("lease_cold");
+      expect(caps.Terminal.url).toBeNull();
+    },
+  );
+
   // ── A successfully-minted relay/Modal stream url is ITSELF proof of liveness ──
   // A selfhosted-active session has NO warm Modal GROUP lease, so ctx.liveness is
   // "cold" — but the stream cells are minted against the selfhosted RELAY (the box

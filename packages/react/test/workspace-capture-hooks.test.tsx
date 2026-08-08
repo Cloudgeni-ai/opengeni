@@ -1929,6 +1929,56 @@ describe("useWorkspaceEdit", () => {
     await hook.unmount();
   });
 
+  test("a buffered edit never flushes while teardown owns a draining lease", async () => {
+    const reads: string[] = [];
+    const writes: string[] = [];
+    const client = fakeClient({
+      fsRead: async (_workspaceId, _sessionId, request) => {
+        reads.push(request.path);
+        return {
+          path: request.path,
+          encoding: "utf8" as const,
+          content: "base\n",
+          sizeBytes: 5,
+          truncated: false,
+          isBinary: false,
+          revision: 0,
+        };
+      },
+      fsWrite: async (_workspaceId, _sessionId, request) => {
+        writes.push(request.path);
+        return { path: request.path, sizeBytes: request.content.length, revision: 1 };
+      },
+    });
+    const hook = await renderHook(
+      (props: { liveness: string }) =>
+        useWorkspaceEdit(SESSION_ID, {
+          ...ctx,
+          client,
+          path: "a.txt",
+          baseContent: "base\n",
+          liveness: props.liveness,
+        }),
+      { liveness: "cold" },
+    );
+    await flush();
+    await actRun(() => hook.result.current.edit("edited\n"));
+    await hook.rerender({ liveness: "draining" });
+    await flush();
+
+    expect(hook.result.current.state).toBe("buffering");
+    expect(hook.result.current.buffer).toBe("edited\n");
+    expect(reads).toEqual([]);
+    expect(writes).toEqual([]);
+
+    await hook.rerender({ liveness: "warm" });
+    await flush();
+    expect(hook.result.current.state).toBe("flushed");
+    expect(reads).toEqual(["a.txt"]);
+    expect(writes).toEqual(["a.txt"]);
+    await hook.unmount();
+  });
+
   test("conflict path: live diverged from base → conflict, NO write (C2)", async () => {
     const writes: unknown[] = [];
     const client = fakeClient({
@@ -2163,13 +2213,23 @@ describe("useWorkspaceEdit", () => {
 describe("deriveMachineChip", () => {
   const NOW = Date.parse("2026-07-08T12:05:00.000Z");
 
-  test("warm lease → live", () => {
+  test("only a holder-confirmed warm lease is live", () => {
     expect(deriveMachineChip({ liveness: "warm" })).toEqual({
       state: "live",
       label: "Live",
       asOf: null,
     });
-    expect(deriveMachineChip({ liveness: "draining" }).state).toBe("live");
+    expect(
+      deriveMachineChip({
+        liveness: "draining",
+        capturedAt: "2026-07-08T12:00:00.000Z",
+        now: NOW,
+      }),
+    ).toEqual({
+      state: "offline",
+      label: "Offline — as of 5m ago",
+      asOf: "2026-07-08T12:00:00.000Z",
+    });
   });
 
   test("negotiating or wanting-warm → waking", () => {

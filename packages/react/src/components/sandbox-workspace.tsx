@@ -30,6 +30,7 @@ import {
 import { type ClientOverride, useOpenGeni } from "../provider";
 import { cn } from "../lib/cn";
 import { xtermThemeFromTokens } from "../lib/xterm-theme";
+import { sandboxAcceptsLiveIo } from "../lib/sandbox-liveness";
 import { useSessionCapabilities } from "../hooks/use-session-capabilities";
 import { useSandboxFiles } from "../hooks/use-sandbox-files";
 import {
@@ -336,8 +337,7 @@ export function useSandboxWorkspaceTabs(
   // Mutations are live-only. A capture is a review artifact, never a writable
   // surrogate for a sleeping machine; the user must deliberately open the live
   // workspace before create/rename/delete/edit controls appear.
-  const filesEditable =
-    fileSystemOn && !fsReadOnly && (liveness === "warm" || liveness === "draining");
+  const filesEditable = fileSystemOn && !fsReadOnly && sandboxAcceptsLiveIo(liveness);
   const gitOn = capabilities?.Git.available ?? false;
   const terminalOn = terminalEnabled && (capabilities?.Terminal.transport ?? null) !== null;
   // The REAL interactive terminal is the ttyd pty-ws stream. When it's live the
@@ -382,7 +382,7 @@ export function useSandboxWorkspaceTabs(
     enabled: workspaceDataEnabled,
   });
   const captureAvailable = captureState.available;
-  const liveWorkspaceExpected = liveness === "warm" || liveness === "draining";
+  const liveWorkspaceExpected = sandboxAcceptsLiveIo(liveness);
   // Capability negotiation and capture resolution are independent requests. A
   // cold capability document can win that race by a few milliseconds; enabling
   // the leaf hooks in that window would make them interpret `capture: null` as a
@@ -691,7 +691,7 @@ export function useSandboxWorkspaceTabs(
                   ...(requestedFileRequestId !== null && requestedFileRequestId !== undefined
                     ? { requestedPathRequestId: requestedFileRequestId }
                     : {}),
-                  requestedPathReady: liveness === "warm" || liveness === "draining",
+                  requestedPathReady: sandboxAcceptsLiveIo(liveness),
                 }
               : {})}
             // Ordinary capture browsing does not warm a box. The first edit — or an
