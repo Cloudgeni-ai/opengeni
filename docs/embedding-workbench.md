@@ -130,7 +130,10 @@ Live reconciliation batches the visible file-tree frontier into one
 `fs/list-batch` request and all repository status/diff reads into one
 `git/read-batch` request. Each batch acquires the session's Channel-A lease once
 and runs its independent reads concurrently, avoiding repeated provider attach
-and lease traffic as repository count or expanded folders grow. The individual
+and lease traffic as repository count or expanded folders grow. Separate Modal
+read requests for the same exact live lease are serialized through a bounded
+PostgreSQL advisory lock across API replicas, so load balancing cannot make two
+reconstructed handles race the provider command transport. The individual
 `fs/list`, `git/status`, and `git/diff` methods remain available for point reads.
 
 Repository discovery walks the workspace filesystem without a fixed nesting

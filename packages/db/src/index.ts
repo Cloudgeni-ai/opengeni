@@ -325,6 +325,8 @@ import {
   withWorkspaceRls,
   withWorkspaceSubjectRls,
   withWorkspaceUsageLock,
+  withSandboxProviderReadLock,
+  SandboxProviderReadLockUnavailableError,
   type Database,
 } from "./database";
 export {
@@ -340,11 +342,14 @@ export {
   withWorkspaceRls,
   withWorkspaceSubjectRls,
   withWorkspaceUsageLock,
+  withSandboxProviderReadLock,
+  SandboxProviderReadLockUnavailableError,
   type CreateDbOptions,
   type Database,
   type DbClient,
   type RlsContext,
   type RlsStrategy,
+  type SandboxProviderReadLockIdentity,
   type UserLookup,
 } from "./database";
 import {

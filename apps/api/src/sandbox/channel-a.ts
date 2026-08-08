@@ -37,6 +37,8 @@ import {
   readActiveSandbox,
   readLease,
   releaseLeaseHolder,
+  SandboxProviderReadLockUnavailableError,
+  withSandboxProviderReadLock,
   type Database,
   type LeaseSnapshot,
 } from "@opengeni/db";
@@ -238,6 +240,26 @@ function rememberEstablishedHandle(key: string, established: EstablishedSandboxS
 export async function withChannelA<T>(
   services: ChannelAServices,
   ctx: ChannelAContext,
+  fn: (handle: ChannelAHandle) => Promise<T>,
+): Promise<T> {
+  return await withChannelAOperation(services, ctx, false, fn);
+}
+
+/** Read-only API-direct seam. Separate requests for the same exact live Modal
+ * instance are serialized across API replicas; each request's batched reads
+ * remain concurrent behind that one distributed boundary. */
+export async function withChannelARead<T>(
+  services: ChannelAServices,
+  ctx: ChannelAContext,
+  fn: (handle: ChannelAHandle) => Promise<T>,
+): Promise<T> {
+  return await withChannelAOperation(services, ctx, true, fn);
+}
+
+async function withChannelAOperation<T>(
+  services: ChannelAServices,
+  ctx: ChannelAContext,
+  readOnly: boolean,
   fn: (handle: ChannelAHandle) => Promise<T>,
 ): Promise<T> {
   const { db, settings, bus } = services;
@@ -550,7 +572,20 @@ export async function withChannelA<T>(
       },
       established,
     );
-    return await runEstablished(routed, leaseSnapshot);
+    const run = async () => await runEstablished(routed, leaseSnapshot);
+    return readOnly && session.sandboxBackend === "modal"
+      ? await withSandboxProviderReadLock(
+          db,
+          {
+            workspaceId,
+            sandboxGroupId,
+            leaseEpoch: leaseSnapshot.leaseEpoch,
+            instanceId: leaseSnapshot.instanceId!,
+          },
+          ctx.waitSignal,
+          run,
+        )
+      : await run();
   } catch (error) {
     throw mapChannelAError(error);
   } finally {
@@ -568,6 +603,8 @@ export function mapChannelAError(error: unknown): unknown {
     error instanceof SandboxResumeIdentityUnavailableError
   )
     return new HTTPException(409, { message: error.message });
+  if (error instanceof SandboxProviderReadLockUnavailableError)
+    return new HTTPException(503, { message: error.message });
   if (error instanceof ChannelAUnavailableError)
     return new HTTPException(503, { message: error.message });
   if (error instanceof ChannelAValidationError)

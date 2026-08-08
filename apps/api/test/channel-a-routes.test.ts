@@ -199,6 +199,36 @@ describe("P4.4 Channel-A route discipline", () => {
     }
   });
 
+  test("every provider-backed point read uses the cross-replica read seam", () => {
+    for (const route of [
+      "fs/list",
+      "fs/list-batch",
+      "fs/read",
+      "git/status",
+      "git/diff",
+      "git/read-batch",
+      "git/log",
+      "git/show",
+    ]) {
+      const body = handlerBody(
+        sessionsRoute,
+        "post",
+        `/v1/workspaces/:workspaceId/sessions/:sessionId/${route}`,
+      );
+      expect(body).toContain("withChannelARead(");
+    }
+
+    for (const route of ["fs/write", "fs/delete", "fs/move", "fs/mkdir", "terminal/exec"]) {
+      const body = handlerBody(
+        sessionsRoute,
+        "post",
+        `/v1/workspaces/:workspaceId/sessions/:sessionId/${route}`,
+      );
+      expect(body).toContain("withChannelA(");
+      expect(body).not.toContain("withChannelARead(");
+    }
+  });
+
   test("near-identical non-transient reads are never retried", async () => {
     let calls = 0;
     const failure = new ChannelAValidationError("bad path");
