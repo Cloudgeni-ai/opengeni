@@ -64,6 +64,7 @@ import {
   areGitHubRepositoriesAllowedForWorkspace,
   SandboxLeaseRecoveryBlockedError,
   SandboxLeaseSupersededError,
+  SandboxLeaseTransitionError,
   SandboxImageConflictError,
   isSessionEventPersistenceError,
   getEnrollment,
@@ -159,7 +160,7 @@ import {
   configuredModelPricingSchedules,
   configuredStaticUsageLimits,
   responseSatisfiesLatencyMode,
-  sandboxArchiveCaptureTimeoutMs,
+  sandboxLifecycleTransitionWaitMs,
   sandboxWarmRateMicrosPerSecond,
   serviceTierForLatencyMode,
   settingsWithResolvedModelContext,
@@ -2239,7 +2240,11 @@ export function isLazySandboxProvisionRetryable(error: unknown): boolean {
   if (error instanceof WorkspaceArchiveIntegrityError) {
     return error.retryable;
   }
-  if (error instanceof SandboxLeaseSupersededError || error instanceof SandboxWarmingTimeoutError) {
+  if (
+    error instanceof SandboxLeaseSupersededError ||
+    error instanceof SandboxLeaseTransitionError ||
+    error instanceof SandboxWarmingTimeoutError
+  ) {
     return true;
   }
   const message = error instanceof Error ? error.message : String(error);
@@ -2248,18 +2253,15 @@ export function isLazySandboxProvisionRetryable(error: unknown): boolean {
   );
 }
 
-/**
- * Deadline recovery cannot re-admit the same turn until the global reaper has
- * observed the released holder, captured the final archive, terminated the old
- * provider box, and committed the lease cold. Give that full sequence one
- * snapshot budget plus two schedule periods. This is workflow-visible pacing,
- * not an in-memory sleep, so Pause/Steer/new user intent can still wake the
- * durable session immediately.
- */
+/** Short workflow-visible anti-churn pacing after a lifecycle transition. The
+ * next acquire waits on the exact durable claim itself, so this is deliberately
+ * not a guessed snapshot-plus-schedules completion time. */
 export function sandboxDeadlineRotationRecoveryDelayMs(
-  settings: Pick<Settings, "sandboxLeaseReaperPeriodMs" | "sandboxSnapshotTimeoutMs">,
+  settings: Pick<Settings, "sandboxLeaseReaperPeriodMs">,
 ): number {
-  return settings.sandboxSnapshotTimeoutMs + settings.sandboxLeaseReaperPeriodMs * 2;
+  // The next attempt waits on the durable lifecycle claim itself. This delay is
+  // only anti-churn pacing, not an estimate of snapshot + future schedules.
+  return Math.min(5_000, settings.sandboxLeaseReaperPeriodMs);
 }
 
 export function createTurnSandboxProvisioner<T>(
@@ -2786,7 +2788,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         expectedEpoch: sandbox.leaseEpoch,
         expectedInstanceId: sandbox.established.instanceId,
         operation,
-        captureWaitMs: sandboxArchiveCaptureTimeoutMs(settings),
+        captureWaitMs: sandboxLifecycleTransitionWaitMs(settings),
+        ...(cancellationSignal ? { waitSignal: cancellationSignal } : {}),
       };
       const admission = await advanceWorkspaceGeneration(db, identity);
       let result: T;
@@ -5508,6 +5511,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 onOp: machineOpObserver.observer,
                 onSandboxOperation: sandboxOperationObserver,
                 onHomeSandboxRebound,
+                ...(runtimeCancellationSignal ? { waitSignal: runtimeCancellationSignal } : {}),
               },
               {
                 workspaceId: input.workspaceId,
@@ -5618,6 +5622,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 onSandboxOperation: sandboxOperationObserver,
                 onHomeSandboxLost: publishSandboxLost,
                 onHomeSandboxRebound,
+                ...(runtimeCancellationSignal ? { waitSignal: runtimeCancellationSignal } : {}),
               },
               // Thread the SAME declared environment the group box was created with
               // (resumeBoxForTurn, above) so a selfhosted swap target's manifest
@@ -6176,6 +6181,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             onSandboxOperation: sandboxOperationObserver,
             onHomeSandboxLost: publishSandboxLost,
             onHomeSandboxRebound,
+            ...(runtimeCancellationSignal ? { waitSignal: runtimeCancellationSignal } : {}),
           },
           {
             workspaceId: input.workspaceId,
@@ -7396,15 +7402,24 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // back to the workflow-claimed turn when the local lookup had not
       // finished yet.
       const recoveryTurnId = turnId;
-      // P1.2: a lease supersession during resume (a newer epoch re-established
-      // the box concurrently) is NOT a session failure. Recover the same turn
-      // so its next attempt reattaches under the current epoch.
-      if (error instanceof SandboxLeaseSupersededError && recoveryTurnId) {
+      // A true epoch supersession and a provider lifecycle transition are both
+      // recoverable control-plane states, never session failures. The latter is
+      // paced briefly; the next acquire waits on the durable claim and resumes
+      // immediately when it clears.
+      if (
+        (error instanceof SandboxLeaseSupersededError ||
+          error instanceof SandboxLeaseTransitionError) &&
+        recoveryTurnId
+      ) {
         try {
           const fencedLease = await readLease(db, input.workspaceId, error.sandboxGroupId).catch(
             () => null,
           );
-          const rotationPending = fencedLease?.rotationRequestedAt != null;
+          const lifecycleTransition = error instanceof SandboxLeaseTransitionError;
+          const rotationPending =
+            fencedLease?.rotationRequestedAt != null ||
+            (lifecycleTransition && error.reason === "rotation_in_progress");
+          const transitionPending = lifecycleTransition || rotationPending;
           const deadlineRotationPending =
             rotationPending && fencedLease?.rotationReason === "provider_deadline";
           const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
@@ -7414,13 +7429,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             attemptId: input.attemptId,
             reason: deadlineRotationPending
               ? "sandbox_deadline_rotation"
-              : "sandbox_lease_superseded",
-            ...(rotationPending
+              : lifecycleTransition
+                ? "sandbox_lifecycle_transition"
+                : "sandbox_lease_superseded",
+            ...(transitionPending
               ? {
                   detail: {
                     sandboxGroupId: error.sandboxGroupId,
                     leaseEpoch: error.leaseEpoch,
-                    rotationReason: fencedLease?.rotationReason ?? "operator",
+                    ...(rotationPending
+                      ? { rotationReason: fencedLease?.rotationReason ?? "operator" }
+                      : {}),
+                    ...(lifecycleTransition ? { transitionReason: error.reason } : {}),
                   },
                 }
               : {}),
@@ -7442,17 +7462,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           turnMetricOutcome = "recovering";
           return claimedResult({
             status: "recovering",
-            ...(rotationPending
+            ...(transitionPending
               ? {
                   continueDelayMs: sandboxDeadlineRotationRecoveryDelayMs(settings),
                 }
               : {}),
           });
         } catch (recoveryError) {
-          console.error(
-            "sandbox lease supersession recovery failed",
-            safeErrorDiagnostic(recoveryError),
-          );
+          console.error("sandbox lifecycle recovery failed", safeErrorDiagnostic(recoveryError));
           throw recoveryError;
         }
       }

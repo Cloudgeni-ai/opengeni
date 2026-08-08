@@ -17,9 +17,15 @@
 // this test does not mock @opengeni/runtime globally and poison unrelated tests.
 
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { testSettings } from "@opengeni/testing";
 import * as runtime from "@opengeni/runtime";
-import { terminateProviderBox } from "../src/activities/sandbox-lease";
+import {
+  SandboxProviderCaptureTimeoutError,
+  terminateProviderBox,
+} from "../src/activities/sandbox-lease";
 
 // A Modal-faithful fake provider client. resume() enforces the SAME invariant the
 // real SDK does (throws when state.sandboxId is absent), so a regressed envelope
@@ -29,28 +35,31 @@ const deleteCalls: Array<string | undefined> = [];
 const TEST_WORKSPACE_FINGERPRINT =
   "OPENGENI_WORKSPACE_FINGERPRINT_V1 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 3 2 17\n";
 function makeFakeModalClient() {
+  const resumeExact = async (state: { sandboxId?: unknown }) => {
+    if (!state.sandboxId) {
+      throw new Error("Modal sandbox resume requires a persisted sandboxId.");
+    }
+    resumeCalls.push(state.sandboxId as string);
+    // The resumed live session exposes persistWorkspace() (the snapshot/tar
+    // capture) — terminateProviderBox MUST call it BEFORE delete().
+    return {
+      state: { sandboxId: state.sandboxId },
+      kill: async () => {},
+      closed: false,
+      exec: async () => ({ stdout: TEST_WORKSPACE_FINGERPRINT }),
+      persistWorkspace: async () =>
+        new TextEncoder().encode('MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"im-snap-123"}'),
+      modal: { images: { delete: async () => {} } },
+    };
+  };
   return {
     backendId: "modal",
     async deserializeSessionState(state: Record<string, unknown>) {
       // Echo (preserves sandboxId iff present), like the SDK's `...state` spread.
       return { ...state, ownsSandbox: true };
     },
-    async resume(state: { sandboxId?: unknown }) {
-      if (!state.sandboxId) {
-        throw new Error("Modal sandbox resume requires a persisted sandboxId.");
-      }
-      resumeCalls.push(state.sandboxId as string);
-      // The resumed live session exposes persistWorkspace() (the snapshot/tar
-      // capture) — terminateProviderBox MUST call it BEFORE delete().
-      return {
-        kill: async () => {},
-        closed: false,
-        exec: async () => ({ stdout: TEST_WORKSPACE_FINGERPRINT }),
-        persistWorkspace: async () =>
-          new TextEncoder().encode('MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"im-snap-123"}'),
-        modal: { images: { delete: async () => {} } },
-      };
-    },
+    resume: resumeExact,
+    resumeExact,
     async serializeSessionState(state: Record<string, unknown>) {
       // The persistable FLAT provider state (sandboxId at the top), like Modal.
       return { ...state };
@@ -81,6 +90,11 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
           "UnixLocal sandbox workspace is unavailable and no local snapshot could be restored.",
         );
       },
+      async resumeExact() {
+        throw new Error(
+          "UnixLocal sandbox workspace is unavailable and no local snapshot could be restored.",
+        );
+      },
     };
 
     const persistCalls: unknown[] = [];
@@ -90,6 +104,7 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
         sandboxGroupId: "group-local-sdk-id",
         leaseEpoch: 1,
         backend: "local",
+        instanceId: "/tmp/opengeni-local-workspace",
         resumeBackendId: "unix_local",
         resumeState: {
           backendId: "unix_local",
@@ -115,6 +130,78 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
       providerMissingBeforeCapture: true,
     });
     expect(persistCalls).toHaveLength(0);
+  });
+
+  test("a claimed Docker drain restarts only the same live workspace, captures it, then removes it", async () => {
+    const calls: string[] = [];
+    const workspaceRootPath = mkdtempSync(join(tmpdir(), "opengeni-docker-reaper-continuity-"));
+    writeFileSync(join(workspaceRootPath, "latest.txt"), "latest-docker-workspace");
+    const providerState = {
+      containerId: "docker-old",
+      workspaceRootPath,
+      workspaceRootOwned: true,
+      snapshot: null,
+    };
+    const dockerArchive = JSON.stringify({
+      version: 1,
+      directories: [],
+      files: [
+        {
+          path: "latest.txt",
+          data: Buffer.from("latest-docker-workspace").toString("base64"),
+        },
+      ],
+    });
+    const client = {
+      backendId: "docker",
+      async deserializeSessionState(state: Record<string, unknown>) {
+        return { ...state };
+      },
+      async resume(state: Record<string, unknown>) {
+        calls.push("restart-same-workspace");
+        return {
+          state: { ...state, containerId: "docker-new" },
+          exec: async () => ({ stdout: TEST_WORKSPACE_FINGERPRINT }),
+          persistWorkspace: async () => new TextEncoder().encode(dockerArchive),
+          delete: async () => calls.push("delete-workspace-and-wrapper"),
+        };
+      },
+    };
+    try {
+      const archives: string[] = [];
+      const outcome = await terminateProviderBox(
+        testSettings({ sandboxBackend: "docker", sandboxOwnershipEnabled: true }),
+        {
+          sandboxGroupId: "group-docker-continuity",
+          leaseEpoch: 4,
+          backend: "docker",
+          instanceId: "docker-old",
+          resumeBackendId: "docker",
+          resumeState: {
+            backendId: "docker",
+            opengeniProviderInstanceId: "docker-old",
+            sessionState: { providerState },
+          },
+        } as never,
+        observability,
+        async (archive) => {
+          expect(calls).not.toContain("delete-workspace-and-wrapper");
+          archives.push(archive);
+          return { wrote: true };
+        },
+        (() => client) as never,
+      );
+
+      expect(outcome).toEqual({
+        terminated: true,
+        providerMissingBeforeCapture: false,
+      });
+      expect(archives).toHaveLength(1);
+      expect(Buffer.from(archives[0]!, "base64").toString()).toBe(dockerArchive);
+      expect(calls).toEqual(["restart-same-workspace", "delete-workspace-and-wrapper"]);
+    } finally {
+      rmSync(workspaceRootPath, { recursive: true, force: true });
+    }
   });
 
   test("the PRODUCTION envelope nests providerState under sessionState (the trap)", async () => {
@@ -162,6 +249,7 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
       sandboxGroupId: "group-1",
       leaseEpoch: 1,
       backend: "modal",
+      instanceId: "sb-live-123",
       resumeBackendId: "modal",
       resumeState,
     };
@@ -201,7 +289,284 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
     expect(deleteCalls).toEqual(["sb-live-123"]); // and terminated BY ID, AFTER persist
   });
 
-  test("an already-closed resumable session is successful after its verified archive is folded", async () => {
+  test("a durably published drain resumes exact teardown without another workspace capture", async () => {
+    resumeCalls.length = 0;
+    deleteCalls.length = 0;
+    const resumeState = await runtime.serializeEstablishedSandboxEnvelope({
+      client: makeFakeModalClient(),
+      session: {},
+      sessionState: { sandboxId: "sb-published", appName: "app", imageTag: "tag" },
+      instanceId: "sb-published",
+      backendId: "modal",
+    } as never);
+    let persistCalls = 0;
+    const outcome = await terminateProviderBox(
+      testSettings({ sandboxBackend: "modal", sandboxOwnershipEnabled: true }),
+      {
+        sandboxGroupId: "group-published",
+        leaseEpoch: 9,
+        backend: "modal",
+        instanceId: "sb-published",
+        resumeBackendId: "modal",
+        resumeState,
+      } as never,
+      observability,
+      async () => {
+        persistCalls += 1;
+        return { wrote: true };
+      },
+      ((backend: string) => (backend === "modal" ? makeFakeModalClient() : undefined)) as never,
+      undefined,
+      undefined,
+      "archive_published",
+    );
+
+    expect(outcome).toEqual({
+      terminated: true,
+      providerMissingBeforeCapture: false,
+    });
+    expect(resumeCalls).toEqual(["sb-published"]);
+    expect(persistCalls).toBe(0);
+    expect(deleteCalls).toEqual(["sb-published"]);
+  });
+
+  test("a generic provider timeout preserves and late-publishes the exact capture without teardown", async () => {
+    let resolveCapture!: (bytes: Uint8Array) => void;
+    const providerCapture = new Promise<Uint8Array>((resolve) => {
+      resolveCapture = resolve;
+    });
+    let deleteCount = 0;
+    const client = {
+      backendId: "modal",
+      async deserializeSessionState(state: Record<string, unknown>) {
+        return { ...state };
+      },
+      async resume(state: { sandboxId?: unknown }) {
+        return {
+          state: { sandboxId: state.sandboxId },
+          exec: async () => ({ stdout: TEST_WORKSPACE_FINGERPRINT }),
+          persistWorkspace: async () => await providerCapture,
+          kill: async () => {},
+          closed: false,
+          modal: { images: { delete: async () => {} } },
+        };
+      },
+      async resumeExact(state: { sandboxId?: unknown }) {
+        return await this.resume(state);
+      },
+      async delete() {
+        deleteCount += 1;
+      },
+    };
+    let resolvePublished!: () => void;
+    const published = new Promise<void>((resolve) => {
+      resolvePublished = resolve;
+    });
+    let publishedArchive: string | null = null;
+    const operation = terminateProviderBox(
+      testSettings({
+        sandboxBackend: "modal",
+        sandboxOwnershipEnabled: true,
+        sandboxSnapshotTimeoutMs: 10,
+      }),
+      {
+        sandboxGroupId: "group-late-capture",
+        leaseEpoch: 3,
+        backend: "modal",
+        instanceId: "sb-late-capture",
+        resumeBackendId: "modal",
+        resumeState: {
+          backendId: "modal",
+          sessionState: { providerState: { sandboxId: "sb-late-capture" } },
+        },
+      } as never,
+      observability,
+      async (archive) => {
+        publishedArchive = archive;
+        resolvePublished();
+        return { wrote: true };
+      },
+      (() => client) as never,
+    );
+
+    await expect(operation).rejects.toBeInstanceOf(SandboxProviderCaptureTimeoutError);
+    expect(deleteCount).toBe(0);
+    resolveCapture(
+      new TextEncoder().encode('MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"im-late"}'),
+    );
+    await Promise.race([
+      published,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("late capture did not publish")), 1_000),
+      ),
+    ]);
+    expect(publishedArchive).not.toBeNull();
+    expect(deleteCount).toBe(0);
+  });
+
+  test("a Modal warming-death record uses the exact attributed instance without guessing an envelope", async () => {
+    const directTerminateCalls: string[] = [];
+    const clientBuilds: string[] = [];
+    const persistCalls: Array<string | null> = [];
+    const outcome = await terminateProviderBox(
+      testSettings({ sandboxBackend: "modal", sandboxOwnershipEnabled: true }),
+      {
+        sandboxGroupId: "group-unpublished-modal",
+        leaseEpoch: 4,
+        backend: "modal",
+        instanceId: "sb-unpublished-modal",
+        resumeBackendId: "modal",
+        resumeState: {
+          opengeniRecovery: {
+            provider: { status: "creating", instanceId: "sb-unpublished-modal" },
+            workspace: { status: "not_ready" },
+          },
+        },
+        recovery: {
+          provider: { status: "creating", instanceId: "sb-unpublished-modal" },
+          workspace: { status: "not_ready" },
+        },
+      } as never,
+      observability,
+      async (archiveBase64) => {
+        persistCalls.push(archiveBase64);
+        return { wrote: true };
+      },
+      ((backend: string) => {
+        clientBuilds.push(backend);
+        throw new Error("provider client must not be built for unpublished Modal state");
+      }) as never,
+      (async (_settings: unknown, instanceId: string) => {
+        directTerminateCalls.push(instanceId);
+      }) as never,
+    );
+
+    expect(outcome).toEqual({
+      terminated: true,
+      providerMissingBeforeCapture: false,
+    });
+    expect(persistCalls).toEqual([null]);
+    expect(directTerminateCalls).toEqual(["sb-unpublished-modal"]);
+    expect(clientBuilds).toEqual([]);
+  });
+
+  test("a re-armed unpublished Modal lease is left running", async () => {
+    const directTerminateCalls: string[] = [];
+    const outcome = await terminateProviderBox(
+      testSettings({ sandboxBackend: "modal", sandboxOwnershipEnabled: true }),
+      {
+        sandboxGroupId: "group-rearmed-modal",
+        leaseEpoch: 5,
+        backend: "modal",
+        instanceId: "sb-rearmed-modal",
+        resumeBackendId: "modal",
+        resumeState: null,
+        recovery: {
+          provider: { status: "creating", instanceId: "sb-rearmed-modal" },
+          workspace: { status: "not_ready" },
+        },
+      } as never,
+      observability,
+      async () => ({ wrote: false }),
+      (() => {
+        throw new Error("provider client must not be built");
+      }) as never,
+      (async (_settings: unknown, instanceId: string) => {
+        directTerminateCalls.push(instanceId);
+      }) as never,
+    );
+
+    expect(outcome).toEqual({
+      terminated: false,
+      providerMissingBeforeCapture: false,
+    });
+    expect(directTerminateCalls).toEqual([]);
+  });
+
+  test("provider identity disagreement fails closed before any provider operation", async () => {
+    const clientBuilds: string[] = [];
+    const persistCalls: unknown[] = [];
+    await expect(
+      terminateProviderBox(
+        testSettings({ sandboxBackend: "modal", sandboxOwnershipEnabled: true }),
+        {
+          sandboxGroupId: "group-mismatch",
+          leaseEpoch: 6,
+          backend: "modal",
+          instanceId: "sb-authoritative",
+          resumeBackendId: "modal",
+          resumeState: {
+            opengeniProviderInstanceId: "sb-stale-envelope",
+            sessionState: { providerState: { sandboxId: "sb-stale-envelope" } },
+          },
+        } as never,
+        observability,
+        async (...args) => {
+          persistCalls.push(args);
+          return { wrote: true };
+        },
+        ((backend: string) => {
+          clientBuilds.push(backend);
+          return makeFakeModalClient();
+        }) as never,
+      ),
+    ).rejects.toThrow(/does not match persisted provider identity/);
+    expect(clientBuilds).toEqual([]);
+    expect(persistCalls).toEqual([]);
+  });
+
+  test("a persisted provider identity without an authoritative lease instance fails closed", async () => {
+    await expect(
+      terminateProviderBox(
+        testSettings({ sandboxBackend: "modal", sandboxOwnershipEnabled: true }),
+        {
+          sandboxGroupId: "group-missing-authority",
+          leaseEpoch: 7,
+          backend: "modal",
+          instanceId: null,
+          resumeBackendId: "modal",
+          resumeState: { opengeniProviderInstanceId: "sb-unattributed" },
+        } as never,
+        observability,
+        async () => ({ wrote: true }),
+        (() => {
+          throw new Error("provider client must not be built");
+        }) as never,
+      ),
+    ).rejects.toThrow(/no authoritative lease instance/);
+  });
+
+  test("non-identity provider configuration is never guessed as a provider address", async () => {
+    const clientBuilds: string[] = [];
+    await expect(
+      terminateProviderBox(
+        testSettings({ sandboxBackend: "runloop", sandboxOwnershipEnabled: true }),
+        {
+          sandboxGroupId: "group-runloop-config-only",
+          leaseEpoch: 8,
+          backend: "runloop",
+          instanceId: "devbox-attributed-but-unresumable",
+          resumeBackendId: "runloop",
+          resumeState: {
+            sessionState: { providerState: { region: "us-west", timeoutSeconds: 300 } },
+          },
+          recovery: {
+            provider: { status: "unknown", instanceId: "devbox-attributed-but-unresumable" },
+            workspace: { status: "unknown" },
+          },
+        } as never,
+        observability,
+        async () => ({ wrote: true }),
+        ((backend: string) => {
+          clientBuilds.push(backend);
+          return undefined;
+        }) as never,
+      ),
+    ).rejects.toThrow(/no resumable provider envelope/);
+    expect(clientBuilds).toEqual([]);
+  });
+
+  test("an already-closed resumable session idempotently runs its declared cleanup", async () => {
     const closeCalls: string[] = [];
     const persistedArchives: string[] = [];
     const closeOnlyClient = {
@@ -211,6 +576,7 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
       },
       async resume() {
         return {
+          state: { sandboxId: "sb-already-closed" },
           closed: true,
           close: async () => {
             closeCalls.push("close");
@@ -221,6 +587,9 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
               'MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"im-already-closed"}',
             ),
         };
+      },
+      async resumeExact() {
+        return await this.resume();
       },
       async serializeSessionState(state: Record<string, unknown>) {
         return { ...state };
@@ -233,6 +602,7 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
         sandboxGroupId: "group-already-closed",
         leaseEpoch: 3,
         backend: "modal",
+        instanceId: "sb-already-closed",
         resumeBackendId: "modal",
         resumeState: {
           backendId: "modal",
@@ -253,7 +623,7 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
       providerMissingBeforeCapture: false,
     });
     expect(persistedArchives).toHaveLength(1);
-    expect(closeCalls).toEqual([]);
+    expect(closeCalls).toEqual(["close"]);
   });
 
   test("CRITICAL: a selfhosted lease is NEVER provider-stopped by the reaper (drain-to-cold only)", async () => {
@@ -343,6 +713,7 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
       async resume() {
         resumeCalls.push("sb-nosnap");
         return {
+          state: { sandboxId: "sb-nosnap" },
           kill: async () => {},
           closed: false,
           exec: async () => ({ stdout: TEST_WORKSPACE_FINGERPRINT }),
@@ -350,6 +721,9 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
             throw new Error("Modal snapshot_filesystem persistence timed out.");
           },
         };
+      },
+      async resumeExact() {
+        return await this.resume();
       },
       async serializeSessionState(state: Record<string, unknown>) {
         return { ...state };
@@ -371,6 +745,7 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
       sandboxGroupId: "group-nosnap",
       leaseEpoch: 1,
       backend: "modal",
+      instanceId: "sb-nosnap",
       resumeBackendId: "modal",
       resumeState,
     };
@@ -400,11 +775,15 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
         Object.assign(error, { status: 404, code: "NOT_FOUND" });
         throw error;
       },
+      async resumeExact() {
+        return await this.resume();
+      },
     };
     const lease = {
       sandboxGroupId: "group-gone",
       leaseEpoch: 7,
       backend: "modal",
+      instanceId: "sb-gone",
       resumeBackendId: "modal",
       resumeState: {
         backendId: "modal",
@@ -431,6 +810,60 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
     expect(persistCalls).toHaveLength(0);
   });
 
+  test("an SDK-created resume replacement is deleted and never captured as the original", async () => {
+    const replacementDeletes: string[] = [];
+    const replacementClient = {
+      backendId: "runloop",
+      async deserializeSessionState(state: Record<string, unknown>) {
+        return { ...state };
+      },
+      async resume() {
+        return {
+          state: { devboxId: "devbox-replacement" },
+          async delete() {
+            replacementDeletes.push("devbox-replacement");
+          },
+          async persistWorkspace() {
+            throw new Error("replacement must never be captured");
+          },
+        };
+      },
+      async resumeExact() {
+        return await this.resume();
+      },
+    };
+    const persistCalls: unknown[] = [];
+
+    const outcome = await terminateProviderBox(
+      testSettings({ sandboxBackend: "runloop", sandboxOwnershipEnabled: true }),
+      {
+        sandboxGroupId: "group-recreated-by-sdk",
+        leaseEpoch: 9,
+        backend: "runloop",
+        instanceId: "devbox-gone",
+        resumeBackendId: "runloop",
+        resumeState: {
+          backendId: "runloop",
+          opengeniProviderInstanceId: "devbox-gone",
+          sessionState: { providerState: { devboxId: "devbox-gone" } },
+        },
+      } as never,
+      observability,
+      async (...args) => {
+        persistCalls.push(args);
+        return { wrote: true };
+      },
+      (() => replacementClient) as never,
+    );
+
+    expect(outcome).toEqual({
+      terminated: true,
+      providerMissingBeforeCapture: true,
+    });
+    expect(replacementDeletes).toEqual(["devbox-replacement"]);
+    expect(persistCalls).toHaveLength(0);
+  });
+
   test("an ambiguous provider termination failure is never reported as success", async () => {
     const terminateFailureClient = {
       ...makeFakeModalClient(),
@@ -453,6 +886,7 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
           sandboxGroupId: "group-ambiguous",
           leaseEpoch: 8,
           backend: "modal",
+          instanceId: "sb-ambiguous",
           resumeBackendId: "modal",
           resumeState,
         } as never,

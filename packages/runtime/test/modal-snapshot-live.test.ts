@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -16,6 +17,10 @@ import {
 } from "../src/sandbox/providers/modal";
 
 const liveGate = process.env.OPENGENI_LIVE_MODAL_SNAPSHOT === "1" && hasModalCredentials();
+const workspacePersistence =
+  process.env.OPENGENI_MODAL_SNAPSHOT_MODE === "snapshot_directory"
+    ? "snapshot_directory"
+    : "snapshot_filesystem";
 
 function hasModalCredentials(): boolean {
   if (process.env.MODAL_TOKEN_ID && process.env.MODAL_TOKEN_SECRET) return true;
@@ -98,16 +103,18 @@ describe("Modal native checkpoint round trip (opt-in live service)", () => {
         sandboxBackend: "modal",
         modalAppName: process.env.OPENGENI_MODAL_SMOKE_APP ?? "opengeni-snapshot-live-smoke",
         modalImageRef: process.env.OPENGENI_MODAL_SMOKE_IMAGE ?? "python:3.12-slim",
-        modalWorkspacePersistence: "snapshot_filesystem",
+        modalWorkspacePersistence: workspacePersistence,
         modalTimeoutSeconds: 600,
         modalIdleTimeoutSeconds: 300,
       });
       const client = createSandboxClient(settings) as {
         backendId: string;
         create(input?: unknown): Promise<unknown>;
+        resume(state: unknown): Promise<unknown>;
       };
       let source: EstablishedSandboxSession | null = null;
       let restored: EstablishedSandboxSession | null = null;
+      let parallelHandle: { sandbox?: { detach?: () => void } } | null = null;
       let snapshot:
         | {
             base64: string;
@@ -136,9 +143,35 @@ describe("Modal native checkpoint round trip (opt-in live service)", () => {
           "mkdir -p /workspace/checkpoint-smoke && printf 'modal-native-roundtrip' > /workspace/checkpoint-smoke/original && ln /workspace/checkpoint-smoke/original /workspace/checkpoint-smoke/hardlink",
         );
         providerBinding = await resolveModalCheckpointProviderBindingForSession(settings, session);
-        snapshot = await captureVerifiedWorkspaceArchive(session);
+        const captureRequestId = randomUUID();
+        // A Temporal retry can overlap the predecessor from a different worker,
+        // so prove idempotency through two independently resumed handles. The
+        // in-process capture gate intentionally does not serialize these.
+        parallelHandle = (await client.resume(source.sessionState)) as typeof parallelHandle;
+        const [firstCapture, overlappingCapture] = await Promise.all([
+          captureVerifiedWorkspaceArchive(session, Date.now(), {
+            requestId: captureRequestId,
+          }),
+          captureVerifiedWorkspaceArchive(parallelHandle, Date.now(), {
+            requestId: captureRequestId,
+          }),
+        ]);
+        snapshot = firstCapture;
         expect(snapshot.kind).toBe("provider_snapshot");
         expect(snapshot.descriptor.version).toBe(2);
+        expect(overlappingCapture.nativeSnapshot?.snapshotId).toBe(
+          snapshot.nativeSnapshot?.snapshotId,
+        );
+        expect(overlappingCapture.base64).toBe(snapshot.base64);
+        // Native capture is a read operation: it must neither replace nor stop
+        // the live source. Mutate it afterwards and prove the restored Image is
+        // the fixed pre-mutation checkpoint rather than a live filesystem view.
+        expect(
+          await exec(
+            session,
+            "printf 'source-still-live' > /workspace/checkpoint-smoke/post-capture && cat /workspace/checkpoint-smoke/post-capture",
+          ),
+        ).toBe("source-still-live");
 
         restored = await establishSandboxSessionFromEnvelope(
           settings,
@@ -167,13 +200,14 @@ describe("Modal native checkpoint round trip (opt-in live service)", () => {
         expect(
           await exec(
             restored.session,
-            "printf '%s|' \"$(cat /workspace/checkpoint-smoke/original)\"; cat /workspace/checkpoint-smoke/hardlink",
+            "printf '%s|' \"$(cat /workspace/checkpoint-smoke/original)\"; cat /workspace/checkpoint-smoke/hardlink; test ! -e /workspace/checkpoint-smoke/post-capture",
           ),
         ).toBe("modal-native-roundtrip|modal-native-roundtrip");
       } catch (error) {
         runFailed = true;
         runError = error;
       }
+      parallelHandle?.sandbox?.detach?.();
       const cleanupResults: PromiseSettledResult<unknown>[] = await Promise.allSettled([
         terminate(restored),
         terminate(source),

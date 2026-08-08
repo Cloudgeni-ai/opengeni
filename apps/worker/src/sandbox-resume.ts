@@ -20,7 +20,11 @@
 //
 // Liveness between turns is the lease refcount; there is no keepalive loop.
 
-import { sandboxArchiveCaptureTimeoutMs, type Settings } from "@opengeni/config";
+import {
+  sandboxArchiveCaptureTimeoutMs,
+  sandboxLifecycleTransitionWaitMs,
+  type Settings,
+} from "@opengeni/config";
 import { randomUUID } from "node:crypto";
 import {
   acquireLease,
@@ -31,6 +35,7 @@ import {
   failSandboxRematerialization,
   failWarmingToCold,
   getSandboxSessionEnvelope,
+  heartbeatLeaseHolder,
   markSandboxRestoreVerifying,
   markWarmLeaseInstanceLost,
   markSandboxCheckpointArtifactDeletePending,
@@ -43,6 +48,7 @@ import {
   touchLeaseHolder,
   SandboxLeaseRecoveryBlockedError,
   SandboxLeaseSupersededError,
+  SandboxLeaseTransitionError,
   type Database,
   type LeaseHolderKind,
 } from "@opengeni/db";
@@ -53,12 +59,16 @@ import {
   establishSandboxSessionFromEnvelope,
   isProviderSandboxNotFoundError,
   parseWorkspaceArchiveDescriptor,
+  providerWorkspaceCapturePolicy,
+  SandboxProviderContinuityUnavailableError,
   requirePersistableReplacementSandboxEnvelope,
   modalSessionMatchesCheckpointProviderBinding,
   resolveModalCheckpointProviderBindingForSession,
   serializeReplacementSandboxEnvelope,
   tagModalSandbox,
+  terminateUnpublishedSandboxSession,
   verifySandboxExecReadiness,
+  withoutSandboxProviderIdentity,
   type EstablishedSandboxSession,
   type RuntimeMetricsHooks,
   type WorkspaceArchiveDescriptor,
@@ -354,43 +364,10 @@ async function resolveModalCheckpointBindingBeforeCapture(
 async function terminateEstablishedSandbox(
   established: EstablishedSandboxSession | null,
 ): Promise<boolean> {
-  if (!established) {
-    return true;
-  }
-  const client = established.client as {
-    delete?: (state: unknown) => Promise<unknown>;
-  };
-  if (typeof client.delete === "function" && established.sessionState !== undefined) {
-    try {
-      await client.delete(established.sessionState);
-      return true;
-    } catch (error) {
-      if (isProviderSandboxNotFoundError(established.backendId, error)) {
-        return true;
-      }
-      return false;
-    }
-  }
-  const session = established.session as {
-    close?: () => Promise<unknown>;
-    terminate?: () => Promise<unknown>;
-    kill?: () => Promise<unknown>;
-    closed?: boolean;
-  };
+  if (!established) return true;
   try {
-    if (session.terminate) {
-      await session.terminate();
-      return true;
-    } else if (session.kill) {
-      await session.kill();
-      return true;
-    } else if (session.close) {
-      if (!session.closed) {
-        await session.close();
-      }
-      return true;
-    }
-    return false;
+    await terminateUnpublishedSandboxSession(established);
+    return true;
   } catch (error) {
     if (isProviderSandboxNotFoundError(established.backendId, error)) {
       return true;
@@ -463,23 +440,6 @@ function legacyNativeArchiveFromEnvelope(envelope: Record<string, unknown> | nul
   );
 }
 
-/** A per-session fallback may still carry the dead provider identity that made
- * recovery necessary. It is useful only as durable archive/config input: never
- * let a cold rematerialization resume that stale provider before hydrating the
- * selected revision. */
-function withoutProviderIdentity(
-  envelope: Record<string, unknown> | null,
-): Record<string, unknown> | null {
-  if (!envelope) return null;
-  const sessionState =
-    envelope.sessionState && typeof envelope.sessionState === "object"
-      ? (envelope.sessionState as Record<string, unknown>)
-      : null;
-  if (!sessionState) return envelope;
-  const { providerState: _providerState, ...providerIndependentState } = sessionState;
-  return { ...envelope, sessionState: providerIndependentState };
-}
-
 /**
  * MID-SESSION /workspace snapshot (sandbox-file-persistence). The reaper's
  * drain-persist only protects boxes the reaper itself kills; anything else —
@@ -528,17 +488,14 @@ export async function maybePersistWarmWorkspaceSnapshot(
   if (typeof persistable.persistWorkspace !== "function") {
     return false;
   }
-  // Modal filesystem snapshots terminate the source sandbox. They are safe at
-  // controlled drain/rotation (force=true), but a periodic or turn-end warm
-  // checkpoint would kill the box while its lease still points at it. The next
-  // dock read or turn would then route to a dead provider instance. Let the
-  // drain reaper capture this backend instead.
+  // Filesystem and directory snapshots create retained Images without
+  // terminating the source Sandbox. (Modal's termination warning applies to
+  // memory snapshots.) They are therefore the preferred warm-checkpoint path:
+  // the durable capture gate pauses OpenGeni commands while the provider reads
+  // the filesystem, then the same live instance continues serving the turn.
   const workspacePersistence =
     persistable.state?.workspacePersistence ??
     persistable.state?.providerState?.workspacePersistence;
-  if (!force && workspacePersistence === "snapshot_filesystem") {
-    return false;
-  }
   if (signal?.aborted) {
     return false;
   }
@@ -556,6 +513,10 @@ export async function maybePersistWarmWorkspaceSnapshot(
       return false;
     }
     const instanceId = lease.instanceId;
+    const capturePolicy = providerWorkspaceCapturePolicy(lease.backend, session);
+    if (!capturePolicy || capturePolicy.liveInstance !== "preserved") {
+      return false;
+    }
     const nativeModalPersistence =
       workspacePersistence === "snapshot_filesystem" ||
       workspacePersistence === "snapshot_directory";
@@ -576,6 +537,8 @@ export async function maybePersistWarmWorkspaceSnapshot(
       liveness: "warm",
       captureTimeoutMs,
       minIntervalMs: force ? 0 : intervalMs,
+      providerReplaySafe: capturePolicy.takeover === "same_request",
+      takeoverSafe: capturePolicy.takeover !== "exclusive",
       warmAttempt: {
         sessionId: ids.sessionId,
         turnId: ids.turnId,
@@ -634,7 +597,10 @@ export async function maybePersistWarmWorkspaceSnapshot(
     const captureAndPublish = (async (): Promise<boolean> => {
       let candidate: { id: string } | null = null;
       try {
-        const archive = await captureVerifiedWorkspaceArchive(session, capturedAtMs);
+        const archive = await captureVerifiedWorkspaceArchive(session, capturedAtMs, {
+          requestId: claimed.claim.providerRequestId,
+          strategy: capturePolicy.strategy,
+        });
         candidate = await registerCandidate(archive);
         const { wrote } = await persistWarmSnapshot(db, {
           accountId: ids.accountId,
@@ -805,8 +771,9 @@ export async function resumeBoxForTurn(
     // durable capture-and-drain rotation as an image change.
     ...(ids.rigVersionId ? { rigVersionId: ids.rigVersionId } : {}),
     leaseTtlMs,
-    warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
-    captureWaitMs: sandboxArchiveCaptureTimeoutMs(settings),
+    warmingLeaseTtlMs: settings.sandboxLeaseWarmingTtlMs,
+    captureWaitMs: sandboxLifecycleTransitionWaitMs(settings),
+    ...(cancellationSignal ? { waitSignal: cancellationSignal } : {}),
   });
 
   if (cancellationSignal) {
@@ -823,7 +790,7 @@ export async function resumeBoxForTurn(
     throw cancellationError();
   }
 
-  // HOLDER-LIVENESS loop: touch OUR holder row every 10s from the moment it is
+  // HOLDER-LIVENESS loop: refresh OUR holder every 10s from registration.
   // registered until release. The dead-worker turn-holder reap judges liveness
   // by last_heartbeat_at, and the full turn heartbeat (heartbeatLeaseHolder in
   // agent-turn) only starts AFTER this function returns — while waitForWarm and
@@ -831,21 +798,46 @@ export async function resumeBoxForTurn(
   // COMPOUNDING past any fixed reap horizon. With this
   // loop no live holder is ever silent for more than one tick, so the reap
   // horizon is pure defense-in-depth, not a tuned guess about path lengths.
-  // Epoch-free by design (touch only refreshes our own row's timestamp);
-  // best-effort (a transient DB error must never fail the resume).
+  // The elected spawner also heartbeats the short rolling warming lease; this
+  // makes warming expiry a crash detector rather than a fixed upper bound on a
+  // legitimate provider create/restore. A warming waiter only touches its own
+  // holder so it cannot keep a dead spawner's lease alive. Once the box is warm,
+  // every owner uses the normal epoch-fenced lease heartbeat.
+  let holderLeaseHeartbeat: { expectedEpoch: number; leaseTtlMs: number } | null =
+    acquired.role === "spawner"
+      ? {
+          expectedEpoch: acquired.lease.leaseEpoch,
+          leaseTtlMs: settings.sandboxLeaseWarmingTtlMs,
+        }
+      : (acquired.role === "attached" || acquired.role === "rearmed") &&
+          acquired.lease.liveness === "warm"
+        ? { expectedEpoch: acquired.lease.leaseEpoch, leaseTtlMs }
+        : null;
   holderLivenessTimer = setInterval(() => {
-    void touchLeaseHolder(db, {
-      accountId: ids.accountId,
-      workspaceId: ids.workspaceId,
-      sandboxGroupId: ids.sandboxGroupId,
-      kind,
-      holderId,
-    })
+    const heartbeat = holderLeaseHeartbeat;
+    const refresh = heartbeat
+      ? heartbeatLeaseHolder(db, {
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          sandboxGroupId: ids.sandboxGroupId,
+          kind,
+          holderId,
+          expectedEpoch: heartbeat.expectedEpoch,
+          leaseTtlMs: heartbeat.leaseTtlMs,
+        })
+      : touchLeaseHolder(db, {
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          sandboxGroupId: ids.sandboxGroupId,
+          kind,
+          holderId,
+        });
+    void refresh
       .then((touched) => {
         // A canonical turn holder is rejected once its exact attempt is no
         // longer the active writer. Stop this otherwise-unbounded provider
         // operation and idempotently drop any remaining holder state.
-        if (!touched) {
+        if (!touched && heartbeat === holderLeaseHeartbeat) {
           void release().catch(() => undefined);
         }
       })
@@ -869,7 +861,21 @@ export async function resumeBoxForTurn(
   }
   if (acquired.role === "fenced") {
     await release();
-    throw new SandboxLeaseSupersededError(ids.sandboxGroupId, acquired.lease.leaseEpoch);
+    if (acquired.reason !== "superseded") {
+      throw new SandboxLeaseTransitionError(
+        ids.sandboxGroupId,
+        acquired.lease.leaseEpoch,
+        acquired.reason,
+        acquired.lease.backend,
+        acquired.lease.instanceId,
+        acquired.lease.liveness,
+      );
+    }
+    throw new SandboxLeaseSupersededError(ids.sandboxGroupId, acquired.lease.leaseEpoch, {
+      backend: acquired.lease.backend,
+      instanceId: acquired.lease.instanceId,
+      liveness: acquired.lease.liveness,
+    });
   }
 
   // SPAWNER: we won the cold->warming CAS. Establish (cold-restore/create),
@@ -898,16 +904,19 @@ export async function resumeBoxForTurn(
       const fallbackArchiveEnvelope =
         acquired.lease.recovery.archive.status === "none" &&
         workspaceArchiveFieldsFromEnvelope(envelope) !== null
-          ? withoutProviderIdentity(envelope)
+          ? withoutSandboxProviderIdentity(envelope)
           : null;
       let spawnEnvelope = fallbackArchiveEnvelope ?? acquired.lease.resumeState ?? envelope;
       const archiveSource =
         acquired.lease.recovery.archive.status === "none"
           ? fallbackArchiveEnvelope
           : acquired.lease.resumeState;
+      const continuityRecovery = acquired.lease.recovery.continuity;
       if (
-        acquired.lease.recovery.archive.status === "available" ||
-        workspaceArchiveFieldsFromEnvelope(archiveSource) !== null
+        (acquired.lease.recovery.archive.status === "available" &&
+          acquired.lease.archiveComplete) ||
+        (acquired.lease.recovery.archive.status === "none" &&
+          workspaceArchiveFieldsFromEnvelope(archiveSource) !== null)
       ) {
         const rematerializationId = crypto.randomUUID();
         const legacyNativeArchive = legacyNativeArchiveFromEnvelope(archiveSource);
@@ -950,7 +959,7 @@ export async function resumeBoxForTurn(
           legacyCheckpoint: begun.checkpointArtifact === null ? legacyNativeArchive : null,
           legacyProviderBinding: null,
         };
-      } else if (acquired.lease.recovery.archive.status !== "none") {
+      } else if (acquired.lease.recovery.archive.status !== "none" && !continuityRecovery) {
         throw new SandboxLeaseRecoveryBlockedError(
           ids.sandboxGroupId,
           expectedEpoch,
@@ -1027,6 +1036,9 @@ export async function resumeBoxForTurn(
             sandboxGroupId: ids.sandboxGroupId,
             expectedEpoch,
             rematerializationId: rematerialization?.id ?? null,
+            ...(created.providerContinuity
+              ? { continuityRecovery: created.providerContinuity }
+              : {}),
             instanceId: created.instanceId,
             resumeBackendId: created.backendId,
             resumeState: resumeEnvelope,
@@ -1041,7 +1053,7 @@ export async function resumeBoxForTurn(
             leaseTtlMs,
             // Keep the warming budget after create(): manifest setup and
             // commitWarmingToWarm still run, and can exceed the 90s turn TTL.
-            warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
+            warmingLeaseTtlMs: settings.sandboxLeaseWarmingTtlMs,
           });
           if (!recorded.recorded) {
             throw new SandboxLeaseSupersededError(ids.sandboxGroupId, expectedEpoch);
@@ -1133,6 +1145,7 @@ export async function resumeBoxForTurn(
       throwIfReleasedOrCancelled();
       if (
         rematerialization &&
+        !established.providerContinuity &&
         established.restoredArchive?.revision !== rematerialization.selectedRevision
       ) {
         throw new WorkspaceArchiveIntegrityError(
@@ -1151,14 +1164,16 @@ export async function resumeBoxForTurn(
         dataPlaneUrl: null,
         resumeBackendId: established.backendId,
         resumeState: resumeEnvelope,
-        ...(rematerialization
-          ? {
-              rematerialization: {
-                id: rematerialization.id,
-                verifiedRevision: rematerialization.selectedRevision,
-              },
-            }
-          : {}),
+        ...(established.providerContinuity
+          ? { continuityRecovery: established.providerContinuity }
+          : rematerialization
+            ? {
+                rematerialization: {
+                  id: rematerialization.id,
+                  verifiedRevision: rematerialization.selectedRevision,
+                },
+              }
+            : {}),
         leaseTtlMs,
       });
       if (!committed.committed || !committed.lease) {
@@ -1167,7 +1182,7 @@ export async function resumeBoxForTurn(
         // holder; surface supersession. This spawner created the box, so stop it
         // before retrying to avoid an untracked running sandbox.
         const terminated = await terminateEstablishedSandbox(established);
-        if (terminated && rematerialization) {
+        if (terminated && rematerialization && !established.providerContinuity) {
           await failSandboxRematerialization(db, {
             accountId: ids.accountId,
             workspaceId: ids.workspaceId,
@@ -1177,10 +1192,21 @@ export async function resumeBoxForTurn(
             failureCode: committed.reason ?? "warm_commit_rejected",
             retryable: false,
           });
+        } else if (terminated) {
+          await failWarmingToCold(db, {
+            accountId: ids.accountId,
+            workspaceId: ids.workspaceId,
+            sandboxGroupId: ids.sandboxGroupId,
+            expectedEpoch,
+          });
         }
         await release();
         throw new SandboxLeaseSupersededError(ids.sandboxGroupId, expectedEpoch);
       }
+      holderLeaseHeartbeat = {
+        expectedEpoch: committed.lease.leaseEpoch,
+        leaseTtlMs,
+      };
       throwIfReleasedOrCancelled();
       return { established, leaseEpoch: committed.lease.leaseEpoch, release };
     } catch (error) {
@@ -1196,18 +1222,25 @@ export async function resumeBoxForTurn(
       // the warming row; the lease TTL/reaper and Modal orphan sweep are the
       // tracked backstops, and we must not erase the only provider pointer.
       if (terminated) {
-        if (rematerialization) {
+        const continuityUnavailable = error instanceof SandboxProviderContinuityUnavailableError;
+        if (rematerialization && !createdEstablished?.providerContinuity) {
           await failSandboxRematerialization(db, {
             accountId: ids.accountId,
             workspaceId: ids.workspaceId,
             sandboxGroupId: ids.sandboxGroupId,
             expectedEpoch,
             rematerializationId: rematerialization.id,
-            failureCode:
-              error instanceof WorkspaceArchiveIntegrityError
+            failureCode: continuityUnavailable
+              ? "provider_continuity_unavailable"
+              : error instanceof WorkspaceArchiveIntegrityError
                 ? error.code
                 : "sandbox_rematerialization_failed",
-            retryable: error instanceof WorkspaceArchiveIntegrityError ? error.retryable : true,
+            retryable: continuityUnavailable
+              ? error.retryable
+              : error instanceof WorkspaceArchiveIntegrityError
+                ? error.retryable
+                : true,
+            ...(continuityUnavailable ? { discardContinuity: true } : {}),
           });
         } else {
           await failWarmingToCold(db, {
@@ -1215,6 +1248,7 @@ export async function resumeBoxForTurn(
             workspaceId: ids.workspaceId,
             sandboxGroupId: ids.sandboxGroupId,
             expectedEpoch,
+            ...(continuityUnavailable ? { discardContinuity: true } : {}),
           });
         }
       }
@@ -1238,6 +1272,7 @@ export async function resumeBoxForTurn(
     let leaseEpoch = acquired.lease.leaseEpoch;
     if (acquired.lease.liveness === "warming") {
       leaseEpoch = (await waitForWarm(services, ids)).leaseEpoch;
+      holderLeaseHeartbeat = { expectedEpoch: leaseEpoch, leaseTtlMs };
     }
     throwIfReleasedOrCancelled();
 

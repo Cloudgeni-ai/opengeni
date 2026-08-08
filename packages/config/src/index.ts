@@ -31,6 +31,24 @@ import { z } from "zod";
 
 const envName = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const registryId = /^[A-Za-z0-9_-]+$/;
+
+// Archive capture claims are also the admission/teardown fence around a
+// provider snapshot. Keep a real settlement window after the provider request;
+// a configured request timeout may never consume the entire durable claim.
+export const SANDBOX_ARCHIVE_CAPTURE_MAX_TIMEOUT_MS = 60 * 60_000;
+export const SANDBOX_ARCHIVE_CAPTURE_SETTLEMENT_GRACE_MS = 10_000;
+export const SANDBOX_SNAPSHOT_MAX_TIMEOUT_MS =
+  SANDBOX_ARCHIVE_CAPTURE_MAX_TIMEOUT_MS - SANDBOX_ARCHIVE_CAPTURE_SETTLEMENT_GRACE_MS;
+// Admission waits are observational: successful capture/teardown returns as
+// soon as the DB fence clears. This ceiling only covers the unhealthy path. It
+// allows one scheduled inventory and one complete successor claim without
+// turning a recoverable lifecycle transition into a visible caller error. A
+// dead holder's TTL is deliberately NOT included: admission cannot accelerate
+// that proof, and the turn moves to durable recovery if holder quiescence takes
+// longer than this observational wait. The outer cap remains an explicit
+// request-resource boundary; successful transitions return immediately.
+export const SANDBOX_LIFECYCLE_TRANSITION_MAX_WAIT_MS = 60 * 60_000;
+export const SANDBOX_LIFECYCLE_RETRY_HANDOFF_GRACE_MS = 10_000;
 const EnvBoolean = z.preprocess((value) => {
   if (typeof value !== "string") {
     return value;
@@ -821,7 +839,12 @@ const SettingsSchema = z.object({
   // graceful shutdown, or become permission to GC an older archive. Timeout is
   // treated exactly like a failed best-effort snapshot. Knob:
   // OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS. Default 60s.
-  sandboxSnapshotTimeoutMs: z.coerce.number().int().positive().default(60_000),
+  sandboxSnapshotTimeoutMs: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(SANDBOX_SNAPSHOT_MAX_TIMEOUT_MS)
+    .default(60_000),
   // Begin a controlled snapshot/quiesce/drain/rematerialize transition this far
   // ahead of a finite provider deadline. Modal's 24h creation clock cannot be
   // extended; the logical sandbox outlives it by moving to one successor box.
@@ -831,13 +854,12 @@ const SettingsSchema = z.object({
   // an operator deliberately wants more rotation headroom; the boot invariant
   // still requires it to remain below the provider lifetime.
   sandboxRotationLeadMs: z.coerce.number().int().positive().default(3_600_000),
-  // Bound each global reaper pass so a rollout that discovers many legacy boxes
-  // with unknown creation clocks cannot create a provider/API thundering herd.
-  // One is the safe admission default: the reaper services provider transitions
-  // sequentially, so claiming a wider batch would fence boxes before the same
-  // sweep can service them. Larger fleets may raise this only as an explicit,
-  // observed deployment choice.
-  sandboxRotationBatchSize: z.coerce.number().int().positive().max(500).default(1),
+  // Bound provider-deadline rotation admission independently of execution.
+  // Every admitted box receives its own durable drain child; the control worker
+  // limits provider I/O to 32 concurrent activities. Matching that bound avoids
+  // both the old one-box-per-tick deadline backlog and an unbounded provider/API
+  // burst. Operators may tune this for a differently-sized worker pool.
+  sandboxRotationBatchSize: z.coerce.number().int().positive().max(500).default(32),
   // expires_at refresh window for a held lease (>> the turn 10s heartbeat so a
   // single missed heartbeat never TTL-reaps a live turn). The warming TTL is the
   // window a cold->warming spawner has to commit warm before a reaper resets it.
@@ -2089,8 +2111,20 @@ export function sandboxArchiveCaptureTimeoutMs(
   settings: Pick<Settings, "sandboxSnapshotTimeoutMs">,
 ): number {
   return Math.min(
-    60 * 60_000,
-    Math.max(settings.sandboxSnapshotTimeoutMs + 30_000, settings.sandboxSnapshotTimeoutMs * 2),
+    SANDBOX_ARCHIVE_CAPTURE_MAX_TIMEOUT_MS,
+    settings.sandboxSnapshotTimeoutMs + SANDBOX_ARCHIVE_CAPTURE_SETTLEMENT_GRACE_MS,
+  );
+}
+
+export function sandboxLifecycleTransitionWaitMs(
+  settings: Pick<Settings, "sandboxSnapshotTimeoutMs" | "sandboxLeaseReaperPeriodMs">,
+): number {
+  const captureTimeoutMs = sandboxArchiveCaptureTimeoutMs(settings);
+  return Math.min(
+    SANDBOX_LIFECYCLE_TRANSITION_MAX_WAIT_MS,
+    settings.sandboxLeaseReaperPeriodMs +
+      captureTimeoutMs +
+      SANDBOX_LIFECYCLE_RETRY_HANDOFF_GRACE_MS,
   );
 }
 
@@ -4692,10 +4726,15 @@ function validateSettings(settings: Settings): void {
           `OPENGENI_MODAL_TIMEOUT_SECONDS*1000 (${providerLifetimeMs}).`,
       );
     }
-    if (!(rotationLeadMs > settings.sandboxSnapshotTimeoutMs + 2 * reaperPeriod)) {
+    // This is provider-hard-deadline headroom, not a retry delay. Rotation is
+    // admitted immediately before the same sweep's drain inventory, so only the
+    // worst-case time until that sweep plus the complete durable capture window
+    // is required. No second schedule period belongs in the availability path.
+    const captureTimeoutMs = sandboxArchiveCaptureTimeoutMs(settings);
+    if (!(rotationLeadMs > captureTimeoutMs + reaperPeriod)) {
       throw new Error(
-        `OPENGENI_SANDBOX_ROTATION_LEAD_MS (${rotationLeadMs}) must exceed the snapshot timeout ` +
-          `plus two reaper periods (${settings.sandboxSnapshotTimeoutMs + 2 * reaperPeriod}).`,
+        `OPENGENI_SANDBOX_ROTATION_LEAD_MS (${rotationLeadMs}) must exceed the durable capture ` +
+          `timeout plus one reaper period (${captureTimeoutMs + reaperPeriod}).`,
       );
     }
     if (!(viewerTtl < idleTimeoutMs)) {

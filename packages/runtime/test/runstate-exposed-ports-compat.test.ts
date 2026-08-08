@@ -77,11 +77,14 @@ describe("RunState exposedPorts compatibility", () => {
   test.each(["modal", "docker", "e2b"])(
     "%s keeps configured port arrays in providerState without lifting them",
     async (backendId) => {
+      const instanceId = `${backendId}-instance`;
+      const providerIdentity =
+        backendId === "docker" ? { containerId: instanceId } : { sandboxId: instanceId };
       const client = {
         backendId,
         async serializeSessionState() {
           return {
-            instanceId: `${backendId}-instance`,
+            ...providerIdentity,
             manifest: {},
             configuredExposedPorts: [3000, 6080],
             providerMarker: "kept",
@@ -92,8 +95,8 @@ describe("RunState exposedPorts compatibility", () => {
       const envelope = await serializeEstablishedSandboxEnvelope({
         client,
         session: {},
-        sessionState: { instanceId: `${backendId}-instance` },
-        instanceId: `${backendId}-instance`,
+        sessionState: providerIdentity,
+        instanceId,
         backendId,
       } as never);
 

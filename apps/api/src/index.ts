@@ -35,6 +35,7 @@ import { observabilityEventLogger } from "./observability";
 import { startAuthCalloutResponder } from "./sandbox/auth-callout";
 import { startHelloIngestion, startMetricsIngestion } from "./sandbox/metrics-ingestion";
 import { startSlackInteractionPump } from "./integrations/slack-interactions";
+import { startTemporalScheduleCleanupPump } from "./temporal-schedule-cleanup";
 
 /**
  * A REJECT_DUPLICATE start collides on the deterministic workflowId when the
@@ -167,10 +168,14 @@ export async function createTemporalWorkflowClient(
       }
     },
     deleteScheduledTaskSchedule: async ({ temporalScheduleId }) => {
-      await temporal.schedule
-        .getHandle(temporalScheduleId)
-        .delete()
-        .catch(() => undefined);
+      try {
+        await temporal.withDeadline(Date.now() + 5_000, async () => {
+          await temporal.schedule.getHandle(temporalScheduleId).delete();
+        });
+      } catch (error) {
+        if (error instanceof ScheduleNotFoundError) return;
+        throw error;
+      }
     },
     triggerScheduledTask: async ({
       task,
@@ -332,6 +337,13 @@ export async function startApi() {
   const stopSlackInteractionPump = settings.slackSigningSecret
     ? startSlackInteractionPump(routeDeps)
     : undefined;
+  const stopTemporalScheduleCleanupPump = startTemporalScheduleCleanupPump({
+    db: dbClient.db,
+    deleteSchedule: async (temporalScheduleId) => {
+      await workflowClient.client.deleteScheduledTaskSchedule({ temporalScheduleId });
+    },
+    observability,
+  });
   // M10 — start the metrics-ingestion consumer (agent heartbeats → DB last-sample
   // + downsampled series), gated on the selfhosted flag. A no-op when disabled.
   let stopMetricsIngestion: (() => void) | undefined;
@@ -393,6 +405,7 @@ export async function startApi() {
       stopSlackInteractionPump?.();
       stopMetricsIngestion?.();
       stopHelloIngestion?.();
+      await stopTemporalScheduleCleanupPump();
       await Promise.allSettled([
         authCalloutResponder?.close(),
         bus.close(),

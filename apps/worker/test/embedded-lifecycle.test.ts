@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve as resolvePath } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createObservability } from "@opengeni/observability";
 import { testSettings } from "@opengeni/testing";
@@ -18,6 +18,7 @@ import {
   type WorkerLifecycleState,
 } from "../src/http";
 import {
+  combineWorkerRunTargets,
   constructWithOwnedConnection,
   createWorkerServiceLifecycle,
 } from "../src/worker-service-lifecycle";
@@ -31,6 +32,70 @@ afterEach(async () => {
 });
 
 describe("embedded worker lifecycle contract", () => {
+  test("a multi-queue worker starts and drains every Temporal poller as one service", async () => {
+    let finishFirst!: () => void;
+    let finishSecond!: () => void;
+    const firstRun = new Promise<void>((complete) => {
+      finishFirst = complete;
+    });
+    const secondRun = new Promise<void>((complete) => {
+      finishSecond = complete;
+    });
+    const started: string[] = [];
+    const stopped: string[] = [];
+    const worker = combineWorkerRunTargets([
+      {
+        run: () => {
+          started.push("base");
+          return firstRun;
+        },
+        shutdown: () => stopped.push("base"),
+      },
+      {
+        run: () => {
+          started.push("sandbox-lifecycle");
+          return secondRun;
+        },
+        shutdown: () => stopped.push("sandbox-lifecycle"),
+      },
+    ]);
+
+    const run = worker.run();
+    expect(worker.run()).toBe(run);
+    expect(started).toEqual(["base", "sandbox-lifecycle"]);
+    worker.shutdown();
+    expect(stopped).toEqual(["base", "sandbox-lifecycle"]);
+    finishFirst();
+    finishSecond();
+    await run;
+  });
+
+  test("a failed poller drains every sibling and preserves its failure", async () => {
+    let siblingShutdowns = 0;
+    let finishSibling!: () => void;
+    const siblingRun = new Promise<void>((complete) => {
+      finishSibling = complete;
+    });
+    const worker = combineWorkerRunTargets([
+      {
+        run: async () => {
+          throw new Error("poller failed");
+        },
+        shutdown: () => undefined,
+      },
+      {
+        run: () => siblingRun,
+        shutdown: () => {
+          siblingShutdowns += 1;
+          finishSibling();
+        },
+      },
+    ]);
+
+    await expect(worker.run()).rejects.toThrow("poller failed");
+    expect(siblingShutdowns).toBe(1);
+  });
+
   test("only the designated control role owns engine maintenance schedules", () => {
     expect(workerOwnsInternalSchedules("control")).toBe(true);
     expect(workerOwnsInternalSchedules("control", "none")).toBe(false);
@@ -46,15 +111,6 @@ describe("embedded worker lifecycle contract", () => {
         workflowBundle: { code: "" },
       }),
     ).rejects.toThrow("workflowBundle is valid only for the control worker role");
-  });
-
-  test("every control-worker construction path rejects an unsafe reaper budget", async () => {
-    await expect(
-      createOpenGeniWorker({
-        role: "control",
-        settings: testSettings({ sandboxSnapshotTimeoutMs: 27 * 60_000 }),
-      }),
-    ).rejects.toThrow("must strictly exceed the prelude budget");
   });
 
   test("construction failure closes the acquired connection and preserves the cause", async () => {
@@ -257,7 +313,7 @@ describe("embedded worker lifecycle contract", () => {
   test("workspace source uses source workflows while installed dist requires its bundle", async () => {
     const source = resolveOpenGeniWorkflowDefinition();
     expect(source).toEqual({
-      workflowsPath: resolve(import.meta.dir, "../src/workflows.ts"),
+      workflowsPath: resolvePath(import.meta.dir, "../src/workflows.ts"),
     });
 
     const root = await mkdtemp(join(tmpdir(), "opengeni-worker-bundle-"));

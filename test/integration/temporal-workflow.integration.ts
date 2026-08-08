@@ -52,6 +52,10 @@ const workerDeathTestTimeoutMs = 360_000;
 const temporalWorkflowTestTimeoutMs = 60_000;
 const workflowDefinitionsPath = new URL("../../apps/worker/src/workflows.ts", import.meta.url)
   .pathname;
+const legacySandboxReaperWorkflowPath = new URL(
+  "../../apps/worker/test/fixtures/legacy-sandbox-reaper-workflow.ts",
+  import.meta.url,
+).pathname;
 
 // This case follows two real 125-second heartbeat-timeout proofs. Temporal can
 // take more than the general 30-second budget to poll and drain its next worker
@@ -1421,6 +1425,51 @@ describe("Temporal workflow integration", () => {
         worker.shutdown();
         await run;
       }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
+    "sandbox reaper schedule is replay-safe in both rolling-deploy directions",
+    async () => {
+      const execute = async (workflowsPath: string, label: string) => {
+        const taskQueue = `sandbox-reaper-replay-${label}-${crypto.randomUUID()}`;
+        const workflowId = `sandbox-reaper-replay-${label}-${crypto.randomUUID()}`;
+        const worker = await Worker.create({
+          connection: nativeConnection,
+          namespace: "default",
+          taskQueue,
+          workflowsPath,
+          activities: { reapSandboxLeases: async () => undefined },
+        });
+        const run = worker.run();
+        try {
+          const client = new Client({ connection });
+          const handle = await client.workflow.start("sandboxReaperWorkflow", {
+            taskQueue,
+            workflowId,
+          });
+          await handle.result();
+          return { history: await handle.fetchHistory(), workflowId };
+        } finally {
+          worker.shutdown();
+          await run;
+        }
+      };
+
+      const legacy = await execute(legacySandboxReaperWorkflowPath, "legacy");
+      await Worker.runReplayHistory(
+        { workflowsPath: workflowDefinitionsPath },
+        legacy.history,
+        legacy.workflowId,
+      );
+
+      const current = await execute(workflowDefinitionsPath, "current");
+      await Worker.runReplayHistory(
+        { workflowsPath: legacySandboxReaperWorkflowPath },
+        current.history,
+        current.workflowId,
+      );
     },
     temporalWorkflowTestTimeoutMs,
   );

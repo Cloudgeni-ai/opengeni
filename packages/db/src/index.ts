@@ -103,6 +103,7 @@ import type {
   TarWorkspaceArchiveDescriptor,
   WorkspaceArchiveDescriptor,
   ModalCheckpointProviderBinding,
+  SandboxProviderContinuityRecovery,
 } from "@opengeni/contracts";
 import {
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
@@ -111,6 +112,8 @@ import {
   backendForNativeSnapshotProvider,
   canonicalModalCheckpointProviderBinding,
   decodeNativeSnapshotRef,
+  OPENGENI_SANDBOX_PROVIDER_INSTANCE_ID_FIELD,
+  SANDBOX_PROVIDER_INSTANCE_ID_FIELDS_BY_BACKEND,
   parseWorkspaceArchiveDescriptor,
   stableJson,
   MODEL_ATTACHMENT_REFS_FIELD,
@@ -1819,6 +1822,302 @@ export async function getManagedUserByEmail(db: Database, email: string): Promis
 
 export async function deleteWorkspace(db: Database, workspaceId: string): Promise<void> {
   await db.delete(schema.workspaces).where(eq(schema.workspaces.id, workspaceId));
+}
+
+export type TemporalScheduleCleanupClaim = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  temporalScheduleId: string;
+  claimId: string;
+  attemptCount: number;
+};
+
+export type DeleteWorkspaceIfQuiescentResult =
+  | { status: "deleted"; temporalScheduleCleanups: TemporalScheduleCleanupClaim[] }
+  | {
+      status: "not_found" | "only_workspace" | "active_sessions" | "live_sandboxes";
+    };
+
+/**
+ * Atomically prove a workspace has no live runtime ownership and delete it.
+ *
+ * The account/workspace parent locks block concurrent child inserts through
+ * their foreign-key key-share locks. Existing session and lease rows are then
+ * locked before their state is inspected, so a cold lease cannot become live
+ * between a preflight count and the cascade. Schedule ids are copied under the
+ * same fence and returned for post-commit Temporal cleanup.
+ */
+export async function deleteWorkspaceIfQuiescent(
+  db: Database,
+  input: { accountId: string; workspaceId: string },
+): Promise<DeleteWorkspaceIfQuiescentResult> {
+  try {
+    return await withRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: input.workspaceId },
+      async (scopedDb) =>
+        await scopedDb.transaction(async (txRaw) => {
+          const tx = txRaw as unknown as Database;
+          const [account] = await tx
+            .select({ id: schema.managedAccounts.id })
+            .from(schema.managedAccounts)
+            .where(eq(schema.managedAccounts.id, input.accountId))
+            .for("update")
+            .limit(1);
+          if (!account) return { status: "not_found" as const };
+
+          const accountWorkspaces = await tx
+            .select({ id: schema.workspaces.id })
+            .from(schema.workspaces)
+            .where(eq(schema.workspaces.accountId, input.accountId))
+            .for("update");
+          if (!accountWorkspaces.some((workspace) => workspace.id === input.workspaceId)) {
+            return { status: "not_found" as const };
+          }
+          if (accountWorkspaces.length <= 1) {
+            return { status: "only_workspace" as const };
+          }
+
+          const sessions = await tx
+            .select({ id: schema.sessions.id, status: schema.sessions.status })
+            .from(schema.sessions)
+            .where(eq(schema.sessions.workspaceId, input.workspaceId))
+            .for("update", { noWait: true });
+          if (
+            sessions.some(
+              (session) =>
+                session.status === "queued" ||
+                session.status === "running" ||
+                session.status === "requires_action" ||
+                session.status === "recovering" ||
+                session.status === "waiting_capacity",
+            )
+          ) {
+            return { status: "active_sessions" as const };
+          }
+
+          // Session status is a projection, not execution ownership. Refuse an
+          // inconsistent/stale projection while an exact attempt still owns work.
+          const liveAttempts = await tx
+            .select({ id: schema.sessionTurnAttempts.id })
+            .from(schema.sessionTurnAttempts)
+            .where(
+              and(
+                eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
+                inArray(schema.sessionTurnAttempts.state, ["claimed", "running"]),
+              ),
+            )
+            .for("update", { noWait: true });
+          if (liveAttempts.length > 0) {
+            return { status: "active_sessions" as const };
+          }
+
+          const leases = await tx
+            .select({
+              liveness: schema.sandboxLeases.liveness,
+              refcount: schema.sandboxLeases.refcount,
+              turnHolders: schema.sandboxLeases.turnHolders,
+              viewerHolders: schema.sandboxLeases.viewerHolders,
+              instanceId: schema.sandboxLeases.instanceId,
+              archiveCaptureId: schema.sandboxLeases.archiveCaptureId,
+              reaperHoldId: schema.sandboxLeases.reaperHoldId,
+              rotationRequestedAt: schema.sandboxLeases.rotationRequestedAt,
+              providerDeadlineAt: schema.sandboxLeases.providerDeadlineAt,
+            })
+            .from(schema.sandboxLeases)
+            .where(eq(schema.sandboxLeases.workspaceId, input.workspaceId))
+            .for("update", { noWait: true });
+          if (
+            leases.some(
+              (lease) =>
+                lease.liveness !== "cold" ||
+                lease.refcount !== 0 ||
+                lease.turnHolders !== 0 ||
+                lease.viewerHolders !== 0 ||
+                lease.instanceId !== null ||
+                lease.archiveCaptureId !== null ||
+                lease.reaperHoldId !== null ||
+                lease.rotationRequestedAt !== null ||
+                lease.providerDeadlineAt !== null,
+            )
+          ) {
+            return { status: "live_sandboxes" as const };
+          }
+
+          // Counters are a fast projection. The underlying ownership ledgers are
+          // authoritative and must independently be empty/settled before cascade
+          // deletion can erase their provider address or mutation evidence.
+          const holders = await tx
+            .select({ id: schema.sandboxLeaseHolders.id })
+            .from(schema.sandboxLeaseHolders)
+            .where(eq(schema.sandboxLeaseHolders.workspaceId, input.workspaceId))
+            .for("update", { noWait: true });
+          if (holders.length > 0) {
+            return { status: "live_sandboxes" as const };
+          }
+          const unsettledAdmissions = await tx
+            .select({ id: schema.sandboxWorkspaceMutationAdmissions.id })
+            .from(schema.sandboxWorkspaceMutationAdmissions)
+            .where(
+              and(
+                eq(schema.sandboxWorkspaceMutationAdmissions.workspaceId, input.workspaceId),
+                isNull(schema.sandboxWorkspaceMutationAdmissions.settledAt),
+              ),
+            )
+            .for("update", { noWait: true });
+          if (unsettledAdmissions.length > 0) {
+            return { status: "live_sandboxes" as const };
+          }
+          const activeProcesses = await tx
+            .select({ id: schema.sandboxRetainedProcesses.id })
+            .from(schema.sandboxRetainedProcesses)
+            .where(
+              and(
+                eq(schema.sandboxRetainedProcesses.workspaceId, input.workspaceId),
+                eq(schema.sandboxRetainedProcesses.state, "active"),
+              ),
+            )
+            .for("update", { noWait: true });
+          if (activeProcesses.length > 0) {
+            return { status: "live_sandboxes" as const };
+          }
+          const openPtys = await tx
+            .select({ id: schema.sandboxPtySessions.id })
+            .from(schema.sandboxPtySessions)
+            .where(
+              and(
+                eq(schema.sandboxPtySessions.workspaceId, input.workspaceId),
+                eq(schema.sandboxPtySessions.status, "open"),
+              ),
+            )
+            .for("update", { noWait: true });
+          if (openPtys.length > 0) {
+            return { status: "live_sandboxes" as const };
+          }
+
+          const schedules = await tx
+            .select({ temporalScheduleId: schema.scheduledTasks.temporalScheduleId })
+            .from(schema.scheduledTasks)
+            .where(eq(schema.scheduledTasks.workspaceId, input.workspaceId))
+            .for("update", { noWait: true });
+          const cleanupClaimId = randomUUID();
+          const temporalScheduleCleanups =
+            schedules.length === 0
+              ? []
+              : await tx
+                  .insert(schema.temporalScheduleCleanupOutbox)
+                  .values(
+                    schedules.map((schedule) => ({
+                      accountId: input.accountId,
+                      workspaceId: input.workspaceId,
+                      temporalScheduleId: schedule.temporalScheduleId,
+                      claimId: cleanupClaimId,
+                      claimUntil: sql<Date>`now() + interval '15 seconds'`,
+                      attemptCount: 1,
+                    })),
+                  )
+                  .returning({
+                    id: schema.temporalScheduleCleanupOutbox.id,
+                    accountId: schema.temporalScheduleCleanupOutbox.accountId,
+                    workspaceId: schema.temporalScheduleCleanupOutbox.workspaceId,
+                    temporalScheduleId: schema.temporalScheduleCleanupOutbox.temporalScheduleId,
+                    attemptCount: schema.temporalScheduleCleanupOutbox.attemptCount,
+                  });
+          if (temporalScheduleCleanups.length !== schedules.length) {
+            throw new Error("Failed to persist every Temporal schedule cleanup receipt");
+          }
+
+          const deleted = await tx
+            .delete(schema.workspaces)
+            .where(
+              and(
+                eq(schema.workspaces.id, input.workspaceId),
+                eq(schema.workspaces.accountId, input.accountId),
+              ),
+            )
+            .returning({ id: schema.workspaces.id });
+          if (deleted.length !== 1) return { status: "not_found" as const };
+          return {
+            status: "deleted" as const,
+            temporalScheduleCleanups: temporalScheduleCleanups.map((cleanup) => ({
+              ...cleanup,
+              claimId: cleanupClaimId,
+            })),
+          };
+        }),
+    );
+  } catch (error) {
+    // The parent workspace lock deliberately blocks new FK children. Never wait
+    // on a child row owned by a transaction that may itself be waiting for that
+    // parent lock: fail closed and let the caller retry after live work settles.
+    let current: unknown = error;
+    const visited = new Set<unknown>();
+    for (let depth = 0; depth < 8 && current && !visited.has(current); depth += 1) {
+      visited.add(current);
+      if (
+        typeof current === "object" &&
+        "code" in current &&
+        (current as { code?: unknown }).code === "55P03"
+      ) {
+        return { status: "live_sandboxes" };
+      }
+      current =
+        typeof current === "object" && "cause" in current
+          ? (current as { cause?: unknown }).cause
+          : undefined;
+    }
+    throw error;
+  }
+}
+
+/** Claim a bounded cross-workspace batch after abandoned claims expire. */
+export async function claimTemporalScheduleCleanups(
+  db: Database,
+  input: { claimId: string; limit?: number; claimSeconds?: number },
+): Promise<TemporalScheduleCleanupClaim[]> {
+  const rows = await rawRows<{
+    id: string;
+    account_id: string;
+    workspace_id: string;
+    temporal_schedule_id: string;
+    attempt_count: number;
+  }>(
+    db,
+    sql`
+      select * from opengeni_private.claim_temporal_schedule_cleanups(
+        ${input.claimId}, ${input.limit ?? 32}, ${input.claimSeconds ?? 15}
+      )
+    `,
+  );
+  return rows.map((row) => ({
+    id: row.id,
+    accountId: row.account_id,
+    workspaceId: row.workspace_id,
+    temporalScheduleId: row.temporal_schedule_id,
+    claimId: input.claimId,
+    attemptCount: row.attempt_count,
+  }));
+}
+
+/**
+ * Settle only the exact claimed cleanup. A null error acknowledges the
+ * idempotent external deletion and removes the durable receipt; an error
+ * releases it with bounded exponential backoff.
+ */
+export async function settleTemporalScheduleCleanup(
+  db: Database,
+  input: { id: string; claimId: string; error?: string | null },
+): Promise<boolean> {
+  const [row] = await rawRows<{ settled: boolean }>(
+    db,
+    sql`
+      select opengeni_private.settle_temporal_schedule_cleanup(
+        ${input.id}, ${input.claimId}, ${input.error ?? null}
+      ) as settled
+    `,
+  );
+  return row?.settled === true;
 }
 
 export async function createApiKey(
@@ -24612,6 +24911,22 @@ export type SandboxRecoveryState = {
     verifiedRevision: string | null;
     verifiedAt: string | null;
   };
+  /** Provider-specific proof that an elected recovery owner may replace only
+   * the disposable execution wrapper while retaining the same workspace. */
+  continuity?: SandboxProviderContinuityRecovery;
+  /** A provider disappeared while a non-cancellable capture response could
+   * still settle. The cold lease retains this exact source/lineage receipt so a
+   * late verified archive can repair recovery without reopening the old box. */
+  lateArchiveCapture?: {
+    version: 1;
+    captureId: string;
+    providerRequestId: string;
+    sourceLeaseId: string;
+    sourceLeaseEpoch: number;
+    sourceInstanceId: string;
+    sourceWorkspaceGeneration: number;
+    recordedAt: string;
+  };
 };
 
 // The snake_case raw shape returned by the raw sql`` lease queries. lease_epoch
@@ -24639,9 +24954,18 @@ type LeaseRow = {
   workspace_generation: number | string;
   archive_generation: number | string | null;
   archive_capture_id: string | null;
+  archive_capture_operation_id: string | null;
+  archive_capture_provider_request_id: string | null;
+  archive_capture_provider_replay_safe: boolean;
+  archive_capture_takeover_safe: boolean;
+  archive_capture_attempt: number | string | null;
   archive_capture_generation: number | string | null;
   archive_capture_started_at: Date | string | null;
   archive_capture_deadline_at: Date | string | null;
+  archive_capture_published_at: Date | string | null;
+  reaper_hold_id: string | null;
+  reaper_hold_until: Date | string | null;
+  reaper_hold_reason: string | null;
   resume_backend_id: string | null;
   resume_state: Record<string, unknown> | null;
   last_meter_at: Date | string | null;
@@ -24649,7 +24973,7 @@ type LeaseRow = {
   provider_created_at: Date | string | null;
   provider_deadline_at: Date | string | null;
   rotation_requested_at: Date | string | null;
-  rotation_reason: "provider_deadline" | "operator" | null;
+  rotation_reason: "provider_deadline" | "operator" | "teardown_claim" | null;
   current_checkpoint_artifact_id: string | null;
   previous_checkpoint_artifact_id: string | null;
   expires_at: Date | string;
@@ -24690,9 +25014,24 @@ export interface LeaseSnapshot {
   /** Exact provider capture currently holding the lease-local admission gate. */
   archiveCapture: {
     id: string;
+    operationId: string;
+    providerRequestId: string;
+    providerReplaySafe: boolean;
+    takeoverSafe: boolean;
+    attempt: number;
     workspaceGeneration: number;
     startedAt: Date;
     deadlineAt: Date;
+    /** Durable proof that this exact draining capture already published a
+     * verified current-generation archive. Null while capture is outstanding. */
+    publishedAt: Date | null;
+  } | null;
+  /** Bounded exact operator hold. Active holds stop reaper capture/teardown but
+   * deliberately do not stop a user from re-arming a resumable drain. */
+  reaperHold: {
+    id: string;
+    until: Date;
+    reason: string;
   } | null;
   resumeBackendId: string | null;
   resumeState: Record<string, unknown> | null;
@@ -24708,7 +25047,7 @@ export interface LeaseSnapshot {
   /** Once set, new holders and new filesystem mutations are fenced while the
    * current holders quiesce and the reaper creates a successor. */
   rotationRequestedAt: Date | null;
-  rotationReason: "provider_deadline" | "operator" | null;
+  rotationReason: "provider_deadline" | "operator" | "teardown_claim" | null;
   currentCheckpointArtifactId: string | null;
   previousCheckpointArtifactId: string | null;
   expiresAt: Date;
@@ -24756,8 +25095,13 @@ export interface AcquireLeaseInput {
   // turn-arrival increment is gated on lease_epoch == expectedEpoch (split-brain).
   expectedEpoch?: number;
   /** Bounded wait for an exact provider-native capture claim to settle. The
-   * transaction is released between retries; every retry re-reads the lease. */
+   * transaction is released between retries; every retry re-reads the lease.
+   * The same wait also covers a requested provider rotation. The legacy field
+   * name is retained at the API boundary so rolling workers remain compatible. */
   captureWaitMs?: number;
+  /** Optional owner cancellation for the transition wait. No holder exists
+   * while a capture/rotation fence is observed, so cancellation is leak-free. */
+  waitSignal?: AbortSignal;
 }
 
 export type AcquireLeaseResult =
@@ -24776,19 +25120,57 @@ export type AcquireLeaseResult =
       code: "restore_degraded" | "restore_unrecoverable";
       lease: LeaseSnapshot;
     }
-  // Epoch fence rejected the turn-arrival increment: a newer epoch exists (a
-  // later turn re-established the box). Caller must back off and re-read; NEVER
-  // create().
-  | { role: "fenced"; lease: LeaseSnapshot };
+  // A true epoch supersession is distinct from an in-progress lifecycle
+  // transition. Capture/rotation fences are transient and callers wait/retry;
+  // only `superseded` means this exact epoch can never be acquired.
+  | {
+      role: "fenced";
+      reason:
+        | "superseded"
+        | "capture_in_progress"
+        | "rotation_in_progress"
+        | "provider_recovery_in_progress";
+      lease: LeaseSnapshot;
+    };
 
 // Thrown by callers that treat a fenced/superseded epoch as an error path.
 export class SandboxLeaseSupersededError extends Error {
   constructor(
     public readonly sandboxGroupId: string,
     public readonly leaseEpoch: number,
+    public readonly diagnostic?: {
+      backend: string;
+      instanceId: string | null;
+      liveness: SandboxLeaseLiveness;
+    },
   ) {
-    super(`Sandbox lease superseded for group ${sandboxGroupId} (epoch ${leaseEpoch})`);
+    super(
+      `Sandbox lease superseded for group ${sandboxGroupId} (epoch ${leaseEpoch}` +
+        `${diagnostic ? `, backend ${diagnostic.backend}, instance ${diagnostic.instanceId ?? "none"}, ${diagnostic.liveness}` : ""})`,
+    );
     this.name = "SandboxLeaseSupersededError";
+  }
+}
+
+export class SandboxLeaseTransitionError extends Error {
+  readonly name = "SandboxLeaseTransitionError";
+
+  constructor(
+    public readonly sandboxGroupId: string,
+    public readonly leaseEpoch: number,
+    public readonly reason:
+      | "capture_in_progress"
+      | "rotation_in_progress"
+      | "provider_recovery_in_progress",
+    public readonly backend: string,
+    public readonly instanceId: string | null,
+    public readonly liveness: SandboxLeaseLiveness,
+  ) {
+    super(
+      `Sandbox lifecycle transition still in progress for group ${sandboxGroupId} ` +
+        `(epoch ${leaseEpoch}, reason ${reason}, backend ${backend}, ` +
+        `instance ${instanceId ?? "none"}, ${liveness})`,
+    );
   }
 }
 
@@ -24895,12 +25277,20 @@ function mapLeaseRow(row: LeaseRow): LeaseSnapshot {
       archiveGeneration === workspaceGeneration,
     archiveCapture:
       row.archive_capture_id === null ||
+      row.archive_capture_operation_id === null ||
+      row.archive_capture_provider_request_id === null ||
+      row.archive_capture_attempt === null ||
       row.archive_capture_generation === null ||
       row.archive_capture_started_at === null ||
       row.archive_capture_deadline_at === null
         ? null
         : {
             id: row.archive_capture_id,
+            operationId: row.archive_capture_operation_id,
+            providerRequestId: row.archive_capture_provider_request_id,
+            providerReplaySafe: row.archive_capture_provider_replay_safe,
+            takeoverSafe: row.archive_capture_takeover_safe,
+            attempt: Number(row.archive_capture_attempt),
             workspaceGeneration: Number(row.archive_capture_generation),
             startedAt:
               row.archive_capture_started_at instanceof Date
@@ -24910,6 +25300,25 @@ function mapLeaseRow(row: LeaseRow): LeaseSnapshot {
               row.archive_capture_deadline_at instanceof Date
                 ? row.archive_capture_deadline_at
                 : new Date(row.archive_capture_deadline_at),
+            publishedAt:
+              row.archive_capture_published_at === null
+                ? null
+                : row.archive_capture_published_at instanceof Date
+                  ? row.archive_capture_published_at
+                  : new Date(row.archive_capture_published_at),
+          },
+    reaperHold:
+      row.reaper_hold_id === null ||
+      row.reaper_hold_until === null ||
+      row.reaper_hold_reason === null
+        ? null
+        : {
+            id: row.reaper_hold_id,
+            until:
+              row.reaper_hold_until instanceof Date
+                ? row.reaper_hold_until
+                : new Date(row.reaper_hold_until),
+            reason: row.reaper_hold_reason,
           },
     resumeBackendId: row.resume_backend_id,
     resumeState: row.resume_state,
@@ -24937,6 +25346,98 @@ function mapLeaseRow(row: LeaseRow): LeaseSnapshot {
     previousCheckpointArtifactId: row.previous_checkpoint_artifact_id,
     expiresAt: row.expires_at instanceof Date ? row.expires_at : new Date(row.expires_at),
   };
+}
+
+function hasResumableLeaseInstance(row: LeaseRow): boolean {
+  const envelope =
+    row.resume_state && typeof row.resume_state === "object" ? row.resume_state : undefined;
+  const declared = envelope?.[OPENGENI_SANDBOX_PROVIDER_INSTANCE_ID_FIELD];
+  // The lease column is authoritative. Merely finding an address is
+  // insufficient: a stale envelope for a predecessor must never make the
+  // current drain re-armable.
+  const state =
+    envelope?.sessionState && typeof envelope.sessionState === "object"
+      ? (envelope.sessionState as Record<string, unknown>)
+      : envelope;
+  const providerState = state?.providerState;
+  if (!providerState || typeof providerState !== "object" || Array.isArray(providerState)) {
+    return typeof declared === "string" && declared.length > 0 && declared === row.instance_id;
+  }
+  const record = providerState as Record<string, unknown>;
+  const fields = SANDBOX_PROVIDER_INSTANCE_ID_FIELDS_BY_BACKEND[row.backend as SandboxBackend];
+  if (!fields) return false;
+  const legacyIdentities = fields.flatMap((field) => {
+    const value = record[field];
+    return typeof value === "string" && value.length > 0 ? [value] : [];
+  });
+  if (typeof declared === "string" && declared.length > 0) {
+    return (
+      declared === row.instance_id &&
+      legacyIdentities.every((identity) => identity === row.instance_id)
+    );
+  }
+  return (
+    legacyIdentities.length > 0 &&
+    legacyIdentities.every((identity) => identity === row.instance_id)
+  );
+}
+
+function leaseBackendRequiresResumableInstance(row: LeaseRow): boolean {
+  const fields = SANDBOX_PROVIDER_INSTANCE_ID_FIELDS_BY_BACKEND[row.backend as SandboxBackend];
+  // Fail closed for an unknown/new provider until its exact address contract is
+  // registered. `none` is intentionally the sole providerless backend today.
+  return fields === undefined || fields.length > 0;
+}
+
+function providerlessLeaseBackendPredicateSql() {
+  const providerlessBackends = Object.entries(SANDBOX_PROVIDER_INSTANCE_ID_FIELDS_BY_BACKEND)
+    .filter(([, fields]) => fields.length === 0)
+    .map(([backend]) => backend);
+  if (providerlessBackends.length === 0) return sql`false`;
+  return sql`backend in (${sql.join(
+    providerlessBackends.map((backend) => sql`${backend}`),
+    sql`, `,
+  )})`;
+}
+
+function legacyLeaseProviderIdentityPredicateSql(predicate: "matches" | "conflicts") {
+  const providerState = sql`case
+    when pg_catalog.jsonb_typeof(coalesce(
+      resume_state #> '{sessionState,providerState}',
+      resume_state #> '{providerState}'
+    )) = 'object'
+    then coalesce(
+      resume_state #> '{sessionState,providerState}',
+      resume_state #> '{providerState}'
+    )
+    else '{}'::jsonb
+  end`;
+  const comparison = predicate === "matches" ? sql`=` : sql`<>`;
+  const branches = Object.entries(SANDBOX_PROVIDER_INSTANCE_ID_FIELDS_BY_BACKEND).flatMap(
+    ([backend, fields]) =>
+      fields.length === 0
+        ? []
+        : [
+            sql`when backend = ${backend} then exists (
+        select 1
+        from pg_catalog.jsonb_each_text(${providerState}) as provider_identity(key, value)
+        where provider_identity.key in (${sql.join(
+          fields.map((field) => sql`${field}`),
+          sql`, `,
+        )})
+          and provider_identity.value ${comparison} instance_id
+      )`,
+          ],
+  );
+  return sql`case ${sql.join(branches, sql` `)} else false end`;
+}
+
+function legacyLeaseProviderIdentityMatchesSql() {
+  return legacyLeaseProviderIdentityPredicateSql("matches");
+}
+
+function legacyLeaseProviderIdentityConflictsSql() {
+  return legacyLeaseProviderIdentityPredicateSql("conflicts");
 }
 
 function hasCompleteWorkspaceArchive(row: LeaseRow): boolean {
@@ -24985,6 +25486,8 @@ function recoveryStateFromLeaseRow(row: LeaseRow): SandboxRecoveryState {
   const providerInput = explicit?.provider;
   const restoreInput = explicit?.restore;
   const workspaceInput = explicit?.workspace;
+  const lateCaptureInput = explicit?.lateArchiveCapture;
+  const continuityInput = explicit?.continuity;
   const providerStatus = providerInput?.status;
   const provider: SandboxRecoveryState["provider"] = {
     status:
@@ -25058,11 +25561,53 @@ function recoveryStateFromLeaseRow(row: LeaseRow): SandboxRecoveryState {
       typeof workspaceInput?.verifiedRevision === "string" ? workspaceInput.verifiedRevision : null,
     verifiedAt: typeof workspaceInput?.verifiedAt === "string" ? workspaceInput.verifiedAt : null,
   };
+  const lateArchiveCapture =
+    lateCaptureInput?.version === 1 &&
+    typeof lateCaptureInput.captureId === "string" &&
+    typeof lateCaptureInput.providerRequestId === "string" &&
+    typeof lateCaptureInput.sourceLeaseId === "string" &&
+    Number.isSafeInteger(lateCaptureInput.sourceLeaseEpoch) &&
+    lateCaptureInput.sourceLeaseEpoch >= 0 &&
+    typeof lateCaptureInput.sourceInstanceId === "string" &&
+    lateCaptureInput.sourceInstanceId.length > 0 &&
+    Number.isSafeInteger(lateCaptureInput.sourceWorkspaceGeneration) &&
+    lateCaptureInput.sourceWorkspaceGeneration >= 0 &&
+    typeof lateCaptureInput.recordedAt === "string"
+      ? {
+          version: 1 as const,
+          captureId: lateCaptureInput.captureId,
+          providerRequestId: lateCaptureInput.providerRequestId,
+          sourceLeaseId: lateCaptureInput.sourceLeaseId,
+          sourceLeaseEpoch: lateCaptureInput.sourceLeaseEpoch,
+          sourceInstanceId: lateCaptureInput.sourceInstanceId,
+          sourceWorkspaceGeneration: lateCaptureInput.sourceWorkspaceGeneration,
+          recordedAt: lateCaptureInput.recordedAt,
+        }
+      : null;
+  const continuity =
+    continuityInput?.version === 1 &&
+    continuityInput.backend === "docker" &&
+    continuityInput.kind === "docker_workspace" &&
+    typeof continuityInput.sourceInstanceId === "string" &&
+    continuityInput.sourceInstanceId.length > 0 &&
+    typeof continuityInput.continuityKey === "string" &&
+    continuityInput.continuityKey.startsWith("/") &&
+    continuityInput.continuityKey.length <= 4096
+      ? {
+          version: 1 as const,
+          backend: "docker" as const,
+          kind: "docker_workspace" as const,
+          sourceInstanceId: continuityInput.sourceInstanceId,
+          continuityKey: continuityInput.continuityKey,
+        }
+      : null;
   return {
     provider,
     archive: { status: archiveStatus, current, previous },
     restore,
     workspace,
+    ...(continuity ? { continuity } : {}),
+    ...(lateArchiveCapture ? { lateArchiveCapture } : {}),
   };
 }
 
@@ -25134,6 +25679,95 @@ function archiveOnlyResumeState(
     ...(Object.keys(sessionState).length > 0 ? { sessionState } : {}),
     opengeniRecovery: recovery,
   };
+}
+
+function providerStateFromLeaseResumeState(row: LeaseRow): Record<string, unknown> | null {
+  const resume = row.resume_state;
+  if (!resume || typeof resume !== "object") return null;
+  const sessionState =
+    resume.sessionState && typeof resume.sessionState === "object"
+      ? (resume.sessionState as Record<string, unknown>)
+      : resume;
+  const providerState = sessionState.providerState;
+  return providerState && typeof providerState === "object" && !Array.isArray(providerState)
+    ? (providerState as Record<string, unknown>)
+    : null;
+}
+
+/** Docker's container is disposable; its owned host workspace is the durable
+ * provider resource. The SDK is configured without local snapshots, so an
+ * elected owner can restart a missing container on this exact path without
+ * restoring older bytes over it. Every predicate is intentionally explicit. */
+function dockerContinuityRecoveryFromLeaseRow(
+  row: LeaseRow,
+  sourceInstanceId: string | null,
+): SandboxProviderContinuityRecovery | null {
+  if (
+    (row.resume_backend_id ?? row.backend) !== "docker" ||
+    !sourceInstanceId ||
+    !row.resume_state
+  ) {
+    return null;
+  }
+  const providerState = providerStateFromLeaseResumeState(row);
+  const declared = row.resume_state[OPENGENI_SANDBOX_PROVIDER_INSTANCE_ID_FIELD];
+  const containerId = providerState?.containerId;
+  const workspaceRootPath = providerState?.workspaceRootPath;
+  if (
+    (declared !== undefined && declared !== sourceInstanceId) ||
+    containerId !== sourceInstanceId ||
+    typeof workspaceRootPath !== "string" ||
+    !workspaceRootPath.startsWith("/") ||
+    workspaceRootPath.length > 4096 ||
+    workspaceRootPath.includes("\0") ||
+    providerState?.workspaceRootOwned !== true ||
+    (providerState.snapshot !== null && providerState.snapshot !== undefined)
+  ) {
+    return null;
+  }
+  return {
+    version: 1,
+    backend: "docker",
+    kind: "docker_workspace",
+    sourceInstanceId,
+    continuityKey: workspaceRootPath,
+  };
+}
+
+function continuityRecoveryFromLeaseRow(row: LeaseRow): SandboxProviderContinuityRecovery | null {
+  const current = recoveryStateFromLeaseRow(row).continuity;
+  const derived = dockerContinuityRecoveryFromLeaseRow(
+    row,
+    row.instance_id ?? current?.sourceInstanceId ?? null,
+  );
+  return derived && (!current || continuityRecoveryEquals(current, derived, false))
+    ? derived
+    : null;
+}
+
+function continuityRecoveryEquals(
+  left: SandboxProviderContinuityRecovery | null | undefined,
+  right: SandboxProviderContinuityRecovery | null | undefined,
+  compareSourceInstance = true,
+): boolean {
+  return Boolean(
+    left &&
+    right &&
+    left.version === right.version &&
+    left.backend === right.backend &&
+    left.kind === right.kind &&
+    (!compareSourceInstance || left.sourceInstanceId === right.sourceInstanceId) &&
+    left.continuityKey === right.continuityKey,
+  );
+}
+
+function recoveryResumeState(
+  row: LeaseRow,
+  recovery: SandboxRecoveryState,
+): Record<string, unknown> {
+  return recovery.continuity
+    ? resumeStateWithRecovery(row.resume_state, recovery)
+    : archiveOnlyResumeState(row, recovery);
 }
 
 function archiveProjectionFromResumeState(
@@ -25256,8 +25890,8 @@ async function acquireLeaseOnce(
         // (2) Serialize ALL concurrent arrivals on this group's row. Plain FOR
         // UPDATE (block, do NOT skip) — unlike concurrent enrollment scans,
         // because we WANT the loser to block then attach, not skip and lose.
-        const rows = await tx.execute<LeaseRow & { draining_expired: boolean }>(sql`
-        select *, (liveness = 'draining' and expires_at <= now()) as draining_expired
+        const rows = await tx.execute<LeaseRow>(sql`
+        select *
         from sandbox_leases
         where workspace_id = ${workspaceId} and sandbox_group_id = ${sandboxGroupId}
         for update
@@ -25291,7 +25925,11 @@ async function acquireLeaseOnce(
         // another holder while that operation owns the exact lease: the caller
         // retries after the claim clears, before it can reach the provider.
         if (row.archive_capture_id !== null) {
-          return { role: "fenced" as const, lease: mapLeaseRow(row) };
+          return {
+            role: "fenced" as const,
+            reason: "capture_in_progress" as const,
+            lease: mapLeaseRow(row),
+          };
         }
 
         // A finite-lifetime provider instance is already being replaced. Do not
@@ -25299,17 +25937,29 @@ async function acquireLeaseOnce(
         // quiescence, snapshot, and drain; every new arrival retries after the
         // cold->warming successor election.
         if (liveness !== "cold" && row.rotation_requested_at !== null) {
-          return { role: "fenced" as const, lease: mapLeaseRow(row) };
+          return {
+            role: "fenced" as const,
+            reason: "rotation_in_progress" as const,
+            lease: mapLeaseRow(row),
+          };
         }
 
-        // An expired DRAINING row is owned by the reaper's provider teardown,
-        // not by a new arrival. In particular, do this before image/rig conflict
-        // handling: a conflicting successor must not take the SOLO-recreate path
-        // and clear the attributed instance while the reaper/old creator still
-        // owns its termination. The row remains drainable until confirmDrainCold
-        // settles it, so callers fail closed and retry after the box is cold.
-        if (liveness === "draining" && row.draining_expired) {
-          return { role: "fenced" as const, lease: mapLeaseRow(row) };
+        // A creator died after publishing an instance id but before publishing
+        // its resumable envelope. The attributed provider may still be live,
+        // but an arrival has no safe SDK state with which to attach. Keep this
+        // exceptional row transiently fenced until the reaper captures/settles
+        // it; unlike an ordinary expired drain, re-arming it cannot restore
+        // service and would strand an unmanageable provider.
+        if (
+          liveness === "draining" &&
+          leaseBackendRequiresResumableInstance(row) &&
+          !hasResumableLeaseInstance(row)
+        ) {
+          return {
+            role: "fenced" as const,
+            reason: "provider_recovery_in_progress" as const,
+            lease: mapLeaseRow(row),
+          };
         }
 
         // -- SHARED STATE CONFLICT (B3 image + M3 rig): a LIVE box (warm/draining/warming)
@@ -25370,13 +26020,16 @@ async function acquireLeaseOnce(
         `);
           return {
             role: "fenced" as const,
+            reason: "rotation_in_progress" as const,
             lease: mapLeaseRow(rotating[0] ?? row),
           };
         }
 
-        // -- draining: late arrival re-arms (D1) only while the grace is open.
-        // An expired row was fenced above because the reaper owns its provider
-        // teardown and must not lose the attributed instance race.
+        // -- draining: a late arrival re-arms until the reaper has acquired the
+        // exact durable archive-capture claim checked above. `expires_at` makes a
+        // row eligible for cleanup; it is never teardown ownership by itself.
+        // The row lock serializes this holder insertion against the reaper claim:
+        // whichever wins first owns the next state without an availability gap.
         if (liveness === "draining") {
           await upsertLeaseHolder(tx, row.id, accountId, workspaceId, kind, holderId, subjectId);
           const updated = await recomputeAndStampLease(tx, row.id, input.leaseTtlMs, "warm");
@@ -25429,7 +26082,11 @@ async function acquireLeaseOnce(
           input.expectedEpoch !== undefined &&
           Number(row.lease_epoch) !== input.expectedEpoch
         ) {
-          return { role: "fenced" as const, lease: mapLeaseRow(row) };
+          return {
+            role: "fenced" as const,
+            reason: "superseded" as const,
+            lease: mapLeaseRow(row),
+          };
         }
 
         // -- warm / warming: attach (A2 / A1). refcount++ ONLY; never touch
@@ -25447,8 +26104,33 @@ async function acquireLeaseOnce(
   );
 }
 
-function waitForLeaseArchiveCapture(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function waitForSandboxTransition(
+  ms: number,
+  signal: AbortSignal | undefined,
+  cancellationMessage: string,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(finish, ms);
+    function finish(): void {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", cancel);
+      resolve();
+    }
+    const cancel = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", cancel);
+      reject(signal?.reason ?? new Error(cancellationMessage));
+    };
+    signal?.addEventListener("abort", cancel, { once: true });
+    // Close the precheck/listener-registration race: an abort dispatched after
+    // the caller entered this function but before the listener was attached is
+    // still observed synchronously here.
+    if (signal?.aborted) cancel();
+  });
 }
 
 export async function acquireLease(
@@ -25459,18 +26141,25 @@ export async function acquireLease(
   if (!Number.isSafeInteger(captureWaitMs) || captureWaitMs < 0 || captureWaitMs > 60 * 60_000) {
     throw new Error("Sandbox lease archive capture wait is invalid");
   }
-  const deadline = Date.now() + captureWaitMs;
+  // A bounded in-process wait must use a monotonic clock. Wall-clock steps from
+  // NTP/VM resume may change timestamp interpretation, but must never stretch
+  // or prematurely consume the caller's resource budget.
+  const deadline = performance.now() + captureWaitMs;
   let delayMs = 25;
   for (;;) {
     const result = await acquireLeaseOnce(db, input);
     if (
       result.role !== "fenced" ||
-      result.lease.archiveCapture === null ||
-      Date.now() >= deadline
+      result.reason === "superseded" ||
+      performance.now() >= deadline
     ) {
       return result;
     }
-    await waitForLeaseArchiveCapture(Math.min(delayMs, Math.max(1, deadline - Date.now())));
+    await waitForSandboxTransition(
+      Math.min(delayMs, Math.max(1, deadline - performance.now())),
+      input.waitSignal,
+      "Sandbox lease transition wait cancelled",
+    );
     delayMs = Math.min(500, delayMs * 2);
   }
 }
@@ -25690,6 +26379,7 @@ export async function beginSandboxRematerialization(
                 verifiedRevision: null,
                 verifiedAt: null,
               },
+              ...(current.continuity ? { continuity: current.continuity } : {}),
             };
             const degradedResumeState = resumeStateWithRecovery(workingResumeState, degraded);
             const degradedRows = await tx.execute<LeaseRow>(sql`
@@ -25812,6 +26502,7 @@ export async function beginSandboxRematerialization(
                 verifiedRevision: null,
                 verifiedAt: null,
               },
+              ...(current.continuity ? { continuity: current.continuity } : {}),
             };
             const degradedRows = await tx.execute<LeaseRow>(sql`
               update sandbox_leases set
@@ -25881,6 +26572,7 @@ export async function beginSandboxRematerialization(
             verifiedRevision: null,
             verifiedAt: null,
           },
+          ...(current.continuity ? { continuity: current.continuity } : {}),
         };
         const resumeStateJson = JSON.stringify(
           resumeStateWithRecovery(workingResumeState, recovery),
@@ -25951,6 +26643,7 @@ export async function failSandboxRematerialization(
     rematerializationId: string;
     failureCode: string;
     retryable: boolean;
+    discardContinuity?: boolean;
   },
 ): Promise<{ failed: boolean; lease: LeaseSnapshot | null }> {
   return await withRlsContext(
@@ -25981,7 +26674,13 @@ export async function failSandboxRematerialization(
           return { failed: false, lease: row ? mapLeaseRow(row) : null };
         }
         const current = recoveryStateFromLeaseRow(row);
-        const terminalStatus: SandboxRestoreStatus = input.retryable ? "degraded" : "unrecoverable";
+        const continuity =
+          input.retryable && !input.discardContinuity ? continuityRecoveryFromLeaseRow(row) : null;
+        const terminalStatus: SandboxRestoreStatus = continuity
+          ? "pending"
+          : input.retryable
+            ? "degraded"
+            : "unrecoverable";
         const recovery: SandboxRecoveryState = {
           provider: {
             status: "missing",
@@ -25993,16 +26692,25 @@ export async function failSandboxRematerialization(
             ...current.restore,
             status: terminalStatus,
             completedAt: new Date().toISOString(),
-            failureCode: input.failureCode.slice(0, 96),
-            retryable: input.retryable,
+            ...(continuity
+              ? {
+                  rematerializationId: null,
+                  selectedRevision: current.archive.current?.revision ?? null,
+                  startedAt: null,
+                }
+              : {
+                  failureCode: input.failureCode.slice(0, 96),
+                  retryable: input.retryable,
+                }),
           },
           workspace: {
-            status: input.retryable ? "degraded" : "unrecoverable",
+            status: continuity ? "not_ready" : input.retryable ? "degraded" : "unrecoverable",
             verifiedRevision: null,
             verifiedAt: null,
           },
+          ...(continuity ? { continuity } : {}),
         };
-        const resumeStateJson = JSON.stringify(archiveOnlyResumeState(row, recovery));
+        const resumeStateJson = JSON.stringify(recoveryResumeState(row, recovery));
         const updated = await tx.execute<LeaseRow>(sql`
           update sandbox_leases set
             liveness = 'cold',
@@ -26010,15 +26718,24 @@ export async function failSandboxRematerialization(
             data_plane_url = null,
             terminal_data_plane_url = null,
             lease_epoch = lease_epoch + 1,
+            reaper_hold_id = null,
+            reaper_hold_until = null,
+            reaper_hold_reason = null,
             resume_state = ${resumeStateJson}::jsonb,
             provider_created_at = null,
             provider_deadline_at = null,
             rotation_requested_at = null,
             rotation_reason = null,
             archive_capture_id = null,
+            archive_capture_operation_id = null,
+            archive_capture_provider_request_id = null,
+            archive_capture_provider_replay_safe = false,
+            archive_capture_takeover_safe = false,
+            archive_capture_attempt = null,
             archive_capture_generation = null,
             archive_capture_started_at = null,
             archive_capture_deadline_at = null,
+            archive_capture_published_at = null,
             updated_at = now()
           where id = ${row.id}
             and liveness = 'warming'
@@ -26129,6 +26846,9 @@ export async function commitWarmingToWarm(
       id: string;
       verifiedRevision: string;
     };
+    /** Exact durable same-workspace receipt returned by the elected provider
+     * continuity recovery. Mutually exclusive with archive hydration. */
+    continuityRecovery?: SandboxProviderContinuityRecovery;
     leaseTtlMs: number;
   },
 ): Promise<{
@@ -26138,6 +26858,8 @@ export async function commitWarmingToWarm(
     | "stale_epoch"
     | "rematerialization_required"
     | "rematerialization_mismatch"
+    | "recovery_mode_conflict"
+    | "continuity_mismatch"
     | "archive_revision_mismatch"
     | "archive_generation_mismatch";
 }> {
@@ -26164,7 +26886,35 @@ export async function commitWarmingToWarm(
 
         const current = recoveryStateFromLeaseRow(row);
         const rematerialization = input.rematerialization;
-        if (current.archive.status === "available" && !rematerialization) {
+        const continuityRecovery = input.continuityRecovery;
+        if (rematerialization && continuityRecovery) {
+          return {
+            committed: false,
+            lease: mapLeaseRow(row),
+            reason: "recovery_mode_conflict" as const,
+          };
+        }
+        if (continuityRecovery) {
+          const adoptedState = dockerContinuityRecoveryFromLeaseRow(row, input.instanceId);
+          if (
+            !continuityRecoveryEquals(current.continuity, continuityRecovery) ||
+            !continuityRecoveryEquals(adoptedState, continuityRecovery, false)
+          ) {
+            return {
+              committed: false,
+              lease: mapLeaseRow(row),
+              reason: "continuity_mismatch" as const,
+            };
+          }
+        }
+        if (current.continuity && !continuityRecovery && !rematerialization) {
+          return {
+            committed: false,
+            lease: mapLeaseRow(row),
+            reason: "continuity_mismatch" as const,
+          };
+        }
+        if (current.archive.status === "available" && !rematerialization && !continuityRecovery) {
           return {
             committed: false,
             lease: mapLeaseRow(row),
@@ -26257,6 +27007,9 @@ export async function commitWarmingToWarm(
             resume_backend_id = ${input.resumeBackendId ?? null},
             resume_state      = ${resumeStateJson}::jsonb,
             lease_epoch       = lease_epoch + 1,
+            reaper_hold_id    = null,
+            reaper_hold_until = null,
+            reaper_hold_reason = null,
             expires_at        = now() + (${String(input.leaseTtlMs)} || ' milliseconds')::interval,
             updated_at        = now()
           where id = ${row.id}
@@ -26292,6 +27045,7 @@ export async function recordWarmingSandboxCreated(
      *  archive-less create. Provider attribution is accepted only while the
      *  warming row still carries this same attempt as well as this epoch. */
     rematerializationId?: string | null;
+    continuityRecovery?: SandboxProviderContinuityRecovery;
     instanceId: string;
     resumeBackendId?: string | null;
     resumeState?: Record<string, unknown> | null;
@@ -26328,6 +27082,25 @@ export async function recordWarmingSandboxCreated(
         const current = recoveryStateFromLeaseRow(row);
         if (current.restore.rematerializationId !== (input.rematerializationId ?? null)) {
           return { recorded: false, lease: mapLeaseRow(row) };
+        }
+        if (input.continuityRecovery) {
+          const candidateRow: LeaseRow = {
+            ...row,
+            instance_id: input.instanceId,
+            resume_backend_id: input.resumeBackendId ?? row.resume_backend_id,
+            resume_state: input.resumeState ?? row.resume_state,
+          };
+          const adoptedState = dockerContinuityRecoveryFromLeaseRow(candidateRow, input.instanceId);
+          if (
+            !continuityRecoveryEquals(current.continuity, input.continuityRecovery) ||
+            !continuityRecoveryEquals(adoptedState, input.continuityRecovery, false)
+          ) {
+            return { recorded: false, lease: mapLeaseRow(row) };
+          }
+        } else if (current.continuity) {
+          // A normal fresh create/archive restore superseded the continuity
+          // candidate. Never carry its authorization onto a different workspace.
+          delete current.continuity;
         }
         const recovery: SandboxRecoveryState = {
           ...current,
@@ -28120,10 +28893,11 @@ export async function markWarmLeaseInstanceLost(
 
         const observedAt = new Date().toISOString();
         const before = recoveryStateFromLeaseRow(current);
+        const continuity = dockerContinuityRecoveryFromLeaseRow(current, input.expectedInstanceId);
         const archiveStatus = before.archive.status;
         const archiveComplete = hasCompleteWorkspaceArchive(current);
         const restoreStatus: SandboxRestoreStatus =
-          archiveStatus === "available" && archiveComplete
+          continuity || (archiveStatus === "available" && archiveComplete)
             ? "pending"
             : archiveStatus === "available" ||
                 archiveStatus === "unverified" ||
@@ -28168,8 +28942,9 @@ export async function markWarmLeaseInstanceLost(
             verifiedRevision: null,
             verifiedAt: null,
           },
+          ...(continuity ? { continuity } : {}),
         };
-        const coldResumeState = archiveOnlyResumeState(current, recovery);
+        const coldResumeState = recoveryResumeState(current, recovery);
         const coldResumeStateJson = JSON.stringify(coldResumeState);
         const updatedRows = await tx.execute<LeaseRow>(sql`
           update sandbox_leases set
@@ -28178,6 +28953,9 @@ export async function markWarmLeaseInstanceLost(
             data_plane_url = null,
             terminal_data_plane_url = null,
             lease_epoch = lease_epoch + 1,
+            reaper_hold_id = null,
+            reaper_hold_until = null,
+            reaper_hold_reason = null,
             resume_state = ${coldResumeStateJson}::jsonb,
             resume_backend_id = coalesce(resume_backend_id, backend),
             provider_created_at = null,
@@ -28185,9 +28963,15 @@ export async function markWarmLeaseInstanceLost(
             rotation_requested_at = null,
             rotation_reason = null,
             archive_capture_id = null,
+            archive_capture_operation_id = null,
+            archive_capture_provider_request_id = null,
+            archive_capture_provider_replay_safe = false,
+            archive_capture_takeover_safe = false,
+            archive_capture_attempt = null,
             archive_capture_generation = null,
             archive_capture_started_at = null,
             archive_capture_deadline_at = null,
+            archive_capture_published_at = null,
             updated_at = now()
           where id = ${current.id}
           returning *
@@ -28411,6 +29195,7 @@ export async function failWarmingToCold(
     workspaceId: string;
     sandboxGroupId: string;
     expectedEpoch: number;
+    discardContinuity?: boolean;
   },
 ): Promise<void> {
   await withRlsContext(
@@ -28431,10 +29216,12 @@ export async function failWarmingToCold(
         }
         const current = recoveryStateFromLeaseRow(row);
         const hasArchive = current.archive.status !== "none";
+        const continuity = input.discardContinuity ? null : continuityRecoveryFromLeaseRow(row);
+        const hasRecovery = hasArchive || continuity !== null;
         const archiveComplete = hasCompleteWorkspaceArchive(row);
         const now = new Date().toISOString();
         const restoreStatus: SandboxRestoreStatus =
-          current.archive.status === "available" && archiveComplete
+          continuity || (current.archive.status === "available" && archiveComplete)
             ? "pending"
             : hasArchive
               ? "degraded"
@@ -28474,9 +29261,10 @@ export async function failWarmingToCold(
             verifiedRevision: null,
             verifiedAt: null,
           },
+          ...(continuity ? { continuity } : {}),
         };
-        const resumeStateJson = hasArchive
-          ? JSON.stringify(archiveOnlyResumeState(row, recovery))
+        const resumeStateJson = hasRecovery
+          ? JSON.stringify(recoveryResumeState(row, recovery))
           : null;
         await tx.execute(sql`
           update sandbox_leases set
@@ -28485,16 +29273,25 @@ export async function failWarmingToCold(
             data_plane_url = null,
             terminal_data_plane_url = null,
             lease_epoch = lease_epoch + 1,
+            reaper_hold_id = null,
+            reaper_hold_until = null,
+            reaper_hold_reason = null,
             resume_state = ${resumeStateJson}::jsonb,
-            resume_backend_id = case when ${hasArchive} then coalesce(resume_backend_id, backend) else null end,
+            resume_backend_id = case when ${hasRecovery} then coalesce(resume_backend_id, backend) else null end,
             provider_created_at = null,
             provider_deadline_at = null,
             rotation_requested_at = null,
             rotation_reason = null,
             archive_capture_id = null,
+            archive_capture_operation_id = null,
+            archive_capture_provider_request_id = null,
+            archive_capture_provider_replay_safe = false,
+            archive_capture_takeover_safe = false,
+            archive_capture_attempt = null,
             archive_capture_generation = null,
             archive_capture_started_at = null,
             archive_capture_deadline_at = null,
+            archive_capture_published_at = null,
             updated_at = now()
           where id = ${row.id}
             and liveness = 'warming'
@@ -28596,7 +29393,11 @@ export async function releaseLeaseHolder(
         // Release during warming decrements only, NEVER touches liveness (the
         // spawner owns warming->warm and re-checks refcount after committing).
         const enterDraining = row.liveness === "warm" && c.total === 0 && c.turns === 0;
-        const drainGraceMs = row.rotation_requested_at ? 0 : input.idleGraceMs;
+        // A capture claim is already the durable teardown fence. Once its final
+        // holder leaves, waiting through the ordinary idle grace only creates an
+        // avoidable availability outage; dispatch recovery on the next sweep.
+        const drainGraceMs =
+          row.rotation_requested_at || row.archive_capture_id ? 0 : input.idleGraceMs;
         const updated = await tx.execute<LeaseRow>(sql`
         update sandbox_leases set
           refcount = ${c.total}, turn_holders = ${c.turns}, viewer_holders = ${c.viewers},
@@ -28855,12 +29656,15 @@ export async function reapStaleLeaseHolders(
         const reapedTurnRows =
           input.turnHolderTtlMs && input.turnHolderTtlMs > 0
             ? await tx.execute<{ lease_id: string }>(sql`
-          delete from sandbox_lease_holders
+          delete from sandbox_lease_holders as holder
           where id in (
-            select id from sandbox_lease_holders
-            where workspace_id = ${input.workspaceId} and kind = 'turn'
-              and last_heartbeat_at < now() - (${String(input.turnHolderTtlMs)} || ' milliseconds')::interval
-            for update skip locked
+            select holder.id from sandbox_lease_holders as holder
+            where holder.workspace_id = ${input.workspaceId} and holder.kind = 'turn'
+              and (
+                holder.last_heartbeat_at < now() - (${String(input.turnHolderTtlMs)} || ' milliseconds')::interval
+                or not ${LIVE_CANONICAL_TURN_HOLDER_PREDICATE}
+              )
+            for update of holder skip locked
           )
           returning lease_id
         `)
@@ -28875,9 +29679,12 @@ export async function reapStaleLeaseHolders(
           turn_holders   = c.turns,
           viewer_holders = c.viewers,
           liveness = case when L.liveness = 'warm' and c.total = 0 and c.turns = 0
+                            and (L.reaper_hold_id is null or L.reaper_hold_until <= now())
                           then 'draining' else L.liveness end,
           expires_at = case when L.liveness = 'warm' and c.total = 0 and c.turns = 0
+                            and (L.reaper_hold_id is null or L.reaper_hold_until <= now())
                           then case when L.rotation_requested_at is not null
+                              or L.archive_capture_id is not null
                             then now() - interval '1 millisecond'
                             else now() + (${String(input.idleGraceMs)} || ' milliseconds')::interval
                           end
@@ -28902,6 +29709,7 @@ export async function reapStaleLeaseHolders(
         select * from sandbox_leases
         where workspace_id = ${input.workspaceId}
           and liveness = 'warming' and expires_at < now() and instance_id is null
+          and (reaper_hold_id is null or reaper_hold_until <= now())
         for update
       `);
         let warmingReset = 0;
@@ -28940,18 +29748,25 @@ export async function reapStaleLeaseHolders(
           update sandbox_leases set
             liveness = 'cold', instance_id = null,
             lease_epoch = lease_epoch + 1,
+            reaper_hold_id = null, reaper_hold_until = null, reaper_hold_reason = null,
             resume_backend_id = case when ${hasArchive} then coalesce(resume_backend_id, backend) else null end,
             resume_state = ${resetResumeState ? JSON.stringify(resetResumeState) : null}::jsonb,
             data_plane_url = null, terminal_data_plane_url = null,
             provider_created_at = null, provider_deadline_at = null,
             rotation_requested_at = null, rotation_reason = null,
-            archive_capture_id = null, archive_capture_generation = null,
+            archive_capture_id = null, archive_capture_operation_id = null,
+            archive_capture_provider_request_id = null,
+            archive_capture_provider_replay_safe = false,
+            archive_capture_takeover_safe = false,
+            archive_capture_attempt = null, archive_capture_generation = null,
             archive_capture_started_at = null, archive_capture_deadline_at = null,
+            archive_capture_published_at = null,
             updated_at = now()
           where id = ${row.id}
             and liveness = 'warming'
             and lease_epoch = ${Number(row.lease_epoch)}
             and instance_id is null
+            and (reaper_hold_id is null or reaper_hold_until <= now())
           returning id
         `);
           warmingReset += reset.length;
@@ -28970,10 +29785,14 @@ export async function reapStaleLeaseHolders(
           data_plane_url = null,
           terminal_data_plane_url = null,
           lease_epoch = lease_epoch + 1,
+          reaper_hold_id = null,
+          reaper_hold_until = null,
+          reaper_hold_reason = null,
           expires_at = now() - interval '1 millisecond',
           updated_at = now()
         where workspace_id = ${input.workspaceId}
           and liveness = 'warming' and expires_at < now() and instance_id is not null
+          and (reaper_hold_id is null or reaper_hold_until <= now())
         returning id
       `);
 
@@ -28990,6 +29809,7 @@ export async function reapStaleLeaseHolders(
         select sandbox_group_id, instance_id, lease_epoch from sandbox_leases
         where workspace_id = ${input.workspaceId}
           and liveness = 'draining' and expires_at < now() and refcount = 0
+          and (reaper_hold_id is null or reaper_hold_until <= now())
       `,
         );
 
@@ -29228,7 +30048,8 @@ export async function listLiveModalSandboxLeaseAttributions(
 
 // §4.7 — explicit re-arm seam (D1). acquireLease already re-arms a draining
 // lease inline; this is the standalone version for callers that learn a holder
-// is wanted during the grace window without going through acquireLease first.
+// is wanted without going through acquireLease first. Expiry is only scan
+// eligibility: the durable capture/teardown claim is the point of no return.
 export async function reArmDrainingLease(
   db: Database,
   input: {
@@ -29249,8 +30070,25 @@ export async function reArmDrainingLease(
           updated_at = now()
         where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
           and liveness = 'draining'
-          and expires_at > now()
           and archive_capture_id is null
+          and rotation_requested_at is null
+          and (
+            (${providerlessLeaseBackendPredicateSql()} and instance_id is null)
+            or (
+              instance_id is not null
+              and
+              case
+                when coalesce(
+                  resume_state ->> ${OPENGENI_SANDBOX_PROVIDER_INSTANCE_ID_FIELD},
+                  ''
+                ) <> ''
+                then resume_state ->> ${OPENGENI_SANDBOX_PROVIDER_INSTANCE_ID_FIELD} = instance_id
+                  and not (${legacyLeaseProviderIdentityConflictsSql()})
+                else ${legacyLeaseProviderIdentityMatchesSql()}
+                  and not (${legacyLeaseProviderIdentityConflictsSql()})
+              end
+            )
+          )
         returning id
       `);
       return { rearmed: rows.length > 0 };
@@ -29259,10 +30097,10 @@ export async function reArmDrainingLease(
 }
 
 // §4.8 — the reaper's final teardown commit (D3). Called AFTER the caller issued
-// the provider stop() on instance_id. CAS-guarded (draining AND refcount=0 AND
-// lease_epoch=expected) so a late re-arm (D1) or a newer epoch that snuck in
-// during teardown wins — wentCold:false means the box is still wanted and must
-// NOT have been stopped (the caller checks this CAS before stop(), or re-reads).
+// provider stop() on instance_id. The exact capture id is the durable teardown
+// claim: holder admission cannot re-arm after that claim is acquired, and a
+// recovered/replaced claim makes an older worker's final commit a no-op. The
+// liveness/refcount/epoch checks remain defense-in-depth for pre-claim races.
 export async function confirmDrainCold(
   db: Database,
   input: {
@@ -29270,6 +30108,9 @@ export async function confirmDrainCold(
     workspaceId: string;
     sandboxGroupId: string;
     expectedEpoch: number;
+    /** Exact durable teardown ownership. Omission asserts that no claim exists;
+     *  a replaced, newly installed, or expired claim always fences this commit. */
+    expectedCaptureId?: string;
     /** Definitive provider NotFound before this drain could capture /workspace.
      *  With no durable archive this must become typed unrecoverable, never a
      *  clean cold lease that can expose an empty replacement. */
@@ -29296,8 +30137,11 @@ export async function confirmDrainCold(
         // -> resume_state is nulled as before. The archive then rides the COLD lease's
         // resume_state until the next spawner reads + hydrates it; it is re-superseded
         // (GC'd) on the next drain and finally cleared on workspace teardown.
-        const observedRows = await tx.execute<LeaseRow>(sql`
-          select * from sandbox_leases
+        const observedRows = await tx.execute<LeaseRow & { reaper_hold_active: boolean }>(sql`
+          select *,
+            (reaper_hold_id is not null and reaper_hold_until > now())
+              as reaper_hold_active
+          from sandbox_leases
           where workspace_id = ${input.workspaceId}
             and sandbox_group_id = ${input.sandboxGroupId}
         `);
@@ -29305,8 +30149,10 @@ export async function confirmDrainCold(
         if (
           !observed ||
           observed.liveness !== "draining" ||
+          observed.reaper_hold_active ||
           observed.refcount !== 0 ||
-          Number(observed.lease_epoch) !== input.expectedEpoch
+          Number(observed.lease_epoch) !== input.expectedEpoch ||
+          observed.archive_capture_id !== (input.expectedCaptureId ?? null)
         ) {
           return { wentCold: false };
         }
@@ -29328,8 +30174,11 @@ export async function confirmDrainCold(
         if (blockerScope) {
           await lockExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
         }
-        const locked = await tx.execute<LeaseRow>(sql`
-          select * from sandbox_leases
+        const locked = await tx.execute<LeaseRow & { reaper_hold_active: boolean }>(sql`
+          select *,
+            (reaper_hold_id is not null and reaper_hold_until > now())
+              as reaper_hold_active
+          from sandbox_leases
           where workspace_id = ${input.workspaceId}
             and sandbox_group_id = ${input.sandboxGroupId}
           for update
@@ -29339,8 +30188,10 @@ export async function confirmDrainCold(
           !row ||
           row.id !== observed.id ||
           row.liveness !== "draining" ||
+          row.reaper_hold_active ||
           row.refcount !== 0 ||
           Number(row.lease_epoch) !== input.expectedEpoch ||
+          row.archive_capture_id !== (input.expectedCaptureId ?? null) ||
           (blockerScope && row.instance_id !== blockerScope.lostInstanceId)
         ) {
           return { wentCold: false };
@@ -29352,6 +30203,24 @@ export async function confirmDrainCold(
         const hasArchive = current.archive.status !== "none";
         const archiveComplete = hasCompleteWorkspaceArchive(row);
         const now = new Date().toISOString();
+        const lateArchiveCapture =
+          input.providerMissingBeforeCapture &&
+          row.archive_capture_id !== null &&
+          row.archive_capture_provider_request_id !== null &&
+          row.archive_capture_generation !== null &&
+          row.archive_capture_published_at === null &&
+          row.instance_id !== null
+            ? {
+                version: 1 as const,
+                captureId: row.archive_capture_id,
+                providerRequestId: row.archive_capture_provider_request_id,
+                sourceLeaseId: row.id,
+                sourceLeaseEpoch: Number(row.lease_epoch),
+                sourceInstanceId: row.instance_id,
+                sourceWorkspaceGeneration: Number(row.archive_capture_generation),
+                recordedAt: now,
+              }
+            : null;
         const restoreStatus: SandboxRestoreStatus =
           current.archive.status === "available" && archiveComplete
             ? "pending"
@@ -29400,11 +30269,21 @@ export async function confirmDrainCold(
             verifiedRevision: null,
             verifiedAt: null,
           },
+          ...(lateArchiveCapture ? { lateArchiveCapture } : {}),
         };
         const preserveRecovery = hasArchive || restoreStatus === "unrecoverable";
         const resumeStateJson = preserveRecovery
           ? JSON.stringify(archiveOnlyResumeState(row, recovery))
           : null;
+        // Migration 0184 also enforces exact teardown ownership at the table
+        // boundary so a pre-0184 confirm cannot erase a newer worker's claim.
+        // Set the receipt transaction-locally only after the locked row passed
+        // every CAS guard; the trigger compares it with OLD.archive_capture_id.
+        if (input.expectedCaptureId) {
+          await tx.execute(
+            sql`select set_config('opengeni.sandbox_drain_capture_id', ${input.expectedCaptureId}, true)`,
+          );
+        }
         const rows = await tx.execute<{ id: string }>(sql`
         update sandbox_leases set
           liveness = 'cold',
@@ -29412,6 +30291,9 @@ export async function confirmDrainCold(
           data_plane_url = null,
           terminal_data_plane_url = null,
           lease_epoch = lease_epoch + 1,
+          reaper_hold_id = null,
+          reaper_hold_until = null,
+          reaper_hold_reason = null,
           resume_state = ${resumeStateJson}::jsonb,
           resume_backend_id = case when ${preserveRecovery} then coalesce(resume_backend_id, backend) else null end,
           provider_created_at = null,
@@ -29419,14 +30301,22 @@ export async function confirmDrainCold(
           rotation_requested_at = null,
           rotation_reason = null,
           archive_capture_id = null,
+          archive_capture_operation_id = null,
+          archive_capture_provider_request_id = null,
+          archive_capture_provider_replay_safe = false,
+          archive_capture_takeover_safe = false,
+          archive_capture_attempt = null,
           archive_capture_generation = null,
           archive_capture_started_at = null,
           archive_capture_deadline_at = null,
+          archive_capture_published_at = null,
           updated_at = now()
         where id = ${row.id}
           and liveness = 'draining'
           and refcount = 0
           and lease_epoch = ${input.expectedEpoch}
+          and (reaper_hold_id is null or reaper_hold_until <= now())
+          and archive_capture_id is not distinct from ${input.expectedCaptureId ?? null}::uuid
         returning id
       `);
         return { wentCold: rows.length > 0 };
@@ -30200,20 +31090,17 @@ async function advanceWorkspaceGenerationForAuthorityOnce(
   );
 }
 
-function waitForWorkspaceArchiveCapturePoll(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 async function advanceWorkspaceGenerationForAuthority(
   db: Database,
   authority: WorkspaceMutationAuthority,
   operationInput: string,
   captureWaitMs = 0,
+  waitSignal?: AbortSignal,
 ): Promise<SandboxWorkspaceMutationAdmission> {
   if (!Number.isSafeInteger(captureWaitMs) || captureWaitMs < 0 || captureWaitMs > 60 * 60_000) {
     throw new Error("Workspace archive capture wait is invalid");
   }
-  const deadline = Date.now() + captureWaitMs;
+  const deadline = performance.now() + captureWaitMs;
   let delayMs = 25;
   for (;;) {
     try {
@@ -30222,12 +31109,14 @@ async function advanceWorkspaceGenerationForAuthority(
       if (
         !(error instanceof SandboxWorkspaceMutationFencedError) ||
         error.code !== "capture_in_progress" ||
-        Date.now() >= deadline
+        performance.now() >= deadline
       ) {
         throw error;
       }
-      await waitForWorkspaceArchiveCapturePoll(
-        Math.min(delayMs, Math.max(1, deadline - Date.now())),
+      await waitForSandboxTransition(
+        Math.min(delayMs, Math.max(1, deadline - performance.now())),
+        waitSignal,
+        "Sandbox workspace mutation wait cancelled",
       );
       delayMs = Math.min(500, delayMs * 2);
     }
@@ -30258,6 +31147,8 @@ export async function advanceWorkspaceGeneration(
     /** Wait before provider admission while an exact archive capture owns this
      * lease. The attempt/route fences are re-read on every bounded retry. */
     captureWaitMs?: number;
+    /** Cancel the bounded transition wait without creating an admission. */
+    waitSignal?: AbortSignal;
     /** Active-routed mutations bind to the exact session pointer. Omitted means
      * an intentional home-provider write outside the routing surface. */
     routeKind?: "home" | "active";
@@ -30286,6 +31177,7 @@ export async function advanceWorkspaceGeneration(
     },
     input.operation,
     input.captureWaitMs,
+    input.waitSignal,
   );
 }
 
@@ -30307,6 +31199,7 @@ export async function advanceWorkspaceGenerationForDirectRequest(
     routeEpoch: number;
     operation: string;
     captureWaitMs?: number;
+    waitSignal?: AbortSignal;
   },
 ): Promise<SandboxWorkspaceMutationAdmission> {
   return await advanceWorkspaceGenerationForAuthority(
@@ -30314,6 +31207,7 @@ export async function advanceWorkspaceGenerationForDirectRequest(
     { kind: "direct", routeKind: "active", ...input },
     input.operation,
     input.captureWaitMs,
+    input.waitSignal,
   );
 }
 
@@ -30329,6 +31223,7 @@ export async function advanceWorkspaceGenerationForRetainedProcess(
     processId: string;
     operation: string;
     captureWaitMs?: number;
+    waitSignal?: AbortSignal;
   },
 ): Promise<SandboxWorkspaceMutationAdmission> {
   return await advanceWorkspaceGenerationForAuthority(
@@ -30336,6 +31231,7 @@ export async function advanceWorkspaceGenerationForRetainedProcess(
     { kind: "process", ...input },
     input.operation,
     input.captureWaitMs,
+    input.waitSignal,
   );
 }
 
@@ -31788,8 +32684,206 @@ export async function readWorkspaceArchiveCapturePreflight(
   );
 }
 
+export const SANDBOX_REAPER_HOLD_MAX_TTL_MS = 24 * 60 * 60_000;
+
+/** Read the exact operator-hold target without exposing it across an
+ * account/workspace mismatch. The operator CLI projects only non-secret fields
+ * from this snapshot; resumeState remains an internal DB contract. */
+export async function readSandboxLeaseReaperHoldTarget(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+  },
+): Promise<LeaseSnapshot | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<LeaseRow>(sql`
+        select lease.* from sandbox_leases lease
+        where lease.account_id = ${input.accountId}
+          and lease.workspace_id = ${input.workspaceId}
+          and lease.sandbox_group_id = ${input.sandboxGroupId}
+        limit 1
+      `);
+      return rows[0] ? mapLeaseRow(rows[0]) : null;
+    },
+  );
+}
+
+export type SandboxLeaseReaperHoldResult =
+  | { status: "held"; renewed: boolean; lease: LeaseSnapshot }
+  | {
+      status:
+        | "lease_fenced"
+        | "not_live"
+        | "held_by_other"
+        | "teardown_in_progress"
+        | "rotation_in_progress"
+        | "provider_deadline_conflict"
+        | "reason_conflict";
+      lease: LeaseSnapshot | null;
+    };
+
+/**
+ * Install or renew a bounded operator preservation gate on one exact physical
+ * lease. The row lock serializes this decision with reaper claim acquisition.
+ * A hold never creates/resumes a provider and never overrides teardown already
+ * issued: callers must receive a positive receipt before relying on it.
+ */
+export async function acquireSandboxLeaseReaperHold(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    expectedEpoch: number;
+    expectedInstanceId: string;
+    holdId: string;
+    ttlMs: number;
+    /** Preserve this much configured rotation headroom after the hold expires.
+     *  Callers should pass the deployment's sandboxRotationLeadMs. */
+    providerDeadlineHeadroomMs: number;
+    reason: string;
+  },
+): Promise<SandboxLeaseReaperHoldResult> {
+  if (
+    !Number.isSafeInteger(input.ttlMs) ||
+    input.ttlMs <= 0 ||
+    input.ttlMs > SANDBOX_REAPER_HOLD_MAX_TTL_MS
+  ) {
+    throw new Error("Sandbox reaper hold TTL must be between 1ms and 24h");
+  }
+  if (
+    !Number.isSafeInteger(input.providerDeadlineHeadroomMs) ||
+    input.providerDeadlineHeadroomMs <= 0 ||
+    input.providerDeadlineHeadroomMs > SANDBOX_REAPER_HOLD_MAX_TTL_MS
+  ) {
+    throw new Error("Sandbox reaper hold provider-deadline headroom must be between 1ms and 24h");
+  }
+  const reason = input.reason.trim();
+  if (reason.length < 1 || reason.length > 500) {
+    throw new Error("Sandbox reaper hold reason must contain 1-500 characters");
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        const rows = await tx.execute<
+          LeaseRow & { reaper_hold_active: boolean; provider_hold_safe: boolean }
+        >(sql`
+          select lease.*,
+            (lease.reaper_hold_id is not null and lease.reaper_hold_until > now())
+              as reaper_hold_active,
+            (
+              lease.provider_deadline_at is null
+              or lease.provider_deadline_at > now()
+                + (${input.ttlMs + input.providerDeadlineHeadroomMs}
+                  * interval '1 millisecond')
+            ) as provider_hold_safe
+          from sandbox_leases lease
+          where lease.account_id = ${input.accountId}
+            and lease.workspace_id = ${input.workspaceId}
+            and lease.sandbox_group_id = ${input.sandboxGroupId}
+          for update
+        `);
+        const row = rows[0];
+        if (
+          !row ||
+          Number(row.lease_epoch) !== input.expectedEpoch ||
+          row.instance_id !== input.expectedInstanceId
+        ) {
+          return {
+            status: "lease_fenced" as const,
+            lease: row ? mapLeaseRow(row) : null,
+          };
+        }
+        if (row.instance_id === null || (row.liveness !== "warm" && row.liveness !== "draining")) {
+          return { status: "not_live" as const, lease: mapLeaseRow(row) };
+        }
+        const renewing = row.reaper_hold_active && row.reaper_hold_id === input.holdId;
+        if (row.reaper_hold_active && !renewing) {
+          return { status: "held_by_other" as const, lease: mapLeaseRow(row) };
+        }
+        if (renewing && row.reaper_hold_reason !== reason) {
+          return { status: "reason_conflict" as const, lease: mapLeaseRow(row) };
+        }
+        if (row.archive_capture_id !== null || row.rotation_reason === "teardown_claim") {
+          return { status: "teardown_in_progress" as const, lease: mapLeaseRow(row) };
+        }
+        if (row.rotation_requested_at !== null) {
+          return { status: "rotation_in_progress" as const, lease: mapLeaseRow(row) };
+        }
+        if (!row.provider_hold_safe) {
+          return { status: "provider_deadline_conflict" as const, lease: mapLeaseRow(row) };
+        }
+        const held = await tx.execute<LeaseRow>(sql`
+          update sandbox_leases set
+            reaper_hold_id = ${input.holdId}::uuid,
+            reaper_hold_until = now()
+              + (${input.ttlMs} * interval '1 millisecond'),
+            reaper_hold_reason = ${reason},
+            updated_at = now()
+          where id = ${row.id}
+            and lease_epoch = ${input.expectedEpoch}
+            and instance_id = ${input.expectedInstanceId}
+          returning *
+        `);
+        const lease = held[0];
+        if (!lease) {
+          return { status: "lease_fenced" as const, lease: mapLeaseRow(row) };
+        }
+        return { status: "held" as const, renewed: renewing, lease: mapLeaseRow(lease) };
+      }),
+  );
+}
+
+/** Release only the exact operator receipt on the exact physical lease. */
+export async function releaseSandboxLeaseReaperHold(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    expectedEpoch: number;
+    expectedInstanceId: string;
+    holdId: string;
+  },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<{ id: string }>(sql`
+        update sandbox_leases set
+          reaper_hold_id = null,
+          reaper_hold_until = null,
+          reaper_hold_reason = null,
+          updated_at = now()
+        where account_id = ${input.accountId}
+          and workspace_id = ${input.workspaceId}
+          and sandbox_group_id = ${input.sandboxGroupId}
+          and lease_epoch = ${input.expectedEpoch}
+          and instance_id = ${input.expectedInstanceId}
+          and reaper_hold_id = ${input.holdId}::uuid
+        returning id
+      `);
+      return rows.length === 1;
+    },
+  );
+}
+
 export type WorkspaceArchiveCaptureClaim = {
   id: string;
+  operationId: string;
+  providerRequestId: string;
+  providerReplaySafe: boolean;
+  takeoverSafe: boolean;
+  attempt: number;
   leaseId: string;
   leaseEpoch: number;
   instanceId: string;
@@ -31798,7 +32892,49 @@ export type WorkspaceArchiveCaptureClaim = {
   archiveComplete: boolean;
   startedAt: Date;
   deadlineAt: Date;
+  /** Non-null only after a verified drain archive was atomically published
+   * under this exact capture. Such a claim may finish teardown, never recapture
+   * or release/re-arm. */
+  publishedAt: Date | null;
 };
+
+/** Read the authoritative takeover clock for one exact unpublished capture.
+ * Provider recovery must never compare a Postgres deadline with an application
+ * wall clock: clock skew could otherwise fence a still-accepted provider
+ * request early. The eventual replacement remains a separate exact CAS. */
+export async function workspaceArchiveCaptureDeadlineElapsed(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    captureId: string;
+    expectedEpoch: number;
+    expectedInstanceId: string;
+  },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<{ elapsed: boolean }>(sql`
+        select exists (
+          select 1
+          from sandbox_leases lease
+          where lease.account_id = ${input.accountId}
+            and lease.workspace_id = ${input.workspaceId}
+            and lease.sandbox_group_id = ${input.sandboxGroupId}
+            and lease.lease_epoch = ${input.expectedEpoch}
+            and lease.instance_id = ${input.expectedInstanceId}
+            and lease.archive_capture_id = ${input.captureId}::uuid
+            and lease.archive_capture_published_at is null
+            and lease.archive_capture_deadline_at <= now()
+        ) as elapsed
+      `);
+      return rows[0]?.elapsed === true;
+    },
+  );
+}
 
 export type ClaimWorkspaceArchiveCaptureResult =
   | {
@@ -31810,6 +32946,7 @@ export type ClaimWorkspaceArchiveCaptureResult =
       status:
         | "lease_fenced"
         | "attempt_fenced"
+        | "reaper_held"
         | "capture_in_progress"
         | "holder_in_progress"
         | "mutation_in_progress"
@@ -31829,11 +32966,19 @@ export async function claimWorkspaceArchiveCapture(
     workspaceId: string;
     sandboxGroupId: string;
     captureId: string;
+    /** Stable logical request across retries. Old callers default to the exact
+     * capture id and are normalized the same way by migration 0184's trigger. */
+    operationId?: string;
+    attempt?: number;
     expectedEpoch: number;
     expectedInstanceId: string;
     liveness: "warm" | "draining";
     captureTimeoutMs: number;
     minIntervalMs: number;
+    /** Explicit provider-registry proof. Optional false defaults preserve safe
+     * rolling behavior for pre-policy callers. */
+    providerReplaySafe?: boolean;
+    takeoverSafe?: boolean;
     warmAttempt?: {
       sessionId: string;
       turnId: string;
@@ -31848,6 +32993,22 @@ export async function claimWorkspaceArchiveCapture(
     input.captureTimeoutMs > 60 * 60_000
   ) {
     throw new Error("Workspace archive capture timeout is invalid");
+  }
+  const operationId = input.operationId ?? input.captureId;
+  // captureId owns one DB callback; providerRequestId owns the external
+  // operation. Modal's wire contract explicitly defines snapshotId as an
+  // idempotency key, so every Temporal retry of one logical capture must reuse
+  // it. Other providers still retain the stable lineage for late-result
+  // adoption, but may not replay the physical request before its deadline.
+  const providerRequestId = operationId;
+  const captureAttempt = input.attempt ?? 1;
+  const providerReplaySafe = input.providerReplaySafe === true;
+  const takeoverSafe = input.takeoverSafe === true;
+  if (providerReplaySafe && !takeoverSafe) {
+    throw new Error("Provider-replay-safe capture must also be takeover-safe");
+  }
+  if (!Number.isSafeInteger(captureAttempt) || captureAttempt <= 0) {
+    throw new Error("Workspace archive capture attempt is invalid");
   }
   if (
     !Number.isSafeInteger(input.minIntervalMs) ||
@@ -31865,7 +33026,7 @@ export async function claimWorkspaceArchiveCapture(
     async (scopedDb) => {
       if (input.warmAttempt) {
         await lockWorkspaceInferenceControl(scopedDb, input.workspaceId, "share");
-        const [attempt] = await scopedDb
+        const [turnAttempt] = await scopedDb
           .select({
             accountId: schema.sessionTurnAttempts.accountId,
             state: schema.sessionTurnAttempts.state,
@@ -31902,7 +33063,7 @@ export async function claimWorkspaceArchiveCapture(
             ),
           )
           .limit(1);
-        const [interruption] = attempt
+        const [interruption] = turnAttempt
           ? await scopedDb
               .select({ id: schema.sessionAttemptInterruptions.id })
               .from(schema.sessionAttemptInterruptions)
@@ -31916,22 +33077,24 @@ export async function claimWorkspaceArchiveCapture(
               .limit(1)
           : [];
         const attemptMayCapture =
-          attempt !== undefined &&
-          attempt.accountId === input.accountId &&
-          attempt.sandboxGroupId === input.sandboxGroupId &&
-          attempt.activeAttemptId === input.warmAttempt.attemptId &&
+          turnAttempt !== undefined &&
+          turnAttempt.accountId === input.accountId &&
+          turnAttempt.sandboxGroupId === input.sandboxGroupId &&
+          turnAttempt.activeAttemptId === input.warmAttempt.attemptId &&
           !interruption &&
-          (attempt.state === "claimed" || attempt.state === "running"
-            ? attempt.outcome === null
-            : attempt.state === "closed" &&
-              (attempt.outcome === "completed" ||
-                attempt.outcome === "failed" ||
-                attempt.outcome === "requires_action"));
+          (turnAttempt.state === "claimed" || turnAttempt.state === "running"
+            ? turnAttempt.outcome === null
+            : turnAttempt.state === "closed" &&
+              (turnAttempt.outcome === "completed" ||
+                turnAttempt.outcome === "failed" ||
+                turnAttempt.outcome === "requires_action"));
         if (!attemptMayCapture) return { status: "attempt_fenced" as const };
       }
 
-      const rows = await scopedDb.execute<LeaseRow>(sql`
-        select lease.*
+      const rows = await scopedDb.execute<LeaseRow & { reaper_hold_active: boolean }>(sql`
+        select lease.*,
+          (lease.reaper_hold_id is not null and lease.reaper_hold_until > now())
+            as reaper_hold_active
         from sandbox_leases lease
         where lease.account_id = ${input.accountId}
           and lease.workspace_id = ${input.workspaceId}
@@ -31947,6 +33110,9 @@ export async function claimWorkspaceArchiveCapture(
         row.instance_id !== input.expectedInstanceId
       ) {
         return { status: "lease_fenced" as const };
+      }
+      if (input.liveness === "draining" && row.reaper_hold_active) {
+        return { status: "reaper_held" as const };
       }
       if (row.archive_capture_id !== null) {
         return { status: "capture_in_progress" as const };
@@ -32032,17 +33198,24 @@ export async function claimWorkspaceArchiveCapture(
         return { status: "throttled" as const };
       }
 
-      const startedAt = new Date();
       // The deadline is diagnostic/reconciliation truth, never permission to
       // clear a possibly still-running provider operation. Normal completion
       // clears the exact claim; stale recovery must first prove provider safety.
-      const deadlineAt = new Date(startedAt.getTime() + input.captureTimeoutMs);
+      // Start it on the authoritative DB clock at the instant the claim commits,
+      // not on an app clock before a potentially blocked row update.
       const claimed = await scopedDb.execute<LeaseRow>(sql`
         update sandbox_leases set
           archive_capture_id = ${input.captureId}::uuid,
+          archive_capture_operation_id = ${operationId}::uuid,
+          archive_capture_provider_request_id = ${providerRequestId}::uuid,
+          archive_capture_provider_replay_safe = ${providerReplaySafe},
+          archive_capture_takeover_safe = ${takeoverSafe},
+          archive_capture_attempt = ${captureAttempt},
           archive_capture_generation = workspace_generation,
-          archive_capture_started_at = ${startedAt.toISOString()}::timestamptz,
-          archive_capture_deadline_at = ${deadlineAt.toISOString()}::timestamptz,
+          archive_capture_started_at = now(),
+          archive_capture_deadline_at = now() +
+            (${input.captureTimeoutMs}::bigint * interval '1 millisecond'),
+          archive_capture_published_at = null,
           updated_at = now()
         where id = ${row.id}
           and archive_capture_id is null
@@ -32055,10 +33228,22 @@ export async function claimWorkspaceArchiveCapture(
       if (!instanceId) {
         throw new Error("Workspace archive capture claim returned no provider instance");
       }
+      const startedAtRaw = lease.archive_capture_started_at;
+      const deadlineAtRaw = lease.archive_capture_deadline_at;
+      if (!startedAtRaw || !deadlineAtRaw) {
+        throw new Error("Workspace archive capture claim returned no timing receipt");
+      }
+      const startedAt = startedAtRaw instanceof Date ? startedAtRaw : new Date(startedAtRaw);
+      const deadlineAt = deadlineAtRaw instanceof Date ? deadlineAtRaw : new Date(deadlineAtRaw);
       return {
         status: "claimed" as const,
         claim: {
           id: input.captureId,
+          operationId,
+          providerRequestId,
+          providerReplaySafe: lease.archive_capture_provider_replay_safe,
+          takeoverSafe: lease.archive_capture_takeover_safe,
+          attempt: captureAttempt,
           leaseId: lease.id,
           leaseEpoch: Number(lease.lease_epoch),
           instanceId,
@@ -32067,6 +33252,7 @@ export async function claimWorkspaceArchiveCapture(
           archiveComplete,
           startedAt,
           deadlineAt,
+          publishedAt: null,
         },
         lease: mapLeaseRow(lease),
       };
@@ -32094,15 +33280,30 @@ export async function releaseWorkspaceArchiveCapture(
       const rows = await scopedDb.execute<{ id: string }>(sql`
         update sandbox_leases set
           archive_capture_id = null,
+          archive_capture_operation_id = null,
+          archive_capture_provider_request_id = null,
+          archive_capture_provider_replay_safe = false,
+          archive_capture_takeover_safe = false,
+          archive_capture_attempt = null,
           archive_capture_generation = null,
           archive_capture_started_at = null,
           archive_capture_deadline_at = null,
+          archive_capture_published_at = null,
+          rotation_requested_at = case
+            when rotation_reason = 'teardown_claim' then null
+            else rotation_requested_at
+          end,
+          rotation_reason = case
+            when rotation_reason = 'teardown_claim' then null
+            else rotation_reason
+          end,
           updated_at = now()
         where workspace_id = ${input.workspaceId}
           and sandbox_group_id = ${input.sandboxGroupId}
           and lease_epoch = ${input.expectedEpoch}
           and instance_id = ${input.expectedInstanceId}
           and archive_capture_id = ${input.captureId}::uuid
+          and archive_capture_published_at is null
         returning id
       `);
       return rows.length === 1;
@@ -32111,12 +33312,14 @@ export async function releaseWorkspaceArchiveCapture(
 }
 
 /**
- * Replace an expired capture claim without ever opening the admission gate.
- * This is reserved for the zero-holder drain reaper after it has independently
- * proved the exact provider is command-ready (and therefore no longer paused by
- * the dead owner's capture). The old claim remains authoritative on every miss.
+ * Replace a capture attempt without ever opening the admission gate. A generic
+ * provider remains deadline-gated. A provider registration explicitly recorded
+ * as takeover-safe may retry immediately, using either same-request idempotency
+ * or an independently repeatable read-only capture.
+ * captureId changes to fence teardown ownership; providerRequestId deliberately
+ * does not, so a predecessor success remains adoptable by its successor.
  */
-export async function replaceExpiredWorkspaceArchiveCapture(
+export async function replaceWorkspaceArchiveCaptureAfterProof(
   db: Database,
   input: {
     accountId: string;
@@ -32124,6 +33327,8 @@ export async function replaceExpiredWorkspaceArchiveCapture(
     sandboxGroupId: string;
     priorCaptureId: string;
     captureId: string;
+    operationId: string;
+    attempt: number;
     expectedEpoch: number;
     expectedInstanceId: string;
     captureTimeoutMs: number;
@@ -32136,8 +33341,12 @@ export async function replaceExpiredWorkspaceArchiveCapture(
   ) {
     throw new Error("Workspace archive capture timeout is invalid");
   }
-  const startedAt = new Date();
-  const deadlineAt = new Date(startedAt.getTime() + input.captureTimeoutMs);
+  if (!Number.isSafeInteger(input.attempt) || input.attempt <= 0) {
+    throw new Error("Workspace archive capture attempt is invalid");
+  }
+  if (input.captureId === input.priorCaptureId) {
+    throw new Error("Replacement workspace archive capture must use a new capture id");
+  }
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -32145,9 +33354,13 @@ export async function replaceExpiredWorkspaceArchiveCapture(
       const rows = await scopedDb.execute<LeaseRow>(sql`
         update sandbox_leases as lease set
           archive_capture_id = ${input.captureId}::uuid,
+          archive_capture_operation_id = ${input.operationId}::uuid,
+          archive_capture_attempt = ${input.attempt},
           archive_capture_generation = lease.workspace_generation,
-          archive_capture_started_at = ${startedAt.toISOString()}::timestamptz,
-          archive_capture_deadline_at = ${deadlineAt.toISOString()}::timestamptz,
+          archive_capture_started_at = now(),
+          archive_capture_deadline_at = now() +
+            (${input.captureTimeoutMs}::bigint * interval '1 millisecond'),
+          archive_capture_published_at = null,
           updated_at = now()
         where lease.workspace_id = ${input.workspaceId}
           and lease.sandbox_group_id = ${input.sandboxGroupId}
@@ -32156,8 +33369,17 @@ export async function replaceExpiredWorkspaceArchiveCapture(
           and lease.lease_epoch = ${input.expectedEpoch}
           and lease.instance_id = ${input.expectedInstanceId}
           and lease.archive_capture_id = ${input.priorCaptureId}::uuid
+          and (
+            lease.archive_capture_operation_id <> ${input.operationId}::uuid
+            or lease.archive_capture_attempt < ${input.attempt}
+          )
           and lease.archive_capture_generation = lease.workspace_generation
-          and lease.archive_capture_deadline_at <= now()
+          and lease.archive_capture_published_at is null
+          and (lease.reaper_hold_id is null or lease.reaper_hold_until <= now())
+          and (
+            lease.archive_capture_deadline_at <= now()
+            or lease.archive_capture_takeover_safe
+          )
           and not exists (
             select 1 from sandbox_lease_holders holder
             where holder.lease_id = lease.id
@@ -32189,8 +33411,24 @@ export async function replaceExpiredWorkspaceArchiveCapture(
       if (!instanceId) {
         throw new Error("Replacement workspace archive capture returned no provider instance");
       }
+      const startedAtRaw = lease.archive_capture_started_at;
+      const deadlineAtRaw = lease.archive_capture_deadline_at;
+      if (!startedAtRaw || !deadlineAtRaw) {
+        throw new Error("Replacement workspace archive capture returned no timing receipt");
+      }
+      const providerRequestId = lease.archive_capture_provider_request_id;
+      if (!providerRequestId) {
+        throw new Error("Replacement workspace archive capture returned no provider request");
+      }
+      const startedAt = startedAtRaw instanceof Date ? startedAtRaw : new Date(startedAtRaw);
+      const deadlineAt = deadlineAtRaw instanceof Date ? deadlineAtRaw : new Date(deadlineAtRaw);
       return {
         id: input.captureId,
+        operationId: input.operationId,
+        providerRequestId,
+        providerReplaySafe: lease.archive_capture_provider_replay_safe,
+        takeoverSafe: lease.archive_capture_takeover_safe,
+        attempt: input.attempt,
         leaseId: lease.id,
         leaseEpoch: Number(lease.lease_epoch),
         instanceId,
@@ -32200,6 +33438,7 @@ export async function replaceExpiredWorkspaceArchiveCapture(
         archiveComplete: hasCompleteWorkspaceArchive(lease),
         startedAt,
         deadlineAt,
+        publishedAt: null,
       };
     },
   );
@@ -32862,10 +34101,14 @@ export async function persistDrainSnapshot(
     accountId: string;
     workspaceId: string;
     sandboxGroupId: string;
+    /** Exact source lease identity. Required for cold late-result adoption. */
+    expectedLeaseId?: string;
     expectedEpoch: number;
     expectedInstanceId: string;
     expectedWorkspaceGeneration: number;
     captureId: string;
+    /** Stable provider-operation lineage across atomic claim replacements. */
+    providerRequestId?: string;
   } & (
     | {
         /** Null performs only the epoch/instance/generation CAS check. */
@@ -32907,35 +34150,24 @@ export async function persistDrainSnapshot(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
-      // (1) Lock + read the PRIOR archive under the CAS guard (draining AND
-      // refcount=0 AND lease_epoch=expected). A miss (re-armed / newer epoch /
-      // vanished) returns no row → wrote:false, the caller must NOT terminate.
-      const guard = await scopedDb.execute<{
-        prior_archive: string | null;
-        prior_archive_prev: string | null;
-        current_checkpoint_artifact_id: string | null;
-        previous_checkpoint_artifact_id: string | null;
-        resume_state: Record<string, unknown> | null;
-        workspace_generation: number | string;
-      }>(sql`
+      // Serialize every publication, successor replacement, cold commit and late
+      // repair on the one lease row. The mode is decided only after the lock:
+      //   1. current draining owner (exact capture or continuous lineage), or
+      //   2. exact cold provider-loss receipt left by confirmDrainCold.
+      const guard = await scopedDb.execute<
+        LeaseRow & {
+          prior_archive: string | null;
+          prior_archive_prev: string | null;
+          current_checkpoint_artifact_id: string | null;
+          previous_checkpoint_artifact_id: string | null;
+          unsettled_mutation: boolean;
+        }
+      >(sql`
         select
+          lease.*,
           resume_state #>> '{sessionState,workspaceArchive}' as prior_archive,
           resume_state #>> '{sessionState,workspaceArchivePrev}' as prior_archive_prev,
-          current_checkpoint_artifact_id,
-          previous_checkpoint_artifact_id,
-          resume_state,
-          workspace_generation
-        from sandbox_leases as lease
-        where lease.workspace_id = ${input.workspaceId}
-          and lease.sandbox_group_id = ${input.sandboxGroupId}
-          and lease.liveness = 'draining'
-          and lease.refcount = 0
-          and lease.lease_epoch = ${input.expectedEpoch}
-          and lease.instance_id = ${input.expectedInstanceId}
-          and lease.workspace_generation = ${input.expectedWorkspaceGeneration}
-          and lease.archive_capture_id = ${input.captureId}::uuid
-          and lease.archive_capture_generation = ${input.expectedWorkspaceGeneration}
-          and not exists (
+          exists (
             select 1
             from sandbox_workspace_mutation_admissions as admission
             left join session_turn_attempts as attempt
@@ -32947,72 +34179,158 @@ export async function persistDrainSnapshot(
              and attempt.execution_generation = admission.execution_generation
              and admission.actor_kind = 'turn'
             where admission.lease_id = lease.id
-              and admission.lease_epoch = lease.lease_epoch
-              and admission.provider_backend = lease.backend
-              and admission.provider_instance_id = lease.instance_id
               and admission.workspace_generation <= ${input.expectedWorkspaceGeneration}
               and admission.settled_at is null
               and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
-          )
+          ) as unsettled_mutation
+        from sandbox_leases as lease
+        where lease.workspace_id = ${input.workspaceId}
+          and lease.sandbox_group_id = ${input.sandboxGroupId}
         for update
       `);
-      if (guard.length === 0) {
+      const row = guard[0];
+      if (!row) {
         return {
           wrote: false,
           archiveRevision: null,
         };
       }
-      const priorArchive = guard[0]!.prior_archive ?? null;
-      const priorArchivePrev = guard[0]!.prior_archive_prev ?? null;
-      // null workspaceArchive = pure CAS-check (re-arm guard for no-archive backends).
-      // The FOR UPDATE lock above is the only synchronization needed; no write.
+      const sourceLeaseMatches =
+        input.expectedLeaseId === undefined || row.id === input.expectedLeaseId;
+      const activeLineageMatches =
+        row.archive_capture_id === input.captureId ||
+        (input.providerRequestId !== undefined &&
+          row.archive_capture_provider_request_id === input.providerRequestId);
+      const activePublication =
+        sourceLeaseMatches &&
+        row.liveness === "draining" &&
+        Number(row.refcount) === 0 &&
+        Number(row.lease_epoch) === input.expectedEpoch &&
+        row.instance_id === input.expectedInstanceId &&
+        Number(row.workspace_generation) === input.expectedWorkspaceGeneration &&
+        Number(row.archive_capture_generation) === input.expectedWorkspaceGeneration &&
+        row.archive_capture_id !== null &&
+        activeLineageMatches &&
+        !row.unsettled_mutation;
+      const recovery = recoveryStateFromLeaseRow(row);
+      const lateReceipt = recovery.lateArchiveCapture;
+      const coldLatePublication =
+        input.workspaceArchive !== null &&
+        input.expectedLeaseId !== undefined &&
+        input.providerRequestId !== undefined &&
+        row.id === input.expectedLeaseId &&
+        row.liveness === "cold" &&
+        Number(row.refcount) === 0 &&
+        Number(row.lease_epoch) === input.expectedEpoch + 1 &&
+        row.instance_id === null &&
+        Number(row.workspace_generation) === input.expectedWorkspaceGeneration &&
+        row.archive_capture_id === null &&
+        recovery.provider.status === "missing" &&
+        recovery.provider.instanceId === input.expectedInstanceId &&
+        recovery.restore.rematerializationId === null &&
+        (recovery.restore.status === "unrecoverable" ||
+          recovery.restore.status === "degraded" ||
+          recovery.restore.status === "pending") &&
+        lateReceipt?.sourceLeaseId === input.expectedLeaseId &&
+        lateReceipt.sourceLeaseEpoch === input.expectedEpoch &&
+        lateReceipt.sourceInstanceId === input.expectedInstanceId &&
+        lateReceipt.sourceWorkspaceGeneration === input.expectedWorkspaceGeneration &&
+        lateReceipt.providerRequestId === input.providerRequestId &&
+        !row.unsettled_mutation;
+      if (!activePublication && !coldLatePublication) {
+        return { wrote: false, archiveRevision: null };
+      }
+      const priorArchive = row.prior_archive ?? null;
+      const priorArchivePrev = row.prior_archive_prev ?? null;
+      // null workspaceArchive = pure CAS-check. Keep the drain's exact capture
+      // claim intact: it is also the durable teardown claim and must fence new
+      // holders until provider termination commits cold or recovery replaces it.
       if (input.workspaceArchive === null) {
-        await scopedDb.execute(sql`
-          update sandbox_leases set
-            archive_capture_id = null,
-            archive_capture_generation = null,
-            archive_capture_started_at = null,
-            archive_capture_deadline_at = null,
-            updated_at = now()
-          where workspace_id = ${input.workspaceId}
-            and sandbox_group_id = ${input.sandboxGroupId}
-            and lease_epoch = ${input.expectedEpoch}
-            and instance_id = ${input.expectedInstanceId}
-            and archive_capture_id = ${input.captureId}::uuid
-        `);
         return {
           wrote: true,
           archiveRevision: null,
         };
       }
+      const priorMeta = parseArchiveRevision(
+        row.resume_state?.sessionState && typeof row.resume_state.sessionState === "object"
+          ? (row.resume_state.sessionState as Record<string, unknown>).workspaceArchiveMeta
+          : null,
+      );
+      if (activePublication && row.archive_capture_published_at !== null) {
+        // A predecessor and its successor may receive the same provider result.
+        // Publication is already durable; treat this as an idempotent ownership
+        // gate and hand any distinct unused Modal candidate to GC.
+        if (priorArchive === null || priorMeta === null) {
+          throw new Error("Published workspace capture has no durable verified archive");
+        }
+        if (
+          input.checkpointArtifactId &&
+          input.checkpointArtifactId !== row.current_checkpoint_artifact_id
+        ) {
+          await scopedDb.execute(sql`
+            update sandbox_checkpoint_artifacts artifact set
+              state = 'delete_pending', delete_after = now(),
+              last_delete_error = 'duplicate_drain_snapshot_result', updated_at = now()
+            where artifact.id = ${input.checkpointArtifactId}::uuid
+              and artifact.state in ('candidate', 'delete_failed')
+              and not exists (
+                select 1 from sandbox_leases lease
+                where lease.current_checkpoint_artifact_id = artifact.id
+                   or lease.previous_checkpoint_artifact_id = artifact.id
+              )
+          `);
+        }
+        return { wrote: true, archiveRevision: priorMeta.revision };
+      }
       const rotation = rotateWorkspaceArchives({
-        resumeState: guard[0]!.resume_state,
+        resumeState: row.resume_state,
         priorCurrentArchive: priorArchive,
         priorPreviousArchive: priorArchivePrev,
       });
       const previousCheckpointArtifactId =
         rotation.previousArchive === priorArchive
-          ? guard[0]!.current_checkpoint_artifact_id
+          ? row.current_checkpoint_artifact_id
           : rotation.previousArchive === priorArchivePrev
-            ? guard[0]!.previous_checkpoint_artifact_id
+            ? row.previous_checkpoint_artifact_id
             : null;
+      const resumeState = coldLatePublication
+        ? archiveOnlyResumeState(row, {
+            provider: recovery.provider,
+            archive: recovery.archive,
+            restore: {
+              status: "pending",
+              rematerializationId: null,
+              selectedRevision: workspaceArchiveMeta?.revision ?? null,
+              startedAt: null,
+              completedAt: null,
+            },
+            workspace: {
+              status: "not_ready",
+              verifiedRevision: null,
+              verifiedAt: null,
+            },
+          })
+        : row.resume_state;
       const folded = await foldWorkspaceArchiveOntoLease(scopedDb, {
         workspaceId: input.workspaceId,
         sandboxGroupId: input.sandboxGroupId,
         expectedEpoch: input.expectedEpoch,
         expectedInstanceId: input.expectedInstanceId,
         expectedWorkspaceGeneration: input.expectedWorkspaceGeneration,
-        captureId: input.captureId,
+        captureId: activePublication ? row.archive_capture_id : null,
+        ...(coldLatePublication && input.providerRequestId !== undefined
+          ? { providerRequestId: input.providerRequestId }
+          : {}),
         workspaceArchive: input.workspaceArchive,
         workspaceArchiveMeta,
-        resumeState: guard[0]!.resume_state,
-        livenessGuard: "draining",
+        resumeState,
+        livenessGuard: coldLatePublication ? "cold_late" : "draining",
         previousArchive: rotation.previousArchive,
         previousArchiveMeta: rotation.previousArchiveMeta,
         checkpointArtifactId: input.checkpointArtifactId ?? null,
         previousCheckpointArtifactId,
-        priorCurrentCheckpointArtifactId: guard[0]!.current_checkpoint_artifact_id,
-        priorPreviousCheckpointArtifactId: guard[0]!.previous_checkpoint_artifact_id,
+        priorCurrentCheckpointArtifactId: row.current_checkpoint_artifact_id,
+        priorPreviousCheckpointArtifactId: row.previous_checkpoint_artifact_id,
       });
       if (!folded) {
         return {
@@ -33093,11 +34411,12 @@ async function foldWorkspaceArchiveOntoLease(
     expectedEpoch: number;
     expectedInstanceId: string;
     expectedWorkspaceGeneration: number;
-    captureId: string;
+    captureId: string | null;
+    providerRequestId?: string | null;
     workspaceArchive: string;
     workspaceArchiveMeta: SandboxArchiveRevision | null;
     resumeState: Record<string, unknown> | null;
-    livenessGuard: "draining" | "warm";
+    livenessGuard: "draining" | "warm" | "cold_late";
     previousArchive: string | null;
     previousArchiveMeta: SandboxArchiveRevision | null;
     checkpointArtifactId: string | null;
@@ -33111,10 +34430,31 @@ async function foldWorkspaceArchiveOntoLease(
     archiveAtIso?: string;
   },
 ): Promise<boolean> {
+  const currentLeaseEpoch =
+    input.livenessGuard === "cold_late" ? input.expectedEpoch + 1 : input.expectedEpoch;
+  const currentInstanceId = input.livenessGuard === "cold_late" ? null : input.expectedInstanceId;
   const livenessGuard =
     input.livenessGuard === "draining"
       ? sql`lease.liveness = 'draining' and lease.refcount = 0`
-      : sql`lease.liveness = 'warm'`;
+      : input.livenessGuard === "warm"
+        ? sql`lease.liveness = 'warm'`
+        : sql`lease.liveness = 'cold' and lease.refcount = 0 and lease.archive_capture_id is null`;
+  const captureGuard =
+    input.livenessGuard === "cold_late"
+      ? sql`
+          lease.resume_state #>> '{opengeniRecovery,lateArchiveCapture,providerRequestId}' =
+            ${input.providerRequestId ?? null}
+          and lease.resume_state #>> '{opengeniRecovery,lateArchiveCapture,sourceLeaseEpoch}' =
+            ${String(input.expectedEpoch)}
+          and lease.resume_state #>> '{opengeniRecovery,lateArchiveCapture,sourceInstanceId}' =
+            ${input.expectedInstanceId}
+          and lease.resume_state #>> '{opengeniRecovery,lateArchiveCapture,sourceWorkspaceGeneration}' =
+            ${String(input.expectedWorkspaceGeneration)}
+        `
+      : sql`
+          lease.archive_capture_id = ${input.captureId}::uuid
+          and lease.archive_capture_generation = ${input.expectedWorkspaceGeneration}
+        `;
   const archiveAtIso =
     input.workspaceArchiveMeta?.capturedAt ?? input.archiveAtIso ?? new Date().toISOString();
   const base = input.resumeState && typeof input.resumeState === "object" ? input.resumeState : {};
@@ -33152,25 +34492,74 @@ async function foldWorkspaceArchiveOntoLease(
     archive: archiveProjectionFromResumeState(folded),
   };
   const foldedJson = JSON.stringify(folded);
+  // Publication and GC must serialize on the provider-object receipt itself.
+  // Merely checking its state in a lease UPDATE subquery permits a write-skew:
+  // a concurrent failed callback can mark the object delete_pending after the
+  // subquery snapshot but before we promote it. Locking the artifact first makes
+  // lease reference + receipt->current one atomic ownership handoff. A provider
+  // replay may return the same object to a successor after the predecessor
+  // pessimistically handed it to GC; delete_pending/delete_failed are safe to
+  // reclaim here because the exact active capture keeps this source receipt out
+  // of the GC claim query. `deleting` is never reclaimable.
+  if (input.checkpointArtifactId) {
+    const candidate = await scopedDb.execute<{ id: string }>(sql`
+      select artifact.id
+      from sandbox_checkpoint_artifacts artifact
+      join sandbox_leases lease on lease.id = artifact.source_lease_id
+      where artifact.id = ${input.checkpointArtifactId}::uuid
+        and lease.workspace_id = ${input.workspaceId}
+        and lease.sandbox_group_id = ${input.sandboxGroupId}
+        and lease.lease_epoch = ${currentLeaseEpoch}
+        and lease.instance_id is not distinct from ${currentInstanceId}
+        and lease.workspace_generation = ${input.expectedWorkspaceGeneration}
+        and artifact.account_id = lease.account_id
+        and artifact.workspace_id = lease.workspace_id
+        and artifact.sandbox_group_id = lease.sandbox_group_id
+        and artifact.source_lease_epoch = ${input.expectedEpoch}
+        and artifact.source_instance_id = ${input.expectedInstanceId}
+        and artifact.source_workspace_generation = lease.workspace_generation
+        and artifact.provenance = 'native_capture'
+        and artifact.provider_backend = lease.backend
+        and artifact.archive_base64 = ${input.workspaceArchive}
+        and artifact.descriptor_revision =
+          coalesce(${input.workspaceArchiveMeta?.revision ?? null}, '')
+        and artifact.state in ('candidate', 'delete_pending', 'delete_failed')
+      for update of artifact
+    `);
+    if (candidate.length !== 1) return false;
+  }
   const rows = await scopedDb.execute<{ id: string }>(sql`
     update sandbox_leases as lease set
       resume_state = ${foldedJson}::jsonb,
       archive_generation = ${input.expectedWorkspaceGeneration},
       current_checkpoint_artifact_id = ${input.checkpointArtifactId}::uuid,
       previous_checkpoint_artifact_id = ${input.previousCheckpointArtifactId}::uuid,
-      archive_capture_id = null,
-      archive_capture_generation = null,
-      archive_capture_started_at = null,
-      archive_capture_deadline_at = null,
+      ${
+        input.livenessGuard === "warm"
+          ? sql`
+              archive_capture_id = null,
+              archive_capture_operation_id = null,
+              archive_capture_provider_request_id = null,
+              archive_capture_provider_replay_safe = false,
+              archive_capture_takeover_safe = false,
+              archive_capture_attempt = null,
+              archive_capture_generation = null,
+              archive_capture_started_at = null,
+              archive_capture_deadline_at = null,
+              archive_capture_published_at = null,
+            `
+          : input.livenessGuard === "draining"
+            ? sql`archive_capture_published_at = now(),`
+            : sql``
+      }
       updated_at = now()
     where lease.workspace_id = ${input.workspaceId}
       and lease.sandbox_group_id = ${input.sandboxGroupId}
       and ${livenessGuard}
-      and lease.lease_epoch = ${input.expectedEpoch}
-      and lease.instance_id = ${input.expectedInstanceId}
+      and lease.lease_epoch = ${currentLeaseEpoch}
+      and lease.instance_id is not distinct from ${currentInstanceId}
       and lease.workspace_generation = ${input.expectedWorkspaceGeneration}
-      and lease.archive_capture_id = ${input.captureId}::uuid
-      and lease.archive_capture_generation = ${input.expectedWorkspaceGeneration}
+      and ${captureGuard}
       and (
         ${input.checkpointArtifactId}::uuid is null
         or exists (
@@ -33181,14 +34570,14 @@ async function foldWorkspaceArchiveOntoLease(
             and artifact.workspace_id = lease.workspace_id
             and artifact.sandbox_group_id = lease.sandbox_group_id
             and artifact.source_lease_id = lease.id
-            and artifact.source_lease_epoch = lease.lease_epoch
-            and artifact.source_instance_id = lease.instance_id
+            and artifact.source_lease_epoch = ${input.expectedEpoch}
+            and artifact.source_instance_id = ${input.expectedInstanceId}
             and artifact.source_workspace_generation = lease.workspace_generation
             and artifact.provenance = 'native_capture'
             and artifact.archive_base64 = ${input.workspaceArchive}
             and artifact.descriptor_revision =
               coalesce(${input.workspaceArchiveMeta?.revision ?? null}, '')
-            and artifact.state = 'candidate'
+            and artifact.state in ('candidate', 'delete_pending', 'delete_failed')
         )
       )
       and not exists (
@@ -33203,9 +34592,9 @@ async function foldWorkspaceArchiveOntoLease(
          and attempt.execution_generation = admission.execution_generation
          and admission.actor_kind = 'turn'
         where admission.lease_id = lease.id
-          and admission.lease_epoch = lease.lease_epoch
+          and admission.lease_epoch = ${input.expectedEpoch}
           and admission.provider_backend = lease.backend
-          and admission.provider_instance_id = lease.instance_id
+          and admission.provider_instance_id = ${input.expectedInstanceId}
           and admission.workspace_generation <= ${input.expectedWorkspaceGeneration}
           and admission.settled_at is null
           and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
@@ -33215,12 +34604,17 @@ async function foldWorkspaceArchiveOntoLease(
   if (rows.length === 0) return false;
 
   if (input.checkpointArtifactId) {
-    await scopedDb.execute(sql`
+    const published = await scopedDb.execute<{ id: string }>(sql`
       update sandbox_checkpoint_artifacts set
         state = 'current', published_at = coalesce(published_at, now()),
         delete_after = null, last_delete_error = null, updated_at = now()
-      where id = ${input.checkpointArtifactId}::uuid and state = 'candidate'
+      where id = ${input.checkpointArtifactId}::uuid
+        and state in ('candidate', 'delete_pending', 'delete_failed')
+      returning id
     `);
+    if (published.length !== 1) {
+      throw new Error("Checkpoint artifact publication lost its locked candidate");
+    }
   }
   if (
     input.previousCheckpointArtifactId &&

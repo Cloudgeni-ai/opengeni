@@ -2398,6 +2398,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         accountId: grant.accountId,
         workspaceId,
         session,
+        waitSignal: c.req.raw.signal,
         ...(parsed.data.viewerId ? { viewerId: parsed.data.viewerId } : {}),
       });
 
@@ -2581,6 +2582,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     workspaceId: string;
     session: Session;
     subjectId: string;
+    waitSignal: AbortSignal;
   };
 
   // Shared preamble: grant BEFORE parse, ownership gate, session lookup. Returns
@@ -2602,6 +2604,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       workspaceId,
       session,
       subjectId: grant.subjectId,
+      waitSignal: c.req.raw.signal,
     };
   }
 

@@ -22,6 +22,8 @@ import {
   establishSandboxSessionFromEnvelope as establishRuntimeSandboxSessionFromEnvelope,
   readWorkspaceArchiveFromEnvelopeSessionState,
   SandboxResumeStateUnavailableError,
+  SandboxResumeIdentityMismatchError,
+  SandboxProviderContinuityUnavailableError,
 } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
 
@@ -43,6 +45,9 @@ class FakeModalSandboxClient {
   }
   async resume() {
     throw new Error("Modal sandbox sb-old not found (has been terminated)");
+  }
+  async resumeExact() {
+    return await this.resume();
   }
   async create(args: { manifest?: unknown; snapshot?: unknown }) {
     createArgs.push(args);
@@ -186,6 +191,333 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
       }),
     ).rejects.toThrow(SandboxResumeStateUnavailableError);
     expect(createArgs).toHaveLength(0);
+  });
+
+  test.each([
+    ["runloop", "devboxId", "devbox-existing"],
+    ["blaxel", "sandboxIdentity", "blaxel-existing:created:workspace"],
+  ] as const)(
+    "resume-only recognizes the %s SDK legacy provider identity",
+    async (backend, field, instanceId) => {
+      let createCount = 0;
+      const established = await establishRuntimeSandboxSessionFromEnvelope(
+        testSettings({ sandboxBackend: "none" }),
+        {
+          backendId: backend,
+          sessionState: { providerState: { [field]: instanceId } },
+        },
+        {
+          sessionId: `sess-${backend}`,
+          recovery: "resume-only",
+          backendOverride: backend,
+          environment: {},
+          clientFactory: () => ({
+            backendId: backend,
+            async deserializeSessionState(state: Record<string, unknown>) {
+              return state;
+            },
+            async resume(state: Record<string, unknown>) {
+              return { state };
+            },
+            async resumeExact(state: Record<string, unknown>) {
+              return { state };
+            },
+            async create() {
+              createCount += 1;
+              return { state: { [field]: "rival" } };
+            },
+          }),
+        },
+      );
+
+      expect(established.instanceId).toBe(instanceId);
+      expect(established.origin).toBe("resumed");
+      expect(createCount).toBe(0);
+    },
+  );
+
+  test("resume-only materializes the stable OpenGeni identity for a legacy SDK deserializer", async () => {
+    let deserialized: Record<string, unknown> | null = null;
+    const established = await establishRuntimeSandboxSessionFromEnvelope(
+      testSettings({ sandboxBackend: "none" }),
+      {
+        backendId: "runloop",
+        opengeniProviderInstanceId: "stable-existing",
+        sessionState: { providerState: { providerPrivateAddress: "opaque" } },
+      },
+      {
+        sessionId: "sess-stable-provider-identity",
+        recovery: "resume-only",
+        backendOverride: "runloop",
+        environment: {},
+        clientFactory: () => ({
+          backendId: "runloop",
+          async deserializeSessionState(state: Record<string, unknown>) {
+            deserialized = state;
+            return state;
+          },
+          async resume(state: Record<string, unknown>) {
+            return { state };
+          },
+          async resumeExact(state: Record<string, unknown>) {
+            return { state };
+          },
+        }),
+      },
+    );
+
+    expect(deserialized).toMatchObject({
+      providerPrivateAddress: "opaque",
+      devboxId: "stable-existing",
+    });
+    expect(established.instanceId).toBe("stable-existing");
+  });
+
+  test("resume-only rejects disagreement between the durable and live provider identities", async () => {
+    await expect(
+      establishRuntimeSandboxSessionFromEnvelope(
+        testSettings({ sandboxBackend: "none" }),
+        {
+          backendId: "runloop",
+          opengeniProviderInstanceId: "devbox-authoritative",
+          sessionState: { providerState: { devboxId: "devbox-stale" } },
+        },
+        {
+          sessionId: "sess-provider-identity-mismatch",
+          recovery: "resume-only",
+          backendOverride: "runloop",
+          environment: {},
+          clientFactory: () => ({
+            backendId: "runloop",
+            async deserializeSessionState(state: Record<string, unknown>) {
+              return state;
+            },
+            async resume() {
+              return { state: { devboxId: "devbox-stale" } };
+            },
+            async resumeExact() {
+              return { state: { devboxId: "devbox-stale" } };
+            },
+          }),
+        },
+      ),
+    ).rejects.toMatchObject({
+      name: SandboxResumeIdentityMismatchError.name,
+      expectedInstanceId: "devbox-authoritative",
+      actualInstanceId: "devbox-stale",
+    });
+  });
+
+  test("resume-only discards an SDK-created replacement and reports the original missing", async () => {
+    const calls: string[] = [];
+    await expect(
+      establishRuntimeSandboxSessionFromEnvelope(
+        testSettings({ sandboxBackend: "none" }),
+        {
+          backendId: "runloop",
+          opengeniProviderInstanceId: "devbox-gone",
+          sessionState: { providerState: { devboxId: "devbox-gone" } },
+        },
+        {
+          sessionId: "sess-sdk-replacement",
+          recovery: "resume-only",
+          backendOverride: "runloop",
+          environment: {},
+          clientFactory: () => ({
+            backendId: "runloop",
+            async deserializeSessionState(state: Record<string, unknown>) {
+              return state;
+            },
+            async resume() {
+              return {
+                state: { devboxId: "devbox-replacement" },
+                async delete() {
+                  calls.push("replacement.delete");
+                },
+              };
+            },
+            async resumeExact() {
+              return {
+                state: { devboxId: "devbox-replacement" },
+                async delete() {
+                  calls.push("replacement.delete");
+                },
+              };
+            },
+          }),
+        },
+      ),
+    ).rejects.toMatchObject({
+      name: "SandboxExactResumeReplacedError",
+      code: "SANDBOX_NOT_FOUND",
+      expectedInstanceId: "devbox-gone",
+      replacementInstanceId: "devbox-replacement",
+    });
+    expect(calls).toEqual(["replacement.delete"]);
+  });
+
+  test("the elected owner durably attributes a same-workspace Docker restart before use", async () => {
+    const workspaceRootPath = "/tmp/opengeni-docker-continuity";
+    const oldState = {
+      containerId: "docker-old",
+      workspaceRootPath,
+      workspaceRootOwned: true,
+      snapshot: null,
+    };
+    const continuity = {
+      version: 1 as const,
+      backend: "docker" as const,
+      kind: "docker_workspace" as const,
+      sourceInstanceId: "docker-old",
+      continuityKey: workspaceRootPath,
+    };
+    const callbacks: string[] = [];
+    let createCount = 0;
+    const established = await establishRuntimeSandboxSessionFromEnvelope(
+      testSettings({ sandboxBackend: "none" }),
+      {
+        backendId: "docker",
+        opengeniProviderInstanceId: "docker-old",
+        sessionState: { providerState: oldState },
+        opengeniRecovery: { continuity },
+      },
+      {
+        sessionId: "sess-docker-continuity",
+        recovery: "create-or-restore",
+        backendOverride: "docker",
+        environment: {},
+        clientFactory: () => ({
+          backendId: "docker",
+          async deserializeSessionState(state: Record<string, unknown>) {
+            return state;
+          },
+          async resume(state: Record<string, unknown>) {
+            callbacks.push("ordinary-resume");
+            return { state: { ...state, containerId: "docker-new" } };
+          },
+          async resumeExact() {
+            throw new Error("continuity owner must use the authorized replacement path");
+          },
+          async create() {
+            createCount += 1;
+            return { state: { ...oldState, containerId: "docker-rival" } };
+          },
+        }),
+        onSandboxCreated: async (created) => {
+          callbacks.push(`record:${created.instanceId}`);
+          expect(created.providerContinuity).toEqual(continuity);
+        },
+      },
+    );
+
+    expect(established.instanceId).toBe("docker-new");
+    expect(established.lostInstanceId).toBe("docker-old");
+    expect(established.providerContinuity).toEqual(continuity);
+    expect(callbacks).toEqual(["ordinary-resume", "record:docker-new"]);
+    expect(createCount).toBe(0);
+  });
+
+  test("failed Docker continuity without an archive never creates an empty workspace", async () => {
+    const workspaceRootPath = "/tmp/opengeni-docker-continuity-missing";
+    let createCount = 0;
+    await expect(
+      establishRuntimeSandboxSessionFromEnvelope(
+        testSettings({ sandboxBackend: "none" }),
+        {
+          backendId: "docker",
+          opengeniProviderInstanceId: "docker-gone",
+          sessionState: {
+            providerState: {
+              containerId: "docker-gone",
+              workspaceRootPath,
+              workspaceRootOwned: true,
+              snapshot: null,
+            },
+          },
+          opengeniRecovery: {
+            continuity: {
+              version: 1,
+              backend: "docker",
+              kind: "docker_workspace",
+              sourceInstanceId: "docker-gone",
+              continuityKey: workspaceRootPath,
+            },
+          },
+        },
+        {
+          sessionId: "sess-docker-continuity-missing",
+          recovery: "create-or-restore",
+          backendOverride: "docker",
+          environment: {},
+          clientFactory: () => ({
+            backendId: "docker",
+            async deserializeSessionState(state: Record<string, unknown>) {
+              return state;
+            },
+            async resume() {
+              throw new Error(
+                "Docker sandbox resources are unavailable and no local snapshot could be restored.",
+              );
+            },
+            async create() {
+              createCount += 1;
+              return { state: { containerId: "empty-rival" } };
+            },
+          }),
+        },
+      ),
+    ).rejects.toMatchObject({
+      name: SandboxProviderContinuityUnavailableError.name,
+      backend: "docker",
+      sourceInstanceId: "docker-gone",
+      retryable: false,
+    });
+    expect(createCount).toBe(0);
+  });
+
+  test("exact Vercel resume bypasses snapshot replacement and keeps recovery receipt", async () => {
+    let receivedState: Record<string, unknown> | undefined;
+    const established = await establishRuntimeSandboxSessionFromEnvelope(
+      testSettings({ sandboxBackend: "none" }),
+      {
+        backendId: "vercel",
+        opengeniProviderInstanceId: "sb-vercel-live",
+        sessionState: {
+          providerState: {
+            sandboxId: "sb-vercel-live",
+            snapshotId: "snap-durable",
+            snapshotSandboxId: "sb-vercel-live",
+          },
+        },
+      },
+      {
+        sessionId: "sess-vercel-exact",
+        recovery: "resume-only",
+        backendOverride: "vercel",
+        environment: {},
+        clientFactory: () => ({
+          backendId: "vercel",
+          async deserializeSessionState(state: Record<string, unknown>) {
+            return state;
+          },
+          async resume(state: Record<string, unknown>) {
+            receivedState = state;
+            return { state };
+          },
+          async resumeExact(state: Record<string, unknown>) {
+            receivedState = state;
+            return { state };
+          },
+        }),
+      },
+    );
+
+    expect(receivedState).toMatchObject({
+      sandboxId: "sb-vercel-live",
+      snapshotId: "snap-durable",
+    });
+    expect(receivedState).not.toHaveProperty("snapshotSandboxId");
+    expect(established.instanceId).toBe("sb-vercel-live");
   });
 
   test("cold-restore creates a FRESH box (NO snapshot arg) and hydrates from the lease archive", async () => {

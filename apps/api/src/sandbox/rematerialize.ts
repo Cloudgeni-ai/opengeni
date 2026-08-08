@@ -21,8 +21,11 @@ import {
   requirePersistableReplacementSandboxEnvelope,
   resolveModalCheckpointProviderBindingForSession,
   serializeReplacementSandboxEnvelope,
+  SandboxProviderContinuityUnavailableError,
   tagModalSandbox,
+  terminateUnpublishedSandboxSession,
   verifySandboxExecReadiness,
+  withoutSandboxProviderIdentity,
   WorkspaceArchiveIntegrityError,
   type EstablishedSandboxSession,
   type WorkspaceArchiveDescriptor,
@@ -52,39 +55,10 @@ function legacyNativeArchiveFromEnvelope(envelope: Record<string, unknown> | nul
   );
 }
 
-function withoutProviderIdentity(
-  envelope: Record<string, unknown> | null,
-): Record<string, unknown> | null {
-  if (!envelope) return null;
-  const sessionState =
-    envelope.sessionState && typeof envelope.sessionState === "object"
-      ? (envelope.sessionState as Record<string, unknown>)
-      : null;
-  if (!sessionState) return envelope;
-  const { providerState: _providerState, ...providerIndependentState } = sessionState;
-  return { ...envelope, sessionState: providerIndependentState };
-}
-
 async function terminateCreated(established: EstablishedSandboxSession | null): Promise<boolean> {
   if (!established) return true;
-  const client = established.client as {
-    delete?: (state: unknown) => Promise<unknown>;
-  };
   try {
-    if (typeof client.delete === "function" && established.sessionState !== undefined) {
-      await client.delete(established.sessionState);
-      return true;
-    }
-    const session = established.session as {
-      terminate?: () => Promise<unknown>;
-      kill?: () => Promise<unknown>;
-      close?: () => Promise<unknown>;
-      closed?: boolean;
-    };
-    if (session.terminate) await session.terminate();
-    else if (session.kill) await session.kill();
-    else if (session.close && !session.closed) await session.close();
-    else return false;
+    await terminateUnpublishedSandboxSession(established);
     return true;
   } catch (error) {
     return isProviderSandboxNotFoundError(established.backendId, error);
@@ -112,7 +86,7 @@ export async function establishApiSandboxSpawner(input: {
   const fallbackArchiveEnvelope =
     input.acquiredLease.recovery.archive.status === "none" &&
     hasWorkspaceArchive(input.fallbackEnvelope)
-      ? withoutProviderIdentity(input.fallbackEnvelope)
+      ? withoutSandboxProviderIdentity(input.fallbackEnvelope)
       : null;
   let spawnEnvelope =
     fallbackArchiveEnvelope ?? input.acquiredLease.resumeState ?? input.fallbackEnvelope;
@@ -131,10 +105,12 @@ export async function establishApiSandboxSpawner(input: {
       ReturnType<typeof resolveModalCheckpointProviderBindingForSession>
     > | null;
   } | null = null;
+  const continuityRecovery = input.acquiredLease.recovery.continuity;
   try {
     if (
-      input.acquiredLease.recovery.archive.status === "available" ||
-      hasWorkspaceArchive(archiveSource)
+      (input.acquiredLease.recovery.archive.status === "available" &&
+        input.acquiredLease.archiveComplete) ||
+      (input.acquiredLease.recovery.archive.status === "none" && hasWorkspaceArchive(archiveSource))
     ) {
       const id = crypto.randomUUID();
       const legacyNativeArchive = legacyNativeArchiveFromEnvelope(archiveSource);
@@ -177,7 +153,7 @@ export async function establishApiSandboxSpawner(input: {
         legacyCheckpoint: begun.checkpointArtifact === null ? legacyNativeArchive : null,
         legacyProviderBinding: null,
       };
-    } else if (input.acquiredLease.recovery.archive.status !== "none") {
+    } else if (input.acquiredLease.recovery.archive.status !== "none" && !continuityRecovery) {
       throw new SandboxLeaseRecoveryBlockedError(
         input.sandboxGroupId,
         input.expectedEpoch,
@@ -235,6 +211,7 @@ export async function establishApiSandboxSpawner(input: {
           sandboxGroupId: input.sandboxGroupId,
           expectedEpoch: input.expectedEpoch,
           rematerializationId: rematerialization?.id ?? null,
+          ...(created.providerContinuity ? { continuityRecovery: created.providerContinuity } : {}),
           instanceId: created.instanceId,
           resumeBackendId: created.backendId,
           resumeState,
@@ -310,6 +287,7 @@ export async function establishApiSandboxSpawner(input: {
     await verifySandboxExecReadiness(established);
     if (
       rematerialization &&
+      !established.providerContinuity &&
       established.restoredArchive?.revision !== rematerialization.selectedRevision
     ) {
       throw new WorkspaceArchiveIntegrityError(
@@ -330,19 +308,21 @@ export async function establishApiSandboxSpawner(input: {
       dataPlaneUrl: input.dataPlaneUrl,
       resumeBackendId: established.backendId,
       resumeState,
-      ...(rematerialization
-        ? {
-            rematerialization: {
-              id: rematerialization.id,
-              verifiedRevision: rematerialization.selectedRevision,
-            },
-          }
-        : {}),
+      ...(established.providerContinuity
+        ? { continuityRecovery: established.providerContinuity }
+        : rematerialization
+          ? {
+              rematerialization: {
+                id: rematerialization.id,
+                verifiedRevision: rematerialization.selectedRevision,
+              },
+            }
+          : {}),
       leaseTtlMs: input.settings.sandboxLeaseTtlMs,
     });
     if (!committed.committed || !committed.lease) {
       const terminated = await terminateCreated(established);
-      if (terminated && rematerialization) {
+      if (terminated && rematerialization && !established.providerContinuity) {
         await failSandboxRematerialization(input.db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
@@ -367,18 +347,25 @@ export async function establishApiSandboxSpawner(input: {
     if (error instanceof SandboxLeaseSupersededError) throw error;
     const terminated = await terminateCreated(established);
     if (terminated) {
-      if (rematerialization) {
+      const continuityUnavailable = error instanceof SandboxProviderContinuityUnavailableError;
+      if (rematerialization && !established?.providerContinuity) {
         await failSandboxRematerialization(input.db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           sandboxGroupId: input.sandboxGroupId,
           expectedEpoch: input.expectedEpoch,
           rematerializationId: rematerialization.id,
-          failureCode:
-            error instanceof WorkspaceArchiveIntegrityError
+          failureCode: continuityUnavailable
+            ? "provider_continuity_unavailable"
+            : error instanceof WorkspaceArchiveIntegrityError
               ? error.code
               : "sandbox_rematerialization_failed",
-          retryable: error instanceof WorkspaceArchiveIntegrityError ? error.retryable : true,
+          retryable: continuityUnavailable
+            ? error.retryable
+            : error instanceof WorkspaceArchiveIntegrityError
+              ? error.retryable
+              : true,
+          ...(continuityUnavailable ? { discardContinuity: true } : {}),
         });
       } else {
         await failWarmingToCold(input.db, {
@@ -386,6 +373,7 @@ export async function establishApiSandboxSpawner(input: {
           workspaceId: input.workspaceId,
           sandboxGroupId: input.sandboxGroupId,
           expectedEpoch: input.expectedEpoch,
+          ...(continuityUnavailable ? { discardContinuity: true } : {}),
         });
       }
     }

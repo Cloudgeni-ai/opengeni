@@ -26,6 +26,7 @@ import {
   ScheduleAlreadyRunning,
   ScheduleOverlapPolicy,
   Client as TemporalClient,
+  WorkflowExecutionAlreadyStartedError,
 } from "@temporalio/client";
 import { NativeConnection, Worker, type WorkflowBundleOption } from "@temporalio/worker";
 import { existsSync } from "node:fs";
@@ -40,6 +41,7 @@ import type {
   InspectSessionAttemptActivity,
   SignalCodexCapacityWorkflow,
   SignalSessionAttemptQuiesced,
+  StartSandboxReaperWorkflow,
   WakeSessionWorkflowSignal,
 } from "./activities/types";
 import { turnTaskQueue } from "./workflows/activities";
@@ -63,9 +65,11 @@ import {
   turnWorkerConcurrencyOptions,
 } from "./concurrency";
 import {
+  combineWorkerRunTargets,
   constructWithOwnedConnection,
   createWorkerServiceLifecycle,
   type WorkerServiceLifecycle,
+  type WorkerRunTarget,
 } from "./worker-service-lifecycle";
 import {
   createTurnWorkerMemoryPressureGuard,
@@ -73,6 +77,10 @@ import {
   type TurnWorkerMemoryPressureGuard,
 } from "./memory-pressure-guard";
 import { assertSandboxReaperActivityTimeout } from "./sandbox-reaper-timeout";
+import {
+  SANDBOX_REAPER_V2_WORKFLOW_ID,
+  sandboxLifecycleTaskQueue,
+} from "./sandbox-reaper-contract";
 
 export {
   createHostExportPump,
@@ -168,7 +176,7 @@ export function resolveOpenGeniWorkflowDefinition(
 }
 
 export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
-  worker: Worker;
+  worker: WorkerRunTarget;
   connection: NativeConnection;
 }> {
   const settings = options.settings ?? getSettings();
@@ -217,22 +225,15 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
           settings,
           observability,
         });
-      const worker = await Worker.create({
+      const workflowDefinition =
+        options.role === "control"
+          ? options.workflowBundle
+            ? { workflowBundle: options.workflowBundle }
+            : resolveOpenGeniWorkflowDefinition()
+          : {};
+      const sharedWorkerOptions = {
         connection,
         namespace: settings.temporalNamespace,
-        taskQueue:
-          options.role === "control"
-            ? settings.temporalTaskQueue
-            : turnTaskQueue(settings.temporalTaskQueue),
-        ...(options.role === "control"
-          ? {
-              ...(options.workflowBundle
-                ? { workflowBundle: options.workflowBundle }
-                : resolveOpenGeniWorkflowDefinition()),
-              maxConcurrentWorkflowTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS,
-              maxConcurrentActivityTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
-            }
-          : turnWorkerConcurrencyOptions(settings)),
         activities,
         // Cancellation is delivered through an activity heartbeat. The SDK would
         // otherwise throttle a two-minute heartbeat timeout to its 60-second cap,
@@ -243,17 +244,49 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
         defaultHeartbeatThrottleInterval: "5s",
         // GRACEFUL DEPLOY SHUTDOWN (with the SIGTERM handler in startWorker):
         // after shutdown() stops polling, in-flight activities get this long to
-        // finish naturally; the rest are then CANCELLED with WORKER_SHUTDOWN —
-        // which triggers agent-turn's same-turn recovery checkpoint instead of a
-        // heartbeat-timeout worker_death. Short on purpose: a long grace here
-        // only delays the checkpoint window long turns actually need.
+        // finish naturally; the rest are then CANCELLED with WORKER_SHUTDOWN.
         shutdownGraceTime: "5s",
-        // Hard ceiling INSIDE the pod's terminationGracePeriodSeconds (120s): a
-        // wedged checkpoint force-stops here, on our terms, rather than riding
-        // into the kubelet's SIGKILL mid-DB-write.
+        // Hard ceiling inside the pod's termination grace period.
         shutdownForceTime: "100s",
+      } as const;
+      const worker = await Worker.create({
+        ...sharedWorkerOptions,
+        taskQueue:
+          options.role === "control"
+            ? settings.temporalTaskQueue
+            : turnTaskQueue(settings.temporalTaskQueue),
+        ...(options.role === "control"
+          ? {
+              ...workflowDefinition,
+              maxConcurrentWorkflowTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS,
+              maxConcurrentActivityTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
+            }
+          : turnWorkerConcurrencyOptions(settings)),
       });
-      return { worker, connection };
+      if (options.role !== "control") return { worker, connection };
+
+      try {
+        const sandboxLifecycleWorker = await Worker.create({
+          ...sharedWorkerOptions,
+          ...workflowDefinition,
+          taskQueue: sandboxLifecycleTaskQueue(settings.temporalTaskQueue),
+          maxConcurrentWorkflowTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS,
+          maxConcurrentActivityTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
+        });
+        return {
+          worker: combineWorkerRunTargets([worker, sandboxLifecycleWorker]),
+          connection,
+        };
+      } catch (error) {
+        try {
+          worker.shutdown();
+        } catch {
+          // Preserve the lifecycle worker construction failure. The base poller
+          // still received its shutdown request; a secondary synchronous
+          // shutdown error must not replace the startup root cause.
+        }
+        throw error;
+      }
     },
     (connection) => connection.close(),
   );
@@ -272,6 +305,7 @@ export async function createWorkerWorkflowSignaler(
   signalSessionAttemptQuiesced: SignalSessionAttemptQuiesced;
   inspectSessionAttemptActivity: InspectSessionAttemptActivity;
   signalCodexCapacityWorkflow: SignalCodexCapacityWorkflow;
+  startSandboxReaperWorkflow: StartSandboxReaperWorkflow;
   check: () => Promise<void>;
   close: () => Promise<void>;
 }> {
@@ -366,6 +400,22 @@ export async function createWorkerWorkflowSignaler(
       // another producer may have advanced it with a Pause/Steer that requires
       // sessionControl. The global dispatcher owns that acknowledgement.
     },
+    startSandboxReaperWorkflow: async () => {
+      try {
+        await temporal.workflow.start("sandboxReaperWorkflowV2", {
+          taskQueue: sandboxLifecycleTaskQueue(settings.temporalTaskQueue),
+          workflowId: SANDBOX_REAPER_V2_WORKFLOW_ID,
+          workflowIdReusePolicy: "ALLOW_DUPLICATE",
+          args: [],
+        });
+        return "started";
+      } catch (error) {
+        if (error instanceof WorkflowExecutionAlreadyStartedError) {
+          return "already_running";
+        }
+        throw error;
+      }
+    },
     check: async () => {
       await connection.workflowService.getSystemInfo({});
     },
@@ -381,13 +431,14 @@ export async function createWorkerWorkflowSignaler(
  * sandbox ownership off the activity performs bounded DB outbox repair and
  * read-only observability projections; it never mutates or terminates sandbox leases.
  *
- * The Schedule fires sandboxReaperWorkflow on the worker's global task queue
+ * The Schedule permanently fires sandboxReaperWorkflow on the legacy/base queue
  * every settings.sandboxLeaseReaperPeriodMs (the SAME cadence the boot invariant
  * `reaperPeriod < viewerHolderTTL` and `reaperPeriod + idleGrace < providerLifetime`
  * validates in packages/config — wiring the schedule period to it). SKIP overlap means a slow
  * sweep never overlaps itself. Idempotent: a duplicate scheduleId across the
- * worker pool collides on ScheduleAlreadyRunning and no-ops, so the Schedule is
- * registered exactly once per deployment.
+ * worker pool collides on ScheduleAlreadyRunning and reconciles the same
+ * definition. New workers route onto the versioned lifecycle queue; old workers
+ * can still run the legacy action during rollout or a full binary rollback.
  *
  * Returns a `close()` for the dedicated client connection (separate from the
  * worker's NativeConnection — the Schedule client is a @temporalio/client).
@@ -399,27 +450,29 @@ export async function registerSandboxReaperSchedule(
   assertSandboxReaperActivityTimeout(settings);
   const connection = await Connection.connect(temporalConnectionOptions(settings));
   const temporal = new TemporalClient({ connection, namespace: settings.temporalNamespace });
+  const spec = { intervals: [{ every: settings.sandboxLeaseReaperPeriodMs }] };
+  const action = {
+    type: "startWorkflow" as const,
+    workflowType: "sandboxReaperWorkflow",
+    taskQueue: settings.temporalTaskQueue,
+    args: [] as [],
+  };
+  const policies = {
+    overlap: ScheduleOverlapPolicy.SKIP,
+    catchupWindow: "1m",
+    pauseOnFailure: false,
+  } as const;
   try {
     await temporal.schedule.create({
       scheduleId: SANDBOX_REAPER_SCHEDULE_ID,
-      spec: {
-        // @every-style interval: fire once per reaper period. The boot invariant
-        // (config) guarantees reaperPeriod < viewerHolderTTL and
-        // reaperPeriod + idleGrace < providerLifetime.
-        intervals: [{ every: settings.sandboxLeaseReaperPeriodMs }],
-      },
-      action: {
-        type: "startWorkflow",
-        workflowType: "sandboxReaperWorkflow",
-        taskQueue: settings.temporalTaskQueue,
-        args: [],
-      },
-      policies: {
-        // A slow sweep must never overlap itself; the next fire is skipped.
-        overlap: ScheduleOverlapPolicy.SKIP,
-        catchupWindow: "1m",
-        pauseOnFailure: false,
-      },
+      // @every-style interval: fire once per reaper period. The boot invariant
+      // guarantees reaperPeriod < viewerHolderTTL and
+      // reaperPeriod + idleGrace < providerLifetime.
+      spec,
+      action,
+      // The base workflow is a short router on new binaries; legacy binaries
+      // still execute the pre-refactor composite under this same overlap fence.
+      policies,
     });
     observability.info("Registered the global sandbox-lease reaper Schedule", {
       scheduleId: SANDBOX_REAPER_SCHEDULE_ID,
@@ -433,12 +486,24 @@ export async function registerSandboxReaperSchedule(
     };
   } catch (error) {
     if (error instanceof ScheduleAlreadyRunning) {
-      // Another worker in the pool already created it. The Schedule exists
-      // exactly once — this is the expected no-op on every replica after the
-      // first. (We do NOT update the spec here: a redeploy with a changed cadence
-      // is an operational concern handled by deleting+recreating the Schedule.)
-      observability.info("Global sandbox-lease reaper Schedule already registered", {
+      // Never move this action off the base queue: doing so would leave a full
+      // rollback with no worker polling the only reaper Schedule. The workflow
+      // implementation itself owns the forward-compatible queue handoff.
+      await temporal.schedule.getHandle(SANDBOX_REAPER_SCHEDULE_ID).update((previous) => ({
+        spec,
+        action,
+        policies,
+        state: {
+          paused: previous.state.paused,
+          ...(previous.state.note ? { note: previous.state.note } : {}),
+          ...(previous.state.remainingActions !== undefined
+            ? { remainingActions: previous.state.remainingActions }
+            : {}),
+        },
+      }));
+      observability.info("Reconciled the global sandbox-lease reaper Schedule", {
         scheduleId: SANDBOX_REAPER_SCHEDULE_ID,
+        temporalTaskQueue: action.taskQueue,
       });
       return {
         registered: false,
@@ -561,7 +626,7 @@ export type OpenGeniWorkerServiceOptions = Omit<WorkerOptions, "activityDependen
 
 export type OpenGeniWorkerService = {
   readonly role: OpenGeniWorkerRole;
-  readonly worker: Worker;
+  readonly worker: WorkerRunTarget;
   readonly connection: NativeConnection;
   state(): WorkerLifecycleState;
   run(): Promise<void>;
@@ -604,7 +669,8 @@ export async function createOpenGeniWorkerService(
       !options.activityDependencies.wakeSessionWorkflow ||
       !options.activityDependencies.signalSessionAttemptQuiesced ||
       !options.activityDependencies.inspectSessionAttemptActivity ||
-      !options.activityDependencies.signalCodexCapacityWorkflow;
+      !options.activityDependencies.signalCodexCapacityWorkflow ||
+      !options.activityDependencies.startSandboxReaperWorkflow;
     if (needsSignaler) {
       signaler = await retryStartupDependency(
         "Temporal client",
@@ -623,11 +689,15 @@ export async function createOpenGeniWorkerService(
     const signalCodexCapacityWorkflow =
       options.activityDependencies.signalCodexCapacityWorkflow ??
       signaler?.signalCodexCapacityWorkflow;
+    const startSandboxReaperWorkflow =
+      options.activityDependencies.startSandboxReaperWorkflow ??
+      signaler?.startSandboxReaperWorkflow;
     if (
       !wakeSessionWorkflow ||
       !signalSessionAttemptQuiesced ||
       !inspectSessionAttemptActivity ||
-      !signalCodexCapacityWorkflow
+      !signalCodexCapacityWorkflow ||
+      !startSandboxReaperWorkflow
     ) {
       throw new Error("OpenGeni worker lifecycle could not resolve its workflow signalers");
     }
@@ -644,6 +714,7 @@ export async function createOpenGeniWorkerService(
         signalSessionAttemptQuiesced,
         inspectSessionAttemptActivity,
         signalCodexCapacityWorkflow,
+        startSandboxReaperWorkflow,
       },
     });
 

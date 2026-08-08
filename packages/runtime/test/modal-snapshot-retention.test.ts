@@ -1,6 +1,7 @@
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, mock, spyOn, test } from "bun:test";
 import { Manifest, type SandboxSessionLike } from "@openai/agents/sandbox";
 import { ModalSandboxClient } from "@openai/agents-extensions/sandbox/modal";
@@ -15,6 +16,7 @@ import {
 import { discoverWorkspaceSkills } from "../src/workspace-skills";
 
 type Persistence = "tar" | "snapshot_filesystem" | "snapshot_directory";
+const SNAPSHOT_REQUEST_ID = "11111111-1111-4111-8111-111111111111";
 
 function fakeSession(
   persistence: Persistence,
@@ -29,7 +31,7 @@ function fakeSession(
     modal: { version: () => sdkVersion },
     sandbox,
     state,
-    persistWorkspace: mock(async () => {
+    persistWorkspace: mock(async (_options?: { requestId: string }) => {
       if (state.workspacePersistence === "snapshot_filesystem") {
         await (
           session.sandbox?.snapshotFilesystem as
@@ -87,6 +89,15 @@ function fakeModalFilesystemSession(root: string) {
 }
 
 describe("OpenGeni Modal 0.9 snapshot policy", () => {
+  test("the pinned Modal patch binds both native snapshot operations to caller UUIDs", async () => {
+    // This is deliberately a distribution-level assertion. The takeover
+    // contract depends on the request UUID reaching Modal's protobuf, beneath
+    // the adapter mock exercised by the tests below.
+    const source = await readFile(fileURLToPath(import.meta.resolve("modal")), "utf8");
+    const callerOwnedSnapshotIds = source.match(/params\?\.snapshotId \?\? uuidv4\w*\(\)/g) ?? [];
+    expect(callerOwnedSnapshotIds).toHaveLength(2);
+  });
+
   test("the runtime resolves the exact supported Modal SDK", () => {
     const modal = new ModalClient({
       tokenId: "test-token-id",
@@ -104,13 +115,24 @@ describe("OpenGeni Modal 0.9 snapshot policy", () => {
     const session = fakeSession("snapshot_filesystem", { snapshotFilesystem });
 
     installOpenGeniModalSnapshotPolicy(session);
-    await session.persistWorkspace();
+    await session.persistWorkspace({ requestId: SNAPSHOT_REQUEST_ID });
 
     expect(snapshotFilesystem).toHaveBeenCalledTimes(1);
     expect(snapshotFilesystem.mock.calls[0]?.[0]).toEqual({
       timeoutMs: 120_000,
       ttlMs: null,
+      snapshotId: SNAPSHOT_REQUEST_ID,
     });
+  });
+
+  test("refuses an unreceipted indefinite native snapshot", async () => {
+    const snapshotFilesystem = mock(async (_params?: unknown) => ({ imageId: "im-fs" }));
+    const session = fakeSession("snapshot_filesystem", { snapshotFilesystem });
+
+    installOpenGeniModalSnapshotPolicy(session);
+
+    await expect(session.persistWorkspace()).rejects.toThrow("requires a valid UUID request id");
+    expect(snapshotFilesystem).not.toHaveBeenCalled();
   });
 
   test("current configuration replaces a legacy resume-envelope snapshot timeout", async () => {
@@ -150,20 +172,41 @@ describe("OpenGeni Modal 0.9 snapshot policy", () => {
     }
   });
 
-  test("passes snapshot_directory timeout and disables provider expiry", async () => {
+  test("passes snapshot_directory timeout, disables expiry, and reuses its durable id", async () => {
     const snapshotDirectory = mock(async (_path: string, _params?: unknown) => ({
       imageId: "im-dir",
     }));
     const session = fakeSession("snapshot_directory", { snapshotDirectory });
 
     installOpenGeniModalSnapshotPolicy(session);
-    await session.persistWorkspace();
+    await session.persistWorkspace({ requestId: SNAPSHOT_REQUEST_ID });
 
     expect(snapshotDirectory).toHaveBeenCalledTimes(1);
     expect(snapshotDirectory.mock.calls[0]?.[0]).toBe("/workspace");
     expect(snapshotDirectory.mock.calls[0]?.[1]).toEqual({
       timeoutMs: 120_000,
       ttlMs: null,
+      snapshotId: SNAPSHOT_REQUEST_ID,
+    });
+    expect(session.state.snapshotFilesystemTimeoutMs).toBe(120_000);
+  });
+
+  test("restores an explicitly present undefined directory timeout exactly", async () => {
+    const snapshotDirectory = mock(async (_path: string, _params?: unknown) => ({
+      imageId: "im-dir",
+    }));
+    const session = fakeSession("snapshot_directory", { snapshotDirectory });
+    session.state.snapshotFilesystemTimeoutMs = undefined as never;
+
+    installOpenGeniModalSnapshotPolicy(session);
+    await session.persistWorkspace({ requestId: SNAPSHOT_REQUEST_ID });
+
+    expect(Object.hasOwn(session.state, "snapshotFilesystemTimeoutMs")).toBe(true);
+    expect(session.state.snapshotFilesystemTimeoutMs).toBeUndefined();
+    expect(snapshotDirectory.mock.calls[0]?.[1]).toEqual({
+      timeoutMs: undefined,
+      ttlMs: null,
+      snapshotId: SNAPSHOT_REQUEST_ID,
     });
   });
 
@@ -175,17 +218,19 @@ describe("OpenGeni Modal 0.9 snapshot policy", () => {
     });
 
     installOpenGeniModalSnapshotPolicy(session);
-    await session.persistWorkspace();
+    await session.persistWorkspace({ requestId: SNAPSHOT_REQUEST_ID });
     session.sandbox = { snapshotFilesystem: secondSnapshot };
-    await session.persistWorkspace();
+    await session.persistWorkspace({ requestId: SNAPSHOT_REQUEST_ID });
 
     expect(firstSnapshot.mock.calls[0]?.[0]).toEqual({
       timeoutMs: 120_000,
       ttlMs: null,
+      snapshotId: SNAPSHOT_REQUEST_ID,
     });
     expect(secondSnapshot.mock.calls[0]?.[0]).toEqual({
       timeoutMs: 120_000,
       ttlMs: null,
+      snapshotId: SNAPSHOT_REQUEST_ID,
     });
   });
 

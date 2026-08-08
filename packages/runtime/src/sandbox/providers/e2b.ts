@@ -1,10 +1,21 @@
 import { E2BSandboxClient } from "@openai/agents-extensions/sandbox/e2b";
 import { CAPABILITY_DESCRIPTORS } from "../capabilities";
 import { SandboxConfigError } from "../errors";
-import type { ProviderRegistration } from "./types";
+import {
+  REPEATABLE_CONFIGURED_WORKSPACE_CAPTURE,
+  REPEATABLE_PORTABLE_TAR_WORKSPACE_CAPTURE,
+  providerWorkspacePersistence,
+  type ProviderRegistration,
+} from "./types";
 
 export const e2bProvider: ProviderRegistration = {
   backend: "e2b",
+  exactResumeMode: "custom",
+  instanceIdFields: ["sandboxId"],
+  workspaceCapturePolicy: (state) =>
+    providerWorkspacePersistence(state) === "snapshot"
+      ? REPEATABLE_PORTABLE_TAR_WORKSPACE_CAPTURE
+      : REPEATABLE_CONFIGURED_WORKSPACE_CAPTURE,
   descriptor: CAPABILITY_DESCRIPTORS.e2b,
   validateCredentials(settings) {
     // The underlying e2b SDK reads E2B_API_KEY from process.env; we mirror it to

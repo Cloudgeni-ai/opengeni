@@ -109,6 +109,7 @@ function createActivityServices(
         signalSessionAttemptQuiesced: dependencies.signalSessionAttemptQuiesced ?? null,
         inspectSessionAttemptActivity: dependencies.inspectSessionAttemptActivity ?? null,
         signalCodexCapacityWorkflow: dependencies.signalCodexCapacityWorkflow ?? null,
+        startSandboxReaperWorkflow: dependencies.startSandboxReaperWorkflow ?? null,
         // §7.5 P3 — host-entitlements port. No constructed default: standalone
         // has no host meter, so unset → null → `ensureRunAllowed` reads the
         // local ledger exactly as today (mirrors `wakeSessionWorkflow`'s
@@ -139,8 +140,8 @@ function controlActivities(services: () => Promise<ActivityServices>) {
     ...createFileUploadReaperActivities(services),
     ...createRetainedScreenshotMaintenanceActivities(services),
     ...createWorkflowWakeActivities(services),
-    // P1.3: the SOLE liveness/GC/cost-stop driver. Only reapSandboxLeases — no
-    // *ForViewer activities, no ownerHeartbeat, no resolveOwnerTaskQueue.
+    // P1.3: one global inventory plus exact per-box drain activities. No
+    // *ForViewer activities, owner heartbeat, or owner task queue.
     ...createSandboxLeaseActivities(services),
   };
 }
@@ -185,6 +186,9 @@ export const enqueueGoalRetryWake = defaultControlActivities.enqueueGoalRetryWak
 export const maybeContinueGoal = defaultControlActivities.maybeContinueGoal;
 export const getCodexCapacityWait = defaultControlActivities.getCodexCapacityWait;
 export const reconcileCodexCapacityWait = defaultControlActivities.reconcileCodexCapacityWait;
+export const prepareSandboxLeaseSweep = defaultControlActivities.prepareSandboxLeaseSweep;
+export const drainSandboxLease = defaultControlActivities.drainSandboxLease;
+export const maintainSandboxLeaseSweep = defaultControlActivities.maintainSandboxLeaseSweep;
 export const reapSandboxLeases = defaultControlActivities.reapSandboxLeases;
 export const reapExpiredFileUploads = defaultControlActivities.reapExpiredFileUploads;
 export const maintainRetainedScreenshots = defaultControlActivities.maintainRetainedScreenshots;

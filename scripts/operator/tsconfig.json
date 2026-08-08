@@ -7,6 +7,8 @@
     "connected-machine-load-profile.ts",
     "connected-machine-load-profile.test.ts",
     "turn-density-profile.ts",
+    "sandbox-reaper-hold.ts",
+    "sandbox-reaper-hold.test.ts",
     "reconcile-cold-lost-sandbox-blockers.ts",
     "reconcile-cold-lost-sandbox-blockers.test.ts"
   ]

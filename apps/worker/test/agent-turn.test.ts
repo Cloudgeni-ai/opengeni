@@ -17,6 +17,7 @@ import {
   SandboxImageConflictError,
   SandboxLeaseRecoveryBlockedError,
   SandboxLeaseSupersededError,
+  SandboxLeaseTransitionError,
   SandboxWorkspaceMutationFencedError,
   SessionEventPersistenceError,
 } from "@opengeni/db";
@@ -2393,13 +2394,12 @@ describe("on-turn recording gate (selfhosted machines have no in-box capture plu
 });
 
 describe("lazy sandbox provisioner single-flight", () => {
-  test("deadline rotation paces recovery for one capture and two reaper periods", () => {
+  test("deadline rotation uses only short anti-churn pacing", () => {
     expect(
       sandboxDeadlineRotationRecoveryDelayMs({
         sandboxLeaseReaperPeriodMs: 30_000,
-        sandboxSnapshotTimeoutMs: 60_000,
       }),
-    ).toBe(120_000);
+    ).toBe(5_000);
   });
 
   test("concurrent callers share one establish promise", async () => {
@@ -2498,6 +2498,18 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(isLazySandboxProvisionRetryable(new SandboxLeaseSupersededError("group-1", 1))).toBe(
       true,
     );
+    expect(
+      isLazySandboxProvisionRetryable(
+        new SandboxLeaseTransitionError(
+          "group-1",
+          1,
+          "capture_in_progress",
+          "modal",
+          "sb-1",
+          "draining",
+        ),
+      ),
+    ).toBe(true);
     expect(
       isLazySandboxProvisionRetryable(
         new WorkspaceArchiveIntegrityError(

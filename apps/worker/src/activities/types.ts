@@ -38,6 +38,11 @@ export type SignalCodexCapacityWorkflow = (input: {
   wakeRevision: number;
 }) => Promise<void>;
 
+/** Start the versioned, per-box sandbox reaper from the history-stable legacy
+ * activity. The legacy Schedule workflow must keep its exact historical
+ * ScheduleActivity command across mixed-version worker pools. */
+export type StartSandboxReaperWorkflow = () => Promise<"started" | "already_running">;
+
 /** Exact activity-owned proof that the hard sandbox/tool fence physically
  * drained. This is delivery evidence only: the workflow still validates the
  * persisted attempt dispatch and commits the authoritative Postgres receipt. */
@@ -76,6 +81,9 @@ export type ActivityServices = {
   inspectSessionAttemptActivity: InspectSessionAttemptActivity | null;
   /** Revision-carrying capacity nudge; generic outbox repair is also sufficient. */
   signalCodexCapacityWorkflow?: SignalCodexCapacityWorkflow | null;
+  /** Production control workers inject this Temporal client edge. A null edge
+   * deliberately retains the composite implementation for embedded/test hosts. */
+  startSandboxReaperWorkflow?: StartSandboxReaperWorkflow | null;
   // §7.5 P3 — host-entitlements port, the WORKER half of the same seam the API
   // edge exposes on `AppDependencies`. When set, `ensureRunAllowed` (turn-entry
   // AND the mid-stream budget valve) delegates the funding decision to

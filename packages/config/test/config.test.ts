@@ -21,6 +21,7 @@ import {
   retryStartupDependency,
   SANDBOX_REQUIRED_ENV,
   sandboxArchiveCaptureTimeoutMs,
+  sandboxLifecycleTransitionWaitMs,
   sandboxEnvironmentVariableNames,
   sandboxLifecycleHookIds,
   stableSandboxEnvironmentForRun,
@@ -1471,9 +1472,41 @@ describe("backend-gated sandbox required-credential validation", () => {
 
 describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)", () => {
   test("the durable capture gate outlives provider snapshot settlement but remains bounded", () => {
-    expect(sandboxArchiveCaptureTimeoutMs({ sandboxSnapshotTimeoutMs: 10_000 })).toBe(40_000);
-    expect(sandboxArchiveCaptureTimeoutMs({ sandboxSnapshotTimeoutMs: 40_000 })).toBe(80_000);
+    expect(sandboxArchiveCaptureTimeoutMs({ sandboxSnapshotTimeoutMs: 10_000 })).toBe(20_000);
+    expect(sandboxArchiveCaptureTimeoutMs({ sandboxSnapshotTimeoutMs: 40_000 })).toBe(50_000);
     expect(sandboxArchiveCaptureTimeoutMs({ sandboxSnapshotTimeoutMs: 3_590_000 })).toBe(3_600_000);
+  });
+
+  test("caller transition waiting covers dispatch plus one successor without charging dead-holder TTL", () => {
+    expect(
+      sandboxLifecycleTransitionWaitMs({
+        sandboxSnapshotTimeoutMs: 60_000,
+        sandboxLeaseReaperPeriodMs: 30_000,
+      }),
+    ).toBe(110_000);
+    expect(
+      sandboxLifecycleTransitionWaitMs({
+        sandboxSnapshotTimeoutMs: 3_590_000,
+        sandboxLeaseReaperPeriodMs: 30_000,
+      }),
+    ).toBe(60 * 60_000);
+  });
+
+  test("snapshot configuration cannot consume the durable claim's settlement window", () => {
+    expect(() =>
+      withEnv({ OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS: String(60 * 60_000) }, () => getSettings()),
+    ).toThrow();
+    expect(
+      withEnv(
+        {
+          OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS: String(59 * 60_000 + 30_000),
+          // Preserve the independent rotation-safety invariant while probing
+          // the exact schema ceiling.
+          OPENGENI_SANDBOX_ROTATION_LEAD_MS: String(61 * 60_000),
+        },
+        () => getSettings(),
+      ).sandboxSnapshotTimeoutMs,
+    ).toBe(59 * 60_000 + 30_000);
   });
 
   test("idle timeout defaults to the hard lifetime and the default cadence passes boot", () => {
@@ -1483,7 +1516,7 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
     expect(effectiveModalIdleTimeoutSeconds(settings)).toBe(settings.modalTimeoutSeconds);
     expect(effectiveModalIdleTimeoutSeconds(settings)).toBe(86_400);
     expect(settings.sandboxRotationLeadMs).toBe(3_600_000);
-    expect(settings.sandboxRotationBatchSize).toBe(1);
+    expect(settings.sandboxRotationBatchSize).toBe(32);
     expect(settings.sandboxLeaseReaperPeriodMs + settings.sandboxIdleGraceMs).toBeLessThan(
       effectiveModalIdleTimeoutSeconds(settings) * 1000,
     );
@@ -1529,10 +1562,14 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
     ).toThrow(/rotation_lead_ms.*strictly less/i);
   });
 
-  test("boot reserves snapshot timeout plus two reaper ticks before rotation", () => {
+  test("boot reserves the full capture window plus one reaper tick before rotation", () => {
     expect(() =>
-      withEnv({ OPENGENI_SANDBOX_ROTATION_LEAD_MS: "120000" }, () => getSettings()),
-    ).toThrow(/must exceed the snapshot timeout/i);
+      withEnv({ OPENGENI_SANDBOX_ROTATION_LEAD_MS: "100000" }, () => getSettings()),
+    ).toThrow(/must exceed the durable capture timeout/i);
+    expect(
+      withEnv({ OPENGENI_SANDBOX_ROTATION_LEAD_MS: "100001" }, () => getSettings())
+        .sandboxRotationLeadMs,
+    ).toBe(100_001);
   });
 
   test("the rotation batch is positive and bounded", () => {

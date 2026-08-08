@@ -4130,10 +4130,27 @@ export const sandboxLeases = pgTable(
     archiveGeneration: integer("archive_generation"),
     // Provider-native capture may pause the live box. The exact claim is
     // acquired before provider I/O and cleared only after that capture settles;
-    // new holders and workspace mutations fence on it. The SQL constraint also
-    // requires the claimed generation to remain current, so an unaware writer
-    // cannot advance generation through an active capture.
+    // new holders and workspace mutations fence on it. operation_id is the
+    // stable logical request across Temporal retries, while capture_id + attempt
+    // identify the one callback currently allowed to publish/terminate. The SQL
+    // constraint also requires the claimed generation to remain current, so an
+    // unaware writer cannot advance generation through an active capture.
     archiveCaptureId: uuid("archive_capture_id"),
+    archiveCaptureOperationId: uuid("archive_capture_operation_id"),
+    archiveCaptureProviderRequestId: uuid("archive_capture_provider_request_id"),
+    // True only when the provider contract guarantees that reusing
+    // archiveCaptureProviderRequestId resumes the same physical capture. This is
+    // deliberately explicit rather than inferred from backend/id equality so a
+    // rolling old worker can never be mistaken for an idempotent caller.
+    archiveCaptureProviderReplaySafe: boolean("archive_capture_provider_replay_safe")
+      .notNull()
+      .default(false),
+    // Provider-neutral takeover proof. True means the registered adapter has
+    // proven either same-request idempotency or an independently repeatable,
+    // read-only capture. It is distinct from providerReplaySafe so portable tar
+    // can recover immediately without pretending it resumes one provider RPC.
+    archiveCaptureTakeoverSafe: boolean("archive_capture_takeover_safe").notNull().default(false),
+    archiveCaptureAttempt: integer("archive_capture_attempt"),
     archiveCaptureGeneration: integer("archive_capture_generation"),
     archiveCaptureStartedAt: timestamp("archive_capture_started_at", {
       withTimezone: true,
@@ -4141,6 +4158,19 @@ export const sandboxLeases = pgTable(
     archiveCaptureDeadlineAt: timestamp("archive_capture_deadline_at", {
       withTimezone: true,
     }),
+    // Set atomically with a verified draining archive publication. Once set,
+    // the exact claim is an irreversible teardown receipt: a recovered worker
+    // skips recapture and resumes provider termination. Warm capture clears its
+    // claim in the publication write and therefore never retains this marker.
+    archiveCapturePublishedAt: timestamp("archive_capture_published_at", {
+      withTimezone: true,
+    }),
+    // Bounded operator preservation gate. Unlike rotation/capture, this blocks
+    // only reaper teardown: a user may still re-arm a resumable draining lease.
+    // The exact id makes renewal/release ownership explicit and race-safe.
+    reaperHoldId: uuid("reaper_hold_id"),
+    reaperHoldUntil: timestamp("reaper_hold_until", { withTimezone: true }),
+    reaperHoldReason: text("reaper_hold_reason"),
 
     // The group box-envelope (the "envelope split" Critical): the small recovery
     // descriptor to resume()-by-id the group's box without a per-session join.
@@ -4161,7 +4191,7 @@ export const sandboxLeases = pgTable(
       withTimezone: true,
     }),
     rotationReason: text("rotation_reason", {
-      enum: ["provider_deadline", "operator"],
+      enum: ["provider_deadline", "operator", "teardown_claim"],
     }),
     // The SQL migration owns the two DEFERRABLE foreign keys and deferred
     // scope/state constraint triggers. Drizzle does not model deferrability, so
@@ -4213,20 +4243,52 @@ export const sandboxLeases = pgTable(
       "sandbox_leases_archive_capture_check",
       sql`(
           ${table.archiveCaptureId} is null
+          and ${table.archiveCaptureOperationId} is null
+          and ${table.archiveCaptureProviderRequestId} is null
+          and ${table.archiveCaptureProviderReplaySafe} = false
+          and ${table.archiveCaptureTakeoverSafe} = false
+          and ${table.archiveCaptureAttempt} is null
           and ${table.archiveCaptureGeneration} is null
           and ${table.archiveCaptureStartedAt} is null
           and ${table.archiveCaptureDeadlineAt} is null
+          and ${table.archiveCapturePublishedAt} is null
         ) or (
           ${table.archiveCaptureId} is not null
+          and ${table.archiveCaptureOperationId} is not null
+          and ${table.archiveCaptureProviderRequestId} is not null
+          and (
+            ${table.archiveCaptureProviderReplaySafe} = false
+            or ${table.archiveCaptureTakeoverSafe} = true
+          )
+          and ${table.archiveCaptureAttempt} is not null
+          and ${table.archiveCaptureAttempt} > 0
           and ${table.archiveCaptureGeneration} is not null
           and ${table.archiveCaptureGeneration} = ${table.workspaceGeneration}
           and ${table.archiveCaptureStartedAt} is not null
+          and ${table.archiveCaptureDeadlineAt} is not null
           and ${table.archiveCaptureDeadlineAt} > ${table.archiveCaptureStartedAt}
+          and (
+            ${table.archiveCapturePublishedAt} is null
+            or ${table.liveness} = 'draining'
+          )
         )`,
     ),
     archiveCaptureDeadline: index("sandbox_leases_archive_capture_deadline_idx")
       .on(table.archiveCaptureDeadlineAt, table.id)
       .where(sql`${table.archiveCaptureId} is not null`),
+    reaperHoldValid: check(
+      "sandbox_leases_reaper_hold_check",
+      sql`(
+          ${table.reaperHoldId} is null
+          and ${table.reaperHoldUntil} is null
+          and ${table.reaperHoldReason} is null
+        ) or (
+          ${table.reaperHoldId} is not null
+          and ${table.reaperHoldUntil} is not null
+          and ${table.reaperHoldReason} is not null
+          and length(${table.reaperHoldReason}) between 1 and 500
+        )`,
+    ),
     providerDeadlineValid: check(
       "sandbox_leases_provider_deadline_check",
       sql`(${table.providerCreatedAt} is null and ${table.providerDeadlineAt} is null)
@@ -4238,7 +4300,8 @@ export const sandboxLeases = pgTable(
       "sandbox_leases_rotation_check",
       sql`(${table.rotationRequestedAt} is null and ${table.rotationReason} is null)
         or (${table.rotationRequestedAt} is not null
-          and ${table.rotationReason} in ('provider_deadline', 'operator'))`,
+          and ${table.rotationReason} is not null
+          and ${table.rotationReason} in ('provider_deadline', 'operator', 'teardown_claim'))`,
     ),
     checkpointDistinct: check(
       "sandbox_leases_checkpoint_distinct_check",
@@ -5252,6 +5315,49 @@ export const scheduledTasks = pgTable(
     variableSet: index("scheduled_tasks_variable_set_idx").on(
       table.workspaceId,
       table.variableSetId,
+    ),
+  }),
+);
+
+/**
+ * Durable ownership of Temporal schedules whose database owner was deleted.
+ *
+ * Deliberately no workspace/account foreign key: this row must survive the
+ * workspace cascade that creates it. Ordinary runtime code may insert it while
+ * the workspace is still RLS-visible; cross-workspace claim/settlement is only
+ * available through migration-owned SECURITY DEFINER functions.
+ */
+export const temporalScheduleCleanupOutbox = pgTable(
+  "temporal_schedule_cleanup_outbox",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    temporalScheduleId: text("temporal_schedule_id").notNull(),
+    claimId: uuid("claim_id"),
+    claimUntil: timestamp("claim_until", { withTimezone: true }),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull().defaultNow(),
+    lastError: text("last_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    schedule: uniqueIndex("temporal_schedule_cleanup_outbox_schedule_uq").on(
+      table.temporalScheduleId,
+    ),
+    due: index("temporal_schedule_cleanup_outbox_due_idx").on(
+      table.nextAttemptAt,
+      table.claimUntil,
+      table.id,
+    ),
+    valid: check(
+      "temporal_schedule_cleanup_outbox_valid_chk",
+      sql`length(${table.temporalScheduleId}) between 1 and 512
+        and ${table.attemptCount} >= 0
+        and ((${table.claimId} is null and ${table.claimUntil} is null)
+          or (${table.claimId} is not null and ${table.claimUntil} is not null))
+        and (${table.lastError} is null or length(${table.lastError}) <= 2000)`,
     ),
   }),
 );

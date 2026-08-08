@@ -1,5 +1,5 @@
 import type { AccessGrant, Rig, RigChange, RigVersion } from "@opengeni/contracts";
-import { sandboxArchiveCaptureTimeoutMs } from "@opengeni/config";
+import { sandboxLifecycleTransitionWaitMs } from "@opengeni/config";
 import {
   recordRigAuditEvent,
   classifyRigVerificationOutcome,
@@ -28,6 +28,7 @@ import {
   sandboxCommandOutput,
   serializeEstablishedSandboxEnvelope,
   tagModalSandbox,
+  terminateManagedSandboxSession,
   type EstablishedSandboxSession,
   type SandboxLifecycleCommandRunner,
   type TurnSandboxCommandSession,
@@ -251,34 +252,13 @@ function systemGrant(rig: Rig): AccessGrant {
 }
 
 async function terminateThrowaway(established: EstablishedSandboxSession | null): Promise<boolean> {
-  if (!established) {
-    return true;
-  }
-  const client = established.client as { delete?: (state: unknown) => Promise<unknown> };
-  if (typeof client.delete === "function" && established.sessionState !== undefined) {
-    try {
-      await client.delete(established.sessionState);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-  const session = established.session as {
-    terminate?: () => Promise<unknown>;
-    kill?: () => Promise<unknown>;
-    close?: () => Promise<unknown>;
-    closed?: boolean;
-  };
+  if (!established) return true;
   try {
-    if (session.terminate) {
-      await session.terminate();
-    } else if (session.kill) {
-      await session.kill();
-    } else if (session.close && !session.closed) {
-      await session.close();
-    } else {
-      return false;
-    }
+    await terminateManagedSandboxSession(
+      established.client,
+      established.sessionState,
+      established.session,
+    );
     return true;
   } catch {
     return false;
@@ -477,7 +457,8 @@ export async function runWithOwnedRigVerificationSandbox<T>(
       rigVersionId: input.rigVersionId,
       leaseTtlMs: RIG_VERIFICATION_OWNER_TTL_MS,
       warmingLeaseTtlMs: RIG_VERIFICATION_OWNER_TTL_MS,
-      captureWaitMs: sandboxArchiveCaptureTimeoutMs(input.settings),
+      captureWaitMs: sandboxLifecycleTransitionWaitMs(input.settings),
+      waitSignal: signal,
     });
     acquired = true;
     expectedEpoch = lease.lease.leaseEpoch;

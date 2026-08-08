@@ -425,7 +425,12 @@ function pendingShellCancellationCommand(state: PendingShellStart): string {
     ...processInspectionCommandLines(),
     "umask 077",
     `command mkdir -p ${markerDir} || exit 76`,
-    `command : > ${cancellation} || exit 76`,
+    // `:` is a shell special builtin, not an external command. `command :`
+    // happens to work in bash but fails in zsh (the ordinary macOS Local
+    // provider default) after the redirection has already created the file.
+    // That left the user command fenced while the cancellation proof retried
+    // exit 76 forever. Invoke the portable special builtin directly.
+    `: > ${cancellation} || exit 76`,
     `__opengeni_marker=${marker}`,
     `__opengeni_token=${token}`,
     '[ -r "$__opengeni_marker" ] || exit 0',

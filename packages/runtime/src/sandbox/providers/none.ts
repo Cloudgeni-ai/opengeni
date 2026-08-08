@@ -3,6 +3,9 @@ import type { ProviderRegistration } from "./types";
 
 export const noneProvider: ProviderRegistration = {
   backend: "none",
+  exactResumeMode: "none",
+  instanceIdFields: [],
+  workspaceCapturePolicy: () => null,
   descriptor: CAPABILITY_DESCRIPTORS.none,
   // No sandbox: nothing to validate, and build() returns undefined. The factory
   // short-circuits on "none" before calling build, but we keep build honest.
