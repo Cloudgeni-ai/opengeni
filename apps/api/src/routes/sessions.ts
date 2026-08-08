@@ -2639,10 +2639,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const ctx = await channelAPreamble(c, "files:read");
     const req = await parseChannelABody(c, FsListBatchRequest);
     const out = await withChannelA(channelAServices, ctx, async ({ service }) => ({
-      results: await Promise.all(
-        req.requests.map((request) =>
-          Promise.resolve().then(async () => await service.fsList(request)),
-        ),
+      results: await runConcurrentChannelAReads(
+        req.requests.map((request) => async () => await service.fsList(request)),
       ),
     }));
     return c.json(out);

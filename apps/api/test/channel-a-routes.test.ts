@@ -187,6 +187,18 @@ describe("P4.4 Channel-A route discipline", () => {
     expect(transientCalls).toBe(2);
   });
 
+  test("both concurrent batch routes use the settled read helper", () => {
+    for (const route of ["fs/list-batch", "git/read-batch"]) {
+      const body = handlerBody(
+        sessionsRoute,
+        "post",
+        `/v1/workspaces/:workspaceId/sessions/:sessionId/${route}`,
+      );
+      expect(body).toContain("runConcurrentChannelAReads(");
+      expect(body).not.toContain("Promise.all(");
+    }
+  });
+
   test("near-identical non-transient reads are never retried", async () => {
     let calls = 0;
     const failure = new ChannelAValidationError("bad path");
