@@ -2920,6 +2920,8 @@ describe("workflow contracts", () => {
         "Install pinned Playwright Chromium runtime",
         "Codex quota Codex quota and entitlement browser acceptance",
         "Queue surface browser acceptance",
+        "Long user-message disclosure browser acceptance",
+        "Public realtime SDK demo browser acceptance",
         "Session pin browser acceptance",
         "Responsive knowledge surfaces browser acceptance",
         "Workbench browser acceptance",
@@ -2939,8 +2941,8 @@ describe("workflow contracts", () => {
       ],
     } as const;
     const expectedGates = Object.values(expectedGateNames).flat();
-    expect(expectedGates).toHaveLength(28);
-    expect(new Set(expectedGates)).toHaveProperty("size", 28);
+    expect(expectedGates).toHaveLength(30);
+    expect(new Set(expectedGates)).toHaveProperty("size", 30);
     const allLaneSteps = laneNames.flatMap((jobName) =>
       ci.jobs[jobName].steps.map((step: any) => step.name).filter(Boolean),
     );
@@ -2953,7 +2955,7 @@ describe("workflow contracts", () => {
         expect(allLaneSteps.filter((stepName) => stepName === gateName)).toHaveLength(1);
       }
     }
-    expect(allLaneSteps.filter((stepName) => expectedGates.includes(stepName))).toHaveLength(28);
+    expect(allLaneSteps.filter((stepName) => expectedGates.includes(stepName))).toHaveLength(30);
 
     const expensiveLaneNames = ["unit-shards", "unit-safety", "test-suite", "browser-acceptance"];
     for (const jobName of expensiveLaneNames) {
@@ -3019,6 +3021,78 @@ describe("workflow contracts", () => {
     expect(safetyStep.run).toBe("bun run test:unit");
 
     const browser = ci.jobs["browser-acceptance"];
+    const expectedBrowserGates = new Map([
+      [
+        "Codex quota Codex quota and entitlement browser acceptance",
+        {
+          lane: "interaction",
+          run: "bun scripts/run-browser-e2e.ts ./test/e2e/codex-overview.e2e.ts",
+        },
+      ],
+      [
+        "Queue surface browser acceptance",
+        {
+          lane: "interaction",
+          run: "bun scripts/run-browser-e2e.ts ./test/e2e/queue-surface.browser.e2e.ts",
+        },
+      ],
+      [
+        "Long user-message disclosure browser acceptance",
+        {
+          lane: "interaction",
+          run: "bun scripts/run-browser-e2e.ts ./test/e2e/user-message-disclosure.browser.e2e.ts",
+        },
+      ],
+      [
+        "Public realtime SDK demo browser acceptance",
+        {
+          lane: "interaction",
+          run: "bun scripts/run-browser-e2e.ts ./test/e2e/realtime-demo.browser.e2e.ts",
+        },
+      ],
+      [
+        "Session pin browser acceptance",
+        {
+          lane: "knowledge",
+          run: "bun test --max-concurrency=1 --timeout 180000 ./test/e2e/session-pins.browser.e2e.ts",
+        },
+      ],
+      [
+        "Responsive knowledge surfaces browser acceptance",
+        {
+          lane: "knowledge",
+          run: "bun test --max-concurrency=1 --timeout 300000 ./test/e2e/knowledge-surfaces.browser.e2e.ts",
+        },
+      ],
+      [
+        "Workbench browser acceptance",
+        {
+          lane: "workbench",
+          run: "bun test --max-concurrency=1 --timeout 180000 ./test/e2e/workbench.browser.e2e.ts",
+        },
+      ],
+    ]);
+    const hasCompleteBrowserLaneContract = (candidate: any) =>
+      candidate.name === "Browser and visual acceptance (${{ matrix.lane }})" &&
+      candidate.strategy?.["fail-fast"] === false &&
+      JSON.stringify(candidate.strategy?.matrix?.lane) ===
+        JSON.stringify(["interaction", "knowledge", "workbench"]) &&
+      [...expectedBrowserGates].every(([stepName, expected]) => {
+        const step = candidate.steps.find((entry: any) => entry.name === stepName);
+        return (
+          step?.if === `\${{ matrix.lane == '${expected.lane}' }}` && step.run === expected.run
+        );
+      });
+    expect(hasCompleteBrowserLaneContract(browser)).toBe(true);
+    const missingWorkbenchLane = structuredClone(browser);
+    missingWorkbenchLane.strategy.matrix.lane = ["interaction", "knowledge"];
+    expect(hasCompleteBrowserLaneContract(missingWorkbenchLane)).toBe(false);
+    const misroutedWorkbenchGate = structuredClone(browser);
+    misroutedWorkbenchGate.steps.find(
+      (step: any) => step.name === "Workbench browser acceptance",
+    ).if = "${{ matrix.lane == 'knowledge' }}";
+    expect(hasCompleteBrowserLaneContract(misroutedWorkbenchGate)).toBe(false);
+
     const browserInstall = browser.steps.find(
       (step: any) => step.name === "Install pinned Playwright Chromium runtime",
     );
@@ -3054,7 +3128,7 @@ describe("workflow contracts", () => {
 
     const expectedEvidence = {
       "Upload session pin visual evidence": {
-        if: "${{ always() && (steps.session_pin_browser.outcome == 'success' || steps.session_pin_browser.outcome == 'failure') }}",
+        if: "${{ always() && matrix.lane == 'knowledge' && (steps.session_pin_browser.outcome == 'success' || steps.session_pin_browser.outcome == 'failure') }}",
         name: "sessionpin-session-pin-visual-evidence",
         path: [
           "/tmp/sessionpin-session-pin-desktop-light.png",
@@ -3066,7 +3140,7 @@ describe("workflow contracts", () => {
         ],
       },
       "Upload Codex quota visual evidence": {
-        if: "${{ always() }}",
+        if: "${{ always() && matrix.lane == 'interaction' }}",
         name: "codex-quota-codex-quota-entitlement-visual-evidence",
         path: [
           "/tmp/codex-quota-evidence/codex-quota-desktop-light.png",
@@ -3076,7 +3150,7 @@ describe("workflow contracts", () => {
         ],
       },
       "Upload responsive knowledge-surface evidence": {
-        if: "${{ always() }}",
+        if: "${{ always() && matrix.lane == 'knowledge' }}",
         name: "responsive-knowledge-surface-evidence",
         path: [
           "/tmp/knowledge-surfaces-320-light-memory.png",
@@ -3090,7 +3164,7 @@ describe("workflow contracts", () => {
         ],
       },
       "Upload workbench visual evidence": {
-        if: "${{ always() && (steps.workbench_browser.outcome == 'success' || steps.workbench_browser.outcome == 'failure') }}",
+        if: "${{ always() && matrix.lane == 'workbench' && (steps.workbench_browser.outcome == 'success' || steps.workbench_browser.outcome == 'failure') }}",
         name: "workbench-visual-evidence",
         path: [
           "/tmp/workbench-mobile-dark-dense.png",

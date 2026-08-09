@@ -361,10 +361,14 @@ jobs:
             ./apps/worker/test/context-compaction-activity.test.ts
 
   browser-acceptance:
-    name: Browser and visual acceptance
+    name: Browser and visual acceptance (${{ matrix.lane }})
     needs: automation-admission
     if: ${{ always() && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [interaction, knowledge, workbench]
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -393,6 +397,7 @@ jobs:
         run: bunx playwright install --with-deps --only-shell chromium
 
       - name: Codex quota Codex quota and entitlement browser acceptance
+        if: ${{ matrix.lane == 'interaction' }}
         env:
           # Human-only redemption recovery and allocator independence require
           # the real FORCE-RLS/OCC/PostgreSQL boundary; no skipped green path.
@@ -401,18 +406,22 @@ jobs:
         run: bun scripts/run-browser-e2e.ts ./test/e2e/codex-overview.e2e.ts
 
       - name: Queue surface browser acceptance
+        if: ${{ matrix.lane == 'interaction' }}
         id: queue_surface_browser
         run: bun scripts/run-browser-e2e.ts ./test/e2e/queue-surface.browser.e2e.ts
 
       - name: Long user-message disclosure browser acceptance
+        if: ${{ matrix.lane == 'interaction' }}
         run: bun scripts/run-browser-e2e.ts ./test/e2e/user-message-disclosure.browser.e2e.ts
 
       - name: Public realtime SDK demo browser acceptance
+        if: ${{ matrix.lane == 'interaction' }}
         env:
           OPENGENI_REALTIME_DEMO_EVIDENCE_DIR: /tmp/opengeni-realtime-demo-evidence
         run: bun scripts/run-browser-e2e.ts ./test/e2e/realtime-demo.browser.e2e.ts
 
       - name: Session pin browser acceptance
+        if: ${{ matrix.lane == 'knowledge' }}
         id: session_pin_browser
         env:
           # This browser gate must fail when its real PostgreSQL boundary is unavailable.
@@ -420,6 +429,7 @@ jobs:
         run: bun test --max-concurrency=1 --timeout 180000 ./test/e2e/session-pins.browser.e2e.ts
 
       - name: Responsive knowledge surfaces browser acceptance
+        if: ${{ matrix.lane == 'knowledge' }}
         env:
           # This gate traverses the public configured-principal API and must fail
           # rather than skip when its real PostgreSQL boundary is unavailable.
@@ -427,6 +437,7 @@ jobs:
         run: bun test --max-concurrency=1 --timeout 300000 ./test/e2e/knowledge-surfaces.browser.e2e.ts
 
       - name: Workbench browser acceptance
+        if: ${{ matrix.lane == 'workbench' }}
         id: workbench_browser
         run: bun test --max-concurrency=1 --timeout 180000 ./test/e2e/workbench.browser.e2e.ts
 
@@ -440,6 +451,7 @@ jobs:
         # `if-no-files-found: error` remains mandatory in either case.
         if: >-
           ${{ always() &&
+          matrix.lane == 'knowledge' &&
           (steps.session_pin_browser.outcome == 'success' ||
           steps.session_pin_browser.outcome == 'failure') }}
         uses: actions/upload-artifact@v7.0.1
@@ -456,7 +468,7 @@ jobs:
             /tmp/sessionpin-session-pin-mobile-375-dark.png
 
       - name: Upload Codex quota visual evidence
-        if: ${{ always() }}
+        if: ${{ always() && matrix.lane == 'interaction' }}
         uses: actions/upload-artifact@v7.0.1
         with:
           name: codex-quota-codex-quota-entitlement-visual-evidence
@@ -469,7 +481,7 @@ jobs:
             /tmp/codex-quota-evidence/codex-quota-mobile-dark.png
 
       - name: Upload responsive knowledge-surface evidence
-        if: ${{ always() }}
+        if: ${{ always() && matrix.lane == 'knowledge' }}
         uses: actions/upload-artifact@v7.0.1
         with:
           name: responsive-knowledge-surface-evidence
@@ -488,6 +500,7 @@ jobs:
       - name: Upload workbench visual evidence
         if: >-
           ${{ always() &&
+          matrix.lane == 'workbench' &&
           (steps.workbench_browser.outcome == 'success' ||
           steps.workbench_browser.outcome == 'failure') }}
         uses: actions/upload-artifact@v7.0.1
