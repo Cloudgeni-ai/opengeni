@@ -10,6 +10,7 @@ import {
 import type { ObjectStorage } from "../../packages/storage/src/index";
 import * as dbSchema from "../../packages/db/src/schema";
 import {
+  acceptSessionApprovalDecision,
   appendSessionEvents,
   applySessionTurnSettlement,
   bootstrapWorkspace,
@@ -3942,6 +3943,21 @@ async function appendOwnedEvents(
       reasoningEffortFallback: "medium",
     });
     return [accepted.accepted];
+  }
+  if (events.length === 1 && events[0]?.type === "user.approvalDecision") {
+    const event = events[0];
+    const accepted = await acceptSessionApprovalDecision(db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId,
+      subjectId: grant.subjectId,
+      payload: event.payload,
+      clientEventId: event.clientEventId ?? null,
+    });
+    if (accepted.action !== "accepted") {
+      throw new Error(`approval fixture was not accepted: session is ${accepted.sessionStatus}`);
+    }
+    return [accepted.event];
   }
   return await appendSessionEvents(db, grant.workspaceId, sessionId, events);
 }
