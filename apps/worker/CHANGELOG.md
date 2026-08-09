@@ -1,5 +1,21 @@
 # @opengeni/worker-bundle
 
+## 0.16.47
+
+### Patch Changes
+
+- Updated dependencies [7b2d5ff]
+  - @opengeni/contracts@0.42.0
+  - @opengeni/core@0.22.0
+  - @opengeni/config@0.12.9
+  - @opengeni/db@0.28.19
+  - @opengeni/documents@0.5.28
+  - @opengeni/events@0.3.99
+  - @opengeni/github@0.4.46
+  - @opengeni/observability@0.5.15
+  - @opengeni/runtime@0.18.38
+  - @opengeni/storage@0.2.83
+
 ## 0.16.46
 
 ### Patch Changes

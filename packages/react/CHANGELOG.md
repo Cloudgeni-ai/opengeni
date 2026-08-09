@@ -1,5 +1,17 @@
 # @opengeni/react
 
+## 0.50.0
+
+### Minor Changes
+
+- 7b2d5ff: Add trust-gated in-session capability recommendations, human-owned authorization
+  requests, and a GitHub owner-consent flow that returns to the initiating session.
+
+### Patch Changes
+
+- Updated dependencies [7b2d5ff]
+  - @opengeni/sdk@0.50.0
+
 ## 0.49.9
 
 ### Patch Changes
