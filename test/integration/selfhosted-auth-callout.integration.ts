@@ -16,9 +16,10 @@
 //   - an agent authenticated for workspace A is DENIED pub/sub on `agent.B.>`;
 //   - an invalid/revoked bearer is DENIED connection entirely.
 //
-// nats-server is launched via nix (`nix run nixpkgs#nats-server`) so the test needs
-// no globally-installed broker. The responder runs in-process (the SAME
-// handleAuthorizationRequest the API boots), connected as the callout `auth` user.
+// nats-server resolves from an explicit binary or PATH, then falls back to nix or
+// a digest-pinned Docker image, so the test needs no globally-installed broker.
+// The responder runs in-process (the SAME handleAuthorizationRequest the API boots),
+// connected as the callout `auth` user.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -123,13 +124,68 @@ interface RunningNats {
   serverLog: () => Promise<string>;
 }
 
+const NATS_DOCKER_IMAGE =
+  "nats:2.10.21-alpine@sha256:b76faa6b447604217b5526b8adc1229d3db5c5d2773e43ae4aea328817e7fecb";
+
+function natsServerLaunch(
+  configPath: string,
+  port: number,
+  monitorPort: number,
+): { command: string[]; cleanupCommand: string[] | null } {
+  const configured = process.env.OPENGENI_NATS_SERVER_BIN;
+  if (configured) {
+    return { command: [configured, "-c", configPath], cleanupCommand: null };
+  }
+
+  const installed = Bun.which("nats-server");
+  if (installed) {
+    return { command: [installed, "-c", configPath], cleanupCommand: null };
+  }
+
+  const nix = Bun.which("nix");
+  if (nix) {
+    return {
+      command: [nix, "run", "nixpkgs#nats-server", "--", "-c", configPath],
+      cleanupCommand: null,
+    };
+  }
+
+  const docker = Bun.which("docker");
+  if (docker) {
+    const containerName = `opengeni-authcallout-${crypto.randomUUID()}`;
+    return {
+      command: [
+        docker,
+        "run",
+        "--rm",
+        "--name",
+        containerName,
+        "--publish",
+        `127.0.0.1:${port}:${port}`,
+        "--publish",
+        `127.0.0.1:${monitorPort}:${monitorPort}`,
+        "--volume",
+        `${configPath}:/etc/nats/nats.conf:ro`,
+        NATS_DOCKER_IMAGE,
+        "-c",
+        "/etc/nats/nats.conf",
+      ],
+      cleanupCommand: [docker, "rm", "--force", containerName],
+    };
+  }
+
+  throw new Error(
+    "selfhosted auth-callout integration requires OPENGENI_NATS_SERVER_BIN, nats-server, nix, or docker",
+  );
+}
+
 /**
- * Start a nats-server (via nix) configured with auth_callout: the AUTH account holds
- * the responder's `auth`/`auth` login (the only configured auth_users), and the
- * callout `issuer` is our account public key. A client presenting any token triggers
- * the callout; the responder mints the scoped JWT placing the user into the AUTH
- * account with `agent.<ws>.>` permissions. The control plane connects as the same
- * `auth` user (broad, account-default permissions) so request/reply routes.
+ * Start a real nats-server configured with auth_callout: the AUTH account holds the
+ * responder's `auth`/`auth` login (the only configured auth_users), and the callout
+ * `issuer` is our account public key. A client presenting any token triggers the
+ * callout; the responder mints the scoped JWT placing the user into the AUTH account
+ * with `agent.<ws>.>` permissions. The control plane connects as the same `auth` user
+ * (broad, account-default permissions) so request/reply routes.
  */
 async function startNatsWithCallout(accountPublicKey: string): Promise<RunningNats> {
   const configDir = await mkdtemp(join(tmpdir(), "opengeni-authcallout-"));
@@ -179,11 +235,23 @@ authorization {
   // stalls the server under `debug:true`; the test can read it on a failure.
   const logPath = join(configDir, "nats.log");
   const logFile = Bun.file(logPath);
+  const launch = natsServerLaunch(configPath, port, monitorPort);
 
-  const proc = Bun.spawn(["nix", "run", "nixpkgs#nats-server", "--", "-c", configPath], {
+  const proc = Bun.spawn(launch.command, {
     stdout: logFile,
     stderr: logFile,
   });
+  let stopped = false;
+  const stop = async () => {
+    if (stopped) return;
+    stopped = true;
+    if (launch.cleanupCommand) {
+      const cleanup = Bun.spawn(launch.cleanupCommand, { stdout: "ignore", stderr: "ignore" });
+      await cleanup.exited.catch(() => undefined);
+    }
+    proc.kill();
+    await proc.exited.catch(() => undefined);
+  };
 
   const url = `nats://127.0.0.1:${port}`;
   // Wait for the monitor port to answer (the server is up). The control-plane
@@ -203,7 +271,7 @@ authorization {
     await Bun.sleep(250);
   }
   if (!up) {
-    proc.kill();
+    await stop();
     const err = await Bun.file(logPath)
       .text()
       .catch(() => "");
@@ -219,8 +287,7 @@ authorization {
         .text()
         .catch(() => ""),
     stop: async () => {
-      proc.kill();
-      await proc.exited.catch(() => undefined);
+      await stop();
       await rm(configDir, { recursive: true, force: true });
     },
   };
