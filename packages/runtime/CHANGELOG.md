@@ -1,5 +1,11 @@
 # @opengeni/runtime
 
+## 0.18.34
+
+### Patch Changes
+
+- 435a4f2: Split model-input shaping and SDK run-event normalization into package-private runtime modules while preserving the existing public entrypoint and exports.
+
 ## 0.18.33
 
 ### Patch Changes
