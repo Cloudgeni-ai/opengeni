@@ -110,6 +110,35 @@ CREATE TABLE "durable_learning_receipts" (
 CREATE INDEX "durable_learning_receipts_workspace_time_idx"
   ON "durable_learning_receipts" ("workspace_id", "created_at" DESC, "id" DESC);
 
+-- The selected authority records its exact compatibility result in the same
+-- transaction as the authority effect. This is immutable replay evidence, not
+-- active Memory/Documents/policy authority, and terminal replay reads it
+-- without invoking the mutable authority again.
+CREATE TABLE "durable_learning_authority_results" (
+  "account_id" uuid NOT NULL REFERENCES "managed_accounts"("id") ON DELETE CASCADE,
+  "workspace_id" uuid NOT NULL REFERENCES "workspaces"("id") ON DELETE CASCADE,
+  "attempt_id" uuid NOT NULL,
+  "input_hash" text NOT NULL,
+  "effect_kind" text NOT NULL,
+  "result" jsonb NOT NULL,
+  "created_at" timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT "durable_learning_authority_results_pk"
+    PRIMARY KEY ("account_id", "workspace_id", "attempt_id"),
+  CONSTRAINT "durable_learning_authority_results_attempt_fk"
+    FOREIGN KEY ("account_id", "workspace_id", "attempt_id")
+    REFERENCES "durable_learning_attempts"("account_id", "workspace_id", "id")
+    ON DELETE CASCADE,
+  CONSTRAINT "durable_learning_authority_results_contract_chk" CHECK (
+    "input_hash" ~ '^[0-9a-f]{64}$'
+    AND "effect_kind" IN ('memory_write', 'memory_rollback')
+    AND jsonb_typeof("result") = 'object'
+    AND octet_length("result"::text) <= 1048576
+  )
+);
+
+CREATE INDEX "durable_learning_authority_results_workspace_time_idx"
+  ON "durable_learning_authority_results" ("workspace_id", "created_at" DESC, "attempt_id" DESC);
+
 -- Coordination is deliberately separate from immutable audit evidence. A live
 -- claim excludes concurrent adapter execution; expiry lets a crashed executor
 -- retry the same authority operation id without rewriting its attempt.
@@ -184,10 +213,16 @@ CREATE TRIGGER durable_learning_receipts_immutable
   BEFORE UPDATE OR DELETE ON "durable_learning_receipts"
   FOR EACH ROW EXECUTE FUNCTION durable_learning_reject_mutation();
 
+CREATE TRIGGER durable_learning_authority_results_immutable
+  BEFORE UPDATE OR DELETE ON "durable_learning_authority_results"
+  FOR EACH ROW EXECUTE FUNCTION durable_learning_reject_mutation();
+
 ALTER TABLE "durable_learning_attempts" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "durable_learning_attempts" FORCE ROW LEVEL SECURITY;
 ALTER TABLE "durable_learning_receipts" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "durable_learning_receipts" FORCE ROW LEVEL SECURITY;
+ALTER TABLE "durable_learning_authority_results" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "durable_learning_authority_results" FORCE ROW LEVEL SECURITY;
 ALTER TABLE "durable_learning_attempt_claims" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "durable_learning_attempt_claims" FORCE ROW LEVEL SECURITY;
 
@@ -199,6 +234,10 @@ CREATE POLICY workspace_isolation ON "durable_learning_receipts"
   USING (opengeni_private.workspace_rls_visible("account_id", "workspace_id"))
   WITH CHECK (opengeni_private.workspace_rls_visible("account_id", "workspace_id"));
 
+CREATE POLICY workspace_isolation ON "durable_learning_authority_results"
+  USING (opengeni_private.workspace_rls_visible("account_id", "workspace_id"))
+  WITH CHECK (opengeni_private.workspace_rls_visible("account_id", "workspace_id"));
+
 CREATE POLICY workspace_isolation ON "durable_learning_attempt_claims"
   USING (opengeni_private.workspace_rls_visible("account_id", "workspace_id"))
   WITH CHECK (opengeni_private.workspace_rls_visible("account_id", "workspace_id"));
@@ -206,6 +245,7 @@ CREATE POLICY workspace_isolation ON "durable_learning_attempt_claims"
 REVOKE ALL ON TABLE
   "durable_learning_attempts",
   "durable_learning_receipts",
+  "durable_learning_authority_results",
   "durable_learning_attempt_claims"
   FROM PUBLIC;
 
@@ -213,7 +253,8 @@ DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
     GRANT SELECT, INSERT ON TABLE
-      "durable_learning_attempts", "durable_learning_receipts"
+      "durable_learning_attempts", "durable_learning_receipts",
+      "durable_learning_authority_results"
       TO opengeni_app;
     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
       "durable_learning_attempt_claims"

@@ -12,6 +12,7 @@ import {
 import {
   correctWorkspaceMemory,
   createDurableLearningAttemptLedger,
+  getDurableLearningMemoryWriteResult,
   saveWorkspaceMemory,
   type Database,
   type MemoryEmbedder,
@@ -145,6 +146,10 @@ export function createWorkspaceMemoryDurableLearningAdapter(
         id: memoryId,
         reason,
         sessionId: attempt.sessionId,
+        durableLearningOperation: {
+          attemptId: attempt.id,
+          inputHash: attempt.inputHash,
+        },
       });
       return {
         resource: {
@@ -283,26 +288,22 @@ export async function routeLegacyWorkspaceMemoryWrite(
     (router.receipt.outcome === "applied" || router.receipt.outcome === "noop") &&
     router.receipt.resource?.surface === "memory"
   ) {
-    memory = await saveWorkspaceMemory(
-      input.db,
-      {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        text: input.text,
-        kind: input.kind,
-        ...(input.confidence !== undefined ? { confidence: input.confidence } : {}),
-        ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
-        ...(input.replacesId ? { replacesId: input.replacesId } : {}),
-        metadata: input.metadata ?? {},
-        durableLearningOperation: {
-          attemptId: router.receipt.attemptId,
-          inputHash: router.receipt.inputHash,
-        },
-        origin: input.actor.kind === "human" ? "human" : "agent",
-      },
-      input.embedder,
-    );
+    memory = await getDurableLearningMemoryWriteResult(input.db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      attemptId: router.receipt.attemptId,
+      inputHash: router.receipt.inputHash,
+    });
+    if (
+      memory === null ||
+      memory.memory.id !== router.receipt.resource.id ||
+      memory.memory.updatedAt !== router.receipt.resource.version ||
+      memory.memory.status !== router.receipt.resource.status
+    ) {
+      throw new Error(
+        "Completed durable-learning Memory replay has no matching immutable authority result",
+      );
+    }
   }
   return { router, memory };
 }

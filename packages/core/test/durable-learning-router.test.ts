@@ -223,7 +223,11 @@ describe("durable learning route planner", () => {
     const result = planDurableLearningWrite(
       request({ origin: "autonomous_learning" }),
       context({
-        learningPolicy: { mode: "suggest", snapshotId: "snapshot-1", revisionId: "revision-1" },
+        learningPolicy: {
+          mode: "suggest",
+          snapshotId: "snapshot-1",
+          revisionId: "revision-1",
+        },
       }),
     );
     expect(result).toMatchObject({
@@ -231,6 +235,170 @@ describe("durable learning route planner", () => {
       authority: "proposal",
       policySnapshotId: "snapshot-1",
     });
+  });
+
+  test("enforces autonomous policy modes before routing every surface", () => {
+    const cases: Array<{
+      name: string;
+      request: DurableLearningWriteRequest;
+      context: DurableLearningAuthorityContext;
+      suggestAuthority: "proposal" | "evidence_only";
+      automaticAuthority: "active" | "evidence_only";
+    }> = [
+      {
+        name: "memory",
+        request: request({ origin: "autonomous_learning" }),
+        context: context(),
+        suggestAuthority: "proposal",
+        automaticAuthority: "active",
+      },
+      {
+        name: "preference_registry",
+        request: request({
+          origin: "autonomous_learning",
+          targetSurface: "preference_registry",
+          subject: {
+            kind: "procedure",
+            content: "Run focused checks before broad checks.",
+            stableKey: "verification.focused-first",
+            title: "Focused checks first",
+            summary: "Run focused checks before broad checks.",
+            roleKey: null,
+            replacesResourceId: null,
+            legacyMemory: null,
+          },
+        }),
+        context: context(),
+        suggestAuthority: "proposal",
+        automaticAuthority: "active",
+      },
+      {
+        name: "instruction_policy",
+        request: request({
+          origin: "autonomous_learning",
+          targetSurface: "instruction_policy",
+          subject: {
+            kind: "workspace_charter",
+            content: "Use the canonical operating charter.",
+            stableKey: null,
+            title: null,
+            summary: null,
+            roleKey: null,
+            replacesResourceId: null,
+            legacyMemory: null,
+          },
+        }),
+        context: context(),
+        suggestAuthority: "proposal",
+        automaticAuthority: "active",
+      },
+      {
+        name: "company_profile",
+        request: request({
+          origin: "autonomous_learning",
+          requestedScope: { kind: "organization" },
+          targetSurface: "company_profile",
+          subject: {
+            kind: "company_identity",
+            content: "OpenGeni builds dependable autonomous infrastructure.",
+            stableKey: null,
+            title: null,
+            summary: null,
+            roleKey: null,
+            replacesResourceId: null,
+            legacyMemory: null,
+          },
+        }),
+        context: context({
+          grants: { ...context().grants, organization: true },
+          availableSurfaces: {
+            ...context().availableSurfaces,
+            companyProfile: true,
+          },
+        }),
+        suggestAuthority: "proposal",
+        automaticAuthority: "active",
+      },
+      {
+        name: "documents_evidence",
+        request: request({
+          origin: "autonomous_learning",
+          requestedAuthority: "evidence_only",
+          targetSurface: "documents_evidence",
+          subject: {
+            kind: "document",
+            content: "Immutable evidence for the durable-learning decision.",
+            stableKey: null,
+            title: null,
+            summary: null,
+            roleKey: null,
+            replacesResourceId: null,
+            legacyMemory: null,
+          },
+        }),
+        context: context(),
+        suggestAuthority: "evidence_only",
+        automaticAuthority: "evidence_only",
+      },
+    ];
+
+    for (const item of cases) {
+      expect(
+        planDurableLearningWrite(item.request, {
+          ...item.context,
+          learningPolicy: null,
+        }),
+        `${item.name} missing policy`,
+      ).toMatchObject({
+        disposition: "rejected",
+        code: "LEARNING_POLICY_REQUIRED",
+      });
+      expect(
+        planDurableLearningWrite(item.request, {
+          ...item.context,
+          learningPolicy: {
+            mode: "off",
+            snapshotId: "off",
+            revisionId: "off-revision",
+          },
+        }),
+        `${item.name} off policy`,
+      ).toMatchObject({
+        disposition: "rejected",
+        code: "LEARNING_POLICY_OFF",
+        policySnapshotId: "off",
+      });
+      expect(
+        planDurableLearningWrite(item.request, {
+          ...item.context,
+          learningPolicy: {
+            mode: "suggest",
+            snapshotId: "suggest",
+            revisionId: "suggest-revision",
+          },
+        }),
+        `${item.name} suggest policy`,
+      ).toMatchObject({
+        disposition: "route",
+        authority: item.suggestAuthority,
+        policySnapshotId: "suggest",
+      });
+      expect(
+        planDurableLearningWrite(item.request, {
+          ...item.context,
+          learningPolicy: {
+            mode: "automatic",
+            snapshotId: "automatic",
+            revisionId: "automatic-revision",
+          },
+        }),
+        `${item.name} automatic policy`,
+      ).toMatchObject({
+        disposition: "route",
+        authority: item.automaticAuthority,
+        policySnapshotId: "automatic",
+      });
+    }
   });
 
   test("fails closed for unavailable organization company profile authority", () => {
@@ -251,7 +419,10 @@ describe("durable learning route planner", () => {
       }),
       context({ grants: { ...context().grants, organization: true } }),
     );
-    expect(result).toMatchObject({ disposition: "rejected", code: "SURFACE_NOT_AVAILABLE" });
+    expect(result).toMatchObject({
+      disposition: "rejected",
+      code: "SURFACE_NOT_AVAILABLE",
+    });
   });
 
   test("returns deterministic clarification fields instead of guessing", () => {
@@ -595,4 +766,108 @@ describe("durable learning router service", () => {
     );
     expect(sideEffects).toBe(1);
   });
+
+  for (const failureMode of ["adapter", "heartbeat", "receipt"] as const) {
+    test(`converges rollback after ${failureMode} outcome uncertainty`, async () => {
+      const { ledger, claims, receipts } = memoryLedger();
+      const originalRenew = ledger.renewAttemptClaim;
+      const originalComplete = ledger.completeAttempt;
+      let allowRollbackRenewal = failureMode !== "heartbeat";
+      let failRollbackReceipt = failureMode === "receipt";
+      ledger.renewAttemptClaim = async (attempt, claimId) =>
+        attempt.request.operation !== "rollback" || allowRollbackRenewal
+          ? await originalRenew(attempt, claimId)
+          : false;
+      ledger.completeAttempt = async (attempt, receipt, claimId) => {
+        if (attempt.request.operation === "rollback" && failRollbackReceipt) {
+          failRollbackReceipt = false;
+          throw new Error("receipt connection lost after authority commit");
+        }
+        return await originalComplete(attempt, receipt, claimId);
+      };
+
+      let rollbackCommitted = false;
+      let rollbackMutations = 0;
+      let throwAfterCommit = failureMode === "adapter";
+      const ports = {
+        ledger,
+        ...(failureMode === "heartbeat" ? { claimHeartbeatMs: 1 } : {}),
+        authorities: {
+          memory: {
+            async write() {
+              return {
+                outcome: "applied" as const,
+                resource: {
+                  surface: "memory" as const,
+                  id: "memory-rollback-recovery",
+                  version: "1",
+                  status: "active",
+                },
+                effectiveBoundary: "next_accepted_attempt" as const,
+                rollback: {
+                  supported: true,
+                  targetAttemptId: null,
+                  token: "memory:rollback-recovery",
+                },
+              };
+            },
+            async rollback() {
+              if (!rollbackCommitted) {
+                rollbackCommitted = true;
+                rollbackMutations += 1;
+              }
+              if (failureMode === "heartbeat") await Bun.sleep(10);
+              if (throwAfterCommit) {
+                throwAfterCommit = false;
+                throw new Error("connection lost after rollback commit");
+              }
+              return {
+                resource: {
+                  surface: "memory" as const,
+                  id: "memory-rollback-recovery",
+                  version: "2",
+                  status: "archived",
+                },
+                effectiveBoundary: "next_accepted_attempt" as const,
+              };
+            },
+          },
+        },
+      };
+      await routeDurableLearning(request(), context(), ports);
+      const rollbackAttemptId = {
+        adapter: "10000000-0000-4000-8000-000000000021",
+        heartbeat: "10000000-0000-4000-8000-000000000022",
+        receipt: "10000000-0000-4000-8000-000000000023",
+      }[failureMode];
+      const rollbackRequest: DurableLearningRollbackRequest = {
+        contractVersion: DURABLE_LEARNING_CONTRACT_VERSION,
+        operation: "rollback",
+        attemptId: rollbackAttemptId,
+        origin: "human_admin",
+        targetAttemptId: ATTEMPT_ID,
+        reason: `recover ${failureMode} rollback`,
+      };
+
+      await expect(routeDurableLearning(rollbackRequest, context(), ports)).rejects.toBeInstanceOf(
+        DurableLearningAuthorityOutcomeUnknownError,
+      );
+      expect(receipts.has(rollbackAttemptId)).toBe(false);
+      claims.delete(rollbackAttemptId);
+      allowRollbackRenewal = true;
+
+      const retried = await routeDurableLearning(rollbackRequest, context(), ports);
+      expect(retried.receipt.outcome).toBe("rolled_back");
+      expect(retried.receipt.resource).toMatchObject({
+        id: "memory-rollback-recovery",
+        version: "2",
+        status: "archived",
+      });
+      expect(rollbackMutations).toBe(1);
+      expect((await routeDurableLearning(rollbackRequest, context(), ports)).receipt).toEqual(
+        retried.receipt,
+      );
+      expect(rollbackMutations).toBe(1);
+    });
+  }
 });

@@ -1,6 +1,11 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { bootstrapWorkspace, createDb } from "@opengeni/db";
+import {
+  bootstrapWorkspace,
+  correctWorkspaceMemory,
+  createDb,
+  saveWorkspaceMemory,
+} from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { routeLegacyWorkspaceMemoryWrite } from "../src/domain/durable-learning-memory-adapter";
 
@@ -79,6 +84,13 @@ describe("Workspace Memory durable-learning adapter", () => {
       updated: true,
       superseded: null,
     });
+    const createdAfterUpdate = await routeLegacyWorkspaceMemoryWrite({
+      ...base,
+      text: "Create through one stable durable operation",
+      kind: "semantic",
+    });
+    expect(createdAfterUpdate.router.idempotency).toBe("replayed");
+    expect(createdAfterUpdate.memory).toEqual(created.memory);
 
     const superseded = await routeLegacyWorkspaceMemoryWrite({
       ...base,
@@ -99,5 +111,50 @@ describe("Workspace Memory durable-learning adapter", () => {
       superseded: { id: updated.memory!.memory.id },
       updated: false,
     });
+    await correctWorkspaceMemory(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      id: superseded.memory!.memory.id,
+      reason: "change lifecycle after the immutable replacement result",
+    });
+    const supersededAfterArchive = await routeLegacyWorkspaceMemoryWrite({
+      ...base,
+      text: "Replacement through one stable durable operation",
+      kind: "decision",
+      replacesId: updated.memory!.memory.id.slice(0, 8),
+    });
+    expect(supersededAfterArchive.router.idempotency).toBe("replayed");
+    expect(supersededAfterArchive.memory).toEqual(superseded.memory);
+
+    const noOpWinner = await saveWorkspaceMemory(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      text: "No-op compatibility result survives lifecycle changes",
+      kind: "semantic",
+      origin: "human",
+    });
+    const noOp = await routeLegacyWorkspaceMemoryWrite({
+      ...base,
+      text: noOpWinner.memory.text,
+      kind: "semantic",
+    });
+    expect(noOp.router.receipt.outcome).toBe("noop");
+    expect(noOp.memory).toMatchObject({
+      memory: { id: noOpWinner.memory.id, status: "active" },
+      deduped: true,
+    });
+    await correctWorkspaceMemory(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      id: noOpWinner.memory.id,
+      reason: "archive after the immutable no-op result",
+    });
+    const noOpAfterArchive = await routeLegacyWorkspaceMemoryWrite({
+      ...base,
+      text: noOpWinner.memory.text,
+      kind: "semantic",
+    });
+    expect(noOpAfterArchive.router.idempotency).toBe("replayed");
+    expect(noOpAfterArchive.memory).toEqual(noOp.memory);
   });
 });

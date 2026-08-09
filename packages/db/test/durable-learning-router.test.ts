@@ -9,6 +9,7 @@ import {
 import { eq } from "drizzle-orm";
 import {
   bootstrapWorkspace,
+  correctWorkspaceMemory,
   createDb,
   createDurableLearningAttemptLedger,
   DurableLearningLedgerConflictError,
@@ -142,6 +143,24 @@ function receipt(attempt: DurableLearningAttempt): DurableLearningReceipt {
   };
 }
 
+async function reserveMemoryOperation(input: {
+  accountId: string;
+  workspaceId: string;
+  subjectId: string;
+  operation: { attemptId: string; inputHash: string };
+}): Promise<void> {
+  const attempt = learningAttempt({
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    subjectId: input.subjectId,
+    attemptId: input.operation.attemptId,
+  });
+  await createDurableLearningAttemptLedger(client!.db).reserveAttempt({
+    ...attempt,
+    inputHash: input.operation.inputHash,
+  });
+}
+
 describe("durable learning Postgres ledger", () => {
   test("replays one immutable attempt and terminal receipt", async () => {
     if (!client) return;
@@ -239,6 +258,12 @@ describe("durable learning Postgres ledger", () => {
       attemptId: randomUUID(),
       inputHash: "d".repeat(64),
     };
+    await reserveMemoryOperation({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: grant.subjectId,
+      operation: updateOperation,
+    });
     const updated = await saveWorkspaceMemory(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -268,6 +293,12 @@ describe("durable learning Postgres ledger", () => {
       attemptId: randomUUID(),
       inputHash: "e".repeat(64),
     };
+    await reserveMemoryOperation({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: grant.subjectId,
+      operation: supersedeOperation,
+    });
     const superseded = await saveWorkspaceMemory(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -311,6 +342,12 @@ describe("durable learning Postgres ledger", () => {
       attemptId: randomUUID(),
       inputHash: "f".repeat(64),
     };
+    await reserveMemoryOperation({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: grant.subjectId,
+      operation: dedupeOperation,
+    });
     const deduped = await saveWorkspaceMemory(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -339,5 +376,152 @@ describe("durable learning Postgres ledger", () => {
       deduped: true,
       superseded: { id: old.memory.id },
     });
+  });
+
+  test("replays a completed Memory no-op from immutable output after lifecycle change", async () => {
+    if (!client) return;
+    const grant = await workspace("memory-noop-lifecycle-replay");
+    const existing = await saveWorkspaceMemory(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      text: "Immutable no-op replay winner",
+      kind: "semantic",
+      origin: "human",
+    });
+    const attempt = learningAttempt({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: grant.subjectId,
+      content: existing.memory.text,
+    });
+    const ledger = createDurableLearningAttemptLedger(client.db);
+    await ledger.reserveAttempt(attempt);
+    const operation = { attemptId: attempt.id, inputHash: attempt.inputHash };
+    const first = await saveWorkspaceMemory(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      text: existing.memory.text,
+      kind: "semantic",
+      origin: "human",
+      durableLearningOperation: operation,
+    });
+    expect(first).toMatchObject({
+      memory: { id: existing.memory.id, status: "active" },
+      deduped: true,
+      dedupeReason: "exact",
+      updated: false,
+    });
+
+    await correctWorkspaceMemory(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      id: existing.memory.id,
+      reason: "lifecycle changed after the immutable no-op",
+    });
+    const replay = await saveWorkspaceMemory(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      text: existing.memory.text,
+      kind: "semantic",
+      origin: "human",
+      durableLearningOperation: operation,
+    });
+    expect(replay).toEqual(first);
+
+    const memories = await withWorkspaceRls(client.db, grant.workspaceId, async (scopedDb) =>
+      scopedDb
+        .select({ id: schema.knowledgeMemories.id })
+        .from(schema.knowledgeMemories)
+        .where(eq(schema.knowledgeMemories.workspaceId, grant.workspaceId)),
+    );
+    const authorityResults = await withWorkspaceRls(
+      client.db,
+      grant.workspaceId,
+      async (scopedDb) =>
+        scopedDb
+          .select({
+            attemptId: schema.durableLearningAuthorityResults.attemptId,
+          })
+          .from(schema.durableLearningAuthorityResults)
+          .where(eq(schema.durableLearningAuthorityResults.attemptId, attempt.id)),
+    );
+    expect(memories).toHaveLength(1);
+    expect(authorityResults).toEqual([{ attemptId: attempt.id }]);
+  });
+
+  test("replays one Memory rollback effect without mutating the row twice", async () => {
+    if (!client) return;
+    const grant = await workspace("memory-rollback-convergence");
+    const created = await saveWorkspaceMemory(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      text: "Rollback exactly once",
+      kind: "decision",
+      origin: "human",
+    });
+    const rollbackAttemptId = randomUUID();
+    const rollbackAttempt: DurableLearningAttempt = {
+      ...learningAttempt({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        subjectId: grant.subjectId,
+        attemptId: rollbackAttemptId,
+      }),
+      inputHash: "9".repeat(64),
+      request: {
+        contractVersion: DURABLE_LEARNING_CONTRACT_VERSION,
+        operation: "rollback",
+        attemptId: rollbackAttemptId,
+        origin: "human_admin",
+        targetAttemptId: randomUUID(),
+        reason: "archive the original result",
+      },
+    };
+    const ledger = createDurableLearningAttemptLedger(client.db);
+    await ledger.reserveAttempt(rollbackAttempt);
+    const operation = {
+      attemptId: rollbackAttempt.id,
+      inputHash: rollbackAttempt.inputHash,
+    };
+    const first = await correctWorkspaceMemory(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      id: created.memory.id,
+      reason: "archive the original result",
+      durableLearningOperation: operation,
+    });
+    const replay = await correctWorkspaceMemory(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      id: created.memory.id,
+      reason: "archive the original result",
+      durableLearningOperation: operation,
+    });
+    expect(replay).toEqual(first);
+
+    const [row] = await withWorkspaceRls(client.db, grant.workspaceId, async (scopedDb) =>
+      scopedDb
+        .select({
+          status: schema.knowledgeMemories.status,
+          updatedAt: schema.knowledgeMemories.updatedAt,
+        })
+        .from(schema.knowledgeMemories)
+        .where(eq(schema.knowledgeMemories.id, created.memory.id))
+        .limit(1),
+    );
+    const authorityResults = await withWorkspaceRls(
+      client.db,
+      grant.workspaceId,
+      async (scopedDb) =>
+        scopedDb
+          .select({
+            attemptId: schema.durableLearningAuthorityResults.attemptId,
+          })
+          .from(schema.durableLearningAuthorityResults)
+          .where(eq(schema.durableLearningAuthorityResults.attemptId, rollbackAttempt.id)),
+    );
+    expect(row?.status).toBe("archived");
+    expect(row?.updatedAt.toISOString()).toBe(first.memory.updatedAt);
+    expect(authorityResults).toEqual([{ attemptId: rollbackAttempt.id }]);
   });
 });

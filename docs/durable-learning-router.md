@@ -76,9 +76,11 @@ rejections, not policy drafts or Memory fallbacks.
 The router consumes an already-resolved immutable learning-policy snapshot; it
 does not implement policy storage or resolution. Autonomous learning:
 
-- rejects when no snapshot exists or the mode is `off`;
-- routes to proposal authority in `suggest` mode, even if active authority was
-  requested;
+- rejects every target surface, including Documents/RAG evidence, when no
+  snapshot exists or the mode is `off`;
+- routes mutable authorities to proposal authority in `suggest` mode, even if
+  active authority was requested; Documents/RAG remains `evidence_only` after
+  passing the same policy gate;
 - may retain active authority in `automatic` mode only when the frozen context
   also grants activation.
 
@@ -92,7 +94,10 @@ services directly.
 `attemptId` is the durable operation identity. The input hash covers the exact
 request plus frozen authority context. Reusing an attempt id with different
 input is rejected. An exact replay returns the original immutable receipt and
-does not invoke an authority adapter again.
+does not invoke an authority adapter again. A terminal compatibility replay is
+read-only too: it loads the authority's immutable result snapshot and verifies
+that its resource identity, version, and status still match the receipt rather
+than calling a mutating adapter to reconstruct current state.
 
 The router records the immutable attempt before invoking the selected adapter.
 A separate renewable execution claim excludes concurrent invocation for the
@@ -100,7 +105,11 @@ same pending attempt; it is coordination state, not learning authority or audit
 history. A crashed executor's expired claim can be replaced, and the successor
 retries the same attempt id. Every adapter receives that attempt id as its
 operation identity and must converge a crash-gap retry without duplicating
-authority state. A concurrent caller receives typed `ATTEMPT_IN_PROGRESS`
+authority state. The current Memory adapter binds its write or rollback effect
+and an immutable authority-result row to one RLS transaction under an
+attempt-scoped advisory lock. A crash therefore commits both or neither; after
+an uncertain response, the same attempt reads the stored result without a
+second mutation. A concurrent caller receives typed `ATTEMPT_IN_PROGRESS`
 rather than invoking a second adapter. The terminal receipt records:
 
 - deterministic route/rejection/clarification code and reasons;
@@ -115,7 +124,9 @@ already have committed. It never creates a false terminal failure receipt: the
 immutable attempt remains pending, its claim prevents overlap until expiry, and
 the caller retries the same attempt id. An adapter may expose a definitive
 `AUTHORITY_WRITE_FAILED` receipt only when it can prove no authority effect
-occurred; canonical authority audit data remains in its own ledger.
+occurred; canonical authority audit data remains in its own ledger. Failure to
+persist a terminal router receipt after a successful authority write or
+rollback is also outcome-unknown, never proof that the authority effect failed.
 
 ## Rollback
 
@@ -134,7 +145,10 @@ Authority adapters preserve their native history semantics: Memory correction
 or archival, Preference Registry correction/supersession lifecycle,
 instruction-policy rollback activation events, company-profile revision
 rollback when that authority supplies it, and evidence
-revocation/supersession rather than destructive deletion.
+revocation/supersession rather than destructive deletion. The Memory rollback
+adapter uses the rollback attempt id as its native operation identity, so a
+post-effect retry returns the immutable archived result and cannot archive or
+emit the authority effect twice.
 
 ## Compatibility and deliberate non-goals
 
@@ -153,7 +167,10 @@ Workspace Memory stamps the exact attempt/input identity onto a created or
 in-place-updated resource and stamps supersession convergence evidence onto the
 retired target. A retry can therefore reconstruct create, update,
 insert-and-supersede, or dedupe-to-existing outcomes even when a short target id
-became terminal after the first commit.
+became terminal after the first commit. The immutable authority-result snapshot
+is the replay source of truth; those resource markers remain convergence and
+audit evidence rather than a license to derive a different result from later
+lifecycle state.
 
 This slice deliberately does not implement:
 

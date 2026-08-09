@@ -9280,6 +9280,13 @@ export type SaveWorkspaceMemoryInput = {
   durableLearningOperation?: { attemptId: string; inputHash: string } | null | undefined;
 };
 
+export type DurableLearningMemoryOperation = {
+  accountId: string;
+  workspaceId: string;
+  attemptId: string;
+  inputHash: string;
+};
+
 export type SaveWorkspaceMemoryResult = {
   memory: KnowledgeMemory;
   // true → a matching record already existed; nothing new was inserted (NOOP).
@@ -9301,6 +9308,7 @@ export type CorrectWorkspaceMemoryInput = {
   reason?: string | undefined;
   replacementText?: string | undefined;
   sessionId?: string | null | undefined;
+  durableLearningOperation?: { attemptId: string; inputHash: string } | null | undefined;
 };
 
 export type CorrectWorkspaceMemoryResult = {
@@ -9493,6 +9501,93 @@ async function findDurableLearningMemoryOperationRows(
   return { owned: owned[0] ?? null, superseded: superseded[0] ?? null };
 }
 
+type DurableLearningMemoryEffectKind = "memory_write" | "memory_rollback";
+
+async function durableLearningMemoryAuthorityResult<T>(
+  scopedDb: Database,
+  operation: DurableLearningMemoryOperation,
+  effectKind: DurableLearningMemoryEffectKind,
+): Promise<T | null> {
+  const [row] = await scopedDb
+    .select({
+      inputHash: schema.durableLearningAuthorityResults.inputHash,
+      effectKind: schema.durableLearningAuthorityResults.effectKind,
+      result: schema.durableLearningAuthorityResults.result,
+    })
+    .from(schema.durableLearningAuthorityResults)
+    .where(
+      and(
+        eq(schema.durableLearningAuthorityResults.accountId, operation.accountId),
+        eq(schema.durableLearningAuthorityResults.workspaceId, operation.workspaceId),
+        eq(schema.durableLearningAuthorityResults.attemptId, operation.attemptId),
+      ),
+    )
+    .limit(1);
+  if (!row) return null;
+  if (row.inputHash !== operation.inputHash || row.effectKind !== effectKind) {
+    throw new Error("Durable-learning authority result conflicts with its immutable attempt");
+  }
+  return row.result as T;
+}
+
+async function recordDurableLearningMemoryAuthorityResult<T extends object>(
+  scopedDb: Database,
+  operation: DurableLearningMemoryOperation,
+  effectKind: DurableLearningMemoryEffectKind,
+  result: T,
+): Promise<T> {
+  const [created] = await scopedDb
+    .insert(schema.durableLearningAuthorityResults)
+    .values({
+      accountId: operation.accountId,
+      workspaceId: operation.workspaceId,
+      attemptId: operation.attemptId,
+      inputHash: operation.inputHash,
+      effectKind,
+      result,
+    })
+    .returning({ result: schema.durableLearningAuthorityResults.result });
+  if (!created) {
+    throw new Error("Durable-learning authority result was not recorded");
+  }
+  return created.result as T;
+}
+
+async function lockDurableLearningMemoryAuthorityOperation(
+  scopedDb: Database,
+  operation: DurableLearningMemoryOperation,
+): Promise<void> {
+  await scopedDb.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`durable-learning-authority:${operation.accountId}:${operation.workspaceId}:${operation.attemptId}`}, 0::bigint))`,
+  );
+}
+
+export async function getDurableLearningMemoryWriteResult(
+  db: Database,
+  operation: DurableLearningMemoryOperation,
+): Promise<SaveWorkspaceMemoryResult | null> {
+  return await withWorkspaceRls(db, operation.workspaceId, async (scopedDb) =>
+    durableLearningMemoryAuthorityResult<SaveWorkspaceMemoryResult>(
+      scopedDb,
+      operation,
+      "memory_write",
+    ),
+  );
+}
+
+export async function getDurableLearningMemoryRollbackResult(
+  db: Database,
+  operation: DurableLearningMemoryOperation,
+): Promise<CorrectWorkspaceMemoryResult | null> {
+  return await withWorkspaceRls(db, operation.workspaceId, async (scopedDb) =>
+    durableLearningMemoryAuthorityResult<CorrectWorkspaceMemoryResult>(
+      scopedDb,
+      operation,
+      "memory_rollback",
+    ),
+  );
+}
+
 // Resolve a short prefix or full uuid to the full id within a workspace. Full
 // uuid lookup is status-agnostic so correction/archive paths can still surface a
 // clear terminal-row result; prefix lookup is restricted to non-terminal rows
@@ -9560,6 +9655,19 @@ export async function saveWorkspaceMemory(
   }
   const textHash = hashMemoryText(exactText);
   const kind: KnowledgeMemoryKind = input.kind ?? "semantic";
+  const durableOperation = input.durableLearningOperation
+    ? {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        attemptId: input.durableLearningOperation.attemptId,
+        inputHash: input.durableLearningOperation.inputHash,
+      }
+    : null;
+
+  if (durableOperation) {
+    const replay = await getDurableLearningMemoryWriteResult(db, durableOperation);
+    if (replay) return replay;
+  }
 
   // Embed fail-soft, OUTSIDE the transaction: a provider error must never block a
   // write (the row stays keyword-searchable). Mirrors indexDocumentNow.
@@ -9582,6 +9690,27 @@ export async function saveWorkspaceMemory(
   }
 
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    if (durableOperation) {
+      await lockDurableLearningMemoryAuthorityOperation(scopedDb, durableOperation);
+      const replay = await durableLearningMemoryAuthorityResult<SaveWorkspaceMemoryResult>(
+        scopedDb,
+        durableOperation,
+        "memory_write",
+      );
+      if (replay) return replay;
+    }
+    const complete = async (
+      result: SaveWorkspaceMemoryResult,
+    ): Promise<SaveWorkspaceMemoryResult> =>
+      durableOperation
+        ? await recordDurableLearningMemoryAuthorityResult(
+            scopedDb,
+            durableOperation,
+            "memory_write",
+            result,
+          )
+        : result;
+
     const operationRows = await findDurableLearningMemoryOperationRows(scopedDb, input);
     if (operationRows.superseded?.supersededById) {
       const [resource] = await scopedDb
@@ -9595,8 +9724,9 @@ export async function saveWorkspaceMemory(
         )
         .limit(1);
       if (resource && operationRows.superseded.status === "superseded") {
-        const reason = operationRows.superseded.metadata["durableLearningSupersededByDedupeReason"];
-        return {
+        const reason =
+          operationRows.superseded.metadata["durableLearningSupersededByDedupeReason"];
+        return await complete({
           memory: mapKnowledgeMemory(resource),
           deduped: reason === "exact" || reason === "near",
           dedupeReason: reason === "exact" || reason === "near" ? reason : null,
@@ -9604,12 +9734,12 @@ export async function saveWorkspaceMemory(
           supersededId: operationRows.superseded.id,
           updated: false,
           embedded: embedding !== null,
-        };
+        });
       }
     }
     const ownedOperationKind = operationRows.owned?.metadata["durableLearningOperationKind"];
     if (operationRows.owned && ownedOperationKind === "create" && !input.replacesId) {
-      return {
+      return await complete({
         memory: mapKnowledgeMemory(operationRows.owned),
         deduped: false,
         dedupeReason: null,
@@ -9617,10 +9747,10 @@ export async function saveWorkspaceMemory(
         supersededId: null,
         updated: false,
         embedded: embedding !== null,
-      };
+      });
     }
     if (operationRows.owned && ownedOperationKind === "update") {
-      return {
+      return await complete({
         memory: mapKnowledgeMemory(operationRows.owned),
         deduped: false,
         dedupeReason: null,
@@ -9628,7 +9758,7 @@ export async function saveWorkspaceMemory(
         supersededId: null,
         updated: true,
         embedded: embedding !== null,
-      };
+      });
     }
 
     // Resolve the supersession target first so an invalid replaces_id fails before
@@ -9801,7 +9931,7 @@ export async function saveWorkspaceMemory(
       .limit(replacesFullId ? 2 : 1);
     const exact = exactMatches.find((row) => row.id !== replacesFullId) ?? exactMatches[0];
     if (exact) {
-      return await dedupeToExisting(exact, "exact");
+      return await complete(await dedupeToExisting(exact, "exact"));
     }
 
     // Near-dup gate: top-N cosine neighbours among agent-visible rows with a
@@ -9843,7 +9973,7 @@ export async function saveWorkspaceMemory(
           )
           .limit(1);
         if (row) {
-          return await dedupeToExisting(row, "near");
+          return await complete(await dedupeToExisting(row, "near"));
         }
       }
     }
@@ -9914,7 +10044,7 @@ export async function saveWorkspaceMemory(
       if (!winner) {
         throw error;
       }
-      return await dedupeToExisting(winner, "exact");
+      return await complete(await dedupeToExisting(winner, "exact"));
     }
     if (!inserted) {
       throw new Error("Failed to save workspace memory");
@@ -9946,7 +10076,7 @@ export async function saveWorkspaceMemory(
       superseded = old ? mapKnowledgeMemory(old) : null;
     }
 
-    return {
+    return await complete({
       memory: mapKnowledgeMemory(inserted),
       deduped: false,
       dedupeReason: null,
@@ -9954,7 +10084,7 @@ export async function saveWorkspaceMemory(
       supersededId: superseded?.id ?? null,
       updated: false,
       embedded: embedding !== null,
-    };
+    });
   });
 }
 
@@ -9964,7 +10094,18 @@ export async function correctWorkspaceMemory(
   embedder?: MemoryEmbedder,
 ): Promise<CorrectWorkspaceMemoryResult> {
   const replacementText = input.replacementText;
+  const durableOperation = input.durableLearningOperation
+    ? {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        attemptId: input.durableLearningOperation.attemptId,
+        inputHash: input.durableLearningOperation.inputHash,
+      }
+    : null;
   if (replacementText !== undefined) {
+    if (durableOperation) {
+      throw new Error("Durable-learning rollback does not support replacement correction");
+    }
     // Correction WITH a replacement is a full supersede through the one write gate.
     const [old] = await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
       const fullId = await resolveWorkspaceMemoryId(scopedDb, input.workspaceId, input.id);
@@ -10014,7 +10155,21 @@ export async function correctWorkspaceMemory(
   }
 
   // No replacement → archive the record.
+  if (durableOperation) {
+    const replay = await getDurableLearningMemoryRollbackResult(db, durableOperation);
+    if (replay) return replay;
+  }
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    if (durableOperation) {
+      await lockDurableLearningMemoryAuthorityOperation(scopedDb, durableOperation);
+      const replay = await durableLearningMemoryAuthorityResult<CorrectWorkspaceMemoryResult>(
+        scopedDb,
+        durableOperation,
+        "memory_rollback",
+      );
+      if (replay) return replay;
+    }
+
     const fullId = await resolveWorkspaceMemoryId(scopedDb, input.workspaceId, input.id);
     if (!fullId) {
       throw new Error(`Memory "${input.id}" not found in this workspace.`);
@@ -10053,11 +10208,19 @@ export async function correctWorkspaceMemory(
     if (!archived) {
       throw new Error(`Memory "${input.id}" not found in this workspace.`);
     }
-    return {
+    const result: CorrectWorkspaceMemoryResult = {
       action: "archived",
       memory: mapKnowledgeMemory(archived),
       replacement: null,
     };
+    return durableOperation
+      ? await recordDurableLearningMemoryAuthorityResult(
+          scopedDb,
+          durableOperation,
+          "memory_rollback",
+          result,
+        )
+      : result;
   });
 }
 

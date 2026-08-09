@@ -239,6 +239,28 @@ function activeAuthority(
   request: DurableLearningWriteRequest,
   context: DurableLearningAuthorityContext,
 ): DurableLearningRouteDecision | "active" | "proposal" | "evidence_only" {
+  if (request.origin === "autonomous_learning") {
+    if (context.learningPolicy === null) {
+      return decision({
+        disposition: "rejected",
+        code: "LEARNING_POLICY_REQUIRED",
+        destination: request.targetSurface as DurableLearningResolvedSurface,
+        scope: request.requestedScope as DurableLearningResolvedScope,
+        reasons: ["Autonomous learning requires an immutable resolved learning-policy snapshot."],
+      });
+    }
+    if (context.learningPolicy.mode === "off") {
+      return decision({
+        disposition: "rejected",
+        code: "LEARNING_POLICY_OFF",
+        destination: request.targetSurface as DurableLearningResolvedSurface,
+        scope: request.requestedScope as DurableLearningResolvedScope,
+        policySnapshotId: context.learningPolicy.snapshotId,
+        reasons: ["The resolved learning policy disables autonomous durable writes."],
+      });
+    }
+  }
+
   if (request.targetSurface === "documents_evidence") {
     if (request.requestedAuthority !== "evidence_only") {
       return decision({
@@ -263,26 +285,7 @@ function activeAuthority(
   }
 
   if (request.origin === "autonomous_learning") {
-    if (context.learningPolicy === null) {
-      return decision({
-        disposition: "rejected",
-        code: "LEARNING_POLICY_REQUIRED",
-        destination: request.targetSurface as DurableLearningResolvedSurface,
-        scope: request.requestedScope as DurableLearningResolvedScope,
-        reasons: ["Autonomous learning requires an immutable resolved learning-policy snapshot."],
-      });
-    }
-    if (context.learningPolicy.mode === "off") {
-      return decision({
-        disposition: "rejected",
-        code: "LEARNING_POLICY_OFF",
-        destination: request.targetSurface as DurableLearningResolvedSurface,
-        scope: request.requestedScope as DurableLearningResolvedScope,
-        policySnapshotId: context.learningPolicy.snapshotId,
-        reasons: ["The resolved learning policy disables autonomous durable writes."],
-      });
-    }
-    if (request.requestedAuthority === "proposal" || context.learningPolicy.mode === "suggest") {
+    if (request.requestedAuthority === "proposal" || context.learningPolicy?.mode === "suggest") {
       return "proposal";
     }
   }
@@ -756,49 +759,72 @@ export async function routeDurableLearning(
           }),
           resource: target.receipt.resource,
           effectiveBoundary: "not_applicable",
-          rollback: { supported: false, targetAttemptId: request.targetAttemptId, token: null },
+          rollback: {
+            supported: false,
+            targetAttemptId: request.targetAttemptId,
+            token: null,
+          },
           createdAt: receiptCreatedAt,
         },
         claimId,
       );
     }
-    const result = await withClaimHeartbeat(
-      ports,
-      attempt,
-      claimId,
-      async () =>
-        await adapter.rollback({
-          attempt,
-          targetAttempt: target.attempt,
-          targetReceipt: target.receipt,
-          rollbackToken,
-          reason: request.reason,
-        }),
-    );
-    return await complete(
-      ports,
-      attempt,
-      {
-        contractVersion: DURABLE_LEARNING_CONTRACT_VERSION,
-        attemptId: attempt.id,
-        inputHash: attempt.inputHash,
-        outcome: "rolled_back",
-        decision: decision({
-          disposition: "route",
-          code: "ROUTED",
-          destination,
-          scope: targetScope,
-          authority: targetAuthority,
-          policySnapshotId: target.receipt.decision.policySnapshotId,
-          reasons: [`Rollback routed to the original ${destination} authority.`],
-        }),
-        resource: result.resource,
-        effectiveBoundary: result.effectiveBoundary,
-        rollback: { supported: false, targetAttemptId: request.targetAttemptId, token: null },
-        createdAt: receiptCreatedAt,
-      },
-      claimId,
-    );
+    let result: DurableLearningAuthorityRollbackResult;
+    try {
+      result = await withClaimHeartbeat(
+        ports,
+        attempt,
+        claimId,
+        async () =>
+          await adapter.rollback({
+            attempt,
+            targetAttempt: target.attempt,
+            targetReceipt: target.receipt,
+            rollbackToken,
+            reason: request.reason,
+          }),
+      );
+    } catch (error) {
+      throw new DurableLearningAuthorityOutcomeUnknownError(
+        "The selected canonical authority rollback may have committed; retry the same attempt id after its execution claim expires",
+        error,
+      );
+    }
+    try {
+      return await complete(
+        ports,
+        attempt,
+        {
+          contractVersion: DURABLE_LEARNING_CONTRACT_VERSION,
+          attemptId: attempt.id,
+          inputHash: attempt.inputHash,
+          outcome: "rolled_back",
+          decision: decision({
+            disposition: "route",
+            code: "ROUTED",
+            destination,
+            scope: targetScope,
+            authority: targetAuthority,
+            policySnapshotId: target.receipt.decision.policySnapshotId,
+            reasons: [`Rollback routed to the original ${destination} authority.`],
+          }),
+          resource: result.resource,
+          effectiveBoundary: result.effectiveBoundary,
+          rollback: {
+            supported: false,
+            targetAttemptId: request.targetAttemptId,
+            token: null,
+          },
+          createdAt: receiptCreatedAt,
+        },
+        claimId,
+      );
+    } catch (error) {
+      throw new DurableLearningAuthorityOutcomeUnknownError(
+        "The canonical authority rollback committed but its receipt may not have; retry the same attempt id after its execution claim expires",
+        error,
+      );
+    }
   }
 
   const routeDecision = planDurableLearningWrite(request, context);
@@ -867,20 +893,27 @@ export async function routeDurableLearning(
       error,
     );
   }
-  return await complete(
-    ports,
-    attempt,
-    {
-      contractVersion: DURABLE_LEARNING_CONTRACT_VERSION,
-      attemptId: attempt.id,
-      inputHash: attempt.inputHash,
-      outcome: result.outcome,
-      decision: routeDecision,
-      resource: result.resource,
-      effectiveBoundary: result.effectiveBoundary,
-      rollback: result.rollback,
-      createdAt: receiptCreatedAt,
-    },
-    claimId,
-  );
+  try {
+    return await complete(
+      ports,
+      attempt,
+      {
+        contractVersion: DURABLE_LEARNING_CONTRACT_VERSION,
+        attemptId: attempt.id,
+        inputHash: attempt.inputHash,
+        outcome: result.outcome,
+        decision: routeDecision,
+        resource: result.resource,
+        effectiveBoundary: result.effectiveBoundary,
+        rollback: result.rollback,
+        createdAt: receiptCreatedAt,
+      },
+      claimId,
+    );
+  } catch (error) {
+    throw new DurableLearningAuthorityOutcomeUnknownError(
+      "The canonical authority write committed but its receipt may not have; retry the same attempt id after its execution claim expires",
+      error,
+    );
+  }
 }

@@ -72,6 +72,33 @@ export const durableLearningReceipts = pgTable(
   }),
 );
 
+// Immutable authority-side compatibility output. The selected authority writes
+// this in the same transaction as its effect so a retry can reconstruct the
+// exact original result without invoking the mutable authority again.
+export const durableLearningAuthorityResults = pgTable(
+  "durable_learning_authority_results",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    attemptId: uuid("attempt_id").notNull(),
+    inputHash: text("input_hash").notNull(),
+    effectKind: text("effect_kind").notNull(),
+    result: jsonb("result").$type<unknown>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({
+      name: "durable_learning_authority_results_pk",
+      columns: [table.accountId, table.workspaceId, table.attemptId],
+    }),
+    workspaceTimeline: index("durable_learning_authority_results_workspace_time_idx").on(
+      table.workspaceId,
+      table.createdAt,
+      table.attemptId,
+    ),
+  }),
+);
+
 // Mutable coordination only: claims fence concurrent execution while attempts
 // and receipts remain immutable audit evidence. Expired claims may be replaced
 // so a crashed executor can retry the same authority operation id.

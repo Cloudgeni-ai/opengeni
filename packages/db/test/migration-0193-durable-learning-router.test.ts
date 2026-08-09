@@ -12,7 +12,11 @@ describe("migration 0193 durable-learning router", () => {
   test("is rolling, append-only, tenant-scoped audit evidence", async () => {
     const source = await readFile(migrationUrl, "utf8");
     expect(source.split(/\r?\n/, 1)[0]).toBe("-- deployment-mode: rolling");
-    for (const table of ["durable_learning_attempts", "durable_learning_receipts"] as const) {
+    for (const table of [
+      "durable_learning_attempts",
+      "durable_learning_receipts",
+      "durable_learning_authority_results",
+    ] as const) {
       expect(source).toContain(`CREATE TABLE "${table}"`);
       expect(source).toContain(`ALTER TABLE "${table}" ENABLE ROW LEVEL SECURITY`);
       expect(source).toContain(`ALTER TABLE "${table}" FORCE ROW LEVEL SECURITY`);
@@ -22,6 +26,7 @@ describe("migration 0193 durable-learning router", () => {
     }
     expect(source).toContain("durable_learning_attempts_immutable");
     expect(source).toContain("durable_learning_receipts_immutable");
+    expect(source).toContain("durable_learning_authority_results_immutable");
     expect(source).toContain("durable_learning_reject_mutation");
     expect(source).toContain("GRANT SELECT, INSERT ON TABLE");
     expect(source).toContain('CREATE TABLE "durable_learning_attempt_claims"');
@@ -48,6 +53,8 @@ describe("migration 0193 durable-learning router", () => {
     expect(source).toContain('"request" ->> \'attemptId\' = "id"::text');
     expect(source).toContain('"receipt" ->> \'attemptId\' = "attempt_id"::text');
     expect(source).toContain('"receipt" ->> \'inputHash\' = "input_hash"');
+    expect(source).toContain("durable_learning_authority_results_attempt_fk");
+    expect(source).toContain("'memory_write', 'memory_rollback'");
   });
 
   test("keeps the router ledger separate from every knowledge authority", async () => {
