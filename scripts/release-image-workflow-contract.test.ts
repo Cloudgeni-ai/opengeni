@@ -589,7 +589,13 @@ ${parser}`,
     expect(imagesJob).toContain("docker/setup-qemu-action@");
     expect(imagesJob.match(/platforms: linux\/amd64,linux\/arm64/g)).toHaveLength(7);
 
-    const imageSteps = ["api-image", "worker-web-images", "relay-image", "sandbox-image"].flatMap(
+    const imageSteps = [
+      "api-image",
+      "worker-web-images",
+      "web-image",
+      "relay-image",
+      "sandbox-image",
+    ].flatMap(
       (jobName) =>
         parsed.jobs[jobName]!.steps.filter(
           (step): step is { name: string; uses: string; with: Record<string, string> } =>
@@ -621,6 +627,21 @@ ${parser}`,
         fingerprint: "641ae5f4c76a62fe3d3f2e42cea03cd5514d6db906be3d824f9e602b0955cc9f",
       },
       {
+        jobName: "web-image",
+        name: "Build artifact materializer image",
+        fingerprint: "932536d47211c1a8b5e77d2d5eda9aed64df87f6d3297f29c2a0a2f86c84528d",
+      },
+      {
+        jobName: "web-image",
+        name: "Build artifact outbox dispatcher image",
+        fingerprint: "ea59c9c57d6e0ccc97b05d34d9f13c2cd7531faf791d00cb248a893a0bb77635",
+      },
+      {
+        jobName: "web-image",
+        name: "Build web image",
+        fingerprint: "641ae5f4c76a62fe3d3f2e42cea03cd5514d6db906be3d824f9e602b0955cc9f",
+      },
+      {
         jobName: "relay-image",
         name: "Build relay image",
         fingerprint: "1464aec087ebbbd792371ceb86f67c41ecd75ba500b824a784ed94affb8e6a9f",
@@ -635,6 +656,8 @@ ${parser}`,
     const expectedCacheScopes = new Map([
       ["Build API image", "opengeni-ci-api"],
       ["Build worker image", "opengeni-ci-worker"],
+      ["Build artifact materializer image", "opengeni-ci-artifact-materializer"],
+      ["Build artifact outbox dispatcher image", "opengeni-ci-artifact-outbox-dispatcher"],
       ["Build web image", "opengeni-ci-web"],
       ["Build relay image", "opengeni-ci-relay"],
       ["Build headless sandbox image", "opengeni-ci-sandbox"],

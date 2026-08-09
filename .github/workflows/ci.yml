@@ -1232,6 +1232,8 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name == 'push' }}
           tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-artifact-materializer:dogfood-sha-{0}', github.sha) || 'opengeni-artifact-materializer:ci' }}
+          cache-from: type=gha,scope=opengeni-ci-artifact-materializer
+          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=min,scope=opengeni-ci-artifact-materializer,ignore-error=true' || '' }}
           build-args: |
             OPENGENI_SERVER_VERSION=sha-${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
@@ -1245,6 +1247,8 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name == 'push' }}
           tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-artifact-outbox-dispatcher:dogfood-sha-{0}', github.sha) || 'opengeni-artifact-outbox-dispatcher:ci' }}
+          cache-from: type=gha,scope=opengeni-ci-artifact-outbox-dispatcher
+          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=min,scope=opengeni-ci-artifact-outbox-dispatcher,ignore-error=true' || '' }}
           build-args: |
             OPENGENI_SERVER_VERSION=sha-${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
