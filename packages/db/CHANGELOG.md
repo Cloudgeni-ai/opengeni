@@ -1,5 +1,11 @@
 # @opengeni/db
 
+## 0.28.17
+
+### Patch Changes
+
+- 8485ff5: Fence approved session MCP tool execution against worker-shutdown replay.
+
 ## 0.28.16
 
 ### Patch Changes
