@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import type { AccessGrant } from "@opengeni/contracts";
 import {
+  continuedGitHubBrowserGrantClaims,
   githubBrowserBaseUrl,
   githubBrowserGrantClaims,
   githubBrowserGrantFromState,
   githubBrowserGrantMaxAgeSeconds,
+  githubSessionReturnPath,
 } from "../src/github-browser-flow";
 
 const grant: AccessGrant = {
@@ -71,6 +73,36 @@ describe("GitHub configured-token browser handoff", () => {
         1_001,
       ),
     ).toBeNull();
+  });
+
+  test("carries only the server-validated session return path through GitHub state rotations", () => {
+    expect(
+      continuedGitHubBrowserGrantClaims({
+        nonce: "nonce",
+        iat: 1_000,
+        browserGrantSubjectId: grant.subjectId,
+        browserGrantExpiresAt: 1_600,
+        returnPath: `/workspaces/${grant.workspaceId}/sessions/session-id?capability_auth=api%3Agithub-app`,
+      }),
+    ).toEqual({
+      browserGrantSubjectId: grant.subjectId,
+      browserGrantExpiresAt: 1_600,
+      returnPath: `/workspaces/${grant.workspaceId}/sessions/session-id?capability_auth=api%3Agithub-app`,
+    });
+  });
+
+  test("accepts only same-workspace session return paths", () => {
+    const valid = `/workspaces/${grant.workspaceId}/sessions/session-id?capability_auth=api%3Agithub-app`;
+    expect(githubSessionReturnPath(valid, grant.workspaceId)).toBe(valid);
+    for (const rejected of [
+      "https://attacker.example/session",
+      "//attacker.example/session",
+      `/workspaces/another-workspace/sessions/session-id`,
+      `/workspaces/${grant.workspaceId}/capabilities`,
+      `/workspaces/${grant.workspaceId}/sessions`,
+    ]) {
+      expect(githubSessionReturnPath(rejected, grant.workspaceId)).toBeNull();
+    }
   });
 
   test("prefers the explicit GitHub callback host over the general public host", () => {

@@ -38,6 +38,7 @@ import {
   githubBrowserBaseUrl,
   githubBrowserGrantClaims,
   githubBrowserGrantFromState,
+  githubSessionReturnPath,
 } from "../github-browser-flow";
 import {
   githubBindingStatus,
@@ -64,12 +65,14 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     const status = githubBindingStatus(missing.length === 0, installations);
     const setupMode = settings.productAccessMode === "managed" ? "platform" : "operator";
     const canManage = hasPermission(grant.permissions, "github:manage");
+    const returnPath = githubSessionReturnPath(c.req.query("returnPath"), grant.workspaceId);
     const connectState =
       missing.length === 0 && slug && canManage
         ? createSignedState(githubStateSecret, {
             accountId: grant.accountId,
             workspaceId: grant.workspaceId,
             intent: "installation_authority",
+            ...(returnPath ? { returnPath } : {}),
             ...githubBrowserGrantClaims(settings, grant),
           })
         : null;
@@ -517,7 +520,12 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.html(
       githubSetupSuccessHtml(
         proof.installation.accountLogin ?? `installation ${installationId}`,
-        openGeniReturnUrl(settings, c, grant.workspaceId),
+        openGeniReturnUrl(
+          settings,
+          c,
+          grant.workspaceId,
+          typeof statePayload.returnPath === "string" ? statePayload.returnPath : null,
+        ),
       ),
     );
   });
@@ -879,8 +887,16 @@ function openGeniReturnUrl(
   settings: ApiRouteDeps["settings"],
   c: Context,
   workspaceId: string,
+  returnPath: string | null = null,
 ): string {
-  const url = new URL(openGeniBaseUrl(settings, c) || new URL(c.req.url).origin);
+  const baseUrl = openGeniBaseUrl(settings, c) || new URL(c.req.url).origin;
+  const safeReturnPath = githubSessionReturnPath(returnPath, workspaceId);
+  const url = safeReturnPath ? new URL(safeReturnPath, `${baseUrl}/`) : new URL(baseUrl);
+  if (safeReturnPath) {
+    url.searchParams.delete("capability_auth");
+    url.searchParams.set("github", "connected");
+    return url.toString();
+  }
   url.searchParams.set("workspaceId", workspaceId);
   return url.toString();
 }

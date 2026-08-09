@@ -1193,7 +1193,9 @@ describe("OpenGeniClient capabilities", () => {
 describe("OpenGeniClient github", () => {
   test("app info, connect URL, repositories, sync, and app manifest", async () => {
     const { client, requests } = makeClient(() => jsonResponse({ repositories: [] }));
-    await client.getGitHubApp(WORKSPACE_ID);
+    await client.getGitHubApp(WORKSPACE_ID, {
+      returnPath: `/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}`,
+    });
     await client.listGitHubRepositories(WORKSPACE_ID);
     await client.syncGitHubRepositories(WORKSPACE_ID);
     await client.unlinkGitHubInstallation(WORKSPACE_ID, 123);
@@ -1208,6 +1210,9 @@ describe("OpenGeniClient github", () => {
         `DELETE /v1/workspaces/${WORKSPACE_ID}/github/installations/123`,
         `POST /v1/workspaces/${WORKSPACE_ID}/github/app-manifest`,
       ],
+    );
+    expect(new URL(requests[0]!.url).searchParams.get("returnPath")).toBe(
+      `/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}`,
     );
     expect(client.githubConnectUrl(WORKSPACE_ID, "signed-state")).toBe(
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/github/connect?state=signed-state`,

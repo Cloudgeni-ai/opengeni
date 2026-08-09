@@ -3673,8 +3673,16 @@ export class OpenGeniClient {
   // --- GitHub ----------------------------------------------------------------------------------
 
   /** GitHub App server configuration plus truthful workspace binding status. */
-  async getGitHubApp(workspaceId: string): Promise<GitHubAppInfo> {
-    return await this.requestJson<GitHubAppInfo>("GET", `/v1/workspaces/${workspaceId}/github/app`);
+  async getGitHubApp(
+    workspaceId: string,
+    options: { returnPath?: string } = {},
+  ): Promise<GitHubAppInfo> {
+    return await this.requestJson<GitHubAppInfo>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/github/app`,
+      undefined,
+      options.returnPath ? { returnPath: options.returnPath } : undefined,
+    );
   }
 
   /** Build the GitHub owner-consent entry URL for fresh workspace-bound state. */

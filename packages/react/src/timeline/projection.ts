@@ -642,6 +642,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
 
       case "tool.auth_needed":
       case "credential.auth_needed": {
+        const capability = capabilityAuthorizationRequest(payload.capability);
         if (
           event.type === "tool.auth_needed" &&
           !stringValue(payload.toolName) &&
@@ -664,7 +665,11 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           id: event.id,
           turnId,
           serverId: typeof payload.serverId === "string" ? payload.serverId : null,
-          source: event.type === "tool.auth_needed" ? "tool" : "credential",
+          source: capability
+            ? "capability"
+            : event.type === "tool.auth_needed"
+              ? "tool"
+              : "credential",
           providerDomain: stringValue(payload.providerDomain),
           connectionId: typeof payload.connectionId === "string" ? payload.connectionId : null,
           reason: authNeededReason(payload.reason),
@@ -673,6 +678,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           toolName: typeof payload.toolName === "string" ? payload.toolName : null,
           authorizationUrl:
             typeof payload.authorizationUrl === "string" ? payload.authorizationUrl : null,
+          capability,
           occurredAt: event.occurredAt,
         });
         break;
@@ -1707,6 +1713,37 @@ function authNeededReason(value: unknown): AuthNeededItem["reason"] {
   return typeof value === "string" && AUTH_NEEDED_REASONS.has(value)
     ? (value as AuthNeededItem["reason"])
     : null;
+}
+
+function capabilityAuthorizationRequest(
+  value: unknown,
+): NonNullable<AuthNeededItem["capability"]> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const kind = record.kind;
+  const source = record.source;
+  const action = record.action;
+  if (
+    typeof record.id !== "string" ||
+    typeof record.name !== "string" ||
+    !["pack", "mcp", "api", "skill", "plugin"].includes(String(kind)) ||
+    !["built_in", "library", "configured", "public_registry", "registry", "manual"].includes(
+      String(source),
+    ) ||
+    !["connect", "add_credentials", "enable"].includes(String(action)) ||
+    typeof record.rationale !== "string"
+  ) {
+    return null;
+  }
+  return {
+    id: record.id,
+    name: record.name,
+    kind: kind as NonNullable<AuthNeededItem["capability"]>["kind"],
+    source: source as NonNullable<AuthNeededItem["capability"]>["source"],
+    action: action as NonNullable<AuthNeededItem["capability"]>["action"],
+    rationale: record.rationale,
+    requiredVariables: stringList(record.requiredVariables),
+  };
 }
 
 function stringList(value: unknown): string[] {

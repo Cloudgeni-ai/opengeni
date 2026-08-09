@@ -831,6 +831,26 @@ export function CapabilitiesRoute({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, items]);
 
+  // An agent recommendation deep-links to the same human-reviewed setup sheet
+  // as a marketplace click. Loading the live catalog again prevents an old
+  // session event from authorizing a removed or changed entry.
+  const suggestionHandled = useRef(false);
+  useEffect(() => {
+    if (suggestionHandled.current || loading) return;
+    const params = new URLSearchParams(window.location.search);
+    const capabilityId = params.get("suggested_capability");
+    if (!capabilityId) return;
+    suggestionHandled.current = true;
+    window.history.replaceState(null, "", window.location.pathname);
+    const item = items.find((candidate) => candidate.id === capabilityId);
+    if (item) {
+      setSelected({ id: item.id, registry: false, snapshotFallback: false, snapshot: item });
+    } else {
+      setQuery(capabilityId.replace(/^[^:]+:/, ""));
+      toast.error("That recommended capability is no longer available");
+    }
+  }, [loading, items]);
+
   // Deep-link from an in-session reconnect card for an api-key connection:
   // ?reconnect_domain=<domain> opens the connect sheet for the enabled item on
   // that provider so the credential can be re-entered. Runs after the catalog
