@@ -1067,8 +1067,8 @@ jobs:
           build-args: |
             OPENGENI_SERVER_VERSION=sha-${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
 
-  worker-image:
-    name: Build worker workload image
+  worker-web-images:
+    name: Build worker and web workload images
     needs: [automation-admission, plan]
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'docs' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
@@ -1077,6 +1077,7 @@ jobs:
       packages: write # push the immutable exact-main-SHA dogfood image; PR and automation runs remain build-only
     outputs:
       worker_digest: ${{ steps.worker_image.outputs.digest }}
+      web_digest: ${{ steps.web_image.outputs.digest }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -1111,36 +1112,6 @@ jobs:
           cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=min,scope=opengeni-ci-worker,ignore-error=true' || '' }}
           build-args: |
             OPENGENI_SERVER_VERSION=sha-${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
-
-  web-image:
-    name: Build web workload image
-    needs: [automation-admission, plan]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'docs' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write # push the immutable exact-main-SHA dogfood image; PR and automation runs remain build-only
-    outputs:
-      web_digest: ${{ steps.web_image.outputs.digest }}
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
-          persist-credentials: false
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v4.4.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build web image
         id: web_image
@@ -1242,7 +1213,7 @@ jobs:
 
   images:
     name: Workload image builds
-    needs: [automation-admission, plan, api-image, worker-image, web-image, relay-image, sandbox-image]
+    needs: [automation-admission, plan, api-image, worker-web-images, relay-image, sandbox-image]
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'docs' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     permissions:
@@ -1251,15 +1222,13 @@ jobs:
       - name: Require every workload image build
         env:
           API_IMAGE_RESULT: ${{ needs.api-image.result }}
-          WORKER_IMAGE_RESULT: ${{ needs.worker-image.result }}
-          WEB_IMAGE_RESULT: ${{ needs.web-image.result }}
+          WORKER_WEB_IMAGES_RESULT: ${{ needs.worker-web-images.result }}
           RELAY_IMAGE_RESULT: ${{ needs.relay-image.result }}
           SANDBOX_IMAGE_RESULT: ${{ needs.sandbox-image.result }}
         run: |
           set -euo pipefail
           test "$API_IMAGE_RESULT" = "success"
-          test "$WORKER_IMAGE_RESULT" = "success"
-          test "$WEB_IMAGE_RESULT" = "success"
+          test "$WORKER_WEB_IMAGES_RESULT" = "success"
           test "$RELAY_IMAGE_RESULT" = "success"
           test "$SANDBOX_IMAGE_RESULT" = "success"
 
@@ -1272,8 +1241,8 @@ jobs:
         if: ${{ github.event_name == 'push' }}
         env:
           API_DIGEST: ${{ needs.api-image.outputs.api_digest }}
-          WORKER_DIGEST: ${{ needs.worker-image.outputs.worker_digest }}
-          WEB_DIGEST: ${{ needs.web-image.outputs.web_digest }}
+          WORKER_DIGEST: ${{ needs.worker-web-images.outputs.worker_digest }}
+          WEB_DIGEST: ${{ needs.worker-web-images.outputs.web_digest }}
           SANDBOX_DIGEST: ${{ needs.sandbox-image.outputs.sandbox_digest }}
           RELAY_DIGEST: ${{ needs.relay-image.outputs.relay_digest }}
         run: |

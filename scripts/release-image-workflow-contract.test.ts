@@ -156,7 +156,7 @@ describe("release image workflow contract", () => {
       >;
     };
 
-    const leafNames = ["api-image", "worker-image", "web-image", "relay-image", "sandbox-image"];
+    const leafNames = ["api-image", "worker-web-images", "relay-image", "sandbox-image"];
     for (const jobName of leafNames) {
       expect(parsed.jobs[jobName]?.needs).toEqual(["automation-admission", "plan"]);
     }
@@ -165,8 +165,7 @@ describe("release image workflow contract", () => {
       "automation-admission",
       "plan",
       "api-image",
-      "worker-image",
-      "web-image",
+      "worker-web-images",
       "relay-image",
       "sandbox-image",
     ]);
@@ -174,7 +173,7 @@ describe("release image workflow contract", () => {
       expect(parsed.jobs[jobName]?.if).toBe(parsed.jobs["api-image"]?.if);
     }
     expect(parsed.jobs.images?.if).toBe(parsed.jobs["api-image"]?.if);
-    expect(images.match(/packages: write/g)).toHaveLength(5);
+    expect(images.match(/packages: write/g)).toHaveLength(4);
     for (const jobName of leafNames) {
       const login = parsed.jobs[jobName]?.steps?.find((step) => step.name === "Log in to GHCR");
       expect(login?.with).toEqual({
@@ -185,8 +184,7 @@ describe("release image workflow contract", () => {
     }
     expect(images).toContain("Require every workload image build");
     expect(images).toContain("API_IMAGE_RESULT: ${{ needs.api-image.result }}");
-    expect(images).toContain("WORKER_IMAGE_RESULT: ${{ needs.worker-image.result }}");
-    expect(images).toContain("WEB_IMAGE_RESULT: ${{ needs.web-image.result }}");
+    expect(images).toContain("WORKER_WEB_IMAGES_RESULT: ${{ needs.worker-web-images.result }}");
     expect(images).toContain("RELAY_IMAGE_RESULT: ${{ needs.relay-image.result }}");
     expect(images).toContain("SANDBOX_IMAGE_RESULT: ${{ needs.sandbox-image.result }}");
     const aggregate = parsed.jobs.images?.steps?.find(
@@ -194,8 +192,7 @@ describe("release image workflow contract", () => {
     );
     expect(aggregate?.env).toEqual({
       API_IMAGE_RESULT: "${{ needs.api-image.result }}",
-      WORKER_IMAGE_RESULT: "${{ needs.worker-image.result }}",
-      WEB_IMAGE_RESULT: "${{ needs.web-image.result }}",
+      WORKER_WEB_IMAGES_RESULT: "${{ needs.worker-web-images.result }}",
       RELAY_IMAGE_RESULT: "${{ needs.relay-image.result }}",
       SANDBOX_IMAGE_RESULT: "${{ needs.sandbox-image.result }}",
     });
@@ -204,16 +201,15 @@ describe("release image workflow contract", () => {
         env: {
           ...process.env,
           API_IMAGE_RESULT: results[0],
-          WORKER_IMAGE_RESULT: results[1],
-          WEB_IMAGE_RESULT: results[2],
-          RELAY_IMAGE_RESULT: results[3],
-          SANDBOX_IMAGE_RESULT: results[4],
+          WORKER_WEB_IMAGES_RESULT: results[1],
+          RELAY_IMAGE_RESULT: results[2],
+          SANDBOX_IMAGE_RESULT: results[3],
         },
       }).exitCode;
-    expect(aggregateResult("success", "success", "success", "success", "success")).toBe(0);
+    expect(aggregateResult("success", "success", "success", "success")).toBe(0);
     for (const result of ["failure", "skipped", "cancelled", ""]) {
-      for (let index = 0; index < 5; index += 1) {
-        const results = Array(5).fill("success") as string[];
+      for (let index = 0; index < 4; index += 1) {
+        const results = Array(4).fill("success") as string[];
         results[index] = result;
         expect(aggregateResult(...results)).not.toBe(0);
       }
@@ -226,8 +222,8 @@ describe("release image workflow contract", () => {
     expect(images).toContain("Write exact-main-SHA dogfood receipt");
     expect(images).toContain("Upload exact-main-SHA dogfood receipt");
     expect(images).toContain("API_DIGEST: ${{ needs.api-image.outputs.api_digest }}");
-    expect(images).toContain("WORKER_DIGEST: ${{ needs.worker-image.outputs.worker_digest }}");
-    expect(images).toContain("WEB_DIGEST: ${{ needs.web-image.outputs.web_digest }}");
+    expect(images).toContain("WORKER_DIGEST: ${{ needs.worker-web-images.outputs.worker_digest }}");
+    expect(images).toContain("WEB_DIGEST: ${{ needs.worker-web-images.outputs.web_digest }}");
     expect(images).toContain("RELAY_DIGEST: ${{ needs.relay-image.outputs.relay_digest }}");
     expect(images).toContain("SANDBOX_DIGEST: ${{ needs.sandbox-image.outputs.sandbox_digest }}");
     expect(images).toContain('--arg tag "dogfood-sha-${GITHUB_SHA}"');
@@ -574,25 +570,20 @@ ${parser}`,
     expect(imagesJob).toContain("docker/setup-qemu-action@");
     expect(imagesJob.match(/platforms: linux\/amd64,linux\/arm64/g)).toHaveLength(5);
 
-    const imageSteps = [
-      "api-image",
-      "worker-image",
-      "web-image",
-      "relay-image",
-      "sandbox-image",
-    ].flatMap((jobName) =>
-      parsed.jobs[jobName]!.steps.filter(
-        (step): step is { name: string; uses: string; with: Record<string, string> } =>
-          typeof step === "object" &&
-          step !== null &&
-          "uses" in step &&
-          step.uses === "docker/build-push-action@v7.3.0",
-      ).map((step) => ({
-        jobName,
-        name: step.name,
-        step,
-        fingerprint: createHash("sha256").update(JSON.stringify(step)).digest("hex"),
-      })),
+    const imageSteps = ["api-image", "worker-web-images", "relay-image", "sandbox-image"].flatMap(
+      (jobName) =>
+        parsed.jobs[jobName]!.steps.filter(
+          (step): step is { name: string; uses: string; with: Record<string, string> } =>
+            typeof step === "object" &&
+            step !== null &&
+            "uses" in step &&
+            step.uses === "docker/build-push-action@v7.3.0",
+        ).map((step) => ({
+          jobName,
+          name: step.name,
+          step,
+          fingerprint: createHash("sha256").update(JSON.stringify(step)).digest("hex"),
+        })),
     );
     expect(imageSteps.map(({ step: _step, ...identity }) => identity)).toEqual([
       {
@@ -601,12 +592,12 @@ ${parser}`,
         fingerprint: "92035198e8acb29ffa33ae46602f0f4cbe3332e18257cb3bd8582538db3e16dd",
       },
       {
-        jobName: "worker-image",
+        jobName: "worker-web-images",
         name: "Build worker image",
         fingerprint: "8562ea25e72c99df48b2f2150cf9bcbb5a13b39633a5cb4e2648521e24840f67",
       },
       {
-        jobName: "web-image",
+        jobName: "worker-web-images",
         name: "Build web image",
         fingerprint: "641ae5f4c76a62fe3d3f2e42cea03cd5514d6db906be3d824f9e602b0955cc9f",
       },
