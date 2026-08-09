@@ -1,11 +1,5 @@
 # @opengeni/react
 
-## 0.49.5
-
-### Patch Changes
-
-- Require an authoritative warm sandbox before capture-backed workbench hooks issue live reads during capability negotiation.
-
 ## 0.49.4
 
 ### Patch Changes
