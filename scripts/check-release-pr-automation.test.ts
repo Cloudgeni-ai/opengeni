@@ -2826,7 +2826,7 @@ describe("workflow contracts", () => {
       "${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'docs' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",
     );
     expect(ci.jobs.images.if).toBe(ci.jobs.deployment.if);
-    const imageLeaves = ["api-image", "worker-image", "web-image", "relay-image", "sandbox-image"];
+    const imageLeaves = ["api-image", "worker-web-images", "relay-image", "sandbox-image"];
     for (const jobName of imageLeaves) expect(ci.jobs[jobName].if).toBe(ci.jobs.deployment.if);
     const imageSteps = imageLeaves.flatMap((jobName) =>
       ci.jobs[jobName].steps.filter((candidate: any) => candidate.with?.push),
@@ -2860,8 +2860,7 @@ describe("workflow contracts", () => {
       "test",
       "deployment",
       "api-image",
-      "worker-image",
-      "web-image",
+      "worker-web-images",
       "relay-image",
       "sandbox-image",
       "images",
