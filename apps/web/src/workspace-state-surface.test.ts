@@ -65,6 +65,10 @@ describe("Workspace State authority surface", () => {
       "preference_registry_get",
       "Immutable revisions and rollback",
       "Create correction revision",
+      "Retained head descriptor",
+      "Supersede with replacement",
+      "Refresh registry and detail",
+      "correction immediately activates",
       "Immutable lifecycle audit",
       "automatic-activation seam",
     ]) {
@@ -76,6 +80,7 @@ describe("Workspace State authority surface", () => {
       "correctPreferenceRegistry",
       "changePreferenceRegistryScope",
       "deactivatePreferenceRegistry",
+      "supersedePreferenceRegistry",
       "rejectPreferenceRegistryProposal",
     ]) {
       expect(preferences).toContain(operation);

@@ -256,10 +256,15 @@ precedence/conflicts, provenance/trust, immutable revision hashes/correction
 links, and lifecycle actor/reason/time evidence. Direct humans may create an
 inactive proposal, activate or roll back to an older immutable revision,
 correct through a complete replacement body, move scope when authorized for
-both old and new scopes, deactivate, or reject. Explicit audit reasons and a
-new-attempt confirmation accompany lifecycle changes. Server authorization,
-stale-CAS, conflict, and validation errors remain visible rather than being
-reinterpreted by the browser.
+both old and new scopes, deactivate, supersede with an active unexpired
+same-scope replacement, or reject. Supersession preserves the typed replacement
+lineage. Expired and superseded rows retain historical head metadata without an
+`Active` authority label. Explicit audit reasons and a new-attempt confirmation
+accompany every authority-changing lifecycle action, including correction.
+Stable-key collisions remain distinct from stale lifecycle CAS conflicts; the
+visible refresh reloads both inventory and selected detail. Server authorization
+and validation errors remain visible rather than being reinterpreted by the
+browser.
 
 The browser does not receive registry full content or attempt retrieval handles
 on list/detail. It explains that descriptors are automatically composed while

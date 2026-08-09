@@ -191,10 +191,16 @@ expired rows that sort earlier.
 list authorized organization/workspace/personal records, create inactive human
 proposals, inspect compact descriptor metadata, revisions and immutable events,
 activate or roll back to an immutable revision, correct, change scope,
-deactivate, and reject. Organization controls are disabled without the matching
-`account:admin` grant, workspace controls require `workspace:admin`, and personal
-controls remain self-only. The browser never manufactures authority; server 403,
-409, and validation results remain visible and refreshable.
+deactivate, supersede an active record with an active unexpired same-scope
+replacement, and reject. Supersession records the typed replacement ID rather
+than degrading into an unlinked deactivation. Organization controls are disabled
+without the matching `account:admin` grant, workspace controls require
+`workspace:admin`, and personal controls remain self-only. Expired and
+superseded rows may retain their historical head revision, but the console labels
+that head as retained metadata rather than current descriptor authority. The
+browser never manufactures authority; stable-key conflicts remain distinct from
+stale lifecycle CAS conflicts, and the visible recovery refresh reloads both the
+registry inventory and selected detail.
 
 The summary and full-content routes require exact attempt authority. The same
 restriction applies to the first-party MCP tools
@@ -206,7 +212,9 @@ governance detail returns descriptor/revision/audit metadata but not stored full
 content or an attempt retrieval handle. A correction therefore supplies a
 complete replacement body. Agents retrieve full content only through
 `preference_registry_summary` followed by `preference_registry_get` under the
-exact accepted-attempt snapshot.
+exact accepted-attempt snapshot. Because correction immediately activates its
+new immutable revision, the console requires the same explicit new-attempt
+boundary confirmation used by other authority-changing lifecycle actions.
 
 ## Isolation and canonical implementation
 

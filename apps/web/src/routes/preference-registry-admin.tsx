@@ -95,8 +95,11 @@ function registryErrorMessage(error: unknown): string {
     if (error.status === 403) {
       return "This registry action requires a direct signed-in human with authority for both the current and requested scope.";
     }
-    if (error.status === 409 || error.code === "PREFERENCE_REGISTRY_CONFLICT") {
-      return "The preference changed in another request. Refresh its detail before trying again.";
+    if (error.code === "PREFERENCE_REGISTRY_STABLE_KEY_CONFLICT") {
+      return "A preference with this stable key already exists in the requested scope. Choose a different stable key or scope.";
+    }
+    if (error.code === "PREFERENCE_REGISTRY_CONFLICT") {
+      return "The preference changed in another request. Refresh the registry and selected detail before trying again.";
     }
     if (error.status === 422) {
       return error.message;
@@ -487,6 +490,7 @@ function EventRow({ event }: { event: PreferenceRegistryEvent }) {
 function PreferenceDetailPanel({
   workspaceId,
   detail,
+  replacementCandidates,
   canManageScope,
   canManageOrganization,
   canManageWorkspace,
@@ -495,6 +499,7 @@ function PreferenceDetailPanel({
 }: {
   workspaceId: string;
   detail: PreferenceRegistryDetailResponse;
+  replacementCandidates: PreferenceRegistryRecord[];
   canManageScope: (scope: PreferenceRegistryScope) => boolean;
   canManageOrganization: boolean;
   canManageWorkspace: boolean;
@@ -532,6 +537,14 @@ function PreferenceDetailPanel({
     localDateTime(activeRevision?.expiresAt ?? null),
   );
   const [correctionReason, setCorrectionReason] = useState("");
+  const [correctionConfirmed, setCorrectionConfirmed] = useState(false);
+  const [replacementPreferenceId, setReplacementPreferenceId] = useState("");
+  const effectiveReplacementPreferenceId = replacementCandidates.some(
+    (candidate) => candidate.id === replacementPreferenceId,
+  )
+    ? replacementPreferenceId
+    : (replacementCandidates[0]?.id ?? "");
+  const currentlyAuthoritative = preference.status === "active" && activeRevision !== null;
 
   const runLifecycle = async (
     operation: string,
@@ -564,6 +577,12 @@ function PreferenceDetailPanel({
   const correct = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     if (!activeRevision || !canManageCurrent || busy) return;
+    if (!correctionConfirmed) {
+      setActionError(
+        "Confirm that this correction changes authority only for newly accepted attempts.",
+      );
+      return;
+    }
     const rank = Number(correctionRank);
     if (!Number.isInteger(rank) || rank < -1_000 || rank > 1_000) {
       setActionError("Correction precedence rank must be a whole number from -1000 to 1000.");
@@ -587,6 +606,7 @@ function PreferenceDetailPanel({
       });
       setCorrectionContent("");
       setCorrectionReason("");
+      setCorrectionConfirmed(false);
       setActionMessage("Correction created a new immutable active revision.");
       await onMutated();
     } catch (error) {
@@ -602,10 +622,16 @@ function PreferenceDetailPanel({
         <div className="rounded-md border border-border bg-surface-2/20 p-3">
           <div className="flex items-center gap-2 text-sm font-medium text-fg">
             <SlidersHorizontalIcon className="size-4 text-brand" />
-            Compact descriptor
+            {currentlyAuthoritative ? "Compact descriptor" : "Retained head descriptor"}
           </div>
           {activeRevision ? (
             <div className="mt-3">
+              {!currentlyAuthoritative ? (
+                <div className="mb-2 rounded-md border border-status-waiting/30 bg-status-waiting/10 p-2 text-xs leading-5 text-status-waiting">
+                  Retained head metadata only. This {humanize(preference.status).toLowerCase()}{" "}
+                  record is excluded from current descriptor authority for newly accepted attempts.
+                </div>
+              ) : null}
               <RevisionMetadata revision={activeRevision} />
             </div>
           ) : latestRevision ? (
@@ -658,6 +684,13 @@ function PreferenceDetailPanel({
         </div>
       </div>
 
+      {preference.supersededByPreferenceId ? (
+        <div className="rounded-md border border-border bg-surface-2/20 p-3 text-xs text-fg-muted">
+          Superseded by replacement preference:{" "}
+          <code className="break-all text-fg">{preference.supersededByPreferenceId}</code>
+        </div>
+      ) : null}
+
       {canManageCurrent ? (
         <div className="grid gap-3 rounded-md border border-border bg-surface-2/20 p-3">
           <div className="flex items-center gap-2 text-sm font-medium text-fg">
@@ -680,8 +713,9 @@ function PreferenceDetailPanel({
               checked={confirmed}
               onChange={(event) => setConfirmed(event.target.checked)}
             />
-            I understand activation, rollback, scope changes, and deactivation affect only newly
-            accepted attempts; already accepted attempts retain their immutable snapshot.
+            I understand activation, rollback, supersession, scope changes, deactivation, and
+            rejection affect only newly accepted attempts; already accepted attempts retain their
+            immutable snapshot.
           </label>
           <div className="flex flex-wrap gap-2">
             {activeRevision ? (
@@ -721,6 +755,50 @@ function PreferenceDetailPanel({
               </button>
             ) : null}
           </div>
+          {preference.status === "active" && activeRevision ? (
+            <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_auto]">
+              <label className="grid gap-1 text-xs font-medium text-fg-muted">
+                Active same-scope replacement
+                <select
+                  className={fieldClass}
+                  value={effectiveReplacementPreferenceId}
+                  disabled={replacementCandidates.length === 0}
+                  onChange={(event) => setReplacementPreferenceId(event.target.value)}
+                >
+                  {replacementCandidates.length === 0 ? (
+                    <option value="">No active replacement is visible</option>
+                  ) : null}
+                  {replacementCandidates.map((candidate) => (
+                    <option key={candidate.id} value={candidate.id}>
+                      {candidate.activeRevision?.title ?? candidate.stableKey} ·{" "}
+                      {candidate.stableKey}
+                    </option>
+                  ))}
+                </select>
+                <span className="font-normal leading-5 text-fg-subtle">
+                  Supersession records typed replacement lineage and makes this preference terminal.
+                  The replacement must already be active and unexpired in the same scope.
+                </span>
+              </label>
+              <button
+                type="button"
+                className={`${secondaryButtonClass} self-end`}
+                disabled={busy !== null || !effectiveReplacementPreferenceId}
+                onClick={() =>
+                  void runLifecycle("Supersession", async (auditReason) => {
+                    await client.supersedePreferenceRegistry(workspaceId, preference.id, {
+                      replacementPreferenceId: effectiveReplacementPreferenceId,
+                      expectedCurrentRevisionId: activeRevision.id,
+                      expectedScopeVersion: preference.scopeVersion,
+                      reason: auditReason,
+                    });
+                  })
+                }
+              >
+                Supersede with replacement
+              </button>
+            </div>
+          ) : null}
           <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_auto]">
             <label className="grid gap-1 text-xs font-medium text-fg-muted">
               Move to scope
@@ -770,7 +848,8 @@ function PreferenceDetailPanel({
         </div>
         <div className="divide-y divide-border rounded-md border border-border">
           {revisions.map((revision) => {
-            const isActive = revision.id === activeRevision?.id;
+            const isRetainedHead = revision.id === activeRevision?.id;
+            const isActive = isRetainedHead && preference.status === "active";
             const rollback = activeRevision !== null && revision.revision < activeRevision.revision;
             return (
               <div key={revision.id} className="grid gap-3 p-3 md:grid-cols-[minmax(0,1fr)_auto]">
@@ -782,6 +861,11 @@ function PreferenceDetailPanel({
                         Active
                       </span>
                     ) : null}
+                    {isRetainedHead && !isActive ? (
+                      <span className="rounded-full border border-status-waiting/50 px-2 py-0.5 text-status-waiting">
+                        Retained head · not current authority
+                      </span>
+                    ) : null}
                     {revision.correctsRevisionId ? (
                       <span className="rounded-full border border-border px-2 py-0.5 text-fg-muted">
                         Correction
@@ -790,7 +874,7 @@ function PreferenceDetailPanel({
                   </div>
                   <RevisionMetadata revision={revision} />
                 </div>
-                {!isActive && canManageCurrent ? (
+                {!isRetainedHead && canManageCurrent ? (
                   <button
                     type="button"
                     className={`${secondaryButtonClass} self-start`}
@@ -926,6 +1010,16 @@ function PreferenceDetailPanel({
                 onChange={(event) => setCorrectionReason(event.target.value)}
               />
             </label>
+            <label className="flex items-start gap-2 text-xs leading-5 text-fg-muted">
+              <input
+                className="mt-1"
+                type="checkbox"
+                checked={correctionConfirmed}
+                onChange={(event) => setCorrectionConfirmed(event.target.checked)}
+              />
+              I understand this correction immediately activates a new immutable revision only for
+              newly accepted attempts; existing attempts retain their accepted snapshot.
+            </label>
             <div>
               <button type="submit" className={primaryButtonClass} disabled={busy !== null}>
                 {busy === "Correction" ? "Creating correction…" : "Create and activate correction"}
@@ -996,6 +1090,7 @@ export function PreferenceRegistryAdministration({
       (scope === "organization" && canManageOrganization));
   const inventory = usePreferenceRegistryInventory(client, workspaceId);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [manualDetailRefreshVersion, setManualDetailRefreshVersion] = useState(0);
 
   useEffect(() => {
     setSelectedId(null);
@@ -1016,6 +1111,17 @@ export function PreferenceRegistryAdministration({
   const reloadAll = async (): Promise<void> => {
     await Promise.all([inventory.reload(), detail.reload(), onWorkspaceStateReload()]);
   };
+  const refreshAll = async (): Promise<void> => {
+    await reloadAll();
+    setManualDetailRefreshVersion((version) => version + 1);
+  };
+  const replacementCandidates = (inventory.response?.preferences ?? []).filter(
+    (candidate) =>
+      candidate.id !== selectedId &&
+      candidate.status === "active" &&
+      candidate.activeRevision !== null &&
+      candidate.target.scope === detail.response?.preference.target.scope,
+  );
 
   return (
     <section className="rounded-lg border border-border bg-surface p-4">
@@ -1031,11 +1137,11 @@ export function PreferenceRegistryAdministration({
         <button
           type="button"
           className={secondaryButtonClass}
-          disabled={inventory.loading}
-          onClick={() => void inventory.reload()}
+          disabled={inventory.loading || detail.loading}
+          onClick={() => void refreshAll()}
         >
           <RefreshCwIcon className="mr-1.5 inline size-3.5" />
-          Refresh registry
+          Refresh registry and detail
         </button>
       </div>
 
@@ -1119,9 +1225,10 @@ export function PreferenceRegistryAdministration({
           ) : null}
           {detail.response ? (
             <PreferenceDetailPanel
-              key={`${detail.response.preference.id}:${detail.response.preference.activeRevision?.id ?? "none"}:${detail.response.preference.scopeVersion}`}
+              key={`${detail.response.preference.id}:${detail.response.preference.status}:${detail.response.preference.activeRevision?.id ?? "none"}:${detail.response.preference.scopeVersion}:${detail.response.preference.activationVersion}:${manualDetailRefreshVersion}`}
               workspaceId={workspaceId}
               detail={detail.response}
+              replacementCandidates={replacementCandidates}
               canManageScope={canManageScope}
               canManageOrganization={canManageOrganization}
               canManageWorkspace={canManageWorkspace}

@@ -1,9 +1,10 @@
 import { afterAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import type {
-  PreferenceRegistryDetailResponse,
-  PreferenceRegistryMutationResponse,
-  PreferenceRegistryRecord,
+import {
+  OpenGeniApiError,
+  type PreferenceRegistryDetailResponse,
+  type PreferenceRegistryMutationResponse,
+  type PreferenceRegistryRecord,
 } from "@opengeni/sdk";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -13,6 +14,8 @@ const accountId = "00000000-0000-4000-8000-000000000002";
 const preferenceId = "00000000-0000-4000-8000-000000000003";
 const revisionOneId = "00000000-0000-4000-8000-000000000004";
 const revisionTwoId = "00000000-0000-4000-8000-000000000005";
+const replacementPreferenceId = "00000000-0000-4000-8000-000000000010";
+const replacementRevisionId = "00000000-0000-4000-8000-000000000011";
 
 const revisionOne = {
   id: revisionOneId,
@@ -48,7 +51,7 @@ const revisionTwo = {
   createdAt: "2026-08-08T11:00:00.000Z",
 };
 
-const preference = {
+const preference: PreferenceRegistryRecord = {
   id: preferenceId,
   accountId,
   stableKey: "response.recommendation",
@@ -61,7 +64,29 @@ const preference = {
   createdBySubjectId: "user:admin",
   createdAt: "2026-08-08T10:00:00.000Z",
   updatedAt: "2026-08-08T11:00:00.000Z",
-} satisfies PreferenceRegistryRecord;
+};
+
+const replacementRevision = {
+  ...revisionTwo,
+  id: replacementRevisionId,
+  preferenceId: replacementPreferenceId,
+  revision: 1,
+  contentHash: "c".repeat(64),
+  title: "Evidence-first recommendations",
+  description: "Use the replacement recommendation format.",
+  correctsRevisionId: null,
+};
+
+const replacementPreference: PreferenceRegistryRecord = {
+  ...preference,
+  id: replacementPreferenceId,
+  stableKey: "response.recommendation-v2",
+  scopeVersion: 1,
+  activationVersion: 1,
+  activeRevision: replacementRevision,
+  createdAt: "2026-08-08T12:00:00.000Z",
+  updatedAt: "2026-08-08T12:00:00.000Z",
+};
 
 const detail = {
   preference,
@@ -100,8 +125,12 @@ const detail = {
   ],
 } satisfies PreferenceRegistryDetailResponse;
 
-const listPreferenceRegistry = mock(async () => ({ preferences: [preference] }));
-const getPreferenceRegistry = mock(async () => detail);
+const listPreferenceRegistry = mock(
+  async (): Promise<{ preferences: PreferenceRegistryRecord[] }> => ({
+    preferences: [preference],
+  }),
+);
+const getPreferenceRegistry = mock(async (): Promise<PreferenceRegistryDetailResponse> => detail);
 const createPreferenceRegistryProposal = mock(async (_workspaceId: string, request: any) => ({
   ...preference,
   id: "00000000-0000-4000-8000-000000000008",
@@ -135,10 +164,12 @@ const activatePreferenceRegistryRevision = mock(
     },
   }),
 );
-const correctPreferenceRegistry = mock(async () => ({
-  preference,
-  event: detail.events[1]!,
-}));
+const correctPreferenceRegistry = mock(
+  async (_workspaceId: string, _preferenceId: string, _request: Record<string, unknown>) => ({
+    preference,
+    event: detail.events[1]!,
+  }),
+);
 const changePreferenceRegistryScope = mock(async () => ({
   preference,
   event: detail.events[1]!,
@@ -147,6 +178,20 @@ const deactivatePreferenceRegistry = mock(async () => ({
   preference,
   event: detail.events[1]!,
 }));
+const supersedePreferenceRegistry = mock(
+  async (_workspaceId: string, _preferenceId: string, _request: Record<string, unknown>) => ({
+    preference: {
+      ...preference,
+      status: "superseded" as const,
+      supersededByPreferenceId: replacementPreferenceId,
+    },
+    event: {
+      ...detail.events[1]!,
+      type: "superseded" as const,
+      relatedPreferenceId: replacementPreferenceId,
+    },
+  }),
+);
 const rejectPreferenceRegistryProposal = mock(async () => ({
   preference,
   event: detail.events[1]!,
@@ -161,6 +206,7 @@ const appContext: Record<string, any> = {
     correctPreferenceRegistry,
     changePreferenceRegistryScope,
     deactivatePreferenceRegistry,
+    supersedePreferenceRegistry,
     rejectPreferenceRegistryProposal,
   },
   authSession: { user: { id: "user:admin" } },
@@ -212,6 +258,7 @@ beforeEach(() => {
     correctPreferenceRegistry,
     changePreferenceRegistryScope,
     deactivatePreferenceRegistry,
+    supersedePreferenceRegistry,
     rejectPreferenceRegistryProposal,
   ]) {
     operation.mockClear();
@@ -248,6 +295,30 @@ async function setValue(
       onChange({ target: element });
     } else {
       element.dispatchEvent(new Event("input", { bubbles: true }));
+      element.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    await Promise.resolve();
+  });
+}
+
+async function setChecked(element: HTMLInputElement, checked: boolean): Promise<void> {
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "checked")?.set?.call(
+      element,
+      checked,
+    );
+    const reactPropsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+    const onChange = reactPropsKey
+      ? (
+          element as unknown as Record<
+            string,
+            { onChange?: (event: { target: HTMLInputElement }) => void }
+          >
+        )[reactPropsKey]?.onChange
+      : undefined;
+    if (onChange) {
+      onChange({ target: element });
+    } else {
       element.dispatchEvent(new Event("change", { bubbles: true }));
     }
     await Promise.resolve();
@@ -386,29 +457,7 @@ describe("structured preference Workspace State administration", () => {
       ].find((candidate) =>
         candidate.parentElement?.textContent?.includes("newly accepted attempts"),
       )!;
-      await act(async () => {
-        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "checked")?.set?.call(
-          confirmation,
-          true,
-        );
-        const reactPropsKey = Object.keys(confirmation).find((key) =>
-          key.startsWith("__reactProps$"),
-        );
-        const onChange = reactPropsKey
-          ? (
-              confirmation as unknown as Record<
-                string,
-                { onChange?: (event: { target: HTMLInputElement }) => void }
-              >
-            )[reactPropsKey]?.onChange
-          : undefined;
-        if (onChange) {
-          onChange({ target: confirmation });
-        } else {
-          confirmation.dispatchEvent(new Event("change", { bubbles: true }));
-        }
-        await Promise.resolve();
-      });
+      await setChecked(confirmation, true);
       const rollback = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
         (button) => button.textContent?.trim() === "Roll back to r1",
       )!;
@@ -430,6 +479,276 @@ describe("structured preference Workspace State administration", () => {
           reason: "Restore the simpler revision",
         },
       ]);
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
+  test("labels superseded and expired retained heads as non-authoritative", async () => {
+    for (const status of ["superseded", "expired"] as const) {
+      const retainedPreference = {
+        ...preference,
+        status,
+        supersededByPreferenceId:
+          status === "superseded" ? replacementPreferenceId : preference.supersededByPreferenceId,
+      } satisfies PreferenceRegistryRecord;
+      listPreferenceRegistry.mockResolvedValueOnce({ preferences: [retainedPreference] });
+      getPreferenceRegistry.mockResolvedValueOnce({
+        ...detail,
+        preference: retainedPreference,
+      });
+      const container = document.createElement("div");
+      const root = createRoot(container);
+      try {
+        await act(async () =>
+          root.render(
+            <PreferenceRegistryAdministration
+              workspaceId={workspaceId}
+              onWorkspaceStateReload={async () => undefined}
+            />,
+          ),
+        );
+        await settle();
+        await settle();
+
+        expect(container.textContent).toContain("Retained head descriptor");
+        expect(container.textContent).toContain("excluded from current descriptor authority");
+        expect(container.textContent).toContain("Retained head · not current authority");
+        expect(
+          [...container.querySelectorAll("span")].some(
+            (candidate) => candidate.textContent?.trim() === "Active",
+          ),
+        ).toBe(false);
+        if (status === "superseded") {
+          expect(container.textContent).toContain(
+            `Superseded by replacement preference: ${replacementPreferenceId}`,
+          );
+        }
+      } finally {
+        await act(async () => root.unmount());
+      }
+    }
+  });
+
+  test("supersedes an active preference with typed replacement lineage and exact CAS fields", async () => {
+    listPreferenceRegistry.mockResolvedValueOnce({
+      preferences: [preference, replacementPreference],
+    });
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <PreferenceRegistryAdministration
+            workspaceId={workspaceId}
+            onWorkspaceStateReload={async () => undefined}
+          />,
+        ),
+      );
+      await settle();
+      await settle();
+
+      const replacement = controlForLabel<HTMLSelectElement>(
+        container,
+        "Active same-scope replacement",
+      );
+      expect(replacement.value).toBe(replacementPreferenceId);
+      await setValue(controlForLabel(container, "Audit reason"), "Replace the old preference");
+      const confirmation = [
+        ...container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'),
+      ].find((candidate) =>
+        candidate.parentElement?.textContent?.includes("newly accepted attempts"),
+      )!;
+      await setChecked(confirmation, true);
+      const supersede = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent?.trim() === "Supersede with replacement",
+      )!;
+
+      await act(async () => {
+        supersede.click();
+        await Promise.resolve();
+      });
+      await settle();
+
+      expect(supersedePreferenceRegistry).toHaveBeenCalledTimes(1);
+      expect(supersedePreferenceRegistry.mock.calls[0]).toEqual([
+        workspaceId,
+        preferenceId,
+        {
+          replacementPreferenceId,
+          expectedCurrentRevisionId: revisionTwoId,
+          expectedScopeVersion: 3,
+          reason: "Replace the old preference",
+        },
+      ]);
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
+  test("reports stable-key conflicts distinctly from stale lifecycle CAS conflicts", async () => {
+    createPreferenceRegistryProposal.mockRejectedValueOnce(
+      new OpenGeniApiError(
+        409,
+        JSON.stringify({
+          code: "PREFERENCE_REGISTRY_STABLE_KEY_CONFLICT",
+          message: "A preference with this stable key already exists for the target scope",
+        }),
+        { mutation: true },
+      ),
+    );
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <PreferenceRegistryAdministration
+            workspaceId={workspaceId}
+            onWorkspaceStateReload={async () => undefined}
+          />,
+        ),
+      );
+      await settle();
+
+      const form = container.querySelector<HTMLFormElement>(
+        'form[aria-label="Create structured preference proposal"]',
+      )!;
+      await setValue(controlForLabel(form, "Stable key"), preference.stableKey);
+      await setValue(controlForLabel(form, "Descriptor title"), "Duplicate preference");
+      await setValue(controlForLabel(form, "Compact descriptor"), "Duplicate descriptor.");
+      await setValue(controlForLabel(form, "Full preference content"), "Duplicate body.");
+      await act(async () => {
+        form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+        await Promise.resolve();
+      });
+      await settle();
+
+      expect(container.textContent).toContain(
+        "A preference with this stable key already exists in the requested scope.",
+      );
+      expect(container.textContent).not.toContain("changed in another request");
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
+  test("reports stale lifecycle CAS distinctly and refreshes inventory plus selected detail", async () => {
+    deactivatePreferenceRegistry.mockRejectedValueOnce(
+      new OpenGeniApiError(
+        409,
+        JSON.stringify({
+          code: "PREFERENCE_REGISTRY_CONFLICT",
+          message: "The active preference revision changed before deactivation",
+          currentRevisionId: revisionOneId,
+          scopeVersion: 4,
+        }),
+        { mutation: true },
+      ),
+    );
+    const reloadWorkspaceState = mock(async () => undefined);
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <PreferenceRegistryAdministration
+            workspaceId={workspaceId}
+            onWorkspaceStateReload={reloadWorkspaceState}
+          />,
+        ),
+      );
+      await settle();
+      await settle();
+      expect(listPreferenceRegistry).toHaveBeenCalledTimes(1);
+      expect(getPreferenceRegistry).toHaveBeenCalledTimes(1);
+
+      await setValue(controlForLabel(container, "Audit reason"), "Deactivate stale revision");
+      const confirmation = [
+        ...container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'),
+      ].find((candidate) =>
+        candidate.parentElement?.textContent?.includes("newly accepted attempts"),
+      )!;
+      await setChecked(confirmation, true);
+      const deactivate = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent?.trim() === "Deactivate",
+      )!;
+      await act(async () => {
+        deactivate.click();
+        await Promise.resolve();
+      });
+      await settle();
+      expect(container.textContent).toContain(
+        "The preference changed in another request. Refresh the registry and selected detail",
+      );
+
+      const refresh = [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) =>
+        button.textContent?.includes("Refresh registry and detail"),
+      )!;
+      await act(async () => {
+        refresh.click();
+        await Promise.resolve();
+      });
+      await settle();
+
+      expect(listPreferenceRegistry).toHaveBeenCalledTimes(2);
+      expect(getPreferenceRegistry).toHaveBeenCalledTimes(2);
+      expect(reloadWorkspaceState).toHaveBeenCalledTimes(1);
+      expect(container.textContent).not.toContain("The preference changed in another request");
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
+  test("requires accepted-attempt boundary confirmation before activating a correction", async () => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <PreferenceRegistryAdministration
+            workspaceId={workspaceId}
+            onWorkspaceStateReload={async () => undefined}
+          />,
+        ),
+      );
+      await settle();
+      await settle();
+
+      const form = container.querySelector<HTMLFormElement>(
+        'form[aria-label="Correct structured preference"]',
+      )!;
+      await setValue(controlForLabel(form, "Complete replacement content"), "Corrected body.");
+      await setValue(controlForLabel(form, "Correction reason"), "Correct the active content");
+      await act(async () => {
+        form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+        await Promise.resolve();
+      });
+      await settle();
+
+      expect(correctPreferenceRegistry).not.toHaveBeenCalled();
+      expect(container.textContent).toContain(
+        "Confirm that this correction changes authority only for newly accepted attempts.",
+      );
+
+      const confirmation = [
+        ...form.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'),
+      ].find((candidate) =>
+        candidate.parentElement?.textContent?.includes("correction immediately activates"),
+      )!;
+      await setChecked(confirmation, true);
+      await act(async () => {
+        form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+        await Promise.resolve();
+      });
+      await settle();
+
+      expect(correctPreferenceRegistry).toHaveBeenCalledTimes(1);
+      expect(correctPreferenceRegistry.mock.calls[0]?.[2]).toMatchObject({
+        expectedCurrentRevisionId: revisionTwoId,
+        expectedScopeVersion: 3,
+        content: "Corrected body.",
+        reason: "Correct the active content",
+      });
     } finally {
       await act(async () => root.unmount());
     }
