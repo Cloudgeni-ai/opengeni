@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/artifact-kernel-wasm-presentation",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Exact lazy WebAssembly runtime for OpenGeni presentation editing.",
   "license": "Apache-2.0",
   "repository": {
