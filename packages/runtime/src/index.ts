@@ -5160,7 +5160,11 @@ export async function prepareRunInput(
   } else {
     state.reject(target as any, input.message ? { message: input.message } : undefined);
   }
-  return { input: state, persistedHistoryCount: state.history.length };
+  const history = (state as { history?: unknown[] }).history;
+  if (!Array.isArray(history)) {
+    throw new Error("Approval run state has no materialized history");
+  }
+  return { input: state, persistedHistoryCount: history.length };
 }
 
 export type RunAgentStreamOptions = {

@@ -5187,7 +5187,10 @@ describe("clean session control plane", () => {
         turnId: turn.id,
         expectedExecutionGeneration: turn.executionGeneration,
         expectedAttemptId: firstAttemptId,
-        serializedRunState: "approval-race-state",
+        serializedRunState: JSON.stringify({
+          history: [],
+          fixture: "approval-race-state",
+        }),
         pendingApprovals: [{ id: "approval-race" }],
       }),
     ).toBe(true);
@@ -5276,7 +5279,10 @@ describe("clean session control plane", () => {
         turnId: turn.id,
         expectedExecutionGeneration: turn.executionGeneration,
         expectedAttemptId: attemptId,
-        serializedRunState: "approval-identity-state",
+        serializedRunState: JSON.stringify({
+          history: [],
+          fixture: "approval-identity-state",
+        }),
         pendingApprovals: [{ id: "approval-current" }, { rawItem: { callId: "approval-second" } }],
       }),
     ).toBe(true);
@@ -5426,7 +5432,10 @@ describe("clean session control plane", () => {
         turnId: firstClaim.turn.id,
         expectedExecutionGeneration: firstClaim.turn.executionGeneration,
         expectedAttemptId: firstAttemptId,
-        serializedRunState: "connector-ask-state",
+        serializedRunState: JSON.stringify({
+          history: [],
+          fixture: "connector-ask-state",
+        }),
         pendingApprovals: [{ id: askCall.approvalId }],
       }),
     ).toBe(true);
@@ -5550,7 +5559,10 @@ describe("clean session control plane", () => {
         turnId: secondClaim.turn.id,
         expectedExecutionGeneration: secondClaim.turn.executionGeneration,
         expectedAttemptId: secondAttemptId,
-        serializedRunState: "connector-reject-state",
+        serializedRunState: JSON.stringify({
+          history: [],
+          fixture: "connector-reject-state",
+        }),
         pendingApprovals: [{ id: rejectCall.approvalId }],
       }),
     ).toBe(true);
@@ -5698,7 +5710,10 @@ describe("clean session control plane", () => {
         turnId: firstClaim.turn.id,
         expectedExecutionGeneration: firstClaim.turn.executionGeneration,
         expectedAttemptId: firstAttemptId,
-        serializedRunState: "legacy-mcp-approval-state",
+        serializedRunState: JSON.stringify({
+          version: 1,
+          kind: "legacy-mcp-approval-state",
+        }),
         pendingApprovals: [{ id: call.approvalId }],
       }),
     ).toBe(true);

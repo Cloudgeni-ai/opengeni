@@ -22193,10 +22193,159 @@ export async function getSessionEventByClientEventId(
   });
 }
 
+export const APPROVAL_RUN_STATE_MAX_JSON_BYTES = 3 * 1024 * 1024;
+export const APPROVAL_RUN_STATE_MAX_JSON_NODES = 65_536;
+export const APPROVAL_RUN_STATE_MAX_JSON_PROPERTIES = 32_768;
+export const APPROVAL_PENDING_MAX_JSON_BYTES = 256 * 1024;
+export const APPROVAL_PENDING_MAX_ITEMS = 256;
+
+export type ApprovalRunStateMaterializationLimits = {
+  maximumJsonBytes: number;
+  maximumJsonNodes: number;
+  maximumJsonProperties: number;
+  maximumPendingApprovalBytes: number;
+  maximumPendingApprovalItems: number;
+};
+
+export type ApprovalRunStateLimitKind =
+  | "json_bytes"
+  | "json_nodes"
+  | "json_properties"
+  | "invalid_json"
+  | "pending_approval_bytes"
+  | "pending_approval_items";
+
+export class ApprovalRunStateLimitExceededError extends Error {
+  readonly code = "approval_run_state_too_large";
+
+  constructor(
+    readonly limitKind: ApprovalRunStateLimitKind,
+    readonly actual: number,
+    readonly maximum: number,
+  ) {
+    super(approvalRunStateLimitMessage(limitKind, actual, maximum));
+    this.name = "ApprovalRunStateLimitExceededError";
+  }
+}
+
+function approvalRunStateLimitMessage(
+  kind: ApprovalRunStateLimitKind,
+  actual: number,
+  maximum: number,
+): string {
+  if (kind === "invalid_json") return "Approval run state is not a valid serialized JSON object.";
+  const label =
+    kind === "json_bytes"
+      ? "UTF-8 JSON bytes"
+      : kind === "json_nodes"
+        ? "decoded JSON nodes"
+        : kind === "json_properties"
+          ? "decoded JSON object properties"
+          : kind === "pending_approval_bytes"
+            ? "pending-approval JSON bytes"
+            : "pending approval items";
+  return `Approval run state has ${actual} ${label}; the materialization limit is ${maximum}.`;
+}
+
+const DEFAULT_APPROVAL_RUN_STATE_LIMITS: ApprovalRunStateMaterializationLimits = {
+  maximumJsonBytes: APPROVAL_RUN_STATE_MAX_JSON_BYTES,
+  maximumJsonNodes: APPROVAL_RUN_STATE_MAX_JSON_NODES,
+  maximumJsonProperties: APPROVAL_RUN_STATE_MAX_JSON_PROPERTIES,
+  maximumPendingApprovalBytes: APPROVAL_PENDING_MAX_JSON_BYTES,
+  maximumPendingApprovalItems: APPROVAL_PENDING_MAX_ITEMS,
+};
+
+type ApprovalRunStateMeasurement = {
+  actualBytes: number;
+  validJsonObject: boolean;
+  actualNodes: number;
+  actualProperties: number;
+  pendingApprovalBytes: number;
+  pendingApprovalItems: number;
+};
+
+function approvalRunStateLimits(
+  overrides: Partial<ApprovalRunStateMaterializationLimits>,
+): ApprovalRunStateMaterializationLimits {
+  const limits = { ...DEFAULT_APPROVAL_RUN_STATE_LIMITS, ...overrides };
+  for (const [name, value] of Object.entries(limits)) {
+    if (!Number.isSafeInteger(value) || value < 1) {
+      throw new Error(`${name} must be a positive safe integer`);
+    }
+  }
+  return limits;
+}
+
+function safeEnvelopeInteger(value: string, label: string): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new Error(`${label} is not a non-negative safe integer: ${String(value)}`);
+  }
+  return parsed;
+}
+
+function assertApprovalRunStateMeasurement(
+  measured: ApprovalRunStateMeasurement,
+  limits: ApprovalRunStateMaterializationLimits,
+): void {
+  if (measured.actualBytes > limits.maximumJsonBytes) {
+    throw new ApprovalRunStateLimitExceededError(
+      "json_bytes",
+      measured.actualBytes,
+      limits.maximumJsonBytes,
+    );
+  }
+  if (!measured.validJsonObject) {
+    throw new ApprovalRunStateLimitExceededError("invalid_json", 1, 0);
+  }
+  if (measured.actualNodes > limits.maximumJsonNodes) {
+    throw new ApprovalRunStateLimitExceededError(
+      "json_nodes",
+      measured.actualNodes,
+      limits.maximumJsonNodes,
+    );
+  }
+  if (measured.actualProperties > limits.maximumJsonProperties) {
+    throw new ApprovalRunStateLimitExceededError(
+      "json_properties",
+      measured.actualProperties,
+      limits.maximumJsonProperties,
+    );
+  }
+  if (measured.pendingApprovalBytes > limits.maximumPendingApprovalBytes) {
+    throw new ApprovalRunStateLimitExceededError(
+      "pending_approval_bytes",
+      measured.pendingApprovalBytes,
+      limits.maximumPendingApprovalBytes,
+    );
+  }
+  if (measured.pendingApprovalItems > limits.maximumPendingApprovalItems) {
+    throw new ApprovalRunStateLimitExceededError(
+      "pending_approval_items",
+      measured.pendingApprovalItems,
+      limits.maximumPendingApprovalItems,
+    );
+  }
+}
+
+function approvalRunStateNullableDate(value: Date | string | null): Date | null {
+  if (value === null) return null;
+  const parsed = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error("Approval run state has a malformed provider artifact invalidation timestamp");
+  }
+  return parsed;
+}
+
+/**
+ * Read the one approval/human-input RunState through a server-measured envelope.
+ * Ordinary turns never call this path; they use canonical history items only.
+ */
 export async function getLatestRunState(
   db: Database,
   workspaceId: string,
   sessionId: string,
+  limitOverrides: Partial<ApprovalRunStateMaterializationLimits> = {},
 ): Promise<{
   id: string;
   turnId: string | null;
@@ -22204,33 +22353,147 @@ export async function getLatestRunState(
   pendingApprovals: unknown[];
   providerArtifactInvalidatedAt: Date | null;
 } | null> {
+  const limits = approvalRunStateLimits(limitOverrides);
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.agentRunStates)
-      .where(
-        and(
-          eq(schema.agentRunStates.workspaceId, workspaceId),
-          eq(schema.agentRunStates.sessionId, sessionId),
+    const [row] = await rawRows<{
+      id: string;
+      turn_id: string | null;
+      serialized_run_state: string | null;
+      serialized_run_state_codec_version: number | null;
+      pending_approvals: unknown[] | null;
+      pending_approvals_codec_version: number | null;
+      provider_artifact_invalidated_at: Date | string | null;
+      actual_bytes: string;
+      valid_json_object: boolean;
+      actual_nodes: string;
+      actual_properties: string;
+      pending_approval_bytes: string;
+      pending_approval_items: string;
+    }>(
+      scopedDb,
+      sql`
+        with latest as materialized (
+          select id, turn_id, serialized_run_state, serialized_run_state_codec_version,
+                 pending_approvals, pending_approvals_codec_version,
+                 provider_artifact_invalidated_at, state_version, created_at
+          from agent_run_states
+          where workspace_id = ${workspaceId}
+            and session_id = ${sessionId}
+          order by created_at desc, state_version desc
+          limit 1
+        ), measured as materialized (
+          select latest.*,
+                 octet_length(serialized_run_state)::bigint as actual_bytes,
+                 (serialized_run_state is json value) as valid_json,
+                 octet_length(pending_approvals::text)::bigint as pending_approval_bytes,
+                 case when jsonb_typeof(pending_approvals) = 'array'
+                   then jsonb_array_length(pending_approvals)::bigint
+                   else ${limits.maximumPendingApprovalItems + 1}::bigint
+                 end as pending_approval_items
+          from latest
+        ), decoded as materialized (
+          select measured.*,
+                 case
+                   when actual_bytes <= ${limits.maximumJsonBytes} and valid_json
+                   then case
+                     when jsonb_typeof(serialized_run_state::jsonb) = 'object'
+                     then serialized_run_state::jsonb
+                     else null
+                   end
+                   else null
+                 end as state_json
+          from measured
+        ), bounded_nodes as materialized (
+          select count(*)::bigint as actual_nodes
+          from (
+            select node
+            from decoded
+            cross join lateral jsonb_path_query(decoded.state_json, 'strict $.**') as node
+            where decoded.state_json is not null
+            limit ${limits.maximumJsonNodes + 1}
+          ) nodes
+        ), bounded_properties as materialized (
+          select count(*)::bigint as actual_properties
+          from (
+            select property
+            from decoded
+            cross join lateral jsonb_path_query(
+              decoded.state_json,
+              'strict $.** ? (@.type() == "object")'
+            ) as object_value
+            cross join lateral jsonb_object_keys(object_value) as property
+            where decoded.state_json is not null
+            limit ${limits.maximumJsonProperties + 1}
+          ) properties
+        )
+        select decoded.id,
+               decoded.turn_id,
+               case
+                 when decoded.state_json is not null
+                   and bounded_nodes.actual_nodes <= ${limits.maximumJsonNodes}
+                   and bounded_properties.actual_properties <= ${limits.maximumJsonProperties}
+                 then decoded.serialized_run_state
+                 else null
+               end as serialized_run_state,
+               case
+                 when decoded.pending_approval_bytes <= ${limits.maximumPendingApprovalBytes}
+                   and decoded.pending_approval_items <= ${limits.maximumPendingApprovalItems}
+                 then decoded.pending_approvals
+                 else null
+               end as pending_approvals,
+               decoded.serialized_run_state_codec_version,
+               decoded.pending_approvals_codec_version,
+               decoded.provider_artifact_invalidated_at,
+               decoded.actual_bytes::text as actual_bytes,
+               (decoded.valid_json and decoded.state_json is not null) as valid_json_object,
+               bounded_nodes.actual_nodes::text as actual_nodes,
+               bounded_properties.actual_properties::text as actual_properties,
+               decoded.pending_approval_bytes::text as pending_approval_bytes,
+               decoded.pending_approval_items::text as pending_approval_items
+        from decoded
+        cross join bounded_nodes
+        cross join bounded_properties
+      `,
+    );
+    if (!row) return null;
+    assertApprovalRunStateMeasurement(
+      {
+        actualBytes: safeEnvelopeInteger(row.actual_bytes, "approval run-state bytes"),
+        validJsonObject: row.valid_json_object,
+        actualNodes: safeEnvelopeInteger(row.actual_nodes, "approval run-state JSON nodes"),
+        actualProperties: safeEnvelopeInteger(
+          row.actual_properties,
+          "approval run-state JSON properties",
         ),
-      )
-      .orderBy(desc(schema.agentRunStates.createdAt))
-      .limit(1);
-    return row
-      ? {
-          id: row.id,
-          turnId: row.turnId ?? null,
-          serializedRunState: fromPostgresLosslessText(
-            row.serializedRunState,
-            row.serializedRunStateCodecVersion,
-          ),
-          pendingApprovals: fromPostgresLosslessJson(
-            row.pendingApprovals,
-            row.pendingApprovalsCodecVersion,
-          ),
-          providerArtifactInvalidatedAt: row.providerArtifactInvalidatedAt ?? null,
-        }
-      : null;
+        pendingApprovalBytes: safeEnvelopeInteger(
+          row.pending_approval_bytes,
+          "pending-approval JSON bytes",
+        ),
+        pendingApprovalItems: safeEnvelopeInteger(
+          row.pending_approval_items,
+          "pending approval items",
+        ),
+      },
+      limits,
+    );
+    if (row.serialized_run_state === null || row.pending_approvals === null) {
+      throw new Error("Approval run-state envelope passed without materialized bounded values");
+    }
+    return {
+      id: row.id,
+      turnId: row.turn_id ?? null,
+      serializedRunState: fromPostgresLosslessText(
+        row.serialized_run_state,
+        row.serialized_run_state_codec_version,
+      ),
+      pendingApprovals: fromPostgresLosslessJson(
+        row.pending_approvals,
+        row.pending_approvals_codec_version,
+      ),
+      providerArtifactInvalidatedAt: approvalRunStateNullableDate(
+        row.provider_artifact_invalidated_at,
+      ),
+    };
   });
 }
 
@@ -23448,6 +23711,264 @@ export async function getActiveSessionHistoryItems(
       item: fromPostgresLosslessJson(row.item, itemCodecVersion),
     }));
   });
+}
+
+/**
+ * Profiled upper envelope for one session's complete active, model-facing
+ * transcript. Bytes alone do not bound the decoded object graph, so rows, JSON
+ * nodes, and object properties are independently limited. Normal token-driven
+ * compaction keeps active history far below these boundaries. The limits are a
+ * final materialization guard: a corrupt/imported/pathological transcript fails
+ * deterministically before a Postgres driver decodes it instead of using the
+ * pod OOM killer as admission.
+ */
+export const ACTIVE_SESSION_HISTORY_MAX_JSON_BYTES = 3 * 1024 * 1024;
+export const ACTIVE_SESSION_HISTORY_MAX_ROWS = 4_096;
+export const ACTIVE_SESSION_HISTORY_MAX_JSON_NODES = 65_536;
+export const ACTIVE_SESSION_HISTORY_MAX_JSON_PROPERTIES = 32_768;
+
+export type ActiveSessionHistoryLimitKind =
+  | "json_bytes"
+  | "rows"
+  | "json_nodes"
+  | "json_properties";
+
+export class ActiveSessionHistoryLimitExceededError extends Error {
+  readonly code = "active_history_too_large";
+
+  constructor(
+    readonly actualBytes: number,
+    readonly maximumBytes: number,
+    readonly limitKind: ActiveSessionHistoryLimitKind = "json_bytes",
+    readonly actual: number = actualBytes,
+    readonly maximum: number = maximumBytes,
+  ) {
+    super(activeSessionHistoryLimitMessage(limitKind, actual, maximum));
+    this.name = "ActiveSessionHistoryLimitExceededError";
+  }
+}
+
+function activeSessionHistoryLimitMessage(
+  kind: ActiveSessionHistoryLimitKind,
+  actual: number,
+  maximum: number,
+): string {
+  if (kind === "json_bytes") {
+    return `Active session history is ${actual} UTF-8 JSON bytes, exceeding the ${maximum}-byte materialization limit.`;
+  }
+  const label =
+    kind === "rows"
+      ? "rows"
+      : kind === "json_nodes"
+        ? "decoded JSON nodes"
+        : "decoded JSON object properties";
+  return `Active session history has ${actual} ${label}; the materialization limit is ${maximum}.`;
+}
+
+/**
+ * Memory-bounded active-history read for model input and compaction. PostgreSQL
+ * first measures the complete logical window without returning any JSONB item,
+ * then keyset-pages the admitted rows on the same repeatable-read snapshot.
+ */
+export async function getActiveSessionHistoryItemsPaged(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  pageSize = 16,
+  maximumJsonBytes = ACTIVE_SESSION_HISTORY_MAX_JSON_BYTES,
+  maximumRows = ACTIVE_SESSION_HISTORY_MAX_ROWS,
+  maximumJsonNodes = ACTIVE_SESSION_HISTORY_MAX_JSON_NODES,
+  maximumJsonProperties = ACTIVE_SESSION_HISTORY_MAX_JSON_PROPERTIES,
+): Promise<
+  Array<{
+    id: string;
+    position: number;
+    item: Record<string, unknown>;
+    providerArtifactInvalidatedAt: Date | null;
+  }>
+> {
+  if (!Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 100) {
+    throw new Error("active session history page size must be an integer between 1 and 100");
+  }
+  if (!Number.isSafeInteger(maximumJsonBytes) || maximumJsonBytes < 1) {
+    throw new Error("active session history JSON limit must be a positive safe integer");
+  }
+  for (const [name, value] of [
+    ["row", maximumRows],
+    ["JSON node", maximumJsonNodes],
+    ["JSON property", maximumJsonProperties],
+  ] as const) {
+    if (!Number.isSafeInteger(value) || value < 1) {
+      throw new Error(`active session history ${name} limit must be a positive safe integer`);
+    }
+  }
+
+  return await withWorkspaceRls(
+    db,
+    workspaceId,
+    async (scopedDb) => {
+      // Measure one logical JSON array. pg_column_size(jsonb) is deliberately
+      // insufficient because TOAST/compression could hide the decoded size.
+      const [size] = await scopedDb
+        .select({
+          bytes: sql<string>`case
+            when count(*) = 0 then 2
+            else sum(octet_length((${schema.sessionHistoryItems.item})::text)) + count(*) + 1
+          end`,
+          rows: sql<string>`count(*)`,
+        })
+        .from(schema.sessionHistoryItems)
+        .where(
+          and(
+            eq(schema.sessionHistoryItems.workspaceId, workspaceId),
+            eq(schema.sessionHistoryItems.sessionId, sessionId),
+            eq(schema.sessionHistoryItems.active, true),
+          ),
+        );
+      const actualBytes = Number(size?.bytes ?? 0);
+      if (!Number.isSafeInteger(actualBytes) || actualBytes < 0) {
+        throw new Error(
+          `Active session history size is not a safe integer: ${String(size?.bytes)}`,
+        );
+      }
+      if (actualBytes > maximumJsonBytes) {
+        throw new ActiveSessionHistoryLimitExceededError(actualBytes, maximumJsonBytes);
+      }
+      const actualRows = Number(size?.rows ?? 0);
+      if (!Number.isSafeInteger(actualRows) || actualRows < 0) {
+        throw new Error(
+          `Active session history row count is not a safe integer: ${String(size?.rows)}`,
+        );
+      }
+      if (actualRows > maximumRows) {
+        throw new ActiveSessionHistoryLimitExceededError(
+          actualBytes,
+          maximumJsonBytes,
+          "rows",
+          actualRows,
+          maximumRows,
+        );
+      }
+
+      // Bound decoded shape independently from bytes. LIMIT maximum+1 keeps
+      // rejection work proportional to the admitted envelope.
+      const [nodeCount] = await rawRows<{ nodes: string }>(
+        scopedDb,
+        sql`
+          select count(*)::text as nodes
+          from (
+            select node
+            from session_history_items history
+            cross join lateral jsonb_path_query(history.item, 'strict $.**') as node
+            where history.workspace_id = ${workspaceId}
+              and history.session_id = ${sessionId}
+              and history.active = true
+            limit ${maximumJsonNodes + 1}
+          ) bounded_nodes
+        `,
+      );
+      const actualJsonNodes = Number(nodeCount?.nodes ?? 0);
+      if (!Number.isSafeInteger(actualJsonNodes) || actualJsonNodes < 0) {
+        throw new Error(
+          `Active session history JSON node count is not a safe integer: ${String(nodeCount?.nodes)}`,
+        );
+      }
+      if (actualJsonNodes > maximumJsonNodes) {
+        throw new ActiveSessionHistoryLimitExceededError(
+          actualBytes,
+          maximumJsonBytes,
+          "json_nodes",
+          actualJsonNodes,
+          maximumJsonNodes,
+        );
+      }
+
+      const [propertyCount] = await rawRows<{ properties: string }>(
+        scopedDb,
+        sql`
+          select count(*)::text as properties
+          from (
+            select property
+            from session_history_items history
+            cross join lateral jsonb_path_query(
+              history.item,
+              'strict $.** ? (@.type() == "object")'
+            ) as object_value
+            cross join lateral jsonb_object_keys(object_value) as property
+            where history.workspace_id = ${workspaceId}
+              and history.session_id = ${sessionId}
+              and history.active = true
+            limit ${maximumJsonProperties + 1}
+          ) bounded_properties
+        `,
+      );
+      const actualJsonProperties = Number(propertyCount?.properties ?? 0);
+      if (!Number.isSafeInteger(actualJsonProperties) || actualJsonProperties < 0) {
+        throw new Error(
+          `Active session history JSON property count is not a safe integer: ${String(propertyCount?.properties)}`,
+        );
+      }
+      if (actualJsonProperties > maximumJsonProperties) {
+        throw new ActiveSessionHistoryLimitExceededError(
+          actualBytes,
+          maximumJsonBytes,
+          "json_properties",
+          actualJsonProperties,
+          maximumJsonProperties,
+        );
+      }
+
+      const rows: Array<{
+        id: string;
+        position: number;
+        item: Record<string, unknown>;
+        providerArtifactInvalidatedAt: Date | null;
+      }> = [];
+      let afterPosition: number | null = null;
+      for (;;) {
+        const page: Array<{
+          id: string;
+          position: number;
+          item: Record<string, unknown>;
+          itemCodecVersion: number | null;
+          providerArtifactInvalidatedAt: Date | null;
+        }> = await scopedDb
+          .select({
+            id: schema.sessionHistoryItems.id,
+            position: schema.sessionHistoryItems.position,
+            item: schema.sessionHistoryItems.item,
+            itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
+            providerArtifactInvalidatedAt: schema.sessionHistoryItems.providerArtifactInvalidatedAt,
+          })
+          .from(schema.sessionHistoryItems)
+          .where(
+            and(
+              eq(schema.sessionHistoryItems.workspaceId, workspaceId),
+              eq(schema.sessionHistoryItems.sessionId, sessionId),
+              eq(schema.sessionHistoryItems.active, true),
+              ...(afterPosition === null
+                ? []
+                : [gt(schema.sessionHistoryItems.position, afterPosition)]),
+            ),
+          )
+          .orderBy(schema.sessionHistoryItems.position)
+          .limit(pageSize);
+        rows.push(
+          ...page.map(({ itemCodecVersion, ...row }) => ({
+            ...row,
+            item: fromPostgresLosslessJson(row.item, itemCodecVersion),
+          })),
+        );
+        if (page.length < pageSize) return rows;
+        const nextPosition = page.at(-1)!.position;
+        if (afterPosition !== null && nextPosition <= afterPosition) {
+          throw new Error("active session history keyset did not advance");
+        }
+        afterPosition = nextPosition;
+      }
+    },
+    { isolationLevel: "repeatable read" },
+  );
 }
 
 /** Bounded finalized voice turns used only to resume a later realtime call. */
@@ -38249,6 +38770,7 @@ export async function saveRunState(
           attemptId: input.expectedAttemptId,
         });
         if (!allowed.allowed) return false;
+        await assertApprovalRunStateForSave(tx, input.serializedRunState, input.pendingApprovals);
         const [{ maxVersion } = { maxVersion: 0 }] = await tx
           .select({
             maxVersion: sql<number>`coalesce(max(${schema.agentRunStates.stateVersion}), 0)`,
@@ -38282,6 +38804,109 @@ export async function saveRunState(
         return true;
       });
     },
+  );
+}
+
+async function assertApprovalRunStateForSave(
+  executor: Pick<Database, "execute">,
+  serializedRunState: string,
+  pendingApprovals: unknown[],
+): Promise<void> {
+  const limits = DEFAULT_APPROVAL_RUN_STATE_LIMITS;
+  const actualBytes = Buffer.byteLength(serializedRunState, "utf8");
+  if (actualBytes > limits.maximumJsonBytes) {
+    throw new ApprovalRunStateLimitExceededError(
+      "json_bytes",
+      actualBytes,
+      limits.maximumJsonBytes,
+    );
+  }
+  if (pendingApprovals.length > limits.maximumPendingApprovalItems) {
+    throw new ApprovalRunStateLimitExceededError(
+      "pending_approval_items",
+      pendingApprovals.length,
+      limits.maximumPendingApprovalItems,
+    );
+  }
+  const pendingApprovalJson = JSON.stringify(pendingApprovals);
+  const pendingApprovalBytes = Buffer.byteLength(pendingApprovalJson, "utf8");
+  if (pendingApprovalBytes > limits.maximumPendingApprovalBytes) {
+    throw new ApprovalRunStateLimitExceededError(
+      "pending_approval_bytes",
+      pendingApprovalBytes,
+      limits.maximumPendingApprovalBytes,
+    );
+  }
+
+  const [row] = await rawRows<{
+    actual_bytes: string;
+    valid_json_object: boolean;
+    actual_nodes: string;
+    actual_properties: string;
+  }>(
+    executor,
+    sql`
+      with candidate as materialized (
+        select ${serializedRunState}::text as serialized_run_state
+      ), measured as materialized (
+        select serialized_run_state,
+               octet_length(serialized_run_state)::bigint as actual_bytes,
+               (serialized_run_state is json value) as valid_json
+        from candidate
+      ), decoded as materialized (
+        select measured.*,
+               case when valid_json then case
+                 when jsonb_typeof(serialized_run_state::jsonb) = 'object'
+                 then serialized_run_state::jsonb
+                 else null
+               end else null end as state_json
+        from measured
+      ), bounded_nodes as materialized (
+        select count(*)::bigint as actual_nodes
+        from (
+          select node
+          from decoded
+          cross join lateral jsonb_path_query(decoded.state_json, 'strict $.**') as node
+          where decoded.state_json is not null
+          limit ${limits.maximumJsonNodes + 1}
+        ) nodes
+      ), bounded_properties as materialized (
+        select count(*)::bigint as actual_properties
+        from (
+          select property
+          from decoded
+          cross join lateral jsonb_path_query(
+            decoded.state_json,
+            'strict $.** ? (@.type() == "object")'
+          ) as object_value
+          cross join lateral jsonb_object_keys(object_value) as property
+          where decoded.state_json is not null
+          limit ${limits.maximumJsonProperties + 1}
+        ) properties
+      )
+      select decoded.actual_bytes::text as actual_bytes,
+             (decoded.valid_json and decoded.state_json is not null) as valid_json_object,
+             bounded_nodes.actual_nodes::text as actual_nodes,
+             bounded_properties.actual_properties::text as actual_properties
+      from decoded
+      cross join bounded_nodes
+      cross join bounded_properties
+    `,
+  );
+  if (!row) throw new Error("Approval run-state save envelope returned no measurement");
+  assertApprovalRunStateMeasurement(
+    {
+      actualBytes: safeEnvelopeInteger(row.actual_bytes, "approval run-state bytes"),
+      validJsonObject: row.valid_json_object,
+      actualNodes: safeEnvelopeInteger(row.actual_nodes, "approval run-state JSON nodes"),
+      actualProperties: safeEnvelopeInteger(
+        row.actual_properties,
+        "approval run-state JSON properties",
+      ),
+      pendingApprovalBytes,
+      pendingApprovalItems: pendingApprovals.length,
+    },
+    limits,
   );
 }
 

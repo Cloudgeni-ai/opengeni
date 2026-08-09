@@ -7,7 +7,7 @@
  * harness without charging every production process for both dependency trees.
  */
 import { createDocumentServices } from "@opengeni/documents";
-import { createProductionAgentRuntime } from "@opengeni/runtime";
+import { createProductionAgentRuntime, summarizeForCompaction } from "@opengeni/runtime";
 import { createControlActivities, createControlActivitiesFromServices } from "./activities-control";
 import { createTurnActivities, createTurnActivitiesFromServices } from "./activities-turn";
 import { createSharedActivityServices } from "./activity-services";
@@ -60,6 +60,8 @@ export function createActivityTestHarness(dependencies: ActivityDependencies = {
           createProductionAgentRuntime({
             metrics: runtimeMetricsHooksForObservability(common.observability),
           }),
+        summarizeContextForCompaction:
+          dependencies.summarizeContextForCompaction ?? summarizeForCompaction,
         documentServices: dependencies.documentServices ?? createDocumentServices(common.settings),
       };
     })();

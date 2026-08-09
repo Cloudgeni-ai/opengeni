@@ -7,7 +7,7 @@ import {
 } from "@opengeni/contracts";
 import { createHash } from "node:crypto";
 import {
-  getActiveSessionHistoryItems,
+  getActiveSessionHistoryItemsPaged,
   getFiles,
   getLatestRunState,
   getHumanInputResumeForEvent,
@@ -528,7 +528,11 @@ async function messageInput(
   materializeModelHistory?: ModelHistoryAttachmentProjector,
   projectModelHistory?: ModelHistoryAttachmentProjector,
 ): Promise<PreparedTurnInput> {
-  const stored = await getActiveSessionHistoryItems(db, trigger.workspaceId, trigger.sessionId);
+  const stored = await getActiveSessionHistoryItemsPaged(
+    db,
+    trigger.workspaceId,
+    trigger.sessionId,
+  );
   const envelope = await getSandboxSessionEnvelope(db, trigger.workspaceId, trigger.sessionId);
   const canonicalView = projectRejectedProviderArtifacts(stored);
   const canonicalProviderView = projectCanonicalHistory

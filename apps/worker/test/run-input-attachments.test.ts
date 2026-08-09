@@ -369,8 +369,13 @@ describe("turnInput attachment projection", () => {
     const requireFile = spyOn(opengeniDb, "requireFile").mockResolvedValue(image);
     const getFiles = spyOn(opengeniDb, "getFiles").mockResolvedValue([image]);
     const listUpdates = spyOn(opengeniDb, "listSessionSystemUpdatesForTurn").mockResolvedValue([]);
-    const getHistory = spyOn(opengeniDb, "getActiveSessionHistoryItems").mockResolvedValue([
-      { item: storedUser },
+    const getHistory = spyOn(opengeniDb, "getActiveSessionHistoryItemsPaged").mockResolvedValue([
+      {
+        id: "00000000-0000-4000-8000-000000000054",
+        position: 0,
+        item: storedUser,
+        providerArtifactInvalidatedAt: null,
+      },
     ]);
     const getEnvelope = spyOn(opengeniDb, "getSandboxSessionEnvelope").mockResolvedValue(null);
     const runtime = {
@@ -454,8 +459,13 @@ describe("turnInput attachment projection", () => {
         deliveredHistoryItemId: "00000000-0000-4000-8000-000000000056",
       } as never,
     ]);
-    const getHistory = spyOn(opengeniDb, "getActiveSessionHistoryItems").mockResolvedValue([
-      { id: "00000000-0000-4000-8000-000000000056", item: storedUser } as never,
+    const getHistory = spyOn(opengeniDb, "getActiveSessionHistoryItemsPaged").mockResolvedValue([
+      {
+        id: "00000000-0000-4000-8000-000000000056",
+        position: 0,
+        item: storedUser,
+        providerArtifactInvalidatedAt: null,
+      },
     ]);
     const getFiles = spyOn(opengeniDb, "getFiles").mockResolvedValue([image]);
     const getEnvelope = spyOn(opengeniDb, "getSandboxSessionEnvelope").mockResolvedValue(null);
@@ -522,8 +532,13 @@ describe("turnInput attachment projection", () => {
     const listUpdates = spyOn(opengeniDb, "listSessionSystemUpdatesForTurn").mockImplementation(
       async () => [],
     );
-    const getHistory = spyOn(opengeniDb, "getActiveSessionHistoryItems").mockResolvedValue([
-      { position: 0, item: storedUser },
+    const getHistory = spyOn(opengeniDb, "getActiveSessionHistoryItemsPaged").mockResolvedValue([
+      {
+        id: "00000000-0000-4000-8000-000000000064",
+        position: 0,
+        item: storedUser,
+        providerArtifactInvalidatedAt: null,
+      },
     ]);
     const getEnvelope = spyOn(opengeniDb, "getSandboxSessionEnvelope").mockResolvedValue(null);
     const runtime = {

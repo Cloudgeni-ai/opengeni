@@ -75,7 +75,15 @@ The one turn worker uses Temporal's resource-based slot tuner. It admits more
 agent turns while whole-machine CPU stays below 80% and memory stays below 75%,
 up to 256 active turns; excess work remains durable in Temporal. This is a
 safety ceiling, not a reservation or a promise that 256 heavy turns fit. The
-worker samples the most pressured finite process cgroup or ancestor every five
+ordinary chart default remains a fixed 16 turns per worker so multi-worker
+deployments can scale replicas predictably. Fixed/HPA turn workers use a custom
+Temporal slot supplier that reserves 100 MiB for the complete physical
+`runAgentTurn` promise lifetime, retains 512 MiB for runtime/native/GC headroom,
+and refuses another poll when either the startup-baseline or current-cgroup
+projection would exceed the pod memory limit. Logical settlement, drain, or a
+quiescence recovery receipt never releases that permit early; Temporal releases
+it only after the physical activity promise ends. Resource-based turn workers
+also sample the most pressured finite process cgroup or ancestor every five
 seconds after admission, falling back to whole-host `MemAvailable` only when no
 finite cgroup exists. Process RSS pressure first receives a bounded asynchronous
 GC opportunity. If the authoritative scope remains at or above the distinct 90%
@@ -86,9 +94,8 @@ emergency threshold, cadence, and sustained window with
 `OPENGENI_TURN_WORKER_EMERGENCY_MEMORY_USAGE`,
 `OPENGENI_TURN_WORKER_MEMORY_GUARD_INTERVAL_MS` and
 `OPENGENI_TURN_WORKER_MEMORY_GUARD_SUSTAIN_MS`; do not replace this protection
-with a turn-duration limit or a blind hard kill. The
-ordinary chart default remains a fixed 16 turns per worker; managed profiles
-may combine a hard per-process maximum with resource-based admission and HPA.
+with a turn-duration limit or a blind hard kill. Managed profiles may combine a
+hard per-process maximum with resource-based admission and HPA.
 
 The ordinary dependency services remain private `ClusterIP` services. Five
 one-port NodePort services are the complete private-edge surface:
@@ -465,6 +472,15 @@ endpoint, so it exercises turn setup without a model-provider key or the
 deployment's user-facing access mode. It creates a run-scoped account and
 workspace, removes both before exit, and prints one
 `OPENGENI_DENSITY_RESULT=...` record for automation.
+
+Run this profile only in a bounded non-serving execution class. A production
+read-only forensic fingerprint over 3,823 sessions exited 137 in a 1 GiB serving
+API pod; neither that forensic scan nor a density sweep may compete with API or
+turn-worker serving memory. The release sweep is the exact
+`1/2/4/8/12/16/24/32` density set with three waves. Boundary runs may select a
+documented subset with `OPENGENI_DENSITY_SWEEP`, but must retain the artifact's
+exact source revision, raw samples, cleanup proof, compaction-shrink proof, and
+provider-isolation facts.
 
 Direct file, Git, and synchronous terminal APIs follow a machine-targeted
 session's active pointer from the first request. They use API → NATS → enrolled
@@ -1476,7 +1492,7 @@ Minimum production dashboards should cover:
 - Worker execution: activity run rate, failure rate, and p50/p95/p99 `runAgentTurn` duration by `activity`, `status`, `variable set`, and `component`.
 - Turn lifecycle: `opengeni_turns_total{outcome}`, `opengeni_turn_duration_seconds`, `opengeni_turns_inflight`, and `opengeni_turn_oldest_inflight_age_seconds`.
 - Model, Codex, and sandbox SLIs: `opengeni_model_calls_total{provider,outcome}`, `opengeni_model_call_duration_seconds{provider}`, `opengeni_codex_credential_selections_total{strategy,reason}`, `opengeni_codex_credential_failures_total{kind,outcome}`, `opengeni_codex_pool_observations_total{depth}`, `opengeni_codex_pool_low_total{depth}`, `opengeni_sandbox_creates_total{backend,outcome}`, `opengeni_sandbox_create_duration_seconds{backend}`, `opengeni_sandbox_operations_total{backend,op,outcome}` (`ok`, expected path `not_found`, or actual `failed`), `opengeni_sandbox_operation_duration_seconds{backend,op}`, `opengeni_sandbox_inventory_refresh_timestamp_seconds{domain}`, the chart's freshness-filtered `opengeni:*:fresh_max` inventory recording rules, `opengeni_sandbox_warming_timeouts_total`, and `opengeni_sandbox_orphans_terminated_total`.
-- Queue and billing: `opengeni_turns_queued`, `opengeni_credit_balance_micros{account_id}`, `opengeni_credit_micros_total{kind}`, and `opengeni_build_info{version,revision}`.
+- Queue, admission, and billing: `opengeni_turns_queued`, `opengeni_turn_eligible_backlog`, `opengeni_turn_eligible_backlog_oldest_age_seconds`, `opengeni_turn_slot_saturation_ratio`, `opengeni_credit_balance_micros{account_id}`, `opengeni_credit_micros_total{kind}`, and `opengeni_build_info{version,revision}`.
 - Dependency health: Postgres connection health, Temporal worker poll health, NATS connectivity, object-storage write/read conformance, and sandbox backend readiness.
 - Runtime health: API/worker restarts, continuous turn-worker host/cgroup utilization and RSS reserve consumption, node memory/I/O PSI, swap-out activity, kubelet runtime errors, node readiness, pod pending time, collector scrape/export errors, and OTLP export failures.
 
@@ -1520,6 +1536,7 @@ Minimum production alerts:
 - API errors: 5xx ratio is above 2% for 10 minutes, or any critical route stays above 5% for 5 minutes.
 - API latency: p95 latency is above the product SLO for 10 minutes, tracked separately for `/v1/workspaces/:workspaceId/sessions`, event replay, SSE, scheduled-task trigger, and file routes.
 - Turn stuck: the oldest in-flight turn is older than 15 minutes for 5 minutes.
+- Turn admission: Temporal's oldest eligible `runAgentTurn` backlog is above 30 seconds for 5 minutes, or a pod remains above 90% of memory-safe slots while eligible work waits. Durable prompts behind a pause do not count.
 - Sandbox create failures: sandbox create failure ratio is above 20% for 10 minutes.
 - Sandbox orphan growth: `increase(opengeni_sandbox_orphans_terminated_total[30m]) > 0`.
 - Codex credential pool: any zero-eligible observation is critical; repeated one-eligible observations are warning-level reduced redundancy. The default PrometheusRule uses `opengeni_codex_pool_low_total{depth="zero"|"one"}`.

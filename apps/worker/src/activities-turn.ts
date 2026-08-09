@@ -1,4 +1,4 @@
-import { createProductionAgentRuntime } from "@opengeni/runtime";
+import { createProductionAgentRuntime, summarizeForCompaction } from "@opengeni/runtime";
 import { createSharedActivityServices } from "./activity-services";
 import { createRunAgentTurnActivity } from "./activities/agent-turn";
 import type { ActivityDependencies, TurnActivityServices } from "./activities/types";
@@ -19,6 +19,8 @@ function createTurnActivityServices(
           createProductionAgentRuntime({
             metrics: runtimeMetricsHooksForObservability(services.observability),
           }),
+        summarizeContextForCompaction:
+          dependencies.summarizeContextForCompaction ?? summarizeForCompaction,
       };
     })();
     return await servicesPromise;

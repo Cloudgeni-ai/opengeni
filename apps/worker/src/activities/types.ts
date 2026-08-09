@@ -123,6 +123,8 @@ export type ControlActivityServices = SharedActivityServices;
 /** Turn workers own the model loop and never construct document parsers. */
 export type TurnActivityServices = SharedActivityServices & {
   runtime: OpenGeniRuntime;
+  /** Provider-free test/profiling seam; production injects the real runtime summarizer. */
+  summarizeContextForCompaction: typeof import("@opengeni/runtime").summarizeForCompaction;
 };
 
 /** Full test/embedded harness retained as a source-compatible superset. */

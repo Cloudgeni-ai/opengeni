@@ -143,6 +143,12 @@ exact materialized file. Provider ids, object keys, signed URLs, and base64 do
 not enter the model-facing prefix. See
 [`image-generation.md`](image-generation.md).
 
+Serving workers fail closed before decoding an active transcript above 3 MiB,
+4,096 rows, 65,536 JSON nodes, or 32,768 object properties. Approval `RunState`
+uses the same byte/node/property envelope. Oversized state is never silently
+trimmed or compacted inside a serving worker; repair and forensic work belongs
+in a bounded non-serving execution class.
+
 Sandbox recovery state is separate again. The group lease is authoritative for
 provider, archive, restore, workspace-readiness, liveness, and epoch truth;
 `sandbox_session_envelopes` retains the per-session provider/manifest descriptor

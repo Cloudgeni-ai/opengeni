@@ -403,8 +403,14 @@ export async function withWorkspaceRls<T>(
   db: Database,
   workspaceId: string,
   fn: (db: Database) => Promise<T>,
+  transactionConfig?: PgTransactionConfig,
 ): Promise<T> {
-  return await withRlsContext(db, await rlsContextForWorkspace(db, workspaceId), fn);
+  return await withRlsContext(
+    db,
+    await rlsContextForWorkspace(db, workspaceId),
+    fn,
+    transactionConfig,
+  );
 }
 
 export async function retryWorkspacePersistence<T>(

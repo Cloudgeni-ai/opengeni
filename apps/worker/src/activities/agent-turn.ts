@@ -48,8 +48,8 @@ import {
   clearDurablePendingSessionToolCalls,
   appendSessionHistoryItems,
   isSessionCompactionRequested,
+  getActiveSessionHistoryItemsPaged,
   countSessionHistoryItems,
-  getActiveSessionHistoryItems,
   nextSessionHistoryPosition,
   settleCodexCredentialLeaseLoss,
   settleCodexCredentialFailover,
@@ -66,6 +66,8 @@ import {
   SandboxLeaseSupersededError,
   SandboxLeaseTransitionError,
   SandboxImageConflictError,
+  ActiveSessionHistoryLimitExceededError,
+  ApprovalRunStateLimitExceededError,
   isSessionEventPersistenceError,
   getEnrollment,
   abandonRecordingForTurnAttempt,
@@ -106,7 +108,6 @@ import {
   composeAgentInstructions,
   hasActiveWorkspaceInstructionPolicy,
   renderWorkspaceGovernanceContext,
-  summarizeForCompaction,
   requestRemoteCompactionV2,
   serializedToolsForRemoteCompaction,
   REMOTE_COMPACTION_V2_BETA_FEATURE,
@@ -2580,6 +2581,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       db,
       bus,
       runtime,
+      summarizeContextForCompaction,
       objectStorage,
       observability,
       wakeSessionWorkflow,
@@ -4910,7 +4912,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         resolvedModel
           ? (s: Settings, m: Array<Record<string, unknown>>) =>
               withCodex(() =>
-                summarizeForCompaction(s, m, {
+                summarizeContextForCompaction(s, m, {
                   client: resolvedModel.client,
                   provider: resolvedModel.provider,
                   api: resolvedModel.provider.api,
@@ -4922,7 +4924,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 }),
               )
           : (s: Settings, m: Array<Record<string, unknown>>) =>
-              summarizeForCompaction(s, m, {
+              summarizeContextForCompaction(s, m, {
                 model: turnExecutionPolicy.upstreamModelId,
                 maxOutputTokens: SUMMARY_BUFFER_TOKENS,
                 onUsage: recordCompactionUsage,
@@ -7018,6 +7020,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // and bricks the session (issue-61). The repaired seed is already
         // orphan-free, so it is a stable prefix of the re-sanitized history and the
         // slice begins exactly at the first genuinely-new item.
+        // prepareInput already sanitized the exact durable prefix represented
+        // by state.history. Carry its count forward instead of loading and
+        // retaining the full active transcript a second time beside runInput.
         persistedHistoryCount = prepared.persistedHistoryCount;
         nextHistoryPosition = await nextSessionHistoryPosition(
           db,
@@ -8824,7 +8829,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       ) {
         await flushRuntimeBatcher();
         await reconcileConversationTruth({ requireDurable: true });
-        const activeHistory = await getActiveSessionHistoryItems(
+        const activeHistory = await getActiveSessionHistoryItemsPaged(
           db,
           input.workspaceId,
           input.sessionId,
@@ -9653,6 +9658,24 @@ export function agentRunFailurePayload(
     typeof error === "object" && error !== null && "code" in error
       ? String((error as { code?: unknown }).code)
       : undefined;
+  if (error instanceof ActiveSessionHistoryLimitExceededError) {
+    return {
+      error:
+        "The session's active conversation history exceeds the worker's safe materialization envelope. Clear the session context before retrying; an oversized history cannot be compacted safely in a serving worker.",
+      code: error.code,
+      retryable: false,
+      detail: error.message,
+    };
+  }
+  if (error instanceof ApprovalRunStateLimitExceededError) {
+    return {
+      error:
+        "The saved approval state exceeds the worker's safe materialization envelope. Clear the pending approval context before retrying.",
+      code: error.code,
+      retryable: false,
+      detail: error.message,
+    };
+  }
   // An accepted Codex stream with no terminal response is malformed/partial,
   // not provider backpressure. Replaying the same accepted turn could repeat
   // model or tool effects, so this marked transport failure must outrank the
