@@ -18,7 +18,14 @@ import {
   resolveTerminalFontFromReader,
   type TokenReader,
 } from "../src/lib/xterm-theme";
-import { clearTerminalBootStatus, type XtermTheme } from "../src/components/sandbox-terminal";
+import {
+  clearTerminalBootStatus,
+  guardTerminalEngagement,
+  subscribeTerminalInput,
+  terminalInputEngagementAllowed,
+  terminalSurfaceState,
+  type XtermTheme,
+} from "../src/components/sandbox-terminal";
 
 const tick = () => new Promise<void>((r) => setTimeout(r, 0));
 
@@ -45,6 +52,181 @@ test("wake cleanup erases the transient line and homes the live prompt", () => {
   const writes: string[] = [];
   clearTerminalBootStatus({ write: (data) => writes.push(data) });
   expect(writes).toEqual(["\r\x1b[2K\x1b[2J\x1b[H"]);
+});
+
+describe("terminal semantic readiness", () => {
+  test("does not advertise interactivity before xterm is ready", () => {
+    expect(
+      terminalSurfaceState({
+        ready: false,
+        acceptsInput: true,
+        inputPending: false,
+        ptyStatus: "open",
+        booting: false,
+      }),
+    ).toBe("loading");
+  });
+
+  test("distinguishes transport and output-only states", () => {
+    expect(
+      terminalSurfaceState({
+        ready: true,
+        acceptsInput: false,
+        inputPending: false,
+        ptyStatus: "connecting",
+        booting: false,
+      }),
+    ).toBe("connecting");
+    expect(
+      terminalSurfaceState({
+        ready: true,
+        acceptsInput: false,
+        inputPending: false,
+        ptyStatus: "error",
+        booting: false,
+      }),
+    ).toBe("error");
+    expect(
+      terminalSurfaceState({
+        ready: true,
+        acceptsInput: false,
+        inputPending: false,
+        ptyStatus: "closed",
+        booting: true,
+      }),
+    ).toBe("waking");
+    expect(
+      terminalSurfaceState({
+        ready: true,
+        acceptsInput: false,
+        inputPending: false,
+        ptyStatus: "closed",
+        booting: false,
+      }),
+    ).toBe("output-only");
+  });
+
+  test("advertises interactivity only when the mounted terminal accepts stdin", () => {
+    expect(
+      terminalSurfaceState({
+        ready: true,
+        acceptsInput: true,
+        inputPending: false,
+        ptyStatus: "open",
+        booting: false,
+      }),
+    ).toBe("interactive");
+  });
+
+  test("pre-connect engagement does not focus, advertise, or send input", () => {
+    const calls: string[] = [];
+    let emit: ((data: string) => void) | undefined;
+    const term = {
+      onData(callback: (data: string) => void) {
+        emit = callback;
+        calls.push("subscribed");
+        return { dispose: () => calls.push("disposed") };
+      },
+    };
+    const sent: string[] = [];
+    const subscription = subscribeTerminalInput(term, (data) => sent.push(data), false);
+    const event = {
+      preventDefault: () => calls.push("prevented"),
+      stopPropagation: () => calls.push("stopped"),
+      target: { blur: () => calls.push("blurred") },
+    };
+
+    expect(subscription).toBeNull();
+    expect(
+      terminalSurfaceState({
+        ready: true,
+        acceptsInput: false,
+        inputPending: true,
+        ptyStatus: "open",
+        booting: false,
+      }),
+    ).toBe("connecting");
+    expect(guardTerminalEngagement(event, false, true)).toBe(true);
+    emit?.("lost input");
+    expect(sent).toEqual([]);
+    expect(calls).toEqual(["prevented", "stopped", "blurred"]);
+  });
+
+  test("post-connect engagement stays focusable and typed bytes reach the PTY sink", () => {
+    const calls: string[] = [];
+    let emit: ((data: string) => void) | undefined;
+    const term = {
+      onData(callback: (data: string) => void) {
+        emit = callback;
+        calls.push("subscribed");
+        return { dispose: () => calls.push("disposed") };
+      },
+    };
+    const sent: string[] = [];
+    const subscription = subscribeTerminalInput(term, (data) => sent.push(data), true);
+    const event = {
+      preventDefault: () => calls.push("prevented"),
+      stopPropagation: () => calls.push("stopped"),
+      target: { blur: () => calls.push("blurred") },
+    };
+
+    expect(subscription).not.toBeNull();
+    expect(
+      terminalSurfaceState({
+        ready: true,
+        acceptsInput: subscription !== null,
+        inputPending: false,
+        ptyStatus: "open",
+        booting: false,
+      }),
+    ).toBe("interactive");
+    expect(guardTerminalEngagement(event, true, true)).toBe(false);
+    emit?.("printf 'ready'\r");
+    expect(sent).toEqual(["printf 'ready'\r"]);
+    expect(calls).toEqual(["subscribed"]);
+    subscription?.dispose();
+    expect(calls).toEqual(["subscribed", "disposed"]);
+  });
+
+  test("permanent output-only capability still activates without blocking selection", () => {
+    const calls: string[] = [];
+    const event = {
+      preventDefault: () => calls.push("prevented"),
+      stopPropagation: () => calls.push("stopped"),
+      target: { blur: () => calls.push("blurred") },
+    };
+    calls.push("activated");
+    const inputAllowed = terminalInputEngagementAllowed({
+      acceptsInput: false,
+      readOnly: false,
+      ptyCapable: false,
+      ptyWs: false,
+      hasWrite: false,
+    });
+
+    expect(guardTerminalEngagement(event, inputAllowed, true)).toBe(false);
+    expect(calls).toEqual(["activated"]);
+  });
+
+  test("cold PTY-capable engagement activates warm-up but blocks pre-connect focus", () => {
+    const calls: string[] = [];
+    const event = {
+      preventDefault: () => calls.push("prevented"),
+      stopPropagation: () => calls.push("stopped"),
+      target: { blur: () => calls.push("blurred") },
+    };
+    calls.push("activated");
+    const inputAllowed = terminalInputEngagementAllowed({
+      acceptsInput: false,
+      readOnly: false,
+      ptyCapable: true,
+      ptyWs: false,
+      hasWrite: false,
+    });
+
+    expect(guardTerminalEngagement(event, inputAllowed, true)).toBe(true);
+    expect(calls).toEqual(["activated", "prevented", "stopped", "blurred"]);
+  });
 });
 
 // ── E1: renderer fallback ladder ─────────────────────────────────────────────

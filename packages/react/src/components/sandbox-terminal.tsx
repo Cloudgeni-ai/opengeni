@@ -1,7 +1,15 @@
 import type { TerminalCapability } from "@opengeni/sdk";
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import {
+  type FocusEvent as ReactFocusEvent,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { cn } from "../lib/cn";
-import { useTerminalStream } from "../hooks/use-terminal-stream";
+import { type TerminalStreamStatus, useTerminalStream } from "../hooks/use-terminal-stream";
 import type { UseSandboxTerminalResult } from "../hooks/use-sandbox-terminal";
 import { resolveTerminalFont, xtermThemeFromTokens } from "../lib/xterm-theme";
 import { sandboxAcceptsLiveIo } from "../lib/sandbox-liveness";
@@ -61,7 +69,7 @@ export type SandboxTerminalProps = {
   fontSize?: number | undefined;
   /**
    * Lease liveness (`cold` | `warming` | `warm` | `draining`). Drives the
-   * boot-in-terminal status lines: once the user has focused the terminal and
+   * boot-in-terminal status lines: once the user has engaged the terminal and
    * the box is not yet warm, a styled "● waking machine — Ns…" line is rendered
    * INSIDE xterm (no overlay/spinner) until the live PTY connects.
    */
@@ -110,6 +118,80 @@ type XtermLike = {
   };
 };
 type FitAddonLike = { fit: () => void };
+
+export type TerminalSurfaceState =
+  | "loading"
+  | "connecting"
+  | "error"
+  | "waking"
+  | "output-only"
+  | "interactive";
+
+/**
+ * Stable semantic state for hosts and browser acceptance. The xterm helper
+ * textarea exists before the live PTY socket is ready, so its presence alone
+ * must never be treated as proof that keystrokes can reach the sandbox.
+ */
+export function terminalSurfaceState(input: {
+  ready: boolean;
+  acceptsInput: boolean;
+  inputPending: boolean;
+  ptyStatus: TerminalStreamStatus;
+  booting: boolean;
+}): TerminalSurfaceState {
+  if (!input.ready) return "loading";
+  if (input.acceptsInput) return "interactive";
+  if (input.inputPending) return "connecting";
+  if (input.ptyStatus === "connecting") return "connecting";
+  if (input.ptyStatus === "error") return "error";
+  if (input.booting) return "waking";
+  return "output-only";
+}
+
+export function subscribeTerminalInput(
+  term: Pick<XtermLike, "onData"> | null,
+  sink: ((data: string) => void) | null,
+  enabled: boolean,
+): { dispose: () => void } | null {
+  if (!enabled || !term || !sink) return null;
+  return term.onData(sink);
+}
+
+export function terminalInputEngagementAllowed(input: {
+  acceptsInput: boolean;
+  readOnly: boolean;
+  ptyCapable: boolean;
+  ptyWs: boolean;
+  hasWrite: boolean;
+}): boolean {
+  const expectsInteractiveInput =
+    !input.readOnly && (input.ptyCapable || input.ptyWs || input.hasWrite);
+  return input.acceptsInput || !expectsInteractiveInput;
+}
+
+type TerminalEngagementEvent = {
+  preventDefault: () => void;
+  stopPropagation: () => void;
+  target?: unknown;
+};
+
+/**
+ * A pre-connect click still warms the terminal, but must not reach xterm and
+ * focus its hidden textarea. Otherwise the user's first keystrokes are accepted
+ * visually and then silently dropped while the PTY socket is still connecting.
+ */
+export function guardTerminalEngagement(
+  event: TerminalEngagementEvent,
+  inputAllowed: boolean,
+  blurTarget = false,
+): boolean {
+  if (inputAllowed) return false;
+  event.preventDefault();
+  event.stopPropagation();
+  const target = event.target as { blur?: unknown } | null | undefined;
+  if (blurTarget && typeof target?.blur === "function") target.blur();
+  return true;
+}
 
 /** Clear the transient wake line and put the first live prompt at cell 1,1.
  * `Terminal.clear()` removes scrollback but deliberately preserves the cursor,
@@ -194,6 +276,7 @@ export function SandboxTerminal({
   const wroteFirehoseRef = useRef(false);
   const bootActiveRef = useRef(false);
   const [ready, setReady] = useState(false);
+  const [inputReady, setInputReady] = useState(false);
   const [activated, setActivated] = useState(false);
 
   // ── Interactive transport switch ─────────────────────────────────────────────
@@ -224,17 +307,28 @@ export function SandboxTerminal({
   // read-only projection (or the legacy HTTP-write fallback).
   const ptyMode = ptyWs && ptyStatus !== "closed";
   const interactive = !readOnly && (ptyMode ? ptyConnected : result.write !== null);
-  const terminalModeLabel = interactive
+  const acceptsInput = interactive && inputReady;
+  const inputPending = interactive && !inputReady;
+  const inputEngagementAllowed = terminalInputEngagementAllowed({
+    acceptsInput,
+    readOnly: Boolean(readOnly),
+    ptyCapable: terminalCapability?.ptyCapable === true,
+    ptyWs,
+    hasWrite: result.write !== null,
+  });
+  const terminalModeLabel = acceptsInput
     ? null
     : readOnly
       ? "read-only"
-      : ptyMode && ptyStatus === "connecting"
+      : inputPending
         ? "connecting"
-        : ptyMode && ptyStatus === "error"
-          ? "connection error"
-          : "output only";
+        : ptyMode && ptyStatus === "connecting"
+          ? "connecting"
+          : ptyMode && ptyStatus === "error"
+            ? "connection error"
+            : "output only";
 
-  // Boot-in-terminal: after the user focuses a not-yet-warm box, show styled
+  // Boot-in-terminal: after the user engages a not-yet-warm box, show styled
   // status lines INSIDE xterm instead of an overlay — but only when there is no
   // firehose transcript to show yet (otherwise the projected output is shown).
   const warm = sandboxAcceptsLiveIo(liveness);
@@ -245,10 +339,31 @@ export function SandboxTerminal({
     liveness !== null &&
     liveness !== undefined &&
     result.chunks.length === 0;
+  const surfaceState = terminalSurfaceState({
+    ready,
+    acceptsInput,
+    inputPending,
+    ptyStatus,
+    booting,
+  });
 
   function handleActivate() {
     if (!activated) setActivated(true);
     onActivate?.();
+  }
+
+  function handlePointerDownCapture(event: ReactPointerEvent<HTMLDivElement>) {
+    handleActivate();
+    guardTerminalEngagement(event, inputEngagementAllowed);
+  }
+
+  function handleMouseDownCapture(event: ReactMouseEvent<HTMLDivElement>) {
+    guardTerminalEngagement(event, inputEngagementAllowed);
+  }
+
+  function handleFocusCapture(event: ReactFocusEvent<HTMLDivElement>) {
+    handleActivate();
+    guardTerminalEngagement(event, inputEngagementAllowed, true);
   }
 
   // Mount xterm once (client-only). Never re-mounts on interactive/theme flips —
@@ -460,11 +575,14 @@ export function SandboxTerminal({
   // socket; firehose mode uses the legacy ptyWrite-over-HTTP fn.
   useEffect(() => {
     const term = termRef.current;
-    if (!ready || !term || !interactive) return;
+    if (!ready || !term || !interactive) {
+      setInputReady(false);
+      return;
+    }
     const sink = ptyMode ? ptyWrite : result.write;
-    if (!sink) return;
-    const sub = term.onData((data) => sink(data));
-    return () => sub.dispose();
+    const sub = subscribeTerminalInput(term, sink, true);
+    setInputReady(sub !== null);
+    return () => sub?.dispose();
   }, [ready, interactive, ptyMode, ptyWrite, result.write]);
 
   // In PTY mode, tell ttyd the window size on the xterm resize event.
@@ -541,8 +659,9 @@ export function SandboxTerminal({
           12px inset + `--og-color-bg` ground match the dock surface. */}
       <div
         className="relative min-h-0 flex-1 bg-og-bg p-3"
-        onPointerDownCapture={handleActivate}
-        onFocusCapture={handleActivate}
+        onPointerDownCapture={handlePointerDownCapture}
+        onMouseDownCapture={handleMouseDownCapture}
+        onFocusCapture={handleFocusCapture}
       >
         {!ready && (placeholder ?? <TerminalPlaceholder />)}
         {/* Kept `visibility:hidden` until the first successful fit so the first
@@ -552,6 +671,9 @@ export function SandboxTerminal({
           className="h-full w-full"
           style={{ visibility: ready ? "visible" : "hidden" }}
           data-opengeni-terminal
+          data-opengeni-terminal-ready={ready ? "true" : "false"}
+          data-opengeni-terminal-interactive={surfaceState === "interactive" ? "true" : "false"}
+          data-opengeni-terminal-state={surfaceState}
         />
       </div>
     </div>

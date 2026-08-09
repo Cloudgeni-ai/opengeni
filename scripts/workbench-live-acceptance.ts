@@ -45,6 +45,9 @@ const FILE_TREE_READY_SELECTOR =
 const FILE_TREE_MAX_NAVIGATION_STEPS = 4_096;
 const FILE_TREE_MAX_DIAGNOSTIC_ROWS = 8;
 const FILE_TREE_DIAGNOSTIC_FIELD_LENGTH = 80;
+const TERMINAL_SELECTOR = "[data-opengeni-terminal]";
+const INTERACTIVE_TERMINAL_SELECTOR =
+  '[data-opengeni-terminal][data-opengeni-terminal-interactive="true"]';
 const CAPTURE_API_P95_MS = maximumMillisecondBudget("performance.capture-api-response", "p95");
 const CAPTURE_USABLE_WORKBENCH_P95_MS = maximumMillisecondBudget(
   "performance.capture-usable-workbench",
@@ -1055,6 +1058,20 @@ export async function waitForWarm(
   );
 }
 
+export async function waitForInteractiveTerminal(
+  page: Pick<Page, "locator">,
+  timeoutMs = 90_000,
+): Promise<Locator> {
+  const terminal = page.locator(TERMINAL_SELECTOR);
+  await terminal.waitFor({ state: "visible", timeout: timeoutMs });
+  await terminal.click();
+  const interactiveTerminal = page.locator(INTERACTIVE_TERMINAL_SELECTOR);
+  await interactiveTerminal.waitFor({ state: "visible", timeout: timeoutMs });
+  const input = interactiveTerminal.locator(".xterm-helper-textarea");
+  await input.waitFor({ state: "attached", timeout: timeoutMs });
+  return input;
+}
+
 async function runLiveWorkspaceFlow(input: {
   browser: Browser;
   cookieHeader: string;
@@ -1196,8 +1213,7 @@ async function runLiveWorkspaceFlow(input: {
     );
 
     await page.getByRole("tab", { name: "Terminal", exact: true }).click();
-    const terminalInput = page.locator(".xterm-helper-textarea");
-    await terminalInput.waitFor({ timeout: 30_000 });
+    const terminalInput = await waitForInteractiveTerminal(page);
     await terminalInput.click();
     const terminalMarker = `TERMINAL_${marker}`;
     await page.keyboard.type(`printf '${terminalMarker}\\n'`);

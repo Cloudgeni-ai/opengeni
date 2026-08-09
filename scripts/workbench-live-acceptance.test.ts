@@ -27,6 +27,7 @@ import {
   selectTreeFile,
   validateCaptureApiRegionalProbeResult,
   waitForCold,
+  waitForInteractiveTerminal,
   waitForSandboxLiveness,
   waitForSandboxFileViewerText,
   waitForWarm,
@@ -34,6 +35,51 @@ import {
 } from "./workbench-live-acceptance";
 
 describe("workbench live acceptance preflight", () => {
+  test("waits for terminal interactivity before resolving the xterm input", async () => {
+    const calls: unknown[] = [];
+    const input = {
+      waitFor: async (options: { state: string; timeout: number }) => {
+        calls.push(["input.waitFor", options]);
+      },
+    };
+    const interactiveTerminal = {
+      waitFor: async (options: { state: string; timeout: number }) => {
+        calls.push(["interactive.waitFor", options]);
+      },
+      locator: (selector: string) => {
+        calls.push(["interactive.locator", selector]);
+        return input;
+      },
+    };
+    const terminal = {
+      waitFor: async (options: { state: string; timeout: number }) => {
+        calls.push(["terminal.waitFor", options]);
+      },
+      click: async () => {
+        calls.push(["terminal.click"]);
+      },
+    };
+    const page = {
+      locator: (selector: string) => {
+        calls.push(["page.locator", selector]);
+        return selector === "[data-opengeni-terminal]" ? terminal : interactiveTerminal;
+      },
+    } as never;
+
+    const resolved = await waitForInteractiveTerminal(page, 90_000);
+
+    expect(resolved).toBe(input as never);
+    expect(calls).toEqual([
+      ["page.locator", "[data-opengeni-terminal]"],
+      ["terminal.waitFor", { state: "visible", timeout: 90_000 }],
+      ["terminal.click"],
+      ["page.locator", '[data-opengeni-terminal][data-opengeni-terminal-interactive="true"]'],
+      ["interactive.waitFor", { state: "visible", timeout: 90_000 }],
+      ["interactive.locator", ".xterm-helper-textarea"],
+      ["input.waitFor", { state: "attached", timeout: 90_000 }],
+    ]);
+  });
+
   test("admits only concrete single-selector Axe targets to the manual contrast audit", () => {
     expect(axeManualContrastSelector(['button[class="bg-primary"]'])).toBe(
       'button[class="bg-primary"]',
