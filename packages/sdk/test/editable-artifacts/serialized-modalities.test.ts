@@ -55,6 +55,7 @@ import {
   type ArtifactWorkerClientEndpoint,
   type ArtifactWorkerClientErrorEvent,
   type ArtifactWorkerClientMessageEvent,
+  type BrowserEditableArtifactWorkerKernel,
 } from "../../src/editable-artifacts/worker/browser-client";
 import {
   loadBrowserWasmKernelAdapter,
@@ -367,6 +368,64 @@ describe("serialized document/presentation SDK integration", () => {
     }
   });
 
+  test("does not author across the Worker-to-controller committed-head handoff", async () => {
+    const scenario = SCENARIOS[0]!;
+    const adapter = await loadRealAdapter("document");
+    const snapshot = await createInitialSnapshot("document", adapter);
+    const remote = await createRemoteCommit(scenario, adapter, snapshot);
+    const transport = new SerializedTransport(
+      bootstrap("document", adapter, snapshot, 0, snapshot.stateHash, snapshot.nativeRevision),
+      [],
+    );
+    let releaseReconcile!: () => void;
+    const reconcileGate = new Promise<void>((resolve) => {
+      releaseReconcile = resolve;
+    });
+    let workerCommitted!: () => void;
+    const workerCommittedPromise = new Promise<void>((resolve) => {
+      workerCommitted = resolve;
+    });
+    let authorCalls = 0;
+    const session = createSession(
+      "document",
+      adapter,
+      new MemoryEditableArtifactStorage(),
+      transport,
+      (worker) =>
+        interceptWorker(worker, {
+          async afterReconcile() {
+            workerCommitted();
+            await reconcileGate;
+          },
+          onAuthor() {
+            authorCalls += 1;
+          },
+        }),
+    );
+    try {
+      await session.whenReady();
+      transport.connection.push({ type: "transaction.committed", transaction: remote });
+      await workerCommittedPromise;
+
+      expect(session.getView().cursor).toBe(0);
+      const local = session.applyDocumentCommands(
+        scenario.localBatch as DocumentArtifactCommandBatch,
+        { clientTransactionId: "serialized.head-handoff.document.1" },
+      );
+      await Bun.sleep(0);
+      expect(authorCalls).toBe(0);
+
+      releaseReconcile();
+      const authored = await local;
+      expect(authorCalls).toBe(1);
+      expect(authored.observedHeadSequence).toBe(1);
+      expect(session.getView()).toMatchObject({ cursor: 1, pendingTransactions: 1 });
+    } finally {
+      releaseReconcile();
+      await session.close();
+    }
+  });
+
   for (const scenario of SCENARIOS) {
     test(`uses real ${scenario.modality} WASM and fails closed when a remote winner makes local WAL stale`, async () => {
       const adapter = await loadRealAdapter(scenario.modality);
@@ -505,19 +564,24 @@ function createSession(
   adapter: ArtifactWorkerKernelAdapter,
   storage: MemoryEditableArtifactStorage,
   transport: EditableArtifactSyncTransport,
+  decorateWorker: (
+    worker: BrowserEditableArtifactWorkerKernel,
+  ) => BrowserEditableArtifactWorkerKernel = (worker) => worker,
 ) {
-  const worker = createBrowserEditableArtifactWorkerKernel({
-    modality,
-    kernelVersion: adapter.kernelVersion,
-    protocolVersion: adapter.protocolVersion,
-    modelSchemaVersion: adapter.modelSchemaVersion,
-    commandVersion: adapter.commandVersion,
-    applicationOrigin: "https://artifacts.test",
-    workerUrl: "https://artifacts.test/editable-artifacts-worker.js",
-    wasmGlueUrl: "https://artifacts.test/artifact_kernel.js",
-    wasmBinaryUrl: "https://artifacts.test/artifact_kernel_bg.wasm",
-    workerFactory: () => new InProcessArtifactWorker(adapter),
-  });
+  const worker = decorateWorker(
+    createBrowserEditableArtifactWorkerKernel({
+      modality,
+      kernelVersion: adapter.kernelVersion,
+      protocolVersion: adapter.protocolVersion,
+      modelSchemaVersion: adapter.modelSchemaVersion,
+      commandVersion: adapter.commandVersion,
+      applicationOrigin: "https://artifacts.test",
+      workerUrl: "https://artifacts.test/editable-artifacts-worker.js",
+      wasmGlueUrl: "https://artifacts.test/artifact_kernel.js",
+      wasmBinaryUrl: "https://artifacts.test/artifact_kernel_bg.wasm",
+      workerFactory: () => new InProcessArtifactWorker(adapter),
+    }),
+  );
   return createEditableArtifactSession({
     artifactId: ARTIFACT_ID,
     modality,
@@ -530,6 +594,40 @@ function createSession(
     commandVersion: adapter.commandVersion,
     protocolVersion: adapter.protocolVersion,
     writerReplicaIdFactory: () => WRITER_REPLICA_ID,
+  });
+}
+
+function interceptWorker(
+  worker: BrowserEditableArtifactWorkerKernel,
+  hooks: Readonly<{
+    afterReconcile: () => Promise<void>;
+    onAuthor: () => void;
+  }>,
+): BrowserEditableArtifactWorkerKernel {
+  const reconcileCommitted = worker.reconcileCommitted.bind(worker);
+  const authorPending = worker.authorPending.bind(worker);
+  return new Proxy(worker, {
+    get(target, property, receiver) {
+      if (property === "reconcileCommitted") {
+        return async (
+          ...input: Parameters<BrowserEditableArtifactWorkerKernel["reconcileCommitted"]>
+        ) => {
+          const result = await reconcileCommitted(...input);
+          await hooks.afterReconcile();
+          return result;
+        };
+      }
+      if (property === "authorPending") {
+        return async (
+          ...input: Parameters<BrowserEditableArtifactWorkerKernel["authorPending"]>
+        ) => {
+          hooks.onAuthor();
+          return await authorPending(...input);
+        };
+      }
+      const value = Reflect.get(target, property, receiver) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    },
   });
 }
 

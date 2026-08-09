@@ -218,7 +218,12 @@ class EditableArtifactSyncControllerImpl implements EditableArtifactSyncControll
   private processingFailure: Error | null = null;
   private flushTask: Promise<void> | null = null;
   private readonly flushTasks = new Set<Promise<void>>();
-  private authoringTail: Promise<void> = Promise.resolve();
+  /**
+   * Serializes every operation that moves the Worker and controller causal
+   * heads. The Worker commits before its RPC response reaches this thread, so
+   * authoring must not observe the controller cursor during that response gap.
+   */
+  private causalTail: Promise<void> = Promise.resolve();
   private resyncRevision = 0;
   private readonly submittedEpoch = new Map<string, number>();
   /** Receipt-proven mapping from authoritative OGACO/OGAST ids to caller OGATX ids. */
@@ -355,7 +360,7 @@ class EditableArtifactSyncControllerImpl implements EditableArtifactSyncControll
     this.clearLiveQueue();
     if (this.runTask) await this.runTask.catch(() => {});
     await Promise.allSettled([...this.flushTasks]);
-    await this.authoringTail.catch(() => {});
+    await this.causalTail.catch(() => {});
     this.setState("closed");
     this.rejectLiveWaiters(new Error("artifact sync controller closed"));
   }
@@ -395,12 +400,16 @@ class EditableArtifactSyncControllerImpl implements EditableArtifactSyncControll
         ? {}
         : { selectiveUndoTargets: [...input.selectiveUndoTargets] }),
     };
-    const operation = this.authoringTail.then(() => this.queueCommandsExclusive(captured));
-    this.authoringTail = operation.then(
+    return this.runCausalOperation(() => this.queueCommandsExclusive(captured));
+  }
+
+  private runCausalOperation<Result>(operation: () => Promise<Result>): Promise<Result> {
+    const result = this.causalTail.then(operation);
+    this.causalTail = result.then(
       () => undefined,
       () => undefined,
     );
-    return operation;
+    return result;
   }
 
   private async queueCommandsExclusive(
@@ -1015,7 +1024,11 @@ class EditableArtifactSyncControllerImpl implements EditableArtifactSyncControll
     });
   }
 
-  private async replaceSnapshot(
+  private replaceSnapshot(snapshot: EditableArtifactStoredReplica["snapshot"]): Promise<void> {
+    return this.runCausalOperation(() => this.replaceSnapshotExclusive(snapshot));
+  }
+
+  private async replaceSnapshotExclusive(
     snapshot: EditableArtifactStoredReplica["snapshot"],
   ): Promise<void> {
     validateSnapshot(
@@ -1247,7 +1260,13 @@ class EditableArtifactSyncControllerImpl implements EditableArtifactSyncControll
     while (this.drainTask) await this.drainTask;
   }
 
-  private async applyCommitted(transaction: EditableArtifactCommittedTransaction): Promise<void> {
+  private applyCommitted(transaction: EditableArtifactCommittedTransaction): Promise<void> {
+    return this.runCausalOperation(() => this.applyCommittedExclusive(transaction));
+  }
+
+  private async applyCommittedExclusive(
+    transaction: EditableArtifactCommittedTransaction,
+  ): Promise<void> {
     const embeddedPending = validateCommittedTransaction(
       transaction,
       this.artifactId,
