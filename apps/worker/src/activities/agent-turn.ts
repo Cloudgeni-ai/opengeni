@@ -175,6 +175,7 @@ import {
   type ModelProviderApi,
   type RegistryProviderKind,
   type Settings,
+  resolveFirstPartyDelegationSecret,
 } from "@opengeni/config";
 import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import {
@@ -369,6 +370,7 @@ import {
 import { executeGatewayImageGeneration } from "./gateway-image-generation";
 import { executeCodexImageGeneration } from "./codex-image-generation";
 import { imageProviderBindingHash } from "./image-generation-operation";
+import { executeEditableArtifactPublication } from "./editable-artifact-publication";
 import { captureWorkspaceRevision, openFreshWorkspaceCaptureSession } from "./workspace-capture";
 import type { ChannelASession } from "@opengeni/runtime/sandbox";
 import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
@@ -6316,6 +6318,66 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           },
         };
       })();
+      const editableArtifactPublicationOption: Pick<
+        BuildAgentOptions,
+        "editableArtifactPublication"
+      > = (() => {
+        if (
+          !objectStorage ||
+          !sandboxArtifactRuntime.available ||
+          !resolveFirstPartyDelegationSecret(modelRunSettings) ||
+          (session.firstPartyMcpPermissions !== null &&
+            !session.firstPartyMcpPermissions.includes("artifacts:publish") &&
+            !session.firstPartyMcpPermissions.includes("workspace:admin"))
+        ) {
+          return {};
+        }
+        const runtimeEntrypoint = sandboxEnvironment.OPENGENI_ARTIFACT_TOOL_ENTRY;
+        if (!runtimeEntrypoint) return {};
+        const sandboxObjectStorage =
+          activeSandboxBackend === "selfhosted"
+            ? objectStorage
+            : objectStorageForSandboxDownloads(modelRunSettings, objectStorage);
+        return {
+          editableArtifactPublication: {
+            execute: async (request, { toolCallId }) => {
+              const sessionForPublication =
+                resolvedSandbox?.established.session ?? sdkOwnedSandboxSession;
+              const fence = toolCancellationFenceRef.current;
+              if (!sessionForPublication || !fence) {
+                throw new Error(
+                  "Editable artifact publication requires the active sandbox session",
+                );
+              }
+              const runAs = sandboxRunAs(modelRunSettings);
+              return await executeEditableArtifactPublication({
+                db,
+                objectStorage,
+                sandboxObjectStorage,
+                settings: modelRunSettings,
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: turn.id,
+                attemptId: input.attemptId,
+                executionGeneration,
+                toolCallId,
+                request,
+                runtimeEntrypoint,
+                runCommand: async (command) =>
+                  await fence.runSandboxCommandStructured(
+                    sessionForPublication as import("@opengeni/runtime").TurnSandboxCommandSession,
+                    {
+                      ...command,
+                      ...(runAs ? { runAs } : {}),
+                    },
+                  ),
+                ...(runtimeCancellationSignal ? { signal: runtimeCancellationSignal } : {}),
+              });
+            },
+          },
+        };
+      })();
       const serviceTier = serviceTierForLatencyMode(
         turnExecutionPolicy.providerId,
         turnExecutionPolicy.latencyMode,
@@ -6411,6 +6473,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // compaction threshold.
         hostedWebSearch,
         ...imageGenerationOption,
+        ...editableArtifactPublicationOption,
         lazyToolTransport,
         supportsImageInput,
         inputFileMediaTypes: modelInputPolicy.inputFileMediaTypes,

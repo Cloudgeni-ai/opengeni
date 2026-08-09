@@ -5,6 +5,7 @@ import type {
   EditableArtifactMaterializationJobResource,
   EditableArtifactPinnedVersionResource,
   EditableArtifactResource,
+  ImportEditableArtifactResourceRequest,
   PinEditableArtifactVersionRequest,
   ReadEditableArtifactMaterializationOptions,
   ReadEditableArtifactResourceOptions,
@@ -30,6 +31,20 @@ export class OpenGeniClient extends OpenGeniCoreClient {
     return await this.requestJson<EditableArtifactResource>(
       "POST",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/editable-artifacts`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  async importEditableArtifact(
+    workspaceId: string,
+    request: ImportEditableArtifactResourceRequest,
+    options: Readonly<{ signal?: AbortSignal | undefined }> = {},
+  ): Promise<EditableArtifactResource> {
+    return await this.requestJson<EditableArtifactResource>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/editable-artifacts/imports`,
       request,
       {},
       options,

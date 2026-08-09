@@ -2141,6 +2141,11 @@ export const files = pgTable(
   (table) => ({
     workspaceCreated: index("files_workspace_created_idx").on(table.workspaceId, table.createdAt),
     objectKey: uniqueIndex("files_object_key_idx").on(table.objectKey),
+    scopeIdentity: uniqueIndex("files_scope_id_uq").on(
+      table.accountId,
+      table.workspaceId,
+      table.id,
+    ),
     status: index("files_status_idx").on(table.status),
   }),
 );

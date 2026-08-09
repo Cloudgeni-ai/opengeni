@@ -22,6 +22,40 @@ export type CreateEditableArtifactResourceRequest = Readonly<{
   title: string;
 }>;
 
+type ImportEditableArtifactSnapshotCommon = Readonly<{
+  blobReference: string;
+  byteSize: number;
+  contentHash: string;
+  mimeType: "application/vnd.opengeni.editable-artifact-snapshot";
+  coveredHeadSequence: 0;
+  stateHash: string;
+  modelSchemaVersion: number;
+  kernelVersion: string;
+}>;
+
+export type ImportEditableArtifactSnapshot =
+  | (ImportEditableArtifactSnapshotCommon &
+      Readonly<{
+        modality: "spreadsheet";
+        coveredCausalFrontier: readonly Readonly<{ replicaId: string; counter: number }>[];
+        operationProtocolVersion: number;
+        crdtStateVersion: number;
+      }>)
+  | (ImportEditableArtifactSnapshotCommon &
+      Readonly<{
+        modality: "document" | "presentation";
+        nativeRevision: number;
+      }>);
+
+export type ImportEditableArtifactResourceRequest = Readonly<{
+  idempotencyKey: string;
+  replicaId: string;
+  modality: EditableArtifactModality;
+  title: string;
+  sourceFileId: string;
+  snapshot: ImportEditableArtifactSnapshot;
+}>;
+
 export type ReadEditableArtifactResourceOptions = OpenGeniRequestOptions &
   Readonly<{
     /** Writer/read replica used to mint artifact-scoped authority. */

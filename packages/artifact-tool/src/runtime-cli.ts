@@ -1,9 +1,14 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
-import { open, realpath, stat } from "node:fs/promises";
-import { isAbsolute, relative, resolve } from "node:path";
+import { open, realpath, rm, stat } from "node:fs/promises";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import {
+  decodeEditableArtifactCausalFrontier,
+  encodeEditableArtifactCausalFrontier,
+} from "@opengeni/contracts/editable-artifact-causal-frontier";
+import { EDITABLE_ARTIFACT_PRODUCT_MAX_SNAPSHOT_BYTES } from "@opengeni/contracts/editable-artifacts";
 import {
   ARTIFACT_RUNTIME_ENVIRONMENT,
   ArtifactRuntimeError,
@@ -23,6 +28,8 @@ const MAX_ARTIFACT_TOOL_ARCHIVE_BYTES = 256 * 1024 * 1024;
 const MAX_JAVASCRIPT_ENTRYPOINT_BYTES = 32 * 1024 * 1024;
 const MAX_SKILL_FACADE_SUPPORT_FILE_BYTES = 128 * 1024 * 1024;
 const MAX_KERNEL_ASSET_BYTES = 512 * 1024 * 1024;
+const MAX_PUBLICATION_SOURCE_BYTES = 64 * 1024 * 1024;
+const SNAPSHOT_MIME_TYPE = "application/vnd.opengeni.editable-artifact-snapshot" as const;
 
 type RuntimeEnvironment = Readonly<Record<string, string | undefined>>;
 
@@ -64,6 +71,55 @@ export type DoctorArtifactRuntimeOptions = LocateArtifactRuntimeOptions &
 export type VerifiedArtifactKernelRuntime = Readonly<{
   location: VerifiedArtifactRuntimeLocation;
   runtime: ArtifactKernelRuntime;
+}>;
+
+export type PreparedArtifactPublication = Readonly<{
+  schemaVersion: 1;
+  modality: "spreadsheet" | "document" | "presentation";
+  source: Readonly<{
+    byteSize: number;
+    contentHash: `sha256:${string}`;
+    mimeType:
+      | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      | "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+      | "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+  }>;
+  snapshot:
+    | Readonly<{
+        modality: "spreadsheet";
+        byteSize: number;
+        contentHash: `sha256:${string}`;
+        mimeType: typeof SNAPSHOT_MIME_TYPE;
+        coveredHeadSequence: 0;
+        stateHash: `sha256:${string}`;
+        modelSchemaVersion: 1;
+        kernelVersion: string;
+        coveredCausalFrontier: readonly Readonly<{
+          replicaId: string;
+          counter: number;
+        }>[];
+        operationProtocolVersion: 1;
+        crdtStateVersion: 1;
+      }>
+    | Readonly<{
+        modality: "document" | "presentation";
+        byteSize: number;
+        contentHash: `sha256:${string}`;
+        mimeType: typeof SNAPSHOT_MIME_TYPE;
+        coveredHeadSequence: 0;
+        stateHash: `sha256:${string}`;
+        modelSchemaVersion: 1;
+        kernelVersion: string;
+        nativeRevision: number;
+      }>;
+}>;
+
+type ArtifactPublicationModality = PreparedArtifactPublication["modality"];
+
+type PublicationRuntimeLocation = Readonly<{
+  target: ArtifactRuntimeTarget;
+  skillFacadeEntrypoint: string;
+  kernel: Readonly<{ buildIdentity: string }>;
 }>;
 
 /**
@@ -303,18 +359,392 @@ export async function runArtifactRuntimeCli(
   args: readonly string[],
   environment: RuntimeEnvironment = process.env,
 ): Promise<string> {
+  if (args[0] === "prepare-publication") {
+    const location = await doctorVerifiedArtifactRuntime({ environment });
+    return await runVerifiedArtifactPublicationCli(args, location);
+  }
   const [command, format, ...rest] = args;
   if ((command !== "locate" && command !== "doctor") || format !== "--json" || rest.length > 0) {
-    throw new ArtifactRuntimeError(
-      "ARTIFACT_RUNTIME_MANIFEST_INVALID",
-      "Usage: opengeni-artifact-runtime <locate|doctor> --json",
-    );
+    throw new ArtifactRuntimeError("ARTIFACT_RUNTIME_MANIFEST_INVALID", artifactRuntimeCliUsage());
   }
   const location =
     command === "doctor"
       ? await doctorVerifiedArtifactRuntime({ environment })
       : await locateVerifiedArtifactRuntime({ environment });
   return `${JSON.stringify(location)}\n`;
+}
+
+/**
+ * Imports one validated Office file through the manifest-pinned skill facade
+ * and writes an exclusive native-canonical snapshot for the trusted host.
+ */
+export async function runVerifiedArtifactPublicationCli(
+  args: readonly string[],
+  location: PublicationRuntimeLocation,
+): Promise<string> {
+  const parsed = parsePublicationArguments(args);
+  const expected = publicationFormat(parsed.modality);
+  const inputPath = await canonicalFile(parsed.inputPath, "publication source");
+  if (extname(inputPath).toLowerCase() !== expected.extension) {
+    invalidPublication(`publication source must have the ${expected.extension} extension`);
+  }
+  const outputPath = await canonicalNewFilePath(parsed.snapshotOutputPath);
+  if (inputPath === outputPath) {
+    invalidPublication("publication snapshot output must differ from its source");
+  }
+  const sourceBytes = await readBoundedFile(
+    inputPath,
+    MAX_PUBLICATION_SOURCE_BYTES,
+    "publication source",
+  );
+  const sourceContentHash = sha256(sourceBytes);
+
+  let imported: unknown;
+  try {
+    imported = await defaultImporter(pathToFileURL(location.skillFacadeEntrypoint).href);
+  } catch (cause) {
+    throw new ArtifactRuntimeError(
+      "ARTIFACT_RUNTIME_UNAVAILABLE",
+      "Verified skill facade bootstrap could not be evaluated for publication",
+      { cause },
+    );
+  }
+  const module = strictModule(imported, "publication skill facade");
+  const fileBlob = module.FileBlob as
+    | { fromBytes?: (bytes: Uint8Array, options: { name: string; type: string }) => Blob }
+    | undefined;
+  const snapshotArtifact = module.createArtifactPublicationSnapshot;
+  const disposeArtifact = module.disposeArtifact;
+  const importer = publicationImporter(module, parsed.modality);
+  if (
+    typeof fileBlob?.fromBytes !== "function" ||
+    typeof snapshotArtifact !== "function" ||
+    typeof disposeArtifact !== "function"
+  ) {
+    incompatible("skill facade bootstrap is missing its publication surface");
+  }
+
+  const blob = fileBlob.fromBytes(sourceBytes, {
+    name: basename(inputPath),
+    type: expected.mimeType,
+  });
+  let artifact: unknown;
+  try {
+    artifact = await importer(blob);
+  } catch (cause) {
+    throw new ArtifactRuntimeError(
+      "ARTIFACT_RUNTIME_INCOMPATIBLE",
+      `The ${expected.extension} source could not be imported by the verified artifact runtime`,
+      { cause },
+    );
+  }
+
+  let prepared: Readonly<{
+    result: PreparedArtifactPublication;
+    snapshotBytes: Uint8Array;
+  }>;
+  try {
+    prepared = validatePublicationSnapshot({
+      candidate: snapshotArtifact(artifact),
+      modality: parsed.modality,
+      location,
+      sourceByteSize: sourceBytes.byteLength,
+      sourceContentHash,
+      sourceMimeType: expected.mimeType,
+    });
+    await writeExclusivePublicationSnapshot(outputPath, prepared.snapshotBytes);
+  } finally {
+    disposeArtifact(artifact);
+  }
+  return `${JSON.stringify(prepared.result)}\n`;
+}
+
+function parsePublicationArguments(args: readonly string[]): Readonly<{
+  modality: ArtifactPublicationModality;
+  inputPath: string;
+  snapshotOutputPath: string;
+}> {
+  const [command, format, modalityFlag, modality, inputFlag, inputPath, outputFlag, outputPath] =
+    args;
+  if (
+    args.length !== 8 ||
+    command !== "prepare-publication" ||
+    format !== "--json" ||
+    modalityFlag !== "--modality" ||
+    (modality !== "spreadsheet" && modality !== "document" && modality !== "presentation") ||
+    inputFlag !== "--input" ||
+    typeof inputPath !== "string" ||
+    inputPath.length === 0 ||
+    outputFlag !== "--snapshot-output" ||
+    typeof outputPath !== "string" ||
+    outputPath.length === 0
+  ) {
+    invalidPublication(artifactRuntimeCliUsage());
+  }
+  return Object.freeze({ modality, inputPath, snapshotOutputPath: outputPath });
+}
+
+function publicationFormat(modality: ArtifactPublicationModality): Readonly<{
+  extension: ".xlsx" | ".docx" | ".pptx";
+  mimeType:
+    | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    | "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    | "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+}> {
+  if (modality === "spreadsheet") {
+    return Object.freeze({
+      extension: ".xlsx",
+      mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    });
+  }
+  if (modality === "document") {
+    return Object.freeze({
+      extension: ".docx",
+      mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    });
+  }
+  return Object.freeze({
+    extension: ".pptx",
+    mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  });
+}
+
+function publicationImporter(
+  module: Record<string, unknown>,
+  modality: ArtifactPublicationModality,
+): (input: Blob) => unknown | Promise<unknown> {
+  const facadeName =
+    modality === "spreadsheet"
+      ? "SpreadsheetFile"
+      : modality === "document"
+        ? "DocumentFile"
+        : "PresentationFile";
+  const methodName =
+    modality === "spreadsheet"
+      ? "importXlsx"
+      : modality === "document"
+        ? "importDocx"
+        : "importPptx";
+  const facade = module[facadeName];
+  if (typeof facade !== "function" && (typeof facade !== "object" || facade === null)) {
+    incompatible(`skill facade bootstrap is missing ${facadeName}`);
+  }
+  const method = (facade as Record<string, unknown>)[methodName];
+  if (typeof method !== "function") {
+    incompatible(`skill facade bootstrap is missing ${facadeName}.${methodName}()`);
+  }
+  return (input) => Reflect.apply(method, facade, [input]);
+}
+
+function validatePublicationSnapshot(
+  input: Readonly<{
+    candidate: unknown;
+    modality: ArtifactPublicationModality;
+    location: PublicationRuntimeLocation;
+    sourceByteSize: number;
+    sourceContentHash: `sha256:${string}`;
+    sourceMimeType: PreparedArtifactPublication["source"]["mimeType"];
+  }>,
+): Readonly<{ result: PreparedArtifactPublication; snapshotBytes: Uint8Array }> {
+  const candidate = exactDataRecord(
+    input.candidate,
+    input.modality === "spreadsheet"
+      ? [
+          "schemaVersion",
+          "modality",
+          "runtimeTarget",
+          "kernelVersion",
+          "modelSchemaVersion",
+          "snapshotVersion",
+          "stateHash",
+          "snapshotBytes",
+          "coveredCausalFrontier",
+          "operationProtocolVersion",
+          "crdtStateVersion",
+        ]
+      : [
+          "schemaVersion",
+          "modality",
+          "runtimeTarget",
+          "kernelVersion",
+          "modelSchemaVersion",
+          "snapshotVersion",
+          "stateHash",
+          "snapshotBytes",
+          "nativeRevision",
+        ],
+    "publication snapshot",
+  );
+  if (
+    candidate.schemaVersion !== 1 ||
+    candidate.modality !== input.modality ||
+    candidate.runtimeTarget !== input.location.target ||
+    candidate.kernelVersion !== input.location.kernel.buildIdentity ||
+    candidate.modelSchemaVersion !== 1 ||
+    candidate.snapshotVersion !== 1 ||
+    typeof candidate.stateHash !== "string" ||
+    !/^sha256:[0-9a-f]{64}$/u.test(candidate.stateHash) ||
+    !(candidate.snapshotBytes instanceof Uint8Array) ||
+    candidate.snapshotBytes.byteLength <= 0 ||
+    candidate.snapshotBytes.byteLength > EDITABLE_ARTIFACT_PRODUCT_MAX_SNAPSHOT_BYTES
+  ) {
+    incompatible("publication snapshot differs from the verified native runtime boundary");
+  }
+  const snapshotBytes = Uint8Array.from(candidate.snapshotBytes);
+  const common = {
+    byteSize: snapshotBytes.byteLength,
+    contentHash: sha256(snapshotBytes),
+    mimeType: SNAPSHOT_MIME_TYPE,
+    coveredHeadSequence: 0 as const,
+    stateHash: candidate.stateHash as `sha256:${string}`,
+    modelSchemaVersion: 1 as const,
+    kernelVersion: candidate.kernelVersion as string,
+  };
+  const source = Object.freeze({
+    byteSize: input.sourceByteSize,
+    contentHash: input.sourceContentHash,
+    mimeType: input.sourceMimeType,
+  });
+  let snapshot: PreparedArtifactPublication["snapshot"];
+  if (input.modality === "spreadsheet") {
+    if (
+      candidate.operationProtocolVersion !== 1 ||
+      candidate.crdtStateVersion !== 1 ||
+      !Array.isArray(candidate.coveredCausalFrontier)
+    ) {
+      incompatible("spreadsheet publication coverage is invalid");
+    }
+    let coveredCausalFrontier;
+    try {
+      coveredCausalFrontier = decodeEditableArtifactCausalFrontier(
+        encodeEditableArtifactCausalFrontier(candidate.coveredCausalFrontier as never),
+      );
+    } catch {
+      incompatible("spreadsheet publication frontier is invalid");
+    }
+    snapshot = Object.freeze({
+      ...common,
+      modality: "spreadsheet" as const,
+      coveredCausalFrontier,
+      operationProtocolVersion: 1 as const,
+      crdtStateVersion: 1 as const,
+    });
+  } else {
+    if (
+      !Number.isSafeInteger(candidate.nativeRevision) ||
+      (candidate.nativeRevision as number) < 0
+    ) {
+      incompatible("serialized publication revision is invalid");
+    }
+    snapshot = Object.freeze({
+      ...common,
+      modality: input.modality,
+      nativeRevision: candidate.nativeRevision as number,
+    });
+  }
+  return Object.freeze({
+    result: Object.freeze({
+      schemaVersion: 1 as const,
+      modality: input.modality,
+      source,
+      snapshot,
+    }),
+    snapshotBytes,
+  });
+}
+
+async function canonicalNewFilePath(input: string): Promise<string> {
+  if (!isAbsolute(input)) invalidPublication("publication snapshot output path must be absolute");
+  let parent: string;
+  try {
+    parent = await realpath(dirname(input));
+    const metadata = await stat(parent);
+    if (!metadata.isDirectory())
+      unavailable("publication snapshot output directory is unavailable");
+  } catch (cause) {
+    if (cause instanceof ArtifactRuntimeError) throw cause;
+    throw new ArtifactRuntimeError(
+      "ARTIFACT_RUNTIME_UNAVAILABLE",
+      "publication snapshot output directory is unavailable",
+      { cause },
+    );
+  }
+  return join(parent, basename(input));
+}
+
+async function writeExclusivePublicationSnapshot(path: string, bytes: Uint8Array): Promise<void> {
+  let handle;
+  let created = false;
+  let succeeded = false;
+  try {
+    handle = await open(path, "wx", 0o600);
+    created = true;
+    await handle.writeFile(bytes);
+    await handle.sync();
+    const metadata = await handle.stat();
+    if (!metadata.isFile() || metadata.size !== bytes.byteLength) {
+      integrity("publication snapshot write did not preserve its exact byte count");
+    }
+    await handle.close();
+    handle = undefined;
+    succeeded = true;
+  } catch (cause) {
+    if (cause instanceof ArtifactRuntimeError) throw cause;
+    throw new ArtifactRuntimeError(
+      "ARTIFACT_RUNTIME_UNAVAILABLE",
+      "publication snapshot could not be written exclusively",
+      { cause },
+    );
+  } finally {
+    await handle?.close();
+    if (created && !succeeded) await rm(path, { force: true });
+  }
+}
+
+function exactDataRecord(
+  value: unknown,
+  keys: readonly string[],
+  name: string,
+): Record<string, unknown> {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    Array.isArray(value) ||
+    (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)
+  ) {
+    incompatible(`${name} is not a plain data record`);
+  }
+  const ownKeys = Reflect.ownKeys(value);
+  if (
+    ownKeys.length !== keys.length ||
+    ownKeys.some((key) => typeof key !== "string" || !keys.includes(key))
+  ) {
+    incompatible(`${name} contains missing or unknown properties`);
+  }
+  for (const key of keys) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !("value" in descriptor)) incompatible(`${name}.${key} must be data`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function strictModule(value: unknown, name: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    incompatible(`${name} did not export a module namespace`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function sha256(bytes: Uint8Array): `sha256:${string}` {
+  return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+}
+
+function artifactRuntimeCliUsage(): string {
+  return "Usage: opengeni-artifact-runtime <locate|doctor> --json | opengeni-artifact-runtime prepare-publication --json --modality <spreadsheet|document|presentation> --input <absolute-office-file> --snapshot-output <absolute-new-file>";
+}
+
+function invalidPublication(message: string): never {
+  throw new ArtifactRuntimeError("ARTIFACT_RUNTIME_MANIFEST_INVALID", message);
 }
 
 async function readInstallationManifest(
@@ -618,10 +1048,12 @@ export function probeVerifiedArtifactSkillFacade(
   }
   const workbookFactory = module.Workbook as { create?: () => unknown } | undefined;
   const diagnostics = module.getArtifactCompositeDiagnostics;
+  const publicationSnapshot = module.createArtifactPublicationSnapshot;
   const dispose = module.disposeArtifact;
   if (
     typeof workbookFactory?.create !== "function" ||
     typeof diagnostics !== "function" ||
+    typeof publicationSnapshot !== "function" ||
     typeof dispose !== "function"
   ) {
     incompatible("skill facade bootstrap is missing its native workbook health surface");

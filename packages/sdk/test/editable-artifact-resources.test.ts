@@ -76,6 +76,49 @@ describe("editable artifact public SDK", () => {
     for (const value of values) expect(value).toMatch(/^(?!0{16}$)[0-9a-f]{16}$/u);
   });
 
+  test("imports retained Office files through the explicit snapshot contract", async () => {
+    let request: Request | null = null;
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: (async (input, init) => {
+        request = new Request(input, init);
+        return Response.json(artifact, { status: 201 });
+      }) as typeof fetch,
+    });
+    const contentHash = `sha256:${"b".repeat(64)}`;
+    await expect(
+      client.importEditableArtifact(WORKSPACE_ID, {
+        idempotencyKey: "import-forecast-1",
+        replicaId: REPLICA_ID,
+        modality: "spreadsheet",
+        title: "Imported forecast",
+        sourceFileId: "00000000-0000-4000-8000-000000000002",
+        snapshot: {
+          modality: "spreadsheet",
+          blobReference: `editable-artifacts/snapshots/sha256/${"b".repeat(64)}`,
+          byteSize: 8_192,
+          contentHash,
+          mimeType: "application/vnd.opengeni.editable-artifact-snapshot",
+          coveredHeadSequence: 0,
+          coveredCausalFrontier: [{ replicaId: REPLICA_ID, counter: 4 }],
+          stateHash: `sha256:${"c".repeat(64)}`,
+          modelSchemaVersion: 1,
+          kernelVersion: "artifact-kernel-1",
+          operationProtocolVersion: 1,
+          crdtStateVersion: 1,
+        },
+      }),
+    ).resolves.toEqual(artifact);
+    expect(request!.method).toBe("POST");
+    expect(request!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/editable-artifacts/imports`,
+    );
+    expect(await request!.json()).toMatchObject({
+      sourceFileId: "00000000-0000-4000-8000-000000000002",
+      snapshot: { contentHash, coveredHeadSequence: 0 },
+    });
+  });
+
   test("pins, enqueues, polls, and downloads an exact durable version", async () => {
     const requests: Request[] = [];
     const version = {

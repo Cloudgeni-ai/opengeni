@@ -94,6 +94,7 @@ export type PersistedEditableArtifactCreationReceipt = Readonly<{
   receiptId: string;
   scope: PersistedEditableArtifactScope;
   artifactId: string;
+  operationKind: "create" | "import";
   authorityKey: string;
   idempotencyKey: string;
   requestHash: string;
@@ -587,6 +588,7 @@ export class EditableArtifactPersistenceError extends Error {
 export const EDITABLE_ARTIFACT_INTENT_MAX_BYTES = 5 * 1024 * 1024;
 export const EDITABLE_ARTIFACT_KERNEL_TAIL_MAX_TRANSACTIONS = 100_000;
 export const EDITABLE_ARTIFACT_KERNEL_TAIL_MAX_BYTES = 64 * 1024 * 1024;
+const EDITABLE_ARTIFACT_ORIGINAL_IMPORT_MAX_BYTES = 64 * 1024 * 1024;
 
 type ArtifactRow = {
   account_id: string;
@@ -682,6 +684,7 @@ type CommittedTransactionRow = {
 
 type CreationReceiptRow = {
   id: string;
+  operation_kind: string;
   authority_key: string;
   idempotency_key: string;
   request_hash: string;
@@ -838,10 +841,12 @@ export class PostgresEditableArtifactStore {
 
   async findArtifactCreation(
     scopeInput: PersistedEditableArtifactScope,
+    operationKindInput: "create" | "import",
     authorityKeyInput: string,
     idempotencyKeyInput: string,
   ): Promise<CreatePersistedEditableArtifactResult | null> {
     const scope = validateScope(scopeInput);
+    const operationKind = validateOriginOperation(operationKindInput);
     const authorityKey = validateActorKey(authorityKeyInput).key;
     const idempotencyKey = validateClientTransactionId(idempotencyKeyInput);
     return await withRlsContext(
@@ -850,12 +855,12 @@ export class PostgresEditableArtifactStore {
       async (tx) => {
         const rows = await rawRows<CreationReceiptRow>(
           tx,
-          sql`select id, authority_key, idempotency_key, request_hash,
+          sql`select id, operation_kind, authority_key, idempotency_key, request_hash,
             resource_type, resource_id, result, created_at
           from editable_artifact_idempotency_receipts
           where account_id = ${scope.accountId}::uuid
             and workspace_id = ${scope.workspaceId}::uuid
-            and operation_kind = 'create'
+            and operation_kind = ${operationKind}
             and authority_key_digest = sha256(convert_to(${authorityKey}, 'UTF8'))
             and authority_key = ${authorityKey}
             and idempotency_key = ${idempotencyKey}
@@ -898,12 +903,21 @@ export class PostgresEditableArtifactStore {
     authorityKey: string;
     idempotencyKey: string;
     requestHash: string;
+    operationKind: "create" | "import";
     modality: PersistedEditableArtifact["modality"];
     title: string;
     expectedScopeAuthorizationRevision: number;
     initialArtifactAuthorizationRevision: number;
     createdBySubjectId: string;
     genesisSnapshot: PersistedEditableArtifactSnapshotMetadata;
+    originalImport?: Readonly<{
+      fileId: string;
+      blobRefId: string;
+      blobReference: string;
+      byteSize: number;
+      contentHash: string;
+      mimeType: string;
+    }>;
     outbox: PersistedEditableArtifactLiveOutboxRecord;
   }): Promise<CreatePersistedEditableArtifactStoreResult> {
     const scope = validateScope(input.scope);
@@ -916,6 +930,10 @@ export class PostgresEditableArtifactStore {
     }
     const idempotencyKey = validateClientTransactionId(input.idempotencyKey);
     const requestHash = validateHash(input.requestHash, "creation request hash");
+    const operationKind = validateOriginOperation(input.operationKind);
+    if ((operationKind === "import") !== Boolean(input.originalImport)) {
+      throw new TypeError("Artifact import source does not match its origin operation");
+    }
     const expectedScopeAuthorizationRevision = validateInteger(
       input.expectedScopeAuthorizationRevision,
       "expected scope create authorization revision",
@@ -934,6 +952,9 @@ export class PostgresEditableArtifactStore {
     }
     const modality = input.modality;
     const genesisSnapshot = ownSnapshotMetadata(input.genesisSnapshot);
+    const originalImport = input.originalImport
+      ? validateOriginalImport(input.originalImport, modality)
+      : null;
     const outbox = cloneOutbox(input.outbox);
     const createdAtIso = genesisSnapshot.publishedAt;
     const commonCandidateArtifact = {
@@ -953,17 +974,20 @@ export class PostgresEditableArtifactStore {
         ? Object.freeze({
             ...commonCandidateArtifact,
             modality,
-            causalFrontier: Object.freeze([]),
+            causalFrontier:
+              genesisSnapshot.modality === "spreadsheet"
+                ? genesisSnapshot.coveredCausalFrontier
+                : Object.freeze([]),
           })
         : Object.freeze({ ...commonCandidateArtifact, modality });
-    validateGenesisCreation(candidateArtifact, genesisSnapshot, outbox);
+    validateGenesisCreation(candidateArtifact, genesisSnapshot, outbox, operationKind);
     return await withRlsContext(
       this.db,
       scope,
       async (tx) => {
         await tx.execute(
           sql`select pg_advisory_xact_lock(hashtextextended(
-            ${`editable-artifact:create:${scope.accountId}:${scope.workspaceId}:${authorityKey}:${idempotencyKey}`},
+            ${`editable-artifact:${operationKind}:${scope.accountId}:${scope.workspaceId}:${authorityKey}:${idempotencyKey}`},
             0
           ))`,
         );
@@ -971,7 +995,7 @@ export class PostgresEditableArtifactStore {
           scope,
           artifactId,
           actor: authorizationActor,
-          permission: "create",
+          permission: operationKind,
         });
         if (!authorization.allowed) {
           return Object.freeze({ kind: "authorization_stale" as const });
@@ -979,12 +1003,12 @@ export class PostgresEditableArtifactStore {
         const prior = await rawRows<CreationReceiptRow>(
           tx,
           sql`
-          select id, authority_key, idempotency_key, request_hash,
+          select id, operation_kind, authority_key, idempotency_key, request_hash,
             resource_type, resource_id, result, created_at
           from editable_artifact_idempotency_receipts
           where account_id = ${scope.accountId}::uuid
             and workspace_id = ${scope.workspaceId}::uuid
-            and operation_kind = 'create'
+            and operation_kind = ${operationKind}
             and authority_key_digest = sha256(convert_to(${authorityKey}, 'UTF8'))
             and authority_key = ${authorityKey}
             and idempotency_key = ${idempotencyKey}
@@ -1060,7 +1084,15 @@ export class PostgresEditableArtifactStore {
             ) values (
               ${scope.accountId}::uuid, ${scope.workspaceId}::uuid, ${artifactId},
               ${modality}, ${title}, 'active', ${initialArtifactAuthorizationRevision},
-              0, ${modality === "spreadsheet" ? sql`'[]'::jsonb` : sql`null`},
+              0, ${
+                modality === "spreadsheet"
+                  ? json(
+                      genesisSnapshot.modality === "spreadsheet"
+                        ? genesisSnapshot.coveredCausalFrontier
+                        : [],
+                    )
+                  : sql`null`
+              }::jsonb,
               ${genesisSnapshot.stateHash}, ${genesisSnapshot.snapshotId},
               ${createdBySubjectId}, ${createdAtIso}, ${createdAtIso}
             )`);
@@ -1072,11 +1104,28 @@ export class PostgresEditableArtifactStore {
             ) values (
               ${scope.accountId}::uuid, ${scope.workspaceId}::uuid, ${artifactId},
               0, ${modality},
-              ${modality === "spreadsheet" ? sql`'[]'::jsonb` : sql`null`},
+              ${
+                modality === "spreadsheet"
+                  ? json(
+                      genesisSnapshot.modality === "spreadsheet"
+                        ? genesisSnapshot.coveredCausalFrontier
+                        : [],
+                    )
+                  : sql`null`
+              }::jsonb,
               ${genesisSnapshot.modality === "spreadsheet" ? null : genesisSnapshot.nativeRevision},
               ${genesisSnapshot.stateHash}, null, ${createdAtIso}
             )`);
           await insertSnapshotBlobReference(tx, genesisSnapshot);
+          if (originalImport) {
+            await insertOriginalImportBlobReference(
+              tx,
+              scope,
+              artifactId,
+              originalImport,
+              createdAtIso,
+            );
+          }
           await insertSnapshotMetadata(tx, genesisSnapshot);
           const receiptResult = Object.freeze({
             schemaVersion: 1,
@@ -1090,7 +1139,7 @@ export class PostgresEditableArtifactStore {
               resource_id, server_transaction_id, result, created_at
             ) values (
               ${scope.accountId}::uuid, ${scope.workspaceId}::uuid, ${receiptId},
-              ${artifactId}, 'create', ${authorityKey}, ${idempotencyKey},
+              ${artifactId}, ${operationKind}, ${authorityKey}, ${idempotencyKey},
               ${requestHash}, 'artifact', ${artifactId}, null,
               ${json(receiptResult)}::jsonb, ${createdAtIso}
             )`);
@@ -1114,6 +1163,7 @@ export class PostgresEditableArtifactStore {
               receiptId,
               scope,
               artifactId,
+              operationKind,
               authorityKey,
               idempotencyKey,
               requestHash,
@@ -3043,6 +3093,32 @@ async function insertSnapshotBlobReference(
     )`);
 }
 
+async function insertOriginalImportBlobReference(
+  db: Database,
+  scope: PersistedEditableArtifactScope,
+  artifactId: string,
+  source: Readonly<{
+    fileId: string;
+    blobRefId: string;
+    blobReference: string;
+    byteSize: number;
+    contentHash: string;
+    mimeType: string;
+  }>,
+  createdAt: string,
+): Promise<void> {
+  await db.execute(sql`
+    insert into editable_artifact_blob_refs (
+      account_id, workspace_id, artifact_id, id, kind, object_reference,
+      byte_size, content_hash, mime_type, source_file_id, created_at
+    ) values (
+      ${scope.accountId}::uuid, ${scope.workspaceId}::uuid, ${artifactId},
+      ${source.blobRefId}, 'original_import', ${source.blobReference},
+      ${source.byteSize}, ${source.contentHash}, ${source.mimeType},
+      ${source.fileId}::uuid, ${createdAt}
+    )`);
+}
+
 async function insertSnapshotMetadata(
   db: Database,
   snapshot: PersistedEditableArtifactSnapshotMetadata,
@@ -3598,6 +3674,7 @@ function creationReceiptFromRow(
     receiptId: validateStableId(row.id, "creation receipt id"),
     scope,
     artifactId,
+    operationKind: validateOriginOperation(row.operation_kind),
     authorityKey: validateActorKey(row.authority_key).key,
     idempotencyKey: validateClientTransactionId(row.idempotency_key),
     requestHash: validateHash(row.request_hash, "creation request hash"),
@@ -4275,6 +4352,7 @@ function validateGenesisCreation(
   artifact: PersistedEditableArtifact,
   snapshot: PersistedEditableArtifactSnapshotMetadata,
   outbox: PersistedEditableArtifactLiveOutboxRecord,
+  operationKind: "create" | "import",
 ): void {
   validateSnapshotCommit(artifact, {
     expectedCurrentSnapshotId: null,
@@ -4284,9 +4362,10 @@ function validateGenesisCreation(
   });
   if (
     snapshot.coveredHeadSequence !== 0 ||
-    (snapshot.modality === "spreadsheet"
-      ? snapshot.coveredCausalFrontier.length !== 0
-      : snapshot.nativeRevision !== 0) ||
+    (operationKind === "create" &&
+      (snapshot.modality === "spreadsheet"
+        ? snapshot.coveredCausalFrontier.length !== 0
+        : snapshot.nativeRevision !== 0)) ||
     snapshot.stateHash !== artifact.stateHash ||
     snapshot.publishedAt !== artifact.createdAt
   ) {
@@ -4627,7 +4706,7 @@ async function transactionallyAuthorizeEditableArtifactActor(
     scope: PersistedEditableArtifactScope;
     artifactId: string;
     actor: PersistedEditableArtifactActor;
-    permission: "create" | "read" | "edit" | "manage";
+    permission: "create" | "import" | "read" | "edit" | "manage";
   }>,
 ): Promise<Readonly<{ allowed: boolean; revision: number }>> {
   const actor = input.actor;
@@ -4745,6 +4824,67 @@ function validateStableId(value: unknown, label: string): string {
     throw new TypeError(`${label} must be fixed-width lowercase nonzero hexadecimal text`);
   }
   return value;
+}
+
+function validateOriginOperation(value: unknown): "create" | "import" {
+  if (value !== "create" && value !== "import") {
+    throw new TypeError("Editable artifact origin operation is invalid");
+  }
+  return value;
+}
+
+function validateOriginalImport(
+  input: Readonly<{
+    fileId: string;
+    blobRefId: string;
+    blobReference: string;
+    byteSize: number;
+    contentHash: string;
+    mimeType: string;
+  }>,
+  modality: PersistedEditableArtifact["modality"],
+): Readonly<{
+  fileId: string;
+  blobRefId: string;
+  blobReference: string;
+  byteSize: number;
+  contentHash: string;
+  mimeType: string;
+}> {
+  if (
+    typeof input.fileId !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(
+      input.fileId,
+    )
+  ) {
+    throw new TypeError("Original import file id must be a canonical UUID");
+  }
+  const expectedMimeType =
+    modality === "spreadsheet"
+      ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      : modality === "document"
+        ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        : "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+  if (input.mimeType !== expectedMimeType) {
+    throw new TypeError("Original import MIME type does not match artifact modality");
+  }
+  return Object.freeze({
+    fileId: input.fileId,
+    blobRefId: validateStableId(input.blobRefId, "original import blob id"),
+    blobReference: validateBoundedText(
+      input.blobReference,
+      "original import blob reference",
+      1024,
+    ),
+    byteSize: validateInteger(
+      input.byteSize,
+      "original import byte size",
+      1,
+      EDITABLE_ARTIFACT_ORIGINAL_IMPORT_MAX_BYTES,
+    ),
+    contentHash: validateHash(input.contentHash, "original import content hash"),
+    mimeType: expectedMimeType,
+  });
 }
 
 function validateReplicaId(value: unknown): string {

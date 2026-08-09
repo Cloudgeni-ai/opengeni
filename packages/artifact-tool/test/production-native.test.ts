@@ -9,6 +9,7 @@ import {
   SpreadsheetFile,
   Workbook,
   configureArtifactRuntime,
+  createArtifactPublicationSnapshot,
   disposeArtifact,
   getArtifactCompositeDiagnostics,
 } from "../src";
@@ -45,6 +46,68 @@ const ONE_PIXEL_PNG =
   "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 describe("production facade over the real native addon", () => {
+  test("captures exact durable publication snapshots for every modality", () => {
+    const workbook = Workbook.create();
+    workbook.worksheets.add("Published").getRange("A1").values = [[42]];
+    const document = Document.create({ idNamespace: "1234567890abcdef" });
+    document.blocks.addParagraph("Published document");
+    const presentation = Presentation.create();
+    presentation.slides.add().shapes.add({
+      geometry: "textbox",
+      name: "Published",
+      text: "Published presentation",
+      position: { left: 40, top: 40, width: 400, height: 80 },
+    });
+
+    try {
+      const spreadsheet = createArtifactPublicationSnapshot(workbook);
+      expect(spreadsheet).toMatchObject({
+        schemaVersion: 1,
+        modality: "spreadsheet",
+        modelSchemaVersion: 1,
+        snapshotVersion: 1,
+        operationProtocolVersion: 1,
+        crdtStateVersion: 1,
+      });
+      if (spreadsheet.modality !== "spreadsheet") throw new Error("Unexpected modality");
+      expect(spreadsheet.coveredCausalFrontier).toHaveLength(1);
+      const reopenedWorkbook = NativeSpreadsheetSession.open(
+        productionTestRuntime(),
+        spreadsheet.snapshotBytes,
+      );
+      expect(reopenedWorkbook.stateHash()).toBe(spreadsheet.stateHash);
+      expect(reopenedWorkbook.frontier()).toEqual(
+        (
+          requireCompositeState(workbook, "spreadsheet").native as NativeSpreadsheetSession
+        ).frontier(),
+      );
+      reopenedWorkbook.dispose();
+
+      for (const artifact of [document, presentation] as const) {
+        const snapshot = createArtifactPublicationSnapshot(artifact);
+        expect(snapshot.modality).not.toBe("spreadsheet");
+        if (snapshot.modality === "spreadsheet") throw new Error("Unexpected modality");
+        expect(snapshot).toMatchObject({
+          schemaVersion: 1,
+          modelSchemaVersion: 1,
+          snapshotVersion: 1,
+        });
+        expect(snapshot.nativeRevision).toBeGreaterThan(0);
+        const reopened =
+          snapshot.modality === "document"
+            ? NativeDocumentSession.open(productionTestRuntime(), snapshot.snapshotBytes)
+            : NativePresentationSession.open(productionTestRuntime(), snapshot.snapshotBytes);
+        expect(reopened.stateHash()).toBe(snapshot.stateHash);
+        expect(Number(reopened.revision())).toBe(snapshot.nativeRevision);
+        reopened.dispose();
+      }
+    } finally {
+      disposeArtifact(workbook);
+      disposeArtifact(document);
+      disposeArtifact(presentation);
+    }
+  });
+
   test("keeps spreadsheet skill objects and native formulas in one atomic projection", () => {
     const workbook = Workbook.create();
     expect(workbook).toBeInstanceOf(Workbook);

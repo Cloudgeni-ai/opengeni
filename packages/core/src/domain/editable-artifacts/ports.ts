@@ -7,6 +7,8 @@ import type {
   EditableArtifactMutationIntent,
   EditableArtifactOperationId,
   EditableArtifactOperationRecord,
+  EditableArtifactOriginOperation,
+  EditableArtifactOriginalImport,
   EditableArtifactOutboxId,
   EditableArtifactOutboxRetryFailureCode,
   EditableArtifactOutboxDeadLetterFailureCode,
@@ -193,6 +195,7 @@ export interface EditableArtifactClockPort {
 export type EditableArtifactStableIdKind =
   | "artifact"
   | "snapshot"
+  | "blob"
   | "receipt"
   | "outbox"
   | "transaction";
@@ -210,6 +213,7 @@ export type CreateEditableArtifactStoreRequest = Readonly<{
   authorityKey: string;
   idempotencyKey: EditableArtifactClientTransactionId;
   requestHash: EditableArtifactRequestHash;
+  operationKind: EditableArtifactOriginOperation;
   /** Scope-create policy head observed by the authorization decision. */
   expectedScopeAuthorizationRevision: number;
   /** Initial per-artifact policy head installed by the successful create. */
@@ -218,6 +222,7 @@ export type CreateEditableArtifactStoreRequest = Readonly<{
   title: string;
   createdBySubjectId: string;
   genesisSnapshot: EditableArtifactSnapshotMetadata;
+  originalImport?: Readonly<EditableArtifactOriginalImport & { blobRefId: EditableArtifactStableId }>;
   outbox: EditableArtifactLiveOutboxRecord;
 }>;
 
@@ -378,6 +383,7 @@ export interface EditableArtifactStorePort {
   /** Read-only idempotency fast path; `createArtifact` remains authoritative. */
   findArtifactCreation(
     scope: EditableArtifactScope,
+    operationKind: EditableArtifactOriginOperation,
     authorityKey: string,
     idempotencyKey: EditableArtifactClientTransactionId,
   ): Promise<CreateEditableArtifactResult | null>;

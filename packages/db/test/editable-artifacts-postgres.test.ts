@@ -7,9 +7,16 @@ import {
 } from "@opengeni/contracts/editable-artifacts";
 import { encodePresentationArtifactCommandBatch } from "@opengeni/contracts/presentation-artifact-commands";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { sql } from "drizzle-orm";
 
-import { createDb, type DbClient } from "../src/database";
-import { bootstrapWorkspace, createSession } from "../src/index";
+import { createDb, withRlsContext, type DbClient } from "../src/database";
+import {
+  bootstrapWorkspace,
+  completeFileUpload,
+  createSession,
+  nestedPostgresSqlState,
+  prepareEditableArtifactSourceFile,
+} from "../src/index";
 import { provisionRoles } from "../src/provision-roles";
 import {
   EditableArtifactPersistenceError,
@@ -96,6 +103,41 @@ afterAll(async () => {
 }, 180_000);
 
 describe("Postgres editable artifact authority", () => {
+  test("prepares one exact replay-safe Office source upload", async () => {
+    if (!available || !client) return;
+    const fileId = crypto.randomUUID();
+    const uploadId = crypto.randomUUID();
+    const input = {
+      accountId,
+      workspaceId,
+      fileId,
+      uploadId,
+      filename: "final.xlsx",
+      safeFilename: `editable-artifact-source-${fileId}.xlsx`,
+      contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      sizeBytes: 4_096,
+      sha256: "a".repeat(64),
+      bucket: "artifact-test",
+      objectKey: `workspaces/${workspaceId}/files/${fileId}/editable-artifact-source/final.xlsx`,
+      expiresAt: new Date(Date.now() + 60_000),
+    };
+    const prepared = await prepareEditableArtifactSourceFile(client.db, input);
+    expect(prepared).toMatchObject({ created: true, uploadId, file: { status: "pending_upload" } });
+    expect(await prepareEditableArtifactSourceFile(client.db, input)).toMatchObject({
+      created: false,
+      uploadId,
+      file: { id: fileId, sha256: "a".repeat(64), status: "pending_upload" },
+    });
+    expect((await completeFileUpload(client.db, workspaceId, uploadId)).status).toBe("ready");
+    expect(await prepareEditableArtifactSourceFile(client.db, input)).toMatchObject({
+      created: false,
+      file: { status: "ready" },
+    });
+    await expect(
+      prepareEditableArtifactSourceFile(client.db, { ...input, sha256: "b".repeat(64) }),
+    ).rejects.toThrow("identity conflict");
+  });
+
   test("tags built-in bootstrap grants with exact principal provenance", async () => {
     if (!available || !client) return;
     const suffix = crypto.randomUUID();
@@ -191,7 +233,7 @@ describe("Postgres editable artifact authority", () => {
   }, 30_000);
 
   test("rejects null causal collections and incomplete live-ticket actors", async () => {
-    if (!available || !shared) return;
+    if (!available || !shared || !client) return;
     const [validators] = await shared.admin<
       Array<{ frontierValid: boolean; idArrayValid: boolean }>
     >`
@@ -280,6 +322,29 @@ describe("Postgres editable artifact authority", () => {
     expect((serviceError as { constraint_name?: string }).constraint_name).toBe(
       "editable_artifact_live_tickets_actor_chk",
     );
+
+    const invalidAuthorizations = [
+      { artifactId: null, actorKind: "human", permission: "read" },
+      { artifactId, actorKind: null, permission: "read" },
+      { artifactId, actorKind: "human", permission: null },
+    ] as const;
+    for (const invalid of invalidAuthorizations) {
+      const error = await withRlsContext(
+        client.db,
+        { accountId, workspaceId },
+        async (tx) =>
+          await tx.execute(sql`
+            select * from opengeni_private.authorize_editable_artifact_actor(
+              ${accountId}::uuid, ${workspaceId}::uuid, ${invalid.artifactId},
+              ${invalid.actorKind}, 'user:alice', null, null, null, null, null,
+              ${invalid.permission}
+            )`),
+      ).then(
+        () => null,
+        (cause) => cause,
+      );
+      expect(nestedPostgresSqlState(error)).toBe("22023");
+    }
   }, 60_000);
 
   test("stores live tickets as execute-only, database-bounded, atomic one-use capabilities", async () => {
@@ -2358,6 +2423,105 @@ describe("Postgres editable artifact authority", () => {
     expect(replay.value.replayed).toBe(true);
     expect(replay.value.artifact.authorizationRevision).toBe(8);
   }, 30_000);
+
+  test("imports a retained Office file as exact sequence-zero authority", async () => {
+    if (!available || !shared) return;
+    const scope = { accountId, workspaceId };
+    const sourceFileId = crypto.randomUUID();
+    const sourceObjectKey = `workspaces/${workspaceId}/files/${sourceFileId}/original/import.xlsx`;
+    await shared.admin`
+      insert into files (
+        id, account_id, workspace_id, status, filename, safe_filename,
+        content_type, size_bytes, sha256, bucket, object_key
+      ) values (
+        ${sourceFileId}, ${accountId}, ${workspaceId}, 'ready', 'import.xlsx', 'import.xlsx',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        4096, ${"a".repeat(64)}, 'test', ${sourceObjectKey}
+      )`;
+
+    const artifactId = nextId();
+    const idempotencyKey = `import:${artifactId}`;
+    const authorityKey = JSON.stringify(["human", "user:alice"]);
+    const base = creationFixture({
+      scope,
+      artifactId,
+      receiptId: nextId(),
+      authorityKey,
+      idempotencyKey,
+      requestHash: hash("8"),
+      modality: "spreadsheet",
+      title: "Imported workbook",
+      stateHash: hash("7"),
+      authorizationRevision: 1,
+      createdBySubjectId: "user:alice",
+    });
+    if (base.genesisSnapshot.modality !== "spreadsheet") {
+      throw new Error("spreadsheet import fixture returned another modality");
+    }
+    const frontier = [{ replicaId: "1234567890abcdef", counter: 4 }] as const;
+    const imported = await store.createArtifact({
+      ...base,
+      operationKind: "import",
+      genesisSnapshot: { ...base.genesisSnapshot, coveredCausalFrontier: frontier },
+      originalImport: {
+        fileId: sourceFileId,
+        blobRefId: nextId(),
+        blobReference: sourceObjectKey,
+        byteSize: 4_096,
+        contentHash: hash("a"),
+        mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      },
+    });
+    if (imported.kind !== "result") throw new Error("scope-authorized import was fenced");
+    expect(imported.value.creationReceipt.operationKind).toBe("import");
+    expect(spreadsheetArtifact(imported.value.artifact).causalFrontier).toEqual(frontier);
+    expect(imported.value.genesisSnapshot).toMatchObject({
+      coveredHeadSequence: 0,
+      coveredCausalFrontier: frontier,
+    });
+    expect(
+      await store.findArtifactCreation(scope, "import", authorityKey, idempotencyKey),
+    ).toMatchObject({
+      replayed: true,
+      artifact: { id: artifactId },
+      creationReceipt: { operationKind: "import" },
+    });
+    expect(
+      await store.findArtifactCreation(scope, "create", authorityKey, idempotencyKey),
+    ).toBeNull();
+
+    const [sourceLink] = await shared.admin<
+      Array<{ kind: string; sourceFileId: string; objectReference: string }>
+    >`
+      select kind, source_file_id::text as "sourceFileId",
+        object_reference as "objectReference"
+      from editable_artifact_blob_refs
+      where account_id = ${accountId} and workspace_id = ${workspaceId}
+        and artifact_id = ${artifactId} and kind = 'original_import'`;
+    expect(sourceLink).toEqual({
+      kind: "original_import",
+      sourceFileId,
+      objectReference: sourceObjectKey,
+    });
+
+    const createArtifactId = nextId();
+    const createWithSameKey = await store.createArtifact(
+      creationFixture({
+        scope,
+        artifactId: createArtifactId,
+        receiptId: nextId(),
+        authorityKey,
+        idempotencyKey,
+        requestHash: hash("6"),
+        modality: "document",
+        title: "Separate create namespace",
+        stateHash: hash("5"),
+        authorizationRevision: 1,
+        createdBySubjectId: "user:alice",
+      }),
+    );
+    expect(createWithSameKey.kind).toBe("result");
+  }, 30_000);
 });
 
 async function readKernelState(
@@ -2371,6 +2535,7 @@ async function readKernelState(
     previousLocalTransactionId: null,
     selectiveUndoOperationIds: [],
   });
+
   if (basis.kind !== "basis") throw new Error("unexpected existing transaction receipt");
   if (basis.kernelState.modality !== "spreadsheet") {
     throw new Error("spreadsheet test received a serialized kernel state");
@@ -2899,6 +3064,7 @@ function creationFixture(input: {
     authorityKey: input.authorityKey,
     idempotencyKey: input.idempotencyKey,
     requestHash: input.requestHash,
+    operationKind: "create",
     modality: input.modality,
     title: input.title,
     expectedScopeAuthorizationRevision: input.authorizationRevision,

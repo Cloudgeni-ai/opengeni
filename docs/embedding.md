@@ -799,6 +799,17 @@ workspace boundary while avoiding a full browser byte copy. A custom timeline
 may instead call `downloadRetainedArtifact`, which verifies bounded ranges and
 SHA-256. See [`image-generation.md`](image-generation.md).
 
+Editable Office publication is likewise package-owned rather than web-owned.
+`OpenGeniClient.importEditableArtifact` submits a trusted ready source-file id
+and canonical sequence-zero snapshot to the durable import boundary, while
+`parseEditableArtifactPublicationReceipt` validates the closed result emitted
+by the agent's `publish_editable_artifact` tool. The styled `MessageTimeline`
+recognizes that receipt and renders the same internal editor link used by the
+stock console; a custom timeline can parse the receipt and route to its own
+composition around `@opengeni/react/artifacts`. The host never receives a
+bucket, object key, signed snapshot URL, or mutable kernel state. See
+[`artifact-engine.md`](artifact-engine.md).
+
 Repository selection is also host-composable. `CreateSessionRequest.resources`
 accepts the canonical provider-qualified `ResourceRef[]`, including several
 providers, repositories, and credential bindings in one session. The stock web

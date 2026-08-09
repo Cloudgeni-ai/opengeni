@@ -546,6 +546,7 @@ export const editableArtifactBlobRefs = pgTable(
     byteSize: bigint("byte_size", { mode: "number" }).notNull(),
     contentHash: text("content_hash").notNull(),
     mimeType: text("mime_type").notNull(),
+    sourceFileId: uuid("source_file_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -570,6 +571,10 @@ export const editableArtifactBlobRefs = pgTable(
       table.mimeType,
     ),
     hashValid: check("editable_artifact_blob_refs_hash_chk", sha256Sql(table.contentHash)),
+    sourceKindValid: check(
+      "editable_artifact_blob_refs_source_kind_chk",
+      sql`(${table.kind} = 'original_import') = (${table.sourceFileId} is not null)`,
+    ),
   }),
 );
 

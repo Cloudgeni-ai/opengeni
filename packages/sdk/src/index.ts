@@ -21,6 +21,10 @@ export type {
   ReadEditableArtifactResourceOptions,
 } from "./editable-artifact-resources";
 export {
+  parseEditableArtifactPublicationReceipt,
+  type PublishEditableArtifactReceipt,
+} from "./editable-artifact-publication";
+export {
   OpenGeniApiContractMismatchError,
   OpenGeniApiError,
   OpenGeniSessionListCursorError,

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import packageJson from "../package.json" with { type: "json" };
@@ -162,6 +162,84 @@ describe("artifact runtime locator executable", () => {
     );
     await expect(runArtifactRuntimeCli(["locate"], fixture.environment)).rejects.toThrow("Usage:");
   });
+
+  test("imports Office bytes and writes one exclusive canonical publication snapshot", async () => {
+    const target = resolveCurrentArtifactRuntimeTarget();
+    const fixture = await createRuntimeFixture({ target, publication: true });
+    const sourcePath = join(fixture.root, "source.xlsx");
+    const snapshotPath = join(fixture.root, "publication.snapshot");
+    const sourceBytes = new TextEncoder().encode("exact-office-source");
+    await writeFile(sourcePath, sourceBytes);
+
+    const output = await runArtifactRuntimeCli(
+      [
+        "prepare-publication",
+        "--json",
+        "--modality",
+        "spreadsheet",
+        "--input",
+        sourcePath,
+        "--snapshot-output",
+        snapshotPath,
+      ],
+      fixture.environment,
+    );
+    const result = JSON.parse(output);
+    expect(result).toMatchObject({
+      schemaVersion: 1,
+      modality: "spreadsheet",
+      source: {
+        byteSize: sourceBytes.byteLength,
+        contentHash: `sha256:${createHash("sha256").update(sourceBytes).digest("hex")}`,
+        mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      },
+      snapshot: {
+        modality: "spreadsheet",
+        coveredHeadSequence: 0,
+        stateHash: `sha256:${"1".repeat(64)}`,
+        modelSchemaVersion: 1,
+        kernelVersion: buildIdentity,
+        operationProtocolVersion: 1,
+        crdtStateVersion: 1,
+      },
+    });
+    expect(new Uint8Array(await readFile(snapshotPath))).toEqual(
+      new TextEncoder().encode("canonical-publication-snapshot"),
+    );
+    await expect(
+      runArtifactRuntimeCli(
+        [
+          "prepare-publication",
+          "--json",
+          "--modality",
+          "spreadsheet",
+          "--input",
+          sourcePath,
+          "--snapshot-output",
+          snapshotPath,
+        ],
+        fixture.environment,
+      ),
+    ).rejects.toThrow("written exclusively");
+
+    const wrongExtension = join(fixture.root, "source.docx");
+    await writeFile(wrongExtension, sourceBytes);
+    await expect(
+      runArtifactRuntimeCli(
+        [
+          "prepare-publication",
+          "--json",
+          "--modality",
+          "spreadsheet",
+          "--input",
+          wrongExtension,
+          "--snapshot-output",
+          join(fixture.root, "wrong.snapshot"),
+        ],
+        fixture.environment,
+      ),
+    ).rejects.toThrow("must have the .xlsx extension");
+  });
 });
 
 describe("Linux libc runtime evidence", () => {
@@ -255,6 +333,7 @@ async function createRuntimeFixture(
   options: Readonly<{
     canonicalRelease?: boolean;
     portable?: boolean;
+    publication?: boolean;
     target?: (typeof ARTIFACT_RUNTIME_MATRIX)[number]["target"];
   }> = {},
 ): Promise<RuntimeFixture> {
@@ -270,7 +349,12 @@ async function createRuntimeFixture(
   const supportPath = join(root, "runtime-support.js");
   await mkdir(kernelRoot, { recursive: true });
 
-  const facadeBytes = new TextEncoder().encode("export const configured = true;\n");
+  const target = options.target ?? "darwin-arm64";
+  const facadeBytes = new TextEncoder().encode(
+    options.publication
+      ? publicationFixtureFacade(target)
+      : "export const configured = true;\n",
+  );
   const kernelBytes = new TextEncoder().encode("export const kernel = true;\n");
   const assetBytes = new TextEncoder().encode("verified-kernel-asset");
   const archiveBytes = new TextEncoder().encode("verified-packed-artifact-tool");
@@ -288,7 +372,7 @@ async function createRuntimeFixture(
     ? (`sha512-${createHash("sha512").update(archiveBytes).digest("base64")}` as const)
     : integrity;
 
-  const selected = packageManifest(options.target ?? "darwin-arm64", kernelBytes, assetBytes);
+  const selected = packageManifest(target, kernelBytes, assetBytes);
   const release = {
     schemaVersion: 1,
     artifactTool: {
@@ -344,6 +428,52 @@ async function createRuntimeFixture(
     },
     ...(options.portable ? { archivePath, supportPath } : {}),
   };
+}
+
+function publicationFixtureFacade(
+  target: (typeof ARTIFACT_RUNTIME_MATRIX)[number]["target"],
+): string {
+  return `
+const runtime = Object.freeze({
+  kind: "native",
+  target: ${JSON.stringify(target)},
+  buildIdentity: ${JSON.stringify(buildIdentity)},
+  capabilities: Object.freeze({ spreadsheet: true, document: true, presentation: true }),
+});
+export function getConfiguredArtifactRuntime() { return runtime; }
+export const Workbook = Object.freeze({ create() { return { modality: "spreadsheet" }; } });
+export function getArtifactCompositeDiagnostics() {
+  return { runtimeTarget: runtime.target, runtimeBuildIdentity: runtime.buildIdentity, nativeStateHash: "sha256:${"0".repeat(64)}" };
+}
+export class FileBlob {
+  static fromBytes(bytes, options) { return { bytes: bytes.slice(), ...options }; }
+}
+export const SpreadsheetFile = Object.freeze({
+  async importXlsx(blob) { return { modality: "spreadsheet", source: blob.bytes }; },
+});
+export const DocumentFile = Object.freeze({
+  async importDocx(blob) { return { modality: "document", source: blob.bytes }; },
+});
+export const PresentationFile = Object.freeze({
+  async importPptx(blob) { return { modality: "presentation", source: blob.bytes }; },
+});
+export function createArtifactPublicationSnapshot(artifact) {
+  const common = {
+    schemaVersion: 1,
+    modality: artifact.modality,
+    runtimeTarget: runtime.target,
+    kernelVersion: runtime.buildIdentity,
+    modelSchemaVersion: 1,
+    snapshotVersion: 1,
+    stateHash: "sha256:${"1".repeat(64)}",
+    snapshotBytes: new TextEncoder().encode("canonical-publication-snapshot"),
+  };
+  return artifact.modality === "spreadsheet"
+    ? { ...common, coveredCausalFrontier: [{ replicaId: "0000000000000001", counter: 1 }], operationProtocolVersion: 1, crdtStateVersion: 1 }
+    : { ...common, nativeRevision: 1 };
+}
+export function disposeArtifact(artifact) { artifact.disposed = true; }
+`;
 }
 
 function packageManifest(

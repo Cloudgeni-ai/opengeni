@@ -33,11 +33,13 @@ import {
   resourceMountPath,
   signDelegatedAccessToken,
   GenerateImageToolInput,
+  PublishEditableArtifactToolInput,
   RequestHumanInputToolInput,
   type GitCredentialProvider,
   type GitCredentialTransport,
   type HumanInputResponse,
   type McpServerConnectionRef,
+  type PublishEditableArtifactReceipt,
   type Permission,
   type FirstPartyMcpToolName,
   type LatencyMode,
@@ -1982,6 +1984,13 @@ export type BuildAgentOptions = {
         kind: "provider_adapter";
         execute: (input: { prompt: string }, context: { toolCallId: string }) => Promise<unknown>;
       };
+  /** Host-owned durable promotion of one final, verified Office artifact. */
+  editableArtifactPublication?: {
+    execute: (
+      input: PublishEditableArtifactToolInput,
+      context: { toolCallId: string },
+    ) => Promise<PublishEditableArtifactReceipt>;
+  };
   encryptedReasoning?: boolean;
   structuredToolTransport?: boolean;
   /** Explicit provider-contained progressive tool-disclosure strategy. */
@@ -2529,6 +2538,9 @@ export function buildOpenGeniAgent(
     throw new Error("toolspaceTokenSeed and toolspaceTokenSessionId must be supplied together");
   }
   const artifactRuntimeAvailable = artifactRuntimeSkillsAvailable(options);
+  if (options.editableArtifactPublication && !artifactRuntimeAvailable) {
+    throw new Error("editableArtifactPublication requires a verified artifact runtime");
+  }
   // Resolved per-turn gating. Each override defaults to today's settings-derived
   // behaviour, so the legacy global-client callers (no resolved model) build the
   // exact same agent as before; the multi-provider worker path passes the
@@ -2576,6 +2588,26 @@ export function buildOpenGeniAgent(
           },
         })
       : null;
+  const editableArtifactPublicationTool = options.editableArtifactPublication
+    ? agentTool({
+        name: "publish_editable_artifact",
+        description:
+          "Promote one final, validated Office file into the durable collaborative editor. Call exactly once only after exporting, re-importing, and visually verifying the final .docx, .xlsx, or .pptx. Do not call for scratch files, previews, read-only work, or before validation. A successful receipt is authoritative; never repeat it.",
+        parameters: PublishEditableArtifactToolInput,
+        errorFunction: null,
+        execute: async (input, _context, details) => {
+          const toolCallId = details?.toolCall?.callId;
+          if (!toolCallId) {
+            throw new Error("Editable-artifact publication tool call has no durable identity");
+          }
+          const adapter = options.editableArtifactPublication;
+          if (!adapter) {
+            throw new Error("Editable-artifact publication adapter changed during execution");
+          }
+          return await adapter.execute(input, { toolCallId });
+        },
+      })
+    : null;
   const humanInputTool =
     options.humanInputEnabled === false
       ? null
@@ -2606,6 +2638,7 @@ export function buildOpenGeniAgent(
   const agentTools = [
     ...hostedTools,
     ...(providerImageGenerationTool ? [providerImageGenerationTool] : []),
+    ...(editableArtifactPublicationTool ? [editableArtifactPublicationTool] : []),
     ...(humanInputTool ? [humanInputTool] : []),
   ];
   const baseConfig = {

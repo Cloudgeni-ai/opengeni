@@ -1,8 +1,9 @@
 # Editable artifact engine
 
-> Status: architecture contract and implementation roadmap. Code remains the
-> final authority. This subsystem is separate from static published HTML
-> artifacts, retained evidence artifacts, and document-ingestion/RAG.
+> Status: production implementation contract. Code remains the final authority,
+> and release readiness remains contingent on every applicable gate in §12.
+> This subsystem is separate from static published HTML artifacts, retained
+> evidence artifacts, and document-ingestion/RAG.
 
 ## 1. Product contract
 
@@ -230,8 +231,9 @@ Durable records:
 - `editable_artifact_versions`: immutable named/pinned user checkpoints;
 - `editable_artifact_materialization_jobs` and results: immutable
   XLSX/PPTX/DOCX/PDF/render work;
-- `editable_artifact_blob_refs`, live outbox, replica leases, and idempotency
-  receipts for create/import/edit/snapshot/materialize operations.
+- `editable_artifact_blob_refs`, including an immutable original-Office-source
+  link for imports, live outbox, replica leases, and idempotency receipts for
+  create/import/edit/snapshot/materialize operations.
 
 Every table carries account/workspace composite foreign keys, FORCE RLS,
 bounded binary facts, and least-privilege reviewed runtime grants. Immutable
@@ -295,11 +297,30 @@ advisory-lock winner becomes durable and retries return that winner.
 
 ### Import
 
-1. Client uploads bytes through the existing file API.
-2. Core creates an idempotent import job bound to exact file digest and policy.
-3. Worker parses in a bounded isolated process and uploads canonical snapshot.
-4. A single transaction publishes artifact + snapshot + diagnostics.
-5. SDK reconciles the artifact and opens live sync from snapshot frontier.
+1. The Office source is uploaded through the existing authenticated file API;
+   its ready file row binds exact MIME, size, SHA-256, and private object
+   reference.
+2. A trusted, manifest-pinned native runtime imports the exact DOCX/XLSX/PPTX
+   and writes one canonical sequence-zero snapshot to an exclusive output path.
+   Its closed preparation result binds modality, source hash, snapshot hash,
+   state hash, model/kernel versions, and the modality-specific causal boundary.
+3. The host streams that snapshot through a private staging object, verifies
+   immutable ranged reads, and promotes it to the canonical content-addressed
+   snapshot reference. Neither the agent nor an API client chooses a bucket or
+   arbitrary object key.
+4. `POST /v1/workspaces/:workspaceId/editable-artifacts/imports` accepts only
+   the ready source-file id and closed snapshot facts. It rechecks
+   `artifacts:publish` plus `files:read`, modality/MIME/hash/size, the exact
+   active agent attempt when agent-authored, and independently decodes/verifies
+   the snapshot before publication.
+5. One transaction resolves idempotency and publishes the artifact, original
+   import reference, sequence-zero checkpoint/snapshot, receipt, and live
+   outbox. Retries return that exact winner.
+6. `OpenGeniClient.importEditableArtifact` exposes this trusted import boundary.
+   Agent runs instead receive `publish_editable_artifact` only when the verified
+   artifact runtime and host promotion adapter are both present. The tool is
+   called once after final export, re-import, and visual verification; its
+   closed receipt opens the durable collaborative editor in the stock timeline.
 
 ### Edit
 
@@ -344,6 +365,9 @@ methods rather than whole-buffer reads.
   permission invalidation.
 - Browsers connect with an HTTP-minted, short-lived, artifact-scoped ticket;
   durable bearer tokens and object keys never enter query strings.
+- The public SDK parses `publish_editable_artifact` output with
+  `parseEditableArtifactPublicationReceipt`; malformed, cross-modality, or
+  mismatched editor receipts are not rendered as durable editor links.
 - Native parsing/rendering runs in isolated, no-network subprocesses with CPU,
   memory, output, and crash boundaries. N-API faults cannot kill API/turn
   workers.

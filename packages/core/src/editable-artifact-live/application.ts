@@ -10,7 +10,9 @@ import {
   type EditableArtifactClientTransactionId,
   type EditableArtifactId,
   type EditableArtifactModality,
+  type EditableArtifactOriginalImport,
   type EditableArtifactScope,
+  type ImportEditableArtifactRequest,
 } from "../domain/editable-artifacts/types";
 import type {
   EditableArtifactLiveSession,
@@ -50,6 +52,17 @@ export type CreateEditableArtifactApplicationInput = Readonly<{
   signal?: AbortSignal;
 }>;
 
+export type ImportEditableArtifactApplicationInput = Readonly<{
+  scope: EditableArtifactScope;
+  actor: EditableArtifactActor;
+  idempotencyKey: EditableArtifactClientTransactionId;
+  modality: EditableArtifactModality;
+  title: string;
+  originalImport: EditableArtifactOriginalImport;
+  snapshot: ImportEditableArtifactRequest["snapshot"];
+  signal?: AbortSignal;
+}>;
+
 export type ReadEditableArtifactApplicationInput = Readonly<{
   scope: EditableArtifactScope;
   actor: EditableArtifactActor;
@@ -67,6 +80,7 @@ export type MintEditableArtifactApplicationTicketInput = ReadEditableArtifactApp
 /** Exact application seam used by standalone API and embedding hosts. */
 export interface EditableArtifactApplicationPort {
   createArtifact(input: CreateEditableArtifactApplicationInput): Promise<EditableArtifact>;
+  importArtifact(input: ImportEditableArtifactApplicationInput): Promise<EditableArtifact>;
   readArtifact(input: ReadEditableArtifactApplicationInput): Promise<EditableArtifact>;
   mintLiveTicket(
     input: MintEditableArtifactApplicationTicketInput,
@@ -93,6 +107,24 @@ export class EditableArtifactApplication implements EditableArtifactApplicationP
         idempotencyKey: editableArtifactClientTransactionId(input.idempotencyKey),
         modality: input.modality,
         title: input.title,
+      },
+      ...(input.signal ? { signal: input.signal } : {}),
+    });
+    return result.artifact;
+  }
+
+  async importArtifact(input: ImportEditableArtifactApplicationInput): Promise<EditableArtifact> {
+    const scope = editableArtifactScope(input.scope);
+    validateEditableArtifactActor(input.actor);
+    const result = await this.dependencies.domain.importArtifact({
+      scope,
+      actor: Object.freeze({ ...input.actor }) as EditableArtifactActor,
+      request: {
+        idempotencyKey: editableArtifactClientTransactionId(input.idempotencyKey),
+        modality: input.modality,
+        title: input.title,
+        originalImport: input.originalImport,
+        snapshot: input.snapshot,
       },
       ...(input.signal ? { signal: input.signal } : {}),
     });

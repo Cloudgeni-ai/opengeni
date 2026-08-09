@@ -3116,6 +3116,14 @@
       }
     }
   }
+:where(.og-root).group-hover\/artifact-link\:translate-x-0\.5,:where(.og-root) .group-hover\/artifact-link\:translate-x-0\.5 {
+    &:is(:where(.group\/artifact-link):hover *) {
+      @media (hover: hover) {
+        --tw-translate-x: calc(var(--spacing) * 0.5);
+        translate: var(--tw-translate-x) var(--tw-translate-y);
+      }
+    }
+  }
 :where(.og-root).group-hover\/copy\:opacity-100,:where(.og-root) .group-hover\/copy\:opacity-100 {
     &:is(:where(.group\/copy):hover *) {
       @media (hover: hover) {

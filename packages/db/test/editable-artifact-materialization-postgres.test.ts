@@ -470,6 +470,7 @@ async function createArtifact(title: string): Promise<ArtifactFixture> {
     authorityKey: JSON.stringify(["human", "materializer-test-user"]),
     idempotencyKey: `create:${artifactId}`,
     requestHash: hash("f"),
+    operationKind: "create",
     modality: "spreadsheet",
     title,
     expectedScopeAuthorizationRevision: 1,

@@ -437,10 +437,47 @@ export type CreateEditableArtifactRequest = Readonly<{
   title: string;
 }>;
 
+export type EditableArtifactOriginOperation = "create" | "import";
+export const EDITABLE_ARTIFACT_ORIGINAL_IMPORT_MAX_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Immutable, already-retained Office source for one imported artifact. The
+ * object reference is infrastructure-owned; the remaining facts are bound into
+ * the import idempotency hash and independently checked by the snapshot
+ * verifier before publication.
+ */
+export type EditableArtifactOriginalImport = Readonly<{
+  fileId: string;
+  blobReference: string;
+  byteSize: number;
+  contentHash: EditableArtifactContentHash;
+  mimeType:
+    | "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      | "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+}>;
+
+type ImportedEditableArtifactSnapshotRequest =
+  PublishEditableArtifactSnapshotRequest extends infer Snapshot
+    ? Snapshot extends PublishEditableArtifactSnapshotRequest
+      ? Omit<Snapshot, "snapshotId" | "verifiedAt">
+      : never
+    : never;
+
+export type ImportEditableArtifactRequest = Readonly<{
+  idempotencyKey: EditableArtifactClientTransactionId;
+  modality: EditableArtifactModality;
+  title: string;
+  originalImport: EditableArtifactOriginalImport;
+  /** Snapshot identity and verification/publication timestamps remain server-owned. */
+  snapshot: ImportedEditableArtifactSnapshotRequest;
+}>;
+
 export type EditableArtifactCreationReceipt = Readonly<{
   receiptId: EditableArtifactReceiptId;
   scope: EditableArtifactScope;
   artifactId: EditableArtifactId;
+  operationKind: EditableArtifactOriginOperation;
   authorityKey: string;
   idempotencyKey: EditableArtifactClientTransactionId;
   /** Canonical hash of client semantics only; generated genesis facts are result data. */

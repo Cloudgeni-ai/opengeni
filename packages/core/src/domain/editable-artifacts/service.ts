@@ -24,7 +24,7 @@ import type {
   EditableArtifactStableIdFactoryPort,
   EditableArtifactStorePort,
 } from "./ports";
-import { hashEditableArtifactCreateRequest } from "./hash";
+import { hashEditableArtifactCreateRequest, hashEditableArtifactImportRequest } from "./hash";
 import {
   EDITABLE_ARTIFACT_COMMAND_MAX_BYTES,
   EDITABLE_ARTIFACT_INTENT_MAX_BYTES,
@@ -70,11 +70,14 @@ import {
   editableArtifactScope,
   editableArtifactStateHash,
   editableArtifactTransactionId,
+  EDITABLE_ARTIFACT_ORIGINAL_IMPORT_MAX_BYTES,
   mergeCausalFrontiers,
   type ApplyEditableArtifactTransactionRequest,
   type ApplyEditableArtifactTransactionResult,
   type CreateEditableArtifactRequest,
   type CreateEditableArtifactResult,
+  type EditableArtifactOriginalImport,
+  type ImportEditableArtifactRequest,
   type EditableArtifact,
   type EditableArtifactActor,
   type EditableArtifactCausalFrontier,
@@ -146,6 +149,13 @@ export class EditableArtifactService {
       promise: Promise<ApplyEditableArtifactTransactionResult>;
     }>
   >();
+  private readonly inFlightImports = new Map<
+    string,
+    Readonly<{
+      requestHash: EditableArtifactReceipt["requestHash"];
+      promise: Promise<CreateEditableArtifactResult>;
+    }>
+  >();
   private readonly inFlightCompactions = new Map<
     string,
     Promise<EditableArtifactSnapshotMetadata>
@@ -165,7 +175,12 @@ export class EditableArtifactService {
     const request = normalizeCreateRequest(input.request);
     const requestHash = hashEditableArtifactCreateRequest(request);
     const authorityKey = editableArtifactActorKey(actor);
-    const inFlightKey = creationInFlightKey(scope, authorityKey, request.idempotencyKey);
+    const inFlightKey = creationInFlightKey(
+      scope,
+      "create",
+      authorityKey,
+      request.idempotencyKey,
+    );
     for (;;) {
       const inFlight = this.inFlightCreations.get(inFlightKey);
       if (inFlight) {
@@ -217,6 +232,7 @@ export class EditableArtifactService {
     });
     const existing = await this.dependencies.store.findArtifactCreation(
       scope,
+      "create",
       authorityKey,
       request.idempotencyKey,
     );
@@ -278,6 +294,7 @@ export class EditableArtifactService {
         authorityKey,
         idempotencyKey: request.idempotencyKey,
         requestHash,
+        operationKind: "create",
         expectedScopeAuthorizationRevision: authorizationRevision,
         initialArtifactAuthorizationRevision: authorizationRevision,
         modality: request.modality,
@@ -292,6 +309,161 @@ export class EditableArtifactService {
         artifactId,
         actor,
         permission: "create",
+      });
+    }
+    throw new EditableArtifactRetryableConflictError();
+  }
+
+  /**
+   * Publishes one verified Office import as the sequence-zero durable state.
+   * The caller may name immutable source/snapshot objects, but neither becomes
+   * authority until the native snapshot verifier and atomic store commit pass.
+   */
+  async importArtifact(input: {
+    scope: EditableArtifactScope;
+    actor: EditableArtifactActor;
+    request: ImportEditableArtifactRequest;
+    signal?: AbortSignal;
+  }): Promise<CreateEditableArtifactResult> {
+    const scope = editableArtifactScope(input.scope);
+    validateEditableArtifactActor(input.actor);
+    const actor: EditableArtifactActor = Object.freeze({ ...input.actor });
+    const request = normalizeImportRequest(input.request);
+    const requestHash = hashEditableArtifactImportRequest(request);
+    const authorityKey = editableArtifactActorKey(actor);
+    const inFlightKey = creationInFlightKey(
+      scope,
+      "import",
+      authorityKey,
+      request.idempotencyKey,
+    );
+    for (;;) {
+      const inFlight = this.inFlightImports.get(inFlightKey);
+      if (inFlight) {
+        if (inFlight.requestHash === requestHash) {
+          return copyCreateResult(await inFlight.promise, true);
+        }
+        try {
+          await inFlight.promise;
+        } catch {
+          continue;
+        }
+        throw new EditableArtifactIdempotencyConflictError();
+      }
+      const promise = this.importArtifactOptimistically({
+        scope,
+        actor,
+        authorityKey,
+        request,
+        requestHash,
+        ...(input.signal ? { signal: input.signal } : {}),
+      });
+      this.inFlightImports.set(inFlightKey, { requestHash, promise });
+      try {
+        return await promise;
+      } finally {
+        if (this.inFlightImports.get(inFlightKey)?.promise === promise) {
+          this.inFlightImports.delete(inFlightKey);
+        }
+      }
+    }
+  }
+
+  private async importArtifactOptimistically(input: {
+    scope: EditableArtifactScope;
+    actor: EditableArtifactActor;
+    authorityKey: string;
+    request: ImportEditableArtifactRequest;
+    requestHash: EditableArtifactReceipt["requestHash"];
+    signal?: AbortSignal;
+  }): Promise<CreateEditableArtifactResult> {
+    const { scope, actor, authorityKey, request, requestHash } = input;
+    const artifactId = editableArtifactId(this.dependencies.ids.next("artifact"));
+    let authorizationRevision = await this.requirePermission({
+      scope,
+      artifactId,
+      actor,
+      permission: "import",
+    });
+    const existing = await this.dependencies.store.findArtifactCreation(
+      scope,
+      "import",
+      authorityKey,
+      request.idempotencyKey,
+    );
+    if (existing) {
+      if (existing.creationReceipt.requestHash !== requestHash) {
+        throw new EditableArtifactIdempotencyConflictError();
+      }
+      return copyCreateResult(existing, true);
+    }
+    const snapshotId = editableArtifactSnapshotId(this.dependencies.ids.next("snapshot"));
+    const verifiedAt = canonicalNow(this.dependencies.clock);
+    const candidate = validateSnapshotRequest({
+      ...request.snapshot,
+      snapshotId,
+      verifiedAt,
+    } as PublishEditableArtifactSnapshotRequest);
+    if (
+      candidate.modality !== request.modality ||
+      candidate.coveredHeadSequence !== 0
+    ) {
+      throw new EditableArtifactKernelContractError(
+        "Imported snapshot must use its assigned modality and sequence-zero boundary",
+      );
+    }
+    await this.dependencies.snapshotVerifier.verify({
+      scope,
+      artifactId,
+      actor,
+      snapshot: candidate,
+    });
+    const publishedAt = canonicalNow(this.dependencies.clock);
+    if (Date.parse(candidate.verifiedAt) > Date.parse(publishedAt)) {
+      throw new EditableArtifactSnapshotConflictError(
+        "Snapshot verification time cannot be after publication",
+      );
+    }
+    const genesisSnapshot: EditableArtifactSnapshotMetadata = Object.freeze({
+      ...candidate,
+      scope,
+      artifactId,
+      publishedAt,
+    });
+    const receiptId = editableArtifactReceiptId(this.dependencies.ids.next("receipt"));
+    const originalImport = Object.freeze({
+      ...request.originalImport,
+      blobRefId: this.dependencies.ids.next("blob"),
+    });
+    const outbox = snapshotOutboxRecord(
+      editableArtifactOutboxId(this.dependencies.ids.next("outbox")),
+      genesisSnapshot,
+    );
+    for (let attempt = 1; attempt <= EDITABLE_ARTIFACT_MAX_COMMIT_ATTEMPTS; attempt += 1) {
+      const outcome = await this.dependencies.store.createArtifact({
+        scope,
+        artifactId,
+        authorizationActor: actor,
+        receiptId,
+        authorityKey,
+        idempotencyKey: request.idempotencyKey,
+        requestHash,
+        operationKind: "import",
+        expectedScopeAuthorizationRevision: authorizationRevision,
+        initialArtifactAuthorizationRevision: authorizationRevision,
+        modality: request.modality,
+        title: request.title,
+        createdBySubjectId: actor.subjectId,
+        genesisSnapshot,
+        originalImport,
+        outbox,
+      });
+      if (outcome.kind === "result") return outcome.value;
+      authorizationRevision = await this.requirePermission({
+        scope,
+        artifactId,
+        actor,
+        permission: "import",
       });
     }
     throw new EditableArtifactRetryableConflictError();
@@ -1141,10 +1313,17 @@ export class EditableArtifactService {
 
 function creationInFlightKey(
   scope: EditableArtifactScope,
+  operationKind: "create" | "import",
   actorKey: string,
   idempotencyKey: string,
 ): string {
-  return JSON.stringify([scope.accountId, scope.workspaceId, actorKey, idempotencyKey]);
+  return JSON.stringify([
+    scope.accountId,
+    scope.workspaceId,
+    operationKind,
+    actorKey,
+    idempotencyKey,
+  ]);
 }
 
 function transactionInFlightKey(
@@ -1206,6 +1385,111 @@ function normalizeCreateRequest(
     idempotencyKey: editableArtifactClientTransactionId(rawIdempotencyKey),
     modality,
     title,
+  });
+}
+
+function normalizeImportRequest(
+  input: ImportEditableArtifactRequest,
+): ImportEditableArtifactRequest {
+  const record = plainDataRecord(input, "artifact import request");
+  rejectUnknownKeys(
+    record,
+    ["idempotencyKey", "modality", "title", "originalImport", "snapshot"],
+    "artifact import request",
+  );
+  const rawIdempotencyKey = dataProperty(record, "idempotencyKey", true);
+  const modality = dataProperty(record, "modality", true);
+  const title = dataProperty(record, "title", true);
+  const rawOriginalImport = dataProperty(record, "originalImport", true);
+  const rawSnapshot = dataProperty(record, "snapshot", true);
+  if (
+    typeof rawIdempotencyKey !== "string" ||
+    typeof title !== "string" ||
+    (modality !== "spreadsheet" && modality !== "presentation" && modality !== "document")
+  ) {
+    throw new TypeError("Artifact import request fields are malformed");
+  }
+  assertBoundedArtifactTitle(title);
+  const originalImport = normalizeOriginalImport(rawOriginalImport, modality);
+  const snapshotRecord = plainDataRecord(rawSnapshot, "artifact import snapshot");
+  if (
+    Reflect.ownKeys(snapshotRecord).includes("snapshotId") ||
+    Reflect.ownKeys(snapshotRecord).includes("verifiedAt")
+  ) {
+    throw new TypeError("Artifact import snapshot identity and timestamps are server-assigned");
+  }
+  const candidate = Object.fromEntries(
+    Reflect.ownKeys(snapshotRecord).map((key) => {
+      if (typeof key !== "string") throw new TypeError("Artifact import snapshot has symbols");
+      return [key, dataProperty(snapshotRecord, key, true)];
+    }),
+  );
+  const normalized = validateSnapshotRequest({
+    ...candidate,
+    snapshotId: "00000000000000000000000000000001",
+    verifiedAt: "1970-01-01T00:00:00.000Z",
+  } as PublishEditableArtifactSnapshotRequest);
+  if (normalized.modality !== modality || normalized.coveredHeadSequence !== 0) {
+    throw new TypeError("Artifact import snapshot boundary is malformed");
+  }
+  const {
+    snapshotId: _serverAssignedSnapshotId,
+    verifiedAt: _serverAssignedVerifiedAt,
+    ...snapshot
+  } = normalized;
+  return Object.freeze({
+    idempotencyKey: editableArtifactClientTransactionId(rawIdempotencyKey),
+    modality,
+    title,
+    originalImport,
+    snapshot: Object.freeze(snapshot) as ImportEditableArtifactRequest["snapshot"],
+  });
+}
+
+function normalizeOriginalImport(
+  input: unknown,
+  modality: ImportEditableArtifactRequest["modality"],
+): EditableArtifactOriginalImport {
+  const record = plainDataRecord(input, "artifact original import");
+  rejectUnknownKeys(
+    record,
+    ["fileId", "blobReference", "byteSize", "contentHash", "mimeType"],
+    "artifact original import",
+  );
+  const fileId = dataProperty(record, "fileId", true);
+  const blobReference = dataProperty(record, "blobReference", true);
+  const byteSize = dataProperty(record, "byteSize", true);
+  const contentHash = dataProperty(record, "contentHash", true);
+  const mimeType = dataProperty(record, "mimeType", true);
+  const expectedMimeType =
+    modality === "spreadsheet"
+      ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      : modality === "document"
+        ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        : "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+  if (
+    typeof fileId !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(
+      fileId,
+    ) ||
+    typeof blobReference !== "string" ||
+    typeof byteSize !== "number" ||
+    typeof contentHash !== "string" ||
+    mimeType !== expectedMimeType
+  ) {
+    throw new TypeError("Artifact original import fields are malformed");
+  }
+  assertBoundedOpaqueReference(blobReference, "original import blob reference");
+  assertPositiveSafeInteger(byteSize, "original import byte size");
+  if (byteSize > EDITABLE_ARTIFACT_ORIGINAL_IMPORT_MAX_BYTES) {
+    throw new TypeError("Artifact original import exceeds its byte limit");
+  }
+  return Object.freeze({
+    fileId,
+    blobReference,
+    byteSize,
+    contentHash: editableArtifactContentHash(contentHash),
+    mimeType: expectedMimeType,
   });
 }
 

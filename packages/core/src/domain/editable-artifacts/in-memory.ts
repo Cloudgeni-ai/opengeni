@@ -115,12 +115,13 @@ export class InMemoryEditableArtifactStore
 
   async findArtifactCreation(
     scopeInput: EditableArtifactScope,
+    operationKind: "create" | "import",
     authorityKey: string,
     idempotencyKeyInput: string,
   ): Promise<CreateEditableArtifactResult | null> {
     const scope = editableArtifactScope(scopeInput);
     const idempotencyKey = editableArtifactClientTransactionId(idempotencyKeyInput);
-    const key = creationReceiptKey(scope, authorityKey, idempotencyKey);
+    const key = creationReceiptKey(scope, operationKind, authorityKey, idempotencyKey);
     return this.exclusive(async () => {
       const receipt = this.creationReceipts.get(key);
       if (!receipt) return null;
@@ -146,6 +147,12 @@ export class InMemoryEditableArtifactStore
     const receiptId = editableArtifactReceiptId(input.receiptId);
     const idempotencyKey = editableArtifactClientTransactionId(input.idempotencyKey);
     const requestHash = editableArtifactRequestHash(input.requestHash);
+    if (input.operationKind !== "create" && input.operationKind !== "import") {
+      throw new TypeError("Unknown editable artifact origin operation");
+    }
+    if ((input.operationKind === "import") !== Boolean(input.originalImport)) {
+      throw new TypeError("Editable artifact import source does not match its origin operation");
+    }
     assertBoundedArtifactTitle(input.title);
     assertPositiveSafeInteger(
       input.expectedScopeAuthorizationRevision,
@@ -157,14 +164,25 @@ export class InMemoryEditableArtifactStore
     );
     const genesisSnapshot = cloneSnapshot(input.genesisSnapshot);
     const outbox = cloneOutbox(input.outbox);
-    assertGenesisCreateRequest(scope, artifactId, genesisSnapshot, outbox);
+    assertGenesisCreateRequest(
+      scope,
+      artifactId,
+      input.operationKind,
+      genesisSnapshot,
+      outbox,
+    );
     if (!(["spreadsheet", "presentation", "document"] as const).includes(input.modality)) {
       throw new TypeError("Unknown editable artifact modality");
     }
     if (genesisSnapshot.modality !== input.modality) {
       throw new TypeError("Genesis snapshot modality does not match artifact modality");
     }
-    const creationKey = creationReceiptKey(scope, input.authorityKey, idempotencyKey);
+    const creationKey = creationReceiptKey(
+      scope,
+      input.operationKind,
+      input.authorityKey,
+      idempotencyKey,
+    );
     return this.exclusive(async () => {
       const prior = this.creationReceipts.get(creationKey);
       if (prior) {
@@ -213,13 +231,18 @@ export class InMemoryEditableArtifactStore
           ? {
               ...commonArtifact,
               modality: "spreadsheet",
-              causalFrontier: editableArtifactCausalFrontier([]),
+              causalFrontier: editableArtifactCausalFrontier(
+                genesisSnapshot.modality === "spreadsheet"
+                  ? genesisSnapshot.coveredCausalFrontier
+                  : [],
+              ),
             }
           : { ...commonArtifact, modality: input.modality };
       const creationReceipt: EditableArtifactCreationReceipt = Object.freeze({
         receiptId,
         scope,
         artifactId,
+        operationKind: input.operationKind,
         authorityKey: input.authorityKey,
         idempotencyKey,
         requestHash,
@@ -1204,10 +1227,17 @@ function authorizationScopeKey(scope: EditableArtifactScope): string {
 
 function creationReceiptKey(
   scope: EditableArtifactScope,
+  operationKind: "create" | "import",
   authorityKey: string,
   idempotencyKey: string,
 ): string {
-  return JSON.stringify([scope.accountId, scope.workspaceId, authorityKey, idempotencyKey]);
+  return JSON.stringify([
+    scope.accountId,
+    scope.workspaceId,
+    operationKind,
+    authorityKey,
+    idempotencyKey,
+  ]);
 }
 
 function emptyAggregate(
@@ -1239,6 +1269,7 @@ function emptyAggregate(
 function assertGenesisCreateRequest(
   scope: EditableArtifactScope,
   artifactId: EditableArtifactId,
+  operationKind: "create" | "import",
   snapshot: EditableArtifactSnapshotMetadata,
   outbox: EditableArtifactLiveOutboxRecord,
 ): void {
@@ -1249,7 +1280,9 @@ function assertGenesisCreateRequest(
     snapshot.scope.workspaceId !== scope.workspaceId ||
     snapshot.artifactId !== artifactId ||
     snapshot.coveredHeadSequence !== 0 ||
-    (snapshot.modality === "spreadsheet" && snapshot.coveredCausalFrontier.length !== 0) ||
+    (operationKind === "create" &&
+      snapshot.modality === "spreadsheet" &&
+      snapshot.coveredCausalFrontier.length !== 0) ||
     Date.parse(snapshot.verifiedAt) > Date.parse(snapshot.publishedAt)
   ) {
     throw new TypeError(
