@@ -273,6 +273,7 @@ import {
   MEMORY_NEAR_DUP_NEIGHBORS,
   MEMORY_SEARCH_DEFAULT_LIMIT,
   MEMORY_SEARCH_MAX_LIMIT,
+  normalizeMemoryText,
   renderWorkspaceMemoryBlock,
   memoryTextForStorage,
   WORKSPACE_MEMORY_BLOCK_EMPTY,
@@ -8993,7 +8994,7 @@ export async function updateKnowledgeMemory(
   let textUpdate: MemoryTextUpdate | undefined;
   if (input.text !== undefined) {
     const exactText = memoryTextForStorage(input.text);
-    if (exactText.length === 0) {
+    if (normalizeMemoryText(exactText).length === 0) {
       throw new Error("Memory text is empty; nothing to save.");
     }
     if (isMemoryTextTooLong(exactText)) {
@@ -9061,7 +9062,7 @@ export async function updateKnowledgeMemory(
     }
     if (!wasVisible && willBeVisible && textUpdate === undefined) {
       const exactText = memoryTextForStorage(existingText);
-      if (exactText.length === 0) {
+      if (normalizeMemoryText(exactText).length === 0) {
         throw new Error("Memory text is empty; nothing to save.");
       }
       if (isMemoryTextTooLong(exactText)) {
@@ -9479,7 +9480,7 @@ export async function saveWorkspaceMemory(
   embedder?: MemoryEmbedder,
 ): Promise<SaveWorkspaceMemoryResult> {
   const exactText = memoryTextForStorage(input.text);
-  if (exactText.length === 0) {
+  if (normalizeMemoryText(exactText).length === 0) {
     throw new Error("Memory text is empty; nothing to save.");
   }
   if (isMemoryTextTooLong(exactText)) {
@@ -9828,8 +9829,8 @@ export async function correctWorkspaceMemory(
   input: CorrectWorkspaceMemoryInput,
   embedder?: MemoryEmbedder,
 ): Promise<CorrectWorkspaceMemoryResult> {
-  const replacementText = input.replacementText?.trim();
-  if (replacementText) {
+  const replacementText = input.replacementText;
+  if (replacementText !== undefined) {
     // Correction WITH a replacement is a full supersede through the one write gate.
     const [old] = await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
       const fullId = await resolveWorkspaceMemoryId(scopedDb, input.workspaceId, input.id);
@@ -43614,6 +43615,13 @@ export async function settleSessionAttemptInterruptions(
         : steer
           ? "superseded"
           : "interrupted_recoverable";
+      // Logical interruption and physical quiescence can commit in either
+      // order. If quiescence won, park the paused public session projection in
+      // this transaction so both lock orders converge on the same durable state.
+      const pausedRecoveryAlreadyQuiesced =
+        outcome === "interrupted_recoverable" &&
+        effectiveControl.state === "paused" &&
+        attempt.quiescedAt !== null;
       const reason = terminalCancel
         ? "session_cancelled"
         : steer
@@ -43715,6 +43723,24 @@ export async function settleSessionAttemptInterruptions(
                 payload: { status: "recovering" },
                 occurredAt: now,
               },
+              ...(pausedRecoveryAlreadyQuiesced
+                ? [
+                    {
+                      accountId: session.accountId,
+                      workspaceId,
+                      sessionId,
+                      sequence: ++sequence,
+                      type: "session.status.changed" as const,
+                      turnId: turn.id,
+                      turnGeneration: turn.executionGeneration,
+                      turnAttemptId: attemptId,
+                      turnAssociation: null,
+                      payload: { status: "idle", reason: "paused_recovery_settled" },
+                      clientEventId: `opengeni:paused-recovery-settled:${attemptId}`,
+                      occurredAt: now,
+                    },
+                  ]
+                : []),
             ];
       const eventRows = await tx
         .insert(schema.sessionEvents)
@@ -43758,7 +43784,13 @@ export async function settleSessionAttemptInterruptions(
       await tx
         .update(schema.sessions)
         .set({
-          status: terminalCancel ? "cancelled" : steer ? "queued" : "recovering",
+          status: terminalCancel
+            ? "cancelled"
+            : steer
+              ? "queued"
+              : pausedRecoveryAlreadyQuiesced
+                ? "idle"
+                : "recovering",
           activeTurnId: terminalCancel || steer ? null : turn.id,
           lastSequence: sequence,
           updatedAt: now,

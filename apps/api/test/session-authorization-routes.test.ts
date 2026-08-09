@@ -1,5 +1,9 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { signDelegatedAccessToken, type SessionAuthorizationPort } from "@opengeni/contracts";
+import {
+  signDelegatedAccessToken,
+  type McpMutationReceiptType,
+  type SessionAuthorizationPort,
+} from "@opengeni/contracts";
 import {
   bootstrapWorkspace,
   acquireLease,
@@ -876,24 +880,16 @@ describe("embedding host session authorization routes", () => {
       },
     });
 
-    const paused = await callMcpTool<{ effectiveControl: { state: string } }>(
-      server,
-      "session_pause",
-      {
-        sessionId: target.id,
-        idempotencyKey: crypto.randomUUID(),
-      },
-    );
-    expect(paused.effectiveControl.state).toBe("paused");
-    const resumed = await callMcpTool<{ effectiveControl: { state: string } }>(
-      server,
-      "session_resume",
-      {
-        sessionId: target.id,
-        idempotencyKey: crypto.randomUUID(),
-      },
-    );
-    expect(resumed.effectiveControl.state).toBe("active");
+    const paused = await callMcpTool<McpMutationReceiptType>(server, "session_pause", {
+      sessionId: target.id,
+      idempotencyKey: crypto.randomUUID(),
+    });
+    expect(paused.resource.state).toBe("paused");
+    const resumed = await callMcpTool<McpMutationReceiptType>(server, "session_resume", {
+      sessionId: target.id,
+      idempotencyKey: crypto.randomUUID(),
+    });
+    expect(resumed.resource.state).toBe("active");
     const steered = await callMcpTool<{ updateId: string }>(server, "session_steer", {
       sessionId: target.id,
       instruction: "Take the newest direction exactly once",

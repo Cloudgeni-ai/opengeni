@@ -12,6 +12,7 @@ import {
   SessionEventResultMode,
   SessionEventSemanticClass,
   SessionEventType,
+  stableJson,
   compactSessionEventResult,
   sessionEventLatestClassToSemanticClass,
   SessionMcpCredentialUpdateInput,
@@ -977,6 +978,9 @@ export function buildOpenGeniMcpServer(
           sessionAuthorization: deps.sessionAuthorization,
           authorizationSurface: "first_party_mcp",
         });
+        if (!scheduledTaskUpdateChangesState(existing, update)) {
+          return json(scheduledTaskReceipt("scheduled_tasks_update", existing, "unchanged", false));
+        }
         const task = await updateScheduledTask(deps.db, grant.workspaceId, id, update);
         await syncUpdatedScheduledTask({
           db: deps.db,
@@ -984,7 +988,7 @@ export function buildOpenGeniMcpServer(
           previous,
           task,
         });
-        return json(scheduledTaskForGrant(task, grant));
+        return json(scheduledTaskReceipt("scheduled_tasks_update", task, "updated", true));
       },
     );
 
@@ -996,6 +1000,9 @@ export function buildOpenGeniMcpServer(
       },
       async ({ id }) => {
         const existing = await requireScheduledTask(deps.db, grant.workspaceId, id);
+        if (existing.status === "paused") {
+          return json(scheduledTaskReceipt("scheduled_tasks_pause", existing, "unchanged", false));
+        }
         const previous = await captureScheduledTaskRestoreState(deps.db, existing);
         const task = await updateScheduledTask(deps.db, grant.workspaceId, id, {
           status: "paused",
@@ -1006,7 +1013,7 @@ export function buildOpenGeniMcpServer(
           previous,
           task,
         });
-        return json(scheduledTaskForGrant(task, grant));
+        return json(scheduledTaskReceipt("scheduled_tasks_pause", task, "updated", true));
       },
     );
 
@@ -1018,6 +1025,9 @@ export function buildOpenGeniMcpServer(
       },
       async ({ id }) => {
         const existing = await requireScheduledTask(deps.db, grant.workspaceId, id);
+        if (existing.status === "active") {
+          return json(scheduledTaskReceipt("scheduled_tasks_resume", existing, "unchanged", false));
+        }
         const previous = await captureScheduledTaskRestoreState(deps.db, existing);
         const task = await updateScheduledTask(deps.db, grant.workspaceId, id, {
           status: "active",
@@ -1028,7 +1038,7 @@ export function buildOpenGeniMcpServer(
           previous,
           task,
         });
-        return json(scheduledTaskForGrant(task, grant));
+        return json(scheduledTaskReceipt("scheduled_tasks_resume", task, "updated", true));
       },
     );
 
@@ -1519,7 +1529,7 @@ function registerGoalTools(
           ? (grant.metadata["turnId"] as string)
           : null;
       await assertGoalReactivationAllowed(deps, grant.workspaceId, sessionId, callerTurnId);
-      const { goal, events } = await upsertSessionGoalWithEvent(deps.db, {
+      const { goal, replaced, events } = await upsertSessionGoalWithEvent(deps.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId,
@@ -1532,7 +1542,24 @@ function registerGoalTools(
       if (events.length > 0) {
         await deps.bus.publish(grant.workspaceId, sessionId, events);
       }
-      return json(goal);
+      return json(
+        mcpMutationReceipt({
+          operation: "goal_set",
+          committed: true,
+          outcome: replaced ? "updated" : "created",
+          changed: true,
+          resource: {
+            type: "session_goal",
+            id: goal.id,
+            version: goal.version,
+            state: goal.status,
+          },
+          timestamp: goal.updatedAt,
+          idempotency: { status: "not_supported" },
+          facts: { replaced },
+          nextAction: { tool: "session_get", arguments: { sessionId } },
+        }),
+      );
     },
   );
 
@@ -1990,6 +2017,46 @@ function scheduledTaskReceipt(
     ...(options.facts ? { facts: options.facts } : {}),
     nextAction: { tool: "scheduled_tasks_get", arguments: { id: task.id } },
   });
+}
+
+function scheduledTaskUpdateChangesState(
+  task: ScheduledTask,
+  update: Awaited<ReturnType<typeof validatedScheduledTaskUpdate>>,
+): boolean {
+  if (update.name !== undefined && update.name !== task.name) return true;
+  if (update.status !== undefined && update.status !== task.status) return true;
+  if (update.schedule !== undefined && stableJson(update.schedule) !== stableJson(task.schedule)) {
+    return true;
+  }
+  if (update.runMode !== undefined && update.runMode !== task.runMode) return true;
+  if (update.overlapPolicy !== undefined && update.overlapPolicy !== task.overlapPolicy)
+    return true;
+  if (
+    update.agentConfig !== undefined &&
+    stableJson(update.agentConfig) !== stableJson(task.agentConfig)
+  ) {
+    return true;
+  }
+  if (update.targetSessionId !== undefined && update.targetSessionId !== task.targetSessionId) {
+    return true;
+  }
+  if (
+    update.reusableSessionId !== undefined &&
+    update.reusableSessionId !== task.reusableSessionId
+  ) {
+    return true;
+  }
+  if (update.variableSetId !== undefined && update.variableSetId !== task.variableSetId)
+    return true;
+  if (update.rigId !== undefined && update.rigId !== task.rigId) return true;
+  if (update.metadata !== undefined && stableJson(update.metadata) !== stableJson(task.metadata)) {
+    return true;
+  }
+  // Personal-connection delegations are recomputed with agentConfig and can
+  // change even when the visible config is byte-identical (for example after a
+  // connection rotation), so preserve that refresh as a real mutation.
+  if (update.personalConnectionDelegations !== undefined) return true;
+  return false;
 }
 
 function memoryPreview(text: string): string {
@@ -3123,16 +3190,25 @@ function registerWorkspaceOrchestrationTools(
               reason: reason ?? "agent_mcp_pause",
             },
           );
-          return json({
-            receiptId: controlled.receipt.id,
-            effectiveControl: projectEffectiveControlForRelatedAccess(
-              serializeEffectiveSessionControl(controlled.control),
-              sessionId,
-              controlled.authorization?.relatedSessionAccess ?? "root",
-            ),
-            interruptionCount: controlled.interruptionCount,
-            replay: controlled.replay,
-          });
+          const effectiveControl = projectEffectiveControlForRelatedAccess(
+            serializeEffectiveSessionControl(controlled.control),
+            sessionId,
+            controlled.authorization?.relatedSessionAccess ?? "root",
+          );
+          return json(
+            mcpMutationReceipt({
+              operation: "session_pause",
+              committed: true,
+              outcome: controlled.replay ? "replayed" : "updated",
+              changed: !controlled.replay,
+              resource: { type: "session", id: sessionId, state: effectiveControl.state },
+              relatedResources: [{ type: "session_command_receipt", id: controlled.receipt.id }],
+              timestamp: controlled.receipt.createdAt.toISOString(),
+              idempotency: { status: controlled.replay ? "replayed" : "applied" },
+              facts: { interruptionCount: controlled.interruptionCount },
+              nextAction: { tool: "session_get", arguments: { sessionId } },
+            }),
+          );
         }
         const controlled = await controlHumanSessionWorkstream(
           deps,
@@ -3176,16 +3252,25 @@ function registerWorkspaceOrchestrationTools(
               reason: reason ?? "agent_mcp_resume",
             },
           );
-          return json({
-            receiptId: controlled.receipt.id,
-            effectiveControl: projectEffectiveControlForRelatedAccess(
-              serializeEffectiveSessionControl(controlled.control),
-              sessionId,
-              controlled.authorization?.relatedSessionAccess ?? "root",
-            ),
-            interruptionCount: controlled.interruptionCount,
-            replay: controlled.replay,
-          });
+          const effectiveControl = projectEffectiveControlForRelatedAccess(
+            serializeEffectiveSessionControl(controlled.control),
+            sessionId,
+            controlled.authorization?.relatedSessionAccess ?? "root",
+          );
+          return json(
+            mcpMutationReceipt({
+              operation: "session_resume",
+              committed: true,
+              outcome: controlled.replay ? "replayed" : "updated",
+              changed: !controlled.replay,
+              resource: { type: "session", id: sessionId, state: effectiveControl.state },
+              relatedResources: [{ type: "session_command_receipt", id: controlled.receipt.id }],
+              timestamp: controlled.receipt.createdAt.toISOString(),
+              idempotency: { status: controlled.replay ? "replayed" : "applied" },
+              facts: { interruptionCount: controlled.interruptionCount },
+              nextAction: { tool: "session_get", arguments: { sessionId } },
+            }),
+          );
         }
         const controlled = await controlHumanSessionWorkstream(
           deps,

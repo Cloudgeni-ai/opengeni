@@ -139,6 +139,7 @@ describe("timeline annotations", () => {
   });
 
   test("keeps one editable chip and exposes source-unavailable feedback", async () => {
+    await import("../src/components/timeline-annotations-dialog");
     let note = "";
     const rendered = await renderComponent(
       <TimelineAnnotationsChip
@@ -151,9 +152,6 @@ describe("timeline annotations", () => {
     );
     const trigger = rendered.container.querySelector("button");
     expect(trigger?.textContent).toContain("1 annotation");
-    await act(async () => {
-      await import("../src/components/timeline-annotations-dialog");
-    });
     const textarea = document.body.querySelector("textarea");
     expect(textarea).not.toBeNull();
     await act(async () => {

@@ -62,8 +62,8 @@ describe("release image workflow contract", () => {
       "format('ci-automation-{0}-{1}', inputs.automation_pr_number, inputs.automation_head_sha)",
     );
     for (const duplicatedGate of [
-      "bun run typecheck",
-      "bun run build:packages",
+      "scripts/ci/run-typecheck-plan.ts",
+      "scripts/ci/run-build-plan.ts",
       "bun scripts/publish-closure-guard.ts",
       "bun run test:runtime-embedding-consumer",
       "bun run test:ogtool-package",
@@ -138,10 +138,7 @@ describe("release image workflow contract", () => {
 
   test("main CI publishes exact-SHA dogfood images without granting PR publication", async () => {
     const ci = await workflow("ci.yml");
-    const images = ci.slice(
-      ci.indexOf("\n  service-images:\n"),
-      ci.indexOf("\n  automation-report:\n"),
-    );
+    const images = ci.slice(ci.indexOf("\n  api-image:\n"), ci.indexOf("\n  automation-report:\n"));
     const parsed = Bun.YAML.parse(ci) as {
       jobs: Record<
         string,
@@ -159,22 +156,26 @@ describe("release image workflow contract", () => {
       >;
     };
 
-    expect(parsed.jobs["service-images"]?.needs).toBe("automation-admission");
-    expect(parsed.jobs["relay-image"]?.needs).toBe("automation-admission");
-    expect(parsed.jobs["sandbox-image"]?.needs).toBe("automation-admission");
+    const leafNames = ["api-image", "worker-image", "web-image", "relay-image", "sandbox-image"];
+    for (const jobName of leafNames) {
+      expect(parsed.jobs[jobName]?.needs).toEqual(["automation-admission", "plan"]);
+    }
     expect(parsed.jobs.images?.name).toBe("Workload image builds");
     expect(parsed.jobs.images?.needs).toEqual([
       "automation-admission",
-      "service-images",
+      "plan",
+      "api-image",
+      "worker-image",
+      "web-image",
       "relay-image",
       "sandbox-image",
     ]);
-    expect(parsed.jobs["service-images"]?.if).toBe(parsed.jobs["relay-image"]?.if);
-    expect(parsed.jobs["relay-image"]?.if).toBe(parsed.jobs["sandbox-image"]?.if);
-    expect(parsed.jobs["service-images"]?.if).toBe(parsed.jobs["sandbox-image"]?.if);
-    expect(parsed.jobs.images?.if).toBe(parsed.jobs["service-images"]?.if);
-    expect(images.match(/packages: write/g)).toHaveLength(3);
-    for (const jobName of ["service-images", "relay-image", "sandbox-image"]) {
+    for (const jobName of leafNames) {
+      expect(parsed.jobs[jobName]?.if).toBe(parsed.jobs["api-image"]?.if);
+    }
+    expect(parsed.jobs.images?.if).toBe(parsed.jobs["api-image"]?.if);
+    expect(images.match(/packages: write/g)).toHaveLength(5);
+    for (const jobName of leafNames) {
       const login = parsed.jobs[jobName]?.steps?.find((step) => step.name === "Log in to GHCR");
       expect(login?.with).toEqual({
         registry: "ghcr.io",
@@ -183,40 +184,50 @@ describe("release image workflow contract", () => {
       });
     }
     expect(images).toContain("Require every workload image build");
-    expect(images).toContain("SERVICE_IMAGES_RESULT: ${{ needs.service-images.result }}");
+    expect(images).toContain("API_IMAGE_RESULT: ${{ needs.api-image.result }}");
+    expect(images).toContain("WORKER_IMAGE_RESULT: ${{ needs.worker-image.result }}");
+    expect(images).toContain("WEB_IMAGE_RESULT: ${{ needs.web-image.result }}");
     expect(images).toContain("RELAY_IMAGE_RESULT: ${{ needs.relay-image.result }}");
     expect(images).toContain("SANDBOX_IMAGE_RESULT: ${{ needs.sandbox-image.result }}");
     const aggregate = parsed.jobs.images?.steps?.find(
       (step) => step.name === "Require every workload image build",
     );
     expect(aggregate?.env).toEqual({
-      SERVICE_IMAGES_RESULT: "${{ needs.service-images.result }}",
+      API_IMAGE_RESULT: "${{ needs.api-image.result }}",
+      WORKER_IMAGE_RESULT: "${{ needs.worker-image.result }}",
+      WEB_IMAGE_RESULT: "${{ needs.web-image.result }}",
       RELAY_IMAGE_RESULT: "${{ needs.relay-image.result }}",
       SANDBOX_IMAGE_RESULT: "${{ needs.sandbox-image.result }}",
     });
-    const aggregateResult = (serviceResult: string, relayResult: string, sandboxResult: string) =>
+    const aggregateResult = (...results: string[]) =>
       Bun.spawnSync(["bash", "-c", aggregate?.run ?? "exit 1"], {
         env: {
           ...process.env,
-          SERVICE_IMAGES_RESULT: serviceResult,
-          RELAY_IMAGE_RESULT: relayResult,
-          SANDBOX_IMAGE_RESULT: sandboxResult,
+          API_IMAGE_RESULT: results[0],
+          WORKER_IMAGE_RESULT: results[1],
+          WEB_IMAGE_RESULT: results[2],
+          RELAY_IMAGE_RESULT: results[3],
+          SANDBOX_IMAGE_RESULT: results[4],
         },
       }).exitCode;
-    expect(aggregateResult("success", "success", "success")).toBe(0);
+    expect(aggregateResult("success", "success", "success", "success", "success")).toBe(0);
     for (const result of ["failure", "skipped", "cancelled", ""]) {
-      expect(aggregateResult(result, "success", "success")).not.toBe(0);
-      expect(aggregateResult("success", result, "success")).not.toBe(0);
-      expect(aggregateResult("success", "success", result)).not.toBe(0);
+      for (let index = 0; index < 5; index += 1) {
+        const results = Array(5).fill("success") as string[];
+        results[index] = result;
+        expect(aggregateResult(...results)).not.toBe(0);
+      }
     }
     expect(images.match(/push: \$\{\{ github\.event_name == 'push' \}\}/g)).toHaveLength(5);
     expect(images.match(/:dogfood-sha-\{0\}', github\.sha\)/g)).toHaveLength(5);
     expect(images).not.toMatch(/format\('ghcr\.io\/cloudgeni-ai\/opengeni-[^']+:sha-\{0\}'/);
-    expect(images.match(/OPENGENI_SERVER_VERSION=sha-\$\{\{ github\.sha \}\}/g)).toHaveLength(3);
-    expect(images).toContain("OPENGENI_DEPLOYMENT_REVISION=${{ github.sha }}");
+    expect(images.match(/OPENGENI_SERVER_VERSION=sha-\$\{\{ github\.event_name/g)).toHaveLength(3);
+    expect(images).toContain("OPENGENI_DEPLOYMENT_REVISION=${{ github.event_name");
     expect(images).toContain("Write exact-main-SHA dogfood receipt");
     expect(images).toContain("Upload exact-main-SHA dogfood receipt");
-    expect(images).toContain("API_DIGEST: ${{ needs.service-images.outputs.api_digest }}");
+    expect(images).toContain("API_DIGEST: ${{ needs.api-image.outputs.api_digest }}");
+    expect(images).toContain("WORKER_DIGEST: ${{ needs.worker-image.outputs.worker_digest }}");
+    expect(images).toContain("WEB_DIGEST: ${{ needs.web-image.outputs.web_digest }}");
     expect(images).toContain("RELAY_DIGEST: ${{ needs.relay-image.outputs.relay_digest }}");
     expect(images).toContain("SANDBOX_DIGEST: ${{ needs.sandbox-image.outputs.sandbox_digest }}");
     expect(images).toContain('--arg tag "dogfood-sha-${GITHUB_SHA}"');
@@ -549,16 +560,7 @@ ${parser}`,
   test("ordinary CI builds the same five physical image roles", async () => {
     const ci = await workflow("ci.yml");
     const parsed = Bun.YAML.parse(ci) as { jobs: Record<string, { steps: Array<unknown> }> };
-    const imagesJob = ci.slice(ci.indexOf("\n  service-images:\n"));
-    const serviceImages = ci.slice(
-      ci.indexOf("\n  service-images:\n"),
-      ci.indexOf("\n  relay-image:\n"),
-    );
-    const relayImage = ci.slice(
-      ci.indexOf("\n  relay-image:\n"),
-      ci.indexOf("\n  sandbox-image:\n"),
-    );
-    const sandboxImage = ci.slice(ci.indexOf("\n  sandbox-image:\n"), ci.indexOf("\n  images:\n"));
+    const imagesJob = ci.slice(ci.indexOf("\n  api-image:\n"));
 
     for (const identity of [
       "target: api",
@@ -571,15 +573,14 @@ ${parser}`,
     }
     expect(imagesJob).toContain("docker/setup-qemu-action@");
     expect(imagesJob.match(/platforms: linux\/amd64,linux\/arm64/g)).toHaveLength(5);
-    expect(serviceImages).not.toContain("docker/sandbox.Dockerfile");
-    expect(serviceImages).not.toContain("agent/crates/opengeni-relay/Dockerfile");
-    expect(relayImage).toContain("agent/crates/opengeni-relay/Dockerfile");
-    expect(relayImage).not.toMatch(/target: (?:api|worker|web)/);
-    expect(relayImage).not.toContain("docker/sandbox.Dockerfile");
-    expect(sandboxImage).toContain("docker/sandbox.Dockerfile");
-    expect(sandboxImage).not.toMatch(/target: (?:api|worker|web)/);
 
-    const imageSteps = ["service-images", "relay-image", "sandbox-image"].flatMap((jobName) =>
+    const imageSteps = [
+      "api-image",
+      "worker-image",
+      "web-image",
+      "relay-image",
+      "sandbox-image",
+    ].flatMap((jobName) =>
       parsed.jobs[jobName]!.steps.filter(
         (step): step is { name: string; uses: string; with: Record<string, string> } =>
           typeof step === "object" &&
@@ -595,19 +596,19 @@ ${parser}`,
     );
     expect(imageSteps.map(({ step: _step, ...identity }) => identity)).toEqual([
       {
-        jobName: "service-images",
+        jobName: "api-image",
         name: "Build API image",
-        fingerprint: "200e6507d925ce5608edcefa9a4f51af2a25af4f116a9dc71ac3f583031b4e71",
+        fingerprint: "92035198e8acb29ffa33ae46602f0f4cbe3332e18257cb3bd8582538db3e16dd",
       },
       {
-        jobName: "service-images",
+        jobName: "worker-image",
         name: "Build worker image",
-        fingerprint: "1f0f09b8087ce5131969fb3fa104c477d60ce41213c4dfb9ea960a40f00a787d",
+        fingerprint: "8562ea25e72c99df48b2f2150cf9bcbb5a13b39633a5cb4e2648521e24840f67",
       },
       {
-        jobName: "service-images",
+        jobName: "web-image",
         name: "Build web image",
-        fingerprint: "64b1fb64bbcacd194132e5f4d91f6e09b85044b4cc01b577230272910ab5c66b",
+        fingerprint: "641ae5f4c76a62fe3d3f2e42cea03cd5514d6db906be3d824f9e602b0955cc9f",
       },
       {
         jobName: "relay-image",

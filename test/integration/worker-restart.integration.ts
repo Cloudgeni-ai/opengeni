@@ -521,8 +521,15 @@ describe("worker restart resilience", () => {
     expect(events.filter((event) => event.type === "turn.recovery.requested")).toHaveLength(1);
     expect(events.filter((event) => event.type === "turn.completed")).toHaveLength(0);
     expect(events.filter((event) => event.type === "turn.failed")).toHaveLength(0);
+    expect(
+      events.filter(
+        (event) =>
+          event.clientEventId === `opengeni:paused-recovery-settled:${dispatchedAttemptId}`,
+      ),
+    ).toHaveLength(1);
     expect(await getSession(dbClient.db, grant.workspaceId, session.id)).toMatchObject({
-      status: "recovering",
+      status: "idle",
+      activeTurnId: turns[0]!.id,
       effectiveControl: { state: "paused" },
     });
   }, 180_000);
