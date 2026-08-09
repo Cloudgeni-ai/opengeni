@@ -2,6 +2,7 @@ import { FileBlob } from "./file-blob";
 import { ArtifactLimitError, UnsupportedArtifactFeatureError } from "./errors";
 import { formatCellAddress, parseRangeAddress, type RangeAddress } from "./spreadsheet-address";
 import { spreadsheetImageSource } from "./spreadsheet-image";
+import { rasterizeSvgToPng } from "./native-raster";
 import type { Workbook, Worksheet } from "./spreadsheet";
 import type { CellFormat, FormulaResult, RenderSpreadsheetOptions } from "./spreadsheet-types";
 
@@ -44,12 +45,10 @@ export async function renderWorkbook(
     });
   }
 
-  const moduleId = "@resvg/resvg-js";
-  const { Resvg } = await import(/* @vite-ignore */ moduleId);
-  const rendered = new Resvg(svg, {
+  const rendered = await rasterizeSvgToPng(svg, {
     background: options.background ?? DEFAULT_BACKGROUND,
-  }).render();
-  return FileBlob.fromBytes(rendered.asPng(), {
+  });
+  return FileBlob.fromBytes(rendered, {
     type: "image/png",
     name: `${safeFileStem(worksheet.name)}.png`,
   });

@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
 import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
 import {
   chmod,
   cp,
@@ -742,7 +743,11 @@ async function smokeArtifactFacade(entrypoint: string): Promise<void> {
       "Sandbox runtime XLSX round-trip smoke returned the wrong value",
     );
   }
-  await workbook.render({ sheetName: "Smoke", range: "A1:B2", scale: 1 });
+  await assertRasterContainsGlyphs(
+    await importedWorkbook.render({ sheetName: "Smoke", range: "A1:B2", scale: 1 }),
+    entrypoint,
+    "imported XLSX",
+  );
 
   const document = module.Document.create();
   document.blocks.addParagraph("OpenGeni artifact runtime smoke");
@@ -754,7 +759,11 @@ async function smokeArtifactFacade(entrypoint: string): Promise<void> {
       "Sandbox runtime DOCX round-trip smoke returned the wrong text",
     );
   }
-  await document.render({ format: "png", scale: 1 });
+  await assertRasterContainsGlyphs(
+    await importedDocument.render({ format: "png", scale: 1 }),
+    entrypoint,
+    "imported DOCX",
+  );
 
   const presentation = module.Presentation.create({
     slideSize: { width: 1280, height: 720 },
@@ -776,7 +785,60 @@ async function smokeArtifactFacade(entrypoint: string): Promise<void> {
       "Sandbox runtime PPTX round-trip smoke returned the wrong text",
     );
   }
-  await slide.export({ format: "webp", scale: 1 });
+  const importedSlide = importedPresentation.slides.items[0];
+  if (!importedSlide) {
+    throw new ArtifactRuntimeError(
+      "ARTIFACT_RUNTIME_INCOMPATIBLE",
+      "Sandbox runtime PPTX round-trip smoke lost its slide",
+    );
+  }
+  await assertRasterContainsGlyphs(
+    await importedSlide.export({ format: "png", scale: 1 }),
+    entrypoint,
+    "imported PPTX",
+  );
+  const importedWebp = new Uint8Array(
+    await (await importedSlide.export({ format: "webp", scale: 1 })).arrayBuffer(),
+  );
+  if (
+    new TextDecoder().decode(importedWebp.subarray(0, 4)) !== "RIFF" ||
+    new TextDecoder().decode(importedWebp.subarray(8, 12)) !== "WEBP"
+  ) {
+    throw new ArtifactRuntimeError(
+      "ARTIFACT_RUNTIME_INCOMPATIBLE",
+      "Sandbox runtime imported PPTX WebP smoke returned an invalid image",
+    );
+  }
+}
+
+async function assertRasterContainsGlyphs(
+  blob: Blob,
+  entrypoint: string,
+  label: string,
+): Promise<void> {
+  const sharpEntrypoint = createRequire(entrypoint).resolve("sharp");
+  const { default: sharp } = (await import(pathToFileURL(sharpEntrypoint).href)) as {
+    default: (input: Uint8Array) => {
+      flatten(options: { background: string }): {
+        greyscale(): {
+          raw(): { toBuffer(): Promise<Uint8Array> };
+        };
+      };
+    };
+  };
+  const pixels = await sharp(new Uint8Array(await blob.arrayBuffer()))
+    .flatten({ background: "#ffffff" })
+    .greyscale()
+    .raw()
+    .toBuffer();
+  let darkPixels = 0;
+  for (const value of pixels) if (value < 160) darkPixels += 1;
+  if (darkPixels < 10) {
+    throw new ArtifactRuntimeError(
+      "ARTIFACT_RUNTIME_INCOMPATIBLE",
+      `Sandbox runtime ${label} raster omitted its text glyphs`,
+    );
+  }
 }
 
 async function runNodeCli(

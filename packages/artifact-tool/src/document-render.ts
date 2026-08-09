@@ -1,5 +1,6 @@
 import { ArtifactLimitError } from "./errors";
 import { FileBlob } from "./file-blob";
+import { rasterizeSvgToPng } from "./native-raster";
 import {
   Document,
   DocumentPageBreak,
@@ -36,9 +37,7 @@ export async function renderDocument(
   }
   const svg = renderSvg(document, options);
   if (format === "svg") return new FileBlob([svg], { type: "image/svg+xml" });
-  const moduleId = "@resvg/resvg-js";
-  const { Resvg } = await import(/* @vite-ignore */ moduleId);
-  return FileBlob.fromBytes(Uint8Array.from(new Resvg(svg).render().asPng()), {
+  return FileBlob.fromBytes(await rasterizeSvgToPng(svg), {
     type: "image/png",
   });
 }

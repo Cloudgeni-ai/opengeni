@@ -1,4 +1,5 @@
 import { FileBlob } from "./file-blob";
+import { rasterizeSvgToPng } from "./native-raster";
 import {
   assertPresentationRenderPixelBudget,
   InvalidPresentationInputError,
@@ -432,8 +433,7 @@ async function imageBlob(
   }
   if (format === "svg") return new FileBlob([svg], { name, type: "image/svg+xml" });
   assertPresentationRenderPixelBudget(dimensions.width, dimensions.height, scale);
-  const { Resvg } = await importNativeRuntime<ResvgModuleRuntime>("@resvg/resvg-js");
-  const png = new Resvg(svg, { fitTo: { mode: "zoom", value: scale } }).render().asPng();
+  const png = await rasterizeSvgToPng(svg, { zoom: scale });
   if (format === "png") return FileBlob.fromBytes(png, { name, type: "image/png" });
   const { default: sharp } = await importNativeRuntime<SharpModuleRuntime>("sharp");
   const webp = await sharp(png).webp({ quality: 90, smartSubsample: true }).toBuffer();
@@ -517,13 +517,6 @@ const BORDER_RADIUS_TOKENS: Readonly<Record<string, number>> = {
   "rounded-xl": 12,
   "rounded-2xl": 16,
   "rounded-3xl": 24,
-};
-
-type ResvgModuleRuntime = {
-  Resvg: new (
-    svg: string,
-    options: { fitTo: { mode: "zoom"; value: number } },
-  ) => { render(): { asPng(): Uint8Array } };
 };
 
 type SharpModuleRuntime = {

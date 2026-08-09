@@ -10,6 +10,7 @@ import {
   type RangeAddress,
 } from "./spreadsheet-address";
 import { ArtifactLimitError, UnsupportedArtifactFeatureError } from "./errors";
+import { boundInspectionRecords, defineHelpEntries, filterHelpEntries } from "./inspection";
 import { normalizeSpreadsheetImageConfig } from "./spreadsheet-image";
 import {
   FormulaEvaluationBudget,
@@ -2022,23 +2023,13 @@ export class Workbook {
     const filtered = options.target
       ? records.filter((record) => record.id === options.target?.id)
       : records;
-    const bounded = boundNdjson(filtered, options.maxChars ?? 20_000);
+    const bounded = boundInspectionRecords(filtered, options.maxChars ?? 20_000);
     return bounded;
   }
 
   help(query: string, options: HelpOptions = {}): InspectResult {
-    const normalized = query.toLowerCase();
-    const entries = HELP_ENTRIES.filter((entry) => {
-      const content = `${entry.path} ${entry.summary} ${entry.examples.join(" ")}`.toLowerCase();
-      const exact = normalized === "*" || content.includes(normalized.replace("fx.", ""));
-      if (!options.search) return exact;
-      try {
-        return exact && new RegExp(options.search, "i").test(content);
-      } catch {
-        return exact && content.includes(options.search.toLowerCase());
-      }
-    });
-    return boundNdjson(entries, options.maxChars ?? 6_000);
+    const entries = filterHelpEntries(HELP_ENTRIES, query, options.search, "fx.");
+    return boundInspectionRecords(entries, options.maxChars ?? 6_000);
   }
 
   async render(options: RenderSpreadsheetOptions = {}): Promise<FileBlob> {
@@ -5115,23 +5106,6 @@ function reviveValue(value: SerializedCellValue): CellValue {
 function isSerializedChart(value: unknown): value is SerializedChart {
   return Boolean(value && typeof value === "object" && "id" in value && "sourceRange" in value);
 }
-function boundNdjson(records: readonly Record<string, unknown>[], maxChars: number): InspectResult {
-  const lines: string[] = [];
-  let chars = 0;
-  let truncated = false;
-  const accepted: Record<string, unknown>[] = [];
-  for (const record of records) {
-    const line = JSON.stringify(record);
-    if (chars + line.length + (lines.length > 0 ? 1 : 0) > maxChars) {
-      truncated = true;
-      break;
-    }
-    lines.push(line);
-    accepted.push(record);
-    chars += line.length + (lines.length > 1 ? 1 : 0);
-  }
-  return { ndjson: lines.join("\n"), records: accepted, truncated };
-}
 function parseCsv(input: string, delimiter: string): Matrix<CellValue> {
   if (delimiter.length !== 1) throw new Error("CSV delimiter must be one character");
   if (input.length === 0) return [];
@@ -5175,76 +5149,47 @@ function coerceCsv(value: string): CellValue {
   return value;
 }
 
-const HELP_ENTRIES: Array<
-  Record<string, unknown> & {
-    path: string;
-    summary: string;
-    examples: string[];
-  }
-> = [
-  {
-    path: "worksheet.getRange",
-    summary: "Create an A1-addressed rectangular range",
-    examples: ['sheet.getRange("A1:C10")'],
-  },
-  {
-    path: "range.values",
-    summary: "Read or bulk-write a rectangular value matrix",
-    examples: ["range.values = [[1, 2]]"],
-  },
-  {
-    path: "range.formulas",
-    summary: "Read or bulk-write formulas",
-    examples: ['range.formulas = [["=A1*2"]]'],
-  },
-  {
-    path: "range.format",
-    summary: "Apply fills, fonts, formats, borders, alignment, and sizing",
-    examples: ['range.format = { fill: "#000", font: { bold: true } }'],
-  },
-  {
-    path: "workbook.inspect",
-    summary: "Inspect workbook structure, regions, formulas, styles, drawings, and comments",
-    examples: ['await workbook.inspect({ kind: "sheet,formula" })'],
-  },
-  {
-    path: "workbook.render",
-    summary: "Render a sheet or range to PNG or SVG",
-    examples: ['await workbook.render({ sheetName: "Sheet1", format: "png" })'],
-  },
-  {
-    path: "workbook.trace",
-    summary: "Trace formula precedents from one cell",
-    examples: ['workbook.trace("Sheet1!A1")'],
-  },
-  {
-    path: "chart.add",
-    summary: "Add a worksheet chart from a range or configuration",
-    examples: ['sheet.charts.add("line", sheet.getRange("A1:B4"))'],
-  },
-  {
-    path: "sparklineGroups.add",
-    summary:
-      "Add a bounded line, column, or stacked sparkline group with explicit target and source ranges",
-    examples: [
-      'sheet.sparklineGroups.add({ type: "line", targetRange: "E2:E4", sourceData: "B2:D4" })',
-      'sheet.getRange("E2:E4").sparklines.add("line", sheet.getRange("B2:D4"))',
-    ],
-  },
-  {
-    path: "comments.addThread",
-    summary: "Add a threaded comment to one cell",
-    examples: ['workbook.comments.addThread({ cell: sheet.getRange("A1") }, "Note")'],
-  },
-  { path: "fx.SUM", summary: "Sum numeric values", examples: ["=SUM(A1:A10)"] },
-  {
-    path: "fx.AVERAGE",
-    summary: "Average numeric values",
-    examples: ["=AVERAGE(A1:A10)"],
-  },
-  {
-    path: "fx.XLOOKUP",
-    summary: "Find a key and return a corresponding value",
-    examples: ['=XLOOKUP(A1,B1:B10,C1:C10,"Missing")'],
-  },
-];
+const HELP_ENTRIES = defineHelpEntries([
+  ["worksheet.getRange", "Create an A1-addressed rectangular range", 'sheet.getRange("A1:C10")'],
+  ["range.values", "Read or bulk-write a rectangular value matrix", "range.values = [[1, 2]]"],
+  ["range.formulas", "Read or bulk-write formulas", 'range.formulas = [["=A1*2"]]'],
+  [
+    "range.format",
+    "Apply fills, fonts, formats, borders, alignment, and sizing",
+    'range.format = { fill: "#000", font: { bold: true } }',
+  ],
+  [
+    "workbook.inspect",
+    "Inspect workbook structure, regions, formulas, styles, drawings, and comments",
+    'await workbook.inspect({ kind: "sheet,formula" })',
+  ],
+  [
+    "workbook.render",
+    "Render a sheet or range to PNG or SVG",
+    'await workbook.render({ sheetName: "Sheet1", format: "png" })',
+  ],
+  ["workbook.trace", "Trace formula precedents from one cell", 'workbook.trace("Sheet1!A1")'],
+  [
+    "chart.add",
+    "Add a worksheet chart from a range or configuration",
+    'sheet.charts.add("line", sheet.getRange("A1:B4"))',
+  ],
+  [
+    "sparklineGroups.add",
+    "Add a bounded line, column, or stacked sparkline group with explicit target and source ranges",
+    'sheet.sparklineGroups.add({ type: "line", targetRange: "E2:E4", sourceData: "B2:D4" })',
+    'sheet.getRange("E2:E4").sparklines.add("line", sheet.getRange("B2:D4"))',
+  ],
+  [
+    "comments.addThread",
+    "Add a threaded comment to one cell",
+    'workbook.comments.addThread({ cell: sheet.getRange("A1") }, "Note")',
+  ],
+  ["fx.SUM", "Sum numeric values", "=SUM(A1:A10)"],
+  ["fx.AVERAGE", "Average numeric values", "=AVERAGE(A1:A10)"],
+  [
+    "fx.XLOOKUP",
+    "Find a key and return a corresponding value",
+    '=XLOOKUP(A1,B1:B10,C1:C10,"Missing")',
+  ],
+]);

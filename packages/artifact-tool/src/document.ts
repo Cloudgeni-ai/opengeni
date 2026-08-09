@@ -1,4 +1,5 @@
 import { FileBlob } from "./file-blob";
+import { boundInspectionRecords, defineHelpEntries, filterHelpEntries } from "./inspection";
 import type { HelpOptions, InspectOptions, InspectResult } from "./spreadsheet-types";
 
 export type DocumentPageGeometry = {
@@ -177,88 +178,67 @@ function assertDocumentInternalAccess(access: DocumentInternalAccess): void {
   }
 }
 
-const DOCUMENT_HELP_ENTRIES: Array<
-  Record<string, unknown> & {
-    path: string;
-    summary: string;
-    examples: string[];
-  }
-> = [
-  {
-    path: "Document.create",
-    summary: "Create an editable document with stable structural ids and an initial section.",
-    examples: ["const document = Document.create()"],
-  },
-  {
-    path: "document.blocks.addParagraph",
-    summary:
-      "Add styled text runs or plain text, then edit or format Unicode-safe ranges atomically.",
-    examples: [
-      'document.blocks.addParagraph("Body text")',
-      'paragraph.edit({ start: 0, end: 4, text: "Updated" })',
-      "paragraph.format({ start: 0, end: 7, style: { bold: true } })",
-    ],
-  },
-  {
-    path: "document.blocks.addHeading",
-    summary: "Add a semantic heading level 1 through 6.",
-    examples: ['document.blocks.addHeading("Overview", 1)'],
-  },
-  {
-    path: "document.blocks.addTable",
-    summary: "Add an editable rectangular table with explicit point geometry.",
-    examples: [
-      'document.blocks.addTable([["Name", "Value"]], { widthPt: 360, columnWidthsPt: [240, 120], headerRows: 1 })',
-    ],
-  },
-  {
-    path: "document.sections.add",
-    summary:
-      "Start a section and author its default, first-page, or even-page headers and footers.",
-    examples: [
-      "const section = document.sections.add({ page: { widthPt: 792, heightPt: 612 } })",
-      'section.headers.default.addParagraph("Header")',
-    ],
-  },
-  {
-    path: "document.comments.addThread",
-    summary: "Anchor a threaded, resolvable comment to a paragraph text range.",
-    examples: [
-      'const thread = document.comments.addThread({ block: paragraph, start: 0, end: 5 }, "Review")',
-      'thread.addReply("Done")',
-    ],
-  },
-  {
-    path: "document.changes.add",
-    summary: "Mark a non-overlapping paragraph range as an inserted or deleted tracked change.",
-    examples: ['document.changes.add({ block: paragraph, start: 0, end: 5 }, "insert", "Author")'],
-  },
-  {
-    path: "document.inspect",
-    summary:
-      "Return bounded NDJSON records for document, section, block, comment, and redline inspection.",
-    examples: [
-      'await document.inspect({ kind: "document,section,paragraph,table,comment,redline" })',
-    ],
-  },
-  {
-    path: "document.render",
-    summary: "Render a safe HTML, SVG, or bounded PNG preview.",
-    examples: ['await document.render({ format: "png", scale: 1 })'],
-  },
-  {
-    path: "DocumentFile.exportDocx",
-    summary:
-      "Export editable WordprocessingML with sections, numbering, tables, comments, and redlines.",
-    examples: ["const blob = await DocumentFile.exportDocx(document)"],
-  },
-  {
-    path: "DocumentFile.importDocx",
-    summary:
-      "Safely import the bounded editable DOCX subset; unsupported fidelity-bearing features fail closed.",
-    examples: ["const document = await DocumentFile.importDocx(blob)"],
-  },
-];
+const DOCUMENT_HELP_ENTRIES = defineHelpEntries([
+  [
+    "Document.create",
+    "Create an editable document and initial section",
+    "const document = Document.create()",
+  ],
+  [
+    "document.blocks.addParagraph",
+    "Add or edit styled paragraphs",
+    'document.blocks.addParagraph("Body text")',
+    'paragraph.edit({ start: 0, end: 4, text: "Updated" })',
+    "paragraph.format({ start: 0, end: 7, style: { bold: true } })",
+  ],
+  [
+    "document.blocks.addHeading",
+    "Add heading levels 1-6",
+    'document.blocks.addHeading("Overview", 1)',
+  ],
+  [
+    "document.blocks.addTable",
+    "Add an editable table with point geometry",
+    'document.blocks.addTable([["Name", "Value"]], { widthPt: 360, columnWidthsPt: [240, 120], headerRows: 1 })',
+  ],
+  [
+    "document.sections.add",
+    "Add sections, headers, and footers",
+    "const section = document.sections.add({ page: { widthPt: 792, heightPt: 612 } })",
+    'section.headers.default.addParagraph("Header")',
+  ],
+  [
+    "document.comments.addThread",
+    "Add a threaded range comment",
+    'const thread = document.comments.addThread({ block: paragraph, start: 0, end: 5 }, "Review")',
+    'thread.addReply("Done")',
+  ],
+  [
+    "document.changes.add",
+    "Add a tracked insertion or deletion",
+    'document.changes.add({ block: paragraph, start: 0, end: 5 }, "insert", "Author")',
+  ],
+  [
+    "document.inspect",
+    "Inspect bounded document records",
+    'await document.inspect({ kind: "document,section,paragraph,table,comment,redline" })',
+  ],
+  [
+    "document.render",
+    "Render HTML, SVG, or PNG",
+    'await document.render({ format: "png", scale: 1 })',
+  ],
+  [
+    "DocumentFile.exportDocx",
+    "Export an editable DOCX",
+    "const blob = await DocumentFile.exportDocx(document)",
+  ],
+  [
+    "DocumentFile.importDocx",
+    "Import a bounded editable DOCX",
+    "const document = await DocumentFile.importDocx(blob)",
+  ],
+]);
 
 /**
  * Skill-compatible TypeScript reference document used by fixtures and codecs.
@@ -397,22 +377,12 @@ export class Document {
     if (kinds.has("change") || kinds.has("redline")) {
       for (const change of this.changes.items) records.push(change.inspectRecord());
     }
-    return boundedInspect(records, inspectCharacterLimit(options.maxChars, 20_000));
+    return boundInspectionRecords(records, inspectCharacterLimit(options.maxChars, 20_000));
   }
 
   help(query: string, options: HelpOptions = {}): InspectResult {
-    const normalized = query.trim().toLowerCase();
-    const entries = DOCUMENT_HELP_ENTRIES.filter((entry) => {
-      const content = `${entry.path} ${entry.summary} ${entry.examples.join(" ")}`.toLowerCase();
-      const matchesQuery = normalized === "*" || content.includes(normalized);
-      if (!matchesQuery || !options.search) return matchesQuery;
-      try {
-        return new RegExp(options.search, "iu").test(content);
-      } catch {
-        return content.includes(options.search.toLowerCase());
-      }
-    });
-    return boundedInspect(entries, inspectCharacterLimit(options.maxChars, 6_000));
+    const entries = filterHelpEntries(DOCUMENT_HELP_ENTRIES, query, options.search);
+    return boundInspectionRecords(entries, inspectCharacterLimit(options.maxChars, 6_000));
   }
 
   async render(options: DocumentRenderOptions = {}): Promise<FileBlob> {
@@ -2820,23 +2790,6 @@ function storyCounts(stories: DocumentSectionStories): Record<string, number> {
     first: stories.first.items.length,
     even: stories.even.items.length,
   };
-}
-function boundedInspect(records: Record<string, unknown>[], maxChars: number): InspectResult {
-  const accepted: Record<string, unknown>[] = [];
-  const lines: string[] = [];
-  let chars = 0;
-  let truncated = false;
-  for (const record of records) {
-    const line = JSON.stringify(record);
-    if (chars + line.length + (lines.length ? 1 : 0) > maxChars) {
-      truncated = true;
-      break;
-    }
-    accepted.push(record);
-    lines.push(line);
-    chars += line.length + (lines.length > 1 ? 1 : 0);
-  }
-  return { records: accepted, ndjson: lines.join("\n"), truncated };
 }
 function inspectCharacterLimit(value: number | undefined, fallback: number): number {
   const limit = value ?? fallback;

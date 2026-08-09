@@ -184,6 +184,10 @@ describe("presentation skill public-workflow conformance", () => {
       expect(presentation.resolve(titleRecord!.id as string)).toBe(title);
       expect(presentation.resolve(chartRecord!.id as string)).toBe(chart);
 
+      const help = presentation.help("charts.add", { maxChars: 2_000 });
+      expect(help.truncated).toBe(false);
+      expect(help.ndjson).toContain("slide.charts.add");
+
       const png = await presentation.export({ slide, format: "png", scale: 1 });
       expectPng(await bytesOf(png));
 

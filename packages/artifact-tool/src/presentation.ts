@@ -1,4 +1,6 @@
 import { FileBlob } from "./file-blob";
+import { boundInspectionRecords, defineHelpEntries, filterHelpEntries } from "./inspection";
+import type { HelpOptions } from "./spreadsheet-types";
 import { presentationLossState } from "./presentation-pptx-state";
 import {
   canonicalizeRasterDataUrl,
@@ -281,6 +283,39 @@ export class InvalidPresentationInputError extends Error {
   }
 }
 
+const PRESENTATION_HELP_ENTRIES = defineHelpEntries([
+  ["Presentation.create", "Create editable deck", "Presentation.create()"],
+  ["deck.slides.add", "Add slide", "deck.slides.add()"],
+  [
+    "slide.shapes.add",
+    "Add positioned text or shape",
+    'slide.shapes.add({ geometry: "textbox", text, position })',
+  ],
+  [
+    "slide.charts.add",
+    "Add chart data",
+    'slide.charts.add("bar", { categories, series: [{ name, values }] })',
+  ],
+  ["slide.tables.add", "Add table", "slide.tables.add({ rows, position })"],
+  ["slide.images.add", "Add image", "slide.images.add({ dataUrl, name, position })"],
+  [
+    "deck.inspect",
+    "Inspect deck records",
+    'await deck.inspect({ kind: "slide,textbox,chart,table" })',
+  ],
+  [
+    "deck.export",
+    "Export SVG, PNG, WebP, or layout",
+    'await deck.export({ format: "png", montage: true })',
+  ],
+  [
+    "PresentationFile.importPptx",
+    "Import editable PPTX",
+    "await PresentationFile.importPptx(blob)",
+  ],
+  ["PresentationFile.exportPptx", "Export PPTX", "await PresentationFile.exportPptx(deck)"],
+]);
+
 /**
  * Skill-compatible TypeScript reference presentation. Native production
  * presentation editing remains unsupported and must fail closed until the
@@ -413,7 +448,15 @@ export class Presentation {
       : records;
     if (options.target) filtered = filtered.filter((record) => record.id === options.target!.id);
     filtered = filtered.map((record) => projectRecord(record, options.include, options.exclude));
-    return boundRecords(filtered, options.maxChars ?? 20_000);
+    return boundPresentationRecords(filtered, options.maxChars ?? 20_000);
+  }
+
+  help(query: string, options: HelpOptions = {}): PresentationInspectResult {
+    if (typeof query !== "string") {
+      throw new InvalidPresentationInputError("help query", "must be a string");
+    }
+    const records = filterHelpEntries(PRESENTATION_HELP_ENTRIES, query, options.search);
+    return boundPresentationRecords(records, options.maxChars ?? 6_000);
   }
 
   async export(options: PresentationExportOptions): Promise<FileBlob> {
@@ -2520,34 +2563,13 @@ function parseProjection(value: string | undefined): Set<string> {
   );
 }
 
-function boundRecords(
+function boundPresentationRecords(
   records: Array<Record<string, unknown>>,
   maxChars: number,
 ): PresentationInspectResult {
   if (!Number.isInteger(maxChars) || maxChars <= 0)
     throw new Error("inspect maxChars must be a positive integer");
-  const accepted: Array<Record<string, unknown>> = [];
-  const lines: string[] = [];
-  let length = 0;
-  for (const record of records) {
-    const line = JSON.stringify(record);
-    const additional = line.length + (accepted.length > 0 ? 1 : 0);
-    if (length + additional > maxChars) {
-      return {
-        ndjson: lines.join("\n"),
-        records: accepted,
-        truncated: true,
-      };
-    }
-    accepted.push(record);
-    lines.push(line);
-    length += additional;
-  }
-  return {
-    ndjson: lines.join("\n"),
-    records: accepted,
-    truncated: false,
-  };
+  return boundInspectionRecords(records, maxChars);
 }
 
 function jsonBlob(value: unknown, name: string): FileBlob {

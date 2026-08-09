@@ -6,6 +6,24 @@ ARG TARGETARCH
 ARG OPENGENI_ARTIFACT_RUNTIME_BUNDLE=.release/artifact-runtime
 ARG OPENGENI_SOURCE_SHA
 
+RUN set -eux; \
+    for attempt in 1 2 3; do \
+      rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/partial/*; \
+      apt-get update \
+      && apt-get install -y --no-install-recommends fonts-liberation \
+      && break; \
+      if [ "$attempt" = "3" ]; then exit 1; fi; \
+      sleep $((attempt * 5)); \
+    done; \
+    rm -rf /var/lib/apt/lists/*; \
+    test -f /usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf; \
+    test -f /usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf; \
+    test -f /usr/share/fonts/truetype/liberation/LiberationSans-Italic.ttf; \
+    test -f /usr/share/fonts/truetype/liberation/LiberationSans-BoldItalic.ttf
+
+ENV OPENGENI_ARTIFACT_RASTER_FONT_FILES="[\"/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf\",\"/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf\",\"/usr/share/fonts/truetype/liberation/LiberationSans-Italic.ttf\",\"/usr/share/fonts/truetype/liberation/LiberationSans-BoldItalic.ttf\"]"
+ENV OPENGENI_ARTIFACT_RASTER_DEFAULT_FONT_FAMILY="Liberation Sans"
+
 WORKDIR /src
 COPY . .
 COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
@@ -55,6 +73,7 @@ RUN set -eux; \
         openssh-client \
         procps \
         fuse3 \
+        fonts-liberation \
         rclone \
         ripgrep \
         unzip \
@@ -140,6 +159,8 @@ RUN set -eux; \
 
 ENV HOME=/workspace
 ENV OPENGENI_TERMINAL_STREAM_PORT=7681
+ENV OPENGENI_ARTIFACT_RASTER_FONT_FILES="[\"/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf\",\"/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf\",\"/usr/share/fonts/truetype/liberation/LiberationSans-Italic.ttf\",\"/usr/share/fonts/truetype/liberation/LiberationSans-BoldItalic.ttf\"]"
+ENV OPENGENI_ARTIFACT_RASTER_DEFAULT_FONT_FAMILY="Liberation Sans"
 
 COPY docker/opengeni-git-askpass /usr/local/bin/opengeni-git-askpass
 COPY packages/ogtool/package.json  /opt/opengeni/ogtool/package.json
