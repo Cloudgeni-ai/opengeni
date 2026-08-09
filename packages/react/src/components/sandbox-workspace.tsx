@@ -326,6 +326,11 @@ export function useSandboxWorkspaceTabs(
   });
   const capabilities = caps.capabilities;
   const liveness = capabilities?.liveness;
+  // A missing capability document is not evidence that the sandbox is live.
+  // Pass explicit null to live-I/O hooks so fast capture/event hydration cannot
+  // exploit their legacy "liveness omitted" compatibility path while negotiation
+  // is still pending.
+  const liveIoLiveness = liveness ?? null;
   const fileSystemOn = capabilities?.FileSystem.available ?? false;
   // The FS is writable only when it's live AND not read-only. A self-hosted box
   // that's offline (or any read-only advertisement) or a capture-served cold tree
@@ -420,7 +425,7 @@ export function useSandboxWorkspaceTabs(
     enabled: filesEnabled && (captureAvailable || (fileSystemOn && liveWorkspaceExpected)),
     active: filesActive,
     repoPaths,
-    liveness,
+    liveness: liveIoLiveness,
     capture: captureState.capture,
     // A reverted optimistic mutation (e.g. a 409 rename collision) surfaces as a
     // host notification — the tree silently rolls back, the user sees why.
@@ -464,7 +469,7 @@ export function useSandboxWorkspaceTabs(
     // dormant, avoiding the old duplicate full-tree read.
     active: changesActive || resolvedActiveTab === null,
     repoPaths,
-    liveness,
+    liveness: liveIoLiveness,
     comparison: changesComparison,
     capture: changesComparison === "staged" ? null : captureState.capture,
   });
