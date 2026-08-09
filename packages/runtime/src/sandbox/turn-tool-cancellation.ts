@@ -15,7 +15,6 @@ const SHELL_MARKER_DIR = "/tmp/opengeni-turn-shell";
 const RETAINED_SHELL_MARKER_PENDING_EXIT_CODE = 74;
 const RETAINED_SHELL_GROUP_LIVE_EXIT_CODE = 75;
 const RETAINED_SHELL_PROOF_INCONCLUSIVE_EXIT_CODE = 76;
-const RETAINED_SHELL_IDENTITY_PREFIX = "OPENGENI_RETAINED_SHELL_IDENTITY";
 
 type ToolCallDetails = {
   toolCall?: {
@@ -484,8 +483,8 @@ function pendingShellCancellationCommand(state: PendingShellStart): string {
  * require the token in that PID's command line, re-read the live PGID, then
  * signal only that isolated group. It gives TERM a short in-box grace period,
  * escalates to KILL, and returns success only after group absence. If the group
- * remains live, the validated identity is returned for an immediate guarded
- * retry; malformed, mismatched, or unavailable identity never opens the fence.
+ * remains live, the entire token/identity guard is re-run before retrying;
+ * malformed, mismatched, or unavailable identity never opens the fence.
  */
 function retainedShellCancellationCommand(state: ActiveShellSession): string {
   const marker = singleQuote(state.markerPath!);
@@ -525,39 +524,8 @@ function retainedShellCancellationCommand(state: ActiveShellSession): string {
     "  __opengeni_poll=$((__opengeni_poll + 1))",
     "done",
     'command kill -0 "-$__opengeni_pgid" 2>/dev/null || { command rm -f "$__opengeni_marker"; exit 0; }',
-    `command printf '${RETAINED_SHELL_IDENTITY_PREFIX} %s %s\\n' "$__opengeni_pid" "$__opengeni_pgid"`,
     `exit ${RETAINED_SHELL_GROUP_LIVE_EXIT_CODE}`,
   ].join("\n");
-}
-
-function validatedRetainedShellCancellationCommand(identity: ShellProcessIdentity): string {
-  return [
-    `__opengeni_pgid=${identity.processGroupId}`,
-    "__opengeni_poll=0",
-    'while command kill -0 "-$__opengeni_pgid" 2>/dev/null && [ "$__opengeni_poll" -lt 12 ]; do',
-    '  command kill -KILL "-$__opengeni_pgid" 2>/dev/null || true',
-    "  command sleep 0.025 2>/dev/null || true",
-    "  __opengeni_poll=$((__opengeni_poll + 1))",
-    "done",
-    `command kill -0 "-$__opengeni_pgid" 2>/dev/null && exit ${RETAINED_SHELL_GROUP_LIVE_EXIT_CODE}`,
-    "exit 0",
-  ].join("\n");
-}
-
-function retainedShellIdentity(raw: string): ShellProcessIdentity | null {
-  if (parseExecBannerExitCode(raw) !== RETAINED_SHELL_GROUP_LIVE_EXIT_CODE) return null;
-  const match = execOutput(raw).match(
-    new RegExp(`(?:^|\\n)${RETAINED_SHELL_IDENTITY_PREFIX} (\\d+) (\\d+)(?:\\n|$)`),
-  );
-  if (!match) return null;
-  const pid = Number.parseInt(match[1]!, 10);
-  const processGroupId = Number.parseInt(match[2]!, 10);
-  return Number.isSafeInteger(pid) &&
-    Number.isSafeInteger(processGroupId) &&
-    pid > 1 &&
-    pid === processGroupId
-    ? { pid, processGroupId }
-    : null;
 }
 
 function shellHelperInput(command: string): string {
@@ -1465,19 +1433,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     ) {
       while (state.processSession.hasRetainedProcess?.(state.sessionId) === true) {
         try {
-          const command =
-            state.identityValidated && state.identity
-              ? validatedRetainedShellCancellationCommand(state.identity)
-              : retainedShellCancellationCommand(state);
           const output = await state.processSession.execCommandForProcessControl(
             state.sessionId,
-            shellHelperArgs(command),
+            shellHelperArgs(retainedShellCancellationCommand(state)),
           );
-          const identity = retainedShellIdentity(output);
-          if (identity) {
-            state.identity = identity;
-            state.identityValidated = true;
-          }
           const exitCode = parseExecBannerExitCode(output);
           if (exitCode === 0 || exitCode === RETAINED_SHELL_MARKER_PENDING_EXIT_CODE) {
             await this.forgetShellSessionAfterExactSettlement(state);
