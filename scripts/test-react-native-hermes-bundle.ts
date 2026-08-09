@@ -30,6 +30,7 @@ async function emitBundle(mode: BundleMode, out: string): Promise<void> {
   const { runBuild } = require("metro") as {
     runBuild(config: Record<string, unknown>, options: Record<string, unknown>): Promise<void>;
   };
+  const asyncRequireModulePath = require.resolve("metro-runtime/src/modules/asyncRequire");
 
   const defaults = await getDefaultConfig(repoRoot);
   const config = mergeConfig(defaults, {
@@ -42,6 +43,7 @@ async function emitBundle(mode: BundleMode, out: string): Promise<void> {
       useWatchman: false,
     },
     transformer: {
+      asyncRequireModulePath,
       babelTransformerPath: transformerPath,
       enableBabelRCLookup: false,
       enableBabelRuntime: false,
