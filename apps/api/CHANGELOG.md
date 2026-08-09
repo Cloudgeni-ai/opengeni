@@ -1,5 +1,32 @@
 # @opengeni/api-router
 
+## 0.24.0
+
+### Minor Changes
+
+- 7b2d5ff: Add trust-gated in-session capability recommendations, human-owned authorization
+  requests, and a GitHub owner-consent flow that returns to the initiating session.
+- d1189ba: Add the OpenGeni-owned document, spreadsheet, and presentation authoring engine,
+  its durable API/domain/live-sync surfaces, first-party React workbench, and
+  editable-artifact client SDK. Publish independently lazy, identity-pinned browser
+  WASM runtimes for each editor modality.
+
+### Patch Changes
+
+- Updated dependencies [7b2d5ff]
+- Updated dependencies [d1189ba]
+  - @opengeni/contracts@0.42.0
+  - @opengeni/core@0.22.0
+  - @opengeni/artifact-tool@0.1.0
+  - @opengeni/db@0.29.0
+  - @opengeni/config@0.12.9
+  - @opengeni/documents@0.5.28
+  - @opengeni/events@0.3.99
+  - @opengeni/github@0.4.46
+  - @opengeni/observability@0.5.15
+  - @opengeni/runtime@0.18.38
+  - @opengeni/storage@0.2.83
+
 ## 0.23.19
 
 ### Patch Changes
