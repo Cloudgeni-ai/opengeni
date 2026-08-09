@@ -390,7 +390,7 @@ async function main(): Promise<void> {
   pass(
     checks,
     "functional.real-cold-lease",
-    "The real Modal lease reached a dormant cold/draining state before UI review.",
+    "The real Modal lease completed teardown and reached cold before UI review.",
   );
 
   const captureApiRegionProbe = await runCaptureApiRegionalProbe(
@@ -488,13 +488,13 @@ async function main(): Promise<void> {
     }
 
     const afterPassiveBrowser = await cookieClient.getStreamCapabilities(workspaceId, session.id);
-    if (!isDormantSandboxLiveness(afterPassiveBrowser.liveness)) {
+    if (afterPassiveBrowser.liveness !== "cold") {
       throw new Error("passive browser acceptance unexpectedly warmed the sandbox");
     }
     pass(
       checks,
       "functional.capture-cold-zero-channel-a",
-      "Fresh desktop/mobile browsers rendered capture-backed Changes and Files with zero Channel-A requests and left the lease dormant.",
+      "Fresh desktop/mobile browsers rendered capture-backed Changes and Files with zero Channel-A requests and left the lease cold.",
     );
 
     const liveFlow = await runLiveWorkspaceFlow({
@@ -1017,38 +1017,41 @@ export async function waitForSandboxLiveness(
   );
 }
 
-export function isDormantSandboxLiveness(liveness: string): boolean {
-  return liveness === "cold" || liveness === "draining";
-}
-
-async function waitForCold(
-  client: OpenGeniClient,
+export async function waitForCold(
+  client: Pick<OpenGeniClient, "getStreamCapabilities">,
   workspaceId: string,
   sessionId: string,
   timeoutMs: number,
+  pollIntervalMs = 2_000,
+  requestTimeoutMs = 10_000,
 ): Promise<void> {
   await waitForSandboxLiveness(
     client,
     workspaceId,
     sessionId,
-    new Set(["cold", "draining"]),
+    new Set(["cold"]),
     timeoutMs,
+    pollIntervalMs,
+    requestTimeoutMs,
   );
 }
 
-async function waitForWarm(
-  client: OpenGeniClient,
+export async function waitForWarm(
+  client: Pick<OpenGeniClient, "getStreamCapabilities">,
   workspaceId: string,
   sessionId: string,
   timeoutMs = 90_000,
+  pollIntervalMs = 1_000,
+  requestTimeoutMs = 10_000,
 ): Promise<void> {
   await waitForSandboxLiveness(
     client,
     workspaceId,
     sessionId,
-    new Set(["warm", "draining"]),
+    new Set(["warm"]),
     timeoutMs,
-    1_000,
+    pollIntervalMs,
+    requestTimeoutMs,
   );
 }
 
@@ -1139,15 +1142,20 @@ async function runLiveWorkspaceFlow(input: {
       "Reads and mutations through file and parent-directory symlink escapes returned HTTP 400 and left every outside target byte-for-byte unchanged.",
     );
 
-    await page.getByRole("button", { name: "Edit", exact: true }).click();
-    const editor = page.locator("[data-opengeni-code-editor]");
+    await fileViewer.getByRole("button", { name: "Edit", exact: true }).click();
+    const editor = fileViewer.locator("[data-opengeni-code-editor]");
     await editor.waitFor({ timeout: 30_000 });
     const editable = editor.locator(".cm-content");
     await editable.waitFor({ timeout: 30_000 });
     await editable.click();
-    await page.keyboard.press("Control+End");
-    await page.keyboard.type(`\nui edit ${marker}`);
-    await editor.getByRole("button", { name: "Save", exact: true }).click();
+    await editable.press("Control+End");
+    await editable.press("Enter");
+    await editable.pressSequentially(`ui edit ${marker}`);
+    await fileViewer
+      .locator('[data-opengeni-code-editor][data-opengeni-editor-dirty="true"]')
+      .waitFor({ state: "visible", timeout: 20_000 });
+    const saveButton = editor.getByRole("button", { name: "Save", exact: true });
+    await saveButton.click();
     await editor.getByText("Saved", { exact: true }).waitFor({ timeout: 20_000 });
     const saved = await client.fsRead(workspaceId, sessionId, { path: "api/base.txt" });
     if (!saved.content.includes(`ui edit ${marker}`)) {
@@ -1161,9 +1169,13 @@ async function runLiveWorkspaceFlow(input: {
       overwrite: true,
     });
     await editable.click();
-    await page.keyboard.press("Control+End");
-    await page.keyboard.type("\nlocal conflict candidate");
-    await editor.getByRole("button", { name: "Save", exact: true }).click();
+    await editable.press("Control+End");
+    await editable.press("Enter");
+    await editable.pressSequentially("local conflict candidate");
+    await fileViewer
+      .locator('[data-opengeni-code-editor][data-opengeni-editor-dirty="true"]')
+      .waitFor({ state: "visible", timeout: 20_000 });
+    await saveButton.click();
     await editor
       .getByText("File changed on machine.", { exact: true })
       .waitFor({ timeout: 20_000 });

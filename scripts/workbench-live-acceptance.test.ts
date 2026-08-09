@@ -17,7 +17,6 @@ import {
   captureApiRegionalProbeEnvironment,
   controlCancellationDurationMs,
   fixturePrompt,
-  isDormantSandboxLiveness,
   isExpectedBrowserCancellation,
   maskKnownPublicEvidenceValues,
   openWorkspaceIfCollapsed,
@@ -27,8 +26,10 @@ import {
   runCaptureApiRegionalProbe,
   selectTreeFile,
   validateCaptureApiRegionalProbeResult,
+  waitForCold,
   waitForSandboxLiveness,
   waitForSandboxFileViewerText,
+  waitForWarm,
   type CaptureApiRegionalProbeRequest,
 } from "./workbench-live-acceptance";
 
@@ -747,11 +748,46 @@ describe("workbench live acceptance preflight", () => {
     expect(signals).toHaveLength(2);
   });
 
-  test("accepts holderless draining as dormant without admitting a warm sandbox", () => {
-    expect(isDormantSandboxLiveness("cold")).toBe(true);
-    expect(isDormantSandboxLiveness("draining")).toBe(true);
-    expect(isDormantSandboxLiveness("warming")).toBe(false);
-    expect(isDormantSandboxLiveness("warm")).toBe(false);
+  test("does not call a draining lease cold before teardown completes", async () => {
+    let calls = 0;
+    const client = {
+      async getStreamCapabilities() {
+        calls += 1;
+        return { liveness: calls === 1 ? "draining" : "cold" } as never;
+      },
+    };
+
+    await waitForCold(
+      client,
+      "10000000-0000-4000-8000-000000000001",
+      "20000000-0000-4000-8000-000000000002",
+      1_000,
+      0,
+      50,
+    );
+
+    expect(calls).toBe(2);
+  });
+
+  test("does not call a draining lease warm before deliberate wake completes", async () => {
+    let calls = 0;
+    const client = {
+      async getStreamCapabilities() {
+        calls += 1;
+        return { liveness: calls === 1 ? "draining" : "warm" } as never;
+      },
+    };
+
+    await waitForWarm(
+      client,
+      "10000000-0000-4000-8000-000000000001",
+      "20000000-0000-4000-8000-000000000002",
+      1_000,
+      0,
+      50,
+    );
+
+    expect(calls).toBe(2);
   });
 
   test("requires interactive scopes only from the dedicated canary principal", () => {
