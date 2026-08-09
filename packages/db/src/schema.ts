@@ -1,8 +1,10 @@
 import type {
+  DraftTimelineAnnotation,
   FirstPartyMcpToolName,
   McpPersonalConnectionDelegation,
   McpServerConnectionRef,
   SessionMcpApprovalPolicy,
+  TimelineAnnotation,
 } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import type { SessionToolPolicy } from "@opengeni/contracts";
@@ -2825,6 +2827,7 @@ export const sessionTurns = pgTable(
     position: bigint("position", { mode: "number" }).notNull(),
     prompt: losslessText("prompt").notNull(),
     promptCodecVersion: losslessCodecVersion("prompt_codec_version"),
+    annotations: jsonb("annotations").$type<TimelineAnnotation[]>().notNull().default([]),
     // Host context for this exact turn. System-level at runtime and deliberately
     // separate from the visible prompt/event payload.
     turnInstructions: text("turn_instructions"),
@@ -3380,6 +3383,7 @@ export const composerDrafts = pgTable(
     subjectId: text("subject_id").notNull(),
     revision: bigint("revision", { mode: "number" }).notNull().default(1),
     text: text("text").notNull().default(""),
+    annotations: jsonb("annotations").$type<DraftTimelineAnnotation[]>().notNull().default([]),
     resources: jsonb("resources").$type<unknown[]>().notNull().default([]),
     tools: jsonb("tools").$type<unknown[]>().notNull().default([]),
     toolsProvided: boolean("tools_provided").notNull().default(false),

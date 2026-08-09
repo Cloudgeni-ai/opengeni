@@ -52,6 +52,10 @@ import {
   SteerSessionMessageRequest,
   SubmitHumanInputResponseRequest,
   TerminalPtyExitedPayload,
+  DraftTimelineAnnotations,
+  SubmittedTimelineAnnotations,
+  renderTimelineAnnotationsForModel,
+  numberTimelineAnnotations,
   UpdateSessionMcpApprovalPolicyRequest,
   CLEARED_RUN_STATE_BLOB,
   CLEARED_RUN_STATE_MARKER,
@@ -1414,6 +1418,66 @@ describe("contracts", () => {
         payload: { text: "" },
       }),
     ).toThrow();
+  });
+
+  test("accepts annotation-only messages, requires notes on submit, and renders deterministically", () => {
+    const draft = {
+      id: "00000000-0000-4000-8000-000000000201",
+      source: {
+        kind: "assistant_message" as const,
+        eventId: "00000000-0000-4000-8000-000000000202",
+        eventType: "agent.message.completed" as const,
+        sequence: 7,
+        turnId: "00000000-0000-4000-8000-000000000203",
+        startOffset: 6,
+        endOffset: 10,
+        contextBefore: "alpha ",
+        contextAfter: " omega",
+      },
+      quote: "beta",
+      note: "",
+    };
+    expect(DraftTimelineAnnotations.parse([draft])).toHaveLength(1);
+    expect(SubmittedTimelineAnnotations.safeParse([draft]).success).toBe(false);
+
+    const submitted = { ...draft, note: "Use this exact fact." };
+    const parsed = ClientSessionEvent.parse({
+      type: "user.message",
+      payload: { text: "", annotations: [submitted] },
+    });
+    expect(parsed.type).toBe("user.message");
+    if (parsed.type !== "user.message") throw new Error("expected user.message");
+    expect(parsed.payload.text).toBe("");
+    const numbered = numberTimelineAnnotations([submitted]);
+    expect(renderTimelineAnnotationsForModel("", numbered)).toBe(
+      [
+        "[OpenGeni timeline annotations]",
+        "Annotation 1",
+        `Source: ${JSON.stringify(submitted.source)}`,
+        'Exact quote: "beta"',
+        'User note: "Use this exact fact."',
+      ].join("\n"),
+    );
+  });
+
+  test("rejects duplicate annotation identities", () => {
+    const annotation = {
+      id: "00000000-0000-4000-8000-000000000211",
+      source: {
+        kind: "user_message" as const,
+        eventId: "00000000-0000-4000-8000-000000000212",
+        eventType: "user.message" as const,
+        sequence: 1,
+        turnId: null,
+        startOffset: 0,
+        endOffset: 2,
+        contextBefore: "",
+        contextAfter: "",
+      },
+      quote: "hi",
+      note: "remember",
+    };
+    expect(SubmittedTimelineAnnotations.safeParse([annotation, annotation]).success).toBe(false);
   });
 
   test("validates structured human-input questions and typed client responses", () => {

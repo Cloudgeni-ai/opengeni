@@ -1,4 +1,4 @@
-import type { SessionEvent, SessionStatus } from "@opengeni/sdk";
+import type { DraftTimelineAnnotation, SessionEvent, SessionStatus } from "@opengeni/sdk";
 import {
   ArrowDownIcon,
   ArrowRightIcon,
@@ -68,6 +68,7 @@ import {
   type NoticeItem,
   type TimelineGroup,
   type TimelineItem,
+  type TimelineAnnotationSourceDescriptor,
   type RetainedArtifactLoader,
   type RetainedScreenshotLoader,
   type ToolRegistry,
@@ -94,6 +95,8 @@ import { TimelineComputeLabelProvider } from "../timeline/compute-label";
 import { EntranceAnimationProvider, useEntranceAnimation } from "../timeline/entrance";
 import { SeenActivityIdsProvider } from "../timeline/seen-activity-ids";
 import { TooltipProvider } from "./tooltip";
+import { TimelineAnnotationSelection } from "./timeline-annotation-selection";
+import { TimelineAnnotationsChip } from "./timeline-annotations";
 
 export type MessageTimelineProps = {
   /** Raw session events (projected internally) … */
@@ -158,6 +161,8 @@ export type MessageTimelineProps = {
   turnSummary?: TurnSummaryOptions | undefined;
   /** Follow new events when pinned to the bottom. Defaults to true. */
   autoFollow?: boolean | undefined;
+  /** Capture a same-row text selection into the host's canonical composer draft. */
+  onAnnotate?: ((annotation: DraftTimelineAnnotation) => void) | undefined;
   /** Older durable history exists above the current window (see useSessionEvents). */
   hasOlder?: boolean | undefined;
   /** An older window is being fetched; shows the quiet top shimmer. */
@@ -299,6 +304,7 @@ export function MessageTimeline({
   computeLabel = null,
   turnSummary,
   autoFollow = true,
+  onAnnotate,
   hasOlder = false,
   loadingOlder = false,
   onLoadOlder,
@@ -320,6 +326,20 @@ export function MessageTimeline({
     return projected.filter((item) => item.kind !== "auth-needed" || shouldRenderAuthNeeded(item));
   }, [items, events, shouldRenderAuthNeeded]);
   const allGroups = useMemo(() => groupTimeline(resolvedItems), [resolvedItems]);
+  const annotationSources = useMemo(() => {
+    const sources = new Map<string, TimelineAnnotationSourceDescriptor>();
+    for (const item of resolvedItems) {
+      if (
+        (item.kind === "user-message" ||
+          item.kind === "agent-message" ||
+          item.kind === "tool-call") &&
+        item.annotationSource
+      ) {
+        sources.set(item.annotationSource.eventId, item.annotationSource);
+      }
+    }
+    return sources;
+  }, [resolvedItems]);
   const groups = useStableTimelineGroupKeys(allGroups);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const topSentinelRef = useRef<HTMLDivElement | null>(null);
@@ -1286,6 +1306,11 @@ export function MessageTimeline({
             <EntranceAnimationProvider value={!bulkRender}>
               <TooltipProvider delayDuration={400}>
                 <div className={cn("og-root relative flex min-h-0 flex-col", className)}>
+                  <TimelineAnnotationSelection
+                    rootRef={scrollRef}
+                    sources={annotationSources}
+                    onAnnotate={onAnnotate}
+                  />
                   {/* Pinned: anchoring off so the tip-follow camera owns the motion.
           Unpinned: native scroll anchoring holds the reader's place. */}
                   <div
@@ -2331,19 +2356,34 @@ function UserMessageRow({
     <div className={cn(enter && "animate-og-enter", "flex justify-end")}>
       <div className="flex max-w-[85%] min-w-0 flex-col items-end gap-1">
         <CopyHoverFrame
-          copyText={item.text}
+          copyText={
+            item.text ||
+            (item.annotations ?? [])
+              .map((annotation) => `${annotation.quote}\n${annotation.note}`)
+              .join("\n\n")
+          }
           label="Copy message"
           className="w-fit max-w-full min-w-0"
           trailing={<MessageFooterTime occurredAt={item.occurredAt} />}
         >
           <div className="w-fit max-w-full min-w-0 rounded-og-lg rounded-br-og-xs border border-og-border bg-og-surface-2 px-4 py-2.5 text-og-md leading-6 text-og-fg">
-            {renderMessageText ? (
-              renderMessageText(item.text, item)
-            ) : (
-              <UserMessageBody messageId={item.id} text={item.text}>
-                <Markdown>{item.text}</Markdown>
-              </UserMessageBody>
-            )}
+            {item.text ? (
+              <div data-og-annotation-source-key={item.annotationSource?.eventId}>
+                {renderMessageText ? (
+                  renderMessageText(item.text, item)
+                ) : (
+                  <UserMessageBody messageId={item.id} text={item.text}>
+                    <Markdown>{item.text}</Markdown>
+                  </UserMessageBody>
+                )}
+              </div>
+            ) : null}
+            {(item.annotations?.length ?? 0) > 0 ? (
+              <TimelineAnnotationsChip
+                annotations={item.annotations ?? []}
+                className={item.text ? "mt-2" : undefined}
+              />
+            ) : null}
           </div>
         </CopyHoverFrame>
       </div>
@@ -2371,15 +2411,17 @@ function AgentMessageRow({
   // While streaming, copy is still useful (current text) but keep chrome calm —
   // stamp only after the message finishes (occurredAt tracks completion).
   return (
-    <CopyHoverFrame
-      copyText={item.text}
-      label="Copy message"
-      align="start"
-      className={cn(enter && "animate-og-enter", "min-w-0 text-og-md leading-7 text-og-fg")}
-      trailing={item.streaming ? null : <MessageFooterTime occurredAt={item.occurredAt} />}
-    >
-      {body}
-    </CopyHoverFrame>
+    <div data-og-annotation-source-key={item.annotationSource?.eventId}>
+      <CopyHoverFrame
+        copyText={item.text}
+        label="Copy message"
+        align="start"
+        className={cn(enter && "animate-og-enter", "min-w-0 text-og-md leading-7 text-og-fg")}
+        trailing={item.streaming ? null : <MessageFooterTime occurredAt={item.occurredAt} />}
+      >
+        {body}
+      </CopyHoverFrame>
+    </div>
   );
 }
 

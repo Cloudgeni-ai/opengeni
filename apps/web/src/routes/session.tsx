@@ -1001,6 +1001,7 @@ function SessionChatPane(props: {
               status={props.session.status}
               computeLabel={computeLabel}
               renderMessageText={renderMessageText}
+              onAnnotate={composer.addAnnotation}
               onOpenSession={props.onOpenSession}
               onMemoryClick={props.onMemoryClick}
               onReconnect={props.onReconnect}

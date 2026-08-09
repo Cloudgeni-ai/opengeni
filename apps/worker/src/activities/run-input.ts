@@ -402,9 +402,14 @@ export async function turnInput(
     options.runCredentialsNote,
   );
   if (trigger.type === "user.message") {
-    const payload = trigger.payload as { text?: unknown; resources?: unknown };
-    if (typeof payload.text !== "string" || payload.text.trim().length === 0) {
-      throw new Error("user.message payload is missing text");
+    const payload = trigger.payload as {
+      text?: unknown;
+      annotations?: unknown;
+      resources?: unknown;
+    };
+    const hasAnnotations = Array.isArray(payload.annotations) && payload.annotations.length > 0;
+    if (typeof payload.text !== "string" || (payload.text.trim().length === 0 && !hasAnnotations)) {
+      throw new Error("user.message payload is missing text and annotations");
     }
     const resources = Array.isArray(payload.resources) ? (payload.resources as ResourceRef[]) : [];
     const fileAttachments = await resolveUserMessageFileAttachments(

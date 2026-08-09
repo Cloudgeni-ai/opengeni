@@ -606,6 +606,12 @@
 :where(.og-root).z-\[1\],:where(.og-root) .z-\[1\] {
     z-index: 1;
   }
+:where(.og-root).z-\[75\],:where(.og-root) .z-\[75\] {
+    z-index: 75;
+  }
+:where(.og-root).z-\[80\],:where(.og-root) .z-\[80\] {
+    z-index: 80;
+  }
 :where(.og-root).z-\[100\],:where(.og-root) .z-\[100\] {
     z-index: 100;
   }
@@ -764,6 +770,9 @@
   }
 :where(.og-root).ml-px,:where(.og-root) .ml-px {
     margin-left: 1px;
+  }
+:where(.og-root).box-border,:where(.og-root) .box-border {
+    box-sizing: border-box;
   }
 :where(.og-root).line-clamp-1,:where(.og-root) .line-clamp-1 {
     overflow: hidden;
@@ -934,6 +943,9 @@
 :where(.og-root).max-h-20,:where(.og-root) .max-h-20 {
     max-height: calc(var(--spacing) * 20);
   }
+:where(.og-root).max-h-28,:where(.og-root) .max-h-28 {
+    max-height: calc(var(--spacing) * 28);
+  }
 :where(.og-root).max-h-48,:where(.og-root) .max-h-48 {
     max-height: calc(var(--spacing) * 48);
   }
@@ -966,6 +978,9 @@
   }
 :where(.og-root).max-h-\[min\(30rem\,60dvh\)\],:where(.og-root) .max-h-\[min\(30rem\,60dvh\)\] {
     max-height: min(30rem, 60dvh);
+  }
+:where(.og-root).max-h-\[min\(32rem\,70vh\)\],:where(.og-root) .max-h-\[min\(32rem\,70vh\)\] {
+    max-height: min(32rem, 70vh);
   }
 :where(.og-root).max-h-full,:where(.og-root) .max-h-full {
     max-height: 100%;
@@ -1038,6 +1053,9 @@
   }
 :where(.og-root).w-\[clamp\(12rem\,28\%\,15rem\)\],:where(.og-root) .w-\[clamp\(12rem\,28\%\,15rem\)\] {
     width: clamp(12rem, 28%, 15rem);
+  }
+:where(.og-root).w-\[min\(25rem\,calc\(100vw-1\.5rem\)\)\],:where(.og-root) .w-\[min\(25rem\,calc\(100vw-1\.5rem\)\)\] {
+    width: min(25rem, calc(100vw - 1.5rem));
   }
 :where(.og-root).w-\[min\(36rem\,calc\(100vw-2rem\)\)\],:where(.og-root) .w-\[min\(36rem\,calc\(100vw-2rem\)\)\] {
     width: min(36rem, calc(100vw - 2rem));
@@ -1975,6 +1993,12 @@
       background-color: color-mix(in oklab, var(--og-color-surface-2) 40%, transparent);
     }
   }
+:where(.og-root).bg-og-surface-2\/60,:where(.og-root) .bg-og-surface-2\/60 {
+    background-color: var(--og-color-surface-2);
+    @supports (color: color-mix(in lab, red, red)) {
+      background-color: color-mix(in oklab, var(--og-color-surface-2) 60%, transparent);
+    }
+  }
 :where(.og-root).bg-og-surface-2\/70,:where(.og-root) .bg-og-surface-2\/70 {
     background-color: var(--og-color-surface-2);
     @supports (color: color-mix(in lab, red, red)) {
@@ -2860,6 +2884,10 @@
     --tw-ease: var(--ease-out);
     transition-timing-function: var(--ease-out);
   }
+:where(.og-root).outline-none,:where(.og-root) .outline-none {
+    --tw-outline-style: none;
+    outline-style: none;
+  }
 :where(.og-root).select-all,:where(.og-root) .select-all {
     -webkit-user-select: all;
     user-select: all;
@@ -3620,10 +3648,21 @@
       color: var(--color-fg);
     }
   }
+:where(.og-root).focus\:ring-1,:where(.og-root) .focus\:ring-1 {
+    &:focus {
+      --tw-ring-shadow: var(--tw-ring-inset,) 0 0 0 calc(1px + var(--tw-ring-offset-width)) var(--tw-ring-color, currentcolor);
+      box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
+    }
+  }
 :where(.og-root).focus\:ring-2,:where(.og-root) .focus\:ring-2 {
     &:focus {
       --tw-ring-shadow: var(--tw-ring-inset,) 0 0 0 calc(2px + var(--tw-ring-offset-width)) var(--tw-ring-color, currentcolor);
       box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
+    }
+  }
+:where(.og-root).focus\:ring-og-accent,:where(.og-root) .focus\:ring-og-accent {
+    &:focus {
+      --tw-ring-color: var(--og-color-accent);
     }
   }
 :where(.og-root).focus\:ring-og-accent-soft,:where(.og-root) .focus\:ring-og-accent-soft {
@@ -4300,6 +4339,11 @@
 :where(.og-root).sm\:px-3,:where(.og-root) .sm\:px-3 {
     @media (width >= 40rem) {
       padding-inline: calc(var(--spacing) * 3);
+    }
+  }
+:where(.og-root).sm\:px-4,:where(.og-root) .sm\:px-4 {
+    @media (width >= 40rem) {
+      padding-inline: calc(var(--spacing) * 4);
     }
   }
 :where(.og-root).sm\:px-6,:where(.og-root) .sm\:px-6 {

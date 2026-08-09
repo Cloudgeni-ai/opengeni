@@ -16,7 +16,11 @@ import type {
   WorkspaceInferenceControlRequest,
   WorkspaceInferenceControlResponse,
 } from "@opengeni/contracts";
-import { latencyModeForMetadata, reasoningEffortForMetadata } from "@opengeni/contracts";
+import {
+  DraftTimelineAnnotations,
+  latencyModeForMetadata,
+  reasoningEffortForMetadata,
+} from "@opengeni/contracts";
 import {
   deleteSessionQueueItemInTransaction,
   editQueuedTurnInTransaction,
@@ -47,6 +51,7 @@ import {
 } from "@opengeni/events";
 import type { SessionWorkflowClient } from "../dependencies";
 import { normalizeResources } from "../domain/resources";
+import { validateDraftTimelineAnnotations } from "../domain/timeline-annotations";
 import {
   requireSessionAuthorization,
   type ResolvedSessionAuthorization,
@@ -412,6 +417,7 @@ function composerDraft(
   return {
     revision: row.revision,
     text: row.text,
+    annotations: DraftTimelineAnnotations.parse(row.annotations),
     resources: row.resources as ComposerDraft["resources"],
     model: row.model,
     reasoningEffort: row.reasoningEffort as ComposerDraft["reasoningEffort"],
@@ -686,6 +692,7 @@ export async function getHumanComposerDraft(
   return {
     revision: 0,
     text: "",
+    annotations: [],
     resources: [],
     model: session.model,
     reasoningEffort: reasoningEffortForMetadata(session.metadata, "medium"),
@@ -702,6 +709,12 @@ export async function saveHumanComposerDraft(
   input: SaveComposerDraftRequest,
 ): Promise<ComposerDraft> {
   await authorizeHumanSessionCommand(deps, context, "session.composer.write");
+  const annotations = await validateDraftTimelineAnnotations(
+    deps.db,
+    context.workspaceId,
+    context.sessionId,
+    input.annotations,
+  );
   const row = await withWorkspaceSubjectRls(
     deps.db,
     context.workspaceId,
@@ -711,6 +724,7 @@ export async function saveHumanComposerDraft(
         saveComposerDraftInTransaction(tx as unknown as Database, {
           ...context,
           ...input,
+          annotations,
           resources: normalizeResources(input.resources),
           subjectId: context.subjectId,
         }),

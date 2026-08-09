@@ -117,6 +117,10 @@ import {
   parseWorkspaceArchiveDescriptor,
   stableJson,
   MODEL_ATTACHMENT_REFS_FIELD,
+  MODEL_TIMELINE_ANNOTATIONS_FIELD,
+  TimelineAnnotations,
+  renderTimelineAnnotationsForModel,
+  type TimelineAnnotation,
 } from "@opengeni/contracts";
 
 import {
@@ -4068,6 +4072,7 @@ export async function getFiles(
 export function durableUserHistoryItem(
   prompt: string,
   resources: readonly ResourceRef[],
+  annotations: readonly TimelineAnnotation[] = [],
 ): Record<string, unknown> {
   const attachmentRefs = resources.filter(
     (resource): resource is Extract<ResourceRef, { kind: "file" }> => resource.kind === "file",
@@ -4075,8 +4080,11 @@ export function durableUserHistoryItem(
   return {
     type: "message",
     role: "user",
-    content: prompt,
+    content: renderTimelineAnnotationsForModel(prompt, annotations),
     ...(attachmentRefs.length > 0 ? { [MODEL_ATTACHMENT_REFS_FIELD]: attachmentRefs } : {}),
+    ...(annotations.length > 0
+      ? { [MODEL_TIMELINE_ANNOTATIONS_FIELD]: TimelineAnnotations.parse(annotations) }
+      : {}),
   };
 }
 
@@ -42810,6 +42818,7 @@ export async function claimSessionWorkForAttempt(
               item: durableUserHistoryItem(
                 fromPostgresLosslessText(row.prompt, row.promptCodecVersion),
                 Array.isArray(row.resources) ? (row.resources as ResourceRef[]) : [],
+                TimelineAnnotations.parse(row.annotations),
               ),
             },
             "item",
@@ -48999,6 +49008,7 @@ function mapSessionTurn(row: typeof schema.sessionTurns.$inferSelect): SessionTu
     source: row.source as SessionTurnSource,
     position: row.position,
     prompt: fromPostgresLosslessText(row.prompt, row.promptCodecVersion),
+    annotations: TimelineAnnotations.parse(row.annotations),
     resources: row.resources as ResourceRef[],
     tools: row.tools as ToolRef[],
     toolsProvided: row.toolsProvided,

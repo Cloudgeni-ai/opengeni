@@ -1898,6 +1898,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (event.type === "user.message") {
       const { accepted } = await acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
         text: event.payload.text,
+        annotations: event.payload.annotations,
         turnInstructions: event.payload.turnInstructions ?? null,
         resources: event.payload.resources ?? [],
         model: event.payload.model ?? null,

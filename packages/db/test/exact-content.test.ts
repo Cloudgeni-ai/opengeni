@@ -1,4 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import {
+  MODEL_TIMELINE_ANNOTATIONS_FIELD,
+  numberTimelineAnnotations,
+  renderTimelineAnnotationsForModel,
+} from "@opengeni/contracts";
 import { durableUserHistoryItem, memoryTextForStorage } from "../src";
 
 function syntheticExactText(): string {
@@ -41,5 +46,33 @@ describe("exact DB-bound content", () => {
   test("workspace memory preserves arbitrary accepted text exactly", () => {
     const text = syntheticExactText();
     expect(memoryTextForStorage(text)).toBe(text);
+  });
+
+  test("durable user history retains structured annotations beside deterministic model text", () => {
+    const annotations = numberTimelineAnnotations([
+      {
+        id: "00000000-0000-4000-8000-000000000301",
+        source: {
+          kind: "tool_output",
+          eventId: "00000000-0000-4000-8000-000000000302",
+          eventType: "agent.toolCall.output",
+          sequence: 12,
+          turnId: "00000000-0000-4000-8000-000000000303",
+          startOffset: 0,
+          endOffset: 2,
+          contextBefore: "",
+          contextAfter: "",
+          label: "exec_command",
+        },
+        quote: "ok",
+        note: "Use this result.",
+      },
+    ]);
+    expect(durableUserHistoryItem("Continue", [], annotations)).toEqual({
+      type: "message",
+      role: "user",
+      content: renderTimelineAnnotationsForModel("Continue", annotations),
+      [MODEL_TIMELINE_ANNOTATIONS_FIELD]: annotations,
+    });
   });
 });

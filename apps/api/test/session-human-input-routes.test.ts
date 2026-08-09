@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import {
   applySessionTurnSettlement,
+  appendSessionEvents,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createDb,
@@ -176,6 +177,89 @@ async function frozenFixture() {
 }
 
 describe("structured human-input HTTP surface (real PostgreSQL)", () => {
+  test("accepts annotation-only messages and returns server-numbered structured payloads", async () => {
+    const suffix = crypto.randomUUID();
+    const subjectId = `user:${suffix}`;
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `annotation-account-${suffix}`,
+      accountName: "Annotation route",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `annotation-workspace-${suffix}`,
+      workspaceName: "Annotation route",
+      subjectId,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const session = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "Initial message",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const [source] = await appendSessionEvents(client.db, grant.workspaceId!, session.id, [
+      { type: "agent.message.completed", payload: { text: "alpha beta omega" } },
+    ]);
+    const token = await signDelegatedAccessToken(DELEGATION_SECRET, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      subjectId,
+      permissions: ["sessions:read", "sessions:control"],
+      principalKind: "human_session",
+      exp: Math.floor(Date.now() / 1_000) + 3_600,
+    });
+
+    const response = await app.request(
+      `http://x/v1/workspaces/${grant.workspaceId}/sessions/${session.id}/events`,
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          type: "user.message",
+          clientEventId: crypto.randomUUID(),
+          payload: {
+            text: "",
+            annotations: [
+              {
+                id: crypto.randomUUID(),
+                source: {
+                  kind: "assistant_message",
+                  eventId: source!.id,
+                  eventType: "agent.message.completed",
+                  sequence: source!.sequence,
+                  turnId: null,
+                  startOffset: 6,
+                  endOffset: 10,
+                  contextBefore: "alpha ",
+                  contextAfter: " omega",
+                },
+                quote: "beta",
+                note: "Use this exact source.",
+              },
+            ],
+          },
+        }),
+      },
+    );
+    expect(response.status).toBe(202);
+    expect(await response.json()).toMatchObject({
+      type: "user.message",
+      payload: {
+        text: "",
+        annotations: [
+          {
+            ordinal: 1,
+            quote: "beta",
+            note: "Use this exact source.",
+            source: { eventId: source!.id, startOffset: 6, endOffset: 10 },
+          },
+        ],
+      },
+    });
+  });
+
   test("normal user messages remain accepted when agent human input is disabled", async () => {
     const suffix = crypto.randomUUID();
     const subjectId = `user:${suffix}`;

@@ -1,15 +1,20 @@
 import {
+  DraftTimelineAnnotations,
   McpPersonalConnectionDelegations,
+  TimelineAnnotations,
   metadataWithTurnExecutionPolicyV1,
   mergeResourceRefs,
+  renderTimelineAnnotationsForModel,
   ResourceRef,
   resourceMountPath,
   stableJson,
   turnExecutionPolicyAuditMetadata,
   type McpPersonalConnectionDelegation,
+  type DraftTimelineAnnotation,
   type LatencyMode,
   type ReasoningEffort,
   type TurnExecutionPolicyV1,
+  type TimelineAnnotation,
 } from "@opengeni/contracts";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import type { Database } from "./database";
@@ -446,7 +451,19 @@ async function normalizeQueuePositions(
 }
 
 function draftIsNonEmpty(draft: ComposerDraftRow): boolean {
-  return draft.text.length > 0 || draft.resources.length > 0 || draft.sourceTurnId !== null;
+  return (
+    draft.text.length > 0 ||
+    DraftTimelineAnnotations.parse(draft.annotations).length > 0 ||
+    draft.resources.length > 0 ||
+    draft.sourceTurnId !== null
+  );
+}
+
+function draftAnnotationsFromTurn(value: unknown): DraftTimelineAnnotation[] {
+  return TimelineAnnotations.parse(value).map(({ ordinal: _ordinal, ...annotation }) => ({
+    ...annotation,
+    source: { ...annotation.source },
+  }));
 }
 
 function withCanonicalResourceMountPaths(resources: readonly unknown[]): unknown[] {
@@ -503,6 +520,7 @@ export async function saveComposerDraftInTransaction(
     subjectId: string;
     expectedRevision: number;
     text: string;
+    annotations?: DraftTimelineAnnotation[];
     resources: ResourceRef[];
     model: string;
     reasoningEffort: ReasoningEffort;
@@ -534,6 +552,7 @@ export async function saveComposerDraftInTransaction(
     subjectId: input.subjectId,
     revision,
     text: input.text,
+    annotations: DraftTimelineAnnotations.parse(input.annotations ?? []),
     resources: withCanonicalResourceMountPaths(input.resources),
     tools: [],
     toolsProvided: false,
@@ -919,6 +938,7 @@ export async function editQueuedTurnInTransaction(
     subjectId: input.subjectId,
     revision: nextDraftRevision,
     text: turn.prompt,
+    annotations: draftAnnotationsFromTurn(turn.annotations),
     resources: withCanonicalResourceMountPaths(turn.resources),
     tools: [],
     toolsProvided: false,
@@ -1253,6 +1273,7 @@ export async function submitHumanPromptInTransaction(
     controlEtag?: string | null;
     expectedDraftRevision?: number | null;
     text: string;
+    annotations?: TimelineAnnotation[];
     turnInstructions?: string | null;
     resources: ResourceRef[];
     model?: string | null;
@@ -1277,6 +1298,7 @@ export async function submitHumanPromptInTransaction(
     }>;
   },
 ): Promise<SubmitHumanPromptResult> {
+  const annotations = TimelineAnnotations.parse(input.annotations ?? []);
   const workspaceControl = await lockWorkspaceInferenceControl(db, input.workspaceId, "update");
   await lockSessionEventWriteRows(db, {
     workspaceId: input.workspaceId,
@@ -1293,6 +1315,7 @@ export async function submitHumanPromptInTransaction(
     controlEtag: input.controlEtag ?? null,
     expectedDraftRevision: input.expectedDraftRevision ?? null,
     text: input.text,
+    annotations,
     turnInstructions: input.turnInstructions ?? null,
     resources: withCanonicalResourceMountPaths(input.resources),
     model: input.model ?? null,
@@ -1404,6 +1427,7 @@ export async function submitHumanPromptInTransaction(
       draft &&
       canonicalSessionCommandHash({
         text: draft.text,
+        annotations: DraftTimelineAnnotations.parse(draft.annotations),
         resources: withCanonicalResourceMountPaths(draft.resources),
         model: draft.model,
         reasoningEffort: draft.reasoningEffort,
@@ -1411,6 +1435,7 @@ export async function submitHumanPromptInTransaction(
       }) !==
         canonicalSessionCommandHash({
           text: input.text,
+          annotations: annotations.map(({ ordinal: _ordinal, ...annotation }) => annotation),
           resources: withCanonicalResourceMountPaths(input.resources),
           model: input.model ?? session.model,
           reasoningEffort: input.reasoningEffort ?? input.reasoningEffortFallback,
@@ -1531,6 +1556,7 @@ export async function submitHumanPromptInTransaction(
       clientEventId: input.operationKey,
       payload: {
         text: input.messagePresentation?.text ?? input.text,
+        ...(annotations.length > 0 ? { annotations } : {}),
         ...(input.messagePresentation
           ? {
               presentation: {
@@ -1565,6 +1591,7 @@ export async function submitHumanPromptInTransaction(
           source: input.source,
           position: input.delivery === "steer" ? 0 : existingQueued.length + 1,
           prompt: input.text,
+          annotations,
           turnInstructions:
             editedSourceTurnInstructions !== undefined
               ? editedSourceTurnInstructions
@@ -1749,7 +1776,7 @@ export async function submitHumanPromptInTransaction(
       text: renderRealtimeHumanInputContext({
         delivery: input.delivery,
         routing: realtimeRouting,
-        text: input.text,
+        text: renderTimelineAnnotationsForModel(input.text, annotations),
       }),
       payload: {
         delivery: input.delivery,

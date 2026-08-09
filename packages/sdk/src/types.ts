@@ -996,6 +996,39 @@ export type SessionTurnSource =
   | "system"
   | "compaction";
 
+export type TimelineAnnotationSourceKind = "user_message" | "assistant_message" | "tool_output";
+
+export type TimelineAnnotationSourceEventType =
+  | "user.message"
+  | "agent.message.completed"
+  | "agent.toolCall.output";
+
+export type TimelineAnnotationSource = {
+  kind: TimelineAnnotationSourceKind;
+  eventId: string;
+  eventType: TimelineAnnotationSourceEventType;
+  sequence: number;
+  turnId: string | null;
+  startOffset: number;
+  endOffset: number;
+  contextBefore: string;
+  contextAfter: string;
+  label?: string | undefined;
+};
+
+export type DraftTimelineAnnotation = {
+  id: string;
+  source: TimelineAnnotationSource;
+  quote: string;
+  note: string;
+};
+
+export type SubmittedTimelineAnnotation = DraftTimelineAnnotation;
+
+export type TimelineAnnotation = DraftTimelineAnnotation & {
+  ordinal: number;
+};
+
 export type SessionTurn = {
   id: string;
   workspaceId: string;
@@ -1006,6 +1039,7 @@ export type SessionTurn = {
   source: SessionTurnSource;
   position: number;
   prompt: string;
+  annotations?: TimelineAnnotation[] | undefined;
   resources: ResourceRef[];
   tools: ToolRef[];
   toolsProvided?: boolean | undefined;
@@ -3005,6 +3039,7 @@ export type SessionCommandReceipt = {
 export type ComposerDraft = {
   revision: number;
   text: string;
+  annotations?: DraftTimelineAnnotation[] | undefined;
   resources: ResourceRef[];
   model: string;
   reasoningEffort: ReasoningEffort;
@@ -4494,6 +4529,7 @@ export type UserMessageEventInput = {
   clientEventId?: string | undefined;
   payload: {
     text: string;
+    annotations?: SubmittedTimelineAnnotation[] | undefined;
     turnInstructions?: string | undefined;
     resources?: ResourceRef[] | undefined;
     model?: string | undefined;

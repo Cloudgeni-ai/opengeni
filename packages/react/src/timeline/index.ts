@@ -45,6 +45,7 @@ export type {
   SessionStatusItem,
   TimelineGroup,
   TimelineItem,
+  TimelineAnnotationSourceDescriptor,
   TurnEndItem,
   ToolCallItem,
   UserMessageItem,
