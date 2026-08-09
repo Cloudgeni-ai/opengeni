@@ -136,7 +136,7 @@ export function TimelineAnnotationsChip({
         ref={triggerRef}
         type="button"
         className={cn(
-          "inline-flex min-h-8 items-center gap-1.5 rounded-full border border-og-border bg-og-surface-1 px-2.5 py-1 text-og-sm font-medium text-og-fg-muted outline-none transition hover:bg-og-surface-2 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-[44px]",
+          "inline-flex min-h-8 items-center gap-1.5 rounded-full border border-og-border bg-og-surface-1 px-2.5 py-1 text-og-sm font-medium text-og-fg-muted outline-hidden transition hover:bg-og-surface-2 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-[44px]",
           className,
         )}
         aria-label={`Review ${countLabel}`}
@@ -158,7 +158,7 @@ export function TimelineAnnotationsChip({
                 top: position.top,
                 transform: position.above ? "translateY(-100%)" : undefined,
               }}
-              className="og-root fixed z-[75] box-border max-h-[min(32rem,70vh)] w-[min(25rem,calc(100vw-1.5rem))] overflow-y-auto rounded-og-lg border border-og-border bg-og-surface-1 p-3 text-og-fg shadow-xl outline-none"
+              className="og-root fixed z-[75] box-border max-h-[min(32rem,70vh)] w-[min(25rem,calc(100vw-1.5rem))] overflow-y-auto rounded-og-lg border border-og-border bg-og-surface-1 p-3 text-og-fg shadow-xl outline-hidden"
               aria-label={editable ? "Review timeline annotations" : "Timeline annotations"}
             >
               <div className="mb-2 flex items-center justify-between gap-3">
@@ -170,7 +170,7 @@ export function TimelineAnnotationsChip({
                 </div>
                 <button
                   type="button"
-                  className="rounded-md border-0 bg-transparent px-2 py-1 text-og-xs text-og-fg outline-none hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-[44px]"
+                  className="rounded-md border-0 bg-transparent px-2 py-1 text-og-xs text-og-fg outline-hidden hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-[44px]"
                   onClick={() => {
                     setOpen(false);
                     triggerRef.current?.focus();
@@ -189,7 +189,7 @@ export function TimelineAnnotationsChip({
                     <div className="flex items-center justify-between gap-2">
                       <button
                         type="button"
-                        className="truncate rounded border-0 bg-transparent text-left text-og-xs font-medium text-og-fg-muted underline-offset-2 outline-none hover:text-og-fg hover:underline focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-[44px]"
+                        className="truncate rounded border-0 bg-transparent text-left text-og-xs font-medium text-og-fg-muted underline-offset-2 outline-hidden hover:text-og-fg hover:underline focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-[44px]"
                         onClick={() => {
                           const revealed =
                             onRevealSource?.(annotation.source) ??
@@ -202,7 +202,7 @@ export function TimelineAnnotationsChip({
                       {editable && onRemove ? (
                         <button
                           type="button"
-                          className="shrink-0 rounded border-0 bg-transparent p-1 text-og-fg-subtle outline-none hover:bg-og-surface-1 hover:text-og-status-failed focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:size-[44px]"
+                          className="shrink-0 rounded border-0 bg-transparent p-1 text-og-fg-subtle outline-hidden hover:bg-og-surface-1 hover:text-og-status-failed focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:size-[44px]"
                           aria-label={`Remove annotation ${index + 1}`}
                           onClick={() => onRemove(annotation.id)}
                         >
@@ -230,7 +230,7 @@ export function TimelineAnnotationsChip({
                           rows={2}
                           maxLength={2048}
                           placeholder="What should the agent do with this?"
-                          className="mt-1 w-full resize-y rounded-og-sm border border-og-border bg-og-surface-1 px-2.5 py-2 text-og-sm leading-5 text-og-fg outline-none placeholder:text-og-fg-subtle focus:border-og-accent focus:ring-1 focus:ring-og-accent"
+                          className="mt-1 w-full resize-y rounded-og-sm border border-og-border bg-og-surface-1 px-2.5 py-2 text-og-sm leading-5 text-og-fg outline-hidden placeholder:text-og-fg-subtle focus:border-og-accent focus:ring-1 focus:ring-og-accent"
                           onInput={(event) => onUpdate(annotation.id, event.currentTarget.value)}
                         />
                       </label>

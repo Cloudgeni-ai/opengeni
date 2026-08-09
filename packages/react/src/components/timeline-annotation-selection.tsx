@@ -206,7 +206,7 @@ export function TimelineAnnotationSelection({
       ref={buttonRef}
       type="button"
       style={{ left: candidate.left, top: candidate.top }}
-      className="og-root fixed z-[80] -translate-x-1/2 rounded-full border border-og-border bg-og-surface-1 px-3 py-1.5 text-og-sm font-medium text-og-fg shadow-lg outline-none transition hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-[44px]"
+      className="og-root fixed z-[80] -translate-x-1/2 rounded-full border border-og-border bg-og-surface-1 px-3 py-1.5 text-og-sm font-medium text-og-fg shadow-lg outline-hidden transition hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-[44px]"
       onClick={() => {
         onAnnotate(candidate.annotation);
         document.getSelection()?.removeAllRanges();

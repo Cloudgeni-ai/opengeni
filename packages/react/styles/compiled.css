@@ -2884,10 +2884,6 @@
     --tw-ease: var(--ease-out);
     transition-timing-function: var(--ease-out);
   }
-:where(.og-root).outline-none,:where(.og-root) .outline-none {
-    --tw-outline-style: none;
-    outline-style: none;
-  }
 :where(.og-root).select-all,:where(.og-root) .select-all {
     -webkit-user-select: all;
     user-select: all;
