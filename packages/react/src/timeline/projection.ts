@@ -7,7 +7,6 @@ import {
   tryParseJson,
 } from "../lib/format";
 import { mcpToolLeaf, toolMatchesLeaf } from "./tool-display-name";
-import { timelineAnnotationToolOutputText } from "./parsers";
 import type {
   AgentMessageItem,
   ActivityItem,
@@ -63,6 +62,56 @@ const WORKER_MESSAGE_TOOL = "session_send_message";
  * render as machine-input rows.
  */
 const LANDMARK_ONLY_TOOL_LEAVES = new Set(["memory_save", "memory_correct"]);
+const TIMELINE_ANNOTATION_ANSI_SEQUENCE = new RegExp("\\u001B\\[[0-?]*[ -/]*[@-~]", "g");
+
+function safeTimelineAnnotationJson(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? "";
+  } catch {
+    return String(value ?? "");
+  }
+}
+
+function timelineAnnotationToolOutputValue(value: unknown, depth = 0): string {
+  if (depth > 8 || value === null || value === undefined) {
+    return value == null ? "" : safeTimelineAnnotationJson(value);
+  }
+  if (typeof value === "string") return value;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    return safeTimelineAnnotationJson(value);
+  }
+  const record = value as Record<string, unknown>;
+  if (record.type === "text" && typeof record.text === "string") return record.text;
+  if (Array.isArray(record.content)) {
+    const text = record.content.find(
+      (part) =>
+        part !== null &&
+        typeof part === "object" &&
+        (part as { type?: unknown }).type === "text" &&
+        typeof (part as { text?: unknown }).text === "string",
+    ) as { text: string } | undefined;
+    if (text) return text.text;
+  }
+  if ("structuredContent" in record) {
+    return timelineAnnotationToolOutputValue(record.structuredContent, depth + 1);
+  }
+  if ("result" in record) return timelineAnnotationToolOutputValue(record.result, depth + 1);
+  return safeTimelineAnnotationJson(value);
+}
+
+/** Browser mirror of the server's canonical annotation source projection. */
+function timelineAnnotationToolOutputText(output: unknown): string | null {
+  const raw = timelineAnnotationToolOutputValue(output);
+  const marker = raw.indexOf("\nOutput:\n");
+  const text = (
+    marker >= 0
+      ? raw.slice(marker + "\nOutput:\n".length)
+      : raw.startsWith("Output:\n")
+        ? raw.slice("Output:\n".length)
+        : raw
+  ).replace(TIMELINE_ANNOTATION_ANSI_SEQUENCE, "");
+  return text.length > 0 ? text : null;
+}
 
 export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
   const items: TimelineItem[] = [];

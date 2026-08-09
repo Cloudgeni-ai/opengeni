@@ -480,52 +480,6 @@ export function unwrapMcpOutput(output: unknown): {
   return { text: normalized.text, isError: normalized.isError };
 }
 
-const TIMELINE_ANNOTATION_ANSI_SEQUENCE = new RegExp("\\u001B\\[[0-?]*[ -/]*[@-~]", "g");
-
-function safeTimelineAnnotationJson(value: unknown): string {
-  try {
-    return JSON.stringify(value) ?? "";
-  } catch {
-    return String(value ?? "");
-  }
-}
-
-function timelineAnnotationToolOutputValue(value: unknown, depth = 0): string {
-  if (depth > 8 || value === null || value === undefined) {
-    return value == null ? "" : safeTimelineAnnotationJson(value);
-  }
-  if (typeof value === "string") return value;
-  if (typeof value !== "object" || Array.isArray(value)) {
-    return safeTimelineAnnotationJson(value);
-  }
-  const record = value as Record<string, unknown>;
-  if (record.type === "text" && typeof record.text === "string") return record.text;
-  if (Array.isArray(record.content)) {
-    const text = record.content.find(
-      (part) =>
-        part !== null &&
-        typeof part === "object" &&
-        (part as { type?: unknown }).type === "text" &&
-        typeof (part as { text?: unknown }).text === "string",
-    ) as { text: string } | undefined;
-    if (text) return text.text;
-  }
-  if ("structuredContent" in record) {
-    return timelineAnnotationToolOutputValue(record.structuredContent, depth + 1);
-  }
-  if ("result" in record) return timelineAnnotationToolOutputValue(record.result, depth + 1);
-  return safeTimelineAnnotationJson(value);
-}
-
-/** Browser mirror of the server's canonical annotation source projection. */
-export function timelineAnnotationToolOutputText(output: unknown): string | null {
-  const text = stripExecBanner(timelineAnnotationToolOutputValue(output)).replace(
-    TIMELINE_ANNOTATION_ANSI_SEQUENCE,
-    "",
-  );
-  return text.length > 0 ? text : null;
-}
-
 /* --- computer-use screenshot extraction ------------------------------------- */
 
 /**
