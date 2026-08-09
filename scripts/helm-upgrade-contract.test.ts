@@ -60,6 +60,25 @@ describe("Helm database upgrade contract", () => {
     }
   });
 
+  test("projects only dedicated credentials into the artifact materializer", async () => {
+    const values = await source("deploy/helm/opengeni/values.yaml");
+    const materializer = await source(
+      "deploy/helm/opengeni/templates/artifact-materializer-deployment.yaml",
+    );
+
+    expect(materializer).not.toContain("envFrom:");
+    expect(materializer).not.toContain('name: {{ include "opengeni.secretName" . }}');
+    expect(materializer).toContain("$materializer.credentialsSecret");
+    expect(materializer).toContain("$materializer.databaseUrlSecretKey");
+    expect(materializer).toContain("$materializer.objectStorageAccessKeyIdSecretKey");
+    expect(materializer).toContain("$materializer.objectStorageAzureAccountKeySecretKey");
+    expect(materializer).toContain("$materializer.objectStorageGcsCredentialsJsonSecretKey");
+    expect(values).toContain('credentialsSecret: ""');
+    expect(values).toContain("childOpenFiles: 64");
+    expect(values).toContain("childProcesses: 64");
+    expect(values).toContain("childFileBytes: 536870912");
+  });
+
   test("imports the reviewed capability catalog by default with an explicit opt-out", async () => {
     const values = await source("deploy/helm/opengeni/values.yaml");
     const job = await source("deploy/helm/opengeni/templates/catalog-import-job.yaml");

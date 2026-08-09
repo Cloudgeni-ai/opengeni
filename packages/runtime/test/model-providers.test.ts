@@ -1487,6 +1487,94 @@ function webSearchHostedTools(
 }
 
 describe("multi-provider gating in buildOpenGeniAgent", () => {
+  test("publishes a final Office artifact only through the verified host adapter", async () => {
+    const settings = multiProviderSettings({ sandboxBackend: "docker" });
+    const environment = {
+      OPENGENI_ARTIFACT_RUNTIME_MANIFEST: "/opt/opengeni/artifacts/installation.json",
+      OPENGENI_ARTIFACT_TOOL_ENTRY: "/opt/opengeni/artifacts/skill-facade-entry.mjs",
+    };
+    expect(
+      buildOpenGeniAgent(settings, [], {
+        artifactRuntimeAvailable: true,
+        sandboxEnvironment: environment,
+      }).tools.some(
+        (tool) => tool.type === "function" && tool.name === "publish_editable_artifact",
+      ),
+    ).toBe(false);
+    expect(() =>
+      buildOpenGeniAgent(settings, [], {
+        editableArtifactPublication: {
+          execute: async () => {
+            throw new Error("unreachable");
+          },
+        },
+      }),
+    ).toThrow("requires a verified artifact runtime");
+
+    const calls: unknown[] = [];
+    const receipt = {
+      type: "editable_artifact" as const,
+      schemaVersion: 1 as const,
+      artifact: {
+        id: "a".repeat(32),
+        modality: "document" as const,
+        title: "Board report",
+      },
+      sourceFile: {
+        id: "11111111-1111-4111-8111-111111111111",
+        filename: "board-report.docx",
+        contentType:
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document" as const,
+        sizeBytes: 4_096,
+        sha256: "b".repeat(64),
+      },
+      editorPath: `/workspaces/22222222-2222-4222-8222-222222222222/artifacts/editable/${"a".repeat(32)}`,
+    };
+    const agent = buildOpenGeniAgent(settings, [], {
+      artifactRuntimeAvailable: true,
+      sandboxEnvironment: environment,
+      editableArtifactPublication: {
+        execute: async (input, context) => {
+          calls.push({ input, context });
+          return receipt;
+        },
+      },
+    });
+    const tool = agent.tools.find(
+      (candidate) =>
+        candidate.type === "function" && candidate.name === "publish_editable_artifact",
+    );
+    if (!tool || tool.type !== "function") throw new Error("publication tool missing");
+    expect(
+      await tool.invoke(
+        new RunContext(),
+        JSON.stringify({
+          path: "/workspace/board-report.docx",
+          title: "Board report",
+          modality: "document",
+        }),
+        {
+          toolCall: {
+            type: "function_call",
+            callId: "call-publish-1",
+            name: "publish_editable_artifact",
+            arguments: "{}",
+          },
+        },
+      ),
+    ).toEqual(receipt);
+    expect(calls).toEqual([
+      {
+        input: {
+          path: "/workspace/board-report.docx",
+          title: "Board report",
+          modality: "document",
+        },
+        context: { toolCallId: "call-publish-1" },
+      },
+    ]);
+  });
+
   test("selects exactly one image transport without changing the stable tool intent", async () => {
     const settings = multiProviderSettings();
     const native = buildOpenGeniAgent(settings, [], {

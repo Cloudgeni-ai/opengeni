@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "targets": [
+    {
+      "target": "darwin-x64",
+      "kind": "native",
+      "rustTarget": "x86_64-apple-darwin",
+      "os": "darwin",
+      "cpu": "x64"
+    },
+    {
+      "target": "darwin-arm64",
+      "kind": "native",
+      "rustTarget": "aarch64-apple-darwin",
+      "os": "darwin",
+      "cpu": "arm64"
+    },
+    {
+      "target": "linux-x64-gnu",
+      "kind": "native",
+      "rustTarget": "x86_64-unknown-linux-gnu",
+      "os": "linux",
+      "cpu": "x64",
+      "libc": "glibc"
+    },
+    {
+      "target": "linux-arm64-gnu",
+      "kind": "native",
+      "rustTarget": "aarch64-unknown-linux-gnu",
+      "os": "linux",
+      "cpu": "arm64",
+      "libc": "glibc"
+    },
+    {
+      "target": "linux-x64-musl",
+      "kind": "native",
+      "rustTarget": "x86_64-unknown-linux-musl",
+      "os": "linux",
+      "cpu": "x64",
+      "libc": "musl"
+    },
+    {
+      "target": "linux-arm64-musl",
+      "kind": "native",
+      "rustTarget": "aarch64-unknown-linux-musl",
+      "os": "linux",
+      "cpu": "arm64",
+      "libc": "musl"
+    },
+    {
+      "target": "win32-x64-msvc",
+      "kind": "native",
+      "rustTarget": "x86_64-pc-windows-msvc",
+      "os": "win32",
+      "cpu": "x64"
+    },
+    {
+      "target": "wasm-web",
+      "kind": "wasm",
+      "rustTarget": "wasm32-unknown-unknown",
+      "os": "browser",
+      "cpu": "wasm32"
+    }
+  ]
+}

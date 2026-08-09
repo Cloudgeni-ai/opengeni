@@ -11,6 +11,9 @@ import { ClientResumableVoiceInputConfig } from "./transcription-recordings";
 export * from "./slack-bot-scopes";
 export * from "./connector-destinations";
 export * from "./image-generation";
+export * from "./editable-artifacts";
+export * from "./editable-artifact-committed-transaction";
+export * from "./editable-artifact-serialized-commit";
 
 export {
   CreateWorkspaceArtifactRequest,

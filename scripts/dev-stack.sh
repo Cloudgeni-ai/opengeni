@@ -192,6 +192,8 @@ choose_port OPENGENI_MINIO_CONSOLE_HOST_PORT 9001
 choose_port OPENGENI_API_PORT 8000
 choose_port OPENGENI_WORKER_HTTP_PORT 8001
 choose_port OPENGENI_TURN_WORKER_HTTP_PORT 8002
+choose_port OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT 9465
+choose_port OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT 9466
 choose_port OPENGENI_WEB_PORT 3000
 
 default_database_url="postgres://opengeni_app:opengeni_app@127.0.0.1:5432/opengeni"
@@ -207,6 +209,47 @@ if [ -z "${OPENGENI_MIGRATIONS_DATABASE_URL:-}" ] || [ "${OPENGENI_MIGRATIONS_DA
 else
   export OPENGENI_MIGRATIONS_DATABASE_URL="$(rewrite_loopback_port "$OPENGENI_MIGRATIONS_DATABASE_URL" "$OPENGENI_POSTGRES_HOST_PORT")"
 fi
+
+# Artifact services use separate, least-privileged login roles. Generate real
+# per-launch credentials, converge the roles through provision-roles below, and
+# persist only the resulting DSNs in the ignored .env.runtime for this stack.
+OPENGENI_ARTIFACT_MATERIALIZER_DATABASE_USER=opengeni_artifact_materializer
+OPENGENI_ARTIFACT_OUTBOX_DATABASE_USER=opengeni_artifact_outbox_dispatcher
+OPENGENI_ARTIFACT_MATERIALIZER_DATABASE_PASSWORD="$(bun -e 'import { randomBytes } from "node:crypto"; process.stdout.write(randomBytes(24).toString("base64url"))')"
+OPENGENI_ARTIFACT_OUTBOX_DATABASE_PASSWORD="$(bun -e 'import { randomBytes } from "node:crypto"; process.stdout.write(randomBytes(24).toString("base64url"))')"
+export OPENGENI_ARTIFACT_MATERIALIZER_DATABASE_USER
+export OPENGENI_ARTIFACT_OUTBOX_DATABASE_USER
+export OPENGENI_ARTIFACT_MATERIALIZER_DATABASE_PASSWORD
+export OPENGENI_ARTIFACT_OUTBOX_DATABASE_PASSWORD
+
+database_url_for_role() {
+  local role="$1"
+  local password="$2"
+  OPENGENI_ROLE_DSN_BASE="$OPENGENI_MIGRATIONS_DATABASE_URL" \
+    OPENGENI_ROLE_DSN_USER="$role" \
+    OPENGENI_ROLE_DSN_PASSWORD="$password" \
+    bun -e '
+      const url = new URL(Bun.env.OPENGENI_ROLE_DSN_BASE);
+      if (!['"'"'postgres:'"'"', '"'"'postgresql:'"'"'].includes(url.protocol)) throw new Error('"'"'Local database URL must use PostgreSQL'"'"');
+      if (!['"'"'localhost'"'"', '"'"'127.0.0.1'"'"', '"'"'[::1]'"'"'].includes(url.hostname.toLowerCase())) throw new Error('"'"'Local artifact services require a loopback database URL'"'"');
+      url.username = Bun.env.OPENGENI_ROLE_DSN_USER;
+      url.password = Bun.env.OPENGENI_ROLE_DSN_PASSWORD;
+      process.stdout.write(url.href);
+    '
+}
+
+OPENGENI_ARTIFACT_MATERIALIZER_DATABASE_URL="$(database_url_for_role \
+  "$OPENGENI_ARTIFACT_MATERIALIZER_DATABASE_USER" \
+  "$OPENGENI_ARTIFACT_MATERIALIZER_DATABASE_PASSWORD")"
+OPENGENI_ARTIFACT_OUTBOX_DATABASE_URL="$(database_url_for_role \
+  "$OPENGENI_ARTIFACT_OUTBOX_DATABASE_USER" \
+  "$OPENGENI_ARTIFACT_OUTBOX_DATABASE_PASSWORD")"
+OPENGENI_ARTIFACT_MATERIALIZER_DATABASE_ROLE="$OPENGENI_ARTIFACT_MATERIALIZER_DATABASE_USER"
+OPENGENI_ARTIFACT_OUTBOX_DATABASE_ROLE="$OPENGENI_ARTIFACT_OUTBOX_DATABASE_USER"
+export OPENGENI_ARTIFACT_MATERIALIZER_DATABASE_URL
+export OPENGENI_ARTIFACT_OUTBOX_DATABASE_URL
+export OPENGENI_ARTIFACT_MATERIALIZER_DATABASE_ROLE
+export OPENGENI_ARTIFACT_OUTBOX_DATABASE_ROLE
 
 default_nats_url="nats://127.0.0.1:4222"
 if [ -z "${OPENGENI_NATS_URL:-}" ] || [ "${OPENGENI_NATS_URL}" = "$default_nats_url" ]; then
@@ -258,12 +301,64 @@ else
   export VITE_API_BASE_URL="$(rewrite_loopback_port "$VITE_API_BASE_URL" "$OPENGENI_API_PORT")"
 fi
 
+# A clean checkout must establish the canonical workspace package links before
+# the generated facade is verified. The facade never searches alternate roots.
+bun install --frozen-lockfile
+
+# Local editable-artifact authority uses a separately typed current-host bundle.
+# It is rebuilt only when its exact source/toolchain fingerprint or smoke receipt
+# changes. Production's complete eight-target locator remains untouched and a
+# development manifest is rejected by the runtime when NODE_ENV=production.
+unset OPENGENI_ARTIFACT_RUNTIME_MANIFEST
+export NODE_ENV=development
+artifact_development_root="$(pwd)/.opengeni/artifact-runtime-development"
+bun scripts/prepare-development-artifact-runtime.ts \
+  --repository-root "$(pwd)" \
+  --output "$artifact_development_root"
+export OPENGENI_ARTIFACT_DEVELOPMENT_RUNTIME_MANIFEST="${artifact_development_root}/installation.development.json"
+export OPENGENI_ARTIFACT_TOOL_ENTRY="${artifact_development_root}/skill-facade-entry.mjs"
+export OPENGENI_ARTIFACT_MATERIALIZER_EXECUTABLE="${artifact_development_root}/opengeni-artifact-materializer"
+export OPENGENI_ARTIFACT_MATERIALIZER_ENABLED=true
+export OPENGENI_ARTIFACT_OUTBOX_ENABLED=true
+export OPENGENI_ARTIFACT_LOCAL_DEVELOPMENT=true
+export OPENGENI_ARTIFACT_MATERIALIZER_UNSANDBOXED_DEVELOPMENT=true
+export OPENGENI_ARTIFACT_MATERIALIZER_HTTP_HOST=127.0.0.1
+
+# Native agent skills require a source-matched Linux runtime inside the sandbox
+# image. Resolve only the exact clean-HEAD CI artifact; never reuse a stale
+# bundle. Ordinary API/web development remains available when no exact artifact
+# exists, while OPENGENI_REQUIRE_SANDBOX_ARTIFACT_RUNTIME=1 makes that mismatch
+# an explicit startup failure for artifact-engine work.
+sandbox_runtime_bundle=".opengeni/no-artifact-runtime-for-this-source"
+sandbox_source_tag="$(git rev-parse --short=12 HEAD)"
+if [ "${OPENGENI_SANDBOX_BACKEND:-docker}" = "docker" ]; then
+  if sandbox_runtime_json="$(bun scripts/resolve-development-sandbox-runtime.ts \
+    --repository-root "$(pwd)" \
+    --output "$(pwd)/.release/artifact-runtime")"; then
+    sandbox_source_tag="$(printf '%s' "$sandbox_runtime_json" | bun -e 'const value=await Bun.stdin.json();process.stdout.write(value.sourceTag)')"
+    sandbox_runtime_bundle=".release/artifact-runtime"
+    OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED=true
+    echo "Using exact-head sandbox artifact runtime (${sandbox_source_tag})."
+  else
+    OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED=false
+    if [ "${OPENGENI_REQUIRE_SANDBOX_ARTIFACT_RUNTIME:-0}" = "1" ]; then
+      echo "Exact-head sandbox artifact runtime is required but unavailable." >&2
+      exit 1
+    fi
+    echo "Exact-head sandbox artifact runtime unavailable; native artifact skills are disabled." >&2
+  fi
+  OPENGENI_DOCKER_IMAGE="opengeni-sandbox:local-${sandbox_source_tag}"
+  export OPENGENI_DOCKER_IMAGE OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED
+fi
+
 # Sibling shells / `bun run dev:*` source this after `.env`. Use printf so URL
 # passwords containing `$` / backticks cannot break the file via heredoc expansion.
 {
   printf '%s\n' "# Generated by scripts/dev-stack.sh for worktree stack ${COMPOSE_PROJECT_NAME}. Do not commit."
   printf 'COMPOSE_PROJECT_NAME=%s\n' "${COMPOSE_PROJECT_NAME}"
   printf 'OPENGENI_DOCKER_NETWORK=%s\n' "${OPENGENI_DOCKER_NETWORK}"
+  printf 'OPENGENI_DOCKER_IMAGE=%s\n' "${OPENGENI_DOCKER_IMAGE:-opengeni-sandbox:local}"
+  printf 'OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED=%s\n' "${OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED:-false}"
   printf 'OPENGENI_POSTGRES_HOST_PORT=%s\n' "${OPENGENI_POSTGRES_HOST_PORT}"
   printf 'OPENGENI_NATS_HOST_PORT=%s\n' "${OPENGENI_NATS_HOST_PORT}"
   printf 'OPENGENI_NATS_MONITOR_HOST_PORT=%s\n' "${OPENGENI_NATS_MONITOR_HOST_PORT}"
@@ -273,6 +368,8 @@ fi
   printf 'OPENGENI_API_PORT=%s\n' "${OPENGENI_API_PORT}"
   printf 'OPENGENI_WORKER_HTTP_PORT=%s\n' "${OPENGENI_WORKER_HTTP_PORT}"
   printf 'OPENGENI_TURN_WORKER_HTTP_PORT=%s\n' "${OPENGENI_TURN_WORKER_HTTP_PORT}"
+  printf 'OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT=%s\n' "${OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT}"
+  printf 'OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT=%s\n' "${OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT}"
   printf 'OPENGENI_WEB_PORT=%s\n' "${OPENGENI_WEB_PORT}"
   printf 'OPENGENI_DATABASE_URL=%s\n' "${OPENGENI_DATABASE_URL}"
   printf 'OPENGENI_MIGRATIONS_DATABASE_URL=%s\n' "${OPENGENI_MIGRATIONS_DATABASE_URL}"
@@ -282,6 +379,19 @@ fi
   printf 'OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT=%s\n' "${OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT}"
   printf 'OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT=%s\n' "${OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT}"
   printf 'OPENGENI_CODEX_SUBSCRIPTION_ENABLED=%s\n' "${OPENGENI_CODEX_SUBSCRIPTION_ENABLED}"
+  printf 'NODE_ENV=%s\n' "${NODE_ENV}"
+  printf 'OPENGENI_ARTIFACT_DEVELOPMENT_RUNTIME_MANIFEST=%s\n' "${OPENGENI_ARTIFACT_DEVELOPMENT_RUNTIME_MANIFEST}"
+  printf 'OPENGENI_ARTIFACT_TOOL_ENTRY=%s\n' "${OPENGENI_ARTIFACT_TOOL_ENTRY}"
+  printf 'OPENGENI_ARTIFACT_MATERIALIZER_EXECUTABLE=%s\n' "${OPENGENI_ARTIFACT_MATERIALIZER_EXECUTABLE}"
+  printf 'OPENGENI_ARTIFACT_MATERIALIZER_ENABLED=%s\n' "${OPENGENI_ARTIFACT_MATERIALIZER_ENABLED}"
+  printf 'OPENGENI_ARTIFACT_OUTBOX_ENABLED=%s\n' "${OPENGENI_ARTIFACT_OUTBOX_ENABLED}"
+  printf 'OPENGENI_ARTIFACT_LOCAL_DEVELOPMENT=%s\n' "${OPENGENI_ARTIFACT_LOCAL_DEVELOPMENT}"
+  printf 'OPENGENI_ARTIFACT_MATERIALIZER_UNSANDBOXED_DEVELOPMENT=%s\n' "${OPENGENI_ARTIFACT_MATERIALIZER_UNSANDBOXED_DEVELOPMENT}"
+  printf 'OPENGENI_ARTIFACT_MATERIALIZER_HTTP_HOST=%s\n' "${OPENGENI_ARTIFACT_MATERIALIZER_HTTP_HOST}"
+  printf 'OPENGENI_ARTIFACT_MATERIALIZER_DATABASE_URL=%s\n' "${OPENGENI_ARTIFACT_MATERIALIZER_DATABASE_URL}"
+  printf 'OPENGENI_ARTIFACT_MATERIALIZER_DATABASE_ROLE=%s\n' "${OPENGENI_ARTIFACT_MATERIALIZER_DATABASE_ROLE}"
+  printf 'OPENGENI_ARTIFACT_OUTBOX_DATABASE_URL=%s\n' "${OPENGENI_ARTIFACT_OUTBOX_DATABASE_URL}"
+  printf 'OPENGENI_ARTIFACT_OUTBOX_DATABASE_ROLE=%s\n' "${OPENGENI_ARTIFACT_OUTBOX_DATABASE_ROLE}"
   printf 'VITE_API_BASE_URL=%s\n' "${VITE_API_BASE_URL}"
 } >.env.runtime
 
@@ -289,21 +399,30 @@ echo "OpenGeni worktree stack: compose project=${COMPOSE_PROJECT_NAME}"
 echo "  api=${VITE_API_BASE_URL}  web=http://127.0.0.1:${OPENGENI_WEB_PORT}"
 echo "  postgres=127.0.0.1:${OPENGENI_POSTGRES_HOST_PORT}  nats=${OPENGENI_NATS_URL}"
 echo "  temporal=${OPENGENI_TEMPORAL_HOST}  minio=${OPENGENI_OBJECT_STORAGE_ENDPOINT}"
+echo "  artifact-materializer=http://127.0.0.1:${OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT}  artifact-outbox=http://127.0.0.1:${OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT}"
 echo "  Wrote .env.runtime (source it in sibling shells)."
 
-bun install
 docker compose up -d postgres nats temporal minio minio-init
 (cd packages/db && bun run migrate)
 (cd packages/db && bun run provision-roles)
+# The sidecars need only their dedicated DSNs. Do not leak raw provisioning
+# passwords into API/web/worker child environments after role convergence.
+unset OPENGENI_ARTIFACT_MATERIALIZER_DATABASE_PASSWORD
+unset OPENGENI_ARTIFACT_OUTBOX_DATABASE_PASSWORD
 if [ "${OPENGENI_CATALOG_IMPORT_ENABLED:-true}" = "true" ]; then
   OPENGENI_DATABASE_URL="$OPENGENI_MIGRATIONS_DATABASE_URL" \
     bun scripts/import-integrations-catalog.ts \
       --snapshot data/catalog/integrations-snapshot.json --if-changed --skip-logos
 fi
-if [ "${OPENGENI_SANDBOX_BACKEND:-docker}" != "none" ]; then
-  docker build -f docker/sandbox.Dockerfile -t opengeni-sandbox:local .
+if [ "${OPENGENI_SANDBOX_BACKEND:-docker}" = "docker" ]; then
+  docker build \
+    -f docker/sandbox.Dockerfile \
+    --build-arg "OPENGENI_ARTIFACT_RUNTIME_BUNDLE=${sandbox_runtime_bundle}" \
+    --build-arg "OPENGENI_SOURCE_SHA=$(git rev-parse HEAD)" \
+    -t "${OPENGENI_DOCKER_IMAGE}" \
+    .
 else
-  echo "Skipping sandbox image build (OPENGENI_SANDBOX_BACKEND=none)."
+  echo "Skipping local Docker sandbox image build (backend=${OPENGENI_SANDBOX_BACKEND:-docker})."
 fi
 
 pids=()
@@ -322,6 +441,12 @@ pids+=("$!")
 
 (cd apps/worker && OPENGENI_WORKER_ROLE=turn \
   OPENGENI_WORKER_HTTP_PORT="${OPENGENI_TURN_WORKER_HTTP_PORT}" bun run dev:watch) &
+pids+=("$!")
+
+(cd apps/worker && bun run start:artifact-materializer) &
+pids+=("$!")
+
+(cd apps/worker && bun run start:artifact-outbox) &
 pids+=("$!")
 
 (cd apps/web && bun x vite dev --port "${OPENGENI_WEB_PORT}" --host 0.0.0.0) &

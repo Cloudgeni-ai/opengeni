@@ -2134,6 +2134,10 @@ function runtimeEnvValues(
     valueEnv("OPENGENI_API_HOST", "0.0.0.0"),
     valueEnv("OPENGENI_API_PORT", "8000"),
     valueEnv("OPENGENI_SANDBOX_BACKEND", contract.sandbox.backend),
+    valueEnv(
+      "OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED",
+      env.OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED ?? "false",
+    ),
     valueEnv("OPENGENI_OPENAI_PROVIDER", inferredOpenAiProvider(env)),
     valueEnv(
       "OPENGENI_OPENAI_MODEL",
@@ -2454,6 +2458,8 @@ function addRuntimeConfigHelmValues(
   values["config.OPENGENI_TEMPORAL_NAMESPACE"] = contract.temporal.namespace;
   values["config.OPENGENI_TEMPORAL_TASK_QUEUE"] = contract.temporal.taskQueue;
   values["config.OPENGENI_SANDBOX_BACKEND"] = contract.sandbox.backend;
+  values["config.OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED"] =
+    env.OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED ?? "false";
   values["config.OPENGENI_OPENAI_PROVIDER"] = inferredOpenAiProvider(env);
   values["config.OPENGENI_OPENAI_MODEL"] =
     env.OPENGENI_OPENAI_MODEL ?? env.OPENGENI_AZURE_OPENAI_DEPLOYMENT ?? "gpt-5.6-sol";

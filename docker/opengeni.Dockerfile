@@ -11,6 +11,10 @@ COPY apps/worker/package.json apps/worker/package.json
 COPY apps/web/package.json apps/web/package.json
 COPY examples/northstar-support/package.json examples/northstar-support/package.json
 COPY packages/agent-proto/package.json packages/agent-proto/package.json
+COPY packages/artifact-kernel-wasm-document/package.json packages/artifact-kernel-wasm-document/package.json
+COPY packages/artifact-kernel-wasm-presentation/package.json packages/artifact-kernel-wasm-presentation/package.json
+COPY packages/artifact-kernel-wasm-spreadsheet/package.json packages/artifact-kernel-wasm-spreadsheet/package.json
+COPY packages/artifact-tool/package.json packages/artifact-tool/package.json
 COPY packages/codex/package.json packages/codex/package.json
 COPY packages/config/package.json packages/config/package.json
 COPY packages/contracts/package.json packages/contracts/package.json
@@ -49,7 +53,34 @@ ENV PORT=8080
 EXPOSE 8080
 CMD ["bun", "run", "--cwd", "examples/northstar-support", "start"]
 
-FROM base AS api
+# Shared exact artifact runtime for every server-side authority that opens the
+# native kernel. Release automation must stage one verified bundle per OCI
+# architecture at `.release/artifact-runtime/<amd64|arm64>/`. The bundle is
+# root-owned/read-only, and both API and materializer image builds fail before
+# publication if its complete release/install chain or facade probe is invalid.
+FROM base AS artifact-runtime-base
+ARG TARGETARCH
+ARG OPENGENI_ARTIFACT_RUNTIME_BUNDLE=.release/artifact-runtime
+USER root
+RUN case "$TARGETARCH" in \
+      amd64) expected_target=linux-x64-gnu ;; \
+      arm64) expected_target=linux-arm64-gnu ;; \
+      *) echo "unsupported artifact runtime OCI architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+  && printf '%s' "$expected_target" >/tmp/opengeni-artifact-runtime-target
+RUN install -d -o root -g root -m 0555 /app/artifact-runtime
+COPY --chown=root:root ${OPENGENI_ARTIFACT_RUNTIME_BUNDLE}/${TARGETARCH}/ /app/artifact-runtime/
+RUN expected_target="$(cat /tmp/opengeni-artifact-runtime-target)" \
+  && actual_target="$(bun -e 'const value=await Bun.file("/app/artifact-runtime/installation.json").json();process.stdout.write(typeof value.target==="string"?value.target:"")')" \
+  && test "$actual_target" = "$expected_target" \
+  || { echo "artifact runtime bundle target does not match OCI architecture" >&2; exit 1; }
+RUN chmod -R a-w /app/artifact-runtime
+ENV OPENGENI_ARTIFACT_RUNTIME_MANIFEST=/app/artifact-runtime/installation.json \
+  OPENGENI_ARTIFACT_TOOL_ENTRY=/app/artifact-runtime/skill-facade-entry.mjs
+USER bun
+RUN bun packages/artifact-tool/src/runtime-cli-entry.ts doctor --json
+
+FROM artifact-runtime-base AS api
 USER root
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ffmpeg \
@@ -89,6 +120,41 @@ ENV OPENAI_AGENTS_PYTHON=/usr/bin/python3
 USER bun
 RUN bun scripts/build-runtime-processes.ts worker
 CMD ["bun", "apps/worker/dist/process/index.js"]
+
+# Dedicated durable live-hint outbox dispatcher. It has no native artifact
+# runtime and authenticates with the narrow dispatcher-only PostgreSQL role.
+FROM base AS artifact-outbox-dispatcher
+ENV OPENGENI_ARTIFACT_OUTBOX_ENABLED=true \
+  OPENGENI_ARTIFACT_OUTBOX_DATABASE_ROLE=opengeni_artifact_outbox_dispatcher \
+  OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT=9466
+EXPOSE 9466
+CMD ["bun", "run", "--cwd", "apps/worker", "start:artifact-outbox"]
+
+# Dedicated artifact materializer image. It inherits the same exact runtime
+# authority as API and never compiles, downloads, or substitutes kernel bytes.
+FROM artifact-runtime-base AS artifact-materializer
+USER root
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends bubblewrap util-linux \
+  && rm -rf /var/lib/apt/lists/* \
+  && install -d -o bun -g bun -m 0755 /opt/opengeni/bin
+USER bun
+RUN bun build --compile packages/artifact-tool/src/materializer-cli-entry.ts \
+  --outfile /opt/opengeni/bin/opengeni-artifact-materializer
+USER root
+RUN chown root:root /opt/opengeni/bin/opengeni-artifact-materializer \
+  && chmod 0555 /opt/opengeni/bin/opengeni-artifact-materializer
+USER bun
+ENV OPENGENI_ARTIFACT_MATERIALIZER_ENABLED=true \
+  OPENGENI_ARTIFACT_MATERIALIZER_EXECUTABLE=/opt/opengeni/bin/opengeni-artifact-materializer \
+  OPENGENI_ARTIFACT_MATERIALIZER_BWRAP=/usr/bin/bwrap \
+  OPENGENI_ARTIFACT_MATERIALIZER_PRLIMIT=/usr/bin/prlimit \
+  OPENGENI_ARTIFACT_MATERIALIZER_DATABASE_ROLE=opengeni_artifact_materializer \
+  OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT=9465
+# Build-time load verifies the complete manifest/file chain and native ABI.
+RUN /opt/opengeni/bin/opengeni-artifact-materializer --opengeni-materializer-identity-v1
+EXPOSE 9465
+CMD ["bun", "run", "--cwd", "apps/worker", "start:artifact-materializer"]
 
 FROM base AS web-build
 ARG OPENGENI_DEPLOYMENT_REVISION=dev

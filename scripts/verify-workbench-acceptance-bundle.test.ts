@@ -55,6 +55,8 @@ const candidateReceipt = buildReleaseCandidateReceipt({
     web: digest,
     relay: digest,
     sandbox: digest,
+    "artifact-materializer": digest,
+    "artifact-outbox-dispatcher": digest,
   } satisfies Record<ReleaseImageRole, string>,
   chart,
   producer: candidateProducer,
@@ -103,6 +105,8 @@ function validBundle(): WorkbenchAcceptanceBundle {
     relay: digest,
     migration: digest,
     sandbox: digest,
+    "artifact-materializer": digest,
+    "artifact-outbox-dispatcher": digest,
   });
   return {
     schemaVersion: 2,

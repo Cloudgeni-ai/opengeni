@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 /**
- * Prove the built SDK + React package artifacts from an external consumer.
+ * Prove the built SDK + artifact engine + React package artifacts from an
+ * external consumer.
  *
  * The workspace itself resolves package source directly, so ordinary unit/type
  * checks cannot catch a broken published exports map, missing CSS declaration,
@@ -18,6 +19,9 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { rewriteEntryPointsToDist } from "./rewrite-entry-points";
+import { rewriteWorkspaceDependenciesToConcrete } from "./rewrite-workspace-deps";
+import type { PackageJson } from "./publishable-workspaces";
 
 type PackageManifest = {
   name: string;
@@ -25,6 +29,7 @@ type PackageManifest = {
   main?: string;
   module?: string;
   types?: string;
+  bin?: string | Record<string, string>;
   exports?: Record<string, string | Record<string, string>>;
   dependencies?: Record<string, string>;
   optionalDependencies?: Record<string, string>;
@@ -57,11 +62,31 @@ async function run(command: string[], cwd: string, capture = false): Promise<str
   return stdout;
 }
 
-function toDist(value: string, kind: "runtime" | "types"): string {
-  if (!value.startsWith("./src/")) return value;
-  return `./dist/${value
-    .slice("./src/".length)
-    .replace(/\.ts$/u, kind === "types" ? ".d.ts" : ".js")}`;
+process.stdout.write("[publish-consumer] rebuilding the publishable package closure\n");
+await run(["bun", "run", "build:packages"], repoRoot);
+
+function staticRelativeJavaScriptImports(source: string): string[] {
+  const imports = new Set<string>();
+  const pattern = /(?:\bfrom\s*|\bimport\s*)["'](\.[^"']+\.js)["']/gu;
+  for (const match of source.matchAll(pattern)) {
+    if (match[1]) imports.add(match[1]);
+  }
+  return [...imports];
+}
+
+async function staticBrowserChunkClosure(entryPath: string): Promise<Map<string, string>> {
+  const files = new Map<string, string>();
+  const queue = [entryPath];
+  while (queue.length > 0) {
+    const path = queue.shift()!;
+    if (files.has(path)) continue;
+    const source = await readFile(path, "utf8");
+    files.set(path, source);
+    for (const imported of staticRelativeJavaScriptImports(source)) {
+      queue.push(resolve(path, "..", imported));
+    }
+  }
+  return files;
 }
 
 function releaseShape(
@@ -71,34 +96,8 @@ function releaseShape(
   const manifest = structuredClone(source);
   delete manifest.devDependencies;
 
-  for (const field of ["dependencies", "optionalDependencies", "peerDependencies"] as const) {
-    const dependencies = manifest[field];
-    if (!dependencies) continue;
-    for (const [name, range] of Object.entries(dependencies)) {
-      if (!range.startsWith("workspace:")) continue;
-      const version = workspaceVersionByName.get(name);
-      if (!version) throw new Error(`No workspace version found for ${name}`);
-      dependencies[name] = `^${version}`;
-    }
-  }
-
-  if (manifest.main) manifest.main = toDist(manifest.main, "runtime");
-  if (manifest.module) manifest.module = toDist(manifest.module, "runtime");
-  if (manifest.types) manifest.types = toDist(manifest.types, "types");
-  for (const [subpath, entry] of Object.entries(manifest.exports ?? {})) {
-    if (typeof entry === "string") {
-      manifest.exports![subpath] = toDist(entry, "runtime");
-      continue;
-    }
-    const next = { ...entry };
-    if (next.types) next.types = toDist(next.types, "types");
-    const runtime = next.import ?? next.default;
-    if (runtime) {
-      next.import = toDist(runtime, "runtime");
-      delete next.default;
-    }
-    manifest.exports![subpath] = next;
-  }
+  rewriteWorkspaceDependenciesToConcrete(manifest as PackageJson, workspaceVersionByName);
+  rewriteEntryPointsToDist(manifest as PackageJson);
   return manifest;
 }
 
@@ -138,13 +137,17 @@ async function stageTarball(
   const manifest = releaseShape(sourceManifest, versions);
   await writeFile(join(destination, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`);
   const packed = await run(
-    ["npm", "pack", "--ignore-scripts", "--json", "--pack-destination", tarballRoot],
+    ["bun", "pm", "pack", "--ignore-scripts", "--quiet", "--destination", tarballRoot],
     destination,
     true,
   );
-  const receipt = JSON.parse(packed) as Array<{ filename?: string }>;
-  const filename = receipt[0]?.filename;
-  if (!filename) throw new Error(`npm pack did not report a filename for ${manifest.name}`);
+  const filename = packed
+    .trim()
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .at(-1);
+  if (!filename) throw new Error(`bun pm pack did not report a filename for ${manifest.name}`);
   return { manifest, tarball: join(tarballRoot, basename(filename)) };
 }
 
@@ -155,18 +158,171 @@ try {
   const stagingRoot = join(tempRoot, "packages");
   const tarballRoot = join(tempRoot, "tarballs");
   const consumerRoot = join(tempRoot, "consumer");
+  const minimalSpreadsheetRoot = join(tempRoot, "minimal-spreadsheet-artifact-consumer");
   const minimalSessionRoot = join(tempRoot, "minimal-session-consumer");
   const minimalRealtimeRoot = join(tempRoot, "minimal-realtime-consumer");
   await Promise.all([
     mkdir(stagingRoot, { recursive: true }),
     mkdir(tarballRoot, { recursive: true }),
     mkdir(consumerRoot, { recursive: true }),
+    mkdir(minimalSpreadsheetRoot, { recursive: true }),
     mkdir(minimalSessionRoot, { recursive: true }),
     mkdir(minimalRealtimeRoot, { recursive: true }),
   ]);
 
   const versions = await workspaceVersions();
   const sdk = await stageTarball("packages/sdk", stagingRoot, tarballRoot, versions);
+  const sdkTarballContents = await run(["tar", "-tzf", sdk.tarball], consumerRoot, true);
+  for (const artifact of [
+    "package/dist/editable-artifacts.js",
+    "package/dist/editable-artifacts.d.ts",
+    "package/dist/editable-artifacts-worker.js",
+    "package/dist/editable-artifacts-worker.d.ts",
+  ]) {
+    if (!sdkTarballContents.split("\n").includes(artifact)) {
+      throw new Error(`SDK tarball is missing ${artifact}`);
+    }
+  }
+  const sdkEditableExport = sdk.manifest.exports?.["./editable-artifacts"];
+  if (
+    !sdkEditableExport ||
+    typeof sdkEditableExport === "string" ||
+    sdkEditableExport.types !== "./dist/editable-artifacts.d.ts" ||
+    sdkEditableExport.import !== "./dist/editable-artifacts.js"
+  ) {
+    throw new Error("SDK tarball has an invalid ./editable-artifacts export");
+  }
+  const core = await stageTarball("packages/core", stagingRoot, tarballRoot, versions);
+  const coreTarballContents = await run(["tar", "-tzf", core.tarball], consumerRoot, true);
+  for (const artifact of [
+    "package/dist/editable-artifacts.js",
+    "package/dist/editable-artifacts.d.ts",
+    "package/dist/editable-artifact-live.js",
+    "package/dist/editable-artifact-live.d.ts",
+  ]) {
+    if (!coreTarballContents.split("\n").includes(artifact)) {
+      throw new Error(`core tarball is missing ${artifact}`);
+    }
+  }
+  for (const [subpath, stem] of [
+    ["./editable-artifacts", "editable-artifacts"],
+    ["./editable-artifact-live", "editable-artifact-live"],
+  ] as const) {
+    const entry = core.manifest.exports?.[subpath];
+    if (
+      !entry ||
+      typeof entry === "string" ||
+      entry.types !== `./dist/${stem}.d.ts` ||
+      entry.import !== `./dist/${stem}.js`
+    ) {
+      throw new Error(`core tarball has an invalid ${subpath} export`);
+    }
+  }
+  const db = await stageTarball("packages/db", stagingRoot, tarballRoot, versions);
+  const dbTarballContents = await run(["tar", "-tzf", db.tarball], consumerRoot, true);
+  for (const artifact of [
+    "package/dist/editable-artifacts.js",
+    "package/dist/editable-artifacts.d.ts",
+  ]) {
+    if (!dbTarballContents.split("\n").includes(artifact)) {
+      throw new Error(`db tarball is missing ${artifact}`);
+    }
+  }
+  const dbArtifactExport = db.manifest.exports?.["./editable-artifacts"];
+  if (
+    !dbArtifactExport ||
+    typeof dbArtifactExport === "string" ||
+    dbArtifactExport.types !== "./dist/editable-artifacts.d.ts" ||
+    dbArtifactExport.import !== "./dist/editable-artifacts.js"
+  ) {
+    throw new Error("db tarball has an invalid ./editable-artifacts export");
+  }
+  const artifactTool = await stageTarball(
+    "packages/artifact-tool",
+    stagingRoot,
+    tarballRoot,
+    versions,
+  );
+  const artifactTarballContents = await run(
+    ["tar", "-tzf", artifactTool.tarball],
+    consumerRoot,
+    true,
+  );
+  for (const artifact of [
+    "package/dist/index.js",
+    "package/dist/index.d.ts",
+    "package/dist/reference.js",
+    "package/dist/reference.d.ts",
+    "package/dist/native.js",
+    "package/dist/native.d.ts",
+    "package/dist/runtime.js",
+    "package/dist/runtime.d.ts",
+    "package/dist/runtime-cli.js",
+    "package/dist/runtime-cli.d.ts",
+    "package/dist/runtime-cli-entry.js",
+    "package/dist/runtime-cli-entry.d.ts",
+    "package/dist/materializer-cli-entry.js",
+    "package/dist/materializer-cli-entry.d.ts",
+    "package/dist/production-document.js",
+    "package/dist/production-document.d.ts",
+    "package/dist/production-presentation.js",
+    "package/dist/production-presentation.d.ts",
+    "package/dist/production-spreadsheet.js",
+    "package/dist/production-spreadsheet.d.ts",
+    "package/dist/document.js",
+    "package/dist/document.d.ts",
+    "package/dist/document-render.js",
+    "package/dist/document-render.d.ts",
+    "package/dist/document-docx-codec.js",
+    "package/dist/document-docx-codec.d.ts",
+    "package/dist/presentation.js",
+    "package/dist/presentation.d.ts",
+    "package/dist/presentation-render.js",
+    "package/dist/presentation-render.d.ts",
+    "package/dist/presentation-pptx.js",
+    "package/dist/presentation-pptx.d.ts",
+    "package/dist/spreadsheet.js",
+    "package/dist/spreadsheet.d.ts",
+    "package/dist/spreadsheet-render.js",
+    "package/dist/spreadsheet-render.d.ts",
+    "package/dist/spreadsheet-xlsx-codec.js",
+    "package/dist/spreadsheet-xlsx-codec.d.ts",
+  ]) {
+    if (!artifactTarballContents.split("\n").includes(artifact)) {
+      throw new Error(`artifact-tool tarball is missing ${artifact}`);
+    }
+  }
+  if (
+    typeof artifactTool.manifest.bin !== "object" ||
+    artifactTool.manifest.bin?.["opengeni-artifact-runtime"] !== "./dist/runtime-cli-entry.js" ||
+    artifactTool.manifest.bin?.["opengeni-artifact-materializer"] !==
+      "./dist/materializer-cli-entry.js"
+  ) {
+    throw new Error("artifact-tool tarball has invalid artifact runtime executables");
+  }
+  for (const [subpath, entry] of Object.entries(artifactTool.manifest.exports ?? {})) {
+    if (typeof entry === "string") continue;
+    for (const condition of ["types", "import"] as const) {
+      const target = entry[condition];
+      if (!target?.startsWith("./dist/")) {
+        throw new Error(`artifact-tool tarball export ${subpath} has no ${condition} dist target`);
+      }
+      if (!artifactTarballContents.split("\n").includes(`package/${target.slice(2)}`)) {
+        throw new Error(`artifact-tool tarball export ${subpath} is missing ${target}`);
+      }
+    }
+  }
+  for (const packagedPath of artifactTarballContents.split("\n")) {
+    if (
+      packagedPath.startsWith("package/kernel/") ||
+      packagedPath.endsWith(".node") ||
+      packagedPath.endsWith(".wasm")
+    ) {
+      throw new Error(
+        `artifact-tool advertised an incomplete native/WASM distribution asset: ${packagedPath}`,
+      );
+    }
+  }
   const react = await stageTarball("packages/react", stagingRoot, tarballRoot, versions);
   if (
     !Array.isArray(react.manifest.sideEffects) ||
@@ -176,6 +332,14 @@ try {
   }
   const reactTarballContents = await run(["tar", "-tzf", react.tarball], consumerRoot, true);
   for (const artifact of [
+    "package/dist/artifacts.js",
+    "package/dist/artifacts.d.ts",
+    "package/dist/artifacts-document.js",
+    "package/dist/artifacts-document.d.ts",
+    "package/dist/artifacts-presentation.js",
+    "package/dist/artifacts-presentation.d.ts",
+    "package/dist/artifacts-spreadsheet.js",
+    "package/dist/artifacts-spreadsheet.d.ts",
     "package/styles/compiled.css",
     "package/styles/compiled.d.ts",
     "package/styles/effective-tokens.css",
@@ -199,6 +363,37 @@ try {
   const runtimeLocalDependencyFiles = Object.fromEntries(
     runtimeLocalDependencies.map(({ manifest, tarball }) => [manifest.name, `file:${tarball}`]),
   );
+  const contracts = runtimeLocalDependencies.find(
+    ({ manifest }) => manifest.name === "@opengeni/contracts",
+  );
+  if (!contracts) throw new Error("runtime package closure did not stage @opengeni/contracts");
+  if (sdk.manifest.dependencies?.["@opengeni/contracts"] !== `^${contracts.manifest.version}`) {
+    throw new Error("SDK tarball does not declare the staged canonical contracts version");
+  }
+  const contractsTarballContents = await run(
+    ["tar", "-tzf", contracts.tarball],
+    consumerRoot,
+    true,
+  );
+  for (const artifact of [
+    "package/dist/editable-artifacts.js",
+    "package/dist/editable-artifacts.d.ts",
+    "package/dist/editable-artifact-live.js",
+    "package/dist/editable-artifact-live.d.ts",
+  ]) {
+    if (!contractsTarballContents.split("\n").includes(artifact)) {
+      throw new Error(`contracts tarball is missing ${artifact}`);
+    }
+  }
+  const contractsLiveExport = contracts.manifest.exports?.["./editable-artifact-live"];
+  if (
+    !contractsLiveExport ||
+    typeof contractsLiveExport === "string" ||
+    contractsLiveExport.types !== "./dist/editable-artifact-live.d.ts" ||
+    contractsLiveExport.import !== "./dist/editable-artifact-live.js"
+  ) {
+    throw new Error("contracts tarball has an invalid ./editable-artifact-live export");
+  }
   const runtimeTarballContents = await run(["tar", "-tzf", runtime.tarball], consumerRoot, true);
   for (const artifact of [
     "package/dist/skill-library.js",
@@ -218,6 +413,8 @@ try {
   ) as PackageManifest;
 
   const sdkFile = `file:${sdk.tarball}`;
+  const artifactToolFile = `file:${artifactTool.tarball}`;
+  const contractsFile = `file:${contracts.tarball}`;
   const consumerManifest = {
     name: "opengeni-clean-consumer-proof",
     version: "0.0.0",
@@ -225,12 +422,18 @@ try {
     type: "module",
     scripts: {
       typecheck: "tsc -p tsconfig.json --noEmit",
+      "typecheck:nodenext": "tsc -p tsconfig.nodenext.json --noEmit",
       build: "vite build --logLevel warn",
       "build:session": "vite build --config session.vite.config.ts --logLevel warn",
+      "build:worker-entry": "vite build --config worker.vite.config.ts --logLevel warn",
       ssr: "bun ssr.tsx",
+      "artifact-contract": "bun artifact-contract.ts",
+      "artifact-codecs": "bun artifact-codecs.ts",
     },
     dependencies: {
       ...(reactSource.peerDependencies ?? {}),
+      "@opengeni/artifact-tool": artifactToolFile,
+      "@opengeni/contracts": contractsFile,
       "@opengeni/react": `file:${react.tarball}`,
       "@opengeni/sdk": sdkFile,
       "@opengeni/runtime": `file:${runtime.tarball}`,
@@ -244,6 +447,7 @@ try {
       vite: reactSource.devDependencies?.vite,
     },
     overrides: {
+      "@opengeni/artifact-tool": artifactToolFile,
       "@opengeni/sdk": sdkFile,
       ...runtimeLocalDependencyFiles,
     },
@@ -268,6 +472,8 @@ try {
           },
           include: [
             "browser.tsx",
+            "artifact-contract.ts",
+            "artifact-codecs.ts",
             "consumer.css",
             "presentation.tsx",
             "runtime-proof.ts",
@@ -276,6 +482,8 @@ try {
             "session.vite.config.ts",
             "ssr.tsx",
             "vite.config.ts",
+            "worker-entry.ts",
+            "worker.vite.config.ts",
           ],
         },
         null,
@@ -283,12 +491,70 @@ try {
       )}\n`,
     ),
     writeFile(
+      join(consumerRoot, "tsconfig.nodenext.json"),
+      `${JSON.stringify(
+        {
+          compilerOptions: {
+            strict: true,
+            target: "ES2022",
+            lib: ["ES2022", "DOM", "DOM.Iterable"],
+            module: "NodeNext",
+            moduleResolution: "NodeNext",
+            jsx: "react-jsx",
+            skipLibCheck: false,
+            noEmit: true,
+          },
+          include: ["nodenext.ts"],
+        },
+        null,
+        2,
+      )}\n`,
+    ),
+    writeFile(
+      join(consumerRoot, "nodenext.ts"),
+      [
+        'import type { Document, Workbook } from "@opengeni/artifact-tool";',
+        'import type { ReferenceWorkbook } from "@opengeni/artifact-tool/reference";',
+        'import type { NativeSpreadsheetSession } from "@opengeni/artifact-tool/native";',
+        'import type { ArtifactKernelRuntime } from "@opengeni/artifact-tool/runtime";',
+        'import type { locateVerifiedArtifactRuntime } from "@opengeni/artifact-tool/runtime/locator";',
+        'import type { Document as DocumentEntry } from "@opengeni/artifact-tool/document";',
+        'import type { renderDocument } from "@opengeni/artifact-tool/document/render";',
+        'import type { exportDocx } from "@opengeni/artifact-tool/document/docx";',
+        'import type { Presentation as PresentationEntry } from "@opengeni/artifact-tool/presentation";',
+        'import type { executePresentationRender } from "@opengeni/artifact-tool/presentation/render";',
+        'import type { exportPresentationPptx } from "@opengeni/artifact-tool/presentation/pptx";',
+        'import type { Workbook as SpreadsheetEntry } from "@opengeni/artifact-tool/spreadsheet";',
+        'import type { renderWorkbook } from "@opengeni/artifact-tool/spreadsheet/render";',
+        'import type { SpreadsheetXlsxCodec } from "@opengeni/artifact-tool/spreadsheet/xlsx";',
+        'import type { EditableArtifactMutationIntent, encodeEditableArtifactMutationIntent } from "@opengeni/contracts/editable-artifacts";',
+        'import type { EditableArtifactLiveServerFrame, decodeEditableArtifactLiveServerWireFrame } from "@opengeni/contracts/editable-artifact-live";',
+        'import type { DocumentEditorProps, SpreadsheetGridProps } from "@opengeni/react/artifacts";',
+        'import type { DocumentEditorProps as DocumentOnlyProps } from "@opengeni/react/artifacts/document";',
+        'import type { PresentationEditorProps as PresentationOnlyProps } from "@opengeni/react/artifacts/presentation";',
+        'import type { SpreadsheetGridProps as SpreadsheetOnlyProps } from "@opengeni/react/artifacts/spreadsheet";',
+        'import type { EditableArtifactSyncController, BrowserEditableArtifactWorkerKernel, CreateEditableArtifactHttpLiveTransportOptions } from "@opengeni/sdk/editable-artifacts";',
+        'import type { OpenGeniClient as ArtifactApiClient, EditableArtifactResource } from "@opengeni/sdk/artifacts";',
+        'import type { installBrowserArtifactWorkerEntry } from "@opengeni/sdk/editable-artifacts/worker";',
+        "export type PackedNodeNextSurface = [Document, Workbook, ReferenceWorkbook, NativeSpreadsheetSession, ArtifactKernelRuntime, typeof locateVerifiedArtifactRuntime, DocumentEntry, typeof renderDocument, typeof exportDocx, PresentationEntry, typeof executePresentationRender, typeof exportPresentationPptx, SpreadsheetEntry, typeof renderWorkbook, SpreadsheetXlsxCodec, EditableArtifactMutationIntent, typeof encodeEditableArtifactMutationIntent, EditableArtifactLiveServerFrame, typeof decodeEditableArtifactLiveServerWireFrame, DocumentEditorProps, SpreadsheetGridProps, DocumentOnlyProps, PresentationOnlyProps, SpreadsheetOnlyProps, EditableArtifactSyncController, BrowserEditableArtifactWorkerKernel, CreateEditableArtifactHttpLiveTransportOptions, ArtifactApiClient, EditableArtifactResource, typeof installBrowserArtifactWorkerEntry];",
+        "",
+      ].join("\n"),
+    ),
+    writeFile(
       join(consumerRoot, "vite.config.ts"),
-      'import react from "@vitejs/plugin-react";\nimport { defineConfig } from "vite";\nexport default defineConfig({ plugins: [react()] });\n',
+      'import react from "@vitejs/plugin-react";\nimport { defineConfig } from "vite";\nexport default defineConfig({ plugins: [react()], build: { rollupOptions: { external: ["@resvg/resvg-js", "docx", "exceljs", "pptxgenjs", "sharp"] } } });\n',
     ),
     writeFile(
       join(consumerRoot, "session.vite.config.ts"),
       'import { defineConfig } from "vite";\nexport default defineConfig({ build: { emptyOutDir: true, lib: { entry: "session.ts", formats: ["es"], fileName: "session-consumer" }, outDir: "session-dist", rollupOptions: { external: ["react", "@opengeni/sdk"] } } });\n',
+    ),
+    writeFile(
+      join(consumerRoot, "worker.vite.config.ts"),
+      'import { defineConfig } from "vite";\nexport default defineConfig({ build: { emptyOutDir: true, lib: { entry: "worker-entry.ts", formats: ["es"], fileName: "editable-artifacts-worker" }, outDir: "worker-dist" } });\n',
+    ),
+    writeFile(
+      join(consumerRoot, "worker-entry.ts"),
+      'import "@opengeni/sdk/editable-artifacts/worker";\n',
     ),
     writeFile(
       join(consumerRoot, "index.html"),
@@ -296,15 +562,34 @@ try {
     ),
     writeFile(
       join(consumerRoot, "browser.tsx"),
-      'import "./consumer.css";\nimport { OpenGeniProvider, SandboxWorkspace } from "@opengeni/react";\nimport { OpenGeniClient } from "@opengeni/sdk";\nimport { StrictMode } from "react";\nimport { createRoot } from "react-dom/client";\nimport { HostEmbeddedSurfaces } from "./presentation";\nconst root = document.getElementById("root");\nif (!root) throw new Error("missing #root");\nconst client = new OpenGeniClient({ baseUrl: "https://api.example.invalid" });\ncreateRoot(root).render(<StrictMode><OpenGeniProvider client={client} workspaceId="clean-consumer"><SandboxWorkspace sessionId="package-proof" events={[]} primary={<main><p>Clean consumer browser proof</p><HostEmbeddedSurfaces /></main>} /></OpenGeniProvider></StrictMode>);\n',
+      'import "./consumer.css";\nimport artifactWorkerUrl from "@opengeni/sdk/editable-artifacts/worker?worker&url";\nimport { OpenGeniProvider, SandboxWorkspace } from "@opengeni/react";\nimport { OpenGeniClient } from "@opengeni/sdk/artifacts";\nimport { StrictMode } from "react";\nimport { createRoot } from "react-dom/client";\nimport { HostEmbeddedSurfaces } from "./presentation";\nconst root = document.getElementById("root");\nif (!root) throw new Error("missing #root");\nif (!artifactWorkerUrl) throw new Error("missing packed editable-artifact Worker URL");\nconst client = new OpenGeniClient({ baseUrl: "https://api.example.invalid" });\ncreateRoot(root).render(<StrictMode><OpenGeniProvider client={client} workspaceId="clean-consumer"><SandboxWorkspace sessionId="package-proof" events={[]} primary={<main><p>Clean consumer browser proof</p><HostEmbeddedSurfaces /></main>} /></OpenGeniProvider></StrictMode>);\n',
     ),
     writeFile(join(consumerRoot, "consumer.css"), '@import "@opengeni/react/compiled.css";\n'),
     writeFile(
       join(consumerRoot, "presentation.tsx"),
       [
         'import { ApprovalSurface, HumanInputForm, MessageTimeline, QueueSurface, SessionChrome, createDefaultToolRegistry, type QueueSurfaceProps, type ToolRendererProps, type UseTurnQueueResult } from "@opengeni/react";',
+        "// Static browser fixtures use the explicitly non-production reference model. Live browser editing is SDK Worker + WASM owned.",
+        'import { Document, DocumentFile, Presentation, PresentationFile, SpreadsheetFile, Workbook } from "@opengeni/artifact-tool/reference";',
+        'import { DocumentArtifactSurface, PresentationArtifactSurface, SpreadsheetArtifactSurface, type SpreadsheetCommit } from "@opengeni/react/artifacts";',
         'import * as Composer from "@opengeni/react/composer";',
+        'import { MemoryEditableArtifactStorage } from "@opengeni/sdk/editable-artifacts";',
         'import { useMemo, useRef, useState } from "react";',
+        "",
+        "const artifactWorkbook = Workbook.create();",
+        'const artifactSheet = artifactWorkbook.worksheets.add("Proof");',
+        'artifactSheet.getRange("A1:B2").values = [["Artifact package proof", 42], ["Ready", true]];',
+        "const artifactCommits: SpreadsheetCommit[] = [];",
+        "const artifactDocument = Document.create();",
+        'artifactDocument.blocks.addHeading("Artifact document proof", 1);',
+        'artifactDocument.blocks.addParagraph("Editable document surface from packed packages.");',
+        "const artifactPresentation = Presentation.create({ slideSize: { width: 960, height: 540 } });",
+        "const artifactSlide = artifactPresentation.slides.add();",
+        'artifactSlide.title = "Artifact presentation proof";',
+        'artifactSlide.shapes.add({ geometry: "textbox", name: "proof-title", position: { left: 48, top: 40, width: 600, height: 80 }, text: "Packed presentation surface" });',
+        "const artifactStorage = new MemoryEditableArtifactStorage();",
+        'const artifactSdkStatus = artifactStorage instanceof MemoryEditableArtifactStorage ? "Artifact sync SDK ready" : "Artifact sync SDK missing";',
+        'const artifactCodecStatus = [DocumentFile.importDocx, PresentationFile.exportPptx, SpreadsheetFile.importXlsx].every((codec) => typeof codec === "function") ? "Artifact codecs lazy" : "Artifact codecs missing";',
         "",
         "function HostTool({ item }: ToolRendererProps) {",
         '  return <button type="button" data-host-tool={item.name}>Open host entity</button>;',
@@ -391,6 +676,11 @@ try {
         "          </Composer.Footer>",
         "        </Composer.Surface>",
         "      </Composer.Root>",
+        '      <SpreadsheetArtifactSurface workbook={artifactWorkbook} title="Package workbook" readOnly rowCount={4} columnCount={4} onCommit={(commit) => artifactCommits.push(commit)} />',
+        '      <DocumentArtifactSurface document={artifactDocument} title="Package document" readOnly viewportHeight={240} />',
+        '      <PresentationArtifactSurface presentation={artifactPresentation} title="Package presentation" readOnly />',
+        "      <p>{artifactSdkStatus}</p>",
+        "      <p>{artifactCodecStatus}</p>",
         "    </section>",
         "  );",
         "}",
@@ -399,7 +689,73 @@ try {
     ),
     writeFile(
       join(consumerRoot, "ssr.tsx"),
-      'import { renderToStaticMarkup } from "react-dom/server";\nimport { HostEmbeddedSurfaces } from "./presentation";\nconst markup = renderToStaticMarkup(<HostEmbeddedSurfaces />);\nfor (const expected of ["2 agents", "1 running", "Open host entity", "Loading inputs…", "entity-proof", "What should change?", "Host model"]) { if (!markup.includes(expected)) throw new Error(`SSR output lost populated host surface: ${expected}`); }\nconsole.log(`SSR_OK bytes=${new TextEncoder().encode(markup).byteLength}`);\n',
+      'import { renderToStaticMarkup } from "react-dom/server";\nimport { HostEmbeddedSurfaces } from "./presentation";\nconst markup = renderToStaticMarkup(<HostEmbeddedSurfaces />);\nfor (const expected of ["2 agents", "1 running", "Open host entity", "Loading inputs…", "entity-proof", "What should change?", "Host model", "Package workbook", "Artifact package proof", "Package document", "Artifact document proof", "Package presentation", "1 slide", "Artifact sync SDK ready", "Artifact codecs lazy"]) { if (!markup.includes(expected)) throw new Error(`SSR output lost populated host surface: ${expected}`); }\nconsole.log(`SSR_OK bytes=${new TextEncoder().encode(markup).byteLength}`);\n',
+    ),
+    writeFile(
+      join(consumerRoot, "artifact-contract.ts"),
+      [
+        'import { EDITABLE_ARTIFACT_INTENT_VERSION, decodeEditableArtifactMutationIntent, encodeEditableArtifactMutationIntent, hashEditableArtifactMutationIntent, hashEditableArtifactMutationIntentBytes, type EditableArtifactMutationIntent } from "@opengeni/contracts/editable-artifacts";',
+        'import { decodeEditableArtifactLiveServerWireFrame, encodeEditableArtifactLiveServerWireFrame } from "@opengeni/contracts/editable-artifact-live";',
+        'import { createEditableArtifactHttpLiveTransport } from "@opengeni/sdk/editable-artifacts";',
+        "",
+        "const intent: EditableArtifactMutationIntent = {",
+        "  envelopeVersion: EDITABLE_ARTIFACT_INTENT_VERSION,",
+        "  protocolVersion: 1,",
+        "  modelSchemaVersion: 1,",
+        "  commandProtocolVersion: 1,",
+        '  artifactId: "11111111111111111111111111111111",',
+        '  clientTransactionId: "packed-contract-proof",',
+        '  replicaId: "2222222222222222",',
+        "  replicaCounter: 1,",
+        "  previousLocalTransactionId: null,",
+        "  observedHeadSequence: 0,",
+        "  causalBase: [],",
+        "  selectiveUndoOperationIds: [],",
+        "  commandBytes: new Uint8Array([0x4f, 0x47, 0x41, 0x52]),",
+        "};",
+        "const encoded = encodeEditableArtifactMutationIntent(intent);",
+        "const decoded = decodeEditableArtifactMutationIntent(encoded);",
+        "const reencoded = encodeEditableArtifactMutationIntent(decoded);",
+        'if (encoded.length !== reencoded.length || !encoded.every((value, index) => value === reencoded[index])) throw new Error("packed OGATX codec is not canonical");',
+        "const hashed = hashEditableArtifactMutationIntent(intent);",
+        'if (hashed.requestHash !== hashEditableArtifactMutationIntentBytes(encoded)) throw new Error("packed OGATX hash helpers disagree");',
+        'const liveEncoded = encodeEditableArtifactLiveServerWireFrame({ type: "watermark", protocolVersion: 1, artifactId: "11111111111111111111111111111111", streamEpoch: "packed-contract-proof", headSequence: 1 });',
+        "const liveDecoded = decodeEditableArtifactLiveServerWireFrame(liveEncoded);",
+        'if (liveDecoded.type !== "watermark" || liveDecoded.headSequence !== 1) throw new Error("packed OGALV codec round-trip failed");',
+        'const liveTransport = createEditableArtifactHttpLiveTransport({ baseUrl: "http://127.0.0.1:3000", workspaceId: "packed-workspace", protocolVersion: 1, kernelVersion: "packed-kernel", modelSchemaVersion: 1, allowInsecureDevelopmentTransport: true });',
+        'if (typeof liveTransport.mintTicket !== "function" || typeof liveTransport.openLive !== "function") throw new Error("packed SDK live transport is unavailable");',
+        "console.log(`ARTIFACT_CONTRACT_OK bytes=${encoded.byteLength} liveBytes=${liveEncoded.byteLength} hash=${hashed.requestHash}`);",
+        "",
+      ].join("\n"),
+    ),
+    writeFile(
+      join(consumerRoot, "artifact-codecs.ts"),
+      [
+        "// This isolates lazy codec packaging; production skill facades require a manifest-pinned native runtime bootstrap.",
+        'import { Document, DocumentFile, Presentation, PresentationFile, SpreadsheetFile, Workbook } from "@opengeni/artifact-tool/reference";',
+        "",
+        "const document = Document.create();",
+        'document.blocks.addHeading("Packed DOCX codec", 1);',
+        'document.blocks.addParagraph("Lazy codec round trip");',
+        "const docx = await DocumentFile.exportDocx(document);",
+        "const importedDocument = await DocumentFile.importDocx(docx);",
+        'if (!importedDocument.blocks.items.some((block) => "text" in block && block.text.includes("Lazy codec round trip"))) throw new Error("packed DOCX lazy codec lost document content");',
+        "",
+        "const workbook = Workbook.create();",
+        'workbook.worksheets.add("Proof").getRange("A1:B2").values = [["Packed XLSX codec", 7], ["Ready", true]];',
+        "const xlsx = await SpreadsheetFile.exportXlsx(workbook);",
+        "const importedWorkbook = await SpreadsheetFile.importXlsx(xlsx);",
+        'if (importedWorkbook.worksheets.getItem("Proof").getRange("A1").values[0]?.[0] !== "Packed XLSX codec") throw new Error("packed XLSX lazy codec lost workbook content");',
+        "",
+        "const presentation = Presentation.create();",
+        "const slide = presentation.slides.add();",
+        'slide.shapes.add({ geometry: "textbox", name: "proof", position: { left: 40, top: 40, width: 500, height: 80 }, text: "Packed PPTX codec" });',
+        "const pptx = await PresentationFile.exportPptx(presentation);",
+        'if (String.fromCharCode(...new Uint8Array(await pptx.arrayBuffer()).slice(0, 2)) !== "PK") throw new Error("packed PPTX lazy codec did not emit OOXML");',
+        "",
+        "console.log(`ARTIFACT_CODECS_OK docx=${docx.size} xlsx=${xlsx.size} pptx=${pptx.size}`);",
+        "",
+      ].join("\n"),
     ),
     writeFile(
       join(consumerRoot, "runtime-proof.ts"),
@@ -412,6 +768,83 @@ try {
     writeFile(
       join(consumerRoot, "session.ts"),
       await readFile(join(repoRoot, "packages/react/test/fixtures/session-consumer.ts"), "utf8"),
+    ),
+  ]);
+
+  const minimalSpreadsheetManifest = {
+    name: "opengeni-minimal-spreadsheet-artifact-proof",
+    version: "0.0.0",
+    private: true,
+    type: "module",
+    scripts: {
+      typecheck: "tsc -p tsconfig.json --noEmit",
+      build: "vite build --logLevel warn",
+    },
+    dependencies: {
+      "@opengeni/artifact-tool": artifactToolFile,
+      "@opengeni/react": `file:${react.tarball}`,
+      "@opengeni/sdk": sdkFile,
+      react: reactSource.peerDependencies?.react,
+      "react-dom": reactSource.peerDependencies?.["react-dom"],
+    },
+    devDependencies: {
+      "@types/node": "^24.10.1",
+      "@types/react": reactSource.devDependencies?.["@types/react"],
+      "@types/react-dom": reactSource.devDependencies?.["@types/react-dom"],
+      typescript: rootManifest.devDependencies?.typescript,
+      vite: reactSource.devDependencies?.vite,
+    },
+    overrides: {
+      "@opengeni/artifact-tool": artifactToolFile,
+      "@opengeni/contracts": contractsFile,
+      "@opengeni/sdk": sdkFile,
+    },
+  };
+  await Promise.all([
+    writeFile(
+      join(minimalSpreadsheetRoot, "package.json"),
+      `${JSON.stringify(minimalSpreadsheetManifest, null, 2)}\n`,
+    ),
+    writeFile(
+      join(minimalSpreadsheetRoot, "tsconfig.json"),
+      `${JSON.stringify(
+        {
+          compilerOptions: {
+            strict: true,
+            target: "ESNext",
+            lib: ["ESNext", "DOM", "DOM.Iterable"],
+            module: "ESNext",
+            moduleResolution: "Bundler",
+            jsx: "react-jsx",
+            skipLibCheck: false,
+            noEmit: true,
+            types: ["node"],
+          },
+          include: ["spreadsheet.tsx", "vite.config.ts"],
+        },
+        null,
+        2,
+      )}\n`,
+    ),
+    writeFile(
+      join(minimalSpreadsheetRoot, "vite.config.ts"),
+      'import { defineConfig } from "vite";\nexport default defineConfig({ build: { emptyOutDir: true, lib: { entry: "spreadsheet.tsx", formats: ["es"], fileName: "spreadsheet-artifact" }, outDir: "dist", rollupOptions: { external: ["react", "react/jsx-runtime", "@opengeni/artifact-tool/reference"] } } });\n',
+    ),
+    writeFile(
+      join(minimalSpreadsheetRoot, "spreadsheet.tsx"),
+      [
+        "// Static browser fixture; authoritative production edits execute in SDK Worker/WASM.",
+        'import { Workbook } from "@opengeni/artifact-tool/reference";',
+        'import { SpreadsheetArtifactSurface } from "@opengeni/react/artifacts/spreadsheet";',
+        "",
+        "const workbook = Workbook.create();",
+        'workbook.worksheets.add("Only spreadsheet").getRange("A1:B2").values = [["Modality", "Spreadsheet"], ["Ready", true]];',
+        "",
+        "export function SpreadsheetOnlyArtifactSurface() {",
+        '  return <SpreadsheetArtifactSurface workbook={workbook} title="Spreadsheet-only package proof" readOnly rowCount={4} columnCount={4} />;',
+        "}",
+        "",
+      ].join("\n"),
     ),
   ]);
 
@@ -438,6 +871,7 @@ try {
       vite: reactSource.devDependencies?.vite,
     },
     overrides: {
+      "@opengeni/contracts": contractsFile,
       "@opengeni/sdk": sdkFile,
     },
   };
@@ -500,6 +934,7 @@ try {
       vite: reactSource.devDependencies?.vite,
     },
     overrides: {
+      "@opengeni/contracts": contractsFile,
       "@opengeni/sdk": sdkFile,
     },
   };
@@ -600,21 +1035,92 @@ try {
   await rm(join(consumerRoot, "node_modules"), { recursive: true, force: true });
   process.stdout.write("[publish-consumer] repeating install from the frozen lock\n");
   await run(["bun", "install", "--frozen-lockfile"], consumerRoot);
+  const locatorEnvironment = { ...process.env };
+  delete locatorEnvironment.OPENGENI_ARTIFACT_RUNTIME_MANIFEST;
+  delete locatorEnvironment.OPENGENI_ARTIFACT_TOOL_ENTRY;
+  const locator = Bun.spawn({
+    cmd: [
+      "bun",
+      join(consumerRoot, "node_modules", ".bin", "opengeni-artifact-runtime"),
+      "locate",
+      "--json",
+    ],
+    cwd: consumerRoot,
+    env: locatorEnvironment,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [locatorStdout, locatorStderr, locatorExit] = await Promise.all([
+    new Response(locator.stdout).text(),
+    new Response(locator.stderr).text(),
+    locator.exited,
+  ]);
+  if (locatorExit === 0 || locatorStdout !== "") {
+    throw new Error("Packed artifact runtime locator did not fail closed without an installation");
+  }
+  const locatorFailure = JSON.parse(locatorStderr) as { error?: { code?: string } };
+  if (locatorFailure.error?.code !== "ARTIFACT_RUNTIME_UNAVAILABLE") {
+    throw new Error("Packed artifact runtime locator did not emit its stable JSON error");
+  }
   await run(["bun", "run", "typecheck"], consumerRoot);
+  await run(["bun", "run", "typecheck:nodenext"], consumerRoot);
   await run(["bun", "run", "build"], consumerRoot);
   await run(["bun", "run", "build:session"], consumerRoot);
+  await run(["bun", "run", "build:worker-entry"], consumerRoot);
+  const bareWorkerEntryBundle = await readFile(
+    join(consumerRoot, "worker-dist", "editable-artifacts-worker.js"),
+    "utf8",
+  );
+  if (!bareWorkerEntryBundle.includes("artifact Worker is already initialized")) {
+    throw new Error(
+      "Packed SDK side-effect metadata let the editable-artifact Worker entry be tree-shaken",
+    );
+  }
   await run(["bun", "run", "ssr"], consumerRoot);
+  await run(["bun", "run", "artifact-contract"], consumerRoot);
+  await run(["bun", "run", "artifact-codecs"], consumerRoot);
   await run(["bun", "run", "runtime-proof.ts"], consumerRoot);
+  process.stdout.write("[publish-consumer] installing spreadsheet-only artifact consumer\n");
+  await run(["bun", "install"], minimalSpreadsheetRoot);
+  await rm(join(minimalSpreadsheetRoot, "node_modules"), { recursive: true, force: true });
+  await run(["bun", "install", "--frozen-lockfile"], minimalSpreadsheetRoot);
+  await run(["bun", "run", "typecheck"], minimalSpreadsheetRoot);
+  await run(["bun", "run", "build"], minimalSpreadsheetRoot);
+  const spreadsheetOnlyBundle = await readFile(
+    join(minimalSpreadsheetRoot, "dist", "spreadsheet-artifact.js"),
+    "utf8",
+  );
+  if (!spreadsheetOnlyBundle.includes("This workbook has no worksheets.")) {
+    throw new Error("Spreadsheet-only packed consumer did not include its editor runtime");
+  }
+  for (const forbidden of [
+    "DocumentArtifactSurface",
+    "Document editor",
+    "PresentationArtifactSurface",
+    "presentation-selection",
+  ]) {
+    if (spreadsheetOnlyBundle.includes(forbidden)) {
+      throw new Error(
+        `Spreadsheet-only packed consumer reached another artifact modality: ${forbidden}`,
+      );
+    }
+  }
   process.stdout.write("[publish-consumer] installing minimal session-only consumer\n");
   await run(["bun", "install"], minimalSessionRoot);
   await rm(join(minimalSessionRoot, "node_modules"), { recursive: true, force: true });
   await run(["bun", "install", "--frozen-lockfile"], minimalSessionRoot);
+  if (existsSync(join(minimalSessionRoot, "node_modules", "@opengeni", "artifact-tool"))) {
+    throw new Error("Session-only consumer unexpectedly installed optional artifact tooling");
+  }
   await run(["bun", "run", "typecheck"], minimalSessionRoot);
   await run(["bun", "run", "build"], minimalSessionRoot);
   process.stdout.write("[publish-consumer] installing minimal realtime-only consumer\n");
   await run(["bun", "install"], minimalRealtimeRoot);
   await rm(join(minimalRealtimeRoot, "node_modules"), { recursive: true, force: true });
   await run(["bun", "install", "--frozen-lockfile"], minimalRealtimeRoot);
+  if (existsSync(join(minimalRealtimeRoot, "node_modules", "@opengeni", "artifact-tool"))) {
+    throw new Error("Realtime-only consumer unexpectedly installed optional artifact tooling");
+  }
   await run(["bun", "run", "typecheck"], minimalRealtimeRoot);
   await run(["bun", "run", "build"], minimalRealtimeRoot);
   await run(["bun", "run", "ssr"], minimalRealtimeRoot);
@@ -631,6 +1137,14 @@ try {
     "react/jsx-runtime",
     "@uiw/react-codemirror",
     "@xterm/",
+    "@opengeni/artifact-tool",
+    "@opengeni/sdk/editable-artifacts",
+    "MemoryEditableArtifactStorage",
+    "@resvg/resvg-js",
+    "docx",
+    "exceljs",
+    "pptxgenjs",
+    "sharp",
   ]) {
     if (sessionBundle.includes(forbidden)) {
       throw new Error(`Session-only tarball consumer reached forbidden runtime: ${forbidden}`);
@@ -642,6 +1156,38 @@ try {
   }
 
   const assetRoot = join(consumerRoot, "dist", "assets");
+  const browserHtml = await readFile(join(consumerRoot, "dist", "index.html"), "utf8");
+  const browserEntry = /<script[^>]+src="\/?([^"]+\.js)"/u.exec(browserHtml)?.[1];
+  if (!browserEntry) throw new Error("Vite output did not identify its browser entry chunk");
+  const browserStaticClosure = await staticBrowserChunkClosure(
+    join(consumerRoot, "dist", browserEntry),
+  );
+  const artifactCodecChunks = [
+    ["DOCX", "document-docx-codec-"],
+    ["XLSX", "spreadsheet-xlsx-codec-"],
+    ["PPTX", "presentation-pptx-"],
+  ] as const;
+  const artifactWorkerMarker = "artifact Worker is already initialized";
+  for (const [codec, chunkStem] of artifactCodecChunks) {
+    if ([...browserStaticClosure.keys()].some((path) => path.includes(chunkStem))) {
+      throw new Error(`${codec} codec leaked into the initial packed browser chunk closure`);
+    }
+  }
+  if ([...browserStaticClosure.values()].some((source) => source.includes(artifactWorkerMarker))) {
+    throw new Error("Editable-artifact Worker leaked into the initial browser chunk closure");
+  }
+  const browserJavaScriptFiles = (await readdir(assetRoot)).filter((file) => file.endsWith(".js"));
+  const browserJavaScript = (
+    await Promise.all(browserJavaScriptFiles.map((file) => readFile(join(assetRoot, file), "utf8")))
+  ).join("\n");
+  for (const [codec, chunkStem] of artifactCodecChunks) {
+    if (!browserJavaScriptFiles.some((file) => file.includes(chunkStem))) {
+      throw new Error(`Packed browser build did not emit the lazy ${codec} codec chunk`);
+    }
+  }
+  if (!browserJavaScript.includes(artifactWorkerMarker)) {
+    throw new Error("Packed browser build did not emit the editable-artifact Worker chunk");
+  }
   const cssFiles = (await readdir(assetRoot)).filter((file) => file.endsWith(".css"));
   const compiledCss = (
     await Promise.all(cssFiles.map((file) => readFile(join(assetRoot, file), "utf8")))
@@ -660,7 +1206,7 @@ try {
 
   passed = true;
   process.stdout.write(
-    `[publish-consumer] PASS ${sdk.manifest.name}@${sdk.manifest.version} + ${react.manifest.name}@${react.manifest.version} + ${runtime.manifest.name}@${runtime.manifest.version}; strict types, compiler-free scoped browser CSS, CSS-free session and realtime-only bundles, SSR, and packed artifacts are clean.\n`,
+    `[publish-consumer] PASS ${sdk.manifest.name}@${sdk.manifest.version} + ${artifactTool.manifest.name}@${artifactTool.manifest.version} + ${react.manifest.name}@${react.manifest.version} + ${runtime.manifest.name}@${runtime.manifest.version}; strict types, compiler-free scoped browser CSS, CSS-free session and realtime-only bundles, SSR, and packed artifacts are clean.\n`,
   );
 } finally {
   if (passed && !keepArtifacts) {

@@ -214,6 +214,14 @@ const PUBLIC_TELEMETRY_ERROR_CLASSES = new Set([
 
 const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
   "agent_command_wake_failed",
+  "artifact_materializer_native_input_framing_failed",
+  "artifact_materializer_native_revision_mismatch",
+  "artifact_materializer_native_snapshot_open_failed",
+  "artifact_materializer_native_state_mismatch",
+  "artifact_materializer_source_content_type_mismatch",
+  "artifact_materializer_source_open_failed",
+  "artifact_materializer_source_revalidation_failed",
+  "artifact_materializer_source_stream_identity_mismatch",
   "cleared_goal_live_publish_failed",
   "codex_failover_checkpoint_failed",
   "codex_fleet_shadow_failed",

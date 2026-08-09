@@ -4043,6 +4043,35 @@ export class OpenGeniClient {
     }
   }
 
+  /** Authenticated, contract-checked response for bounded streaming downloads. */
+  protected async requestResponse(
+    method: string,
+    path: string,
+    query: Record<string, string> = {},
+    options: OpenGeniRequestOptions = {},
+  ): Promise<Response> {
+    const correlationId = crypto.randomUUID();
+    let response: Response;
+    try {
+      response = await this.fetchImpl(this.url(path, query), {
+        method,
+        headers: {
+          ...this.headers(correlationId),
+          Accept: "application/octet-stream",
+        },
+        ...(options.signal ? { signal: options.signal } : {}),
+      });
+    } catch (error) {
+      if (isMutationMethod(method)) throw mutationTransportError(correlationId);
+      throw error;
+    }
+    assertApiContractResponse(response);
+    if (!response.ok) {
+      throw await apiErrorFromResponse(response, { method, correlationId });
+    }
+    return response;
+  }
+
   /** Like `requestJson` for endpoints that respond with no body (204). */
   private async requestVoid(method: string, path: string, body?: unknown): Promise<void> {
     const correlationId = crypto.randomUUID();

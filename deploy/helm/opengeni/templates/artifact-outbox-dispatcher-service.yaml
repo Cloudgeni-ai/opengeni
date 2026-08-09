@@ -1,0 +1,25 @@
+{{- if .Values.artifactOutboxDispatcher.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "opengeni.fullname" . }}-artifact-outbox-dispatcher
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: artifact-outbox-dispatcher
+  {{- if ((.Values.observability).metrics).enabled }}
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/path: {{ ((.Values.observability).metrics).path | default "/metrics" | quote }}
+    prometheus.io/port: {{ .Values.artifactOutboxDispatcher.service.port | quote }}
+  {{- end }}
+spec:
+  type: {{ .Values.artifactOutboxDispatcher.service.type }}
+  ports:
+    - port: {{ .Values.artifactOutboxDispatcher.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "opengeni.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: artifact-outbox-dispatcher
+{{- end }}

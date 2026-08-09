@@ -175,6 +175,7 @@ import {
   type ModelProviderApi,
   type RegistryProviderKind,
   type Settings,
+  resolveFirstPartyDelegationSecret,
 } from "@opengeni/config";
 import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import {
@@ -369,6 +370,7 @@ import {
 import { executeGatewayImageGeneration } from "./gateway-image-generation";
 import { executeCodexImageGeneration } from "./codex-image-generation";
 import { imageProviderBindingHash } from "./image-generation-operation";
+import { executeEditableArtifactPublication } from "./editable-artifact-publication";
 import { captureWorkspaceRevision, openFreshWorkspaceCaptureSession } from "./workspace-capture";
 import type { ChannelASession } from "@opengeni/runtime/sandbox";
 import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
@@ -2000,6 +2002,63 @@ export async function ensureTurnModalRegistryImage(
     return;
   }
   await ensureRegistryImage(runSettings);
+}
+
+const SANDBOX_ARTIFACT_RUNTIME_MANIFEST = "/opt/opengeni/artifact-runtime/installation.json";
+const SANDBOX_ARTIFACT_TOOL_ENTRY = "/opt/opengeni/artifact-runtime/skill-facade-entry.mjs";
+
+export type SandboxArtifactRuntimeAdmission = Readonly<{
+  available: boolean;
+  environment: Readonly<Record<string, string>>;
+}>;
+
+/**
+ * Admit native artifact skills only for the deployment's exact base sandbox
+ * image contract. A pack/rig image override is an independent filesystem and
+ * therefore fails closed even when the deployment base image is capable.
+ *
+ * This keeps lazy provisioning intact: CI/release proves the image closure,
+ * while a before-agent-start doctor verifies the actual box before any model
+ * call. No speculative sandbox is created merely to populate the skill index.
+ */
+export function sandboxArtifactRuntimeAdmission(
+  deploymentSettings: Settings,
+  runSettings: Settings,
+  backend: Settings["sandboxBackend"] | undefined,
+  options: Readonly<{ production?: boolean }> = {},
+): SandboxArtifactRuntimeAdmission {
+  if (!deploymentSettings.sandboxArtifactRuntimeEnabled) {
+    return { available: false, environment: {} };
+  }
+  const production = options.production ?? process.env.NODE_ENV === "production";
+  if (backend === "docker") {
+    const image = deploymentSettings.dockerImage;
+    const localDevelopmentImage = /^opengeni-sandbox:local-[0-9a-f]{12}$/u.test(image);
+    if (
+      runSettings.dockerImage !== image ||
+      (!/@sha256:[0-9a-f]{64}$/u.test(image) && (production || !localDevelopmentImage))
+    ) {
+      return { available: false, environment: {} };
+    }
+  } else if (backend === "modal") {
+    if (
+      !deploymentSettings.modalImageRef ||
+      !/@sha256:[0-9a-f]{64}$/u.test(deploymentSettings.modalImageRef) ||
+      runSettings.modalImageRef !== deploymentSettings.modalImageRef ||
+      runSettings.modalImageId !== deploymentSettings.modalImageId
+    ) {
+      return { available: false, environment: {} };
+    }
+  } else {
+    return { available: false, environment: {} };
+  }
+  return {
+    available: true,
+    environment: {
+      OPENGENI_ARTIFACT_RUNTIME_MANIFEST: SANDBOX_ARTIFACT_RUNTIME_MANIFEST,
+      OPENGENI_ARTIFACT_TOOL_ENTRY: SANDBOX_ARTIFACT_TOOL_ENTRY,
+    },
+  };
 }
 
 /**
@@ -5419,8 +5478,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const toolspaceAuthority = {
         sessionId: input.sessionId,
       };
+      const sandboxArtifactRuntime = sandboxArtifactRuntimeAdmission(
+        settings,
+        runSettings,
+        activeSandboxBackend ?? groupBoxBackend,
+      );
       const {
-        environment: sandboxEnvironment,
+        environment: baseSandboxEnvironment,
         gitToken: sandboxGitToken,
         gitTokens: sandboxGitTokens,
         gitTokenExpiresAt: sandboxGitTokenExpiresAt,
@@ -5449,6 +5513,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         cancellationSignal,
         undefined,
       );
+      // Reserved, image-owned paths win over workspace/session variables. The
+      // exact same merged object feeds both box manifest and agent declaration,
+      // preserving the no-environment-delta invariant.
+      const sandboxEnvironment = sandboxArtifactRuntime.available
+        ? { ...baseSandboxEnvironment, ...sandboxArtifactRuntime.environment }
+        : baseSandboxEnvironment;
 
       const sandboxToolspaceTokenFile = sandboxToolspaceToken
         ? toolspaceTokenFileFromEnvironment(sandboxEnvironment, input.sessionId)
@@ -6248,6 +6318,66 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           },
         };
       })();
+      const editableArtifactPublicationOption: Pick<
+        BuildAgentOptions,
+        "editableArtifactPublication"
+      > = (() => {
+        if (
+          !objectStorage ||
+          !sandboxArtifactRuntime.available ||
+          !resolveFirstPartyDelegationSecret(modelRunSettings) ||
+          (session.firstPartyMcpPermissions !== null &&
+            !session.firstPartyMcpPermissions.includes("artifacts:publish") &&
+            !session.firstPartyMcpPermissions.includes("workspace:admin"))
+        ) {
+          return {};
+        }
+        const runtimeEntrypoint = sandboxEnvironment.OPENGENI_ARTIFACT_TOOL_ENTRY;
+        if (!runtimeEntrypoint) return {};
+        const sandboxObjectStorage =
+          activeSandboxBackend === "selfhosted"
+            ? objectStorage
+            : objectStorageForSandboxDownloads(modelRunSettings, objectStorage);
+        return {
+          editableArtifactPublication: {
+            execute: async (request, { toolCallId }) => {
+              const sessionForPublication =
+                resolvedSandbox?.established.session ?? sdkOwnedSandboxSession;
+              const fence = toolCancellationFenceRef.current;
+              if (!sessionForPublication || !fence) {
+                throw new Error(
+                  "Editable artifact publication requires the active sandbox session",
+                );
+              }
+              const runAs = sandboxRunAs(modelRunSettings);
+              return await executeEditableArtifactPublication({
+                db,
+                objectStorage,
+                sandboxObjectStorage,
+                settings: modelRunSettings,
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: turn.id,
+                attemptId: input.attemptId,
+                executionGeneration,
+                toolCallId,
+                request,
+                runtimeEntrypoint,
+                runCommand: async (command) =>
+                  await fence.runSandboxCommandStructured(
+                    sessionForPublication as import("@opengeni/runtime").TurnSandboxCommandSession,
+                    {
+                      ...command,
+                      ...(runAs ? { runAs } : {}),
+                    },
+                  ),
+                ...(runtimeCancellationSignal ? { signal: runtimeCancellationSignal } : {}),
+              });
+            },
+          },
+        };
+      })();
       const serviceTier = serviceTierForLatencyMode(
         turnExecutionPolicy.providerId,
         turnExecutionPolicy.latencyMode,
@@ -6289,6 +6419,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           titleIsSet: Boolean(session.title?.trim()),
         },
         sandboxEnvironment,
+        ...(sandboxArtifactRuntime.available ? { artifactRuntimeAvailable: true } : {}),
         ...(cancellationSignal ? { turnCancellationSignal: cancellationSignal } : {}),
         onToolCancellationFence: (fence) => {
           toolCancellationFenceRef.current = fence;
@@ -6342,6 +6473,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // compaction threshold.
         hostedWebSearch,
         ...imageGenerationOption,
+        ...editableArtifactPublicationOption,
         lazyToolTransport,
         supportsImageInput,
         inputFileMediaTypes: modelInputPolicy.inputFileMediaTypes,

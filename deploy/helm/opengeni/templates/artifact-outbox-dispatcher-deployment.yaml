@@ -1,0 +1,115 @@
+{{- if .Values.artifactOutboxDispatcher.enabled }}
+{{- $dispatcher := .Values.artifactOutboxDispatcher }}
+{{- $priorityClassName := include "opengeni.priorityClassName" (dict "root" . "explicit" $dispatcher.priorityClassName "tier" "control") }}
+{{- $credentialsSecret := default (include "opengeni.secretName" .) $dispatcher.credentialsSecret }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "opengeni.fullname" . }}-artifact-outbox-dispatcher
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: artifact-outbox-dispatcher
+spec:
+  replicas: {{ $dispatcher.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "opengeni.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: artifact-outbox-dispatcher
+  template:
+    metadata:
+      labels:
+        {{- include "opengeni.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: artifact-outbox-dispatcher
+        opengeni.ai/worker-role: artifact-outbox-dispatcher
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if and .Values.secret.create (not $dispatcher.credentialsSecret) }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with $dispatcher.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "opengeni.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      terminationGracePeriodSeconds: {{ $dispatcher.terminationGracePeriodSeconds }}
+      {{- if $priorityClassName }}
+      priorityClassName: {{ $priorityClassName | quote }}
+      {{- end }}
+      securityContext:
+        {{- toYaml $dispatcher.podSecurityContext | nindent 8 }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: artifact-outbox-dispatcher
+          image: {{ include "opengeni.image" (dict "root" . "image" $dispatcher.image) | quote }}
+          imagePullPolicy: {{ $dispatcher.image.pullPolicy }}
+          securityContext:
+            {{- toYaml $dispatcher.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ $dispatcher.containerPort }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "opengeni.fullname" . }}-config
+          env:
+            - name: OPENGENI_ARTIFACT_OUTBOX_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $credentialsSecret }}
+                  key: {{ required "artifactOutboxDispatcher.databaseUrlSecretKey is required" $dispatcher.databaseUrlSecretKey }}
+            - name: OPENGENI_SELFHOSTED_NATS_CONTROL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $credentialsSecret }}
+                  key: {{ required "artifactOutboxDispatcher.natsControlPasswordSecretKey is required" $dispatcher.natsControlPasswordSecretKey }}
+                  optional: true
+            - name: OPENGENI_ARTIFACT_OUTBOX_ENABLED
+              value: "true"
+            - name: OPENGENI_ARTIFACT_OUTBOX_DATABASE_ROLE
+              value: opengeni_artifact_outbox_dispatcher
+            - name: OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT
+              value: {{ $dispatcher.containerPort | quote }}
+            - name: OPENGENI_ARTIFACT_OUTBOX_DB_POOL_SIZE
+              value: {{ $dispatcher.databasePoolSize | quote }}
+            - name: OPENGENI_ARTIFACT_OUTBOX_BATCH_SIZE
+              value: {{ $dispatcher.batchSize | quote }}
+            - name: OPENGENI_ARTIFACT_OUTBOX_CONCURRENCY
+              value: {{ $dispatcher.concurrency | quote }}
+            - name: OPENGENI_ARTIFACT_OUTBOX_LEASE_MS
+              value: {{ $dispatcher.leaseMs | quote }}
+            - name: OPENGENI_ARTIFACT_OUTBOX_RENEW_MS
+              value: {{ $dispatcher.renewMs | quote }}
+            - name: OPENGENI_ARTIFACT_OUTBOX_POLL_MS
+              value: {{ $dispatcher.pollMs | quote }}
+            - name: OPENGENI_ARTIFACT_OUTBOX_PUBLISH_TIMEOUT_MS
+              value: {{ $dispatcher.publishTimeoutMs | quote }}
+            - name: OPENGENI_ARTIFACT_OUTBOX_RETRY_BASE_MS
+              value: {{ $dispatcher.retryBaseMs | quote }}
+            - name: OPENGENI_ARTIFACT_OUTBOX_RETRY_MAX_MS
+              value: {{ $dispatcher.retryMaxMs | quote }}
+          {{- if $dispatcher.probes.readiness.enabled }}
+          readinessProbe:
+            {{- include "opengeni.httpProbe" (dict "probe" $dispatcher.probes.readiness) | nindent 12 }}
+          {{- end }}
+          {{- if $dispatcher.probes.liveness.enabled }}
+          livenessProbe:
+            {{- include "opengeni.httpProbe" (dict "probe" $dispatcher.probes.liveness) | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml $dispatcher.resources | nindent 12 }}
+      {{- with $dispatcher.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $dispatcher.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $dispatcher.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

@@ -1243,6 +1243,11 @@ export async function bootstrapWorkspace(
         subjectId: input.subjectId,
         ...(input.subjectLabel ? { subjectLabel: input.subjectLabel } : {}),
         permissions: row.membership.permissions as Permission[],
+        ...(input.accountExternalSource === "opengeni:local"
+          ? { principalKind: "human_session" as const }
+          : input.accountExternalSource === "opengeni:configured"
+            ? { principalKind: "configured_key" as const }
+            : {}),
       })),
       defaultAccountId: account.id,
       defaultWorkspaceId: workspace.id,
@@ -4023,6 +4028,128 @@ export async function createFileUpload(
         };
       }),
   );
+}
+
+export type PrepareEditableArtifactSourceFileInput = {
+  accountId: string;
+  workspaceId: string;
+  fileId: string;
+  uploadId: string;
+  filename: string;
+  safeFilename: string;
+  contentType: string;
+  sizeBytes: number;
+  sha256: string;
+  bucket: string;
+  objectKey: string;
+  expiresAt: Date;
+};
+
+/**
+ * Prepare one deterministic upload intent for an agent-published Office source.
+ * Retries return the same pending/ready file only when every immutable byte and
+ * storage fact matches; identity reuse with different content fails closed.
+ */
+export async function prepareEditableArtifactSourceFile(
+  db: Database,
+  input: PrepareEditableArtifactSourceFileInput,
+): Promise<{ file: FileAsset; uploadId: string; created: boolean }> {
+  if (!Number.isSafeInteger(input.sizeBytes) || input.sizeBytes < 1) {
+    throw new TypeError("Editable artifact source size is invalid");
+  }
+  if (!/^[0-9a-f]{64}$/u.test(input.sha256)) {
+    throw new TypeError("Editable artifact source sha256 is invalid");
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${`editable-artifact-source:${input.workspaceId}:${input.fileId}`}, 0))`,
+        );
+        const [existing] = await tx
+          .select({ file: schema.files, upload: schema.fileUploads })
+          .from(schema.files)
+          .innerJoin(
+            schema.fileUploads,
+            and(
+              eq(schema.fileUploads.workspaceId, schema.files.workspaceId),
+              eq(schema.fileUploads.fileId, schema.files.id),
+              eq(schema.fileUploads.id, input.uploadId),
+            ),
+          )
+          .where(
+            and(eq(schema.files.workspaceId, input.workspaceId), eq(schema.files.id, input.fileId)),
+          )
+          .for("update")
+          .limit(1);
+        if (existing) {
+          assertEditableArtifactSourceFileMatches(existing.file, existing.upload, input);
+          return { file: mapFile(existing.file), uploadId: existing.upload.id, created: false };
+        }
+
+        const [file] = await tx
+          .insert(schema.files)
+          .values({
+            id: input.fileId,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            status: "pending_upload",
+            filename: input.filename,
+            safeFilename: input.safeFilename,
+            contentType: input.contentType,
+            sizeBytes: input.sizeBytes,
+            sha256: input.sha256,
+            bucket: input.bucket,
+            objectKey: input.objectKey,
+          })
+          .returning();
+        if (!file) throw new Error("Failed to prepare editable artifact source file");
+        const [upload] = await tx
+          .insert(schema.fileUploads)
+          .values({
+            id: input.uploadId,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            fileId: input.fileId,
+            status: "pending",
+            expiresAt: input.expiresAt,
+          })
+          .returning();
+        if (!upload) throw new Error("Failed to prepare editable artifact source upload");
+        return { file: mapFile(file), uploadId: upload.id, created: true };
+      }),
+  );
+}
+
+function assertEditableArtifactSourceFileMatches(
+  file: typeof schema.files.$inferSelect,
+  upload: typeof schema.fileUploads.$inferSelect,
+  input: PrepareEditableArtifactSourceFileInput,
+): void {
+  const statusMatches =
+    (file.status === "pending_upload" && upload.status === "pending") ||
+    (file.status === "ready" && upload.status === "completed");
+  if (
+    !statusMatches ||
+    file.accountId !== input.accountId ||
+    file.workspaceId !== input.workspaceId ||
+    file.id !== input.fileId ||
+    upload.id !== input.uploadId ||
+    upload.accountId !== input.accountId ||
+    upload.workspaceId !== input.workspaceId ||
+    upload.fileId !== input.fileId ||
+    file.filename !== input.filename ||
+    file.safeFilename !== input.safeFilename ||
+    file.contentType !== input.contentType ||
+    file.sizeBytes !== input.sizeBytes ||
+    file.sha256 !== input.sha256 ||
+    file.bucket !== input.bucket ||
+    file.objectKey !== input.objectKey
+  ) {
+    throw new Error(`Editable artifact source identity conflict: ${input.fileId}`);
+  }
 }
 
 export async function getFile(
@@ -49975,3 +50102,5 @@ export {
 
 export * from "./workspace-artifacts";
 export * from "./transcription-recordings";
+export * from "./editable-artifacts";
+export * from "./editable-artifact-materialization";

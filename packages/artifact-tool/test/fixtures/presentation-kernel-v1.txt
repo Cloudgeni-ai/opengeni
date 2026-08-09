@@ -1,0 +1,5 @@
+deck|pr/1|1280|720
+master|mt/2|Master
+layout|ly/3|Layout|mt/2
+slide|sl/4||ly/3
+textbox|sh/5|Greeting|10|20|30|40|Hello

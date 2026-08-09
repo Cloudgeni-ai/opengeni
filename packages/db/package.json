@@ -34,6 +34,14 @@
     "./provision-roles": {
       "types": "./src/provision-roles.ts",
       "default": "./src/provision-roles.ts"
+    },
+    "./editable-artifacts": {
+      "types": "./src/editable-artifacts.ts",
+      "default": "./src/editable-artifacts.ts"
+    },
+    "./editable-artifact-durable-export": {
+      "types": "./src/editable-artifact-durable-export.ts",
+      "default": "./src/editable-artifact-durable-export.ts"
     }
   },
   "publishConfig": {

@@ -5,6 +5,8 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "..");
+const exactCiSource =
+  "${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}";
 
 async function workflow(name: string): Promise<string> {
   return readFile(resolve(root, ".github/workflows", name), "utf8");
@@ -99,13 +101,15 @@ describe("release image workflow contract", () => {
       "target: api",
       "target: worker",
       "target: web",
+      "target: artifact-materializer",
+      "target: artifact-outbox-dispatcher",
       "file: docker/sandbox.Dockerfile",
       "file: agent/crates/opengeni-relay/Dockerfile",
     ]) {
       expect(candidate).toContain(identity);
     }
     expect(candidate).toContain("docker/setup-qemu-action@");
-    expect(candidate.match(/platforms: linux\/amd64,linux\/arm64/g)).toHaveLength(5);
+    expect(candidate.match(/platforms: linux\/amd64,linux\/arm64/g)).toHaveLength(7);
     expect(candidate).toContain("candidate-$SOURCE_SHA");
     expect(candidate).toContain("opengeni-candidate-${SOURCE_SHA}");
     expect(candidate).toContain("evidence/release-candidate.json");
@@ -156,9 +160,27 @@ describe("release image workflow contract", () => {
       >;
     };
 
-    const leafNames = ["api-image", "worker-web-images", "relay-image", "sandbox-image"];
-    for (const jobName of leafNames) {
+    const leafNames = [
+      "api-image",
+      "worker-web-images",
+      "artifact-materializer-image",
+      "artifact-outbox-dispatcher-image",
+      "relay-image",
+      "sandbox-image",
+    ];
+    for (const jobName of [
+      "worker-web-images",
+      "artifact-outbox-dispatcher-image",
+      "relay-image",
+    ]) {
       expect(parsed.jobs[jobName]?.needs).toEqual(["automation-admission", "plan"]);
+    }
+    for (const jobName of ["api-image", "artifact-materializer-image", "sandbox-image"]) {
+      expect(parsed.jobs[jobName]?.needs).toEqual([
+        "automation-admission",
+        "plan",
+        "artifact-runtime",
+      ]);
     }
     expect(parsed.jobs.images?.name).toBe("Workload image builds");
     expect(parsed.jobs.images?.needs).toEqual([
@@ -166,14 +188,23 @@ describe("release image workflow contract", () => {
       "plan",
       "api-image",
       "worker-web-images",
+      "artifact-materializer-image",
+      "artifact-outbox-dispatcher-image",
       "relay-image",
       "sandbox-image",
     ]);
-    for (const jobName of leafNames) {
+    for (const jobName of ["api-image", "artifact-materializer-image", "sandbox-image"]) {
       expect(parsed.jobs[jobName]?.if).toBe(parsed.jobs["api-image"]?.if);
     }
-    expect(parsed.jobs.images?.if).toBe(parsed.jobs["api-image"]?.if);
-    expect(images.match(/packages: write/g)).toHaveLength(4);
+    for (const jobName of [
+      "worker-web-images",
+      "artifact-outbox-dispatcher-image",
+      "relay-image",
+    ]) {
+      expect(parsed.jobs[jobName]?.if).toBe(parsed.jobs["worker-web-images"]?.if);
+    }
+    expect(parsed.jobs.images?.if).toBe(parsed.jobs["worker-web-images"]?.if);
+    expect(images.match(/packages: write/g)).toHaveLength(6);
     for (const jobName of leafNames) {
       const login = parsed.jobs[jobName]?.steps?.find((step) => step.name === "Log in to GHCR");
       expect(login?.with).toEqual({
@@ -185,6 +216,12 @@ describe("release image workflow contract", () => {
     expect(images).toContain("Require every workload image build");
     expect(images).toContain("API_IMAGE_RESULT: ${{ needs.api-image.result }}");
     expect(images).toContain("WORKER_WEB_IMAGES_RESULT: ${{ needs.worker-web-images.result }}");
+    expect(images).toContain(
+      "ARTIFACT_MATERIALIZER_IMAGE_RESULT: ${{ needs.artifact-materializer-image.result }}",
+    );
+    expect(images).toContain(
+      "ARTIFACT_OUTBOX_DISPATCHER_IMAGE_RESULT: ${{ needs.artifact-outbox-dispatcher-image.result }}",
+    );
     expect(images).toContain("RELAY_IMAGE_RESULT: ${{ needs.relay-image.result }}");
     expect(images).toContain("SANDBOX_IMAGE_RESULT: ${{ needs.sandbox-image.result }}");
     const aggregate = parsed.jobs.images?.steps?.find(
@@ -193,6 +230,9 @@ describe("release image workflow contract", () => {
     expect(aggregate?.env).toEqual({
       API_IMAGE_RESULT: "${{ needs.api-image.result }}",
       WORKER_WEB_IMAGES_RESULT: "${{ needs.worker-web-images.result }}",
+      ARTIFACT_MATERIALIZER_IMAGE_RESULT: "${{ needs.artifact-materializer-image.result }}",
+      ARTIFACT_OUTBOX_DISPATCHER_IMAGE_RESULT:
+        "${{ needs.artifact-outbox-dispatcher-image.result }}",
       RELAY_IMAGE_RESULT: "${{ needs.relay-image.result }}",
       SANDBOX_IMAGE_RESULT: "${{ needs.sandbox-image.result }}",
     });
@@ -202,23 +242,27 @@ describe("release image workflow contract", () => {
           ...process.env,
           API_IMAGE_RESULT: results[0],
           WORKER_WEB_IMAGES_RESULT: results[1],
-          RELAY_IMAGE_RESULT: results[2],
-          SANDBOX_IMAGE_RESULT: results[3],
+          ARTIFACT_MATERIALIZER_IMAGE_RESULT: results[2],
+          ARTIFACT_OUTBOX_DISPATCHER_IMAGE_RESULT: results[3],
+          RELAY_IMAGE_RESULT: results[4],
+          SANDBOX_IMAGE_RESULT: results[5],
         },
       }).exitCode;
-    expect(aggregateResult("success", "success", "success", "success")).toBe(0);
+    expect(aggregateResult("success", "success", "success", "success", "success", "success")).toBe(
+      0,
+    );
     for (const result of ["failure", "skipped", "cancelled", ""]) {
-      for (let index = 0; index < 4; index += 1) {
-        const results = Array(4).fill("success") as string[];
+      for (let index = 0; index < 6; index += 1) {
+        const results = Array(6).fill("success") as string[];
         results[index] = result;
         expect(aggregateResult(...results)).not.toBe(0);
       }
     }
-    expect(images.match(/push: \$\{\{ github\.event_name == 'push' \}\}/g)).toHaveLength(5);
-    expect(images.match(/:dogfood-sha-\{0\}', github\.sha\)/g)).toHaveLength(5);
+    expect(images.match(/push: \$\{\{ github\.event_name == 'push' \}\}/g)).toHaveLength(7);
+    expect(images.match(/:dogfood-sha-\{0\}', github\.sha\)/g)).toHaveLength(7);
     expect(images).not.toMatch(/format\('ghcr\.io\/cloudgeni-ai\/opengeni-[^']+:sha-\{0\}'/);
-    expect(images.match(/OPENGENI_SERVER_VERSION=sha-\$\{\{ github\.event_name/g)).toHaveLength(3);
-    expect(images).toContain("OPENGENI_DEPLOYMENT_REVISION=${{ github.event_name");
+    expect(images.split(`OPENGENI_SERVER_VERSION=sha-${exactCiSource}`).length - 1).toBe(5);
+    expect(images).toContain(`OPENGENI_DEPLOYMENT_REVISION=${exactCiSource}`);
     expect(images).toContain("Write exact-main-SHA dogfood receipt");
     expect(images).toContain("Upload exact-main-SHA dogfood receipt");
     expect(images).toContain("API_DIGEST: ${{ needs.api-image.outputs.api_digest }}");
@@ -226,6 +270,12 @@ describe("release image workflow contract", () => {
     expect(images).toContain("WEB_DIGEST: ${{ needs.worker-web-images.outputs.web_digest }}");
     expect(images).toContain("RELAY_DIGEST: ${{ needs.relay-image.outputs.relay_digest }}");
     expect(images).toContain("SANDBOX_DIGEST: ${{ needs.sandbox-image.outputs.sandbox_digest }}");
+    expect(images).toContain(
+      "ARTIFACT_MATERIALIZER_DIGEST: ${{ needs.artifact-materializer-image.outputs.artifact_materializer_digest }}",
+    );
+    expect(images).toContain(
+      "ARTIFACT_OUTBOX_DISPATCHER_DIGEST: ${{ needs.artifact-outbox-dispatcher-image.outputs.artifact_outbox_dispatcher_digest }}",
+    );
     expect(images).toContain('--arg tag "dogfood-sha-${GITHUB_SHA}"');
     expect(images).not.toContain('--arg tag "sha-${GITHUB_SHA}"');
     expect(images).toContain("dogfood-images-${{ github.sha }}");
@@ -553,7 +603,7 @@ ${parser}`,
     expect(invalidResult.status).not.toBe(0);
   });
 
-  test("ordinary CI builds the same five physical image roles", async () => {
+  test("ordinary CI builds the same seven physical image roles", async () => {
     const ci = await workflow("ci.yml");
     const parsed = Bun.YAML.parse(ci) as { jobs: Record<string, { steps: Array<unknown> }> };
     const imagesJob = ci.slice(ci.indexOf("\n  api-image:\n"));
@@ -562,44 +612,62 @@ ${parser}`,
       "target: api",
       "target: worker",
       "target: web",
+      "target: artifact-materializer",
+      "target: artifact-outbox-dispatcher",
       "file: docker/sandbox.Dockerfile",
       "file: agent/crates/opengeni-relay/Dockerfile",
     ]) {
       expect(imagesJob).toContain(identity);
     }
     expect(imagesJob).toContain("docker/setup-qemu-action@");
-    expect(imagesJob.match(/platforms: linux\/amd64,linux\/arm64/g)).toHaveLength(5);
+    expect(imagesJob.match(/platforms: linux\/amd64,linux\/arm64/g)).toHaveLength(7);
 
-    const imageSteps = ["api-image", "worker-web-images", "relay-image", "sandbox-image"].flatMap(
-      (jobName) =>
-        parsed.jobs[jobName]!.steps.filter(
-          (step): step is { name: string; uses: string; with: Record<string, string> } =>
-            typeof step === "object" &&
-            step !== null &&
-            "uses" in step &&
-            step.uses === "docker/build-push-action@v7.3.0",
-        ).map((step) => ({
-          jobName,
-          name: step.name,
-          step,
-          fingerprint: createHash("sha256").update(JSON.stringify(step)).digest("hex"),
-        })),
+    const imageSteps = [
+      "api-image",
+      "worker-web-images",
+      "artifact-materializer-image",
+      "artifact-outbox-dispatcher-image",
+      "relay-image",
+      "sandbox-image",
+    ].flatMap((jobName) =>
+      parsed.jobs[jobName]!.steps.filter(
+        (step): step is { name: string; uses: string; with: Record<string, string> } =>
+          typeof step === "object" &&
+          step !== null &&
+          "uses" in step &&
+          step.uses === "docker/build-push-action@v7.3.0",
+      ).map((step) => ({
+        jobName,
+        name: step.name,
+        step,
+        fingerprint: createHash("sha256").update(JSON.stringify(step)).digest("hex"),
+      })),
     );
     expect(imageSteps.map(({ step: _step, ...identity }) => identity)).toEqual([
       {
         jobName: "api-image",
         name: "Build API image",
-        fingerprint: "92035198e8acb29ffa33ae46602f0f4cbe3332e18257cb3bd8582538db3e16dd",
+        fingerprint: "791b6b1d1ea3bbb12a893b2056b2db1c343c2972f6202fe1be6276eed30f66f1",
       },
       {
         jobName: "worker-web-images",
         name: "Build worker image",
-        fingerprint: "8562ea25e72c99df48b2f2150cf9bcbb5a13b39633a5cb4e2648521e24840f67",
+        fingerprint: "18b96f7cc2e97584967f580b6e678f20c96022ca77db76fea49753df8e82641a",
       },
       {
         jobName: "worker-web-images",
         name: "Build web image",
-        fingerprint: "641ae5f4c76a62fe3d3f2e42cea03cd5514d6db906be3d824f9e602b0955cc9f",
+        fingerprint: "1689497eac266bd4b700ddea4e1f4d7ced2316657a2be37062d6ee064bf2d8e8",
+      },
+      {
+        jobName: "artifact-materializer-image",
+        name: "Build artifact materializer image",
+        fingerprint: "932536d47211c1a8b5e77d2d5eda9aed64df87f6d3297f29c2a0a2f86c84528d",
+      },
+      {
+        jobName: "artifact-outbox-dispatcher-image",
+        name: "Build artifact outbox dispatcher image",
+        fingerprint: "ea59c9c57d6e0ccc97b05d34d9f13c2cd7531faf791d00cb248a893a0bb77635",
       },
       {
         jobName: "relay-image",
@@ -609,13 +677,15 @@ ${parser}`,
       {
         jobName: "sandbox-image",
         name: "Build headless sandbox image",
-        fingerprint: "0985451362b8a06fe51d1a56186445a7311c916f3908e56c48c9fd4d9a1ec46f",
+        fingerprint: "a336e75d1ba14e166a4ae30a53d0a6aa4a4bec663f4b14ec2b2607015d1cd6c1",
       },
     ]);
 
     const expectedCacheScopes = new Map([
       ["Build API image", "opengeni-ci-api"],
       ["Build worker image", "opengeni-ci-worker"],
+      ["Build artifact materializer image", "opengeni-ci-artifact-materializer"],
+      ["Build artifact outbox dispatcher image", "opengeni-ci-artifact-outbox-dispatcher"],
       ["Build web image", "opengeni-ci-web"],
       ["Build relay image", "opengeni-ci-relay"],
       ["Build headless sandbox image", "opengeni-ci-sandbox"],

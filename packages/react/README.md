@@ -24,6 +24,90 @@ ancestor. Components are styled with Tailwind v4 utilities mapped onto the
 tokens, Radix primitives for behavior, and Motion for state-communicating
 animation. Override the tokens to rebrand everything.
 
+## Editable Office artifacts
+
+The optional artifact workbench is isolated from the ordinary session and
+realtime entries. The default browser composition owns one verified WASM
+Worker, durable IndexedDB state, authenticated live sync, teardown, and the
+matching editor for the artifact modality:
+
+```tsx
+import workerUrl from "@opengeni/sdk/editable-artifacts/worker?worker&url";
+import { BrowserEditableArtifactWorkbench } from "@opengeni/react/artifacts";
+import { editableArtifactKernelRuntime } from "@opengeni/artifact-kernel-wasm-spreadsheet";
+
+<BrowserEditableArtifactWorkbench
+  options={{
+    baseUrl: "https://api.example.com",
+    workspaceId,
+    artifact,
+    replicaId,
+    storageAuthority,
+    runtime: {
+      workerUrl,
+      ...editableArtifactKernelRuntime,
+      applicationOrigin: window.location.origin,
+    },
+    transport: { credentials: "include" },
+  }}
+  spreadsheet={{ title: artifact.title }}
+/>;
+```
+
+`storageAuthority` is the host's authenticated deployment/account/workspace/
+principal partition and authorization epoch; it must rotate when that authority
+or any static transport credential changes. `replicaId` is a persisted random
+64-bit writer id. Cookie auth works through `credentials`; self-hosted browser
+consoles may pass static deployment-bound `transport.headers`. Browser API keys
+and custom fetch/WebSocket functions stay on the lower-level
+`EditableArtifactWorkbenchHost`, whose host supplies its own SDK session factory
+and complete `sessionKey`.
+
+Hosts that already own an `EditableArtifactSession` can render one modality
+directly. No snapshot or artifact-tool model crosses onto the React thread:
+
+```tsx
+import { EditableSpreadsheetArtifactSurface } from "@opengeni/react/artifacts/spreadsheet";
+import { EditableDocumentArtifactSurface } from "@opengeni/react/artifacts/document";
+import { EditablePresentationArtifactSurface } from "@opengeni/react/artifacts/presentation";
+
+<EditableSpreadsheetArtifactSurface session={spreadsheetSession} title="Report" />;
+<EditableDocumentArtifactSurface session={documentSession} title="Brief" />;
+<EditablePresentationArtifactSurface session={presentationSession} title="Launch deck" />;
+```
+
+The durable document surface composes bounded summary, body, section, and
+review queries at one native revision. Text edits become UTF-16-correct minimal
+`paragraph.edit` commands; formatting becomes `paragraph.format`. Empty
+documents use the SDK's native-namespace structural allocator to create their
+first durable paragraph without inventing React-side identity rules.
+
+The durable presentation surface composes the bounded slide catalog and
+per-slide editor ABI. It keeps master/layout inheritance and node hierarchy in
+the projection, renders inherited nodes read-only in slide mode, and maps
+movement, resizing, and rich-text changes to canonical node commands. Geometry
+uses the Office EMU-to-CSS-pixel scale; unchanged command fields retain their
+exact canonical values. Slide and text-box insertion/deletion likewise use
+canonical SDK/session commands; optimistic UI never mutates a shadow deck.
+
+Run `OPENGENI_REACT_DEMO_API_TARGET=http://127.0.0.1:8000 bun run demo`, then
+open `http://localhost:3100/editable-artifacts.html?workspaceId=<id>`. This is a
+live public-SDK reference consumer for all three modalities; it has no in-memory
+or permissive fallback.
+
+`DocumentProjectionEditor`, `PresentationProjectionEditor`, and
+`SpreadsheetProjectionGrid` expose the same host-owned projection/async-command
+boundary without requiring the OpenGeni sync session. Pending, failure, retry,
+read-only, focus, and reconciliation behavior stays inside the components.
+
+Projection editors use browser-safe structural views and do not load
+`@opengeni/artifact-tool`, its codecs, or native bindings. Local authoring tools
+can optionally supply the reference models from `@opengeni/artifact-tool/reference`
+to the compatible `DocumentEditor`,
+`PresentationEditor`, or `SpreadsheetGrid` adapters. Those convenience adapters
+deliberately mutate the supplied public authoring model.
+`@opengeni/react/artifacts` remains the all-modality barrel.
+
 ## Install & styles
 
 Hosts that render their own UI should import the session-only surface:

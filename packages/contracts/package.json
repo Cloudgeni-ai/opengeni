@@ -33,6 +33,66 @@
     "./connector-destinations": {
       "types": "./src/connector-destinations.ts",
       "default": "./src/connector-destinations.ts"
+    },
+    "./editable-artifacts": {
+      "types": "./src/editable-artifacts.ts",
+      "default": "./src/editable-artifacts.ts"
+    },
+    "./editable-artifact-committed-transaction": {
+      "types": "./src/editable-artifact-committed-transaction.ts",
+      "default": "./src/editable-artifact-committed-transaction.ts"
+    },
+    "./editable-artifact-serialized-commit": {
+      "types": "./src/editable-artifact-serialized-commit.ts",
+      "default": "./src/editable-artifact-serialized-commit.ts"
+    },
+    "./editable-artifact-live": {
+      "types": "./src/editable-artifact-live.ts",
+      "default": "./src/editable-artifact-live.ts"
+    },
+    "./editable-artifact-causal-frontier": {
+      "types": "./src/editable-artifact-causal-frontier.ts",
+      "default": "./src/editable-artifact-causal-frontier.ts"
+    },
+    "./editable-artifact-codec-registry": {
+      "types": "./src/editable-artifact-codec-registry.ts",
+      "default": "./src/editable-artifact-codec-registry.ts"
+    },
+    "./editable-artifact-versions": {
+      "types": "./src/editable-artifact-versions.ts",
+      "default": "./src/editable-artifact-versions.ts"
+    },
+    "./editable-artifact-publication": {
+      "types": "./src/editable-artifact-publication.ts",
+      "default": "./src/editable-artifact-publication.ts"
+    },
+    "./editable-artifact-publication-receipt": {
+      "types": "./src/editable-artifact-publication-receipt.ts",
+      "default": "./src/editable-artifact-publication-receipt.ts"
+    },
+    "./spreadsheet-artifact-commands": {
+      "types": "./src/spreadsheet-artifact-commands.ts",
+      "default": "./src/spreadsheet-artifact-commands.ts"
+    },
+    "./spreadsheet-artifact-query": {
+      "types": "./src/spreadsheet-artifact-query.ts",
+      "default": "./src/spreadsheet-artifact-query.ts"
+    },
+    "./document-artifact-commands": {
+      "types": "./src/document-artifact-commands.ts",
+      "default": "./src/document-artifact-commands.ts"
+    },
+    "./document-artifact-query": {
+      "types": "./src/document-artifact-query.ts",
+      "default": "./src/document-artifact-query.ts"
+    },
+    "./presentation-artifact-commands": {
+      "types": "./src/presentation-artifact-commands.ts",
+      "default": "./src/presentation-artifact-commands.ts"
+    },
+    "./presentation-artifact-query": {
+      "types": "./src/presentation-artifact-query.ts",
+      "default": "./src/presentation-artifact-query.ts"
     }
   },
   "publishConfig": {

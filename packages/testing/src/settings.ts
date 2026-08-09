@@ -161,6 +161,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     azureOpenaiAdToken: undefined,
     disableOpenaiTracing: true,
     sandboxBackend: "none",
+    sandboxArtifactRuntimeEnabled: false,
     dockerImage: "opengeni-sandbox:local",
     dockerExposedPorts: "",
     dockerNetwork: undefined,

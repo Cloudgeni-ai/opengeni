@@ -11,7 +11,7 @@ import { defineConfig } from "tsup";
 // (@opengeni/storage/documents/observability, better-auth) are erased by the
 // transpile and never appear in the emitted JS.
 export default defineConfig({
-  entry: ["src/index.ts"],
+  entry: ["src/index.ts", "src/editable-artifacts.ts", "src/editable-artifact-live.ts"],
   format: ["esm"],
   target: "es2022",
   dts: true,

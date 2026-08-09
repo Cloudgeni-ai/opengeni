@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "source": "docs/artifact-engine.md#11-performance-budgets",
+  "claimPolicy": "A target is production-measured only after its exact packaged runtime passes the pinned release suite on that target. Kernel-core measurements do not certify packaging, sandbox execution, codecs, rendering, or another platform.",
+  "targets": [
+    {
+      "target": "darwin-x64",
+      "kernelCore": "unmeasured",
+      "packagedRuntime": "unmeasured",
+      "sandboxRuntime": "unmeasured"
+    },
+    {
+      "target": "darwin-arm64",
+      "kernelCore": "measured-local-development",
+      "packagedRuntime": "unmeasured",
+      "sandboxRuntime": "unmeasured"
+    },
+    {
+      "target": "linux-x64-gnu",
+      "kernelCore": "unmeasured",
+      "packagedRuntime": "unmeasured",
+      "sandboxRuntime": "unmeasured"
+    },
+    {
+      "target": "linux-arm64-gnu",
+      "kernelCore": "unmeasured",
+      "packagedRuntime": "unmeasured",
+      "sandboxRuntime": "unmeasured"
+    },
+    {
+      "target": "linux-x64-musl",
+      "kernelCore": "unmeasured",
+      "packagedRuntime": "unmeasured",
+      "sandboxRuntime": "unmeasured"
+    },
+    {
+      "target": "linux-arm64-musl",
+      "kernelCore": "unmeasured",
+      "packagedRuntime": "unmeasured",
+      "sandboxRuntime": "unmeasured"
+    },
+    {
+      "target": "win32-x64-msvc",
+      "kernelCore": "unmeasured",
+      "packagedRuntime": "unmeasured",
+      "sandboxRuntime": "unmeasured"
+    },
+    {
+      "target": "wasm-web",
+      "kernelCore": "measured-local-development",
+      "packagedRuntime": "unmeasured",
+      "sandboxRuntime": "not-applicable"
+    }
+  ]
+}

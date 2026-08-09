@@ -18,6 +18,7 @@ export type PackageJson = Record<string, unknown> & {
   version?: string;
   private?: boolean;
   scripts?: Record<string, string>;
+  bin?: string | Record<string, string>;
   dependencies?: Record<string, string>;
   peerDependencies?: Record<string, string>;
   optionalDependencies?: Record<string, string>;

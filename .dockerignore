@@ -11,6 +11,8 @@ var
 # agent/install/baked/ by scripts/bake-agent.sh and ride into the image via
 # `COPY . .`; the raw target/ tree must NOT bloat the build context.
 agent/target
+**/target
+.opengeni
 dist
 build
 coverage

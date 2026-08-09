@@ -88,6 +88,7 @@ import {
   prefixedMcpToolName,
   prepareAgentTools,
   runAzureCliLoginHook,
+  runBeforeAgentStartHooks,
   runRepositoryCloneHook,
   runToolspaceTokenSeedHook,
   mcpTransportErrorWithRetryMetadata,
@@ -96,6 +97,7 @@ import {
   refreshToolspaceTokenFile,
   withStructuredViewImageFunctionResults,
   sandboxCommandExitCode,
+  sandboxArtifactRuntimeDoctorHooks,
   sandboxFileDownloadsForAgent,
   sandboxRunAs,
   toolspaceTokenSeedCommand,
@@ -6655,6 +6657,80 @@ describe("pack skills in the sandbox skill index", () => {
     expect(index.map((entry) => entry.name)).toContain("checkov");
     expect(index.map((entry) => entry.name)).not.toContain("infra-ops");
     expect(index.map((entry) => entry.name)).not.toContain("azure-verified-modules");
+    expect(index.map((entry) => entry.name)).not.toContain("opengeni-spreadsheets");
+  });
+
+  test("artifact skills are indexed only after an exact host runtime preflight", () => {
+    const source = lazySkillSourceWithPackSkills([], [], true);
+    const index = source.getIndex?.(emptyManifest, ".agents") ?? [];
+    expect(index.map((entry) => entry.name)).toEqual(
+      expect.arrayContaining([
+        "opengeni-spreadsheets",
+        "opengeni-documents",
+        "opengeni-presentations",
+      ]),
+    );
+    const sourceDir = source.source as { type: string; children: Record<string, any> };
+    expect(sourceDir.children["opengeni-spreadsheets"].type).toBe("local_dir");
+  });
+
+  test("buildOpenGeniAgent refuses to advertise artifact skills without absolute host paths", () => {
+    const settings = testSettings({ sandboxBackend: "docker" });
+    expect(() =>
+      buildOpenGeniAgent(settings, [], {
+        artifactRuntimeAvailable: true,
+        sandboxEnvironment: {},
+      }),
+    ).toThrow("artifactRuntimeAvailable requires absolute");
+
+    const agent = buildOpenGeniAgent(settings, [], {
+      artifactRuntimeAvailable: true,
+      sandboxEnvironment: {
+        OPENGENI_ARTIFACT_RUNTIME_MANIFEST: "/opt/opengeni/artifacts/installation.json",
+        OPENGENI_ARTIFACT_TOOL_ENTRY: "/opt/opengeni/artifacts/skill-facade-entry.mjs",
+      },
+    });
+    const skillsCapability = (
+      (agent as any).capabilities as Array<{
+        type: string;
+        lazyFrom?: {
+          getIndex?: (manifest: unknown, skillsPath: string) => Array<{ name: string }>;
+        };
+      }>
+    ).find((capability) => capability.type === "skills");
+    const names =
+      skillsCapability?.lazyFrom?.getIndex?.(emptyManifest, ".agents").map((entry) => entry.name) ??
+      [];
+    expect(names).toContain("opengeni-documents");
+  });
+
+  test("artifact runtime doctor blocks the agent before an unavailable image can be used", async () => {
+    const hooks = sandboxArtifactRuntimeDoctorHooks({
+      OPENGENI_ARTIFACT_RUNTIME_MANIFEST: "/opt/opengeni/artifact-runtime/installation.json",
+      OPENGENI_ARTIFACT_TOOL_ENTRY: "/opt/opengeni/artifact-runtime/skill-facade-entry.mjs",
+    });
+    const commands: string[] = [];
+    await runBeforeAgentStartHooks(
+      {
+        execCommand: async ({ cmd }: { cmd: string }) => {
+          commands.push(cmd);
+          return { exitCode: 0, output: '{"target":"linux-x64-gnu"}' };
+        },
+      } as any,
+      hooks,
+      { environment: {} },
+    );
+    expect(commands).toEqual([
+      "'/opt/opengeni/artifact-runtime/opengeni-artifact-runtime.mjs' doctor --json",
+    ]);
+
+    await expect(
+      runBeforeAgentStartHooks(
+        { execCommand: async () => ({ exitCode: 1, output: "runtime unavailable" }) } as any,
+        hooks,
+        { environment: {} },
+      ),
+    ).rejects.toThrow("Artifact runtime doctor failed");
   });
 
   test("an explicit curated library selection is materialized and indexed", () => {

@@ -38,6 +38,12 @@ const versionPattern = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const sourceShaPattern = /^[0-9a-f]{40}$/;
 const integrityPattern = /^sha512-[A-Za-z0-9+/=]+$/;
 const imageDigestPattern = /^sha256:[0-9a-f]{64}$/;
+const artifactKernelReleasePackages = [
+  "@opengeni/artifact-tool",
+  "@opengeni/artifact-kernel-wasm-document",
+  "@opengeni/artifact-kernel-wasm-presentation",
+  "@opengeni/artifact-kernel-wasm-spreadsheet",
+] as const;
 
 function uniqueBy<T>(items: T[], key: (item: T) => string, label: string): void {
   const seen = new Set<string>();
@@ -90,6 +96,7 @@ export function buildReleaseBom(input: {
 
   uniqueBy(input.packages, (pkg) => pkg.name, "package");
   uniqueBy(input.images, (image) => image.name, "image");
+  assertArtifactKernelReleaseClosure(input.packages);
   const suppliedImages = new Set(input.images.map((image) => image.name));
   if (suppliedImages.size !== requiredReleaseImages.length) {
     throw new Error(`release BOM images must contain exactly: ${requiredReleaseImages.join(", ")}`);
@@ -110,6 +117,25 @@ export function buildReleaseBom(input: {
     images: [...input.images].sort((a, b) => a.name.localeCompare(b.name)),
     chart,
   };
+}
+
+function assertArtifactKernelReleaseClosure(
+  packages: Array<ReleaseBomPackage & { state: "published" }>,
+): void {
+  const byName = new Map(packages.map((pkg) => [pkg.name, pkg]));
+  if (!artifactKernelReleasePackages.some((name) => byName.has(name))) return;
+  const closure = artifactKernelReleasePackages.map((name) => byName.get(name));
+  if (closure.some((pkg) => pkg === undefined)) {
+    throw new Error(
+      `release BOM artifact kernel closure must contain exactly: ${artifactKernelReleasePackages.join(", ")}`,
+    );
+  }
+  const identities = new Set(closure.map((pkg) => `${pkg!.version}:${pkg!.gitHead}`));
+  if (identities.size !== 1) {
+    throw new Error(
+      "release BOM artifact-tool and modality WASM packages must have one exact version/source identity",
+    );
+  }
 }
 
 function normalizeChart(

@@ -69,3 +69,9 @@ export * from "./domain/slack-bot";
 export * from "./domain/workspace-members";
 export * from "./application/new-session-drafts";
 export * from "./application/session-commands";
+
+// Durable editable-artifact live broker, ticket, ports, and projection types.
+export * from "./editable-artifact-live";
+
+// Transport-neutral editable-artifact domain service, ports, and contracts.
+export * from "./editable-artifacts";

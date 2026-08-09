@@ -1,0 +1,52 @@
+{
+  "description": "Shared TypeScript/Rust OGAKQ001 and OGAKV001 conformance vectors",
+  "viewportQuery": {
+    "sheetId": "01020304050607081112131415161718",
+    "startRow": 2,
+    "startColumn": 3,
+    "rowCount": 4,
+    "columnCount": 5,
+    "maxCells": 6,
+    "maxBytes": 1024
+  },
+  "viewportQueryHex": "4f47414b5130303101000000000000000600000000040000200000001817161514131211080706050403020102000000030000000400000005000000e2d5ced44d3646cd",
+  "metadataQuery": { "maxSheets": 7, "maxBytes": 2048 },
+  "metadataQueryHex": "4f47414b5130303101000000010000000700000000080000000000007ee599fc5e1006e6",
+  "viewportProjection": {
+    "revision": "1",
+    "sheetId": "01020304050607081112131415161718",
+    "generationId": "21222324252627283132333435363738",
+    "startRow": 2,
+    "startColumn": 3,
+    "rowCount": 4,
+    "columnCount": 5,
+    "cells": [
+      {
+        "row": 2,
+        "column": 3,
+        "formula": null,
+        "value": { "kind": "boolean", "value": true }
+      },
+      {
+        "row": 2,
+        "column": 4,
+        "formula": null,
+        "value": { "kind": "text", "value": "x" }
+      }
+    ]
+  },
+  "viewportProjectionHex": "4f47414b5630303101000100000000000100000000000000020000004900000000000000181716151413121108070605040302013837363534333231282726252423222102000000030000000400000005000000000000000000000000020000000001000000000401000000781249277f6a4c1c1b",
+  "metadataProjection": {
+    "revision": "1",
+    "modeledFeatures": { "dimensions": false, "hidden": false, "merges": false },
+    "sheets": [
+      {
+        "sheetId": "01020304050607081112131415161718",
+        "generationId": "21222324252627283132333435363738",
+        "name": "Data ✓",
+        "usedBounds": { "startRow": 2, "startColumn": 3, "endRow": 2, "endColumn": 4 }
+      }
+    ]
+  },
+  "metadataProjectionHex": "4f47414b5630303101000100010000000100000000000000010000004100000000000000000000001817161514131211080706050403020138373635343332312827262524232221080000004461746120e29c9301020000000300000002000000040000003b5b6e02275fe68e"
+}

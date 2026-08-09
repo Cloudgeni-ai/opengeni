@@ -5,6 +5,10 @@ const testFiles =
   requestedTestFiles.length > 0
     ? requestedTestFiles
     : [
+        "./test/e2e/artifact-spreadsheet-canvas.browser.e2e.ts",
+        "./test/e2e/artifact-spreadsheet-scroll.browser.e2e.ts",
+        "./test/e2e/artifact-static-renderer.browser.e2e.ts",
+        "./test/e2e/editable-artifacts.browser.e2e.ts",
         "./test/e2e/browser.e2e.ts",
         "./test/e2e/connected-machine-removal.browser.e2e.ts",
         "./test/e2e/knowledge-surfaces.browser.e2e.ts",
@@ -22,15 +26,24 @@ const testFiles =
       ];
 
 for (const testFile of testFiles) {
-  const status = runTestFile(testFile);
-  if (status !== 0) process.exit(status);
+  const engineIds = testFile.endsWith("artifact-spreadsheet-canvas.browser.e2e.ts")
+    ? (["chromium", "firefox", "webkit"] as const)
+    : ([undefined] as const);
+  for (const engineId of engineIds) {
+    // Keep native browser engines in separate Bun processes so one engine's teardown cannot
+    // influence another engine's performance or liveness result.
+    const environment = engineId ? { OPENGENI_ARTIFACT_CANVAS_BROWSER_ENGINE: engineId } : {};
+    const status = runTestFile(testFile, environment);
+    if (status !== 0) process.exit(status);
+  }
 }
 
-function runTestFile(testFile: string): number {
+function runTestFile(testFile: string, environment: Readonly<Record<string, string>>): number {
   const testArgs = ["test", "--max-concurrency=1", testFile];
   const first = spawnSync("bun", testArgs, {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, ...environment },
   });
 
   if (first.status === 0) {
@@ -85,6 +98,7 @@ function runTestFile(testFile: string): number {
     stdio: "inherit",
     env: {
       ...process.env,
+      ...environment,
       LD_LIBRARY_PATH: [libraryPath, process.env.LD_LIBRARY_PATH].filter(Boolean).join(":"),
     },
   });

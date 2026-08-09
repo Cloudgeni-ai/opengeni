@@ -1,0 +1,31 @@
+/** Document-only artifact surface. Import from `@opengeni/react/artifacts/document`. */
+export {
+  EditableDocumentArtifactSurface,
+  type EditableDocumentArtifactSurfaceProps,
+} from "./components/artifacts/editable-document";
+export {
+  DocumentArtifactSurface,
+  DocumentEditor,
+  DocumentProjectionArtifactSurface,
+  DocumentProjectionEditor,
+  type DocumentArtifactSurfaceProps,
+  type DocumentCommit,
+  type DocumentCommitHandler,
+  type DocumentEditorProps,
+  type DocumentEditorProjection,
+  type DocumentLayoutMode,
+  type DocumentProjectionArtifactSurfaceProps,
+  type DocumentProjectionBlock,
+  type DocumentProjectionChange,
+  type DocumentProjectionComment,
+  type DocumentProjectionEditorProps,
+  type DocumentProjectionPageBreak,
+  type DocumentProjectionPageGeometry,
+  type DocumentProjectionParagraph,
+  type DocumentProjectionParagraphStyle,
+  type DocumentProjectionSection,
+  type DocumentProjectionTable,
+  type DocumentProjectionTextRun,
+  type DocumentProjectionTextStyle,
+  type DocumentSelection,
+} from "./components/artifacts/document-editor";

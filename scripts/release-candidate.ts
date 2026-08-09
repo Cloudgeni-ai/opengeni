@@ -15,7 +15,15 @@ import {
   releaseOciPrefixFromEnvironment,
 } from "./release-registry";
 
-export const RELEASE_IMAGE_ROLES = ["api", "worker", "web", "relay", "sandbox"] as const;
+export const RELEASE_IMAGE_ROLES = [
+  "api",
+  "worker",
+  "web",
+  "relay",
+  "sandbox",
+  "artifact-materializer",
+  "artifact-outbox-dispatcher",
+] as const;
 export type ReleaseImageRole = (typeof RELEASE_IMAGE_ROLES)[number];
 
 export const RELEASE_IMAGE_NAMES: Record<ReleaseImageRole, string> = {
@@ -24,6 +32,11 @@ export const RELEASE_IMAGE_NAMES: Record<ReleaseImageRole, string> = {
   web: releaseImageName(DEFAULT_RELEASE_OCI_PREFIX, "web"),
   relay: releaseImageName(DEFAULT_RELEASE_OCI_PREFIX, "relay"),
   sandbox: releaseImageName(DEFAULT_RELEASE_OCI_PREFIX, "sandbox"),
+  "artifact-materializer": releaseImageName(DEFAULT_RELEASE_OCI_PREFIX, "artifact-materializer"),
+  "artifact-outbox-dispatcher": releaseImageName(
+    DEFAULT_RELEASE_OCI_PREFIX,
+    "artifact-outbox-dispatcher",
+  ),
 };
 
 export function releaseImageNames(
@@ -238,6 +251,8 @@ export function deploymentImageDigests(
     web: receipt.images.web.digest,
     relay: receipt.images.relay.digest,
     sandbox: receipt.images.sandbox.digest,
+    "artifact-materializer": receipt.images["artifact-materializer"].digest,
+    "artifact-outbox-dispatcher": receipt.images["artifact-outbox-dispatcher"].digest,
   };
 }
 

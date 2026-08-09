@@ -478,7 +478,13 @@ export function WorkbenchChanges({
               ))}
             </select>
           </div>
-          <div className="min-h-0 min-w-0 flex-1 overflow-auto" data-opengeni-changes-pane>
+          <div
+            aria-label="Changed file diff"
+            className="min-h-0 min-w-0 flex-1 overflow-auto outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent"
+            data-opengeni-changes-pane
+            role="region"
+            tabIndex={0}
+          >
             {activeFile ? (
               <DiffSection
                 file={activeFile}
@@ -525,8 +531,11 @@ export function WorkbenchChanges({
             full scroll height so scrolling + the rail-jump stay accurate. */}
           <div
             ref={windowed.scrollRef}
-            className="min-h-0 min-w-0 flex-1 overflow-auto"
+            aria-label="Changed files diff"
+            className="min-h-0 min-w-0 flex-1 overflow-auto outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent"
             data-opengeni-changes-pane
+            role="region"
+            tabIndex={0}
           >
             <div style={{ position: "relative", height: windowed.totalHeight }}>
               {orderedFiles.map((file, index) => {

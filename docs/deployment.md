@@ -513,9 +513,31 @@ Current profiles:
 
 ## Local Docker Compose
 
-`bun run dev` is the primary local Docker Compose path. It starts Postgres, NATS, Temporal, MinIO, migrations, imports the fingerprinted reviewed integrations catalog, builds the sandbox image, and starts the API, both workers (control and turn), and web. Set `OPENGENI_CATALOG_IMPORT_ENABLED=false` to omit the catalog import.
+`bun run dev` is the primary local Docker Compose path. It starts Postgres,
+NATS, Temporal, MinIO, migrations, imports the fingerprinted reviewed
+integrations catalog, builds the sandbox image, and starts the API, control and
+turn workers, artifact materializer, artifact outbox dispatcher, and web. The
+two artifact roles receive distinct generated least-privilege database logins
+and independently selected health ports (defaults `9465` and `9466`). Their
+ignored local values are written to `.env.runtime`, not `.env`. Set
+`OPENGENI_CATALOG_IMPORT_ENABLED=false` to omit the catalog import.
 
-When a common host port is already occupied, `bun run dev` auto-selects a nearby free port for Docker Compose and rewrites the in-memory runtime URLs for that run. Set `OPENGENI_POSTGRES_HOST_PORT`, `OPENGENI_NATS_HOST_PORT`, `OPENGENI_NATS_MONITOR_HOST_PORT`, `OPENGENI_TEMPORAL_HOST_PORT`, `OPENGENI_MINIO_HOST_PORT`, or `OPENGENI_MINIO_CONSOLE_HOST_PORT` in `.env` if you need fixed local port choices.
+The script prepares one canonical current-host development artifact bundle only
+when its exact source/toolchain fingerprint or native receipt is absent or
+stale. On macOS the materializer runs as an explicitly opted-in unsandboxed
+development subprocess, restricted to loopback PostgreSQL, object storage, and
+HTTP health authority. Its health response advertises
+`sandboxEnforced: false`. This mode is rejected under `NODE_ENV=production` and
+cannot coexist with `OPENGENI_ARTIFACT_RUNTIME_MANIFEST`. Production artifact
+materialization currently requires Linux with enforced `bwrap` + `prlimit`
+isolation and fails closed on other hosts. The sandbox starts from an empty
+filesystem namespace, mounts only the verified artifact runtime/executable and
+system loader libraries, and proves CPU, memory, open-file, process-count, and
+per-file-size ceilings before readiness. Helm projects only the selected
+`artifactMaterializer` database/object-storage credential keys; it never imports
+the shared runtime Secret wholesale.
+
+When a common host port is already occupied, `bun run dev` auto-selects a nearby free port for Docker Compose and rewrites the in-memory runtime URLs for that run. Set `OPENGENI_POSTGRES_HOST_PORT`, `OPENGENI_NATS_HOST_PORT`, `OPENGENI_NATS_MONITOR_HOST_PORT`, `OPENGENI_TEMPORAL_HOST_PORT`, `OPENGENI_MINIO_HOST_PORT`, `OPENGENI_MINIO_CONSOLE_HOST_PORT`, `OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT`, or `OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT` in `.env` if you need fixed local port choices.
 
 When the turn worker itself runs in a container and controls the host Docker
 daemon through its socket, configure
@@ -793,7 +815,7 @@ Federated credentials must bind the exact `public-release`,
 workload identity must have the narrow push role on the selected registry.
 
 Whichever registry is selected must permit anonymous pulls. Candidate creation
-logs out before it writes a receipt and proves all five image digests through
+logs out before it writes a receipt and proves all seven image digests through
 the unauthenticated path. Embedded and final promotion repeat that proof for
 the published image aliases and chart bytes. A private or inconsistently
 configured registry therefore fails closed before becoming distribution
@@ -923,12 +945,25 @@ byte for byte and fails instead of overwriting them. No moving BOM alias is
 created. Ordinary pushes to `main` can open/update the Version PR but cannot
 publish.
 
-The stock sandbox remains a separate workload image, but the public release publishes it and
-binds its immutable digest in the same BOM:
+The stock sandbox remains a separate workload image. The public release binds
+its immutable digest and its exact native artifact-runtime inputs to the same
+source SHA. Build it only with the verified `.release/artifact-runtime` bundle:
 
 ```bash
-docker build -f docker/sandbox.Dockerfile -t opengeni-sandbox:local .
+docker build \
+  --build-arg OPENGENI_SOURCE_SHA="$(git rev-parse HEAD)" \
+  -f docker/sandbox.Dockerfile \
+  -t opengeni-sandbox:local-"$(git rev-parse --short=12 HEAD)" \
+  .
 ```
+
+Set `OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED=true` only with that stock image.
+Production Docker/Modal references must be digest-pinned; pack, rig, mutable,
+self-hosted, and mismatched images fail closed. The worker runs the absolute
+runtime doctor inside the actual box before the model starts. `bun run dev`
+automatically caches an exact clean-HEAD CI runtime when available, source-tags
+the local image, and otherwise leaves native agent artifact skills disabled
+unless `OPENGENI_REQUIRE_SANDBOX_ARTIFACT_RUNTIME=1` requests a hard failure.
 
 The Connected Machine stream relay is a separate deployed component built from
 the `agent/` Cargo workspace. It is only needed when Connected Machines are

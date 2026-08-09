@@ -16,3 +16,13 @@ body,
   color: var(--og-color-fg);
   font-family: var(--og-font-sans);
 }
+
+@layer components {
+  .og-artifact-primary {
+    @apply inline-flex min-h-10 items-center justify-center gap-2 rounded-og-lg bg-og-accent px-4 text-og-xs font-medium text-og-accent-fg transition hover:bg-og-accent-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .og-artifact-secondary {
+    @apply inline-flex min-h-10 items-center justify-center gap-2 rounded-og-lg border border-og-border bg-og-surface-1 px-4 text-og-xs font-medium text-og-fg transition hover:border-og-border-strong hover:bg-og-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent/40;
+  }
+}
