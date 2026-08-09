@@ -16,6 +16,7 @@ import {
   assertChangesDefaultVisible,
   assertRepositoryChangesVisible,
   captureApiRegionalProbeEnvironment,
+  classifyControlCommandMarkerEvent,
   controlCancellationDurationMs,
   fixturePrompt,
   isExpectedBrowserCancellation,
@@ -37,6 +38,38 @@ import {
 } from "./workbench-live-acceptance";
 
 describe("workbench live acceptance preflight", () => {
+  test("accepts only a marker from a still-running agent command", () => {
+    const marker = "CONTROL_READY_EXACT";
+    const event = (output: string, type = "agent.toolCall.output") =>
+      ({ type, payload: { output } }) as never;
+
+    expect(
+      classifyControlCommandMarkerEvent(
+        event(`Chunk ID: abc\nProcess running with session ID 7\nOutput:\n${marker}`),
+        marker,
+      ),
+    ).toBe("running");
+    expect(
+      classifyControlCommandMarkerEvent(
+        event(`Chunk ID: abc\nProcess exited with code 0\nOutput:\n${marker}`),
+        marker,
+      ),
+    ).toBe("completed");
+    expect(
+      classifyControlCommandMarkerEvent(
+        event(
+          `Chunk ID: abc\nProcess exited with code 0\nOutput:\nProcess running with session ID 7\n${marker}`,
+        ),
+        marker,
+      ),
+    ).toBe("malformed");
+    expect(classifyControlCommandMarkerEvent(event(marker), marker)).toBe("malformed");
+    expect(
+      classifyControlCommandMarkerEvent(event(marker, "sandbox.command.output.delta"), marker),
+    ).toBeNull();
+    expect(classifyControlCommandMarkerEvent(event("different"), marker)).toBeNull();
+  });
+
   test("observes split binary terminal output without depending on xterm DOM rows", async () => {
     let onSocket: ((socket: unknown) => void) | undefined;
     let onFrame: ((frame: { payload: string | Buffer }) => void) | undefined;

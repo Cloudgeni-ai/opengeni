@@ -70,6 +70,10 @@ type ActiveShellSession = {
 };
 
 type CommandCancellationSession = {
+  /** Resolve the physical cancellation primitive for the current route. A
+   * routing proxy must answer from its resolved backend, not from the proxy's
+   * always-present method surface or a pre-resolution PTY default. */
+  commandCancellationTransport?(): Promise<"remote_operation" | "shell_session">;
   cancelExecCommand?(opId: string): Promise<boolean>;
   /** Abort a provider exec-start transport before it returns a session id. */
   cancelPendingExecCommand?(): Promise<void>;
@@ -92,6 +96,19 @@ type CommandCancellationSession = {
     args: TurnSandboxCommandArgs,
   ): Promise<string>;
 };
+
+async function usesRemoteOperationCancellation(
+  session: CommandCancellationSession | undefined,
+): Promise<boolean> {
+  const resolved = await session?.commandCancellationTransport?.();
+  if (resolved !== undefined) {
+    if (resolved !== "remote_operation" && resolved !== "shell_session") {
+      throw new Error(`Unsupported sandbox command cancellation transport: ${String(resolved)}`);
+    }
+    return resolved === "remote_operation";
+  }
+  return Boolean(session?.cancelExecCommand) && session?.supportsPty?.() === false;
+}
 
 export type TurnSandboxCommandArgs = {
   cmd: string;
@@ -674,8 +691,8 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
             }
           : null;
       const correlationId = `turn_lifecycle_${crypto.randomUUID()}`;
-      const useRemoteOpCancellation =
-        Boolean(session.cancelExecCommand) && session.supportsPty?.() === false;
+      const useRemoteOpCancellation = await usesRemoteOperationCancellation(session);
+      if (this.cancelled) throw cancellationError(this.reason);
       const interactive = args.tty ?? true;
       const remoteExec =
         session.cancelExecCommand && useRemoteOpCancellation
@@ -888,7 +905,8 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
             // wrapper and preserves the user's command byte-for-byte. PTY-backed
             // cloud/local sessions use the portable SDK session + POSIX marker.
             const useRemoteOpCancellation =
-              Boolean(cancelExecCommand) && cancellationSession?.supportsPty?.() === false;
+              await usesRemoteOperationCancellation(cancellationSession);
+            if (this.cancelled) throw cancellationError(this.reason);
             const interactive = parsed.tty !== false;
             const remoteExec =
               cancelExecCommand && useRemoteOpCancellation
