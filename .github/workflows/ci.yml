@@ -268,6 +268,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: ci-impact-plan
+          path: ${{ runner.temp }}/ci-impact-plan
 
       - name: Validate changeset release plan
         shell: bash
@@ -329,7 +330,8 @@ jobs:
           --name typecheck
           --output ci-profile/typecheck.json
           --timeout-seconds 600
-          -- bun scripts/ci/run-typecheck-plan.ts --plan impact-plan.json
+          -- bun scripts/ci/run-typecheck-plan.ts
+          --plan ${{ runner.temp }}/ci-impact-plan/impact-plan.json
 
       - name: Run exactly the explained source guards
         run: >-
@@ -338,7 +340,7 @@ jobs:
           --output ci-profile/guards.json
           --timeout-seconds 900
           -- bun scripts/ci/run-guards-plan.ts
-          --plan impact-plan.json
+          --plan ${{ runner.temp }}/ci-impact-plan/impact-plan.json
           --exclude publish-closure
 
       - name: Impact, resource, and profiling contracts

@@ -321,6 +321,14 @@ describe("workflow fail-closed contracts", () => {
     expect(ci).toContain("bun scripts/ci/impact.ts --full --output impact-plan.json");
     expect(ci).not.toContain("jq . impact-plan.json");
     expect(ci).toContain("changedCount:(.changedFiles|length)");
+
+    const sourceContracts = ci.slice(
+      ci.indexOf("  source-contracts:"),
+      ci.indexOf("  unit-shards:"),
+    );
+    expect(sourceContracts).toContain("path: ${{ runner.temp }}/ci-impact-plan");
+    expect(sourceContracts).toContain("--plan ${{ runner.temp }}/ci-impact-plan/impact-plan.json");
+    expect(sourceContracts).not.toContain("--plan impact-plan.json");
   });
 
   test("CI retains exact aggregate names and every current release/image lane", () => {
