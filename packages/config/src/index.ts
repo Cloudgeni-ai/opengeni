@@ -4474,11 +4474,6 @@ function validateSettings(settings: Settings): void {
     );
   }
   if (settings.slackClientId) {
-    if (!settings.slackSigningSecret) {
-      throw new Error(
-        "OPENGENI_SLACK_SIGNING_SECRET is required when the OpenGeni Slack app is configured",
-      );
-    }
     if (!settings.publicBaseUrl) {
       throw new Error(
         "OPENGENI_PUBLIC_BASE_URL is required when the OpenGeni Slack app is configured",
