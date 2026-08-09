@@ -547,7 +547,11 @@ attempt-qualified credential deletion, cache, recording, provider, lease, or
 workspace housekeeping. The
 receipt, its `session.queue.changed` event, the session queue/sequence update,
 and the exact `session_workflow_wake_outbox` revision commit in one retryable,
-idempotent transaction. Provider completion and batch flushes that ignore
+idempotent transaction. The commit returns that exact still-undelivered wake;
+the activity immediately attempts its `signalWithStart` before NATS fanout, and
+the durable outbox retains the same revision for bounded repair if transport
+fails or the worker dies after commit. Provider completion and batch flushes
+that ignore
 cancellation are detached with rejection handlers; all later housekeeping is
 attempt-fenced and detachable. While either logical interruption or the exact
 physical receipt remains pending, `effectiveControl.settlement` stays typed as
@@ -608,8 +612,8 @@ is never admission authority. The workflow waits up to five seconds for a wake
 and may then close without running another turn activity; the outbox continues
 bounded redelivery until the exact activity disappears or supplies its proof. A
 proof accepted at that timeout boundary is persisted before close. Once the
-receipt commits, its coalescing outbox wake uses
-`signalWithStart` on the same stable workflow id, which restarts the exact
+receipt commits, its coalescing outbox wake uses immediate `signalWithStart` on
+the same stable workflow id, which restarts the exact
 session and admits the replacement once. This event-driven path needs no
 quiescence scanner, inferred timeout, polling loop, synthetic user message,
 prompt/history/effect replay, or duplicate visible queue row. Admission searches

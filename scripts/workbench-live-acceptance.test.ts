@@ -18,6 +18,7 @@ import {
   captureApiRegionalProbeEnvironment,
   classifyControlCommandMarkerEvent,
   controlCancellationDurationMs,
+  controlCancellationTimelineMs,
   fixturePrompt,
   isExpectedBrowserCancellation,
   maskKnownPublicEvidenceValues,
@@ -856,7 +857,14 @@ describe("workbench live acceptance preflight", () => {
 
   test("control cancellation timing fails closed on invalid or impossible event order", () => {
     expect(controlCancellationDurationMs(1_000, 1_125)).toBe(125);
+    expect(controlCancellationTimelineMs(1_000, 1_125, 1_180)).toEqual({
+      physicalQuiescenceMs: 125,
+      replacementStartedMs: 180,
+    });
     expect(() => controlCancellationDurationMs(1_000, 999)).toThrow("before its control commit");
+    expect(() => controlCancellationTimelineMs(1_000, 1_200, 1_150)).toThrow(
+      "started before physical quiescence",
+    );
     expect(() => controlCancellationDurationMs(Number.NaN, 1_000)).toThrow("must be finite");
   });
 

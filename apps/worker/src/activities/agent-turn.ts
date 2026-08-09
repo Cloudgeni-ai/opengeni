@@ -71,7 +71,7 @@ import {
   isSessionEventPersistenceError,
   getEnrollment,
   abandonRecordingForTurnAttempt,
-  markSessionAttemptQuiesced,
+  commitSessionAttemptQuiescence,
   getOrCreatePreferenceRegistrySnapshot,
   getOrCreateWorkspaceInstructionPolicySnapshot,
   PreferenceRegistryInitiatorError,
@@ -85,6 +85,7 @@ import {
   type CodexCredentialLeaseResult,
   type CodexCredentialLeaseSelectionContext,
   type ApplySessionTurnSettlementInput,
+  type SessionAttemptQuiescenceCommit,
   type SessionTurnRecordingSettlement,
 } from "@opengeni/db";
 import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
@@ -761,18 +762,22 @@ const QUIESCENCE_PROOF_SIGNAL_MAX_RETRY_MS = 5_000;
  * state. The proof object never changes between attempts. */
 export async function persistOrSignalSessionAttemptQuiescence(input: {
   proof: SessionAttemptQuiescenceProof;
-  persistReceipt: () => Promise<SessionEvent[]>;
+  persistReceipt: () => Promise<SessionAttemptQuiescenceCommit>;
+  deliverWorkflowWake?: (
+    wake: NonNullable<SessionAttemptQuiescenceCommit["workflowWake"]>,
+  ) => Promise<unknown>;
   publishEvents: (events: SessionEvent[]) => Promise<unknown>;
   signalProof: ActivityServices["signalSessionAttemptQuiesced"];
   sleep?: (ms: number) => Promise<void>;
   heartbeat?: (attempt: number, delayMs: number) => void;
   onReceiptFailure?: (error: unknown) => void;
+  onWakeFailure?: (error: unknown) => void;
   onPublishFailure?: (error: unknown) => void;
   onSignalFailure?: (error: unknown, attempt: number, delayMs: number) => void;
 }): Promise<"receipt" | "signal"> {
-  let events: SessionEvent[];
+  let receipt: SessionAttemptQuiescenceCommit;
   try {
-    events = await input.persistReceipt();
+    receipt = await input.persistReceipt();
   } catch (receiptError) {
     input.onReceiptFailure?.(receiptError);
     if (!input.signalProof) {
@@ -802,8 +807,17 @@ export async function persistOrSignalSessionAttemptQuiescence(input: {
     }
   }
 
+  if (receipt.workflowWake && input.deliverWorkflowWake) {
+    try {
+      await input.deliverWorkflowWake(receipt.workflowWake);
+    } catch (wakeError) {
+      // The exact revision is already durable. Immediate delivery is latency
+      // optimization only; the outbox dispatcher remains the repair path.
+      input.onWakeFailure?.(wakeError);
+    }
+  }
   try {
-    await input.publishEvents(events);
+    await input.publishEvents(receipt.events);
   } catch (publishError) {
     // Postgres already committed quiesced_at, the queue event, and the wake.
     // NATS is live fanout only; never misclassify its failure as receipt loss.
@@ -9251,7 +9265,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const recoveryMode = await persistOrSignalSessionAttemptQuiescence({
             proof,
             persistReceipt: async () =>
-              await markSessionAttemptQuiesced(db, {
+              await commitSessionAttemptQuiescence(db, {
                 accountId: input.accountId,
                 workspaceId: input.workspaceId,
                 sessionId: input.sessionId,
@@ -9261,6 +9275,21 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 temporalActivityId: dispatchId,
                 allowUninterrupted: true,
               }),
+            ...(wakeSessionWorkflow
+              ? {
+                  deliverWorkflowWake: async (
+                    wake: NonNullable<SessionAttemptQuiescenceCommit["workflowWake"]>,
+                  ) =>
+                    await wakeSessionWorkflow({
+                      accountId: wake.accountId,
+                      workspaceId: wake.workspaceId,
+                      sessionId: wake.sessionId,
+                      workflowId: wake.temporalWorkflowId,
+                      wakeRevision: wake.wakeRevision,
+                      interruptionRequested: wake.interruptionRequested,
+                    }),
+                }
+              : {}),
             publishEvents: async (events) => {
               await waitForTurnFinalizerStep(
                 publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events),
@@ -9281,6 +9310,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             onReceiptFailure: (error) => {
               console.error(
                 "agent turn quiescence receipt exhausted; signalling proof",
+                safeErrorDiagnostic(error),
+              );
+            },
+            onWakeFailure: (error) => {
+              console.error(
+                "agent turn quiescence immediate workflow wake failed; outbox repair retained",
                 safeErrorDiagnostic(error),
               );
             },

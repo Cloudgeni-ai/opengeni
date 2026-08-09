@@ -2992,7 +2992,7 @@ describe("worker shutdown preemption", () => {
           workflowRunId: "run-1",
           activityId: "activity-1",
         },
-        persistReceipt: async () => [],
+        persistReceipt: async () => ({ events: [], workflowWake: null }),
         publishEvents: async () => {
           throw new Error("NATS unavailable");
         },
@@ -3006,6 +3006,51 @@ describe("worker shutdown preemption", () => {
     ).toBe("receipt");
     expect(signalCalls).toBe(0);
     expect(publishFailures).toBe(1);
+  });
+
+  test("delivers the exact committed wake before best-effort event fanout", async () => {
+    const order: string[] = [];
+    const wake = {
+      accountId: "account-1",
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      temporalWorkflowId: "workflow-1",
+      wakeRevision: 17,
+      interruptionRequested: false,
+    };
+    let signalCalls = 0;
+    let wakeFailures = 0;
+    expect(
+      await persistOrSignalSessionAttemptQuiescence({
+        proof: {
+          accountId: "account-1",
+          workspaceId: "workspace-1",
+          sessionId: "session-1",
+          attemptId: "attempt-1",
+          workflowId: "workflow-1",
+          workflowRunId: "run-1",
+          activityId: "activity-1",
+        },
+        persistReceipt: async () => ({ events: [], workflowWake: wake }),
+        deliverWorkflowWake: async (delivered) => {
+          order.push("wake");
+          expect(delivered).toEqual(wake);
+          throw new Error("Temporal unavailable");
+        },
+        publishEvents: async () => {
+          order.push("fanout");
+        },
+        signalProof: async () => {
+          signalCalls += 1;
+        },
+        onWakeFailure: () => {
+          wakeFailures += 1;
+        },
+      }),
+    ).toBe("receipt");
+    expect(order).toEqual(["wake", "fanout"]);
+    expect(signalCalls).toBe(0);
+    expect(wakeFailures).toBe(1);
   });
 
   test("receipt exhaustion fails closed when the proof signaler is missing", async () => {
