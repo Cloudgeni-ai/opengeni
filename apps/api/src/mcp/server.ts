@@ -3190,16 +3190,25 @@ function registerWorkspaceOrchestrationTools(
               reason: reason ?? "agent_mcp_pause",
             },
           );
-          return json({
-            receiptId: controlled.receipt.id,
-            effectiveControl: projectEffectiveControlForRelatedAccess(
-              serializeEffectiveSessionControl(controlled.control),
-              sessionId,
-              controlled.authorization?.relatedSessionAccess ?? "root",
-            ),
-            interruptionCount: controlled.interruptionCount,
-            replay: controlled.replay,
-          });
+          const effectiveControl = projectEffectiveControlForRelatedAccess(
+            serializeEffectiveSessionControl(controlled.control),
+            sessionId,
+            controlled.authorization?.relatedSessionAccess ?? "root",
+          );
+          return json(
+            mcpMutationReceipt({
+              operation: "session_pause",
+              committed: true,
+              outcome: controlled.replay ? "replayed" : "updated",
+              changed: !controlled.replay,
+              resource: { type: "session", id: sessionId, state: effectiveControl.state },
+              relatedResources: [{ type: "session_command_receipt", id: controlled.receipt.id }],
+              timestamp: controlled.receipt.createdAt.toISOString(),
+              idempotency: { status: controlled.replay ? "replayed" : "applied" },
+              facts: { interruptionCount: controlled.interruptionCount },
+              nextAction: { tool: "session_get", arguments: { sessionId } },
+            }),
+          );
         }
         const controlled = await controlHumanSessionWorkstream(
           deps,
@@ -3243,16 +3252,25 @@ function registerWorkspaceOrchestrationTools(
               reason: reason ?? "agent_mcp_resume",
             },
           );
-          return json({
-            receiptId: controlled.receipt.id,
-            effectiveControl: projectEffectiveControlForRelatedAccess(
-              serializeEffectiveSessionControl(controlled.control),
-              sessionId,
-              controlled.authorization?.relatedSessionAccess ?? "root",
-            ),
-            interruptionCount: controlled.interruptionCount,
-            replay: controlled.replay,
-          });
+          const effectiveControl = projectEffectiveControlForRelatedAccess(
+            serializeEffectiveSessionControl(controlled.control),
+            sessionId,
+            controlled.authorization?.relatedSessionAccess ?? "root",
+          );
+          return json(
+            mcpMutationReceipt({
+              operation: "session_resume",
+              committed: true,
+              outcome: controlled.replay ? "replayed" : "updated",
+              changed: !controlled.replay,
+              resource: { type: "session", id: sessionId, state: effectiveControl.state },
+              relatedResources: [{ type: "session_command_receipt", id: controlled.receipt.id }],
+              timestamp: controlled.receipt.createdAt.toISOString(),
+              idempotency: { status: controlled.replay ? "replayed" : "applied" },
+              facts: { interruptionCount: controlled.interruptionCount },
+              nextAction: { tool: "session_get", arguments: { sessionId } },
+            }),
+          );
         }
         const controlled = await controlHumanSessionWorkstream(
           deps,

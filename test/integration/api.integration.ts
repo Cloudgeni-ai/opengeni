@@ -5145,7 +5145,19 @@ describe("API component integration", () => {
       githubAppApi,
     });
     const context = await defaultAccessContext(app);
-    const firstWorkspaceId = context.defaultWorkspaceId!;
+    const firstWorkspaceResponse = await app.request("/v1/workspaces", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        accountId: context.defaultAccountId,
+        name: "First GitHub workspace",
+      }),
+    });
+    expect(firstWorkspaceResponse.status).toBe(201);
+    const firstWorkspace = (await firstWorkspaceResponse.json()) as {
+      id: string;
+    };
+    const firstWorkspaceId = firstWorkspace.id;
     const secondWorkspaceResponse = await app.request("/v1/workspaces", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -5158,6 +5170,7 @@ describe("API component integration", () => {
     const secondWorkspace = (await secondWorkspaceResponse.json()) as {
       id: string;
     };
+    const refreshedContext = await defaultAccessContext(app);
 
     const authorityCheckedAt = new Date();
     const authorityExpiresAt = new Date(Date.now() + 10 * 60_000);
@@ -5310,7 +5323,7 @@ describe("API component integration", () => {
     expect(connectedSession.status).toBe(202);
     const connected = (await connectedSession.json()) as { id: string };
 
-    const initialWorkspaceGrant = context.workspaceGrants.find(
+    const initialWorkspaceGrant = refreshedContext.workspaceGrants.find(
       (candidate) => candidate.workspaceId === firstWorkspaceId,
     );
     expect(initialWorkspaceGrant).toBeTruthy();
@@ -8473,8 +8486,9 @@ describe("API component integration", () => {
     const managerAttempt = await claimCreatedSessionForRun(dbClient.db, grant, managerSession.id);
 
     // The delegated token the runtime mints for a session's first-party MCP
-    // connection carries the session's permission set, which gates manager
-    // tool visibility end to end; the default set stays worker-shaped.
+    // connection carries the session's permission and tool sets, which gate
+    // manager visibility end to end. The second preparation deliberately uses
+    // an explicit narrow worker policy rather than relying on broad defaults.
     const server = Bun.serve({
       port: 0,
       hostname: "127.0.0.1",
@@ -8529,6 +8543,14 @@ describe("API component integration", () => {
         turnId: managerAttempt.turnId,
         attemptId: managerAttempt.attemptId,
         executionGeneration: managerAttempt.executionGeneration,
+        firstPartyPermissions: ["workspace:read", "sessions:control", "goals:manage"],
+        firstPartyTools: [
+          "set_session_title",
+          "goal_set",
+          "goal_update",
+          "goal_complete",
+          "goal_pause",
+        ],
       });
       const workerTools = (await workerPrepared.mcpServers[0]!.listTools()).map(
         (tool) => tool.name,
@@ -9461,20 +9483,23 @@ describe("API component integration", () => {
       },
     };
     const authorizedMcp = buildOpenGeniMcpServer(mcpDeps, authorizedGrant);
-    const spawned = await callMcpTool<{
-      id: string;
-      firstPartyMcpPermissions: string[] | null;
-    }>(authorizedMcp, "session_create", {
-      initialMessage: "spawn a goal-bearing worker",
-      model: "scripted-model",
-      sandboxBackend: "none",
-      sandbox: "new",
-      goal: { text: "fleet healthy" },
-    });
+    const spawnedReceipt = await callMcpTool<McpMutationReceiptType>(
+      authorizedMcp,
+      "session_create",
+      {
+        initialMessage: "spawn a goal-bearing worker",
+        model: "scripted-model",
+        sandboxBackend: "none",
+        sandbox: "new",
+        goal: { text: "fleet healthy" },
+      },
+    );
+    const spawned = await requireSession(
+      dbClient.db,
+      grant.workspaceId,
+      spawnedReceipt.resource.id,
+    );
     expect(spawned.firstPartyMcpPermissions).toEqual(authorizedGrant.permissions);
-    expect(
-      (await getSession(dbClient.db, grant.workspaceId, spawned.id))?.firstPartyMcpPermissions,
-    ).toEqual(authorizedGrant.permissions);
 
     // Even an authorized creator cannot ask for a goal while explicitly
     // narrowing goals:manage out of the child token.
