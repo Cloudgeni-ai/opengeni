@@ -21,6 +21,7 @@ import {
 } from "@opengeni/db";
 import { createNatsEventBus, type ResponderConnection } from "@opengeni/events";
 import { createObservability, logStartupDependencyRetry } from "@opengeni/observability";
+import { createObjectStorage } from "@opengeni/storage";
 import { SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID } from "@opengeni/core";
 import {
   Connection,
@@ -36,6 +37,15 @@ import { startAuthCalloutResponder } from "./sandbox/auth-callout";
 import { startHelloIngestion, startMetricsIngestion } from "./sandbox/metrics-ingestion";
 import { startSlackInteractionPump } from "./integrations/slack-interactions";
 import { startTemporalScheduleCleanupPump } from "./temporal-schedule-cleanup";
+import {
+  EDITABLE_ARTIFACT_LIVE_WEBSOCKET_MAX_MESSAGE_BYTES,
+  EditableArtifactWebSocketTransport,
+  type EditableArtifactWebSocketConnection,
+} from "./editable-artifact-websocket";
+import {
+  createStandaloneEditableArtifactApplication,
+  type StandaloneEditableArtifactApplication,
+} from "./editable-artifact-production";
 
 /**
  * A REJECT_DUPLICATE start collides on the deterministic workflowId when the
@@ -317,22 +327,63 @@ export async function startApi() {
     await dbClient.close();
     throw new Error("OpenGeni API startup dependencies were not initialized");
   }
+  const objectStorage = createObjectStorage(settings);
+  let editableArtifactComposition: StandaloneEditableArtifactApplication | undefined;
+  if (objectStorage) {
+    try {
+      editableArtifactComposition = await createStandaloneEditableArtifactApplication({
+        db: dbClient.db,
+        bus,
+        objectStorage,
+      });
+    } catch (error) {
+      await Promise.allSettled([bus.close(), workflowClient.close(), dbClient.close()]);
+      throw error;
+    }
+  }
   const { app, routeDeps } = createAppComposition({
     settings,
     db: dbClient.db,
     bus,
     workflowClient: workflowClient.client,
     documentIndexer: workflowClient.documentIndexer,
+    objectStorage,
+    ...(editableArtifactComposition
+      ? {
+          editableArtifacts: editableArtifactComposition.application,
+          editableArtifactExports: editableArtifactComposition.durableExports,
+        }
+      : {}),
     observability,
     readinessChecks: {
       db: runtimeDatabaseReadyCheck(dbClient.db, databasePosture),
     },
   });
-  const server = Bun.serve({
+  if (!routeDeps.editableArtifacts) {
+    observability.warn("editable artifact engine is not composed", {
+      subsystem: "editable_artifacts",
+      behavior: "http_and_websocket_fail_closed",
+    });
+  }
+  const artifactWebSockets = new EditableArtifactWebSocketTransport(routeDeps.editableArtifacts);
+  const server = Bun.serve<EditableArtifactWebSocketConnection>({
     hostname: settings.apiHost,
     port: settings.apiPort,
     idleTimeout: 255,
-    fetch: app.fetch,
+    fetch: (request, bunServer) => {
+      if (artifactWebSockets.handles(request)) {
+        return artifactWebSockets.upgrade(request, bunServer);
+      }
+      return app.fetch(request);
+    },
+    websocket: {
+      maxPayloadLength: EDITABLE_ARTIFACT_LIVE_WEBSOCKET_MAX_MESSAGE_BYTES,
+      backpressureLimit: 16 * 1024 * 1024,
+      closeOnBackpressureLimit: true,
+      open: (socket) => artifactWebSockets.websocket.open(socket),
+      message: (socket, message) => artifactWebSockets.websocket.message(socket, message),
+      close: (socket) => artifactWebSockets.websocket.close(socket),
+    },
   });
   const stopSlackInteractionPump = settings.slackSigningSecret
     ? startSlackInteractionPump(routeDeps)
@@ -407,6 +458,7 @@ export async function startApi() {
       stopHelloIngestion?.();
       await stopTemporalScheduleCleanupPump();
       await Promise.allSettled([
+        Promise.resolve(editableArtifactComposition?.close()),
         authCalloutResponder?.close(),
         bus.close(),
         workflowClient.close(),

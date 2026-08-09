@@ -6,9 +6,13 @@ export async function runtimeModuleSpecifiers(
   source: string,
   loader: RuntimeLoader,
 ): Promise<string[]> {
+  // Bun.Transpiler rejects executable hashbangs even though Node/Bun accept
+  // them at the start of shipped CLI modules. Preserve line numbering while
+  // scanning the JavaScript body for its dependency closure.
+  const scannableSource = source.startsWith("#!") ? source.replace(/^#![^\r\n]*/u, "") : source;
   const transpiler = new Bun.Transpiler({ loader });
-  const imports = transpiler.scanImports(source);
-  const scan = await transpiler.scan(source);
+  const imports = transpiler.scanImports(scannableSource);
+  const scan = await transpiler.scan(scannableSource);
   return [...new Set([...scan.imports, ...imports].map((entry) => entry.path))];
 }
 

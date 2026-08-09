@@ -573,7 +573,7 @@ jobs:
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
         run: |
           set -euo pipefail
-          for role in api worker web relay sandbox; do
+          for role in api worker web relay sandbox artifact-materializer artifact-outbox-dispatcher; do
             name="$(jq -er --arg role "$role" '.images[$role].name' evidence/release-candidate.json)"
             expected="$(jq -er --arg role "$role" '.images[$role].digest' evidence/release-candidate.json)"
             resolved="$(bun scripts/resolve-optional-oci-manifest.ts "${name}:${RELEASE_VERSION}")"
@@ -694,7 +694,7 @@ jobs:
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
         run: |
           set -euo pipefail
-          for role in api worker web relay sandbox; do
+          for role in api worker web relay sandbox artifact-materializer artifact-outbox-dispatcher; do
             name="$(jq -er --arg role "$role" '.images[$role].name' evidence/release-candidate.json)"
             digest="$(jq -er --arg role "$role" '.images[$role].digest' evidence/release-candidate.json)"
             source="${name}@${digest}"
@@ -724,7 +724,7 @@ jobs:
           # public-consumer path. Registry visibility can take a few seconds to
           # converge, so retry only the read-only manifest inspection.
           docker logout "$REGISTRY"
-          for role in api worker web relay sandbox; do
+          for role in api worker web relay sandbox artifact-materializer artifact-outbox-dispatcher; do
             image="$(jq -er --arg role "$role" '.images[$role].name' evidence/release-candidate.json):${RELEASE_VERSION}"
             expected="$(jq -er --arg role "$role" '.images[$role].digest' evidence/release-candidate.json)"
             resolved=""

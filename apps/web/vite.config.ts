@@ -42,6 +42,18 @@ export default defineConfig({
               entriesAwareMergeThreshold: 128 * 1024,
               priority: 2,
             },
+            {
+              // Keep the three Office editors, sync stack, Worker bootstrap,
+              // and modality runtimes behind their one direct route. Like the
+              // session group, entriesAware preserves genuinely shared shell
+              // code without folding route-only dependencies into startup.
+              name: "editable-artifact",
+              test: /src[\\/]routes[\\/]editable-artifact\.tsx$/,
+              includeDependenciesRecursively: true,
+              entriesAware: true,
+              entriesAwareMergeThreshold: 128 * 1024,
+              priority: 3,
+            },
           ],
         },
       },

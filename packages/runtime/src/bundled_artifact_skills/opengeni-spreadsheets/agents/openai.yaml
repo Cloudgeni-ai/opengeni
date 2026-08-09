@@ -1,0 +1,4 @@
+interface:
+  display_name: "OpenGeni Spreadsheets"
+  short_description: "Create and edit verified spreadsheet artifacts"
+  default_prompt: "Use $opengeni-spreadsheets to create a polished, formula-driven workbook."

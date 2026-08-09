@@ -164,6 +164,8 @@ describe("release candidate receipt", () => {
       web: imageDigests.web,
       relay: imageDigests.relay,
       sandbox: imageDigests.sandbox,
+      "artifact-materializer": imageDigests["artifact-materializer"],
+      "artifact-outbox-dispatcher": imageDigests["artifact-outbox-dispatcher"],
     });
     expect(releaseBomImages(receipt)).toEqual(
       RELEASE_IMAGE_ROLES.map((role) => ({

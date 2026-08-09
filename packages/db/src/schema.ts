@@ -27,6 +27,8 @@ import {
 } from "drizzle-orm/pg-core";
 import { losslessCodecVersion, losslessJsonb, losslessText } from "./lossless-columns";
 
+export * from "./editable-artifacts-schema";
+
 const vector = customType<{ data: number[]; driverData: string }>({
   dataType() {
     return "vector(3072)";

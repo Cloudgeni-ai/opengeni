@@ -8,6 +8,10 @@
     "url": "git+https://github.com/Cloudgeni-ai/opengeni.git",
     "directory": "apps/worker"
   },
+  "bin": {
+    "opengeni-artifact-materializer-worker": "./src/artifact-materializer-entry.ts",
+    "opengeni-artifact-outbox-dispatcher": "./src/artifact-outbox-entry.ts"
+  },
   "files": [
     "dist",
     "src"
@@ -24,6 +28,14 @@
     "./host-export": {
       "types": "./src/host-export.ts",
       "default": "./src/host-export.ts"
+    },
+    "./artifact-materializer": {
+      "types": "./src/artifact-materializer-entry.ts",
+      "default": "./src/artifact-materializer-entry.ts"
+    },
+    "./artifact-outbox-dispatcher": {
+      "types": "./src/artifact-outbox-entry.ts",
+      "default": "./src/artifact-outbox-entry.ts"
     }
   },
   "publishConfig": {
@@ -34,6 +46,8 @@
     "dev": "bun --watch src/index.ts",
     "dev:watch": "bun --watch src/index.ts",
     "start": "bun src/index.ts",
+    "start:artifact-materializer": "bun src/artifact-materializer-entry.ts",
+    "start:artifact-outbox": "bun src/artifact-outbox-entry.ts",
     "typecheck": "tsc --noEmit",
     "build": "bun ../../scripts/build-typescript-package.ts && bun scripts/build-workflow-bundle.ts",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"

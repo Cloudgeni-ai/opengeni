@@ -6655,6 +6655,51 @@ describe("pack skills in the sandbox skill index", () => {
     expect(index.map((entry) => entry.name)).toContain("checkov");
     expect(index.map((entry) => entry.name)).not.toContain("infra-ops");
     expect(index.map((entry) => entry.name)).not.toContain("azure-verified-modules");
+    expect(index.map((entry) => entry.name)).not.toContain("opengeni-spreadsheets");
+  });
+
+  test("artifact skills are indexed only after an exact host runtime preflight", () => {
+    const source = lazySkillSourceWithPackSkills([], [], true);
+    const index = source.getIndex?.(emptyManifest, ".agents") ?? [];
+    expect(index.map((entry) => entry.name)).toEqual(
+      expect.arrayContaining([
+        "opengeni-spreadsheets",
+        "opengeni-documents",
+        "opengeni-presentations",
+      ]),
+    );
+    const sourceDir = source.source as { type: string; children: Record<string, any> };
+    expect(sourceDir.children["opengeni-spreadsheets"].type).toBe("local_dir");
+  });
+
+  test("buildOpenGeniAgent refuses to advertise artifact skills without absolute host paths", () => {
+    const settings = testSettings({ sandboxBackend: "docker" });
+    expect(() =>
+      buildOpenGeniAgent(settings, [], {
+        artifactRuntimeAvailable: true,
+        sandboxEnvironment: {},
+      }),
+    ).toThrow("artifactRuntimeAvailable requires absolute");
+
+    const agent = buildOpenGeniAgent(settings, [], {
+      artifactRuntimeAvailable: true,
+      sandboxEnvironment: {
+        OPENGENI_ARTIFACT_RUNTIME_MANIFEST: "/opt/opengeni/artifacts/installation.json",
+        OPENGENI_ARTIFACT_TOOL_ENTRY: "/opt/opengeni/artifacts/skill-facade-entry.mjs",
+      },
+    });
+    const skillsCapability = (
+      (agent as any).capabilities as Array<{
+        type: string;
+        lazyFrom?: {
+          getIndex?: (manifest: unknown, skillsPath: string) => Array<{ name: string }>;
+        };
+      }>
+    ).find((capability) => capability.type === "skills");
+    const names =
+      skillsCapability?.lazyFrom?.getIndex?.(emptyManifest, ".agents").map((entry) => entry.name) ??
+      [];
+    expect(names).toContain("opengeni-documents");
   });
 
   test("an explicit curated library selection is materialized and indexed", () => {

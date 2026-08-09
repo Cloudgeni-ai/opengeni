@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "idNamespace": "0011223344556677",
+  "nextId": 25,
+  "revision": 14,
+  "page": { "widthPt": 612, "heightPt": 792, "marginTopPt": 72, "marginRightPt": 72, "marginBottomPt": 72, "marginLeftPt": 72 },
+  "blocks": [
+    { "kind": "paragraph", "id": "p/0011223344556677000000000000000a", "runs": [{ "text": "Launch decision", "style": {} }], "style": { "headingLevel": 1, "keepNext": true } },
+    { "kind": "paragraph", "id": "p/0011223344556677000000000000000b", "runs": [{ "text": "Recommendation: release", "style": { "bold": true } }, { "text": " the engine.", "style": {} }], "style": {} },
+    { "kind": "paragraph", "id": "p/0011223344556677000000000000000c", "runs": [{ "text": "Verify fidelity", "style": {} }], "style": { "list": { "kind": "number", "level": 0 } } },
+    { "kind": "table", "id": "dt/0011223344556677000000000000000d", "rows": [[[{ "text": "Area", "style": {} }], [{ "text": "Result", "style": {} }]], [[{ "text": "Comments", "style": {} }], [{ "text": "Editable", "style": {} }]]], "style": { "widthPt": 360, "columnWidthsPt": [210, 150], "headerRows": 1, "headerFill": "#E5E7EB" } },
+    { "kind": "paragraph", "id": "p/00112233445566770000000000000016", "runs": [{ "text": "Evidence.", "style": {} }], "style": {} }
+  ],
+  "sections": [
+    {
+      "id": "sec/00112233445566770000000000000001", "startBlockIndex": 0,
+      "page": { "widthPt": 612, "heightPt": 792, "marginTopPt": 72, "marginRightPt": 72, "marginBottomPt": 72, "marginLeftPt": 72 },
+      "headers": {
+        "default": { "id": "hdr/00112233445566770000000000000002", "blocks": [{ "kind": "paragraph", "id": "p/00112233445566770000000000000008", "runs": [{ "text": "OpenGeni brief", "style": {} }], "style": {} }] },
+        "first": { "id": "hdr/00112233445566770000000000000003", "blocks": [] },
+        "even": { "id": "hdr/00112233445566770000000000000004", "blocks": [] }
+      },
+      "footers": {
+        "default": { "id": "ftr/00112233445566770000000000000005", "blocks": [{ "kind": "paragraph", "id": "p/00112233445566770000000000000009", "runs": [{ "text": "Confidential", "style": {} }], "style": {} }] },
+        "first": { "id": "ftr/00112233445566770000000000000006", "blocks": [] },
+        "even": { "id": "ftr/00112233445566770000000000000007", "blocks": [] }
+      }
+    },
+    {
+      "id": "sec/0011223344556677000000000000000e", "startBlockIndex": 4,
+      "page": { "widthPt": 792, "heightPt": 612, "marginTopPt": 72, "marginRightPt": 54, "marginBottomPt": 72, "marginLeftPt": 54 },
+      "headers": {
+        "default": { "id": "hdr/0011223344556677000000000000000f", "blocks": [] },
+        "first": { "id": "hdr/00112233445566770000000000000010", "blocks": [{ "kind": "paragraph", "id": "p/00112233445566770000000000000015", "runs": [{ "text": "Appendix", "style": {} }], "style": {} }] },
+        "even": { "id": "hdr/00112233445566770000000000000011", "blocks": [] }
+      },
+      "footers": {
+        "default": { "id": "ftr/00112233445566770000000000000012", "blocks": [] },
+        "first": { "id": "ftr/00112233445566770000000000000013", "blocks": [] },
+        "even": { "id": "ftr/00112233445566770000000000000014", "blocks": [] }
+      }
+    }
+  ],
+  "comments": [{
+    "id": "dc/00112233445566770000000000000017", "blockId": "p/0011223344556677000000000000000b", "start": 0, "end": 14, "resolved": true,
+    "replies": [
+      { "author": "Reviewer", "text": "Confirm.", "createdAt": "2026-01-02T03:04:05.000Z" },
+      { "author": "Author", "text": "Confirmed.", "createdAt": "2026-01-02T03:04:05.000Z" }
+    ]
+  }],
+  "changes": [{ "id": "chg/00112233445566770000000000000018", "blockId": "p/0011223344556677000000000000000b", "kind": "insert", "start": 16, "end": 23, "author": "Author", "createdAt": "2026-01-02T03:04:05.000Z" }]
+}

@@ -19,7 +19,7 @@ jobs:
         run: |
           set -euo pipefail
           owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
-          for role in api worker web relay sandbox; do
+          for role in api worker web relay sandbox artifact-materializer artifact-outbox-dispatcher; do
             token_response="$(curl -fsSL \
               "https://ghcr.io/token?scope=repository:${owner}/opengeni-${role}:pull&service=ghcr.io")"
             token="$(jq -er '.token' <<<"$token_response")"

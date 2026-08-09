@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Rewrite the entry-point fields (`main`/`module`/`types`/`exports`) of the
+ * Rewrite the entry-point fields (`main`/`module`/`types`/`exports`/`bin`) of the
  * PUBLISHABLE packages from their src form to their dist form right before
  * `changeset publish`.
  *
@@ -45,11 +45,11 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { publishableWorkspacePackages, repoRoot, type PackageJson } from "./publishable-workspaces";
 
-type ExportsEntry = { types?: string; style?: string; import?: string; default?: string } | string;
+export type ExportsEntry =
+  | { types?: string; style?: string; import?: string; default?: string }
+  | string;
 
-const restore = process.argv.includes("--restore");
-
-function srcToDist(value: string, kind: "runtime" | "types"): string {
+export function srcToDist(value: string, kind: "runtime" | "types"): string {
   if (!value.startsWith("./src/")) {
     return value;
   }
@@ -59,7 +59,7 @@ function srcToDist(value: string, kind: "runtime" | "types"): string {
   return `./dist/${withoutSourceRoot}`;
 }
 
-function distToSrc(value: string): string {
+export function distToSrc(value: string): string {
   if (!value.startsWith("./dist/")) {
     return value;
   }
@@ -74,14 +74,21 @@ function entryToDist(entry: ExportsEntry): ExportsEntry {
   if (typeof entry === "string") {
     return srcToDist(entry, "runtime");
   }
-  const next: ExportsEntry = { ...entry };
-  const runtimeSource = entry.import ?? entry.default;
-  if (entry.types) {
+  const next = { ...entry };
+  if (entry.types?.startsWith("./src/")) {
     next.types = srcToDist(entry.types, "types");
   }
-  if (runtimeSource) {
-    next.import = srcToDist(runtimeSource, "runtime");
-    delete next.default;
+  if (entry.import?.startsWith("./src/")) {
+    next.import = srcToDist(entry.import, "runtime");
+  }
+  if (entry.default?.startsWith("./src/")) {
+    const runtime = srcToDist(entry.default, "runtime");
+    if (entry.import === undefined) {
+      next.import = runtime;
+      delete next.default;
+    } else {
+      next.default = runtime;
+    }
   }
   return next;
 }
@@ -90,20 +97,27 @@ function entryToSrc(entry: ExportsEntry): ExportsEntry {
   if (typeof entry === "string") {
     return distToSrc(entry);
   }
-  const next: ExportsEntry = { ...entry };
-  const runtimeDist = entry.import ?? entry.default;
-  if (entry.types) {
+  const next = { ...entry };
+  if (entry.types?.startsWith("./dist/")) {
     next.types = distToSrc(entry.types);
   }
-  if (runtimeDist) {
-    next.default = distToSrc(runtimeDist);
-    delete next.import;
+  if (entry.import?.startsWith("./dist/")) {
+    const runtime = distToSrc(entry.import);
+    if (entry.default === undefined) {
+      next.default = runtime;
+      delete next.import;
+    } else {
+      next.import = runtime;
+    }
+  }
+  if (entry.default?.startsWith("./dist/")) {
+    next.default = distToSrc(entry.default);
   }
   return next;
 }
 
 /** Entry points in the dist form (published tarball). */
-function toDist(pkg: PackageJson): boolean {
+export function rewriteEntryPointsToDist(pkg: PackageJson): boolean {
   let changed = false;
   if (typeof pkg.main === "string" && pkg.main !== srcToDist(pkg.main, "runtime")) {
     pkg.main = srcToDist(pkg.main, "runtime");
@@ -126,11 +140,26 @@ function toDist(pkg: PackageJson): boolean {
       }
     }
   }
+  if (typeof pkg.bin === "string") {
+    const next = srcToDist(pkg.bin, "runtime");
+    if (pkg.bin !== next) {
+      pkg.bin = next;
+      changed = true;
+    }
+  } else if (pkg.bin && typeof pkg.bin === "object") {
+    for (const [name, entry] of Object.entries(pkg.bin)) {
+      const next = srcToDist(entry, "runtime");
+      if (entry !== next) {
+        pkg.bin[name] = next;
+        changed = true;
+      }
+    }
+  }
   return changed;
 }
 
 /** Entry points in the src form (internal workspace resolution; committed tree). */
-function toSrc(pkg: PackageJson): boolean {
+export function rewriteEntryPointsToSrc(pkg: PackageJson): boolean {
   let changed = false;
   if (typeof pkg.main === "string" && pkg.main !== distToSrc(pkg.main)) {
     pkg.main = distToSrc(pkg.main);
@@ -153,37 +182,55 @@ function toSrc(pkg: PackageJson): boolean {
       }
     }
   }
+  if (typeof pkg.bin === "string") {
+    const next = distToSrc(pkg.bin);
+    if (pkg.bin !== next) {
+      pkg.bin = next;
+      changed = true;
+    }
+  } else if (pkg.bin && typeof pkg.bin === "object") {
+    for (const [name, entry] of Object.entries(pkg.bin)) {
+      const next = distToSrc(entry);
+      if (entry !== next) {
+        pkg.bin[name] = next;
+        changed = true;
+      }
+    }
+  }
   return changed;
 }
 
-let changed = 0;
+if (import.meta.main) {
+  const restore = process.argv.includes("--restore");
+  let changed = 0;
 
-for (const { dir: pkgDir } of publishableWorkspacePackages()) {
-  const pkgPath = join(repoRoot, pkgDir, "package.json");
-  const raw = readFileSync(pkgPath, "utf8");
-  const pkg = JSON.parse(raw) as PackageJson;
+  for (const { dir: pkgDir } of publishableWorkspacePackages()) {
+    const pkgPath = join(repoRoot, pkgDir, "package.json");
+    const raw = readFileSync(pkgPath, "utf8");
+    const pkg = JSON.parse(raw) as PackageJson;
 
-  const pkgChanged = restore ? toSrc(pkg) : toDist(pkg);
+    const pkgChanged = restore ? rewriteEntryPointsToSrc(pkg) : rewriteEntryPointsToDist(pkg);
 
-  if (pkgChanged) {
-    changed += 1;
-    const trailing = raw.endsWith("\n") ? "\n" : "";
-    writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}${trailing}`);
-    const form = restore ? "src" : "dist";
-    process.stdout.write(`  ${pkg.name ?? pkgDir}: entry points -> ${form}\n`);
+    if (pkgChanged) {
+      changed += 1;
+      const trailing = raw.endsWith("\n") ? "\n" : "";
+      writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}${trailing}`);
+      const form = restore ? "src" : "dist";
+      process.stdout.write(`  ${pkg.name ?? pkgDir}: entry points -> ${form}\n`);
+    }
   }
-}
 
-if (restore) {
-  process.stdout.write(
-    `rewrite-entry-points: restored ${changed} package(s) to src entry points.\n`,
-  );
-} else if (changed === 0) {
-  process.stdout.write(
-    "rewrite-entry-points: no packages to rewrite (already dist entry points).\n",
-  );
-} else {
-  process.stdout.write(
-    `rewrite-entry-points: rewrote ${changed} package(s) to dist entry points.\n`,
-  );
+  if (restore) {
+    process.stdout.write(
+      `rewrite-entry-points: restored ${changed} package(s) to src entry points.\n`,
+    );
+  } else if (changed === 0) {
+    process.stdout.write(
+      "rewrite-entry-points: no packages to rewrite (already dist entry points).\n",
+    );
+  } else {
+    process.stdout.write(
+      `rewrite-entry-points: rewrote ${changed} package(s) to dist entry points.\n`,
+    );
+  }
 }

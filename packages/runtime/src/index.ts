@@ -2018,6 +2018,13 @@ export type BuildAgentOptions = {
   // unset to avoid unknown-parameter 400s.
   promptCacheKey?: string;
   sandboxEnvironment?: Record<string, string>;
+  /**
+   * Host assertion that the selected sandbox/machine passed the exact artifact
+   * runtime manifest, integrity, target, and capability preflight. The runtime
+   * also requires absolute manifest/facade paths in `sandboxEnvironment` before
+   * advertising artifact skills. Omitted/false keeps those skills absent.
+   */
+  artifactRuntimeAvailable?: boolean;
   // The EFFECTIVE/active compute backend for this turn. `settings.sandboxBackend`
   // is the session's HOME backend (the default cloud group box it was created
   // with); when a session has swapped its active sandbox to a connected machine
@@ -2496,6 +2503,22 @@ export function mcpToolErrorOutput(error: unknown): {
 const mcpToolErrorFunction: MCPToolErrorFunction = ({ error }) =>
   mcpToolErrorOutput(error) as unknown as string;
 
+const ARTIFACT_RUNTIME_MANIFEST_ENV = "OPENGENI_ARTIFACT_RUNTIME_MANIFEST";
+const ARTIFACT_TOOL_ENTRY_ENV = "OPENGENI_ARTIFACT_TOOL_ENTRY";
+
+function artifactRuntimeSkillsAvailable(options: BuildAgentOptions): boolean {
+  if (options.artifactRuntimeAvailable !== true) return false;
+  const environment = options.sandboxEnvironment;
+  const manifest = environment?.[ARTIFACT_RUNTIME_MANIFEST_ENV];
+  const entrypoint = environment?.[ARTIFACT_TOOL_ENTRY_ENV];
+  if (!manifest || !entrypoint || !isAbsolute(manifest) || !isAbsolute(entrypoint)) {
+    throw new Error(
+      "artifactRuntimeAvailable requires absolute OPENGENI_ARTIFACT_RUNTIME_MANIFEST and OPENGENI_ARTIFACT_TOOL_ENTRY paths",
+    );
+  }
+  return true;
+}
+
 export function buildOpenGeniAgent(
   settings: Settings,
   resources: ResourceRef[],
@@ -2504,6 +2527,7 @@ export function buildOpenGeniAgent(
   if (Boolean(options.toolspaceTokenSeed) !== Boolean(options.toolspaceTokenSessionId)) {
     throw new Error("toolspaceTokenSeed and toolspaceTokenSessionId must be supplied together");
   }
+  const artifactRuntimeAvailable = artifactRuntimeSkillsAvailable(options);
   // Resolved per-turn gating. Each override defaults to today's settings-derived
   // behaviour, so the legacy global-client callers (no resolved model) build the
   // exact same agent as before; the multi-provider worker path passes the
@@ -2675,6 +2699,7 @@ export function buildOpenGeniAgent(
         ? { skillLibrarySkills: options.skillLibrarySkills }
         : {}),
       ...(options.sessionSkills?.length ? { sessionSkills: options.sessionSkills } : {}),
+      ...(artifactRuntimeAvailable ? { artifactRuntimeAvailable: true } : {}),
       ...repositoryWorkspaceSkillPathsOption(resources),
       ...(options.structuredToolTransport !== undefined
         ? { structuredToolTransport: options.structuredToolTransport }
@@ -2702,6 +2727,7 @@ export function buildOpenGeniAgent(
         options.skillLibrarySkills ?? [],
         options.packSkills ?? [],
         options.sessionSkills ?? [],
+        artifactRuntimeAvailable,
       ).map((selection) => Object.freeze(selection)),
     ),
   );
@@ -3177,6 +3203,7 @@ export function buildAgentCapabilities(
   options: {
     skillLibrarySkills?: PackSkill[];
     sessionSkills?: PackSkill[];
+    artifactRuntimeAvailable?: boolean;
     workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
     structuredToolTransport?: boolean;
     supportsImageInput?: boolean;
@@ -3227,12 +3254,14 @@ export function buildAgentCapabilities(
     packSkills,
     options.skillLibrarySkills ?? [],
     options.sessionSkills ?? [],
+    options.artifactRuntimeAvailable === true,
   );
   caps.push(
     skills({
       lazyFrom: lazySkillSourceWithPackSkills(
         [...packSkills, ...sessionSkills],
         options.skillLibrarySkills ?? [],
+        options.artifactRuntimeAvailable === true,
       ),
     }),
   );
@@ -3240,6 +3269,9 @@ export function buildAgentCapabilities(
     caps.push(
       workspaceSkills(options.workspaceSkillPaths, [
         ...bundledSkillDirNames(bundledSkillsDir()),
+        ...(options.artifactRuntimeAvailable
+          ? bundledSkillDirNames(bundledArtifactSkillsDir())
+          : []),
         ...(options.skillLibrarySkills ?? []).map((skill) => skill.name),
         ...packSkills.map((skill) => skill.name),
         ...sessionSkills.map((skill) => skill.name),
@@ -8370,6 +8402,7 @@ export function azureOpenAIDefaultQuery(
 // in production — so stage a copy under the working directory once per
 // process instead of granting the packaged path.
 let stagedBundledSkillsDir: string | null = null;
+let stagedBundledArtifactSkillsDir: string | null = null;
 
 function bundledSkillsDir(): string {
   const moduleDir = dirname(fileURLToPath(import.meta.url));
@@ -8390,6 +8423,23 @@ function bundledSkillsDir(): string {
     );
   }
   return stagedBundledSkillsDir;
+}
+
+function bundledArtifactSkillsDir(): string {
+  const moduleDir = dirname(fileURLToPath(import.meta.url));
+  const packaged =
+    [
+      join(moduleDir, "bundled_artifact_skills"),
+      join(moduleDir, "..", "src", "bundled_artifact_skills"),
+    ].find((candidate) => existsSync(candidate)) ?? join(moduleDir, "bundled_artifact_skills");
+  if (isPathWithin(process.cwd(), packaged)) return packaged;
+  if (!stagedBundledArtifactSkillsDir) {
+    stagedBundledArtifactSkillsDir = stageBundledSkills(
+      packaged,
+      join(process.cwd(), ".opengeni", "bundled_artifact_skills"),
+    );
+  }
+  return stagedBundledArtifactSkillsDir;
 }
 
 function stageBundledSkills(packaged: string, target: string): string {
@@ -8428,15 +8478,24 @@ function isPathWithin(root: string, candidate: string): boolean {
 export function lazySkillSourceWithPackSkills(
   packSkills: PackSkill[],
   skillLibrarySkills: PackSkill[] = [],
+  artifactRuntimeAvailable = false,
 ): LocalDirLazySkillSource {
   const bundledDir = bundledSkillsDir();
   const bundled = localDirLazySkillSource({ src: bundledDir });
-  if (packSkills.length === 0 && skillLibrarySkills.length === 0) {
+  if (packSkills.length === 0 && skillLibrarySkills.length === 0 && !artifactRuntimeAvailable) {
     return bundled;
   }
   const children: Record<string, Entry> = {};
   for (const name of bundledSkillDirNames(bundledDir)) {
     children[name] = localDir({ src: join(bundledDir, name) });
+  }
+  let artifactBundled: LocalDirLazySkillSource | null = null;
+  if (artifactRuntimeAvailable) {
+    const artifactDir = bundledArtifactSkillsDir();
+    artifactBundled = localDirLazySkillSource({ src: artifactDir });
+    for (const name of bundledSkillDirNames(artifactDir)) {
+      children[name] = localDir({ src: join(artifactDir, name) });
+    }
   }
   const libraryIndex: SkillIndexEntry[] = [];
   const libraryNameKeys = new Set<string>();
@@ -8479,6 +8538,11 @@ export function lazySkillSourceWithPackSkills(
           !packNameKeys.has((entry.path ?? entry.name).toLowerCase()) &&
           !libraryNameKeys.has((entry.path ?? entry.name).toLowerCase()),
       ),
+      ...(artifactBundled?.getIndex?.(manifest, skillsPath) ?? []).filter(
+        (entry) =>
+          !packNameKeys.has((entry.path ?? entry.name).toLowerCase()) &&
+          !libraryNameKeys.has((entry.path ?? entry.name).toLowerCase()),
+      ),
       ...libraryIndex.filter(
         (entry) => !packNameKeys.has((entry.path ?? entry.name).toLowerCase()),
       ),
@@ -8492,8 +8556,13 @@ function effectiveSkillSelections(
   librarySkills: readonly PackSkill[],
   packSkills: readonly PackSkill[],
   sessionSkills: readonly PackSkill[],
+  artifactRuntimeAvailable = false,
 ): readonly EffectiveSkillSelection[] {
-  const defaultSelections = bundledSkillDirNames(bundledSkillsDir()).map((name) => ({
+  const defaultSkillNames = [
+    ...bundledSkillDirNames(bundledSkillsDir()),
+    ...(artifactRuntimeAvailable ? bundledSkillDirNames(bundledArtifactSkillsDir()) : []),
+  ];
+  const defaultSelections = defaultSkillNames.map((name) => ({
     id: `bundled:${name}`,
     name,
     source: "bundled" as const,
@@ -8507,6 +8576,7 @@ function effectiveSkillSelections(
     packSkills,
     librarySkills,
     sessionSkills,
+    artifactRuntimeAvailable,
   );
   const sessionNameKeys = new Set(effectiveSessionSkills.map((skill) => skill.name.toLowerCase()));
   const selected = librarySelections.filter((selection) =>
@@ -8547,13 +8617,17 @@ function sessionSkillsForMaterialization(
   packSkills: readonly PackSkill[],
   librarySkills: readonly PackSkill[],
   sessionSkills: readonly PackSkill[],
+  artifactRuntimeAvailable = false,
 ): PackSkill[] {
   const configured = new Map<string, PackSkill>();
   for (const skill of [...librarySkills, ...packSkills]) {
     configured.set(skill.name.toLowerCase(), skill);
   }
   const bundledNames = new Set(
-    bundledSkillDirNames(bundledSkillsDir()).map((name) => name.toLowerCase()),
+    [
+      ...bundledSkillDirNames(bundledSkillsDir()),
+      ...(artifactRuntimeAvailable ? bundledSkillDirNames(bundledArtifactSkillsDir()) : []),
+    ].map((name) => name.toLowerCase()),
   );
   const selected = new Map<string, PackSkill>();
   for (const skill of sessionSkills) {

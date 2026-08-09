@@ -21,6 +21,14 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./editable-artifacts": {
+      "types": "./src/editable-artifacts.ts",
+      "default": "./src/editable-artifacts.ts"
+    },
+    "./editable-artifact-live": {
+      "types": "./src/editable-artifact-live.ts",
+      "default": "./src/editable-artifact-live.ts"
     }
   },
   "publishConfig": {

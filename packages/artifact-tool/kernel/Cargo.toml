@@ -1,0 +1,45 @@
+[package]
+name = "opengeni-artifact-kernel"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Deterministic, platform-neutral artifact model kernel for OpenGeni"
+publish = false
+
+[lib]
+crate-type = ["rlib"]
+
+[[bench]]
+name = "kernel"
+harness = false
+
+[[bench]]
+name = "formula"
+harness = false
+
+[[bench]]
+name = "text_layout"
+harness = false
+
+[[bench]]
+name = "presentation"
+harness = false
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+panic = "abort"
+
+[profile.bench]
+codegen-units = 1
+lto = "thin"
+
+[dependencies]
+rustybuzz = "0.20.1"
+sha2 = "0.10.9"
+unicode-bidi = "0.3.18"
+unicode-linebreak = "0.1.5"
+unicode-segmentation = "1.13.3"
+
+[dev-dependencies]
+serde_json = "1.0.145"

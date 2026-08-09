@@ -76,6 +76,7 @@ import { registerWorkspaceArtifactRoutes } from "./routes/workspace-artifacts";
 import { registerPreferenceRegistryRoutes } from "./routes/preference-registry";
 import { registerInsightsRoutes } from "./routes/insights";
 import { registerTranscriptionRoutes } from "./routes/transcriptions";
+import { registerEditableArtifactRoutes } from "./routes/editable-artifacts";
 import { projectClientModel } from "./model-catalog";
 import { createTranscriptionService } from "./transcription/service";
 import { createFfmpegTranscriptionSegmenter } from "./transcription/segmenter";
@@ -588,6 +589,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerScheduledTaskRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
   registerTranscriptionRoutes(app, routeDeps);
+  registerEditableArtifactRoutes(app, routeDeps);
   registerSlackInteractionRoutes(app, routeDeps);
 
   app.notFound((c) => {

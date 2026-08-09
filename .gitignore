@@ -4,6 +4,9 @@
 !.env.example
 var/
 dist/
+packages/react/demo-dist/
+!packages/artifact-kernel-wasm-*/dist/
+!packages/artifact-kernel-wasm-*/dist/**
 build/
 htmlcov/
 .coverage

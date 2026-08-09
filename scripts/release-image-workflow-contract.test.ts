@@ -99,13 +99,15 @@ describe("release image workflow contract", () => {
       "target: api",
       "target: worker",
       "target: web",
+      "target: artifact-materializer",
+      "target: artifact-outbox-dispatcher",
       "file: docker/sandbox.Dockerfile",
       "file: agent/crates/opengeni-relay/Dockerfile",
     ]) {
       expect(candidate).toContain(identity);
     }
     expect(candidate).toContain("docker/setup-qemu-action@");
-    expect(candidate.match(/platforms: linux\/amd64,linux\/arm64/g)).toHaveLength(5);
+    expect(candidate.match(/platforms: linux\/amd64,linux\/arm64/g)).toHaveLength(7);
     expect(candidate).toContain("candidate-$SOURCE_SHA");
     expect(candidate).toContain("opengeni-candidate-${SOURCE_SHA}");
     expect(candidate).toContain("evidence/release-candidate.json");
@@ -214,8 +216,8 @@ describe("release image workflow contract", () => {
         expect(aggregateResult(...results)).not.toBe(0);
       }
     }
-    expect(images.match(/push: \$\{\{ github\.event_name == 'push' \}\}/g)).toHaveLength(5);
-    expect(images.match(/:dogfood-sha-\{0\}', github\.sha\)/g)).toHaveLength(5);
+    expect(images.match(/push: \$\{\{ github\.event_name == 'push' \}\}/g)).toHaveLength(7);
+    expect(images.match(/:dogfood-sha-\{0\}', github\.sha\)/g)).toHaveLength(7);
     expect(images).not.toMatch(/format\('ghcr\.io\/cloudgeni-ai\/opengeni-[^']+:sha-\{0\}'/);
     expect(images.match(/OPENGENI_SERVER_VERSION=sha-\$\{\{ github\.event_name/g)).toHaveLength(3);
     expect(images).toContain("OPENGENI_DEPLOYMENT_REVISION=${{ github.event_name");
@@ -226,6 +228,12 @@ describe("release image workflow contract", () => {
     expect(images).toContain("WEB_DIGEST: ${{ needs.worker-web-images.outputs.web_digest }}");
     expect(images).toContain("RELAY_DIGEST: ${{ needs.relay-image.outputs.relay_digest }}");
     expect(images).toContain("SANDBOX_DIGEST: ${{ needs.sandbox-image.outputs.sandbox_digest }}");
+    expect(images).toContain(
+      "ARTIFACT_MATERIALIZER_DIGEST: ${{ needs.service-images.outputs.artifact_materializer_digest }}",
+    );
+    expect(images).toContain(
+      "ARTIFACT_OUTBOX_DISPATCHER_DIGEST: ${{ needs.service-images.outputs.artifact_outbox_dispatcher_digest }}",
+    );
     expect(images).toContain('--arg tag "dogfood-sha-${GITHUB_SHA}"');
     expect(images).not.toContain('--arg tag "sha-${GITHUB_SHA}"');
     expect(images).toContain("dogfood-images-${{ github.sha }}");
@@ -553,7 +561,7 @@ ${parser}`,
     expect(invalidResult.status).not.toBe(0);
   });
 
-  test("ordinary CI builds the same five physical image roles", async () => {
+  test("ordinary CI builds the same seven physical image roles", async () => {
     const ci = await workflow("ci.yml");
     const parsed = Bun.YAML.parse(ci) as { jobs: Record<string, { steps: Array<unknown> }> };
     const imagesJob = ci.slice(ci.indexOf("\n  api-image:\n"));
@@ -562,6 +570,8 @@ ${parser}`,
       "target: api",
       "target: worker",
       "target: web",
+      "target: artifact-materializer",
+      "target: artifact-outbox-dispatcher",
       "file: docker/sandbox.Dockerfile",
       "file: agent/crates/opengeni-relay/Dockerfile",
     ]) {

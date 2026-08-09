@@ -5,6 +5,10 @@ const testFiles =
   requestedTestFiles.length > 0
     ? requestedTestFiles
     : [
+        "./test/e2e/artifact-spreadsheet-canvas.browser.e2e.ts",
+        "./test/e2e/artifact-spreadsheet-scroll.browser.e2e.ts",
+        "./test/e2e/artifact-static-renderer.browser.e2e.ts",
+        "./test/e2e/editable-artifacts.browser.e2e.ts",
         "./test/e2e/browser.e2e.ts",
         "./test/e2e/connected-machine-removal.browser.e2e.ts",
         "./test/e2e/knowledge-surfaces.browser.e2e.ts",

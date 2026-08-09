@@ -1,21 +1,20 @@
 import { defineConfig } from "tsup";
 
-// @opengeni/sdk ships ESM + .d.ts with ZERO runtime dependencies. It hand-mirrors
-// the contracts wire types in src/types.ts (pinned by test/contract-parity.test.ts),
-// so nothing — neither @opengeni/contracts nor any server-internal package — is
-// bundled or imported at runtime. Do NOT add runtime deps or zod here.
+// @opengeni/sdk ships ESM + .d.ts. Its ordinary surfaces hand-mirror the public
+// wire types (pinned by test/contract-parity.test.ts); only the opt-in editable
+// artifact entries import canonical bounds/codecs from @opengeni/contracts.
 //
-// Every @opengeni/* specifier is marked external. The SDK legitimately has zero
-// @opengeni runtime imports, so this is normally a no-op — but it is load-bearing
-// for the publish closure guard: if a stray `import "@opengeni/<server>"` ever
-// sneaks in, externalizing keeps the literal specifier in dist/index.js (instead
-// of esbuild silently inlining the server package and erasing the specifier the
-// guard greps for), so the guard catches the leak instead of shipping it.
+// Every @opengeni/* specifier stays external. This keeps the Worker contract
+// edge explicit and is load-bearing for the publish closure guard: if a stray
+// server import appears, it remains visible in dist instead of being inlined.
 export default defineConfig({
   entry: [
     "src/index.ts",
     "src/core.ts",
+    "src/artifacts.ts",
     "src/realtime.ts",
+    "src/editable-artifacts.ts",
+    "src/editable-artifacts-worker.ts",
     "src/codex-realtime-controller.ts",
     "src/gateway-realtime-transport.ts",
   ],

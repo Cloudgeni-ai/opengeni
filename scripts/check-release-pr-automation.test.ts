@@ -2831,7 +2831,15 @@ describe("workflow contracts", () => {
     const imageSteps = imageLeaves.flatMap((jobName) =>
       ci.jobs[jobName].steps.filter((candidate: any) => candidate.with?.push),
     );
-    expect(imageSteps).toHaveLength(5);
+    expect(imageSteps.map((step: any) => step.name)).toEqual([
+      "Build API image",
+      "Build worker image",
+      "Build artifact materializer image",
+      "Build artifact outbox dispatcher image",
+      "Build web image",
+      "Build relay image",
+      "Build headless sandbox image",
+    ]);
     for (const imageStep of imageSteps)
       expect(imageStep.with.push).toBe("${{ github.event_name == 'push' }}");
   });
@@ -3001,7 +3009,10 @@ describe("workflow contracts", () => {
         "Recovery integration regressions",
       ],
       "browser-acceptance": [
-        "Install pinned Playwright Chromium runtime",
+        "Install pinned Playwright browser runtimes",
+        "Editable artifact browser acceptance",
+        "Install pinned artifact native toolchain",
+        "Editable artifact full-stack browser acceptance",
         "Codex quota Codex quota and entitlement browser acceptance",
         "Queue surface browser acceptance",
         "Long user-message disclosure browser acceptance",
@@ -3013,9 +3024,14 @@ describe("workflow contracts", () => {
         "Upload Codex quota visual evidence",
         "Upload responsive knowledge-surface evidence",
         "Upload workbench visual evidence",
+        "Upload editable artifact visual evidence",
       ],
       "package-contracts": [
+        "Install pinned artifact-kernel build toolchain",
         "Build client packages (contracts + SDK + React)",
+        "Reproduce committed modality WASM packages from clean Rust sources",
+        "Install Chromium for packed WASM package proof",
+        "Packed SDK Worker and modality WASM packages",
         "Publish closure guard",
         "Clean published consumer",
         "Runtime embedding consumer",
@@ -3110,11 +3126,11 @@ describe("workflow contracts", () => {
     expect(hasCompleteBrowserLaneContract(misroutedWorkbenchGate)).toBe(false);
 
     const browserInstall = browser.steps.find(
-      (step: any) => step.name === "Install pinned Playwright Chromium runtime",
+      (step: any) => step.name === "Install pinned Playwright browser runtimes",
     );
     expect(browserInstall).toEqual({
-      name: "Install pinned Playwright Chromium runtime",
-      run: "bunx playwright install --with-deps --only-shell chromium",
+      name: "Install pinned Playwright browser runtimes",
+      run: "bun x playwright install --with-deps chromium firefox webkit",
     });
     expect(
       browser.steps.filter((step: any) => String(step.run ?? "").includes("playwright install")),

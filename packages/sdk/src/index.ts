@@ -8,6 +8,18 @@ export type {
   TranscribeAudioInput,
   WorkspaceControlEventPage,
 } from "./client";
+export type {
+  CreateEditableArtifactMaterializationRequest,
+  CreateEditableArtifactResourceRequest,
+  EditableArtifactMaterializationFormat,
+  EditableArtifactMaterializationJobResource,
+  EditableArtifactMaterializationResultResource,
+  EditableArtifactPinnedVersionResource,
+  EditableArtifactResource,
+  PinEditableArtifactVersionRequest,
+  ReadEditableArtifactMaterializationOptions,
+  ReadEditableArtifactResourceOptions,
+} from "./editable-artifact-resources";
 export {
   OpenGeniApiContractMismatchError,
   OpenGeniApiError,

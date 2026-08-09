@@ -1243,6 +1243,11 @@ export async function bootstrapWorkspace(
         subjectId: input.subjectId,
         ...(input.subjectLabel ? { subjectLabel: input.subjectLabel } : {}),
         permissions: row.membership.permissions as Permission[],
+        ...(input.accountExternalSource === "opengeni:local"
+          ? { principalKind: "human_session" as const }
+          : input.accountExternalSource === "opengeni:configured"
+            ? { principalKind: "configured_key" as const }
+            : {}),
       })),
       defaultAccountId: account.id,
       defaultWorkspaceId: workspace.id,
@@ -49975,3 +49980,5 @@ export {
 
 export * from "./workspace-artifacts";
 export * from "./transcription-recordings";
+export * from "./editable-artifacts";
+export * from "./editable-artifact-materialization";
