@@ -34,6 +34,9 @@ export const FORCE_RLS_TABLES = [
   "document_bases",
   "document_chunks",
   "documents",
+  "durable_learning_attempt_claims",
+  "durable_learning_attempts",
+  "durable_learning_receipts",
   "enrollments",
   "file_uploads",
   "files",
@@ -199,6 +202,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "document_bases",
   "document_chunks",
   "documents",
+  "durable_learning_attempt_claims",
   "enrollments",
   "file_uploads",
   "files",
@@ -295,6 +299,8 @@ export const RUNTIME_READ_ONLY_TABLES = [
 
 /** Append-only evidence/revision tables are insertable and queryable, never mutable. */
 export const RUNTIME_READ_INSERT_TABLES = [
+  "durable_learning_attempts",
+  "durable_learning_receipts",
   "knowledge_change_proposals",
   "knowledge_claim_evidence",
   "knowledge_claim_relations",

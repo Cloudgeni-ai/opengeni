@@ -10,10 +10,17 @@ Canonical implementation:
 
 - wire contracts: `packages/contracts/src/durable-learning.ts`;
 - deterministic planner and single-authority execution service:
-  `packages/core/src/domain/durable-learning-router.ts`.
+  `packages/core/src/domain/durable-learning-router.ts`;
+- append-only Postgres attempt/receipt ledger and exact live-attempt authority
+  resolver: `packages/db/src/durable-learning-router.ts`;
+- ledger schema and rolling migration:
+  `packages/db/src/durable-learning-schema.ts` and
+  `packages/db/drizzle/0193_durable_learning_router.sql`;
+- current Workspace Memory authority adapter and legacy write integration:
+  `packages/core/src/domain/durable-learning-memory-adapter.ts`.
 
-The persistence integration implements the service's attempt-ledger and
-authority-adapter ports. It may not bypass or reinterpret the planner contract.
+Persistence and authority adapters implement the service ports. They may not
+bypass or reinterpret the planner contract.
 
 ## One router, existing authorities
 
@@ -36,8 +43,9 @@ a competing mutation path.
 
 The router rejects a subject/surface mismatch rather than silently moving the
 write. `unspecified` scope, authority, or surface produces a deterministic
-`clarification_required` receipt with an ordered field list. OPE-184 owns
-natural-language interpretation and command wiring; this service never guesses.
+`clarification_required` receipt with an ordered field list. Natural-language
+interpretation and command wiring are separately owned; this service never
+guesses.
 
 ## Scope and initiating-human authority
 
@@ -57,14 +65,14 @@ The planner supports only scopes already owned by each canonical authority:
 - Documents/RAG evidence: organization, workspace, or initiating user.
 
 An unavailable authority fails closed with `SURFACE_NOT_AVAILABLE`. In
-particular, OPE-185 owns company-profile storage and prompt composition; until
-that adapter is installed, company-profile requests are auditable rejections,
-not policy drafts or Memory fallbacks.
+particular, company-profile storage and prompt composition remain separately
+owned; until that adapter is installed, company-profile requests are auditable
+rejections, not policy drafts or Memory fallbacks.
 
 ## Learning policy seam
 
 The router consumes an already-resolved immutable learning-policy snapshot; it
-does not implement OPE-147 resolution. Autonomous learning:
+does not implement policy storage or resolution. Autonomous learning:
 
 - rejects when no snapshot exists or the mode is `off`;
 - routes to proposal authority in `suggest` mode, even if active authority was
@@ -72,9 +80,9 @@ does not implement OPE-147 resolution. Autonomous learning:
 - may retain active authority in `automatic` mode only when the frozen context
   also grants activation.
 
-OPE-148 owns evaluation, confidence/conflict analysis, and the automatic
-controller. It must call this router with its resolved snapshot and evidence;
-it must not call Memory, preference, policy, profile, or Documents mutation
+The separately owned autonomous evaluator/controller supplies confidence,
+conflict analysis, the resolved snapshot, and evidence. It must call this
+router rather than Memory, preference, policy, profile, or Documents mutation
 services directly.
 
 ## Immutable attempts, receipts, and retries
@@ -85,9 +93,13 @@ input is rejected. An exact replay returns the original immutable receipt and
 does not invoke an authority adapter again.
 
 The router records the immutable attempt before invoking the selected adapter.
-Every adapter receives the attempt id as its operation identity and must
-converge retries without duplicating authority state. The terminal receipt
-records:
+A separate renewable execution claim excludes concurrent invocation for the
+same pending attempt; it is coordination state, not learning authority or audit
+history. A crashed executor's expired claim can be replaced, and the successor
+retries the same attempt id. Every adapter receives that attempt id as its
+operation identity and must converge a crash-gap retry without duplicating
+authority state. A concurrent caller receives typed `ATTEMPT_IN_PROGRESS`
+rather than invoking a second adapter. The terminal receipt records:
 
 - deterministic route/rejection/clarification code and reasons;
 - destination, resolved scope and authority, and learning-policy snapshot id;
@@ -111,8 +123,8 @@ deterministic rejection.
 Authority adapters preserve their native history semantics: Memory correction
 or archival, Preference Registry correction/supersession lifecycle,
 instruction-policy rollback activation events, company-profile revision
-rollback when OPE-185 supplies it, and evidence revocation/supersession rather
-than destructive deletion.
+rollback when that authority supplies it, and evidence
+revocation/supersession rather than destructive deletion.
 
 ## Compatibility and deliberate non-goals
 
@@ -125,10 +137,10 @@ rewrite historical Memory or create duplicate prompt injection.
 
 This slice deliberately does not implement:
 
-- OPE-147 learning-policy storage or resolution;
-- OPE-148 autonomous evaluation/controller logic;
-- OPE-184 natural-language parsing, agent tools, or user-command wiring;
-- OPE-185 company-profile storage, UI, snapshots, or prompt composition;
+- learning-policy storage or resolution;
+- autonomous evaluation/controller logic;
+- natural-language parsing, new agent tools, or user-command wiring;
+- company-profile storage, UI, snapshots, or prompt composition;
 - prompt composition or duplicate suppression owned by later attempt-boundary
   work;
 - a second Memory, Preference Registry, instruction-policy, company-profile, or

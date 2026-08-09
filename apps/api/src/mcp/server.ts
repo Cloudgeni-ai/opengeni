@@ -68,7 +68,7 @@ import {
   MEMORY_SEARCH_TOOL_DESCRIPTION,
   requireScheduledTask,
   requireSession,
-  saveWorkspaceMemory,
+  resolveDurableLearningAttemptAuthority,
   searchWorkspaceMemories,
   serializeEffectiveSessionControl,
   setSessionGoalStatusWithEvent,
@@ -106,6 +106,7 @@ import {
   requireLiveAgentAttemptAuthorization,
   requireSessionAuthorization,
   requireSessionAuthorizationListScope,
+  routeLegacyWorkspaceMemoryWrite,
   type ResolvedSessionAuthorization,
 } from "@opengeni/core";
 import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
@@ -2108,20 +2109,32 @@ function registerMemoryTools(
       },
     },
     async ({ text, kind, confidence, replaces_id }) => {
-      const result = await saveWorkspaceMemory(
-        deps.db,
-        {
-          accountId: grant.accountId,
-          workspaceId: grant.workspaceId,
-          sessionId,
-          text,
-          kind,
-          ...(confidence !== undefined ? { confidence } : {}),
-          ...(replaces_id ? { replacesId: replaces_id } : {}),
-          origin: "agent",
-        },
-        deps.getDocumentServices().embedder,
-      );
+      const claims = preferenceAttemptClaims(grant);
+      if (!claims) throw new Error("Exact signed durable-learning attempt authority is required.");
+      const authority = await resolveDurableLearningAttemptAuthority(deps.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        ...claims,
+      });
+      const routed = await routeLegacyWorkspaceMemoryWrite({
+        db: deps.db,
+        embedder: deps.getDocumentServices().embedder,
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId,
+        actor: { kind: "agent", subjectId: `agent:${sessionId}` },
+        initiatingHumanSubjectId: authority.initiatingHumanSubjectId,
+        text,
+        kind,
+        ...(confidence !== undefined ? { confidence } : {}),
+        ...(replaces_id ? { replacesId: replaces_id } : {}),
+      });
+      const result = routed.memory;
+      if (!result) {
+        throw new Error(
+          `Durable learning did not complete the Memory write: ${routed.router.receipt.decision.code}`,
+        );
+      }
       await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [
         {
           type: "memory.saved",
@@ -2171,6 +2184,8 @@ function registerMemoryTools(
             dedupeReason: result.dedupeReason,
             updatedInPlace: result.updated,
             embedded: result.embedded,
+            durableLearningAttemptId: routed.router.receipt.attemptId,
+            durableLearningRoute: routed.router.receipt.decision.destination,
           },
         }),
       );

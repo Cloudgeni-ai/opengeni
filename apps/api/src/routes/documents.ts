@@ -21,7 +21,6 @@ import {
   getKnowledgeMemory,
   listKnowledgeMemories,
   updateKnowledgeMemory,
-  saveWorkspaceMemory,
   searchWorkspaceMemories,
 } from "@opengeni/db";
 import {
@@ -40,7 +39,11 @@ import {
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { requireAccessGrant, requireAccessGrantAuthorization } from "@opengeni/core";
+import {
+  requireAccessGrant,
+  requireAccessGrantAuthorization,
+  routeLegacyWorkspaceMemoryWrite,
+} from "@opengeni/core";
 import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { buildDocumentsMcpServer } from "../mcp/documents";
@@ -566,21 +569,27 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     // the legacy curated create.
     if (payload.status === "active") {
       try {
-        const result = await saveWorkspaceMemory(
+        const routed = await routeLegacyWorkspaceMemoryWrite({
           db,
-          {
-            accountId: grant.accountId,
-            workspaceId,
-            text: payload.text,
-            kind: payload.kind,
-            confidence: payload.confidence,
-            pinned: payload.pinned,
-            replacesId: payload.replacesId ?? null,
-            metadata: payload.metadata,
-            origin: "human",
-          },
-          getDocumentServices().embedder,
-        );
+          embedder: getDocumentServices().embedder,
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId: payload.createdBySessionId ?? null,
+          actor: { kind: "human", subjectId: grant.subjectId },
+          initiatingHumanSubjectId: grant.subjectId,
+          text: payload.text,
+          kind: payload.kind,
+          confidence: payload.confidence,
+          ...(payload.pinned !== undefined ? { pinned: payload.pinned } : {}),
+          replacesId: payload.replacesId ?? null,
+          metadata: payload.metadata,
+        });
+        const result = routed.memory;
+        if (!result) {
+          throw new Error(
+            `Durable learning did not complete the Memory write: ${routed.router.receipt.decision.code}`,
+          );
+        }
         return c.json(KnowledgeMemory.parse(result.memory), 201);
       } catch (error) {
         throw documentHttpException(error);

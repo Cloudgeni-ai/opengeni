@@ -291,6 +291,7 @@ export * from "./workspace-instruction-policies";
 export * from "./preference-registry";
 export * from "./memory-governance";
 export * from "./scoped-knowledge";
+export * from "./durable-learning-router";
 export * from "./generated-images";
 export { interruptedToolCallResult } from "./session-tool-call-settlement";
 export { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";

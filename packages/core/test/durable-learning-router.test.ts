@@ -8,6 +8,7 @@ import {
 } from "@opengeni/contracts";
 import {
   DurableLearningAttemptConflictError,
+  DurableLearningAttemptInProgressError,
   planDurableLearningWrite,
   routeDurableLearning,
   type DurableLearningAttemptLedger,
@@ -67,6 +68,7 @@ function request(
       summary: null,
       roleKey: null,
       replacesResourceId: null,
+      legacyMemory: null,
     },
     evidence: [],
     ...overrides,
@@ -76,17 +78,35 @@ function request(
 function memoryLedger() {
   const attempts = new Map<string, DurableLearningAttempt>();
   const receipts = new Map<string, DurableLearningReceipt>();
+  const claims = new Map<string, string>();
+  let nextClaim = 0;
   const ledger: DurableLearningAttemptLedger = {
     async reserveAttempt(attempt) {
       const existing = attempts.get(attempt.id);
       if (existing && existing.inputHash !== attempt.inputHash) {
-        return { attempt: existing, receipt: receipts.get(attempt.id) ?? null };
+        return {
+          attempt: existing,
+          receipt: receipts.get(attempt.id) ?? null,
+          claimId: null,
+        };
       }
       attempts.set(attempt.id, attempt);
-      return { attempt, receipt: receipts.get(attempt.id) ?? null };
+      const receipt = receipts.get(attempt.id) ?? null;
+      if (receipt) return { attempt: existing ?? attempt, receipt, claimId: null };
+      if (claims.has(attempt.id)) {
+        return { attempt: existing ?? attempt, receipt: null, claimId: null };
+      }
+      const claimId = `claim-${++nextClaim}`;
+      claims.set(attempt.id, claimId);
+      return { attempt: existing ?? attempt, receipt: null, claimId };
     },
-    async completeAttempt(attempt, receipt) {
+    async renewAttemptClaim(attempt, claimId) {
+      return claims.get(attempt.id) === claimId;
+    },
+    async completeAttempt(attempt, receipt, claimId) {
+      if (claims.get(attempt.id) !== claimId) throw new Error("claim lost");
       receipts.set(attempt.id, receipt);
+      claims.delete(attempt.id);
       return receipt;
     },
     async getCompletedAttempt(accountId, workspaceId, attemptId) {
@@ -109,7 +129,13 @@ function memoryLedger() {
 describe("durable learning route planner", () => {
   test("preserves legacy memory_save as an active workspace Memory write", () => {
     const result = planDurableLearningWrite(
-      request({ origin: "legacy_memory_save" }),
+      request({
+        origin: "legacy_memory_save",
+        subject: {
+          ...request().subject,
+          legacyMemory: { kind: "semantic", confidence: null, pinned: null, metadata: {} },
+        },
+      }),
       context({ grants: { ...context().grants, activate: false } }),
     );
     expect(result).toMatchObject({
@@ -117,6 +143,31 @@ describe("durable learning route planner", () => {
       destination: "memory",
       authority: "active",
     });
+  });
+
+  test("preserves legacy procedural Memory without making it canonical preference routing", () => {
+    const result = planDurableLearningWrite(
+      request({
+        origin: "legacy_memory_save",
+        subject: {
+          ...request().subject,
+          kind: "procedure",
+          legacyMemory: {
+            kind: "procedural",
+            confidence: 0.8,
+            pinned: false,
+            metadata: {},
+          },
+        },
+      }),
+      context(),
+    );
+    expect(result).toMatchObject({
+      disposition: "route",
+      destination: "memory",
+      authority: "active",
+    });
+    expect(result.reasons.join(" ")).toContain("Legacy preference/procedural Memory");
   });
 
   test("routes procedures only to the preference registry", () => {
@@ -132,6 +183,7 @@ describe("durable learning route planner", () => {
           summary: "Run targeted checks before broad validation.",
           roleKey: null,
           replacesResourceId: null,
+          legacyMemory: null,
         },
       }),
       context(),
@@ -140,6 +192,27 @@ describe("durable learning route planner", () => {
       disposition: "route",
       destination: "preference_registry",
       authority: "proposal",
+    });
+  });
+
+  test("rejects compatibility-only Memory metadata on canonical explicit writes", () => {
+    const result = planDurableLearningWrite(
+      request({
+        subject: {
+          ...request().subject,
+          legacyMemory: {
+            kind: "preference",
+            confidence: 1,
+            pinned: true,
+            metadata: { source: "legacy-only" },
+          },
+        },
+      }),
+      context(),
+    );
+    expect(result).toMatchObject({
+      disposition: "rejected",
+      code: "LEGACY_MEMORY_SAVE_CONTRACT_VIOLATION",
     });
   });
 
@@ -170,6 +243,7 @@ describe("durable learning route planner", () => {
           summary: null,
           roleKey: null,
           replacesResourceId: null,
+          legacyMemory: null,
         },
       }),
       context({ grants: { ...context().grants, organization: true } }),
@@ -242,5 +316,51 @@ describe("durable learning router service", () => {
         ports,
       ),
     ).rejects.toBeInstanceOf(DurableLearningAttemptConflictError);
+  });
+
+  test("does not invoke an authority concurrently for the same pending attempt", async () => {
+    const { ledger } = memoryLedger();
+    let releaseWrite!: () => void;
+    const writeStarted = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    let enteredWrite!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enteredWrite = resolve;
+    });
+    const ports = {
+      ledger,
+      now: () => new Date("2026-08-09T16:00:00.000Z"),
+      authorities: {
+        memory: {
+          async write() {
+            enteredWrite();
+            await writeStarted;
+            return {
+              outcome: "applied" as const,
+              resource: {
+                surface: "memory" as const,
+                id: "memory-1",
+                version: "1",
+                status: "active",
+              },
+              effectiveBoundary: "next_accepted_attempt" as const,
+              rollback: { supported: false, targetAttemptId: null, token: null },
+            };
+          },
+          async rollback() {
+            throw new Error("not used");
+          },
+        },
+      },
+    };
+
+    const first = routeDurableLearning(request(), context(), ports);
+    await entered;
+    await expect(routeDurableLearning(request(), context(), ports)).rejects.toBeInstanceOf(
+      DurableLearningAttemptInProgressError,
+    );
+    releaseWrite();
+    expect((await first).receipt.outcome).toBe("applied");
   });
 });

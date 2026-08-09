@@ -93,6 +93,15 @@ export const DurableLearningSubject = z.object({
   summary: z.string().min(1).max(DURABLE_LEARNING_SUMMARY_MAX_CHARS).nullable().default(null),
   roleKey: z.string().min(1).max(64).nullable().default(null),
   replacesResourceId: z.string().min(1).max(512).nullable().default(null),
+  legacyMemory: z
+    .object({
+      kind: z.enum(["semantic", "preference", "procedural", "episodic", "decision"]),
+      confidence: z.number().min(0).max(1).nullable().default(null),
+      pinned: z.boolean().nullable().default(null),
+      metadata: z.record(z.string(), z.unknown()).default({}),
+    })
+    .nullable()
+    .default(null),
 });
 export type DurableLearningSubject = z.infer<typeof DurableLearningSubject>;
 
@@ -210,6 +219,7 @@ export const DurableLearningDecisionCode = z.enum([
   "ROLLBACK_TARGET_NOT_FOUND",
   "ROLLBACK_NOT_SUPPORTED",
   "ATTEMPT_REUSED_WITH_DIFFERENT_INPUT",
+  "ATTEMPT_IN_PROGRESS",
   "AUTHORITY_WRITE_FAILED",
 ]);
 export type DurableLearningDecisionCode = z.infer<typeof DurableLearningDecisionCode>;

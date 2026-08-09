@@ -58,9 +58,15 @@ export class DurableLearningAttemptConflictError extends Error {
   readonly code = "ATTEMPT_REUSED_WITH_DIFFERENT_INPUT" as const;
 }
 
+export class DurableLearningAttemptInProgressError extends Error {
+  readonly name = "DurableLearningAttemptInProgressError";
+  readonly code = "ATTEMPT_IN_PROGRESS" as const;
+}
+
 export type DurableLearningAttemptReservation = {
   attempt: DurableLearningAttempt;
   receipt: DurableLearningReceipt | null;
+  claimId: string | null;
 };
 
 export type DurableLearningAttemptLedger = {
@@ -68,7 +74,9 @@ export type DurableLearningAttemptLedger = {
   completeAttempt: (
     attempt: DurableLearningAttempt,
     receipt: DurableLearningReceipt,
+    claimId: string,
   ) => Promise<DurableLearningReceipt>;
+  renewAttemptClaim: (attempt: DurableLearningAttempt, claimId: string) => Promise<boolean>;
   getCompletedAttempt: (
     accountId: string,
     workspaceId: string,
@@ -297,7 +305,11 @@ export function planDurableLearningWrite(
 
   const surface = request.targetSurface as DurableLearningResolvedSurface;
   const scope = request.requestedScope as DurableLearningResolvedScope;
-  if (!SUBJECTS_BY_SURFACE[surface].has(request.subject.kind)) {
+  const legacyMemorySubject =
+    request.origin === "legacy_memory_save" &&
+    surface === "memory" &&
+    (PREFERENCE_SUBJECTS.has(request.subject.kind) || MEMORY_SUBJECTS.has(request.subject.kind));
+  if (!SUBJECTS_BY_SURFACE[surface].has(request.subject.kind) && !legacyMemorySubject) {
     return decision({
       disposition: "rejected",
       code: "SUBJECT_SURFACE_MISMATCH",
@@ -353,7 +365,10 @@ export function planDurableLearningWrite(
   }
   if (
     request.origin === "legacy_memory_save" &&
-    (surface !== "memory" || scope.kind !== "workspace" || request.requestedAuthority !== "active")
+    (surface !== "memory" ||
+      scope.kind !== "workspace" ||
+      request.requestedAuthority !== "active" ||
+      request.subject.legacyMemory === null)
   ) {
     return decision({
       disposition: "rejected",
@@ -361,6 +376,17 @@ export function planDurableLearningWrite(
       destination: surface,
       scope,
       reasons: ["Legacy memory_save is preserved only as an active workspace Memory write."],
+    });
+  }
+  if (request.origin !== "legacy_memory_save" && request.subject.legacyMemory !== null) {
+    return decision({
+      disposition: "rejected",
+      code: "LEGACY_MEMORY_SAVE_CONTRACT_VIOLATION",
+      destination: surface,
+      scope,
+      reasons: [
+        "Legacy Memory kind and metadata are accepted only from memory_save compatibility.",
+      ],
     });
   }
   if (
@@ -400,6 +426,11 @@ export function planDurableLearningWrite(
     policySnapshotId: context.learningPolicy?.snapshotId ?? null,
     reasons: [
       `Routed exactly once to ${surface}.`,
+      ...(legacyMemorySubject && PREFERENCE_SUBJECTS.has(request.subject.kind)
+        ? [
+            "Legacy preference/procedural Memory remains effective until a separate canonical promotion supersedes it.",
+          ]
+        : []),
       authority === request.requestedAuthority
         ? `Requested ${authority} authority was preserved.`
         : `Requested ${request.requestedAuthority} authority was reduced to ${authority}.`,
@@ -430,11 +461,52 @@ async function complete(
   ports: DurableLearningRouterPorts,
   attempt: DurableLearningAttempt,
   receipt: DurableLearningReceipt,
+  claimId: string,
 ): Promise<DurableLearningRouterResponse> {
   return {
-    receipt: await ports.ledger.completeAttempt(attempt, receipt),
+    receipt: await ports.ledger.completeAttempt(attempt, receipt, claimId),
     idempotency: "created",
   };
+}
+
+const DURABLE_LEARNING_CLAIM_HEARTBEAT_MS = 30_000;
+
+async function withClaimHeartbeat<T>(
+  ports: DurableLearningRouterPorts,
+  attempt: DurableLearningAttempt,
+  claimId: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  let stopped = false;
+  let heartbeatFailure: unknown = null;
+  let heartbeat = Promise.resolve();
+  const timer = setInterval(() => {
+    heartbeat = heartbeat
+      .then(async () => {
+        if (stopped) return;
+        if (!(await ports.ledger.renewAttemptClaim(attempt, claimId))) {
+          throw new DurableLearningAttemptInProgressError(
+            "Durable-learning attempt execution claim was lost",
+          );
+        }
+      })
+      .catch((error: unknown) => {
+        heartbeatFailure = error;
+      });
+  }, DURABLE_LEARNING_CLAIM_HEARTBEAT_MS);
+  timer.unref?.();
+
+  try {
+    const result = await operation();
+    stopped = true;
+    clearInterval(timer);
+    await heartbeat;
+    if (heartbeatFailure) throw heartbeatFailure;
+    return result;
+  } finally {
+    stopped = true;
+    clearInterval(timer);
+  }
 }
 
 export async function routeDurableLearning(
@@ -445,9 +517,9 @@ export async function routeDurableLearning(
   const request = DurableLearningRequest.parse(rawRequest);
   const context = DurableLearningAuthorityContext.parse(rawContext);
   const now = ports.now?.() ?? new Date();
-  const attempt = buildAttempt(request, context, now);
-  const reservation = await ports.ledger.reserveAttempt(attempt);
-  if (reservation.attempt.inputHash !== attempt.inputHash) {
+  const candidateAttempt = buildAttempt(request, context, now);
+  const reservation = await ports.ledger.reserveAttempt(candidateAttempt);
+  if (reservation.attempt.inputHash !== candidateAttempt.inputHash) {
     throw new DurableLearningAttemptConflictError(
       "Durable-learning attempt id was reused with different immutable input",
     );
@@ -455,6 +527,14 @@ export async function routeDurableLearning(
   if (reservation.receipt !== null) {
     return { receipt: reservation.receipt, idempotency: "replayed" };
   }
+  if (reservation.claimId === null) {
+    throw new DurableLearningAttemptInProgressError(
+      "Durable-learning attempt is already executing; retry the same attempt id",
+    );
+  }
+  const attempt = reservation.attempt;
+  const claimId = reservation.claimId;
+  const receiptCreatedAt = attempt.createdAt;
 
   if (request.operation === "rollback") {
     const target = await ports.ledger.getCompletedAttempt(
@@ -463,113 +543,179 @@ export async function routeDurableLearning(
       request.targetAttemptId,
     );
     if (target === null) {
-      return await complete(ports, attempt, {
-        contractVersion: DURABLE_LEARNING_CONTRACT_VERSION,
-        attemptId: attempt.id,
-        inputHash: attempt.inputHash,
-        outcome: "rejected",
-        decision: decision({
-          disposition: "rejected",
-          code: "ROLLBACK_TARGET_NOT_FOUND",
-          reasons: ["The target attempt is not visible in this account and workspace."],
-        }),
-        resource: null,
-        effectiveBoundary: "not_applicable",
-        rollback: { supported: false, targetAttemptId: request.targetAttemptId, token: null },
-        createdAt: now.toISOString(),
-      });
+      return await complete(
+        ports,
+        attempt,
+        {
+          contractVersion: DURABLE_LEARNING_CONTRACT_VERSION,
+          attemptId: attempt.id,
+          inputHash: attempt.inputHash,
+          outcome: "rejected",
+          decision: decision({
+            disposition: "rejected",
+            code: "ROLLBACK_TARGET_NOT_FOUND",
+            reasons: ["The target attempt is not visible in this account and workspace."],
+          }),
+          resource: null,
+          effectiveBoundary: "not_applicable",
+          rollback: { supported: false, targetAttemptId: request.targetAttemptId, token: null },
+          createdAt: receiptCreatedAt,
+        },
+        claimId,
+      );
     }
     const destination = target.receipt.decision.destination;
     const rollbackToken = target.receipt.rollback.token;
     const adapter = destination ? ports.authorities[destination] : undefined;
     if (!target.receipt.rollback.supported || rollbackToken === null || !adapter) {
-      return await complete(ports, attempt, {
+      return await complete(
+        ports,
+        attempt,
+        {
+          contractVersion: DURABLE_LEARNING_CONTRACT_VERSION,
+          attemptId: attempt.id,
+          inputHash: attempt.inputHash,
+          outcome: "rejected",
+          decision: decision({
+            disposition: "rejected",
+            code: "ROLLBACK_NOT_SUPPORTED",
+            destination,
+            reasons: ["The target receipt does not expose an authorized rollback operation."],
+          }),
+          resource: target.receipt.resource,
+          effectiveBoundary: "not_applicable",
+          rollback: { supported: false, targetAttemptId: request.targetAttemptId, token: null },
+          createdAt: receiptCreatedAt,
+        },
+        claimId,
+      );
+    }
+    const result = await withClaimHeartbeat(
+      ports,
+      attempt,
+      claimId,
+      async () =>
+        await adapter.rollback({
+          attempt,
+          targetAttempt: target.attempt,
+          targetReceipt: target.receipt,
+          rollbackToken,
+          reason: request.reason,
+        }),
+    );
+    return await complete(
+      ports,
+      attempt,
+      {
+        contractVersion: DURABLE_LEARNING_CONTRACT_VERSION,
+        attemptId: attempt.id,
+        inputHash: attempt.inputHash,
+        outcome: "rolled_back",
+        decision: decision({
+          disposition: "route",
+          code: "ROUTED",
+          destination,
+          reasons: [`Rollback routed to the original ${destination} authority.`],
+        }),
+        resource: result.resource,
+        effectiveBoundary: result.effectiveBoundary,
+        rollback: { supported: false, targetAttemptId: request.targetAttemptId, token: null },
+        createdAt: receiptCreatedAt,
+      },
+      claimId,
+    );
+  }
+
+  const routeDecision = planDurableLearningWrite(request, context);
+  if (routeDecision.disposition !== "route") {
+    return await complete(
+      ports,
+      attempt,
+      {
+        contractVersion: DURABLE_LEARNING_CONTRACT_VERSION,
+        attemptId: attempt.id,
+        inputHash: attempt.inputHash,
+        outcome:
+          routeDecision.disposition === "clarification_required"
+            ? "clarification_required"
+            : "rejected",
+        decision: routeDecision,
+        resource: null,
+        effectiveBoundary: "not_applicable",
+        rollback: { supported: false, targetAttemptId: null, token: null },
+        createdAt: receiptCreatedAt,
+      },
+      claimId,
+    );
+  }
+
+  const destination = routeDecision.destination!;
+  const adapter = ports.authorities[destination];
+  if (!adapter) {
+    return await complete(
+      ports,
+      attempt,
+      {
         contractVersion: DURABLE_LEARNING_CONTRACT_VERSION,
         attemptId: attempt.id,
         inputHash: attempt.inputHash,
         outcome: "rejected",
         decision: decision({
           disposition: "rejected",
-          code: "ROLLBACK_NOT_SUPPORTED",
+          code: "SURFACE_NOT_AVAILABLE",
           destination,
-          reasons: ["The target receipt does not expose an authorized rollback operation."],
+          scope: routeDecision.scope as DurableLearningResolvedScope,
+          authority: routeDecision.authority,
+          policySnapshotId: routeDecision.policySnapshotId,
+          reasons: [`No canonical ${destination} authority adapter is installed.`],
         }),
-        resource: target.receipt.resource,
+        resource: null,
         effectiveBoundary: "not_applicable",
-        rollback: { supported: false, targetAttemptId: request.targetAttemptId, token: null },
-        createdAt: now.toISOString(),
-      });
-    }
-    const result = await adapter.rollback({
-      attempt,
-      targetAttempt: target.attempt,
-      targetReceipt: target.receipt,
-      rollbackToken,
-      reason: request.reason,
-    });
-    return await complete(ports, attempt, {
-      contractVersion: DURABLE_LEARNING_CONTRACT_VERSION,
-      attemptId: attempt.id,
-      inputHash: attempt.inputHash,
-      outcome: "rolled_back",
-      decision: decision({
-        disposition: "route",
-        code: "ROUTED",
-        destination,
-        reasons: [`Rollback routed to the original ${destination} authority.`],
-      }),
-      resource: result.resource,
-      effectiveBoundary: result.effectiveBoundary,
-      rollback: { supported: false, targetAttemptId: request.targetAttemptId, token: null },
-      createdAt: now.toISOString(),
-    });
+        rollback: { supported: false, targetAttemptId: null, token: null },
+        createdAt: receiptCreatedAt,
+      },
+      claimId,
+    );
   }
 
-  const routeDecision = planDurableLearningWrite(request, context);
-  if (routeDecision.disposition !== "route") {
-    return await complete(ports, attempt, {
-      contractVersion: DURABLE_LEARNING_CONTRACT_VERSION,
-      attemptId: attempt.id,
-      inputHash: attempt.inputHash,
-      outcome:
-        routeDecision.disposition === "clarification_required"
-          ? "clarification_required"
-          : "rejected",
-      decision: routeDecision,
-      resource: null,
-      effectiveBoundary: "not_applicable",
-      rollback: { supported: false, targetAttemptId: null, token: null },
-      createdAt: now.toISOString(),
-    });
-  }
-
-  const destination = routeDecision.destination!;
-  const adapter = ports.authorities[destination];
-  if (!adapter) {
-    return await complete(ports, attempt, {
-      contractVersion: DURABLE_LEARNING_CONTRACT_VERSION,
-      attemptId: attempt.id,
-      inputHash: attempt.inputHash,
-      outcome: "rejected",
-      decision: decision({
-        disposition: "rejected",
-        code: "SURFACE_NOT_AVAILABLE",
-        destination,
-        scope: routeDecision.scope as DurableLearningResolvedScope,
-        authority: routeDecision.authority,
-        policySnapshotId: routeDecision.policySnapshotId,
-        reasons: [`No canonical ${destination} authority adapter is installed.`],
-      }),
-      resource: null,
-      effectiveBoundary: "not_applicable",
-      rollback: { supported: false, targetAttemptId: null, token: null },
-      createdAt: now.toISOString(),
-    });
-  }
-
+  let result: DurableLearningAuthorityWriteResult;
   try {
-    const result = await adapter.write({ attempt, request, decision: routeDecision });
-    return await complete(ports, attempt, {
+    result = await withClaimHeartbeat(
+      ports,
+      attempt,
+      claimId,
+      async () => await adapter.write({ attempt, request, decision: routeDecision }),
+    );
+  } catch {
+    return await complete(
+      ports,
+      attempt,
+      {
+        contractVersion: DURABLE_LEARNING_CONTRACT_VERSION,
+        attemptId: attempt.id,
+        inputHash: attempt.inputHash,
+        outcome: "failed",
+        decision: decision({
+          disposition: "rejected",
+          code: "AUTHORITY_WRITE_FAILED",
+          destination,
+          scope: routeDecision.scope as DurableLearningResolvedScope,
+          authority: routeDecision.authority,
+          policySnapshotId: routeDecision.policySnapshotId,
+          reasons: ["The selected canonical authority did not complete the write."],
+        }),
+        resource: null,
+        effectiveBoundary: "not_applicable",
+        rollback: { supported: false, targetAttemptId: null, token: null },
+        createdAt: receiptCreatedAt,
+      },
+      claimId,
+    );
+  }
+  return await complete(
+    ports,
+    attempt,
+    {
       contractVersion: DURABLE_LEARNING_CONTRACT_VERSION,
       attemptId: attempt.id,
       inputHash: attempt.inputHash,
@@ -578,27 +724,8 @@ export async function routeDurableLearning(
       resource: result.resource,
       effectiveBoundary: result.effectiveBoundary,
       rollback: result.rollback,
-      createdAt: now.toISOString(),
-    });
-  } catch {
-    return await complete(ports, attempt, {
-      contractVersion: DURABLE_LEARNING_CONTRACT_VERSION,
-      attemptId: attempt.id,
-      inputHash: attempt.inputHash,
-      outcome: "failed",
-      decision: decision({
-        disposition: "rejected",
-        code: "AUTHORITY_WRITE_FAILED",
-        destination,
-        scope: routeDecision.scope as DurableLearningResolvedScope,
-        authority: routeDecision.authority,
-        policySnapshotId: routeDecision.policySnapshotId,
-        reasons: ["The selected canonical authority did not complete the write."],
-      }),
-      resource: null,
-      effectiveBoundary: "not_applicable",
-      rollback: { supported: false, targetAttemptId: null, token: null },
-      createdAt: now.toISOString(),
-    });
-  }
+      createdAt: receiptCreatedAt,
+    },
+    claimId,
+  );
 }

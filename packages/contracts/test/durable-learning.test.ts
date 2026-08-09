@@ -14,6 +14,7 @@ describe("durable learning contract", () => {
       subject: {
         kind: "decision",
         content: "Use one canonical durable-learning router.",
+        legacyMemory: null,
       },
       evidence: [
         {
@@ -27,6 +28,7 @@ describe("durable learning contract", () => {
     expect(parsed.operation).toBe("write");
     if (parsed.operation !== "write") throw new Error("expected a write request");
     expect(parsed.subject.stableKey).toBeNull();
+    expect(parsed.subject.legacyMemory).toBeNull();
     expect(parsed.evidence[0]?.sourceVersion).toBeNull();
   });
 

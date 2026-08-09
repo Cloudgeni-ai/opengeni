@@ -7218,7 +7218,54 @@ describe("API component integration", () => {
         status: "active",
         kind: "procedural",
         createdBySessionId: session.id,
-        metadata: { origin: "agent" },
+        metadata: {
+          origin: "agent",
+          durableLearningAttemptId: expect.any(String),
+          durableLearningInputHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+        },
+      });
+      const durableLearningRows = await withWorkspaceRls(
+        dbClient.db,
+        workspaceId,
+        async (scopedDb) =>
+          (await scopedDb.execute(dbSql`
+            select
+              attempt.id,
+              attempt.origin,
+              attempt.request,
+              receipt.outcome,
+              receipt.destination,
+              receipt.resource_id
+            from durable_learning_attempts attempt
+            join durable_learning_receipts receipt
+              on receipt.account_id = attempt.account_id
+             and receipt.workspace_id = attempt.workspace_id
+             and receipt.attempt_id = attempt.id
+            where attempt.workspace_id = ${workspaceId}
+              and attempt.session_id = ${session.id}
+              and receipt.resource_id = ${saved.resource.id}
+          `)) as unknown as Array<{
+            id: string;
+            origin: string;
+            request: {
+              targetSurface: string;
+              subject: { kind: string; legacyMemory: { kind: string } };
+            };
+            outcome: string;
+            destination: string;
+            resource_id: string;
+          }>,
+      );
+      expect(durableLearningRows).toHaveLength(1);
+      expect(durableLearningRows[0]).toMatchObject({
+        origin: "legacy_memory_save",
+        request: {
+          targetSurface: "memory",
+          subject: { kind: "procedure", legacyMemory: { kind: "procedural" } },
+        },
+        outcome: "applied",
+        destination: "memory",
+        resource_id: saved.resource.id,
       });
 
       const saveEvents = (await listSessionEvents(dbClient.db, workspaceId, session.id)).filter(
