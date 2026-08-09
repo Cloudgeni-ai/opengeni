@@ -812,7 +812,6 @@ jobs:
         run: |
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           rustup show active-toolchain
-          cargo install --locked wasm-bindgen-cli --version 0.2.127
 
       - name: Production native artifact contracts
         env:
