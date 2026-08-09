@@ -194,7 +194,7 @@ describe("durable learning Postgres ledger", () => {
     ).toBeNull();
   });
 
-  test("rejects direct mutation of append-only attempts", async () => {
+  test("denies direct mutation of append-only attempts to the runtime role", async () => {
     if (!client) return;
     const grant = await workspace("immutable");
     const ledger = createDurableLearningAttemptLedger(client.db);
@@ -216,8 +216,10 @@ describe("durable learning Postgres ledger", () => {
       failure = error;
     }
     expect(failure).toBeDefined();
+    // The application role is INSERT-only on immutable audit evidence. The
+    // owner-level mutation trigger remains a separately asserted defense in depth.
     expect(errorChainMessage(failure)).toContain(
-      "durable learning attempts and receipts are immutable",
+      "permission denied for table durable_learning_attempts",
     );
   });
 });
