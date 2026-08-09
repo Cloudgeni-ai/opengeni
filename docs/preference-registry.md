@@ -14,8 +14,10 @@ The registry provides storage, service operations, HTTP and first-party MCP
 retrieval, SDK types, and isolation guarantees. Migration
 `0157_session_policy_role_snapshots.sql` now invokes its exact-attempt snapshot
 at runtime and composes only bounded descriptors with workspace policy. Full
-content remains on-demand. This adds no UI, connector, source/fact schema, or
-parallel preference authority.
+content remains on-demand. The Workspace State console now provides a bounded
+human administration surface over these same governance routes; it does not add
+a connector, source/fact schema, browser full-content read path, or parallel
+preference authority.
 
 ## Scope and identity
 
@@ -118,8 +120,13 @@ Knowledge, imported documents, Slack messages, meeting transcripts, and call
 transcripts are evidence sources, not preference authority. They may create
 only inactive proposals with a required provenance source ID and
 `untrusted_proposal` trust. Neither ingestion nor a connector/service identity
-can activate a preference or change its scope. A separately authorized human
-must review and activate the exact immutable revision, producing audit evidence.
+can activate a preference or change its scope. The currently implemented human
+route requires a separately authorized direct human to activate the exact
+immutable revision and produce audit evidence. The only authorized future
+automatic seam is the separate governed-learning controller: it must activate
+an exact immutable proposal through this canonical lifecycle under a versioned
+automatic policy. Connectors, ingestion, workers, source text, and arbitrary
+services still cannot activate directly.
 
 This registry does not ingest source content and does not define connector or
 source/fact schemas. Those systems can call proposal creation later, but cannot
@@ -180,12 +187,26 @@ Derived active/expired predicates execute in the joined SQL query before
 deterministic ordering and `LIMIT`, so bounded status pages cannot be emptied by
 expired rows that sort earlier.
 
+`/workspaces/:workspaceId/state` uses those same human governance routes to
+list authorized organization/workspace/personal records, create inactive human
+proposals, inspect compact descriptor metadata, revisions and immutable events,
+activate or roll back to an immutable revision, correct, change scope,
+deactivate, and reject. Organization controls are disabled without the matching
+`account:admin` grant, workspace controls require `workspace:admin`, and personal
+controls remain self-only. The browser never manufactures authority; server 403,
+409, and validation results remain visible and refreshable.
+
 The summary and full-content routes require exact attempt authority. The same
 restriction applies to the first-party MCP tools
 `preference_registry_summary` and `preference_registry_get`. They are registered
 only when complete signed attempt metadata exists and are not registered on the
 Toolspace surface. `@opengeni/sdk` exposes the corresponding governance and
-retrieval contracts without introducing a second editor or content system.
+retrieval contracts without introducing a second content system. Browser
+governance detail returns descriptor/revision/audit metadata but not stored full
+content or an attempt retrieval handle. A correction therefore supplies a
+complete replacement body. Agents retrieve full content only through
+`preference_registry_summary` followed by `preference_registry_get` under the
+exact accepted-attempt snapshot.
 
 ## Isolation and canonical implementation
 
@@ -208,5 +229,7 @@ Canonical implementation:
 - `apps/api/src/routes/preference-registry.ts`;
 - `apps/api/src/mcp/server.ts`;
 - `packages/sdk/src/preference-registry.ts`;
+- `apps/web/src/routes/preference-registry-admin.tsx`;
+- `apps/web/src/routes/workspace-state-loader.ts`;
 - `packages/runtime/src/workspace-governance.ts`;
 - `apps/worker/src/activities/agent-turn.ts`.

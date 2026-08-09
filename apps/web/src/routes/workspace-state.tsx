@@ -35,6 +35,7 @@ import {
   useWorkspaceInstructionPolicyOnboardingProposals,
   useWorkspaceStateInventory,
 } from "./workspace-state-loader";
+import { PreferenceRegistryAdministration } from "./preference-registry-admin";
 
 const GAP_LABELS: Record<WorkspaceStateGapCode, string> = {
   no_document_bases: "No document bases are configured.",
@@ -892,7 +893,7 @@ function ExistingSources({ workspaceId }: { workspaceId: string }) {
   return (
     <StateCard
       title="Authoritative source surfaces"
-      description="Workspace State is an inventory, not a duplicate editor. Use the existing surfaces for detail and permitted changes."
+      description="Workspace State links to each existing authority and hosts only bounded governance actions where the canonical backend already exists."
     >
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
         {links.map((item) => (
@@ -934,7 +935,7 @@ export function WorkspaceStateRoute({ workspaceId }: { workspaceId: string }) {
       <PageHeader
         icon={<MapIcon className="size-4" />}
         title="Workspace State"
-        description="Inspect policy and knowledge authorities, compare accepted-attempt governance, and create inactive onboarding draft proposals."
+        description="Inspect policy and knowledge authorities, administer structured preferences, compare accepted-attempt governance, and create inactive onboarding drafts."
       />
       {loading && !state ? <WorkspaceStateLoading /> : null}
       {error && !state ? (
@@ -955,11 +956,16 @@ export function WorkspaceStateRoute({ workspaceId }: { workspaceId: string }) {
           ) : null}
           <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-surface-2/30 px-3 py-2 text-xs text-fg-muted">
             <NetworkIcon className="size-3.5 text-brand" />
-            Generated {formatDate(state.generatedAt)} from a read-time projection. Onboarding
-            proposals use an explicit admin action and never activate policy automatically.
+            Generated {formatDate(state.generatedAt)} from a read-time projection. Registry and
+            onboarding mutations use explicit canonical lifecycle APIs; imported evidence never
+            activates prompt authority directly.
           </div>
           <PolicyInventory state={state} />
           <PreferenceInventory state={state} />
+          <PreferenceRegistryAdministration
+            workspaceId={workspaceId}
+            onWorkspaceStateReload={reload}
+          />
           <OnboardingProposalInventory
             state={state}
             workspaceId={workspaceId}

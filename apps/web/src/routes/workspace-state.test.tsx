@@ -4,7 +4,11 @@ import type { WorkspaceStateResponse } from "@opengeni/sdk";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 
-import { useWorkspaceStateInventory } from "./workspace-state-loader";
+import {
+  usePreferenceRegistryDetail,
+  usePreferenceRegistryInventory,
+  useWorkspaceStateInventory,
+} from "./workspace-state-loader";
 import { AttemptGovernanceInventory } from "./workspace-state";
 
 GlobalRegistrator.register();
@@ -110,6 +114,72 @@ describe("Workspace State loader", () => {
     );
     expect(container.textContent).toBe("2026-08-03T11:00:02.000Z");
     expect(current().state?.generatedAt).toBe("2026-08-03T11:00:02.000Z");
+    await act(async () => root.unmount());
+  });
+
+  test("fences late structured-preference inventory across workspaces", async () => {
+    const workspaceA = "00000000-0000-4000-8000-000000000031";
+    const workspaceB = "00000000-0000-4000-8000-000000000032";
+    const pendingA = deferred<{ preferences: [] }>();
+    const pendingB = deferred<{ preferences: [] }>();
+    const client: Parameters<typeof usePreferenceRegistryInventory>[0] = {
+      listPreferenceRegistry: async (workspaceId) =>
+        await (workspaceId === workspaceA ? pendingA.promise : pendingB.promise),
+      getPreferenceRegistry: async () => {
+        throw new Error("not used");
+      },
+    };
+    let observed: ReturnType<typeof usePreferenceRegistryInventory> | null = null;
+
+    function Harness({ workspaceId }: { workspaceId: string }) {
+      observed = usePreferenceRegistryInventory(client, workspaceId);
+      return <output>{observed.response ? workspaceId : "loading"}</output>;
+    }
+
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => root.render(<Harness workspaceId={workspaceA} />));
+    await act(async () => root.render(<Harness workspaceId={workspaceB} />));
+    await act(async () => pendingB.resolve({ preferences: [] }));
+    expect(container.textContent).toBe(workspaceB);
+    await act(async () => pendingA.resolve({ preferences: [] }));
+    expect(container.textContent).toBe(workspaceB);
+    expect(
+      (observed as unknown as ReturnType<typeof usePreferenceRegistryInventory>).error,
+    ).toBeNull();
+    await act(async () => root.unmount());
+  });
+
+  test("fences late structured-preference detail after selection changes", async () => {
+    const workspaceId = "00000000-0000-4000-8000-000000000041";
+    const preferenceA = "00000000-0000-4000-8000-000000000042";
+    const preferenceB = "00000000-0000-4000-8000-000000000043";
+    const pendingA = deferred<any>();
+    const pendingB = deferred<any>();
+    const client: Parameters<typeof usePreferenceRegistryDetail>[0] = {
+      listPreferenceRegistry: async () => ({ preferences: [] }),
+      getPreferenceRegistry: async (_workspaceId, preferenceId) =>
+        await (preferenceId === preferenceA ? pendingA.promise : pendingB.promise),
+    };
+    let observed: ReturnType<typeof usePreferenceRegistryDetail> | null = null;
+
+    function Harness({ preferenceId }: { preferenceId: string }) {
+      observed = usePreferenceRegistryDetail(client, workspaceId, preferenceId);
+      return <output>{observed.response?.preference.id ?? "loading"}</output>;
+    }
+
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => root.render(<Harness preferenceId={preferenceA} />));
+    await act(async () => root.render(<Harness preferenceId={preferenceB} />));
+    await act(async () => pendingB.resolve({ preference: { id: preferenceB } }));
+    expect(container.textContent).toBe(preferenceB);
+    await act(async () => pendingA.resolve({ preference: { id: preferenceA } }));
+    expect(container.textContent).toBe(preferenceB);
+    expect(
+      (observed as unknown as ReturnType<typeof usePreferenceRegistryDetail>).response?.preference
+        .id,
+    ).toBe(preferenceB);
     await act(async () => root.unmount());
   });
 });

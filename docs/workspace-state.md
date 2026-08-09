@@ -3,14 +3,16 @@
 Workspace State is a read-time inventory of existing workspace authorities. It
 helps operators understand instruction-policy metadata, structured preference
 identities, document authority coverage, knowledge freshness, and deterministic
-structural gaps. The inventory remains read-only;
-the console additionally provides one bounded workspace-admin action that
-creates an inactive onboarding proposal through the existing instruction-policy
-authority. It does not create another storage authority, background synthesizer,
-or runtime prompt source.
+structural gaps. The projection and export remain read-only. The console hosts
+two bounded administration seams over existing canonical authorities: an
+instruction-policy onboarding composer that creates only inactive drafts, and
+structured preference governance for explicit organization/workspace/personal
+proposal and lifecycle operations. It does not create another storage
+authority, background synthesizer, or runtime prompt source.
 
-The current slice is additive and dependency-safe. It does not implement the
-full structured Workspace State administration planned for later phases.
+The current slice is additive and dependency-safe. Wider policy authoring,
+proposal review workflows, learning-policy history, and source administration
+remain later phases.
 
 ## Authority boundaries
 
@@ -61,6 +63,16 @@ The separate proposal surface lives at
 active-head baseline, bounded source/version/confidence evidence, and an
 idempotent operation ID. The POST creates only immutable proposal evidence plus
 one inactive instruction-policy revision. It never activates policy.
+
+Structured preference administration uses the existing
+`/v1/workspaces/:workspaceId/preferences` governance routes rather than a
+Workspace State write endpoint. List/detail requires `workspace:read` and is
+limited to the authenticated subject's visible organization, current-workspace,
+and personal rows. Organization mutations require the matching direct-human
+`account:admin` grant, workspace mutations require direct-human
+`workspace:admin`, and personal mutations always derive the target from the
+signed-in human. API keys, services, workers, agent attempts, and incomplete
+principal contexts remain read only.
 
 Attempt inspection additionally requires the authenticated subject to equal
 the turn's immutable initiating-human subject (including a causal human carried
@@ -236,21 +248,46 @@ cannot populate a newer selection. A second generation-fenced loader lists
 recent onboarding proposal evidence. Workspace admins may submit one explicit
 draft-only proposal with the exact displayed active-head baseline; readers see
 the immutable source/version/confidence, linked draft, baseline, and timestamp.
-There is no activation, rollback, Memory promotion, Documents promotion, or
-general policy editor. Deep links lead to the existing Documents, Memory,
-Capabilities/Skills, Sessions/Agents, Rigs, Variable Sets, and Workspace
-Settings surfaces.
+
+A separate generation-fenced registry loader lists at most 100 authorized
+structured preferences and loads one selected detail. The administration panel
+shows the scope, status, scope/activation versions, compact descriptor,
+precedence/conflicts, provenance/trust, immutable revision hashes/correction
+links, and lifecycle actor/reason/time evidence. Direct humans may create an
+inactive proposal, activate or roll back to an older immutable revision,
+correct through a complete replacement body, move scope when authorized for
+both old and new scopes, deactivate, or reject. Explicit audit reasons and a
+new-attempt confirmation accompany lifecycle changes. Server authorization,
+stale-CAS, conflict, and validation errors remain visible rather than being
+reinterpreted by the browser.
+
+The browser does not receive registry full content or attempt retrieval handles
+on list/detail. It explains that descriptors are automatically composed while
+agents retrieve the full body only through `preference_registry_summary` and
+`preference_registry_get` under exact accepted-attempt authority. This is not a
+Memory editor: `knowledge_memories.kind = preference` remains legacy,
+non-authoritative observation metadata. Documents, Memory, connectors, and
+imported sources remain evidence or inactive proposals and never directly
+activate registry state. The separately authorized governed-learning controller
+is the sole future automatic-activation seam.
+
+There is no instruction-policy activation/rollback UI, Memory promotion,
+Documents promotion, or general policy editor. Deep links lead to the existing
+Documents, Memory, Capabilities/Skills, Sessions/Agents, Rigs, Variable Sets,
+and Workspace Settings surfaces.
 
 ## Explicit non-goals
 
 This slice does not implement:
 
-- policy activation, rollback, preference administration, or general policy
-  editing;
+- instruction-policy activation, rollback, or general policy editing;
 - preference storage;
+- browser-readable preference bodies or browser-issued attempt retrieval
+  handles;
 - source/fact schema work;
 - Slack, transcript, email, repository, or other connectors;
-- proposal review/approval states or automatic proposal generation;
+- onboarding proposal review/approval states or automatic proposal generation;
+- the governed-learning controller or direct automatic activation;
 - background sweeps, auto-synthesis, direct prompt injection, or a new charter
   authority.
 
