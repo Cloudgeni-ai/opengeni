@@ -5710,7 +5710,10 @@ describe("clean session control plane", () => {
         turnId: firstClaim.turn.id,
         expectedExecutionGeneration: firstClaim.turn.executionGeneration,
         expectedAttemptId: firstAttemptId,
-        serializedRunState: "legacy-mcp-approval-state",
+        serializedRunState: JSON.stringify({
+          version: 1,
+          kind: "legacy-mcp-approval-state",
+        }),
         pendingApprovals: [{ id: call.approvalId }],
       }),
     ).toBe(true);
