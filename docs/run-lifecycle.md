@@ -534,9 +534,10 @@ v1 WAIT/fallback command order only for deterministic replay; new workflow runs
 never select that path, and the current activity still writes the authoritative
 receipt. Temporal cancellation,
 completion, or failure is transport state and can never prove that a sandbox
-process or parallel tool operation stopped. Worker heartbeat throttles cap
-cancellation delivery at five seconds independently of the two-minute
-heartbeat timeout and the activity's ten-second heartbeat timer.
+process or parallel tool operation stopped. The turn activity heartbeat timer
+and worker SDK throttle share a 500 ms bound, leaving the unchanged four-second
+live control budget for physical writer drain and receipt-gated replacement
+admission independently of the two-minute heartbeat timeout.
 
 The dying `runAgentTurn` activity owns physical proof. It cancels the exact
 turn's tool/sandbox controller, waits for all controller-owned operations to
