@@ -47,6 +47,7 @@ import {
   resolveModalCheckpointProviderBindingForSession,
   sandboxProviderInstanceIdFromEnvelope,
   sandboxBackendForSdkBackendId,
+  selectBackend,
   verifySandboxExecReadiness,
   type ControlRpc,
   type EstablishedSandboxSession,
@@ -869,8 +870,17 @@ export function wrapLazyTurnBoxWithRouting(
   const beforeProcessMutation = beforeRetainedProcessMutation(services, ids);
   const afterProcessMutation = afterRetainedProcessMutation(services, ids);
   const settleProcess = settleRetainedProcessForTurn(services, ids);
+  const defaultBackend = sandboxBackendForSdkBackendId(args.backendId);
+  const defaultSupportsPty = defaultBackend
+    ? selectBackend(defaultBackend).capabilities.Terminal.pty
+    : false;
   const syntheticSession: RoutableBackendSession = {
     state: { manifest: args.agentDefaultManifest },
+    // The SDK binds shell tools synchronously before lazy provisioning. Preserve
+    // the authoritative descriptor's PTY shape so a Modal home exposes
+    // write_stdin on its first turn operation; the async cancellation transport
+    // below still resolves the exact live route before executing a command.
+    supportsPty: () => defaultSupportsPty,
   };
   const routedResolver = makeActiveBackendResolver({
     workspaceId: ids.workspaceId,

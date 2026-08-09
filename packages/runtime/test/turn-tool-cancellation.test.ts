@@ -512,6 +512,89 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     expect(session.hasRetainedProcess(34)).toBe(false);
   });
 
+  test("resolves a lazy routing backend before choosing its cancellation transport", async () => {
+    const controller = createTurnToolCancellationController();
+    let resolves = 0;
+    let wrappedInput: Record<string, unknown> | null = null;
+    const backend = {
+      supportsPty: () => true,
+      execCommand: async () => running(41, "started"),
+      writeStdin: async () => "write_stdin failed: session not found: 41",
+    };
+    const session = new RoutingSandboxSession({
+      defaultResolved: {
+        session: { state: { manifest: {} }, supportsPty: () => false },
+        sandboxId: null,
+        kind: "unprovisioned",
+      },
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => {
+        resolves += 1;
+        return { session: backend, sandboxId: null, kind: "modal" };
+      },
+    });
+    const exec = functionTool("exec_command", async (_runContext, input) => {
+      wrappedInput = JSON.parse(input) as Record<string, unknown>;
+      return await session.execCommand({
+        cmd: wrappedInput.cmd,
+        tty: wrappedInput.tty,
+        yieldTimeMs: wrappedInput.yield_time_ms,
+      });
+    });
+    const write = functionTool("write_stdin", async (_runContext, input) => {
+      const parsed = JSON.parse(input) as { session_id: number };
+      return await session.writeStdin({ sessionId: parsed.session_id });
+    });
+    const [wrappedExec, wrappedWrite] = controller.wrapTools([exec, write], session) as Array<
+      Extract<Tool<unknown>, { type: "function" }>
+    >;
+
+    expect(
+      await wrappedExec!.invoke(
+        runContext,
+        JSON.stringify({ cmd: "sleep 60", tty: false, yield_time_ms: 10_000 }),
+      ),
+    ).toContain("Process running with session ID 41");
+    expect(resolves).toBe(1);
+    expect(wrappedInput?.yield_time_ms).toBe(250);
+    expect(String(wrappedInput?.cmd)).toContain("/tmp/opengeni-turn-shell/");
+
+    await wrappedWrite!.invoke(runContext, JSON.stringify({ session_id: 41, chars: "" }));
+    controller.cancel(new Error("turn finalized"));
+    await controller.waitForQuiescence();
+  });
+
+  test("does not start a command after cancellation wins transport resolution", async () => {
+    const abort = new AbortController();
+    const controller = createTurnToolCancellationController(abort.signal);
+    let releaseTransport!: () => void;
+    const transport = new Promise<void>((resolve) => {
+      releaseTransport = resolve;
+    });
+    let execCalls = 0;
+    const exec = functionTool("exec_command", async () => {
+      execCalls += 1;
+      return exited(0);
+    });
+    const [wrappedExec] = controller.wrapTools([exec], {
+      commandCancellationTransport: async () => {
+        await transport;
+        return "shell_session";
+      },
+    }) as Array<Extract<Tool<unknown>, { type: "function" }>>;
+
+    const invocation = wrappedExec!
+      .invoke(runContext, JSON.stringify({ cmd: "printf late" }))
+      .catch((error) => error);
+    await Promise.resolve();
+    abort.abort(new Error("steered while resolving"));
+    releaseTransport();
+    await controller.waitForQuiescence();
+
+    expect(await invocation).toBeInstanceOf(Error);
+    expect(execCalls).toBe(0);
+  });
+
   test("lifecycle command finalization drains an exact process whose promotion was ambiguous", async () => {
     const controller = createTurnToolCancellationController();
     let providerMutationCalls = 0;

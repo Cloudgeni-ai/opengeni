@@ -63,6 +63,7 @@ export interface ActivePointer {
  */
 export interface RoutableBackendSession {
   state?: unknown;
+  commandCancellationTransport?(): Promise<"remote_operation" | "shell_session">;
   exec?(args: unknown): Promise<unknown>;
   execCommand?(args: unknown): Promise<string>;
   writeStdin?(args: unknown): Promise<string>;
@@ -1426,6 +1427,22 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   supportsPty(): boolean {
     const s = (this.lastResolved ?? this.deps.defaultResolved)?.session;
     return Boolean(s?.supportsPty?.());
+  }
+
+  /** Resolve cancellation from the physical backend, not this proxy's
+   * unconditional forwarding methods. Before a lazy first operation the proxy
+   * exposes cancelExecCommand structurally and its synchronous PTY probe may be
+   * only a binding-time hint; combining those two facts would misclassify Modal
+   * as a connected-machine op stream and leave its process uncancellable. */
+  async commandCancellationTransport(): Promise<"remote_operation" | "shell_session"> {
+    const backend = await this.resolve();
+    if (backend.session.commandCancellationTransport) {
+      return await backend.session.commandCancellationTransport();
+    }
+    return typeof backend.session.cancelExecCommand === "function" &&
+      backend.session.supportsPty?.() === false
+      ? "remote_operation"
+      : "shell_session";
   }
 
   /** createEditor is a synchronous factory in the SDK surface. The SDK's filesystem

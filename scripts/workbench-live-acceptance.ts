@@ -1450,6 +1450,31 @@ type ControlCancellationAudit = {
   >;
 };
 
+export function classifyControlCommandMarkerEvent(
+  event: Pick<SessionEvent, "type" | "payload">,
+  marker: string,
+): "running" | "completed" | "malformed" | null {
+  if (event.type !== "agent.toolCall.output" || !isRecord(event.payload)) return null;
+  const output = event.payload.output;
+  if (typeof output !== "string" || !output.includes(marker)) return null;
+  const running = /^Process running with session ID [1-9][0-9]*$/mu.test(output);
+  const completed = /^Process exited with code -?[0-9]+$/mu.test(output);
+  if (running && !completed) return "running";
+  if (completed && !running) return "completed";
+  return "malformed";
+}
+
+function isRunningControlCommandMarkerEvent(event: SessionEvent, marker: string): boolean {
+  const state = classifyControlCommandMarkerEvent(event, marker);
+  if (state === "completed") {
+    throw new Error("the cancellation fixture command completed before control was requested");
+  }
+  if (state === "malformed") {
+    throw new Error("the cancellation fixture command marker had no running-process receipt");
+  }
+  return state === "running";
+}
+
 async function proveLiveSteerCancellation(input: {
   client: OpenGeniClient;
   page: Page;
@@ -1477,8 +1502,8 @@ async function proveLiveSteerCancellation(input: {
   const zombiePath = `steer-stress/zombie-${iteration}.txt`;
   const terminalCommand =
     iteration === 0
-      ? `rm -rf steer-stress; mkdir -p steer-stress; for d in $(seq 1 150); do mkdir -p "steer-stress/d$d"; for f in $(seq 1 29); do : > "steer-stress/d$d/f$f.ts"; done; done; printf '${controlMarker}\\n'; trap '' INT TERM; sleep 5; printf zombie > '${zombiePath}'`
-      : `rm -f '${zombiePath}'; test "$(find steer-stress -type f | wc -l)" -ge 4350; printf '${controlMarker}\\n'; trap '' INT TERM; sleep 5; printf zombie > '${zombiePath}'`;
+      ? `rm -rf steer-stress; mkdir -p steer-stress; for d in $(seq 1 150); do mkdir -p "steer-stress/d$d"; for f in $(seq 1 29); do : > "steer-stress/d$d/f$f.ts"; done; done; printf '${controlMarker}\\n'; trap '' INT TERM; sleep 30; printf zombie > '${zombiePath}'`
+      : `rm -f '${zombiePath}'; test "$(find steer-stress -type f | wc -l)" -ge 4350; printf '${controlMarker}\\n'; trap '' INT TERM; sleep 30; printf zombie > '${zombiePath}'`;
   const queue = await client.getQueue(workspaceId, sessionId);
   const initialAccepted = await client.sendMessage(workspaceId, sessionId, {
     text: [
@@ -1497,10 +1522,8 @@ async function proveLiveSteerCancellation(input: {
     sessionId,
     afterSequence,
     sessionTimeoutMs,
-    (event) =>
-      event.type === "sandbox.command.output.delta" &&
-      JSON.stringify(event.payload).includes(controlMarker),
-    "the live cancellation fixture command marker",
+    (event) => isRunningControlCommandMarkerEvent(event, controlMarker),
+    "the running live cancellation fixture command marker",
   );
   if (!ready.turnId || !ready.turnAttemptId) {
     throw new Error("control fixture output was not bound to its owning turn attempt");
@@ -1686,7 +1709,7 @@ async function proveLivePauseCancellation(input: {
   // safe branch and cannot manufacture a false zombie after Resume.
   const terminalCommand =
     `if mkdir pause-stress/claimed 2>/dev/null; then printf '${controlMarker}\\n'; ` +
-    `trap '' INT TERM; sleep 5; printf zombie > '${zombiePath}'; ` +
+    `trap '' INT TERM; sleep 30; printf zombie > '${zombiePath}'; ` +
     `else printf 'PAUSE_RESUMED_SAFE_${marker}\\n'; fi`;
   await client.sendMessage(workspaceId, sessionId, {
     text: [
@@ -1705,10 +1728,8 @@ async function proveLivePauseCancellation(input: {
     sessionId,
     afterSequence,
     sessionTimeoutMs,
-    (event) =>
-      event.type === "sandbox.command.output.delta" &&
-      JSON.stringify(event.payload).includes(controlMarker),
-    "the live Pause fixture command marker",
+    (event) => isRunningControlCommandMarkerEvent(event, controlMarker),
+    "the running live Pause fixture command marker",
   );
   if (!ready.turnId || !ready.turnAttemptId) {
     throw new Error("Pause fixture output was not bound to its owning turn attempt");
