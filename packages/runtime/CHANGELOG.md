@@ -1,5 +1,14 @@
 # @opengeni/runtime
 
+## 0.18.36
+
+### Patch Changes
+
+- ef78ecf: Separate credential-free capability discovery from exact, permission-checked live-plane grants; mint terminal credentials just in time, preserve first input across connection setup, and bound pre-open terminal memory.
+- Updated dependencies [ef78ecf]
+  - @opengeni/contracts@0.41.4
+  - @opengeni/config@0.12.8
+
 ## 0.18.35
 
 ### Patch Changes
