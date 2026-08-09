@@ -1,9 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+import { chromium, type Browser, type Page } from "playwright";
 
 import { OpenGeniClient } from "@opengeni/sdk/artifacts";
+import { createEditableArtifactReplicaId } from "@opengeni/sdk/editable-artifacts";
 import {
   freePort,
   removeTempDir,
@@ -140,7 +141,7 @@ describe("public editable-artifact browser composition", () => {
       await paragraph.fill("Durable document text from the real browser session.");
       await waitForEditorIdle(page, "document");
       await assertReloadedText(page, "Durable document text from the real browser session.");
-      await assertServerAdvanced(documentArtifact, page);
+      await assertServerAdvanced(documentArtifact);
       await capture(page, "editable-artifact-document-dark.png");
 
       await openArtifactStart(page);
@@ -171,6 +172,28 @@ describe("public editable-artifact browser composition", () => {
           (await page.locator('[data-og-cell="A1"]').getAttribute("aria-label")) === "A1, 2",
         {
           timeoutMs: 20_000,
+          describe: () => observed.diagnostics.join("\n"),
+        },
+      );
+      await formula.fill("after reopen");
+      await formula.press("Enter");
+      await waitForEditorIdle(page, "spreadsheet");
+      await waitFor(
+        async () =>
+          (await page.locator('[data-og-cell="A1"]').getAttribute("aria-label")) ===
+          "A1, after reopen",
+        {
+          timeoutMs: 20_000,
+          describe: () => observed.diagnostics.join("\n"),
+        },
+      );
+      await page.reload();
+      await waitFor(
+        async () =>
+          (await page.locator('[data-og-cell="A1"]').getAttribute("aria-label")) ===
+          "A1, after reopen",
+        {
+          timeoutMs: 30_000,
           describe: () => observed.diagnostics.join("\n"),
         },
       );
@@ -221,7 +244,6 @@ describe("public editable-artifact browser composition", () => {
     const first = await browser.newContext({ viewport: { width: 1_280, height: 800 } });
     const firstPage = await first.newPage();
     const firstObserved = observeBrowser(firstPage);
-    let second: BrowserContext | undefined;
     let secondPage: Page | undefined;
     let secondObserved: BrowserObservation | undefined;
     try {
@@ -233,8 +255,7 @@ describe("public editable-artifact browser composition", () => {
       await firstPage.getByRole("textbox", { name: "Paragraph" }).fill("Replica one");
       await waitForEditorIdle(firstPage, "document");
 
-      second = await browser.newContext({ viewport: { width: 1_280, height: 800 } });
-      secondPage = await second.newPage();
+      secondPage = await first.newPage();
       secondObserved = observeBrowser(secondPage);
       await secondPage.goto(artifact.url);
       const secondParagraph = secondPage.getByRole("textbox", { name: "Paragraph" });
@@ -268,28 +289,16 @@ describe("public editable-artifact browser composition", () => {
     } finally {
       firstObserved.stop();
       secondObserved?.stop();
-      await Promise.allSettled([
-        secondPage?.close(),
-        second?.close(),
-        firstPage.close(),
-        first.close(),
-      ]);
+      await Promise.allSettled([secondPage?.close(), firstPage.close(), first.close()]);
     }
   }, 120_000);
 
   async function assertServerAdvanced(
     artifact: Readonly<{ id: string; url: string }>,
-    page: Page,
   ): Promise<void> {
-    const replicaId = await page.evaluate((id) => {
-      for (let index = 0; index < localStorage.length; index += 1) {
-        const key = localStorage.key(index);
-        if (key?.includes(id)) return localStorage.getItem(key);
-      }
-      return null;
-    }, artifact.id);
-    if (!replicaId) throw new Error("Browser did not retain its artifact replica identity");
-    const resource = await client.getEditableArtifact(workspaceId, artifact.id, { replicaId });
+    const resource = await client.getEditableArtifact(workspaceId, artifact.id, {
+      replicaId: createEditableArtifactReplicaId(),
+    });
     expect(resource.headSequence).toBeGreaterThan(0);
     expect(resource.stateHash).toMatch(/^sha256:[0-9a-f]{64}$/u);
   }

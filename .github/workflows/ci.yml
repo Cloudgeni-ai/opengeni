@@ -1307,8 +1307,8 @@ jobs:
           cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=min,scope=opengeni-ci-relay,ignore-error=true' || '' }}
   sandbox-image:
     name: Build headless sandbox workload image
-    needs: [automation-admission, plan]
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'docs' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    needs: [automation-admission, plan, artifact-runtime]
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'docs' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1321,6 +1321,11 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
+      - name: Download exact artifact runtime inputs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.artifact-runtime.outputs.artifact_name }}
+          path: .release/artifact-runtime
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
 
@@ -1341,6 +1346,7 @@ jobs:
           context: .
           file: docker/sandbox.Dockerfile
           platforms: linux/amd64,linux/arm64
+          build-args: OPENGENI_SOURCE_SHA=${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.sha }}
           push: ${{ github.event_name == 'push' }}
           tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-sandbox:dogfood-sha-{0}', github.sha) || 'opengeni-sandbox:ci' }}
           cache-from: type=gha,scope=opengeni-ci-sandbox

@@ -159,8 +159,15 @@ describe("release image workflow contract", () => {
     };
 
     const leafNames = ["api-image", "worker-web-images", "relay-image", "sandbox-image"];
-    for (const jobName of leafNames) {
+    for (const jobName of ["worker-web-images", "relay-image"]) {
       expect(parsed.jobs[jobName]?.needs).toEqual(["automation-admission", "plan"]);
+    }
+    for (const jobName of ["api-image", "sandbox-image"]) {
+      expect(parsed.jobs[jobName]?.needs).toEqual([
+        "automation-admission",
+        "plan",
+        "artifact-runtime",
+      ]);
     }
     expect(parsed.jobs.images?.name).toBe("Workload image builds");
     expect(parsed.jobs.images?.needs).toEqual([
@@ -578,7 +585,7 @@ ${parser}`,
       expect(imagesJob).toContain(identity);
     }
     expect(imagesJob).toContain("docker/setup-qemu-action@");
-    expect(imagesJob.match(/platforms: linux\/amd64,linux\/arm64/g)).toHaveLength(5);
+    expect(imagesJob.match(/platforms: linux\/amd64,linux\/arm64/g)).toHaveLength(7);
 
     const imageSteps = ["api-image", "worker-web-images", "relay-image", "sandbox-image"].flatMap(
       (jobName) =>
@@ -619,7 +626,7 @@ ${parser}`,
       {
         jobName: "sandbox-image",
         name: "Build headless sandbox image",
-        fingerprint: "0985451362b8a06fe51d1a56186445a7311c916f3908e56c48c9fd4d9a1ec46f",
+        fingerprint: "1c5f95c76e4f086750b16d04d46a10bd3b23498fc1adaf6671eceeefe5ff475e",
       },
     ]);
 

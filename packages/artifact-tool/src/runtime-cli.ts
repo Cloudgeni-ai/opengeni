@@ -19,7 +19,9 @@ import {
 
 const MAX_INSTALLATION_MANIFEST_BYTES = 256 * 1024;
 const MAX_RELEASE_MANIFEST_BYTES = 1024 * 1024;
+const MAX_ARTIFACT_TOOL_ARCHIVE_BYTES = 256 * 1024 * 1024;
 const MAX_JAVASCRIPT_ENTRYPOINT_BYTES = 32 * 1024 * 1024;
+const MAX_SKILL_FACADE_SUPPORT_FILE_BYTES = 128 * 1024 * 1024;
 const MAX_KERNEL_ASSET_BYTES = 512 * 1024 * 1024;
 
 type RuntimeEnvironment = Readonly<Record<string, string | undefined>>;
@@ -34,7 +36,9 @@ export type VerifiedArtifactRuntimeLocation = Readonly<{
     packageVersion: string;
     integrity: `sha512-${string}`;
   }>;
+  artifactToolArchive?: string;
   skillFacadeEntrypoint: string;
+  skillFacadeSupportFiles?: readonly string[];
   kernel: Readonly<{
     packageName: string;
     packageVersion: string;
@@ -94,10 +98,22 @@ export async function locateVerifiedArtifactRuntime(
     installationRoot,
     "release manifest",
   );
+  const artifactToolArchive = dependencies.artifactToolArchiveUrl
+    ? await confinedCanonicalFile(
+        dependencies.artifactToolArchiveUrl,
+        installationRoot,
+        "artifact-tool archive",
+      )
+    : undefined;
   const skillFacadeEntrypoint = await confinedCanonicalFile(
     dependencies.skillFacadeEntrypoint,
     installationRoot,
     "skill facade entrypoint",
+  );
+  const skillFacadeSupportFiles = await Promise.all(
+    dependencies.skillFacadeSupportFiles.map((url, index) =>
+      confinedCanonicalFile(url, installationRoot, `skill facade support file ${index}`),
+    ),
   );
   const kernelEntrypoint = await confinedCanonicalFile(
     dependencies.kernelEntrypoint,
@@ -132,6 +148,18 @@ export async function locateVerifiedArtifactRuntime(
   if (!sameJson(release.artifactTool, installation.artifactTool)) {
     integrity("Installed artifact-tool identity does not match the complete release manifest");
   }
+  if (artifactToolArchive && installation.artifactToolArchive) {
+    const archiveBytes = await readAndVerifyFile(
+      artifactToolArchive,
+      installation.artifactToolArchive,
+      MAX_ARTIFACT_TOOL_ARCHIVE_BYTES,
+      "artifact-tool archive",
+    );
+    const archiveIntegrity = `sha512-${createHash("sha512").update(archiveBytes).digest("base64")}`;
+    if (archiveIntegrity !== installation.artifactTool.integrity) {
+      integrity("Packed artifact-tool archive differs from its installation identity");
+    }
+  }
   const releasedKernel = release.targets.find((entry) => entry.target === installation.target);
   if (!releasedKernel || !sameJson(releasedKernel, installation.kernel)) {
     integrity("Installed kernel package does not match its exact release target manifest");
@@ -145,6 +173,14 @@ export async function locateVerifiedArtifactRuntime(
     MAX_JAVASCRIPT_ENTRYPOINT_BYTES,
     "skill facade entrypoint",
   );
+  for (const [index, path] of skillFacadeSupportFiles.entries()) {
+    await verifyFile(
+      path,
+      installation.skillFacadeSupportFiles![index]!,
+      MAX_SKILL_FACADE_SUPPORT_FILE_BYTES,
+      `skill facade support file ${index}`,
+    );
+  }
   await verifyFile(
     kernelEntrypoint,
     installation.kernel.entrypoint,
@@ -167,7 +203,11 @@ export async function locateVerifiedArtifactRuntime(
     manifestPath,
     releaseManifestPath,
     artifactTool: Object.freeze({ ...installation.artifactTool }),
+    ...(artifactToolArchive ? { artifactToolArchive } : {}),
     skillFacadeEntrypoint,
+    ...(skillFacadeSupportFiles.length > 0
+      ? { skillFacadeSupportFiles: Object.freeze([...skillFacadeSupportFiles]) }
+      : {}),
     kernel: Object.freeze({
       packageName: installation.kernel.packageName,
       packageVersion: installation.kernel.packageVersion,

@@ -822,6 +822,7 @@ describe("deployment contract", () => {
         OPENGENI_MODAL_TOKEN_SECRET: "modal-token-secret",
         OPENGENI_MODAL_TIMEOUT_SECONDS: "300",
         OPENGENI_MODAL_IMAGE_REF: "opengenistgneuacr.azurecr.io/opengeni-desktop:preview-123",
+        OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED: "true",
         OPENGENI_STREAM_TOKEN_SECRET: "ogs_preview_stream_secret",
         OPENGENI_IMAGE_TAG: "preview-123",
         OPENGENI_API_IMAGE_DIGEST: "sha256:api",
@@ -843,6 +844,7 @@ describe("deployment contract", () => {
       "OPENGENI_PUBLIC_BASE_URL=https://preview-123.app.opengeni.ai",
     );
     expect(artifacts.runtimeEnv).toContain("OPENGENI_SANDBOX_BACKEND=modal");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED=true");
     // Recognized sandbox workspace passthroughs reach the runtime secret when set.
     expect(artifacts.runtimeEnv).toContain(
       "OPENGENI_STREAM_TOKEN_SECRET=ogs_preview_stream_secret",
@@ -858,6 +860,7 @@ describe("deployment contract", () => {
     );
     expect(artifacts.helmValuesYaml).toContain('tag: "preview-123"');
     expect(artifacts.helmValuesYaml).toContain('digest: "sha256:worker"');
+    expect(artifacts.helmValuesYaml).toContain('OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED: "true"');
     expect(artifacts.helmValuesYaml).toContain('existingSecret: "opengeni-migrations"');
     expect(artifacts.helmValuesYaml).toContain('existingSecret: "opengeni-runtime"');
   });

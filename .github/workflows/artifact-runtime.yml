@@ -295,7 +295,8 @@ jobs:
             --release-manifest "$RUNNER_TEMP/artifact-runtime-packages/artifact-runtime-release-manifest.json" \
             --materialized-packages-root "$RUNNER_TEMP/artifact-runtime-packages" \
             --artifact-tool-tarball "$TARBALL" \
-            --output "$GITHUB_WORKSPACE/.release/artifact-runtime"
+            --output "$GITHUB_WORKSPACE/.release/artifact-runtime" \
+            --source-sha "${{ inputs.source_sha }}"
 
       - name: Strict host locator and doctor
         env:

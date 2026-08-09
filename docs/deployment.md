@@ -945,12 +945,25 @@ byte for byte and fails instead of overwriting them. No moving BOM alias is
 created. Ordinary pushes to `main` can open/update the Version PR but cannot
 publish.
 
-The stock sandbox remains a separate workload image, but the public release publishes it and
-binds its immutable digest in the same BOM:
+The stock sandbox remains a separate workload image. The public release binds
+its immutable digest and its exact native artifact-runtime inputs to the same
+source SHA. Build it only with the verified `.release/artifact-runtime` bundle:
 
 ```bash
-docker build -f docker/sandbox.Dockerfile -t opengeni-sandbox:local .
+docker build \
+  --build-arg OPENGENI_SOURCE_SHA="$(git rev-parse HEAD)" \
+  -f docker/sandbox.Dockerfile \
+  -t opengeni-sandbox:local-"$(git rev-parse --short=12 HEAD)" \
+  .
 ```
+
+Set `OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED=true` only with that stock image.
+Production Docker/Modal references must be digest-pinned; pack, rig, mutable,
+self-hosted, and mismatched images fail closed. The worker runs the absolute
+runtime doctor inside the actual box before the model starts. `bun run dev`
+automatically caches an exact clean-HEAD CI runtime when available, source-tags
+the local image, and otherwise leaves native agent artifact skills disabled
+unless `OPENGENI_REQUIRE_SANDBOX_ARTIFACT_RUNTIME=1` requests a hard failure.
 
 The Connected Machine stream relay is a separate deployed component built from
 the `agent/` Cargo workspace. It is only needed when Connected Machines are

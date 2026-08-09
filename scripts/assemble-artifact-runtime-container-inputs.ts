@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
-import { lstat, mkdir, mkdtemp, rename, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
 import type { ArtifactRuntimeTarget } from "../packages/artifact-tool/src/runtime";
@@ -16,6 +17,7 @@ export type AssembleArtifactRuntimeContainerInputsOptions = Readonly<{
   materializedPackagesRoot: string;
   artifactToolTarballPath: string;
   outputRoot: string;
+  sourceSha: string;
 }>;
 
 type InstallationAssembler = typeof assembleArtifactRuntimeInstallation;
@@ -25,11 +27,19 @@ export async function assembleArtifactRuntimeContainerInputs(
   options: AssembleArtifactRuntimeContainerInputsOptions,
   assemble: InstallationAssembler = assembleArtifactRuntimeInstallation,
 ): Promise<void> {
-  for (const [name, path] of Object.entries(options)) {
+  for (const [name, path] of Object.entries({
+    releaseManifestPath: options.releaseManifestPath,
+    materializedPackagesRoot: options.materializedPackagesRoot,
+    artifactToolTarballPath: options.artifactToolTarballPath,
+    outputRoot: options.outputRoot,
+  })) {
     if (!isAbsolute(path)) throw new TypeError(`${name} must be absolute`);
   }
   if (resolve(options.outputRoot) === resolve("/")) {
     throw new TypeError("outputRoot must not be the filesystem root");
+  }
+  if (!/^[0-9a-f]{40}$/u.test(options.sourceSha)) {
+    throw new TypeError("sourceSha must be an exact lowercase Git SHA");
   }
   await rejectSymlinkIfPresent(options.outputRoot);
   const outputParent = dirname(options.outputRoot);
@@ -45,6 +55,22 @@ export async function assembleArtifactRuntimeContainerInputs(
         target,
       });
     }
+    const installations = await Promise.all(
+      Object.keys(ARTIFACT_RUNTIME_CONTAINER_TARGETS).map(async (architecture) => {
+        const bytes = new Uint8Array(
+          await readFile(join(stagingRoot, architecture, "installation.json")),
+        );
+        return {
+          architecture,
+          installationSha256: `sha256:${createHash("sha256").update(bytes).digest("hex")}`,
+        };
+      }),
+    );
+    await writeFile(
+      join(stagingRoot, "artifact-runtime-container-receipt.json"),
+      `${JSON.stringify({ schemaVersion: 1, sourceSha: options.sourceSha, installations }, null, 2)}\n`,
+      { mode: 0o444 },
+    );
     await rm(options.outputRoot, { recursive: true, force: true });
     await rename(stagingRoot, options.outputRoot);
   } catch (error) {
@@ -69,6 +95,7 @@ function parseArguments(args: readonly string[]): AssembleArtifactRuntimeContain
     "--materialized-packages-root",
     "--artifact-tool-tarball",
     "--output",
+    "--source-sha",
   ]);
   for (let index = 0; index < args.length; index += 2) {
     const name = args[index];
@@ -88,6 +115,7 @@ function parseArguments(args: readonly string[]): AssembleArtifactRuntimeContain
     materializedPackagesRoot: required("--materialized-packages-root"),
     artifactToolTarballPath: required("--artifact-tool-tarball"),
     outputRoot: required("--output"),
+    sourceSha: required("--source-sha"),
   };
 }
 

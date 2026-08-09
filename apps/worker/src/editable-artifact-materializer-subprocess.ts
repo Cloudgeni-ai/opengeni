@@ -8,6 +8,7 @@ import {
   EditableArtifactMaterializerPermanentError,
   mimeTypeForFormat,
   type ClaimedEditableArtifactMaterialization,
+  type EditableArtifactMaterializerFailureDiagnostic,
   type NativeEditableArtifactMaterializationResult,
   type NativeEditableArtifactMaterializerIdentity,
   type NativeEditableArtifactMaterializerPort,
@@ -313,26 +314,51 @@ async function readTypedError(
     await reader.readExactly(metadataBytes, signal),
   );
   const value = JSON.parse(text) as unknown;
+  const keys =
+    typeof value === "object" && value !== null && !Array.isArray(value)
+      ? Object.keys(value).sort().join("\0")
+      : "";
   if (
     JSON.stringify(value) !== text ||
     typeof value !== "object" ||
     value === null ||
     Array.isArray(value) ||
-    Object.keys(value).sort().join("\0") !== "code\0protocol" ||
+    (keys !== "code\0protocol" && keys !== "code\0protocol\0subcode") ||
     (value as Record<string, unknown>).protocol !== "OGAMERR1"
   ) {
     return new EditableArtifactMaterializerPermanentError("kernel_result_mismatch");
   }
   const code = (value as Record<string, unknown>).code;
+  const subcode = (value as Record<string, unknown>).subcode;
   if (
     code === "unsupported_semantics" ||
     code === "source_identity_mismatch" ||
     code === "kernel_incompatible" ||
     code === "output_verification_failed"
   ) {
-    return new EditableArtifactMaterializerPermanentError(code);
+    const diagnostic = nativeFailureDiagnostic(code, subcode);
+    if (subcode !== undefined && !diagnostic) {
+      return new EditableArtifactMaterializerPermanentError("kernel_result_mismatch");
+    }
+    return new EditableArtifactMaterializerPermanentError(code, diagnostic);
   }
   return new EditableArtifactMaterializerPermanentError("kernel_result_mismatch");
+}
+
+function nativeFailureDiagnostic(
+  code: unknown,
+  subcode: unknown,
+): EditableArtifactMaterializerFailureDiagnostic | undefined {
+  if (code !== "source_identity_mismatch") return undefined;
+  if (
+    subcode === "input_framing" ||
+    subcode === "snapshot_open" ||
+    subcode === "state_mismatch" ||
+    subcode === "revision_mismatch"
+  ) {
+    return { stage: "native", subcode };
+  }
+  return undefined;
 }
 
 async function probeIdentity(

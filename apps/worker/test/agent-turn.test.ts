@@ -85,6 +85,7 @@ import {
   resolveActiveSandboxBackend,
   runMandatoryHistoryPersistenceStep,
   safeErrorDiagnostic,
+  sandboxArtifactRuntimeAdmission,
   sandboxDeadlineRotationRecoveryDelayMs,
   shouldRecoverCompactionProviderFailure,
   shouldStartOnTurnRecording,
@@ -2373,6 +2374,83 @@ describe("turn-time Modal private-registry warm", () => {
       ensureRegistryImage,
     );
     expect(ensureRegistryImage).not.toHaveBeenCalled();
+  });
+});
+
+describe("sandbox artifact runtime admission", () => {
+  test("admits the configured Docker base image and injects only fixed image paths", () => {
+    const settings = testSettings({
+      sandboxBackend: "docker",
+      dockerImage: "opengeni-sandbox:local-0123456789ab",
+      sandboxArtifactRuntimeEnabled: true,
+    });
+
+    expect(sandboxArtifactRuntimeAdmission(settings, settings, "docker")).toEqual({
+      available: true,
+      environment: {
+        OPENGENI_ARTIFACT_RUNTIME_MANIFEST: "/opt/opengeni/artifact-runtime/installation.json",
+        OPENGENI_ARTIFACT_TOOL_ENTRY: "/opt/opengeni/artifact-runtime/skill-facade-entry.mjs",
+      },
+    });
+  });
+
+  test("admits exact digest-pinned production Docker and Modal base images", () => {
+    const docker = testSettings({
+      sandboxBackend: "docker",
+      dockerImage: `ghcr.io/cloudgeni-ai/opengeni-sandbox@sha256:${"a".repeat(64)}`,
+      sandboxArtifactRuntimeEnabled: true,
+    });
+    expect(
+      sandboxArtifactRuntimeAdmission(docker, docker, "docker", { production: true }).available,
+    ).toBe(true);
+
+    const modal = testSettings({
+      sandboxBackend: "modal",
+      modalImageRef: `ghcr.io/cloudgeni-ai/opengeni-sandbox@sha256:${"b".repeat(64)}`,
+      modalImageId: "im-1234567890123456789012",
+      sandboxArtifactRuntimeEnabled: true,
+    });
+    expect(
+      sandboxArtifactRuntimeAdmission(modal, modal, "modal", { production: true }).available,
+    ).toBe(true);
+  });
+
+  test("fails closed for disabled, custom-image, missing-Modal-image, and machine turns", () => {
+    const disabled = testSettings({
+      sandboxBackend: "docker",
+      sandboxArtifactRuntimeEnabled: false,
+    });
+    expect(sandboxArtifactRuntimeAdmission(disabled, disabled, "docker").available).toBe(false);
+
+    const modal = testSettings({
+      sandboxBackend: "modal",
+      modalImageRef: `ghcr.io/cloudgeni-ai/opengeni-sandbox@sha256:${"a".repeat(64)}`,
+      sandboxArtifactRuntimeEnabled: true,
+    });
+    const custom = {
+      ...modal,
+      modalImageRef: `ghcr.io/example/custom-sandbox@sha256:${"b".repeat(64)}`,
+    };
+    expect(sandboxArtifactRuntimeAdmission(modal, custom, "modal").available).toBe(false);
+    expect(
+      sandboxArtifactRuntimeAdmission(
+        { ...modal, modalImageRef: undefined },
+        { ...modal, modalImageRef: undefined },
+        "modal",
+      ).available,
+    ).toBe(false);
+    expect(sandboxArtifactRuntimeAdmission(modal, modal, "selfhosted").available).toBe(false);
+
+    const mutableProduction = testSettings({
+      sandboxBackend: "docker",
+      dockerImage: "opengeni-sandbox:local-0123456789ab",
+      sandboxArtifactRuntimeEnabled: true,
+    });
+    expect(
+      sandboxArtifactRuntimeAdmission(mutableProduction, mutableProduction, "docker", {
+        production: true,
+      }).available,
+    ).toBe(false);
   });
 });
 

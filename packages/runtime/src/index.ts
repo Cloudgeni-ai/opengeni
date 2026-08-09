@@ -2427,6 +2427,7 @@ export function appendGenesisTitleDirective(
 
 const agentFileDownloads = new WeakMap<object, SandboxFileDownload[]>();
 const agentRepositoryCloneHooks = new WeakMap<object, SandboxLifecycleHook[]>();
+const agentArtifactRuntimeHooks = new WeakMap<object, SandboxLifecycleHook[]>();
 // TOKEN-BROKER (B1): the per-turn provider git token seeds, stashed alongside
 // the agent's repository-clone hooks (a parallel map keyed by the agent). Kept
 // OFF the manifest/defaultManifest so rotating values never ride the SDK's
@@ -2748,6 +2749,12 @@ export function buildOpenGeniAgent(
     agent,
     sandboxRepositoryCloneHooks(settings, resources, options.activeSandboxBackend),
   );
+  if (artifactRuntimeAvailable) {
+    agentArtifactRuntimeHooks.set(
+      agent,
+      sandboxArtifactRuntimeDoctorHooks(options.sandboxEnvironment!),
+    );
+  }
   // Stash the EFFECTIVE backend so runStream's owned branch can skip the direct
   // beforeAgentStart hook run on a connected machine: the box there is the user's
   // REAL computer — the platform must not run setup (az login) against it. The
@@ -5433,6 +5440,7 @@ export async function runAgentStream(
       // credential / repository-clone hooks below. The rig's credential hooks are
       // unioned into the deployment preparation-profile hooks (deduped by id).
       ...sandboxRigSetupHooksForAgent(agent),
+      ...sandboxArtifactRuntimeHooksForAgent(agent),
       ...unionCredentialHooks(
         sandboxLifecycleHooksForIds(sandboxLifecycleHookIds(settings)),
         rigCredentialHooksForAgent(agent),
@@ -5558,6 +5566,7 @@ export async function runAgentStream(
           // path (this legacy create/resume decoration path is byte-for-byte today
           // for a rig-less turn — the rig hooks are empty then).
           ...sandboxRigSetupHooksForAgent(agent),
+          ...sandboxArtifactRuntimeHooksForAgent(agent),
           ...unionCredentialHooks(
             sandboxLifecycleHooksForIds(sandboxLifecycleHookIds(settings)),
             rigCredentialHooksForAgent(agent),
@@ -6059,6 +6068,7 @@ export async function runOwnedSandboxSetup(
     // client create/resume decoration), so the rig hooks MUST be here or a
     // rig-bound turn would start without ever running the frozen setup script.
     ...sandboxRigSetupHooksForAgent(agent),
+    ...sandboxArtifactRuntimeHooksForAgent(agent),
     ...unionCredentialHooks(
       sandboxLifecycleHooksForIds(sandboxLifecycleHookIds(settings)),
       rigCredentialHooksForAgent(agent),
@@ -6893,6 +6903,38 @@ export function withSandboxLifecycleHooks(
 
 function sandboxRepositoryCloneHooksForAgent(agent: Agent<any, any>): SandboxLifecycleHook[] {
   return agentRepositoryCloneHooks.get(agent) ?? [];
+}
+
+function sandboxArtifactRuntimeHooksForAgent(agent: Agent<any, any>): SandboxLifecycleHook[] {
+  return agentArtifactRuntimeHooks.get(agent) ?? [];
+}
+
+export function sandboxArtifactRuntimeDoctorHooks(
+  environment: Readonly<Record<string, string>>,
+): SandboxLifecycleHook[] {
+  const facade = environment[ARTIFACT_TOOL_ENTRY_ENV];
+  if (!facade || !isAbsolute(facade)) return [];
+  const runtimeCli = join(dirname(facade), "opengeni-artifact-runtime.mjs");
+  return [
+    {
+      id: "artifact-runtime-doctor",
+      phase: "beforeAgentStart",
+      run: async (session, context) => {
+        const result = await runSandboxLifecycleCommand(
+          session,
+          {
+            cmd: `${shellQuote(runtimeCli)} doctor --json`,
+            workdir: "/workspace",
+            ...(context.runAs ? { runAs: context.runAs } : {}),
+            yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+            maxOutputTokens: 2_000,
+          },
+          context.commandRunner,
+        );
+        assertSandboxCommandSucceeded(result, "Artifact runtime doctor");
+      },
+    },
+  ];
 }
 
 // TOKEN-BROKER (B1): the per-turn git token seed stashed for this agent (undefined

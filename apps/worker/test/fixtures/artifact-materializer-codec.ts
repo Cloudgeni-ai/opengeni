@@ -62,10 +62,19 @@ const manifest = JSON.parse(new TextDecoder().decode(input.subarray(metadataStar
   normalizedOptions: {
     hang?: boolean;
     malformed?: "hash" | "type" | "extra" | "mime" | "codec";
+    typedFailure?: boolean;
   };
 };
 if (manifest.normalizedOptions.hang) {
   await new Promise(() => undefined);
+}
+if (manifest.normalizedOptions.typedFailure) {
+  writeFrame("OGAME001", {
+    code: "source_identity_mismatch",
+    protocol: "OGAMERR1",
+    subcode: "state_mismatch",
+  });
+  process.exit(0);
 }
 const output = new TextEncoder().encode("native-codec-output");
 const contentHash = `sha256:${createHash("sha256").update(output).digest("hex")}`;

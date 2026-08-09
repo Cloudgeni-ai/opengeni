@@ -43,50 +43,14 @@ export async function createConsoleEditableArtifactAuthority(
   });
 }
 
-export function getOrCreateConsoleEditableArtifactReplicaId(
-  input: Readonly<{
-    authority: EditableArtifactCacheAuthority;
-    artifactId: string;
-    storage?: Pick<Storage, "getItem" | "setItem">;
-    createReplicaId?: () => string;
-  }>,
+export function createConsoleEditableArtifactReplicaId(
+  createReplicaId: () => string = createEditableArtifactReplicaId,
 ): string {
-  if (!/^[0-9a-f]{32}$/u.test(input.artifactId) || /^0+$/u.test(input.artifactId)) {
-    throw new Error("Editable artifact ID is malformed.");
-  }
-  const key = consoleEditableArtifactReplicaStorageKey(input.authority, input.artifactId);
-  let storage: Pick<Storage, "getItem" | "setItem">;
-  let existing: string | null;
-  try {
-    storage = input.storage ?? globalThis.localStorage;
-    existing = storage.getItem(key);
-  } catch {
-    throw new Error("Browser storage is required for durable offline editing.");
-  }
-  if (existing && /^[0-9a-f]{16}$/u.test(existing) && !/^0+$/u.test(existing)) return existing;
-  const replicaId = (input.createReplicaId ?? createEditableArtifactReplicaId)();
+  const replicaId = createReplicaId();
   if (!/^[0-9a-f]{16}$/u.test(replicaId) || /^0+$/u.test(replicaId)) {
     throw new Error("Could not create a valid editable artifact writer identity.");
   }
-  try {
-    storage.setItem(key, replicaId);
-    return replicaId;
-  } catch {
-    throw new Error("Browser storage is required for durable offline editing.");
-  }
-}
-
-export function consoleEditableArtifactReplicaStorageKey(
-  authority: EditableArtifactCacheAuthority,
-  artifactId: string,
-): string {
-  return `opengeni:editable-artifact-replica:v1:${JSON.stringify([
-    new URL(authority.deploymentOrigin).origin,
-    authority.accountId,
-    authority.workspaceId,
-    authority.principalId,
-    artifactId,
-  ])}`;
+  return replicaId;
 }
 
 async function sha256(value: string): Promise<string> {

@@ -1,5 +1,39 @@
 FROM node:22.22.0-bookworm-slim AS node-runtime
 
+FROM oven/bun:1.3.14 AS artifact-runtime-builder
+
+ARG TARGETARCH
+ARG OPENGENI_ARTIFACT_RUNTIME_BUNDLE=.release/artifact-runtime
+ARG OPENGENI_SOURCE_SHA
+
+WORKDIR /src
+COPY . .
+COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
+RUN set -eux; \
+    case "$TARGETARCH" in \
+      amd64) expected_target=linux-x64-gnu ;; \
+      arm64) expected_target=linux-arm64-gnu ;; \
+      *) echo "unsupported artifact runtime OCI architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+    && input="/src/$OPENGENI_ARTIFACT_RUNTIME_BUNDLE/$TARGETARCH/installation.json" \
+    && if [ -f "$input" ]; then \
+      test "$(node --version)" = "v22.22.0"; \
+      bun scripts/verify-artifact-runtime-container-inputs.ts \
+        --root "/src/$OPENGENI_ARTIFACT_RUNTIME_BUNDLE" \
+        --source-sha "$OPENGENI_SOURCE_SHA" \
+        --architecture "$TARGETARCH"; \
+      actual_target="$(bun -e 'const value=await Bun.file(process.argv[1]).json();process.stdout.write(typeof value.target==="string"?value.target:"")' "$input")"; \
+      test "$actual_target" = "$expected_target"; \
+      bun install --frozen-lockfile; \
+      bun scripts/prepare-artifact-sandbox-runtime.ts \
+        --repository-root /src \
+        --installation-root "$(dirname "$input")" \
+        --output /opt/opengeni/artifact-runtime; \
+    else \
+      mkdir -p /opt/opengeni/artifact-runtime; \
+      touch /opt/opengeni/artifact-runtime/.unavailable; \
+    fi
+
 FROM python:3.12-slim
 
 ARG TERRAFORM_VERSION=1.13.3
@@ -42,6 +76,21 @@ RUN set -eux; \
 # exact official LTS binary instead of trusting a mutable third-party apt key.
 COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
 RUN test "$(node --version)" = "v22.22.0"
+
+# Exact native document/spreadsheet/presentation runtime. The builder turns the
+# release-matrix input into a self-contained Node facade, vendors only its
+# target-native renderer closure, pins every byte in installation.json, and
+# runs real DOCX/XLSX/PPTX plus PNG/WebP smoke probes before this copy.
+COPY --from=artifact-runtime-builder /opt/opengeni/artifact-runtime /opt/opengeni/artifact-runtime
+RUN set -eux; \
+    if [ -f /opt/opengeni/artifact-runtime/installation.json ]; then \
+      ln -s /opt/opengeni/artifact-runtime/opengeni-artifact-runtime.mjs /usr/local/bin/opengeni-artifact-runtime; \
+      OPENGENI_ARTIFACT_RUNTIME_MANIFEST=/opt/opengeni/artifact-runtime/installation.json \
+        OPENGENI_ARTIFACT_TOOL_ENTRY=/opt/opengeni/artifact-runtime/skill-facade-entry.mjs \
+        opengeni-artifact-runtime doctor --json; \
+    else \
+      test -f /opt/opengeni/artifact-runtime/.unavailable; \
+    fi
 
 RUN set -eux; \
     arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \

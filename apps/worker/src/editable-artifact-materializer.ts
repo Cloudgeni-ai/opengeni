@@ -300,8 +300,24 @@ export type EditableArtifactMaterializerDeadLetterCode =
   | "output_verification_failed"
   | "retry_exhausted";
 
+export type EditableArtifactMaterializerFailureDiagnostic = Readonly<{
+  stage: "source_reader" | "native";
+  subcode:
+    | "open"
+    | "content_type"
+    | "stream_identity"
+    | "revalidate"
+    | "input_framing"
+    | "snapshot_open"
+    | "state_mismatch"
+    | "revision_mismatch";
+}>;
+
 export class EditableArtifactMaterializerPermanentError extends Error {
-  constructor(readonly code: EditableArtifactMaterializerDeadLetterCode) {
+  constructor(
+    readonly code: EditableArtifactMaterializerDeadLetterCode,
+    readonly diagnostic?: EditableArtifactMaterializerFailureDiagnostic,
+  ) {
     super(`Editable artifact materialization cannot continue: ${code}`);
     this.name = "EditableArtifactMaterializerPermanentError";
   }
@@ -446,20 +462,34 @@ export class EditableArtifactMaterializer {
       if (job.sourceByteSize > this.#options.maxSourceBytes) {
         throw new EditableArtifactMaterializerPermanentError("source_size_limit");
       }
-      source = await this.dependencies.sourceReader.open({
-        opaqueReference: job.sourceObjectReference,
-        maxBytes: this.#options.maxSourceBytes,
-        expectedByteSize: job.sourceByteSize,
-        signal: combined.signal,
-      });
+      try {
+        source = await this.dependencies.sourceReader.open({
+          opaqueReference: job.sourceObjectReference,
+          maxBytes: this.#options.maxSourceBytes,
+          expectedByteSize: job.sourceByteSize,
+          signal: combined.signal,
+        });
+      } catch (error) {
+        throw diagnoseSourceReaderFailure(error, "open");
+      }
       if (source.contentType !== undefined && source.contentType !== job.sourceMimeType) {
-        throw new EditableArtifactMaterializerPermanentError("source_identity_mismatch");
+        throw new EditableArtifactMaterializerPermanentError("source_identity_mismatch", {
+          stage: "source_reader",
+          subcode: "content_type",
+        });
+      }
+      let sourceChunks: AsyncIterable<Uint8Array>;
+      try {
+        sourceChunks = source.chunks({ signal: combined.signal });
+      } catch (error) {
+        throw diagnoseSourceReaderFailure(error, "stream_identity");
       }
       const trackedSource = trackExactStream(
-        source.chunks({ signal: combined.signal }),
+        sourceChunks,
         job.sourceByteSize,
         job.sourceContentHash,
         "source_identity_mismatch",
+        { stage: "source_reader", subcode: "stream_identity" },
       );
       let output: NativeEditableArtifactMaterializationResult;
       try {
@@ -477,7 +507,11 @@ export class EditableArtifactMaterializer {
         void trackedSource.done.catch(() => undefined);
         throw error;
       }
-      await source.assertUnchanged(combined.signal);
+      try {
+        await source.assertUnchanged(combined.signal);
+      } catch (error) {
+        throw diagnoseSourceReaderFailure(error, "revalidate");
+      }
       validateKernelResult(job, output);
 
       const written = await this.dependencies.outputWriter.write({
@@ -628,6 +662,12 @@ export class EditableArtifactMaterializer {
       this.dependencies.logger?.warn(message, {
         code,
         errorClass: error instanceof Error ? error.name : "UnknownError",
+        ...(error instanceof EditableArtifactMaterializerPermanentError && error.diagnostic
+          ? {
+              failureStage: error.diagnostic.stage,
+              failureSubcode: error.diagnostic.subcode,
+            }
+          : {}),
       });
     } catch {
       // Logging is never part of the correctness boundary.
@@ -953,6 +993,7 @@ function trackExactStream(
   expectedByteSize: number,
   expectedContentHash: string,
   code: EditableArtifactMaterializerDeadLetterCode,
+  diagnostic?: EditableArtifactMaterializerFailureDiagnostic,
 ): { chunks: AsyncIterable<Uint8Array>; done: Promise<void> } {
   let settle!: () => void;
   let reject!: (error: unknown) => void;
@@ -964,7 +1005,7 @@ function trackExactStream(
   const chunks: AsyncIterable<Uint8Array> = Object.freeze({
     async *[Symbol.asyncIterator](): AsyncIterableIterator<Uint8Array> {
       if (claimed) {
-        const error = new EditableArtifactMaterializerPermanentError(code);
+        const error = new EditableArtifactMaterializerPermanentError(code, diagnostic);
         reject(error);
         throw error;
       }
@@ -974,30 +1015,44 @@ function trackExactStream(
       try {
         for await (const chunk of source) {
           if (!(chunk instanceof Uint8Array) || chunk.byteLength === 0) {
-            throw new EditableArtifactMaterializerPermanentError(code);
+            throw new EditableArtifactMaterializerPermanentError(code, diagnostic);
           }
           byteSize += chunk.byteLength;
           if (byteSize > expectedByteSize) {
-            throw new EditableArtifactMaterializerPermanentError(code);
+            throw new EditableArtifactMaterializerPermanentError(code, diagnostic);
           }
           digest.update(chunk);
           yield chunk.slice();
         }
         if (byteSize !== expectedByteSize) {
-          throw new EditableArtifactMaterializerPermanentError(code);
+          throw new EditableArtifactMaterializerPermanentError(code, diagnostic);
         }
         const contentHash = `sha256:${digest.digest("hex")}`;
         if (contentHash !== expectedContentHash) {
-          throw new EditableArtifactMaterializerPermanentError(code);
+          throw new EditableArtifactMaterializerPermanentError(code, diagnostic);
         }
         settle();
       } catch (error) {
-        reject(error);
-        throw error;
+        const diagnosed = diagnoseSourceReaderFailure(error, "stream_identity");
+        reject(diagnosed);
+        throw diagnosed;
       }
     },
   });
   return { chunks, done };
+}
+
+function diagnoseSourceReaderFailure(
+  error: unknown,
+  subcode: Extract<
+    EditableArtifactMaterializerFailureDiagnostic["subcode"],
+    "open" | "stream_identity" | "revalidate"
+  >,
+): unknown {
+  const code = permanentDependencyFailure(error);
+  return code
+    ? new EditableArtifactMaterializerPermanentError(code, { stage: "source_reader", subcode })
+    : error;
 }
 
 function deterministicResultIds(

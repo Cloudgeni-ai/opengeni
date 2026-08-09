@@ -83,4 +83,20 @@ describe("local artifact runtime stack contract", () => {
     expect(source.indexOf(hostInternalEndpoint)).toBeLessThan(source.indexOf(">.env.runtime"));
     expect(source.indexOf(sandboxEndpoint)).toBeLessThan(source.indexOf(">.env.runtime"));
   });
+
+  test("admits only an exact-head runtime in a source-tagged local image", async () => {
+    const source = await Bun.file(scriptPath).text();
+    expect(source).toContain("bun scripts/resolve-development-sandbox-runtime.ts");
+    expect(source).toContain('sandbox_source_tag="$(git rev-parse --short=12 HEAD)"');
+    expect(source).toContain(
+      'OPENGENI_DOCKER_IMAGE="opengeni-sandbox:local-${sandbox_source_tag}"',
+    );
+    expect(source).toContain("OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED=true");
+    expect(source).toContain("OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED=false");
+    expect(source).toContain("OPENGENI_REQUIRE_SANDBOX_ARTIFACT_RUNTIME");
+    expect(source).toContain(
+      '--build-arg "OPENGENI_ARTIFACT_RUNTIME_BUNDLE=${sandbox_runtime_bundle}"',
+    );
+    expect(source).not.toContain("-t opengeni-sandbox:local .");
+  });
 });

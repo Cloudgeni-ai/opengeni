@@ -97,6 +97,60 @@ describe("artifact runtime distribution", () => {
     ).toThrow("unexpected fields");
   });
 
+  test("validates a bounded, collision-free portable facade closure", () => {
+    const manifest = {
+      ...installationManifest(),
+      artifactToolArchive: { path: "artifact-tool.tgz", bytes: 4096, sha256: digest },
+      skillFacadeSupportFiles: [
+        { path: "node_modules/a/index.js", bytes: 32, sha256: digest },
+        { path: "opengeni-artifact-runtime.mjs", bytes: 64, sha256: digest },
+      ],
+    } satisfies ArtifactRuntimeInstallationManifest;
+    const parsed = validateArtifactRuntimeInstallationManifest(manifest);
+    expect(parsed.skillFacadeSupportFiles).toHaveLength(2);
+    const dependencies = locateArtifactRuntimeDependencies(
+      manifest,
+      new URL("file:///opt/opengeni/artifacts/installation.json"),
+    );
+    expect(dependencies.artifactToolArchiveUrl?.href).toBe(
+      "file:///opt/opengeni/artifacts/artifact-tool.tgz",
+    );
+    expect(dependencies.skillFacadeSupportFiles.map(String)).toEqual([
+      "file:///opt/opengeni/artifacts/node_modules/a/index.js",
+      "file:///opt/opengeni/artifacts/opengeni-artifact-runtime.mjs",
+    ]);
+
+    expect(() =>
+      validateArtifactRuntimeInstallationManifest({
+        ...manifest,
+        skillFacadeSupportFiles: [...manifest.skillFacadeSupportFiles].reverse(),
+      }),
+    ).toThrow("strictly sorted");
+    expect(() =>
+      validateArtifactRuntimeInstallationManifest({
+        ...manifest,
+        skillFacadeSupportFiles: [
+          { path: manifest.releaseManifest.path, bytes: 32, sha256: digest },
+        ],
+      }),
+    ).toThrow("collision-free");
+    expect(() =>
+      validateArtifactRuntimeInstallationManifest({
+        ...manifest,
+        skillFacadeSupportFiles: [{ path: "kernel/index.js", bytes: 32, sha256: digest }],
+      }),
+    ).toThrow("collision-free");
+    expect(() =>
+      validateArtifactRuntimeInstallationManifest({
+        ...manifest,
+        skillFacadeSupportFiles: [
+          { path: "node_modules/a", bytes: 160 * 1024 * 1024, sha256: digest },
+          { path: "node_modules/b", bytes: 160 * 1024 * 1024, sha256: digest },
+        ],
+      }),
+    ).toThrow("256 MiB");
+  });
+
   test("loads only the selected package and validates package identity plus ABI", async () => {
     const dependencies = locateArtifactRuntimeDependencies(
       installationManifest(),

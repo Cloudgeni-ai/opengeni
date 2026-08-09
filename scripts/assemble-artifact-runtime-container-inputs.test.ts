@@ -7,6 +7,7 @@ import {
   ARTIFACT_RUNTIME_CONTAINER_TARGETS,
   assembleArtifactRuntimeContainerInputs,
 } from "./assemble-artifact-runtime-container-inputs";
+import { validateArtifactRuntimeContainerReceipt } from "./verify-artifact-runtime-container-inputs";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -44,6 +45,24 @@ describe("artifact runtime container inputs", () => {
     expect(await readFile(join(outputRoot, "arm64", "installation.json"), "utf8")).toBe(
       "linux-arm64-gnu",
     );
+    expect(
+      JSON.parse(
+        await readFile(join(outputRoot, "artifact-runtime-container-receipt.json"), "utf8"),
+      ),
+    ).toEqual({
+      schemaVersion: 1,
+      sourceSha: "a".repeat(40),
+      installations: [
+        {
+          architecture: "amd64",
+          installationSha256: expect.stringMatching(/^sha256:[0-9a-f]{64}$/u),
+        },
+        {
+          architecture: "arm64",
+          installationSha256: expect.stringMatching(/^sha256:[0-9a-f]{64}$/u),
+        },
+      ],
+    });
   });
 
   test("preserves the previous complete tree when either architecture fails", async () => {
@@ -60,6 +79,27 @@ describe("artifact runtime container inputs", () => {
     ).rejects.toThrow("missing exact arm64 receipt");
     expect(await readFile(join(outputRoot, "accepted"), "utf8")).toBe("previous");
   });
+
+  test("accepts only the exact two-architecture receipt schema and order", () => {
+    const receipt = {
+      schemaVersion: 1,
+      sourceSha: "a".repeat(40),
+      installations: [
+        { architecture: "amd64", installationSha256: `sha256:${"b".repeat(64)}` },
+        { architecture: "arm64", installationSha256: `sha256:${"c".repeat(64)}` },
+      ],
+    };
+    expect(validateArtifactRuntimeContainerReceipt(receipt)).toEqual(receipt);
+    expect(() =>
+      validateArtifactRuntimeContainerReceipt({
+        ...receipt,
+        installations: [...receipt.installations].reverse(),
+      }),
+    ).toThrow("container receipt is invalid");
+    expect(() => validateArtifactRuntimeContainerReceipt({ ...receipt, unexpected: true })).toThrow(
+      "container receipt is invalid",
+    );
+  });
 });
 
 async function temporaryRoot(): Promise<string> {
@@ -74,5 +114,6 @@ function options(root: string, outputRoot: string) {
     materializedPackagesRoot: join(root, "packages"),
     artifactToolTarballPath: join(root, "artifact-tool.tgz"),
     outputRoot,
+    sourceSha: "a".repeat(40),
   };
 }

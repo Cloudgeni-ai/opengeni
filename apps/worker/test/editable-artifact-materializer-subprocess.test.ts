@@ -237,6 +237,25 @@ describe("native editable artifact materializer subprocess", () => {
     ).rejects.toMatchObject({ code: "output_size_limit" });
   });
 
+  test("preserves bounded native failure diagnostics without changing the terminal code", async () => {
+    const port = await createNativeEditableArtifactSubprocessPort(options());
+    const normalizedOptions = '{"typedFailure":true}';
+    await expect(
+      port.materialize({
+        job: makeJob({
+          normalizedOptions,
+          optionsHash: hash(new TextEncoder().encode(normalizedOptions)),
+        }),
+        normalizedOptions: new TextEncoder().encode(normalizedOptions),
+        snapshot: chunks(source),
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toMatchObject({
+      code: "source_identity_mismatch",
+      diagnostic: { stage: "native", subcode: "state_mismatch" },
+    });
+  });
+
   test("large multi-chunk input reuses one abort/exit listener pair", async () => {
     const large = new Uint8Array(4 * 1024 * 1024);
     large.fill(7);

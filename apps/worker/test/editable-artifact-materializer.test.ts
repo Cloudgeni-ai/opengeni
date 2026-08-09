@@ -123,6 +123,12 @@ describe("editable artifact materializer", () => {
     expect(fixture.store.failed[0]).toMatchObject({
       errorCode: "source_identity_mismatch",
     });
+    expect(fixture.warnings).toContainEqual({
+      code: "source_identity_mismatch",
+      errorClass: "EditableArtifactMaterializerPermanentError",
+      failureStage: "source_reader",
+      failureSubcode: "stream_identity",
+    });
     expect(fixture.objects.size).toBe(0);
   });
 
@@ -281,6 +287,7 @@ function createFixture(options: FixtureOptions = {}) {
   const objects = new Map<string, Uint8Array>();
   const kernelInputs: Array<{ snapshot: number[]; options: string; jobId: string }> = [];
   const verifierCalls: unknown[] = [];
+  const warnings: Array<Record<string, unknown>> = [];
   let computeCount = 0;
   let verifierMismatch = false;
 
@@ -415,6 +422,7 @@ function createFixture(options: FixtureOptions = {}) {
     kernel,
     scheduler,
     clock: { now: () => new Date("2026-08-08T12:00:00.000Z") },
+    logger: { warn: (_message, attributes) => warnings.push({ ...attributes }) },
   });
 
   return {
@@ -423,6 +431,7 @@ function createFixture(options: FixtureOptions = {}) {
     objects,
     kernelInputs,
     verifierCalls,
+    warnings,
     get computeCount() {
       return computeCount;
     },

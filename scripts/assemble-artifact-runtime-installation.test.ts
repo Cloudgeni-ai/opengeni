@@ -58,6 +58,7 @@ describe("artifact runtime installation assembler", () => {
       [ARTIFACT_RUNTIME_ENVIRONMENT.toolEntrypoint]: join(relocated, "skill-facade-entry.mjs"),
     };
     const location = await locateVerifiedArtifactRuntime({ environment, expectedTarget: target });
+    expect(location.artifactToolArchive).toBe(await realpath(join(relocated, "artifact-tool.tgz")));
     expect(location.kernel.asset).toBe(
       await realpath(join(relocated, "kernel", "opengeni_artifact_kernel.node")),
     );

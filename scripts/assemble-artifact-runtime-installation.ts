@@ -40,6 +40,7 @@ import { renderArtifactSkillFacadeBootstrap } from "./materialize-artifact-kerne
 const RELEASE_MANIFEST = "artifact-runtime-release-manifest.json";
 const PACKAGE_MANIFEST = "artifact-kernel-manifest.json";
 const SKILL_FACADE = "skill-facade-entry.mjs";
+const ARTIFACT_TOOL_ARCHIVE = "artifact-tool.tgz";
 const INSTALLATION_MANIFEST = "installation.json";
 const MAX_RELEASE_MANIFEST_BYTES = 1024 * 1024;
 const MAX_PACKAGE_MANIFEST_BYTES = 256 * 1024;
@@ -173,6 +174,7 @@ export async function assembleArtifactRuntimeInstallation(
     await mkdir(join(stagingRoot, "kernel"), { recursive: true });
     await Promise.all([
       writeFile(join(stagingRoot, RELEASE_MANIFEST), releaseBytes, { mode: 0o444 }),
+      writeFile(join(stagingRoot, ARTIFACT_TOOL_ARCHIVE), artifactToolTarball, { mode: 0o444 }),
       writeFile(join(stagingRoot, SKILL_FACADE), facadeBytes, { mode: 0o444 }),
       ...runtimeFiles.map(({ descriptor, bytes }) =>
         writeFile(join(stagingRoot, "kernel", descriptor.path), bytes, { mode: 0o444 }),
@@ -184,6 +186,7 @@ export async function assembleArtifactRuntimeInstallation(
       target: options.target,
       releaseManifest: fileDescriptor(RELEASE_MANIFEST, releaseBytes),
       artifactTool: release.artifactTool,
+      artifactToolArchive: fileDescriptor(ARTIFACT_TOOL_ARCHIVE, artifactToolTarball),
       skillFacadeEntrypoint: fileDescriptor(SKILL_FACADE, facadeBytes),
       kernelPackageRoot: "kernel",
       kernel: packageManifest,

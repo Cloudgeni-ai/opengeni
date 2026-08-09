@@ -208,7 +208,7 @@ export async function createProductionEditableArtifactMaterializerService(
           warn(message, attributes) {
             observability.warn(message, {
               errorClass: "WorkerOperationError",
-              errorCode: "worker_operation_failed",
+              errorCode: materializerFailureErrorCode(attributes) ?? "worker_operation_failed",
               origin: "worker",
               outcome: typeof attributes.code === "string" ? attributes.code : "unknown",
             });
@@ -258,6 +258,39 @@ export async function createProductionEditableArtifactMaterializerService(
     });
   } finally {
     if (!created) await dbClient.close();
+  }
+}
+
+function materializerFailureErrorCode(
+  attributes: Readonly<Record<string, unknown>>,
+):
+  | "artifact_materializer_source_open_failed"
+  | "artifact_materializer_source_content_type_mismatch"
+  | "artifact_materializer_source_stream_identity_mismatch"
+  | "artifact_materializer_source_revalidation_failed"
+  | "artifact_materializer_native_input_framing_failed"
+  | "artifact_materializer_native_snapshot_open_failed"
+  | "artifact_materializer_native_state_mismatch"
+  | "artifact_materializer_native_revision_mismatch"
+  | undefined {
+  const key = `${String(attributes.failureStage)}:${String(attributes.failureSubcode)}`;
+  switch (key) {
+    case "source_reader:open":
+      return "artifact_materializer_source_open_failed";
+    case "source_reader:content_type":
+      return "artifact_materializer_source_content_type_mismatch";
+    case "source_reader:stream_identity":
+      return "artifact_materializer_source_stream_identity_mismatch";
+    case "source_reader:revalidate":
+      return "artifact_materializer_source_revalidation_failed";
+    case "native:input_framing":
+      return "artifact_materializer_native_input_framing_failed";
+    case "native:snapshot_open":
+      return "artifact_materializer_native_snapshot_open_failed";
+    case "native:state_mismatch":
+      return "artifact_materializer_native_state_mismatch";
+    case "native:revision_mismatch":
+      return "artifact_materializer_native_revision_mismatch";
   }
 }
 

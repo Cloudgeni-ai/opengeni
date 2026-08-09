@@ -101,11 +101,30 @@ export type ArtifactRuntimeInstallationManifest = {
     readonly packageVersion: string;
     readonly integrity: `sha512-${string}`;
   };
+  /** Exact packed package whose SHA-512 is `artifactTool.integrity`. */
+  readonly artifactToolArchive?: {
+    readonly path: string;
+    readonly bytes: number;
+    readonly sha256: `sha256:${string}`;
+  };
   readonly skillFacadeEntrypoint: {
     readonly path: string;
     readonly bytes: number;
     readonly sha256: `sha256:${string}`;
   };
+  /**
+   * Optional, installation-local files dynamically loaded by the facade.
+   *
+   * A plain server installation can omit this when its package manager owns
+   * those dependencies. A portable sandbox installation lists every vendored
+   * runtime file here so locator/doctor verifies the complete executable
+   * closure before evaluating the facade.
+   */
+  readonly skillFacadeSupportFiles?: readonly {
+    readonly path: string;
+    readonly bytes: number;
+    readonly sha256: `sha256:${string}`;
+  }[];
   readonly kernelPackageRoot: string;
   readonly kernel: ArtifactKernelPackageManifest;
 };
@@ -124,7 +143,9 @@ export type ArtifactRuntimeDependencies = {
   readonly target: ArtifactRuntimeTargetDescriptor;
   readonly manifestUrl: URL;
   readonly releaseManifestUrl: URL;
+  readonly artifactToolArchiveUrl?: URL;
   readonly skillFacadeEntrypoint: URL;
+  readonly skillFacadeSupportFiles: readonly URL[];
   readonly kernelEntrypoint: URL;
   readonly kernelAsset: URL;
   readonly kernelSupportFiles: readonly URL[];
@@ -410,14 +431,17 @@ export function validateArtifactRuntimeInstallationManifest(
   value: unknown,
   expectedTarget?: ArtifactRuntimeTarget,
 ): ArtifactRuntimeInstallationManifest {
+  const candidate = requiredRecord(value, "artifact runtime installation manifest");
   const record = exactRecord(
-    value,
+    candidate,
     [
       "schemaVersion",
       "target",
       "releaseManifest",
       "artifactTool",
+      ...(Object.hasOwn(candidate, "artifactToolArchive") ? ["artifactToolArchive"] : []),
       "skillFacadeEntrypoint",
+      ...(Object.hasOwn(candidate, "skillFacadeSupportFiles") ? ["skillFacadeSupportFiles"] : []),
       "kernelPackageRoot",
       "kernel",
     ],
@@ -443,14 +467,75 @@ export function validateArtifactRuntimeInstallationManifest(
   }
   const packageVersion = exactStableVersion(artifactTool.packageVersion, "artifact-tool version");
   const integrity = sha512Integrity(artifactTool.integrity, "artifact-tool integrity");
+  const artifactToolArchive = Object.hasOwn(candidate, "artifactToolArchive")
+    ? exactRecord(record.artifactToolArchive, ["path", "bytes", "sha256"], "artifact-tool archive")
+    : undefined;
   const skillFacadeEntrypoint = exactRecord(
     record.skillFacadeEntrypoint,
     ["path", "bytes", "sha256"],
     "skill facade entrypoint",
   );
+  const rawSkillFacadeSupportFiles = record.skillFacadeSupportFiles ?? [];
+  if (!Array.isArray(rawSkillFacadeSupportFiles) || rawSkillFacadeSupportFiles.length > 256) {
+    invalid("skill facade supportFiles must be an array with at most 256 entries");
+  }
+  const skillFacadeSupportFiles = rawSkillFacadeSupportFiles.map((supportFile, index) => {
+    const file = exactRecord(
+      supportFile,
+      ["path", "bytes", "sha256"],
+      `skill facade support file ${index}`,
+    );
+    return {
+      path: safeRelativePath(file.path, `skill facade support file ${index} path`),
+      bytes: positiveSafeInteger(file.bytes, `skill facade support file ${index} bytes`),
+      sha256: sha256(file.sha256, `skill facade support file ${index} sha256`),
+    };
+  });
+  if (
+    !skillFacadeSupportFiles.every(
+      (file, index) => index === 0 || skillFacadeSupportFiles[index - 1]!.path < file.path,
+    )
+  ) {
+    invalid("skill facade supportFiles must be strictly sorted by path");
+  }
+  const facadeRuntimePaths = [
+    ...(artifactToolArchive
+      ? [safeRelativePath(artifactToolArchive.path, "artifact-tool archive path")]
+      : []),
+    safeRelativePath(releaseManifest.path, "release manifest path"),
+    safeRelativePath(skillFacadeEntrypoint.path, "skill facade entrypoint path"),
+    ...skillFacadeSupportFiles.map((file) => file.path),
+  ];
+  const skillFacadeSupportBytes = skillFacadeSupportFiles.reduce(
+    (total, file) => total + file.bytes,
+    0,
+  );
+  if (
+    !Number.isSafeInteger(skillFacadeSupportBytes) ||
+    skillFacadeSupportBytes > 256 * 1024 * 1024
+  ) {
+    invalid("skill facade supportFiles exceed the 256 MiB installation limit");
+  }
   const kernel = validateArtifactKernelPackageManifest(record.kernel, record.target);
   if (kernel.artifactToolVersion !== packageVersion) {
     invalid("installed artifact-tool and kernel versions must be identical");
+  }
+  const kernelPackageRoot = safeRelativePath(record.kernelPackageRoot, "kernel package root");
+  const installationFilePaths = [
+    ...facadeRuntimePaths,
+    `${kernelPackageRoot}/${kernel.entrypoint.path}`,
+    `${kernelPackageRoot}/${kernel.asset.path}`,
+    ...kernel.supportFiles.map((file) => `${kernelPackageRoot}/${file.path}`),
+  ].sort();
+  if (
+    installationFilePaths.some(
+      (path, index) =>
+        index > 0 &&
+        (path === installationFilePaths[index - 1] ||
+          path.startsWith(`${installationFilePaths[index - 1]}/`)),
+    )
+  ) {
+    invalid("installation runtime file paths must be collision-free");
   }
   return {
     schemaVersion: 1,
@@ -465,12 +550,22 @@ export function validateArtifactRuntimeInstallationManifest(
       packageVersion,
       integrity,
     },
+    ...(artifactToolArchive
+      ? {
+          artifactToolArchive: {
+            path: safeRelativePath(artifactToolArchive.path, "artifact-tool archive path"),
+            bytes: positiveSafeInteger(artifactToolArchive.bytes, "artifact-tool archive bytes"),
+            sha256: sha256(artifactToolArchive.sha256, "artifact-tool archive sha256"),
+          },
+        }
+      : {}),
     skillFacadeEntrypoint: {
       path: safeRelativePath(skillFacadeEntrypoint.path, "skill facade entrypoint path"),
       bytes: positiveSafeInteger(skillFacadeEntrypoint.bytes, "skill facade entrypoint bytes"),
       sha256: sha256(skillFacadeEntrypoint.sha256, "skill facade entrypoint sha256"),
     },
-    kernelPackageRoot: safeRelativePath(record.kernelPackageRoot, "kernel package root"),
+    ...(Object.hasOwn(candidate, "skillFacadeSupportFiles") ? { skillFacadeSupportFiles } : {}),
+    kernelPackageRoot,
     kernel: {
       ...kernel,
     },
@@ -542,7 +637,13 @@ export function locateArtifactRuntimeDependencies(
     target: artifactRuntimeTarget(manifest.target),
     manifestUrl,
     releaseManifestUrl: confinedUrl(root, manifest.releaseManifest.path),
+    ...(manifest.artifactToolArchive
+      ? { artifactToolArchiveUrl: confinedUrl(root, manifest.artifactToolArchive.path) }
+      : {}),
     skillFacadeEntrypoint: confinedUrl(root, manifest.skillFacadeEntrypoint.path),
+    skillFacadeSupportFiles: (manifest.skillFacadeSupportFiles ?? []).map((file) =>
+      confinedUrl(root, file.path),
+    ),
     kernelEntrypoint: confinedUrl(kernelRoot, manifest.kernel.entrypoint.path),
     kernelAsset: confinedUrl(kernelRoot, manifest.kernel.asset.path),
     kernelSupportFiles: manifest.kernel.supportFiles.map((file) =>

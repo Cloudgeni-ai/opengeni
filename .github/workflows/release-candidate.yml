@@ -330,6 +330,7 @@ jobs:
           file: docker/sandbox.Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
+          build-args: OPENGENI_SOURCE_SHA=${{ inputs.source_sha }}
           tags: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-sandbox:${{ steps.meta.outputs.candidate_tag }}
 
       - name: Resolve sandbox candidate digest

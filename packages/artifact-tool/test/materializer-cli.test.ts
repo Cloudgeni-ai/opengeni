@@ -179,6 +179,99 @@ describe("compiled native artifact materializer", () => {
       metadata: { code: "unsupported_semantics", protocol: "OGAMERR1" },
     });
 
+    const framingMismatch = parseFrame(
+      (
+        await invoke(
+          fixture,
+          MATERIALIZE,
+          framed(
+            INPUT_MAGIC,
+            manifest({ sourceContentHash: sha256(text("different source")) }),
+            fixture.snapshot,
+          ),
+        )
+      ).stdout,
+    );
+    expect(framingMismatch).toMatchObject({
+      magic: ERROR_MAGIC,
+      metadata: {
+        code: "source_identity_mismatch",
+        protocol: "OGAMERR1",
+        subcode: "input_framing",
+      },
+    });
+
+    const invalidSnapshot = Uint8Array.from(fixture.snapshot);
+    invalidSnapshot[0] = invalidSnapshot[0]! ^ 0xff;
+    const snapshotOpen = parseFrame(
+      (
+        await invoke(
+          fixture,
+          MATERIALIZE,
+          framed(
+            INPUT_MAGIC,
+            manifest({
+              sourceContentHash: sha256(invalidSnapshot),
+              sourceByteSize: invalidSnapshot.byteLength,
+            }),
+            invalidSnapshot,
+          ),
+        )
+      ).stdout,
+    );
+    expect(snapshotOpen).toMatchObject({
+      magic: ERROR_MAGIC,
+      metadata: {
+        code: "source_identity_mismatch",
+        protocol: "OGAMERR1",
+        subcode: "snapshot_open",
+      },
+    });
+
+    const stateMismatch = parseFrame(
+      (
+        await invoke(
+          fixture,
+          MATERIALIZE,
+          framed(
+            INPUT_MAGIC,
+            manifest({ stateHash: `sha256:${"0".repeat(64)}` }),
+            fixture.snapshot,
+          ),
+        )
+      ).stdout,
+    );
+    expect(stateMismatch).toMatchObject({
+      magic: ERROR_MAGIC,
+      metadata: {
+        code: "source_identity_mismatch",
+        protocol: "OGAMERR1",
+        subcode: "state_mismatch",
+      },
+    });
+
+    const revisionMismatch = parseFrame(
+      (
+        await invoke(
+          fixture,
+          MATERIALIZE,
+          framed(
+            INPUT_MAGIC,
+            manifest({ targetHeadSequence: fixture.headSequence + 1 }),
+            fixture.snapshot,
+          ),
+        )
+      ).stdout,
+    );
+    expect(revisionMismatch).toMatchObject({
+      magic: ERROR_MAGIC,
+      metadata: {
+        code: "source_identity_mismatch",
+        protocol: "OGAMERR1",
+        subcode: "revision_mismatch",
+      },
+    });
+
     const valid = parseFrame(
       (await invoke(fixture, MATERIALIZE, framed(INPUT_MAGIC, manifest(), fixture.snapshot)))
         .stdout,

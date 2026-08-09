@@ -69,6 +69,39 @@ describe("artifact runtime locator executable", () => {
     expect(imported).toBe(false);
   });
 
+  test("verifies every portable facade support byte and packed package before import", async () => {
+    const fixture = await createRuntimeFixture({ portable: true });
+    const location = await locateVerifiedArtifactRuntime({
+      environment: fixture.environment,
+      expectedTarget: "darwin-arm64",
+    });
+    expect(location.artifactToolArchive).toBe(fixture.archivePath);
+    expect(location.skillFacadeSupportFiles).toEqual([fixture.supportPath!]);
+
+    await writeFile(fixture.supportPath!, "tampered-support-file");
+    let imported = false;
+    await expect(
+      doctorVerifiedArtifactRuntime({
+        environment: fixture.environment,
+        expectedTarget: "darwin-arm64",
+        importer: () => {
+          imported = true;
+          return {};
+        },
+      }),
+    ).rejects.toThrow("ARTIFACT_RUNTIME_INTEGRITY");
+    expect(imported).toBe(false);
+
+    const archiveTamper = await createRuntimeFixture({ portable: true });
+    await writeFile(archiveTamper.archivePath!, "tampered-packed-tool");
+    await expect(
+      locateVerifiedArtifactRuntime({
+        environment: archiveTamper.environment,
+        expectedTarget: "darwin-arm64",
+      }),
+    ).rejects.toThrow("ARTIFACT_RUNTIME_INTEGRITY");
+  });
+
   test("rejects wrong target, wrong facade authority, and noncanonical release bytes", async () => {
     const wrongTarget = await createRuntimeFixture();
     await expect(
@@ -214,11 +247,14 @@ type RuntimeFixture = Readonly<{
   facadePath: string;
   assetPath: string;
   environment: Readonly<Record<string, string>>;
+  archivePath?: string;
+  supportPath?: string;
 }>;
 
 async function createRuntimeFixture(
   options: Readonly<{
     canonicalRelease?: boolean;
+    portable?: boolean;
     target?: (typeof ARTIFACT_RUNTIME_MATRIX)[number]["target"];
   }> = {},
 ): Promise<RuntimeFixture> {
@@ -230,16 +266,27 @@ async function createRuntimeFixture(
   const kernelEntrypoint = join(kernelRoot, "index.js");
   const assetPath = join(kernelRoot, "opengeni_artifact_kernel.node");
   const manifestPath = join(root, "installation.json");
+  const archivePath = join(root, "artifact-tool.tgz");
+  const supportPath = join(root, "runtime-support.js");
   await mkdir(kernelRoot, { recursive: true });
 
   const facadeBytes = new TextEncoder().encode("export const configured = true;\n");
   const kernelBytes = new TextEncoder().encode("export const kernel = true;\n");
   const assetBytes = new TextEncoder().encode("verified-kernel-asset");
+  const archiveBytes = new TextEncoder().encode("verified-packed-artifact-tool");
+  const supportBytes = new TextEncoder().encode("verified-support-file");
   await Promise.all([
     writeFile(facadePath, facadeBytes),
     writeFile(kernelEntrypoint, kernelBytes),
     writeFile(assetPath, assetBytes),
+    ...(options.portable
+      ? [writeFile(archivePath, archiveBytes), writeFile(supportPath, supportBytes)]
+      : []),
   ]);
+
+  const artifactToolIntegrity = options.portable
+    ? (`sha512-${createHash("sha512").update(archiveBytes).digest("base64")}` as const)
+    : integrity;
 
   const selected = packageManifest(options.target ?? "darwin-arm64", kernelBytes, assetBytes);
   const release = {
@@ -247,7 +294,7 @@ async function createRuntimeFixture(
     artifactTool: {
       packageName: "@opengeni/artifact-tool",
       packageVersion,
-      integrity,
+      integrity: artifactToolIntegrity,
     },
     targets: ARTIFACT_RUNTIME_MATRIX.map((runtimeDescriptor, index) =>
       runtimeDescriptor.target === selected.target
@@ -273,9 +320,15 @@ async function createRuntimeFixture(
     artifactTool: {
       packageName: "@opengeni/artifact-tool",
       packageVersion,
-      integrity,
+      integrity: artifactToolIntegrity,
     },
+    ...(options.portable
+      ? { artifactToolArchive: descriptor("artifact-tool.tgz", archiveBytes) }
+      : {}),
     skillFacadeEntrypoint: descriptor("skill-facade.js", facadeBytes),
+    ...(options.portable
+      ? { skillFacadeSupportFiles: [descriptor("runtime-support.js", supportBytes)] }
+      : {}),
     kernelPackageRoot: "kernel",
     kernel: selected,
   };
@@ -289,6 +342,7 @@ async function createRuntimeFixture(
       [ARTIFACT_RUNTIME_ENVIRONMENT.manifest]: manifestPath,
       [ARTIFACT_RUNTIME_ENVIRONMENT.toolEntrypoint]: facadePath,
     },
+    ...(options.portable ? { archivePath, supportPath } : {}),
   };
 }
 

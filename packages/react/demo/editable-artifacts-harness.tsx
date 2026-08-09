@@ -71,7 +71,7 @@ function EditableArtifactReferenceConsumer() {
     void loadWorkspaceAuthority(workspaceId)
       .then(async (authority) => {
         if (!artifactId) return { kind: "workspace", value: authority } as const;
-        const replicaId = getOrCreateReplicaId(authority.cacheAuthority, artifactId);
+        const replicaId = createEditableArtifactReplicaId();
         const artifact = await client.getEditableArtifact(workspaceId, artifactId, { replicaId });
         return {
           kind: "artifact",
@@ -208,7 +208,6 @@ function ArtifactStart({
         idempotencyKey: attempt.idempotencyKey,
         replicaId: attempt.replicaId,
       });
-      storeReplicaId(authority.cacheAuthority, artifact.id, attempt.replicaId);
       attemptRef.current = undefined;
       onOpen(artifact.id);
     } catch (cause) {
@@ -492,38 +491,6 @@ function writeLocation(workspaceId: string, artifactId: string): void {
   if (artifactId) url.searchParams.set("artifactId", artifactId);
   else url.searchParams.delete("artifactId");
   history.replaceState(null, "", url);
-}
-
-function replicaStorageKey(authority: EditableArtifactCacheAuthority, artifactId: string): string {
-  return `opengeni:editable-artifact-replica:v1:${JSON.stringify([
-    authority.deploymentOrigin,
-    authority.accountId,
-    authority.workspaceId,
-    authority.principalId,
-    artifactId,
-  ])}`;
-}
-
-function getOrCreateReplicaId(
-  authority: EditableArtifactCacheAuthority,
-  artifactId: string,
-): string {
-  assertBrowserStorage();
-  const key = replicaStorageKey(authority, artifactId);
-  const existing = localStorage.getItem(key);
-  if (existing && /^[0-9a-f]{16}$/u.test(existing) && !/^0+$/u.test(existing)) return existing;
-  const replicaId = createEditableArtifactReplicaId();
-  localStorage.setItem(key, replicaId);
-  return replicaId;
-}
-
-function storeReplicaId(
-  authority: EditableArtifactCacheAuthority,
-  artifactId: string,
-  replicaId: string,
-): void {
-  assertBrowserStorage();
-  localStorage.setItem(replicaStorageKey(authority, artifactId), replicaId);
 }
 
 function assertBrowserStorage(): void {

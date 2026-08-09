@@ -92,6 +92,12 @@ type ProjectedWorkbook = Readonly<{
   semanticHash: string;
 }>;
 
+type NativeSourceDiagnosticSubcode =
+  | "input_framing"
+  | "snapshot_open"
+  | "state_mismatch"
+  | "revision_mismatch";
+
 export async function runArtifactMaterializerCli(
   args: readonly string[],
   environment: Readonly<Record<string, string | undefined>> = process.env,
@@ -108,7 +114,7 @@ export async function runArtifactMaterializerCli(
       await materialize(environment);
     } catch (error) {
       if (!(error instanceof MaterializerCliError)) throw error;
-      await writeTypedError(error.code);
+      await writeTypedError(error.code, error.diagnosticSubcode);
     }
     return;
   }
@@ -117,7 +123,7 @@ export async function runArtifactMaterializerCli(
       await verifyMaterialization(environment);
     } catch (error) {
       if (!(error instanceof MaterializerCliError)) throw error;
-      await writeTypedError(error.code);
+      await writeTypedError(error.code, error.diagnosticSubcode);
     }
     return;
   }
@@ -137,19 +143,25 @@ async function loadCapabilities(
 async function materialize(
   environment: Readonly<Record<string, string | undefined>>,
 ): Promise<void> {
-  const reader = new InputReader(process.stdin);
-  assertBytes(await reader.readExactly(INPUT_MAGIC.byteLength), INPUT_MAGIC, "input protocol");
-  const header = await reader.readExactly(12);
-  const headerView = new DataView(header.buffer, header.byteOffset, header.byteLength);
-  const metadataLength = headerView.getUint32(0, true);
-  const sourceLength = safeU64(headerView, 4, "source length");
-  if (metadataLength < 2 || metadataLength > MAX_METADATA_BYTES) throw invalidSource();
-  if (sourceLength <= 0 || sourceLength > MAX_SOURCE_BYTES) throw unsupported();
-  const manifest = decodeManifest(await reader.readExactly(metadataLength));
-  if (sourceLength !== manifest.sourceByteSize) throw invalidSource();
-  const source = await reader.readExactly(sourceLength);
-  await reader.assertEof();
-  if (sha256(source) !== manifest.sourceContentHash) throw invalidSource();
+  let manifest: MaterializationManifest;
+  let source: Uint8Array;
+  try {
+    const reader = new InputReader(process.stdin);
+    assertBytes(await reader.readExactly(INPUT_MAGIC.byteLength), INPUT_MAGIC, "input protocol");
+    const header = await reader.readExactly(12);
+    const headerView = new DataView(header.buffer, header.byteOffset, header.byteLength);
+    const metadataLength = headerView.getUint32(0, true);
+    const sourceLength = safeU64(headerView, 4, "source length");
+    if (metadataLength < 2 || metadataLength > MAX_METADATA_BYTES) throw invalidSource();
+    if (sourceLength <= 0 || sourceLength > MAX_SOURCE_BYTES) throw unsupported();
+    manifest = decodeManifest(await reader.readExactly(metadataLength));
+    if (sourceLength !== manifest.sourceByteSize) throw invalidSource();
+    source = await reader.readExactly(sourceLength);
+    await reader.assertEof();
+    if (sha256(source) !== manifest.sourceContentHash) throw invalidSource();
+  } catch (error) {
+    throw classifyInvalidSource(error, "input_framing");
+  }
 
   const loaded = await loadRuntime(environment);
   const capabilities = editableArtifactMaterializerCapabilitiesForRuntime(
@@ -239,14 +251,12 @@ function projectSpreadsheet(
   try {
     session = NativeSpreadsheetSession.open(runtime, source);
   } catch {
-    throw invalidSource();
+    throw invalidSource("snapshot_open");
   }
   try {
-    if (
-      session.stateHash() !== manifest.stateHash ||
-      session.revision() !== BigInt(manifest.targetHeadSequence)
-    ) {
-      throw invalidSource();
+    if (session.stateHash() !== manifest.stateHash) throw invalidSource("state_mismatch");
+    if (session.revision() !== BigInt(manifest.targetHeadSequence)) {
+      throw invalidSource("revision_mismatch");
     }
     const metadataLimit = Math.min(
       session.capabilities.maxQueryResponseBytes,
@@ -560,8 +570,19 @@ function strictCanonicalRecord(
   return parsed;
 }
 
-async function writeTypedError(code: string): Promise<void> {
-  await writeFrame(ERROR_MAGIC, canonicalBytes({ code, protocol: "OGAMERR1" }), new Uint8Array(0));
+async function writeTypedError(
+  code: string,
+  diagnosticSubcode?: NativeSourceDiagnosticSubcode,
+): Promise<void> {
+  await writeFrame(
+    ERROR_MAGIC,
+    canonicalBytes({
+      code,
+      protocol: "OGAMERR1",
+      ...(diagnosticSubcode ? { subcode: diagnosticSubcode } : {}),
+    }),
+    new Uint8Array(0),
+  );
 }
 
 async function writeFrame(
@@ -686,7 +707,10 @@ class MaterializerCliError extends Error {
     | "kernel_incompatible"
     | "output_verification_failed";
 
-  constructor(code: MaterializerCliError["code"]) {
+  constructor(
+    code: MaterializerCliError["code"],
+    readonly diagnosticSubcode?: NativeSourceDiagnosticSubcode,
+  ) {
     super(code);
     this.name = "MaterializerCliError";
     this.code = code;
@@ -696,14 +720,23 @@ class MaterializerCliError extends Error {
 function unsupported(): MaterializerCliError {
   return new MaterializerCliError("unsupported_semantics");
 }
-function invalidSource(): MaterializerCliError {
-  return new MaterializerCliError("source_identity_mismatch");
+function invalidSource(diagnosticSubcode?: NativeSourceDiagnosticSubcode): MaterializerCliError {
+  return new MaterializerCliError("source_identity_mismatch", diagnosticSubcode);
 }
 function incompatible(): MaterializerCliError {
   return new MaterializerCliError("kernel_incompatible");
 }
 function invalidOutput(): MaterializerCliError {
   return new MaterializerCliError("output_verification_failed");
+}
+
+function classifyInvalidSource(
+  error: unknown,
+  diagnosticSubcode: NativeSourceDiagnosticSubcode,
+): unknown {
+  return error instanceof MaterializerCliError && error.code === "source_identity_mismatch"
+    ? invalidSource(error.diagnosticSubcode ?? diagnosticSubcode)
+    : error;
 }
 
 async function loadRuntime(

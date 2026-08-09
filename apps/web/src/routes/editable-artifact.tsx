@@ -19,8 +19,8 @@ import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { useAppContext } from "@/context";
 import {
+  createConsoleEditableArtifactReplicaId,
   createConsoleEditableArtifactAuthority,
-  getOrCreateConsoleEditableArtifactReplicaId,
 } from "@/lib/editable-artifact-browser";
 
 type OpenArtifact = Readonly<{
@@ -148,10 +148,7 @@ async function loadArtifact(
     accessContext: input.accessContext,
     accessKeyVersion: input.accessKeyVersion,
   });
-  const replicaId = getOrCreateConsoleEditableArtifactReplicaId({
-    authority,
-    artifactId: input.artifactId,
-  });
+  const replicaId = createConsoleEditableArtifactReplicaId();
   const artifact = await artifactClient.getEditableArtifact(input.workspaceId, input.artifactId, {
     replicaId,
   });
