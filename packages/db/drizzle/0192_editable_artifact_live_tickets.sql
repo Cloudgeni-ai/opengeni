@@ -49,12 +49,16 @@ CREATE TABLE "editable_artifact_live_tickets" (
         AND "service_name" IS NULL)
       OR
       ("actor_kind" = 'agent'
+        AND "agent_session_id" IS NOT NULL
         AND octet_length("agent_session_id") BETWEEN 1 AND 1024
         AND "agent_session_id" = btrim("agent_session_id")
+        AND "agent_turn_id" IS NOT NULL
         AND octet_length("agent_turn_id") BETWEEN 1 AND 1024
         AND "agent_turn_id" = btrim("agent_turn_id")
+        AND "agent_attempt_id" IS NOT NULL
         AND octet_length("agent_attempt_id") BETWEEN 1 AND 1024
         AND "agent_attempt_id" = btrim("agent_attempt_id")
+        AND "agent_generation" IS NOT NULL
         AND "agent_generation" BETWEEN 0 AND 2147483647
         AND "service_name" IS NULL)
       OR
@@ -63,6 +67,7 @@ CREATE TABLE "editable_artifact_live_tickets" (
         AND "agent_turn_id" IS NULL
         AND "agent_attempt_id" IS NULL
         AND "agent_generation" IS NULL
+        AND "service_name" IS NOT NULL
         AND octet_length("service_name") BETWEEN 1 AND 1024
         AND "service_name" = btrim("service_name"))
     )

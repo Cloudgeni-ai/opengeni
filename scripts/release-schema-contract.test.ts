@@ -214,7 +214,7 @@ describe("release schema contract", () => {
         (migrations.has("0194_editable_artifact_durable_exports.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "e91030815382f5beb1b14f9ef755ddcb98933c578110ecf88284702489687fe8",
+      "8fdbd98f3fa89be9eece114fe06cced90b1944256cfcdfea08d35cafb972f7a5",
     );
     expect(contract.latestMigration).toBe("0194_editable_artifact_durable_exports.sql");
     expect(migrations.get("0065_enrollment_credential_generation.sql")).toMatchObject({
@@ -262,11 +262,11 @@ describe("release schema contract", () => {
       deploymentMode: "rolling",
     });
     expect(migrations.get("0191_editable_artifact_engine.sql")).toMatchObject({
-      sha256: "82ddf5998387717ebe14084a3a99df937863fa2cc09b1229b67352b799b0b3fa",
+      sha256: "5d51991c1ba63c298d7d59032956cac752c5b29645f594cf87f1aaa1919c7d1e",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0192_editable_artifact_live_tickets.sql")).toMatchObject({
-      sha256: "e01a0c478186a806a2b5754454997ffb52031189d08f9267e1ad0af318ddf2fb",
+      sha256: "e96f7a9537cc074516d9f08758f03880fdb0cfdab8559c8a7c814bf8229ba9ef",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0193_editable_artifact_authorization.sql")).toMatchObject({

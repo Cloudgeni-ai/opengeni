@@ -190,6 +190,98 @@ describe("Postgres editable artifact authority", () => {
     expect(directPrivileges).toEqual({ tablePrivileges: 0, sequencePrivileges: 0 });
   }, 30_000);
 
+  test("rejects null causal collections and incomplete live-ticket actors", async () => {
+    if (!available || !shared) return;
+    const [validators] = await shared.admin<
+      Array<{ frontierValid: boolean; idArrayValid: boolean }>
+    >`
+      select
+        opengeni_private.editable_artifact_frontier_valid(null::jsonb) as "frontierValid",
+        opengeni_private.editable_artifact_id_array_valid(null::jsonb) as "idArrayValid"`;
+    expect(validators).toEqual({ frontierValid: false, idArrayValid: false });
+
+    const invalidArtifactId = nextId();
+    const invalidArtifactError = await shared.admin`
+      insert into editable_artifacts (
+        account_id, workspace_id, id, modality, title, authorization_revision,
+        causal_frontier, state_hash, created_by_subject_id
+      ) values (
+        ${accountId}, ${workspaceId}, ${invalidArtifactId}, 'spreadsheet',
+        'Invalid null frontier', 1, null, ${hash("e")}, 'user:null-frontier'
+      )`.then(
+      () => null,
+      (error) => error,
+    );
+    expect((invalidArtifactError as { constraint_name?: string }).constraint_name).toBe(
+      "editable_artifacts_frontier_chk",
+    );
+
+    const artifactId = nextId();
+    const creation = creationFixture({
+      scope: { accountId, workspaceId },
+      artifactId,
+      receiptId: nextId(),
+      authorityKey: JSON.stringify(["human", "user:ticket-owner"]),
+      idempotencyKey: `create:${artifactId}`,
+      requestHash: hash("d"),
+      modality: "document",
+      title: "Live ticket null authority",
+      stateHash: hash("c"),
+      authorizationRevision: 1,
+      createdBySubjectId: "user:ticket-owner",
+    });
+    expect((await store.createArtifact(creation)).kind).toBe("result");
+
+    const completeAgent = {
+      sessionId: "session:null-authority",
+      turnId: "turn:null-authority",
+      attemptId: "attempt:null-authority",
+      generation: 1,
+    };
+    for (const missing of Object.keys(completeAgent) as Array<keyof typeof completeAgent>) {
+      const actor = { ...completeAgent, [missing]: null };
+      const digest = hashBytesSha256(
+        new TextEncoder().encode(`missing-live-ticket-agent-${missing}`),
+      );
+      const error = await shared.admin`
+        insert into editable_artifact_live_tickets (
+          token_digest, account_id, workspace_id, artifact_id, modality,
+          actor_kind, actor_subject_id, replica_id, agent_session_id,
+          agent_turn_id, agent_attempt_id, agent_generation, allow_edit,
+          protocol_version, issued_at, expires_at
+        ) values (
+          ${digest}, ${accountId}, ${workspaceId}, ${artifactId}, 'document',
+          'agent', 'agent:null-authority', '1234567890abcdef', ${actor.sessionId},
+          ${actor.turnId}, ${actor.attemptId}, ${actor.generation}, true, 1,
+          now(), now() + interval '30 seconds'
+        )`.then(
+        () => null,
+        (cause) => cause,
+      );
+      expect((error as { constraint_name?: string }).constraint_name).toBe(
+        "editable_artifact_live_tickets_actor_chk",
+      );
+    }
+
+    const serviceError = await shared.admin`
+      insert into editable_artifact_live_tickets (
+        token_digest, account_id, workspace_id, artifact_id, modality,
+        actor_kind, actor_subject_id, replica_id, allow_edit, protocol_version,
+        issued_at, expires_at
+      ) values (
+        ${hashBytesSha256(new TextEncoder().encode("missing-live-ticket-service"))},
+        ${accountId}, ${workspaceId}, ${artifactId}, 'document',
+        'service', 'service:null-authority', '234567890abcdef1', true, 1,
+        now(), now() + interval '30 seconds'
+      )`.then(
+      () => null,
+      (error) => error,
+    );
+    expect((serviceError as { constraint_name?: string }).constraint_name).toBe(
+      "editable_artifact_live_tickets_actor_chk",
+    );
+  }, 60_000);
+
   test("stores live tickets as execute-only, database-bounded, atomic one-use capabilities", async () => {
     if (!available || !shared) return;
     const scope = { accountId, workspaceId };

@@ -20,7 +20,8 @@ DECLARE replica text;
 DECLARE counter_text text;
 DECLARE previous_replica text;
 BEGIN
-  IF jsonb_typeof(value) <> 'array'
+  IF value IS NULL
+    OR jsonb_typeof(value) IS DISTINCT FROM 'array'
     OR jsonb_array_length(value) > 65536
     OR pg_column_size(value) > 1048576
     OR octet_length(value::text) > 1048576
@@ -60,31 +61,33 @@ LANGUAGE sql
 IMMUTABLE
 SET search_path = pg_catalog, pg_temp
 AS $body$
-  SELECT jsonb_typeof(value) = 'array'
-    AND jsonb_array_length(value) <= 10000
-    AND pg_column_size(value) <= 1048576
-    AND octet_length(value::text) <= 1048576
-    AND NOT EXISTS (
-      SELECT 1
-      FROM jsonb_array_elements(value) AS entries(entry)
-      WHERE jsonb_typeof(entry) <> 'string'
-        OR entry #>> '{}' !~ '^[0-9a-f]{32}$'
-        OR entry #>> '{}' ~ '^0+$'
-    )
-    AND (
-      SELECT count(*) = count(DISTINCT entry #>> '{}')
-      FROM jsonb_array_elements(value) AS entries(entry)
-    )
-    AND NOT EXISTS (
-      SELECT 1
-      FROM (
-        SELECT entry #>> '{}' AS current_value,
-          lag(entry #>> '{}') OVER (ORDER BY ordinal) AS previous_value
-        FROM jsonb_array_elements(value) WITH ORDINALITY AS entries(entry, ordinal)
-      ) ordered
-      WHERE previous_value IS NOT NULL
-        AND convert_to(previous_value, 'UTF8') >= convert_to(current_value, 'UTF8')
-    );
+  SELECT CASE
+    WHEN value IS NULL OR jsonb_typeof(value) IS DISTINCT FROM 'array' THEN false
+    ELSE jsonb_array_length(value) <= 10000
+      AND pg_column_size(value) <= 1048576
+      AND octet_length(value::text) <= 1048576
+      AND NOT EXISTS (
+        SELECT 1
+        FROM jsonb_array_elements(value) AS entries(entry)
+        WHERE jsonb_typeof(entry) <> 'string'
+          OR entry #>> '{}' !~ '^[0-9a-f]{32}$'
+          OR entry #>> '{}' ~ '^0+$'
+      )
+      AND (
+        SELECT count(*) = count(DISTINCT entry #>> '{}')
+        FROM jsonb_array_elements(value) AS entries(entry)
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM (
+          SELECT entry #>> '{}' AS current_value,
+            lag(entry #>> '{}') OVER (ORDER BY ordinal) AS previous_value
+          FROM jsonb_array_elements(value) WITH ORDINALITY AS entries(entry, ordinal)
+        ) ordered
+        WHERE previous_value IS NOT NULL
+          AND convert_to(previous_value, 'UTF8') >= convert_to(current_value, 'UTF8')
+      )
+  END;
 $body$;
 
 CREATE OR REPLACE FUNCTION opengeni_private.editable_artifact_frontier_dominates(

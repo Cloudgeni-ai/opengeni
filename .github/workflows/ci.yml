@@ -622,6 +622,7 @@ jobs:
         run: bun x playwright install --with-deps chromium firefox webkit
 
       - name: Editable artifact browser acceptance
+        if: ${{ matrix.lane == 'workbench' }}
         run: |
           bun scripts/run-browser-e2e.ts \
             ./test/e2e/artifact-spreadsheet-canvas.browser.e2e.ts \
@@ -629,12 +630,14 @@ jobs:
             ./test/e2e/artifact-static-renderer.browser.e2e.ts
 
       - name: Install pinned artifact native toolchain
+        if: ${{ matrix.lane == 'workbench' }}
         working-directory: packages/artifact-tool/kernel
         run: |
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           rustup show active-toolchain
 
       - name: Editable artifact full-stack browser acceptance
+        if: ${{ matrix.lane == 'workbench' }}
         id: editable_artifact_browser
         env:
           OPENGENI_EDITABLE_ARTIFACT_EVIDENCE_DIR: /tmp/opengeni-editable-artifact-evidence
@@ -761,6 +764,7 @@ jobs:
       - name: Upload editable artifact visual evidence
         if: >-
           ${{ always() &&
+          matrix.lane == 'workbench' &&
           (steps.editable_artifact_browser.outcome == 'success' ||
           steps.editable_artifact_browser.outcome == 'failure') }}
         uses: actions/upload-artifact@v7.0.1

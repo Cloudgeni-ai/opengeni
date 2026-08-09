@@ -3136,6 +3136,21 @@ describe("workflow contracts", () => {
     expect(
       browser.steps.filter((step: any) => String(step.run ?? "").includes("playwright install")),
     ).toEqual([browserInstall]);
+    for (const stepName of [
+      "Editable artifact browser acceptance",
+      "Install pinned artifact native toolchain",
+      "Editable artifact full-stack browser acceptance",
+    ]) {
+      expect(browser.steps.find((step: any) => step.name === stepName).if).toBe(
+        "${{ matrix.lane == 'workbench' }}",
+      );
+    }
+    expect(
+      browser.steps.find((step: any) => step.name === "Upload editable artifact visual evidence")
+        .if,
+    ).toBe(
+      "${{ always() && matrix.lane == 'workbench' && (steps.editable_artifact_browser.outcome == 'success' || steps.editable_artifact_browser.outcome == 'failure') }}",
+    );
     expect(
       browser.steps.some(
         (step: any) =>
