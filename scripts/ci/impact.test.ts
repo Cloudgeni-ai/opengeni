@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import {
   assertRootTestDependencyMapComplete,
   createImpactPlan,
+  impactPlanConsoleSummary,
   parseGitNameStatus,
 } from "./impact";
 import { explicitBunTestPath } from "./run-test-shard";
@@ -108,6 +109,16 @@ describe("fail-closed change impact", () => {
     expect(plan.buildPackages).toEqual(
       expect.arrayContaining(["@opengeni/sdk", "@opengeni/react"]),
     );
+  });
+
+  test("written-plan console output is bounded to counts instead of echoing the full plan", () => {
+    const plan = createImpactPlan([], { forceFull: true });
+    const summary = impactPlanConsoleSummary(plan, "impact-plan.json");
+    expect(summary.length).toBeLessThan(512);
+    expect(summary).toContain(`unit=${plan.unitTests.length}`);
+    expect(summary).toContain(`integration=${plan.integrationTests.length}`);
+    expect(summary).toContain("output=impact-plan.json");
+    expect(summary).not.toContain(plan.unitTests[0]!);
   });
 
   test("renames and copies retain both dependency boundaries", () => {
@@ -306,6 +317,8 @@ describe("workflow fail-closed contracts", () => {
     expect(ci).toContain("bun-version-file: .bun-version");
     expect(ci).toContain('bun scripts/ci/impact.ts --base "$BASE_SHA" --head "$HEAD_SHA"');
     expect(ci).toContain("bun scripts/ci/impact.ts --full --output impact-plan.json");
+    expect(ci).not.toContain("jq . impact-plan.json");
+    expect(ci).toContain("changedCount:(.changedFiles|length)");
   });
 
   test("CI retains exact aggregate names and every current release/image lane", () => {

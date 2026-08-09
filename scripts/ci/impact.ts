@@ -32,6 +32,23 @@ export type ImpactPlan = {
   reasons: ImpactReason[];
 };
 
+export function impactPlanConsoleSummary(plan: ImpactPlan, outputPath: string): string {
+  return [
+    `[impact] mode=${plan.mode}`,
+    `changed=${plan.changedFiles.length}`,
+    `affected=${plan.affectedPackages.length}`,
+    `typecheck=${plan.typecheckProjects.length}`,
+    `unit=${plan.unitTests.length}`,
+    `integration=${plan.integrationTests.length}`,
+    `e2e=${plan.e2eTests.length}`,
+    `build=${plan.buildPackages.length}`,
+    `examples=${plan.exampleBuildProjects.length}`,
+    `guards=${plan.guards.length}`,
+    `reasons=${plan.reasons.length}`,
+    `output=${outputPath}`,
+  ].join(" ");
+}
+
 const GLOBAL_FENCES = [
   /^\.bun-version$/,
   /^\.changeset\//,
@@ -511,6 +528,8 @@ export function main(args = process.argv.slice(2)): void {
   if (outputPath) {
     mkdirSync(dirname(outputPath), { recursive: true });
     writeFileSync(outputPath, json);
+    process.stdout.write(`${impactPlanConsoleSummary(plan, outputPath)}\n`);
+    return;
   }
   process.stdout.write(json);
 }

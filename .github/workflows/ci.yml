@@ -182,7 +182,7 @@ jobs:
             # safety net and therefore never trust change selection.
             bun scripts/ci/impact.ts --full --output impact-plan.json
           fi
-          jq . impact-plan.json
+          jq '{schemaVersion, mode, changedCount:(.changedFiles|length), affectedPackageCount:(.affectedPackages|length), typecheckProjectCount:(.typecheckProjects|length), unitCount:(.unitTests|length), integrationCount:(.integrationTests|length), e2eCount:(.e2eTests|length), buildCount:(.buildPackages|length), exampleBuildCount:(.exampleBuildProjects|length), guardCount:(.guards|length), reasonCount:(.reasons|length)}' impact-plan.json
           echo "mode=$(jq -r .mode impact-plan.json)" >> "$GITHUB_OUTPUT"
           echo "unit_count=$(jq '.unitTests | length' impact-plan.json)" >> "$GITHUB_OUTPUT"
           echo "integration_count=$(jq '.integrationTests | length' impact-plan.json)" >> "$GITHUB_OUTPUT"
