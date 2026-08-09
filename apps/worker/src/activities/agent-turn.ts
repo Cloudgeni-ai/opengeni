@@ -88,7 +88,7 @@ import {
   type SessionTurnRecordingSettlement,
 } from "@opengeni/db";
 import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
-import { sandboxOperationMetricObserver } from "@opengeni/observability";
+import { sandboxLeaseTelemetryKey, sandboxOperationMetricObserver } from "@opengeni/observability";
 import {
   sandboxStateEntryFromRunState,
   maxTurnsExceededRunState,
@@ -9604,12 +9604,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             value: physicalCancellationDurationSeconds,
           });
           observability.info("agent turn physical cancellation completed", {
-            "opengeni.session_id": input.sessionId,
-            "opengeni.turn_id": turnId ?? "",
-            "opengeni.attempt_id": input.attemptId,
-            "opengeni.physical_cancellation_duration_ms": Math.round(
-              physicalCancellationDurationSeconds * 1000,
-            ),
+            durationMs: Math.round(physicalCancellationDurationSeconds * 1000),
+            ...(sandboxGroupId
+              ? {
+                  sandboxLeaseKey: sandboxLeaseTelemetryKey(input.workspaceId, sandboxGroupId),
+                }
+              : {}),
           });
         }
         observability.recordWorkerActivity({

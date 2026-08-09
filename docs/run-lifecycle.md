@@ -559,7 +559,13 @@ and randomized command token before signalling; it reads those facts through
 or malformed identity remains fail-closed. An explicit `tty:false` command keeps
 pipe-mode stdin/stdout/stderr and never receives terminal control bytes during
 cancellation; the same marker-bound process-group TERM/KILL proof remains
-authoritative. Omitting `tty` preserves the existing interactive default.
+authoritative. Omitting `tty` preserves the existing interactive default. A
+durably retained command performs marker read, token/PGID validation, TERM/KILL,
+and group-absence proof in one bounded in-box helper on its exact pinned backend,
+then enters one exact provider-session settlement phase. Inconclusive identity,
+transport failure, or a still-live group retries that same idempotent proof and
+keeps admission closed; the ordinary path does not serialize one provider round
+trip per signal and poll.
 Modal turn-owned exec starts use isolated command-router handles. If cancellation
 arrives before `TaskExecStart` returns a provider session id, the controller
 closes only that pending handle, reattaches the same sandbox for control, writes
