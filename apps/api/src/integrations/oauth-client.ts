@@ -300,17 +300,9 @@ async function startMcpOAuthWithinDeadline(
   const providerDomain = officialSlackResource
     ? "slack.com"
     : canonicalProviderDomain(context.payload.providerDomain ?? new URL(mcpUrl).hostname);
-  const personalSlack = officialSlackResource || providerDomain === "slack.com";
-  assertPersonalSlackOAuthStart(settings, context.payload, mcpUrl, personalSlack);
-  if (personalSlack && context.payload.ownership === "workspace") {
-    throw new HTTPException(422, {
-      message:
-        "Slack's hosted MCP connection is personal; use the OpenGeni Slack bot installation for workspace access",
-    });
-  }
-  const requestedOwnership: ConnectionOwnership = personalSlack
-    ? "personal"
-    : (context.payload.ownership ?? "workspace");
+  const hostedSlackMcp = officialSlackResource || providerDomain === "slack.com";
+  assertHostedSlackMcpOAuthStart(settings, context.payload, mcpUrl, hostedSlackMcp);
+  const requestedOwnership: ConnectionOwnership = context.payload.ownership ?? "workspace";
   const returnPath = safeReturnPath(context.payload.returnPath ?? "/integrations");
   const baseUrl = integrationBaseUrl(settings.publicBaseUrl, context.requestUrl);
   const redirectUri = `${baseUrl}/v1/integrations/oauth/callback`;
@@ -321,7 +313,7 @@ async function startMcpOAuthWithinDeadline(
       subjectId: context.subjectId,
       providerDomain,
       mcpUrl,
-      personalSlack,
+      hostedSlackMcp,
       connectionId: context.payload.connectionId,
       requestedOwnership: context.payload.ownership,
       newConnectionOwnership: requestedOwnership,
@@ -335,7 +327,7 @@ async function startMcpOAuthWithinDeadline(
     : requestedOwnership;
 
   const discovery = await discoverMcpOAuth(mcpUrl, settings, deadline);
-  if (personalSlack && !isLocalTestEnvironment(settings.environment)) {
+  if (hostedSlackMcp && !isLocalTestEnvironment(settings.environment)) {
     assertSlackAuthorizationServer(discovery.as);
   }
   const resource = discovery.prm.resource ? canonicalOAuthResource(discovery.prm.resource) : mcpUrl;
@@ -619,13 +611,13 @@ async function requireOAuthCallbackGrant(db: Database, state: OAuthStatePayload)
   }
 }
 
-function assertPersonalSlackOAuthStart(
+function assertHostedSlackMcpOAuthStart(
   settings: Settings,
   payload: OAuthStartRequest,
   mcpUrl: string,
-  personalSlack: boolean,
+  hostedSlackMcp: boolean,
 ): void {
-  if (!personalSlack) return;
+  if (!hostedSlackMcp) return;
   if (payload.oauthClient) {
     throw new HTTPException(422, {
       message: "Slack OAuth client credentials are deployment-managed",
@@ -638,13 +630,12 @@ function assertPersonalSlackOAuthStart(
   }
   if (!isLocalTestEnvironment(settings.environment) && mcpUrl !== OFFICIAL_SLACK_MCP_URL) {
     throw new HTTPException(422, {
-      message: `personal Slack OAuth must use ${OFFICIAL_SLACK_MCP_URL}`,
+      message: `Slack MCP OAuth must use ${OFFICIAL_SLACK_MCP_URL}`,
     });
   }
   if (!settings.slackClientId?.trim() || !settings.slackClientSecret?.trim()) {
     throw new HTTPException(503, {
-      message:
-        "personal Slack OAuth requires OPENGENI_SLACK_CLIENT_ID and OPENGENI_SLACK_CLIENT_SECRET",
+      message: "Slack MCP OAuth requires OPENGENI_SLACK_CLIENT_ID and OPENGENI_SLACK_CLIENT_SECRET",
     });
   }
 }
@@ -1153,7 +1144,7 @@ async function existingOAuthConnectionForStart(
     subjectId: string;
     providerDomain: string;
     mcpUrl: string;
-    personalSlack: boolean;
+    hostedSlackMcp: boolean;
     connectionId?: string | undefined;
     requestedOwnership?: ConnectionOwnership | undefined;
     newConnectionOwnership: ConnectionOwnership;
@@ -1176,7 +1167,7 @@ async function existingOAuthConnectionForStart(
       });
     }
     return connection.providerDomain === input.providerDomain &&
-      (!input.personalSlack || connection.metadata.mcpUrl === input.mcpUrl)
+      (!input.hostedSlackMcp || connection.metadata.mcpUrl === input.mcpUrl)
       ? connection
       : null;
   }
@@ -1187,9 +1178,9 @@ async function existingOAuthConnectionForStart(
       connection.subjectId === ownerSubjectId &&
       connection.kind === "oauth2" &&
       connection.providerDomain === input.providerDomain &&
-      (!input.personalSlack || connection.metadata.mcpUrl === input.mcpUrl),
+      (!input.hostedSlackMcp || connection.metadata.mcpUrl === input.mcpUrl),
   );
-  if (input.personalSlack) {
+  if (input.hostedSlackMcp && input.newConnectionOwnership === "personal") {
     return selectCanonicalPersonalSlackConnection(matching);
   }
   return matching.find((connection) => connection.status === "active") ?? null;

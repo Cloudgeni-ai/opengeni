@@ -105,6 +105,7 @@ describe("personal Slack account linking", () => {
     expect(personalSlackOAuthTarget(item)).toEqual({
       providerDomain: "slack.com",
       mcpUrl: OPENGENI_PERSONAL_SLACK_MCP_URL,
+      ownership: "personal",
     });
     expect(personalSlackOAuthTarget(item)).not.toHaveProperty("oauthClient");
   });
