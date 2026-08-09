@@ -443,7 +443,6 @@
 }
 /*! tailwindcss v4.2.4 | MIT License | https://tailwindcss.com */
 :where(.og-root) {
-    --color-slate-950: oklch(12.9% 0.042 264.695);
     --color-black: #000;
     --color-white: #fff;
     --spacing: 0.25rem;
@@ -2667,9 +2666,6 @@
   }
 :where(.og-root).text-popover-foreground,:where(.og-root) .text-popover-foreground {
     color: var(--color-fg);
-  }
-:where(.og-root).text-slate-950,:where(.og-root) .text-slate-950 {
-    color: var(--color-slate-950);
   }
 :where(.og-root).text-status-failed,:where(.og-root) .text-status-failed {
     color: var(--og-color-status-failed);

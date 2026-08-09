@@ -1574,7 +1574,7 @@ function PresentationEditorCore({
                       finishTextEdit();
                     }
                   }}
-                  className="absolute resize-none overflow-hidden border-2 border-og-accent bg-white/95 p-1 text-slate-950 outline-hidden"
+                  className="absolute resize-none overflow-hidden border-2 border-og-accent bg-white/95 p-1 outline-hidden"
                   style={{
                     left: effectiveSelectedPosition.left * zoom,
                     top: effectiveSelectedPosition.top * zoom,
