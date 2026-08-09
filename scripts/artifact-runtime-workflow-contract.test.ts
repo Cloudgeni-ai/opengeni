@@ -95,9 +95,12 @@ describe("artifact runtime workflow contract", () => {
 
     expect(parsed.jobs["artifact-runtime"]?.with?.source_sha).toBe(exactCiSource);
 
-    const service = parsed.jobs["service-images"];
-    const sandbox = parsed.jobs["sandbox-image"];
-    for (const job of [service, sandbox]) {
+    const runtimeConsumers = [
+      parsed.jobs["api-image"],
+      parsed.jobs["artifact-materializer-image"],
+      parsed.jobs["sandbox-image"],
+    ];
+    for (const job of runtimeConsumers) {
       expect(job?.steps?.find((step) => step.name === "Check out repository")?.with?.ref).toBe(
         exactCiSource,
       );
@@ -107,26 +110,34 @@ describe("artifact runtime workflow contract", () => {
       ).toBe("${{ needs.artifact-runtime.outputs.artifact_name }}");
     }
 
-    const serviceBuilds = service?.steps?.filter(
-      (step) => step.uses === "docker/build-push-action@v7.3.0",
+    const serverBuilds = [
+      "api-image",
+      "worker-image",
+      "web-image",
+      "artifact-materializer-image",
+      "artifact-outbox-dispatcher-image",
+    ].map((jobName) =>
+      parsed.jobs[jobName]?.steps?.find((step) => step.uses === "docker/build-push-action@v7.3.0"),
     );
-    expect(serviceBuilds?.map((step) => step.id)).toEqual([
+    expect(serverBuilds.map((step) => step?.id)).toEqual([
       "api_image",
       "worker_image",
+      "web_image",
       "artifact_materializer_image",
       "artifact_outbox_dispatcher_image",
-      "web_image",
     ]);
-    for (const step of serviceBuilds ?? []) {
-      const buildArgs = step.with?.["build-args"];
+    for (const step of serverBuilds) {
+      const buildArgs = step?.with?.["build-args"];
       expect(typeof buildArgs).toBe("string");
       expect(buildArgs).toContain(`OPENGENI_SERVER_VERSION=sha-${exactCiSource}`);
     }
-    expect(serviceBuilds?.find((step) => step.id === "web_image")?.with?.["build-args"]).toContain(
+    expect(serverBuilds.find((step) => step?.id === "web_image")?.with?.["build-args"]).toContain(
       `OPENGENI_DEPLOYMENT_REVISION=${exactCiSource}`,
     );
 
-    const sandboxBuild = sandbox?.steps?.find((step) => step.id === "sandbox_image");
+    const sandboxBuild = parsed.jobs["sandbox-image"]?.steps?.find(
+      (step) => step.id === "sandbox_image",
+    );
     expect(sandboxBuild?.with?.["build-args"]).toBe(`OPENGENI_SOURCE_SHA=${exactCiSource}`);
   });
 });

@@ -2826,17 +2826,33 @@ describe("workflow contracts", () => {
       "${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'docs' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",
     );
     expect(ci.jobs.images.if).toBe(ci.jobs.deployment.if);
-    const imageLeaves = ["api-image", "worker-web-images", "relay-image", "sandbox-image"];
-    for (const jobName of imageLeaves) expect(ci.jobs[jobName].if).toBe(ci.jobs.deployment.if);
+    const imageLeaves = [
+      "api-image",
+      "worker-web-images",
+      "artifact-materializer-image",
+      "artifact-outbox-dispatcher-image",
+      "relay-image",
+      "sandbox-image",
+    ];
+    for (const jobName of [
+      "worker-web-images",
+      "artifact-outbox-dispatcher-image",
+      "relay-image",
+    ]) {
+      expect(ci.jobs[jobName].if).toBe(ci.jobs.deployment.if);
+    }
+    for (const jobName of ["api-image", "artifact-materializer-image", "sandbox-image"]) {
+      expect(ci.jobs[jobName].if).toContain("needs.artifact-runtime.result == 'success'");
+    }
     const imageSteps = imageLeaves.flatMap((jobName) =>
       ci.jobs[jobName].steps.filter((candidate: any) => candidate.with?.push),
     );
     expect(imageSteps.map((step: any) => step.name)).toEqual([
       "Build API image",
       "Build worker image",
+      "Build web image",
       "Build artifact materializer image",
       "Build artifact outbox dispatcher image",
-      "Build web image",
       "Build relay image",
       "Build headless sandbox image",
     ]);
@@ -2856,6 +2872,17 @@ describe("workflow contracts", () => {
     });
     expect(ciText).not.toContain("pull-requests: write");
     expect(ciText).not.toMatch(/pulls\/.+\/reviews/);
+    const exactSelectorJobs = new Set([
+      "deployment",
+      "api-image",
+      "worker-image",
+      "web-image",
+      "artifact-materializer-image",
+      "artifact-outbox-dispatcher-image",
+      "relay-image",
+      "sandbox-image",
+      "images",
+    ]);
     for (const jobName of [
       "plan",
       "source-contracts",
@@ -2869,6 +2896,8 @@ describe("workflow contracts", () => {
       "deployment",
       "api-image",
       "worker-web-images",
+      "artifact-materializer-image",
+      "artifact-outbox-dispatcher-image",
       "relay-image",
       "sandbox-image",
       "images",
@@ -2877,7 +2906,9 @@ describe("workflow contracts", () => {
         (step: any) => step.uses === "actions/checkout@v6",
       );
       expect(checkout.with.ref).toBe(
-        "${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}",
+        exactSelectorJobs.has(jobName)
+          ? "${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
+          : "${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}",
       );
       expect(checkout.with["persist-credentials"]).toBe(false);
     }

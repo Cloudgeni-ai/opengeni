@@ -160,11 +160,22 @@ describe("release image workflow contract", () => {
       >;
     };
 
-    const leafNames = ["api-image", "worker-web-images", "relay-image", "sandbox-image"];
-    for (const jobName of ["worker-web-images", "relay-image"]) {
+    const leafNames = [
+      "api-image",
+      "worker-web-images",
+      "artifact-materializer-image",
+      "artifact-outbox-dispatcher-image",
+      "relay-image",
+      "sandbox-image",
+    ];
+    for (const jobName of [
+      "worker-web-images",
+      "artifact-outbox-dispatcher-image",
+      "relay-image",
+    ]) {
       expect(parsed.jobs[jobName]?.needs).toEqual(["automation-admission", "plan"]);
     }
-    for (const jobName of ["api-image", "sandbox-image"]) {
+    for (const jobName of ["api-image", "artifact-materializer-image", "sandbox-image"]) {
       expect(parsed.jobs[jobName]?.needs).toEqual([
         "automation-admission",
         "plan",
@@ -177,14 +188,23 @@ describe("release image workflow contract", () => {
       "plan",
       "api-image",
       "worker-web-images",
+      "artifact-materializer-image",
+      "artifact-outbox-dispatcher-image",
       "relay-image",
       "sandbox-image",
     ]);
-    for (const jobName of leafNames) {
+    for (const jobName of ["api-image", "artifact-materializer-image", "sandbox-image"]) {
       expect(parsed.jobs[jobName]?.if).toBe(parsed.jobs["api-image"]?.if);
     }
-    expect(parsed.jobs.images?.if).toBe(parsed.jobs["api-image"]?.if);
-    expect(images.match(/packages: write/g)).toHaveLength(4);
+    for (const jobName of [
+      "worker-web-images",
+      "artifact-outbox-dispatcher-image",
+      "relay-image",
+    ]) {
+      expect(parsed.jobs[jobName]?.if).toBe(parsed.jobs["worker-web-images"]?.if);
+    }
+    expect(parsed.jobs.images?.if).toBe(parsed.jobs["worker-web-images"]?.if);
+    expect(images.match(/packages: write/g)).toHaveLength(6);
     for (const jobName of leafNames) {
       const login = parsed.jobs[jobName]?.steps?.find((step) => step.name === "Log in to GHCR");
       expect(login?.with).toEqual({
@@ -196,6 +216,12 @@ describe("release image workflow contract", () => {
     expect(images).toContain("Require every workload image build");
     expect(images).toContain("API_IMAGE_RESULT: ${{ needs.api-image.result }}");
     expect(images).toContain("WORKER_WEB_IMAGES_RESULT: ${{ needs.worker-web-images.result }}");
+    expect(images).toContain(
+      "ARTIFACT_MATERIALIZER_IMAGE_RESULT: ${{ needs.artifact-materializer-image.result }}",
+    );
+    expect(images).toContain(
+      "ARTIFACT_OUTBOX_DISPATCHER_IMAGE_RESULT: ${{ needs.artifact-outbox-dispatcher-image.result }}",
+    );
     expect(images).toContain("RELAY_IMAGE_RESULT: ${{ needs.relay-image.result }}");
     expect(images).toContain("SANDBOX_IMAGE_RESULT: ${{ needs.sandbox-image.result }}");
     const aggregate = parsed.jobs.images?.steps?.find(
@@ -204,6 +230,9 @@ describe("release image workflow contract", () => {
     expect(aggregate?.env).toEqual({
       API_IMAGE_RESULT: "${{ needs.api-image.result }}",
       WORKER_WEB_IMAGES_RESULT: "${{ needs.worker-web-images.result }}",
+      ARTIFACT_MATERIALIZER_IMAGE_RESULT: "${{ needs.artifact-materializer-image.result }}",
+      ARTIFACT_OUTBOX_DISPATCHER_IMAGE_RESULT:
+        "${{ needs.artifact-outbox-dispatcher-image.result }}",
       RELAY_IMAGE_RESULT: "${{ needs.relay-image.result }}",
       SANDBOX_IMAGE_RESULT: "${{ needs.sandbox-image.result }}",
     });
@@ -213,14 +242,18 @@ describe("release image workflow contract", () => {
           ...process.env,
           API_IMAGE_RESULT: results[0],
           WORKER_WEB_IMAGES_RESULT: results[1],
-          RELAY_IMAGE_RESULT: results[2],
-          SANDBOX_IMAGE_RESULT: results[3],
+          ARTIFACT_MATERIALIZER_IMAGE_RESULT: results[2],
+          ARTIFACT_OUTBOX_DISPATCHER_IMAGE_RESULT: results[3],
+          RELAY_IMAGE_RESULT: results[4],
+          SANDBOX_IMAGE_RESULT: results[5],
         },
       }).exitCode;
-    expect(aggregateResult("success", "success", "success", "success")).toBe(0);
+    expect(aggregateResult("success", "success", "success", "success", "success", "success")).toBe(
+      0,
+    );
     for (const result of ["failure", "skipped", "cancelled", ""]) {
-      for (let index = 0; index < 4; index += 1) {
-        const results = Array(4).fill("success") as string[];
+      for (let index = 0; index < 6; index += 1) {
+        const results = Array(6).fill("success") as string[];
         results[index] = result;
         expect(aggregateResult(...results)).not.toBe(0);
       }
@@ -238,10 +271,10 @@ describe("release image workflow contract", () => {
     expect(images).toContain("RELAY_DIGEST: ${{ needs.relay-image.outputs.relay_digest }}");
     expect(images).toContain("SANDBOX_DIGEST: ${{ needs.sandbox-image.outputs.sandbox_digest }}");
     expect(images).toContain(
-      "ARTIFACT_MATERIALIZER_DIGEST: ${{ needs.service-images.outputs.artifact_materializer_digest }}",
+      "ARTIFACT_MATERIALIZER_DIGEST: ${{ needs.artifact-materializer-image.outputs.artifact_materializer_digest }}",
     );
     expect(images).toContain(
-      "ARTIFACT_OUTBOX_DISPATCHER_DIGEST: ${{ needs.service-images.outputs.artifact_outbox_dispatcher_digest }}",
+      "ARTIFACT_OUTBOX_DISPATCHER_DIGEST: ${{ needs.artifact-outbox-dispatcher-image.outputs.artifact_outbox_dispatcher_digest }}",
     );
     expect(images).toContain('--arg tag "dogfood-sha-${GITHUB_SHA}"');
     expect(images).not.toContain('--arg tag "sha-${GITHUB_SHA}"');
@@ -592,7 +625,8 @@ ${parser}`,
     const imageSteps = [
       "api-image",
       "worker-web-images",
-      "web-image",
+      "artifact-materializer-image",
+      "artifact-outbox-dispatcher-image",
       "relay-image",
       "sandbox-image",
     ].flatMap(
@@ -614,32 +648,27 @@ ${parser}`,
       {
         jobName: "api-image",
         name: "Build API image",
-        fingerprint: "92035198e8acb29ffa33ae46602f0f4cbe3332e18257cb3bd8582538db3e16dd",
+        fingerprint: "791b6b1d1ea3bbb12a893b2056b2db1c343c2972f6202fe1be6276eed30f66f1",
       },
       {
         jobName: "worker-web-images",
         name: "Build worker image",
-        fingerprint: "8562ea25e72c99df48b2f2150cf9bcbb5a13b39633a5cb4e2648521e24840f67",
+        fingerprint: "18b96f7cc2e97584967f580b6e678f20c96022ca77db76fea49753df8e82641a",
       },
       {
         jobName: "worker-web-images",
         name: "Build web image",
-        fingerprint: "641ae5f4c76a62fe3d3f2e42cea03cd5514d6db906be3d824f9e602b0955cc9f",
+        fingerprint: "1689497eac266bd4b700ddea4e1f4d7ced2316657a2be37062d6ee064bf2d8e8",
       },
       {
-        jobName: "web-image",
+        jobName: "artifact-materializer-image",
         name: "Build artifact materializer image",
         fingerprint: "932536d47211c1a8b5e77d2d5eda9aed64df87f6d3297f29c2a0a2f86c84528d",
       },
       {
-        jobName: "web-image",
+        jobName: "artifact-outbox-dispatcher-image",
         name: "Build artifact outbox dispatcher image",
         fingerprint: "ea59c9c57d6e0ccc97b05d34d9f13c2cd7531faf791d00cb248a893a0bb77635",
-      },
-      {
-        jobName: "web-image",
-        name: "Build web image",
-        fingerprint: "641ae5f4c76a62fe3d3f2e42cea03cd5514d6db906be3d824f9e602b0955cc9f",
       },
       {
         jobName: "relay-image",
