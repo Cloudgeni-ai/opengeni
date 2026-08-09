@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 const scriptPath = new URL("./dev-stack.sh", import.meta.url);
+const sandboxDockerfilePath = new URL("../docker/sandbox.Dockerfile", import.meta.url);
 
 describe("local artifact runtime stack contract", () => {
   test("script is valid shell and uses the strict current-host runtime producer", async () => {
@@ -98,5 +99,16 @@ describe("local artifact runtime stack contract", () => {
       '--build-arg "OPENGENI_ARTIFACT_RUNTIME_BUNDLE=${sandbox_runtime_bundle}"',
     );
     expect(source).not.toContain("-t opengeni-sandbox:local .");
+  });
+
+  test("installs the locked verifier closure before verifying a clean sandbox image", async () => {
+    const source = await Bun.file(sandboxDockerfilePath).text();
+    const install = source.indexOf("bun install --frozen-lockfile");
+    const verify = source.indexOf("bun scripts/verify-artifact-runtime-container-inputs.ts");
+    const prepare = source.indexOf("bun scripts/prepare-artifact-sandbox-runtime.ts");
+
+    expect(install).toBeGreaterThan(-1);
+    expect(verify).toBeGreaterThan(install);
+    expect(prepare).toBeGreaterThan(verify);
   });
 });

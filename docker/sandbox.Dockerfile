@@ -36,13 +36,13 @@ RUN set -eux; \
     && input="/src/$OPENGENI_ARTIFACT_RUNTIME_BUNDLE/$TARGETARCH/installation.json" \
     && if [ -f "$input" ]; then \
       test "$(node --version)" = "v22.22.0"; \
+      bun install --frozen-lockfile; \
       bun scripts/verify-artifact-runtime-container-inputs.ts \
         --root "/src/$OPENGENI_ARTIFACT_RUNTIME_BUNDLE" \
         --source-sha "$OPENGENI_SOURCE_SHA" \
         --architecture "$TARGETARCH"; \
       actual_target="$(bun -e 'const value=await Bun.file(process.argv[1]).json();process.stdout.write(typeof value.target==="string"?value.target:"")' "$input")"; \
       test "$actual_target" = "$expected_target"; \
-      bun install --frozen-lockfile; \
       bun scripts/prepare-artifact-sandbox-runtime.ts \
         --repository-root /src \
         --installation-root "$(dirname "$input")" \
