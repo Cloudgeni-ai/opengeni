@@ -813,6 +813,8 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "variable_set_get_variable",
   "variable_set_set_variable",
   "environment_set_variable",
+  "capability_catalog_search",
+  "capability_authorization_request",
   "github_connect_link",
   "github_repositories_list",
   "social_connections_list",
@@ -7306,6 +7308,21 @@ export const ToolAuthNeededPayload = z.object({
   selectedResources: McpConnectionResourceScopes.optional(),
   authorizationUrl: z.string().url().optional(),
   subjectId: z.string().min(1).nullable().optional(),
+  // A catalog recommendation is still a tool-level authorization condition:
+  // the agent may describe and request it, but only the authenticated host UI
+  // can start setup. Keeping this nested and optional preserves the established
+  // auth-needed event for ordinary failed MCP calls.
+  capability: z
+    .object({
+      id: z.string().min(1).max(512),
+      name: z.string().min(1).max(256),
+      kind: CapabilityKind,
+      source: CapabilitySource,
+      action: z.enum(["connect", "add_credentials", "enable"]),
+      rationale: z.string().min(1).max(2000),
+      requiredVariables: z.array(VariableSetVariableName).max(64).default([]),
+    })
+    .optional(),
 });
 export type ToolAuthNeededPayload = z.infer<typeof ToolAuthNeededPayload>;
 

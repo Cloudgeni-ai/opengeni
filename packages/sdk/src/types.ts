@@ -1411,6 +1411,17 @@ export type ToolAuthNeededPayload = {
   selectedResources?: Array<{ id: string; kind: "repository" }> | undefined;
   authorizationUrl?: string | undefined;
   subjectId?: string | null | undefined;
+  capability?:
+    | {
+        id: string;
+        name: string;
+        kind: CapabilityKind;
+        source: CapabilitySource;
+        action: "connect" | "add_credentials" | "enable";
+        rationale: string;
+        requiredVariables: string[];
+      }
+    | undefined;
 };
 
 // Payload shapes for the high-traffic event types. `SessionEvent.payload` is
@@ -2156,6 +2167,8 @@ export type FirstPartyMcpToolName =
   | "variable_set_get_variable"
   | "variable_set_set_variable"
   | "environment_set_variable"
+  | "capability_catalog_search"
+  | "capability_authorization_request"
   | "github_connect_link"
   | "github_repositories_list"
   | "social_connections_list"

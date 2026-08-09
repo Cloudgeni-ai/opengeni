@@ -6,6 +6,7 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import {
   CapabilityCatalogItem,
+  capabilityCatalogItemIsTrustedForExposure,
   type AccessGrant,
   type CapabilityCatalogResponse,
   type CapabilityInstallation,
@@ -1003,6 +1004,7 @@ function packCatalogItem(
       connectors: pack.connectors,
       knowledge: pack.knowledge,
       scheduledTaskTemplates: pack.scheduledTaskTemplates,
+      ...(pack.variableSet ? { variableSet: pack.variableSet } : {}),
       // Runtime composition surface only: skill names, never file content.
       ...(pack.sandboxImage ? { sandboxImage: pack.sandboxImage } : {}),
       ...(pack.sandboxProviderImages ? { sandboxProviderImages: pack.sandboxProviderImages } : {}),
@@ -1135,7 +1137,20 @@ function platformApiCatalogItems(socialConnections: SocialConnection[]): Capabil
       ],
     },
   });
-  const platformApis = [
+  const platformApiDefinitions: Array<{
+    id: string;
+    name: string;
+    description: string;
+    category: string;
+    tags: string[];
+    endpointPath: string;
+    homepageUrl?: string;
+    providerDomain?: string;
+    authModel?: string;
+    authKind?: "oauth2" | "api_key" | "none" | "unknown";
+    surfaceType?: string;
+    firstPartyMcpTools?: string[];
+  }> = [
     {
       id: "api:github-app",
       name: "GitHub App",
@@ -1143,6 +1158,12 @@ function platformApiCatalogItems(socialConnections: SocialConnection[]): Capabil
       category: "source-control",
       tags: ["api", "github", "repositories"],
       endpointPath: "/v1/workspaces/{workspaceId}/github/app",
+      homepageUrl: "https://github.com",
+      providerDomain: "github.com",
+      authModel: "github_app_owner_consent",
+      authKind: "oauth2" as const,
+      surfaceType: "first_party_github",
+      firstPartyMcpTools: ["github_connect_link", "github_repositories_list"],
     },
     {
       id: "api:documents",
@@ -1168,7 +1189,8 @@ function platformApiCatalogItems(socialConnections: SocialConnection[]): Capabil
       tags: ["api", "schedules", "agents"],
       endpointPath: "/v1/workspaces/{workspaceId}/scheduled-tasks",
     },
-  ].map((item) =>
+  ];
+  const platformApis = platformApiDefinitions.map((item) =>
     CapabilityCatalogItem.parse({
       id: item.id,
       name: item.name,
@@ -1177,12 +1199,22 @@ function platformApiCatalogItems(socialConnections: SocialConnection[]): Capabil
       tags: item.tags,
       kind: "api",
       source: "built_in",
+      ...(item.homepageUrl ? { homepageUrl: item.homepageUrl } : {}),
+      ...(item.providerDomain ? { providerDomain: item.providerDomain } : {}),
+      ...(item.authModel ? { authModel: item.authModel } : {}),
+      ...(item.authKind ? { authKind: item.authKind } : {}),
+      ...(item.surfaceType ? { surfaceType: item.surfaceType } : {}),
+      ...(item.firstPartyMcpTools ? { tools: [{ kind: "mcp", id: "opengeni" }] } : {}),
       runtime: {
         available: true,
-        notes: "Available through the OpenGeni API.",
+        notes:
+          item.surfaceType === "first_party_github"
+            ? "GitHub credentials stay host-owned; a workspace owner must approve repository access."
+            : "Available through the OpenGeni API.",
       },
       metadata: {
         endpointPath: item.endpointPath,
+        ...(item.firstPartyMcpTools ? { firstPartyMcpTools: item.firstPartyMcpTools } : {}),
       },
     }),
   );
@@ -1463,6 +1495,88 @@ function dedupeCatalogItems(items: CapabilityCatalogItem[]): CapabilityCatalogIt
 
 function compareCatalogItems(a: CapabilityCatalogItem, b: CapabilityCatalogItem): number {
   return `${a.kind}:${a.category}:${a.name}`.localeCompare(`${b.kind}:${b.category}:${b.name}`);
+}
+
+export type CapabilityCatalogSearchMatch = {
+  item: CapabilityCatalogItem;
+  score: number;
+  matchedOn: Array<"name" | "provider" | "tag" | "category" | "description" | "id">;
+};
+
+/**
+ * Deterministically rank the already-merged workspace catalog for an agent.
+ * The caller still owns live authorization checks (GitHub binding, OAuth row,
+ * and so on); this function searches metadata only and never probes a provider
+ * or exposes credential/setup prose to the model.
+ */
+export function searchCapabilityCatalogItems(
+  items: readonly CapabilityCatalogItem[],
+  query: string,
+  limit = 8,
+): CapabilityCatalogSearchMatch[] {
+  const phrase = normalizeCapabilitySearchText(query);
+  const tokens = [...new Set(phrase.split(" ").filter(Boolean))].slice(0, 24);
+  if (tokens.length === 0) return [];
+  const boundedLimit = Math.min(20, Math.max(1, Math.trunc(limit)));
+  const weightedFields = (item: CapabilityCatalogItem) =>
+    [
+      ["name", item.name, 100],
+      ["provider", item.providerDomain ?? "", 80],
+      ["tag", item.tags.join(" "), 50],
+      ["category", item.category, 30],
+      ["id", item.id, 25],
+      ["description", item.description ?? "", 15],
+    ] as const;
+
+  return items
+    .filter((item) => capabilityCatalogItemIsTrustedForExposure(item))
+    .flatMap((item): CapabilityCatalogSearchMatch[] => {
+      let score = 0;
+      const matchedOn = new Set<CapabilityCatalogSearchMatch["matchedOn"][number]>();
+      for (const [field, raw, weight] of weightedFields(item)) {
+        const value = normalizeCapabilitySearchText(raw);
+        if (!value) continue;
+        const words = value.split(" ");
+        if (value.includes(phrase)) {
+          score += Math.round(weight * 1.5);
+          matchedOn.add(field);
+        }
+        for (const token of tokens) {
+          if (words.includes(token)) {
+            score += weight;
+            matchedOn.add(field);
+          } else if (words.some((word) => word.startsWith(token) || token.startsWith(word))) {
+            score += Math.round(weight * 0.7);
+            matchedOn.add(field);
+          } else if (value.includes(token)) {
+            score += Math.round(weight * 0.4);
+            matchedOn.add(field);
+          }
+        }
+      }
+      if (score === 0) return [];
+      if (item.enabled) score += 12;
+      if (item.tier === "verified") score += 8;
+      if (item.source === "built_in") score += 6;
+      return [{ item, score, matchedOn: [...matchedOn] }];
+    })
+    .sort(
+      (left, right) =>
+        right.score - left.score ||
+        Number(right.item.enabled) - Number(left.item.enabled) ||
+        left.item.name.localeCompare(right.item.name) ||
+        left.item.id.localeCompare(right.item.id),
+    )
+    .slice(0, boundedLimit);
+}
+
+function normalizeCapabilitySearchText(value: string): string {
+  return value
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
 }
 
 function firstPartyMcpDescription(id: string): string | null {

@@ -1840,6 +1840,42 @@ describe("buildTimeline", () => {
     });
   });
 
+  test("agent capability recommendations stay explicit human authorization requests", () => {
+    reset();
+    const items = buildTimeline([
+      event(
+        "tool.auth_needed",
+        {
+          serverId: "opengeni",
+          toolName: "capability_authorization_request",
+          providerDomain: "github.com",
+          reason: "missing_connection",
+          capability: {
+            id: "api:github-app",
+            name: "GitHub App",
+            kind: "api",
+            source: "built_in",
+            action: "connect",
+            rationale: "This lets me inspect the repositories you asked about.",
+            requiredVariables: [],
+          },
+        },
+        { turnId: "turn-1" },
+      ),
+    ]);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: "auth-needed",
+      source: "capability",
+      providerDomain: "github.com",
+      capability: {
+        id: "api:github-app",
+        action: "connect",
+        rationale: "This lets me inspect the repositories you asked about.",
+      },
+    });
+  });
+
   test("historical tool.auth_needed without a concrete tool call stays out of chat", () => {
     reset();
     const items = buildTimeline([

@@ -153,6 +153,41 @@ Open the **Capabilities** view in the web app to:
 
 The official MCP Registry is public metadata. Evaluate any server and its endpoint before enabling it in a workspace with sensitive data.
 
+## Agent discovery and in-session authorization
+
+Ordinary new sessions include two first-party OpenGeni tools:
+
+- `capability_catalog_search` searches the same merged workspace catalog as the
+  Capabilities page. It returns bounded, secret-free descriptors and a live
+  setup state; it never returns credential instructions, tokens, or raw catalog
+  metadata. Search is deterministic, excludes untrusted registry rows, and
+  prefers exact, enabled, verified, and built-in matches. Agents should search
+  by the outcome they need (for example, `GitHub repositories`, `product
+  analytics`, or `Slack notifications`) rather than guessing an MCP endpoint.
+- `capability_authorization_request` posts one `tool.auth_needed`-style card to
+  the current session for an exact catalog result. Calling it does not install,
+  enable, connect, or grant anything. The exact turn attempt fences the event,
+  and the signed-in human must confirm the provider domain and complete setup.
+
+The recommendation card resolves the catalog again at click time. A removed or
+changed item is never authorized from stale event data. OAuth-backed MCPs can
+start the normal connection flow directly from the session for a workspace
+admin, return to the same session, and enable the capability against the exact
+new connection. API-key, required-variable, and admin-review paths open the
+existing protected Capabilities/variable-set setup surfaces; credential values
+never enter the event or model-visible tool result. Existing explicit session
+tool policies remain exact and do not silently gain the two discovery tools.
+
+GitHub is the first fully specialized adapter. Search prefers the built-in
+`api:github-app` capability, checks the live workspace binding, and reports it
+ready only when an active owner-authorized installation exists. Otherwise the
+human click mints fresh `github:manage` owner-consent state and carries only a
+validated same-workspace session return path across GitHub redirects. The agent
+never receives `github:manage`, an installation token, the signed browser state,
+or a repository outside the durable allowlist. On success the browser returns
+to the originating session and subsequent tool calls use the existing
+host-owned GitHub authority.
+
 ## integrations.sh Snapshot Imports
 
 The integrations catalog import pipeline is offline and reviewable. It never
