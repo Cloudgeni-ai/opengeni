@@ -1,13 +1,24 @@
-# Workspace State
+# Agent Brain overview (Workspace State projection)
 
-Workspace State is a read-time inventory of existing workspace authorities. It
-helps operators understand instruction-policy metadata, structured preference
-identities, document authority coverage, knowledge freshness, and deterministic
-structural gaps. The projection and export remain read-only. The console hosts
-two bounded administration seams over existing canonical authorities: an
+The Agent Brain page is a plain-language, read-time overview of existing
+workspace authorities, backed by the Workspace State projection. Its default
+view explains the four canonical authorities and the two ways agents use them:
+
+- bounded charter/policy context and preference descriptors are always-known
+  governance;
+- Documents/RAG evidence and Memory records remain searchable and are retrieved
+  when relevant.
+
+The overview helps ordinary users understand effective status, scope,
+provenance, freshness, lifecycle signals, and the correct authority-specific
+entry point without combining those authorities or creating another store.
+Hashes, accepted-attempt lookup, raw inventories, structural gaps, and
+onboarding internals live under **Advanced & diagnostics**. The underlying
+projection and export remain read-only. Advanced & diagnostics preserves two
+bounded administration seams over existing canonical authorities: an
 instruction-policy onboarding composer that creates only inactive drafts, and
 structured preference governance for explicit organization/workspace/personal
-proposal and lifecycle operations. It does not create another storage
+proposal and lifecycle operations. Neither seam creates another storage
 authority, background synthesizer, or runtime prompt source.
 
 The current slice is additive and dependency-safe. Wider policy authoring,
@@ -237,17 +248,45 @@ changes. Gaps are not persisted and cannot activate policy.
 
 ## Console surface
 
-`/workspaces/:workspaceId/state` renders Workspace State with loading, empty,
-permission-unavailable, error/retry, partial-coverage, freshness, and accepted-
-attempt governance states. It separately shows current structured-preference
-identity counts and company/workspace/personal document authority counts. The
-inspector accepts an attempt UUID and displays
-only drift status, counts, hashes, role metadata, and timestamps. Loader
-generation fences include both workspace and attempt IDs, so a late response
-cannot populate a newer selection. A second generation-fenced loader lists
-recent onboarding proposal evidence. Workspace admins may submit one explicit
-draft-only proposal with the exact displayed active-head baseline; readers see
-the immutable source/version/confidence, linked draft, baseline, and timestamp.
+`/workspaces/:workspaceId/state` is labeled **Agent Brain** in the console and
+renders loading, empty, permission-unavailable, error/retry, partial-coverage,
+freshness, and accepted-attempt governance states. The default page is grouped
+by use at runtime. Status badges explicitly distinguish unavailable, partial or
+truncated, processing, failed, and empty projections from complete non-empty
+ones:
+
+1. **Always known** shows bounded charter/policy active-head scope, the latest
+   revision's state and provenance, and the legacy source configuration as three
+   separate facts. Because `runtimeComposition.status` is `not_implemented`, it
+   never labels the latest inactive revision or legacy fallback as the composed
+   effective runtime source. It also shows structured preference descriptor
+   counts by organization/workspace/user scope. Runtime descriptors contain
+   bounded identity, title/description, scope/version/hash,
+   precedence/conflict/provenance metadata, expiry, and an exact retrieval
+   handle; this overview requests and renders only aggregate count/scope/hash
+   metadata. Full preference bodies remain on demand. The current projection
+   does not infer or synthesize an organization company profile when that
+   authority is not present in the response contract.
+2. **Retrieved when relevant** shows Documents/RAG indexing and immutable
+   authority coverage separately from a bounded Memory lifecycle/kind sample.
+3. **Pending changes** explicitly says that the current projection has no
+   unified governed-learning suggestion queue. Existing onboarding drafts remain
+   separate inactive policy evidence rather than being presented as automatic
+   learning.
+4. **History & rollback** directs users to the authority-specific surfaces and
+   states that the Brain never performs a cross-authority rollback.
+
+**Advanced & diagnostics** preserves the detailed policy and structured-
+preference inventories, the canonical Preference Registry administration panel,
+knowledge map, deterministic gaps, onboarding proposal evidence, and accepted-
+attempt inspector. The inspector accepts an attempt UUID and displays only
+drift status, counts, hashes, role metadata, and timestamps.
+Loader generation fences include both workspace and attempt IDs, so a late
+response cannot populate a newer selection. A second generation-fenced loader
+lists recent onboarding proposal evidence. Workspace admins may submit one
+explicit draft-only proposal with the exact displayed active-head baseline;
+readers see the immutable source/version/confidence, linked draft, baseline, and
+timestamp.
 
 A separate generation-fenced registry loader lists at most 100 authorized
 structured preferences and loads one selected detail. The administration panel
