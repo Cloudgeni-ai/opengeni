@@ -686,10 +686,16 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
     );
     const proxy = lazy.session as {
       state: { manifest: unknown };
+      supportsPty: () => boolean;
+      commandCancellationTransport: () => Promise<"remote_operation" | "shell_session">;
       exec: (a: unknown) => Promise<{ stdout: string }>;
     };
 
     expect(proxy.state.manifest).toBe(manifest);
+    expect(proxy.supportsPty()).toBe(true);
+    expect(provisions).toBe(0);
+    expect(await proxy.commandCancellationTransport()).toBe("shell_session");
+    expect(provisions).toBe(1);
     expect((await proxy.exec({ cmd: "echo hi" })).stdout).toBe("lazy-real");
     expect(provisions).toBe(1);
     expect((await proxy.exec({ cmd: "echo again" })).stdout).toBe("lazy-real");
