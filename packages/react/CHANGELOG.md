@@ -1,5 +1,13 @@
 # @opengeni/react
 
+## 0.49.8
+
+### Patch Changes
+
+- ef78ecf: Separate credential-free capability discovery from exact, permission-checked live-plane grants; mint terminal credentials just in time, preserve first input across connection setup, and bound pre-open terminal memory.
+- Updated dependencies [ef78ecf]
+  - @opengeni/sdk@0.49.8
+
 ## 0.49.7
 
 ### Patch Changes

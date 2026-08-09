@@ -1,5 +1,11 @@
 # @opengeni/contracts
 
+## 0.41.4
+
+### Patch Changes
+
+- ef78ecf: Separate credential-free capability discovery from exact, permission-checked live-plane grants; mint terminal credentials just in time, preserve first input across connection setup, and bound pre-open terminal memory.
+
 ## 0.41.3
 
 ### Patch Changes
