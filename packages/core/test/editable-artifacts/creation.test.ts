@@ -284,9 +284,7 @@ describe("editable artifact genesis composition", () => {
     const first = importRequest({ idempotencyKey: "first", blobReference: "objects/a" });
     const retry = importRequest({ idempotencyKey: "second", blobReference: "objects/b" });
     const changed = importRequest({ sourceContentHash: hash(804) });
-    expect(hashEditableArtifactImportRequest(first)).toBe(
-      hashEditableArtifactImportRequest(retry),
-    );
+    expect(hashEditableArtifactImportRequest(first)).toBe(hashEditableArtifactImportRequest(retry));
     expect(hashEditableArtifactImportRequest(changed)).not.toBe(
       hashEditableArtifactImportRequest(first),
     );

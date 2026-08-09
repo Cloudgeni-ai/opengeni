@@ -53,9 +53,15 @@ import {
   encodeSpreadsheetArtifactKernelProjection,
   encodeSpreadsheetArtifactKernelQuery,
 } from "./spreadsheet-artifact-query";
+import {
+  EDITABLE_ARTIFACT_MODEL_SCHEMA_VERSION,
+  EDITABLE_ARTIFACT_SNAPSHOT_VERSION,
+} from "./editable-artifact-versions";
 
-export const EDITABLE_ARTIFACT_MODEL_SCHEMA_VERSION = 1 as const;
-export const EDITABLE_ARTIFACT_SNAPSHOT_VERSION = 1 as const;
+export {
+  EDITABLE_ARTIFACT_MODEL_SCHEMA_VERSION,
+  EDITABLE_ARTIFACT_SNAPSHOT_VERSION,
+} from "./editable-artifact-versions";
 
 export type EditableArtifactModality = "spreadsheet" | "document" | "presentation";
 export type EditableArtifactConcurrencySemantics =

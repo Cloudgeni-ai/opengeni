@@ -1,4 +1,5 @@
 import { describe, expect, test as bunTest } from "bun:test";
+import { decodeEditableArtifactCausalFrontier } from "@opengeni/contracts/editable-artifact-causal-frontier";
 
 import {
   Document,
@@ -9,10 +10,10 @@ import {
   SpreadsheetFile,
   Workbook,
   configureArtifactRuntime,
-  createArtifactPublicationSnapshot,
   disposeArtifact,
   getArtifactCompositeDiagnostics,
 } from "../src";
+import { createArtifactPublicationSnapshot } from "../src/publication";
 import {
   Document as ReferenceDocument,
   DocumentFile as ReferenceDocumentFile,
@@ -70,7 +71,9 @@ describe("production facade over the real native addon", () => {
         crdtStateVersion: 1,
       });
       if (spreadsheet.modality !== "spreadsheet") throw new Error("Unexpected modality");
-      expect(spreadsheet.coveredCausalFrontier).toHaveLength(1);
+      expect(
+        decodeEditableArtifactCausalFrontier(spreadsheet.coveredCausalFrontierBytes),
+      ).toHaveLength(1);
       const reopenedWorkbook = NativeSpreadsheetSession.open(
         productionTestRuntime(),
         spreadsheet.snapshotBytes,

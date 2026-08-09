@@ -4,10 +4,7 @@ import { createHash } from "node:crypto";
 import { open, realpath, rm, stat } from "node:fs/promises";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import {
-  decodeEditableArtifactCausalFrontier,
-  encodeEditableArtifactCausalFrontier,
-} from "@opengeni/contracts/editable-artifact-causal-frontier";
+import { decodeEditableArtifactCausalFrontier } from "@opengeni/contracts/editable-artifact-causal-frontier";
 import { EDITABLE_ARTIFACT_PRODUCT_MAX_SNAPSHOT_BYTES } from "@opengeni/contracts/editable-artifacts";
 import {
   ARTIFACT_RUNTIME_ENVIRONMENT,
@@ -558,7 +555,7 @@ function validatePublicationSnapshot(
           "snapshotVersion",
           "stateHash",
           "snapshotBytes",
-          "coveredCausalFrontier",
+          "coveredCausalFrontierBytes",
           "operationProtocolVersion",
           "crdtStateVersion",
         ]
@@ -610,14 +607,14 @@ function validatePublicationSnapshot(
     if (
       candidate.operationProtocolVersion !== 1 ||
       candidate.crdtStateVersion !== 1 ||
-      !Array.isArray(candidate.coveredCausalFrontier)
+      !(candidate.coveredCausalFrontierBytes instanceof Uint8Array)
     ) {
       incompatible("spreadsheet publication coverage is invalid");
     }
     let coveredCausalFrontier;
     try {
       coveredCausalFrontier = decodeEditableArtifactCausalFrontier(
-        encodeEditableArtifactCausalFrontier(candidate.coveredCausalFrontier as never),
+        candidate.coveredCausalFrontierBytes,
       );
     } catch {
       incompatible("spreadsheet publication frontier is invalid");

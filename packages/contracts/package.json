@@ -58,6 +58,18 @@
       "types": "./src/editable-artifact-codec-registry.ts",
       "default": "./src/editable-artifact-codec-registry.ts"
     },
+    "./editable-artifact-versions": {
+      "types": "./src/editable-artifact-versions.ts",
+      "default": "./src/editable-artifact-versions.ts"
+    },
+    "./editable-artifact-publication": {
+      "types": "./src/editable-artifact-publication.ts",
+      "default": "./src/editable-artifact-publication.ts"
+    },
+    "./editable-artifact-publication-receipt": {
+      "types": "./src/editable-artifact-publication-receipt.ts",
+      "default": "./src/editable-artifact-publication-receipt.ts"
+    },
     "./spreadsheet-artifact-commands": {
       "types": "./src/spreadsheet-artifact-commands.ts",
       "default": "./src/spreadsheet-artifact-commands.ts"

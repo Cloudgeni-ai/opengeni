@@ -1,8 +1,5 @@
-import {
-  parseEditableArtifactPublicationReceipt,
-  type GitFileDiff,
-  type RetainedArtifactReference,
-} from "@opengeni/sdk";
+import type { GitFileDiff, RetainedArtifactReference } from "@opengeni/sdk";
+import { parseEditableArtifactPublicationReceipt } from "@opengeni/sdk/editable-artifact-publication";
 import {
   ArrowRightIcon,
   BoxIcon,
@@ -11,11 +8,11 @@ import {
   CameraIcon,
   CameraOffIcon,
   FileDiffIcon,
-  FileSpreadsheetIcon,
+  FilePenLineIcon,
   FileSearchIcon,
-  FileTextIcon,
   FolderGitIcon,
   GlobeIcon,
+  GalleryHorizontalEndIcon,
   ImageIcon,
   KeyboardIcon,
   KeyRoundIcon,
@@ -27,12 +24,12 @@ import {
   PackageSearchIcon,
   PanelsTopLeftIcon,
   PlugIcon,
-  PresentationIcon,
   SearchIcon,
   ServerCogIcon,
   ServerIcon,
   Share2Icon,
   TargetIcon,
+  Table2Icon,
   TerminalIcon,
   WrenchIcon,
 } from "lucide-react";
@@ -1031,10 +1028,10 @@ function EditableArtifactPublicationRenderer({ item }: ToolRendererProps) {
       <BodyNote>{receipt.artifact.title}</BodyNote>
       <a
         href={receipt.editorPath}
-        className="group/artifact-link inline-flex min-h-9 items-center gap-1.5 rounded-og-md bg-og-accent px-3 py-1.5 text-og-sm font-medium text-og-accent-fg transition-colors hover:bg-og-accent-strong"
+        className="group/memlink inline-flex min-h-9 items-center gap-1.5 rounded-og-md bg-og-accent px-3 py-1.5 text-og-sm font-medium text-og-accent-fg transition-colors hover:bg-og-accent-strong"
       >
         Open editor
-        <ArrowRightIcon className="size-3.5 transition-transform group-hover/artifact-link:translate-x-0.5" />
+        <ArrowRightIcon className="size-3.5 transition-transform group-hover/memlink:translate-x-0.5" />
       </a>
       <BodyNote>
         {receipt.sourceFile.filename} · {formatBytes(receipt.sourceFile.sizeBytes)}
@@ -1046,9 +1043,9 @@ function EditableArtifactPublicationRenderer({ item }: ToolRendererProps) {
 function editableArtifactIcon(
   modality: "document" | "spreadsheet" | "presentation" | null,
 ): ReactNode {
-  if (modality === "document") return <FileTextIcon className={ICON_SIZE} />;
-  if (modality === "spreadsheet") return <FileSpreadsheetIcon className={ICON_SIZE} />;
-  if (modality === "presentation") return <PresentationIcon className={ICON_SIZE} />;
+  if (modality === "document") return <FilePenLineIcon className={ICON_SIZE} />;
+  if (modality === "spreadsheet") return <Table2Icon className={ICON_SIZE} />;
+  if (modality === "presentation") return <GalleryHorizontalEndIcon className={ICON_SIZE} />;
   return <PanelsTopLeftIcon className={ICON_SIZE} />;
 }
 

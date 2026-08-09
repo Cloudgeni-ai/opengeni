@@ -4080,10 +4080,7 @@ export async function prepareEditableArtifactSourceFile(
             ),
           )
           .where(
-            and(
-              eq(schema.files.workspaceId, input.workspaceId),
-              eq(schema.files.id, input.fileId),
-            ),
+            and(eq(schema.files.workspaceId, input.workspaceId), eq(schema.files.id, input.fileId)),
           )
           .for("update")
           .limit(1);

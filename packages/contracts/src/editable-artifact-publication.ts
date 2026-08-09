@@ -1,24 +1,17 @@
 import { z } from "zod";
+import {
+  editableArtifactOfficeMimeType,
+  editableArtifactOfficeMimeTypeFor,
+  isWellFormedEditableArtifactText,
+} from "./editable-artifact-publication-common";
 
-const portableId = /^[0-9a-f]+$/u;
-const sha256Hex = /^[0-9a-f]{64}$/u;
 const sha256Text = /^sha256:[0-9a-f]{64}$/u;
 const replicaId = /^[0-9a-f]{16}$/u;
-const officeMimeType = z.enum([
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-]);
 
-const receiptText = z
-  .string()
-  .min(1)
-  .refine(
-    (value) =>
-      value.trim() === value &&
-      isWellFormedText(value) &&
-      new TextEncoder().encode(value).byteLength <= 512,
-  );
+export {
+  PublishEditableArtifactReceiptSchema,
+  type PublishEditableArtifactReceipt,
+} from "./editable-artifact-publication-receipt";
 
 const PreparedSnapshotCommon = {
   byteSize: z
@@ -47,7 +40,7 @@ export const PreparedEditableArtifactPublicationSchema = z
           .positive()
           .max(64 * 1024 * 1024),
         contentHash: z.string().regex(sha256Text),
-        mimeType: officeMimeType,
+        mimeType: editableArtifactOfficeMimeType,
       })
       .strict(),
     snapshot: z.discriminatedUnion("modality", [
@@ -97,12 +90,7 @@ export const PreparedEditableArtifactPublicationSchema = z
         message: "publication snapshot modality does not match its source",
       });
     }
-    const expectedMime =
-      value.modality === "document"
-        ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        : value.modality === "spreadsheet"
-          ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-          : "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+    const expectedMime = editableArtifactOfficeMimeTypeFor(value.modality);
     if (value.source.mimeType !== expectedMime) {
       context.addIssue({
         code: "custom",
@@ -135,88 +123,17 @@ export const PublishEditableArtifactToolInput = z
       .string()
       .min(1)
       .max(4_096)
-      .refine((value) => value.trim() === value && isWellFormedText(value)),
+      .refine((value) => value.trim() === value && isWellFormedEditableArtifactText(value)),
     title: z
       .string()
       .min(1)
       .refine(
         (value) =>
           value.trim() === value &&
-          isWellFormedText(value) &&
+          isWellFormedEditableArtifactText(value) &&
           new TextEncoder().encode(value).byteLength <= 512,
       ),
     modality: z.enum(["document", "spreadsheet", "presentation"]),
   })
   .strict();
 export type PublishEditableArtifactToolInput = z.infer<typeof PublishEditableArtifactToolInput>;
-
-export const PublishEditableArtifactReceiptSchema = z
-  .object({
-    type: z.literal("editable_artifact"),
-    schemaVersion: z.literal(1),
-    artifact: z
-      .object({
-        id: z
-          .string()
-          .length(32)
-          .regex(portableId)
-          .refine((value) => !/^0+$/u.test(value)),
-        modality: z.enum(["document", "spreadsheet", "presentation"]),
-        title: receiptText,
-      })
-      .strict(),
-    sourceFile: z
-      .object({
-        id: z.string().uuid(),
-        filename: receiptText,
-        contentType: officeMimeType,
-        sizeBytes: z.number().int().positive(),
-        sha256: z.string().regex(sha256Hex),
-      })
-      .strict(),
-    editorPath: z
-      .string()
-      .max(512)
-      .regex(
-        /^\/workspaces\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/artifacts\/editable\/[0-9a-f]{32}$/u,
-      ),
-  })
-  .strict()
-  .superRefine((value, context) => {
-    if (!value.editorPath.endsWith(`/artifacts/editable/${value.artifact.id}`)) {
-      context.addIssue({
-        code: "custom",
-        path: ["editorPath"],
-        message: "editable-artifact editor path does not match its artifact",
-      });
-    }
-    const expectedMime =
-      value.artifact.modality === "document"
-        ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        : value.artifact.modality === "spreadsheet"
-          ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-          : "application/vnd.openxmlformats-officedocument.presentationml.presentation";
-    if (value.sourceFile.contentType !== expectedMime) {
-      context.addIssue({
-        code: "custom",
-        path: ["sourceFile", "contentType"],
-        message: "editable-artifact source MIME type does not match its modality",
-      });
-    }
-  });
-export type PublishEditableArtifactReceipt = z.infer<typeof PublishEditableArtifactReceiptSchema>;
-
-function isWellFormedText(value: string): boolean {
-  if (value.includes("\0")) return false;
-  for (let index = 0; index < value.length; index += 1) {
-    const codeUnit = value.charCodeAt(index);
-    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
-      const next = value.charCodeAt(index + 1);
-      if (!Number.isFinite(next) || next < 0xdc00 || next > 0xdfff) return false;
-      index += 1;
-    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
-      return false;
-    }
-  }
-  return true;
-}

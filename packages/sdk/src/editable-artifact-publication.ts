@@ -1,7 +1,7 @@
 import {
   PublishEditableArtifactReceiptSchema,
   type PublishEditableArtifactReceipt,
-} from "@opengeni/contracts";
+} from "@opengeni/contracts/editable-artifact-publication-receipt";
 
 export type { PublishEditableArtifactReceipt };
 

@@ -222,7 +222,9 @@ export type CreateEditableArtifactStoreRequest = Readonly<{
   title: string;
   createdBySubjectId: string;
   genesisSnapshot: EditableArtifactSnapshotMetadata;
-  originalImport?: Readonly<EditableArtifactOriginalImport & { blobRefId: EditableArtifactStableId }>;
+  originalImport?: Readonly<
+    EditableArtifactOriginalImport & { blobRefId: EditableArtifactStableId }
+  >;
   outbox: EditableArtifactLiveOutboxRecord;
 }>;
 

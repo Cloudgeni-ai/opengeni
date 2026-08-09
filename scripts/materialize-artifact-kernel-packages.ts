@@ -165,6 +165,7 @@ export function renderArtifactSkillFacadeBootstrap(
     "const binding = await loadArtifactKernelBinding();",
     `configureArtifactRuntime(new ArtifactKernelRuntime(${JSON.stringify(validated.kind)}, binding, expectedManifest));`,
     'export * from "@opengeni/artifact-tool";',
+    'export * from "@opengeni/artifact-tool/publication";',
     "",
   ].join("\n");
 }

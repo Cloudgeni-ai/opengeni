@@ -35,6 +35,10 @@ Read [references/api.md](references/api.md) before authoring.
    inconsistent furniture, bad crops, and chart/data mismatches.
 6. Export one final PPTX. Preserve safe unknown imported content; fail closed
    rather than silently discarding fidelity-bearing features.
+7. Re-import that exact final PPTX and render every slide once more. If the
+   `publish_editable_artifact` tool is available, call it exactly once with the
+   final path, title, and `presentation` modality only after this check passes.
+   Its successful receipt is the durable editor handoff; never repeat the call.
 
 ## Design rules
 
@@ -53,3 +57,4 @@ Read [references/api.md](references/api.md) before authoring.
 - Every final slide reviewed at full size after the latest change.
 - No unintended overlap, clipping, wrapping, broken placeholders, or bad crops.
 - Final PPTX exported once to the requested path; scratch renders stay hidden.
+- When available, `publish_editable_artifact` returned the final editor receipt.

@@ -3116,14 +3116,6 @@
       }
     }
   }
-:where(.og-root).group-hover\/artifact-link\:translate-x-0\.5,:where(.og-root) .group-hover\/artifact-link\:translate-x-0\.5 {
-    &:is(:where(.group\/artifact-link):hover *) {
-      @media (hover: hover) {
-        --tw-translate-x: calc(var(--spacing) * 0.5);
-        translate: var(--tw-translate-x) var(--tw-translate-y);
-      }
-    }
-  }
 :where(.og-root).group-hover\/copy\:opacity-100,:where(.og-root) .group-hover\/copy\:opacity-100 {
     &:is(:where(.group\/copy):hover *) {
       @media (hover: hover) {
@@ -4776,15 +4768,15 @@
 }
 @supports (color: color-mix(in lab, red, red)) {
   :where(.og-root) {
-    --og-color-accent-soft: color-mix(in oklch, var(--og-color-accent) 16%, transparent);
-    --og-color-diff-add-bg: color-mix(in oklch, var(--og-color-status-idle) 14%, transparent);
-    --og-color-diff-del-bg: color-mix(in oklch, var(--og-color-status-failed) 14%, transparent);
-    --og-shadow-glow: 0 0 24px color-mix(in oklch, var(--og-color-accent) 18%, transparent);
-    --og-session-chrome-surface: color-mix(in oklch, var(--og-color-surface-2) 82%, transparent);
-    --og-session-chrome-surface-open: color-mix(in oklch, var(--og-color-surface-2) 92%, transparent);
-    --og-session-chrome-border: color-mix(in oklch, var(--og-color-border) 85%, transparent);
-    --og-session-chrome-highlight-ring: color-mix(in oklch, var(--og-color-fg) 16%, transparent);
-    --og-session-chrome-row-hover: color-mix(in oklch, var(--og-color-surface-3) 55%, transparent);
+    --_og-color-accent-soft: var(--og-color-accent-soft, color-mix(in oklch, var(--og-color-accent) 16%, transparent));
+    --_og-color-diff-add-bg: var(--og-color-diff-add-bg, color-mix(in oklch, var(--og-color-status-idle) 14%, transparent));
+    --_og-color-diff-del-bg: var(--og-color-diff-del-bg, color-mix(in oklch, var(--og-color-status-failed) 14%, transparent));
+    --_og-shadow-glow: var(--og-shadow-glow, 0 0 24px color-mix(in oklch, var(--og-color-accent) 18%, transparent));
+    --_og-session-chrome-surface: var(--og-session-chrome-surface, color-mix(in oklch, var(--og-color-surface-2) 82%, transparent));
+    --_og-session-chrome-surface-open: var(--og-session-chrome-surface-open, color-mix(in oklch, var(--og-color-surface-2) 92%, transparent));
+    --_og-session-chrome-border: var(--og-session-chrome-border, color-mix(in oklch, var(--og-color-border) 85%, transparent));
+    --_og-session-chrome-highlight-ring: var(--og-session-chrome-highlight-ring, color-mix(in oklch, var(--og-color-fg) 16%, transparent));
+    --_og-session-chrome-row-hover: var(--og-session-chrome-row-hover, color-mix(in oklch, var(--og-color-surface-3) 55%, transparent));
   }
 }
 :where([data-og-density="compact"]):where(.og-root),:where([data-og-density="compact"]):has(:where(.og-root)),:where(.og-root) :where([data-og-density="compact"]),:where( .og-density-compact):where(.og-root),:where( .og-density-compact):has(:where(.og-root)),:where(.og-root) :where( .og-density-compact) {

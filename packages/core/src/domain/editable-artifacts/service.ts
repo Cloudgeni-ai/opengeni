@@ -175,12 +175,7 @@ export class EditableArtifactService {
     const request = normalizeCreateRequest(input.request);
     const requestHash = hashEditableArtifactCreateRequest(request);
     const authorityKey = editableArtifactActorKey(actor);
-    const inFlightKey = creationInFlightKey(
-      scope,
-      "create",
-      authorityKey,
-      request.idempotencyKey,
-    );
+    const inFlightKey = creationInFlightKey(scope, "create", authorityKey, request.idempotencyKey);
     for (;;) {
       const inFlight = this.inFlightCreations.get(inFlightKey);
       if (inFlight) {
@@ -331,12 +326,7 @@ export class EditableArtifactService {
     const request = normalizeImportRequest(input.request);
     const requestHash = hashEditableArtifactImportRequest(request);
     const authorityKey = editableArtifactActorKey(actor);
-    const inFlightKey = creationInFlightKey(
-      scope,
-      "import",
-      authorityKey,
-      request.idempotencyKey,
-    );
+    const inFlightKey = creationInFlightKey(scope, "import", authorityKey, request.idempotencyKey);
     for (;;) {
       const inFlight = this.inFlightImports.get(inFlightKey);
       if (inFlight) {
@@ -404,10 +394,7 @@ export class EditableArtifactService {
       snapshotId,
       verifiedAt,
     } as PublishEditableArtifactSnapshotRequest);
-    if (
-      candidate.modality !== request.modality ||
-      candidate.coveredHeadSequence !== 0
-    ) {
+    if (candidate.modality !== request.modality || candidate.coveredHeadSequence !== 0) {
       throw new EditableArtifactKernelContractError(
         "Imported snapshot must use its assigned modality and sequence-zero boundary",
       );
@@ -1469,9 +1456,7 @@ function normalizeOriginalImport(
         : "application/vnd.openxmlformats-officedocument.presentationml.presentation";
   if (
     typeof fileId !== "string" ||
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(
-      fileId,
-    ) ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(fileId) ||
     typeof blobReference !== "string" ||
     typeof byteSize !== "number" ||
     typeof contentHash !== "string" ||

@@ -33,13 +33,11 @@ import {
   resourceMountPath,
   signDelegatedAccessToken,
   GenerateImageToolInput,
-  PublishEditableArtifactToolInput,
   RequestHumanInputToolInput,
   type GitCredentialProvider,
   type GitCredentialTransport,
   type HumanInputResponse,
   type McpServerConnectionRef,
-  type PublishEditableArtifactReceipt,
   type Permission,
   type FirstPartyMcpToolName,
   type LatencyMode,
@@ -48,6 +46,10 @@ import {
   type ToolAuthNeededPayload,
   type ToolRef,
 } from "@opengeni/contracts";
+import {
+  PublishEditableArtifactToolInput,
+  type PublishEditableArtifactReceipt,
+} from "@opengeni/contracts/editable-artifact-publication";
 import {
   MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
   MCP_MAX_TOOL_RESULT_BYTES,

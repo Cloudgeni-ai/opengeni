@@ -164,13 +164,7 @@ export class InMemoryEditableArtifactStore
     );
     const genesisSnapshot = cloneSnapshot(input.genesisSnapshot);
     const outbox = cloneOutbox(input.outbox);
-    assertGenesisCreateRequest(
-      scope,
-      artifactId,
-      input.operationKind,
-      genesisSnapshot,
-      outbox,
-    );
+    assertGenesisCreateRequest(scope, artifactId, input.operationKind, genesisSnapshot, outbox);
     if (!(["spreadsheet", "presentation", "document"] as const).includes(input.modality)) {
       throw new TypeError("Unknown editable artifact modality");
     }

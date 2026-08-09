@@ -42,6 +42,10 @@
       "types": "./src/editable-artifacts.ts",
       "default": "./src/editable-artifacts.ts"
     },
+    "./editable-artifact-publication": {
+      "types": "./src/editable-artifact-publication.ts",
+      "default": "./src/editable-artifact-publication.ts"
+    },
     "./editable-artifacts/worker": {
       "types": "./src/editable-artifacts-worker.ts",
       "default": "./src/editable-artifacts-worker.ts"

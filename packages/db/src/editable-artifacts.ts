@@ -4853,9 +4853,7 @@ function validateOriginalImport(
 }> {
   if (
     typeof input.fileId !== "string" ||
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(
-      input.fileId,
-    )
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(input.fileId)
   ) {
     throw new TypeError("Original import file id must be a canonical UUID");
   }
@@ -4871,11 +4869,7 @@ function validateOriginalImport(
   return Object.freeze({
     fileId: input.fileId,
     blobRefId: validateStableId(input.blobRefId, "original import blob id"),
-    blobReference: validateBoundedText(
-      input.blobReference,
-      "original import blob reference",
-      1024,
-    ),
+    blobReference: validateBoundedText(input.blobReference, "original import blob reference", 1024),
     byteSize: validateInteger(
       input.byteSize,
       "original import byte size",

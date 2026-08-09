@@ -7,7 +7,9 @@
  * lengths. It intentionally does not construct an editable artifact model.
  */
 
-export const COMMITTED_TRANSACTION_PROTOCOL_VERSION = 1 as const;
+import { COMMITTED_TRANSACTION_PROTOCOL_VERSION } from "./editable-artifact-versions";
+
+export { COMMITTED_TRANSACTION_PROTOCOL_VERSION } from "./editable-artifact-versions";
 export const MAX_COMMITTED_TRANSACTION_BYTES = 8 * 1024 * 1024;
 export const MAX_COMMITTED_TRANSACTION_OPERATIONS = 4_096;
 export const MAX_COMMITTED_TRANSACTION_CAUSAL_REPLICAS = 100_000;

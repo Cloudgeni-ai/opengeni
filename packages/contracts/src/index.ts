@@ -14,7 +14,6 @@ export * from "./image-generation";
 export * from "./editable-artifacts";
 export * from "./editable-artifact-committed-transaction";
 export * from "./editable-artifact-serialized-commit";
-export * from "./editable-artifact-publication";
 
 export {
   CreateWorkspaceArtifactRequest,

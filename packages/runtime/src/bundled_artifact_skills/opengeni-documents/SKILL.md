@@ -35,6 +35,10 @@ Read [references/api.md](references/api.md) before authoring.
    header/footer drift. Re-render after every layout-sensitive change.
 6. Export one final DOCX. Unsupported fidelity-bearing input must fail closed
    or remain preserved and unchanged; never silently drop it.
+7. Re-import that exact final DOCX and render it once more. If the
+   `publish_editable_artifact` tool is available, call it exactly once with the
+   final path, title, and `document` modality only after this check passes. Its
+   successful receipt is the durable editor handoff; never repeat the call.
 
 ## Content and review rules
 
@@ -51,3 +55,4 @@ Read [references/api.md](references/api.md) before authoring.
 - Every rendered page reviewed at full size after the latest edit.
 - No clipping, overlap, broken tables, missing glyphs, or accidental blank pages.
 - Final DOCX exported once to the requested path; scratch renders stay hidden.
+- When available, `publish_editable_artifact` returned the final editor receipt.

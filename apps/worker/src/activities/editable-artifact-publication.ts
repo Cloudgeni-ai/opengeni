@@ -1,12 +1,11 @@
+import { signDelegatedAccessToken, type FileAsset } from "@opengeni/contracts";
 import {
   PreparedEditableArtifactPublicationSchema,
   PublishEditableArtifactReceiptSchema,
-  signDelegatedAccessToken,
-  type FileAsset,
   type PreparedEditableArtifactPublication,
   type PublishEditableArtifactReceipt,
   type PublishEditableArtifactToolInput,
-} from "@opengeni/contracts";
+} from "@opengeni/contracts/editable-artifact-publication";
 import {
   firstPartyMcpWorkspaceUrl,
   resolveFirstPartyDelegationSecret,

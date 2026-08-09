@@ -50,6 +50,10 @@
       "types": "./src/materializer-cli.ts",
       "default": "./src/materializer-cli.ts"
     },
+    "./publication": {
+      "types": "./src/publication.ts",
+      "default": "./src/publication.ts"
+    },
     "./spreadsheet": {
       "types": "./src/production-spreadsheet.ts",
       "default": "./src/production-spreadsheet.ts"

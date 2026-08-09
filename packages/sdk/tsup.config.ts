@@ -14,6 +14,7 @@ export default defineConfig({
     "src/artifacts.ts",
     "src/realtime.ts",
     "src/editable-artifacts.ts",
+    "src/editable-artifact-publication.ts",
     "src/editable-artifacts-worker.ts",
     "src/codex-realtime-controller.ts",
     "src/gateway-realtime-transport.ts",

@@ -351,9 +351,7 @@ async function createRuntimeFixture(
 
   const target = options.target ?? "darwin-arm64";
   const facadeBytes = new TextEncoder().encode(
-    options.publication
-      ? publicationFixtureFacade(target)
-      : "export const configured = true;\n",
+    options.publication ? publicationFixtureFacade(target) : "export const configured = true;\n",
   );
   const kernelBytes = new TextEncoder().encode("export const kernel = true;\n");
   const assetBytes = new TextEncoder().encode("verified-kernel-asset");
@@ -469,7 +467,7 @@ export function createArtifactPublicationSnapshot(artifact) {
     snapshotBytes: new TextEncoder().encode("canonical-publication-snapshot"),
   };
   return artifact.modality === "spreadsheet"
-    ? { ...common, coveredCausalFrontier: [{ replicaId: "0000000000000001", counter: 1 }], operationProtocolVersion: 1, crdtStateVersion: 1 }
+    ? { ...common, coveredCausalFrontierBytes: Uint8Array.from([79,71,65,67,70,48,48,49,1,0,0,0,1,0,0,0,1,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,78,192,196,13,215,35,182,146]), operationProtocolVersion: 1, crdtStateVersion: 1 }
     : { ...common, nativeRevision: 1 };
 }
 export function disposeArtifact(artifact) { artifact.disposed = true; }

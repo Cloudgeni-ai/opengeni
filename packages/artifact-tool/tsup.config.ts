@@ -13,6 +13,7 @@ export default defineConfig({
     "src/runtime-development.ts",
     "src/materializer-cli.ts",
     "src/materializer-cli-entry.ts",
+    "src/publication.ts",
     "src/production-spreadsheet.ts",
     "src/production-document.ts",
     "src/production-presentation.ts",

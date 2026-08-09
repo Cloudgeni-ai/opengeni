@@ -37,6 +37,10 @@ feature-specific help returned by `workbook.help()` when a call remains unclear.
 6. Export one final XLSX. Preserve safe unknown imported content; if fidelity
    diagnostics report unsupported content, either keep it unchanged or report
    the blocker—never silently discard it.
+7. Re-import that exact final XLSX, recalculate, and render it once more. If the
+   `publish_editable_artifact` tool is available, call it exactly once with the
+   final path, title, and `spreadsheet` modality only after this check passes.
+   Its successful receipt is the durable editor handoff; never repeat the call.
 
 ## Editing rules
 
@@ -56,3 +60,4 @@ feature-specific help returned by `workbook.help()` when a call remains unclear.
 - No unexpected `#REF!`, `#DIV/0!`, `#VALUE!`, `#NAME?`, or `#N/A`.
 - Visual review passed for every affected sheet.
 - Final XLSX exported once to the requested path; scratch files remain hidden.
+- When available, `publish_editable_artifact` returned the final editor receipt.

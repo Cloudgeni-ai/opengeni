@@ -1,6 +1,3 @@
-import { decodeEditableArtifactCausalFrontier } from "@opengeni/contracts/editable-artifact-causal-frontier";
-import { EDITABLE_ARTIFACT_CODEC_REGISTRY } from "@opengeni/contracts/editable-artifact-codec-registry";
-import { COMMITTED_TRANSACTION_PROTOCOL_VERSION } from "@opengeni/contracts/editable-artifact-committed-transaction";
 import type { FileBlob } from "./file-blob";
 import {
   Document as ReferenceDocument,
@@ -20,11 +17,7 @@ import {
   type DocumentTextStyle,
 } from "./document";
 import { DOCUMENT_LOSS_PRESERVATION } from "./document-docx-state";
-import {
-  NativeDocumentSession,
-  NativePresentationSession,
-  NativeSpreadsheetSession,
-} from "./native";
+import { NativeDocumentSession, NativePresentationSession } from "./native";
 import {
   Presentation as ReferencePresentation,
   PresentationChart,
@@ -423,81 +416,6 @@ export type ArtifactCompositeDiagnostics = Readonly<{
   nativeSnapshot: Uint8Array;
   hostProjection: SerializedWorkbook | SerializedDocument | Record<string, unknown>;
 }>;
-
-type ArtifactPublicationSnapshotCommon = Readonly<{
-  schemaVersion: 1;
-  modality: "spreadsheet" | "document" | "presentation";
-  runtimeTarget: string;
-  kernelVersion: string;
-  modelSchemaVersion: 1;
-  snapshotVersion: 1;
-  stateHash: string;
-  snapshotBytes: Uint8Array;
-}>;
-
-/**
- * Exact canonical state suitable for the durable editable-artifact import
- * boundary. Unlike diagnostics, this contains only native persistence
- * authority and its exact coverage/version facts.
- */
-export type ArtifactPublicationSnapshot =
-  | (ArtifactPublicationSnapshotCommon &
-      Readonly<{
-        modality: "spreadsheet";
-        coveredCausalFrontier: readonly Readonly<{
-          replicaId: string;
-          counter: number;
-        }>[];
-        operationProtocolVersion: 1;
-        crdtStateVersion: 1;
-      }>)
-  | (ArtifactPublicationSnapshotCommon &
-      Readonly<{
-        modality: "document" | "presentation";
-        nativeRevision: number;
-      }>);
-
-/** Captures one immutable, native-canonical publication boundary. */
-export function createArtifactPublicationSnapshot(
-  artifact: ReferenceWorkbook | ReferenceDocument | ReferencePresentation,
-): ArtifactPublicationSnapshot {
-  const state = requireCompositeState(artifact);
-  const native = state.native;
-  const descriptor = EDITABLE_ARTIFACT_CODEC_REGISTRY[state.modality];
-  const common = {
-    schemaVersion: 1 as const,
-    modality: state.modality,
-    runtimeTarget: native.target,
-    kernelVersion: native.buildIdentity,
-    modelSchemaVersion: descriptor.modelSchemaVersion,
-    snapshotVersion: descriptor.snapshotVersion,
-    stateHash: native.stateHash(),
-    snapshotBytes: Uint8Array.from(native.snapshot()),
-  };
-  if (state.modality === "spreadsheet") {
-    if (!(native instanceof NativeSpreadsheetSession)) {
-      throw new Error("Spreadsheet composite does not own a spreadsheet native session");
-    }
-    return Object.freeze({
-      ...common,
-      modality: "spreadsheet" as const,
-      coveredCausalFrontier: decodeEditableArtifactCausalFrontier(native.frontier()),
-      operationProtocolVersion: COMMITTED_TRANSACTION_PROTOCOL_VERSION,
-      crdtStateVersion: descriptor.snapshotVersion,
-    });
-  }
-  if (
-    !(native instanceof NativeDocumentSession) &&
-    !(native instanceof NativePresentationSession)
-  ) {
-    throw new Error("Serialized composite does not own its expected native session");
-  }
-  return Object.freeze({
-    ...common,
-    modality: state.modality,
-    nativeRevision: safePublicationRevision(native.revision()),
-  });
-}
 
 /**
  * Point-in-time diagnostics only. This is deliberately not a persistence,
@@ -1101,11 +1019,4 @@ function u64Hex(value: bigint): string {
     throw new RangeError("Artifact namespace must be a nonzero u64");
   }
   return value.toString(16).padStart(16, "0");
-}
-
-function safePublicationRevision(value: bigint): number {
-  if (value < 0n || value > BigInt(Number.MAX_SAFE_INTEGER)) {
-    throw new RangeError("Artifact native revision exceeds the durable publication range");
-  }
-  return Number(value);
 }
