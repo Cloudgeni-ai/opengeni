@@ -89,12 +89,14 @@ export type UseSandboxFilesOptions = ClientOverride & {
   active?: boolean | undefined;
   /** Repository roots advertised by capabilities, relative to the workspace. */
   repoPaths?: readonly string[] | undefined;
-  /** The lease liveness. The structured FileSystem
+  /** The lease liveness. `null` means capability negotiation has not produced
+   *  an authoritative lifecycle value yet and therefore blocks live I/O. Omitting
+   *  the option preserves the legacy direct-hook behavior. The structured FileSystem
    *  capability is advertised even on a COLD box, so the mount-time list can race
    *  the box: it lists before the box is warm, gets an empty/errored result, and
    *  (with no `fs.changed` event) never re-lists. Passing liveness re-lists when
    *  the box first becomes warm, so the tree populates as soon as the box is up. */
-  liveness?: SessionCapabilities["liveness"] | undefined;
+  liveness?: SessionCapabilities["liveness"] | null | undefined;
   /** The latest turn-end workspace capture (from `useWorkspaceCapture`). The tree
    *  paints immediately from this durable index, then a warm box reconciles live
    *  in place. If that live read fails, the capture remains a truthful read-only
@@ -491,11 +493,11 @@ export function useSandboxFiles(
   const capture = options.capture ?? null;
   const isLive = sandboxAcceptsLiveIo(options.liveness);
   // `liveness` predates this hook option. Preserve legacy embedders that omit it;
-  // an explicit lifecycle value, however, must pass the warm-only provider fence.
+  // explicit `null` (negotiating) and lifecycle values require authoritative warm.
   const acceptsEventReads = options.liveness === undefined || isLive;
   const acceptsEventReadsRef = useRef(acceptsEventReads);
   acceptsEventReadsRef.current = acceptsEventReads;
-  const livenessKnown = options.liveness !== undefined;
+  const hasLiveIoFence = options.liveness !== undefined;
   const identityKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${rootPath}\u0000${repoPathsKey}`;
 
   const [tree, setTree] = useState<FileTreeNode[]>([]);
@@ -1145,7 +1147,7 @@ export function useSandboxFiles(
       }
       return;
     }
-    if (isLive || (!livenessKnown && !currentCapture)) {
+    if (isLive || (!hasLiveIoFence && !currentCapture)) {
       void refresh();
     }
     return () => {
@@ -1158,7 +1160,7 @@ export function useSandboxFiles(
     enabled,
     active,
     isLive,
-    livenessKnown,
+    hasLiveIoFence,
     captureRevision,
     identityKey,
     refresh,

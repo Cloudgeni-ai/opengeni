@@ -28,9 +28,10 @@ export type UseSandboxGitOptions = ClientOverride & {
   enabled?: boolean | undefined;
   /** Pause live reads/invalidation while preserving the last rendered result. */
   active?: boolean | undefined;
-  /** Lease liveness ("warm" | "draining" | "cold"). When NOT warm, the diff is
-   *  served from the capture (cold/offline) instead of a live `gitDiff` RPC. */
-  liveness?: SessionCapabilities["liveness"] | undefined;
+  /** Lease liveness. `null` means capability negotiation is still pending and
+   *  blocks live I/O. When not warm, the diff is served from the capture instead
+   *  of a live `gitDiff` RPC. Omission preserves legacy direct-hook behavior. */
+  liveness?: SessionCapabilities["liveness"] | null | undefined;
   /** The latest turn-end capture (from `useWorkspaceCapture`). Seeds the diff
    *  immediately; a warm box reconciles live and leaves this durable review
    *  surface in place if the live request is temporarily unavailable. */
@@ -209,12 +210,12 @@ export function useSandboxGit(
   // the workspace controller without inventing an empty branch comparison.
   const capture = comparison === "staged" ? null : (options.capture ?? null);
   const isLive = sandboxAcceptsLiveIo(options.liveness);
-  // `liveness` is optional for compatibility with direct hook consumers. Only
-  // an explicit lifecycle value is subject to the warm-only provider fence.
+  // `liveness` is optional for compatibility with direct hook consumers. Explicit
+  // `null` (negotiating) and lifecycle values require authoritative warm.
   const acceptsEventReads = options.liveness === undefined || isLive;
   const acceptsEventReadsRef = useRef(acceptsEventReads);
   acceptsEventReadsRef.current = acceptsEventReads;
-  const livenessKnown = options.liveness !== undefined;
+  const hasLiveIoFence = options.liveness !== undefined;
   const identityKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${repoPathsKey}\u0000${workspaceWide}\u0000${comparison}`;
 
   const [diff, setDiff] = useState<SandboxGitFileDiff[]>([]);
@@ -459,7 +460,7 @@ export function useSandboxGit(
       if (!active) setLoading(false);
       return;
     }
-    if (isLive || (!livenessKnown && !currentCapture)) {
+    if (isLive || (!hasLiveIoFence && !currentCapture)) {
       void refresh();
     }
     return () => {
@@ -471,7 +472,7 @@ export function useSandboxGit(
     enabled,
     active,
     isLive,
-    livenessKnown,
+    hasLiveIoFence,
     captureRevision,
     identityKey,
     refresh,

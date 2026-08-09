@@ -323,6 +323,89 @@ describe("workbench surface allowlist", () => {
 // ── Refinement 1: prewarm gated to intent ────────────────────────────────────
 
 describe("workbench prewarm gating (Refinement 1)", () => {
+  test("pending capability negotiation cannot replay captured history into Channel-A", async () => {
+    const historicalEvents = [
+      fakeEvent(1, "git.changed", { revision: 3 }),
+      fakeEvent(2, "agent.toolCall.output", {}),
+    ];
+
+    for (const initialTab of [WORKBENCH_TAB_CHANGES, WORKBENCH_TAB_FILES]) {
+      let resolveCapabilities: (value: ReturnType<typeof fakeColdCapabilities>) => void = () => {};
+      const capabilitiesPromise = new Promise<ReturnType<typeof fakeColdCapabilities>>(
+        (resolve) => {
+          resolveCapabilities = resolve;
+        },
+      );
+      const reads = {
+        fsList: 0,
+        fsListBatch: 0,
+        gitStatus: 0,
+        gitDiff: 0,
+        gitReadBatch: 0,
+      };
+      const { client } = coldClient({
+        getStreamCapabilities: () => capabilitiesPromise,
+        getWorkspaceCapture: async () => captureAvailable(fakeManifest(1)),
+        fsList: async () => {
+          reads.fsList += 1;
+          throw new Error("unsettled capabilities must not list the provider filesystem");
+        },
+        fsListBatch: async () => {
+          reads.fsListBatch += 1;
+          throw new Error("unsettled capabilities must not batch-list the provider filesystem");
+        },
+        gitStatus: async () => {
+          reads.gitStatus += 1;
+          throw new Error("unsettled capabilities must not query provider Git status");
+        },
+        gitDiff: async () => {
+          reads.gitDiff += 1;
+          throw new Error("unsettled capabilities must not query a provider Git diff");
+        },
+        gitReadBatch: async () => {
+          reads.gitReadBatch += 1;
+          throw new Error("unsettled capabilities must not batch-read provider Git");
+        },
+      });
+      const hook = await renderTabsHook(client, {
+        sessionId: SESSION_ID,
+        events: historicalEvents,
+        initialTab,
+      });
+
+      // The capture wins the mount race and exposes the historical event tail while
+      // capabilities remain unresolved. Cross every event debounce window: no live
+      // request may start merely to be aborted when the cold document arrives.
+      await flush(1_150);
+      expect(reads).toEqual({
+        fsList: 0,
+        fsListBatch: 0,
+        gitStatus: 0,
+        gitDiff: 0,
+        gitReadBatch: 0,
+      });
+
+      await act(async () => resolveCapabilities(fakeColdCapabilities()));
+      await flush(60);
+      expect(reads).toEqual({
+        fsList: 0,
+        fsListBatch: 0,
+        gitStatus: 0,
+        gitDiff: 0,
+        gitReadBatch: 0,
+      });
+      const changes = hook.result.current.tabs.find((tab) => tab.id === WORKBENCH_TAB_CHANGES);
+      const files = hook.result.current.tabs.find((tab) => tab.id === WORKBENCH_TAB_FILES);
+      expect(
+        (changes!.content as ReactElement<{ git: { source: string | null } }>).props.git.source,
+      ).toBe("capture");
+      expect(
+        (files!.content as ReactElement<{ files: { source: string | null } }>).props.files.source,
+      ).toBe("capture");
+      await hook.unmount();
+    }
+  });
+
   test("cold capability negotiation cannot race a pending capture into Channel-A reads", async () => {
     let resolveCapture: (value: GetWorkspaceCaptureResponse) => void = () => {};
     const capturePromise = new Promise<GetWorkspaceCaptureResponse>((resolve) => {
