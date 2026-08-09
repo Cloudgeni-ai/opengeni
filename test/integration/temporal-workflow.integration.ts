@@ -808,6 +808,10 @@ describe("Temporal workflow integration", () => {
           cancellationWaitAttemptId = input.attemptId;
           return { action: "continue" as const };
         },
+        reconcileSessionAttemptQuiescence: async () =>
+          cancellationWaitAttemptId
+            ? { action: "pending" as const }
+            : { action: "quiesced" as const },
       });
       const run = worker.run();
       try {
@@ -881,6 +885,7 @@ describe("Temporal workflow integration", () => {
           terminateFirst = true;
           return { action: "continue" as const };
         },
+        reconcileSessionAttemptQuiescence: async () => ({ action: "pending" as const }),
       });
       const run = worker.run();
       try {
@@ -1571,6 +1576,8 @@ describe("Temporal workflow integration", () => {
       const sessionId = crypto.randomUUID();
       const workflowId = `session-${sessionId}`;
       const triggerEventId = crypto.randomUUID();
+      const agentRunUsageIdempotencyKey = `test:scheduled-manual:${crypto.randomUUID()}`;
+      const initiator = { kind: "subject" as const, subjectId: crypto.randomUUID() };
       const worker = await testWorker(nativeConnection, taskQueue, {
         runAgentTurn: async () => ({ status: "idle" }),
         dispatchScheduledTaskRun: async (input: unknown) => {
@@ -1592,13 +1599,23 @@ describe("Temporal workflow integration", () => {
         const fire = await client.workflow.start("scheduledTaskFireWorkflow", {
           taskQueue,
           workflowId: `scheduled-fire-${crypto.randomUUID()}`,
-          args: [{ ...scope, taskId: crypto.randomUUID(), triggerType: "manual" }],
+          args: [
+            {
+              ...scope,
+              taskId: crypto.randomUUID(),
+              triggerType: "manual",
+              agentRunUsageIdempotencyKey,
+              initiator,
+            },
+          ],
         });
         await fire.result();
         expect(dispatches).toHaveLength(1);
         expect(dispatches[0]).toMatchObject({
           workspaceId: scope.workspaceId,
           triggerType: "manual",
+          agentRunUsageIdempotencyKey,
+          initiator,
         });
       } finally {
         worker.shutdown();
@@ -2535,6 +2552,7 @@ async function testWorker(
     maybeContinueGoal: async () => ({ action: "none" }),
     getCodexCapacityWait: async () => null,
     reconcileCodexCapacityWait: async () => ({ action: "stale" }),
+    reconcileSessionAttemptQuiescence: async () => ({ action: "stale" }),
     ...activities,
   };
   const { runAgentTurn, ...controlActivities } = defaults;
