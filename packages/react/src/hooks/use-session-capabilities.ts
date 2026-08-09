@@ -357,7 +357,7 @@ export function useSessionCapabilities(
               // a successful holder that waits forever. Release it and surface
               // a retryable error instead of retaining stale credentials.
               await client.detachViewer(workspaceId, sessionId, holder.viewerId).catch(() => {});
-              throw new Error("requested live plane grant was unavailable");
+              throw new Error("live plane unavailable");
             }
             localViewerId = holder.viewerId;
             viewerIdRef.current = holder.viewerId;

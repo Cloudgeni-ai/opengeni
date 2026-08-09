@@ -399,7 +399,7 @@ describe("useSessionCapabilities", () => {
     await flush();
 
     expect(hook.result.current.state).toBe("error");
-    expect(hook.result.current.error?.message).toContain("grant was unavailable");
+    expect(hook.result.current.error?.message).toBe("live plane unavailable");
     expect(detached).toEqual([fakeAttachResponse().viewerId]);
     await hook.unmount();
   });

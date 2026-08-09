@@ -74,6 +74,14 @@ function decodeFrame(data: string | ArrayBuffer): { command: string; payload: st
   return { command, payload };
 }
 
+function closeSocket(socket: WebSocket | null): void {
+  try {
+    socket?.close();
+  } catch {
+    // Already closed or rejected by the host WebSocket implementation.
+  }
+}
+
 /**
  * Drive a ttyd PTY-over-websocket connection from a `pty-ws` Terminal capability,
  * symmetric with `use-desktop-stream` (the noVNC-over-tunnel hook). The scoped
@@ -180,11 +188,7 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
       } catch {
         socketFailedRef.current = true;
         setStatus("error");
-        try {
-          socket.close();
-        } catch {
-          // already closed
-        }
+        closeSocket(socket);
         return;
       }
       setStatus("open");
@@ -227,11 +231,7 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
       socket.onmessage = null;
       socket.onerror = null;
       socket.onclose = null;
-      try {
-        socket.close();
-      } catch {
-        // ignore teardown errors
-      }
+      closeSocket(socket);
     };
     // A url/token change (rotation) re-runs this effect → close old, open new.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -246,11 +246,7 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
         } catch {
           socketFailedRef.current = true;
           setStatus("error");
-          try {
-            ws.close();
-          } catch {
-            // already closed
-          }
+          closeSocket(ws);
         }
       } else if (transport === "pty-ws" && !socketFailedRef.current) {
         const nextSize = pendingInputRef.current.length + data.length;
@@ -258,13 +254,7 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
           pendingInputRef.current = "";
           socketFailedRef.current = true;
           setStatus("error");
-          if (ws) {
-            try {
-              ws.close();
-            } catch {
-              // already closed
-            }
-          }
+          closeSocket(ws);
           return;
         }
         pendingInputRef.current += data;
@@ -289,13 +279,7 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
       socketFailedRef.current = false;
       socketAuthenticatedRef.current = false;
       setStatus("closed");
-      if (ws) {
-        try {
-          ws.close();
-        } catch {
-          // ignore
-        }
-      }
+      closeSocket(ws);
     };
     return { connected: status === "open", status, write, resize, disconnect };
   }, [status, transport]);
