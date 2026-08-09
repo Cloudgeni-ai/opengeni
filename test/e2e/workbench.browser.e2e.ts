@@ -828,6 +828,44 @@ describe("workbench browser acceptance", () => {
     await context.close();
   });
 
+  test("real CodeMirror input marks the file editor dirty", async () => {
+    const context = await browser.newContext({ viewport: { width: 1440, height: 960 } });
+    try {
+      const page = await context.newPage();
+      const pageErrors: string[] = [];
+      page.on("pageerror", (error) => pageErrors.push(error.stack ?? error.message));
+      await page.goto(dockUrl(baseUrl, "warm-live", "dark", "files"), {
+        waitUntil: "networkidle",
+      });
+      const file = page.getByRole("treeitem").filter({ hasText: "README.md" }).first();
+      await file.getByRole("button").click();
+      const fileViewer = page.locator("#sandbox-files-viewer");
+      await fileViewer.getByRole("button", { name: "Edit", exact: true }).click();
+      const editor = fileViewer.locator("[data-opengeni-code-editor]");
+      await editor.waitFor();
+      const editable = editor.locator(".cm-content");
+      await editable.waitFor();
+      expect(await editable.getAttribute("contenteditable")).toBe("true");
+
+      await editable.click();
+      await editable.press("Control+End");
+      await editable.press("Enter");
+      await editable.pressSequentially("ui edit marker");
+      await fileViewer
+        .locator('[data-opengeni-code-editor][data-opengeni-editor-dirty="true"]')
+        .waitFor({ timeout: 10_000 });
+      expect(await editable.textContent()).toContain("ui edit marker");
+      const save = editor.getByRole("button", { name: "Save", exact: true });
+      expect(await save.isEnabled()).toBe(true);
+      await save.click();
+      await editor.getByText("Saved", { exact: true }).waitFor({ timeout: 10_000 });
+      expect(await editor.getAttribute("data-opengeni-editor-dirty")).toBe("false");
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  }, 30_000);
+
   test("file deletion uses an accessible non-blocking dialog on mobile", async () => {
     const context = await browser.newContext({
       viewport: { width: 320, height: 720 },
