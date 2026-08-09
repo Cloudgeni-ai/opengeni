@@ -1,5 +1,11 @@
 # @opengeni/runtime
 
+## 0.18.37
+
+### Patch Changes
+
+- bea1e89: Resolve lazy sandbox command cancellation against the physical backend before execution.
+
 ## 0.18.36
 
 ### Patch Changes
