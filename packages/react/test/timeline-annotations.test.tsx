@@ -151,7 +151,9 @@ describe("timeline annotations", () => {
     );
     const trigger = rendered.container.querySelector("button");
     expect(trigger?.textContent).toContain("1 annotation");
-    await flush();
+    await act(async () => {
+      await import("../src/components/timeline-annotations-dialog");
+    });
     const textarea = document.body.querySelector("textarea");
     expect(textarea).not.toBeNull();
     await act(async () => {
