@@ -1,5 +1,7 @@
 import type {
   OpenGeniClient,
+  PreferenceRegistryDetailResponse,
+  PreferenceRegistryListResponse,
   WorkspaceInstructionPolicyOnboardingProposalListResponse,
   WorkspaceStateResponse,
 } from "@opengeni/sdk";
@@ -156,6 +158,182 @@ export function useWorkspaceInstructionPolicyOnboardingProposals(
 
   if (result.client !== client || result.workspaceId !== workspaceId) {
     return { response: null, error: null, loading: true, reload };
+  }
+  return {
+    response: result.response,
+    error: result.error,
+    loading: result.loading,
+    reload,
+  };
+}
+
+type PreferenceRegistryClient = Pick<
+  OpenGeniClient,
+  "getPreferenceRegistry" | "listPreferenceRegistry"
+>;
+
+type PreferenceRegistryInventoryLoad = {
+  client: PreferenceRegistryClient;
+  workspaceId: string;
+  response: PreferenceRegistryListResponse | null;
+  error: Error | null;
+  loading: boolean;
+};
+
+export function usePreferenceRegistryInventory(
+  client: PreferenceRegistryClient,
+  workspaceId: string,
+): Omit<PreferenceRegistryInventoryLoad, "client" | "workspaceId"> & {
+  reload: () => Promise<void>;
+} {
+  const generation = useRef(0);
+  const [result, setResult] = useState<PreferenceRegistryInventoryLoad>(() => ({
+    client,
+    workspaceId,
+    response: null,
+    error: null,
+    loading: true,
+  }));
+  const reload = useCallback(async () => {
+    const requestGeneration = ++generation.current;
+    setResult((previous) => ({
+      client,
+      workspaceId,
+      response:
+        previous.client === client && previous.workspaceId === workspaceId
+          ? previous.response
+          : null,
+      error: null,
+      loading: true,
+    }));
+    try {
+      const response = await client.listPreferenceRegistry(workspaceId, { limit: 100 });
+      if (generation.current !== requestGeneration) return;
+      setResult({ client, workspaceId, response, error: null, loading: false });
+    } catch (loadError) {
+      if (generation.current !== requestGeneration) return;
+      setResult((previous) => ({
+        client,
+        workspaceId,
+        response:
+          previous.client === client && previous.workspaceId === workspaceId
+            ? previous.response
+            : null,
+        error: loadError instanceof Error ? loadError : new Error(String(loadError)),
+        loading: false,
+      }));
+    }
+  }, [client, workspaceId]);
+
+  useEffect(() => {
+    void reload();
+    return () => {
+      generation.current += 1;
+    };
+  }, [reload]);
+
+  if (result.client !== client || result.workspaceId !== workspaceId) {
+    return { response: null, error: null, loading: true, reload };
+  }
+  return {
+    response: result.response,
+    error: result.error,
+    loading: result.loading,
+    reload,
+  };
+}
+
+type PreferenceRegistryDetailLoad = {
+  client: PreferenceRegistryClient;
+  workspaceId: string;
+  preferenceId: string | null;
+  response: PreferenceRegistryDetailResponse | null;
+  error: Error | null;
+  loading: boolean;
+};
+
+export function usePreferenceRegistryDetail(
+  client: PreferenceRegistryClient,
+  workspaceId: string,
+  preferenceId: string | null,
+): Omit<PreferenceRegistryDetailLoad, "client" | "workspaceId" | "preferenceId"> & {
+  reload: () => Promise<void>;
+} {
+  const generation = useRef(0);
+  const [result, setResult] = useState<PreferenceRegistryDetailLoad>(() => ({
+    client,
+    workspaceId,
+    preferenceId,
+    response: null,
+    error: null,
+    loading: preferenceId !== null,
+  }));
+  const reload = useCallback(async () => {
+    const requestGeneration = ++generation.current;
+    if (!preferenceId) {
+      setResult({
+        client,
+        workspaceId,
+        preferenceId: null,
+        response: null,
+        error: null,
+        loading: false,
+      });
+      return;
+    }
+    setResult((previous) => ({
+      client,
+      workspaceId,
+      preferenceId,
+      response:
+        previous.client === client &&
+        previous.workspaceId === workspaceId &&
+        previous.preferenceId === preferenceId
+          ? previous.response
+          : null,
+      error: null,
+      loading: true,
+    }));
+    try {
+      const response = await client.getPreferenceRegistry(workspaceId, preferenceId);
+      if (generation.current !== requestGeneration) return;
+      setResult({ client, workspaceId, preferenceId, response, error: null, loading: false });
+    } catch (loadError) {
+      if (generation.current !== requestGeneration) return;
+      setResult((previous) => ({
+        client,
+        workspaceId,
+        preferenceId,
+        response:
+          previous.client === client &&
+          previous.workspaceId === workspaceId &&
+          previous.preferenceId === preferenceId
+            ? previous.response
+            : null,
+        error: loadError instanceof Error ? loadError : new Error(String(loadError)),
+        loading: false,
+      }));
+    }
+  }, [client, preferenceId, workspaceId]);
+
+  useEffect(() => {
+    void reload();
+    return () => {
+      generation.current += 1;
+    };
+  }, [reload]);
+
+  if (
+    result.client !== client ||
+    result.workspaceId !== workspaceId ||
+    result.preferenceId !== preferenceId
+  ) {
+    return {
+      response: null,
+      error: null,
+      loading: preferenceId !== null,
+      reload,
+    };
   }
   return {
     response: result.response,
