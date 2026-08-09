@@ -1072,6 +1072,84 @@ export async function waitForInteractiveTerminal(
   return input;
 }
 
+export type TerminalOutputProbe = {
+  expect: (marker: string, action: () => Promise<void>, timeoutMs?: number) => Promise<void>;
+};
+
+/**
+ * Observe the exact PTY bytes delivered to the browser without depending on an
+ * xterm renderer's DOM shape. WebGL and canvas render cells without
+ * `.xterm-rows`; the DOM renderer happens to expose that private element, but it
+ * is not a transport or execution receipt.
+ */
+export function createTerminalOutputProbe(page: Pick<Page, "on">): TerminalOutputProbe {
+  const tails = new Map<object, string>();
+  let pending:
+    | {
+        marker: string;
+        resolve: () => void;
+        reject: (error: Error) => void;
+        timer: ReturnType<typeof setTimeout>;
+      }
+    | undefined;
+
+  page.on("websocket", (socket) => {
+    tails.set(socket, "");
+    socket.on("framereceived", ({ payload }) => {
+      const chunk = typeof payload === "string" ? payload : payload.toString("utf8");
+      const tail = `${tails.get(socket) ?? ""}${chunk}`.slice(-8_192);
+      tails.set(socket, tail);
+      if (!pending || !tail.includes(pending.marker)) return;
+      const observed = pending;
+      pending = undefined;
+      clearTimeout(observed.timer);
+      observed.resolve();
+    });
+  });
+
+  return {
+    async expect(marker, action, timeoutMs = 30_000) {
+      if (!marker) throw new Error("terminal output marker must not be empty");
+      if (pending) throw new Error("terminal output probe already has a pending observation");
+      for (const socket of tails.keys()) tails.set(socket, "");
+
+      let resolveOutput!: () => void;
+      let rejectOutput!: (error: Error) => void;
+      const output = new Promise<void>((resolvePromise, reject) => {
+        resolveOutput = resolvePromise;
+        rejectOutput = reject;
+      });
+      const timer = setTimeout(() => {
+        const current = pending;
+        pending = undefined;
+        current?.reject(new Error(`terminal output marker was not received within ${timeoutMs}ms`));
+      }, timeoutMs);
+      const observation = { marker, resolve: resolveOutput, reject: rejectOutput, timer };
+      pending = observation;
+      try {
+        await Promise.all([action(), output]);
+      } finally {
+        if (pending === observation) {
+          pending = undefined;
+          clearTimeout(timer);
+        }
+      }
+    },
+  };
+}
+
+export function terminalOutputCommand(marker: string): string {
+  if (!/^[A-Z0-9_]+$/.test(marker)) {
+    throw new Error("terminal output marker is outside the deterministic acceptance alphabet");
+  }
+  const encoded = Buffer.from(`${marker}\n`, "utf8").toString("base64");
+  const command = `printf '%s' '${encoded}' | base64 -d`;
+  if (command.includes(marker)) {
+    throw new Error("terminal output marker encoding is not echo-safe");
+  }
+  return command;
+}
+
 async function runLiveWorkspaceFlow(input: {
   browser: Browser;
   cookieHeader: string;
@@ -1088,6 +1166,7 @@ async function runLiveWorkspaceFlow(input: {
   const context = await browser.newContext({ viewport: { width: 1440, height: 960 } });
   await installManagedCookies(context, cookieHeader, args.webUrl, args.apiUrl);
   const page = await context.newPage();
+  const terminalOutput = createTerminalOutputProbe(page);
   const problems = observePage(page);
   try {
     await page.goto(sessionUrl(args.webUrl, workspaceId, sessionId), {
@@ -1216,17 +1295,18 @@ async function runLiveWorkspaceFlow(input: {
     const terminalInput = await waitForInteractiveTerminal(page);
     await terminalInput.click();
     const terminalMarker = `TERMINAL_${marker}`;
-    await page.keyboard.type(`printf '${terminalMarker}\\n'`);
-    await page.keyboard.press("Enter");
-    await page.waitForFunction(
-      (expected) => document.querySelector(".xterm-rows")?.textContent?.includes(String(expected)),
+    await terminalOutput.expect(
       terminalMarker,
-      { timeout: 30_000 },
+      async () => {
+        await page.keyboard.type(terminalOutputCommand(terminalMarker));
+        await page.keyboard.press("Enter");
+      },
+      30_000,
     );
     pass(
       checks,
       "functional.terminal-roundtrip",
-      "The deployed interactive terminal accepted input and rendered the exact deterministic output.",
+      "The deployed interactive terminal accepted input and returned exact deterministic PTY output to the browser.",
     );
 
     if (args.environment === "staging") {

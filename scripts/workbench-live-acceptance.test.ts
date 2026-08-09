@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 import type { AccessContext, WorkspaceCaptureManifest } from "@opengeni/sdk";
 
 import {
+  createTerminalOutputProbe,
   axeManualContrastSelector,
   assertFixtureCapture,
   assertFixtureToolOutput,
@@ -25,6 +26,7 @@ import {
   parseProtectedEmails,
   runCaptureApiRegionalProbe,
   selectTreeFile,
+  terminalOutputCommand,
   validateCaptureApiRegionalProbeResult,
   waitForCold,
   waitForInteractiveTerminal,
@@ -35,6 +37,63 @@ import {
 } from "./workbench-live-acceptance";
 
 describe("workbench live acceptance preflight", () => {
+  test("observes split binary terminal output without depending on xterm DOM rows", async () => {
+    let onSocket: ((socket: unknown) => void) | undefined;
+    let onFrame: ((frame: { payload: string | Buffer }) => void) | undefined;
+    const page = {
+      on: (event: string, listener: (socket: unknown) => void) => {
+        expect(event).toBe("websocket");
+        onSocket = listener;
+      },
+    } as never;
+    const socket = {
+      on: (event: string, listener: (frame: { payload: string | Buffer }) => void) => {
+        expect(event).toBe("framereceived");
+        onFrame = listener;
+      },
+    };
+    const probe = createTerminalOutputProbe(page);
+    onSocket?.(socket);
+
+    await probe.expect("TERMINAL_EXACT_MARKER", async () => {
+      onFrame?.({ payload: "noise TERMINAL_EX" });
+      onFrame?.({ payload: Buffer.from("ACT_MARKER") });
+    });
+  });
+
+  test("clears a failed terminal action before the next observation", async () => {
+    let onSocket: ((socket: unknown) => void) | undefined;
+    let onFrame: ((frame: { payload: string | Buffer }) => void) | undefined;
+    const probe = createTerminalOutputProbe({
+      on: (_event: string, listener: (socket: unknown) => void) => {
+        onSocket = listener;
+      },
+    } as never);
+    onSocket?.({
+      on: (_event: string, listener: (frame: { payload: string | Buffer }) => void) => {
+        onFrame = listener;
+      },
+    });
+
+    await expect(
+      probe.expect("FAILED_ACTION", async () => {
+        throw new Error("keyboard unavailable");
+      }),
+    ).rejects.toThrow("keyboard unavailable");
+    await probe.expect("RECOVERED_ACTION", async () => {
+      onFrame?.({ payload: "RECOVERED_ACTION" });
+    });
+  });
+
+  test("terminal acceptance command proves execution rather than matching echoed input", () => {
+    const marker = "TERMINAL_EXACT_MARKER";
+    const command = terminalOutputCommand(marker);
+    expect(command).not.toContain(marker);
+    const encoded = command.match(/'([A-Za-z0-9+/=]+)'/)?.[1];
+    expect(encoded).toBeDefined();
+    expect(Buffer.from(encoded!, "base64").toString("utf8")).toBe(`${marker}\n`);
+  });
+
   test("waits for terminal interactivity before resolving the xterm input", async () => {
     const calls: unknown[] = [];
     const input = {
