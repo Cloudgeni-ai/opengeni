@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test as bunTest } from "bun:test";
 
 import {
   Document,
@@ -32,9 +32,14 @@ import {
 } from "../src/native";
 import { requireCompositeState } from "../src/production-composite";
 import { encodePresentationProjectionCommands } from "../src/production-native-codecs";
-import { productionTestRuntime } from "./production-runtime-fixture";
+import {
+  productionTestRuntime,
+  productionTestRuntimeAvailable,
+} from "./production-runtime-fixture";
 
-configureArtifactRuntime(productionTestRuntime());
+const nativeRuntimeAvailable = productionTestRuntimeAvailable();
+const test = nativeRuntimeAvailable ? bunTest : bunTest.skip;
+if (nativeRuntimeAvailable) configureArtifactRuntime(productionTestRuntime());
 
 const ONE_PIXEL_PNG =
   "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";

@@ -5,7 +5,11 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { buildArtifactKernelWasmPackages } from "./build-artifact-kernel-wasm-packages";
+import {
+  assertCanonicalArtifactKernelWasmRebuildHost,
+  buildArtifactKernelWasmPackages,
+  refreshArtifactKernelWasmPackageIdentities,
+} from "./build-artifact-kernel-wasm-packages";
 
 const repoRoot = resolve(import.meta.dir, "..");
 const modalities = ["spreadsheet", "document", "presentation"] as const;
@@ -143,7 +147,7 @@ test("version automation regenerates WASM identity without forcing peer dependen
   };
 
   expect(rootPackage.scripts?.["changeset:version"]).toBe(
-    "changeset version && bun scripts/build-artifact-kernel-wasm-packages.ts",
+    "changeset version && bun scripts/build-artifact-kernel-wasm-packages.ts --refresh-package-identities",
   );
   expect(
     changesetConfig.___experimentalUnsafeOptions_WILL_CHANGE_IN_PATCH
@@ -152,9 +156,96 @@ test("version automation regenerates WASM identity without forcing peer dependen
   expect(reactPackage.peerDependencies?.["@opengeni/artifact-tool"]).toBe(">=0.0.0 <0.2.0");
   expect(
     ciWorkflow.match(
-      /@changesets\/cli\/bin\.js" version\n\s+bun scripts\/build-artifact-kernel-wasm-packages\.ts/gu,
+      /@changesets\/cli\/bin\.js" version\n\s+bun scripts\/build-artifact-kernel-wasm-packages\.ts --refresh-package-identities/gu,
     ),
   ).toHaveLength(2);
+});
+
+test("refreshes version identities from tracked package assets without raw Rust output", async () => {
+  const versionFixture = await fixture("0.1.0");
+  await buildArtifactKernelWasmPackages({
+    assetRoot: versionFixture.assetRoot,
+    artifactToolPackagePath: versionFixture.artifactToolPackagePath,
+    outputPackagesRoot: versionFixture.packagesRoot,
+  });
+  const before = await Promise.all(
+    modalities.map(async (modality) => {
+      const wasm = join(
+        versionFixture.packagesRoot,
+        `artifact-kernel-wasm-${modality}`,
+        "dist",
+        `artifact_kernel_${modality}_bg.wasm`,
+      );
+      return createHash("sha256")
+        .update(await readFile(wasm))
+        .digest("hex");
+    }),
+  );
+  await rm(versionFixture.assetRoot, { recursive: true, force: true });
+  await writeFile(
+    versionFixture.artifactToolPackagePath,
+    `${JSON.stringify({ name: "@opengeni/artifact-tool", version: "0.2.0" })}\n`,
+  );
+  for (const modality of modalities) {
+    const packagePath = join(
+      versionFixture.packagesRoot,
+      `artifact-kernel-wasm-${modality}`,
+      "package.json",
+    );
+    await writeFile(
+      packagePath,
+      `${JSON.stringify({
+        name: `@opengeni/artifact-kernel-wasm-${modality}`,
+        version: "0.2.0",
+      })}\n`,
+    );
+  }
+
+  const builds = await refreshArtifactKernelWasmPackageIdentities({
+    artifactToolPackagePath: versionFixture.artifactToolPackagePath,
+    outputPackagesRoot: versionFixture.packagesRoot,
+  });
+
+  expect(builds.map(({ identity }) => identity.packageVersion)).toEqual([
+    "0.2.0",
+    "0.2.0",
+    "0.2.0",
+  ]);
+  expect(builds.map(({ identity }) => identity.artifactToolVersion)).toEqual([
+    "0.2.0",
+    "0.2.0",
+    "0.2.0",
+  ]);
+  const after = await Promise.all(
+    modalities.map(async (modality) => {
+      const wasm = join(
+        versionFixture.packagesRoot,
+        `artifact-kernel-wasm-${modality}`,
+        "dist",
+        `artifact_kernel_${modality}_bg.wasm`,
+      );
+      return createHash("sha256")
+        .update(await readFile(wasm))
+        .digest("hex");
+    }),
+  );
+  expect(after).toEqual(before);
+});
+
+test("restricts exact Rust byte regeneration to the canonical builder host", () => {
+  const canonicalRoot = "/tmp/opengeni-artifact-wasm-source-v1";
+  expect(() =>
+    assertCanonicalArtifactKernelWasmRebuildHost("linux", "x64", canonicalRoot),
+  ).not.toThrow();
+  expect(() =>
+    assertCanonicalArtifactKernelWasmRebuildHost("darwin", "arm64", canonicalRoot),
+  ).toThrow("canonical linux/x64 builder");
+  expect(() =>
+    assertCanonicalArtifactKernelWasmRebuildHost("linux", "arm64", canonicalRoot),
+  ).toThrow("canonical linux/x64 builder");
+  expect(() => assertCanonicalArtifactKernelWasmRebuildHost("linux", "x64", repoRoot)).toThrow(
+    canonicalRoot,
+  );
 });
 
 async function fixture(version?: string): Promise<{

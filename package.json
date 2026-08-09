@@ -92,7 +92,7 @@
     "artifact-runtime:build-target": "bun scripts/build-artifact-runtime-target.ts",
     "test:runtime-embedding-consumer": "bun scripts/test-runtime-embedding-consumer.ts",
     "test:ogtool-package": "bun scripts/test-ogtool-package.ts",
-    "changeset:version": "changeset version && bun scripts/build-artifact-kernel-wasm-packages.ts",
+    "changeset:version": "changeset version && bun scripts/build-artifact-kernel-wasm-packages.ts --refresh-package-identities",
     "release:rewrite-deps": "bun scripts/rewrite-workspace-deps.ts",
     "release:rewrite-entry-points": "bun scripts/rewrite-entry-points.ts",
     "release:publish": "bash scripts/release-publish.sh",

@@ -90,6 +90,17 @@ export type VerifiedConfiguredArtifactKernelRuntime = Readonly<{
   runtime: ArtifactKernelRuntime;
 }>;
 
+/** True when any production/development runtime authority was explicitly supplied. */
+export function isArtifactRuntimeConfigured(
+  environment: RuntimeEnvironment = process.env,
+): boolean {
+  return [
+    ARTIFACT_RUNTIME_ENVIRONMENT.manifest,
+    ARTIFACT_RUNTIME_ENVIRONMENT.toolEntrypoint,
+    DEVELOPMENT_ARTIFACT_RUNTIME_ENVIRONMENT.manifest,
+  ].some((name) => typeof environment[name] === "string");
+}
+
 export function validateDevelopmentArtifactRuntimeManifest(
   value: unknown,
   expectedTarget?: NativeArtifactRuntimeTarget,

@@ -1831,6 +1831,8 @@ export function SpreadsheetProjectionGrid({
     canvas.dataset.ogReusedTiles = String(stats.reusedTiles);
     canvas.dataset.ogUncachedTiles = String(stats.uncachedTiles);
     canvas.dataset.ogDevicePixelRatio = String(stats.devicePixelRatio);
+    canvas.dataset.ogLogicalScrollLeft = String(logicalScrollLeft);
+    canvas.dataset.ogLogicalScrollTop = String(logicalScrollTop);
     if (!canvasReady) setCanvasReady(true);
   }, [
     canvasColumns,

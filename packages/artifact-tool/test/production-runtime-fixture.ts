@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import packageJson from "../package.json" with { type: "json" };
 
 import {
@@ -19,16 +19,7 @@ export function productionTestRuntime(): ArtifactKernelRuntime {
   const shared = globalThis as RuntimeGlobal;
   if (shared[runtimeSymbol]) return shared[runtimeSymbol];
   const target = localTarget();
-  const nativePath = join(
-    import.meta.dir,
-    "..",
-    "kernel",
-    "bindings",
-    "dist",
-    "native",
-    `${process.platform}-${process.arch}`,
-    "opengeni_artifact_kernel.node",
-  );
+  const nativePath = productionTestNativeAssetPath();
   if (!existsSync(nativePath)) {
     throw new Error(`Production native test addon is missing: ${nativePath}`);
   }
@@ -58,6 +49,36 @@ export function productionTestRuntime(): ArtifactKernelRuntime {
   } satisfies ArtifactKernelPackageManifest);
   shared[runtimeSymbol] = runtime;
   return runtime;
+}
+
+export function productionTestRuntimeAvailable(): boolean {
+  const available = existsSync(productionTestNativeAssetPath());
+  if (!available && process.env.OPENGENI_REQUIRE_ARTIFACT_NATIVE_TESTS === "1") {
+    throw new Error(
+      `Production native test addon is required but missing: ${productionTestNativeAssetPath()}`,
+    );
+  }
+  return available;
+}
+
+export function productionTestNativeAssetPath(): string {
+  const configured = process.env.OPENGENI_ARTIFACT_KERNEL_NATIVE_PATH;
+  if (configured !== undefined) {
+    if (configured.length === 0 || !isAbsolute(configured)) {
+      throw new Error("OPENGENI_ARTIFACT_KERNEL_NATIVE_PATH must be a nonempty absolute path");
+    }
+    return configured;
+  }
+  return join(
+    import.meta.dir,
+    "..",
+    "kernel",
+    "bindings",
+    "dist",
+    "native",
+    `${process.platform}-${process.arch}`,
+    "opengeni_artifact_kernel.node",
+  );
 }
 
 function localTarget(): ArtifactRuntimeTarget {

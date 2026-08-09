@@ -6,8 +6,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
-    let protocol_root = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("manifest dir"));
-    let kernel_root = protocol_root.join("../..");
+    let protocol_root = fs::canonicalize(PathBuf::from(
+        env::var_os("CARGO_MANIFEST_DIR").expect("manifest dir"),
+    ))
+    .expect("canonical protocol root");
+    let kernel_root = fs::canonicalize(protocol_root.join("../..")).expect("canonical kernel root");
     let mut files = vec![
         kernel_root.join("Cargo.toml"),
         kernel_root.join("Cargo.lock"),

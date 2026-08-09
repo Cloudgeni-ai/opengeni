@@ -155,14 +155,35 @@ describe("artifact spreadsheet retained canvas", () => {
         const scrollFrames = await grid.evaluate(async (element) => {
           const samples: number[] = [];
           for (let index = 1; index <= 12; index += 1) {
+            const target = index * 64;
             const started = performance.now();
-            element.scrollLeft = index * 64;
-            await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+            element.scrollLeft = target;
+            await new Promise<void>((resolve, reject) => {
+              const deadline = performance.now() + 2_000;
+              const observePaint = () => {
+                const canvas = element.querySelector<HTMLCanvasElement>(
+                  "canvas[data-og-spreadsheet-canvas]",
+                );
+                if (Number(canvas?.dataset.ogLogicalScrollLeft) === target) {
+                  resolve();
+                  return;
+                }
+                if (performance.now() >= deadline) {
+                  reject(new Error(`canvas did not paint scroll position ${target}`));
+                  return;
+                }
+                requestAnimationFrame(observePaint);
+              };
+              requestAnimationFrame(observePaint);
+            });
             samples.push(performance.now() - started);
           }
           return samples;
         });
-        expect(Math.max(...scrollFrames)).toBeLessThan(250);
+        const orderedScrollFrames = [...scrollFrames].sort((left, right) => left - right);
+        expect(orderedScrollFrames[8]).toBeLessThan(100);
+        expect(orderedScrollFrames[10]).toBeLessThan(250);
+        expect(orderedScrollFrames[11]).toBeLessThan(1_000);
         await grid.evaluate((element) => {
           element.scrollLeft = 260;
         });

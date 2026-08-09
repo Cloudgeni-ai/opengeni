@@ -7,8 +7,8 @@
     "packageName": "@opengeni/artifact-kernel-wasm-presentation",
     "packageVersion": "0.0.0",
     "artifactToolVersion": "0.0.0",
-    "buildIdentity": "opengeni-artifact-kernel/0.1.0;abi=1;command=1;query=1;snapshot=1;document-snapshot=1;document-command=1;document-query=1;presentation-snapshot=1;presentation-command=1;presentation-query=1;text-layout-fonts=1;text-layout-request=1;text-layout-response=1;render-tile=1;render-patch=1;source=d55bdb2e773e8dd6009624f0fcc41e9060a7b2b61dede178c8e8d2ace47814be;toolchain=1367261bf04dd2fc4b2c6aa0ef397c21659ee1c973a9d98dcb8d84b46d68b06f",
-    "kernelVersion": "opengeni-artifact-kernel/0.1.0;abi=1;command=1;query=1;snapshot=1;document-snapshot=1;document-command=1;document-query=1;presentation-snapshot=1;presentation-command=1;presentation-query=1;text-layout-fonts=1;text-layout-request=1;text-layout-response=1;render-tile=1;render-patch=1;source=d55bdb2e773e8dd6009624f0fcc41e9060a7b2b61dede178c8e8d2ace47814be;toolchain=1367261bf04dd2fc4b2c6aa0ef397c21659ee1c973a9d98dcb8d84b46d68b06f",
+    "buildIdentity": "opengeni-artifact-kernel/0.1.0;abi=1;command=1;query=1;snapshot=1;document-snapshot=1;document-command=1;document-query=1;presentation-snapshot=1;presentation-command=1;presentation-query=1;text-layout-fonts=1;text-layout-request=1;text-layout-response=1;render-tile=1;render-patch=1;source=a9194d659991a0910e6f9f47510670b2857b927c2a1b818b13cf480521a986dd;toolchain=1367261bf04dd2fc4b2c6aa0ef397c21659ee1c973a9d98dcb8d84b46d68b06f",
+    "kernelVersion": "opengeni-artifact-kernel/0.1.0;abi=1;command=1;query=1;snapshot=1;document-snapshot=1;document-command=1;document-query=1;presentation-snapshot=1;presentation-command=1;presentation-query=1;text-layout-fonts=1;text-layout-request=1;text-layout-response=1;render-tile=1;render-patch=1;source=a9194d659991a0910e6f9f47510670b2857b927c2a1b818b13cf480521a986dd;toolchain=1367261bf04dd2fc4b2c6aa0ef397c21659ee1c973a9d98dcb8d84b46d68b06f",
     "abiVersion": 1,
     "protocolVersion": 1,
     "modelSchemaVersion": 1,
@@ -26,9 +26,9 @@
   "files": [
     {
       "path": "artifact_kernel_presentation_bg.wasm",
-      "bytes": 297655,
-      "sha256": "sha256:cc70b04c0cfe81839e0c1a167e64a077007787cd2d5107421d19156e9f14600e",
-      "gzipBytes": 94773
+      "bytes": 296525,
+      "sha256": "sha256:0ffb017b4af39dafa0dc4d1660576202dfd64fc638bce5f891cd8e3d7e33e605",
+      "gzipBytes": 94594
     },
     {
       "path": "artifact_kernel_presentation_bg.wasm.d.ts",
@@ -49,12 +49,12 @@
     {
       "path": "index.d.ts",
       "bytes": 2309,
-      "sha256": "sha256:928a2671ce5f5696335c1d2da23c60b3d1b858aaf874629caa2341c05e3b39f1"
+      "sha256": "sha256:1649964a0e819304c9ab0c73fb36343aae2a7a1f2c26c06c5ac989c86189be8a"
     },
     {
       "path": "index.js",
       "bytes": 2266,
-      "sha256": "sha256:ae5c512b10f44fd652cd6fac771f4dd66311b43422c03509ee554bdcea4986da"
+      "sha256": "sha256:9aaf93ebffe92a4723b825305c525e044e09c7f6284aaae128d11b8c1e7c95da"
     }
   ]
 }

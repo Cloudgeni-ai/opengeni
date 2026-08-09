@@ -98,6 +98,7 @@
     "bench:release": "bun bench/release.ts",
     "test:kernel": "cargo test --manifest-path kernel/Cargo.toml",
     "test:kernel-packages": "bun ../../scripts/test-artifact-kernel-package-consumers.ts",
+    "test:production-native": "bun ../../scripts/run-artifact-native-tests.ts",
     "bench:kernel": "cargo bench --manifest-path kernel/Cargo.toml --bench kernel",
     "test:perf": "bun test --timeout 30000 test/perf",
     "fuzz:check": "cargo check --manifest-path kernel/fuzz/Cargo.toml",

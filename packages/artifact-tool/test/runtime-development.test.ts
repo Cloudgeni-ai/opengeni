@@ -17,6 +17,7 @@ import {
   canonicalDevelopmentArtifactRuntimeManifestBytes,
   canonicalDevelopmentArtifactToolIdentityBytes,
   doctorVerifiedDevelopmentArtifactRuntime,
+  isArtifactRuntimeConfigured,
   locateVerifiedDevelopmentArtifactRuntime,
   runConfiguredArtifactRuntimeCli,
   type DevelopmentArtifactRuntimeManifest,
@@ -31,6 +32,21 @@ afterEach(async () => {
 });
 
 describe("current-host development artifact runtime", () => {
+  test("distinguishes an absent runtime from every explicit or partial configuration", () => {
+    expect(isArtifactRuntimeConfigured({})).toBe(false);
+    expect(
+      isArtifactRuntimeConfigured({ [ARTIFACT_RUNTIME_ENVIRONMENT.manifest]: "/runtime.json" }),
+    ).toBe(true);
+    expect(isArtifactRuntimeConfigured({ [ARTIFACT_RUNTIME_ENVIRONMENT.toolEntrypoint]: "" })).toBe(
+      true,
+    );
+    expect(
+      isArtifactRuntimeConfigured({
+        [DEVELOPMENT_ARTIFACT_RUNTIME_ENVIRONMENT.manifest]: "/development.json",
+      }),
+    ).toBe(true);
+  });
+
   test("locates and doctors the separate canonical development chain", async () => {
     const fixture = await createFixture();
     const location = await locateVerifiedDevelopmentArtifactRuntime({

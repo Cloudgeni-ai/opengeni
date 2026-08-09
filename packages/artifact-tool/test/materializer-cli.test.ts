@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test as bunTest } from "bun:test";
 import { createHash } from "node:crypto";
 import { copyFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -22,7 +22,10 @@ import {
   type ArtifactRuntimeTarget,
 } from "../src/runtime";
 import { SpreadsheetXlsxCodec } from "../src/spreadsheet-xlsx-codec";
-import { productionTestRuntime } from "./production-runtime-fixture";
+import {
+  productionTestRuntime,
+  productionTestRuntimeAvailable,
+} from "./production-runtime-fixture";
 
 const MATERIALIZE = "--opengeni-materialize-v1";
 const VERIFY = "--opengeni-verify-materialization-v1";
@@ -60,8 +63,11 @@ type ParsedFrame = Readonly<{
 }>;
 
 let fixture: Fixture;
+const nativeRuntimeAvailable = productionTestRuntimeAvailable();
+const test = nativeRuntimeAvailable ? bunTest : bunTest.skip;
 
 beforeAll(async () => {
+  if (!nativeRuntimeAvailable) return;
   fixture = await createFixture();
 }, 120_000);
 

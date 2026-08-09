@@ -3028,6 +3028,7 @@ describe("workflow contracts", () => {
       ],
       "package-contracts": [
         "Install pinned artifact-kernel build toolchain",
+        "Production native artifact contracts",
         "Build client packages (contracts + SDK + React)",
         "Reproduce committed modality WASM packages from clean Rust sources",
         "Install Chromium for packed WASM package proof",

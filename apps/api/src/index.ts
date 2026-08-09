@@ -22,6 +22,7 @@ import {
 import { createNatsEventBus, type ResponderConnection } from "@opengeni/events";
 import { createObservability, logStartupDependencyRetry } from "@opengeni/observability";
 import { createObjectStorage } from "@opengeni/storage";
+import { isArtifactRuntimeConfigured } from "@opengeni/artifact-tool/runtime/development";
 import { SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID } from "@opengeni/core";
 import {
   Connection,
@@ -329,7 +330,7 @@ export async function startApi() {
   }
   const objectStorage = createObjectStorage(settings);
   let editableArtifactComposition: StandaloneEditableArtifactApplication | undefined;
-  if (objectStorage) {
+  if (objectStorage && isArtifactRuntimeConfigured()) {
     try {
       editableArtifactComposition = await createStandaloneEditableArtifactApplication({
         db: dbClient.db,

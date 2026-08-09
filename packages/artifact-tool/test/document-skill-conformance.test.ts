@@ -1,9 +1,14 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test as bunTest } from "bun:test";
 
 import { Document, DocumentFile, DocumentTextRun, configureArtifactRuntime } from "../src";
-import { productionTestRuntime } from "./production-runtime-fixture";
+import {
+  productionTestRuntime,
+  productionTestRuntimeAvailable,
+} from "./production-runtime-fixture";
 
-configureArtifactRuntime(productionTestRuntime());
+const nativeRuntimeAvailable = productionTestRuntimeAvailable();
+const test = nativeRuntimeAvailable ? bunTest : bunTest.skip;
+if (nativeRuntimeAvailable) configureArtifactRuntime(productionTestRuntime());
 
 function bytesOf(blob: Blob): Promise<Uint8Array> {
   return blob.arrayBuffer().then((buffer) => new Uint8Array(buffer));

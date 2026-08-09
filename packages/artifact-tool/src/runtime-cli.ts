@@ -462,23 +462,96 @@ function requiredEnvironmentPath(environment: RuntimeEnvironment, name: string):
   return value;
 }
 
-function detectLinuxLibc(): "gnu" | "musl" {
-  const versions = process.versions as Record<string, string | undefined>;
-  if (versions.musl) return "musl";
-  const report = process.report?.getReport() as
-    | { header?: { glibcVersionRuntime?: unknown }; sharedObjects?: unknown }
-    | undefined;
-  if (typeof report?.header?.glibcVersionRuntime === "string") return "gnu";
+export type LinuxLibcRuntimeEvidence = Readonly<{
+  arch: string;
+  versions: Readonly<Record<string, string | undefined>>;
+  report?: Readonly<{
+    header?: Readonly<{
+      glibcVersionRuntime?: unknown;
+      release?: Readonly<{ sourceUrl?: unknown }>;
+    }>;
+    sharedObjects?: unknown;
+  }>;
+}>;
+
+/** Resolves only mutually consistent evidence about the running Linux binary. */
+export function resolveLinuxLibcFromRuntimeEvidence(
+  evidence: LinuxLibcRuntimeEvidence,
+): "gnu" | "musl" {
+  const candidates = new Set<"gnu" | "musl">();
+  if (nonempty(evidence.versions.musl)) candidates.add("musl");
+  if (nonempty(evidence.report?.header?.glibcVersionRuntime)) candidates.add("gnu");
   if (
-    Array.isArray(report?.sharedObjects) &&
-    report.sharedObjects.some((entry) => typeof entry === "string" && entry.includes("ld-musl"))
+    Array.isArray(evidence.report?.sharedObjects) &&
+    evidence.report.sharedObjects.some(
+      (entry) =>
+        typeof entry === "string" &&
+        /(?:^|[\\/])ld-musl-(?:aarch64|x86_64)\.so(?:\.\d+)?$/u.test(entry),
+    )
   ) {
-    return "musl";
+    candidates.add("musl");
   }
+  const bunArchiveLibc = libcFromOfficialBunRelease(
+    evidence.report?.header?.release?.sourceUrl,
+    evidence.versions.bun,
+    evidence.arch,
+  );
+  if (bunArchiveLibc) candidates.add(bunArchiveLibc);
+  if (candidates.size === 1) return [...candidates][0]!;
   throw new ArtifactRuntimeError(
     "ARTIFACT_RUNTIME_UNSUPPORTED_TARGET",
     "Could not prove whether this Linux host uses glibc or musl",
   );
+}
+
+function detectLinuxLibc(): "gnu" | "musl" {
+  const report = process.report?.getReport() as LinuxLibcRuntimeEvidence["report"];
+  return resolveLinuxLibcFromRuntimeEvidence({
+    arch: process.arch,
+    versions: process.versions as Record<string, string | undefined>,
+    ...(report ? { report } : {}),
+  });
+}
+
+function libcFromOfficialBunRelease(
+  sourceUrl: unknown,
+  bunVersion: string | undefined,
+  arch: string,
+): "gnu" | "musl" | undefined {
+  if (!nonempty(sourceUrl) || !nonempty(bunVersion)) return undefined;
+  let url: URL;
+  try {
+    url = new URL(sourceUrl);
+  } catch {
+    return undefined;
+  }
+  if (
+    url.protocol !== "https:" ||
+    url.hostname !== "github.com" ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash
+  ) {
+    return undefined;
+  }
+  const match = /^\/oven-sh\/bun\/releases\/download\/bun-v([^/]+)\/bun-linux-([^/]+)\.zip$/u.exec(
+    url.pathname,
+  );
+  if (!match || match[1] !== bunVersion) return undefined;
+  const archiveTarget = match[2]!;
+  const validTarget =
+    arch === "arm64"
+      ? /^aarch64(?:-musl)?(?:-profile)?$/u.test(archiveTarget)
+      : arch === "x64"
+        ? /^x64(?:-musl)?(?:-baseline)?(?:-profile)?$/u.test(archiveTarget)
+        : false;
+  if (!validTarget) return undefined;
+  return archiveTarget.split("-").includes("musl") ? "musl" : "gnu";
+}
+
+function nonempty(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
 }
 
 export function probeVerifiedArtifactSkillFacade(

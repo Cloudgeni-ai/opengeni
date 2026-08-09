@@ -8,6 +8,8 @@ import {
   canonicalArtifactRuntimeReleaseManifestBytes,
   doctorVerifiedArtifactRuntime,
   locateVerifiedArtifactRuntime,
+  resolveCurrentArtifactRuntimeTarget,
+  resolveLinuxLibcFromRuntimeEvidence,
   runArtifactRuntimeCli,
 } from "../src/runtime-cli";
 import {
@@ -118,13 +120,91 @@ describe("artifact runtime locator executable", () => {
   });
 
   test("CLI is JSON-only and fails closed without an explicitly installed runtime", async () => {
-    const fixture = await createRuntimeFixture();
+    const target = resolveCurrentArtifactRuntimeTarget();
+    const fixture = await createRuntimeFixture({ target });
     const output = await runArtifactRuntimeCli(["locate", "--json"], fixture.environment);
-    expect(JSON.parse(output)).toMatchObject({ schemaVersion: 1, target: "darwin-arm64" });
+    expect(JSON.parse(output)).toMatchObject({ schemaVersion: 1, target });
     await expect(runArtifactRuntimeCli(["locate", "--json"], {})).rejects.toThrow(
       "never downloads or guesses",
     );
     await expect(runArtifactRuntimeCli(["locate"], fixture.environment)).rejects.toThrow("Usage:");
+  });
+});
+
+describe("Linux libc runtime evidence", () => {
+  test.each([
+    ["arm64", "aarch64-musl", "musl"],
+    ["x64", "x64", "gnu"],
+    ["x64", "x64-musl-baseline", "musl"],
+  ] as const)("accepts the exact official Bun archive for %s", (arch, archive, expected) => {
+    expect(
+      resolveLinuxLibcFromRuntimeEvidence({
+        arch,
+        versions: { bun: "1.3.14" },
+        report: {
+          header: {
+            release: {
+              sourceUrl: `https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-${archive}.zip`,
+            },
+          },
+          sharedObjects: [],
+        },
+      }),
+    ).toBe(expected);
+  });
+
+  test("retains direct runtime and loader evidence", () => {
+    expect(resolveLinuxLibcFromRuntimeEvidence({ arch: "x64", versions: { musl: "1.2.5" } })).toBe(
+      "musl",
+    );
+    expect(
+      resolveLinuxLibcFromRuntimeEvidence({
+        arch: "x64",
+        versions: {},
+        report: { header: { glibcVersionRuntime: "2.39" } },
+      }),
+    ).toBe("gnu");
+    expect(
+      resolveLinuxLibcFromRuntimeEvidence({
+        arch: "arm64",
+        versions: {},
+        report: { sharedObjects: ["/lib/ld-musl-aarch64.so.1"] },
+      }),
+    ).toBe("musl");
+  });
+
+  test.each([
+    undefined,
+    "https://example.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-x64-musl.zip",
+    "https://github.com/oven-sh/bun/releases/download/bun-v1.3.13/bun-linux-x64-musl.zip",
+    "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-aarch64-musl.zip",
+    "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-x64-musl-unknown.zip",
+  ])("rejects absent, lookalike, stale, wrong-arch, or unknown Bun evidence", (sourceUrl) => {
+    expect(() =>
+      resolveLinuxLibcFromRuntimeEvidence({
+        arch: "x64",
+        versions: { bun: "1.3.14" },
+        report: { header: { release: { sourceUrl } } },
+      }),
+    ).toThrow("Could not prove");
+  });
+
+  test("rejects conflicting evidence instead of guessing", () => {
+    expect(() =>
+      resolveLinuxLibcFromRuntimeEvidence({
+        arch: "x64",
+        versions: { bun: "1.3.14" },
+        report: {
+          header: {
+            glibcVersionRuntime: "2.39",
+            release: {
+              sourceUrl:
+                "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-x64-musl.zip",
+            },
+          },
+        },
+      }),
+    ).toThrow("Could not prove");
   });
 });
 
@@ -137,7 +217,10 @@ type RuntimeFixture = Readonly<{
 }>;
 
 async function createRuntimeFixture(
-  options: Readonly<{ canonicalRelease?: boolean }> = {},
+  options: Readonly<{
+    canonicalRelease?: boolean;
+    target?: (typeof ARTIFACT_RUNTIME_MATRIX)[number]["target"];
+  }> = {},
 ): Promise<RuntimeFixture> {
   const root = await realpath(await mkdtemp(join(tmpdir(), "opengeni-artifact-runtime-")));
   roots.push(root);
@@ -158,7 +241,7 @@ async function createRuntimeFixture(
     writeFile(assetPath, assetBytes),
   ]);
 
-  const selected = packageManifest("darwin-arm64", kernelBytes, assetBytes);
+  const selected = packageManifest(options.target ?? "darwin-arm64", kernelBytes, assetBytes);
   const release = {
     schemaVersion: 1,
     artifactTool: {
@@ -185,7 +268,7 @@ async function createRuntimeFixture(
 
   const installation: ArtifactRuntimeInstallationManifest = {
     schemaVersion: 1,
-    target: "darwin-arm64",
+    target: selected.target,
     releaseManifest: descriptor("release-manifest.json", releaseBytes),
     artifactTool: {
       packageName: "@opengeni/artifact-tool",

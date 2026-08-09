@@ -4,9 +4,21 @@ set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 crate_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
+kernel_root=$(CDPATH= cd -- "$crate_dir/../.." && pwd)
 bindgen_target=${1:-web}
 output_dir=${2:-"$crate_dir/dist"}
 profile=${3:-full}
+
+if [ -n "${RUSTFLAGS:-}" ] || [ -n "${CARGO_ENCODED_RUSTFLAGS:-}" ]; then
+  echo "error: externally supplied Rust flags make the WASM build identity ambiguous" >&2
+  exit 1
+fi
+
+# Rust crate metadata otherwise incorporates the checkout path, producing
+# different executable bytes for identical sources. Pin every checkout to one
+# synthetic path before compilation so the committed package is reproducible.
+CARGO_ENCODED_RUSTFLAGS="--remap-path-prefix=$kernel_root=/opengeni/artifact-kernel"
+export CARGO_ENCODED_RUSTFLAGS
 
 case "$bindgen_target" in
   web) ;;

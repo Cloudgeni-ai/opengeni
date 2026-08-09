@@ -10,6 +10,7 @@ import { gzipSync } from "node:zlib";
 const repoRoot = resolve(import.meta.dir, "..");
 const defaultAssetRoot = join(repoRoot, "packages/artifact-tool/kernel/bindings/dist/wasm-web");
 const artifactToolPackagePath = join(repoRoot, "packages/artifact-tool/package.json");
+const canonicalRebuildRoot = "/tmp/opengeni-artifact-wasm-source-v1";
 const modalities = ["spreadsheet", "document", "presentation"] as const;
 type ArtifactModality = (typeof modalities)[number];
 
@@ -103,6 +104,36 @@ export async function buildArtifactKernelWasmPackages(
         packageVersion: packageJson.version,
         artifactToolVersion: artifactToolPackage.version,
       }),
+    );
+  }
+  return Object.freeze(builds);
+}
+
+/**
+ * Rewrites version-bearing package identities from the already committed,
+ * canonical modality assets. Changesets runs this in clean checkouts where
+ * the raw Rust build directory is intentionally absent.
+ */
+export async function refreshArtifactKernelWasmPackageIdentities(
+  options: {
+    artifactToolPackagePath?: string;
+    outputPackagesRoot?: string;
+    modalities?: readonly ArtifactModality[];
+  } = {},
+): Promise<readonly PackageBuild[]> {
+  const outputPackagesRoot = resolve(options.outputPackagesRoot ?? join(repoRoot, "packages"));
+  const selected = options.modalities ?? modalities;
+  assertModalities(selected);
+  const builds: PackageBuild[] = [];
+  for (const modality of selected) {
+    const packageRoot = join(outputPackagesRoot, `artifact-kernel-wasm-${modality}`);
+    builds.push(
+      ...(await buildArtifactKernelWasmPackages({
+        assetRoot: join(packageRoot, "dist"),
+        artifactToolPackagePath: options.artifactToolPackagePath,
+        outputPackagesRoot,
+        modalities: [modality],
+      })),
     );
   }
   return Object.freeze(builds);
@@ -446,6 +477,7 @@ async function digestTree(root: string): Promise<Readonly<Record<string, string>
 }
 
 async function rebuildBindings(outputRoot: string): Promise<void> {
+  assertCanonicalArtifactKernelWasmRebuildHost();
   const kernelRoot = join(repoRoot, "packages/artifact-tool/kernel");
   const buildScript = join(kernelRoot, "bindings/wasm/scripts/build.sh");
   for (const modality of modalities) {
@@ -458,6 +490,22 @@ async function rebuildBindings(outputRoot: string): Promise<void> {
       stderr: "inherit",
     });
     if ((await child.exited) !== 0) throw new Error(`Failed rebuilding ${modality} WASM`);
+  }
+}
+
+export function assertCanonicalArtifactKernelWasmRebuildHost(
+  platform = process.platform,
+  architecture = process.arch,
+  sourceRoot = repoRoot,
+): void {
+  if (
+    platform !== "linux" ||
+    architecture !== "x64" ||
+    resolve(sourceRoot) !== canonicalRebuildRoot
+  ) {
+    throw new Error(
+      `Rust-to-WASM byte regeneration requires the canonical linux/x64 builder at ${canonicalRebuildRoot}; ordinary package materialization and checks remain cross-platform`,
+    );
   }
 }
 
@@ -478,9 +526,25 @@ function parseModality(value: string | undefined): readonly ArtifactModality[] {
 }
 
 if (import.meta.main) {
-  const selected = parseModality(argument("--modality"));
   const check = process.argv.includes("--check");
   const rebuild = process.argv.includes("--rebuild");
+  const refreshPackageIdentities = process.argv.includes("--refresh-package-identities");
+  if (refreshPackageIdentities) {
+    if (
+      check ||
+      rebuild ||
+      process.argv.includes("--asset-root") ||
+      process.argv.includes("--modality")
+    ) {
+      throw new TypeError("--refresh-package-identities cannot be combined with build options");
+    }
+    const builds = await refreshArtifactKernelWasmPackageIdentities();
+    process.stdout.write(
+      `${JSON.stringify({ packages: builds.map(({ identity }) => identity), refreshed: true })}\n`,
+    );
+    process.exit(0);
+  }
+  const selected = parseModality(argument("--modality"));
   const temporaryRoot =
     check || rebuild ? await mkdtemp(join(tmpdir(), "opengeni-wasm-packages-")) : null;
   try {

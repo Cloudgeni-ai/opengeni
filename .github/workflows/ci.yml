@@ -108,7 +108,7 @@ jobs:
           (
             cd "$expected"
             bun "$GITHUB_WORKSPACE/node_modules/@changesets/cli/bin.js" version
-            bun scripts/build-artifact-kernel-wasm-packages.ts
+            bun scripts/build-artifact-kernel-wasm-packages.ts --refresh-package-identities
             git add -A
             git diff --cached --check
           )
@@ -303,7 +303,7 @@ jobs:
             (
               cd "$expected"
               bun "$GITHUB_WORKSPACE/node_modules/@changesets/cli/bin.js" version
-              bun scripts/build-artifact-kernel-wasm-packages.ts
+              bun scripts/build-artifact-kernel-wasm-packages.ts --refresh-package-identities
               git add -A
               git diff --cached --check
             )
@@ -814,6 +814,17 @@ jobs:
           rustup show active-toolchain
           cargo install --locked wasm-bindgen-cli --version 0.2.127
 
+      - name: Production native artifact contracts
+        env:
+          ARTIFACT_NATIVE_TEST_ROOT: ${{ runner.temp }}/artifact-native-test
+        run: |
+          set -euo pipefail
+          bun scripts/build-artifact-runtime-target.ts \
+            --target linux-x64-gnu \
+            --output "$ARTIFACT_NATIVE_TEST_ROOT"
+          OPENGENI_ARTIFACT_KERNEL_NATIVE_PATH="$ARTIFACT_NATIVE_TEST_ROOT/native/linux-x64-gnu/opengeni_artifact_kernel.node" \
+            bun run --cwd packages/artifact-tool test:production-native
+
       - name: Build client packages (contracts + SDK + React)
         env:
           OPENGENI_BUILD_CACHE_REPORT: ci-profile/package-cache.json
@@ -828,7 +839,7 @@ jobs:
         run: bun run test:react-native-hermes-bundle
 
       - name: Reproduce committed modality WASM packages from clean Rust sources
-        run: bun scripts/build-artifact-kernel-wasm-packages.ts --rebuild --check
+        run: bun scripts/rebuild-artifact-kernel-wasm-packages.ts --check
 
       - name: Install Chromium for packed WASM package proof
         run: bun x playwright install --with-deps --only-shell chromium
