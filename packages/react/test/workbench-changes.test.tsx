@@ -49,6 +49,54 @@ function changesRailScroller(root: HTMLElement): HTMLElement {
   return scroller;
 }
 
+function controlAnimationFrames() {
+  const originalRequest = globalThis.requestAnimationFrame;
+  const originalCancel = globalThis.cancelAnimationFrame;
+  const frames = new Map<number, FrameRequestCallback>();
+  let nextFrame = 1;
+  globalThis.requestAnimationFrame = (callback: FrameRequestCallback): number => {
+    const frame = nextFrame++;
+    frames.set(frame, callback);
+    return frame;
+  };
+  globalThis.cancelAnimationFrame = (frame: number): void => {
+    frames.delete(frame);
+  };
+  return {
+    async runNextBatch() {
+      const callbacks = [...frames.values()];
+      frames.clear();
+      await act(async () => {
+        for (const callback of callbacks) callback(performance.now());
+      });
+    },
+    restore() {
+      globalThis.requestAnimationFrame = originalRequest;
+      globalThis.cancelAnimationFrame = originalCancel;
+    },
+  };
+}
+
+/** Make the same surviving path look temporarily unmounted to the focus
+ * restorer, as it is while Virtua catches up to a restored scroll offset. */
+function hideRailPathQueries(host: HTMLElement, count: number): () => void {
+  const querySelectorAll = host.querySelectorAll.bind(host);
+  let remaining = count;
+  Object.defineProperty(host, "querySelectorAll", {
+    configurable: true,
+    value: ((selectors: string) => {
+      if (selectors === "[data-rail-file-path]" && remaining > 0) {
+        remaining -= 1;
+        return document.createElement("div").querySelectorAll(selectors);
+      }
+      return querySelectorAll(selectors);
+    }) as typeof host.querySelectorAll,
+  });
+  return () => {
+    Reflect.deleteProperty(host, "querySelectorAll");
+  };
+}
+
 describe("WorkbenchChanges — windowing (D2)", () => {
   test("a 40-file change set mounts a BOUNDED window, not all 40 sections", async () => {
     const r = await renderComponent(
@@ -137,6 +185,71 @@ describe("WorkbenchChanges — rail, badge, guard", () => {
     expect(changesRailScroller(container(r))).toBe(afterScroller);
     expect(document.activeElement).toBe(afterFocused);
     await r.unmount();
+  });
+
+  test("consecutive shrink resets carry a pending same-row focus restore", async () => {
+    const r = await renderComponent(
+      <WorkbenchChanges diff={manyFiles(80)} source="live" capturedAt={null} />,
+    );
+    await flush();
+    const host = container(r).querySelector<HTMLElement>("[data-opengeni-changes-rail]");
+    const focused = container(r).querySelector<HTMLButtonElement>(
+      '[data-rail-file-path="src/file-000.ts"]',
+    );
+    expect(host).not.toBeNull();
+    focused?.focus();
+
+    const frames = controlAnimationFrames();
+    const restoreQueries = hideRailPathQueries(host!, 2);
+    try {
+      await r.rerender(<WorkbenchChanges diff={manyFiles(79)} source="live" capturedAt={null} />);
+      await r.rerender(<WorkbenchChanges diff={manyFiles(78)} source="live" capturedAt={null} />);
+      restoreQueries();
+      await frames.runNextBatch();
+
+      expect(document.activeElement?.getAttribute("data-rail-file-path")).toBe("src/file-000.ts");
+    } finally {
+      restoreQueries();
+      await r.unmount();
+      frames.restore();
+    }
+  });
+
+  test("deferred rail focus restoration yields permanently to external focus", async () => {
+    const r = await renderComponent(
+      <WorkbenchChanges diff={manyFiles(80)} source="live" capturedAt={null} />,
+    );
+    await flush();
+    const host = container(r).querySelector<HTMLElement>("[data-opengeni-changes-rail]");
+    const focused = container(r).querySelector<HTMLButtonElement>(
+      '[data-rail-file-path="src/file-000.ts"]',
+    );
+    expect(host).not.toBeNull();
+    focused?.focus();
+
+    const external = document.createElement("button");
+    document.body.appendChild(external);
+    const frames = controlAnimationFrames();
+    const restoreQueries = hideRailPathQueries(host!, 1);
+    try {
+      await r.rerender(<WorkbenchChanges diff={manyFiles(79)} source="live" capturedAt={null} />);
+      restoreQueries();
+      external.focus();
+      await frames.runNextBatch();
+      expect(document.activeElement).toBe(external);
+
+      external.blur();
+      await r.rerender(<WorkbenchChanges diff={manyFiles(78)} source="live" capturedAt={null} />);
+      await frames.runNextBatch();
+      expect(document.activeElement?.getAttribute("data-rail-file-path")).not.toBe(
+        "src/file-000.ts",
+      );
+    } finally {
+      restoreQueries();
+      external.remove();
+      await r.unmount();
+      frames.restore();
+    }
   });
 
   test("a shrink reset does not focus a different row when the focused file disappears", async () => {

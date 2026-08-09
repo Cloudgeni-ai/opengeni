@@ -101,6 +101,7 @@ type ChangesRailVListProps = {
   children: ReactNode;
   className: string;
   coarsePointer: boolean;
+  files: readonly SandboxGitFileDiff[];
   rowCount: number;
 };
 
@@ -128,6 +129,7 @@ class ChangesRailVList extends Component<
 
   private host: HTMLDivElement | null = null;
   private listHandle: VListHandle | null = null;
+  private pendingFocusedPath: string | null = null;
   private restoreFrame: number | null = null;
 
   static getDerivedStateFromProps(
@@ -155,7 +157,7 @@ class ChangesRailVList extends Component<
         ? active.closest<HTMLElement>("[data-rail-file-path]")
         : null;
     return {
-      focusedPath: focusedRow?.dataset.railFilePath ?? null,
+      focusedPath: focusedRow?.dataset.railFilePath ?? this.pendingFocusedPath,
       scrollOffset: scroller.scrollTop,
     };
   }
@@ -170,24 +172,36 @@ class ChangesRailVList extends Component<
     const maxOffset = Math.max(0, this.listHandle.scrollSize - this.listHandle.viewportSize);
     this.listHandle.scrollTo(Math.min(Math.max(snapshot.scrollOffset, 0), maxOffset));
     const focusedPath = snapshot.focusedPath;
-    if (!focusedPath || this.restoreFocusedPath(focusedPath)) return;
-    if (typeof requestAnimationFrame === "function") {
-      this.restoreFrame = requestAnimationFrame(() => {
-        this.restoreFrame = null;
-        this.restoreFocusedPath(focusedPath);
-      });
-    }
+    if (!focusedPath) return;
+    this.pendingFocusedPath = focusedPath;
+    this.continueFocusRestore();
   }
 
   componentWillUnmount(): void {
     this.cancelRestoreFrame();
+    this.pendingFocusedPath = null;
   }
 
   private cancelRestoreFrame(): void {
-    if (this.restoreFrame === null || typeof cancelAnimationFrame !== "function") return;
-    cancelAnimationFrame(this.restoreFrame);
+    if (this.restoreFrame === null) return;
+    if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(this.restoreFrame);
     this.restoreFrame = null;
   }
+
+  private continueFocusRestore = (): void => {
+    const path = this.pendingFocusedPath;
+    if (!path) return;
+    if (this.restoreFocusedPath(path)) {
+      this.pendingFocusedPath = null;
+      return;
+    }
+    if (this.restoreFrame === null && typeof requestAnimationFrame === "function") {
+      this.restoreFrame = requestAnimationFrame(() => {
+        this.restoreFrame = null;
+        this.continueFocusRestore();
+      });
+    }
+  };
 
   private restoreFocusedPath(path: string): boolean {
     const host = this.host;
@@ -196,6 +210,7 @@ class ChangesRailVList extends Component<
     if (active instanceof HTMLElement && active.isConnected && active !== document.body) {
       return true;
     }
+    if (!this.props.files.some((file) => file.path === path)) return true;
     const row = Array.from(host.querySelectorAll<HTMLButtonElement>("[data-rail-file-path]")).find(
       (candidate) => candidate.dataset.railFilePath === path,
     );
@@ -480,6 +495,7 @@ export function WorkbenchChanges({
           <ChangesRailVList
             rowCount={rows.length}
             coarsePointer={coarsePointer}
+            files={orderedFiles}
             className="w-[clamp(12rem,28%,15rem)] shrink-0 border-r border-og-border bg-og-surface-1/35"
           >
             {rows.map((row) =>
