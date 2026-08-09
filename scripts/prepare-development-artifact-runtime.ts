@@ -388,10 +388,26 @@ async function buildCurrentHostKernel(
     if (!Bun.which(tool))
       throw new Error(`${tool} is required to build the local artifact runtime`);
   }
-  const napiRoot = join(repositoryRoot, "packages", "artifact-tool", "kernel", "bindings", "napi");
+  const kernelRoot = join(repositoryRoot, "packages", "artifact-tool", "kernel");
+  const napiRoot = join(kernelRoot, "bindings", "napi");
+  const toolchain = Bun.TOML.parse(
+    await readFile(join(kernelRoot, "rust-toolchain.toml"), "utf8"),
+  ) as { toolchain?: { channel?: unknown } };
+  const pinnedChannel = toolchain.toolchain?.channel;
+  if (
+    typeof pinnedChannel !== "string" ||
+    pinnedChannel.length === 0 ||
+    pinnedChannel.trim() !== pinnedChannel
+  ) {
+    throw new Error("Artifact kernel Rust toolchain pin is missing or malformed");
+  }
+  assertArtifactKernelRustcVersion(await capture(["rustc", "--version"], napiRoot), pinnedChannel);
+  // rustup resolves the checked-in kernel/rust-toolchain.toml from this directory's ancestors.
+  // Running from the repository root can silently select a different host default and produce a
+  // native build identity that the pinned browser WASM packages correctly reject.
   await run(
     ["cargo", "build", "--locked", "--manifest-path", join(napiRoot, "Cargo.toml"), "--release"],
-    repositoryRoot,
+    napiRoot,
   );
   const temporaryAssetRoot = await mkdtemp(join(dirname(assetRoot), ".artifact-native-build-"));
   try {
@@ -413,6 +429,18 @@ async function buildCurrentHostKernel(
     await rename(targetDirectory, destination);
   } finally {
     await rm(temporaryAssetRoot, { recursive: true, force: true });
+  }
+}
+
+export function assertArtifactKernelRustcVersion(
+  rustcVersion: string,
+  pinnedChannel: string,
+): void {
+  const [executable, version] = rustcVersion.trim().split(/\s+/u);
+  if (executable !== "rustc" || version !== pinnedChannel) {
+    throw new Error(
+      `Artifact kernel requires Rust ${pinnedChannel}; active compiler is ${rustcVersion.trim() || "<unknown>"}`,
+    );
   }
 }
 

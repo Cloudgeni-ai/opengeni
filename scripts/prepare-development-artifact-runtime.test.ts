@@ -12,6 +12,7 @@ import {
 import type { NativeArtifactRuntimeTarget } from "../packages/artifact-tool/src/runtime";
 import { resolveCurrentArtifactRuntimeTarget } from "../packages/artifact-tool/src/runtime-cli";
 import {
+  assertArtifactKernelRustcVersion,
   developmentArtifactRuntimeSourceFingerprint,
   prepareDevelopmentArtifactRuntime,
 } from "./prepare-development-artifact-runtime";
@@ -23,6 +24,15 @@ afterEach(async () => {
 });
 
 describe("development artifact runtime preparation", () => {
+  test("accepts only the exact pinned compiler identity", () => {
+    expect(() =>
+      assertArtifactKernelRustcVersion("rustc 1.97.0 (2d8144b78 2026-07-07)\n", "1.97.0"),
+    ).not.toThrow();
+    expect(() => assertArtifactKernelRustcVersion("rustc 1.96.0 (host default)", "1.97.0")).toThrow(
+      "Artifact kernel requires Rust 1.97.0; active compiler is rustc 1.96.0",
+    );
+  });
+
   test("assembles a clean output from a matching current-host receipt and reuses it exactly", async () => {
     const fixture = await createRepositoryFixture();
     const first = await prepareDevelopmentArtifactRuntime({

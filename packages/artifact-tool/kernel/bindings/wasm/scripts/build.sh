@@ -8,6 +8,7 @@ kernel_root=$(CDPATH= cd -- "$crate_dir/../.." && pwd)
 bindgen_target=${1:-web}
 output_dir=${2:-"$crate_dir/dist"}
 profile=${3:-full}
+cargo_target_dir=${CARGO_TARGET_DIR:-"$crate_dir/target"}
 
 if [ -n "${RUSTFLAGS:-}" ] || [ -n "${CARGO_ENCODED_RUSTFLAGS:-}" ]; then
   echo "error: externally supplied Rust flags make the WASM build identity ambiguous" >&2
@@ -92,7 +93,7 @@ else
     --target wasm32-unknown-unknown
 fi
 
-wasm_path="$crate_dir/target/wasm32-unknown-unknown/release/opengeni_artifact_kernel_wasm.wasm"
+wasm_path="$cargo_target_dir/wasm32-unknown-unknown/release/opengeni_artifact_kernel_wasm.wasm"
 
 if [ ! -f "$wasm_path" ]; then
   echo "error: expected WebAssembly output was not produced: $wasm_path" >&2

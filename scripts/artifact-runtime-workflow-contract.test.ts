@@ -5,6 +5,29 @@ import { resolve } from "node:path";
 const root = resolve(import.meta.dir, "..");
 
 describe("artifact runtime workflow contract", () => {
+  test("keeps byte-hashed kernel sources identical on every checkout platform", async () => {
+    const attributes = await readFile(resolve(root, ".gitattributes"), "utf8");
+    expect(attributes.split(/\r?\n/u)).toContain(
+      "packages/artifact-tool/kernel/** text=auto eol=lf",
+    );
+  });
+
+  test("keeps Cargo output outside the read-only canonical source mount", async () => {
+    const [wrapper, build] = await Promise.all([
+      readFile(resolve(root, "scripts/rebuild-artifact-kernel-wasm-packages.ts"), "utf8"),
+      readFile(
+        resolve(root, "packages/artifact-tool/kernel/bindings/wasm/scripts/build.sh"),
+        "utf8",
+      ),
+    ]);
+    expect(wrapper).toContain('const canonicalTarget = "/tmp/opengeni-artifact-wasm-target-v1"');
+    expect(wrapper).toContain("`CARGO_TARGET_DIR=${canonicalTarget}`");
+    expect(build).toContain('cargo_target_dir=${CARGO_TARGET_DIR:-"$crate_dir/target"}');
+    expect(build).toContain(
+      'wasm_path="$cargo_target_dir/wasm32-unknown-unknown/release/opengeni_artifact_kernel_wasm.wasm"',
+    );
+  });
+
   test("aggregates only eight OS-smoked targets and proves both OCI architectures", async () => {
     const source = await readFile(resolve(root, ".github/workflows/artifact-runtime.yml"), "utf8");
     const parsed = Bun.YAML.parse(source) as {
