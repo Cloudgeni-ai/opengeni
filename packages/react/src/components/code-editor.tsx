@@ -458,7 +458,7 @@ function PlainTextarea({
         }
       }}
       aria-label="Plain text file editor"
-      className="h-full w-full resize-none bg-transparent p-2 font-og-mono text-og-sm text-og-fg outline-none"
+      className="h-full w-full resize-none bg-transparent p-2 font-og-mono text-og-sm text-og-fg outline-hidden"
     />
   );
 }

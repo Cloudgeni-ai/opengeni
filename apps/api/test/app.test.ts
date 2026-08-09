@@ -72,6 +72,7 @@ describe("API helpers", () => {
         kind: "repository",
         uri: "https://github.com/OpenAI/example.git",
         ref: "main",
+        provider: "github",
         subpath: "/infra/",
       },
     ]);
@@ -80,6 +81,7 @@ describe("API helpers", () => {
       kind: "repository",
       uri: "https://github.com/OpenAI/example.git",
       ref: "main",
+      provider: "github",
       subpath: "infra",
       mountPath: "repos/github.com/OpenAI/example",
     });
@@ -104,7 +106,12 @@ describe("API helpers", () => {
   test("keeps same-name repositories on different providers collision-free", () => {
     expect(
       normalizeResources([
-        { kind: "repository", uri: "https://github.com/acme/app.git", ref: "main" },
+        {
+          kind: "repository",
+          uri: "https://github.com/acme/app.git",
+          ref: "main",
+          provider: "github",
+        },
         {
           kind: "repository",
           uri: "https://gitlab.com/acme/app.git",
@@ -291,6 +298,24 @@ describe("API helpers", () => {
     });
     expect(
       temporalScheduleSpec({
+        type: "interval",
+        everySeconds: 21_600,
+        startAt: "2026-05-08T21:00:00.000Z",
+      }),
+    ).toEqual({
+      intervals: [{ every: "21600s", offset: "10800000ms" }],
+      startAt: new Date("2026-05-08T21:00:00.000Z"),
+    });
+    expect(
+      temporalScheduleSpec({
+        type: "interval",
+        everySeconds: 21_600,
+      }),
+    ).toEqual({
+      intervals: [{ every: "21600s" }],
+    });
+    expect(
+      temporalScheduleSpec({
         type: "calendar",
         timeZone: "Europe/Oslo",
         hour: 9,
@@ -383,7 +408,7 @@ describe("API helpers", () => {
         headers: {
           origin,
           "access-control-request-method": "GET",
-          "access-control-request-headers": "authorization",
+          "access-control-request-headers": "authorization,range",
         },
       });
 
@@ -392,6 +417,7 @@ describe("API helpers", () => {
     expect(external.headers.get("access-control-allow-origin")).toBe("*");
     expect(external.headers.get("access-control-allow-credentials")).toBeNull();
     expect(external.headers.get("access-control-allow-headers")).toContain("Authorization");
+    expect(external.headers.get("access-control-allow-headers")).toContain("Range");
 
     const externalResponse = await app.request("http://localhost/v1/config/client", {
       headers: { origin: "https://product.example" },
@@ -399,6 +425,12 @@ describe("API helpers", () => {
     expect(externalResponse.status).toBe(200);
     expect(externalResponse.headers.get("access-control-allow-origin")).toBe("*");
     expect(externalResponse.headers.get("access-control-allow-credentials")).toBeNull();
+    expect(externalResponse.headers.get("access-control-expose-headers")).toContain(
+      "Accept-Ranges",
+    );
+    expect(externalResponse.headers.get("access-control-expose-headers")).toContain(
+      "Content-Range",
+    );
 
     const trusted = await preflight("http://localhost:5173");
     expect(trusted.status).toBe(204);
@@ -425,6 +457,18 @@ describe("API helpers", () => {
     );
     expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/control`)).toBe(
       "/v1/workspaces/:workspaceId/sessions/:id/:controlAction",
+    );
+    expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/git/read-batch`)).toBe(
+      "/v1/workspaces/:workspaceId/sessions/:id/git/:operation",
+    );
+    expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/fs/read`)).toBe(
+      "/v1/workspaces/:workspaceId/sessions/:id/fs/:operation",
+    );
+    expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/terminal/exec`)).toBe(
+      "/v1/workspaces/:workspaceId/sessions/:id/terminal/:operation",
+    );
+    expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/terminal/pty/resize`)).toBe(
+      "/v1/workspaces/:workspaceId/sessions/:id/terminal/pty/:action",
     );
     expect(routeLabel(`/v1/workspaces/${workspace}/control-events/stream`)).toBe(
       "/v1/workspaces/:workspaceId/control-events/stream",
@@ -566,6 +610,7 @@ describe("API helpers", () => {
   });
 
   test("readyz reports a failing dependency", async () => {
+    const sentinel = "READYZ_PUBLIC_SENTINEL_9e3468";
     const app = createApp({
       settings: testSettings(),
       db: {} as never,
@@ -575,7 +620,7 @@ describe("API helpers", () => {
       readinessChecks: {
         db: async () => {},
         nats: () => {
-          throw new Error("nats down");
+          throw Object.assign(new Error(sentinel), { name: sentinel, code: sentinel });
         },
         temporal: async () => {},
       },
@@ -589,7 +634,8 @@ describe("API helpers", () => {
     };
     expect(body.ok).toBe(false);
     expect(body.checks.nats.ok).toBe(false);
-    expect(body.checks.nats.error).toContain("nats down");
+    expect(body.checks.nats.error).toBe("dependency_unavailable");
+    expect(JSON.stringify(body)).not.toContain(sentinel);
   });
 
   test("traffic-readyz stays routable through a NATS or Temporal outage", async () => {
@@ -627,6 +673,7 @@ describe("API helpers", () => {
   });
 
   test("traffic-readyz stops routing when the durable database is unavailable", async () => {
+    const sentinel = "TRAFFIC_READYZ_PUBLIC_SENTINEL_4a10d2";
     const app = createApp({
       settings: testSettings(),
       db: {} as never,
@@ -635,7 +682,7 @@ describe("API helpers", () => {
       managedAuth: null,
       readinessChecks: {
         db: async () => {
-          throw new Error("database down");
+          throw Object.assign(new Error(sentinel), { name: sentinel, code: sentinel });
         },
       },
     });
@@ -648,7 +695,8 @@ describe("API helpers", () => {
     };
     expect(body.ok).toBe(false);
     expect(body.checks.db.ok).toBe(false);
-    expect(body.checks.db.error).toContain("database down");
+    expect(body.checks.db.error).toBe("dependency_unavailable");
+    expect(JSON.stringify(body)).not.toContain(sentinel);
   });
 
   test("rejects oversized streamed request bodies before route parsing", async () => {

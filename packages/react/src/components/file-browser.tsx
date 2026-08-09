@@ -24,7 +24,11 @@ import {
 import { AlertDialog } from "radix-ui";
 import { VList, type VListHandle } from "virtua";
 import { cn } from "../lib/cn";
-import { type PortalTokenStyle, usePortalTokenStyle } from "../lib/use-portal-token-style";
+import {
+  type PortalTokenStyle,
+  usePortalTokenSource,
+  usePortalTokenStyle,
+} from "../lib/use-portal-token-style";
 import { useUnicodeFallbackFonts } from "../lib/use-unicode-fonts";
 import type { FileTreeNode, UseSandboxFilesResult } from "../hooks/use-sandbox-files";
 
@@ -155,10 +159,11 @@ export function FileBrowser({
   const [busy, setBusy] = useState(false);
   const [coarsePointer, setCoarsePointer] = useState(false);
   const treeId = useId();
-  const containerRef = useRef<HTMLDivElement | null>(null);
+  const container = usePortalTokenSource<HTMLDivElement>();
+  const containerRef = container.currentRef;
   const deleteReturnFocusRef = useRef<HTMLElement | null>(null);
   const vlistRef = useRef<VListHandle>(null);
-  const portalTokenStyle = usePortalTokenStyle(containerRef);
+  const portalTokenStyle = usePortalTokenStyle(container.source);
   const getTreeElement = useCallback(
     () => (typeof document === "undefined" ? null : document.getElementById(treeId)),
     [treeId],
@@ -569,6 +574,7 @@ export function FileBrowser({
       runDelete,
       supportsMutation,
       coarsePointer,
+      containerRef,
       rowIndexByPath,
       treeId,
     ],
@@ -594,7 +600,13 @@ export function FileBrowser({
   // Retry lives next to the state it explains (the degraded/empty notice), so do
   // not render a second toolbar retry for the same failure.
   const showToolbar = supportsMutation || result.loading;
-  const usesVirtualTree = !showErrorEmpty && !showEmpty;
+  // Virtua caches the previous visible range when a lazy-expanded subtree is
+  // inserted in the middle of a short list. The spacer grows but later root
+  // siblings can remain unmounted until a scroll/resize (for example,
+  // `.bash_history` vanished after expanding `repositories/<repo>`). Small
+  // trees do not benefit from virtualization, so render them directly and keep
+  // Virtua only for genuinely large workspaces.
+  const usesVirtualTree = !showErrorEmpty && !showEmpty && renderItems.length > 500;
 
   // Render a SINGLE node row (no recursion — children are separate flat items the
   // virtualizer renders). Returns the row element; the caller assigns the key.
@@ -854,7 +866,7 @@ export function FileBrowser({
             type="button"
             onClick={() => void result.refresh()}
             disabled={result.loading}
-            className="inline-flex min-h-7 shrink-0 items-center gap-1 rounded-og-sm border border-og-border bg-og-surface-1 px-2 font-medium text-og-fg transition-colors hover:border-og-border-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:min-h-11"
+            className="inline-flex min-h-7 shrink-0 items-center gap-1 rounded-og-sm border border-og-border bg-og-surface-1 px-2 font-medium text-og-fg transition-colors hover:border-og-border-strong focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:min-h-11"
           >
             <RefreshCwIcon
               className={cn("size-3", result.loading && "animate-spin motion-reduce:animate-none")}
@@ -868,13 +880,7 @@ export function FileBrowser({
       {/* The tree itself. The root is a drop target so a node can be moved to "". */}
       {/* biome-ignore lint/a11y/noNoninteractiveTabindex: the tree owns keyboard nav */}
       <div
-        ref={containerRef}
-        id={usesVirtualTree ? undefined : treeId}
-        role={usesVirtualTree ? undefined : "tree"}
-        aria-label={usesVirtualTree ? undefined : "Workspace files"}
-        aria-activedescendant={usesVirtualTree ? undefined : activeDescendantId}
-        tabIndex={usesVirtualTree ? undefined : 0}
-        aria-multiselectable={usesVirtualTree ? undefined : false}
+        ref={container.ref}
         onFocus={(event) => {
           if ((event.target as HTMLElement).id === treeId && cursorIndex < 0) {
             const first = flatRows[0];
@@ -901,7 +907,7 @@ export function FileBrowser({
             : undefined
         }
         className={cn(
-          "flex min-h-0 min-w-0 flex-1 flex-col p-1 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent",
+          "flex min-h-0 min-w-0 flex-1 flex-col p-1",
           dragOver === "" && "ring-1 ring-inset ring-og-accent",
         )}
         data-opengeni-file-tree
@@ -929,6 +935,22 @@ export function FileBrowser({
           <div className="p-2 text-og-sm text-og-fg-subtle">
             {emptyState ?? "This directory is empty"}
           </div>
+        ) : !usesVirtualTree ? (
+          <div
+            id={treeId}
+            role="tree"
+            aria-label="Workspace files"
+            aria-activedescendant={activeDescendantId}
+            aria-multiselectable={false}
+            tabIndex={0}
+            className="min-h-0 min-w-0 flex-1 overflow-auto outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent"
+          >
+            {renderItems.map((item) => (
+              <div key={itemKey(item)} className="min-w-0">
+                {renderItem(item)}
+              </div>
+            ))}
+          </div>
         ) : (
           // Virtualized: only the rows in/near the viewport mount, so a 3k-node
           // tree stays responsive. The flat item list already carries the
@@ -941,7 +963,7 @@ export function FileBrowser({
             aria-activedescendant={activeDescendantId}
             aria-multiselectable={false}
             tabIndex={0}
-            className="min-h-0 flex-1 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent"
+            className="min-h-0 flex-1 outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent"
             itemSize={coarsePointer ? 44 : 28}
             ssrCount={Math.min(32, renderItems.length)}
           >
@@ -1041,9 +1063,9 @@ function DeleteDialog({
       }}
     >
       <AlertDialog.Portal container={typeof document === "undefined" ? null : document.body}>
-        <AlertDialog.Overlay className="fixed inset-0 z-[100] bg-black/45 backdrop-blur-[2px]" />
+        <AlertDialog.Overlay className="og-root fixed inset-0 z-[100] bg-black/45 backdrop-blur-[2px]" />
         <AlertDialog.Content
-          className="og-root fixed left-1/2 top-1/2 z-[101] max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-sm -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-og-lg border border-og-border-strong bg-og-surface-1 p-4 text-og-fg shadow-2xl outline-none"
+          className="og-root fixed left-1/2 top-1/2 z-[101] max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-sm -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-og-lg border border-og-border-strong bg-og-surface-1 p-4 text-og-fg shadow-2xl outline-hidden"
           style={portalTokenStyle}
           onOpenAutoFocus={(event) => {
             event.preventDefault();
@@ -1208,7 +1230,7 @@ function InlineInput({
         className={cn(
           "min-w-0 flex-1 rounded-og-sm border bg-og-bg px-1 py-0 text-og-sm",
           "border-og-accent text-og-fg",
-          "outline-none",
+          "outline-hidden",
         )}
       />
     </div>

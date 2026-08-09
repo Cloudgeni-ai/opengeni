@@ -1,3 +1,4 @@
+import type { RetainedArtifactReference } from "@opengeni/sdk";
 import type { ComponentType } from "react";
 import { mcpToolLeaf } from "./tool-display-name";
 import type { ToolCallItem } from "./types";
@@ -22,7 +23,19 @@ import type { ToolCallItem } from "./types";
 
 export type ToolRendererProps = {
   item: ToolCallItem;
+  loadRetainedScreenshot?: RetainedScreenshotLoader | undefined;
+  loadRetainedArtifact?: RetainedArtifactLoader | undefined;
 };
+
+export type RetainedScreenshotLoader = (
+  artifact: RetainedArtifactReference,
+  signal: AbortSignal,
+) => Promise<Uint8Array | null>;
+
+export type RetainedArtifactLoader = (
+  artifact: RetainedArtifactReference,
+  signal: AbortSignal,
+) => Promise<Uint8Array | { url: string } | null>;
 
 export type ToolRenderer = ComponentType<ToolRendererProps>;
 

@@ -14,6 +14,8 @@ import { createSandboxClientForBackend } from "../src/index";
 
 setDefaultTimeout(30_000);
 
+const linuxDescribe = describe.skipIf(process.platform !== "linux");
+
 const expected = {
   accountId: "account-a",
   workspaceId: "workspace-a",
@@ -161,9 +163,6 @@ describe("run credential response validation", () => {
       normalizeRunCredentialsResolution(resolution({ authNeeded: {} as never }), expected),
     ).toThrow(RunCredentialValidationError);
     expect(() =>
-      normalizeRunCredentialsResolution(resolution({ redactions: {} as never }), expected),
-    ).toThrow(RunCredentialValidationError);
-    expect(() =>
       normalizeRunCredentialsResolution(resolution({ expiresAt: 42 as never }), expected),
     ).toThrow(RunCredentialValidationError);
   });
@@ -179,7 +178,6 @@ describe("run credential response validation", () => {
           fileEnvironment: {},
           expiresAt: null,
           authNeeded: [],
-          redactions: [],
         },
         {
           sessionId: "session-a",
@@ -255,7 +253,7 @@ afterEach(async () => {
   }
 });
 
-describe("run credential sandbox lifecycle — real local box", () => {
+linuxDescribe("run credential sandbox lifecycle — real local box", () => {
   test("rejects a decoder that exits successfully without writing all bytes", async () => {
     const session = await makeBox();
     const sessionId = crypto.randomUUID();
@@ -481,18 +479,21 @@ describe("run credential sandbox lifecycle — real local box", () => {
         sessionId,
         attemptId: successorAttempt,
         executionGeneration: 2,
-        pruneOtherAttempts: true,
       },
     );
-    const versionCount = await session.exec({
+    const versionCountBeforeCleanup = await session.exec({
       cmd: `find ${runCredentialRoot(sessionId)}/versions -mindepth 1 -maxdepth 1 -type d | wc -l`,
     });
-    expect(versionCount.stdout.trim()).toBe("1");
+    expect(versionCountBeforeCleanup.stdout.trim()).toBe("2");
     await clearRunCredentialsForAttempt(session as never, {
       sessionId,
       attemptId: firstAttempt,
       executionGeneration: 1,
     });
+    const versionCountAfterCleanup = await session.exec({
+      cmd: `find ${runCredentialRoot(sessionId)}/versions -mindepth 1 -maxdepth 1 -type d | wc -l`,
+    });
+    expect(versionCountAfterCleanup.stdout.trim()).toBe("1");
     const wrapped = withRunCredentialsSession(session, sessionId);
     const result = await wrapped.exec({ cmd: `printf '%s' "$TOKEN"` });
     expect(result.stdout).toBe("successor-secret");

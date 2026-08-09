@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "opengeni": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceRevision", "dashboards"],
+      "properties": {
+        "sourceRevision": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "dashboards": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "labelKey",
+            "labelValue",
+            "folderAnnotation",
+            "folder",
+            "extraLabels",
+            "extraAnnotations"
+          ],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "labelKey": { "type": "string", "minLength": 1 },
+            "labelValue": { "type": "string", "minLength": 1 },
+            "folderAnnotation": { "type": "string", "minLength": 1 },
+            "folder": { "type": "string", "minLength": 1 },
+            "extraLabels": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            },
+            "extraAnnotations": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "kube-prometheus-stack": {
+      "type": "object"
+    }
+  },
+  "required": ["opengeni", "kube-prometheus-stack"]
+}

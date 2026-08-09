@@ -1,5 +1,125 @@
 # @opengeni/config
 
+## 0.12.6
+
+### Patch Changes
+
+- e2edfbc: Add provider-aware image generation with permanent verified artifacts,
+  prompt-cache-safe history, sandbox materialization, and SDK/React rendering.
+- 7f70d33: Bound long-running service memory, upgrade the OpenAI Agents SDK to 0.14.3, and preserve exact provider, streaming, and durable-resume semantics.
+- Updated dependencies [e2edfbc]
+- Updated dependencies [7f70d33]
+  - @opengeni/codex@0.2.14
+  - @opengeni/contracts@0.41.2
+
+## 0.12.5
+
+### Patch Changes
+
+- 2727236: Make sandbox draining crash-safe with durable capture and teardown ownership, idempotent Modal snapshots, scoped operator holds, parallel Temporal reaping, exact lifecycle errors, and verified Local/Docker workspace recovery.
+- c8eb465: Add explicit provider-contained lazy-tool transports: preserve Codex native search, use native client tool search for direct OpenAI/Azure Responses, and use a cache-stable ordinary search/invoke dispatcher for other function-calling providers.
+- Updated dependencies [2727236]
+  - @opengeni/contracts@0.41.1
+
+## 0.12.4
+
+### Patch Changes
+
+- bb9a346: Add token and cache coverage plus nullable provider-rate cost comparisons to Workspace Insights, preserving exact Gateway billing while keeping incomplete configured telemetry unpriced.
+- Updated dependencies [bb9a346]
+  - @opengeni/contracts@0.41.0
+
+## 0.12.3
+
+### Patch Changes
+
+- dec7ada: Promote the immutable OpenGeni connected-machine agent 0.1.14 release through the default stable install and update channel.
+
+## 0.12.2
+
+### Patch Changes
+
+- 7d13f51: Promote the immutable OpenGeni connected-machine agent 0.1.13 release through the default stable install and update channel.
+- 7ac558e: Continuously enforce resource-based turn-worker memory headroom through the existing graceful checkpoint and drain lifecycle.
+
+## 0.12.1
+
+### Patch Changes
+
+- 410835e: Promote the immutable OpenGeni connected-machine agent 0.1.12 release through the default stable install and update channel.
+- Updated dependencies [fed43cf]
+  - @opengeni/contracts@0.40.0
+
+## 0.12.0
+
+### Minor Changes
+
+- f8eb9f9: Serve signed stable and beta Connected Machine update manifests from each enrolled deployment, with explicit release promotion pointers.
+
+### Patch Changes
+
+- 5dfb93d: Make Connected Machine command duration unbounded by default over replayable op-stream execution, preserve explicit positive deadlines for constrained deployments, wire and finalize streaming across direct and swapped machine routes, remove the generated service's aggregate memory throttle while retaining accounting and OOM isolation, and bound transient reordering memory by bytes without limiting command resources or output.
+- 5dfb93d: Let one Connected Machine agent retain and serve independent connections to multiple OpenGeni workspaces and deployments, with additive connection UX and connection-scoped runtime isolation.
+- Updated dependencies [200586a]
+  - @opengeni/contracts@0.39.5
+
+## 0.11.5
+
+### Patch Changes
+
+- Updated dependencies [70ced80]
+  - @opengeni/contracts@0.39.4
+
+## 0.11.4
+
+### Patch Changes
+
+- Updated dependencies [43d45c6]
+  - @opengeni/codex@0.2.13
+
+## 0.11.3
+
+### Patch Changes
+
+- af24281: Keep Connected Machine outages inside the agent loop and reserve automatic Toolspace setup for managed sandboxes.
+- Updated dependencies [5d8bb99]
+- Updated dependencies [34c5cdb]
+  - @opengeni/contracts@0.39.3
+
+## 0.11.2
+
+### Patch Changes
+
+- Updated dependencies [7dbd057]
+- Updated dependencies [30a0b9a]
+- Updated dependencies [23de73b]
+  - @opengeni/contracts@0.39.2
+  - @opengeni/codex@0.2.12
+
+## 0.11.1
+
+### Patch Changes
+
+- Updated dependencies [ce823ce]
+  - @opengeni/contracts@0.39.1
+
+## 0.11.0
+
+### Minor Changes
+
+- 6eb0b23: Add production resumable composer transcription with exact-subject durable
+  manifests, idempotent SHA-256 chunk uploads, bounded ffmpeg segmentation, one
+  recording-wide provider pin, persisted retryable segment results, deterministic
+  assembly, cross-browser SDK recovery, object-ledger cleanup, and expiry purging
+  of transcript metadata after every provider object is confirmed deleted. Legacy
+  one-shot voice input remains compatible.
+
+### Patch Changes
+
+- 5b6d36e: Enable progressive Codex MCP tool disclosure by default while retaining an explicit operator opt-out.
+- Updated dependencies [6eb0b23]
+  - @opengeni/contracts@0.39.0
+
 ## 0.10.14
 
 ### Patch Changes

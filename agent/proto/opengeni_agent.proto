@@ -290,7 +290,7 @@ message ExecRequest {
   map<string, string> env = 4;
   // Optional stdin fed to the process.
   bytes stdin = 5;
-  // Hard wall-clock timeout; 0 means the control-plane default.
+  // Optional hard wall-clock timeout; 0 means no process deadline.
   uint32 timeout_ms = 6;
 }
 

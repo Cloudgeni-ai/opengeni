@@ -1,9 +1,10 @@
 import { CameraIcon, CameraOffIcon, ChevronRightIcon } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { createContext, useContext, useState, type ReactNode } from "react";
 import { cn } from "../lib/cn";
 import { stringifyPayload } from "../lib/format";
 import { useForcedDefaultOpen } from "./disclosure-context";
 import { useLightboxOptional } from "./screenshot-lightbox";
+import type { ToolCallTruncation } from "./types";
 
 /* ----------------------------------------------------------------------------
    Shared timeline primitives
@@ -36,6 +37,22 @@ export type DisclosureChip = {
   tone: "ok" | "bad" | "muted" | "interrupted";
   text: string;
 };
+
+const ToolCallTruncationContext = createContext<ToolCallTruncation | null>(null);
+
+export function ToolCallTruncationProvider({
+  value,
+  children,
+}: {
+  value: ToolCallTruncation | null;
+  children: ReactNode;
+}) {
+  return (
+    <ToolCallTruncationContext.Provider value={value}>
+      {children}
+    </ToolCallTruncationContext.Provider>
+  );
+}
 
 export type ActivityDisclosureProps = {
   icon: ReactNode;
@@ -81,6 +98,8 @@ export type ActivityDisclosureProps = {
   cancelled?: boolean | undefined;
   /** When false the row is a static line (no expand affordance). */
   expandable?: boolean | undefined;
+  /** Seed this individual disclosure open; user interaction still owns it afterwards. */
+  defaultOpen?: boolean | undefined;
   children?: ReactNode | undefined;
 };
 
@@ -109,6 +128,7 @@ export function ActivityDisclosure({
   failed,
   cancelled,
   expandable = true,
+  defaultOpen,
   children,
 }: ActivityDisclosureProps) {
   // `failed` takes precedence over `cancelled` when both are set (shouldn't happen, but be safe).
@@ -128,8 +148,9 @@ export function ActivityDisclosure({
   // An ancestor may seed the initial open state (screenshot instrumentation);
   // absent in normal app usage, where the row starts collapsed.
   const forcedDefaultOpen = useForcedDefaultOpen();
-  const [open, setOpen] = useState(forcedDefaultOpen ?? false);
-  const hasBody = expandable && children != null;
+  const [open, setOpen] = useState(defaultOpen ?? forcedDefaultOpen ?? false);
+  const truncation = useContext(ToolCallTruncationContext);
+  const hasBody = expandable && (children != null || truncation != null);
 
   // The preview is detail-on-demand: it is suppressed once the row is open so a
   // path/stat shown in the body never also sits in the collapsed row.
@@ -154,16 +175,16 @@ export function ActivityDisclosure({
   const rowClass = cn(
     "group/disclosure flex w-full min-w-0 items-center gap-2 rounded-og-sm px-1.5 py-1.5 text-left text-og-base",
     "text-og-fg-muted transition-colors duration-150",
-    // A tool row is a touch target on coarse pointers: grow its padding so the
-    // hit area clears the 40px minimum without loosening the dense desktop rail.
-    "pointer-coarse:py-2.5",
+    // A tool row is a touch target on coarse pointers: grow its hit area to the
+    // 44px mobile minimum without loosening the dense desktop rail.
+    "pointer-coarse:min-h-11 pointer-coarse:py-2.5",
   );
   // The chevron rotates to point down when open; it tracks `data-state` on this
   // same row (the Trigger), so the affordance never freezes.
   const inner = (
     <>
       {hasBody ? (
-        <ChevronRightIcon className="size-3.5 shrink-0 text-og-fg-subtle transition-transform duration-[var(--og-duration-disclose)] ease-og-in-out group-data-[state=open]/disclosure:rotate-90" />
+        <ChevronRightIcon className="size-3.5 shrink-0 text-og-fg-subtle transition-transform duration-[var(--_og-duration-disclose)] ease-og-in-out group-data-[state=open]/disclosure:rotate-90" />
       ) : (
         <span className="size-3.5 shrink-0" />
       )}
@@ -184,7 +205,7 @@ export function ActivityDisclosure({
       )}
       {/* The right gutter carries at most ONE signal: the media thumbnail, else a
           terse settle chip (hidden once expanded — the body owns the detail). */}
-      {media ? (
+      {media && !open ? (
         <span className="ml-auto flex shrink-0 items-center gap-2 pl-2">{media}</span>
       ) : chip && !open ? (
         <span className="ml-auto shrink-0 pl-2">
@@ -226,7 +247,7 @@ export function ActivityDisclosure({
         data-status={dataStatus}
         className={cn(
           rowClass,
-          "cursor-pointer outline-none hover:bg-og-surface-1 hover:text-og-fg",
+          "cursor-pointer outline-hidden hover:bg-og-surface-1 hover:text-og-fg",
           "focus-visible:ring-2 focus-visible:ring-og-accent focus-visible:ring-offset-0",
         )}
       >
@@ -235,8 +256,27 @@ export function ActivityDisclosure({
       {open ? (
         <div className="mb-2 ml-7 mt-1.5 flex flex-col gap-2 overflow-hidden animate-og-expand">
           {children}
+          {truncation ? <ToolCallTruncationNotice truncation={truncation} /> : null}
         </div>
       ) : null}
+    </div>
+  );
+}
+
+function ToolCallTruncationNotice({ truncation }: { truncation: ToolCallTruncation }) {
+  const fullEvidence = truncation.fullEvidence.available
+    ? "retained"
+    : (truncation.fullEvidence.reason ?? "unavailable");
+  return (
+    <div data-og-tool-output-truncation="" className="text-og-sm leading-5 text-og-fg-subtle">
+      Output bounded at <code className="font-og-mono">{truncation.surface}</code>
+      {truncation.omittedBytes != null && truncation.omittedBytes > 0
+        ? ` · ${truncation.omittedBytes.toLocaleString()} bytes omitted`
+        : null}
+      {" · reason "}
+      <code className="font-og-mono">{truncation.reason}</code>
+      {" · full evidence "}
+      <code className="font-og-mono">{fullEvidence}</code>
     </div>
   );
 }
@@ -467,10 +507,14 @@ export function Thumbnail({
   src,
   caption,
   alt = "screenshot",
+  expandLabel = "Expand screenshot",
+  lightboxLabel = "Screenshot",
 }: {
   src: string;
   caption?: string | undefined;
   alt?: string;
+  expandLabel?: string | undefined;
+  lightboxLabel?: string | undefined;
 }) {
   const lightbox = useLightboxOptional();
   const [failed, setFailed] = useState(false);
@@ -498,7 +542,7 @@ export function Thumbnail({
       type="button"
       onClick={(event) => {
         event.stopPropagation();
-        lightbox.open(src, caption);
+        lightbox.open(src, caption, event.currentTarget, lightboxLabel);
       }}
       onKeyDown={(event) => {
         if (event.key === "Enter" || event.key === " ") {
@@ -507,10 +551,10 @@ export function Thumbnail({
       }}
       className={cn(
         MEDIA_BOX,
-        "group/thumb relative inline-flex overflow-hidden bg-og-bg outline-none",
+        "group/thumb relative inline-flex overflow-hidden bg-og-bg outline-hidden",
         "focus-visible:ring-2 focus-visible:ring-og-accent",
       )}
-      aria-label="Expand screenshot"
+      aria-label={expandLabel}
     >
       {img}
     </button>
@@ -527,10 +571,14 @@ export function ScreenshotFigure({
   src,
   caption,
   alt = "screenshot",
+  expandLabel = "Expand screenshot",
+  lightboxLabel = "Screenshot",
 }: {
   src: string;
   caption?: string | undefined;
   alt?: string;
+  expandLabel?: string | undefined;
+  lightboxLabel?: string | undefined;
 }) {
   const lightbox = useLightboxOptional();
   const [failed, setFailed] = useState(false);
@@ -554,9 +602,9 @@ export function ScreenshotFigure({
       ) : lightbox ? (
         <button
           type="button"
-          onClick={() => lightbox.open(src, caption)}
+          onClick={(event) => lightbox.open(src, caption, event.currentTarget, lightboxLabel)}
           className={surface}
-          aria-label="Expand screenshot"
+          aria-label={expandLabel}
         >
           {img}
         </button>

@@ -19,6 +19,7 @@ import { useSandboxFiles } from "../src/hooks/use-sandbox-files";
 import { useSandboxGit } from "../src/hooks/use-sandbox-git";
 import { useSandboxTerminal } from "../src/hooks/use-sandbox-terminal";
 import { useSessionCapabilities } from "../src/hooks/use-session-capabilities";
+import type { SessionClientLike } from "../src/client";
 
 registerDom();
 
@@ -80,6 +81,32 @@ describe("useSessionCapabilities", () => {
     await hook.unmount();
   });
 
+  test("a draining lease without intent stays on-demand and never polls or attaches", async () => {
+    let capabilityCalls = 0;
+    let attachCalls = 0;
+    const client = fakeClient({
+      getStreamCapabilities: async () => {
+        capabilityCalls += 1;
+        return fakeCapabilities({ liveness: "draining" });
+      },
+      attachViewer: async () => {
+        attachCalls += 1;
+        return fakeAttachResponse();
+      },
+    });
+    const hook = await renderHook(
+      () => useSessionCapabilities(SESSION_ID, { ...ctx, client, warmingPollMs: 20 }),
+      undefined,
+    );
+    await flush(120);
+
+    expect(hook.result.current.state).toBe("on-demand");
+    expect(hook.result.current.capabilities?.liveness).toBe("draining");
+    expect(capabilityCalls).toBe(1);
+    expect(attachCalls).toBe(0);
+    await hook.unmount();
+  });
+
   test("a cold lease WITH a warm-up in flight polls toward warm (then ready)", async () => {
     let calls = 0;
     const client = fakeClient({
@@ -112,7 +139,7 @@ describe("useSessionCapabilities", () => {
     await hook.unmount();
   });
 
-  test("desktop attach 409 surfaces an acknowledgment requirement (consent prompt)", async () => {
+  test("desktop attach 409 surfaces an acknowledgment requirement", async () => {
     const client = fakeClient({
       getStreamCapabilities: async () => fakeCapabilities(),
       attachViewer: async () => {
@@ -256,34 +283,38 @@ describe("useSessionCapabilities", () => {
     await hook.unmount();
   });
 
-  test("attachFiles warms even a COLD box — wake-on-edit cold-creates (Refinement 1)", async () => {
-    // Edit intent legitimately spins a cold box up (that IS the wake). The old
-    // "keep-warm-only-if-already-warm" guard is gone: attachFiles now attaches on a
-    // cold lease, minting a holder with desktop:false (no un-redacted consent gate).
-    let attachCalls = 0;
-    let attachOpts: { desktop?: boolean } | null = null;
-    const client = fakeClient({
-      getStreamCapabilities: async () => fakeColdCapabilities(),
-      attachViewer: async (_w: string, _s: string, opts: { desktop?: boolean }) => {
-        attachCalls += 1;
-        attachOpts = opts;
-        return fakeAttachResponse();
-      },
-      heartbeatViewer: async () => ({ alive: true }),
-      detachViewer: async () => {},
-    });
-    const hook = await renderHook(
-      () => useSessionCapabilities(SESSION_ID, { ...ctx, client, attachFiles: true }),
-      undefined,
-    );
-    await flush();
-    expect(attachCalls).toBe(1);
-    expect(attachOpts).not.toBeNull();
-    expect((attachOpts as unknown as { desktop?: boolean }).desktop).toBe(false);
-    // A holder was minted → the box is live, not resting on the benign on-demand state.
-    expect(hook.result.current.state).toBe("ready");
-    await hook.unmount();
-  });
+  test.each(["cold", "draining"] as const)(
+    "attachFiles explicitly reacquires a %s box for wake-on-edit",
+    async (liveness) => {
+      // Edit intent legitimately acquires a holder (that IS the wake), including
+      // across teardown. Passive review stays capture-backed; this explicit path
+      // asks the server to cold-create or safely re-arm before returning warm.
+      let attachCalls = 0;
+      let attachOpts: { desktop?: boolean } | null = null;
+      const client = fakeClient({
+        getStreamCapabilities: async () =>
+          liveness === "cold" ? fakeColdCapabilities() : fakeCapabilities({ liveness: "draining" }),
+        attachViewer: async (_w: string, _s: string, opts: { desktop?: boolean }) => {
+          attachCalls += 1;
+          attachOpts = opts;
+          return fakeAttachResponse();
+        },
+        heartbeatViewer: async () => ({ alive: true }),
+        detachViewer: async () => {},
+      });
+      const hook = await renderHook(
+        () => useSessionCapabilities(SESSION_ID, { ...ctx, client, attachFiles: true }),
+        undefined,
+      );
+      await flush();
+      expect(attachCalls).toBe(1);
+      expect(attachOpts).not.toBeNull();
+      expect((attachOpts as unknown as { desktop?: boolean }).desktop).toBe(false);
+      // A holder was minted → the box is live, not resting on the benign on-demand state.
+      expect(hook.result.current.state).toBe("ready");
+      await hook.unmount();
+    },
+  );
 
   test("no attach intent: a cold session NEVER calls attachViewer — browsing is free (Refinement 1)", async () => {
     // With no desktop/terminal/edit intent, a cold lease must warm nothing: reviewing
@@ -520,6 +551,36 @@ describe("useSandboxTerminal", () => {
     await hook.unmount();
   });
 
+  test("interactive mode does not open a PTY until a draining lease becomes warm", async () => {
+    let opens = 0;
+    const client = fakeClient({
+      terminalPtyOpen: async () => {
+        opens += 1;
+        return { ptyId: "opened-1", streamVia: "sse-events" as const, supportsInput: true };
+      },
+      terminalPtyClose: async () => {},
+    });
+    const hook = await renderHook(
+      (props: { liveness: string }) =>
+        useSandboxTerminal(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: [],
+          interactive: true,
+          liveness: props.liveness,
+        }),
+      { liveness: "draining" },
+    );
+    await flush();
+    expect(opens).toBe(0);
+
+    await hook.rerender({ liveness: "warm" });
+    await flush();
+    expect(opens).toBe(1);
+    expect(hook.result.current.activePtyId).toBe("opened-1");
+    await hook.unmount();
+  });
+
   test("a closed pty stops running and drops the write fn", async () => {
     const events: SessionEvent[] = [
       fakeEvent(1, "terminal.pty.started", {
@@ -660,6 +721,7 @@ describe("useSandboxTerminal", () => {
 describe("useSandboxFiles", () => {
   test("lists the tree (depth 1) and overlays git status, expands lazily", async () => {
     const listCalls: string[] = [];
+    let batchCalls = 0;
     const client = fakeClient({
       gitStatus: async () => ({
         isRepo: true,
@@ -679,6 +741,16 @@ describe("useSandboxFiles", () => {
         ],
         revision: 1,
       }),
+      fsListBatch: async (workspaceId, sessionId, request, options) => {
+        batchCalls += 1;
+        return {
+          results: await Promise.all(
+            request.requests.map(
+              async (item) => await client.fsList(workspaceId, sessionId, item, options),
+            ),
+          ),
+        };
+      },
       fsList: async (_ws, _s, req) => {
         listCalls.push(req?.path ?? "");
         if ((req?.path ?? "") === "src") {
@@ -755,6 +827,7 @@ describe("useSandboxFiles", () => {
     expect(src?.children?.[0]?.name).toBe("app.ts");
     // The modified file carries the git-status overlay.
     expect(src?.children?.[0]?.status).toBe("modified");
+    expect(batchCalls).toBe(1);
     expect(listCalls).toContain("src");
     await hook.unmount();
   });
@@ -1270,28 +1343,44 @@ describe("useSandboxGit", () => {
     const statusRoots: string[] = [];
     const diffRoots: string[] = [];
     const includeUntracked: (boolean | undefined)[] = [];
+    let batchCalls = 0;
+    const gitStatus: SessionClientLike["gitStatus"] = async (_workspaceId, _sessionId, request) => {
+      const root = request?.path ?? "";
+      statusRoots.push(root);
+      return {
+        isRepo: true,
+        head: `${root}-main`,
+        detached: false,
+        upstream: null,
+        ahead: root === "api" ? 1 : 0,
+        behind: root === "web" ? 2 : 0,
+        files: [],
+        revision: 1,
+      };
+    };
+    const gitDiff: SessionClientLike["gitDiff"] = async (_workspaceId, _sessionId, request) => {
+      const root = request?.path ?? "";
+      diffRoots.push(root);
+      includeUntracked.push(request?.includeUntracked);
+      return {
+        files: [fakeFileDiff({ path: root === "api" ? "src/server.ts" : "src/app.tsx" })],
+        revision: 1,
+      };
+    };
     const client = fakeClient({
-      gitStatus: async (_workspaceId, _sessionId, request) => {
-        const root = request?.path ?? "";
-        statusRoots.push(root);
+      gitStatus,
+      gitDiff,
+      gitReadBatch: async (workspaceId, sessionId, request, options) => {
+        batchCalls += 1;
         return {
-          isRepo: true,
-          head: `${root}-main`,
-          detached: false,
-          upstream: null,
-          ahead: root === "api" ? 1 : 0,
-          behind: root === "web" ? 2 : 0,
-          files: [],
-          revision: 1,
-        };
-      },
-      gitDiff: async (_workspaceId, _sessionId, request) => {
-        const root = request?.path ?? "";
-        diffRoots.push(root);
-        includeUntracked.push(request?.includeUntracked);
-        return {
-          files: [fakeFileDiff({ path: root === "api" ? "src/server.ts" : "src/app.tsx" })],
-          revision: 1,
+          results: await Promise.all(
+            request.requests.map(async (item) => ({
+              status: await gitStatus(workspaceId, sessionId, item.status, options),
+              ...(item.diff
+                ? { diff: await gitDiff(workspaceId, sessionId, item.diff, options) }
+                : {}),
+            })),
+          ),
         };
       },
     });
@@ -1310,6 +1399,7 @@ describe("useSandboxGit", () => {
     expect(statusRoots).toEqual(["api", "web"]);
     expect(diffRoots).toEqual(["api", "web"]);
     expect(includeUntracked).toEqual([true, true]);
+    expect(batchCalls).toBe(1);
     expect(hook.result.current.repoCount).toBe(2);
     expect(hook.result.current.repoRoots).toEqual(["api", "web"]);
     expect(hook.result.current.branch).toBeNull();
@@ -1319,6 +1409,149 @@ describe("useSandboxGit", () => {
       ["api/src/server.ts", "api"],
       ["web/src/app.tsx", "web"],
     ]);
+    await hook.unmount();
+  });
+
+  test("warm multi-repo mode chunks 33 and 65 roots at the 32-request protocol boundary", async () => {
+    for (const [rootCount, expectedBatchSizes] of [
+      [33, [32, 1]],
+      [65, [32, 32, 1]],
+    ] as const) {
+      const roots = Array.from(
+        { length: rootCount },
+        (_, index) => `repo-${String(index).padStart(2, "0")}`,
+      );
+      const batches: string[][] = [];
+      const client = fakeClient({
+        gitReadBatch: async (_workspaceId, _sessionId, request) => {
+          const batchRoots = request.requests.map((item) => item.status.path ?? "");
+          batches.push(batchRoots);
+          if (request.requests.length > 32) {
+            throw new Error("GitReadBatchRequest exceeded 32 requests");
+          }
+          return {
+            results: batchRoots.map((root) => ({
+              status: {
+                isRepo: true,
+                head: `${root}-main`,
+                detached: false,
+                upstream: null,
+                ahead: 0,
+                behind: 0,
+                files: [],
+                revision: 1,
+              },
+              diff: { files: [fakeFileDiff({ path: "src/index.ts" })], revision: 1 },
+            })),
+          };
+        },
+      });
+      const hook = await renderHook(
+        () =>
+          useSandboxGit(SESSION_ID, {
+            client,
+            workspaceId: WORKSPACE_ID,
+            liveness: "warm",
+            repoPaths: roots,
+          }),
+        undefined,
+      );
+      await flush();
+
+      expect(batches.map((batch) => batch.length)).toEqual([...expectedBatchSizes]);
+      expect(batches.flat()).toEqual(roots);
+      expect(hook.result.current.error).toBeNull();
+      expect(hook.result.current.repoCount).toBe(rootCount);
+      expect(hook.result.current.repoRoots).toEqual(roots);
+      expect(hook.result.current.diff.map((file) => file.path)).toEqual(
+        roots.map((root) => `${root}/src/index.ts`),
+      );
+      await hook.unmount();
+    }
+  });
+
+  test("warm multi-repo mode keeps an exact 32-root request in one batch", async () => {
+    const roots = Array.from(
+      { length: 32 },
+      (_, index) => `repo-${String(index).padStart(2, "0")}`,
+    );
+    const batchSizes: number[] = [];
+    const client = fakeClient({
+      gitReadBatch: async (_workspaceId, _sessionId, request) => {
+        batchSizes.push(request.requests.length);
+        return {
+          results: request.requests.map((item) => ({
+            status: {
+              isRepo: true,
+              head: `${item.status.path ?? ""}-main`,
+              detached: false,
+              upstream: null,
+              ahead: 0,
+              behind: 0,
+              files: [],
+              revision: 1,
+            },
+            diff: { files: [], revision: 1 },
+          })),
+        };
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useSandboxGit(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          liveness: "warm",
+          repoPaths: roots,
+        }),
+      undefined,
+    );
+    await flush();
+
+    expect(batchSizes).toEqual([32]);
+    expect(hook.result.current.error).toBeNull();
+    expect(hook.result.current.repoRoots).toEqual(roots);
+    await hook.unmount();
+  });
+
+  test("warm multi-repo mode fails closed when a batch result count cannot map to its roots", async () => {
+    const roots = ["api", "web"];
+    const client = fakeClient({
+      gitReadBatch: async () => ({
+        results: [
+          {
+            status: {
+              isRepo: true,
+              head: "api-main",
+              detached: false,
+              upstream: null,
+              ahead: 0,
+              behind: 0,
+              files: [],
+              revision: 1,
+            },
+            diff: { files: [], revision: 1 },
+          },
+        ],
+      }),
+    });
+    const hook = await renderHook(
+      () =>
+        useSandboxGit(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          liveness: "warm",
+          repoPaths: roots,
+        }),
+      undefined,
+    );
+    await flush();
+
+    expect(hook.result.current.error?.message).toBe(
+      "Workspace Git batch returned 1 results for 2 repositories.",
+    );
+    expect(hook.result.current.repoRoots).toEqual([]);
+    expect(hook.result.current.diff).toEqual([]);
     await hook.unmount();
   });
 

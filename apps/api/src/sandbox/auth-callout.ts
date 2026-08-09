@@ -10,8 +10,8 @@
 //      to, the `server_id` for the response `aud`, and the presented `auth_token`);
 //   2. VALIDATES the bearer with verifyEnrollmentBearer (HMAC, via
 //      resolveEnrollmentSigningSecret) — an invalid/expired/forged bearer is denied;
-//   3. confirms the enrollment is still ACTIVE in the DB (a revoked machine is
-//      denied even with a still-unexpired bearer);
+//   3. confirms the enrollment is still ACTIVE in the DB at the exact credential
+//      generation (a revoked or re-enrolled machine denies an old bearer);
 //   4. signs a NATS user JWT granting pub/sub ONLY `agent.<ws>.>` + `_INBOX.>`
 //      (deny-all-else by an allow-list) and returns it inside a signed
 //      authorization-response JWT.
@@ -48,6 +48,8 @@ import { observabilityEventLogger } from "../observability";
 
 /** The NATS subject nats-server publishes authorization requests on (ADR-26). */
 export const AUTH_CALLOUT_SUBJECT = "$SYS.REQ.USER.AUTH";
+/** Keep live NATS credentials short-lived while never outliving the bearer. */
+export const NATS_USER_JWT_TTL_SECONDS = 5 * 60;
 
 export interface AuthCalloutDeps {
   db: Database;
@@ -123,13 +125,23 @@ export async function handleAuthorizationRequest(
   // Belt-and-braces: the bearer's agentId/enrollmentId must match the row we found.
   // (verifyEnrollmentBearer already binds them; this guards a future schema where
   // agentId != enrollmentId.)
-  if (enrollment.id !== claims.enrollmentId) {
+  if (
+    enrollment.workspaceId !== claims.workspaceId ||
+    enrollment.id !== claims.enrollmentId ||
+    enrollment.id !== claims.agentId ||
+    claims.agentId !== claims.enrollmentId ||
+    claims.subjectPrefix !== `agent.${claims.workspaceId}.${claims.agentId}`
+  ) {
     return deny("enrollment identity mismatch");
+  }
+  if (enrollment.credentialGeneration !== claims.credentialGeneration) {
+    return deny("enrollment credential generation mismatch");
   }
 
   // GRANT: a user JWT scoped to ONLY this workspace's agent subtree + the reply
   // inbox. This allow-list IS the per-workspace isolation boundary.
   const permissions = workspaceAgentPermissions(claims.workspaceId);
+  const nowSeconds = Math.floor(Date.now() / 1000);
   const userJwt = mintUserJwt({
     userPublicKey: decoded.userNkey,
     accountSeed: deps.callout.accountSeed,
@@ -142,7 +154,7 @@ export async function handleAuthorizationRequest(
     audienceAccount: deps.callout.accountName,
     // Tie the credential's life to the bearer's remaining life: a revoked/expired
     // enrollment cannot outlive its bearer at the NATS layer either.
-    expiresAtSeconds: claims.exp,
+    expiresAtSeconds: Math.min(claims.exp, nowSeconds + NATS_USER_JWT_TTL_SECONDS),
   });
   const response = mintAuthResponse({
     userPublicKey: decoded.userNkey,

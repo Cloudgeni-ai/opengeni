@@ -268,12 +268,10 @@ export function ScenarioStack({
     <>
       <div
         className={
-          variant === "phone"
-            ? "mb-2 w-full shrink-0 px-3"
-            : "mx-auto mb-2 w-full max-w-3xl shrink-0 px-4 sm:px-6"
+          variant === "phone" ? "mb-2 w-full shrink-0 px-3" : "mb-2 w-full shrink-0 px-4 sm:px-6"
         }
       >
-        {chrome}
+        <div className={variant === "phone" ? "w-full" : "mx-auto w-full max-w-3xl"}>{chrome}</div>
       </div>
       <div
         className={

@@ -16,7 +16,7 @@ export type GitCredentialRenewalResult = {
 export type GitCredentialRenewalFailure = {
   providers: readonly GitCredentialProvider[];
   retryDelayMs: number;
-  errorClass: string;
+  errorClass: "GitCredentialRenewalOperationError";
 };
 
 export type GitCredentialRenewalController = {
@@ -133,7 +133,7 @@ export function startGitCredentialRenewalLoop(
         // Observability callbacks never own credential liveness.
       }
       scheduleRefresh(nextDelayMs);
-    } catch (error) {
+    } catch {
       if (stopped) return;
       const scheduledRetryMs = retryDelayMs;
       retryDelayMs = Math.min(retryDelayMs * 2, GIT_CREDENTIAL_MAX_RETRY_MS);
@@ -141,7 +141,7 @@ export function startGitCredentialRenewalLoop(
         options.onFailure?.({
           providers,
           retryDelayMs: scheduledRetryMs,
-          errorClass: error instanceof Error ? error.name : "UnknownError",
+          errorClass: "GitCredentialRenewalOperationError",
         });
       } catch {
         // Observability callbacks never own credential liveness.

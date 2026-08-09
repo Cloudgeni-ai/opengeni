@@ -31,6 +31,24 @@ import { z } from "zod";
 
 const envName = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const registryId = /^[A-Za-z0-9_-]+$/;
+
+// Archive capture claims are also the admission/teardown fence around a
+// provider snapshot. Keep a real settlement window after the provider request;
+// a configured request timeout may never consume the entire durable claim.
+export const SANDBOX_ARCHIVE_CAPTURE_MAX_TIMEOUT_MS = 60 * 60_000;
+export const SANDBOX_ARCHIVE_CAPTURE_SETTLEMENT_GRACE_MS = 10_000;
+export const SANDBOX_SNAPSHOT_MAX_TIMEOUT_MS =
+  SANDBOX_ARCHIVE_CAPTURE_MAX_TIMEOUT_MS - SANDBOX_ARCHIVE_CAPTURE_SETTLEMENT_GRACE_MS;
+// Admission waits are observational: successful capture/teardown returns as
+// soon as the DB fence clears. This ceiling only covers the unhealthy path. It
+// allows one scheduled inventory and one complete successor claim without
+// turning a recoverable lifecycle transition into a visible caller error. A
+// dead holder's TTL is deliberately NOT included: admission cannot accelerate
+// that proof, and the turn moves to durable recovery if holder quiescence takes
+// longer than this observational wait. The outer cap remains an explicit
+// request-resource boundary; successful transitions return immediately.
+export const SANDBOX_LIFECYCLE_TRANSITION_MAX_WAIT_MS = 60 * 60_000;
+export const SANDBOX_LIFECYCLE_RETRY_HANDOFF_GRACE_MS = 10_000;
 const EnvBoolean = z.preprocess((value) => {
   if (typeof value !== "string") {
     return value;
@@ -214,6 +232,12 @@ const SettingsSchema = z.object({
   turnWorkerMaxConcurrentTurns: z.coerce.number().int().positive().max(2_000).default(16),
   turnWorkerTargetCpuUsage: z.coerce.number().positive().max(1).default(0.8),
   turnWorkerTargetMemoryUsage: z.coerce.number().positive().max(0.8).default(0.75),
+  // Admission and emergency recovery are deliberately separate control loops.
+  // The Temporal tuner stops polling at the lower target; only genuine danger
+  // may invoke the disruptive graceful-drain fallback.
+  turnWorkerEmergencyMemoryUsage: z.coerce.number().min(0.85).max(0.95).default(0.9),
+  turnWorkerMemoryGuardIntervalMs: z.coerce.number().int().min(1_000).max(60_000).default(5_000),
+  turnWorkerMemoryGuardSustainMs: z.coerce.number().int().min(5_000).max(300_000).default(30_000),
   observabilityStructuredLogs: EnvBoolean.default(false),
   observabilityMetricsEnabled: EnvBoolean.default(true),
   observabilityOtlpEndpoint: z.string().url().optional(),
@@ -249,7 +273,13 @@ const SettingsSchema = z.object({
   agentStableVersion: z
     .string()
     .regex(/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u)
-    .default("0.1.9"),
+    .default("0.1.14"),
+  // Optional independent beta-channel pointer. When unset, the beta update
+  // manifest route is unavailable rather than silently serving stable.
+  agentBetaVersion: z
+    .string()
+    .regex(/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u)
+    .optional(),
   productAccessMode: ProductAccessMode.default("local"),
   billingMode: BillingMode.default("disabled"),
   entitlementsMode: EntitlementsMode.default("none"),
@@ -359,6 +389,8 @@ const SettingsSchema = z.object({
   // Gateway models below are added to the managed-credit catalog. Workspace
   // Gateway keys use the encrypted connection broker and never this secret.
   vercelAiGatewayApiKey: z.string().optional(),
+  /** Image adapter route; native hosted providers ignore this model. */
+  imageGenerationModel: z.string().trim().min(1).max(256).default("openai/gpt-image-2"),
   // Native composer voice input (browser MediaRecorder → API transcription).
   // Provider credentials stay server-side; ClientConfig only projects availability
   // and hard ceilings. Selection happens once before audio is sent — never retry
@@ -370,6 +402,35 @@ const SettingsSchema = z.object({
     .positive()
     .max(25 * 1024 * 1024)
     .default(25 * 1024 * 1024),
+  // Durable long-form capture uploads bounded chunks to object storage, then
+  // normalizes them into provider-safe segments. It is advertised only when
+  // object storage and the configured ffmpeg executable are both available.
+  voiceInputResumableEnabled: EnvBoolean.default(true),
+  voiceInputResumableMaxDurationSeconds: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(8 * 60 * 60)
+    .default(2 * 60 * 60),
+  voiceInputResumableMaxSizeBytes: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(512 * 1024 * 1024)
+    .default(512 * 1024 * 1024),
+  voiceInputResumableMaxChunkSizeBytes: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(25 * 1024 * 1024)
+    .default(8 * 1024 * 1024),
+  voiceInputResumableRetentionSeconds: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(7 * 24 * 60 * 60)
+    .default(24 * 60 * 60),
+  voiceInputFfmpegPath: z.string().trim().min(1).max(1024).default("ffmpeg"),
   // Preferred provider order (comma-separated ids). First configured+ready wins.
   // Codex subscription STT is preferred by default when subscription routing is
   // enabled; operators can put openai/azure-openai first explicitly.
@@ -415,9 +476,16 @@ const SettingsSchema = z.object({
   // flag non-mandatory selected MCP tools `defer_loading:true` (dropping their
   // schemas from model context) and add one client-executed tool_search tool
   // that BM25-discloses bounded matches. The mandatory OpenGeni tools stay
-  // eager. Default OFF — a codex turn is byte-for-byte unchanged until enabled.
+  // eager. Default ON so selected connector catalogues do not consume every
+  // Codex turn's context. Operators may explicitly disable it for emergency
+  // compatibility diagnosis.
   // OPENGENI_CODEX_TOOL_SEARCH_ENABLED
-  codexToolSearchEnabled: EnvBoolean.default(false),
+  codexToolSearchEnabled: EnvBoolean.default(true),
+  // Provider-neutral progressive disclosure for direct OpenAI/Azure native
+  // client search and ordinary-function generic dispatch. Kept separate from
+  // the Codex rollout so an emergency Codex opt-out cannot disable every model.
+  // OPENGENI_LAZY_TOOL_SEARCH_ENABLED
+  lazyToolSearchEnabled: EnvBoolean.default(true),
   // credential allocator atomic, workspace-local credential allocation. Default OFF is a
   // deliberate rolling-deploy fence: migrate + roll every worker first, then
   // enable. Turning it off restores the legacy sticky selector without a schema
@@ -669,10 +737,13 @@ const SettingsSchema = z.object({
   // the deploy-staging IaC secret/configmap pattern.
   sandboxSelfhostedEnabled: EnvBoolean.default(false),
   // Gates the op-stream (streaming exec) transport to Connected Machines. The
-  // runner must ALSO advertise Capabilities.op_stream; default off, and legacy
-  // request/reply exec is the permanent fallback. EnvBoolean (NOT
+  // runner must ALSO advertise Capabilities.op_stream. Streaming is the default
+  // because it is the only transport that can keep a command alive without an
+  // arbitrary request/reply wall while still supporting replay and cancellation.
+  // Older runners remain usable when an explicit positive exec timeout is set.
+  // EnvBoolean (NOT
   // z.coerce.boolean(), which coerces "false" -> true).
-  agentOpStreamEnabled: EnvBoolean.default(false),
+  agentOpStreamEnabled: EnvBoolean.default(true),
   // The HMAC secret the control plane signs the enrollment bearer credential with
   // (the `oge_` envelope the agent presents back to the control plane). Optional:
   // when ABSENT and sandboxSelfhostedEnabled is on, the poll route reports the
@@ -730,23 +801,15 @@ const SettingsSchema = z.object({
   selfhostedNatsControlUser: z.string().optional(),
   selfhostedNatsControlPassword: z.string().optional(),
   // --- selfhosted (Connected Machine) control/exec op deadlines ---------------
-  // The control plane splits its op deadline in two. CONTROL ops (ping / fs / git /
-  // desktop / pty) must stay responsive so a machine's liveness is never masked by a
-  // slow op, so they use the short control timeout. EXEC gets its OWN, larger budget:
-  // a real command (compile, test run, dependency install) routinely outlives the
-  // control timeout, and before the split a long command was killed at the ~30s
-  // control wall. The agent kills the exec child at this deadline; the wire waits
-  // slightly longer (SELFHOSTED_EXEC_REPLY_GRACE_MS) for the typed timed-out reply.
-  //
-  // The exec default is a DELIBERATELY MODEST 2min (not 5): the agent-side admission
-  // pool is (until a later agent release) a FLAT 8 permits with no per-class split,
-  // so 8 slow execs holding a permit for 5 minutes would blanket-DRAIN every fs/git
-  // op — shipping the amplifier before the class-aware-admission fix. 2min still
-  // clears the large majority of the observed >30s exec tail; genuinely long jobs run
-  // in the background (see the exec-deadline hint) or raise the knob per deployment.
-  // Knobs: OPENGENI_SANDBOX_SELFHOSTED_EXEC_TIMEOUT_MS (default 2min) and
+  // CONTROL ops (ping / fs / git / desktop / pty) keep a short request timeout so
+  // liveness failures surface promptly. EXEC duration is a different concern: by
+  // default it is unbounded (0), exactly like a command launched by an unrestricted
+  // local agent. The op-stream transport keeps control liveness, replay, and explicit
+  // cancellation independent of command duration. A deployment may opt into a hard
+  // process deadline by setting a positive value; 0 never schedules a process kill.
+  // Knobs: OPENGENI_SANDBOX_SELFHOSTED_EXEC_TIMEOUT_MS (default 0 = none) and
   // OPENGENI_SANDBOX_SELFHOSTED_CONTROL_TIMEOUT_MS (default 30s).
-  sandboxSelfhostedExecTimeoutMs: z.coerce.number().int().positive().default(120_000),
+  sandboxSelfhostedExecTimeoutMs: z.coerce.number().int().nonnegative().default(0),
   sandboxSelfhostedControlTimeoutMs: z.coerce.number().int().positive().default(30_000),
   // --- sandbox lease cadences (cadence invariant validated at boot below) ---
   // reaperPeriod < viewerHolderTTL, and reaperPeriod + idleGrace < the EFFECTIVE
@@ -782,7 +845,12 @@ const SettingsSchema = z.object({
   // graceful shutdown, or become permission to GC an older archive. Timeout is
   // treated exactly like a failed best-effort snapshot. Knob:
   // OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS. Default 60s.
-  sandboxSnapshotTimeoutMs: z.coerce.number().int().positive().default(60_000),
+  sandboxSnapshotTimeoutMs: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(SANDBOX_SNAPSHOT_MAX_TIMEOUT_MS)
+    .default(60_000),
   // Begin a controlled snapshot/quiesce/drain/rematerialize transition this far
   // ahead of a finite provider deadline. Modal's 24h creation clock cannot be
   // extended; the logical sandbox outlives it by moving to one successor box.
@@ -792,13 +860,12 @@ const SettingsSchema = z.object({
   // an operator deliberately wants more rotation headroom; the boot invariant
   // still requires it to remain below the provider lifetime.
   sandboxRotationLeadMs: z.coerce.number().int().positive().default(3_600_000),
-  // Bound each global reaper pass so a rollout that discovers many legacy boxes
-  // with unknown creation clocks cannot create a provider/API thundering herd.
-  // One is the safe admission default: the reaper services provider transitions
-  // sequentially, so claiming a wider batch would fence boxes before the same
-  // sweep can service them. Larger fleets may raise this only as an explicit,
-  // observed deployment choice.
-  sandboxRotationBatchSize: z.coerce.number().int().positive().max(500).default(1),
+  // Bound provider-deadline rotation admission independently of execution.
+  // Every admitted box receives its own durable drain child; the control worker
+  // limits provider I/O to 32 concurrent activities. Matching that bound avoids
+  // both the old one-box-per-tick deadline backlog and an unbounded provider/API
+  // burst. Operators may tune this for a differently-sized worker pool.
+  sandboxRotationBatchSize: z.coerce.number().int().positive().max(500).default(32),
   // expires_at refresh window for a held lease (>> the turn 10s heartbeat so a
   // single missed heartbeat never TTL-reaps a live turn). The warming TTL is the
   // window a cold->warming spawner has to commit warm before a reaper resets it.
@@ -1103,6 +1170,13 @@ export type ModelUsageInput = {
   requestUsageEntries?: ModelUsageInput[] | undefined;
 };
 
+export type ModelUsageCostBreakdown = {
+  /** Provider-rate cost basis for the exact usage, before OpenGeni margin. */
+  providerCostMicros: number;
+  /** OpenGeni credit price after configured margin and latency-mode multiplier. */
+  creditCostMicros: number;
+};
+
 export type StaticUsageLimitsConfig = StaticUsageLimits;
 export type EntitlementsConfig = Entitlements;
 
@@ -1174,6 +1248,10 @@ export const ModelCapabilitiesV1Schema = z
       webSearch: CapabilityStateV1Schema,
       xSearch: CapabilityStateV1Schema,
       codeExecution: CapabilityStateV1Schema,
+      imageGeneration: CapabilityStateV1Schema.default({
+        upstream: "unknown",
+        runnable: false,
+      }),
     }),
     inputModalities: z.array(ModelModalityV1).min(1),
     /** Exact MIME types accepted as typed `input_file`; `text/*` is allowed. */
@@ -1710,6 +1788,9 @@ export function getSettings(): Settings {
     turnWorkerMaxConcurrentTurns: optional("OPENGENI_TURN_WORKER_MAX_CONCURRENT_TURNS"),
     turnWorkerTargetCpuUsage: optional("OPENGENI_TURN_WORKER_TARGET_CPU_USAGE"),
     turnWorkerTargetMemoryUsage: optional("OPENGENI_TURN_WORKER_TARGET_MEMORY_USAGE"),
+    turnWorkerEmergencyMemoryUsage: optional("OPENGENI_TURN_WORKER_EMERGENCY_MEMORY_USAGE"),
+    turnWorkerMemoryGuardIntervalMs: optional("OPENGENI_TURN_WORKER_MEMORY_GUARD_INTERVAL_MS"),
+    turnWorkerMemoryGuardSustainMs: optional("OPENGENI_TURN_WORKER_MEMORY_GUARD_SUSTAIN_MS"),
     observabilityStructuredLogs: optional("OPENGENI_OBSERVABILITY_STRUCTURED_LOGS"),
     observabilityMetricsEnabled: optional("OPENGENI_OBSERVABILITY_METRICS_ENABLED"),
     observabilityOtlpEndpoint:
@@ -1726,6 +1807,7 @@ export function getSettings(): Settings {
     webBaseUrl: optional("OPENGENI_WEB_BASE_URL"),
     agentReleasesBaseUrl: optional("OPENGENI_AGENT_RELEASES_BASE_URL"),
     agentStableVersion: optional("OPENGENI_AGENT_STABLE_VERSION"),
+    agentBetaVersion: optional("OPENGENI_AGENT_BETA_VERSION"),
     productAccessMode: optional("OPENGENI_PRODUCT_ACCESS_MODE"),
     billingMode: optional("OPENGENI_BILLING_MODE"),
     entitlementsMode: optional("OPENGENI_ENTITLEMENTS_MODE"),
@@ -1776,8 +1858,21 @@ export function getSettings(): Settings {
     openaiModel: optional("OPENGENI_OPENAI_MODEL"),
     openaiAllowedModels: optional("OPENGENI_OPENAI_ALLOWED_MODELS"),
     vercelAiGatewayApiKey: optional("OPENGENI_VERCEL_AI_GATEWAY_API_KEY"),
+    imageGenerationModel: optional("OPENGENI_IMAGE_GENERATION_MODEL"),
     voiceInputMaxDurationSeconds: optional("OPENGENI_VOICE_INPUT_MAX_DURATION_SECONDS"),
     voiceInputMaxSizeBytes: optional("OPENGENI_VOICE_INPUT_MAX_SIZE_BYTES"),
+    voiceInputResumableEnabled: optional("OPENGENI_VOICE_INPUT_RESUMABLE_ENABLED"),
+    voiceInputResumableMaxDurationSeconds: optional(
+      "OPENGENI_VOICE_INPUT_RESUMABLE_MAX_DURATION_SECONDS",
+    ),
+    voiceInputResumableMaxSizeBytes: optional("OPENGENI_VOICE_INPUT_RESUMABLE_MAX_SIZE_BYTES"),
+    voiceInputResumableMaxChunkSizeBytes: optional(
+      "OPENGENI_VOICE_INPUT_RESUMABLE_MAX_CHUNK_SIZE_BYTES",
+    ),
+    voiceInputResumableRetentionSeconds: optional(
+      "OPENGENI_VOICE_INPUT_RESUMABLE_RETENTION_SECONDS",
+    ),
+    voiceInputFfmpegPath: optional("OPENGENI_VOICE_INPUT_FFMPEG_PATH"),
     voiceInputProviderOrder: optional("OPENGENI_VOICE_INPUT_PROVIDER_ORDER"),
     voiceInputOpenaiEnabled: optional("OPENGENI_VOICE_INPUT_OPENAI_ENABLED"),
     voiceInputOpenaiApiKey: optional("OPENGENI_VOICE_INPUT_OPENAI_API_KEY"),
@@ -1795,6 +1890,7 @@ export function getSettings(): Settings {
     codexSubscriptionEnabled: optional("OPENGENI_CODEX_SUBSCRIPTION_ENABLED"),
     codexConnectedAppsEnabled: optional("OPENGENI_CODEX_CONNECTED_APPS_ENABLED"),
     codexToolSearchEnabled: optional("OPENGENI_CODEX_TOOL_SEARCH_ENABLED"),
+    lazyToolSearchEnabled: optional("OPENGENI_LAZY_TOOL_SEARCH_ENABLED"),
     codexCredentialLeasingEnabled: optional("OPENGENI_CODEX_CREDENTIAL_LEASING_ENABLED"),
     codexFleetPolicyShadowEnabled: optional("OPENGENI_CODEX_FLEET_POLICY_SHADOW_ENABLED"),
     codexProductSku: optional("OPENGENI_CODEX_PRODUCT_SKU"),
@@ -2027,8 +2123,20 @@ export function sandboxArchiveCaptureTimeoutMs(
   settings: Pick<Settings, "sandboxSnapshotTimeoutMs">,
 ): number {
   return Math.min(
-    60 * 60_000,
-    Math.max(settings.sandboxSnapshotTimeoutMs + 30_000, settings.sandboxSnapshotTimeoutMs * 2),
+    SANDBOX_ARCHIVE_CAPTURE_MAX_TIMEOUT_MS,
+    settings.sandboxSnapshotTimeoutMs + SANDBOX_ARCHIVE_CAPTURE_SETTLEMENT_GRACE_MS,
+  );
+}
+
+export function sandboxLifecycleTransitionWaitMs(
+  settings: Pick<Settings, "sandboxSnapshotTimeoutMs" | "sandboxLeaseReaperPeriodMs">,
+): number {
+  const captureTimeoutMs = sandboxArchiveCaptureTimeoutMs(settings);
+  return Math.min(
+    SANDBOX_LIFECYCLE_TRANSITION_MAX_WAIT_MS,
+    settings.sandboxLeaseReaperPeriodMs +
+      captureTimeoutMs +
+      SANDBOX_LIFECYCLE_RETRY_HANDOFF_GRACE_MS,
   );
 }
 
@@ -2291,7 +2399,12 @@ function normalizeCapabilities(capabilities: ModelCapabilitiesV1): ModelCapabili
 
 function legacyModelCapabilities(
   settings: Settings,
-  input: { reasoningEffort: boolean; hostedWebSearch: boolean; vision?: boolean },
+  input: {
+    reasoningEffort: boolean;
+    hostedWebSearch: boolean;
+    hostedImageGeneration?: boolean;
+    vision?: boolean;
+  },
 ): ModelCapabilitiesV1 {
   const reasoningEfforts = input.reasoningEffort ? configuredAllowedReasoningEfforts(settings) : [];
   return normalizeCapabilities({
@@ -2311,6 +2424,10 @@ function legacyModelCapabilities(
       },
       xSearch: { upstream: "unknown", runnable: false },
       codeExecution: { upstream: "unknown", runnable: false },
+      imageGeneration: {
+        upstream: input.hostedImageGeneration ? "supported" : "unknown",
+        runnable: input.hostedImageGeneration ?? false,
+      },
     },
     inputModalities: input.vision ? ["text", "image"] : ["text"],
     inputFileMediaTypes: [
@@ -2541,6 +2658,35 @@ function builtinPromptCachingForModel(
   return slug.startsWith("gpt-5.6-")
     ? { upstream: "supported", runnable: true, mode: "implicit" }
     : undefined;
+}
+
+/** Reviewed direct-OpenAI text models that accept the hosted image tool. */
+function builtinHostedImageGenerationForModel(settings: Settings, modelId: string): boolean {
+  return (
+    settings.openaiProvider === "openai" &&
+    isDirectOpenAiApiBaseUrl(settings.openaiBaseUrl) &&
+    ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"].includes(modelId)
+  );
+}
+
+/** Undefined and the exact public OpenAI v1 endpoint are the same direct route. */
+export function isDirectOpenAiApiBaseUrl(baseUrl: string | undefined): boolean {
+  if (baseUrl === undefined) return true;
+  try {
+    const parsed = new URL(baseUrl);
+    return (
+      parsed.protocol === "https:" &&
+      parsed.hostname === "api.openai.com" &&
+      parsed.port === "" &&
+      parsed.username === "" &&
+      parsed.password === "" &&
+      parsed.search === "" &&
+      parsed.hash === "" &&
+      parsed.pathname.replace(/\/+$/, "") === "/v1"
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -2983,6 +3129,7 @@ export function configuredModels(settings: Settings): ConfiguredModel[] {
         ...legacyModelCapabilities(settings, {
           reasoningEffort: true,
           hostedWebSearch: settings.webSearchEnabled,
+          hostedImageGeneration: builtinHostedImageGenerationForModel(settings, id),
           vision: id.startsWith("gpt-5.6-"),
         }),
         ...(builtinPromptCachingForModel(id)
@@ -3379,6 +3526,15 @@ export function calculateModelUsageCostMicros(
   usage: ModelUsageInput,
   options?: { latencyMode?: LatencyMode },
 ): number {
+  return calculateModelUsageCostBreakdown(settings, model, usage, options).creditCostMicros;
+}
+
+export function calculateModelUsageCostBreakdown(
+  settings: Settings,
+  model: string,
+  usage: ModelUsageInput,
+  options?: { latencyMode?: LatencyMode },
+): ModelUsageCostBreakdown {
   const schedule = configuredModelPricingSchedules(settings)[model];
   if (!schedule) {
     throw new Error(`Missing model pricing for ${model}`);
@@ -3395,10 +3551,12 @@ export function calculateModelUsageCostMicros(
       (rawCostByPricing.get(pricing) ?? 0) + calculateEntryCostMicros(pricing, entry),
     );
   }
-  let total = 0;
+  let providerCostMicros = 0;
+  let creditCostMicros = 0;
   for (const [pricing, rawCost] of rawCostByPricing) {
     const marginBps = pricing.marginBps ?? 0;
-    total += Math.ceil((rawCost * (10_000 + marginBps)) / 10_000);
+    providerCostMicros += rawCost;
+    creditCostMicros += Math.ceil((rawCost * (10_000 + marginBps)) / 10_000);
   }
   const latencyMode = options?.latencyMode ?? "standard";
   if (latencyMode !== "standard") {
@@ -3411,10 +3569,11 @@ export function calculateModelUsageCostMicros(
       (mode) => mode.id === latencyMode && mode.runnable,
     )?.billingMultiplierBps;
     if (multiplierBps && multiplierBps > 0) {
-      total = Math.ceil((total * multiplierBps) / 10_000);
+      providerCostMicros = Math.ceil((providerCostMicros * multiplierBps) / 10_000);
+      creditCostMicros = Math.ceil((creditCostMicros * multiplierBps) / 10_000);
     }
   }
-  return total;
+  return { providerCostMicros, creditCostMicros };
 }
 
 /**
@@ -3428,6 +3587,16 @@ export function calculateGatewayReportedCostMicros(
   inferenceCostUsd: string,
   options?: { inputTokens?: number },
 ): number {
+  return calculateGatewayReportedCostBreakdown(settings, model, inferenceCostUsd, options)
+    .creditCostMicros;
+}
+
+export function calculateGatewayReportedCostBreakdown(
+  settings: Settings,
+  model: string,
+  inferenceCostUsd: string,
+  options?: { inputTokens?: number },
+): ModelUsageCostBreakdown {
   const schedule = configuredModelPricingSchedules(settings)[model];
   if (!schedule) {
     throw new Error(`Missing model pricing for ${model}`);
@@ -3440,14 +3609,22 @@ export function calculateGatewayReportedCostMicros(
   const fraction = match[2] ?? "";
   const decimalDigits = BigInt(`${match[1]}${fraction}`);
   const decimalScale = 10n ** BigInt(fraction.length);
+  const providerNumerator = decimalDigits * 1_000_000n;
+  const providerMicros = (providerNumerator + decimalScale - 1n) / decimalScale;
   const marginBps = BigInt(10_000 + (pricing.marginBps ?? 0));
-  const numerator = decimalDigits * 1_000_000n * marginBps;
+  const numerator = providerNumerator * marginBps;
   const denominator = decimalScale * 10_000n;
-  const micros = (numerator + denominator - 1n) / denominator;
-  if (micros > BigInt(Number.MAX_SAFE_INTEGER)) {
+  const creditMicros = (numerator + denominator - 1n) / denominator;
+  if (
+    providerMicros > BigInt(Number.MAX_SAFE_INTEGER) ||
+    creditMicros > BigInt(Number.MAX_SAFE_INTEGER)
+  ) {
     throw new Error("AI Gateway inference cost exceeds the supported billing range");
   }
-  return Number(micros);
+  return {
+    providerCostMicros: Number(providerMicros),
+    creditCostMicros: Number(creditMicros),
+  };
 }
 
 export function configuredAllowedReasoningEfforts(
@@ -3661,16 +3838,8 @@ export function stableSandboxEnvironmentForRun(
     environment.OPENGENI_GIT_CLI_WRAPPER_DIR ??= `${home}/.opengeni/bin`;
     environment.PATH = prependPathEntry(environment.PATH, environment.OPENGENI_GIT_CLI_WRAPPER_DIR);
   }
-  if (settings.toolspaceEnabled) {
-    // Connected Machines do not share one control-plane-known home path. Keep a
-    // stable shell-resolved pointer in the manifest; runtime expands this trusted
-    // marker against the machine's own HOME for seed, renewal, and every command.
-    // Never derive it from the selfhosted descriptor root (`/`), which would try
-    // to write `/.opengeni` as an ordinary machine user.
-    environment.OPENGENI_TOOLSPACE_TOKEN_FILE ??=
-      settings.sandboxBackend === "selfhosted"
-        ? "$HOME/.opengeni/toolspace-token"
-        : `${environment.HOME ?? descriptor.workspaceRoot}/.opengeni/toolspace-token`;
+  if (settings.toolspaceEnabled && settings.sandboxBackend !== "selfhosted") {
+    environment.OPENGENI_TOOLSPACE_TOKEN_FILE ??= `${environment.HOME ?? descriptor.workspaceRoot}/.opengeni/toolspace-token`;
     if (settings.ogtoolPackageSpec) {
       environment.OPENGENI_OGTOOL_PACKAGE_SPEC ??= settings.ogtoolPackageSpec;
     }
@@ -4608,10 +4777,15 @@ function validateSettings(settings: Settings): void {
           `OPENGENI_MODAL_TIMEOUT_SECONDS*1000 (${providerLifetimeMs}).`,
       );
     }
-    if (!(rotationLeadMs > settings.sandboxSnapshotTimeoutMs + 2 * reaperPeriod)) {
+    // This is provider-hard-deadline headroom, not a retry delay. Rotation is
+    // admitted immediately before the same sweep's drain inventory, so only the
+    // worst-case time until that sweep plus the complete durable capture window
+    // is required. No second schedule period belongs in the availability path.
+    const captureTimeoutMs = sandboxArchiveCaptureTimeoutMs(settings);
+    if (!(rotationLeadMs > captureTimeoutMs + reaperPeriod)) {
       throw new Error(
-        `OPENGENI_SANDBOX_ROTATION_LEAD_MS (${rotationLeadMs}) must exceed the snapshot timeout ` +
-          `plus two reaper periods (${settings.sandboxSnapshotTimeoutMs + 2 * reaperPeriod}).`,
+        `OPENGENI_SANDBOX_ROTATION_LEAD_MS (${rotationLeadMs}) must exceed the durable capture ` +
+          `timeout plus one reaper period (${captureTimeoutMs + reaperPeriod}).`,
       );
     }
     if (!(viewerTtl < idleTimeoutMs)) {

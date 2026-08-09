@@ -97,6 +97,8 @@ export async function maybeCompactContext(
      * append again — the event is already durable.
      */
     publishLiveEvents?: (events: SessionEvent[]) => Promise<void>;
+    /** Materialize retained screenshot receipts only in the attempt-local model view. */
+    materializeHistory?: (items: CompactionItem[]) => Promise<CompactionItem[]>;
     /** Turn-scoped attachment/modality view; canonical persisted rows stay untouched. */
     projectModelInput?: (items: CompactionItem[]) => Promise<CompactionItem[]>;
   } = {},
@@ -144,11 +146,15 @@ export async function maybeCompactContext(
   }
 
   const canonicalItems = projectRejectedProviderArtifacts(active) as CompactionItem[];
-  const projectForWire = async (input: CompactionItem[]): Promise<CompactionItem[]> =>
-    sanitizeHistoryItemsForModel(
-      options.projectModelInput ? await options.projectModelInput(input) : input,
+  const projectForWire = async (input: CompactionItem[]): Promise<CompactionItem[]> => {
+    const materialized = options.materializeHistory
+      ? await options.materializeHistory(input)
+      : input;
+    return sanitizeHistoryItemsForModel(
+      options.projectModelInput ? await options.projectModelInput(materialized) : materialized,
       settings.modelToolOutputTruncationTokens,
     ) as CompactionItem[];
+  };
   const items = await projectForWire(canonicalItems);
   const decision = decideCompaction({
     items,
@@ -341,7 +347,6 @@ async function compactContextRemoteV2(
     expectedAttemptId: scope.attemptId,
     replacementItems: replacementHistory.slice(0, -1),
     summaryItem: tailItem as Record<string, unknown>,
-    replacementInputTokens: estimatedTokensAfter,
     ...(options.clearRequestedCompaction ? { clearRequestedCompaction: true } : {}),
     eventPayload: {
       trigger: options.trigger ?? "auto",
@@ -417,7 +422,6 @@ async function compactContextPortable(
     expectedAttemptId: scope.attemptId,
     replacementItems: replacementHistory.slice(0, -1),
     summaryItem: summaryItem as Record<string, unknown>,
-    replacementInputTokens: estimatedTokensAfter,
     ...(options.clearRequestedCompaction ? { clearRequestedCompaction: true } : {}),
     eventPayload: {
       trigger: options.trigger ?? "auto",

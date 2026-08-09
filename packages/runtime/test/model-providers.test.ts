@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { OpenAIChatCompletionsModel, OpenAIResponsesModel } from "@openai/agents";
+import { OpenAIChatCompletionsModel, OpenAIResponsesModel, RunContext } from "@openai/agents";
+import { getOrCreateTrace } from "@openai/agents-core";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import {
@@ -28,10 +29,13 @@ import {
   buildProviderClient,
   CodexSubscriptionUnavailableError,
   HUMAN_INPUT_TOOL_NAME,
+  modelRequestPolicyForProvider,
   MultiProviderModelProvider,
   resolveTurnModel,
+  summarizeForCompaction,
   vercelGatewayRoutingFetch,
 } from "../src/index";
+import { ReplayableJsonOpenAI, requestBodyText } from "../src/replayable-json-body";
 
 describe("Vercel AI Gateway request fence", () => {
   test("replaces caller routing for both Gateway billing paths", async () => {
@@ -147,16 +151,36 @@ describe("Vercel AI Gateway request fence", () => {
       {
         model: "moonshotai/kimi-k3",
         input: [
-          { type: "function_call", call_id: "a", name: "alpha", arguments: "{}" },
-          { type: "function_call", call_id: "b", name: "beta", arguments: "{}" },
+          {
+            type: "function_call",
+            call_id: "a",
+            name: "alpha",
+            arguments: "{}",
+          },
+          {
+            type: "function_call",
+            call_id: "b",
+            name: "beta",
+            arguments: "{}",
+          },
           { type: "function_call_output", call_id: "a", output: "done" },
         ],
       },
       {
         model: "deepseek/deepseek-v4-flash-0731",
         input: [
-          { type: "function_call", call_id: "a", name: "alpha", arguments: "{}" },
-          { type: "function_call", call_id: "b", name: "beta", arguments: "{}" },
+          {
+            type: "function_call",
+            call_id: "a",
+            name: "alpha",
+            arguments: "{}",
+          },
+          {
+            type: "function_call",
+            call_id: "b",
+            name: "beta",
+            arguments: "{}",
+          },
           { type: "function_call_output", call_id: "a", output: "one" },
           { type: "function_call_output", call_id: "b", output: "two" },
         ],
@@ -191,6 +215,37 @@ describe("Vercel AI Gateway request fence", () => {
       }),
     ).rejects.toThrow("approved catalogue");
     expect(calls).toBe(0);
+  });
+
+  test("cancels an upstream error body before returning the synthetic error", async () => {
+    let cancelled = false;
+    const routed = vercelGatewayRoutingFetch(
+      "vercel-gateway-managed",
+      (async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode("upstream detail"));
+            },
+            cancel() {
+              cancelled = true;
+            },
+          }),
+          { status: 503 },
+        )) as typeof fetch,
+    );
+    const response = await routed("https://ai-gateway.vercel.sh/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "moonshotai/kimi-k3" }),
+    });
+    expect(response.status).toBe(503);
+    expect(cancelled).toBe(true);
+    expect(await response.json()).toEqual({
+      error: {
+        type: "model_unavailable",
+        message: "The selected model is temporarily unavailable.",
+      },
+    });
   });
 });
 
@@ -250,7 +305,10 @@ describe("pinned Responses large-output boundary", () => {
       output: Array.from({ length: 10_000 }, (_, index): Record<string, unknown> => {
         if (index % 3 === 0) return { type: "input_text", text: `text-${index}` };
         if (index % 3 === 1) {
-          return { type: "input_image", image: `data:image/png;base64,a${index}` };
+          return {
+            type: "input_image",
+            image: `data:image/png;base64,a${index}`,
+          };
         }
         return {
           type: "input_file",
@@ -374,6 +432,7 @@ describe("pinned Responses streamed terminal failures", () => {
         responseId: "resp_failed",
         responseStatus: "failed",
       },
+      sentinel: "SECRET response.failed provider detail",
     },
     {
       name: "nested response.error",
@@ -396,6 +455,7 @@ describe("pinned Responses streamed terminal failures", () => {
         responseId: "resp_error",
         responseStatus: "failed",
       },
+      sentinel: "SECRET nested response.error provider detail",
     },
     {
       name: "top-level error",
@@ -410,6 +470,7 @@ describe("pinned Responses streamed terminal failures", () => {
         type: "rate_limit_exceeded",
         eventType: "error",
       },
+      sentinel: "SECRET top-level error provider detail",
     },
     {
       name: "response.incomplete",
@@ -429,6 +490,7 @@ describe("pinned Responses streamed terminal failures", () => {
         responseId: "resp_incomplete",
         responseStatus: "incomplete",
       },
+      sentinel: "SECRET provider incomplete reason",
     },
     {
       name: "missing terminal",
@@ -488,7 +550,11 @@ describe("pinned Responses streamed terminal failures", () => {
         error: (observed as { error?: unknown }).error,
       });
       expect(Buffer.byteLength(serialized, "utf8")).toBeLessThan(2_000);
-      expect(serialized).not.toContain("SECRET");
+      if ("sentinel" in terminalCase) {
+        expect(serialized).toContain(terminalCase.sentinel);
+      } else {
+        expect(serialized).not.toContain("SECRET");
+      }
     });
   }
 
@@ -537,6 +603,412 @@ describe("pinned Responses streamed terminal failures", () => {
     expect((observed as { headers?: Headers }).headers?.get(CODEX_TRANSPORT_ERROR_HEADER)).toBe(
       "1",
     );
+  });
+});
+
+type DirectResponsesEvent = Record<string, unknown> & { type: string };
+
+function responseMessage(id: string, text: string): Record<string, unknown> {
+  return {
+    type: "message",
+    id,
+    status: "completed",
+    role: "assistant",
+    content: [{ type: "output_text", text, annotations: [], logprobs: [] }],
+  };
+}
+
+async function consumeDirectResponses(
+  events: DirectResponsesEvent[],
+  options: { keepSocketOpenAfterEvents?: boolean } = {},
+) {
+  let calls = 0;
+  let streamCancelled = false;
+  const client = new OpenAI({
+    apiKey: "test-key",
+    baseURL: "https://responses.example.test/v1",
+    maxRetries: 0,
+    fetch: async () => {
+      calls += 1;
+      const encodedEvents = events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("");
+      const body = options.keepSocketOpenAfterEvents
+        ? new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode(encodedEvents));
+            },
+            cancel() {
+              streamCancelled = true;
+            },
+          })
+        : encodedEvents;
+      return new Response(body, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    },
+  });
+  const model = new OpenAIResponsesModel(client, "test-model");
+  const observed: Array<Record<string, unknown>> = [];
+  let error: unknown;
+  try {
+    for await (const event of model.getStreamedResponse({
+      input: "test",
+      modelSettings: {},
+      tools: [],
+      handoffs: [],
+      outputType: "text",
+      tracing: false,
+    } as never)) {
+      observed.push(event as unknown as Record<string, unknown>);
+    }
+  } catch (caught) {
+    error = caught;
+  }
+  return { calls, events: observed, error, streamCancelled };
+}
+
+async function consumeDirectNonStreaming(status?: string) {
+  let calls = 0;
+  const client = new OpenAI({
+    apiKey: "test-key",
+    baseURL: "https://responses.example.test/v1",
+    maxRetries: 0,
+    fetch: async () => {
+      calls += 1;
+      return Response.json({
+        id: "direct-response",
+        ...(status === undefined ? {} : { status }),
+        output: [],
+        usage: null,
+      });
+    },
+  });
+  const model = new OpenAIResponsesModel(client, "test-model");
+  try {
+    const response = await getOrCreateTrace(() =>
+      model.getResponse({
+        input: "test",
+        modelSettings: {},
+        tools: [],
+        handoffs: [],
+        outputType: "text",
+        tracing: false,
+      } as never),
+    );
+    return { calls, response, error: undefined };
+  } catch (error) {
+    return { calls, response: undefined, error };
+  }
+}
+
+describe("pinned Responses protocol conformance", () => {
+  for (const terminal of [
+    {
+      type: "response.failed",
+      response: {
+        id: "failed",
+        status: "failed",
+        output: [],
+        error: { message: "provider failed" },
+      },
+    },
+    {
+      type: "response.incomplete",
+      response: {
+        id: "incomplete",
+        status: "incomplete",
+        output: [],
+        incomplete_details: { reason: "limit" },
+      },
+    },
+  ]) {
+    test(`fails closed on ${terminal.type}`, async () => {
+      const result = await consumeDirectResponses([terminal]);
+      expect(result.calls).toBe(1);
+      expect(result.error).toBeInstanceOf(Error);
+      expect(String((result.error as Error).message)).toContain(terminal.type);
+      expect(String((result.error as Error).message)).not.toContain("provider failed");
+      expect(result.events.some((event) => event.type === "response_done")).toBe(false);
+    });
+  }
+
+  for (const status of ["failed", "incomplete", "cancelled", "queued", "in_progress"]) {
+    test(`fails closed on non-streaming ${status} status`, async () => {
+      const result = await consumeDirectNonStreaming(status);
+      expect(result.calls).toBe(1);
+      expect(result.response).toBeUndefined();
+      expect(result.error).toBeInstanceOf(Error);
+      expect(String((result.error as Error).message)).toContain(
+        status === "failed" || status === "incomplete"
+          ? `response.${status}`
+          : "response.non_completed",
+      );
+    });
+  }
+
+  for (const status of ["completed", undefined]) {
+    test(`accepts a non-streaming ${status ?? "omitted"} status`, async () => {
+      const result = await consumeDirectNonStreaming(status);
+      expect(result.calls).toBe(1);
+      expect(result.error).toBeUndefined();
+      expect(result.response?.responseId).toBe("direct-response");
+    });
+  }
+
+  test("fails closed when the stream ends without a terminal", async () => {
+    const result = await consumeDirectResponses([
+      {
+        type: "response.created",
+        response: { id: "missing", status: "in_progress" },
+      },
+    ]);
+    expect(String((result.error as Error).message)).toContain("without a terminal");
+    expect(result.events.some((event) => event.type === "response_done")).toBe(false);
+  });
+
+  test("reconstructs empty terminal output by output_index, not arrival order", async () => {
+    const result = await consumeDirectResponses([
+      {
+        type: "response.output_item.done",
+        output_index: 1,
+        item: responseMessage("message-b", "B"),
+      },
+      {
+        type: "response.output_item.done",
+        output_index: 0,
+        item: responseMessage("message-a", "A"),
+      },
+      {
+        type: "response.completed",
+        response: {
+          id: "completed",
+          status: "completed",
+          output: [],
+          usage: null,
+        },
+      },
+    ]);
+    expect(result.error).toBeUndefined();
+    const terminalModel = result.events.find(
+      (event) =>
+        event.type === "model" &&
+        (event.event as { type?: unknown } | undefined)?.type === "response.completed",
+    );
+    const output = (terminalModel?.event as { response?: { output?: Array<{ id?: string }> } })
+      ?.response?.output;
+    expect(output?.map((item) => item.id)).toEqual(["message-a", "message-b"]);
+    expect(result.events.filter((event) => event.type === "response_done")).toHaveLength(1);
+  });
+
+  test("fails closed on duplicate output indices", async () => {
+    const result = await consumeDirectResponses([
+      {
+        type: "response.output_item.done",
+        output_index: 0,
+        item: responseMessage("message-a", "A"),
+      },
+      {
+        type: "response.output_item.done",
+        output_index: 0,
+        item: responseMessage("message-b", "B"),
+      },
+      {
+        type: "response.completed",
+        response: {
+          id: "completed",
+          status: "completed",
+          output: [],
+          usage: null,
+        },
+      },
+    ]);
+    expect(String((result.error as Error).message)).toContain("duplicate output_item.done index");
+    expect(result.events.some((event) => event.type === "response_done")).toBe(false);
+  });
+
+  test("treats the first successful terminal as the protocol boundary", async () => {
+    const result = await consumeDirectResponses([
+      {
+        type: "response.completed",
+        response: { id: "first", status: "completed", output: [], usage: null },
+      },
+      {
+        type: "response.output_item.done",
+        output_index: 0,
+        item: responseMessage("late", "late"),
+      },
+    ]);
+    expect(result.error).toBeUndefined();
+    expect(result.events.filter((event) => event.type === "response_done")).toHaveLength(1);
+    expect(
+      result.events.some(
+        (event) =>
+          event.type === "model" &&
+          (event.event as { type?: unknown } | undefined)?.type === "response.output_item.done",
+      ),
+    ).toBe(false);
+  });
+
+  test("does not wait for socket EOF after a successful terminal", async () => {
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const result = await Promise.race([
+        consumeDirectResponses(
+          [
+            {
+              type: "response.completed",
+              response: {
+                id: "terminal",
+                status: "completed",
+                output: [],
+                usage: null,
+              },
+            },
+          ],
+          { keepSocketOpenAfterEvents: true },
+        ),
+        new Promise<never>((_resolve, reject) => {
+          timeoutId = setTimeout(
+            () => reject(new Error("terminal event did not stop stream consumption")),
+            1_000,
+          );
+        }),
+      ]);
+      expect(result.error).toBeUndefined();
+      expect(result.streamCancelled).toBe(true);
+      expect(result.events.filter((event) => event.type === "response_done")).toHaveLength(1);
+    } finally {
+      if (timeoutId !== undefined) clearTimeout(timeoutId);
+    }
+  });
+
+  test("keeps a non-empty terminal output authoritative", async () => {
+    const result = await consumeDirectResponses([
+      {
+        type: "response.output_item.done",
+        output_index: 0,
+        item: responseMessage("done-copy", "done"),
+      },
+      {
+        type: "response.completed",
+        response: {
+          id: "completed",
+          status: "completed",
+          output: [responseMessage("terminal-copy", "terminal")],
+          usage: null,
+        },
+      },
+    ]);
+    expect(result.error).toBeUndefined();
+    const terminalModel = result.events.find(
+      (event) =>
+        event.type === "model" &&
+        (event.event as { type?: unknown } | undefined)?.type === "response.completed",
+    );
+    const output = (terminalModel?.event as { response?: { output?: Array<{ id?: string }> } })
+      ?.response?.output;
+    expect(output?.map((item) => item.id)).toEqual(["terminal-copy"]);
+  });
+
+  test("deterministically fuzzes valid permutations and malformed terminal traces", async () => {
+    let seed = 0x5eed1234;
+    const random = () => {
+      seed ^= seed << 13;
+      seed ^= seed >>> 17;
+      seed ^= seed << 5;
+      return (seed >>> 0) / 0x1_0000_0000;
+    };
+    const shuffle = <T>(values: T[]): T[] => {
+      const out = [...values];
+      for (let index = out.length - 1; index > 0; index -= 1) {
+        const other = Math.floor(random() * (index + 1));
+        [out[index], out[other]] = [out[other]!, out[index]!];
+      }
+      return out;
+    };
+
+    for (let iteration = 0; iteration < 32; iteration += 1) {
+      const count = 1 + Math.floor(random() * 6);
+      const items = Array.from({ length: count }, (_, outputIndex) => ({
+        type: "response.output_item.done",
+        output_index: outputIndex,
+        item: responseMessage(`message-${outputIndex}`, String(outputIndex)),
+      }));
+      const result = await consumeDirectResponses([
+        ...shuffle(items),
+        {
+          type: "response.completed",
+          response: {
+            id: `valid-${iteration}`,
+            status: "completed",
+            output: [],
+            usage: null,
+          },
+        },
+      ]);
+      expect(result.error).toBeUndefined();
+      expect(result.events.filter((event) => event.type === "response_done")).toHaveLength(1);
+      const rawTerminal = result.events.find(
+        (event) =>
+          event.type === "model" &&
+          (event.event as { type?: unknown } | undefined)?.type === "response.completed",
+      );
+      const output = (rawTerminal?.event as { response?: { output?: Array<{ id?: string }> } })
+        ?.response?.output;
+      expect(output?.map((item) => item.id)).toEqual(
+        Array.from({ length: count }, (_, index) => `message-${index}`),
+      );
+    }
+
+    const malformedCases: DirectResponsesEvent[][] = [
+      [{ type: "response.created", response: { id: "unterminated" } }],
+      [
+        {
+          type: "response.output_item.done",
+          output_index: 2,
+          item: responseMessage("sparse", "sparse"),
+        },
+        {
+          type: "response.completed",
+          response: {
+            id: "sparse",
+            status: "completed",
+            output: [],
+            usage: null,
+          },
+        },
+      ],
+      [
+        {
+          type: "response.output_item.done",
+          output_index: 0,
+          item: responseMessage("duplicate-a", "a"),
+        },
+        {
+          type: "response.output_item.done",
+          output_index: 0,
+          item: responseMessage("duplicate-b", "b"),
+        },
+      ],
+      [
+        {
+          type: "response.failed",
+          response: {
+            id: "failed",
+            status: "failed",
+            output: [],
+            error: { message: "failed" },
+          },
+        },
+      ],
+    ];
+    for (let iteration = 0; iteration < 32; iteration += 1) {
+      const result = await consumeDirectResponses(
+        malformedCases[Math.floor(random() * malformedCases.length)]!,
+      );
+      expect(result.error).toBeInstanceOf(Error);
+      expect(result.events.some((event) => event.type === "response_done")).toBe(false);
+    }
   });
 });
 
@@ -603,6 +1075,315 @@ describe("buildModelInstance — chat vs responses Model selection per provider 
     const model = buildModelInstance(provider, client, "gpt-5.6-sol");
     expect(model).toBeInstanceOf(OpenAIResponsesModel);
     expect(model).not.toBeInstanceOf(OpenAIChatCompletionsModel);
+  });
+
+  test("normalizes a subscription request at the owned object stage and strips internal handoff headers", async () => {
+    let capturedBody: Record<string, unknown> | null = null;
+    let capturedHeaders = new Headers();
+    let requestIds = 0;
+    const opaqueObservations: Array<{
+      requestId: string;
+      fingerprints: readonly string[];
+    }> = [];
+    const provider: ResolvedModelProvider = {
+      id: CODEX_PROVIDER_ID,
+      label: "Subscription",
+      kind: "codex-subscription",
+      api: "responses",
+      builtin: false,
+    };
+    const subscriptionClient = new ReplayableJsonOpenAI(
+      {
+        apiKey: "placeholder",
+        baseURL: CODEX_PROVIDER_BASE_URL,
+        maxRetries: 0,
+        fetch: codexSubscriptionFetch(async (_input, init) => {
+          capturedBody = JSON.parse(await requestBodyText(init?.body)) as Record<string, unknown>;
+          capturedHeaders = new Headers(init?.headers);
+          return new Response(
+            'data: {"type":"response.completed","response":{"id":"r1","status":"completed","output":[],"usage":null}}\n\n',
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          );
+        }),
+      },
+      { modelRequestPolicy: modelRequestPolicyForProvider(provider) },
+    );
+    const model = buildModelInstance(provider, subscriptionClient, "gpt-5.6-sol");
+    await codexRequestStorage.run(
+      {
+        ...codexTestContext(),
+        nextRequestId: () => `request-${++requestIds}`,
+        onRequestOpaqueArtifacts: (observation) => opaqueObservations.push(observation),
+      },
+      async () => {
+        for await (const _event of model.getStreamedResponse({
+          input: "hello",
+          modelSettings: { maxTokens: 123 },
+          tools: [],
+          handoffs: [],
+          outputType: "text",
+          tracing: false,
+        } as never)) {
+          // consume
+        }
+      },
+    );
+    expect(requestIds).toBe(1);
+    expect(capturedBody).toMatchObject({
+      model: "gpt-5.6-sol",
+      stream: true,
+      store: false,
+      include: ["reasoning.encrypted_content"],
+    });
+    expect(capturedBody && "max_output_tokens" in capturedBody).toBe(false);
+    expect(capturedHeaders.get("x-opengeni-request-body-normalized")).toBeNull();
+    expect(capturedHeaders.get("x-opengeni-request-model")).toBeNull();
+    expect(capturedHeaders.get("x-opengeni-request-id")).toBeNull();
+    expect(capturedHeaders.get("idempotency-key")).toBe("request-1");
+    expect(opaqueObservations).toEqual([{ requestId: "request-1", fingerprints: [] }]);
+  });
+
+  test("collects subscription compaction through the object-stage streaming path", async () => {
+    let capturedBody: Record<string, unknown> | null = null;
+    let capturedHeaders = new Headers();
+    const provider: ResolvedModelProvider = {
+      id: CODEX_PROVIDER_ID,
+      label: "Subscription",
+      kind: "codex-subscription",
+      api: "responses",
+      builtin: false,
+    };
+    const compactionClient = new ReplayableJsonOpenAI(
+      {
+        apiKey: "placeholder",
+        baseURL: CODEX_PROVIDER_BASE_URL,
+        maxRetries: 0,
+        fetch: codexSubscriptionFetch(async (_input, init) => {
+          capturedBody = JSON.parse(await requestBodyText(init?.body)) as Record<string, unknown>;
+          capturedHeaders = new Headers(init?.headers);
+          return new Response(
+            [
+              'data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"m1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"compact","annotations":[],"logprobs":[]}]}}',
+              'data: {"type":"response.completed","response":{"id":"r1","status":"completed","output":[],"usage":null}}',
+              "",
+            ].join("\n\n"),
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          );
+        }),
+      },
+      { modelRequestPolicy: modelRequestPolicyForProvider(provider) },
+    );
+    const summary = await codexRequestStorage.run(codexTestContext(), () =>
+      summarizeForCompaction(
+        multiProviderSettings(),
+        [{ type: "message", role: "user", content: "compact me" }],
+        {
+          client: compactionClient,
+          provider,
+          api: "responses",
+          model: "gpt-5.6-sol",
+          maxOutputTokens: 50,
+        },
+      ),
+    );
+
+    expect(summary).toBe("compact");
+    expect(capturedBody).toMatchObject({ stream: true, store: false });
+    expect(capturedBody && "max_output_tokens" in capturedBody).toBe(false);
+    expect(capturedHeaders.get("x-opengeni-request-body-normalized")).toBeNull();
+  });
+
+  test("preserves a non-streaming subscription caller over the streaming-only wire", async () => {
+    let capturedBody: Record<string, unknown> | null = null;
+    let capturedHeaders = new Headers();
+    const provider: ResolvedModelProvider = {
+      id: CODEX_PROVIDER_ID,
+      label: "Subscription",
+      kind: "codex-subscription",
+      api: "responses",
+      builtin: false,
+    };
+    const subscriptionClient = new ReplayableJsonOpenAI(
+      {
+        apiKey: "placeholder",
+        baseURL: CODEX_PROVIDER_BASE_URL,
+        maxRetries: 0,
+        fetch: codexSubscriptionFetch(async (_input, init) => {
+          capturedBody = JSON.parse(await requestBodyText(init?.body)) as Record<string, unknown>;
+          capturedHeaders = new Headers(init?.headers);
+          return new Response(
+            [
+              'data: {"type":"response.completed","response":{"id":"r1","status":"completed","output":[{"type":"message","id":"m1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"done","annotations":[],"logprobs":[]}]}],"usage":null}}',
+              "",
+            ].join("\n\n"),
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          );
+        }),
+      },
+      { modelRequestPolicy: modelRequestPolicyForProvider(provider) },
+    );
+    const model = buildModelInstance(provider, subscriptionClient, "gpt-5.6-sol");
+
+    const response = await codexRequestStorage.run(codexTestContext(), () =>
+      getOrCreateTrace(() =>
+        model.getResponse({
+          input: "hello",
+          modelSettings: {},
+          tools: [],
+          handoffs: [],
+          outputType: "text",
+          tracing: false,
+        } as never),
+      ),
+    );
+
+    expect(capturedBody).toMatchObject({ stream: true, store: false });
+    expect(capturedHeaders.get("x-opengeni-request-caller-stream")).toBeNull();
+    expect(response.output).toHaveLength(1);
+  });
+
+  test("normalizes Gateway routing at the owned object stage without leaking its handoff header", async () => {
+    let capturedBody: Record<string, unknown> | null = null;
+    let capturedHeaders = new Headers();
+    const provider: ResolvedModelProvider = {
+      id: "gateway",
+      label: "Gateway",
+      kind: "vercel-gateway-managed",
+      api: "responses",
+      builtin: false,
+    };
+    const gatewayClient = new ReplayableJsonOpenAI(
+      {
+        apiKey: "test",
+        baseURL: "https://ai-gateway.vercel.sh/v1",
+        maxRetries: 0,
+        fetch: vercelGatewayRoutingFetch("vercel-gateway-managed", async (_input, init) => {
+          capturedBody = JSON.parse(await requestBodyText(init?.body)) as Record<string, unknown>;
+          capturedHeaders = new Headers(init?.headers);
+          return new Response(
+            'data: {"type":"response.completed","response":{"id":"r1","status":"completed","output":[],"usage":null}}\n\n',
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          );
+        }),
+      },
+      { modelRequestPolicy: modelRequestPolicyForProvider(provider) },
+    );
+    const model = buildModelInstance(provider, gatewayClient, "moonshotai/kimi-k3");
+    for await (const _event of model.getStreamedResponse({
+      input: "hello",
+      modelSettings: {},
+      tools: [],
+      handoffs: [],
+      outputType: "text",
+      tracing: false,
+    } as never)) {
+      // consume
+    }
+    expect(capturedBody?.providerOptions).toEqual({
+      gateway: {
+        only: ["baseten", "fireworks"],
+        order: ["baseten", "fireworks"],
+        caching: "auto",
+      },
+    });
+    expect(capturedHeaders.get("x-opengeni-gateway-request-body-normalized")).toBeNull();
+  });
+
+  test("applies the same Gateway object policy to Chat Completions", async () => {
+    let capturedBody: Record<string, unknown> | null = null;
+    const provider: ResolvedModelProvider = {
+      id: "gateway-chat",
+      label: "Gateway Chat",
+      kind: "vercel-gateway-managed",
+      api: "chat",
+      builtin: false,
+    };
+    const gatewayChatClient = new ReplayableJsonOpenAI(
+      {
+        apiKey: "test",
+        baseURL: "https://ai-gateway.vercel.sh/v1",
+        maxRetries: 0,
+        fetch: vercelGatewayRoutingFetch("vercel-gateway-managed", async (_input, init) => {
+          capturedBody = JSON.parse(await requestBodyText(init?.body)) as Record<string, unknown>;
+          return Response.json({
+            id: "chat-1",
+            object: "chat.completion",
+            created: 0,
+            model: "moonshotai/kimi-k3",
+            choices: [
+              { index: 0, finish_reason: "stop", message: { role: "assistant", content: "ok" } },
+            ],
+          });
+        }),
+      },
+      { modelRequestPolicy: modelRequestPolicyForProvider(provider) },
+    );
+
+    await gatewayChatClient.chat.completions.create({
+      model: "moonshotai/kimi-k3",
+      messages: [{ role: "user", content: "hello" }],
+    });
+
+    expect(capturedBody?.providerOptions).toEqual({
+      gateway: {
+        only: ["baseten", "fireworks"],
+        order: ["baseten", "fireworks"],
+        caching: "auto",
+      },
+    });
+  });
+
+  test("provider policies never mutate converted input retained for the next request", () => {
+    const callA = Object.freeze({ type: "function_call", call_id: "a" });
+    const callB = Object.freeze({ type: "function_call", call_id: "b" });
+    const resultA = Object.freeze({ type: "function_call_output", call_id: "a" });
+    const resultB = Object.freeze({ type: "function_call_output", call_id: "b" });
+    const gatewayInput = Object.freeze([callA, callB, resultA, resultB]);
+    const gatewayBody = Object.freeze({
+      model: "moonshotai/kimi-k3",
+      input: gatewayInput,
+    });
+    const gatewayPolicy = modelRequestPolicyForProvider({
+      id: "gateway-copy-on-write",
+      label: "Gateway",
+      kind: "vercel-gateway-managed",
+      api: "responses",
+      builtin: false,
+    });
+    const gatewayResult = gatewayPolicy({ path: "/responses", body: gatewayBody });
+    expect(gatewayBody.input).toEqual([callA, callB, resultA, resultB]);
+    expect(gatewayResult?.body?.input).toEqual([callA, resultA, callB, resultB]);
+    expect(gatewayResult?.body?.input).not.toBe(gatewayInput);
+
+    const computerCall = Object.freeze({
+      type: "computer_call",
+      action: Object.freeze({ type: "screenshot" }),
+      actions: Object.freeze([{ type: "screenshot" }]),
+    });
+    const screenshotOutput = Object.freeze({ type: "computer_screenshot", image_url: "" });
+    const computerOutput = Object.freeze({
+      type: "computer_call_output",
+      output: screenshotOutput,
+    });
+    const azureInput = Object.freeze([computerCall, computerOutput]);
+    const azureBody = Object.freeze({ model: "gpt-5.6-sol", input: azureInput });
+    const azurePolicy = modelRequestPolicyForProvider({
+      id: "azure",
+      label: "Azure OpenAI",
+      kind: "api-key",
+      api: "responses",
+      builtin: true,
+    });
+    const azureResult = azurePolicy({ path: "/responses", body: azureBody });
+    const projected = azureResult?.body?.input as Array<Record<string, unknown>>;
+    expect(computerCall).toHaveProperty("action");
+    expect(screenshotOutput.image_url).toBe("");
+    expect(projected[0]).not.toHaveProperty("action");
+    expect(projected[0]?.actions).toEqual([{ type: "screenshot" }]);
+    const projectedImageUrl = (projected[1]?.output as Record<string, unknown> | undefined)
+      ?.image_url;
+    expect(projectedImageUrl).toBeString();
+    expect((projectedImageUrl as string).length).toBeGreaterThan(0);
   });
 });
 
@@ -706,6 +1487,61 @@ function webSearchHostedTools(
 }
 
 describe("multi-provider gating in buildOpenGeniAgent", () => {
+  test("selects exactly one image transport without changing the stable tool intent", async () => {
+    const settings = multiProviderSettings();
+    const native = buildOpenGeniAgent(settings, [], {
+      imageGeneration: { kind: "native_hosted" },
+    });
+    const nativeImageTools = native.tools.filter(
+      (tool) =>
+        tool.type === "hosted_tool" &&
+        (tool.providerData as { type?: unknown } | undefined)?.type === "image_generation",
+    );
+    expect(nativeImageTools).toHaveLength(1);
+    expect(
+      native.tools.some((tool) => tool.type === "function" && tool.name === "generate_image"),
+    ).toBe(false);
+
+    const calls: Array<{ prompt: string; toolCallId: string }> = [];
+    const adapter = buildOpenGeniAgent(settings, [], {
+      imageGeneration: {
+        kind: "provider_adapter",
+        execute: async (input, context) => {
+          calls.push({ ...input, ...context });
+          return {
+            type: "generated_image",
+            artifact: { artifactId: "artifact-1" },
+          };
+        },
+      },
+    });
+    expect(
+      adapter.tools.some(
+        (tool) =>
+          tool.type === "hosted_tool" &&
+          (tool.providerData as { type?: unknown } | undefined)?.type === "image_generation",
+      ),
+    ).toBe(false);
+    const tool = adapter.tools.find(
+      (candidate) => candidate.type === "function" && candidate.name === "generate_image",
+    );
+    if (!tool || tool.type !== "function") throw new Error("generate_image tool missing");
+    const output = await tool.invoke(
+      new RunContext(),
+      JSON.stringify({ prompt: "a blue sphere" }),
+      {
+        toolCall: {
+          type: "function_call",
+          callId: "call-image-1",
+          name: "generate_image",
+          arguments: "{}",
+        },
+      },
+    );
+    expect(calls).toEqual([{ prompt: "a blue sphere", toolCallId: "call-image-1" }]);
+    expect(output).toEqual({ type: "generated_image", artifact: { artifactId: "artifact-1" } });
+  });
+
   test("a resolved chat provider turn: no web_search tool, no encrypted reasoning, no server store", () => {
     const settings = multiProviderSettings();
     const resolved = resolveTurnModel(settings, FIREWORKS_MODEL)!;
@@ -937,7 +1773,13 @@ describe("MultiProviderModelProvider — routes a model NAME to its provider (th
       label: "Codex (ChatGPT subscription)",
       api: "responses" as const,
       baseUrl: "https://chatgpt.com/backend-api",
-      models: [{ id: "codex/gpt-5.6-sol", label: "gpt-5.6-sol", reasoningEffort: true }],
+      models: [
+        {
+          id: "codex/gpt-5.6-sol",
+          label: "gpt-5.6-sol",
+          reasoningEffort: true,
+        },
+      ],
     };
     // The codex turn's OWN settings (codex provider injected).
     const codexSettings = multiProviderSettings({

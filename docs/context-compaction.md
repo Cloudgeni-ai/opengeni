@@ -55,20 +55,22 @@ has:
 | effective input window (95%) | 258,400 |
 | automatic compaction limit (90%) | 244,800 |
 
-Before a provider response exists, the guard estimates the complete outgoing
-request: active items, instructions, and tool schemas. After a response, it
-anchors to that exact response's provider-reported **total** tokens and adds all
-locally appended items after the last model-generated item, plus any positive
+Automatic compaction is provider-accounted. Before a provider response exists,
+no local whole-request estimate may force compaction: OpenGeni sends the request,
+then either records the provider's usage or handles the provider's typed context
+overflow through the same compaction recovery. After a response, the per-call
+guard anchors to that exact response's provider-reported **total** tokens and
+adds only items appended after the last model-generated item plus positive
 instruction or tool-schema growth. That anchor is accepted only when the usage
-revision belongs to the immediately preceding model request. If stream
-consumption lags the SDK's background model loop, the guard uses the complete
-request estimate instead of binding delayed usage to a newer request. A durable prior-turn input count is only a
-conservative floor; it can never hide a larger active-history estimate. Attempt
-fencing prevents a stale worker from overwriting durable token state.
-MCP schemas marked `defer_loading:true` are excluded from that estimate because
-the provider excludes them from context until a bounded `tool_search_output`
-discloses a match. The disclosed definition is then ordinary structured history
-and is counted there.
+revision belongs to the immediately preceding model request; a delayed signal
+is ignored rather than attached to newer input. At a later turn boundary, the
+attempt-fenced provider-reported `last_input_tokens` is the only durable
+automatic signal. Every newer authoritative terminal response replaces it with
+that response's usable input count or null when the provider supplied none;
+compaction and context clearing also set it to null. A missing or invalid count
+never carries an older response's value forward. Local
+estimates remain limited to shaping a compaction request and describing the
+history-only before/after replacement; they never enter `last_input_tokens`.
 
 Opaque Codex items (`type: "compaction"` with `encrypted_content`, and
 reasoning with encrypted content) use Codex CLI's encrypted-payload heuristic
@@ -104,8 +106,9 @@ model history.
 
 The final request-time filter is not a compaction boundary. For an unchanged
 canonical prefix and settings, a later provider request must reproduce the
-earlier serialized filtered prefix exactly. Deterministic normalization,
-redaction, and output bounding are allowed; deleting or reordering an earlier
+earlier serialized filtered prefix exactly. Deterministic protocol
+normalization and output bounding are allowed; arbitrary text must not be
+classified or rewritten, and deleting or reordering an earlier
 `view_image` call/result pair is not. Only the fenced durable replacement below
 may remove active history.
 
@@ -183,13 +186,13 @@ recomputed from the opaque-aware estimate afterward.
 
 One transaction locks workspace, session, and turn; verifies
 `turnId + executionGeneration + attemptId`; supersedes every old active row;
-inserts the replacement at fresh whole-number positions; updates
+inserts the replacement at fresh whole-number positions; clears
 `last_input_tokens`; records `session.context.compacted`; and clears a manual
 compaction request when applicable. A stale attempt can do none of those writes.
 
 ## Timeline UX
 
-Compaction is maintenance of **conversation memory** (model history), not a
+Compaction is maintenance of **conversation history** supplied to the model, not a
 rewrite of the chat transcript. The React timeline projects a first-class
 `context-compaction` landmark (not a foldable notice):
 
@@ -197,7 +200,7 @@ rewrite of the chat transcript. The React timeline projects a first-class
 | --- | --- |
 | `session.context.compaction.requested` (idle manual claim) | `started` until a later finish settles it |
 | `session.context.compaction.started` (attempt-fenced, before provider call) | `started` — live-published so the UI can show progress |
-| `session.context.compacted` | `compacted` with optional `~before → ~after` tokens |
+| `session.context.compacted` | `compacted` with optional `~before → ~after estimated history tokens` |
 | `session.context.compaction.skipped` | `skipped` with a short reason |
 
 Start and finish for the same turn settle in place (one landmark). The landmark

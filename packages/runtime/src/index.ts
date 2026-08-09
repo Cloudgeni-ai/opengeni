@@ -8,6 +8,7 @@ import {
   AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
   OPENGENI_GATEWAY_MODELS,
   collectSandboxEnvironment,
+  configuredProviders,
   firstPartyMcpBaseUrl,
   gatewayRequestPolicyForUpstreamModel,
   resolveFirstPartyDelegationSecret,
@@ -22,15 +23,18 @@ import {
   assertUniqueResourceMountPaths,
   gitCredentialBindingIdForRepository,
   gitCredentialProviderForRepository,
+  gitRemoteIdentity,
+  gitRemotePathAliases,
+  gitRemoteUriAliases,
   isClearedRunStateBlob,
   normalizeRepositorySubpath,
   normalizeResourceMountPath,
   prefixedMcpToolName as sharedPrefixedMcpToolName,
   resourceMountPath,
-  redactSensitiveText,
   sessionEventMediaPreview,
   sessionEventMediaPreviewFromDataUrl,
   signDelegatedAccessToken,
+  GenerateImageToolInput,
   RequestHumanInputToolInput,
   type GitCredentialProvider,
   type GitCredentialTransport,
@@ -62,17 +66,26 @@ import {
   undiciFetch,
   type McpRequestReplayInfo,
 } from "./mcp-network";
+import { normalizeProtocolJsonValue } from "./protocol-json";
+import { AppendOnlyOpenAIResponsesModel } from "./append-only-responses-model";
+import {
+  LazyToolModelProvider,
+  installLazyToolRuntime,
+  lazyToolRuntimeForAgent,
+  restoreGenericDispatchHistoryItem,
+  restoreGenericDispatchHistoryItems,
+  type LazyToolTransport,
+} from "./lazy-tool-transport";
 import {
   Agent,
   AgentsError,
   connectMcpServers,
-  OpenAIProvider,
   setDefaultModelProvider,
   MaxTurnsExceededError,
   MCPServerStreamableHttp,
   // Provider-bound Model instances. Both are re-exported from
   // @openai/agents-openai via `export * from '@openai/agents-openai'` in
-  // @openai/agents' index (0.11.6), so the multi-provider routing imports them
+  // @openai/agents' index, so the multi-provider routing imports them
   // from the same entrypoint as the rest of the SDK rather than reaching into
   // the openai subpackage. OpenAIChatCompletionsModel speaks /v1/chat/completions
   // (the registry "chat" wire API, e.g. Fireworks); OpenAIResponsesModel speaks
@@ -80,21 +93,22 @@ import {
   // model id to a specific OpenAI client, which is what routes a turn to its
   // provider without touching the global default client.
   OpenAIChatCompletionsModel,
-  OpenAIResponsesModel,
   RunState,
   isOpenAIResponsesRawModelStreamEvent,
   run,
   Runner,
+  Usage,
   setDefaultOpenAIClient,
   setDefaultOpenAIKey,
   setOpenAIResponsesTransport,
   setTracingDisabled,
   tool as agentTool,
   // Hosted web_search tool factory. Re-exported from @openai/agents-openai via
-  // `export * from '@openai/agents-openai'` in @openai/agents' index (0.11.6);
+  // `export * from '@openai/agents-openai'` in @openai/agents' index;
   // it returns a { type: 'hosted_tool', providerData: { type: 'web_search' } }
   // descriptor the OpenAI Responses model serializes into request.tools[].
   webSearchTool,
+  imageGenerationTool,
   // The SDK's V4A-diff applier — the apply_patch host the filesystem capability's
   // editor uses. The agent-loop-free sandbox leaf cannot import it (it lives behind
   // the `@openai/agents` root the leaf forbids), so the barrel imports it here and
@@ -109,6 +123,7 @@ import {
   type MCPToolErrorFunction,
   type Model,
   type ModelRequest,
+  type ModelResponse,
   type ModelProvider,
   type RunStreamEvent,
   type SerializedTool,
@@ -145,20 +160,29 @@ import {
   CODEX_APPS_MCP_URL,
   CODEX_MODEL_ID_PREFIX,
   CODEX_ORIGINATOR,
+  CODEX_REQUEST_BODY_NORMALIZED_HEADER,
+  CODEX_REQUEST_CALLER_STREAM_HEADER,
+  CODEX_REQUEST_ID_HEADER,
+  CODEX_REQUEST_MODEL_HEADER,
   CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS,
-  boundModelToolOutputItems,
+  boundModelToolOutputItem,
+  codexRequestStorage,
   codexAppsSanitizingFetch,
   codexSubscriptionFetch,
+  normalizedCodexRequestBody,
+  opaqueProviderArtifactFingerprints,
 } from "@opengeni/codex";
 import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, posix as posixPath, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
-  computerCallNormalizingFetch,
+  normalizeComputerCallAction,
   normalizeComputerCallActions,
   repairHistoryProtocolItems,
+  rewriteComputerCallsToActionsOnly,
+  rewriteEmptyComputerCallOutputImageUrls,
   sanitizeHistoryItemsForModel,
 } from "./history-sanitizer";
 import { installCodexToolSearch } from "./codex-tool-search";
@@ -170,11 +194,10 @@ import {
   buildRemoteCompactionV2PromptInput,
   extractRemoteCompactionV2OutputItem,
   compactionThresholdTokens,
-  estimateCompleteModelInput,
+  estimateCompleteModelInputTokens,
   estimateSerializedValueTokens,
   hasModelGeneratedItem,
   renderCompactionPromptInputForChat,
-  type CompleteModelInputFootprint,
   type ProviderContextTokenSignal,
 } from "./context-compaction";
 import {
@@ -191,6 +214,12 @@ import {
   type RunCredentialSessionReady,
 } from "./sandbox";
 import { runWithToolCallCorrelation } from "./sandbox/op-correlation";
+import {
+  sandboxCommandExitCode,
+  sandboxCommandOutput,
+  sandboxCommandStillRunning,
+  sandboxCommandStdout,
+} from "./sandbox/command-result";
 import { shellToolspacePath } from "./sandbox/toolspace-token";
 import {
   createTurnToolCancellationController,
@@ -204,6 +233,7 @@ import { computerUse, type ComputerToolMode } from "./sandbox-computer";
 import type { RuntimeMetricsHooks } from "./metrics";
 import { workspaceSkills, type WorkspaceSkillSearchPath } from "./workspace-skills";
 import { appendWorkspaceGovernance } from "./workspace-governance";
+import { ReplayableJsonOpenAI, type ModelJsonRequestPolicy } from "./replayable-json-body";
 
 // The Agents SDK's debug namespaces can otherwise serialize complete model
 // inputs/outputs and tool arguments/results. These getters read process.env on
@@ -240,6 +270,12 @@ export type {
   TurnToolCancellationController,
   TurnToolCancellationFence,
 } from "./sandbox/turn-tool-cancellation";
+export {
+  sandboxCommandExitCode,
+  sandboxCommandOutput,
+  sandboxCommandStillRunning,
+  sandboxCommandStdout,
+};
 
 // P4.3 computer-use surface (the agent's :0 driver). Re-exported from the barrel
 // so callers (the worker, live proofs) reach SandboxComputer/ComputerUseCapability
@@ -250,11 +286,13 @@ export {
   ComputerUseCapability,
   computerUse,
   ComputerUnavailableError,
+  ScreenshotReadError,
   ComputerReadOnlyError,
   ComputerActionError,
   type SandboxComputerOptions,
   type ComputerUseArgs,
   type ComputerToolMode,
+  type ScreenshotReadErrorCode,
 } from "./sandbox-computer";
 
 // The agent-loop-free sandbox leaf (createSandboxClient + resume/recovery
@@ -284,6 +322,7 @@ export {
   serializedRunStateHasOpaqueProviderArtifact,
 } from "./history-sanitizer";
 export type { HistoryItem } from "./history-sanitizer";
+export { normalizeProtocolJsonValue, UnsupportedProtocolJsonValueError } from "./protocol-json";
 export {
   projectHistoryForProvider,
   ProviderHistoryIncompatibleError,
@@ -327,6 +366,7 @@ export {
   opaqueEncryptedContentLength,
   estimateNativeImageTokens,
   estimateCompleteModelInput,
+  estimateCompleteModelInputTokens,
   estimateSerializedValueTokens,
   hasModelGeneratedItem,
   renderCompactionPromptInputForChat,
@@ -372,6 +412,14 @@ const SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS = 120_000;
 export type NormalizedRuntimeEvent = {
   type: SessionEventType;
   payload: unknown;
+  retainedOutputEvidence?: unknown;
+};
+
+export type NormalizeSdkEventOptions = {
+  /** Trusted worker replacement for one tool output (for example an artifact receipt). */
+  toolOutputOverride?: unknown;
+  /** Separately trusted receipt for the event truncation boundary. */
+  retainedOutputEvidence?: unknown;
 };
 
 export type ModelResponseUsage = {
@@ -400,6 +448,11 @@ export type ModelResponseUsage = {
       output_tokens_details?: Record<string, number>;
     }>;
   };
+};
+
+export type ModelTerminalResponse = {
+  responseId?: string;
+  usage: ModelResponseUsage | null;
 };
 
 type RuntimeMcpTool = Awaited<ReturnType<MCPServer["listTools"]>>[number];
@@ -625,24 +678,22 @@ export function buildOpenAIClientFromSettings(
   if (settings.openaiProvider === "azure") {
     const baseURL = settings.azureOpenaiBaseUrl ?? azureDeploymentBaseUrl(settings);
     const apiKey = settings.azureOpenaiApiKey ?? settings.azureOpenaiAdToken ?? "azure-ad-token";
-    return new OpenAI({
-      apiKey,
-      baseURL,
-      maxRetries: settings.openaiMaxRetries,
-      defaultQuery: azureOpenAIDefaultQuery(settings, baseURL),
-      defaultHeaders:
-        settings.azureOpenaiAdToken && !settings.azureOpenaiApiKey
-          ? { Authorization: `Bearer ${settings.azureOpenaiAdToken}` }
-          : undefined,
-      // Rewrite every outbound /responses computer_call to the ACTIONS-ONLY shape
-      // the GA Azure computer tool accepts. This is the lowest reachable
-      // seam — below the SDK responses converter, which always re-synthesizes BOTH
-      // `action` and `actions` (rejected 400 "exactly one of action or actions").
-      // See computerCallNormalizingFetch / rewriteComputerCallsToActionsOnly.
-      fetch: computerCallNormalizingFetch(instrumentedModelFetch(providerId, globalThis.fetch)),
-    });
+    return new ReplayableJsonOpenAI(
+      {
+        apiKey,
+        baseURL,
+        maxRetries: settings.openaiMaxRetries,
+        defaultQuery: azureOpenAIDefaultQuery(settings, baseURL),
+        defaultHeaders:
+          settings.azureOpenaiAdToken && !settings.azureOpenaiApiKey
+            ? { Authorization: `Bearer ${settings.azureOpenaiAdToken}` }
+            : undefined,
+        fetch: instrumentedModelFetch(providerId, globalThis.fetch),
+      },
+      { modelRequestPolicy: azureModelRequestPolicy },
+    );
   }
-  return new OpenAI({
+  return new ReplayableJsonOpenAI({
     apiKey: settings.openaiApiKey ?? process.env.OPENAI_API_KEY,
     ...(settings.openaiBaseUrl ? { baseURL: settings.openaiBaseUrl } : {}),
     maxRetries: settings.openaiMaxRetries,
@@ -681,37 +732,42 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
         // per-workspace token from the Codex request context at call time.
         // The provider id is constant ("codex-subscription"), so one cached client serves
         // every workspace without baking a token into it.
-        new OpenAI({
-          apiKey: provider.apiKey ?? "codex-subscription",
-          ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
-          // Codex transport owns exactly one explicit 401 refresh/retry. Blind
-          // SDK retries on network/5xx/partial streams can replay provider work
-          // or external tool side effects without a durable checkpoint.
-          maxRetries: 0,
-          // The Codex transport owns finer headers/idle/whole deadlines and
-          // emits typed durable evidence. Keep the SDK's opaque envelope beyond
-          // that whole-response budget so `Request timed out.` cannot win first.
-          timeout: CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS,
-          fetch: codexSubscriptionFetch(instrumentedModelFetch(provider.id, globalThis.fetch)),
-        })
+        new ReplayableJsonOpenAI(
+          {
+            apiKey: provider.apiKey ?? "codex-subscription",
+            ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
+            // Codex transport owns exactly one explicit 401 refresh/retry. Blind
+            // SDK retries on network/5xx/partial streams can replay provider work
+            // or external tool side effects without a durable checkpoint.
+            maxRetries: 0,
+            // Codex transport owns finer headers/idle/whole deadlines and emits
+            // typed durable evidence. Keep the SDK envelope beyond that budget.
+            timeout: CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS,
+            fetch: codexSubscriptionFetch(instrumentedModelFetch(provider.id, globalThis.fetch)),
+          },
+          { modelRequestPolicy: modelRequestPolicyForProvider(provider) },
+        )
       : // ResolvedModelProvider.apiKey is already the resolved key (configuredProviders
         // ran resolveProviderApiKey at config time, collapsing apiKey/apiKeyEnv), so it
         // is passed straight through here rather than re-resolved.
-        new OpenAI({
-          ...(provider.apiKey ? { apiKey: provider.apiKey } : {}),
-          ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
-          // Gateway routing is deliberately fail-closed. Avoid SDK replay after
-          // a request may have reached the one pinned endpoint.
-          maxRetries: gatewayProvider ? 0 : settings.openaiMaxRetries,
-          ...(provider.defaultQuery ? { defaultQuery: provider.defaultQuery } : {}),
-          ...(provider.defaultHeaders ? { defaultHeaders: provider.defaultHeaders } : {}),
-          fetch: gatewayProvider
-            ? vercelGatewayRoutingFetch(
-                provider.kind as "vercel-gateway-managed" | "vercel-gateway-workspace",
-                instrumentedModelFetch(provider.id, globalThis.fetch),
-              )
-            : instrumentedModelFetch(provider.id, globalThis.fetch),
-        });
+        new ReplayableJsonOpenAI(
+          {
+            ...(provider.apiKey ? { apiKey: provider.apiKey } : {}),
+            ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
+            // Gateway routing is deliberately fail-closed. Avoid SDK replay after
+            // a request may have reached the one pinned endpoint.
+            maxRetries: gatewayProvider ? 0 : settings.openaiMaxRetries,
+            ...(provider.defaultQuery ? { defaultQuery: provider.defaultQuery } : {}),
+            ...(provider.defaultHeaders ? { defaultHeaders: provider.defaultHeaders } : {}),
+            fetch: gatewayProvider
+              ? vercelGatewayRoutingFetch(
+                  provider.kind as "vercel-gateway-managed" | "vercel-gateway-workspace",
+                  instrumentedModelFetch(provider.id, globalThis.fetch),
+                )
+              : instrumentedModelFetch(provider.id, globalThis.fetch),
+          },
+          { modelRequestPolicy: modelRequestPolicyForProvider(provider) },
+        );
   if (!workspaceGateway) {
     providerClientCache.set(provider.id, client);
   }
@@ -735,6 +791,8 @@ export class WorkspaceGatewayUnavailableError extends Error {
  * parallel execution, model, and provider route. Partial or ambiguous batches
  * stay untouched and fail closed upstream.
  */
+const GATEWAY_REQUEST_BODY_NORMALIZED_HEADER = "x-opengeni-gateway-request-body-normalized";
+
 function pairKimiParallelFunctionCallResults(body: Record<string, unknown>): void {
   const input = body.input;
   if (!Array.isArray(input)) return;
@@ -805,10 +863,36 @@ function pairKimiParallelFunctionCallResults(body: Record<string, unknown>): voi
   }
 }
 
+/** Apply the complete reviewed Gateway request policy to an SDK-owned object. */
+export function normalizeVercelGatewayRequestBody(body: Record<string, unknown>): void {
+  const model = typeof body.model === "string" ? body.model : "";
+  const policy = gatewayRequestPolicyForUpstreamModel(model);
+  if (!policy) {
+    throw new Error("Model request is not in the approved catalogue");
+  }
+  const providerOptions =
+    body.providerOptions &&
+    typeof body.providerOptions === "object" &&
+    !Array.isArray(body.providerOptions)
+      ? { ...(body.providerOptions as Record<string, unknown>) }
+      : {};
+  providerOptions.gateway = {
+    only: [...policy.gateway.only],
+    order: [...policy.gateway.only],
+    ...(policy.gateway.caching === "auto" ? { caching: "auto" } : {}),
+  };
+  body.providerOptions = providerOptions;
+  if (model === OPENGENI_GATEWAY_MODELS.kimi.upstreamModelId) {
+    pairKimiParallelFunctionCallResults(body);
+  }
+}
+
 /**
- * Inject the reviewed route after SDK serialization, replacing any caller
- * gateway options. Only the ordered, reviewed endpoint providers are allowed;
- * no model fallback list is sent. Unknown models/body shapes fail before I/O.
+ * Compatibility fallback for callers that did not apply the object-stage
+ * request policy. Inject the reviewed route from the serialized body and
+ * replace any caller gateway options. Only the ordered, reviewed endpoint
+ * providers are allowed; no model fallback list is sent. Unknown models/body
+ * shapes fail before I/O.
  */
 export function vercelGatewayRoutingFetch(
   kind: Extract<
@@ -821,43 +905,34 @@ export function vercelGatewayRoutingFetch(
     if (!isModelCallFetch(input)) {
       return await inner(input, init);
     }
-    if (typeof init?.body !== "string") {
-      throw new Error("Model request could not be prepared");
-    }
-    let body: Record<string, unknown>;
-    try {
-      const parsed = JSON.parse(init.body) as unknown;
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        throw new Error("invalid body");
+    const headers = new Headers(init?.headers);
+    const bodyAlreadyNormalized = headers.get(GATEWAY_REQUEST_BODY_NORMALIZED_HEADER) === "1";
+    headers.delete(GATEWAY_REQUEST_BODY_NORMALIZED_HEADER);
+    let nextInit: RequestInit = { ...init, headers };
+    if (!bodyAlreadyNormalized) {
+      if (typeof init?.body !== "string") {
+        throw new Error("Model request could not be prepared");
       }
-      body = parsed as Record<string, unknown>;
-    } catch {
-      throw new Error("Model request could not be prepared");
+      try {
+        const parsed = JSON.parse(init.body) as unknown;
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          throw new Error("invalid body");
+        }
+        const body = parsed as Record<string, unknown>;
+        normalizeVercelGatewayRequestBody(body);
+        nextInit = { ...nextInit, body: JSON.stringify(body) };
+      } catch (error) {
+        if (error instanceof Error && error.message.includes("approved catalogue")) throw error;
+        throw new Error("Model request could not be prepared", { cause: error });
+      }
     }
-    const model = typeof body.model === "string" ? body.model : "";
-    const policy = gatewayRequestPolicyForUpstreamModel(model);
-    if (!policy) {
-      throw new Error("Model request is not in the approved catalogue");
-    }
-    const providerOptions =
-      body.providerOptions &&
-      typeof body.providerOptions === "object" &&
-      !Array.isArray(body.providerOptions)
-        ? { ...(body.providerOptions as Record<string, unknown>) }
-        : {};
-    providerOptions.gateway = {
-      only: [...policy.gateway.only],
-      order: [...policy.gateway.only],
-      ...(policy.gateway.caching === "auto" ? { caching: "auto" } : {}),
-    };
-    body.providerOptions = providerOptions;
-    if (model === OPENGENI_GATEWAY_MODELS.kimi.upstreamModelId) {
-      pairKimiParallelFunctionCallResults(body);
-    }
-    const response = await inner(input, { ...init, body: JSON.stringify(body) });
+    const response = await inner(input, nextInit);
     if (response.ok) {
       return response;
     }
+    // The public error below replaces the upstream response. Cancel its unread
+    // body now so buffered bytes and the connection are not retained until GC.
+    await response.body?.cancel().catch(() => undefined);
     const message =
       kind === "vercel-gateway-workspace" && (response.status === 401 || response.status === 403)
         ? "Your Gateway connection needs attention. Reconnect it in workspace Settings."
@@ -870,15 +945,110 @@ export function vercelGatewayRoutingFetch(
   }) as typeof fetch;
 }
 
+function azureModelRequestPolicy({
+  body,
+}: {
+  body: Readonly<Record<string, unknown>>;
+}): ReturnType<ModelJsonRequestPolicy> {
+  const input = body.input;
+  if (!Array.isArray(input)) return undefined;
+  const containsComputerProtocol = input.some(
+    (item) =>
+      item &&
+      typeof item === "object" &&
+      ((item as Record<string, unknown>).type === "computer_call" ||
+        (item as Record<string, unknown>).type === "computer_call_output"),
+  );
+  if (!containsComputerProtocol) return undefined;
+  const projectedInput = input.map((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+    const record = item as Record<string, unknown>;
+    if (record.type === "computer_call") return { ...record };
+    if (
+      record.type === "computer_call_output" &&
+      record.output &&
+      typeof record.output === "object" &&
+      !Array.isArray(record.output)
+    ) {
+      return { ...record, output: { ...(record.output as Record<string, unknown>) } };
+    }
+    return item;
+  });
+  const projectedBody: Record<string, unknown> = { ...body, input: projectedInput };
+  const changedComputerCalls = rewriteComputerCallsToActionsOnly(projectedBody);
+  const changedScreenshots = rewriteEmptyComputerCallOutputImageUrls(projectedBody);
+  return changedComputerCalls || changedScreenshots ? { body: projectedBody } : undefined;
+}
+
 /**
- * Bind a model id to a provider's OpenAI client as an @openai/agents `Model`
- * instance, choosing the wire API by the provider's declared `api`: the "chat"
- * providers (e.g. Fireworks) get an OpenAIChatCompletionsModel that speaks
- * /v1/chat/completions, the "responses" providers (built-in OpenAI/Azure) get
- * an OpenAIResponsesModel that speaks /v1/responses. Passing this Model into
- * the agent is what routes a turn to its provider without mutating the global
- * default client.
+ * One object-stage request policy for both Responses and Chat Completions.
+ * Transport wrappers only authenticate, route, observe, and translate errors;
+ * they never need to parse and re-stringify an owned model request.
  */
+export function modelRequestPolicyForProvider(
+  provider: ResolvedModelProvider,
+): ModelJsonRequestPolicy {
+  return ({ path, body }) => {
+    if (provider.id === "azure") {
+      return azureModelRequestPolicy({ body });
+    }
+    if (provider.kind === "codex-subscription") {
+      if (!(path.split("?", 1)[0] ?? path).endsWith("/responses")) {
+        throw new Error("Subscription models require the Responses API");
+      }
+      const fallbackModel = typeof body.model === "string" ? body.model : provider.id;
+      const callerWantsStream = body.stream === true;
+      const context = codexRequestStorage.getStore();
+      if (!context) throw new CodexSubscriptionUnavailableError(fallbackModel);
+
+      const normalizedBody = normalizedCodexRequestBody(body, context.resolveModel);
+      const requestId = context.nextRequestId?.() ?? randomUUID();
+      context.onRequestOpaqueArtifacts?.({
+        requestId,
+        fingerprints: opaqueProviderArtifactFingerprints(normalizedBody.input),
+      });
+      return {
+        body: normalizedBody,
+        headers: {
+          [CODEX_REQUEST_BODY_NORMALIZED_HEADER]: "1",
+          [CODEX_REQUEST_CALLER_STREAM_HEADER]: callerWantsStream ? "1" : "0",
+          [CODEX_REQUEST_MODEL_HEADER]:
+            typeof normalizedBody.model === "string" ? normalizedBody.model : fallbackModel,
+          [CODEX_REQUEST_ID_HEADER]: requestId,
+        },
+      };
+    }
+    if (
+      provider.kind === "vercel-gateway-managed" ||
+      provider.kind === "vercel-gateway-workspace"
+    ) {
+      const projectedBody: Record<string, unknown> = {
+        ...body,
+        ...(body.model === OPENGENI_GATEWAY_MODELS.kimi.upstreamModelId && Array.isArray(body.input)
+          ? { input: [...body.input] }
+          : {}),
+      };
+      normalizeVercelGatewayRequestBody(projectedBody);
+      return {
+        body: projectedBody,
+        headers: { [GATEWAY_REQUEST_BODY_NORMALIZED_HEADER]: "1" },
+      };
+    }
+    return undefined;
+  };
+}
+
+export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
+  constructor(
+    client: OpenAI,
+    model: string,
+    protected readonly provider: ResolvedModelProvider,
+  ) {
+    super(client, model);
+  }
+}
+
+/** Bind a model id to the provider's declared wire API and owned client. */
 export function buildModelInstance(
   provider: ResolvedModelProvider,
   client: OpenAI,
@@ -886,7 +1056,7 @@ export function buildModelInstance(
 ): Model {
   return provider.api === "chat"
     ? new OpenAIChatCompletionsModel(client, modelId)
-    : new OpenAIResponsesModel(client, modelId);
+    : new OpenGeniResponsesModel(client, modelId, provider);
 }
 
 /**
@@ -930,7 +1100,7 @@ export function resolveTurnModel(
  * hits the default client (e.g. Azure) and a registry model 404s
  * ("deployment does not exist"); with it the name resolves back to the right
  * provider. Installed both as the run-scoped `Runner.config.modelProvider` (every
- * run in runAgentStream goes through `runScopedRunner(settings)`, built from the
+ * run in runAgentStream goes through `runScopedRunner(settings, agent)`, built from the
  * per-turn settings) and as the process default (see configureOpenAI). The
  * run-scoped instance is the load-bearing one: a `Runner` resolves string model
  * names against ITS OWN modelProvider, not the lazy global default, so each
@@ -940,8 +1110,6 @@ export function resolveTurnModel(
  * SDK default provider for a model that is in no provider's allow-list.
  */
 export class MultiProviderModelProvider implements ModelProvider {
-  private fallback: OpenAIProvider | undefined;
-
   constructor(private readonly settings: Settings) {}
 
   async getModel(modelName?: string): Promise<Model> {
@@ -972,7 +1140,7 @@ export class MultiProviderModelProvider implements ModelProvider {
       // provider — which it does ONLY for a workspace with an *active* connected
       // Codex subscription. If it did not resolve, the subscription is not
       // connected for this workspace, so the codex provider is absent. Falling
-      // through to the built-in OpenAIProvider below would ship `codex/<slug>` to
+      // through to the built-in Responses fallback below would ship `codex/<slug>` to
       // the global default (Azure) client as a deployment name and surface a
       // misleading "DeploymentNotFound" 404. Throw a clear, user-actionable error
       // instead; it propagates through the worker's agentRunFailurePayload as the
@@ -982,11 +1150,17 @@ export class MultiProviderModelProvider implements ModelProvider {
         throw new CodexSubscriptionUnavailableError(modelName);
       }
     }
-    // A non-codex model in no provider's allow-list falls back to the SDK's
-    // default OpenAIProvider, which uses the global default client/key
-    // configureOpenAI set up (the built-in OpenAI/Azure provider).
-    this.fallback ??= new OpenAIProvider();
-    return this.fallback.getModel(modelName);
+    // Preserve the legacy unlisted-model fallback, but bind it through the same
+    // typed request-policy model as every configured Responses call. This keeps
+    // Azure wire normalization at the object stage instead of reintroducing a
+    // JSON parse/stringify transport wrapper on the fallback path.
+    const builtin = configuredProviders(this.settings)[0];
+    if (!builtin) throw new Error("Built-in model provider is unavailable");
+    return new OpenGeniResponsesModel(
+      buildProviderClient(builtin, this.settings),
+      modelName ?? this.settings.openaiModel,
+      builtin,
+    );
   }
 }
 
@@ -1152,6 +1326,7 @@ export async function summarizeForCompaction(
   input: Array<Record<string, unknown>>,
   options: {
     client?: OpenAI;
+    provider?: ResolvedModelProvider;
     api?: ModelProviderApi;
     maxOutputTokens?: number;
     model?: string;
@@ -1163,6 +1338,8 @@ export async function summarizeForCompaction(
   const client = options.client ?? buildOpenAIClientFromSettings(settings);
   const api = options.api ?? "responses";
   const model = options.model ?? settings.openaiModel;
+  const provider = options.provider ?? configuredProviders(settings)[0];
+  if (!provider) throw new Error("Built-in model provider is unavailable");
   const maxTokens = options.maxOutputTokens ?? SUMMARY_BUFFER_TOKENS;
   if (api === "chat") {
     const transcript = renderCompactionPromptInputForChat(input);
@@ -1212,7 +1389,7 @@ export async function summarizeForCompaction(
   };
   let response: unknown;
   try {
-    response = await new CompactionResponsesModel(client, model).fetchResponse(request);
+    response = await new CompactionResponsesModel(client, model, provider).fetchResponse(request);
   } catch (error) {
     throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
   }
@@ -1372,6 +1549,7 @@ export async function requestRemoteCompactionV2(
   input: Array<Record<string, unknown>>,
   options: {
     client: OpenAI;
+    provider?: ResolvedModelProvider;
     model: string;
     /**
      * Exact agent system instructions for this session/turn. Required and
@@ -1414,9 +1592,13 @@ export async function requestRemoteCompactionV2(
   };
   let response: unknown;
   try {
-    response = await new CompactionResponsesModel(options.client, options.model).fetchResponse(
-      request,
-    );
+    const provider = options.provider ?? configuredProviders(settings)[0];
+    if (!provider) throw new Error("Built-in model provider is unavailable");
+    response = await new CompactionResponsesModel(
+      options.client,
+      options.model,
+      provider,
+    ).fetchResponse(request);
   } catch (error) {
     throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
   }
@@ -1680,9 +1862,30 @@ export function extractResponseOutputText(response: unknown): string {
  * request conversion and Responses transport without manufacturing a runner
  * trace solely to satisfy that wrapper.
  */
-class CompactionResponsesModel extends OpenAIResponsesModel {
-  fetchResponse(request: ModelRequest) {
-    return this._fetchResponse(request, false);
+class CompactionResponsesModel extends OpenGeniResponsesModel {
+  async fetchResponse(request: ModelRequest): Promise<ModelResponse> {
+    if (this.provider.kind !== "codex-subscription") {
+      return (await this._fetchResponse(request, false)) as unknown as ModelResponse;
+    }
+    // Codex is streaming-only. Use the SDK's normal streaming adapter so its
+    // terminal reducer, output reconstruction, and failure checks remain the
+    // single protocol implementation; only collect the final ModelResponse.
+    let response: ModelResponse | undefined;
+    for await (const event of this.getStreamedResponse(request)) {
+      if (event.type === "response_done") {
+        response = {
+          usage: Usage.fromJSON(
+            event.response.usage as NonNullable<Parameters<typeof Usage.fromJSON>[0]>,
+          ),
+          output: event.response.output,
+          responseId: event.response.id,
+          ...(event.response.requestId ? { requestId: event.response.requestId } : {}),
+          ...(event.response.providerData ? { providerData: event.response.providerData } : {}),
+        };
+      }
+    }
+    if (!response) throw new Error("Compaction response ended without a terminal response");
+    return response;
   }
 }
 
@@ -1754,6 +1957,8 @@ export type ConnectorActionPolicyHooks = {
 
 export type BuildAgentOptions = {
   model?: Model;
+  /** Attach the built-in structured human-input tool. Default: enabled. */
+  humanInputEnabled?: boolean;
   /** Settled response for the one internal human-input interruption resumed by this run. */
   humanInputResponse?: {
     requestId: string;
@@ -1778,20 +1983,29 @@ export type BuildAgentOptions = {
   //   API has no such field, so registry "chat" providers turn it off.
   //   Default: settings.openaiReasoningEncryptedContent.
   // - structuredToolTransport: whether the backend supports the Responses
-  //   STRUCTURED/HOSTED sandbox-tool transport — the hosted `apply_patch` tool
-  //   type and structured `view_image` output. The SDK's sandbox capabilities
+  //   HOSTED sandbox-tool transport — notably the hosted `apply_patch` tool.
+  //   The SDK's sandbox capabilities
   //   pick hosted-vs-function purely from the bound model instance's constructor
   //   name (supportsApplyPatchTransport / supportsStructuredToolOutputTransport).
   //   Our codex turns run the OpenAIResponsesModel — which the SDK reads as
   //   hosted-capable — but route it to the ChatGPT/Codex backend, which REJECTS
   //   the hosted `apply_patch` type ("Unsupported tool type: apply_patch",
-  //   verified live). Set false for that backend so filesystem emits the
-  //   function `apply_patch` + text `view_image` variants it accepts. Default
-  //   true (let the SDK decide from the model instance) — non-codex paths are
-  //   byte-for-byte unchanged.
+  //   verified live). Gateway routes also use ordinary function tools. When
+  //   false, OpenGeni keeps function `apply_patch` and converts successful
+  //   `view_image` data URLs back into typed input_image content when the
+  //   selected model has a proven image-input wire.
   hostedWebSearch?: boolean;
+  /** Stable provider-specific image-generation transport for this turn. */
+  imageGeneration?:
+    | { kind: "native_hosted" }
+    | {
+        kind: "provider_adapter";
+        execute: (input: { prompt: string }, context: { toolCallId: string }) => Promise<unknown>;
+      };
   encryptedReasoning?: boolean;
   structuredToolTransport?: boolean;
+  /** Explicit provider-contained progressive tool-disclosure strategy. */
+  lazyToolTransport?: LazyToolTransport;
   // Whether this turn's resolved model accepts image input. This is derived
   // from ConfiguredModel.capabilities.inputModalities at the worker boundary.
   // False removes image-only sandbox tools and projects images out of each
@@ -2123,7 +2337,9 @@ function composedPersistentAgentInstructions(
             appendGitCredentialBindingInstructions(
               appendToolspaceInstructions(
                 personaAndCore,
-                settings.toolspaceEnabled && Boolean(options.toolspaceTokenSeed),
+                settings.toolspaceEnabled &&
+                  options.activeSandboxBackend !== "selfhosted" &&
+                  Boolean(options.toolspaceTokenSeed),
               ),
               options.gitCredentialBindings,
               options.activeSandboxBackend,
@@ -2154,7 +2370,9 @@ function composedPersistentAgentInstructions(
           ),
           options.persistentSessionSettings,
         ),
-        settings.toolspaceEnabled && Boolean(options.toolspaceTokenSeed),
+        settings.toolspaceEnabled &&
+          options.activeSandboxBackend !== "selfhosted" &&
+          Boolean(options.toolspaceTokenSeed),
       ),
       options.gitCredentialBindings,
       options.activeSandboxBackend,
@@ -2169,14 +2387,11 @@ function composedPersistentAgentInstructions(
  * substrate prompting — the same text for every host, never per-host copy.
  *
  * Included ONLY when `toolspaceAvailable` is true, which the caller sets from the
- * exact condition that gates the sandbox token mint: the toolspace feature is
- * enabled AND a toolspace token was minted for THIS turn. That mint now happens
- * on every backend including selfhosted (connected machines get the token too),
- * so the block appears there as well; a turn with no minted token (feature off)
- * has no toolspace URL/token in its sandbox and must not advertise a capability
- * that is not there — the gate is false and this is a no-op. Placed BEFORE the
- * per-session instructions so host/session specificity still wins over this
- * substrate note.
+ * exact condition that gates the managed-sandbox token mint: the feature is
+ * enabled, the effective backend is not selfhosted, and a token was minted for
+ * this turn. A turn with no minted token has no Toolspace URL/token and must not
+ * advertise a capability that is not there. Placed before the per-session
+ * instructions so host/session specificity still wins over this substrate note.
  */
 export function appendToolspaceInstructions(composed: string, toolspaceAvailable: boolean): string {
   return toolspaceAvailable ? `${composed} ${TOOLSPACE_PROGRAMMATIC_DIRECTIVE}` : composed;
@@ -2281,7 +2496,7 @@ export function mcpToolErrorOutput(error: unknown): {
   isError: true;
   content: [{ type: "text"; text: string }];
 } {
-  const details = redactSensitiveText(error instanceof Error ? error.message : String(error));
+  const details = error instanceof Error ? error.message : String(error);
   return {
     isError: true,
     content: [
@@ -2334,32 +2549,60 @@ export function buildOpenGeniAgent(
   // with the sandbox capability tools (prepareSandboxAgent: tools =
   // [...agent.tools, ...capability.tools()]), so hosted web_search coexists with
   // both rather than overriding them.
-  const hostedTools = hostedWebSearch ? [webSearchTool()] : [];
-  const humanInputTool = agentTool({
-    name: HUMAN_INPUT_TOOL_NAME,
-    description:
-      "Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, an optional Other value, multiple questions, explicit skip policy, and an optional expiry.",
-    parameters: RequestHumanInputToolInput,
-    needsApproval: true,
-    // A missing/mismatched durable response is a protocol integrity failure,
-    // not model-visible tool output the agent may reason past.
-    errorFunction: null,
-    execute: (_input, _context, details) => {
-      const settled = options.humanInputResponse;
-      if (!settled) {
-        throw new Error("Human-input tool resumed without a durable response");
-      }
-      const resumedCallId = details?.toolCall?.callId;
-      if (resumedCallId && resumedCallId !== settled.toolCallId) {
-        throw new Error("Human-input response does not belong to the resumed tool call");
-      }
-      return JSON.stringify({
-        requestId: settled.requestId,
-        ...settled.response,
-      });
-    },
-  });
-  const agentTools = [...hostedTools, humanInputTool];
+  const hostedTools: Tool[] = hostedWebSearch ? [webSearchTool()] : [];
+  if (options.imageGeneration?.kind === "native_hosted") {
+    hostedTools.push(imageGenerationTool({ model: "gpt-image-2" }));
+  }
+  const providerImageGenerationTool =
+    options.imageGeneration?.kind === "provider_adapter"
+      ? agentTool({
+          name: "generate_image",
+          description:
+            "Generate exactly one image from the requested visual description. Use this when the user asks to create an image. The result is a permanent image artifact and its exact sandbox path. Do not call it repeatedly unless the user requested multiple distinct images.",
+          parameters: GenerateImageToolInput,
+          errorFunction: null,
+          execute: async (input, _context, details) => {
+            const toolCallId = details?.toolCall?.callId;
+            if (!toolCallId) throw new Error("Image-generation tool call has no durable identity");
+            if (options.imageGeneration?.kind !== "provider_adapter") {
+              throw new Error("Image-generation adapter changed during execution");
+            }
+            return await options.imageGeneration.execute(input, { toolCallId });
+          },
+        })
+      : null;
+  const humanInputTool =
+    options.humanInputEnabled === false
+      ? null
+      : agentTool({
+          name: HUMAN_INPUT_TOOL_NAME,
+          description:
+            "Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, an optional Other value, multiple questions, explicit skip policy, and an optional expiry.",
+          parameters: RequestHumanInputToolInput,
+          needsApproval: true,
+          // A missing/mismatched durable response is a protocol integrity failure,
+          // not model-visible tool output the agent may reason past.
+          errorFunction: null,
+          execute: (_input, _context, details) => {
+            const settled = options.humanInputResponse;
+            if (!settled) {
+              throw new Error("Human-input tool resumed without a durable response");
+            }
+            const resumedCallId = details?.toolCall?.callId;
+            if (resumedCallId && resumedCallId !== settled.toolCallId) {
+              throw new Error("Human-input response does not belong to the resumed tool call");
+            }
+            return JSON.stringify({
+              requestId: settled.requestId,
+              ...settled.response,
+            });
+          },
+        });
+  const agentTools = [
+    ...hostedTools,
+    ...(providerImageGenerationTool ? [providerImageGenerationTool] : []),
+    ...(humanInputTool ? [humanInputTool] : []),
+  ];
   const baseConfig = {
     name: "OpenGeni Agent",
     model: options.model ?? settings.openaiModel,
@@ -2375,9 +2618,7 @@ export function buildOpenGeniAgent(
     //   1. workspace instructionsTemplate (or deployment default) with the
     //      non-bypassable CORE substituted at {{core}} — composeAgentInstructions,
     //   2. + the generic programmatic-tool-calling (toolspace) directive, ONLY
-    //      when a toolspace token was minted for this turn (feature enabled + a
-    //      per-turn seed — the mint gate, which includes selfhosted turns since
-    //      they now receive the token too) — appendToolspaceInstructions,
+    //      when a toolspace token was minted for this managed-sandbox turn,
     //   3. + managed-sandbox Git binding discovery, ONLY when one provider has
     //      multiple credential bindings,
     //   4. + workspace memory working set, ONLY when the workspace setting is on
@@ -2429,7 +2670,7 @@ export function buildOpenGeniAgent(
     if (options.inputFileMediaTypes) {
       agentInputFileMediaTypes.set(agent, options.inputFileMediaTypes);
     }
-    maybeInstallCodexToolSearch(agent, settings, options);
+    maybeInstallLazyToolTransport(agent, settings, options);
     applyMcpApprovalPolicy(
       agent,
       settings,
@@ -2522,7 +2763,7 @@ export function buildOpenGeniAgent(
   if (options.gitCredentialBindings && options.gitCredentialBindings.length > 0) {
     agentGitCredentialBindings.set(agent, options.gitCredentialBindings);
   }
-  if (options.toolspaceTokenSeed) {
+  if (options.toolspaceTokenSeed && options.activeSandboxBackend !== "selfhosted") {
     agentToolspaceTokenSeed.set(agent, options.toolspaceTokenSeed);
     agentToolspaceTokenSessionId.set(agent, options.toolspaceTokenSessionId!);
   }
@@ -2536,7 +2777,7 @@ export function buildOpenGeniAgent(
   if (options.rigCredentialHookIds && options.rigCredentialHookIds.length > 0) {
     agentRigCredentialHooks.set(agent, sandboxLifecycleHooksForIds(options.rigCredentialHookIds));
   }
-  maybeInstallCodexToolSearch(agent, settings, options);
+  maybeInstallLazyToolTransport(agent, settings, options);
   applyMcpApprovalPolicy(
     agent,
     settings,
@@ -2547,39 +2788,62 @@ export function buildOpenGeniAgent(
 }
 
 /**
- * Enable Codex-CLI-style progressive MCP disclosure on a Codex turn when the
- * flag is on. Gated on `structuredToolTransport === false` — the same signal that
- * identifies a Codex-subscription turn (the ChatGPT backend that rejects hosted
- * tools) — so no non-Codex turn is ever touched. On qualifying turns it wraps
- * `getAllTools` (clone-survivingly — see {@link installCodexToolSearch}) to defer
- * selected non-mandatory MCP schemas and add the client tool_search tool. The
- * description combines live connector namespaces with selected server identities.
+ * Install the explicitly resolved progressive-disclosure transport. The legacy
+ * rollout flag remains only an on/off switch; provider selection never depends
+ * on the unrelated sandbox structured-tool Boolean.
+ *
+ * Codex stays on its existing native `defer_loading` implementation. Direct
+ * OpenAI/Azure keep full real tools in Runner's execution registry while a model
+ * wrapper omits searchable schemas from the provider request and native client
+ * tool_search discloses the same objects. Generic providers receive only stable
+ * ordinary tool_search/tool_invoke schemas; valid dispatcher calls are rewritten
+ * back to the real runtime tool before Runner handles approval and execution.
  */
-function maybeInstallCodexToolSearch(
+function maybeInstallLazyToolTransport(
   agent: Agent<any, any>,
   settings: Settings,
   options: BuildAgentOptions,
 ): void {
-  if (settings.codexToolSearchEnabled && options.structuredToolTransport === false) {
-    const mcpServers = options.mcpServers ?? [];
-    // `defer_loading:true` removes these MCP schemas from provider context until
-    // tool_search discloses a bounded match. Keep the compaction estimator on
-    // that same wire truth; otherwise a large deferred catalog can falsely trip
-    // compaction before the first real model request. OpenGeni remains eager.
-    for (const server of mcpServers) {
-      if (server.name === "opengeni") continue;
-      (
-        server as MCPServer & {
-          deferModelToolSchemaAccounting?: () => void;
-        }
-      ).deferModelToolSchemaAccounting?.();
-    }
+  const transport = options.lazyToolTransport;
+  if (!transport) return;
+  const enabled =
+    transport === "codex_native" ? settings.codexToolSearchEnabled : settings.lazyToolSearchEnabled;
+  if (!enabled) return;
+
+  const mcpServers = options.mcpServers ?? [];
+  // Every transport removes non-mandatory MCP definitions from the provider's
+  // initial tool block. Keep proactive compaction accounting on that wire truth.
+  for (const server of mcpServers) {
+    const registryId = server instanceof PrefixedMcpServer ? server.registryId : server.name;
+    if (registryId === "opengeni") continue;
+    (
+      server as MCPServer & {
+        deferModelToolSchemaAccounting?: () => void;
+      }
+    ).deferModelToolSchemaAccounting?.();
+  }
+  // Prepared servers use a shared SDK lifecycle name; tool prefixes come from
+  // their registry identity. Preserve the fallback for embedded/test servers.
+  const mcpServerIds = new Set(
+    mcpServers.map((server) =>
+      server instanceof PrefixedMcpServer ? server.registryId : server.name,
+    ),
+  );
+
+  if (transport === "codex_native") {
     installCodexToolSearch(
       agent as unknown as Parameters<typeof installCodexToolSearch>[0],
       options.codexConnectorNamespaces ?? new Set<string>(),
-      new Set(mcpServers.map((server) => server.name)),
+      mcpServerIds,
     );
+    return;
   }
+  installLazyToolRuntime(
+    agent as unknown as Parameters<typeof installLazyToolRuntime>[0],
+    transport,
+    mcpServerIds,
+    settings.modelToolOutputTruncationTokens,
+  );
 }
 
 /** True when the unprefixed tool `name` requires approval under `policy`. */
@@ -2867,9 +3131,9 @@ function withExecOpCorrelation(tools: Tool<unknown>[]): Tool<unknown>[] {
 }
 
 /**
- * Codex accepts ordinary FUNCTION tools but also accepts `input_image` content
- * inside a function_call_output (the same transport used by codex-rs
- * view_image). The SDK filesystem capability unnecessarily couples this choice
+ * Codex and reviewed Responses-compatible Gateway routes accept ordinary
+ * FUNCTION tools plus `input_image` content inside a function_call_output. The
+ * SDK filesystem capability unnecessarily couples this choice
  * to hosted apply_patch support; when hosted tools are disabled it degrades
  * view_image to a giant text data URL, charging roughly one token per four
  * base64 characters. Re-wrap only successful data-URL results as a structured
@@ -2932,11 +3196,10 @@ export function buildAgentCapabilities(
   if (toolCancellation) options.onToolCancellationFence?.(toolCancellation);
   // The `filesystem()` capability picks hosted-vs-function tool variants from the
   // bound model instance (supportsApplyPatchTransport / structured tool output).
-  // When the caller declares the backend does NOT support that structured/hosted
-  // transport (codex → the ChatGPT backend rejects the hosted `apply_patch` type),
+  // When the caller declares the backend does NOT support hosted sandbox tools,
   // neutralize this capability's model binding so tools() falls to the function
-  // `apply_patch` + text `view_image` variants the backend accepts — the SDK
-  // handles their function_call round-trip natively, so no reimplementation.
+  // variants. Successful view_image data URLs are restored to typed image
+  // results below; text-only/unproven wires remove the image tool entirely.
   // Scoped to filesystem: shell() is always a function-tool transport.
   const configureFilesystemTools = (tools: Tool<unknown>[]): Tool<unknown>[] => {
     const transportTools =
@@ -3008,6 +3271,7 @@ export function buildAgentCapabilities(
     const computerCapability = computerUse({
       dimensions: [settings.streamResolutionWidth, settings.streamResolutionHeight],
       readOnly: settings.computerUseReadOnly,
+      ...(options.turnCancellationSignal ? { abortSignal: options.turnCancellationSignal } : {}),
       ...(options.onComputerUseReady ? { onReady: options.onComputerUseReady } : {}),
       toolMode: options.computerToolMode ?? "disabled",
     });
@@ -3081,6 +3345,12 @@ export type PrepareToolsOptions = {
 
 type ConnectedMcpServerBatch = Awaited<ReturnType<typeof connectMcpServers>>;
 
+type McpLifecyclePhase = "connect" | "close";
+
+type McpLifecycleAwareServer = MCPServer & {
+  unwrapLifecycleError?: (error: Error, phase: McpLifecyclePhase) => Error | undefined;
+};
+
 export type ConnectedMcpServerBatches = {
   active: MCPServer[];
   failed: MCPServer[];
@@ -3101,18 +3371,21 @@ export async function connectMcpServersInBatches(
   const batches: ConnectedMcpServerBatch[] = [];
   try {
     for (let offset = 0; offset < servers.length; offset += MCP_MAX_CONCURRENT_SERVER_OPERATIONS) {
-      batches.push(
-        await connectMcpServers(
-          servers.slice(offset, offset + MCP_MAX_CONCURRENT_SERVER_OPERATIONS),
-          {
+      const batchServers = servers.slice(offset, offset + MCP_MAX_CONCURRENT_SERVER_OPERATIONS);
+      try {
+        batches.push(
+          await connectMcpServers(batchServers, {
             ...(options.connectTimeoutMs === undefined
               ? {}
               : { connectTimeoutMs: options.connectTimeoutMs }),
             connectInParallel: true,
             strict: options.strict,
-          },
-        ),
-      );
+          }),
+        );
+      } catch (error) {
+        const sdkError = error instanceof Error ? error : new Error(String(error));
+        throw unwrapMcpLifecycleErrorFromServers(batchServers, sdkError, "connect");
+      }
     }
   } catch (error) {
     await closeMcpServerBatches(batches).catch(() => undefined);
@@ -3121,7 +3394,9 @@ export async function connectMcpServersInBatches(
 
   const errors = new Map<MCPServer, Error>();
   for (const batch of batches) {
-    for (const [server, error] of batch.errors) errors.set(server, error);
+    for (const [server, error] of batch.errors) {
+      errors.set(server, unwrapMcpLifecycleError(server, error, "connect") ?? error);
+    }
   }
   return {
     active: batches.flatMap((batch) => batch.active),
@@ -3141,8 +3416,31 @@ async function closeMcpServerBatches(batches: ConnectedMcpServerBatch[]): Promis
     } catch (error) {
       firstError ??= error;
     }
+    for (const [server, error] of batch.errors) {
+      firstError ??= unwrapMcpLifecycleError(server, error, "close");
+    }
   }
   if (firstError !== undefined) throw firstError;
+}
+
+function unwrapMcpLifecycleError(
+  server: MCPServer,
+  error: Error,
+  phase: McpLifecyclePhase,
+): Error | undefined {
+  return (server as McpLifecycleAwareServer).unwrapLifecycleError?.(error, phase);
+}
+
+function unwrapMcpLifecycleErrorFromServers(
+  servers: MCPServer[],
+  error: Error,
+  phase: McpLifecyclePhase,
+): Error {
+  for (const server of servers) {
+    const exact = unwrapMcpLifecycleError(server, error, phase);
+    if (exact) return exact;
+  }
+  return error;
 }
 
 export async function prepareAgentTools(
@@ -3196,10 +3494,11 @@ export async function prepareAgentTools(
           ...(useBunNativeFetch ? { pinResolvedDestination: false } : {}),
         },
       );
+      const optional = tool.optional === true;
       const fetchImpl = isCodexAppsMcpServer(config)
         ? codexAppsAuthFetch(guardedFetch, settings, options)
         : config.connectionRef
-          ? connectionBrokerFetch(guardedFetch, config, options, resolvedMcpConnectionIds)
+          ? connectionBrokerFetch(guardedFetch, config, options, resolvedMcpConnectionIds, optional)
           : firstParty
             ? firstPartyAuthFetch(guardedFetch, settings, options)
             : guardedFetch;
@@ -3220,10 +3519,9 @@ export async function prepareAgentTools(
       // a best-effort server whose tools/list throws (e.g. an expired connection
       // credential surfacing as a StreamableHTTP "authentication required" 401)
       // degrades to zero tools rather than throwing out of the SDK's run-time
-      // getAllMcpTools and failing an unrelated turn. The actionable
-      // tool.auth_needed signal is preserved: the connection-broker fetch
-      // publishes it before returning the 401 that provokes the throw.
-      const optional = tool.optional === true;
+      // getAllMcpTools and failing an unrelated turn. Codex Apps setup-time
+      // auth misses are still published as actionable state because the
+      // workspace catalog explicitly told the user that the surface existed.
       const bestEffort = isCodexAppsMcpServer(config) || optional || !!config.connectionRef;
       const server = new PrefixedMcpServer(
         new MCPServerStreamableHttp({
@@ -3233,7 +3531,13 @@ export async function prepareAgentTools(
           // The upstream transport logger receives raw thrown errors, whose
           // messages may contain response bodies, URLs, headers, or echoed
           // credentials. Keep its diagnostic surface structural only.
-          logger: safeMcpTransportLogger(config.id),
+          logger: mcpTransportLogger(config.id, {
+            // Codex Apps setup is a read-only initialize/tools-list handshake.
+            // A statusless transport failure is safe to retry, while auth
+            // responses remain non-retryable and publish their specific
+            // reconnect reason through codexAppsAuthFetch.
+            recoverySafeSetup: isCodexAppsMcpServer(config),
+          }),
           // codex_apps returns connector tools with empty `outputSchema: {}` that the
           // MCP SDK's strict Tool schema rejects (fails the turn during tools/list);
           // sanitize the response on the wire before validation. The namespace Set
@@ -3252,6 +3556,7 @@ export async function prepareAgentTools(
         bestEffort,
         aggregateToolBudget,
         `${config.id}:${index}`,
+        firstParty && !bestEffort,
       );
       return {
         server,
@@ -3265,11 +3570,16 @@ export async function prepareAgentTools(
   const bestEffortEntries = servers.filter((entry) => entry.bestEffort);
   const requiredServers = requiredEntries.map((entry) => entry.server);
   const bestEffortServers = bestEffortEntries.map((entry) => entry.server);
-  // Names of the OPTIONAL servers (not codex_apps) so a drop is surfaced as a
-  // warning; codex_apps keeps its historically-quiet drop (a not-logged-in
-  // ChatGPT plan is a normal, non-noteworthy state).
-  const optionalServerNames = new Set(
-    servers.filter((entry) => entry.optional).map((entry) => entry.server.name),
+  // Names of optional servers so a setup drop is surfaced with the registry
+  // identity and safe retry metadata. Codex Apps is intentionally included:
+  // its catalog entry told the user the surface was available, so an auth or
+  // transport failure must not collapse into a silent empty tool_search pool.
+  const optionalServerIds = new Set(
+    servers
+      .filter((entry) => entry.optional)
+      .map((entry) => entry.server)
+      .filter((server): server is PrefixedMcpServer => server instanceof PrefixedMcpServer)
+      .map((server) => server.registryId),
   );
   const connectedRequired = await connectMcpServersInBatches(requiredServers, {
     strict: true,
@@ -3294,13 +3604,19 @@ export async function prepareAgentTools(
       if (failed instanceof PrefixedMcpServer) {
         failed.releaseAggregateBudget();
       }
-      if (!optionalServerNames.has(failed.name)) {
+      if (
+        !(failed instanceof PrefixedMcpServer) ||
+        (failed.registryId !== CODEX_APPS_MCP_SERVER_ID &&
+          !optionalServerIds.has(failed.registryId))
+      ) {
         continue;
       }
       const error = connectedBestEffort.errors.get(failed);
       console.warn(
-        `[mcp] optional server "${failed.name}" failed to connect/list tools; skipping it for this turn`,
-        safeMcpErrorFields(error),
+        failed.registryId === CODEX_APPS_MCP_SERVER_ID
+          ? "[mcp] Codex Apps setup failed; reconnect or retry before relying on its tools"
+          : "[mcp] optional server failed to connect/list tools; skipping it for this turn",
+        mcpErrorFields(error, "mcp_connect_failed", failed.registryId),
       );
     }
   }
@@ -3332,6 +3648,7 @@ function connectionBrokerFetch(
   config: Settings["mcpServers"][number],
   options: PrepareToolsOptions,
   resolvedMcpConnectionIds: Map<string, string>,
+  suppressSetupAuthNeeded: boolean,
 ): FetchLike {
   const connectionRef = config.connectionRef;
   if (!connectionRef) {
@@ -3349,7 +3666,14 @@ function connectionBrokerFetch(
       false,
     );
     if (first.status === "auth_needed") {
-      return await authNeededFetchResponse(options, config.id, request, first, connectionRef);
+      return await authNeededFetchResponse(
+        options,
+        config.id,
+        request,
+        first,
+        connectionRef,
+        suppressSetupAuthNeeded,
+      );
     }
     recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, first.connectionId);
     const response = await baseFetch(
@@ -3357,7 +3681,16 @@ function connectionBrokerFetch(
       withConnectionHeaders(input, init, first.headers),
     );
     if (response.status === 401) {
-      await cancelMcpResponseBody(response);
+      const providerFailure = request.replaySafeAfter401
+        ? null
+        : {
+            status: response.status,
+            statusText: response.statusText,
+            body: await response.text(),
+          };
+      if (!providerFailure) {
+        await cancelMcpResponseBody(response);
+      }
       const refreshed = await resolveConnectionForRequest(
         options,
         config.id,
@@ -3368,14 +3701,28 @@ function connectionBrokerFetch(
       );
       if (refreshed.status === "auth_needed") {
         if (!request.replaySafeAfter401) {
-          await publishAuthNeededForRequest(options, config.id, request, refreshed, connectionRef);
-          return mcpOutcomeUncertainResponse(request);
+          await publishAuthNeededForRequest(
+            options,
+            config.id,
+            request,
+            refreshed,
+            connectionRef,
+            suppressSetupAuthNeeded,
+          );
+          return mcpOutcomeUncertainResponse(request, providerFailure!);
         }
-        return await authNeededFetchResponse(options, config.id, request, refreshed, connectionRef);
+        return await authNeededFetchResponse(
+          options,
+          config.id,
+          request,
+          refreshed,
+          connectionRef,
+          suppressSetupAuthNeeded,
+        );
       }
       recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, refreshed.connectionId);
       if (!request.replaySafeAfter401) {
-        return mcpOutcomeUncertainResponse(request);
+        return mcpOutcomeUncertainResponse(request, providerFailure!);
       }
       const retry = await baseFetch(
         fetchInputForAttempt(input),
@@ -3385,7 +3732,14 @@ function connectionBrokerFetch(
         const auth = insufficientScopeAuth(retry.headers, connectionRef, refreshed.connectionId);
         if (auth) {
           await cancelMcpResponseBody(retry);
-          return await authNeededFetchResponse(options, config.id, request, auth, connectionRef);
+          return await authNeededFetchResponse(
+            options,
+            config.id,
+            request,
+            auth,
+            connectionRef,
+            suppressSetupAuthNeeded,
+          );
         }
         return retry;
       }
@@ -3408,6 +3762,7 @@ function connectionBrokerFetch(
               : {}),
           },
           connectionRef,
+          suppressSetupAuthNeeded,
         );
       }
       return retry;
@@ -3416,7 +3771,14 @@ function connectionBrokerFetch(
       const auth = insufficientScopeAuth(response.headers, connectionRef, first.connectionId);
       if (auth) {
         await cancelMcpResponseBody(response);
-        return await authNeededFetchResponse(options, config.id, request, auth, connectionRef);
+        return await authNeededFetchResponse(
+          options,
+          config.id,
+          request,
+          auth,
+          connectionRef,
+          suppressSetupAuthNeeded,
+        );
       }
       return response;
     }
@@ -3527,10 +3889,18 @@ async function authNeededFetchResponse(
   request: McpRequestReplayInfo,
   auth: Extract<ResolveConnectionCredentialResult, { status: "auth_needed" }>,
   connectionRef: McpServerConnectionRef,
+  suppressSetupAuthNeeded: boolean,
 ): Promise<Response> {
-  await publishAuthNeededForRequest(options, serverId, request, auth, connectionRef);
-  if (request.method === "tools/call") {
-    return mcpToolAuthNeededResponse(request.id);
+  await publishAuthNeededForRequest(
+    options,
+    serverId,
+    request,
+    auth,
+    connectionRef,
+    suppressSetupAuthNeeded,
+  );
+  if (request.toolName) {
+    return mcpToolAuthNeededResponse(request);
   }
   return new Response("Authentication required for MCP server connection", {
     status: 401,
@@ -3543,7 +3913,11 @@ async function publishAuthNeededForRequest(
   request: McpRequestReplayInfo,
   auth: Extract<ResolveConnectionCredentialResult, { status: "auth_needed" }>,
   connectionRef: McpServerConnectionRef,
+  suppressSetupAuthNeeded: boolean,
 ): Promise<void> {
+  if (suppressSetupAuthNeeded && !request.toolName) {
+    return;
+  }
   const connectionId = auth.connectionId ?? connectionRef.connectionId;
   await publishAuthNeeded(options, {
     serverId,
@@ -3658,16 +4032,14 @@ const MCP_TOOL_OUTCOME_UNCERTAIN_ERROR = {
     "Tool outcome uncertain: the provider returned 401 after receiving the request. OpenGeni did not replay this call. Do not retry automatically; verify provider state before any new attempt.",
 } as const;
 
-function mcpToolAuthNeededResponse(id: string | number | null | undefined): Response {
+function mcpToolAuthNeededResponse(request: McpRequestReplayInfo): Response {
   return new Response(
-    JSON.stringify({
-      jsonrpc: "2.0",
-      id: id ?? null,
-      error: {
+    JSON.stringify(
+      mcpJsonRpcErrorPayloadForRequest(request, {
         code: MCP_AUTH_NEEDED_ERROR.code,
         message: MCP_AUTH_NEEDED_ERROR.message,
-      },
-    }),
+      }),
+    ),
     {
       status: 200,
       headers: { "content-type": "application/json" },
@@ -3675,9 +4047,23 @@ function mcpToolAuthNeededResponse(id: string | number | null | undefined): Resp
   );
 }
 
-function mcpOutcomeUncertainResponse(request: McpRequestReplayInfo): Response {
+type McpOutcomeUncertainProviderFailure = {
+  status: number;
+  statusText: string;
+  body: string;
+};
+
+function mcpOutcomeUncertainResponse(
+  request: McpRequestReplayInfo,
+  providerFailure: McpOutcomeUncertainProviderFailure,
+): Response {
   return new Response(
-    JSON.stringify(mcpJsonRpcErrorPayloadForRequest(request, MCP_TOOL_OUTCOME_UNCERTAIN_ERROR)),
+    JSON.stringify(
+      mcpJsonRpcErrorPayloadForRequest(request, {
+        ...MCP_TOOL_OUTCOME_UNCERTAIN_ERROR,
+        data: { providerFailure },
+      }),
+    ),
     {
       status: 200,
       headers: { "content-type": "application/json" },
@@ -3698,54 +4084,135 @@ function isAuthNeededMcpError(error: unknown): boolean {
 }
 
 function isToolOutcomeUncertainMcpError(error: unknown): boolean {
-  if (!(error instanceof Error)) {
-    return false;
-  }
-  const code = (error as { code?: unknown }).code;
   return (
-    code === MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.code &&
-    (error.message === MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.message ||
-      error.message ===
-        `MCP error ${MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.code}: ${MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.message}`)
+    error instanceof Error &&
+    (error as { code?: unknown }).code === MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.code
   );
 }
 
-// Model-facing text for a best-effort server whose tool call failed for a
-// non-auth reason (transport 401/403 that never became the broker's JSON-RPC
-// short-circuit, a provider 5xx, a network blip). The copy is LOOP-SAFE: it
-// tells the model the tool is dead for the REST OF THIS TURN and to NOT retry
-// it, so a model that would otherwise burn the turn re-calling the same broken
-// optional tool moves on instead. Only the safe error surface (JS error class +
-// numeric HTTP status) is interpolated — NEVER the raw error message/response
-// body, which for a broker 401/403 can echo request URLs/headers/credentials.
-function mcpToolUnavailableMessage(reason: string): string {
-  return `This tool is unavailable for the rest of this turn (${reason}). Do not retry it — continue without it or use another approach.`;
+function mcpToolOutcomeUncertainContent(error: unknown): Array<{ type: "text"; text: string }> {
+  const data = error && typeof error === "object" ? (error as { data?: unknown }).data : undefined;
+  const providerFailure =
+    data && typeof data === "object"
+      ? (data as { providerFailure?: unknown }).providerFailure
+      : undefined;
+  const body =
+    providerFailure && typeof providerFailure === "object"
+      ? (providerFailure as { body?: unknown }).body
+      : undefined;
+  return [
+    ...(typeof body === "string" ? [{ type: "text" as const, text: body }] : []),
+    { type: "text", text: MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.message },
+  ];
 }
 
-// The only error detail safe to surface to the model or the logs: the JS error
-// constructor name and, when present, a numeric HTTP status. A StreamableHTTP
-// transport error carries the raw response BODY in its `.message` (a broker
-// 401/403 body can echo request detail), so `.message` is never included; the
-// numeric `.code`/`.status` (e.g. 401) is safe and useful.
-function safeMcpErrorFields(error: unknown): {
-  errorClass: string;
+// Preserve the exact source diagnostic as one independent content item. The
+// second item is OpenGeni guidance and never substitutes for or mutates it.
+function mcpToolUnavailableContent(error: unknown): Array<{ type: "text"; text: string }> {
+  return [
+    { type: "text", text: exactErrorMessage(error) },
+    {
+      type: "text",
+      text: "This tool is unavailable for the rest of this turn. Do not retry it — continue without it or use another approach.",
+    },
+  ];
+}
+
+function exactErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+type McpPublicErrorFields = {
+  errorClass: "McpOperationError";
+  errorCode: McpPublicFailureCode;
+  serverId?: string;
   status?: number;
-} {
-  const errorClass = error instanceof Error ? error.constructor.name : typeof error;
-  const raw = (error as { code?: unknown; status?: unknown } | null)?.code;
-  const status = typeof raw === "number" ? raw : undefined;
-  if (status === undefined) {
-    const altRaw = (error as { status?: unknown } | null)?.status;
-    return typeof altRaw === "number" ? { errorClass, status: altRaw } : { errorClass };
-  }
-  return { errorClass, status };
+  retryable?: boolean;
+  origin: "runtime";
+};
+
+type McpPublicFailureCode =
+  | "mcp_connect_failed"
+  | "mcp_close_failed"
+  | "mcp_transport_failed"
+  | "mcp_tools_list_failed"
+  | "mcp_tool_call_failed";
+
+function safeMcpServerIdentity(serverId: string): string {
+  return serverId.replace(/[\u0000-\u001f\u007f]/g, "_").slice(0, 128);
 }
 
-type SafeMcpTransportError = Error & {
+/** Allowlisted projection for public SDK/console telemetry; internal errors stay exact. */
+function mcpErrorFields(
+  error: unknown,
+  errorCode: McpPublicFailureCode,
+  serverId?: string,
+  options: McpTransportErrorOptions = {},
+): McpPublicErrorFields {
+  const fields: McpPublicErrorFields = {
+    errorClass: "McpOperationError",
+    errorCode,
+    origin: "runtime",
+  };
+  if (serverId !== undefined) {
+    fields.serverId = safeMcpServerIdentity(serverId);
+  }
+  try {
+    const rawStatus =
+      error && typeof error === "object"
+        ? ((error as { status?: unknown; statusCode?: unknown }).status ??
+          (error as { statusCode?: unknown }).statusCode)
+        : undefined;
+    const status = Number(rawStatus);
+    if (Number.isInteger(status) && status >= 100 && status <= 599) fields.status = status;
+  } catch {
+    // Public diagnostics are best-effort. Hostile getters/proxies must never
+    // replace the exact internal failure with a logging projection failure.
+  }
+  if (
+    isMcpRequestTimeoutError(error) ||
+    isMcpTransportConnectivityError(error) ||
+    isRawMcpTransportConnectivityError(error, options)
+  ) {
+    fields.retryable = true;
+  }
+  return fields;
+}
+
+type McpTransportError = Error & {
   status?: number;
   code?: number;
-  mcpTransportFailureKind?: "request_timeout" | "connectivity_unavailable";
+  mcpTransportFailureKind?: McpTransportFailureKind;
 };
+
+type McpTransportFailureKind = "request_timeout" | "connectivity_unavailable";
+
+type McpTransportErrorOptions = {
+  /**
+   * The failed operation was connect/tools-list for a required first-party MCP
+   * server. Those setup requests have no external side effect; the worker
+   * checkpoints any preceding model/tool truth before recovering the same turn.
+   * A rolling API replacement can briefly surface either the old route's 404 or
+   * a statusless plain transport Error.
+   */
+  recoverySafeSetup?: boolean;
+};
+
+// Lifecycle errors must cross the SDK boundary as structural safe errors while
+// the authoritative caller receives the original Error object. Keep retry
+// classification out-of-band so exact Error identity and content are unchanged.
+const mcpTransportFailureKinds = new WeakMap<object, McpTransportFailureKind>();
+
+function mcpTransportFailureKind(error: object): McpTransportFailureKind | undefined {
+  try {
+    const inline = (error as Record<string, unknown>).mcpTransportFailureKind;
+    if (inline === "request_timeout" || inline === "connectivity_unavailable") return inline;
+  } catch {
+    // Hostile getters/proxies cannot replace the exact internal failure or
+    // widen its retry classification.
+  }
+  return mcpTransportFailureKinds.get(error);
+}
 
 const MCP_CONNECTIVITY_ERROR_CODES = new Set([
   "ECONNRESET",
@@ -3754,67 +4221,175 @@ const MCP_CONNECTIVITY_ERROR_CODES = new Set([
   "ECONNREFUSED",
   "EPIPE",
 ]);
+const MCP_REQUEST_TIMEOUT_MESSAGES = new Set([
+  "Request timed out",
+  "MCP error -32001: Request timed out",
+  "Maximum total timeout exceeded",
+  "MCP error -32001: Maximum total timeout exceeded",
+]);
 
-function mcpTransportHttpStatuses(error: unknown, seen = new WeakSet<object>()): number[] {
-  if (!error || typeof error !== "object" || seen.has(error)) {
-    return [];
-  }
-  seen.add(error);
-  const record = error as Record<string, unknown>;
+const MCP_TRANSPORT_ERROR_MAX_DEPTH = 8;
+const MCP_TRANSPORT_ERROR_MAX_NODES = 32;
+const MCP_TRANSPORT_ERROR_NESTED_KEYS = ["error", "cause", "response", "data"] as const;
+
+function inspectMcpTransportError(
+  error: unknown,
+  seen = new WeakSet<object>(),
+): {
+  complete: boolean;
+  hasConnectivityCode: boolean;
+  hasConnectivityMarker: boolean;
+  hasTypedError: boolean;
+  hasRequestTimeout: boolean;
+  statuses: number[];
+} {
+  const pending: Array<{ depth: number; value: unknown }> = [{ depth: 0, value: error }];
   const statuses: number[] = [];
-  for (const value of [record.status, record.statusCode, record.code]) {
-    if (typeof value === "number" && Number.isFinite(value) && value >= 100 && value <= 599) {
-      statuses.push(value);
+  let hasConnectivityCode = false;
+  let hasConnectivityMarker = false;
+  let hasTypedError = false;
+  let hasRequestTimeout = false;
+  let inspectedNodes = 0;
+  let complete = true;
+
+  while (pending.length > 0 && inspectedNodes < MCP_TRANSPORT_ERROR_MAX_NODES) {
+    const current = pending.shift()!;
+    if (!current.value || typeof current.value !== "object" || seen.has(current.value)) {
+      continue;
+    }
+    seen.add(current.value);
+    inspectedNodes += 1;
+    const record = current.value as Record<string, unknown>;
+    let statusValues: unknown[];
+    let code: unknown;
+    let failureKind: unknown;
+    let message: unknown;
+    try {
+      statusValues = [record.status, record.statusCode, record.code];
+      code = record.code;
+      failureKind = record.mcpTransportFailureKind;
+      message = record.message;
+      if (
+        current.value instanceof Error &&
+        Object.getPrototypeOf(current.value) !== Error.prototype
+      ) {
+        hasTypedError = true;
+      }
+    } catch {
+      complete = false;
+      continue;
+    }
+    for (const value of statusValues) {
+      if (typeof value === "number" && Number.isFinite(value) && value >= 100 && value <= 599) {
+        statuses.push(value);
+      }
+    }
+    if (typeof code === "string" && MCP_CONNECTIVITY_ERROR_CODES.has(code.toUpperCase())) {
+      hasConnectivityCode = true;
+    }
+    if (failureKind === "connectivity_unavailable") {
+      hasConnectivityMarker = true;
+    }
+    const timeoutCode = typeof code === "number" ? code : statusValues[0];
+    if (
+      failureKind === "request_timeout" ||
+      (timeoutCode === -32_001 &&
+        typeof message === "string" &&
+        MCP_REQUEST_TIMEOUT_MESSAGES.has(message))
+    ) {
+      hasRequestTimeout = true;
+    }
+
+    for (const key of MCP_TRANSPORT_ERROR_NESTED_KEYS) {
+      let nested: unknown;
+      try {
+        nested = record[key];
+      } catch {
+        complete = false;
+        continue;
+      }
+      if (!nested || typeof nested !== "object" || seen.has(nested)) {
+        continue;
+      }
+      if (current.depth >= MCP_TRANSPORT_ERROR_MAX_DEPTH) {
+        complete = false;
+        continue;
+      }
+      pending.push({ depth: current.depth + 1, value: nested });
     }
   }
-  for (const key of ["error", "cause", "response", "data"]) {
-    statuses.push(...mcpTransportHttpStatuses(record[key], seen));
+
+  if (pending.length > 0) {
+    complete = false;
   }
-  return statuses;
+  return {
+    complete,
+    hasConnectivityCode,
+    hasConnectivityMarker,
+    hasTypedError,
+    hasRequestTimeout,
+    statuses,
+  };
 }
 
-function hasMcpConnectivityErrorCode(error: unknown, seen = new WeakSet<object>()): boolean {
-  if (!error || typeof error !== "object" || seen.has(error)) {
+/**
+ * Classify an allowlisted transport-connectivity meaning across MCP SDK
+ * wrappers. HTTP client failures remain authoritative and fail closed even if
+ * a nested object also carries a socket-looking code. Classification never
+ * rewrites the source diagnostic.
+ */
+function isRawMcpTransportConnectivityError(
+  error: unknown,
+  options: McpTransportErrorOptions = {},
+): boolean {
+  if (!error || typeof error !== "object") {
     return false;
   }
-  seen.add(error);
-  const record = error as Record<string, unknown>;
-  if (
-    typeof record.code === "string" &&
-    MCP_CONNECTIVITY_ERROR_CODES.has(record.code.toUpperCase())
-  ) {
+  const inspection = inspectMcpTransportError(error);
+  if (inspection.hasConnectivityMarker) {
     return true;
   }
-  return ["error", "cause", "response", "data"].some((key) =>
-    hasMcpConnectivityErrorCode(record[key], seen),
+  if (!inspection.complete) {
+    return false;
+  }
+  if (
+    inspection.statuses.some(
+      (status) =>
+        status >= 400 && status < 500 && !(options.recoverySafeSetup === true && status === 404),
+    )
+  ) {
+    return false;
+  }
+  if (inspection.statuses.some((status) => status >= 500 && status < 600)) {
+    return true;
+  }
+  if (options.recoverySafeSetup === true && inspection.statuses.includes(404)) {
+    return true;
+  }
+  if (inspection.hasConnectivityCode) {
+    return true;
+  }
+  // The MCP SDK can erase the transport's socket code while wrapping a failed
+  // first-party initialize/tools-list request. Retry only its plain statusless
+  // Error shape. Typed parser, validation, and programming errors remain
+  // terminal so a broken protocol implementation cannot masquerade as rollout
+  // unavailability.
+  let isPlainError = false;
+  try {
+    isPlainError = error instanceof Error && Object.getPrototypeOf(error) === Error.prototype;
+  } catch {
+    // A hostile proxy is not a rollout-safe plain transport Error.
+  }
+  return (
+    options.recoverySafeSetup === true &&
+    inspection.statuses.length === 0 &&
+    !inspection.hasTypedError &&
+    isPlainError
   );
 }
 
 /**
- * Preserve only an allowlisted transport-connectivity meaning across MCP SDK
- * wrappers. HTTP client failures remain authoritative and fail closed even if
- * a nested object also carries a socket-looking code. Raw messages, URLs,
- * response bodies, and arbitrary provider codes are never copied forward.
- */
-function isRawMcpTransportConnectivityError(error: unknown): boolean {
-  if (!error || typeof error !== "object") {
-    return false;
-  }
-  if ((error as Record<string, unknown>).mcpTransportFailureKind === "connectivity_unavailable") {
-    return true;
-  }
-  const statuses = mcpTransportHttpStatuses(error);
-  if (statuses.some((status) => status >= 400 && status < 500)) {
-    return false;
-  }
-  if (statuses.some((status) => status >= 500 && status < 600)) {
-    return true;
-  }
-  return hasMcpConnectivityErrorCode(error);
-}
-
-/**
- * Test only the secret-safe marker emitted by `safeMcpTransportError`. Callers
+ * Test only the typed marker emitted by `mcpTransportErrorWithRetryMetadata`. Callers
  * outside the MCP boundary must not infer MCP ownership from a generic 5xx or
  * socket-shaped provider error.
  */
@@ -3822,63 +4397,58 @@ export function isMcpTransportConnectivityError(error: unknown): boolean {
   return (
     !!error &&
     typeof error === "object" &&
-    (error as Record<string, unknown>).mcpTransportFailureKind === "connectivity_unavailable"
+    mcpTransportFailureKind(error) === "connectivity_unavailable"
   );
 }
 
 /**
- * Preserve the MCP SDK's exact request-timeout meaning without retaining or
- * exposing a raw HTTP response body. The numeric code is not sufficient:
+ * Preserve the MCP SDK's exact request-timeout meaning. The numeric code is not sufficient:
  * Streamable HTTP also uses -32001 for "Session not found" and arbitrary
  * AbortSignal reasons, so only the SDK's two owned timeout messages qualify.
  */
 export function isMcpRequestTimeoutError(error: unknown, seen = new WeakSet<object>()): boolean {
-  if (!error || typeof error !== "object") {
-    return false;
-  }
-  if (seen.has(error)) {
-    return false;
-  }
-  seen.add(error);
-  const record = error as Record<string, unknown>;
-  if (record.mcpTransportFailureKind === "request_timeout") {
-    return true;
-  }
-  const code = typeof record.code === "number" ? record.code : record.status;
-  const message = typeof record.message === "string" ? record.message : "";
-  const sdkTimeoutMessages = new Set([
-    "Request timed out",
-    "MCP error -32001: Request timed out",
-    "Maximum total timeout exceeded",
-    "MCP error -32001: Maximum total timeout exceeded",
-  ]);
-  if (code === -32_001 && sdkTimeoutMessages.has(message)) {
-    return true;
-  }
-  return ["error", "cause", "response", "data"].some((key) =>
-    isMcpRequestTimeoutError(record[key], seen),
-  );
+  return inspectMcpTransportError(error, seen).hasRequestTimeout;
 }
 
-export function safeMcpTransportError(error: unknown): SafeMcpTransportError {
-  const fields = safeMcpErrorFields(error);
-  const safeError = new Error(
-    `MCP transport operation failed (${mcpErrorReason(fields)})`,
-  ) as SafeMcpTransportError;
-  safeError.name = "McpTransportError";
-  if (fields.status !== undefined) {
-    safeError.status = fields.status;
-    safeError.code = fields.status;
-  }
+export function mcpTransportErrorWithRetryMetadata(
+  error: unknown,
+  options: McpTransportErrorOptions = {},
+): McpTransportError {
+  const classified =
+    error instanceof Error
+      ? (error as McpTransportError)
+      : (new Error(exactErrorMessage(error), { cause: error }) as McpTransportError);
   if (isMcpRequestTimeoutError(error)) {
-    safeError.mcpTransportFailureKind = "request_timeout";
-  } else if (isRawMcpTransportConnectivityError(error)) {
-    safeError.mcpTransportFailureKind = "connectivity_unavailable";
+    mcpTransportFailureKinds.set(classified, "request_timeout");
+  } else if (isRawMcpTransportConnectivityError(error, options)) {
+    mcpTransportFailureKinds.set(classified, "connectivity_unavailable");
   }
-  return safeError;
+  return classified;
 }
 
-function safeMcpTransportLogger(serverId: string) {
+/**
+ * Compatibility alias retained for the rollout-recovery API introduced on
+ * main. Despite the historical name, internal callers receive exact content;
+ * public lifecycle logging uses `publicMcpLifecycleError` instead.
+ */
+export function safeMcpTransportError(
+  error: unknown,
+  options: McpTransportErrorOptions = {},
+): McpTransportError {
+  return mcpTransportErrorWithRetryMetadata(error, options);
+}
+
+function exactMcpLifecycleError(error: unknown, options: McpTransportErrorOptions = {}): Error {
+  const exactError = error instanceof Error ? error : new Error(String(error), { cause: error });
+  if (isMcpRequestTimeoutError(error)) {
+    mcpTransportFailureKinds.set(exactError, "request_timeout");
+  } else if (isRawMcpTransportConnectivityError(error, options)) {
+    mcpTransportFailureKinds.set(exactError, "connectivity_unavailable");
+  }
+  return exactError;
+}
+
+function mcpTransportLogger(serverId: string, options: McpTransportErrorOptions = {}) {
   const logFailure = (_message: string, ...args: unknown[]) => {
     let error: unknown;
     for (let index = args.length - 1; index >= 0; index -= 1) {
@@ -3887,10 +4457,10 @@ function safeMcpTransportLogger(serverId: string) {
         break;
       }
     }
-    console.warn("[mcp] transport operation failed", {
-      serverId,
-      ...safeMcpErrorFields(error),
-    });
+    console.warn(
+      "[mcp] transport operation failed",
+      mcpErrorFields(error, "mcp_transport_failed", serverId, options),
+    );
   };
   return {
     namespace: "opengeni:mcp-transport",
@@ -3900,12 +4470,6 @@ function safeMcpTransportLogger(serverId: string) {
     dontLogModelData: true,
     dontLogToolData: true,
   };
-}
-
-// Compose the safe model/log reason string ("StreamableHTTPError 401", or just
-// the class when no numeric status is available). Never carries the raw body.
-function mcpErrorReason(fields: { errorClass: string; status?: number }): string {
-  return fields.status === undefined ? fields.errorClass : `${fields.errorClass} ${fields.status}`;
 }
 
 async function mcpServerRequestInit(
@@ -4034,25 +4598,55 @@ function codexAppsAuthFetch(
   options: PrepareToolsOptions,
 ): FetchLike {
   return async (input, init) => {
+    const request = await mcpRequestReplayInfo(input, init);
     const auth = options.codexAppsAuth;
     if (!auth) {
+      await publishCodexAppsAuthNeeded(options, request, "missing_connection");
       throw new Error("Codex Apps has no explicit workspace designation");
     }
-    return await auth.withAuthorization(async (token) => {
-      const headers: Record<string, string> = {
-        authorization: `Bearer ${token.accessToken}`,
-        originator: CODEX_ORIGINATOR,
-        "user-agent": `${CODEX_ORIGINATOR}/${auth.clientVersion}`,
-        version: auth.clientVersion,
-      };
-      if (token.chatgptAccountId) headers["chatgpt-account-id"] = token.chatgptAccountId;
-      if (settings.codexProductSku) headers["X-OpenAI-Product-Sku"] = settings.codexProductSku;
-      return await baseFetch(
-        fetchInputForAttempt(input),
-        withConnectionHeaders(input, init, headers),
+    let token: { accessToken: string; chatgptAccountId: string | null };
+    try {
+      token = await auth.withAuthorization(async (snapshot) => snapshot);
+    } catch (error) {
+      await publishCodexAppsAuthNeeded(options, request, "refresh_failed");
+      throw error;
+    }
+    const headers: Record<string, string> = {
+      authorization: `Bearer ${token.accessToken}`,
+      originator: CODEX_ORIGINATOR,
+      "user-agent": `${CODEX_ORIGINATOR}/${auth.clientVersion}`,
+      version: auth.clientVersion,
+    };
+    if (token.chatgptAccountId) headers["chatgpt-account-id"] = token.chatgptAccountId;
+    if (settings.codexProductSku) headers["X-OpenAI-Product-Sku"] = settings.codexProductSku;
+    const response = await baseFetch(
+      fetchInputForAttempt(input),
+      withConnectionHeaders(input, init, headers),
+    );
+    if (response.status === 401 || response.status === 403) {
+      await publishCodexAppsAuthNeeded(
+        options,
+        request,
+        response.status === 403 ? "insufficient_scope" : "expired",
       );
-    });
+    }
+    return response;
   };
+}
+
+async function publishCodexAppsAuthNeeded(
+  options: PrepareToolsOptions,
+  request: McpRequestReplayInfo,
+  reason: ToolAuthNeededPayload["reason"],
+): Promise<void> {
+  await publishAuthNeeded(options, {
+    serverId: CODEX_APPS_MCP_SERVER_ID,
+    toolName: request.toolName ?? null,
+    providerDomain: new URL(CODEX_APPS_MCP_URL).hostname,
+    provider: "codex_apps",
+    reason,
+    ...(options.subjectId ? { subjectId: options.subjectId } : {}),
+  });
 }
 
 // The first-party MCP permission set signed into a worker's delegated token
@@ -4158,10 +4752,66 @@ export function prefixedMcpToolName(registryId: string, toolName: string): strin
   return sharedPrefixedMcpToolName(registryId, toolName);
 }
 
-class PrefixedMcpServer implements MCPServer {
+const MCP_SDK_LIFECYCLE_NAME = "opengeni-mcp-lifecycle";
+
+type McpLifecycleFailure = {
+  phase: McpLifecyclePhase;
+  publicError: Error;
+  exactError: Error;
+};
+
+function publicMcpLifecycleError(
+  error: Error,
+  phase: McpLifecyclePhase,
+  serverId: string,
+  options: McpTransportErrorOptions = {},
+): Error {
+  const errorCode = phase === "connect" ? "mcp_connect_failed" : "mcp_close_failed";
+  const fields = mcpErrorFields(error, errorCode, serverId, options);
+  const lifecycleError = new Error(`MCP lifecycle ${phase} failed`) as Error & {
+    code?: string;
+    serverId?: string;
+    status?: number;
+    retryable?: boolean;
+    origin?: string;
+  };
+  lifecycleError.name = "McpLifecycleError";
+  lifecycleError.code = fields.errorCode;
+  if (fields.serverId !== undefined) lifecycleError.serverId = fields.serverId;
+  if (fields.status !== undefined) lifecycleError.status = fields.status;
+  if (fields.retryable !== undefined) lifecycleError.retryable = fields.retryable;
+  lifecycleError.origin = fields.origin;
+  return lifecycleError;
+}
+
+function logPublicMcpLifecycleFailure(error: Error): void {
+  // Agents SDK 0.14.3 deliberately reduces tool errors to their JavaScript
+  // type when tool-data logging is disabled. Emit our already-sanitized error
+  // once at the boundary so operators retain stable code/server/status fields
+  // without exposing the exact transport failure returned to the caller.
+  const structured = error as Error & {
+    code?: string;
+    serverId?: string;
+    status?: number;
+    retryable?: boolean;
+    origin?: string;
+  };
+  console.warn("[mcp] lifecycle operation failed", error, {
+    name: error.name,
+    ...(structured.code === undefined ? {} : { code: structured.code }),
+    ...(structured.serverId === undefined ? {} : { serverId: structured.serverId }),
+    ...(structured.status === undefined ? {} : { status: structured.status }),
+    ...(structured.retryable === undefined ? {} : { retryable: structured.retryable }),
+    ...(structured.origin === undefined ? {} : { origin: structured.origin }),
+  });
+}
+
+/** @internal Exported for exact SDK-boundary conformance tests. */
+export class PrefixedMcpServer implements MCPServer {
   readonly cacheToolsList: boolean;
   readonly name: string;
   readonly prefix: string;
+  readonly registryId: string;
   private readonly allowedTools: Set<string> | undefined;
   // Best-effort servers (optional refs, connectionRef-backed capability MCPs,
   // codex_apps) must never fail a turn: a tools/list throw degrades to zero
@@ -4171,6 +4821,7 @@ class PrefixedMcpServer implements MCPServer {
   private loggedListToolsFailure = false;
   private listedToolSchemaTokens = 0;
   private modelToolSchemaAccountingDeferred = false;
+  private readonly lifecycleFailures: Partial<Record<McpLifecyclePhase, McpLifecycleFailure>> = {};
 
   constructor(
     private readonly inner: MCPServer,
@@ -4179,25 +4830,55 @@ class PrefixedMcpServer implements MCPServer {
     bestEffort = false,
     private readonly aggregateToolBudget?: McpAggregateToolListBudget,
     private readonly aggregateSourceId = registryId,
+    private readonly recoverySafeSetup = false,
   ) {
-    this.name = registryId;
+    this.registryId = registryId;
+    // The SDK uses `name` for cache keys, traces, and lifecycle diagnostics.
+    // Keep it unique per prepared registry server while never including URLs,
+    // headers, provider bodies, or other credential-bearing data.
+    this.name = `${MCP_SDK_LIFECYCLE_NAME}:${safeMcpServerIdentity(registryId)}`;
     this.prefix = prefixedMcpToolName(registryId, "");
     this.cacheToolsList = inner.cacheToolsList;
     this.allowedTools = allowedTools ? new Set(allowedTools) : undefined;
     this.bestEffort = bestEffort;
   }
 
-  connect(): Promise<void> {
-    return this.inner.connect().catch((error: unknown) => {
-      // connectMcpServers has its own global logger and logs the thrown Error.
-      // Never let a raw transport response body cross that logging boundary.
-      throw safeMcpTransportError(error);
-    });
+  async connect(): Promise<void> {
+    try {
+      await this.inner.connect();
+      delete this.lifecycleFailures.connect;
+    } catch (error) {
+      // The SDK logs its rejected Error directly. Keep exact internal truth
+      // out-of-band and reject only a structural public lifecycle error.
+      const exactError = exactMcpLifecycleError(error, {
+        recoverySafeSetup: this.recoverySafeSetup,
+      });
+      const publicError = publicMcpLifecycleError(exactError, "connect", this.registryId, {
+        recoverySafeSetup: this.recoverySafeSetup,
+      });
+      this.lifecycleFailures.connect = { phase: "connect", publicError, exactError };
+      logPublicMcpLifecycleFailure(publicError);
+      throw publicError;
+    }
   }
 
-  close(): Promise<void> {
+  async close(): Promise<void> {
     this.releaseAggregateBudget();
-    return this.inner.close();
+    try {
+      await this.inner.close();
+      delete this.lifecycleFailures.close;
+    } catch (error) {
+      const exactError = exactMcpLifecycleError(error);
+      const publicError = publicMcpLifecycleError(exactError, "close", this.registryId);
+      this.lifecycleFailures.close = { phase: "close", publicError, exactError };
+      logPublicMcpLifecycleFailure(publicError);
+      throw publicError;
+    }
+  }
+
+  unwrapLifecycleError(error: Error, phase: McpLifecyclePhase): Error | undefined {
+    const failure = this.lifecycleFailures[phase];
+    return failure?.publicError === error ? failure.exactError : undefined;
   }
 
   releaseAggregateBudget(): void {
@@ -4211,7 +4892,7 @@ class PrefixedMcpServer implements MCPServer {
         .filter((tool) => this.isAllowed(tool.name))
         .map((tool) => ({
           ...tool,
-          name: prefixedMcpToolName(this.name, tool.name),
+          name: prefixedMcpToolName(this.registryId, tool.name),
         }));
       const bounded = (this.aggregateToolBudget?.replace(this.aggregateSourceId, exposed) ??
         assertMcpToolListWithinBounds(exposed)) as RuntimeMcpTool[];
@@ -4221,7 +4902,9 @@ class PrefixedMcpServer implements MCPServer {
       // A REQUIRED server's tools/list failure is fatal (fail-loud default): the
       // caller explicitly requested it, so its absence must fail the turn.
       if (!this.bestEffort) {
-        throw safeMcpTransportError(error);
+        throw mcpTransportErrorWithRetryMetadata(error, {
+          recoverySafeSetup: this.recoverySafeSetup,
+        });
       }
       // Best-effort isolation. The SDK's run-time getAllMcpTools calls listTools
       // OUTSIDE the connect-time connectMcpServers({ strict: false }) guard, so a
@@ -4229,20 +4912,17 @@ class PrefixedMcpServer implements MCPServer {
       // expired/failed connection credential surfacing as a StreamableHTTP
       // "authentication required" 401, a provider 5xx, a network blip) — would
       // otherwise take down an unrelated turn. Drop this server's tools for the
-      // turn instead. An auth failure additionally published tool.auth_needed via
-      // the connection-broker fetch before the throw (so that actionable signal
-      // is preserved), but a non-auth failure has NO such signal — the structured
-      // warn below is its only visibility, so a chronically-dead optional
-      // integration surfaces in logs/metrics rather than being silently swallowed.
+      // turn instead. Optional setup-time auth is intentionally non-conversational;
+      // only a concrete tools/call failure publishes tool.auth_needed. A non-auth
+      // failure has no such signal, so the structured warn below is its visibility
+      // when a chronically-dead optional integration is skipped.
       // Warn once per degraded server per turn (instances are per-turn), so a
       // re-list across model turns does not spam the log.
       if (!this.loggedListToolsFailure) {
         this.loggedListToolsFailure = true;
         console.warn(
           "[mcp] best-effort server tools/list failed; its tools are unavailable this turn",
-          // Safe surface only (class + numeric status), never the raw error
-          // message/response body — a broker 401/403 body can echo request detail.
-          { serverId: this.name, ...safeMcpErrorFields(error) },
+          mcpErrorFields(error, "mcp_tools_list_failed", this.registryId),
         );
       }
       this.releaseAggregateBudget();
@@ -4271,7 +4951,7 @@ class PrefixedMcpServer implements MCPServer {
   ): Promise<any> {
     const unprefixed = this.unprefixToolName(toolName);
     if (!this.isAllowed(unprefixed)) {
-      throw new Error(`MCP tool ${unprefixed} is not allowed for server ${this.name}`);
+      throw new Error(`MCP tool ${unprefixed} is not allowed for server ${this.registryId}`);
     }
     try {
       const output = await this.inner.callTool(unprefixed, args, meta);
@@ -4285,7 +4965,7 @@ class PrefixedMcpServer implements MCPServer {
       if (isToolOutcomeUncertainMcpError(error)) {
         return {
           isError: true,
-          content: [{ type: "text", text: MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.message }],
+          content: mcpToolOutcomeUncertainContent(error),
         };
       }
       // The connection broker's auth-needed short-circuit arrives as a thrown
@@ -4313,19 +4993,13 @@ class PrefixedMcpServer implements MCPServer {
       // already published upstream by the connection-broker fetch before the
       // throw, so degrading here never silences it.
       if (this.bestEffort) {
-        const fields = safeMcpErrorFields(error);
         console.warn(
           "[mcp] best-effort server tool call failed; returning an unavailable result for this turn",
-          { serverId: this.name, toolName: unprefixed, ...fields },
+          mcpErrorFields(error, "mcp_tool_call_failed", this.registryId),
         );
         return {
           isError: true,
-          content: [
-            {
-              type: "text",
-              text: mcpToolUnavailableMessage(mcpErrorReason(fields)),
-            },
-          ],
+          content: mcpToolUnavailableContent(error),
         };
       }
       throw error;
@@ -4341,7 +5015,7 @@ class PrefixedMcpServer implements MCPServer {
       listResources?: (params?: Record<string, unknown>) => Promise<any>;
     };
     if (!resourcesServer.listResources) {
-      throw new Error(`MCP server ${this.name} does not support resources`);
+      throw new Error(`MCP server ${this.registryId} does not support resources`);
     }
     return await resourcesServer.listResources(params);
   }
@@ -4351,7 +5025,7 @@ class PrefixedMcpServer implements MCPServer {
       listResourceTemplates?: (params?: Record<string, unknown>) => Promise<any>;
     };
     if (!resourcesServer.listResourceTemplates) {
-      throw new Error(`MCP server ${this.name} does not support resource templates`);
+      throw new Error(`MCP server ${this.registryId} does not support resource templates`);
     }
     return await resourcesServer.listResourceTemplates(params);
   }
@@ -4361,7 +5035,7 @@ class PrefixedMcpServer implements MCPServer {
       readResource?: (uri: string) => Promise<any>;
     };
     if (!resourcesServer.readResource) {
-      throw new Error(`MCP server ${this.name} does not support resource reads`);
+      throw new Error(`MCP server ${this.registryId} does not support resource reads`);
     }
     return await resourcesServer.readResource(uri);
   }
@@ -4372,7 +5046,7 @@ class PrefixedMcpServer implements MCPServer {
 
   private unprefixToolName(toolName: string): string {
     if (!toolName.startsWith(this.prefix)) {
-      throw new Error(`MCP tool ${toolName} is missing expected ${this.name} prefix`);
+      throw new Error(`MCP tool ${toolName} is missing expected ${this.registryId} prefix`);
     }
     return toolName.slice(this.prefix.length);
   }
@@ -4385,75 +5059,21 @@ export type PrepareInputOptions = {
   sandboxClient?: unknown;
 };
 
-type SerializedGeneratedRunItem = {
-  type?: unknown;
-  rawItem?: unknown;
-};
-
 /**
- * Restore an interrupted SDK run without asking today's tool-search callback to
- * reproduce yesterday's disclosure. The Agents SDK otherwise executes every
- * historical client tool_search while deserializing and rejects the saved state
- * when the current catalogue differs.
- *
- * The temporary JSON copy hides only the historical output schemas from that SDK
- * rehydration hook. The returned RunState receives the exact saved raw items
- * again before it is observed or serialized; execution remains `client`, the
- * durable blob is untouched, and no search is rerun.
+ * Restore immutable provider history while deriving executable tools only from
+ * the current authorized agent catalog. Historical client tool-search callbacks
+ * are never rerun: they may depend on a changed external catalog and are not an
+ * authority for the resumed process. The SDK still rebinds exact routed tool
+ * identities that remain configured, while missing historical tools stay inert
+ * history and any actually pending unresolved tool fails closed.
  */
 export async function restoreInterruptedRunState(
   agent: Agent<any, any>,
   serializedRunState: string,
 ): Promise<RunState<any, any>> {
-  let parsed: { generatedItems?: SerializedGeneratedRunItem[] };
-  try {
-    parsed = JSON.parse(serializedRunState) as {
-      generatedItems?: SerializedGeneratedRunItem[];
-    };
-  } catch {
-    // Preserve the SDK's established typed parse error.
-    return await RunState.fromString(agent, serializedRunState);
-  }
-  if (!parsed || typeof parsed !== "object") {
-    return await RunState.fromString(agent, serializedRunState);
-  }
-  const generatedItems = parsed.generatedItems;
-  if (!Array.isArray(generatedItems)) {
-    return await RunState.fromString(agent, serializedRunState);
-  }
-
-  const savedOutputs = new Map<number, unknown>();
-  for (const [index, item] of generatedItems.entries()) {
-    if (
-      item?.type !== "tool_search_output_item" ||
-      !item.rawItem ||
-      typeof item.rawItem !== "object"
-    ) {
-      continue;
-    }
-    const rawItem = item.rawItem as Record<string, unknown>;
-    if (rawItem.execution === "server" || !Array.isArray(rawItem.tools)) {
-      continue;
-    }
-    savedOutputs.set(index, rawItem);
-    item.rawItem = { ...rawItem, tools: [] };
-  }
-
-  if (savedOutputs.size === 0) {
-    return await RunState.fromString(agent, serializedRunState);
-  }
-
-  const state = await RunState.fromString(agent, JSON.stringify(parsed));
-  const restoredItems = (
-    state as unknown as {
-      _generatedItems: Array<{ rawItem?: unknown }>;
-    }
-  )._generatedItems;
-  for (const [index, rawItem] of savedOutputs) {
-    if (!restoredItems[index]) throw new Error("RunState tool_search output index changed");
-    restoredItems[index].rawItem = rawItem;
-  }
-  return state;
+  return await RunState.fromString(agent, serializedRunState, {
+    clientToolSearchRehydration: "preserve_history",
+  });
 }
 
 export async function prepareRunInput(
@@ -4520,8 +5140,12 @@ export async function prepareRunInput(
     );
   }
   const compatibleRunState = repairSerializedRunStateExposedPorts(input.serializedRunState);
-  for (const repair of compatibleRunState.repairs) {
-    console.warn("[runtime] repaired incompatible RunState exposedPorts", repair);
+  if (compatibleRunState.repairs.length > 0) {
+    console.warn("[runtime] repaired incompatible RunState exposedPorts", {
+      errorClass: "RunStateCompatibilityError",
+      errorCode: "incompatible_exposed_ports",
+      origin: "runtime",
+    });
   }
   const state = await restoreInterruptedRunState(agent, compatibleRunState.serializedRunState);
   const interruptions = state.getInterruptions();
@@ -4550,6 +5174,12 @@ export type RunAgentStreamOptions = {
   sandboxClient?: unknown;
   sandboxEnvironment?: Record<string, string>;
   onRuntimeEvent?: (event: NormalizedRuntimeEvent) => Promise<void> | void;
+  /**
+   * Called after a newly created/resumed SDK-owned sandbox has completed its
+   * platform setup, but before the session is released to the first agent
+   * operation. Hosts use this for durable, session-scoped artifact hydration.
+   */
+  onSandboxSessionReady?: (session: SandboxSessionLike) => Promise<void> | void;
   contextCompactionSignal?: () => ProviderContextTokenSignal | null | undefined;
   contextCompactionRequested?: () => boolean | Promise<boolean>;
   // Host-managed git credential renewal registration. Called only after the
@@ -4675,16 +5305,21 @@ export const TOOLSPACE_PROGRAMMATIC_DIRECTIVE =
  * fragility without adding information. Pairing fields (`call_id`/`callId`)
  * are separate properties and stay untouched; items are cloned, never mutated.
  */
-export const stripProviderItemIdsFilter: CallModelInputFilter = ({ modelData }) => ({
-  ...modelData,
-  input: modelData.input.map((item) => {
-    if (item && typeof item === "object" && "id" in item) {
-      const { id: _id, ...rest } = item as Record<string, unknown>;
-      return rest as AgentInputItem;
-    }
-    return item;
-  }),
-});
+export const stripProviderItemIdsFilter: CallModelInputFilter = ({ modelData }) => {
+  let projected: AgentInputItem[] | null = null;
+  for (const [index, item] of modelData.input.entries()) {
+    const next = stripProviderItemId(item);
+    if (next !== item && projected === null) projected = modelData.input.slice(0, index);
+    projected?.push(next);
+  }
+  return projected ? { ...modelData, input: projected } : modelData;
+};
+
+function stripProviderItemId(item: AgentInputItem): AgentInputItem {
+  if (!item || typeof item !== "object" || !("id" in item)) return item;
+  const { id: _id, ...rest } = item as Record<string, unknown>;
+  return rest as AgentInputItem;
+}
 
 /**
  * callModelInputFilter that normalizes every `computer_call` carrying BOTH
@@ -4693,7 +5328,7 @@ export const stripProviderItemIdsFilter: CallModelInputFilter = ({ modelData }) 
  * both with `400 Computer call input must include exactly one of `action` or
  * `actions``; and (live-proven against gpt-5.6-sol's GA computer tool) it also
  * rejects the `action`-only form, accepting ONLY the batched plural `actions`.
- * The SDK 0.11.6 schema allows both, so a freshly-emitted
+ * The SDK 0.14.3 schema allows both, so a freshly-emitted
  * screenshot call carries the redundant pair. This filter runs before EVERY
  * model call — the turn-start history replay AND every mid-turn follow-up — so
  * it covers the just-emitted (non-replayed) computer_call on the same turn,
@@ -4707,19 +5342,29 @@ export const normalizeComputerCallsFilter: CallModelInputFilter = ({ modelData }
   ) as unknown as AgentInputItem[],
 });
 
+/** Keep persisted generic-dispatch internals out of every provider request. */
+export const restoreLazyToolProviderHistoryFilter: CallModelInputFilter = ({ modelData }) => {
+  const input = restoreGenericDispatchHistoryItems(
+    modelData.input as unknown as Array<Record<string, unknown>>,
+  );
+  return input === modelData.input
+    ? modelData
+    : { ...modelData, input: input as unknown as AgentInputItem[] };
+};
+
 /**
  * Canonical Codex-style tool-result bound at the final model-input seam. The
  * identical pure normalizer also runs before conversation rows are persisted,
  * so this is a live-turn defense rather than a request-only alternate history.
  */
 export function boundModelToolOutputsFilterForSettings(settings: Settings): CallModelInputFilter {
-  return ({ modelData }) => ({
-    ...modelData,
-    input: boundModelToolOutputItems(
-      modelData.input as unknown as Array<Record<string, unknown>>,
-      settings.modelToolOutputTruncationTokens,
-    ) as unknown as AgentInputItem[],
-  });
+  return memoizedInputItemProjectionFilter(
+    (item) =>
+      boundModelToolOutputItem(
+        item as unknown as Record<string, unknown>,
+        settings.modelToolOutputTruncationTokens,
+      ) as unknown as AgentInputItem,
+  );
 }
 
 function estimateAgentToolSchemaTokens(agent: Agent<any, any>): number {
@@ -4757,18 +5402,16 @@ export function contextRobustnessFilterForSettings(
   const thresholdTokens = compactionThresholdTokens(settings);
   let previousRequest: {
     revision: number;
-    footprint: CompleteModelInputFootprint;
+    instructionsTokens: number;
+    toolSchemaTokens: number;
   } | null = null;
   let requestRevision = 0;
   return async ({ modelData, agent }) => {
     const input = modelData.input;
     if (options.throwOnCompactionNeeded) {
       const reported = options.contextCompactionSignal?.();
-      const current: CompleteModelInputFootprint = {
-        input: input as unknown as Array<Record<string, unknown>>,
-        instructionsTokens: estimateSerializedValueTokens(modelData.instructions ?? ""),
-        toolSchemaTokens: estimateAgentToolSchemaTokens(agent),
-      };
+      const instructionsTokens = estimateSerializedValueTokens(modelData.instructions ?? "");
+      const toolSchemaTokens = estimateAgentToolSchemaTokens(agent);
       // Stream consumption can lag the SDK's background model loop. A provider
       // usage signal is safe only when its response revision belongs to the
       // immediately preceding request. Never attach a delayed response count to
@@ -4778,33 +5421,44 @@ export function contextRobustnessFilterForSettings(
         reported &&
         previousRequest &&
         reported.revision === previousRequest.revision &&
-        hasModelGeneratedItem(current.input)
+        hasModelGeneratedItem(input as unknown as Array<Record<string, unknown>>)
           ? reported
           : null;
-      const estimate = estimateCompleteModelInput({
-        current,
-        provider: boundProvider,
-        providerRequestFootprint: boundProvider ? (previousRequest?.footprint ?? null) : null,
-      });
-      const signalTokens = estimate.tokens;
-      previousRequest = { revision: ++requestRevision, footprint: current };
+      // Without an exact provider response bound to the immediately preceding
+      // request, do not turn a whole-request approximation into a compaction
+      // decision. Let the provider accept the request or return its typed
+      // context-window error, which the worker already compacts and retries.
+      const signalTokens = boundProvider
+        ? (estimateCompleteModelInputTokens({
+            currentInput: input as unknown as Array<Record<string, unknown>>,
+            currentInstructionsTokens: instructionsTokens,
+            currentToolSchemaTokens: toolSchemaTokens,
+            provider: boundProvider,
+            previousRequest: previousRequest!,
+          }) ?? 0)
+        : 0;
+      previousRequest = {
+        revision: ++requestRevision,
+        instructionsTokens,
+        toolSchemaTokens,
+      };
       if (await options.contextCompactionRequested?.()) {
         throw new CompactionNeededError({
           signalTokens,
           thresholdTokens,
-          signalSource: boundProvider ? "provider" : "estimate",
+          signalSource: boundProvider ? "provider" : "operator",
           trigger: "operator",
         });
       }
-      if (signalTokens >= thresholdTokens) {
+      if (boundProvider && signalTokens >= thresholdTokens) {
         throw new CompactionNeededError({
           signalTokens,
           thresholdTokens,
-          signalSource: boundProvider ? "provider" : "estimate",
+          signalSource: "provider",
         });
       }
     }
-    return { ...modelData, input };
+    return modelData.input === input ? modelData : { ...modelData, input };
   };
 }
 
@@ -4822,7 +5476,46 @@ function composeCallModelInputFilters(filters: CallModelInputFilter[]): CallMode
   };
 }
 
-const IMAGE_CONTENT_TYPES = new Set(["image", "input_image", "image_url", "computer_screenshot"]);
+/**
+ * Memoize immutable protocol-item projections for one run. The SDK rebuilds the
+ * input array before each call but reuses item identities; caching by identity
+ * avoids cloning/bounding the whole historical prefix hundreds of times while
+ * still returning a fresh array only when at least one item differs on wire.
+ */
+function memoizedInputItemProjectionFilter(
+  project: (item: AgentInputItem) => AgentInputItem,
+): CallModelInputFilter {
+  const cache = new WeakMap<object, AgentInputItem>();
+  return ({ modelData }) => {
+    let projected: AgentInputItem[] | null = null;
+    for (const [index, item] of modelData.input.entries()) {
+      let next = item;
+      if (item && typeof item === "object") {
+        const cached = cache.get(item);
+        if (cached) {
+          next = cached;
+        } else {
+          next = project(item);
+          cache.set(item, next);
+        }
+      }
+      if (next !== item && projected === null) projected = modelData.input.slice(0, index);
+      projected?.push(next);
+    }
+    return projected ? { ...modelData, input: projected } : modelData;
+  };
+}
+
+const IMAGE_CONTENT_TYPES = new Set([
+  "image",
+  "input_image",
+  "image_url",
+  "computer_screenshot",
+  // Compact durable marker used for a direct function-image result before
+  // attempt-local artifact materialization. Text-only wires project it out
+  // without reading the retained object back into RAM.
+  "retained_artifact",
+]);
 const FILE_CONTENT_TYPES = new Set(["file", "input_file"]);
 const IMAGE_OMITTED_TEXT =
   "[Image content omitted because the selected model does not support image input.]";
@@ -5047,15 +5740,23 @@ export function callModelInputFilterForSettings(
   settings: Settings,
   options: ContextRobustnessFilterOptions = {},
 ): CallModelInputFilter | undefined {
-  const filters: CallModelInputFilter[] = [
-    normalizeComputerCallsFilter,
+  return composeCallModelInputFilters([
+    baseModelInputFilterForSettings(settings),
     boundModelToolOutputsFilterForSettings(settings),
-  ];
-  if (settings.openaiProviderItemIds === "strip") {
-    filters.push(stripProviderItemIdsFilter);
-  }
-  filters.push(contextRobustnessFilterForSettings(settings, options));
-  return composeCallModelInputFilters(filters);
+    contextRobustnessFilterForSettings(settings, options),
+  ]);
+}
+
+/** Rules that normalize history but do not impose final bounds/accounting. */
+function baseModelInputFilterForSettings(settings: Settings): CallModelInputFilter {
+  const stripProviderIds = settings.openaiProviderItemIds === "strip";
+  return memoizedInputItemProjectionFilter((source) => {
+    let item = restoreGenericDispatchHistoryItem(source);
+    item = normalizeComputerCallAction(
+      item as unknown as Record<string, unknown>,
+    ) as unknown as AgentInputItem;
+    return stripProviderIds ? stripProviderItemId(item) : item;
+  });
 }
 
 export async function runAgentStream(
@@ -5200,7 +5901,7 @@ export async function runAgentStream(
     );
     const ownedFilter = composeCallModelInputFilters(
       [
-        callModelInputFilterForSettings(settings),
+        baseModelInputFilterForSettings(settings),
         genesisTitleInputFilter,
         overrides.callModelInputFilter,
         // A caller filter may synthesize model input. Re-apply the idempotent
@@ -5226,6 +5927,8 @@ export async function runAgentStream(
     const ownedRunOptions: Parameters<typeof run>[2] = {
       stream: true,
       maxTurns: settings.agentMaxModelCallsPerTurn,
+      historyOwnership: "external",
+      modelResponseRetention: "last",
       callModelInputFilter: ownedFilter,
       ...(overrides.signal ? { signal: overrides.signal } : {}),
     };
@@ -5234,7 +5937,7 @@ export async function runAgentStream(
       session: agentSession,
       ...(sessionState ? { sessionState } : {}),
     } as SandboxRunConfig;
-    return await runScopedRunner(settings).run(agent, prepared.input, ownedRunOptions);
+    return await runScopedRunner(settings, agent).run(agent, prepared.input, ownedRunOptions);
   }
 
   const rawClient = overrides.sandboxClient ?? createSandboxClient(settings, environment);
@@ -5274,7 +5977,7 @@ export async function runAgentStream(
   const gitCredentialBindings = gitCredentialBindingsForAgent(agent);
   const toolspaceTokenSeed = toolspaceTokenSeedForAgent(agent);
   const legacyRigSetup = rigSetupDescriptorForAgent(agent);
-  const client = toolspaceClient
+  const lifecycleClient = toolspaceClient
     ? withSandboxLifecycleHooks(
         toolspaceClient,
         [
@@ -5305,16 +6008,20 @@ export async function runAgentStream(
         },
       )
     : undefined;
+  const client =
+    lifecycleClient && overrides.onSandboxSessionReady
+      ? withSandboxSessionReady(lifecycleClient, overrides.onSandboxSessionReady)
+      : lifecycleClient;
   const sandboxSessionState = prepared.sandboxSessionState;
   // Apply the built-in per-call filters (computer-call normalization, optional
   // provider-id stripping, output bounds), then any per-turn filter, the model's
   // modality projection, and finally context accounting over the exact payload
-  // that can reach the provider. The SDK invokes filters on a deep request clone;
-  // OpenGeni does not pass an SDK session here and reconciles durable conversation
-  // truth from the untouched run-state history.
+  // that can reach the provider. External ownership gives the SDK a borrowed,
+  // immutable history view; every filter below is copy-on-write. OpenGeni does not
+  // pass an SDK session and reconciles durable truth from the untouched input.
   const callModelInputFilter = composeCallModelInputFilters(
     [
-      callModelInputFilterForSettings(settings),
+      baseModelInputFilterForSettings(settings),
       genesisTitleInputFilter,
       overrides.callModelInputFilter,
       boundModelToolOutputsFilterForSettings(settings),
@@ -5335,6 +6042,8 @@ export async function runAgentStream(
   const runOptions: Parameters<typeof run>[2] = {
     stream: true,
     maxTurns: settings.agentMaxModelCallsPerTurn,
+    historyOwnership: "external",
+    modelResponseRetention: "last",
     // Built-in per-call guard chain: normalize computer calls, optionally strip
     // provider ids, trim to the input budget on the client-compaction path, and
     // raise the proactive compaction signal. This runs for turn-start replay AND
@@ -5348,7 +6057,7 @@ export async function runAgentStream(
       ...(sandboxSessionState ? { sessionState: sandboxSessionState } : {}),
     } as SandboxRunConfig;
   }
-  return await runScopedRunner(settings).run(agent, prepared.input, runOptions);
+  return await runScopedRunner(settings, agent).run(agent, prepared.input, runOptions);
 }
 
 function appendSandboxFileDownloadFailureNote(
@@ -5389,11 +6098,18 @@ function appendSandboxFileDownloadFailureNote(
  * Runner inherits the SDK's default config for everything else, identical to the
  * default runner. setDefaultModelProvider remains only as a boot-time fallback.
  */
-function runScopedRunner(settings: Settings): Runner {
+function runScopedRunner(settings: Settings, agent: Agent<any, any>): Runner {
+  const baseProvider = new MultiProviderModelProvider(settings);
+  const lazyRuntime = lazyToolRuntimeForAgent(agent);
   return new Runner({
-    modelProvider: new MultiProviderModelProvider(settings),
+    modelProvider: lazyRuntime
+      ? new LazyToolModelProvider(baseProvider, lazyRuntime)
+      : baseProvider,
   });
 }
+
+export { restoreGenericDispatchHistoryItems } from "./lazy-tool-transport";
+export type { LazyToolTransport } from "./lazy-tool-transport";
 
 export { MaxTurnsExceededError } from "@openai/agents";
 
@@ -5714,7 +6430,7 @@ export async function pinProvidedSessionManifestEnvironment(
  * refactor for the eager path: same order, same gates, same idempotency
  * (clone skips a materialized tree, token seed overwrites — the desired per-turn
  * refresh, az login is idempotent). The connected-machine (selfhosted) branch
- * keeps platform setup OFF the user's real box and seeds ONLY the toolspace token.
+ * runs no platform setup against the user's real machine.
  *
  * `gitTokenSeedsOverride` lets the lazy provisioner pass its own freshly-minted
  * run-scoped provider tokens (minted at establish time, not turn start);
@@ -5798,17 +6514,6 @@ export async function runOwnedSandboxSetup(
   // this keeps az login off it too).
   if (agentActiveSandboxBackend.get(agent) !== "selfhosted") {
     await runBeforeAgentStartHooks(setupSession, ownedHooks, ownedHookContext);
-  } else {
-    // SELFHOSTED TOOLSPACE (parity): platform setup hooks stay OFF the user's
-    // real machine. The toolspace token is one narrowly-scoped per-turn input
-    // that must reach it (a scoped,
-    // own-session-bound token written to $OPENGENI_TOOLSPACE_TOKEN_FILE over the
-    // same off-manifest exec channel the clone-seed uses; the machine's only path
-    // to programmatic tool calling). Seed it (only) here.
-    const toolspaceHooks = sandboxToolspaceTokenHooksForAgent(agent);
-    if (toolspaceHooks.length > 0) {
-      await runBeforeAgentStartHooks(setupSession, toolspaceHooks, ownedHookContext);
-    }
   }
   // FILE RESOURCES are user-selected turn inputs, not platform machine setup.
   // Deliver them on every backend, including connected machines. The command is
@@ -5869,6 +6574,69 @@ export function withSandboxFileDownloads(
       ? {
           resume: async (state: SandboxSessionState) =>
             await wrapSession(await client.resume!(state)),
+        }
+      : {}),
+    ...(client.delete
+      ? {
+          delete: async (state: SandboxSessionState) => await client.delete!(state),
+        }
+      : {}),
+    ...(client.serializeSessionState
+      ? {
+          serializeSessionState: async (state: SandboxSessionState, options) =>
+            await client.serializeSessionState!(state, options),
+        }
+      : {}),
+    ...(client.canPersistOwnedSessionState
+      ? {
+          canPersistOwnedSessionState: async (state: SandboxSessionState) =>
+            await client.canPersistOwnedSessionState!(state),
+        }
+      : {}),
+    ...(client.canReusePreservedOwnedSession
+      ? {
+          canReusePreservedOwnedSession: async (state: SandboxSessionState) =>
+            await client.canReusePreservedOwnedSession!(state),
+        }
+      : {}),
+    ...(client.deserializeSessionState
+      ? {
+          deserializeSessionState: async (state: Record<string, unknown>) =>
+            await client.deserializeSessionState!(state),
+        }
+      : {}),
+  };
+}
+
+/**
+ * Observe each real SDK-owned sandbox exactly once, after all inner client
+ * decorators have completed and before the SDK can issue its first operation.
+ */
+export function withSandboxSessionReady(
+  client: SandboxClient,
+  callback: (session: SandboxSessionLike) => Promise<void> | void,
+): SandboxClient {
+  const completed = new WeakSet<object>();
+  const ready = async <T extends SandboxSessionLike>(session: T): Promise<T> => {
+    if (typeof session === "object" && session !== null && !completed.has(session)) {
+      await callback(session);
+      completed.add(session);
+    }
+    return session;
+  };
+  return {
+    backendId: client.backendId,
+    ...(client.supportsDefaultOptions !== undefined
+      ? { supportsDefaultOptions: client.supportsDefaultOptions }
+      : {}),
+    ...(client.create
+      ? {
+          create: async (...args: any[]) => await ready(await (client.create as any)(...args)),
+        }
+      : {}),
+    ...(client.resume
+      ? {
+          resume: async (state: SandboxSessionState) => await ready(await client.resume!(state)),
         }
       : {}),
     ...(client.delete
@@ -6193,8 +6961,14 @@ function hostedWebSearchToolCallFromResponsesEvent(raw: unknown): NormalizedRunt
   };
 }
 
-export function normalizeSdkEvent(event: RunStreamEvent): NormalizedRuntimeEvent[] {
+export function normalizeSdkEvent(
+  event: RunStreamEvent,
+  options: NormalizeSdkEventOptions = {},
+): NormalizedRuntimeEvent[] {
   const out: NormalizedRuntimeEvent[] = [];
+  const pushProtocolEvent = (normalized: NormalizedRuntimeEvent): void => {
+    out.push(normalizeProtocolJsonValue(normalized, '$["event"]'));
+  };
   if (event.type === "raw_model_stream_event") {
     const data = (event as any).data;
     if (data?.type === "output_text_delta" && typeof data.delta === "string") {
@@ -6212,7 +6986,7 @@ export function normalizeSdkEvent(event: RunStreamEvent): NormalizedRuntimeEvent
     }
     const webSearch = hostedWebSearchToolCallFromResponsesEvent(raw);
     if (webSearch) {
-      out.push(webSearch);
+      pushProtocolEvent(webSearch);
     }
     return out;
   }
@@ -6232,7 +7006,7 @@ export function normalizeSdkEvent(event: RunStreamEvent): NormalizedRuntimeEvent
   }
   if (item.type === "tool_call_item") {
     const raw = item.rawItem ?? {};
-    out.push({
+    pushProtocolEvent({
       type: "agent.toolCall.created",
       payload: {
         id: raw.callId ?? raw.id ?? item.id ?? null,
@@ -6242,14 +7016,20 @@ export function normalizeSdkEvent(event: RunStreamEvent): NormalizedRuntimeEvent
       },
     });
   } else if (item.type === "tool_call_output_item") {
-    out.push({
+    pushProtocolEvent({
       type: "agent.toolCall.output",
       payload: {
         id: item.rawItem?.callId ?? item.id ?? null,
         // Inline media becomes a content-free audit fact. Model history keeps
         // the provider's real structured image output on its separate path.
-        output: normalizeToolOutputForEvent(item.output),
+        output:
+          "toolOutputOverride" in options
+            ? options.toolOutputOverride
+            : normalizeToolOutputForEvent(item.output),
       },
+      ...(options.retainedOutputEvidence !== undefined
+        ? { retainedOutputEvidence: options.retainedOutputEvidence }
+        : {}),
     });
   } else if (item.type === "tool_search_call_item") {
     // Progressive connector disclosure: surface the model's tool search as a
@@ -6257,7 +7037,7 @@ export function normalizeSdkEvent(event: RunStreamEvent): NormalizedRuntimeEvent
     // the Codex CLI, which renders its searches). Arguments may be an object
     // (the live wire shape) or a string.
     const raw = item.rawItem ?? {};
-    out.push({
+    pushProtocolEvent({
       type: "agent.toolCall.created",
       payload: {
         id: raw.call_id ?? raw.callId ?? raw.id ?? item.id ?? null,
@@ -6273,7 +7053,7 @@ export function normalizeSdkEvent(event: RunStreamEvent): NormalizedRuntimeEvent
           .map((tool: { name?: unknown }) => (typeof tool?.name === "string" ? tool.name : ""))
           .filter(Boolean)
       : [];
-    out.push({
+    pushProtocolEvent({
       type: "agent.toolCall.output",
       payload: {
         id: raw.call_id ?? raw.callId ?? item.id ?? null,
@@ -6296,8 +7076,22 @@ export function normalizeSdkEvent(event: RunStreamEvent): NormalizedRuntimeEvent
 }
 
 export function modelResponseUsageFromSdkEvent(event: RunStreamEvent): ModelResponseUsage | null {
+  return modelTerminalResponseFromSdkEvent(event)?.usage ?? null;
+}
+
+/** Recognize a terminal response even when the provider omitted usage. */
+export function modelTerminalResponseFromSdkEvent(
+  event: RunStreamEvent,
+): ModelTerminalResponse | null {
   const response = modelResponseFromSdkEvent(event);
-  return modelResponseUsageFromResponse(response);
+  if (!response) {
+    return null;
+  }
+  const responseId = modelResponseIdFromResponse(response);
+  return {
+    ...(responseId ? { responseId } : {}),
+    usage: modelResponseUsageFromResponse(response),
+  };
 }
 
 /** Normalize usage from either a Responses or Chat Completions result. */
@@ -6306,12 +7100,7 @@ export function modelResponseUsageFromResponse(response: unknown): ModelResponse
   if (!usage) {
     return null;
   }
-  const responseId =
-    typeof (response as { id?: unknown } | null)?.id === "string"
-      ? (response as { id: string }).id
-      : typeof (response as { responseId?: unknown } | null)?.responseId === "string"
-        ? (response as { responseId: string }).responseId
-        : undefined;
+  const responseId = modelResponseIdFromResponse(response);
   const serviceTier = modelResponseServiceTierFromResponse(response);
   const gatewayBilling = gatewayBillingFromResponse(response);
   return {
@@ -6320,6 +7109,14 @@ export function modelResponseUsageFromResponse(response: unknown): ModelResponse
     ...(gatewayBilling ? { gatewayBilling } : {}),
     usage,
   };
+}
+
+function modelResponseIdFromResponse(response: unknown): string | undefined {
+  return typeof (response as { id?: unknown } | null)?.id === "string"
+    ? (response as { id: string }).id
+    : typeof (response as { responseId?: unknown } | null)?.responseId === "string"
+      ? (response as { responseId: string }).responseId
+      : undefined;
 }
 
 /** Extract only the bounded, non-secret Gateway billing facts we consume. */
@@ -6526,7 +7323,7 @@ function requestUsageEntriesProp(
 }
 
 export function serializeApprovals(interruptions: unknown[]): unknown[] {
-  return interruptions
+  const approvals = interruptions
     .filter((item) => interruptionToolName(item) !== HUMAN_INPUT_TOOL_NAME)
     .map((item: any) => {
       if (typeof item?.toJSON === "function") {
@@ -6539,6 +7336,7 @@ export function serializeApprovals(interruptions: unknown[]): unknown[] {
         raw: item,
       };
     });
+  return normalizeProtocolJsonValue(approvals, '$["approvals"]');
 }
 
 export function serializeHumanInputRequests(
@@ -6583,17 +7381,13 @@ export function buildManifest(
   );
   for (const resource of resources) {
     if (resource.kind === "repository") {
-      const url = new URL(resource.uri);
-      const host = url.host.toLowerCase();
-      const repo = url.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
       const mountPath = resourceMountPath(resource);
       if (repositoryUsesSandboxClone(settings, resource)) {
         entries[mountPath] = dir();
         continue;
       }
       entries[mountPath] = gitRepo({
-        host,
-        repo,
+        repo: resource.uri,
         ref: resource.ref,
         ...(resource.subpath ? { subpath: normalizeRepositorySubpath(resource.subpath) } : {}),
       });
@@ -6891,7 +7685,7 @@ function sandboxFileDownloadCommand(download: SandboxFileDownload, targetPath: s
     `  tmp=$(mktemp ${shellQuote(`${targetPath}.opengeni-download.XXXXXX`)})`,
     '  cleanup() { rm -f -- "$tmp"; }',
     "  trap cleanup EXIT",
-    `  curl --fail --location --silent --show-error --retry 3 --retry-delay 1 --output "$tmp" ${shellQuote(download.url)}`,
+    `  curl --fail --location --silent --show-error --connect-timeout 10 --max-time 120 --retry 3 --retry-delay 1 --retry-max-time 180 --output "$tmp" ${shellQuote(download.url)}`,
     '  if ! verify_attachment "$tmp"; then echo "Downloaded attachment failed size or SHA-256 verification" >&2; exit 74; fi',
     `  mv -f -- "$tmp" ${shellQuote(targetPath)}`,
     "  trap - EXIT",
@@ -7302,6 +8096,7 @@ function gitTokenSeedExportPrefix(seeds: GitTokenSeeds): string {
 
 type RuntimeGitBindingDescriptor = {
   provider: GitCredentialProvider;
+  remotePathProvider: GitCredentialProvider | null;
   credentialBindingId: string;
   bindingHash: string;
   protocol: string;
@@ -7337,7 +8132,7 @@ function runtimeGitBindingDescriptors(
     const credentialBindingId =
       gitCredentialBindingIdForRepository(resource, credentialProvider) ?? provider;
     const path = url.pathname.replace(/^\/+|\/+$/g, "");
-    const remote = `${url.protocol.toLowerCase()}//${url.host.toLowerCase()}/${path.replace(/\.git$/, "")}`;
+    const remote = gitRemoteIdentity(resource.uri, credentialProvider);
     const bindingKey = `${provider}\u0000${credentialBindingId}`;
     const boundProvider = bindingProviders.get(credentialBindingId);
     if (boundProvider && boundProvider !== provider) {
@@ -7355,6 +8150,7 @@ function runtimeGitBindingDescriptors(
     remoteBindings.set(remote, bindingKey);
     return {
       provider,
+      remotePathProvider: credentialProvider,
       credentialBindingId,
       bindingHash: gitCredentialBindingHash(credentialBindingId),
       protocol: url.protocol.replace(/:$/, "").toLowerCase(),
@@ -7547,11 +8343,7 @@ function gitCredentialHelperBindingCaseLines(
         ),
     )
     .flatMap((descriptor) => {
-      const paths = new Set([
-        descriptor.path,
-        descriptor.path.replace(/\.git$/, ""),
-        `${descriptor.path.replace(/\.git$/, "")}.git`,
-      ]);
+      const paths = gitRemotePathAliases(descriptor.uri, descriptor.remotePathProvider);
       return [...paths].map(
         (path) =>
           `  ${shellQuote(`${descriptor.protocol}|${descriptor.host}|${path}`)}) username=${shellQuote(gitUsernameForProvider(descriptor.provider))}; token_file="$credential_dir/${descriptor.bindingHash}-token" ;;`,
@@ -7563,15 +8355,9 @@ function gitCredentialHelperBrokerCaseLines(
   routes: RuntimeGitHttpBrokerRouteDescriptor[],
 ): string[] {
   return routes.flatMap((route) => {
-    const paths = new Set([
-      route.path,
-      route.path.replace(/\.git$/, ""),
-      `${route.path.replace(/\.git$/, "")}.git`,
-    ]);
-    return [...paths].map(
-      (path) =>
-        `  ${shellQuote(`${route.protocol}|${route.host}|${path}`)}) username=opengeni; token_file="$credential_dir/${route.bindingHash}-token" ;;`,
-    );
+    return [
+      `  ${shellQuote(`${route.protocol}|${route.host}|${route.path}`)}) username=opengeni; token_file="$credential_dir/${route.bindingHash}-token" ;;`,
+    ];
   });
 }
 
@@ -7722,8 +8508,7 @@ function gitCredentialHelperCommandLines(
     ...new Set(wrapperDescriptors.map((item) => `${item.provider}|${item.bindingHash}`)),
   ].map((key) => `    ${shellQuote(key)}) return 0 ;;`);
   const originWrapperHashes = wrapperDescriptors.flatMap((item) => {
-    const base = item.uri.replace(/\.git$/, "");
-    return [...new Set([item.uri, base, `${base}.git`])].map(
+    return gitRemoteUriAliases(item.uri, item.remotePathProvider).map(
       (uri) =>
         `    ${shellQuote(`${item.provider}|${uri}`)}) printf '%s\\n' ${shellQuote(item.bindingHash)}; return 0 ;;`,
     );
@@ -7744,8 +8529,7 @@ function gitCredentialHelperCommandLines(
           .map(([provider]) => provider)
       : [];
   const brokeredOriginCases = brokerRoutes.flatMap((route) => {
-    const base = route.repositoryUri.replace(/\.git$/, "");
-    return [...new Set([route.repositoryUri, base, `${base}.git`])].map(
+    return gitRemoteUriAliases(route.repositoryUri, route.provider).map(
       (uri) => `    ${shellQuote(`${route.provider}|${uri}`)}) return 0 ;;`,
     );
   });
@@ -7948,7 +8732,12 @@ function gitCredentialHelperCommandLines(
     '    if [ -n "$token" ]; then',
     '      case "$token_env" in',
     '        GH_TOKEN) export GH_TOKEN="$token" ;;',
-    '        GITLAB_TOKEN) export GITLAB_TOKEN="$token" ;;',
+    "        GITLAB_TOKEN)",
+    '          case "$token" in',
+    '            glpat-*) unset GITLAB_ACCESS_TOKEN OAUTH_TOKEN GLAB_IS_OAUTH2; export GITLAB_TOKEN="$token" ;;',
+    '            *) unset GITLAB_TOKEN GITLAB_ACCESS_TOKEN; export OAUTH_TOKEN="$token"; export GLAB_IS_OAUTH2=true ;;',
+    "          esac",
+    "          ;;",
     '        AZURE_DEVOPS_EXT_PAT) export AZURE_DEVOPS_EXT_PAT="$token" ;;',
     "      esac",
     "    fi",
@@ -7973,6 +8762,9 @@ function gitCredentialHelperCommandLines(
     '  chmod 0755 "$wrapper.tmp.$$"',
     '  mv -f "$wrapper.tmp.$$" "$wrapper"',
     "done",
+    "if [ -d /etc/profile.d ] && [ -w /etc/profile.d ]; then",
+    '  printf \'%s\\n\' \'case ":$PATH:" in *":${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}:"*) ;; *) export PATH="${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}:$PATH" ;; esac\' > /etc/profile.d/opengeni-git-cli.sh',
+    "fi",
   ];
 }
 
@@ -8111,7 +8903,7 @@ export function repositoryCloneCommand(
     '  rm -rf "$tmp"',
     // Fetch failures must not leak the pid-suffixed tmp clone beside the mount
     // (set -eu would exit before any cleanup).
-    '  if ! { git init "$tmp" >/dev/null && git -C "$tmp" remote add origin "$uri" && git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref" && git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; }; then',
+    '  if ! { git init "$tmp" >/dev/null && git -C "$tmp" remote add origin "$uri" && git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref" && git -C "$tmp" remote set-head origin "$ref" && git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; }; then',
     '    rm -rf "$tmp"',
     '    echo "Repository resource fetch failed for $target" >&2',
     "    exit 1",
@@ -8501,46 +9293,6 @@ export function azureCliLoginCommand(): string {
   ].join("\n");
 }
 
-export function sandboxCommandExitCode(result: unknown): number | null {
-  if (typeof result === "string") {
-    const match = result.match(/Process exited with code (-?\d+)/);
-    return match ? Number(match[1]) : null;
-  }
-  if (!result || typeof result !== "object") {
-    return null;
-  }
-  const candidate = result as {
-    exitCode?: unknown;
-    exit_code?: unknown;
-    code?: unknown;
-    status?: unknown;
-  };
-  for (const value of [candidate.exitCode, candidate.exit_code, candidate.code, candidate.status]) {
-    if (typeof value === "number") {
-      return value;
-    }
-  }
-  return null;
-}
-
-export function sandboxCommandOutput(result: unknown): string {
-  if (typeof result === "string") {
-    const outputIndex = result.indexOf("Output:");
-    return outputIndex >= 0 ? result.slice(outputIndex + "Output:".length).trim() : result.trim();
-  }
-  if (!result || typeof result !== "object") {
-    return "";
-  }
-  const candidate = result as {
-    output?: unknown;
-    stdout?: unknown;
-    stderr?: unknown;
-  };
-  return [candidate.output, candidate.stderr, candidate.stdout]
-    .filter((value): value is string => typeof value === "string" && value.length > 0)
-    .join("\n");
-}
-
 function assertSandboxCommandSucceeded(result: unknown, operation: string): void {
   const output = sandboxCommandOutput(result);
   if (sandboxCommandStillRunning(result)) {
@@ -8557,17 +9309,6 @@ function assertSandboxCommandSucceeded(result: unknown, operation: string): void
   if (exitCode === null) {
     throw new Error(output || `${operation} did not return a command exit code`);
   }
-}
-
-export function sandboxCommandStillRunning(result: unknown): boolean {
-  if (typeof result === "string") {
-    return /Process running with session ID \d+/u.test(result);
-  }
-  if (!result || typeof result !== "object") {
-    return false;
-  }
-  const candidate = result as { sessionId?: unknown; session_id?: unknown };
-  return typeof candidate.sessionId === "number" || typeof candidate.session_id === "number";
 }
 
 function hasAzureServicePrincipal(environment: Record<string, string>): boolean {
@@ -8651,6 +9392,7 @@ function bundledSkillsDir(): string {
   const moduleDir = dirname(fileURLToPath(import.meta.url));
   const packaged =
     [
+      join(moduleDir, "assets", "runtime", "bundled_hashicorp_terraform_skills"),
       join(moduleDir, "bundled_hashicorp_terraform_skills"),
       join(moduleDir, "..", "src", "bundled_hashicorp_terraform_skills"),
     ].find((candidate) => existsSync(candidate)) ??

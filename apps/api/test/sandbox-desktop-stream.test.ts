@@ -281,6 +281,47 @@ describe("P4.2 desktop pixel data plane (real lease + RLS + fence)", () => {
     expect(mint).toBeNull();
   }, 60_000);
 
+  test("GATE — a DRAINING lease never performs observer provider I/O", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const { session, lease } = await seedWarmModalBox(accountId, workspaceId);
+    let establishCalls = 0;
+    const establish = async () => {
+      establishCalls += 1;
+      return await fakeEstablish(lease.leaseEpoch)();
+    };
+    const drainingLease: LeaseSnapshot = { ...lease, liveness: "draining" };
+
+    const [desktop, terminal] = await Promise.all([
+      mintDesktopStream(
+        { db, settings },
+        {
+          accountId,
+          workspaceId,
+          session: session!,
+          viewerId: crypto.randomUUID(),
+          lease: drainingLease,
+          establish,
+        },
+      ),
+      mintTerminalStream(
+        { db, settings },
+        {
+          accountId,
+          workspaceId,
+          session: session!,
+          viewerId: crypto.randomUUID(),
+          lease: drainingLease,
+          establish,
+        },
+      ),
+    ]);
+
+    expect(desktop).toBeNull();
+    expect(terminal).toBeNull();
+    expect(establishCalls).toBe(0);
+  }, 60_000);
+
   test("GATE — desktop DISABLED ⇒ no mint (degradation is a value)", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();

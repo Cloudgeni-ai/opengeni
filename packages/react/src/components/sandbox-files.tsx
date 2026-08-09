@@ -1,9 +1,11 @@
 import { FileCode2Icon, FileWarningIcon, LoaderCircleIcon } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import { Group, Panel, Separator } from "react-resizable-panels";
 import { cn } from "../lib/cn";
 import { useThemeType } from "../lib/use-theme-type";
 import {
   CapturedFileUnavailableError,
+  type SandboxFilesGitSummary,
   type UseSandboxFilesResult,
 } from "../hooks/use-sandbox-files";
 import type { UseSandboxGitResult } from "../hooks/use-sandbox-git";
@@ -14,8 +16,8 @@ import { PierreFile } from "./pierre-file";
 export type SandboxFilesProps = {
   /** From `useSandboxFiles(...)`. */
   files: UseSandboxFilesResult;
-  /** From `useSandboxGit(...)` — drives the branch/dirty header only. */
-  git: UseSandboxGitResult;
+  /** Compatibility fallback for callers that have not yet adopted `files.gitSummary`. */
+  git?: UseSandboxGitResult | undefined;
   /** @deprecated Diffs live in the dedicated Changes tab now; accepted for
    *  source-compat but unused (the Files surface is a browser + viewer). */
   stagedGit?: UseSandboxGitResult | undefined;
@@ -111,15 +113,29 @@ export function SandboxFiles({
   const [wide, setWide] = useState(false);
   useEffect(() => {
     const el = rootRef.current;
-    if (!el || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver((entries) => {
-      const w = entries[0]?.contentRect.width ?? 0;
-      setWide(w >= 720);
-    });
+    if (!el) return;
+    const update = () => setWide(el.getBoundingClientRect().width >= 720);
+    update();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(update);
     observer.observe(el);
-    return () => observer.disconnect();
+    // WorkspaceDock maximization changes its persistent surface from a sized
+    // panel child to `fixed inset-0`. Chromium can retain the child's observer
+    // size across that containing-block change even though its visible bounding
+    // box is now viewport-wide. Follow the surface mode as a deterministic
+    // second signal so the tree/viewer orientation matches what is painted.
+    const surface = el.closest("[data-workspace-surface]");
+    const surfaceObserver =
+      surface && typeof MutationObserver !== "undefined" ? new MutationObserver(update) : null;
+    surfaceObserver?.observe(surface!, {
+      attributes: true,
+      attributeFilter: ["class", "style"],
+    });
+    return () => {
+      observer.disconnect();
+      surfaceObserver?.disconnect();
+    };
   }, []);
-
   // Resolve the effective viewer theme from the host palette (the `data-og-theme`
   // attribute the demo/app sets), defaulting to dark, unless the caller forced one.
   const resolvedTheme = useThemeType(themeType);
@@ -128,7 +144,11 @@ export function SandboxFiles({
   // writable). Nothing is auto-selected — the pane waits for a tree click, so the
   // Files tab opens as a calm browser, not a diff.
   const viewPath = selected;
-  const fileView = useFileView(viewPath, files.readFile, viewReloadRevision);
+  const fileView = useFileView(
+    viewPath,
+    files.readFile,
+    (files.contentRevision ?? 0) + viewReloadRevision,
+  );
 
   // Selecting a (different) file always returns to View — never drop the user into
   // an editor whose buffer belongs to the previously-selected path. Manual
@@ -165,19 +185,6 @@ export function SandboxFiles({
     (!liveWorkspaceReady || files.loading) &&
     captureFileUnavailable !== null;
 
-  if (!fileSystemAvailable) {
-    return (
-      <Notice
-        className={className}
-        icon={<FileWarningIcon className="size-5" aria-hidden />}
-        title="Files unavailable"
-        announce="alert"
-      >
-        This sandbox does not expose a file system.
-      </Notice>
-    );
-  }
-
   if (workspaceResting || workspaceWaking) {
     return (
       <div className={cn("h-full", className)} data-opengeni-workspace-resting>
@@ -208,19 +215,51 @@ export function SandboxFiles({
     );
   }
 
+  if (!fileSystemAvailable) {
+    return (
+      <Notice
+        className={className}
+        icon={<FileWarningIcon className="size-5" aria-hidden />}
+        title="Files unavailable"
+        announce="alert"
+      >
+        This sandbox does not expose a file system.
+      </Notice>
+    );
+  }
+
   return (
     <div ref={rootRef} className={cn("flex h-full min-h-0 min-w-0 flex-col", className)}>
       {/* Branch + dirty header (context; NOT the changed-files list). */}
-      <GitHeader git={git} dirtyCount={git.diff.length} />
+      <GitHeader
+        loading={
+          Boolean(files.loading || files.gitLoading || files.source === null || git?.loading) &&
+          files.gitSummary === null
+        }
+        git={
+          files.gitSummary ?? {
+            branch: git?.branch ?? null,
+            isRepo: git?.isRepo ?? false,
+            repoCount: git?.repoCount ?? 0,
+            ahead: git?.ahead ?? 0,
+            behind: git?.behind ?? 0,
+            dirtyCount: git?.diff.length ?? 0,
+          }
+        }
+      />
 
-      <div className={cn("flex min-h-0 flex-1", wide ? "flex-row" : "flex-col")}>
+      <Group
+        orientation={wide ? "horizontal" : "vertical"}
+        className={cn("min-h-0 flex-1", wide ? "flex-row" : "flex-col")}
+      >
         {/* Tree pane: the full lazy file tree. A fixed left column when wide, a top
             band when narrow. */}
-        <div
-          className={cn(
-            "flex min-h-0 flex-col",
-            wide ? "w-[280px] shrink-0 border-r border-og-border" : "flex-1",
-          )}
+        <Panel
+          id="sandbox-files-tree"
+          defaultSize={wide ? "280px" : "40%"}
+          minSize={wide ? "180px" : "120px"}
+          maxSize={wide ? "60%" : "70%"}
+          className="flex min-h-0 min-w-0 flex-col"
         >
           <FileBrowser
             result={files}
@@ -230,16 +269,26 @@ export function SandboxFiles({
             emptyState="This directory is empty"
             className="min-w-0 flex-1"
           />
-        </div>
+        </Panel>
+
+        <Separator
+          aria-label="Resize file tree"
+          className={cn(
+            "group relative z-10 shrink-0 cursor-col-resize outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent",
+            "w-px bg-og-border after:absolute after:inset-y-0 after:left-1/2 after:w-3 after:-translate-x-1/2",
+            "hover:bg-og-accent focus-visible:bg-og-accent data-[separator-state=dragging]:bg-og-accent",
+            !wide &&
+              "h-px w-full cursor-row-resize after:inset-x-0 after:inset-y-auto after:top-1/2 after:h-3 after:w-full after:-translate-x-0 after:-translate-y-1/2",
+          )}
+        />
 
         {/* Viewer pane: the selected file's contents (read-only) or the editor.
             Fills the remaining width when side-by-side, sits below the tree when
             stacked. */}
-        <div
-          className={cn(
-            "flex min-h-0 min-w-0 flex-col",
-            wide ? "flex-1" : "flex-[1.4] border-t border-og-border",
-          )}
+        <Panel
+          id="sandbox-files-viewer"
+          minSize={wide ? "240px" : "160px"}
+          className={cn("flex min-h-0 min-w-0 flex-col", !wide && "border-t border-og-border")}
         >
           <div className="flex shrink-0 items-center justify-between gap-2 border-b border-og-border bg-og-surface-1 px-2 py-1">
             <span
@@ -371,8 +420,8 @@ export function SandboxFiles({
               </Notice>
             )}
           </div>
-        </div>
-      </div>
+        </Panel>
+      </Group>
     </div>
   );
 }
@@ -382,15 +431,30 @@ function WakeButton({ children, onClick }: { children: ReactNode; onClick: () =>
     <button
       type="button"
       onClick={onClick}
-      className="mt-1 inline-flex min-h-11 items-center justify-center rounded-og-md bg-og-accent-deep px-3 py-2 text-og-sm font-medium text-og-accent-fg shadow-sm transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent focus-visible:ring-offset-2 focus-visible:ring-offset-og-bg"
+      className="mt-1 inline-flex min-h-11 items-center justify-center rounded-og-md bg-og-accent-deep px-3 py-2 text-og-sm font-medium text-og-accent-fg shadow-sm transition-opacity hover:opacity-90 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent focus-visible:ring-offset-2 focus-visible:ring-offset-og-bg"
     >
       {children}
     </button>
   );
 }
 
-function GitHeader({ git, dirtyCount }: { git: UseSandboxGitResult; dirtyCount: number }) {
-  const dirty = dirtyCount > 0;
+function GitHeader({ git, loading }: { git: SandboxFilesGitSummary; loading: boolean }) {
+  if (loading) {
+    return (
+      <div
+        className="flex shrink-0 items-center gap-2 border-b border-og-border bg-og-surface-1 px-2 py-1 text-og-sm text-og-fg-muted"
+        role="status"
+        aria-live="polite"
+      >
+        <LoaderCircleIcon
+          className="size-3.5 shrink-0 animate-spin motion-reduce:animate-none"
+          aria-hidden
+        />
+        <span>Loading repository…</span>
+      </div>
+    );
+  }
+  const dirty = git.dirtyCount > 0;
   return (
     <div className="flex shrink-0 items-center gap-2 border-b border-og-border bg-og-surface-1 px-2 py-1 text-og-sm">
       <span
@@ -401,7 +465,7 @@ function GitHeader({ git, dirtyCount }: { git: UseSandboxGitResult; dirtyCount: 
         )}
       />
       <span className="sr-only">
-        {dirty ? `Working tree has ${dirtyCount} changed files` : "Working tree clean"}
+        {dirty ? `Uncommitted changes in ${git.dirtyCount} files` : "No uncommitted changes"}
       </span>
       <span className="truncate font-og-mono text-og-fg">
         {git.repoCount > 1
@@ -420,7 +484,7 @@ function GitHeader({ git, dirtyCount }: { git: UseSandboxGitResult; dirtyCount: 
           data-contrast-audited
           className="ml-auto shrink-0 text-og-xs text-og-fg-subtle"
         >
-          {dirtyCount} changed
+          {git.dirtyCount} changed
         </span>
       )}
     </div>
@@ -444,7 +508,7 @@ function Segmented({
           type="button"
           onClick={() => onChange(opt.value)}
           className={cn(
-            "min-h-7 rounded-og-xs px-1.5 py-0.5 text-og-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent max-[1023px]:min-h-11 max-[1023px]:min-w-11 pointer-coarse:min-h-11 pointer-coarse:min-w-11",
+            "min-h-7 rounded-og-xs px-1.5 py-0.5 text-og-xs focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent max-[1023px]:min-h-11 max-[1023px]:min-w-11 pointer-coarse:min-h-11 pointer-coarse:min-w-11",
             opt.value === value
               ? "bg-og-accent-soft text-og-fg"
               : "text-og-fg-subtle hover:text-og-fg",
@@ -480,6 +544,7 @@ function useFileView(
   readFile: UseSandboxFilesResult["readFile"],
   reloadRevision = 0,
 ): FileViewState {
+  const previousPathRef = useRef<string | null>(null);
   const [state, setState] = useState<FileViewState>({
     content: null,
     isBinary: false,
@@ -490,6 +555,7 @@ function useFileView(
   });
   useEffect(() => {
     if (!path) {
+      previousPathRef.current = null;
       setState({
         content: null,
         isBinary: false,
@@ -500,16 +566,25 @@ function useFileView(
       });
       return;
     }
+    const pathChanged = previousPathRef.current !== path;
+    previousPathRef.current = path;
     let cancelled = false;
     const abort = new AbortController();
-    setState({
-      content: null,
-      isBinary: false,
-      truncated: false,
-      sizeBytes: null,
-      loading: true,
-      error: null,
-    });
+    if (pathChanged) {
+      setState({
+        content: null,
+        isBinary: false,
+        truncated: false,
+        sizeBytes: null,
+        loading: true,
+        error: null,
+      });
+    } else {
+      // Keep the last successful preview visible while a remote Modal read
+      // revalidates it. Replacing useful content with a multi-second spinner
+      // makes a live workspace feel slower and hides the state being refreshed.
+      setState((previous) => ({ ...previous, error: null }));
+    }
     void readFile(path, { signal: abort.signal })
       .then((res) => {
         if (cancelled) return;
@@ -529,14 +604,19 @@ function useFileView(
       })
       .catch((cause) => {
         if (cancelled) return;
-        setState({
-          content: null,
-          isBinary: false,
-          truncated: false,
-          sizeBytes: null,
-          loading: false,
-          error: cause instanceof Error ? cause : new Error(String(cause)),
-        });
+        const error = cause instanceof Error ? cause : new Error(String(cause));
+        setState((previous) =>
+          pathChanged
+            ? {
+                content: null,
+                isBinary: false,
+                truncated: false,
+                sizeBytes: null,
+                loading: false,
+                error,
+              }
+            : { ...previous, loading: false, error },
+        );
       });
     return () => {
       cancelled = true;

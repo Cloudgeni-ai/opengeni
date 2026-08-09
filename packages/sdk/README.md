@@ -362,6 +362,18 @@ const file = await client.uploadFile(workspaceId, {
 const { url } = await client.createFileDownloadUrl(workspaceId, file.id);
 ```
 
+Generated-image tool results use the same workspace file authority but expose a
+closed `generated_image` receipt. Prefer a short-lived zero-copy browser URL;
+use the bounded range method when the caller needs verified bytes:
+
+```ts
+const { url } = await client.createRetainedArtifactDownloadUrl(workspaceId, receipt.artifact);
+const { bytes } = await client.downloadRetainedArtifact(workspaceId, receipt.artifact);
+```
+
+Both methods validate the receipt first. The byte path additionally verifies
+the assembled SHA-256. See `docs/image-generation.md` in the repository.
+
 ## Connected Machines (bring-your-own-compute)
 
 A session can run on an enrolled **Connected Machine** — a user's own computer —
@@ -408,7 +420,7 @@ Every public endpoint group has typed methods:
 | Turn queue | `getQueue`, `moveQueueItem`, `editQueueItem`, `steerQueueItem`, `deleteQueueItem` |
 | Goal | `getGoal`, `updateGoal`, `pauseGoal`, `resumeGoal` |
 | Scheduled tasks | `createScheduledTask`, `listScheduledTasks`, `getScheduledTask`, `updateScheduledTask`, `pauseScheduledTask`, `resumeScheduledTask`, `triggerScheduledTask`, `deleteScheduledTask`, `listScheduledTaskRuns` |
-| Variable sets | `listVariable sets`, `createVariable set`, `getVariable set`, `updateVariable set`, `deleteVariable set`, `setVariable setVariable`, `deleteVariable setVariable` (values are write-only) |
+| Variable sets | `listVariableSets`, `createVariableSet`, `getVariableSet`, `updateVariableSet`, `deleteVariableSet`, `setVariableSetVariable`, `deleteVariableSetVariable`; generic reads are metadata-only, while dedicated permissioned exact-value reads are part of the held client train |
 | Files | `uploadFile`, `beginFileUpload`, `completeFileUpload`, `getFile`, `createFileDownloadUrl` |
 | Documents | `createDocumentBase`, `listDocumentBases`, `getDocumentBase`, `addDocument`, `listDocuments`, `reindexDocument`, `searchDocuments`, `searchKnowledge` (effective organization + workspace + immutable initiating-user personal scope) |
 | Packs | `listPacks`, `registerPack`, `getPack`, `enablePack`, `deletePack`, `listPackInstallations` |

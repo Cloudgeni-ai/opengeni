@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { collectDefaultMetrics, Counter, Gauge, Histogram, Registry } from "prom-client";
 import { SandboxBackend } from "@opengeni/contracts";
 
@@ -28,6 +29,35 @@ export type Span = {
 
 export type MetricLabels = Record<string, AttributeValue>;
 
+/**
+ * Stable, non-reversible correlation key for one logical sandbox lease. Public
+ * telemetry intentionally drops workspace/group identifiers; this key lets an
+ * operator correlate API, worker, and reaper failures without publishing
+ * either UUID. The domain separator prevents reuse as a generic identifier
+ * digest.
+ */
+export function sandboxLeaseTelemetryKey(workspaceId: string, sandboxGroupId: string): string {
+  return `slk_${createHash("sha256")
+    .update("opengeni:sandbox-lease-telemetry:v1\0")
+    .update(workspaceId)
+    .update("\0")
+    .update(sandboxGroupId)
+    .digest("hex")
+    .slice(0, 32)}`;
+}
+
+/**
+ * Stable selectors shared by OpenGeni's runtime metrics and optional
+ * Prometheus/Grafana distribution. Operators can use these values for custom
+ * namespaces and dashboard ConfigMaps without duplicating chart internals.
+ */
+export const OPENGENI_OBSERVABILITY_DISTRIBUTION = {
+  monitoringNamespaceLabel: "opengeni.ai/monitoring",
+  monitoringNamespaceLabelValue: "enabled",
+  grafanaDashboardLabel: "grafana_dashboard",
+  grafanaDashboardLabelValue: "1",
+} as const;
+
 const httpHistogramBuckets = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10];
 const durationHistogramBuckets = [
   0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 900, 1800, 3600,
@@ -55,10 +85,211 @@ const SANDBOX_OPERATION_NAMES = new Set([
   "serializeSessionState",
 ]);
 
+/**
+ * External logs and OTLP are public/third-party projections, not canonical
+ * OpenGeni storage. Only this reviewed closed set of operational fields may
+ * cross that boundary. Unknown keys are omitted regardless of their value, so
+ * a new diagnostic, identifier, command, response, or provider field cannot
+ * become public by accident. This is schema projection, never value inspection
+ * or rewriting.
+ */
+const PUBLIC_TELEMETRY_ATTRIBUTE_KEYS = new Set([
+  "http.request.method",
+  "http.response.status_code",
+  "opengeni.route",
+  "opengeni.duration_ms",
+  "opengeni.finalization_duration_ms",
+  "opengeni.trigger_kind",
+  "opengeni.status",
+  "error.type",
+  "error.status_code",
+  "method",
+  "route",
+  "status",
+  "durationMs",
+  "attempt",
+  "attempts",
+  "delayMs",
+  "provider",
+  "providerApi",
+  "model",
+  "inputTokens",
+  "outputTokens",
+  "cachedTokens",
+  "cacheWriteTokens",
+  "reasoningTokens",
+  "accountChangedFromPrevCall",
+  "rejectedFields",
+  "dependency",
+  "activity",
+  "backend",
+  "op",
+  "outcome",
+  "eventType",
+  "surface",
+  "reason",
+  "originalBytes",
+  "deliveredBytes",
+  "estimatedOriginalTokens",
+  "estimatedDeliveredTokens",
+  "fullEvidenceAvailable",
+  "retainedOutputKind",
+]);
+
+/** Opaque correlation fields require both a reviewed name and a closed value
+ * grammar. Merely adding one to the ordinary allow-list would let an unrelated
+ * caller accidentally publish a raw identifier under that name. */
+const PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS = new Map<string, RegExp>([
+  ["sandboxLeaseKey", /^slk_[0-9a-f]{32}$/],
+]);
+
+const PUBLIC_CHANNEL_A_OPERATIONS = new Set([
+  "fs.list",
+  "fs.list-batch",
+  "fs.read",
+  "fs.write",
+  "fs.delete",
+  "fs.move",
+  "fs.mkdir",
+  "git.status",
+  "git.diff",
+  "git.read-batch",
+  "git.log",
+  "git.show",
+  "terminal.exec",
+  "terminal.pty.open",
+  "terminal.pty.write",
+  "terminal.pty.resize",
+  "terminal.pty.close",
+  "read",
+  "mutation",
+]);
+
+const PUBLIC_CHANNEL_A_FAILURE_REASONS = new Set([
+  "request_cancelled",
+  "provider_read_busy",
+  "provider_unavailable",
+  "lifecycle_conflict",
+  "request_rejected",
+  "unexpected",
+]);
+
+/**
+ * Public diagnostic values are protocol constants, never values inferred from
+ * an exception's name, constructor, code, message, or enumerable properties.
+ * Unknown classes collapse to one fixed fallback; unknown codes and origins
+ * are omitted rather than copied through based on syntax.
+ */
+const PUBLIC_TELEMETRY_ERROR_CLASSES = new Set([
+  "OperationError",
+  "CodexCheckpointOperationError",
+  "CodexFleetShadowOperationError",
+  "ComputerActionTimeoutError",
+  "ComputerUnavailableError",
+  "CredentialRenewalOperationError",
+  "CredentialReadOperationError",
+  "EventPublishOperationError",
+  "GitCredentialRenewalOperationError",
+  "HostExportOperationError",
+  "HttpOperationError",
+  "McpLifecycleError",
+  "McpOperationError",
+  "MemoryEmbeddingOperationError",
+  "MemorySearchOperationError",
+  "NatsAuthCalloutOperationError",
+  "OAuthOperationError",
+  "RunCredentialRenewalOperationError",
+  "RunStateCompatibilityError",
+  "SandboxChannelAOperationError",
+  "SnapshotOperationError",
+  "StartupDependencyError",
+  "TelemetryExportError",
+  "ToolspaceOperationError",
+  "ToolspaceTokenRenewalOperationError",
+  "WorkerLifecycleOperation",
+  "WorkerLifecycleOperationError",
+  "WorkerOperationError",
+  "WorkflowWakeOperationError",
+]);
+
+const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
+  "agent_command_wake_failed",
+  "cleared_goal_live_publish_failed",
+  "codex_failover_checkpoint_failed",
+  "codex_fleet_shadow_failed",
+  "codex_lease_loss_checkpoint_failed",
+  "codex_active_credential_read_failed",
+  "command_yield_timeout",
+  "conflict",
+  "control_wake_dispatch_failed",
+  "fenced_event_live_publish_failed",
+  "forbidden",
+  "host_export_batch_delivery_failed",
+  "host_export_failure_settlement_stale",
+  "host_export_pump_iteration_failed",
+  "host_export_retention_prune_failed",
+  "idempotency_conflict",
+  "incompatible_exposed_ports",
+  "internal_error",
+  "limit_exceeded",
+  "mcp_close_failed",
+  "mcp_connect_failed",
+  "mcp_tool_call_failed",
+  "mcp_tools_list_failed",
+  "mcp_transport_failed",
+  "memory_edit_embedding_failed",
+  "memory_hybrid_vector_failed",
+  "memory_save_embedding_failed",
+  "nats_auth_callout_start_failed",
+  "nested_agent_depth_exceeded",
+  "nested_agent_depth_override_forbidden",
+  "not_found",
+  "oauth_operation_failed",
+  "otlp_export_failed",
+  "payment_required",
+  "provider_verification_failed",
+  "sandbox_channel_a_cancelled",
+  "sandbox_channel_a_lifecycle_conflict",
+  "sandbox_channel_a_operation_failed",
+  "sandbox_channel_a_provider_busy",
+  "sandbox_channel_a_provider_unavailable",
+  "screenshot_capture_failed",
+  "session_event_live_publish_failed",
+  "session_workflow_wake_failed",
+  "snapshot_operation_failed",
+  "startup_dependency_retry",
+  "tool_list_too_large",
+  "tool_result_too_large",
+  "toolspace_operation_failed",
+  "unauthenticated",
+  "upstream_unavailable",
+  "validation_failed",
+  "worker_draining",
+  "worker_operation_failed",
+  "worker_shutdown_request_failed",
+  "workspace_control_live_publish_failed",
+]);
+
+const PUBLIC_TELEMETRY_ERROR_ORIGINS = new Set([
+  "api",
+  "core",
+  "db",
+  "events",
+  "host-export",
+  "oauth",
+  "observability",
+  "runtime",
+  "sandbox-computer",
+  "sandbox-resume",
+  "toolspace",
+  "worker",
+  "worker-lifecycle",
+]);
+
 export type SandboxOperationMetricObservation = {
   backend: string;
   op: string;
-  outcome: "ok" | "failed";
+  outcome: "ok" | "not_found" | "failed";
   durationMs: number;
 };
 
@@ -140,14 +371,14 @@ export class Observability {
     message: string,
     attributes: Attributes = {},
   ): void {
+    const publicAttributes = projectPublicTelemetryAttributes(attributes);
     if (!this.settings.observabilityStructuredLogs) {
-      const line = attributes.error ? `${message}: ${String(attributes.error)}` : message;
       if (level === "warn") {
-        console.warn(line);
+        console.warn(message);
       } else if (level === "error") {
-        console.error(line);
+        console.error(message);
       } else {
-        console.log(line);
+        console.log(message);
       }
       return;
     }
@@ -158,7 +389,7 @@ export class Observability {
       service: this.settings.serviceName,
       environment: this.settings.environment,
       component: this.options.component,
-      ...cleanAttributes(attributes),
+      ...cleanAttributes(publicAttributes),
     };
     const serialized = JSON.stringify(record);
     if (level === "warn") {
@@ -183,11 +414,11 @@ export class Observability {
           return;
         }
         ended = true;
-        const sanitizedError =
+        const telemetryError =
           input.error !== undefined && input.error !== null
-            ? sanitizeSpanError(input.error)
+            ? projectSpanErrorForTelemetry(input.error)
             : undefined;
-        const errorAttributes = sanitizedError ? errorToAttributes(sanitizedError) : {};
+        const errorAttributes = telemetryError ? errorToAttributes(telemetryError) : {};
         this.exportSpan({
           traceId,
           spanId,
@@ -195,11 +426,13 @@ export class Observability {
           startMs,
           endMs: this.now(),
           attributes: {
-            ...attributes,
-            ...input.attributes,
-            ...errorAttributes,
+            ...projectPublicTelemetryAttributes({
+              ...attributes,
+              ...input.attributes,
+              ...errorAttributes,
+            }),
           },
-          ...(sanitizedError ? { error: sanitizedError } : {}),
+          ...(telemetryError ? { error: telemetryError } : {}),
         });
       },
     };
@@ -397,7 +630,7 @@ export class Observability {
     startMs: number;
     endMs: number;
     attributes: Attributes;
-    error?: SanitizedSpanError;
+    error?: TelemetrySpanError;
   }): void {
     if (!this.settings.observabilityOtlpEndpoint) {
       return;
@@ -433,8 +666,12 @@ export class Observability {
       ],
     };
     void this.exporter(endpoint, body, parseHeaders(this.settings.observabilityOtlpHeaders)).catch(
-      (error) => {
-        this.warn("OTLP span export failed", { error: errorMessage(error), endpoint });
+      () => {
+        this.warn("OTLP span export failed", {
+          errorClass: "TelemetryExportError",
+          errorCode: "otlp_export_failed",
+          origin: "observability",
+        });
       },
     );
   }
@@ -498,13 +735,14 @@ export function logStartupDependencyRetry(
   observability: Observability,
   event: StartupDependencyRetryEvent,
 ): void {
-  const message = event.error instanceof Error ? event.error.message : String(event.error);
   observability.warn("Startup dependency connection failed; retrying", {
     dependency: event.label,
     attempt: event.attempt,
     attempts: event.attempts,
     delayMs: event.delayMs,
-    error: message,
+    errorClass: "StartupDependencyError",
+    errorCode: "startup_dependency_retry",
+    origin: "observability",
   });
 }
 
@@ -527,20 +765,82 @@ function cleanAttributes(attributes: Attributes): Record<string, string | number
   ) as Record<string, string | number | boolean | null>;
 }
 
-type SanitizedSpanError = {
+function projectPublicTelemetryAttributes(attributes: Attributes): Attributes {
+  if ("errorClass" in attributes || "errorCode" in attributes) {
+    return {
+      ...projectPublicChannelADiagnosticAttributes(attributes),
+      ...projectPublicDiagnosticAttributes(attributes),
+    };
+  }
+  return Object.fromEntries(
+    Object.entries(attributes).filter(([key, value]) => {
+      if (value === undefined) return false;
+      if (PUBLIC_TELEMETRY_ATTRIBUTE_KEYS.has(key)) return true;
+      const pattern = PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS.get(key);
+      return typeof value === "string" && pattern?.test(value) === true;
+    }),
+  );
+}
+
+function projectPublicChannelADiagnosticAttributes(attributes: Attributes): Attributes {
+  if (attributes.errorClass !== "SandboxChannelAOperationError") return {};
+  const backend = attributes.backend;
+  const op = attributes.op;
+  const outcome = attributes.outcome;
+  const reason = attributes.reason;
+  const durationMs = attributes.durationMs;
+  const sandboxLeaseKey = attributes.sandboxLeaseKey;
+  return {
+    ...(typeof backend === "string" && SANDBOX_OPERATION_BACKENDS.has(backend) ? { backend } : {}),
+    ...(typeof op === "string" && PUBLIC_CHANNEL_A_OPERATIONS.has(op) ? { op } : {}),
+    ...(outcome === "failed" ? { outcome } : {}),
+    ...(typeof reason === "string" && PUBLIC_CHANNEL_A_FAILURE_REASONS.has(reason)
+      ? { reason }
+      : {}),
+    ...(typeof durationMs === "number" && Number.isFinite(durationMs) && durationMs >= 0
+      ? { durationMs }
+      : {}),
+    ...(typeof sandboxLeaseKey === "string" &&
+    PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS.get("sandboxLeaseKey")?.test(sandboxLeaseKey)
+      ? { sandboxLeaseKey }
+      : {}),
+  };
+}
+
+function projectPublicDiagnosticAttributes(attributes: Attributes): Attributes {
+  const errorClass = attributes.errorClass;
+  const errorCode = attributes.errorCode;
+  const status = attributes.status;
+  const origin = attributes.origin;
+  return {
+    errorClass:
+      typeof errorClass === "string" && PUBLIC_TELEMETRY_ERROR_CLASSES.has(errorClass)
+        ? errorClass
+        : "OperationError",
+    ...(typeof errorCode === "string" && PUBLIC_TELEMETRY_ERROR_CODES.has(errorCode)
+      ? { errorCode }
+      : {}),
+    ...(typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599
+      ? { status }
+      : {}),
+    ...(typeof origin === "string" && PUBLIC_TELEMETRY_ERROR_ORIGINS.has(origin) ? { origin } : {}),
+  };
+}
+
+type TelemetrySpanError = {
   type: string;
   statusCode?: number;
   statusMessage: string;
 };
 
-function sanitizeSpanError(error: unknown): SanitizedSpanError {
-  const type =
-    error instanceof Error && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(error.name)
-      ? error.name
-      : "Error";
+/**
+ * External OTLP projection. It intentionally exports only error class/status
+ * metadata and never mutates canonical OpenGeni errors, events, or history.
+ */
+function projectSpanErrorForTelemetry(error: unknown): TelemetrySpanError {
   const statusCode = errorStatusCode(error);
   return {
-    type,
+    type: "OperationError",
     ...(statusCode === undefined ? {} : { statusCode }),
     statusMessage: statusCode === undefined ? "operation failed" : `HTTP ${statusCode}`,
   };
@@ -548,28 +848,29 @@ function sanitizeSpanError(error: unknown): SanitizedSpanError {
 
 function errorStatusCode(error: unknown): number | undefined {
   if (typeof error !== "object" || error === null) return undefined;
-  const value = (error as { status?: unknown; statusCode?: unknown }).status;
-  const statusCode =
-    Number.isInteger(value) && typeof value === "number"
-      ? value
-      : (error as { statusCode?: unknown }).statusCode;
-  return Number.isInteger(statusCode) &&
-    typeof statusCode === "number" &&
-    statusCode >= 100 &&
-    statusCode <= 599
-    ? statusCode
-    : undefined;
+  try {
+    const value = (error as { status?: unknown; statusCode?: unknown }).status;
+    const statusCode =
+      Number.isInteger(value) && typeof value === "number"
+        ? value
+        : (error as { statusCode?: unknown }).statusCode;
+    return Number.isInteger(statusCode) &&
+      typeof statusCode === "number" &&
+      statusCode >= 100 &&
+      statusCode <= 599
+      ? statusCode
+      : undefined;
+  } catch {
+    // OTLP projection must never mask the exact internal failure.
+    return undefined;
+  }
 }
 
-function errorToAttributes(error: SanitizedSpanError): Attributes {
+function errorToAttributes(error: TelemetrySpanError): Attributes {
   return {
     "error.type": error.type,
     ...(error.statusCode === undefined ? {} : { "error.status_code": error.statusCode }),
   };
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function otlpAttributes(

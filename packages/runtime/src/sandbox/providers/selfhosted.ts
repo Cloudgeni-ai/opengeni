@@ -61,6 +61,9 @@ function defaultControlRpcFactory(): ControlRpc {
 
 export const selfhostedProvider: ProviderRegistration = {
   backend: "selfhosted",
+  exactResumeMode: "ordinary",
+  instanceIdFields: ["agentId"],
+  workspaceCapturePolicy: () => null,
   descriptor: CAPABILITY_DESCRIPTORS.selfhosted,
   /**
    * No per-box credentials: the machine is reached over the agent's own

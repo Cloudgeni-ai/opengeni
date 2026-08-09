@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { RunContext, RunState } from "@openai/agents-core";
+import { Manifest } from "@openai/agents-core/sandbox";
 import { testSettings } from "@opengeni/testing";
 import {
   buildOpenGeniAgent,
@@ -76,11 +77,14 @@ describe("RunState exposedPorts compatibility", () => {
   test.each(["modal", "docker", "e2b"])(
     "%s keeps configured port arrays in providerState without lifting them",
     async (backendId) => {
+      const instanceId = `${backendId}-instance`;
+      const providerIdentity =
+        backendId === "docker" ? { containerId: instanceId } : { sandboxId: instanceId };
       const client = {
         backendId,
         async serializeSessionState() {
           return {
-            instanceId: `${backendId}-instance`,
+            ...providerIdentity,
             manifest: {},
             configuredExposedPorts: [3000, 6080],
             providerMarker: "kept",
@@ -91,8 +95,8 @@ describe("RunState exposedPorts compatibility", () => {
       const envelope = await serializeEstablishedSandboxEnvelope({
         client,
         session: {},
-        sessionState: { instanceId: `${backendId}-instance` },
-        instanceId: `${backendId}-instance`,
+        sessionState: providerIdentity,
+        instanceId,
         backendId,
       } as never);
 
@@ -134,6 +138,39 @@ describe("RunState exposedPorts compatibility", () => {
       configuredExposedPorts: [3000],
       exposedPorts,
     });
+  });
+
+  test("serializes a live SDK Manifest once at the envelope boundary", async () => {
+    const manifest = new Manifest({
+      root: "/workspace",
+      entries: {},
+      environment: { TEST_VALUE: "manifest-ok" },
+    });
+    const envelope = await serializeEstablishedSandboxEnvelope({
+      client: {
+        backendId: "docker",
+        async serializeSessionState() {
+          return {
+            containerId: "container-manifest",
+            manifest,
+          };
+        },
+      },
+      session: {},
+      sessionState: { containerId: "container-manifest" },
+      instanceId: "container-manifest",
+      backendId: "docker",
+    } as never);
+
+    const sessionState = envelope?.sessionState as Record<string, unknown>;
+    expect(sessionState.manifest).toMatchObject({
+      version: 1,
+      root: "/workspace",
+      entries: {},
+      environment: { TEST_VALUE: { value: "manifest-ok" } },
+    });
+    expect(sessionState.manifest).not.toBe(manifest);
+    expect(sessionState.providerState).toEqual({ containerId: "container-manifest" });
   });
 
   test("historical lease-envelope arrays are not rehydrated as SDK exposedPorts", async () => {
@@ -249,17 +286,9 @@ describe("RunState exposedPorts compatibility", () => {
       [
         "[runtime] repaired incompatible RunState exposedPorts",
         {
-          provider: "modal",
-          sessionClass: "root",
-          path: "sandbox.sessionState.exposedPorts",
-        },
-      ],
-      [
-        "[runtime] repaired incompatible RunState exposedPorts",
-        {
-          provider: "modal",
-          sessionClass: "agent",
-          path: "sandbox.sessionsByAgent[*].sessionState.exposedPorts",
+          errorClass: "RunStateCompatibilityError",
+          errorCode: "incompatible_exposed_ports",
+          origin: "runtime",
         },
       ],
     ]);

@@ -270,11 +270,10 @@ export async function discardUnpublishedRecording(args: {
 
 export { DOWNLOAD_URL_TTL_SECONDS };
 
-// Agent/ffmpeg-controlled free text rides redact() like every payload, but we
-// also cap it here (defense in depth — a path/URL with creds shouldn't ride a
-// reason/detail field unbounded; the redactor scrubs known secret shapes).
+// Recording diagnostics are canonical OpenGeni data. Preserve the exact text;
+// transport-specific byte limits must reject or paginate rather than rewrite it.
 function scrubFreeText(value: string | null | undefined): string | null {
   if (value === null || value === undefined) return null;
-  const trimmed = String(value).slice(0, 2_000);
-  return trimmed.length === 0 ? null : trimmed;
+  const exact = String(value);
+  return exact.length === 0 ? null : exact;
 }

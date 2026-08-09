@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve as resolvePath } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createObservability } from "@opengeni/observability";
 import { testSettings } from "@opengeni/testing";
@@ -18,6 +18,7 @@ import {
   type WorkerLifecycleState,
 } from "../src/http";
 import {
+  combineWorkerRunTargets,
   constructWithOwnedConnection,
   createWorkerServiceLifecycle,
 } from "../src/worker-service-lifecycle";
@@ -31,6 +32,70 @@ afterEach(async () => {
 });
 
 describe("embedded worker lifecycle contract", () => {
+  test("a multi-queue worker starts and drains every Temporal poller as one service", async () => {
+    let finishFirst!: () => void;
+    let finishSecond!: () => void;
+    const firstRun = new Promise<void>((complete) => {
+      finishFirst = complete;
+    });
+    const secondRun = new Promise<void>((complete) => {
+      finishSecond = complete;
+    });
+    const started: string[] = [];
+    const stopped: string[] = [];
+    const worker = combineWorkerRunTargets([
+      {
+        run: () => {
+          started.push("base");
+          return firstRun;
+        },
+        shutdown: () => stopped.push("base"),
+      },
+      {
+        run: () => {
+          started.push("sandbox-lifecycle");
+          return secondRun;
+        },
+        shutdown: () => stopped.push("sandbox-lifecycle"),
+      },
+    ]);
+
+    const run = worker.run();
+    expect(worker.run()).toBe(run);
+    expect(started).toEqual(["base", "sandbox-lifecycle"]);
+    worker.shutdown();
+    expect(stopped).toEqual(["base", "sandbox-lifecycle"]);
+    finishFirst();
+    finishSecond();
+    await run;
+  });
+
+  test("a failed poller drains every sibling and preserves its failure", async () => {
+    let siblingShutdowns = 0;
+    let finishSibling!: () => void;
+    const siblingRun = new Promise<void>((complete) => {
+      finishSibling = complete;
+    });
+    const worker = combineWorkerRunTargets([
+      {
+        run: async () => {
+          throw new Error("poller failed");
+        },
+        shutdown: () => undefined,
+      },
+      {
+        run: () => siblingRun,
+        shutdown: () => {
+          siblingShutdowns += 1;
+          finishSibling();
+        },
+      },
+    ]);
+
+    await expect(worker.run()).rejects.toThrow("poller failed");
+    expect(siblingShutdowns).toBe(1);
+  });
+
   test("only the designated control role owns engine maintenance schedules", () => {
     expect(workerOwnsInternalSchedules("control")).toBe(true);
     expect(workerOwnsInternalSchedules("control", "none")).toBe(false);
@@ -199,10 +264,56 @@ describe("embedded worker lifecycle contract", () => {
     await expect(lifecycle.run()).rejects.toThrow("cannot run a worker service that is stopped");
   });
 
+  test("worker lifecycle public logs omit arbitrary shutdown reasons and errors", async () => {
+    const sentinel = "WORKER_LIFECYCLE_PUBLIC_SENTINEL_3a91c7";
+    const settings = {
+      ...testSettings(),
+      observabilityStructuredLogs: true,
+      observabilityMetricsEnabled: false,
+    };
+    const warnings: unknown[][] = [];
+    const logs: unknown[][] = [];
+    const originalWarn = console.warn;
+    const originalLog = console.log;
+    let shutdownAttempts = 0;
+    console.warn = (...args: unknown[]) => warnings.push(args);
+    console.log = (...args: unknown[]) => logs.push(args);
+    const lifecycle = createWorkerServiceLifecycle({
+      role: "turn",
+      observability: createObservability(settings, { component: "worker-test" }),
+      worker: {
+        run: async () => undefined,
+        shutdown: () => {
+          shutdownAttempts += 1;
+          if (shutdownAttempts === 1) {
+            throw Object.assign(new Error(sentinel), { name: sentinel, code: sentinel });
+          }
+        },
+      },
+      closeOwnedResources: async () => undefined,
+    });
+
+    try {
+      expect(lifecycle.drain(sentinel)).toBe(false);
+      expect(lifecycle.state()).toBe("starting");
+      expect(lifecycle.drain(sentinel)).toBe(true);
+      await lifecycle.close();
+    } finally {
+      console.warn = originalWarn;
+      console.log = originalLog;
+    }
+
+    const rendered = JSON.stringify([...warnings, ...logs]);
+    expect(rendered).toContain("worker_draining");
+    expect(rendered).toContain("worker_shutdown_request_failed");
+    expect(rendered).not.toContain(sentinel);
+    expect(shutdownAttempts).toBe(2);
+  });
+
   test("workspace source uses source workflows while installed dist requires its bundle", async () => {
     const source = resolveOpenGeniWorkflowDefinition();
     expect(source).toEqual({
-      workflowsPath: resolve(import.meta.dir, "../src/workflows.ts"),
+      workflowsPath: resolvePath(import.meta.dir, "../src/workflows.ts"),
     });
 
     const root = await mkdtemp(join(tmpdir(), "opengeni-worker-bundle-"));
@@ -343,7 +454,10 @@ describe("embedded worker lifecycle contract", () => {
       checks: {
         db: () => undefined,
         nats: () => {
-          throw new Error("broker disconnected");
+          throw Object.assign(new Error("WORKER_READYZ_PUBLIC_SENTINEL_786d18"), {
+            name: "WORKER_READYZ_PUBLIC_SENTINEL_786d18",
+            code: "WORKER_READYZ_PUBLIC_SENTINEL_786d18",
+          });
         },
         temporal: () => undefined,
       },
@@ -352,10 +466,12 @@ describe("embedded worker lifecycle contract", () => {
 
     const response = await fetch(new Request("http://worker.test/readyz"));
     expect(response.status).toBe(503);
-    expect(await response.json()).toMatchObject({
+    const body = await response.json();
+    expect(body).toMatchObject({
       ok: false,
       state: "ready",
-      checks: { nats: { ok: false, error: "broker disconnected" } },
+      checks: { nats: { ok: false, error: "dependency_unavailable" } },
     });
+    expect(JSON.stringify(body)).not.toContain("WORKER_READYZ_PUBLIC_SENTINEL_786d18");
   });
 });

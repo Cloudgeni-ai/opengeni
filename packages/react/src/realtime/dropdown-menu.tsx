@@ -2,18 +2,16 @@
 
 import { ChevronRightIcon } from "lucide-react";
 import { DropdownMenu as DropdownMenuPrimitive } from "radix-ui";
-import {
-  createContext,
-  useContext,
-  useRef,
-  type ComponentProps,
-  type Ref,
-  type RefObject,
-} from "react";
+import { createContext, useContext, type ComponentProps, type Ref } from "react";
 import { cn } from "../lib/cn";
-import { usePortalTokenStyle } from "../lib/use-portal-token-style";
+import { usePortalTokenSource, usePortalTokenStyle } from "../lib/use-portal-token-style";
 
-const DropdownMenuSourceContext = createContext<RefObject<HTMLElement | null> | null>(null);
+type DropdownMenuSourceContextValue = {
+  source: HTMLElement | null;
+  ref: (node: HTMLElement | null) => void;
+};
+
+const DropdownMenuSourceContext = createContext<DropdownMenuSourceContextValue | null>(null);
 
 function assignRef<T>(ref: Ref<T> | undefined, value: T | null) {
   if (typeof ref === "function") ref(value);
@@ -21,9 +19,9 @@ function assignRef<T>(ref: Ref<T> | undefined, value: T | null) {
 }
 
 function DropdownMenu(props: ComponentProps<typeof DropdownMenuPrimitive.Root>) {
-  const sourceRef = useRef<HTMLElement | null>(null);
+  const source = usePortalTokenSource<HTMLElement>();
   return (
-    <DropdownMenuSourceContext.Provider value={sourceRef}>
+    <DropdownMenuSourceContext.Provider value={source}>
       <DropdownMenuPrimitive.Root data-slot="dropdown-menu" {...props} />
     </DropdownMenuSourceContext.Provider>
   );
@@ -38,7 +36,7 @@ function DropdownMenuTrigger({
     <DropdownMenuPrimitive.Trigger
       data-slot="dropdown-menu-trigger"
       ref={(node) => {
-        if (sourceRef) sourceRef.current = node;
+        sourceRef?.ref(node);
         assignRef(ref, node);
       }}
       {...props}
@@ -52,9 +50,8 @@ function DropdownMenuContent({
   style,
   ...props
 }: ComponentProps<typeof DropdownMenuPrimitive.Content>) {
-  const sourceRef = useContext(DropdownMenuSourceContext);
-  const fallbackRef = useRef<HTMLElement | null>(null);
-  const portalStyle = usePortalTokenStyle(sourceRef ?? fallbackRef);
+  const source = useContext(DropdownMenuSourceContext);
+  const portalStyle = usePortalTokenStyle(source?.source ?? null);
   return (
     <DropdownMenuPrimitive.Portal>
       <DropdownMenuPrimitive.Content
@@ -138,9 +135,8 @@ function DropdownMenuSubContent({
   style,
   ...props
 }: ComponentProps<typeof DropdownMenuPrimitive.SubContent>) {
-  const sourceRef = useContext(DropdownMenuSourceContext);
-  const fallbackRef = useRef<HTMLElement | null>(null);
-  const portalStyle = usePortalTokenStyle(sourceRef ?? fallbackRef);
+  const source = useContext(DropdownMenuSourceContext);
+  const portalStyle = usePortalTokenStyle(source?.source ?? null);
   return (
     <DropdownMenuPrimitive.SubContent
       data-slot="dropdown-menu-sub-content"

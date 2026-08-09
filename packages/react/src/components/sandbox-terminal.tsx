@@ -4,6 +4,7 @@ import { cn } from "../lib/cn";
 import { useTerminalStream } from "../hooks/use-terminal-stream";
 import type { UseSandboxTerminalResult } from "../hooks/use-sandbox-terminal";
 import { resolveTerminalFont, xtermThemeFromTokens } from "../lib/xterm-theme";
+import { sandboxAcceptsLiveIo } from "../lib/sandbox-liveness";
 import { attachRenderer, type RendererLoaders, type RendererTier } from "../lib/xterm-renderer";
 
 /**
@@ -110,6 +111,13 @@ type XtermLike = {
 };
 type FitAddonLike = { fit: () => void };
 
+/** Clear the transient wake line and put the first live prompt at cell 1,1.
+ * `Terminal.clear()` removes scrollback but deliberately preserves the cursor,
+ * which lets the first PTY frame append to the old wake message. */
+export function clearTerminalBootStatus(term: Pick<XtermLike, "write">): void {
+  term.write("\r\x1b[2K\x1b[2J\x1b[H");
+}
+
 /** Debug seam (dev/evidence only, never a typed public API): a global hook the
  *  screenshot harness reads to probe the settled renderer tier + resolved font
  *  without mounting a real WebGL context in unit tests. */
@@ -215,12 +223,21 @@ export function SandboxTerminal({
   // PTY mode = a live ttyd socket drives the screen. Firehose mode = the
   // read-only projection (or the legacy HTTP-write fallback).
   const ptyMode = ptyWs && ptyStatus !== "closed";
-  const interactive = !readOnly && (ptyMode || result.write !== null);
+  const interactive = !readOnly && (ptyMode ? ptyConnected : result.write !== null);
+  const terminalModeLabel = interactive
+    ? null
+    : readOnly
+      ? "read-only"
+      : ptyMode && ptyStatus === "connecting"
+        ? "connecting"
+        : ptyMode && ptyStatus === "error"
+          ? "connection error"
+          : "output only";
 
   // Boot-in-terminal: after the user focuses a not-yet-warm box, show styled
   // status lines INSIDE xterm instead of an overlay — but only when there is no
   // firehose transcript to show yet (otherwise the projected output is shown).
-  const warm = liveness === "warm" || liveness === "draining";
+  const warm = sandboxAcceptsLiveIo(liveness);
   const booting =
     activated &&
     !ptyMode &&
@@ -407,7 +424,7 @@ export function SandboxTerminal({
     if (!booting) {
       if (bootActiveRef.current) {
         bootActiveRef.current = false;
-        if (!wroteFirehoseRef.current) term.clear();
+        if (!wroteFirehoseRef.current) clearTerminalBootStatus(term);
       }
       return;
     }
@@ -496,9 +513,12 @@ export function SandboxTerminal({
             <span className="truncate font-og-mono">pty: {shell ?? "shell"}</span>
           </span>
           <span className="flex shrink-0 items-center gap-2">
-            {!interactive && (
-              <span className="rounded-og-sm bg-og-surface-2 px-1.5 py-0.5 text-og-xs uppercase tracking-wide">
-                read-only
+            {terminalModeLabel && (
+              <span
+                className="rounded-og-sm bg-og-surface-2 px-1.5 py-0.5 text-og-xs uppercase tracking-wide"
+                role="status"
+              >
+                {terminalModeLabel}
               </span>
             )}
             <button

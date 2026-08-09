@@ -3,6 +3,7 @@ import { createObservability } from "@opengeni/observability";
 import { testSettings } from "@opengeni/testing";
 import type { SlotPermit } from "@temporalio/worker";
 import {
+  CONTROL_WORKER_MAX_CACHED_WORKFLOWS,
   CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
   CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS,
   MemoryAwareTurnSlotSupplier,
@@ -47,6 +48,12 @@ describe("worker concurrency contract", () => {
       targetCpuUsage: null,
       targetMemoryUsage: null,
     });
+    expect(CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES).toBe(32);
+    expect(CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS).toBe(40);
+    expect(CONTROL_WORKER_MAX_CACHED_WORKFLOWS).toBe(64);
+    expect(CONTROL_WORKER_MAX_CACHED_WORKFLOWS).toBeGreaterThanOrEqual(
+      CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS,
+    );
   });
 
   test("wires fixed/HPA workers through the hard-reservation supplier", () => {
@@ -82,7 +89,7 @@ describe("worker concurrency contract", () => {
         activityTaskSlotOptions: {
           minimumSlots: 1,
           maximumSlots: 256,
-          rampThrottle: "50ms",
+          rampThrottle: "250ms",
         },
       },
     };

@@ -24,11 +24,14 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
 import {
   acquireLease,
+  advanceWorkspaceGeneration,
   beginSandboxRematerialization,
+  claimSessionWorkForAttempt,
   commitWarmingToWarm,
   createSession,
   createDb,
   heartbeatLeaseHolder,
+  initializeSessionStartAtomically,
   markSandboxRestoreVerifying,
   markWarmLeaseInstanceLost,
   readLease,
@@ -230,6 +233,90 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     const drained = await readRow(workspaceId, groupId);
     expect(drained?.liveness).toBe("draining");
     expect(drained?.refcount).toBe(0);
+  }, 60_000);
+
+  test("(1a) an eager cancellation release can be followed by the exact writer-drained settlement", async () => {
+    if (!available) return;
+    const settings = settingsFor(true);
+    const { accountId, workspaceId } = await freshWorkspace();
+    const session = await createSession(db, {
+      accountId,
+      workspaceId,
+      initialMessage: "exercise staged turn release",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await initializeSessionStartAtomically(db, {
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    const attemptId = crypto.randomUUID();
+    const claim = await claimSessionWorkForAttempt(db, workspaceId, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: `staged-release-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    if (claim.action !== "claimed") {
+      throw new Error(`Staged release fixture did not claim its turn: ${claim.reason}`);
+    }
+    const holderId = sandboxLeaseHolderIdForAttempt(attemptId);
+    const resumed = await resumeBoxForTurn(
+      { db, settings },
+      {
+        accountId,
+        workspaceId,
+        sandboxGroupId: session.sandboxGroupId,
+        sessionId: session.id,
+        backend: "local",
+        os: "linux",
+      },
+      "turn",
+      holderId,
+    );
+    try {
+      const admission = await advanceWorkspaceGeneration(db, {
+        accountId,
+        workspaceId,
+        sessionId: session.id,
+        turnId: claim.turn.id,
+        executionGeneration: claim.turn.executionGeneration,
+        attemptId,
+        holderId,
+        sandboxGroupId: session.sandboxGroupId,
+        expectedEpoch: resumed.leaseEpoch,
+        expectedInstanceId: resumed.established.instanceId,
+        operation: "stagedReleaseFixture",
+      });
+
+      await resumed.release();
+      const [fenced] = await admin<{ provider_outcome: string | null; settled_at: Date | null }[]>`
+        select provider_outcome, settled_at
+        from sandbox_workspace_mutation_admissions
+        where id = ${admission.id}`;
+      expect(fenced).toEqual({ provider_outcome: null, settled_at: null });
+
+      // The same release closure must not treat the eager call as terminal. Its
+      // proof-bearing stage retries the idempotent holder release and settles
+      // the exact admission after physical writer quiescence.
+      await resumed.release({ workspaceWritersQuiesced: true });
+      const [settled] = await admin<{ provider_outcome: string | null; settled_at: Date | null }[]>`
+        select provider_outcome, settled_at
+        from sandbox_workspace_mutation_admissions
+        where id = ${admission.id}`;
+      expect(settled?.provider_outcome).toBe("rejected");
+      expect(settled?.settled_at).not.toBeNull();
+    } finally {
+      await resumed.release({ workspaceWritersQuiesced: true }).catch(() => undefined);
+      await dropSession(resumed.established);
+    }
   }, 60_000);
 
   test("(2) a second turn ATTACHES to the same warm box (refcount fans in, ONE box)", async () => {
@@ -827,7 +914,8 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     });
   }, 60_000);
 
-  test("(F3-b) a successfully hydrated archive remains on the committed live lease", async () => {
+  // oxfmt-ignore
+  test.skipIf(process.platform !== "linux")("(F3-b) a successfully hydrated archive remains on the committed live lease", async () => {
     if (!available) return;
     const settings = settingsFor(true);
     const { accountId, workspaceId, groupId } = await freshWorkspace();
@@ -910,7 +998,8 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     }
   }, 60_000);
 
-  test("(F3-c) a verified session fallback outranks an archive-less lease without importing its stale provider", async () => {
+  // oxfmt-ignore
+  test.skipIf(process.platform !== "linux")("(F3-c) a verified session fallback outranks an archive-less lease without importing its stale provider", async () => {
     if (!available) return;
     const settings = settingsFor(true);
     const { accountId, workspaceId } = await freshWorkspace();

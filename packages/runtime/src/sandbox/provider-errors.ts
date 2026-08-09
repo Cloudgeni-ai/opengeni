@@ -108,6 +108,24 @@ function hasModalTerminalSandboxMessage(signals: ErrorSignals): boolean {
   );
 }
 
+function hasUnixLocalTerminalWorkspaceMessage(signals: ErrorSignals): boolean {
+  return signals.messages.includes(
+    "UnixLocal sandbox workspace is unavailable and no local snapshot could be restored.",
+  );
+}
+
+function hasDockerTerminalWorkspaceMessage(signals: ErrorSignals): boolean {
+  return signals.messages.includes(
+    "Docker sandbox resources are unavailable and no local snapshot could be restored.",
+  );
+}
+
+function hasCloudflareTerminalSandboxMessage(signals: ErrorSignals): boolean {
+  return signals.messages.some((message) =>
+    /^Cloudflare sandbox [A-Za-z0-9._:-]+ is no longer running\.$/.test(message),
+  );
+}
+
 /** Typed transport evidence always dominates nested/string NotFound text. */
 export function classifyProviderSandboxFailure(
   backendId: string,
@@ -138,6 +156,56 @@ export function classifyProviderSandboxFailure(
         diagnostic === "unclassified_provider_failure"
           ? "modal_terminal_message"
           : `${diagnostic} modal_terminal_message`,
+    };
+  }
+
+  // Cloudflare's resume() performs its sandbox-scoped running probe itself and
+  // emits this exact UserError only after that probe returns false. It carries
+  // no HTTP/code field, so omitting the provider grammar would strand a dead
+  // lease in warm/draining forever. Arbitrary Cloudflare path 404s do not match.
+  if (backendId === "cloudflare" && hasCloudflareTerminalSandboxMessage(signals)) {
+    return {
+      kind: "not_found",
+      diagnostic:
+        diagnostic === "unclassified_provider_failure"
+          ? "cloudflare_terminal_message"
+          : `${diagnostic} cloudflare_terminal_message`,
+    };
+  }
+
+  // The SDK emits this exact UserError only after resolving one serialized
+  // unix_local session and proving that both its process-local workspace and
+  // its persisted fallback are absent. That is authoritative provider loss:
+  // on resume it licenses a fresh local workspace, and on drain it licenses
+  // the lease's provider-missing cold transition. Generic "unavailable" prose
+  // remains fail-closed.
+  if (
+    (backendId === "local" || backendId === "unix_local") &&
+    hasUnixLocalTerminalWorkspaceMessage(signals)
+  ) {
+    return {
+      kind: "not_found",
+      diagnostic:
+        diagnostic === "unclassified_provider_failure"
+          ? "unix_local_workspace_missing"
+          : `${diagnostic} unix_local_workspace_missing`,
+    };
+  }
+
+  // Docker's ordinary resume is used only by a durable same-workspace recovery
+  // owner. This exact SDK error is emitted after it has checked both the
+  // serialized container and its host workspace (plus any configured local
+  // snapshot) and proved that none can be resumed. Treating it as transient
+  // would preserve an unusable continuity receipt forever. Routed operations
+  // use the stricter discriminator below, so an arbitrary command error cannot
+  // retire a live container through this message rule.
+  if (backendId === "docker" && hasDockerTerminalWorkspaceMessage(signals)) {
+    return {
+      kind: "not_found",
+      diagnostic:
+        diagnostic === "unclassified_provider_failure"
+          ? "docker_resources_missing"
+          : `${diagnostic} docker_resources_missing`,
     };
   }
 

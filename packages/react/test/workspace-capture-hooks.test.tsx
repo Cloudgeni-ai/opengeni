@@ -13,6 +13,7 @@ import type {
   FsTreeNode,
   GetWorkspaceCaptureResponse,
   GitFileDiff,
+  SessionCapabilities,
   SessionEvent,
   WorkspaceCaptureManifest,
   WorkspaceCaptureRepo,
@@ -87,6 +88,7 @@ function fakeRepo(overrides: Partial<WorkspaceCaptureRepo> = {}): WorkspaceCaptu
     behind: 0,
     status: [],
     diff: [fakeDiff()],
+    branchDiff: [fakeDiff()],
     ...overrides,
   };
 }
@@ -1072,7 +1074,7 @@ describe("useSandboxFiles — capture source", () => {
       },
     });
     const hook = await renderHook(
-      (props: { liveness: string }) =>
+      (props: { liveness: SessionCapabilities["liveness"] }) =>
         useSandboxFiles(SESSION_ID, {
           ...ctx,
           client,
@@ -1113,7 +1115,7 @@ describe("useSandboxFiles — capture source", () => {
     await hook.unmount();
   });
 
-  test("no capture + cold falls back to the live list (status quo, never worse)", async () => {
+  test("known-cold + no capture never issues a passive live list", async () => {
     let fsListCalls = 0;
     const client = fakeClient({
       gitStatus: async () => ({
@@ -1140,8 +1142,56 @@ describe("useSandboxFiles — capture source", () => {
       undefined,
     );
     await flush();
-    expect(fsListCalls).toBeGreaterThan(0);
-    expect(hook.result.current.source).toBe("live");
+    expect(fsListCalls).toBe(0);
+    expect(hook.result.current.source).toBeNull();
+    await hook.unmount();
+  });
+
+  test("warm event reconciliation is cancelled before a draining transition can rearm", async () => {
+    let fsListCalls = 0;
+    let gitBatchCalls = 0;
+    const client = fakeClient({
+      fsList: async () => {
+        fsListCalls += 1;
+        return {
+          root: treeDir("", "", [treeFile("app.py", "app.py", 1)]),
+          revision: 1,
+          truncated: false,
+        };
+      },
+      gitReadBatch: async () => {
+        gitBatchCalls += 1;
+        return { results: [] };
+      },
+    });
+    const hook = await renderHook(
+      (props: { liveness: SessionCapabilities["liveness"]; events: SessionEvent[] }) =>
+        useSandboxFiles(SESSION_ID, {
+          ...ctx,
+          client,
+          capture: fakeManifest(),
+          liveness: props.liveness,
+          events: props.events,
+        }),
+      { liveness: "warm", events: [] },
+    );
+    await flush();
+    fsListCalls = 0;
+    gitBatchCalls = 0;
+
+    await hook.rerender({
+      liveness: "warm",
+      events: [fakeEvent(1, "agent.toolCall.output")],
+    });
+    await hook.rerender({
+      liveness: "draining",
+      events: [fakeEvent(1, "agent.toolCall.output")],
+    });
+    await flush(250);
+
+    expect(fsListCalls).toBe(0);
+    expect(gitBatchCalls).toBe(0);
+    expect(hook.result.current.source).toBe("capture");
     await hook.unmount();
   });
 
@@ -1435,6 +1485,125 @@ describe("useSandboxGit — capture source", () => {
     await hook.unmount();
   });
 
+  test("known-cold + no capture never issues passive Git reads", async () => {
+    let gitStatusCalls = 0;
+    let gitDiffCalls = 0;
+    const client = fakeClient({
+      gitStatus: async () => {
+        gitStatusCalls += 1;
+        throw new Error("known-cold Git must remain passive");
+      },
+      gitDiff: async () => {
+        gitDiffCalls += 1;
+        throw new Error("known-cold Git must remain passive");
+      },
+    });
+    const hook = await renderHook(
+      () => useSandboxGit(SESSION_ID, { ...ctx, client, liveness: "cold" }),
+      undefined,
+    );
+    await flush();
+
+    expect(gitStatusCalls).toBe(0);
+    expect(gitDiffCalls).toBe(0);
+    expect(hook.result.current.source).toBeNull();
+    await hook.unmount();
+  });
+
+  test("a queued warm command refresh cannot run after the lease starts draining", async () => {
+    let gitStatusCalls = 0;
+    let gitDiffCalls = 0;
+    const client = fakeClient({
+      gitStatus: async () => {
+        gitStatusCalls += 1;
+        return {
+          isRepo: true,
+          head: "main",
+          detached: false,
+          upstream: null,
+          ahead: 0,
+          behind: 0,
+          files: [],
+          revision: 1,
+        };
+      },
+      gitDiff: async () => {
+        gitDiffCalls += 1;
+        return { files: [], revision: 1 };
+      },
+    });
+    const hook = await renderHook(
+      (props: { liveness: SessionCapabilities["liveness"]; events: SessionEvent[] }) =>
+        useSandboxGit(SESSION_ID, {
+          ...ctx,
+          client,
+          capture: fakeManifest(),
+          liveness: props.liveness,
+          events: props.events,
+        }),
+      { liveness: "warm", events: [] },
+    );
+    await flush();
+    gitStatusCalls = 0;
+    gitDiffCalls = 0;
+
+    await hook.rerender({
+      liveness: "warm",
+      events: [fakeEvent(1, "sandbox.command.output.delta")],
+    });
+    await hook.rerender({
+      liveness: "draining",
+      events: [fakeEvent(1, "sandbox.command.output.delta")],
+    });
+    await flush(1_100);
+
+    expect(gitStatusCalls).toBe(0);
+    expect(gitDiffCalls).toBe(0);
+    expect(hook.result.current.source).toBe("capture");
+    await hook.unmount();
+  });
+
+  test("cold Branch view uses the captured base-branch diff without waking the sandbox", async () => {
+    let gitStatusCalls = 0;
+    let gitDiffCalls = 0;
+    const client = fakeClient({
+      gitStatus: async () => {
+        gitStatusCalls += 1;
+        throw new Error("cold branch capture must not call live Git status");
+      },
+      gitDiff: async () => {
+        gitDiffCalls += 1;
+        throw new Error("cold branch capture must not call live Git diff");
+      },
+    });
+    const capture = fakeManifest({
+      repos: [
+        fakeRepo({
+          diff: [fakeDiff({ path: "uncommitted.py" })],
+          branchDiff: [fakeDiff({ path: "committed-and-local.py" })],
+        }),
+      ],
+    });
+    const hook = await renderHook(
+      () =>
+        useSandboxGit(SESSION_ID, {
+          ...ctx,
+          client,
+          capture,
+          comparison: "branch",
+          liveness: "cold",
+        }),
+      undefined,
+    );
+    await flush();
+
+    expect(hook.result.current.source).toBe("capture");
+    expect(hook.result.current.diff.map((file) => file.path)).toEqual(["committed-and-local.py"]);
+    expect(gitStatusCalls).toBe(0);
+    expect(gitDiffCalls).toBe(0);
+    await hook.unmount();
+  });
+
   test("cold multi-repo capture aggregates every repo with workspace-qualified paths", async () => {
     let gitStatusCalls = 0;
     let gitDiffCalls = 0;
@@ -1519,7 +1688,7 @@ describe("useSandboxGit — capture source", () => {
       }),
     });
     const hook = await renderHook(
-      (props: { liveness: string }) =>
+      (props: { liveness: SessionCapabilities["liveness"] }) =>
         useSandboxGit(SESSION_ID, {
           ...ctx,
           client,
@@ -1573,7 +1742,7 @@ describe("useSandboxGit — capture source", () => {
       }),
     });
     const hook = await renderHook(
-      (props: { liveness: string }) =>
+      (props: { liveness: SessionCapabilities["liveness"] }) =>
         useSandboxGit(SESSION_ID, {
           ...ctx,
           client,
@@ -1887,6 +2056,56 @@ describe("useWorkspaceEdit", () => {
     await hook.unmount();
   });
 
+  test("a buffered edit never flushes while teardown owns a draining lease", async () => {
+    const reads: string[] = [];
+    const writes: string[] = [];
+    const client = fakeClient({
+      fsRead: async (_workspaceId, _sessionId, request) => {
+        reads.push(request.path);
+        return {
+          path: request.path,
+          encoding: "utf8" as const,
+          content: "base\n",
+          sizeBytes: 5,
+          truncated: false,
+          isBinary: false,
+          revision: 0,
+        };
+      },
+      fsWrite: async (_workspaceId, _sessionId, request) => {
+        writes.push(request.path);
+        return { path: request.path, sizeBytes: request.content.length, revision: 1 };
+      },
+    });
+    const hook = await renderHook(
+      (props: { liveness: string }) =>
+        useWorkspaceEdit(SESSION_ID, {
+          ...ctx,
+          client,
+          path: "a.txt",
+          baseContent: "base\n",
+          liveness: props.liveness,
+        }),
+      { liveness: "cold" },
+    );
+    await flush();
+    await actRun(() => hook.result.current.edit("edited\n"));
+    await hook.rerender({ liveness: "draining" });
+    await flush();
+
+    expect(hook.result.current.state).toBe("buffering");
+    expect(hook.result.current.buffer).toBe("edited\n");
+    expect(reads).toEqual([]);
+    expect(writes).toEqual([]);
+
+    await hook.rerender({ liveness: "warm" });
+    await flush();
+    expect(hook.result.current.state).toBe("flushed");
+    expect(reads).toEqual(["a.txt"]);
+    expect(writes).toEqual(["a.txt"]);
+    await hook.unmount();
+  });
+
   test("conflict path: live diverged from base → conflict, NO write (C2)", async () => {
     const writes: unknown[] = [];
     const client = fakeClient({
@@ -2121,13 +2340,23 @@ describe("useWorkspaceEdit", () => {
 describe("deriveMachineChip", () => {
   const NOW = Date.parse("2026-07-08T12:05:00.000Z");
 
-  test("warm lease → live", () => {
+  test("only a holder-confirmed warm lease is live", () => {
     expect(deriveMachineChip({ liveness: "warm" })).toEqual({
       state: "live",
       label: "Live",
       asOf: null,
     });
-    expect(deriveMachineChip({ liveness: "draining" }).state).toBe("live");
+    expect(
+      deriveMachineChip({
+        liveness: "draining",
+        capturedAt: "2026-07-08T12:00:00.000Z",
+        now: NOW,
+      }),
+    ).toEqual({
+      state: "offline",
+      label: "Offline — as of 5m ago",
+      asOf: "2026-07-08T12:00:00.000Z",
+    });
   });
 
   test("negotiating or wanting-warm → waking", () => {

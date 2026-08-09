@@ -1,4 +1,11 @@
-# Embedding OpenGeni
+# Advanced In-Process Embedding
+
+> Most customer products do **not** need this integration shape. When OpenGeni
+> remains a standalone service and the product presents an OpenGeni-backed agent
+> in its own UI, use `@opengeni/sdk` through a tenant-scoped server proxy and add
+> only the `@opengeni/react` surfaces the product wants. See the package READMEs
+> and the `opengeni-client` skill. This guide is for the rarer case where the
+> host mounts OpenGeni's router or calls its core domain packages in-process.
 
 This guide is for a host application that embeds OpenGeni instead of running it only as the stock API + worker service. Embedding means binding host-owned concerns (identity, tenancy, billing admission, credentials, persistence, worker process, and event bus) into the same OpenGeni domain/runtime code the standalone stack uses.
 
@@ -15,6 +22,20 @@ hook's `{ client, workspaceId }` override when workspace-global provider
 behavior is not appropriate. The proxy does not need billing, rigs, files,
 terminal, workbench, or workspace-administration methods; workspace-level
 Resume is optional.
+
+**OpenGeni-rendered product UI.** A host that mounts the styled React surfaces
+can import `@opengeni/react/compiled.css` once. That package-owned artifact is
+already compiled from the component source with Tailwind v4, contains no global
+Preflight or `--tw-*` property registrations, and scopes rules to the `.og-root`
+roots applied by the components. The host therefore needs no Tailwind compiler
+or source scan. Tailwind runtime variables are initialized only within those
+roots; independent defaults inherit without replacing host `--og-*` values,
+while scoped effective values keep derived tokens live. The additive
+`@opengeni/react/styles.css` bridge remains available when a Tailwind v4 host
+intentionally wants to compile the package utilities itself. Import one styling
+path, not both. Theme, density, and brand overrides remain runtime `--og-*`
+tokens; portalled surfaces copy the effective tokens from their trigger onto
+their own standalone `.og-root`.
 
 **V1: mount the router.** Import `createApp(deps)` from `@opengeni/api-router/app` (`apps/api/src/app.ts`) and mount the returned Hono app under the host's route prefix. The dependency bag is `AppDependencies` from `@opengeni/core` (`packages/core/src/dependencies.ts`): `settings`, `db`, `bus`, and `workflowClient` are required; `documentIndexer`, `documentServices`, `observability`, `managedAuth`, `sessionAuthorization`, `sandboxClient`, and `resumeBoxById` are optional host bindings. The routes remain `/v1/...` inside the mounted app. If the mount prefix makes the worker's loopback MCP URL wrong, set `OPENGENI_MCP_URL` / `settings.opengeniMcpUrl`; `firstPartyMcpBaseUrl` in `packages/config/src/index.ts` is the canonical rule.
 
@@ -254,6 +275,14 @@ but are workspace-relative, separator-normalized, traversal-free, portable to
 case-insensitive filesystems, and collision-checked before sandbox execution.
 The normalized path is returned on the session resource and is the same value
 used by the manifest, clone hook, agent filesystem, and workbench.
+Repository URI normalization preserves the provider-defined HTTPS clone path;
+OpenGeni never manufactures or removes a trailing `.git` suffix. Credential
+routing and resource identity use an exhaustive provider capability policy:
+GitHub and GitLab explicitly declare `.git` and suffix-free paths equivalent,
+while Azure DevOps and provider-neutral remotes use exact paths. Adding a Git
+provider therefore requires choosing its path semantics rather than silently
+inheriting GitHub behavior. Mount-path and display-name derivation are separate
+from the clone transport URI.
 
 When upgrading existing sessions that omitted `mountPath`, the new default
 materializes the repository at the host-aware location. A host that must retain
@@ -380,12 +409,12 @@ domain (commonly the intersection or root-session policy), decline delivery, or
 place differently trusted sessions in separate sandbox groups. OpenGeni never
 claims that `/tmp` path separation protects one same-user process from another.
 
-Environment values are automatically registered with event-output redaction.
-When a credential file embeds atomic secrets (for example a bearer inside a
-kubeconfig), the host must also return those values through `redactions`; this
-lets OpenGeni redact chunked command output without understanding provider file
-formats. `auth_needed` can coexist with usable material and becomes both bounded
-model context and a structured `credential.auth_needed` reconnect card.
+OpenGeni does not register environment or credential-file values for output
+rewriting. Accepted model, tool, event, history, failure, and diagnostic content
+remains exact even when it contains configured-secret-shaped text. Hosts should
+return only the materialization and renewal facts required by the run;
+`auth_needed` can coexist with usable material and becomes both bounded model
+context and a structured `credential.auth_needed` reconnect card.
 
 The box-global websocket `ttyd` server remains credential-free because one box
 may be shared by several sessions. Session-scoped terminal exec and PTY calls do
@@ -761,6 +790,14 @@ approvals. Hooks outside that baseline export exact structural refinements:
 `FileAttachmentClientLike`. A host proxy therefore implements only the methods
 used by the mounted hooks; it does not stub workspace administration, billing,
 rig, connected-machine, or unrelated workbench APIs.
+
+Generated-image timeline rows carry a compact permanent artifact receipt. A
+host using the styled `MessageTimeline` can pass `loadRetainedArtifact`; the
+stock web implementation calls the SDK's
+`createRetainedArtifactDownloadUrl`, preserving the host's authenticated
+workspace boundary while avoiding a full browser byte copy. A custom timeline
+may instead call `downloadRetainedArtifact`, which verifies bounded ranges and
+SHA-256. See [`image-generation.md`](image-generation.md).
 
 Repository selection is also host-composable. `CreateSessionRequest.resources`
 accepts the canonical provider-qualified `ResourceRef[]`, including several

@@ -7,6 +7,7 @@ import {
   runIdempotentPersistenceTransaction,
   type IdempotentPersistenceTransactionOptions,
 } from "./persistence-errors";
+import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "./lossless-json";
 import * as schema from "./schema";
 
 // §7.7 driver widening (Step I). `Database` is the structural, cross-driver
@@ -143,6 +144,103 @@ export async function rawRows<T extends Record<string, unknown>>(
   throw new Error("Unsupported database execute() result shape");
 }
 
+export type SandboxProviderReadLockIdentity = {
+  workspaceId: string;
+  sandboxGroupId: string;
+  leaseEpoch: number;
+  instanceId: string;
+};
+
+export class SandboxProviderReadLockUnavailableError extends Error {
+  constructor() {
+    super("Sandbox provider reads are temporarily busy. Retry the request.");
+    this.name = "SandboxProviderReadLockUnavailableError";
+  }
+}
+
+const SANDBOX_PROVIDER_READ_LOCK_WAIT_MS = 15_000;
+const SANDBOX_PROVIDER_READ_LOCK_POLL_MAX_MS = 200;
+
+function sandboxProviderReadLockKey(identity: SandboxProviderReadLockIdentity): string {
+  return [
+    "sandbox-provider-read",
+    identity.workspaceId,
+    identity.sandboxGroupId,
+    identity.leaseEpoch,
+    identity.instanceId,
+  ].join(":");
+}
+
+async function waitForSandboxProviderReadLockPoll(
+  delayMs: number,
+  signal?: AbortSignal | undefined,
+): Promise<void> {
+  if (signal?.aborted) {
+    throw signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+  }
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const cleanup = () => signal?.removeEventListener("abort", abort);
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve();
+    };
+    const abort = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      cleanup();
+      reject(signal?.reason ?? new DOMException("The operation was aborted", "AbortError"));
+    };
+    timer = setTimeout(finish, delayMs);
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+  });
+}
+
+/**
+ * Cross-process exclusive boundary for one exact live provider instance's
+ * API-direct read request. Modal accepts concurrent commands from one attached
+ * handle, but independent API replicas reconstruct different handles; issuing
+ * overlapping command groups through those handles can make an otherwise valid
+ * read fail transiently. Keep concurrency inside one batched request while
+ * serializing only separate requests that target the same lease identity.
+ *
+ * The callback intentionally runs while one transaction-pinned DB connection
+ * holds the advisory lock. The direct lease holder separately prevents drain,
+ * and the abort-aware bounded poll prevents a disconnected HTTP request from
+ * occupying the connection indefinitely.
+ */
+export async function withSandboxProviderReadLock<T>(
+  db: Database,
+  identity: SandboxProviderReadLockIdentity,
+  signal: AbortSignal | undefined,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const key = sandboxProviderReadLockKey(identity);
+  const deadline = Date.now() + SANDBOX_PROVIDER_READ_LOCK_WAIT_MS;
+  return await db.transaction(async (lockedDb) => {
+    let pollMs = 20;
+    while (true) {
+      if (signal?.aborted) {
+        throw signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+      }
+      const [row] = await rawRows<{ acquired: boolean }>(
+        lockedDb,
+        sql`select pg_try_advisory_xact_lock(hashtextextended(${key}, 0)) as acquired`,
+      );
+      if (row?.acquired === true) return await fn();
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) throw new SandboxProviderReadLockUnavailableError();
+      await waitForSandboxProviderReadLockPoll(Math.min(pollMs, remainingMs), signal);
+      pollMs = Math.min(pollMs * 2, SANDBOX_PROVIDER_READ_LOCK_POLL_MAX_MS);
+    }
+  });
+}
+
 export function createDb(databaseUrl: string, options: CreateDbOptions = {}): DbClient {
   // `prepare: false` is REQUIRED for Azure Database for PostgreSQL Flexible
   // Server's transaction-pooling PgBouncer: postgres-js's default named prepared
@@ -164,7 +262,7 @@ export function createDb(databaseUrl: string, options: CreateDbOptions = {}): Db
     // postgres-js IGNORES a URL `?search_path=`. Unset searchPath → omit it so the
     // server default (`public`) is unchanged for standalone.
     connection: {
-      application_name: "opengeni",
+      application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME,
       ...(options.searchPath ? { search_path: options.searchPath } : {}),
       ...(options.isolationLevel ? { default_transaction_isolation: options.isolationLevel } : {}),
     },
@@ -210,6 +308,11 @@ export async function setRlsContext(db: Database, context: RlsContext): Promise<
   await db.execute(
     sql`select set_config('opengeni.workspace_id', ${context.workspaceId ?? ""}, true)`,
   );
+  // Transaction-local writer identity covers supported injected/embedded
+  // database handles whose connection-level application_name is host-owned.
+  // Old OpenGeni binaries do not set this GUC, so migration-installed update
+  // fences can distinguish their partial writes without inspecting content.
+  await db.execute(sql`select set_config('opengeni.lossless_content_writer', '1', true)`);
   await db.execute(sql`select set_config('opengeni.sandbox_recovery_protocol_v2', '1', true)`);
 }
 

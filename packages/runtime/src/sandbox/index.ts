@@ -22,16 +22,29 @@ import type { Settings } from "@opengeni/config";
 import { collectSandboxEnvironment, parseExposedPorts } from "@opengeni/config";
 import {
   DESKTOP_STREAM_PORT,
+  OPENGENI_SANDBOX_PROVIDER_INSTANCE_ID_FIELD,
   TERMINAL_STREAM_PORT,
   type SandboxBackend,
+  type SandboxProviderContinuityRecovery,
 } from "@opengeni/contracts";
 import type {
+  Manifest,
   SandboxClient,
   SandboxSessionLike,
   SandboxSessionState,
 } from "@openai/agents/sandbox";
+import { serializeManifestRecord } from "@openai/agents-core/sandbox/internal";
 import { PROVIDER_REGISTRY } from "./providers";
-import { SandboxConfigError, SandboxResumeStateUnavailableError } from "./errors";
+import type { ProviderRegistration } from "./providers/types";
+import { sandboxBackendForSdkBackendId } from "./select";
+import {
+  SandboxConfigError,
+  SandboxExactResumeReplacedError,
+  SandboxProviderContinuityUnavailableError,
+  SandboxResumeIdentityMismatchError,
+  SandboxResumeIdentityUnavailableError,
+  SandboxResumeStateUnavailableError,
+} from "./errors";
 import { isProviderSandboxNotFoundError } from "./provider-errors";
 import {
   decodeNativeSnapshotRef,
@@ -42,6 +55,7 @@ import {
   type WorkspaceArchiveDescriptor,
 } from "./workspace-archive";
 import type { RuntimeMetricsHooks } from "../metrics";
+import { normalizeProtocolJsonValue } from "../protocol-json";
 import { runStateCompatibilityProvider, runStateExposedPortsRecord } from "./run-state-compat";
 
 // Re-export the config-owned environment/port helpers from the leaf so the
@@ -69,14 +83,24 @@ export {
 } from "./capabilities";
 export {
   SandboxConfigError,
+  SandboxExactResumeInstanceUnavailableError,
+  SandboxExactResumeReplacedError,
+  SandboxProviderContinuityUnavailableError,
   SandboxProviderUnavailableError,
+  SandboxResumeIdentityMismatchError,
+  SandboxResumeIdentityUnavailableError,
   SandboxResumeStateUnavailableError,
 } from "./errors";
 export {
   PROVIDER_REGISTRY,
   assertProviderRegistryInvariants,
+  prepareProviderForTeardownAfterCapture,
+  providerWorkspaceCapturePolicy,
   type ProviderRegistration,
   type ProviderConstructionContext,
+  type ProviderExactResumeMode,
+  type ProviderWorkspaceCapturePolicy,
+  type ProviderWorkspaceCaptureTakeover,
 } from "./providers";
 export {
   classifyProviderSandboxFailure,
@@ -129,6 +153,8 @@ export {
 } from "./providers/modal";
 export {
   selectBackend,
+  sdkBackendIdForSandboxBackend,
+  sandboxBackendForSdkBackendId,
   backendSupportsOs,
   desktopCapableBackend,
   negotiateCapabilities,
@@ -167,6 +193,24 @@ export {
   type EnsureDisplayStackOptions,
   type EnsureDisplayStackResult,
 } from "./display-stack";
+
+export {
+  sandboxCommandExitCode,
+  sandboxCommandOutput,
+  sandboxCommandStdout,
+  sandboxCommandStillRunning,
+} from "./command-result";
+
+export {
+  createTurnToolCancellationController,
+  TurnSandboxCommandCancelledError,
+} from "./turn-tool-cancellation";
+export type {
+  TurnSandboxCommandArgs,
+  TurnSandboxCommandSession,
+  TurnToolCancellationController,
+  TurnToolCancellationFence,
+} from "./turn-tool-cancellation";
 
 // The Channel-B REAL PTY terminal-server launcher (P5.t). Exec-launched,
 // flock-idempotent twin of ensureDisplayStack; brings up ttyd PTY-over-websocket
@@ -487,18 +531,66 @@ export function createSandboxClientForBackend(
   // Same condition as the 6080 merge (a desktop-capable image bakes ttyd too).
   if (
     desktop.available &&
-    settings.sandboxDesktopEnabled &&
+    settings.sandboxTerminalEnabled &&
     !registration.descriptor.portExposure.supportsOnDemandPorts &&
     !exposedPorts.includes(TERMINAL_STREAM_PORT)
   ) {
     exposedPorts.push(TERMINAL_STREAM_PORT);
   }
 
-  const raw = registration.build({ settings, environment, exposedPorts });
+  const raw = withProviderExactResumeContract(
+    registration,
+    registration.build({ settings, environment, exposedPorts }),
+  );
   // Docker network decoration stays backend-specific (only docker).
   return registration.backend === "docker"
     ? withDockerNetwork(raw as SandboxClient, settings.dockerNetwork)
     : raw;
+}
+
+function withProviderExactResumeContract(
+  registration: ProviderRegistration,
+  raw: unknown,
+): unknown {
+  if (!raw || typeof raw !== "object") {
+    throw new SandboxConfigError(
+      registration.backend,
+      `Sandbox backend "${registration.backend}" returned no client`,
+    );
+  }
+  const client = raw as {
+    resume?: (state: unknown, options?: unknown) => Promise<unknown>;
+    resumeExact?: (state: unknown) => Promise<unknown>;
+  };
+  if (typeof client.resume !== "function") {
+    throw new SandboxConfigError(
+      registration.backend,
+      `Sandbox backend "${registration.backend}" does not support resume()`,
+    );
+  }
+  if (registration.exactResumeMode === "custom") {
+    if (typeof client.resumeExact !== "function") {
+      throw new SandboxConfigError(
+        registration.backend,
+        `Sandbox backend "${registration.backend}" has no non-replacing resumeExact()`,
+      );
+    }
+    return client;
+  }
+  if (registration.exactResumeMode !== "ordinary") {
+    throw new SandboxConfigError(
+      registration.backend,
+      `Sandbox backend "${registration.backend}" has an invalid exact-resume contract`,
+    );
+  }
+  const resume = client.resume;
+  Object.defineProperty(client, "resumeExact", {
+    configurable: false,
+    enumerable: false,
+    writable: false,
+    value: async (state: unknown) => await resume.call(client, state),
+  });
+  return client;
 }
 
 function withDockerNetwork(client: SandboxClient, network: string | undefined): SandboxClient {
@@ -506,6 +598,11 @@ function withDockerNetwork(client: SandboxClient, network: string | undefined): 
   if (!trimmed) {
     return client;
   }
+  const exactResume = (
+    client as SandboxClient & {
+      resumeExact?: (state: SandboxSessionState) => Promise<SandboxSessionLike>;
+    }
+  ).resumeExact;
   const wrapSession = async <T extends SandboxSessionLike>(session: T): Promise<T> => {
     const containerId = (session as { state?: { containerId?: unknown } }).state?.containerId;
     if (typeof containerId === "string" && containerId.length > 0) {
@@ -528,6 +625,16 @@ function withDockerNetwork(client: SandboxClient, network: string | undefined): 
       ? {
           resume: async (state: SandboxSessionState) =>
             await wrapSession(await client.resume!(state)),
+        }
+      : {}),
+    ...(exactResume
+      ? {
+          // Docker's ordinary SDK resume creates a replacement when the exact
+          // container is absent. Preserve OpenGeni's non-replacing attach path
+          // through the network decorator; dropping it would turn an exact
+          // recovery probe into a provider mutation.
+          resumeExact: async (state: SandboxSessionState) =>
+            await wrapSession(await exactResume.call(client, state)),
         }
       : {}),
     ...(client.delete
@@ -602,7 +709,53 @@ export function sandboxStateEntryFromRunState(state: unknown): Record<string, un
   if (!entry || !entry.sessionState) {
     return null;
   }
-  return entry as Record<string, unknown>;
+  return normalizeProtocolJsonValue(
+    sandboxEntryForPersistence(entry as Record<string, unknown>),
+    '$["sandboxSessionEnvelope"]',
+  ) as Record<string, unknown>;
+}
+
+/**
+ * The Agents SDK session envelope carries its canonical serialized manifest at
+ * `sessionState.manifest`. Some provider serializers also repeat a hydrated
+ * `Manifest` instance at `sessionState.providerState.manifest`; the SDK restore
+ * path always overlays the canonical outer value, so the duplicate is neither
+ * read nor JSON-protocol-safe. Remove only that known redundant field before the
+ * envelope crosses OpenGeni's durable canonical-JSON boundary.
+ */
+function sandboxEntryForPersistence(entry: Record<string, unknown>): Record<string, unknown> {
+  const sessionState = entry.sessionState;
+  if (!isObjectRecord(sessionState) || !Object.hasOwn(sessionState, "manifest")) {
+    return entry;
+  }
+  const providerState = sessionState.providerState;
+  if (!isObjectRecord(providerState) || !Object.hasOwn(providerState, "manifest")) {
+    return entry;
+  }
+  const { manifest: _redundantManifest, ...canonicalProviderState } = providerState;
+  return {
+    ...entry,
+    sessionState: {
+      ...sessionState,
+      providerState: canonicalProviderState,
+    },
+  };
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function providerStateWithoutDuplicateManifest(value: object): Record<string, unknown> {
+  const { manifest: _manifest, ...providerState } = value as Record<string, unknown>;
+  return providerState;
+}
+
+function serializeSdkManifestForEnvelope(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype === Object.prototype || prototype === null) return value;
+  return serializeManifestRecord(value as Manifest);
 }
 
 /**
@@ -668,6 +821,7 @@ export function decodeModalSnapshotId(archive: Uint8Array): string | undefined {
 export async function deserializeSandboxSessionStateEnvelope(
   client: SandboxClient,
   envelope: unknown,
+  expectedInstanceId?: string,
 ): Promise<SandboxSessionState | undefined> {
   if (!envelope || typeof envelope !== "object") {
     return undefined;
@@ -686,6 +840,24 @@ export async function deserializeSandboxSessionStateEnvelope(
     workspaceReady?: unknown;
     exposedPorts?: unknown;
   };
+  const providerState = { ...(state.providerState ?? {}) };
+  if (expectedInstanceId) {
+    const backend = sandboxBackendForSdkBackendId(client.backendId) ?? client.backendId;
+    const observedInstanceId = liveProviderInstanceIdFromState(backend, providerState);
+    if (observedInstanceId && observedInstanceId !== expectedInstanceId) {
+      throw new SandboxResumeIdentityMismatchError(backend, expectedInstanceId, observedInstanceId);
+    }
+    if (!observedInstanceId) {
+      const instanceIdField = PROVIDER_REGISTRY[backend as SandboxBackend]?.instanceIdFields[0];
+      if (instanceIdField) {
+        // New envelopes persist one provider-neutral OpenGeni identity. SDK
+        // deserializers still require their legacy provider-specific address,
+        // so materialize it into a cloned payload at this adapter boundary.
+        // The live resumed handle is independently identity-checked before use.
+        providerState[instanceIdField] = expectedInstanceId;
+      }
+    }
+  }
   const exposedPorts = runStateExposedPortsRecord(state.exposedPorts);
   if (state.exposedPorts !== undefined && exposedPorts === undefined) {
     console.warn("[sandbox] ignored incompatible RunState exposedPorts", {
@@ -695,7 +867,7 @@ export async function deserializeSandboxSessionStateEnvelope(
     });
   }
   return await client.deserializeSessionState({
-    ...(state.providerState ?? {}),
+    ...providerState,
     manifest: state.manifest,
     ...(state.snapshot !== undefined ? { snapshot: state.snapshot } : {}),
     ...(state.snapshotFingerprint !== undefined
@@ -747,9 +919,104 @@ export type EstablishedSandboxSession = {
   /** Set when a create-authorized reattach found the envelope's box GONE
    *  (provider NotFound) and fell through to cold-restore. */
   lostInstanceId?: string;
+  /** Durable authorization used when an elected recovery owner adopted a new
+   * execution wrapper over the same provider-owned workspace. Unpublished
+   * failure cleanup must preserve that workspace for the next recovery owner. */
+  providerContinuity?: SandboxProviderContinuityRecovery;
   /** Exact durable archive revision verified byte-for-byte after hydration. */
   restoredArchive?: WorkspaceArchiveDescriptor;
 };
+
+/**
+ * Terminate an SDK-managed provider session through the declared sandbox
+ * lifecycle surface. The reaper must never guess non-standard `kill` or
+ * `terminate` method names: every supported SDK provider exposes one of these
+ * standard operations, while provider-specific by-id rescue stays in its
+ * adapter.
+ */
+export async function terminateManagedSandboxSession(
+  client: unknown,
+  sessionState: unknown,
+  session: unknown,
+): Promise<void> {
+  const lifecycleClient = client as {
+    backendId?: unknown;
+    delete?: (state: never) => Promise<void>;
+  };
+  const lifecycleSession = session as Partial<SandboxSessionLike>;
+  const options = { reason: "cleanup" };
+  let firstError: unknown;
+  const attempt = async (operation: (() => Promise<void>) | undefined): Promise<void> => {
+    if (!operation) return;
+    try {
+      await operation();
+    } catch (error) {
+      firstError ??= error;
+    }
+  };
+  const runPreStopHooks =
+    typeof lifecycleSession.runPreStopHooks === "function"
+      ? lifecycleSession.runPreStopHooks.bind(lifecycleSession)
+      : undefined;
+  const preStop =
+    typeof lifecycleSession.preStop === "function"
+      ? lifecycleSession.preStop.bind(lifecycleSession)
+      : undefined;
+  const stop =
+    typeof lifecycleSession.stop === "function"
+      ? lifecycleSession.stop.bind(lifecycleSession)
+      : undefined;
+  const shutdown =
+    typeof lifecycleSession.shutdown === "function"
+      ? lifecycleSession.shutdown.bind(lifecycleSession)
+      : undefined;
+  const deleteSession =
+    typeof lifecycleSession.delete === "function"
+      ? lifecycleSession.delete.bind(lifecycleSession)
+      : undefined;
+  const close =
+    typeof lifecycleSession.close === "function"
+      ? lifecycleSession.close.bind(lifecycleSession)
+      : undefined;
+
+  // Mirror the Agents SDK's provider-neutral cleanupSandboxSession contract.
+  // Agents SDK 0.14.3 does not publicly export that helper, so this agent-loop-free leaf
+  // keeps the same small sequence locally. Prefer the live session lifecycle:
+  // it owns registered pre-stop hooks and provider cleanup semantics. The
+  // state-only client.delete contract is a fallback when no session teardown
+  // operation exists.
+  await attempt(runPreStopHooks);
+  await attempt(preStop ? async () => await preStop(options) : undefined);
+  await attempt(stop ? async () => await stop(options) : undefined);
+  await attempt(shutdown ? async () => await shutdown(options) : undefined);
+  await attempt(deleteSession ? async () => await deleteSession(options) : undefined);
+  const hasProviderTeardown = Boolean(stop || shutdown || deleteSession);
+  if (!hasProviderTeardown && close) {
+    await attempt(close);
+  } else if (
+    !hasProviderTeardown &&
+    !close &&
+    typeof lifecycleClient.delete === "function" &&
+    sessionState !== undefined &&
+    sessionState !== null
+  ) {
+    await attempt(async () => await lifecycleClient.delete!(sessionState as never));
+  }
+  if (firstError) throw firstError;
+  if (
+    hasProviderTeardown ||
+    close ||
+    (typeof lifecycleClient.delete === "function" &&
+      sessionState !== undefined &&
+      sessionState !== null)
+  ) {
+    return;
+  }
+
+  const backendId =
+    typeof lifecycleClient.backendId === "string" ? lifecycleClient.backendId : "unknown";
+  throw new Error(`Sandbox backend ${backendId} exposes no teardown lifecycle operation`);
+}
 
 export class SandboxExecReadinessError extends Error {
   readonly name = "SandboxExecReadinessError";
@@ -863,6 +1130,10 @@ type ResumeCapableClient = {
   backendId: string;
   deserializeSessionState?: (state: Record<string, unknown>) => Promise<unknown>;
   resume?: (state: unknown, options?: unknown) => Promise<unknown>;
+  /** OpenGeni extension implemented by providers whose ordinary SDK resume may
+   * create a replacement. This method must either return the addressed wrapper
+   * or prove it unavailable without creating anything. */
+  resumeExact?: (state: unknown) => Promise<unknown>;
   create?: (manifest?: unknown, options?: unknown) => Promise<unknown>;
 };
 
@@ -880,16 +1151,286 @@ type ResumeCapableClient = {
  * an unrecognized error is treated as "not NotFound" (propagate), because a
  * false-positive recreate is the dangerous direction (double-spawn).
  */
-function readInstanceId(session: unknown): string {
-  const state = (session as { state?: Record<string, unknown> }).state ?? {};
-  const candidate =
-    state.sandboxId ??
-    state.instanceId ??
-    state.id ??
-    state.hostId ??
-    state.containerId ??
-    state.workspaceRootPath;
-  return typeof candidate === "string" && candidate.length > 0 ? candidate : "";
+function liveProviderInstanceIdFromState(
+  backend: SandboxBackend | string,
+  state: unknown,
+): string | null {
+  if (!state || typeof state !== "object" || Array.isArray(state)) return null;
+  const registration = PROVIDER_REGISTRY[backend as SandboxBackend];
+  if (!registration || registration.backend !== backend) return null;
+  const record = state as Record<string, unknown>;
+  for (const field of registration.instanceIdFields) {
+    const value = record[field];
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  return null;
+}
+
+function legacySandboxProviderInstanceIdFromEnvelope(
+  envelope: Record<string, unknown> | null | undefined,
+  backend?: SandboxBackend | string,
+): string | null {
+  const sessionState =
+    envelope?.sessionState && typeof envelope.sessionState === "object"
+      ? (envelope.sessionState as Record<string, unknown>)
+      : null;
+  const providerState =
+    sessionState?.providerState && typeof sessionState.providerState === "object"
+      ? sessionState.providerState
+      : envelope?.providerState;
+  const envelopeBackendId =
+    typeof envelope?.backendId === "string" && envelope.backendId.length > 0
+      ? envelope.backendId
+      : null;
+  const resolvedBackend =
+    backend ??
+    (envelopeBackendId
+      ? (sandboxBackendForSdkBackendId(envelopeBackendId) ?? envelopeBackendId)
+      : null);
+  return resolvedBackend ? liveProviderInstanceIdFromState(resolvedBackend, providerState) : null;
+}
+
+/** Resolve the stable OpenGeni identity first, then legacy SDK provider keys.
+ * The fallback is compatibility-only: new envelopes always persist the stable
+ * top-level identity, so downstream lease/reaper code remains provider-neutral. */
+export function sandboxProviderInstanceIdFromEnvelope(
+  envelope: Record<string, unknown> | null | undefined,
+  backend?: SandboxBackend | string,
+): string | null {
+  const declared = envelope?.[OPENGENI_SANDBOX_PROVIDER_INSTANCE_ID_FIELD];
+  if (typeof declared === "string" && declared.length > 0) return declared;
+  return legacySandboxProviderInstanceIdFromEnvelope(envelope, backend);
+}
+
+/** Validate rolling-format envelopes before addressing a provider. The stable
+ * OpenGeni identity is authoritative, but a disagreeing legacy SDK address is
+ * corruption/staleness—not evidence that the provider disappeared. */
+export function assertConsistentSandboxProviderIdentity(
+  backend: SandboxBackend | string,
+  envelope: Record<string, unknown> | null | undefined,
+): string | null {
+  const declared = envelope?.[OPENGENI_SANDBOX_PROVIDER_INSTANCE_ID_FIELD];
+  const stable = typeof declared === "string" && declared.length > 0 ? declared : null;
+  const legacy = legacySandboxProviderInstanceIdFromEnvelope(envelope, backend);
+  if (stable && legacy && stable !== legacy) {
+    throw new SandboxResumeIdentityMismatchError(backend, stable, legacy);
+  }
+  return stable ?? legacy;
+}
+
+function exactResumeStateForBackend(backend: string, state: unknown): unknown {
+  if (backend !== "vercel" || !state || typeof state !== "object" || Array.isArray(state)) {
+    return state;
+  }
+  // Vercel's ordinary resume intentionally creates a replacement whenever the
+  // serialized state carries a fresh snapshot. Exact attach/reaper recovery
+  // must address sandboxId instead; clearing only this freshness marker makes
+  // the SDK use Sandbox.get while retaining the snapshot as recovery data.
+  const exactState = { ...(state as Record<string, unknown>) };
+  delete exactState.snapshotSandboxId;
+  return exactState;
+}
+
+function providerContinuityRegistration(backend: SandboxBackend | string) {
+  const registration = PROVIDER_REGISTRY[backend as SandboxBackend];
+  return registration?.backend === backend ? registration.continuity : undefined;
+}
+
+export function sandboxProviderContinuityForState(
+  backend: SandboxBackend | string,
+  state: unknown,
+  sourceInstanceId: string,
+): SandboxProviderContinuityRecovery | null {
+  const continuity = providerContinuityRegistration(backend);
+  const continuityKey = continuity?.keyFromState(state) ?? null;
+  if (!continuity || !continuityKey || sourceInstanceId.length === 0) return null;
+  return {
+    version: 1,
+    backend: backend as SandboxBackend,
+    kind: continuity.kind,
+    sourceInstanceId,
+    continuityKey,
+  };
+}
+
+function parsedEnvelopeContinuity(
+  backend: SandboxBackend | string,
+  envelope: Record<string, unknown> | null,
+  state: unknown,
+  expectedInstanceId: string,
+): SandboxProviderContinuityRecovery | null {
+  const recovery =
+    envelope?.opengeniRecovery && typeof envelope.opengeniRecovery === "object"
+      ? (envelope.opengeniRecovery as { continuity?: unknown })
+      : null;
+  const value = recovery?.continuity;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Partial<SandboxProviderContinuityRecovery>;
+  const derived = sandboxProviderContinuityForState(backend, state, expectedInstanceId);
+  return derived &&
+    candidate.version === derived.version &&
+    candidate.backend === derived.backend &&
+    candidate.kind === derived.kind &&
+    candidate.sourceInstanceId === derived.sourceInstanceId &&
+    candidate.continuityKey === derived.continuityKey
+    ? derived
+    : null;
+}
+
+function continuityMatchesState(
+  receipt: SandboxProviderContinuityRecovery,
+  state: unknown,
+): boolean {
+  const continuity = providerContinuityRegistration(receipt.backend);
+  return (
+    continuity?.kind === receipt.kind && continuity.keyFromState(state) === receipt.continuityKey
+  );
+}
+
+function preserveContinuityWorkspaceForDiscard(
+  backend: SandboxBackend | string,
+  requestedState: unknown,
+  session: unknown,
+  sessionState: unknown,
+): boolean {
+  const continuity = providerContinuityRegistration(backend);
+  if (!continuity) return false;
+  const requestedKey = continuity.keyFromState(requestedState);
+  const replacementKey = continuity.keyFromState(sessionState);
+  if (!requestedKey || requestedKey !== replacementKey) return false;
+  continuity.preserveWorkspaceForDiscard(session, sessionState);
+  return true;
+}
+
+export async function resumeExactSandboxSession(
+  clientInput: unknown,
+  backend: SandboxBackend | string,
+  state: unknown,
+  expectedInstanceId: string,
+  options?: { continuity?: SandboxProviderContinuityRecovery },
+): Promise<{
+  session: unknown;
+  sessionState: unknown;
+  instanceId: string;
+  providerContinuity?: SandboxProviderContinuityRecovery;
+}> {
+  const client = clientInput as ResumeCapableClient;
+  if (!client.resume) {
+    throw new SandboxConfigError(backend, `Sandbox backend "${backend}" does not support resume()`);
+  }
+  const exactState = exactResumeStateForBackend(client.backendId, state);
+  const continuity = options?.continuity;
+  if (
+    continuity &&
+    (continuity.backend !== backend ||
+      continuity.sourceInstanceId !== expectedInstanceId ||
+      !continuityMatchesState(continuity, exactState))
+  ) {
+    throw new SandboxResumeIdentityMismatchError(
+      backend,
+      expectedInstanceId,
+      continuity.sourceInstanceId,
+    );
+  }
+  if (!continuity && !client.resumeExact) {
+    throw new SandboxConfigError(
+      backend,
+      `Sandbox backend "${backend}" has no non-replacing resumeExact()`,
+    );
+  }
+  // A durable continuity receipt is creation authority owned by either the
+  // unique cold->warming winner or a durable teardown claim. Ordinary attached
+  // callers use resumeExact so an SDK cannot silently create a rival wrapper.
+  const session = continuity
+    ? await client.resume(exactState)
+    : await client.resumeExact!(exactState);
+  const actualInstanceId = readInstanceId(backend, session);
+  if (!actualInstanceId) {
+    // Do not tear down an unidentifiable handle: it may be the requested live
+    // provider. The adapter must expose a stable identity before OpenGeni can
+    // safely command, publish, snapshot, or delete it.
+    throw new SandboxResumeIdentityUnavailableError(backend, expectedInstanceId);
+  }
+  if (actualInstanceId !== expectedInstanceId) {
+    const replacementState = (session as { state?: unknown }).state ?? exactState;
+    if (continuity && continuityMatchesState(continuity, replacementState)) {
+      return {
+        session,
+        sessionState: replacementState,
+        instanceId: actualInstanceId,
+        providerContinuity: continuity,
+      };
+    }
+    // A provider may race from running to absent between an exact preflight and
+    // its SDK resume. If that produced a same-workspace wrapper, discard only
+    // the wrapper; deleting the shared workspace would destroy recovery truth.
+    preserveContinuityWorkspaceForDiscard(backend, exactState, session, replacementState);
+    try {
+      await terminateManagedSandboxSession(client, replacementState, session);
+    } catch (cleanupError) {
+      throw new SandboxResumeIdentityMismatchError(backend, expectedInstanceId, actualInstanceId, {
+        cause: cleanupError,
+      });
+    }
+    throw new SandboxExactResumeReplacedError(backend, expectedInstanceId, actualInstanceId);
+  }
+  return {
+    session,
+    sessionState: (session as { state?: unknown }).state ?? exactState,
+    instanceId: actualInstanceId,
+    ...(continuity ? { providerContinuity: continuity } : {}),
+  };
+}
+
+/** Terminate a provider handle that never became durable warm ownership. A
+ * continuity-adopted Docker wrapper is removed while its durable host
+ * workspace remains available to the next elected recovery owner. */
+export async function terminateUnpublishedSandboxSession(
+  established: EstablishedSandboxSession,
+): Promise<void> {
+  if (established.providerContinuity) {
+    const continuity = providerContinuityRegistration(established.providerContinuity.backend);
+    if (
+      continuity?.kind === established.providerContinuity.kind &&
+      continuity.keyFromState(established.sessionState) ===
+        established.providerContinuity.continuityKey
+    ) {
+      continuity.preserveWorkspaceForDiscard(established.session, established.sessionState);
+    }
+  }
+  await terminateManagedSandboxSession(
+    established.client,
+    established.sessionState,
+    established.session,
+  );
+}
+
+/** Remove every live-provider address while retaining backend-independent
+ * archive/config state for a safe cold rematerialization. */
+export function withoutSandboxProviderIdentity(
+  envelope: Record<string, unknown> | null,
+): Record<string, unknown> | null {
+  if (!envelope) return null;
+  const providerIndependentEnvelope = { ...envelope };
+  delete providerIndependentEnvelope[OPENGENI_SANDBOX_PROVIDER_INSTANCE_ID_FIELD];
+  // Some rolling/legacy envelopes contain both a top-level providerState and
+  // the newer nested sessionState. Strip both representations; retaining the
+  // top-level fallback would make the compatibility reader rediscover a dead
+  // provider after we deliberately converted the envelope to archive-only.
+  delete providerIndependentEnvelope.providerState;
+  const sessionState =
+    envelope.sessionState && typeof envelope.sessionState === "object"
+      ? (envelope.sessionState as Record<string, unknown>)
+      : null;
+  if (!sessionState) {
+    return providerIndependentEnvelope;
+  }
+  const { providerState: _providerState, ...providerIndependentState } = sessionState;
+  return { ...providerIndependentEnvelope, sessionState: providerIndependentState };
+}
+
+function readInstanceId(backend: SandboxBackend | string, session: unknown): string {
+  return liveProviderInstanceIdFromState(backend, (session as { state?: unknown }).state) ?? "";
 }
 
 async function terminateCreatedSandbox(
@@ -897,24 +1438,8 @@ async function terminateCreatedSandbox(
   session: unknown,
   sessionState: unknown,
 ): Promise<void> {
-  const clientWithDelete = client as {
-    delete?: (state: unknown) => Promise<unknown>;
-  };
-  if (typeof clientWithDelete.delete === "function" && sessionState !== undefined) {
-    try {
-      await clientWithDelete.delete(sessionState);
-    } catch {
-      /* best-effort */
-    }
-    return;
-  }
-  const sess = session as {
-    close?: () => Promise<unknown>;
-    terminate?: () => Promise<unknown>;
-    kill?: () => Promise<unknown>;
-  };
   try {
-    await (sess.terminate ?? sess.kill ?? sess.close)?.();
+    await terminateManagedSandboxSession(client, sessionState, session);
   } catch {
     /* best-effort */
   }
@@ -1042,11 +1567,19 @@ export async function establishSandboxSessionFromEnvelope(
       throw error;
     }
     let restoredState = (restored as { state?: unknown }).state;
+    const restoredInstanceId = readInstanceId(backend, restored);
+    if (!restoredInstanceId) {
+      await terminateCreatedSandbox(client, restored, restoredState);
+      throw new SandboxConfigError(
+        backend,
+        `Sandbox backend "${backend}" created a handle without its declared provider identity`,
+      );
+    }
     let established: EstablishedSandboxSession = {
       client,
       session: restored,
       sessionState: restoredState ?? resumeFallbackState,
-      instanceId: readInstanceId(restored),
+      instanceId: restoredInstanceId,
       backendId: client.backendId,
     };
     if (opts.onSandboxCreated) {
@@ -1087,8 +1620,15 @@ export async function establishSandboxSessionFromEnvelope(
       // boundary; if it cannot persist the replacement, the caller fails closed
       // and this exact replacement is terminated below.
       const hydratedState = (restored as { state?: unknown }).state;
-      const hydratedInstanceId = readInstanceId(restored);
-      if (hydratedInstanceId && hydratedInstanceId !== established.instanceId) {
+      const hydratedInstanceId = readInstanceId(backend, restored);
+      if (!hydratedInstanceId) {
+        await terminateCreatedSandbox(client, restored, hydratedState);
+        throw new SandboxConfigError(
+          backend,
+          `Sandbox backend "${backend}" hydrated a handle without its declared provider identity`,
+        );
+      }
+      if (hydratedInstanceId !== established.instanceId) {
         established = {
           client,
           session: restored,
@@ -1136,11 +1676,19 @@ export async function establishSandboxSessionFromEnvelope(
       );
     }
     restoredState = (restored as { state?: unknown }).state;
+    const finalInstanceId = readInstanceId(backend, restored);
+    if (!finalInstanceId) {
+      await terminateCreatedSandbox(client, restored, restoredState);
+      throw new SandboxConfigError(
+        backend,
+        `Sandbox backend "${backend}" returned a handle without its declared provider identity`,
+      );
+    }
     return {
       client,
       session: restored,
       sessionState: restoredState ?? resumeFallbackState,
-      instanceId: readInstanceId(restored),
+      instanceId: finalInstanceId,
       backendId: client.backendId,
       origin: hydrationApplied ? ("restored" as const) : ("created" as const),
       ...(workspaceArchive ? { restoredArchive: workspaceArchive.descriptor } : {}),
@@ -1148,25 +1696,12 @@ export async function establishSandboxSessionFromEnvelope(
   };
 
   // Does the envelope carry a RESUMABLE box id (warm reattach), or only a
-  // restorable archive (cold lease)? A Modal envelope with no providerState.sandboxId
-  // (the minimal archive-only envelope confirmDrainCold preserves) is NOT resumable —
-  // client.resume() would throw "requires a persisted sandboxId", which is NOT a
-  // NotFound, so it would propagate instead of cold-restoring. Gate the resume
-  // branch on a present sandbox identity so an archive-only envelope falls straight
-  // through to the cold-restore+hydrate path (b).
-  const envelopeProviderState =
-    envelopeSessionState && typeof envelopeSessionState === "object"
-      ? (envelopeSessionState as { providerState?: Record<string, unknown> }).providerState
-      : undefined;
-  const hasResumableInstance = Boolean(
-    envelopeProviderState &&
-    typeof envelopeProviderState === "object" &&
-    (envelopeProviderState.sandboxId ||
-      envelopeProviderState.instanceId ||
-      envelopeProviderState.id ||
-      envelopeProviderState.containerId ||
-      envelopeProviderState.workspaceRootPath),
-  );
+  // restorable archive (cold lease)? Archive-only state is not resumable: the
+  // provider's deserialize/resume path would reject it before OpenGeni could
+  // cold-restore. New envelopes use the stable OpenGeni identity; legacy SDK
+  // provider keys remain readable during rollout.
+  const persistedInstanceId = assertConsistentSandboxProviderIdentity(backend, envelope);
+  const hasResumableInstance = persistedInstanceId !== null;
 
   // (a) WARM REATTACH BY ID — only when the envelope carries a resumable box id.
   if (
@@ -1180,6 +1715,7 @@ export async function establishSandboxSessionFromEnvelope(
       resumedState = await deserializeSandboxSessionStateEnvelope(
         client as unknown as SandboxClient,
         envelopeSessionState,
+        persistedInstanceId,
       );
     } catch (error) {
       throw new SandboxConfigError(
@@ -1188,16 +1724,43 @@ export async function establishSandboxSessionFromEnvelope(
       );
     }
     if (resumedState !== undefined) {
+      const providerContinuity =
+        opts.recovery === "create-or-restore"
+          ? parsedEnvelopeContinuity(backend, envelope, resumedState, persistedInstanceId)
+          : null;
       try {
-        const session = await client.resume(resumedState);
-        return {
+        const resumed = await resumeExactSandboxSession(
           client,
-          session,
-          sessionState: resumedState,
-          instanceId: readInstanceId(session),
+          backend,
+          resumedState,
+          persistedInstanceId,
+          providerContinuity ? { continuity: providerContinuity } : undefined,
+        );
+        const established: EstablishedSandboxSession = {
+          client,
+          session: resumed.session,
+          sessionState: resumed.sessionState,
+          instanceId: resumed.instanceId,
           backendId: client.backendId,
           origin: "resumed",
+          ...(resumed.providerContinuity ? { providerContinuity: resumed.providerContinuity } : {}),
+          ...(resumed.instanceId !== persistedInstanceId
+            ? { lostInstanceId: persistedInstanceId }
+            : {}),
         };
+        // A continuity resume occurs only on a lease's unique warming owner.
+        // Attribute the restarted/adopted wrapper before returning exactly as
+        // for a fresh create; failure discards the wrapper but preserves the
+        // durable workspace for the next owner.
+        if (resumed.providerContinuity && opts.onSandboxCreated) {
+          try {
+            await opts.onSandboxCreated(established);
+          } catch (error) {
+            await terminateUnpublishedSandboxSession(established).catch(() => undefined);
+            throw error;
+          }
+        }
+        return established;
       } catch (error) {
         // Attached callers never own replacement. Propagate the provider
         // NotFound so their lease-aware caller can atomically mark this exact
@@ -1217,15 +1780,29 @@ export async function establishSandboxSessionFromEnvelope(
         // (sandbox-file-persistence). The shared coldRestore() seam creates a
         // fresh box and replays that archive. `lostInstanceId` carries the gone
         // box's id so the caller can emit the durable sandbox.box.lost event.
-        const lostInstanceId = [
-          envelopeProviderState?.sandboxId,
-          envelopeProviderState?.instanceId,
-          envelopeProviderState?.id,
-          envelopeProviderState?.containerId,
-          envelopeProviderState?.workspaceRootPath,
-        ].find((value): value is string => typeof value === "string" && value.length > 0);
-        const restoredSession = await coldRestore(resumedState);
-        return lostInstanceId ? { ...restoredSession, lostInstanceId } : restoredSession;
+        if (
+          providerContinuity &&
+          (typeof workspaceArchiveBase64 !== "string" || workspaceArchiveBase64.length === 0)
+        ) {
+          throw new SandboxProviderContinuityUnavailableError(backend, persistedInstanceId, false, {
+            cause: error,
+          });
+        }
+        let restoredSession: EstablishedSandboxSession;
+        try {
+          restoredSession = await coldRestore(resumedState);
+        } catch (restoreError) {
+          if (!providerContinuity) throw restoreError;
+          throw new SandboxProviderContinuityUnavailableError(
+            backend,
+            persistedInstanceId,
+            restoreError instanceof WorkspaceArchiveIntegrityError ? restoreError.retryable : true,
+            { cause: restoreError },
+          );
+        }
+        return persistedInstanceId
+          ? { ...restoredSession, lostInstanceId: persistedInstanceId }
+          : restoredSession;
       }
     }
   }
@@ -1299,37 +1876,37 @@ export async function serializeEstablishedSandboxEnvelope(
     // rehydrates `{ ...providerState, manifest, snapshot?, exposedPorts?,
     // workspaceReady }`. So the FLAT serialized state must be nested under
     // `providerState` (and manifest/ports lifted), or sandboxId is dropped on the
-    // round-trip and resume() throws "requires a persisted sandboxId". We pull
-    // manifest/native endpoint records up but leave them in providerState too
-    // (harmless; the deserialize spreads providerState first, then overlays
-    // manifest/ports). configuredExposedPorts is provider configuration/state,
-    // not the SDK's port-keyed endpoint record, so it must never be lifted.
+    // round-trip and resume() throws "requires a persisted sandboxId". SDK-owned
+    // envelope fields are removed from providerState after lifting; providers can
+    // return live Manifest instances there, and deserialization overlays the
+    // authoritative manifest anyway. configuredExposedPorts is provider
+    // configuration/state, not the SDK's port-keyed endpoint record, so it must
+    // never be lifted.
     const flat = serialized as Record<string, unknown>;
-    const manifest = flat.manifest;
+    const backend = sandboxBackendForSdkBackendId(established.backendId) ?? established.backendId;
+    const serializedInstanceId = liveProviderInstanceIdFromState(backend, flat);
+    if (!serializedInstanceId || serializedInstanceId !== established.instanceId) {
+      return null;
+    }
+    const manifest = serializeSdkManifestForEnvelope(flat.manifest);
     const exposedPorts = runStateExposedPortsRecord(flat.exposedPorts);
     const sessionState: Record<string, unknown> = {
-      providerState: flat,
+      providerState: providerStateWithoutDuplicateManifest(flat),
       ...(manifest !== undefined ? { manifest } : {}),
       ...(exposedPorts !== undefined ? { exposedPorts } : {}),
       workspaceReady: true,
     };
-    return { backendId: established.backendId, sessionState };
+    return {
+      backendId: established.backendId,
+      [OPENGENI_SANDBOX_PROVIDER_INSTANCE_ID_FIELD]: established.instanceId,
+      sessionState,
+    };
   } catch {
     // A serialize failure must NOT fail the attach/op; we just lose warm-reattach
     // for this box (it stays resumable-by-instance only via the next cold path).
     return null;
   }
 }
-
-const PROVIDER_IDENTITY_FIELDS = [
-  "sandboxId",
-  "instanceId",
-  "id",
-  "hostId",
-  "containerId",
-  "workspaceRootPath",
-  "agentId",
-] as const;
 
 /**
  * Whether a replacement envelope contains a provider-resumable identity. An
@@ -1338,21 +1915,20 @@ const PROVIDER_IDENTITY_FIELDS = [
  */
 export function hasPersistableSandboxProviderIdentity(
   envelope: Record<string, unknown> | null | undefined,
+  backend?: SandboxBackend | string,
 ): envelope is Record<string, unknown> {
-  const sessionState =
-    envelope?.sessionState && typeof envelope.sessionState === "object"
-      ? (envelope.sessionState as Record<string, unknown>)
-      : null;
-  const providerState =
-    sessionState?.providerState && typeof sessionState.providerState === "object"
-      ? (sessionState.providerState as Record<string, unknown>)
-      : null;
-  return Boolean(
-    providerState &&
-    PROVIDER_IDENTITY_FIELDS.some(
-      (field) => typeof providerState[field] === "string" && providerState[field].length > 0,
-    ),
-  );
+  try {
+    const resolvedBackend =
+      backend ??
+      (typeof envelope?.backendId === "string"
+        ? (sandboxBackendForSdkBackendId(envelope.backendId) ?? envelope.backendId)
+        : undefined);
+    return resolvedBackend
+      ? assertConsistentSandboxProviderIdentity(resolvedBackend, envelope) !== null
+      : sandboxProviderInstanceIdFromEnvelope(envelope) !== null;
+  } catch {
+    return false;
+  }
 }
 
 /** A replacement provider may not be published warm without a resumable
@@ -1373,7 +1949,8 @@ export function requirePersistableReplacementSandboxEnvelope(
   envelope: Record<string, unknown> | null,
   backend: string,
 ): Record<string, unknown> {
-  if (!hasPersistableSandboxProviderIdentity(envelope)) {
+  const providerInstanceId = assertConsistentSandboxProviderIdentity(backend, envelope);
+  if (!envelope || !providerInstanceId) {
     throw new SandboxReplacementProviderStateError(backend);
   }
   return envelope;

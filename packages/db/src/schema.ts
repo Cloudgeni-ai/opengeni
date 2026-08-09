@@ -11,6 +11,7 @@ import {
   bigint,
   boolean,
   check,
+  customType,
   foreignKey,
   index,
   integer,
@@ -21,8 +22,8 @@ import {
   timestamp,
   uniqueIndex,
   uuid,
-  customType,
 } from "drizzle-orm/pg-core";
+import { losslessCodecVersion, losslessJsonb, losslessText } from "./lossless-columns";
 
 const vector = customType<{ data: number[]; driverData: string }>({
   dataType() {
@@ -1371,7 +1372,8 @@ export const sessions = pgTable(
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
     status: text("status").notNull().default("queued"),
-    initialMessage: text("initial_message").notNull(),
+    initialMessage: losslessText("initial_message").notNull(),
+    initialMessageCodecVersion: losslessCodecVersion("initial_message_codec_version"),
     // Invisible host context frozen with the winning session create. The
     // initial turn copies this value so an idempotent repair can never adopt a
     // retrying caller's different instructions.
@@ -1499,10 +1501,9 @@ export const sessions = pgTable(
     nestedAgentDepthPolicySessionId: uuid("nested_agent_depth_policy_session_id"),
     temporalWorkflowId: text("temporal_workflow_id"),
     activeTurnId: uuid("active_turn_id"),
-    // Actual input tokens reported for the last model call of the most recent
-    // turn. The pre-turn portable compaction trigger reads this as its budget
-    // signal (char/4 estimate is the same-turn fallback). Null until a turn with
-    // usage has completed.
+    // Actual input tokens reported for the latest authoritative ordinary model
+    // call. Compaction/context clearing invalidates it to null; local history
+    // estimates must never be stored here.
     lastInputTokens: integer("last_input_tokens"),
     // Operator /compact request flag. The API sets
     // it true; the worker honors it BEFORE the next turn's model call by forcing
@@ -1826,8 +1827,10 @@ export const sessionRealtimeEntries = pgTable(
     // result/error to the same ordinary turn. It never denotes a child/fork
     // session.
     turnId: uuid("turn_id"),
-    text: text("text"),
-    payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
+    text: losslessText("text"),
+    textCodecVersion: losslessCodecVersion("text_codec_version"),
+    payload: losslessJsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
+    payloadCodecVersion: losslessCodecVersion("payload_codec_version"),
     clientAckedAt: timestamp("client_acked_at", { withTimezone: true }),
     providerAckedAt: timestamp("provider_acked_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -1890,14 +1893,6 @@ export const sessionRealtimeEntries = pgTable(
     delegationItemValid: check(
       "session_realtime_entries_delegation_item_check",
       sql`${table.delegationItemId} is null or octet_length(${table.delegationItemId}) between 1 and 1024`,
-    ),
-    textValid: check(
-      "session_realtime_entries_text_check",
-      sql`${table.text} is null or octet_length(${table.text}) <= 131072`,
-    ),
-    payloadValid: check(
-      "session_realtime_entries_payload_check",
-      sql`octet_length(${table.payload}::text) <= 131072`,
     ),
     turnValid: check(
       "session_realtime_entries_turn_check",
@@ -2172,6 +2167,341 @@ export const fileUploads = pgTable(
   }),
 );
 
+/** Permanent generated-image correlation; canonical bytes stay in `files`. */
+export const generatedImageArtifacts = pgTable(
+  "generated_image_artifacts",
+  {
+    artifactId: uuid("artifact_id").primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id").references(() => sessions.id, { onDelete: "set null" }),
+    // Turn/attempt foreign keys are installed by the migration; those tables
+    // are declared later in this monolithic schema module.
+    turnId: uuid("turn_id"),
+    attemptId: uuid("attempt_id"),
+    uploadId: uuid("upload_id").references(() => fileUploads.id, {
+      onDelete: "set null",
+    }),
+    settlementKey: text("settlement_key").notNull(),
+    toolCallId: text("tool_call_id").notNull(),
+    sourceStrategy: text("source_strategy").$type<"native_hosted" | "provider_adapter">().notNull(),
+    providerId: text("provider_id").notNull(),
+    providerBindingHash: text("provider_binding_hash").notNull(),
+    providerItemId: text("provider_item_id"),
+    status: text("status").$type<"pending" | "ready">().notNull().default("pending"),
+    mediaType: text("media_type").notNull(),
+    sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
+    sha256: text("sha256").notNull(),
+    width: integer("width").notNull(),
+    height: integer("height").notNull(),
+    sandboxPath: text("sandbox_path").notNull(),
+    readyAt: timestamp("ready_at", { withTimezone: true }),
+    lastError: text("last_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    settlementKey: uniqueIndex("generated_image_artifacts_settlement_key_uq").on(
+      table.workspaceId,
+      table.settlementKey,
+    ),
+    sessionCreated: index("generated_image_artifacts_session_created_idx").on(
+      table.workspaceId,
+      table.sessionId,
+      table.createdAt,
+      table.artifactId,
+    ),
+    providerItem: uniqueIndex("generated_image_artifacts_provider_item_uq")
+      .on(table.workspaceId, table.providerId, table.providerBindingHash, table.providerItemId)
+      .where(sql`${table.providerItemId} is not null`),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+      name: "generated_image_artifacts_workspace_account_fk",
+    }).onDelete("cascade"),
+    workspaceFile: foreignKey({
+      columns: [table.workspaceId, table.artifactId],
+      foreignColumns: [files.workspaceId, files.id],
+      name: "generated_image_artifacts_workspace_file_fk",
+    }).onDelete("cascade"),
+    sourceStrategyValid: check(
+      "generated_image_artifacts_source_strategy_chk",
+      sql`${table.sourceStrategy} in ('native_hosted', 'provider_adapter')`,
+    ),
+    sourceShapeValid: check(
+      "generated_image_artifacts_source_shape_chk",
+      sql`(${table.sourceStrategy} = 'native_hosted' and ${table.providerItemId} is not null)
+        or (${table.sourceStrategy} = 'provider_adapter' and ${table.providerItemId} is null)`,
+    ),
+    statusValid: check(
+      "generated_image_artifacts_status_chk",
+      sql`${table.status} in ('pending', 'ready')`,
+    ),
+    readyShapeValid: check(
+      "generated_image_artifacts_ready_shape_chk",
+      sql`(${table.status} = 'ready') = (${table.readyAt} is not null)`,
+    ),
+    mediaTypeValid: check(
+      "generated_image_artifacts_media_type_chk",
+      sql`${table.mediaType} in ('image/png', 'image/jpeg', 'image/webp')`,
+    ),
+    sizeValid: check(
+      "generated_image_artifacts_size_chk",
+      sql`${table.sizeBytes} > 0 and ${table.sizeBytes} <= 67108864`,
+    ),
+    sha256Valid: check(
+      "generated_image_artifacts_sha256_chk",
+      sql`${table.sha256} ~ '^[0-9a-f]{64}$'`,
+    ),
+    bindingHashValid: check(
+      "generated_image_artifacts_binding_hash_chk",
+      sql`${table.providerBindingHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+    identityBoundsValid: check(
+      "generated_image_artifacts_identity_bounds_chk",
+      sql`${table.settlementKey} ~ '^[0-9a-f]{64}$'
+        and octet_length(${table.toolCallId}) between 1 and 512
+        and octet_length(${table.providerId}) between 1 and 128
+        and (${table.providerItemId} is null or octet_length(${table.providerItemId}) between 1 and 512)
+        and (${table.lastError} is null or octet_length(${table.lastError}) <= 16384)`,
+    ),
+    dimensionsValid: check(
+      "generated_image_artifacts_dimensions_chk",
+      sql`${table.width} between 1 and 16384 and ${table.height} between 1 and 16384 and (${table.width}::bigint * ${table.height}::bigint) <= 67108864`,
+    ),
+    sandboxPathValid: check(
+      "generated_image_artifacts_sandbox_path_chk",
+      sql`${table.sandboxPath} ~ '^/workspace/generated-images/generated-image-[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\\.(png|jpg|webp)$'`,
+    ),
+  }),
+);
+
+/** Paid non-native generation admission; prevents ambiguous automatic replay. */
+export const imageGenerationOperations = pgTable(
+  "image_generation_operations",
+  {
+    id: uuid("id").primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id").references(() => sessions.id, {
+      onDelete: "cascade",
+    }),
+    turnId: uuid("turn_id"),
+    attemptId: uuid("attempt_id"),
+    operationKey: text("operation_key").notNull(),
+    toolCallId: text("tool_call_id").notNull(),
+    providerId: text("provider_id").notNull(),
+    providerBindingHash: text("provider_binding_hash").notNull(),
+    modelId: text("model_id").notNull(),
+    requestDigest: text("request_digest").notNull(),
+    expectedArtifactId: uuid("expected_artifact_id").notNull(),
+    status: text("status")
+      .$type<
+        "prepared" | "provider_started" | "completed" | "outcome_unknown" | "retention_failed"
+      >()
+      .notNull()
+      .default("prepared"),
+    providerStartedAt: timestamp("provider_started_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    lastError: text("last_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    operationKey: uniqueIndex("image_generation_operations_operation_key_uq").on(
+      table.workspaceId,
+      table.operationKey,
+    ),
+    sessionCreated: index("image_generation_operations_session_created_idx").on(
+      table.workspaceId,
+      table.sessionId,
+      table.createdAt,
+      table.id,
+    ),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+      name: "image_generation_operations_workspace_account_fk",
+    }).onDelete("cascade"),
+    statusValid: check(
+      "image_generation_operations_status_chk",
+      sql`${table.status} in ('prepared', 'provider_started', 'completed', 'outcome_unknown', 'retention_failed')`,
+    ),
+    digestValid: check(
+      "image_generation_operations_digest_chk",
+      sql`${table.operationKey} ~ '^[0-9a-f]{64}$'
+        and ${table.providerBindingHash} ~ '^[0-9a-f]{64}$'
+        and ${table.requestDigest} ~ '^[0-9a-f]{64}$'`,
+    ),
+    identityBoundsValid: check(
+      "image_generation_operations_identity_bounds_chk",
+      sql`octet_length(${table.toolCallId}) between 1 and 512
+        and octet_length(${table.providerId}) between 1 and 128
+        and octet_length(${table.modelId}) between 1 and 256
+        and (${table.lastError} is null or octet_length(${table.lastError}) <= 16384)`,
+    ),
+    stateValid: check(
+      "image_generation_operations_state_chk",
+      sql`(${table.status} = 'prepared' and ${table.providerStartedAt} is null and ${table.completedAt} is null)
+        or (${table.status} in ('provider_started', 'outcome_unknown', 'retention_failed') and ${table.providerStartedAt} is not null and ${table.completedAt} is null)
+        or (${table.status} = 'completed' and ${table.providerStartedAt} is not null and ${table.completedAt} is not null)`,
+    ),
+  }),
+);
+
+/** Exact pending/ready byte accounting for retained computer screenshots. */
+export const workspaceScreenshotQuotas = pgTable(
+  "workspace_screenshot_quotas",
+  {
+    workspaceId: uuid("workspace_id")
+      .primaryKey()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    reservedBytes: bigint("reserved_bytes", { mode: "number" }).notNull().default(0),
+    readyBytes: bigint("ready_bytes", { mode: "number" }).notNull().default(0),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+      name: "workspace_screenshot_quotas_workspace_account_fk",
+    }).onDelete("cascade"),
+    nonnegative: check(
+      "workspace_screenshot_quotas_nonnegative_chk",
+      sql`${table.reservedBytes} >= 0 and ${table.readyBytes} >= 0`,
+    ),
+  }),
+);
+
+/** Provider-neutral screenshot lifecycle; canonical bytes stay in `files` storage. */
+export const retainedScreenshotArtifacts = pgTable(
+  "retained_screenshot_artifacts",
+  {
+    // The composite file FK is RESTRICT in migration 0176: only the retained
+    // screenshot lifecycle may remove its backing file after provider cleanup.
+    artifactId: uuid("artifact_id").primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id").references(() => sessions.id, {
+      onDelete: "set null",
+    }),
+    // Turn/attempt foreign keys are installed by migrations 0140/0176.
+    // Those tables are declared later in this monolithic schema module, so
+    // referencing them here would create an eager initialization cycle.
+    turnId: uuid("turn_id"),
+    attemptId: uuid("attempt_id"),
+    settlementKey: text("settlement_key").notNull(),
+    toolCallId: text("tool_call_id").notNull(),
+    toolOutputId: text("tool_output_id").notNull(),
+    status: text("status")
+      .$type<
+        | "pending"
+        | "reconciling"
+        | "ready"
+        | "cleanup_queued"
+        | "cleanup_pending"
+        | "failed"
+        | "expired"
+        | "deleted"
+      >()
+      .notNull()
+      .default("pending"),
+    quotaState: text("quota_state")
+      .$type<"reserved" | "ready" | "released">()
+      .notNull()
+      .default("reserved"),
+    mediaType: text("media_type").notNull(),
+    sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
+    sha256: text("sha256").notNull(),
+    width: integer("width").notNull(),
+    height: integer("height").notNull(),
+    retentionExpiresAt: timestamp("retention_expires_at", { withTimezone: true }).notNull(),
+    readyAt: timestamp("ready_at", { withTimezone: true }),
+    cleanupReason: text("cleanup_reason"),
+    lastError: text("last_error"),
+    maintenanceClaimId: uuid("maintenance_claim_id"),
+    maintenanceClaimedAt: timestamp("maintenance_claimed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    settlementKey: uniqueIndex("retained_screenshot_artifacts_settlement_key_uq").on(
+      table.settlementKey,
+    ),
+    sessionCreated: index("retained_screenshot_artifacts_session_created_idx").on(
+      table.workspaceId,
+      table.sessionId,
+      table.createdAt,
+      table.artifactId,
+    ),
+    readyExpiry: index("retained_screenshot_artifacts_ready_expiry_idx")
+      .on(table.retentionExpiresAt, table.artifactId)
+      .where(sql`${table.status} = 'ready'`),
+    pendingReconcile: index("retained_screenshot_artifacts_pending_reconcile_idx")
+      .on(table.updatedAt, table.artifactId)
+      .where(
+        sql`${table.status} in ('pending', 'reconciling', 'cleanup_queued', 'cleanup_pending')`,
+      ),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+      name: "retained_screenshot_artifacts_workspace_account_fk",
+    }).onDelete("cascade"),
+    workspaceFile: foreignKey({
+      columns: [table.workspaceId, table.artifactId],
+      foreignColumns: [files.workspaceId, files.id],
+      name: "retained_screenshot_artifacts_workspace_file_fk",
+    }).onDelete("restrict"),
+    statusValid: check(
+      "retained_screenshot_artifacts_status_chk",
+      sql`${table.status} in ('pending', 'reconciling', 'ready', 'cleanup_queued', 'cleanup_pending', 'failed', 'expired', 'deleted')`,
+    ),
+    quotaStateValid: check(
+      "retained_screenshot_artifacts_quota_state_chk",
+      sql`${table.quotaState} in ('reserved', 'ready', 'released')`,
+    ),
+    statusQuotaValid: check(
+      "retained_screenshot_artifacts_status_quota_chk",
+      sql`(${table.status} in ('pending', 'reconciling') and ${table.quotaState} = 'reserved')
+        or (${table.status} = 'ready' and ${table.quotaState} = 'ready')
+        or (${table.status} in ('cleanup_queued', 'cleanup_pending') and ${table.quotaState} in ('reserved', 'ready'))
+        or (${table.status} in ('failed', 'expired', 'deleted') and ${table.quotaState} = 'released')`,
+    ),
+    claimShapeValid: check(
+      "retained_screenshot_artifacts_claim_shape_chk",
+      sql`(${table.status} in ('reconciling', 'cleanup_pending')
+          and ${table.maintenanceClaimId} is not null
+          and ${table.maintenanceClaimedAt} is not null)
+        or (${table.status} not in ('reconciling', 'cleanup_pending')
+          and ${table.maintenanceClaimId} is null
+          and ${table.maintenanceClaimedAt} is null)`,
+    ),
+    dimensionsValid: check(
+      "retained_screenshot_artifacts_dimensions_chk",
+      sql`${table.width} between 1 and 16384 and ${table.height} between 1 and 16384 and (${table.width}::bigint * ${table.height}::bigint) <= 67108864`,
+    ),
+    mediaTypeValid: check(
+      "retained_screenshot_artifacts_media_type_v2_chk",
+      sql`${table.mediaType} in ('image/png', 'image/jpeg', 'image/webp')`,
+    ),
+  }),
+);
+
 export const documentBases = pgTable(
   "document_bases",
   {
@@ -2381,7 +2711,8 @@ export const knowledgeMemories = pgTable(
     status: text("status").notNull().default("proposed"),
     kind: text("kind").notNull().default("semantic"),
     scope: text("scope").notNull().default("workspace"),
-    text: text("text").notNull(),
+    text: losslessText("text").notNull(),
+    textCodecVersion: losslessCodecVersion("text_codec_version"),
     sourceRefs: jsonb("source_refs").$type<unknown[]>().notNull().default([]),
     confidence: integer("confidence").notNull().default(50),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
@@ -2492,7 +2823,8 @@ export const sessionTurns = pgTable(
     status: text("status").notNull(),
     source: text("source").notNull().default("user"),
     position: bigint("position", { mode: "number" }).notNull(),
-    prompt: text("prompt").notNull(),
+    prompt: losslessText("prompt").notNull(),
+    promptCodecVersion: losslessCodecVersion("prompt_codec_version"),
     // Host context for this exact turn. System-level at runtime and deliberately
     // separate from the visible prompt/event payload.
     turnInstructions: text("turn_instructions"),
@@ -3151,8 +3483,10 @@ export const sessionSystemUpdates = pgTable(
     classification: text("classification").notNull().default("info"),
     sourceId: text("source_id").notNull(),
     dedupeKey: text("dedupe_key").notNull(),
-    summary: text("summary").notNull(),
-    payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
+    summary: losslessText("summary").notNull(),
+    summaryCodecVersion: losslessCodecVersion("summary_codec_version"),
+    payload: losslessJsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
+    payloadCodecVersion: losslessCodecVersion("payload_codec_version"),
     lineage: jsonb("lineage").$type<Record<string, unknown>>().notNull().default({}),
     // Private immutable authority frozen when this machine input is accepted.
     // Public projections intentionally omit connection ids and owner subjects.
@@ -3236,8 +3570,10 @@ export const sessionSystemUpdateOutbox = pgTable(
     kind: text("kind").notNull(),
     classification: text("classification").notNull(),
     sourceId: text("source_id").notNull(),
-    summary: text("summary").notNull(),
-    payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
+    summary: losslessText("summary").notNull(),
+    summaryCodecVersion: losslessCodecVersion("summary_codec_version"),
+    payload: losslessJsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
+    payloadCodecVersion: losslessCodecVersion("payload_codec_version"),
     lineage: jsonb("lineage").$type<Record<string, unknown>>().notNull().default({}),
     // Exact private authority copied from the causal parent turn in the source
     // terminal transaction. Delivery retries cannot replace this snapshot.
@@ -3473,7 +3809,8 @@ export const sessionEvents = pgTable(
     duplicateReason: text("duplicate_reason"),
     sequence: integer("sequence").notNull(),
     type: text("type").notNull(),
-    payload: jsonb("payload").$type<unknown>().notNull().default({}),
+    payload: losslessJsonb("payload").$type<unknown>().notNull().default({}),
+    payloadCodecVersion: losslessCodecVersion("payload_codec_version"),
     clientEventId: text("client_event_id"),
     producerId: text("producer_id"),
     producerSeq: integer("producer_seq"),
@@ -3508,16 +3845,15 @@ export const sessionEvents = pgTable(
       table.type,
       table.sequence,
     ),
+    workspaceTurnType: index("session_events_workspace_turn_type_idx")
+      .on(table.workspaceId, table.turnId, table.type)
+      .where(sql`${table.turnId} is not null`),
     monitoringTail: index("session_events_workspace_session_monitoring_tail_idx")
       .on(table.workspaceId, table.sessionId, table.sequence)
       .where(
         sql`${table.type} not in ('agent.message.delta', 'agent.reasoning.delta', 'sandbox.command.output.delta', 'terminal.pty.output.delta')`,
       ),
     duplicateOfEvent: index("session_events_duplicate_of_event_idx").on(table.duplicateOfEventId),
-    payloadBytes: check(
-      "session_events_payload_bytes_check",
-      sql`octet_length(${table.payload}::text) <= 65536`,
-    ),
     typeBytes: check(
       "session_events_type_bytes_check",
       sql`octet_length(${table.type}) <= 256 and position(E'\n' in ${table.type}) = 0 and position(E'\r' in ${table.type}) = 0`,
@@ -3556,8 +3892,10 @@ export const agentRunStates = pgTable("agent_run_states", {
     onDelete: "set null",
   }),
   stateVersion: integer("state_version").notNull(),
-  serializedRunState: text("serialized_run_state").notNull(),
-  pendingApprovals: jsonb("pending_approvals").$type<unknown[]>().notNull().default([]),
+  serializedRunState: losslessText("serialized_run_state").notNull(),
+  serializedRunStateCodecVersion: losslessCodecVersion("serialized_run_state_codec_version"),
+  pendingApprovals: losslessJsonb("pending_approvals").$type<unknown[]>().notNull().default([]),
+  pendingApprovalsCodecVersion: losslessCodecVersion("pending_approvals_codec_version"),
   // Exact provider rejection marks the latest current-turn receipt only when it
   // was part of the rejected request. The serialized receipt remains durable;
   // recovery builds a temporary view without unusable opaque artifacts.
@@ -3652,8 +3990,8 @@ export const sessionHumanInputRequests = pgTable(
 );
 
 // Conversation truth: ordered, verbatim SDK input items (issue #35). The
-// model-facing memory store — unredacted and replay-ready. session_events
-// remains the redacted human/audit timeline.
+// model-facing memory store — exact and replay-ready. session_events is also
+// exact canonical OpenGeni data; transport projections must not rewrite it.
 export const sessionHistoryItems = pgTable(
   "session_history_items",
   {
@@ -3677,7 +4015,8 @@ export const sessionHistoryItems = pgTable(
     // positions; only the summary uses the half-step. `mode: "number"` maps the
     // postgres.js string back to a JS number so every reader stays numeric.
     position: numeric("position", { mode: "number" }).notNull(),
-    item: jsonb("item").$type<Record<string, unknown>>().notNull(),
+    item: losslessJsonb("item").$type<Record<string, unknown>>().notNull(),
+    itemCodecVersion: losslessCodecVersion("item_codec_version"),
     // Live-row flag for client-side context compaction. The read path selects
     // only active rows; a compaction supersedes the summarized prefix (sets this
     // false — never deletes, so the full transcript stays as an audit trail) and
@@ -3707,7 +4046,7 @@ export const sessionHistoryItems = pgTable(
 
 // Turn-lineage ledger for a tool call that the SDK emitted but has not yet
 // produced a durably reconciled result. The raw call item is model-facing truth
-// (not the redacted session-event projection). The attempt/generation identify
+// (not a transport projection). The attempt/generation identify
 // where the call originated, but the receipt survives an approval resume into a
 // newer attempt of the same logical turn. Turn-ending transactions
 // consume these rows atomically and append a valid interrupted result so a
@@ -3733,9 +4072,11 @@ export const sessionPendingToolCalls = pgTable(
     attemptId: uuid("attempt_id").notNull(),
     callId: text("call_id").notNull(),
     callType: text("call_type").notNull(),
-    callItem: jsonb("call_item").$type<Record<string, unknown>>().notNull(),
+    callItem: losslessJsonb("call_item").$type<Record<string, unknown>>().notNull(),
+    callItemCodecVersion: losslessCodecVersion("call_item_codec_version"),
     modelToolOutputTruncationTokens: integer("model_tool_output_truncation_tokens"),
-    resultItem: jsonb("result_item").$type<Record<string, unknown>>(),
+    resultItem: losslessJsonb("result_item").$type<Record<string, unknown>>(),
+    resultItemCodecVersion: losslessCodecVersion("result_item_codec_version"),
     resultRecordedAt: timestamp("result_recorded_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -3774,7 +4115,8 @@ export const sandboxSessionEnvelopes = pgTable(
     sessionId: uuid("session_id")
       .notNull()
       .references(() => sessions.id, { onDelete: "cascade" }),
-    envelope: jsonb("envelope").$type<Record<string, unknown>>().notNull(),
+    envelope: losslessJsonb("envelope").$type<Record<string, unknown>>().notNull(),
+    envelopeCodecVersion: losslessCodecVersion("envelope_codec_version"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -3984,10 +4326,27 @@ export const sandboxLeases = pgTable(
     archiveGeneration: integer("archive_generation"),
     // Provider-native capture may pause the live box. The exact claim is
     // acquired before provider I/O and cleared only after that capture settles;
-    // new holders and workspace mutations fence on it. The SQL constraint also
-    // requires the claimed generation to remain current, so an unaware writer
-    // cannot advance generation through an active capture.
+    // new holders and workspace mutations fence on it. operation_id is the
+    // stable logical request across Temporal retries, while capture_id + attempt
+    // identify the one callback currently allowed to publish/terminate. The SQL
+    // constraint also requires the claimed generation to remain current, so an
+    // unaware writer cannot advance generation through an active capture.
     archiveCaptureId: uuid("archive_capture_id"),
+    archiveCaptureOperationId: uuid("archive_capture_operation_id"),
+    archiveCaptureProviderRequestId: uuid("archive_capture_provider_request_id"),
+    // True only when the provider contract guarantees that reusing
+    // archiveCaptureProviderRequestId resumes the same physical capture. This is
+    // deliberately explicit rather than inferred from backend/id equality so a
+    // rolling old worker can never be mistaken for an idempotent caller.
+    archiveCaptureProviderReplaySafe: boolean("archive_capture_provider_replay_safe")
+      .notNull()
+      .default(false),
+    // Provider-neutral takeover proof. True means the registered adapter has
+    // proven either same-request idempotency or an independently repeatable,
+    // read-only capture. It is distinct from providerReplaySafe so portable tar
+    // can recover immediately without pretending it resumes one provider RPC.
+    archiveCaptureTakeoverSafe: boolean("archive_capture_takeover_safe").notNull().default(false),
+    archiveCaptureAttempt: integer("archive_capture_attempt"),
     archiveCaptureGeneration: integer("archive_capture_generation"),
     archiveCaptureStartedAt: timestamp("archive_capture_started_at", {
       withTimezone: true,
@@ -3995,6 +4354,19 @@ export const sandboxLeases = pgTable(
     archiveCaptureDeadlineAt: timestamp("archive_capture_deadline_at", {
       withTimezone: true,
     }),
+    // Set atomically with a verified draining archive publication. Once set,
+    // the exact claim is an irreversible teardown receipt: a recovered worker
+    // skips recapture and resumes provider termination. Warm capture clears its
+    // claim in the publication write and therefore never retains this marker.
+    archiveCapturePublishedAt: timestamp("archive_capture_published_at", {
+      withTimezone: true,
+    }),
+    // Bounded operator preservation gate. Unlike rotation/capture, this blocks
+    // only reaper teardown: a user may still re-arm a resumable draining lease.
+    // The exact id makes renewal/release ownership explicit and race-safe.
+    reaperHoldId: uuid("reaper_hold_id"),
+    reaperHoldUntil: timestamp("reaper_hold_until", { withTimezone: true }),
+    reaperHoldReason: text("reaper_hold_reason"),
 
     // The group box-envelope (the "envelope split" Critical): the small recovery
     // descriptor to resume()-by-id the group's box without a per-session join.
@@ -4015,7 +4387,7 @@ export const sandboxLeases = pgTable(
       withTimezone: true,
     }),
     rotationReason: text("rotation_reason", {
-      enum: ["provider_deadline", "operator"],
+      enum: ["provider_deadline", "operator", "teardown_claim"],
     }),
     // The SQL migration owns the two DEFERRABLE foreign keys and deferred
     // scope/state constraint triggers. Drizzle does not model deferrability, so
@@ -4067,20 +4439,52 @@ export const sandboxLeases = pgTable(
       "sandbox_leases_archive_capture_check",
       sql`(
           ${table.archiveCaptureId} is null
+          and ${table.archiveCaptureOperationId} is null
+          and ${table.archiveCaptureProviderRequestId} is null
+          and ${table.archiveCaptureProviderReplaySafe} = false
+          and ${table.archiveCaptureTakeoverSafe} = false
+          and ${table.archiveCaptureAttempt} is null
           and ${table.archiveCaptureGeneration} is null
           and ${table.archiveCaptureStartedAt} is null
           and ${table.archiveCaptureDeadlineAt} is null
+          and ${table.archiveCapturePublishedAt} is null
         ) or (
           ${table.archiveCaptureId} is not null
+          and ${table.archiveCaptureOperationId} is not null
+          and ${table.archiveCaptureProviderRequestId} is not null
+          and (
+            ${table.archiveCaptureProviderReplaySafe} = false
+            or ${table.archiveCaptureTakeoverSafe} = true
+          )
+          and ${table.archiveCaptureAttempt} is not null
+          and ${table.archiveCaptureAttempt} > 0
           and ${table.archiveCaptureGeneration} is not null
           and ${table.archiveCaptureGeneration} = ${table.workspaceGeneration}
           and ${table.archiveCaptureStartedAt} is not null
+          and ${table.archiveCaptureDeadlineAt} is not null
           and ${table.archiveCaptureDeadlineAt} > ${table.archiveCaptureStartedAt}
+          and (
+            ${table.archiveCapturePublishedAt} is null
+            or ${table.liveness} = 'draining'
+          )
         )`,
     ),
     archiveCaptureDeadline: index("sandbox_leases_archive_capture_deadline_idx")
       .on(table.archiveCaptureDeadlineAt, table.id)
       .where(sql`${table.archiveCaptureId} is not null`),
+    reaperHoldValid: check(
+      "sandbox_leases_reaper_hold_check",
+      sql`(
+          ${table.reaperHoldId} is null
+          and ${table.reaperHoldUntil} is null
+          and ${table.reaperHoldReason} is null
+        ) or (
+          ${table.reaperHoldId} is not null
+          and ${table.reaperHoldUntil} is not null
+          and ${table.reaperHoldReason} is not null
+          and length(${table.reaperHoldReason}) between 1 and 500
+        )`,
+    ),
     providerDeadlineValid: check(
       "sandbox_leases_provider_deadline_check",
       sql`(${table.providerCreatedAt} is null and ${table.providerDeadlineAt} is null)
@@ -4092,7 +4496,8 @@ export const sandboxLeases = pgTable(
       "sandbox_leases_rotation_check",
       sql`(${table.rotationRequestedAt} is null and ${table.rotationReason} is null)
         or (${table.rotationRequestedAt} is not null
-          and ${table.rotationReason} in ('provider_deadline', 'operator'))`,
+          and ${table.rotationReason} is not null
+          and ${table.rotationReason} in ('provider_deadline', 'operator', 'teardown_claim'))`,
     ),
     checkpointDistinct: check(
       "sandbox_leases_checkpoint_distinct_check",
@@ -4550,7 +4955,8 @@ export const sessionRecordings = pgTable(
     width: integer("width").notNull(),
     height: integer("height").notNull(),
 
-    reason: text("reason"),
+    reason: losslessText("reason"),
+    reasonCodecVersion: losslessCodecVersion("reason_codec_version"),
 
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     finalizedAt: timestamp("finalized_at", { withTimezone: true }),
@@ -4760,6 +5166,10 @@ export const enrollments = pgTable(
     desktopUnavailableReason: text("desktop_unavailable_reason"),
     allowScreenControl: boolean("allow_screen_control").notNull().default(false),
     status: text("status", { enum: enrollmentStatusValues }).notNull().default("active"),
+    // Credential-family fence. Existing rows/migration-era bearers are generation
+    // 1; every successful re-enrollment increments this atomically before a new
+    // bearer is signed. Auth and self-revoke require an exact row/claim match.
+    credentialGeneration: integer("credential_generation").notNull().default(1),
     os: text("os", { enum: enrollmentOsValues }).notNull().default("linux"),
     arch: text("arch").notNull().default("x86_64"),
     // Heartbeat liveness cursor. Null until the first connect.
@@ -4784,6 +5194,68 @@ export const enrollments = pgTable(
     ),
     // List a workspace's ACTIVE machines without scanning revoked rows.
     workspaceStatus: index("enrollments_workspace_status_idx").on(table.workspaceId, table.status),
+  }),
+);
+
+// One durable receipt per workspace-authorized connected-machine removal
+// request. The enrollment row remains the lifecycle truth; this table preserves
+// the exact idempotency key, request fingerprint, and terminal result so a lost
+// response can be replayed without re-running dependency checks or mutating a
+// different enrollment that happens to share the same display name.
+export const machineRemovalOperationOutcomeValues = [
+  "removed",
+  "already_removed",
+  "blocked",
+] as const;
+
+export const machineRemovalOperations = pgTable(
+  "machine_removal_operations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    enrollmentId: uuid("enrollment_id")
+      .notNull()
+      .references(() => enrollments.id, { onDelete: "restrict" }),
+    operationKey: text("operation_key").notNull(),
+    requestFingerprint: text("request_fingerprint").notNull(),
+    outcome: text("outcome", { enum: machineRemovalOperationOutcomeValues }).notNull(),
+    result: jsonb("result").$type<Record<string, unknown>>().notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "machine_removal_operations_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceOperation: uniqueIndex("machine_removal_operations_workspace_operation_uq").on(
+      table.workspaceId,
+      table.operationKey,
+    ),
+    workspaceIdentity: uniqueIndex("machine_removal_operations_workspace_id_uq").on(
+      table.workspaceId,
+      table.id,
+    ),
+    enrollmentTimeline: index("machine_removal_operations_enrollment_created_idx").on(
+      table.workspaceId,
+      table.enrollmentId,
+      table.createdAt,
+    ),
+    requestFingerprintValid: check(
+      "machine_removal_operations_request_fingerprint_chk",
+      sql`${table.requestFingerprint} ~ '^[0-9a-f]{64}$'`,
+    ),
+    operationKeyValid: check(
+      "machine_removal_operations_operation_key_chk",
+      sql`length(btrim(${table.operationKey})) between 1 and 200
+        and ${table.operationKey} = btrim(${table.operationKey})`,
+    ),
   }),
 );
 
@@ -5039,6 +5511,49 @@ export const scheduledTasks = pgTable(
     variableSet: index("scheduled_tasks_variable_set_idx").on(
       table.workspaceId,
       table.variableSetId,
+    ),
+  }),
+);
+
+/**
+ * Durable ownership of Temporal schedules whose database owner was deleted.
+ *
+ * Deliberately no workspace/account foreign key: this row must survive the
+ * workspace cascade that creates it. Ordinary runtime code may insert it while
+ * the workspace is still RLS-visible; cross-workspace claim/settlement is only
+ * available through migration-owned SECURITY DEFINER functions.
+ */
+export const temporalScheduleCleanupOutbox = pgTable(
+  "temporal_schedule_cleanup_outbox",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    temporalScheduleId: text("temporal_schedule_id").notNull(),
+    claimId: uuid("claim_id"),
+    claimUntil: timestamp("claim_until", { withTimezone: true }),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull().defaultNow(),
+    lastError: text("last_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    schedule: uniqueIndex("temporal_schedule_cleanup_outbox_schedule_uq").on(
+      table.temporalScheduleId,
+    ),
+    due: index("temporal_schedule_cleanup_outbox_due_idx").on(
+      table.nextAttemptAt,
+      table.claimUntil,
+      table.id,
+    ),
+    valid: check(
+      "temporal_schedule_cleanup_outbox_valid_chk",
+      sql`length(${table.temporalScheduleId}) between 1 and 512
+        and ${table.attemptCount} >= 0
+        and ((${table.claimId} is null and ${table.claimUntil} is null)
+          or (${table.claimId} is not null and ${table.claimUntil} is not null))
+        and (${table.lastError} is null or length(${table.lastError}) <= 2000)`,
     ),
   }),
 );
@@ -5325,6 +5840,8 @@ export const modelCallFacts = pgTable(
     reasoningTokens: bigint("reasoning_tokens", { mode: "number" }),
     totalTokens: bigint("total_tokens", { mode: "number" }),
     pricedCostMicros: bigint("priced_cost_micros", { mode: "number" }).notNull().default(0),
+    estimatedProviderCostMicros: bigint("estimated_provider_cost_micros", { mode: "number" }),
+    pricingSource: text("pricing_source"),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
     recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -5361,6 +5878,16 @@ export const modelCallFacts = pgTable(
     pricedCostNonNegative: check(
       "model_call_facts_priced_cost_check",
       sql`${table.pricedCostMicros} >= 0`,
+    ),
+    estimatedProviderCostValid: check(
+      "model_call_facts_estimated_provider_cost_check",
+      sql`${table.estimatedProviderCostMicros} is null or ${table.estimatedProviderCostMicros} >= 0`,
+    ),
+    pricingSourceValid: check(
+      "model_call_facts_pricing_source_check",
+      sql`(${table.estimatedProviderCostMicros} is null and ${table.pricingSource} is null)
+        or (${table.estimatedProviderCostMicros} is not null
+          and ${table.pricingSource} in ('configured_list_price', 'gateway_reported'))`,
     ),
     initiatorConsistent: check(
       "model_call_facts_initiator_check",
@@ -5405,7 +5932,8 @@ export const hostExportConfig = pgTable(
 /**
  * Transactional delivery buffer. It intentionally has no tenant/source FKs:
  * a workspace deletion must not erase an already-committed, unacknowledged
- * host fact. Payloads are sanitized/bounded before they reach this table.
+ * host fact. Session-event payloads retain their exact storage bytes plus
+ * explicit codec truth; usage payloads remain ordinary JSON.
  */
 export const hostExportOutbox = pgTable(
   "host_export_outbox",
@@ -5435,6 +5963,7 @@ export const hostExportOutbox = pgTable(
       .default({}),
     origin: text("origin"),
     payload: jsonb("payload").$type<unknown>().notNull(),
+    payloadCodecVersion: losslessCodecVersion("payload_codec_version"),
     envelopeBytes: integer("envelope_bytes").notNull(),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
     sourceRecordedAt: timestamp("source_recorded_at", { withTimezone: true }).notNull(),
@@ -5510,6 +6039,7 @@ export const hostExportConsumers = pgTable(
     consecutiveFailures: integer("consecutive_failures").notNull().default(0),
     nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull().defaultNow(),
     lastError: text("last_error"),
+    lastErrorCodecVersion: losslessCodecVersion("last_error_codec_version"),
     lastErrorAt: timestamp("last_error_at", { withTimezone: true }),
     blockedAt: timestamp("blocked_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -5543,7 +6073,9 @@ export const hostExportDeadLetters = pgTable(
     exportCursor: bigint("export_cursor", { mode: "bigint" }).notNull(),
     sourceId: uuid("source_id").notNull(),
     reason: text("reason").notNull(),
-    envelope: jsonb("envelope").$type<Record<string, unknown>>().notNull(),
+    envelope: losslessJsonb("envelope").$type<Record<string, unknown>>().notNull(),
+    envelopeCodecVersion: losslessCodecVersion("envelope_codec_version"),
+    eventPayloadCodecVersion: losslessCodecVersion("event_payload_codec_version"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -5644,7 +6176,8 @@ export const auditEvents = pgTable(
     action: text("action").notNull(),
     targetType: text("target_type"),
     targetId: text("target_id"),
-    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+    metadata: losslessJsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+    metadataCodecVersion: losslessCodecVersion("metadata_codec_version"),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -6012,11 +6545,13 @@ export const rigChanges = pgTable(
     }),
     // 'setup_append' | 'definition_edit' (CHECK in migration 0047).
     kind: text("kind").notNull(),
-    payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
+    payload: losslessJsonb("payload").$type<Record<string, unknown>>().notNull(),
+    payloadCodecVersion: losslessCodecVersion("payload_codec_version"),
     // 'proposed' | 'verifying' | 'merged' | 'rejected' | 'failed' (CHECK in 0047).
     status: text("status").notNull().default("proposed"),
     proposedBy: text("proposed_by"),
-    verification: jsonb("verification").$type<Record<string, unknown>>(),
+    verification: losslessJsonb("verification").$type<Record<string, unknown>>(),
+    verificationCodecVersion: losslessCodecVersion("verification_codec_version"),
     resultVersionId: uuid("result_version_id").references(() => rigVersions.id, {
       onDelete: "set null",
     }),
@@ -6037,3 +6572,4 @@ export * from "./workspace-instruction-policies-schema";
 export * from "./preference-registry-schema";
 export * from "./memory-governance-schema";
 export * from "./scoped-knowledge-schema";
+export * from "./transcription-recordings-schema";

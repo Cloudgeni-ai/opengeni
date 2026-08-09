@@ -101,6 +101,8 @@ import type {
   MachinesResponse,
   MetricSample,
   MachineMetricsSeriesResponse,
+  RemoveEnrollmentRequest,
+  RemoveEnrollmentResponse,
   // Bring-your-own-compute: the user-authenticated active-sandbox swap (M7).
   SwapActiveSandboxRequest,
   SwapActiveSandboxResponse,
@@ -108,6 +110,11 @@ import type {
   PackInstallation,
   LatencyMode,
   ReasoningEffort,
+  RetainedScreenshotDownload,
+  RetainedScreenshotDownloadOptions,
+  RetainedArtifactDownload,
+  RetainedArtifactDownloadOptions,
+  RetainedArtifactReference,
   RetainedArtifactContent,
   RetainedArtifactContentOptions,
   RetainedArtifactMetadata,
@@ -159,6 +166,8 @@ import type {
   // Channel-A structured services (P4.4).
   FsListRequest,
   FsListResponse,
+  FsListBatchRequest,
+  FsListBatchResponse,
   FsReadRequest,
   FsReadResponse,
   FsWriteRequest,
@@ -173,6 +182,8 @@ import type {
   GitStatusResponse,
   GitDiffRequest,
   GitDiffResponse,
+  GitReadBatchRequest,
+  GitReadBatchResponse,
   GitLogRequest,
   GitLogResponse,
   GitShowRequest,
@@ -189,6 +200,9 @@ import type {
   PtyCloseRequest,
   ToolRef,
   TranscribeAudioResponse,
+  TranscriptionRecordingListResponse,
+  TranscriptionRecordingResponse,
+  UploadTranscriptionRecordingChunkResponse,
   UpdateConnectionRequest,
   UpdateKnowledgeMemoryRequest,
   UpdateScheduledTaskRequest,
@@ -203,6 +217,7 @@ import type {
   SetWorkspaceDefaultRigRequest,
   UploadFileInput,
   VariableSet,
+  VariableSetSecret,
   VariableSetVariableMetadata,
   Rig,
   RigVersion,
@@ -220,6 +235,7 @@ import type {
   SocialConnection,
   SocialOAuthStartRequest,
 } from "./types";
+import { parseRetainedGeneratedImageReference } from "./retained-artifacts";
 import type {
   ActivateWorkspaceInstructionPolicyRequest,
   CreateWorkspaceInstructionPolicyDraftRequest,
@@ -261,6 +277,7 @@ import {
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
   OPENGENI_CORRELATION_HEADER,
+  COMPUTER_SCREENSHOT_MAX_BYTES,
   RETAINED_OUTPUT_MAX_PAGE_BYTES,
 } from "./types";
 
@@ -329,6 +346,28 @@ export type TranscribeAudioInput = {
   signal?: AbortSignal | undefined;
 };
 
+export type CreateTranscriptionRecordingInput = {
+  recordingId: string;
+  mimeType: string;
+  signal?: AbortSignal | undefined;
+};
+
+export type UploadTranscriptionRecordingChunkInput = {
+  audio: Blob | File | Uint8Array;
+  mimeType: string;
+  sha256: string;
+  startMilliseconds: number;
+  durationMilliseconds: number;
+  signal?: AbortSignal | undefined;
+};
+
+export type FinalizeTranscriptionRecordingInput = {
+  chunkCount: number;
+  totalBytes: number;
+  totalDurationMilliseconds: number;
+  signal?: AbortSignal | undefined;
+};
+
 /**
  * Typed client for the OpenGeni public API. Framework-agnostic: only needs
  * WHATWG `fetch` + streams, so it runs in Node 18+, Bun, Deno, browsers, and
@@ -338,6 +377,8 @@ export class OpenGeniClient {
   private readonly baseUrl: string;
   private readonly options: OpenGeniClientOptions;
   private readonly fetchImpl: FetchLike;
+  private readonly readInFlight = new Map<string, Promise<unknown>>();
+  private readonly readTrailing = new Map<string, Promise<unknown>>();
 
   constructor(options: OpenGeniClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
@@ -360,8 +401,12 @@ export class OpenGeniClient {
       input.audio instanceof File
         ? input.audio
         : input.audio instanceof Uint8Array
-          ? new File([Uint8Array.from(input.audio)], filename, { type: input.mimeType })
-          : new File([input.audio], filename, { type: input.mimeType || input.audio.type });
+          ? new File([Uint8Array.from(input.audio)], filename, {
+              type: input.mimeType,
+            })
+          : new File([input.audio], filename, {
+              type: input.mimeType || input.audio.type,
+            });
     form.append("audio", audio, filename);
     form.append("mimeType", input.mimeType);
     if (input.durationSeconds !== undefined) {
@@ -371,7 +416,10 @@ export class OpenGeniClient {
     try {
       response = await this.fetchImpl(this.url(`/v1/workspaces/${workspaceId}/transcriptions`), {
         method: "POST",
-        headers: { ...this.headers(correlationId), Accept: "application/json" },
+        headers: {
+          ...this.headers(correlationId),
+          Accept: "application/json",
+        },
         body: form,
         ...(input.signal ? { signal: input.signal } : {}),
       });
@@ -380,7 +428,11 @@ export class OpenGeniClient {
       throw mutationTransportError(correlationId);
     }
     assertApiContractResponse(response);
-    if (!response.ok) throw await apiErrorFromResponse(response, { method: "POST", correlationId });
+    if (!response.ok)
+      throw await apiErrorFromResponse(response, {
+        method: "POST",
+        correlationId,
+      });
     await assertJsonResponse(response, { method: "POST", correlationId });
     let body: unknown;
     try {
@@ -400,6 +452,157 @@ export class OpenGeniClient {
       });
     }
     return body;
+  }
+
+  async createTranscriptionRecording(
+    workspaceId: string,
+    input: CreateTranscriptionRecordingInput,
+  ): Promise<TranscriptionRecordingResponse> {
+    return transcriptionRecordingResponse(
+      await this.requestJson<unknown>(
+        "POST",
+        `/v1/workspaces/${workspaceId}/transcription-recordings`,
+        { recordingId: input.recordingId, mimeType: input.mimeType },
+        {},
+        input.signal ? { signal: input.signal } : {},
+      ),
+    );
+  }
+
+  async getTranscriptionRecording(
+    workspaceId: string,
+    recordingId: string,
+    options: { signal?: AbortSignal | undefined } = {},
+  ): Promise<TranscriptionRecordingResponse> {
+    return transcriptionRecordingResponse(
+      await this.requestJson<unknown>(
+        "GET",
+        `/v1/workspaces/${workspaceId}/transcription-recordings/${recordingId}`,
+        undefined,
+        {},
+        options.signal ? { signal: options.signal } : {},
+      ),
+    );
+  }
+
+  async listTranscriptionRecordings(
+    workspaceId: string,
+    options: { signal?: AbortSignal | undefined } = {},
+  ): Promise<TranscriptionRecordingListResponse> {
+    const body = await this.requestJson<unknown>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/transcription-recordings`,
+      undefined,
+      {},
+      options.signal ? { signal: options.signal } : {},
+    );
+    if (!isTranscriptionRecordingListResponse(body)) {
+      throw new OpenGeniApiError(502, "Invalid transcription recording list response.", {
+        code: "invalid_response",
+      });
+    }
+    return body;
+  }
+
+  async uploadTranscriptionRecordingChunk(
+    workspaceId: string,
+    recordingId: string,
+    chunkNumber: number,
+    input: UploadTranscriptionRecordingChunkInput,
+  ): Promise<UploadTranscriptionRecordingChunkResponse> {
+    const correlationId = crypto.randomUUID();
+    let response: Response;
+    try {
+      response = await this.fetchImpl(
+        this.url(
+          `/v1/workspaces/${workspaceId}/transcription-recordings/${recordingId}/chunks/${chunkNumber}`,
+        ),
+        {
+          method: "PUT",
+          headers: {
+            ...this.headers(correlationId),
+            Accept: "application/json",
+            "Content-Type": input.mimeType,
+            "x-opengeni-chunk-sha256": input.sha256,
+            "x-opengeni-chunk-start-milliseconds": String(input.startMilliseconds),
+            "x-opengeni-chunk-duration-milliseconds": String(input.durationMilliseconds),
+          },
+          body: input.audio instanceof Uint8Array ? Uint8Array.from(input.audio) : input.audio,
+          ...(input.signal ? { signal: input.signal } : {}),
+        },
+      );
+    } catch (error) {
+      if (input.signal?.aborted) throw error;
+      throw mutationTransportError(correlationId);
+    }
+    assertApiContractResponse(response);
+    if (!response.ok)
+      throw await apiErrorFromResponse(response, {
+        method: "PUT",
+        correlationId,
+      });
+    await assertJsonResponse(response, { method: "PUT", correlationId });
+    const body = await response.json().catch(() => null);
+    if (!isUploadTranscriptionRecordingChunkResponse(body)) {
+      throw new OpenGeniApiError(response.status, "Invalid transcription chunk response.", {
+        code: "invalid_response",
+        mutation: true,
+        correlationId,
+      });
+    }
+    return body;
+  }
+
+  async finalizeTranscriptionRecording(
+    workspaceId: string,
+    recordingId: string,
+    input: FinalizeTranscriptionRecordingInput,
+  ): Promise<TranscriptionRecordingResponse> {
+    return transcriptionRecordingResponse(
+      await this.requestJson<unknown>(
+        "POST",
+        `/v1/workspaces/${workspaceId}/transcription-recordings/${recordingId}/finalize`,
+        {
+          chunkCount: input.chunkCount,
+          totalBytes: input.totalBytes,
+          totalDurationMilliseconds: input.totalDurationMilliseconds,
+        },
+        {},
+        input.signal ? { signal: input.signal } : {},
+      ),
+    );
+  }
+
+  async processNextTranscriptionRecordingSegment(
+    workspaceId: string,
+    recordingId: string,
+    options: { signal?: AbortSignal | undefined } = {},
+  ): Promise<TranscriptionRecordingResponse> {
+    return transcriptionRecordingResponse(
+      await this.requestJson<unknown>(
+        "POST",
+        `/v1/workspaces/${workspaceId}/transcription-recordings/${recordingId}/process-next`,
+        {},
+        {},
+        options.signal ? { signal: options.signal } : {},
+      ),
+    );
+  }
+
+  async discardTranscriptionRecording(
+    workspaceId: string,
+    recordingId: string,
+    options: { signal?: AbortSignal | undefined } = {},
+  ): Promise<TranscriptionRecordingResponse> {
+    return transcriptionRecordingResponse(
+      await this.requestJson<unknown>(
+        "DELETE",
+        `/v1/workspaces/${workspaceId}/transcription-recordings/${recordingId}`,
+        undefined,
+        {},
+        options.signal ? { signal: options.signal } : {},
+      ),
+    );
   }
 
   async createSession(
@@ -431,11 +634,13 @@ export class OpenGeniClient {
     );
   }
 
-  async getSession(workspaceId: string, sessionId: string): Promise<Session> {
-    return await this.requestJson<Session>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}`,
-    );
+  async getSession(
+    workspaceId: string,
+    sessionId: string,
+    options: { fresh?: boolean } = {},
+  ): Promise<Session> {
+    const path = `/v1/workspaces/${workspaceId}/sessions/${sessionId}`;
+    return await this.singleFlightRead(path, () => this.requestJson<Session>("GET", path), options);
   }
 
   async updateSession(
@@ -582,10 +787,38 @@ export class OpenGeniClient {
   }
 
   async getSessionLineage(workspaceId: string, sessionId: string): Promise<SessionLineageResponse> {
-    return await this.requestJson<SessionLineageResponse>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/lineage`,
+    const path = `/v1/workspaces/${workspaceId}/sessions/${sessionId}/lineage`;
+    return await this.singleFlightRead(path, () =>
+      this.requestJson<SessionLineageResponse>("GET", path),
     );
+  }
+
+  private singleFlightRead<T>(
+    key: string,
+    read: () => Promise<T>,
+    options: { fresh?: boolean } = {},
+  ): Promise<T> {
+    const existing = this.readInFlight.get(key);
+    if (existing) {
+      if (!options.fresh) return existing as Promise<T>;
+      const queued = this.readTrailing.get(key);
+      if (queued) return queued as Promise<T>;
+      const trailing = existing.then(
+        () => this.singleFlightRead(key, read),
+        () => this.singleFlightRead(key, read),
+      );
+      this.readTrailing.set(key, trailing);
+      const clear = () => {
+        if (this.readTrailing.get(key) === trailing) this.readTrailing.delete(key);
+      };
+      void trailing.then(clear, clear);
+      return trailing;
+    }
+    const promise = read().finally(() => {
+      if (this.readInFlight.get(key) === promise) this.readInFlight.delete(key);
+    });
+    this.readInFlight.set(key, promise);
+    return promise;
   }
 
   /** Negotiate one server-mediated connected-Codex GPT-Live V3 WebRTC call. */
@@ -711,7 +944,9 @@ export class OpenGeniClient {
 
   /** Newest turn that durably emitted `turn.started`, or null before any admission. */
   async getLatestStartedTurn(workspaceId: string, sessionId: string): Promise<SessionTurn | null> {
-    const turns = await this.listTurns(workspaceId, sessionId, { latestStarted: true });
+    const turns = await this.listTurns(workspaceId, sessionId, {
+      latestStarted: true,
+    });
     return turns[0] ?? null;
   }
 
@@ -754,6 +989,24 @@ export class OpenGeniClient {
       { ...(options.window !== undefined ? { window: options.window } : {}) },
     );
     return response.samples;
+  }
+
+  /**
+   * Remove one connected self-hosted machine enrollment. The control-plane
+   * operation works while the agent is offline, revokes future reconnects,
+   * retains history, and returns a typed blocker when active route/lease or
+   * recovery dependencies make removal unsafe. `idempotencyKey` is replay-safe.
+   */
+  async removeEnrollment(
+    workspaceId: string,
+    enrollmentId: string,
+    request: RemoveEnrollmentRequest = {},
+  ): Promise<RemoveEnrollmentResponse> {
+    return await this.requestJson<RemoveEnrollmentResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/enrollments/${enrollmentId}/revoke`,
+      request,
+    );
   }
 
   // --- Self-hosted enrollment UX (design 11) --------------------------------
@@ -1178,9 +1431,9 @@ export class OpenGeniClient {
   // --- Turn queue ------------------------------------------------------------
 
   async getQueue(workspaceId: string, sessionId: string): Promise<SessionQueueSnapshot> {
-    return await this.requestJson<SessionQueueSnapshot>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue`,
+    const path = `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue`;
+    return await this.singleFlightRead(path, () =>
+      this.requestJson<SessionQueueSnapshot>("GET", path),
     );
   }
 
@@ -1297,7 +1550,11 @@ export class OpenGeniClient {
   async cancelSession(
     workspaceId: string,
     sessionId: string,
-    options: { reason?: string; clientEventId?: string; expectedControlEtag?: string } = {},
+    options: {
+      reason?: string;
+      clientEventId?: string;
+      expectedControlEtag?: string;
+    } = {},
   ): Promise<SessionControlResponse> {
     return await this.controlSession(workspaceId, sessionId, {
       action: "cancel",
@@ -1442,10 +1699,8 @@ export class OpenGeniClient {
 
   /** The session's goal. 404s when the session never had one. */
   async getGoal(workspaceId: string, sessionId: string): Promise<SessionGoal> {
-    return await this.requestJson<SessionGoal>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal`,
-    );
+    const path = `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal`;
+    return await this.singleFlightRead(path, () => this.requestJson<SessionGoal>("GET", path));
   }
 
   async updateGoal(
@@ -1525,6 +1780,22 @@ export class OpenGeniClient {
     return await this.requestJson<FsListResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/list`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  /** FileSystem: hydrate several independent directories behind one sandbox lease. */
+  async fsListBatch(
+    workspaceId: string,
+    sessionId: string,
+    request: FsListBatchRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<FsListBatchResponse> {
+    return await this.requestJson<FsListBatchResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/list-batch`,
       request,
       {},
       options,
@@ -1625,6 +1896,22 @@ export class OpenGeniClient {
     return await this.requestJson<GitDiffResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/git/diff`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  /** Git: read status and optional diffs for several repositories behind one sandbox lease. */
+  async gitReadBatch(
+    workspaceId: string,
+    sessionId: string,
+    request: GitReadBatchRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<GitReadBatchResponse> {
+    return await this.requestJson<GitReadBatchResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/git/read-batch`,
       request,
       {},
       options,
@@ -2312,7 +2599,8 @@ export class OpenGeniClient {
   }
 
   // --- VariableSets --------------------------------------------------------------
-  // Variable values are write-only: reads return name/version metadata only.
+  // Generic reads return name/version metadata only. Plaintext uses one
+  // dedicated permissioned endpoint.
 
   async listVariableSets(workspaceId: string): Promise<VariableSet[]> {
     return await this.requestJson<VariableSet[]>(
@@ -2339,6 +2627,17 @@ export class OpenGeniClient {
     );
   }
 
+  async getVariableSetVariable(
+    workspaceId: string,
+    variableSetId: string,
+    name: string,
+  ): Promise<VariableSetSecret> {
+    return await this.requestJson<VariableSetSecret>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/variable-sets/${variableSetId}/variables/${encodeURIComponent(name)}`,
+    );
+  }
+
   async updateVariableSet(
     workspaceId: string,
     variableSetId: string,
@@ -2358,7 +2657,7 @@ export class OpenGeniClient {
     );
   }
 
-  /** Create or rotate a variable. The value never comes back on any read. */
+  /** Create or rotate a variable. Generic reads never return its value. */
   async setVariableSetVariable(
     workspaceId: string,
     variableSetId: string,
@@ -2554,19 +2853,29 @@ export class OpenGeniClient {
   async beginFileUpload(
     workspaceId: string,
     request: CreateFileUploadRequest,
+    options: OpenGeniRequestOptions = {},
   ): Promise<CreateFileUploadResponse> {
     return await this.requestJson<CreateFileUploadResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/files/uploads`,
       request,
+      {},
+      options,
     );
   }
 
   /** Step 3 of the upload flow: server verifies the object and marks it ready. */
-  async completeFileUpload(workspaceId: string, uploadId: string): Promise<FileAsset> {
+  async completeFileUpload(
+    workspaceId: string,
+    uploadId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<FileAsset> {
     const response = await this.requestJson<CompleteFileUploadResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/files/uploads/${uploadId}/complete`,
+      undefined,
+      {},
+      options,
     );
     return response.file;
   }
@@ -2577,6 +2886,30 @@ export class OpenGeniClient {
    * -> complete. Returns the ready `FileAsset`.
    */
   async uploadFile(workspaceId: string, input: UploadFileInput): Promise<FileAsset> {
+    if (
+      input.timeoutMs !== undefined &&
+      (!Number.isFinite(input.timeoutMs) || input.timeoutMs <= 0)
+    ) {
+      throw new Error("File upload timeout must be a positive number");
+    }
+    const withTimeout = async <T>(
+      timeoutMs: number,
+      operation: (signal: AbortSignal) => Promise<T>,
+    ): Promise<T> => {
+      const controller = new AbortController();
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const timedOut = new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => {
+          controller.abort();
+          reject(new Error("File upload timed out. Retry the upload."));
+        }, timeoutMs);
+      });
+      try {
+        return await Promise.race([operation(controller.signal), timedOut]);
+      } finally {
+        if (timeout !== undefined) clearTimeout(timeout);
+      }
+    };
     // Snapshot mutable inputs before hashing so the digest always describes the
     // exact bytes later sent to object storage. Copy Uint8Array views into a
     // Blob so byte offsets/shared buffers can't leak surrounding bytes.
@@ -2593,32 +2926,52 @@ export class OpenGeniClient {
           ? body.size
           : body.byteLength;
     const sha256 = input.sha256 ?? (await sha256ForUpload(body));
-    const upload = await this.beginFileUpload(workspaceId, {
-      filename: input.filename,
-      contentType: input.contentType,
-      sizeBytes,
-      sha256,
-    });
-    const putResponse = await this.fetchImpl(upload.putUrl, {
-      method: "PUT",
-      // Signed object-storage URLs carry their own short-lived authority.
-      // Browser cookies and HTTP auth must never accompany this cross-origin
-      // request: credentialed fetches are incompatible with wildcard CORS and
-      // can leak ambient credentials to a caller-selected storage endpoint.
-      credentials: "omit",
-      // The backend's requiredHeaders already carry the canonical lowercase
-      // `content-type` for every storage backend (Azure/S3/GCS). Do NOT also set
-      // a `Content-Type` key here: WHATWG Headers treats the two casings as the
-      // same header and comma-joins their values (e.g. "text/plain, text/plain"),
-      // which the object store persists verbatim and COMPLETE then rejects (422),
-      // and which breaks S3's presigned-URL signature.
-      headers: { ...upload.requiredHeaders },
-      body,
-    });
+    const upload = await withTimeout(
+      30_000,
+      async (signal) =>
+        await this.beginFileUpload(
+          workspaceId,
+          {
+            filename: input.filename,
+            contentType: input.contentType,
+            sizeBytes,
+            sha256,
+          },
+          { signal },
+        ),
+    );
+    // Give large valid uploads enough time at a conservative 256 KiB/s while
+    // still bounding an object-storage request that never settles.
+    const transferTimeoutMs =
+      input.timeoutMs ?? Math.max(120_000, Math.ceil(sizeBytes / (256 * 1024)) * 1_000);
+    const putResponse = await withTimeout(
+      transferTimeoutMs,
+      async (signal) =>
+        await this.fetchImpl(upload.putUrl, {
+          method: "PUT",
+          // Signed object-storage URLs carry their own short-lived authority.
+          // Browser cookies and HTTP auth must never accompany this cross-origin
+          // request: credentialed fetches are incompatible with wildcard CORS and
+          // can leak ambient credentials to a caller-selected storage endpoint.
+          credentials: "omit",
+          // The backend's requiredHeaders already carry the canonical lowercase
+          // `content-type` for every storage backend (Azure/S3/GCS). Do NOT also set
+          // a `Content-Type` key here: WHATWG Headers treats the two casings as the
+          // same header and comma-joins their values (e.g. "text/plain, text/plain"),
+          // which the object store persists verbatim and COMPLETE then rejects (422),
+          // and which breaks S3's presigned-URL signature.
+          headers: { ...upload.requiredHeaders },
+          body,
+          signal,
+        }),
+    );
     if (!putResponse.ok) {
       throw await apiErrorFromResponse(putResponse, { method: "PUT" });
     }
-    return await this.completeFileUpload(workspaceId, upload.uploadId);
+    return await withTimeout(
+      30_000,
+      async (signal) => await this.completeFileUpload(workspaceId, upload.uploadId, { signal }),
+    );
   }
 
   async getFile(workspaceId: string, fileId: string): Promise<FileAsset> {
@@ -2648,22 +3001,149 @@ export class OpenGeniClient {
     artifactId: string,
     options: RetainedArtifactContentOptions = {},
   ): Promise<RetainedArtifactContent> {
+    return await this.getRetainedArtifactContentAtPath(
+      `/v1/workspaces/${workspaceId}/artifacts/${artifactId}/content`,
+      options,
+    );
+  }
+
+  async getSessionRetainedArtifact(
+    workspaceId: string,
+    sessionId: string,
+    artifactId: string,
+  ): Promise<RetainedArtifactMetadata> {
+    return await this.requestJson<RetainedArtifactMetadata>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/artifacts/${artifactId}`,
+    );
+  }
+
+  async getSessionRetainedArtifactContent(
+    workspaceId: string,
+    sessionId: string,
+    artifactId: string,
+    options: RetainedArtifactContentOptions = {},
+  ): Promise<RetainedArtifactContent> {
+    return await this.getRetainedArtifactContentAtPath(
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/artifacts/${artifactId}/content`,
+      options,
+    );
+  }
+
+  /** Assemble one permanent generated-image receipt from bounded authenticated ranges. */
+  async downloadRetainedArtifact(
+    workspaceId: string,
+    artifact: RetainedArtifactReference,
+    options: RetainedArtifactDownloadOptions = {},
+  ): Promise<RetainedArtifactDownload> {
+    assertRetainedGeneratedImageReceipt(workspaceId, artifact);
+    const bytes = await this.downloadRetainedArtifactBytes(artifact, options);
+    return { artifact, bytes };
+  }
+
+  /** Mint a short-lived, zero-copy browser source for a validated generated image. */
+  async createRetainedArtifactDownloadUrl(
+    workspaceId: string,
+    artifact: RetainedArtifactReference,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<FileDownloadUrlResponse> {
+    assertRetainedGeneratedImageReceipt(workspaceId, artifact);
+    const download = await this.createFileDownloadUrl(workspaceId, artifact.artifactId, options);
+    assertSafeArtifactDownloadUrl(download);
+    return download;
+  }
+
+  /** Assemble one retained screenshot from bounded authenticated API ranges. */
+  async downloadRetainedScreenshot(
+    workspaceId: string,
+    sessionId: string,
+    artifactId: string,
+    options: RetainedScreenshotDownloadOptions = {},
+  ): Promise<RetainedScreenshotDownload> {
+    const metadata = await this.getSessionRetainedArtifact(workspaceId, sessionId, artifactId);
+    if (!metadata.available) return { metadata, bytes: null };
+    if (
+      metadata.kind !== "computer_screenshot" ||
+      metadata.contentType !== "image/png" ||
+      !metadata.dimensions ||
+      metadata.originalBytes <= 0 ||
+      metadata.originalBytes > COMPUTER_SCREENSHOT_MAX_BYTES
+    ) {
+      throw new OpenGeniApiError(502, "retained screenshot metadata is invalid");
+    }
+    const bytes = await this.downloadRetainedArtifactBytes(metadata, options);
+    return { metadata, bytes };
+  }
+
+  private async downloadRetainedArtifactBytes(
+    artifact: RetainedArtifactReference,
+    options: RetainedArtifactDownloadOptions,
+  ): Promise<Uint8Array> {
+    const maxRetries = options.maxRetries ?? 2;
+    if (!Number.isInteger(maxRetries) || maxRetries < 0 || maxRetries > 3) {
+      throw new RangeError("retained artifact maxRetries must be an integer from 0 to 3");
+    }
+    const bytes = new Uint8Array(artifact.originalBytes);
+    const pageBytes = Math.min(artifact.retrieval.maxRangeBytes, RETAINED_OUTPUT_MAX_PAGE_BYTES);
+    if (!Number.isSafeInteger(pageBytes) || pageBytes <= 0) {
+      throw new OpenGeniApiError(502, "retained artifact range metadata is invalid");
+    }
+    for (let start = 0; start < bytes.byteLength; start += pageBytes) {
+      options.signal?.throwIfAborted();
+      const end = Math.min(start + pageBytes, bytes.byteLength) - 1;
+      let page: RetainedArtifactContent | null = null;
+      for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+        try {
+          page = await this.getRetainedArtifactContentAtPath(artifact.retrieval.path, {
+            range: `bytes=${start}-${end}`,
+            ...(options.signal ? { signal: options.signal } : {}),
+          });
+          break;
+        } catch (error) {
+          options.signal?.throwIfAborted();
+          if (
+            attempt >= maxRetries ||
+            (error instanceof OpenGeniApiError && error.status >= 400 && error.status < 500)
+          ) {
+            throw error;
+          }
+        }
+      }
+      if (!page) throw new OpenGeniApiError(502, "retained artifact range retry exhausted");
+      const expectedLength = end - start + 1;
+      if (
+        page.status !== 206 ||
+        page.contentType !== artifact.contentType ||
+        page.contentLength !== expectedLength ||
+        page.contentRange !== `bytes ${start}-${end}/${artifact.originalBytes}`
+      ) {
+        throw new OpenGeniApiError(502, "retained artifact range response is invalid");
+      }
+      bytes.set(page.bytes, start);
+    }
+    if ((await sha256Hex(bytes)) !== artifact.sha256) {
+      throw new OpenGeniApiError(502, "retained artifact checksum mismatch");
+    }
+    return bytes;
+  }
+
+  private async getRetainedArtifactContentAtPath(
+    path: string,
+    options: RetainedArtifactContentOptions,
+  ): Promise<RetainedArtifactContent> {
     if (options.range && (options.range.length > 128 || /[^\x20-\x7e]/.test(options.range))) {
       throw new RangeError("retained artifact range must be at most 128 printable ASCII bytes");
     }
     const correlationId = crypto.randomUUID();
-    const response = await this.fetchImpl(
-      this.url(`/v1/workspaces/${workspaceId}/artifacts/${artifactId}/content`),
-      {
-        method: "GET",
-        headers: {
-          ...this.headers(correlationId),
-          Accept: "application/octet-stream",
-          ...(options.range ? { Range: options.range } : {}),
-        },
-        ...(options.signal ? { signal: options.signal } : {}),
+    const response = await this.fetchImpl(this.url(path), {
+      method: "GET",
+      headers: {
+        ...this.headers(correlationId),
+        Accept: "application/octet-stream",
+        ...(options.range ? { Range: options.range } : {}),
       },
-    );
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
     try {
       assertApiContractResponse(response);
     } catch (error) {
@@ -2710,10 +3190,14 @@ export class OpenGeniClient {
   async createFileDownloadUrl(
     workspaceId: string,
     fileId: string,
+    options: OpenGeniRequestOptions = {},
   ): Promise<FileDownloadUrlResponse> {
     return await this.requestJson<FileDownloadUrlResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/files/${fileId}/download-url`,
+      undefined,
+      {},
+      options,
     );
   }
 
@@ -3595,6 +4079,91 @@ function isTranscribeAudioResponse(value: unknown): value is TranscribeAudioResp
   );
 }
 
+function isUploadTranscriptionRecordingChunkResponse(
+  value: unknown,
+): value is UploadTranscriptionRecordingChunkResponse {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  if (
+    !isTranscriptionRecordingResponse({
+      recording: record.recording,
+      segments: [],
+    })
+  ) {
+    return false;
+  }
+  if (!record.chunk || typeof record.chunk !== "object" || Array.isArray(record.chunk)) {
+    return false;
+  }
+  const chunk = record.chunk as Record<string, unknown>;
+  return (
+    typeof chunk.chunkNumber === "number" &&
+    typeof chunk.byteLength === "number" &&
+    typeof chunk.sha256 === "string" &&
+    typeof chunk.startMilliseconds === "number" &&
+    typeof chunk.durationMilliseconds === "number" &&
+    typeof chunk.deduplicated === "boolean"
+  );
+}
+
+function isTranscriptionRecordingResponse(value: unknown): value is TranscriptionRecordingResponse {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const response = value as Record<string, unknown>;
+  if (
+    !response.recording ||
+    typeof response.recording !== "object" ||
+    Array.isArray(response.recording)
+  ) {
+    return false;
+  }
+  const recording = response.recording as Record<string, unknown>;
+  return (
+    typeof recording.id === "string" &&
+    typeof recording.workspaceId === "string" &&
+    typeof recording.mimeType === "string" &&
+    typeof recording.state === "string" &&
+    typeof recording.nextChunkNumber === "number" &&
+    typeof recording.chunkCount === "number" &&
+    typeof recording.totalBytes === "number" &&
+    typeof recording.totalDurationMilliseconds === "number" &&
+    typeof recording.segmentCount === "number" &&
+    typeof recording.completedSegmentCount === "number" &&
+    (recording.transcriptText === null || typeof recording.transcriptText === "string") &&
+    Array.isArray(recording.languages) &&
+    (recording.errorCode === null || typeof recording.errorCode === "string") &&
+    typeof recording.retryable === "boolean" &&
+    typeof recording.objectsCleaned === "boolean" &&
+    typeof recording.createdAt === "string" &&
+    typeof recording.updatedAt === "string" &&
+    typeof recording.expiresAt === "string" &&
+    (response.retryAfterMilliseconds === undefined ||
+      (typeof response.retryAfterMilliseconds === "number" &&
+        Number.isInteger(response.retryAfterMilliseconds) &&
+        response.retryAfterMilliseconds > 0 &&
+        response.retryAfterMilliseconds <= 60_000)) &&
+    Array.isArray(response.segments)
+  );
+}
+
+function transcriptionRecordingResponse(value: unknown): TranscriptionRecordingResponse {
+  if (isTranscriptionRecordingResponse(value)) return value;
+  throw new OpenGeniApiError(502, "Invalid transcription recording response.", {
+    code: "invalid_response",
+  });
+}
+
+function isTranscriptionRecordingListResponse(
+  value: unknown,
+): value is TranscriptionRecordingListResponse {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const recordings = (value as Record<string, unknown>).recordings;
+  return (
+    Array.isArray(recordings) &&
+    recordings.length <= 50 &&
+    recordings.every((recording) => isTranscriptionRecordingResponse({ recording, segments: [] }))
+  );
+}
+
 function filenameForAudioMimeType(mimeType: string): string {
   const bare = mimeType.trim().toLowerCase().split(";")[0] ?? "audio/webm";
   switch (bare) {
@@ -3695,8 +4264,43 @@ async function sha256ForUpload(body: Blob | ArrayBuffer | string): Promise<strin
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const owned = Uint8Array.from(bytes);
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", owned.buffer);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 async function cancelResponseBody(response: Response, reason: string): Promise<void> {
   await response.body?.cancel(reason).catch(() => undefined);
+}
+
+function assertRetainedGeneratedImageReceipt(
+  workspaceId: string,
+  artifact: RetainedArtifactReference,
+): void {
+  if (!parseRetainedGeneratedImageReference(artifact, workspaceId)) {
+    throw new OpenGeniApiError(502, "retained generated image receipt is invalid");
+  }
+}
+
+function assertSafeArtifactDownloadUrl(value: FileDownloadUrlResponse): void {
+  if (
+    !value ||
+    typeof value.url !== "string" ||
+    typeof value.expiresAt !== "string" ||
+    !Number.isFinite(Date.parse(value.expiresAt))
+  ) {
+    throw new OpenGeniApiError(502, "retained artifact download URL is invalid");
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value.url);
+  } catch {
+    throw new OpenGeniApiError(502, "retained artifact download URL is invalid");
+  }
+  if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) {
+    throw new OpenGeniApiError(502, "retained artifact download URL is unsafe");
+  }
 }
 
 function parseBoundedContentLength(value: string | null): number | null {

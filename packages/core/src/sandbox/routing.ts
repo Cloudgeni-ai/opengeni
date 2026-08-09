@@ -11,10 +11,11 @@
 // The DB-coupled glue (readActiveSandbox / getSandbox / the selfhosted ControlRpc
 // over the events bus) lives here, not in the leaf (which stays db-free).
 
-import { sandboxArchiveCaptureTimeoutMs, type Settings } from "@opengeni/config";
+import { sandboxLifecycleTransitionWaitMs, type Settings } from "@opengeni/config";
 import {
   advanceWorkspaceGenerationForDirectRequest,
   advanceWorkspaceGenerationForRetainedProcess,
+  getEnrollment,
   getRetainedProcess,
   getSandbox,
   markWarmLeaseInstanceLost,
@@ -32,6 +33,7 @@ import {
   isProviderSandboxGoneDuringRoutedOperation,
   makeActiveBackendResolver,
   NatsControlRpc,
+  NatsOpStreamTransport,
   RoutingSandboxSession,
   resolveModalCheckpointProviderBindingForSession,
   type ControlRpc,
@@ -44,6 +46,7 @@ import {
   type RoutingRetainedProcessTerminalProof,
   type RoutingSandboxOperationObserver,
   type SelfhostedRelayConfig,
+  type SelfhostedOpStreamDeps,
 } from "@opengeni/runtime/sandbox";
 
 type PersistableMutationAdmission = {
@@ -58,6 +61,7 @@ export type ChannelARoutingServices = {
   settings: Settings;
   bus?: EventBus;
   onSandboxOperation?: RoutingSandboxOperationObserver;
+  waitSignal?: AbortSignal;
 };
 
 /** Map the deployment relay URL to the leaf's `SelfhostedRelayConfig` shape. The
@@ -112,6 +116,27 @@ function controlRpcFactory(bus: EventBus | undefined): () => ControlRpc {
       }
       return bus.getRequestConnection();
     });
+}
+
+async function resolveSelfhostedOpStream(
+  services: ChannelARoutingServices,
+  workspaceId: string,
+  sandbox: RoutableSandbox,
+): Promise<SelfhostedOpStreamDeps | undefined> {
+  if (
+    services.settings.agentOpStreamEnabled !== true ||
+    !services.bus?.getOpStreamConnection ||
+    !sandbox.enrollmentId
+  ) {
+    return undefined;
+  }
+  const enrollment = await getEnrollment(services.db, workspaceId, sandbox.enrollmentId);
+  if (enrollment?.opStream !== true) return undefined;
+  return {
+    transport: new NatsOpStreamTransport(
+      async () => services.bus?.getOpStreamConnection?.() ?? null,
+    ),
+  };
 }
 
 /** Whether the routing proxy should wrap the Channel-A box: gated by the
@@ -190,7 +215,8 @@ export function wrapChannelABoxWithRouting(
           routeTargetId: backend.sandboxId,
           routeEpoch: backend.activeEpoch,
           operation: op,
-          captureWaitMs: sandboxArchiveCaptureTimeoutMs(settings),
+          captureWaitMs: sandboxLifecycleTransitionWaitMs(settings),
+          ...(services.waitSignal ? { waitSignal: services.waitSignal } : {}),
         });
         return { admission, providerBinding };
       }
@@ -286,7 +312,8 @@ export function wrapChannelABoxWithRouting(
           sessionId: ids.sessionId,
           processId: process.id,
           operation: op,
-          captureWaitMs: sandboxArchiveCaptureTimeoutMs(settings),
+          captureWaitMs: sandboxLifecycleTransitionWaitMs(settings),
+          ...(services.waitSignal ? { waitSignal: services.waitSignal } : {}),
         })
     : undefined;
   const afterProcessMutation = homeLease
@@ -389,6 +416,8 @@ export function wrapChannelABoxWithRouting(
         : null;
     },
     controlRpcFactory: controlRpcFactory(bus),
+    resolveSelfhostedOpStream: (sandbox) =>
+      resolveSelfhostedOpStream(services, ids.workspaceId, sandbox),
     relay: relayConfigFromSettings(settings),
     selfhostedTimeoutMs: settings.sandboxSelfhostedControlTimeoutMs,
     selfhostedExecTimeoutMs: settings.sandboxSelfhostedExecTimeoutMs,

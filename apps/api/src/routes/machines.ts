@@ -73,7 +73,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
     // Validate the machine belongs to this workspace (RLS already scopes the read,
     // but a clear 404 beats an empty series for an unknown/cross-workspace id).
     const enrollment = await getEnrollment(db, workspaceId, enrollmentId);
-    if (!enrollment) {
+    if (!enrollment || enrollment.status !== "active") {
       throw new HTTPException(404, { message: "machine not found in this workspace" });
     }
     const windowMs = SERIES_WINDOWS_MS[c.req.query("window") ?? ""] ?? DEFAULT_SERIES_WINDOW_MS;

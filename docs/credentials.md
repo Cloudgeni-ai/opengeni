@@ -13,12 +13,12 @@ everything else is machinery you receive from OpenGeni rather than choose.
 | Delegated access token | `ogd_…` bearer; domain-bound `ogd2_…` when it asserts service provenance | Host with the deployment's delegation secret (HMAC) | HMAC + embedded workspace/account/permissions | Short (embedded expiry) | An embedding host acting as one of its users; also self-minted internally for first-party MCP |
 | Managed web session | Better Auth cookie | Managed auth (email/password) | Better Auth session lookup | Session | Humans in the hosted web console |
 | Stream token | `ogs_…` (query/header) | API, on viewer/stream mint | HMAC, scope+TTL embedded | Minutes | Browsers attaching to desktop/terminal streams |
-| Machine enrollment bearer | `oge_…` | Enrollment flow (click-Grant or device flow) | Stored credential + NATS auth-callout | Until revoked | A self-hosted/connected machine agent |
+| Machine enrollment bearer | `oge_…` | Enrollment flow (click-Grant or device flow) | HMAC + active enrollment row + exact credential generation | 30 days; generation-rotated on every re-enrollment | A self-hosted/connected machine agent |
 | Headless enrollment token | `oget_…` | Operator via enrollment API | One-time exchange for `oge_…` | Single use | Provisioning scripts for headless machines |
 | Relay producer token | `ogr_…` | API for self-hosted relay producers | HMAC | Short | The relay forwarding desktop frames |
 | NATS user JWT / callout | NATS credentials | API auth-callout service | NATS server (callout account) | Connection | Machine agents and internal services on the message bus |
-| Session MCP headers | Arbitrary headers, encrypted at rest | Embedding host per session (`mcpServers` on create; rotatable per user turn) | Never read back — write-only, decrypted only in the worker | Host-defined; version-bumped on rotation | Host's own MCP server called from a session |
-| Capability MCP headers | Arbitrary headers, encrypted at rest | Workspace admin when configuring a capability | Write-only, worker-side decrypt | Until reconfigured | Third-party MCP servers enabled workspace-wide |
+| Session MCP headers | Arbitrary headers, authenticated-encrypted at rest | Embedding host per session (`mcpServers` on create; rotatable per user turn) | Worker-side decrypt for execution; ordinary projections are metadata-only. Dedicated tenant-scoped `secrets:read` with metadata-only audit is an approved release-held follow-up, not part of the current emergency head | Host-defined; version-bumped on rotation | Host's own MCP server called from a session |
+| Capability MCP headers | Arbitrary headers, authenticated-encrypted at rest | Workspace admin when configuring a capability | Worker-side decrypt for execution; ordinary projections are metadata-only. Dedicated tenant-scoped `secrets:read` with metadata-only audit is an approved release-held follow-up, not part of the current emergency head | Until reconfigured | Third-party MCP servers enabled workspace-wide |
 | Codex subscription tokens | ChatGPT access/refresh/id tokens, encrypted | Device-code login flow | OpenAI; OpenGeni stores encrypted, never returns them | Provider-defined, auto-refreshed | Workspaces using a ChatGPT/Codex subscription as a model provider |
 | Git credential-binding secret | Contained GitHub/GitLab/Azure DevOps provider token, or host smart-Git broker bearer | OpenGeni or embedding host per repository binding | Git provider or host HTTPS smart-Git broker | Provider/host-defined, independently renewed during active managed-sandbox turns | Sandbox git operations; direct provider tokens may also reach the matching provider CLI, while broker bearers are Git-only (delivered via hashed binding files, never baked into manifests/config/remote URIs) |
 | Host run credentials | Provider-neutral environment values and credential files | Embedding host through `ConnectionCredentialsPort.runCredentials` | Upstream cloud/service CLIs and SDKs | Host-defined, proactively renewed during the active attempt | Agent commands and session-scoped Channel-A terminal processes; never the box-global shared `ttyd` process |
@@ -27,9 +27,15 @@ everything else is machinery you receive from OpenGeni rather than choose.
 
 Rules that hold across the table:
 
-- **Secrets are write-only.** Anything a caller supplies (MCP headers, Codex
-  tokens) is encrypted at rest and never echoed by any read endpoint — responses
-  expose header *names* and credential *versions* only.
+- **Configured-secret authority is explicit.** Secret values are authenticated-
+  encrypted at rest and never appear in unrelated list/detail/event/log/span
+  projections. The approved release-held follow-up adds dedicated
+  tenant-scoped `secrets:list|read|write` operations (plus the owning resource
+  permission) and metadata-only access audit records containing reference/name,
+  actor, session context, action, and timestamp, never the value. Those exact-
+  value endpoints are not implemented in the current emergency head. Provider-
+  owned token types without a product contract remain non-readable rather than
+  being folded into a generic secret dump.
 - **Rotation over longevity.** Rotating credentials are never stored in
   long-lived artifacts such as sandbox manifests. Git provider tokens and
   smart-Git broker bearers are delivered at setup and proactively re-minted by
@@ -57,3 +63,12 @@ Rules that hold across the table:
 - **The perimeter is not identity.** The deployment access key gates who can
   talk to a deployment at all; workspace identity and permissions always come
   from one of the identity-bearing credentials above it.
+- **Machine revocation is bounded, not a claimed synchronous disconnect.** A DB
+  revoke immediately denies the next NATS authorization/reconnect. A connection
+  that already holds a callout-minted user JWT may remain live until that JWT
+  expires; the control plane caps that residual interval at five minutes. A
+  healthy agent treats that expiry as scheduled credential rotation and
+  reconnects immediately with its durable enrollment bearer; it does not add
+  outage backoff or stop established op-stream commands. A
+  re-enrollment atomically advances the row's credential generation, so the old
+  `oge_` bearer can neither authenticate nor self-revoke the new generation.

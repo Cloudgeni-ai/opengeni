@@ -3,9 +3,10 @@
 
 // @opengeni/react — hooks + styled components on @opengeni/sdk.
 //
-// Import the styles once in your Tailwind entry CSS:
-//   @import "@opengeni/react/styles.css";
-//   @source "../node_modules/@opengeni/react/src";
+// Import the ready-to-use styles once:
+//   import "@opengeni/react/compiled.css";
+// Tailwind v4 hosts may instead use the additive styles.css + @source bridge;
+// container-responsive composers additionally import responsive.css.
 
 export type {
   EmbeddedFileAttachmentClientLike,
@@ -22,6 +23,7 @@ export { OpenGeniProvider } from "./provider";
 export type { OpenGeniProviderProps } from "./provider";
 export { useOpenGeni, useOpenGeniClient } from "./session-context";
 export type { ClientOverride, OpenGeniContextValue } from "./session-context";
+export { usePageLiveActivity } from "./hooks/internal";
 
 // Hooks
 export { useSession, isTitleEvent } from "./hooks/use-session";
@@ -79,7 +81,9 @@ export type {
   VoiceRecordingChunk,
   VoiceRecordingChunkUploadState,
   VoiceRecordingFinalizationState,
+  VoiceRecordingHandoffMode,
   VoiceRecordingManifest,
+  VoiceRecordingRecoveryMode,
   VoiceRecordingStore,
   VoiceRecordingTranscriptionState,
   VoiceRecordingUploadState,
@@ -229,12 +233,14 @@ export type {
   CapturedFileUnavailableReason,
   FileTreeNode,
   FileTreeStatus,
+  SandboxFilesGitSummary,
   SandboxWriteFileOptions,
   UseSandboxFilesOptions,
   UseSandboxFilesResult,
 } from "./hooks/use-sandbox-files";
 export { useSandboxGit } from "./hooks/use-sandbox-git";
 export type {
+  SandboxGitComparison,
   SandboxGitFileDiff,
   UseSandboxGitOptions,
   UseSandboxGitResult,
@@ -326,6 +332,8 @@ export {
 } from "./timeline";
 export type {
   CreateToolRegistryOptions,
+  RetainedArtifactLoader,
+  RetainedScreenshotLoader,
   ToolRegistry,
   ToolRegistryEntry,
   ToolRenderer,
@@ -364,7 +372,7 @@ export type {
   TurnSummaryProps,
 } from "./timeline";
 
-// Pure provider-shape parsers (exec banner, V4A diff, secret redaction, …)
+// Pure provider-shape parsers (exec banner, V4A diff, tool arguments, …)
 export {
   applyPatchOps,
   applyPatchOpsFromToolItem,
@@ -376,7 +384,6 @@ export {
   parseExecBannerSessionId,
   parseFreeformApplyPatch,
   parseToolArgs,
-  redactSecrets,
   sandboxCommandExitCode,
   stripExecBanner,
   tailPeek,
@@ -423,7 +430,7 @@ export type {
   ComposerTranscriptionMessages,
 } from "./components/composer-transcription-control";
 export { defaultChatComposerMessages } from "./components/composer";
-export type { ChatComposerMessages } from "./components/composer";
+export type { ChatComposerMessages, ResponsiveBasis } from "./components/composer";
 export { ModelPicker } from "./components/model-picker";
 export type { ModelPickerProps } from "./components/model-picker";
 export {

@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
   assertTurnExecutionPolicyMatchesConfigV1,
+  calculateGatewayReportedCostBreakdown,
   calculateGatewayReportedCostMicros,
+  calculateModelUsageCostBreakdown,
   calculateModelUsageCostMicros,
   canonicalizeConfiguredModelId,
   configuredAllowedModels,
@@ -11,6 +13,7 @@ import {
   configuredProviders,
   defaultModelPricing,
   getSettings,
+  isDirectOpenAiApiBaseUrl,
   parseModelProvidersJson,
   policyProviderIdForModel,
   productLabelForModelId,
@@ -28,6 +31,15 @@ import {
   OPENGENI_GATEWAY_PROVIDER_ID,
   WORKSPACE_GATEWAY_PROVIDER_ID,
 } from "../src";
+
+describe("direct OpenAI API identity", () => {
+  test("treats only the exact public v1 endpoint as direct", () => {
+    expect(isDirectOpenAiApiBaseUrl(undefined)).toBe(true);
+    expect(isDirectOpenAiApiBaseUrl("https://api.openai.com/v1/")).toBe(true);
+    expect(isDirectOpenAiApiBaseUrl("https://api.openai.com/v1?proxy=1")).toBe(false);
+    expect(isDirectOpenAiApiBaseUrl("https://proxy.example/v1")).toBe(false);
+  });
+});
 
 // A reusable Fireworks/GLM-5.2 registry JSON mirroring the doc's host example.
 // Uses an inline apiKey so the registry resolves without touching process.env.
@@ -969,7 +981,7 @@ describe("normalized model definitions", () => {
   test("pins the V1 digest and excludes labels, aliases, API keys, and secret metadata values", () => {
     const baseline = definitionFor();
     expect(baseline.definitionVersion).toBe(
-      "sha256:008d081089653410afffe7b5b92ee709047e8596695dce65f6027eb3ef130882",
+      "sha256:23cd3e997f915c25fb5305acf718039839af3a8731249c8711beb321c4d42861",
     );
     expect(
       definitionFor({
@@ -1391,6 +1403,45 @@ describe("configuredModelPricing", () => {
         { latencyMode: "fast" },
       ),
     ).toBe(50_000);
+    expect(
+      calculateModelUsageCostBreakdown(
+        settings,
+        "gpt-5.6-luna",
+        { inputTokens: 100_000 },
+        { latencyMode: "fast" },
+      ),
+    ).toEqual({
+      providerCostMicros: 40_000,
+      creditCostMicros: 50_000,
+    });
+    expect(
+      calculateModelUsageCostBreakdown(settings, "gpt-5.6-luna", {
+        inputTokens: 300_000,
+        outputTokens: 0,
+        requestUsageEntries: [
+          { inputTokens: 150_000, outputTokens: 0 },
+          { inputTokens: 150_000, outputTokens: 0 },
+        ],
+      }),
+    ).toEqual({
+      // Each provider request stays below the long-context threshold.
+      providerCostMicros: 60_000,
+      creditCostMicros: 75_000,
+    });
+  });
+
+  test("keeps gateway provider cost separate from OpenGeni credit markup", () => {
+    const settings = withEnv({ OPENGENI_OPENAI_API_KEY: "sk-test" }, () => getSettings());
+    expect(
+      calculateGatewayReportedCostBreakdown(
+        settings,
+        OPENGENI_GATEWAY_MODELS.deepseek.productId,
+        "0.000004",
+      ),
+    ).toEqual({
+      providerCostMicros: 4,
+      creditCostMicros: 5,
+    });
   });
 
   test("maps and verifies provider Fast service tiers", () => {

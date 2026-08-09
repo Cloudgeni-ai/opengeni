@@ -6,10 +6,16 @@ to 20 text, single-select, or multi-select questions. Select questions can
 optionally accept an `Other` value; requests can optionally allow Skip and can
 carry a durable expiry deadline.
 
+Workspace admins can set `agentHumanInputEnabled: false` through the ordinary
+workspace settings API. Disabled workspaces omit the tool from model-visible
+tools; a stale resume or forged interruption is rejected before the worker can
+install a `requires_action` boundary. The setting defaults to enabled.
+
 This is not tool approval. Approval asks whether an already-proposed tool may
 run and can approve or reject it. Structured human input is itself a tool call:
-OpenGeni always authorizes that built-in call, freezes the SDK `RunState`, and
-later injects one of these structured outcomes into that exact call:
+when the workspace setting allows it, OpenGeni authorizes that built-in call,
+freezes the SDK `RunState`, and later injects one of these structured outcomes
+into that exact call:
 
 - `answered`, with validated question answers;
 - `skipped`, only when the request allows it;
@@ -59,7 +65,8 @@ Settlement is first-writer-wins under a database lock and compare-and-set:
   workflow/database clock skew re-arms with an interruptible floor instead of
   spinning the workflow and database;
 
-`session_events` remains the redacted audit/live projection. The request table
+`session_events` remains the exact audit/live projection for accepted payloads.
+The request table
 is the authoritative actionable read model; event delivery merely tells a
 client to reconcile it. Neither store is model conversation history.
 

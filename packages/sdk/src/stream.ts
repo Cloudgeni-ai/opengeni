@@ -29,13 +29,25 @@ export type StreamSessionEventsOptions = {
   reconnectDelayMs?: number;
   /** Backoff ceiling. Defaults to 10s. */
   maxReconnectDelayMs?: number;
+  /** Random backoff spread as a fraction of the delay. Defaults to 0.2. */
+  reconnectJitterRatio?: number;
   /**
    * Give up after this many consecutive failed reconnect attempts (i.e. N
    * reconnects = N+1 total open-stream calls). Defaults to unlimited.
    */
   maxReconnectAttempts?: number;
+  /**
+   * Notify the consumer as soon as the SSE response body is open. This callback
+   * is deliberately synchronous and non-blocking: use it to start projection
+   * reconciliation without delaying consumption of live event bytes.
+   */
+  onOpen?: (() => void) | undefined;
   /** Await authoritative client reconciliation before exposing `live`. */
   beforeLive?: (() => void | Promise<void>) | undefined;
+  /** Maximum reconciliation time before reconnecting. Defaults to 15s. */
+  beforeLiveTimeoutMs?: number;
+  /** Maximum time without any SSE bytes before reconnecting. Defaults to 45s. */
+  heartbeatTimeoutMs?: number;
   onStateChange?: (state: StreamConnectionState) => void;
 };
 
@@ -62,6 +74,9 @@ export async function* streamSessionEvents(
   const reconnect = options.reconnect ?? true;
   const baseDelayMs = options.reconnectDelayMs ?? 500;
   const maxDelayMs = options.maxReconnectDelayMs ?? 10_000;
+  const jitterRatio = options.reconnectJitterRatio ?? 0.2;
+  const beforeLiveTimeoutMs = options.beforeLiveTimeoutMs ?? 15_000;
+  const heartbeatTimeoutMs = options.heartbeatTimeoutMs ?? 45_000;
   const maxAttempts = options.maxReconnectAttempts ?? Number.POSITIVE_INFINITY;
   let cursor = options.after ?? 0;
   let failedAttempts = 0;
@@ -77,9 +92,16 @@ export async function* streamSessionEvents(
       everConnected = true;
       failedAttempts = 0;
       delayMs = baseDelayMs;
-      await options.beforeLive?.();
+      try {
+        options.onOpen?.();
+      } catch {
+        // A notification observer cannot own or interrupt the event transport.
+      }
+      await runBeforeLive(options.beforeLive, beforeLiveTimeoutMs, signal);
       options.onStateChange?.("live");
-      for await (const message of parseSseStream(body)) {
+      for await (const message of parseSseStream(
+        withStreamInactivityTimeout(body, heartbeatTimeoutMs, signal),
+      )) {
         // Re-check after every yield resumption: an abort from the consumer
         // must not let already-buffered events keep flowing.
         if (signal?.aborted) {
@@ -108,7 +130,7 @@ export async function* streamSessionEvents(
       // progress (servers legitimately cycle long SSE connections); pace
       // empty closes so a misbehaving server is not hammered in a hot loop.
       if (cursor === cursorAtOpen) {
-        await sleep(baseDelayMs, signal);
+        await sleep(jitteredDelay(baseDelayMs, jitterRatio), signal);
       }
       continue;
     } catch (error) {
@@ -125,9 +147,85 @@ export async function* streamSessionEvents(
         );
       }
     }
-    await sleep(delayMs, signal);
+    await sleep(jitteredDelay(delayMs, jitterRatio), signal);
     delayMs = Math.min(Math.max(delayMs * 2, baseDelayMs), maxDelayMs);
   }
+}
+
+export async function runBeforeLive(
+  beforeLive: (() => void | Promise<void>) | undefined,
+  timeoutMs: number,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  if (!beforeLive) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let abortListener: (() => void) | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new TypeError(`stream reconciliation timed out after ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+    if (signal) {
+      abortListener = () => reject(new DOMException("Aborted", "AbortError"));
+      signal.addEventListener("abort", abortListener, { once: true });
+    }
+  });
+  try {
+    await Promise.race([Promise.resolve().then(beforeLive), timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    if (signal && abortListener) signal.removeEventListener("abort", abortListener);
+  }
+}
+
+export function jitteredDelay(delayMs: number, ratio: number): number {
+  if (delayMs <= 0 || ratio <= 0) return delayMs;
+  const boundedRatio = Math.min(ratio, 1);
+  const spread = delayMs * boundedRatio;
+  return Math.max(0, delayMs - spread + Math.random() * spread * 2);
+}
+
+export function withStreamInactivityTimeout(
+  stream: ReadableStream<Uint8Array>,
+  timeoutMs: number,
+  signal: AbortSignal | undefined,
+): ReadableStream<Uint8Array> {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
+    throw new RangeError("stream heartbeat timeout must be a positive safe integer");
+  }
+  const reader = stream.getReader();
+  return new ReadableStream<Uint8Array>({
+    pull: async (controller) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let abortListener: (() => void) | undefined;
+      try {
+        const result = await Promise.race([
+          reader.read(),
+          new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(
+              () => reject(new TypeError(`event stream heartbeat timed out after ${timeoutMs}ms`)),
+              timeoutMs,
+            );
+            if (signal) {
+              abortListener = () => reject(new DOMException("Aborted", "AbortError"));
+              signal.addEventListener("abort", abortListener, { once: true });
+            }
+          }),
+        ]);
+        if (result.done) controller.close();
+        else controller.enqueue(result.value);
+      } catch (error) {
+        void reader.cancel(error).catch(() => {});
+        controller.error(error);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+        if (signal && abortListener) signal.removeEventListener("abort", abortListener);
+      }
+    },
+    cancel: async (reason) => {
+      await reader.cancel(reason);
+    },
+  });
 }
 
 /**

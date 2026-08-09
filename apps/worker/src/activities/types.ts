@@ -38,6 +38,11 @@ export type SignalCodexCapacityWorkflow = (input: {
   wakeRevision: number;
 }) => Promise<void>;
 
+/** Start the versioned, per-box sandbox reaper from the history-stable legacy
+ * activity. The legacy Schedule workflow must keep its exact historical
+ * ScheduleActivity command across mixed-version worker pools. */
+export type StartSandboxReaperWorkflow = () => Promise<"started" | "already_running">;
+
 /** Exact activity-owned proof that the hard sandbox/tool fence physically
  * drained. This is delivery evidence only: the workflow still validates the
  * persisted attempt dispatch and commits the authoritative Postgres receipt. */
@@ -59,15 +64,13 @@ export type InspectSessionAttemptActivity = (input: {
   activityId: string;
 }) => Promise<"pending" | "settled">;
 
-export type ActivityServices = {
+/** Services shared by both Temporal worker roles. Keep this graph free of the
+ * agent runtime and document parser so each process can load only its role. */
+export type SharedActivityServices = {
   settings: Settings;
   db: Database;
   bus: EventBus;
-  runtime: OpenGeniRuntime;
-  /** Provider-free test/profiling seam; production injects the real runtime summarizer. */
-  summarizeContextForCompaction: typeof import("@opengeni/runtime").summarizeForCompaction;
   objectStorage: ObjectStorage | null;
-  documentServices: DocumentServices;
   observability: Observability;
   wakeSessionWorkflow: WakeSessionWorkflowSignal | null;
   /** Durable signalWithStart fallback used only after the activity's direct
@@ -78,6 +81,9 @@ export type ActivityServices = {
   inspectSessionAttemptActivity: InspectSessionAttemptActivity | null;
   /** Revision-carrying capacity nudge; generic outbox repair is also sufficient. */
   signalCodexCapacityWorkflow?: SignalCodexCapacityWorkflow | null;
+  /** Production control workers inject this Temporal client edge. A null edge
+   * deliberately retains the composite implementation for embedded/test hosts. */
+  startSandboxReaperWorkflow?: StartSandboxReaperWorkflow | null;
   // §7.5 P3 — host-entitlements port, the WORKER half of the same seam the API
   // edge exposes on `AppDependencies`. When set, `ensureRunAllowed` (turn-entry
   // AND the mid-stream budget valve) delegates the funding decision to
@@ -110,6 +116,23 @@ export type ActivityServices = {
   connectionCredentials?: ConnectionCredentialsPort | null;
 };
 
+/** Control workers own short database and maintenance activities. Document
+ * parsing is resolved lazily by the indexing activity itself. */
+export type ControlActivityServices = SharedActivityServices;
+
+/** Turn workers own the model loop and never construct document parsers. */
+export type TurnActivityServices = SharedActivityServices & {
+  runtime: OpenGeniRuntime;
+  /** Provider-free test/profiling seam; production injects the real runtime summarizer. */
+  summarizeContextForCompaction: typeof import("@opengeni/runtime").summarizeForCompaction;
+};
+
+/** Full test/embedded harness retained as a source-compatible superset. */
+export type ActivityServices = ControlActivityServices &
+  TurnActivityServices & {
+    documentServices: DocumentServices;
+  };
+
 export type CodexCapacityWaitRef = {
   waiterId: string;
   generation: number;
@@ -136,6 +159,8 @@ export type ReconcileCodexCapacityWaitResult =
   | { action: "resumed" | "paused" | "superseded" | "stale" };
 
 export type ActivityDependencies = Partial<ActivityServices>;
+export type ControlActivityDependencies = Partial<ControlActivityServices>;
+export type TurnActivityDependencies = Partial<TurnActivityServices>;
 
 export type RunAgentTurnInput = {
   accountId: string;

@@ -587,11 +587,13 @@ export async function publishDurableSessionEvents(
   const publishStartedAt = performance.now();
   try {
     await bus.publish(workspaceId, sessionId, appended);
-  } catch (error) {
-    console.warn(
-      `[events] live publish failed for ${workspaceId}/${sessionId}; ${appended.length} event(s) are durable and reconcile on stream replay`,
-      error,
-    );
+  } catch {
+    console.warn("[events] live publish failed; durable events reconcile on stream replay", {
+      errorClass: "EventPublishOperationError",
+      errorCode: "session_event_live_publish_failed",
+      origin: "events",
+      eventCount: appended.length,
+    });
   }
   observeSince(observe?.onPublish, publishStartedAt, appended.length);
 }
@@ -604,10 +606,14 @@ export async function publishDurableWorkspaceControlEvent(
 ): Promise<void> {
   try {
     await bus.publishWorkspaceControl(workspaceId, event);
-  } catch (error) {
+  } catch {
     console.warn(
-      `[events] workspace-control live publish failed for ${workspaceId} at revision ${event.revision}; the event is durable and reconciles on stream replay`,
-      error,
+      "[events] workspace-control live publish failed; durable event reconciles on stream replay",
+      {
+        errorClass: "EventPublishOperationError",
+        errorCode: "workspace_control_live_publish_failed",
+        origin: "events",
+      },
     );
   }
 }
@@ -621,7 +627,9 @@ export async function appendAndPublishTurnEventsFenced(
   executionGeneration: number,
   attemptId: string,
   events: AppendEventInput[],
+  observe?: AppendPublishObserver,
 ): Promise<{ events: SessionEvent[]; accepted: boolean }> {
+  const appendStartedAt = performance.now();
   const result = await appendSessionEventsForTurnAttempt(
     db,
     workspaceId,
@@ -631,15 +639,20 @@ export async function appendAndPublishTurnEventsFenced(
     attemptId,
     events,
   );
+  observeSince(observe?.onAppend, appendStartedAt, result.events.length);
   if (result.events.length === 0) return result;
+  const publishStartedAt = performance.now();
   try {
     await bus.publish(workspaceId, sessionId, result.events);
-  } catch (error) {
-    console.warn(
-      `[events] live fenced publish failed for ${workspaceId}/${sessionId}/${turnId}@${executionGeneration}/${attemptId}; ${result.events.length} event(s) are durable`,
-      error,
-    );
+  } catch {
+    console.warn("[events] live fenced publish failed; events remain durable", {
+      errorClass: "EventPublishOperationError",
+      errorCode: "fenced_event_live_publish_failed",
+      origin: "events",
+      eventCount: result.events.length,
+    });
   }
+  observeSince(observe?.onPublish, publishStartedAt, result.events.length);
   return result;
 }
 
@@ -852,7 +865,12 @@ export function sessionEventBatchesByBytes(
 /** Return one count+byte-bounded HTTP page and truthful continuation facts. */
 export function boundSessionEventHttpPage(
   events: readonly SessionEvent[],
-  options: { direction: "after" | "before"; maxBytes?: number },
+  options: {
+    direction: "after" | "before";
+    maxBytes?: number;
+    /** Exact mode is restricted to already-canonical forensic REST rows. */
+    eventProjection?: "bounded" | "exact";
+  },
 ): {
   events: SessionEvent[];
   truncated: boolean;
@@ -862,7 +880,10 @@ export function boundSessionEventHttpPage(
   const maxBytes = options.maxBytes ?? SESSION_EVENT_HTTP_PAGE_MAX_BYTES;
   const selected: SessionEvent[] = [];
   let bytes = 2; // []
-  const projected = events.map((event) => boundSessionEventForSurface(event, "http_projection"));
+  const projected =
+    options.eventProjection === "exact"
+      ? [...events]
+      : events.map((event) => boundSessionEventForSurface(event, "http_projection"));
   const candidates = options.direction === "after" ? projected : [...projected].reverse();
   for (const event of candidates) {
     const eventBytes = sessionEventJsonBytes(event);

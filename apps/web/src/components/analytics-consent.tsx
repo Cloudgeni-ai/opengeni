@@ -11,7 +11,7 @@ import {
 import type { ClientConfig } from "@/types";
 
 const BUTTON_CLASS =
-  "inline-flex h-9 cursor-pointer items-center justify-center rounded-md px-4 py-2 text-sm font-medium transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-2 focus-visible:ring-offset-bg";
+  "inline-flex h-11 cursor-pointer items-center justify-center rounded-md px-4 py-2 text-sm font-medium transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-2 focus-visible:ring-offset-bg";
 
 export function AnalyticsManager({
   config,

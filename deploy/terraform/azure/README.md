@@ -73,6 +73,46 @@ aks = {
 }
 ```
 
+An already-existing fixed pool must not jump directly to an unbounded or
+rotation-sensitive configuration. Use the `bounds` phase, explicitly attest
+that the refreshed pool is still fixed, preserve every rotation-sensitive
+field, and bind `node_count` to the exact live count. The live count must fit
+inside the requested bounds, so enabling autoscaling cannot immediately create
+nodes beyond the reviewed maximum. Terraform then omits `node_count` from the
+desired autoscaled resource and lets Azure own the converging live count.
+
+```hcl
+aks_existing_pool = true
+
+aks = {
+  node_count           = 6
+  vm_size              = "Standard_D4ds_v4"
+  auto_scaling_enabled = true
+  min_count            = 3
+  max_count            = 6
+  max_pods             = 30
+  os_disk_size_gb      = 128
+  os_disk_type         = "Managed"
+  temporary_name_for_rotation = null
+}
+
+aks_rollout = {
+  phase = "bounds"
+  expected_existing = {
+    auto_scaling_enabled        = false
+    vm_size                     = "Standard_D4ds_v4"
+    max_pods                    = 30
+    os_disk_size_gb             = 128
+    os_disk_type                = "Managed"
+    temporary_name_for_rotation = null
+  }
+}
+```
+
+Review the saved plan and require an in-place update limited to autoscaling and
+its bounds. After apply, refresh provider state and verify the live count is
+inside the bounds before any later bounds or rotation change.
+
 For the observed staging pool, phase 1 must change only autoscaling bounds. The
 SKU, pod density, managed-disk type, and rotation name below are the existing
 live settings and are repeated to make accidental rotation visible in the
@@ -99,6 +139,7 @@ aks = {
 aks_rollout = {
   phase = "bounds"
   expected_existing = {
+    auto_scaling_enabled = true
     vm_size      = "Standard_D4ds_v4"
     max_pods     = 30
     os_disk_size_gb = 128

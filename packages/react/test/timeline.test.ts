@@ -805,6 +805,62 @@ describe("buildTimeline", () => {
     expect(second.output).toBe("resource {}");
   });
 
+  test("projects a bounded tool-output preview with truthful truncation metadata", () => {
+    reset();
+    const preview = '{"id":"call-1","output":"bounded preview"}';
+    const items = buildTimeline([
+      event("agent.toolCall.created", {
+        id: "call-1",
+        name: "exec_command",
+        arguments: { cmd: "incident-canary-telemetry" },
+      }),
+      event("agent.toolCall.output", {
+        id: "call-1",
+        preview,
+        truncation: {
+          truncated: true,
+          surface: "browser_legacy_guard",
+          reason: "event_envelope_bytes_exceeded",
+          omittedBytes: 83_000,
+          fullEvidence: { available: false, reason: "not_retained" },
+        },
+      }),
+    ]);
+
+    expect(items[0]).toMatchObject({
+      kind: "tool-call",
+      output: preview,
+      truncation: {
+        truncated: true,
+        surface: "browser_legacy_guard",
+        reason: "event_envelope_bytes_exceeded",
+        omittedBytes: 83_000,
+        fullEvidence: { available: false, reason: "not_retained" },
+      },
+    });
+  });
+
+  test("does not synthesize truncation metadata for an ordinary tool output", () => {
+    reset();
+    const items = buildTimeline([
+      event("agent.toolCall.created", {
+        id: "call-1",
+        name: "exec_command",
+        arguments: { cmd: "incident-canary-telemetry" },
+      }),
+      event("agent.toolCall.output", {
+        id: "call-1",
+        output: '{"id":"call-1","output":"bounded preview"}',
+      }),
+    ]);
+
+    expect(items[0]).toMatchObject({
+      kind: "tool-call",
+      output: '{"id":"call-1","output":"bounded preview"}',
+      truncation: null,
+    });
+  });
+
   test("a completed hosted web-search item settles without a separate output event", () => {
     reset();
     const items = buildTimeline([
@@ -907,10 +963,11 @@ describe("buildTimeline", () => {
 
   test("session_create becomes a worker item with prompt and spawned session id from MCP output", () => {
     reset();
-    const worker = {
-      id: "0b3ba745-1111-4222-8333-9c76ad9e0000",
-      workspaceId: "ws-1",
-      status: "queued",
+    const workerId = "0b3ba745-1111-4222-8333-9c76ad9e0000";
+    const receipt = {
+      receiptVersion: "mcp-mutation-receipt.v1",
+      operation: "session_create",
+      resource: { type: "session", id: workerId, state: "queued" },
     };
     const items = buildTimeline([
       event("agent.toolCall.created", {
@@ -920,7 +977,7 @@ describe("buildTimeline", () => {
       }),
       event("agent.toolCall.output", {
         id: "call-1",
-        output: { content: [{ type: "text", text: JSON.stringify(worker) }] },
+        output: { content: [{ type: "text", text: JSON.stringify(receipt) }] },
       }),
     ]);
     expect(items).toHaveLength(1);
@@ -929,7 +986,7 @@ describe("buildTimeline", () => {
     expect(item.action).toBe("spawn");
     expect(item.prompt).toBe("Run the drift check on prod");
     expect(item.status).toBe("complete");
-    expect(item.workerSessionId).toBe(worker.id);
+    expect(item.workerSessionId).toBe(workerId);
   });
 
   test("a worker spawn whose output carries an error flag settles to failed, not complete", () => {
@@ -1701,6 +1758,7 @@ describe("buildTimeline", () => {
     expect(items[0]).toMatchObject({
       kind: "auth-needed",
       turnId: "turn-1",
+      serverId: "mcp-linear",
       providerDomain: "linear.app",
       connectionId: "conn-1",
       reason: "refresh_failed",
@@ -1711,20 +1769,29 @@ describe("buildTimeline", () => {
     });
   });
 
-  test("tool.auth_needed tolerates a sparse payload and drops an unknown reason", () => {
+  test("historical tool.auth_needed without a concrete tool call stays out of chat", () => {
     reset();
     const items = buildTimeline([
       event("tool.auth_needed", { providerDomain: "supabase.com", reason: "who_knows" }),
     ]);
+    expect(items).toEqual([]);
+  });
+
+  test("Codex Apps setup auth remains actionable without a concrete tool name", () => {
+    reset();
+    const items = buildTimeline([
+      event("tool.auth_needed", {
+        serverId: "codex_apps",
+        providerDomain: "chatgpt.com",
+        reason: "refresh_failed",
+      }),
+    ]);
     expect(items[0]).toMatchObject({
       kind: "auth-needed",
-      providerDomain: "supabase.com",
-      connectionId: null,
-      reason: null,
-      scopes: [],
-      resource: null,
+      serverId: "codex_apps",
+      providerDomain: "chatgpt.com",
       toolName: null,
-      authorizationUrl: null,
+      reason: "refresh_failed",
     });
   });
 
@@ -2161,6 +2228,12 @@ describe("extractSessionRef", () => {
       }),
     ).toBe(id);
     expect(extractSessionRef({ structuredContent: { sessionId: id } })).toBe(id);
+    expect(
+      extractSessionRef({
+        receiptVersion: "mcp-mutation-receipt.v1",
+        resource: { type: "session", id, state: "queued" },
+      }),
+    ).toBe(id);
   });
 
   test("rejects non-uuid ids and unrelated payloads", () => {

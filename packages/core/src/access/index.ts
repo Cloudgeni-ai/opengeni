@@ -17,6 +17,7 @@ import {
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { ManagedAuth } from "../managed-auth-type";
+import { getManagedSession } from "../managed-session";
 
 const bearerPrefix = "Bearer ";
 
@@ -143,10 +144,51 @@ export function requirePermission(grant: AccessGrant, permission: Permission): v
   }
 }
 
+/**
+ * Require a permission to be present literally on the grant. This deliberately
+ * does not expand workspace:admin or deprecated aliases and is reserved for
+ * authorities, such as plaintext secret reads, that old broad grants must not
+ * acquire implicitly.
+ */
+export function requireLiteralPermission(grant: AccessGrant, permission: Permission): void {
+  if (!hasLiteralPermission(grant.permissions, permission)) {
+    throw new HTTPException(403, {
+      message: `missing literal permission: ${permission}`,
+    });
+  }
+}
+
+export function hasLiteralPermission(permissions: Permission[], permission: Permission): boolean {
+  return permissions.includes(permission);
+}
+
 export function hasPermission(permissions: Permission[], permission: Permission): boolean {
+  if (permission === "secrets:read") {
+    return permissions.includes("secrets:read");
+  }
   const aliases: Partial<Record<Permission, Permission[]>> = {
     "variable-sets:use": ["environments:use" as Permission],
     "variable-sets:manage": ["environments:manage" as Permission],
+    "variable-sets:list": [
+      "variable-sets:use",
+      "variable-sets:manage",
+      "environments:use" as Permission,
+      "environments:manage" as Permission,
+    ],
+    "variable-sets:read": [
+      "variable-sets:use",
+      "variable-sets:manage",
+      "environments:use" as Permission,
+      "environments:manage" as Permission,
+    ],
+    "variable-sets:write": ["variable-sets:manage", "environments:manage" as Permission],
+    "secrets:list": [
+      "variable-sets:use",
+      "variable-sets:manage",
+      "environments:use" as Permission,
+      "environments:manage" as Permission,
+    ],
+    "secrets:write": ["variable-sets:manage", "environments:manage" as Permission],
   };
   return (
     permissions.includes(permission) ||
@@ -210,9 +252,7 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
   }
 
   if (deps.managedAuth) {
-    const session = await deps.managedAuth.api.getSession({
-      headers: c.req.raw.headers,
-    });
+    const session = await getManagedSession(c, deps.managedAuth);
     if (session?.user) {
       return await ensureManagedAccessForUser(deps.db, {
         userId: session.user.id,

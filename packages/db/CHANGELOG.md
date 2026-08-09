@@ -1,5 +1,185 @@
 # @opengeni/db
 
+## 0.28.16
+
+### Patch Changes
+
+- e2edfbc: Add provider-aware image generation with permanent verified artifacts,
+  prompt-cache-safe history, sandbox materialization, and SDK/React rendering.
+- Updated dependencies [e2edfbc]
+- Updated dependencies [7f70d33]
+  - @opengeni/codex@0.2.14
+  - @opengeni/config@0.12.6
+  - @opengeni/contracts@0.41.2
+  - @opengeni/network@0.2.1
+
+## 0.28.15
+
+### Patch Changes
+
+- 5806484: Serialize separate read-only Modal Channel-A requests across API replicas while preserving concurrent reads inside each batch.
+
+## 0.28.14
+
+### Patch Changes
+
+- 81a51ac: Settle abandoned turn workspace admissions only after the exact attempt's physical writers drain, while preserving eager cancellation holder release and late sandbox provisioning safety. Add privacy-preserving sandbox lease correlation keys to rendered lifecycle logs.
+
+## 0.28.13
+
+### Patch Changes
+
+- 2727236: Make sandbox draining crash-safe with durable capture and teardown ownership, idempotent Modal snapshots, scoped operator holds, parallel Temporal reaping, exact lifecycle errors, and verified Local/Docker workspace recovery.
+- Updated dependencies [2727236]
+- Updated dependencies [c8eb465]
+  - @opengeni/config@0.12.5
+  - @opengeni/contracts@0.41.1
+
+## 0.28.12
+
+### Patch Changes
+
+- bb9a346: Add token and cache coverage plus nullable provider-rate cost comparisons to Workspace Insights, preserving exact Gateway billing while keeping incomplete configured telemetry unpriced.
+- Updated dependencies [bb9a346]
+  - @opengeni/config@0.12.4
+  - @opengeni/contracts@0.41.0
+
+## 0.28.11
+
+### Patch Changes
+
+- Updated dependencies [dec7ada]
+  - @opengeni/config@0.12.3
+
+## 0.28.10
+
+### Patch Changes
+
+- Updated dependencies [7d13f51]
+- Updated dependencies [7ac558e]
+  - @opengeni/config@0.12.2
+
+## 0.28.9
+
+### Patch Changes
+
+- Updated dependencies [fed43cf]
+- Updated dependencies [410835e]
+  - @opengeni/contracts@0.40.0
+  - @opengeni/config@0.12.1
+
+## 0.28.8
+
+### Patch Changes
+
+- Updated dependencies [f8eb9f9]
+- Updated dependencies [200586a]
+- Updated dependencies [5dfb93d]
+- Updated dependencies [5dfb93d]
+  - @opengeni/config@0.12.0
+  - @opengeni/contracts@0.39.5
+
+## 0.28.7
+
+### Patch Changes
+
+- 377180c: Preserve the deployed migration 0172 bytes and move the connected-machine session default into a forward rolling migration.
+
+## 0.28.6
+
+### Patch Changes
+
+- 70ced80: Add an offline-safe Connected Machine enrollment removal lifecycle with credential revocation, durable audit history, guarded route and lease handling, SDK/MCP support, and accessible active-list reconciliation.
+- Updated dependencies [70ced80]
+  - @opengeni/contracts@0.39.4
+  - @opengeni/config@0.11.5
+
+## 0.28.5
+
+### Patch Changes
+
+- Updated dependencies [43d45c6]
+  - @opengeni/codex@0.2.13
+  - @opengeni/config@0.11.4
+
+## 0.28.4
+
+### Patch Changes
+
+- 7a84e1b: Retry transient retained-process promotion transactions and hand ambiguous yielded processes to exact-route turn finalization so they cannot strand sandbox leases.
+- 5d8bb99: Allow scheduled tasks to target and durably wake one authorized existing session without creating a helper session or replacing its goal.
+- 238fb7e: Keep human-to-human Slack DM shortcuts initiating-user-private and route durable acknowledgements, progress, results, and replies through the invoking user's OpenGeni bot DM.
+- 34c5cdb: Retain validated computer screenshots as authenticated, integrity-checked session artifacts with bounded event/history receipts, SDK range assembly, and React rendering while preserving historical inline-image compatibility.
+
+  Fence screenshot cleanup and quota accounting across parent deletion, duplicate settlement, expiry, compensation, and garbage-collection races so provider objects are deleted only after durable lifecycle ownership and quota is released exactly once.
+
+- Updated dependencies [5d8bb99]
+- Updated dependencies [af24281]
+- Updated dependencies [34c5cdb]
+  - @opengeni/contracts@0.39.3
+  - @opengeni/config@0.11.3
+
+## 0.28.3
+
+### Patch Changes
+
+- 30a0b9a: Preserve internal content exactly, replace heuristic rewriting with lossless persistence, and keep public telemetry on reviewed structural projections.
+- 23de73b: Add explicitly permissioned, audited plaintext reads for encrypted workspace variable-set values across REST, SDK, React, MCP, and UI surfaces.
+- 1503151: Keep capped rotation-off Codex sessions in one durable capacity wait and suppress wakes for identical usage snapshots.
+- a296081: Settle abandoned null-outcome direct sandbox mutation admissions when their physically completed request holder is released, preventing a failed settlement callback from blocking workspace checkpoint capture indefinitely. Require an exact physical-quiescence receipt before re-admitting a turn after graceful worker or provider recovery, and reconcile pre-fix attempts from their durable recovery event plus Temporal activity proof.
+- Updated dependencies [7dbd057]
+- Updated dependencies [30a0b9a]
+- Updated dependencies [23de73b]
+  - @opengeni/contracts@0.39.2
+  - @opengeni/codex@0.2.12
+  - @opengeni/config@0.11.2
+
+## 0.28.2
+
+### Patch Changes
+
+- 110d255: Project paused sessions as idle after their interrupted attempt has quiesced, while preserving the recovering turn for Resume.
+- ce823ce: Replace first-party MCP mutation entity echoes with strict, versioned compact
+  receipts; add bounded scheduled-task list/detail projections and preserve worker
+  session references across receipt and legacy timeline results.
+- Updated dependencies [ce823ce]
+  - @opengeni/contracts@0.39.1
+  - @opengeni/config@0.11.1
+
+## 0.28.1
+
+### Patch Changes
+
+- 55f6ad0: Use one terminal-response ordinal for provider context binding, and clear the
+  durable input-token signal when the latest provider response supplies no usable
+  usage instead of retaining an older response's count.
+
+## 0.28.0
+
+### Minor Changes
+
+- 6eb0b23: Add production resumable composer transcription with exact-subject durable
+  manifests, idempotent SHA-256 chunk uploads, bounded ffmpeg segmentation, one
+  recording-wide provider pin, persisted retryable segment results, deterministic
+  assembly, cross-browser SDK recovery, object-ledger cleanup, and expiry purging
+  of transcript metadata after every provider object is confirmed deleted. Legacy
+  one-shot voice input remains compatible.
+
+### Patch Changes
+
+- 49c7f9c: Prevent deadlocks between sandbox mutation settlement and retained-process promotion, retry idempotent settlement transactions after transient database conflicts, and clarify that an idle session sandbox can be restored when the next operation needs it.
+- 5b6d36e: Use provider-reported usage rather than whole-request approximations for automatic context compaction, preserve provider-only input-token state across context rewrites, and label timeline counts as estimated conversation-history tokens.
+- Updated dependencies [5b6d36e]
+- Updated dependencies [6eb0b23]
+  - @opengeni/config@0.11.0
+  - @opengeni/contracts@0.39.0
+
+## 0.27.12
+
+### Patch Changes
+
+- cbf165a: Reconcile settled attempt quiescence while session control remains paused so ancestor sessions do not stay stuck in a stopping transition.
+
 ## 0.27.11
 
 ### Patch Changes

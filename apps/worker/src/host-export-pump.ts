@@ -166,7 +166,7 @@ export function createHostExportPump(options: HostExportPumpOptions): HostExport
       maxBytes: batchMaxBytes,
     };
     const settleFailure = async (error: unknown): Promise<HostExportDrainResult> => {
-      const message = safeErrorMessage(error);
+      const message = exactHostExportErrorMessage(error);
       let failures = 0;
       try {
         failures = await failHostExportBatch(options.db, {
@@ -179,17 +179,15 @@ export function createHostExportPump(options: HostExportPumpOptions): HostExport
       } catch (settlementError) {
         options.observability?.warn("host export failure settlement was stale", {
           kind,
-          consumerId,
-          error: safeErrorMessage(settlementError),
+          ...hostExportPublicErrorFields(settlementError, "host_export_failure_settlement_stale"),
         });
       }
       const blocked = failures >= maxFailures;
       options.observability?.warn("host export batch failed", {
         kind,
-        consumerId,
         failures,
         blocked,
-        error: message,
+        ...hostExportPublicErrorFields(error, "host_export_batch_delivery_failed"),
       });
       const result: HostExportDrainResult = {
         kind,
@@ -222,8 +220,7 @@ export function createHostExportPump(options: HostExportPumpOptions): HostExport
         // a duplicate settlement attempt for the now-stale lease.
         options.observability?.error("host export retention prune failed", {
           kind,
-          consumerId,
-          error: safeErrorMessage(error),
+          ...hostExportPublicErrorFields(error, "host_export_retention_prune_failed"),
         });
       }
       const result: HostExportDrainResult = {
@@ -344,7 +341,7 @@ export function createHostExportPump(options: HostExportPumpOptions): HostExport
               }
             } catch (error) {
               options.observability?.error("host export pump iteration failed", {
-                error: safeErrorMessage(error),
+                ...hostExportPublicErrorFields(error, "host_export_pump_iteration_failed"),
               });
             }
             if (running) await waitForPoll();
@@ -410,7 +407,27 @@ function validateInstanceId(value: string): string {
   return value;
 }
 
-function safeErrorMessage(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  return message.trim().slice(0, 500) || "host sink failed";
+function exactHostExportErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+type HostExportPublicFailureCode =
+  | "host_export_failure_settlement_stale"
+  | "host_export_batch_delivery_failed"
+  | "host_export_retention_prune_failed"
+  | "host_export_pump_iteration_failed";
+
+function hostExportPublicErrorFields(
+  _error: unknown,
+  errorCode: HostExportPublicFailureCode,
+): {
+  errorClass: "HostExportOperationError";
+  errorCode: HostExportPublicFailureCode;
+  origin: "host-export";
+} {
+  return {
+    errorClass: "HostExportOperationError",
+    errorCode,
+    origin: "host-export",
+  };
 }

@@ -152,6 +152,17 @@ image-capable. OpenGeni verifies finalized attachment bytes and checksums, then
 sends images inline as data URLs through the standard Responses input surface;
 it never gives an endpoint provider an object-store URL.
 
+DeepSeek V4 Flash 0731 and Kimi K3 use OpenGeni's provider-neutral lazy-tool
+dispatcher on the Responses wire. Their initial tool block contains the stable
+ordinary `tool_search` and `tool_invoke` schemas plus eager control tools, never
+the selected deferred MCP catalogue. A search result carries only bounded
+matching definitions. A valid `tool_invoke` call is rewritten inside the runtime
+to the real authorized tool before the Agents SDK performs approval, guardrail,
+timeout, MCP error, and event handling. Provider history is restored to the
+original dispatcher call before every later request—including exact stateless
+Responses replay, provider changes, lazy-mode rollback, and compaction input.
+This path completed live on both curated models on 2026-08-07.
+
 A workspace admin can instead connect **Vercel AI Gateway** in workspace Settings.
 The key is stored in the encrypted workspace connection table, resolved only in
 the worker, and uses the same curated models and exact routes. These turns have
@@ -216,7 +227,7 @@ The catalog describes:
 
 - reasoning efforts, default, and whether reasoning is required;
 - function calling and structured output;
-- hosted web search, X search, and code execution;
+- hosted web search, X search, code execution, and image generation;
 - input and output modalities;
 - SSE, Responses WebSocket, and realtime-audio transports; and
 - standard, priority, and fast latency modes.
@@ -232,6 +243,11 @@ until OpenGeni has the request, recovery, and billing contracts to use it
 safely. Capability metadata also never authorizes an OpenGeni tool; tool
 discovery and authorization remain independent.
 
+Hosted image generation is runnable only for reviewed direct OpenAI Responses
+models. Connected Codex and workspace Gateway routes instead expose the same
+provider-neutral client tool through separate paid-operation adapters. See
+[`image-generation.md`](image-generation.md).
+
 ### Native web search is a runtime capability
 
 Provider-native `web_search` is not an MCP catalog entry and is not governed by
@@ -245,6 +261,43 @@ disable web search.
 schemas so the model can discover MCP tools without preloading every schema. It
 does not search the public web and must not be presented as a fallback for
 native `web_search`.
+
+Progressive disclosure is selected explicitly per resolved provider:
+
+- **Codex subscription — `codex_native`:** preserves the existing Codex-native
+  `defer_loading` plus client `tool_search` path.
+- **Built-in direct OpenAI/Azure Responses — `openai_native`:** the runtime keeps
+  the original tool objects in the execution registry with the SDK deferred gate
+  disabled, removes lazy schemas only from the provider request, and returns
+  those same objects from native client `tool_search`.
+- **Other ordinary function-calling providers — `generic_dispatch`:** the model
+  receives stable ordinary `tool_search` and `tool_invoke` functions. No provider
+  protocol extension is required. This includes an OpenAI-compatible custom base
+  URL: configuring the built-in OpenAI slot does not prove native-search support.
+
+The sandbox's hosted-vs-function structured-tool setting does not select any of
+these modes. `OPENGENI_CODEX_TOOL_SEARCH_ENABLED` controls only Codex native
+disclosure. `OPENGENI_LAZY_TOOL_SEARCH_ENABLED` independently controls the
+OpenAI/Azure native and generic paths; both settings default to enabled.
+
+The execution registry and model-visible tools are deliberately separate.
+Search never grants authority: every invocation resolves against the current
+turn's already-authorized tool snapshot. Generic dispatch accepts a remembered
+valid call after portable compaction without requiring a fragile disclosure
+ledger; a removed, revoked, or malformed target returns a typed model-visible
+error and tells the model to search again. The compacted textual summary is
+never trusted as an exact schema store. Historical generic-dispatch calls are
+restored independently of the current transport, so switching providers cannot
+expose OpenGeni's internal execution rewrite. Native disclosure state remains
+provider-owned; after compaction the model may need to search again.
+
+Prompt-cache stability is a primary invariant. Generic control schemas,
+descriptions, and ordering are constant, so adding, removing, or changing a
+deferred MCP tool does not change the request's top-level tool block. The live
+DeepSeek V4 Flash 0731 probe on 2026-08-07 reused 7,680 cached input tokens on
+both post-search requests while completing search → invoke → final output.
+Generic search results are also bounded before they enter ordinary tool-output
+handling, so schema JSON is never silently middle-truncated.
 
 The native tool uses the Agents SDK's bounded `medium` search-context setting
 and preserves provider URL-citation annotations in structured conversation

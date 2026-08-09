@@ -1,8 +1,6 @@
-//! The opt-in always-on service manager.
+//! The always-on service manager used by the ordinary post-connect `start` flow.
 //!
-//! FOREGROUND `opengeni-agent run` is the DEFAULT (the machine is online while it
-//! runs). A service is an EXPLICIT OPT-IN (`opengeni-agent service install`) for a
-//! genuinely dedicated machine — a build box, a CI Mac mini. This module is the
+//! `opengeni-agent run` remains the explicit foreground mode. This module is the
 //! cross-platform service mechanism behind one [`ServiceManager`] trait so the
 //! behavior is cargo-unit-tested ONCE, not duplicated in three shell dialects.
 //!
@@ -152,13 +150,19 @@ pub fn render_systemd_unit(spec: &ServiceSpec) -> String {
          # place each host exec in its own memory sub-cgroup (see cgroup.rs), keeping a\n\
          # runaway command from making the heartbeat/control supervisor the OOM victim.\n\
          # ManagedOOMPreference=avoid biases systemd-oomd away from selecting this unit\n\
-         # for a whole-unit kill; MemoryHigh throttles the unit under sustained\n\
-         # pressure (and turns on the memory accounting the delegated sub-cgroups need)\n\
-         # instead of letting the kernel SIGKILL the supervisor. Linux-only directives;\n\
+         # for a whole-unit kill. MemoryAccounting enables the delegated memory\n\
+         # controller without imposing a unit-wide throttle: commands retain the\n\
+         # machine's full available memory unless an operator explicitly configures\n\
+         # a per-operation limit. Linux-only directives;\n\
          # they are inert on the macOS/Windows service backends.\n\
          Delegate=yes\n\
          ManagedOOMPreference=avoid\n\
-         MemoryHigh=75%\n\
+         MemoryAccounting=yes\n\
+         # The service aggregate is intentionally unrestricted. Optional machine\n\
+         # policy is applied to command leaves, never to the control supervisor.\n\
+         MemoryHigh=infinity\n\
+         MemoryMax=infinity\n\
+         TasksMax=infinity\n\
          \n\
          [Install]\n\
          WantedBy={wanted_by}\n"
@@ -273,7 +277,7 @@ fn systemd_escape(s: &str) -> String {
 #[must_use]
 pub fn unsupported_backend() -> PlatformError {
     PlatformError::Unsupported(
-        "no supported service manager on this platform (use the foreground `run`)".to_string(),
+        "no supported service manager on this platform; use the foreground `run`".to_string(),
     )
 }
 
@@ -355,8 +359,8 @@ mod tests {
     #[test]
     fn systemd_unit_carries_oom_fate_isolation_directives_in_both_scopes() {
         // Issue #345: both the user and the system unit must delegate a cgroup
-        // subtree, bias systemd-oomd away from a whole-unit kill, and set a memory
-        // high-watermark (which also enables the accounting the sub-cgroups need).
+        // subtree, bias systemd-oomd away from a whole-unit kill, and enable memory
+        // accounting without installing a unit-wide memory throttle.
         // These live in [Service], never [Unit] or [Install].
         for scope in [ServiceScope::User, ServiceScope::System] {
             let mut s = spec();
@@ -368,11 +372,21 @@ mod tests {
             for directive in [
                 "Delegate=yes",
                 "ManagedOOMPreference=avoid",
-                "MemoryHigh=75%",
+                "MemoryAccounting=yes",
             ] {
                 assert!(
                     service_section.contains(directive),
                     "{scope:?} unit [Service] must contain {directive}; got:\n{unit}"
+                );
+            }
+            for directive in [
+                "MemoryHigh=infinity",
+                "MemoryMax=infinity",
+                "TasksMax=infinity",
+            ] {
+                assert!(
+                    service_section.contains(directive),
+                    "{scope:?} unit must explicitly leave the aggregate unrestricted with {directive}"
                 );
             }
         }

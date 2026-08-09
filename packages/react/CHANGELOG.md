@@ -1,5 +1,171 @@
 # @opengeni/react
 
+## 0.49.5
+
+### Patch Changes
+
+- 6f31d0d: Require an authoritative warm sandbox before capture-backed workbench hooks issue live reads during capability negotiation.
+
+## 0.49.4
+
+### Patch Changes
+
+- e627d88: Keep known-cold sandbox views passive, fence delayed live-read invalidations across draining transitions, and expose bounded structural Channel-A failure diagnostics without leaking provider details.
+
+## 0.49.3
+
+### Patch Changes
+
+- e2edfbc: Add provider-aware image generation with permanent verified artifacts,
+  prompt-cache-safe history, sandbox materialization, and SDK/React rendering.
+- db82911: Keep teardown-owned workspaces capture-backed until explicit reacquisition reaches warm, and prevent historical events or capability reads from issuing provider I/O during teardown.
+- Updated dependencies [e2edfbc]
+  - @opengeni/sdk@0.49.3
+
+## 0.49.2
+
+### Patch Changes
+
+- bdac906: Open the live desktop automatically when its viewer mounts instead of requiring a confirmation click.
+  - @opengeni/sdk@0.49.0
+
+## 0.49.1
+
+### Patch Changes
+
+- bdbdf5c: Render bounded tool-output previews with explicit delivery and full-evidence truncation facts.
+
+## 0.49.0
+
+### Patch Changes
+
+- Updated dependencies [bb9a346]
+  - @opengeni/sdk@0.49.0
+
+## 0.48.2
+
+### Patch Changes
+
+- 74e7a31: Cancel Modal commands that stall before provider yield without bypassing physical quiescence, and show the truthful stopping state while replacement work waits.
+
+## 0.48.1
+
+### Patch Changes
+
+- 86bd95c: Preserve committed-only workspace captures and load multi-repository Git changes in bounded batches.
+
+## 0.48.0
+
+### Minor Changes
+
+- fed43cf: Make embedded Files and Changes durable and responsive: capture complete branch comparisons, batch file-frontier and multi-repository Git reads behind one sandbox lease, preserve live stream responsiveness during reconciliation, harden portable sandbox reads, and polish the workbench's file tree, resizable panes, machine/terminal states, and embedded composer geometry.
+
+### Patch Changes
+
+- Updated dependencies [fed43cf]
+  - @opengeni/sdk@0.48.0
+
+## 0.47.1
+
+### Patch Changes
+
+- 5dfb93d: Keep derived design tokens available through both the compiled stylesheet and the Tailwind source bridge while sharing compact public fallbacks, so SessionChrome retains its complete default presentation without duplicating color formulas in application bundles.
+- 5dfb93d: Let one Connected Machine agent retain and serve independent connections to multiple OpenGeni workspaces and deployments, with additive connection UX and connection-scoped runtime isolation.
+- Updated dependencies [200586a]
+  - @opengeni/sdk@0.47.1
+
+## 0.47.0
+
+### Minor Changes
+
+- d8b9b71: Add opt-in container-responsive `ChatComposer` and `Composer.Root` layout, including source-container-aware portalled model and realtime menus while preserving viewport defaults.
+- d8b9b71: Ship a ready-to-use, Preflight-free compiled CSS entry scoped to OpenGeni React roots, while retaining the Tailwind v4 bridge and CSS-free session surface.
+
+## 0.46.6
+
+### Patch Changes
+
+- 43fa8f4: Expose authorized Codex Apps through the server-authoritative tool catalog and make setup recovery actionable without widening explicit session policies.
+- 70ced80: Add an offline-safe Connected Machine enrollment removal lifecycle with credential revocation, durable audit history, guarded route and lease handling, SDK/MCP support, and accessible active-list reconciliation.
+- Updated dependencies [70ced80]
+  - @opengeni/sdk@0.46.6
+
+## 0.46.5
+
+### Patch Changes
+
+- 43d45c6: Keep saved voice recordings on their original retry deadline during live UI renders, and normalize connector tool results whose optional structured payload is null without changing tool routing.
+  - @opengeni/sdk@0.46.4
+
+## 0.46.4
+
+### Patch Changes
+
+- b783f12: Keep optional MCP setup authentication out of unrelated chat timelines while preserving actionable tool-call reconnect events.
+- 34c5cdb: Retain validated computer screenshots as authenticated, integrity-checked session artifacts with bounded event/history receipts, SDK range assembly, and React rendering while preserving historical inline-image compatibility.
+
+  Fence screenshot cleanup and quota accounting across parent deletion, duplicate settlement, expiry, compensation, and garbage-collection races so provider objects are deleted only after durable lifecycle ownership and quota is released exactly once.
+
+- 252095e: Keep durable composer voice recordings in automatic bounded recovery after transient failures, while requiring explicit insertion for every delayed or reload-recovered transcript.
+- 4fd349d: Revoke attachment preview URLs on unmount even when React has not committed their attachment state yet.
+- Updated dependencies [5d8bb99]
+- Updated dependencies [34c5cdb]
+  - @opengeni/sdk@0.46.4
+
+## 0.46.3
+
+### Patch Changes
+
+- 800d091: Clear file attachments when their client or workspace changes, revoke outstanding preview URLs on unmount, fence late upload settlements from stale scopes, and reset Changes-tab virtualization measurements when a same-size diff is replaced.
+- 30a0b9a: Preserve internal content exactly, replace heuristic rewriting with lossless persistence, and keep public telemetry on reviewed structural projections.
+- 23de73b: Add explicitly permissioned, audited plaintext reads for encrypted workspace variable-set values across REST, SDK, React, MCP, and UI surfaces.
+- Updated dependencies [30a0b9a]
+- Updated dependencies [23de73b]
+  - @opengeni/sdk@0.46.3
+
+## 0.46.2
+
+### Patch Changes
+
+- 5d1d0c2: Make browser live streams visibility-aware, share one routed session feed,
+  bound reconciliation and heartbeat recovery, coalesce overlapping reads, and
+  expose the append, publish, and SSE connection lifecycle in metrics.
+- ce823ce: Replace first-party MCP mutation entity echoes with strict, versioned compact
+  receipts; add bounded scheduled-task list/detail projections and preserve worker
+  session references across receipt and legacy timeline results.
+- Updated dependencies [5d1d0c2]
+  - @opengeni/sdk@0.46.2
+
+## 0.46.1
+
+### Patch Changes
+
+- 2bfbfcc: Keep compact desktop controls while giving mobile model, voice, navigation,
+  composer, and session controls full-size touch targets.
+
+## 0.46.0
+
+### Minor Changes
+
+- 6eb0b23: Add production resumable composer transcription with exact-subject durable
+  manifests, idempotent SHA-256 chunk uploads, bounded ffmpeg segmentation, one
+  recording-wide provider pin, persisted retryable segment results, deterministic
+  assembly, cross-browser SDK recovery, object-ledger cleanup, and expiry purging
+  of transcript metadata after every provider object is confirmed deleted. Legacy
+  one-shot voice input remains compatible.
+
+### Patch Changes
+
+- 5b6d36e: Use provider-reported usage rather than whole-request approximations for automatic context compaction, preserve provider-only input-token state across context rewrites, and label timeline counts as estimated conversation-history tokens.
+- Updated dependencies [6eb0b23]
+  - @opengeni/sdk@0.46.0
+
+## 0.45.1
+
+### Patch Changes
+
+- ca7d125: Improve mobile touch targets and responsive session interactions across the React surfaces.
+
 ## 0.45.0
 
 ### Minor Changes

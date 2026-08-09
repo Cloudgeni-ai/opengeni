@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { signDelegatedAccessToken } from "@opengeni/contracts";
+import { sessionEventPayloadTruncation, signDelegatedAccessToken } from "@opengeni/contracts";
 import { bootstrapWorkspace, createDb, createSession, type DbClient } from "@opengeni/db";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import {
@@ -258,6 +258,56 @@ describe("session event byte-bounded HTTP pages", () => {
       { headers: { authorization } },
     );
     expect(invalidResultMode.status).toBe(400);
+  });
+
+  test("returns exact oversized forensic payloads without widening ordinary full reads", async () => {
+    if (!available) return;
+    const { workspaceId, sessionId, authorization } = await fixture();
+    const [session] = await admin<Array<{ accountId: string }>>`
+      select account_id as "accountId" from sessions where id = ${sessionId}`;
+    const callId = `forensic-${crypto.randomUUID()}`;
+    const oversizedOutput = "界".repeat(Math.ceil((128 * 1024) / 3));
+    const outputPayload = {
+      id: callId,
+      output: { id: `${callId}-oversized`, output: oversizedOutput },
+    };
+    await admin`
+      insert into session_events (
+        account_id, workspace_id, session_id, sequence, type, payload
+      ) values
+        (${session!.accountId}, ${workspaceId}, ${sessionId}, 1, 'agent.toolCall.created',
+          ${admin.json({ id: callId, name: "exec_command", arguments: { cmd: "forensic-proof" } })}),
+        (${session!.accountId}, ${workspaceId}, ${sessionId}, 2, 'agent.toolCall.output',
+          ${admin.json(outputPayload)})`;
+
+    const forensic = await app.request(
+      `http://x/v1/workspaces/${workspaceId}/sessions/${sessionId}/events?mode=forensic&payloadMode=full&after=0&limit=2`,
+      { headers: { authorization } },
+    );
+    expect(forensic.status).toBe(200);
+    const forensicBody = (await forensic.json()) as Array<{ type: string; payload: unknown }>;
+    expect(forensicBody).toHaveLength(2);
+    expect(forensicBody[1]).toEqual(
+      expect.objectContaining({
+        type: "agent.toolCall.output",
+        payload: outputPayload,
+      }),
+    );
+    expect(sessionEventPayloadTruncation(forensicBody[1]?.payload)).toBeNull();
+    expect(forensic.headers.get("X-OpenGeni-Forensic-Exact")).toBe("true");
+
+    const ordinaryFull = await app.request(
+      `http://x/v1/workspaces/${workspaceId}/sessions/${sessionId}/events?mode=monitoring&payloadMode=full&after=0&limit=2`,
+      { headers: { authorization } },
+    );
+    expect(ordinaryFull.status).toBe(200);
+    const ordinaryBody = (await ordinaryFull.json()) as Array<{ type: string; payload: unknown }>;
+    expect(ordinaryBody).toHaveLength(2);
+    expect(ordinaryBody[1]?.payload).not.toEqual(outputPayload);
+    expect(sessionEventPayloadTruncation(ordinaryBody[1]?.payload)?.surface).toBe(
+      "http_projection",
+    );
+    expect(ordinaryFull.headers.get("X-OpenGeni-Forensic-Exact")).toBe("false");
   });
 
   test("compact pages expose exact bytes and advance through coalescedUntil", async () => {

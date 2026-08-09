@@ -3,11 +3,11 @@ Third-Party Notices for @opengeni/runtime
 
 The executable runtime bundle contains code from these MIT-licensed packages:
 
-@openai/agents 0.13.3
-@openai/agents-core 0.13.3
-@openai/agents-extensions 0.13.3
-@openai/agents-openai 0.13.3
-@openai/agents-realtime 0.13.3
+@openai/agents 0.14.3
+@openai/agents-core 0.14.3
+@openai/agents-extensions 0.14.3
+@openai/agents-openai 0.14.3
+@openai/agents-realtime 0.14.3
 Copyright (c) 2025 OpenAI
 
 zod 4.4.3

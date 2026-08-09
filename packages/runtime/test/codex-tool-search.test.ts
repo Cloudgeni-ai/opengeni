@@ -20,7 +20,12 @@ import {
   isSearchableMcpFunctionTool,
   renderSearchToolDescription,
 } from "../src/codex-tool-search";
-import { buildOpenGeniAgent, prepareRunInput, restoreInterruptedRunState } from "../src";
+import {
+  buildOpenGeniAgent,
+  prepareRunInput,
+  PrefixedMcpServer,
+  restoreInterruptedRunState,
+} from "../src";
 
 // Minimal function-tool doubles (only the fields the search + transform read).
 function connectorTool(name: string, description: string, props: string[] = []): Tool {
@@ -28,6 +33,7 @@ function connectorTool(name: string, description: string, props: string[] = []):
     type: "function",
     name: `codex_apps__${name}`,
     description,
+    isEnabled: async () => true,
     parameters: {
       type: "object",
       properties: Object.fromEntries(props.map((p) => [p, { type: "string" }])),
@@ -387,9 +393,181 @@ describe("tool_search RunState replay", () => {
       "codex_apps__gmail_send_email",
     );
   });
+
+  test("accepts a still-authorized historical tool from the current catalog", async () => {
+    const deferred = connectorTool("gmail_send_email", "Send mail", ["to"]);
+    let executions = 0;
+    const search = toolSearchTool({
+      execution: "client",
+      execute: async () => {
+        executions += 1;
+        return [deferred];
+      },
+    }) as unknown as Tool;
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
+    agent.getAllTools = async () => [deferred, search];
+    const state = new RunState(new RunContext(), "hello", agent, null);
+    const call = {
+      type: "tool_search_call" as const,
+      call_id: "search-rebind",
+      status: "completed" as const,
+      execution: "client" as const,
+      arguments: { query: "send mail" },
+    };
+    const output = {
+      type: "tool_search_output" as const,
+      call_id: "search-rebind",
+      status: "completed" as const,
+      execution: "client" as const,
+      tools: [
+        {
+          type: "function" as const,
+          name: deferred.name,
+          description: deferred.description,
+          parameters: deferred.parameters,
+        },
+      ],
+    };
+    (state as unknown as { _generatedItems: unknown[] })._generatedItems = [
+      new RunToolSearchCallItem(call, agent),
+      new RunToolSearchOutputItem(output, agent),
+    ];
+
+    const resumed = await restoreInterruptedRunState(agent, state.toString());
+
+    expect(executions).toBe(0);
+    expect(resumed.toString()).toContain(deferred.name);
+  });
+
+  test("keeps the SDK default execute-and-validate behavior opt-in", async () => {
+    const deferred = connectorTool("gmail_send_email", "Send mail", ["to"]);
+    let executions = 0;
+    const search = toolSearchTool({
+      execution: "client",
+      execute: async () => {
+        executions += 1;
+        return [deferred];
+      },
+    }) as unknown as Tool;
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
+    agent.getAllTools = async () => [deferred, search];
+    const state = new RunState(new RunContext(), "hello", agent, null);
+    const call = {
+      type: "tool_search_call" as const,
+      call_id: "search-default",
+      status: "completed" as const,
+      execution: "client" as const,
+      arguments: { query: "send mail" },
+    };
+    const output = {
+      type: "tool_search_output" as const,
+      call_id: "search-default",
+      status: "completed" as const,
+      execution: "client" as const,
+      tools: [
+        {
+          type: "function" as const,
+          name: deferred.name,
+          description: deferred.description,
+          parameters: deferred.parameters,
+        },
+      ],
+    };
+    (state as unknown as { _generatedItems: unknown[] })._generatedItems = [
+      new RunToolSearchCallItem(call, agent),
+      new RunToolSearchOutputItem(output, agent),
+    ];
+
+    await RunState.fromString(agent, state.toString());
+
+    expect(executions).toBe(1);
+  });
 });
 
 describe("tool_search tool wiring", () => {
+  test("wrapped OpenGeni stays eager while selected MCP schemas defer", async () => {
+    const makeServer = (registryId: string) =>
+      new PrefixedMcpServer(
+        {
+          name: `inner-${registryId}`,
+          cacheToolsList: false,
+          connect: async () => undefined,
+          close: async () => undefined,
+          listTools: async () =>
+            [
+              {
+                name: "search_documents",
+                description: "Search documents",
+                inputSchema: { type: "object", properties: {} },
+              },
+            ] as never,
+          callTool: async () => ({ content: [] }),
+          invalidateToolsCache: async () => undefined,
+        } as never,
+        registryId,
+      );
+    const opengeni = makeServer("opengeni");
+    const apps = makeServer("codex_apps");
+    const agent = buildOpenGeniAgent(testSettings({ codexToolSearchEnabled: true }), [], {
+      structuredToolTransport: false,
+      lazyToolTransport: "codex_native",
+      mcpServers: [opengeni, apps],
+    });
+
+    await agent.getAllTools(new RunContext());
+    expect(opengeni.modelToolSchemaTokens()).toBeGreaterThan(0);
+    expect(apps.modelToolSchemaTokens()).toBe(0);
+  });
+
+  test("buildAgent passes prepared MCP registry ids to the live tool_search executor", async () => {
+    const apps = new PrefixedMcpServer(
+      {
+        name: "inner-codex-apps",
+        cacheToolsList: false,
+        connect: async () => undefined,
+        close: async () => undefined,
+        listTools: async () =>
+          [
+            {
+              name: "search_documents",
+              description: "Search connected app documents",
+              inputSchema: {
+                type: "object",
+                properties: { query: { type: "string" } },
+              },
+            },
+          ] as never,
+        callTool: async () => ({ content: [] }),
+        invalidateToolsCache: async () => undefined,
+      } as never,
+      "codex_apps",
+    );
+    const agent = buildOpenGeniAgent(testSettings({ codexToolSearchEnabled: true }), [], {
+      structuredToolTransport: false,
+      lazyToolTransport: "codex_native",
+      mcpServers: [apps],
+    });
+
+    const tools = await agent.getAllTools(new RunContext());
+    const searchTool = tools.find((tool) => (tool as { name?: string }).name === "tool_search");
+    expect(searchTool).toBeDefined();
+    const executor = getClientToolSearchExecutor(searchTool as never);
+    const result = await executor!({
+      agent: agent as never,
+      availableTools: tools as never,
+      loadDefault: (() => []) as never,
+      runContext: {} as never,
+      toolCall: {
+        type: "tool_search_call",
+        arguments: { query: "search documents" },
+      } as never,
+    });
+    const matched = (Array.isArray(result) ? result : result ? [result] : []) as Tool[];
+    expect(matched.map((tool) => (tool as { name: string }).name)).toContain(
+      "codex_apps__search_documents",
+    );
+  });
+
   test("buildCodexToolSearchTool carries a client executor that BM25s the deferred pool by reference", async () => {
     const searchTool = buildCodexToolSearchTool(
       new Set(["gmail", "github"]),

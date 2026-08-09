@@ -18,6 +18,7 @@ const run = {
   event: "workflow_dispatch",
   status: "completed",
   conclusion: "success",
+  head_branch: "main",
   head_sha: sourceSha,
   repository: { full_name: RELEASE_REPOSITORY },
   head_repository: { full_name: RELEASE_REPOSITORY },
@@ -33,11 +34,23 @@ const artifact = {
 };
 
 function api(
-  overrides: { run?: Record<string, unknown>; artifact?: Record<string, unknown> } = {},
+  overrides: {
+    run?: Record<string, unknown>;
+    comparison?: Record<string, unknown>;
+    artifact?: Record<string, unknown>;
+  } = {},
 ) {
   return {
     async get(path: string): Promise<unknown> {
       if (path.endsWith("/actions/runs/123")) return { ...run, ...overrides.run };
+      if (path.includes("/compare/")) {
+        const headSha = path.split("/compare/")[1]?.split("...")[0];
+        return {
+          status: "ahead",
+          merge_base_commit: { sha: headSha },
+          ...overrides.comparison,
+        };
+      }
       if (path.includes("/commits/")) {
         return { sha: path.split("/").at(-1), commit: { tree: { sha: treeSha } } };
       }
@@ -67,6 +80,7 @@ describe("release producer provenance", () => {
         sourceTreeSha: treeSha,
       }),
     );
+    expect(result.controller).toEqual({ headBranch: "main", headSha: sourceSha });
     expect(result.artifact).toEqual(
       buildTrustedReleaseArtifact({
         kind: "candidate",
@@ -76,6 +90,115 @@ describe("release producer provenance", () => {
         now: Date.parse("2026-01-01T00:00:00Z"),
       }),
     );
+  });
+
+  test("binds a package publication source through its canonical retained artifact", async () => {
+    const packageSourceSha = "d".repeat(40);
+    const packageRunHeadSha = "e".repeat(40);
+    const packageArtifact = {
+      ...artifact,
+      name: `package-publication-verified-${packageSourceSha}-123-2`,
+    };
+    const result = await verifyReleaseProvenance({
+      kind: "package",
+      sourceSha: packageSourceSha,
+      runId: 123,
+      api: api({
+        run: {
+          path: ".github/workflows/publish-packages.yml",
+          head_sha: packageRunHeadSha,
+        },
+        artifact: packageArtifact,
+      }),
+      now: Date.parse("2026-01-01T00:00:00Z"),
+    });
+
+    expect(result.producer).toEqual(
+      buildReleaseProducerMetadata({
+        kind: "package",
+        runId: 123,
+        runAttempt: 2,
+        sourceSha: packageSourceSha,
+        sourceTreeSha: treeSha,
+      }),
+    );
+    expect(result.controller).toEqual({
+      headBranch: "main",
+      headSha: packageRunHeadSha,
+    });
+    expect(result.producer).not.toHaveProperty("headBranch");
+    expect(result.producer).not.toHaveProperty("headSha");
+    expect(() =>
+      validateReleaseProducerMetadata(result.producer, {
+        kind: "package",
+        sourceSha: packageSourceSha,
+        sourceTreeSha: treeSha,
+      }),
+    ).not.toThrow();
+    expect(result.artifact).toEqual(
+      buildTrustedReleaseArtifact({
+        kind: "package",
+        sourceSha: packageSourceSha,
+        runId: 123,
+        runAttempt: 2,
+        artifact: packageArtifact,
+        now: Date.parse("2026-01-01T00:00:00Z"),
+      }),
+    );
+  });
+
+  test("rejects a package artifact that is not bound to the exact run attempt", async () => {
+    const packageSourceSha = "d".repeat(40);
+    await expect(
+      verifyReleaseProvenance({
+        kind: "package",
+        sourceSha: packageSourceSha,
+        runId: 123,
+        api: api({
+          run: { path: ".github/workflows/publish-packages.yml" },
+          artifact: {
+            name: `package-publication-verified-${packageSourceSha}-123-1`,
+          },
+        }),
+      }),
+    ).rejects.toThrow("exactly one");
+  });
+
+  test("rejects missing or non-main workflow controller refs", async () => {
+    const input = { kind: "package" as const, sourceSha: "d".repeat(40), runId: 123 };
+    await expect(
+      verifyReleaseProvenance({
+        ...input,
+        api: api({
+          run: { path: ".github/workflows/publish-packages.yml", head_branch: undefined },
+        }),
+      }),
+    ).rejects.toThrow("run from main");
+    await expect(
+      verifyReleaseProvenance({
+        ...input,
+        api: api({
+          run: {
+            path: ".github/workflows/publish-packages.yml",
+            head_branch: "reviewer/non-main-controller",
+          },
+        }),
+      }),
+    ).rejects.toThrow("run from main");
+  });
+
+  test("rejects a workflow controller head that is not an ancestor of current main", async () => {
+    await expect(
+      verifyReleaseProvenance({
+        kind: "package",
+        sourceSha: "d".repeat(40),
+        runId: 123,
+        api: api({
+          run: { path: ".github/workflows/publish-packages.yml" },
+          comparison: { status: "diverged" },
+        }),
+      }),
+    ).rejects.toThrow("ancestor of main");
   });
 
   test("rejects arbitrary URL/hash substitution and wrong repository/run/source/workflow", async () => {

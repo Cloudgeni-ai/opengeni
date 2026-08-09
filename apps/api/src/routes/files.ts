@@ -8,6 +8,8 @@ import {
   RETAINED_OUTPUT_MAX_PAGE_BYTES,
   RetainedArtifactMetadataSchema,
   retainedArtifactReferenceFromFile,
+  retainedGeneratedImageReferenceFromFile,
+  retainedScreenshotReferenceFromFile,
   resolveRetainedOutputRange,
   type RetainedArtifactMetadata,
   type RetainedOutputUnavailableReason,
@@ -18,11 +20,15 @@ import {
   completeFileUpload,
   createFileUpload,
   getFileUpload,
+  getGeneratedImageArtifact,
   getRetainedFileArtifact,
+  getRetainedScreenshotArtifact,
   requireFile,
   type RetainedFileArtifact,
+  type GeneratedImageArtifact,
+  type RetainedScreenshotArtifact,
 } from "@opengeni/db";
-import type { Hono } from "hono";
+import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { requireAccessGrant } from "@opengeni/core";
 import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
@@ -36,7 +42,9 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.all("/v1/workspaces/:workspaceId/mcp/files", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "files:read");
-    const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
+    const transport = new WebStandardStreamableHTTPServerTransport({
+      enableJsonResponse: true,
+    });
     const server = buildFilesMcpServer(deps, grant);
     await server.connect(transport);
     return await transport.handleRequest(c.req.raw);
@@ -46,7 +54,9 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "files:upload");
     if (!objectStorage) {
-      throw new HTTPException(503, { message: "object storage is not configured" });
+      throw new HTTPException(503, {
+        message: "object storage is not configured",
+      });
     }
     const payload = CreateFileUploadRequest.parse(await c.req.json());
     await requireLimit(deps, {
@@ -98,7 +108,9 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "files:upload");
     if (!objectStorage) {
-      throw new HTTPException(503, { message: "object storage is not configured" });
+      throw new HTTPException(503, {
+        message: "object storage is not configured",
+      });
     }
     const upload = await getFileUpload(db, workspaceId, c.req.param("uploadId"));
     if (!upload) {
@@ -186,7 +198,9 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
         terminalStatus,
       });
       if (!settled) {
-        throw new HTTPException(409, { message: "file upload cleanup claim was superseded" });
+        throw new HTTPException(409, {
+          message: "file upload cleanup claim was superseded",
+        });
       }
       throw new HTTPException(status, { message });
     };
@@ -259,91 +273,79 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "files:read");
     const artifactId = retainedArtifactId(c.req.param("artifactId"));
-    const artifact = await getRetainedFileArtifact(db, workspaceId, artifactId);
+    const artifact = await getWorkspaceArtifact(db, workspaceId, artifactId);
     if (!artifact) {
       return c.json(retainedArtifactUnavailable(artifactId, "deleted"), 404);
     }
-    return c.json(retainedArtifactMetadata(artifact));
+    return c.json(artifact.metadata);
   });
 
   app.get("/v1/workspaces/:workspaceId/artifacts/:artifactId/content", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "files:read");
     const artifactId = retainedArtifactId(c.req.param("artifactId"));
-    const artifact = await getRetainedFileArtifact(db, workspaceId, artifactId);
+    const artifact = await getWorkspaceArtifact(db, workspaceId, artifactId);
     if (!artifact) {
       return c.json(retainedArtifactUnavailable(artifactId, "deleted"), 404);
     }
 
-    const metadata = retainedArtifactMetadata(artifact);
-    if (!metadata.available) {
-      return c.json(metadata, retainedArtifactUnavailableStatus(metadata.reason));
-    }
-    if (!objectStorage) {
-      return c.json(retainedArtifactUnavailable(artifactId, "missing_storage"), 503);
-    }
-
-    const rangeHeader = c.req.header("range");
-    const range = resolveRetainedOutputRange(
-      rangeHeader,
-      metadata.originalBytes,
-      rangeHeader ? RETAINED_OUTPUT_MAX_PAGE_BYTES : RETAINED_OUTPUT_DEFAULT_PAGE_BYTES,
+    return await serveRetainedArtifactContent(
+      c,
+      objectStorage,
+      artifactId,
+      artifact.file,
+      artifact.metadata,
     );
-    if (range.kind === "invalid") {
-      return c.json(
-        {
-          message: "invalid retained artifact byte range",
-          reason: range.reason,
-          maxRangeBytes: RETAINED_OUTPUT_MAX_PAGE_BYTES,
-        },
-        400,
-      );
-    }
-    if (range.kind === "unsatisfiable") {
-      return c.json(
-        { message: "retained artifact byte range is not satisfiable", reason: range.reason },
-        416,
-        {
-          "Accept-Ranges": "bytes",
-          "Content-Range": range.contentRange,
-          "Cache-Control": "private, no-store",
-        },
-      );
-    }
-
-    const headers = {
-      "Accept-Ranges": range.acceptRanges,
-      "Cache-Control": "private, no-store",
-      "Content-Length": String(range.length),
-      "Content-Type": metadata.contentType,
-      "X-Content-Type-Options": "nosniff",
-      ...(range.contentRange ? { "Content-Range": range.contentRange } : {}),
-    };
-    if (range.kind === "empty") {
-      if (!(await objectStorage.fileExists(artifact.file))) {
-        return c.json(retainedArtifactUnavailable(artifactId, "missing_storage"), 410);
-      }
-      return c.body(null, 200, headers);
-    }
-
-    const bytes = await objectStorage.getFileRange(artifact.file, {
-      start: range.start,
-      end: range.end,
-    });
-    if (!bytes) {
-      return c.json(retainedArtifactUnavailable(artifactId, "missing_storage"), 410);
-    }
-    if (bytes.byteLength !== range.length) {
-      throw new HTTPException(502, { message: "object storage returned an invalid byte range" });
-    }
-    return c.body(new Uint8Array(bytes), range.status, headers);
   });
+
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/artifacts/:artifactId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "files:read");
+    const artifactId = retainedArtifactId(c.req.param("artifactId"));
+    const artifact = await getRetainedScreenshotArtifact(
+      db,
+      workspaceId,
+      c.req.param("sessionId"),
+      artifactId,
+    );
+    if (!artifact) {
+      return c.json(retainedArtifactUnavailable(artifactId, "deleted"), 404);
+    }
+    return c.json(retainedScreenshotMetadata(artifact));
+  });
+
+  app.get(
+    "/v1/workspaces/:workspaceId/sessions/:sessionId/artifacts/:artifactId/content",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      await requireAccessGrant(c, deps, workspaceId, "files:read");
+      const artifactId = retainedArtifactId(c.req.param("artifactId"));
+      const artifact = await getRetainedScreenshotArtifact(
+        db,
+        workspaceId,
+        c.req.param("sessionId"),
+        artifactId,
+      );
+      if (!artifact) {
+        return c.json(retainedArtifactUnavailable(artifactId, "deleted"), 404);
+      }
+      return await serveRetainedArtifactContent(
+        c,
+        objectStorage,
+        artifactId,
+        artifact.file,
+        retainedScreenshotMetadata(artifact),
+      );
+    },
+  );
 
   app.post("/v1/workspaces/:workspaceId/files/:fileId/download-url", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "files:read");
     if (!objectStorage) {
-      throw new HTTPException(503, { message: "object storage is not configured" });
+      throw new HTTPException(503, {
+        message: "object storage is not configured",
+      });
     }
     const file = await requireFile(db, workspaceId, c.req.param("fileId")).catch(() => null);
     if (!file) {
@@ -360,6 +362,81 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
       }),
     );
   });
+}
+
+async function serveRetainedArtifactContent(
+  c: Context,
+  objectStorage: ApiRouteDeps["objectStorage"],
+  artifactId: string,
+  file: RetainedFileArtifact["file"],
+  metadata: RetainedArtifactMetadata,
+) {
+  if (!metadata.available) {
+    return c.json(metadata, retainedArtifactUnavailableStatus(metadata.reason));
+  }
+  if (!objectStorage) {
+    return c.json(retainedArtifactUnavailable(artifactId, "missing_storage"), 503);
+  }
+
+  const rangeHeader = c.req.header("range");
+  const range = resolveRetainedOutputRange(
+    rangeHeader,
+    metadata.originalBytes,
+    rangeHeader ? RETAINED_OUTPUT_MAX_PAGE_BYTES : RETAINED_OUTPUT_DEFAULT_PAGE_BYTES,
+  );
+  if (range.kind === "invalid") {
+    return c.json(
+      {
+        message: "invalid retained artifact byte range",
+        reason: range.reason,
+        maxRangeBytes: RETAINED_OUTPUT_MAX_PAGE_BYTES,
+      },
+      400,
+    );
+  }
+  if (range.kind === "unsatisfiable") {
+    return c.json(
+      {
+        message: "retained artifact byte range is not satisfiable",
+        reason: range.reason,
+      },
+      416,
+      {
+        "Accept-Ranges": "bytes",
+        "Content-Range": range.contentRange,
+        "Cache-Control": "private, no-store",
+      },
+    );
+  }
+
+  const headers = {
+    "Accept-Ranges": range.acceptRanges,
+    "Cache-Control": "private, no-store",
+    "Content-Length": String(range.length),
+    "Content-Type": metadata.contentType,
+    "X-Content-Type-Options": "nosniff",
+    ...(range.contentRange ? { "Content-Range": range.contentRange } : {}),
+  };
+  if (range.kind === "empty") {
+    if (!(await objectStorage.fileExists(file))) {
+      return c.json(retainedArtifactUnavailable(artifactId, "missing_storage"), 410);
+    }
+    return c.body(null, 200, headers);
+  }
+
+  const bytes = await objectStorage.getFileRange(file, {
+    start: range.start,
+    end: range.end,
+  });
+  if (!bytes) {
+    return c.json(retainedArtifactUnavailable(artifactId, "missing_storage"), 410);
+  }
+  if (bytes.byteLength !== range.length) {
+    throw new HTTPException(502, {
+      message: "object storage returned an invalid byte range",
+    });
+  }
+  return c.body(new Uint8Array(bytes), range.status, headers);
 }
 
 export function sanitizeFilename(filename: string): string {
@@ -388,7 +465,11 @@ function retainedArtifactUnavailable(
   artifactId: string,
   reason: RetainedOutputUnavailableReason,
 ): RetainedArtifactMetadata {
-  return RetainedArtifactMetadataSchema.parse({ available: false, artifactId, reason });
+  return RetainedArtifactMetadataSchema.parse({
+    available: false,
+    artifactId,
+    reason,
+  });
 }
 
 function retainedArtifactMetadata(artifact: RetainedFileArtifact): RetainedArtifactMetadata {
@@ -417,6 +498,62 @@ function retainedArtifactMetadata(artifact: RetainedFileArtifact): RetainedArtif
   return retainedArtifactUnavailable(file.id, "unsupported");
 }
 
+async function getWorkspaceArtifact(
+  db: ApiRouteDeps["db"],
+  workspaceId: string,
+  artifactId: string,
+): Promise<{ file: RetainedFileArtifact["file"]; metadata: RetainedArtifactMetadata } | null> {
+  const generated = await getGeneratedImageArtifact(db, workspaceId, artifactId);
+  if (generated) {
+    return { file: generated.file, metadata: retainedGeneratedImageMetadata(generated) };
+  }
+  const artifact = await getRetainedFileArtifact(db, workspaceId, artifactId);
+  return artifact ? { file: artifact.file, metadata: retainedArtifactMetadata(artifact) } : null;
+}
+
+function retainedGeneratedImageMetadata(
+  artifact: GeneratedImageArtifact,
+): RetainedArtifactMetadata {
+  if (artifact.status === "ready") {
+    const reference = retainedGeneratedImageReferenceFromFile({
+      ...artifact.file,
+      width: artifact.width,
+      height: artifact.height,
+    });
+    if (reference) return reference;
+  }
+  return retainedArtifactUnavailable(artifact.artifactId, "pending");
+}
+
+function retainedScreenshotMetadata(
+  artifact: RetainedScreenshotArtifact,
+): RetainedArtifactMetadata {
+  if (
+    artifact.status === "ready" &&
+    artifact.sessionId &&
+    artifact.retentionExpiresAt.getTime() > Date.now()
+  ) {
+    const reference = retainedScreenshotReferenceFromFile({
+      ...artifact.file,
+      sessionId: artifact.sessionId,
+      width: artifact.width,
+      height: artifact.height,
+      expiresAt: artifact.retentionExpiresAt.toISOString(),
+    });
+    if (reference) return reference;
+  }
+  if (artifact.status === "deleted") {
+    return retainedArtifactUnavailable(artifact.artifactId, "deleted");
+  }
+  if (artifact.status === "expired" || artifact.retentionExpiresAt.getTime() <= Date.now()) {
+    return retainedArtifactUnavailable(artifact.artifactId, "expired");
+  }
+  if (artifact.status === "pending" || artifact.status === "reconciling") {
+    return retainedArtifactUnavailable(artifact.artifactId, "pending");
+  }
+  return retainedArtifactUnavailable(artifact.artifactId, "failed");
+}
+
 function retainedArtifactUnavailableStatus(
   reason: RetainedOutputUnavailableReason,
 ): 404 | 409 | 410 | 422 {
@@ -429,6 +566,9 @@ function retainedArtifactUnavailableStatus(
     case "unsupported":
     case "not_retained":
     case "storage_write_failed":
+    case "quota_exceeded":
+    case "invalid_content":
+    case "oversized":
       return 422;
     case "pending":
     case "failed":

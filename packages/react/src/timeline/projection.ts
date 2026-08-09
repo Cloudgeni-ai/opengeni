@@ -21,6 +21,7 @@ import type {
   TimelineItem,
   TurnEndItem,
   ToolCallItem,
+  ToolCallTruncation,
   WorkerItem,
 } from "./types";
 
@@ -312,6 +313,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           name,
           arguments: args,
           output: undefined,
+          truncation: null,
           // The provider-native item drives the per-tool renderers (apply_patch
           // operation, computer_call action, web_search providerData, …).
           raw: payload.raw,
@@ -336,8 +338,14 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         }
         // An output carrying an explicit error flag (or an MCP isError result)
         // settles the tool to "failed" so the renderer can surface it loudly.
+        const truncation = toolCallTruncation(payload);
         target.status = isErrorOutput(payload) ? "failed" : "complete";
-        target.output = payload.output;
+        target.output = Object.prototype.hasOwnProperty.call(payload, "output")
+          ? payload.output
+          : truncation && typeof payload.preview === "string"
+            ? payload.preview
+            : payload.output;
+        target.truncation = truncation;
         break;
       }
 
@@ -540,6 +548,18 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
 
       case "tool.auth_needed":
       case "credential.auth_needed": {
+        if (
+          event.type === "tool.auth_needed" &&
+          !stringValue(payload.toolName) &&
+          stringValue(payload.serverId) !== "codex_apps"
+        ) {
+          // Historical optional-MCP initialize/tools-list credential misses are
+          // setup availability, not evidence of a concrete conversational tool
+          // call. Keep the raw event in Debug/audit but do not manufacture an
+          // actionable reconnect card in the transcript. Actual tools/call auth
+          // failures carry a concrete toolName and remain visible.
+          break;
+        }
         // Keep the whole structured payload — the renderer turns it into a clean
         // inline reconnect card, and the app starts the recovery flow off the
         // connectionId/resource. Losing it to a plain-text notice was the ugly
@@ -549,6 +569,8 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           kind: "auth-needed",
           id: event.id,
           turnId,
+          serverId: typeof payload.serverId === "string" ? payload.serverId : null,
+          source: event.type === "tool.auth_needed" ? "tool" : "credential",
           providerDomain: stringValue(payload.providerDomain),
           connectionId: typeof payload.connectionId === "string" ? payload.connectionId : null,
           reason: authNeededReason(payload.reason),
@@ -1426,6 +1448,31 @@ function isErrorOutput(payload: Record<string, unknown>): boolean {
   );
 }
 
+function toolCallTruncation(payload: Record<string, unknown>): ToolCallTruncation | null {
+  const truncation = asRecord(payload.truncation);
+  const fullEvidence = asRecord(truncation.fullEvidence);
+  const surface = stringValue(truncation.surface);
+  const reason = stringValue(truncation.reason);
+  if (
+    truncation.truncated !== true ||
+    !surface ||
+    !reason ||
+    typeof fullEvidence.available !== "boolean"
+  ) {
+    return null;
+  }
+  return {
+    truncated: true,
+    surface,
+    reason,
+    omittedBytes: numberOrNull(truncation.omittedBytes),
+    fullEvidence: {
+      available: fullEvidence.available,
+      reason: stringValue(fullEvidence.reason) || null,
+    },
+  };
+}
+
 function findOpenCall(
   items: TimelineItem[],
   callId: string | null,
@@ -1609,6 +1656,15 @@ export function extractSessionRef(value: unknown, depth = 0): string | null {
     return null;
   }
   const record = value as Record<string, unknown>;
+  const receiptResource = asRecord(record.resource);
+  if (
+    record.receiptVersion === "mcp-mutation-receipt.v1" &&
+    receiptResource.type === "session" &&
+    typeof receiptResource.id === "string" &&
+    looksLikeId(receiptResource.id)
+  ) {
+    return receiptResource.id;
+  }
   if (typeof record.sessionId === "string" && looksLikeId(record.sessionId)) {
     return record.sessionId;
   }

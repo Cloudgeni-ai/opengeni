@@ -35,6 +35,7 @@ import { observabilityEventLogger } from "./observability";
 import { startAuthCalloutResponder } from "./sandbox/auth-callout";
 import { startHelloIngestion, startMetricsIngestion } from "./sandbox/metrics-ingestion";
 import { startSlackInteractionPump } from "./integrations/slack-interactions";
+import { startTemporalScheduleCleanupPump } from "./temporal-schedule-cleanup";
 
 /**
  * A REJECT_DUPLICATE start collides on the deterministic workflowId when the
@@ -167,10 +168,14 @@ export async function createTemporalWorkflowClient(
       }
     },
     deleteScheduledTaskSchedule: async ({ temporalScheduleId }) => {
-      await temporal.schedule
-        .getHandle(temporalScheduleId)
-        .delete()
-        .catch(() => undefined);
+      try {
+        await temporal.withDeadline(Date.now() + 5_000, async () => {
+          await temporal.schedule.getHandle(temporalScheduleId).delete();
+        });
+      } catch (error) {
+        if (error instanceof ScheduleNotFoundError) return;
+        throw error;
+      }
     },
     triggerScheduledTask: async ({
       task,
@@ -332,6 +337,13 @@ export async function startApi() {
   const stopSlackInteractionPump = settings.slackSigningSecret
     ? startSlackInteractionPump(routeDeps)
     : undefined;
+  const stopTemporalScheduleCleanupPump = startTemporalScheduleCleanupPump({
+    db: dbClient.db,
+    deleteSchedule: async (temporalScheduleId) => {
+      await workflowClient.client.deleteScheduledTaskSchedule({ temporalScheduleId });
+    },
+    observability,
+  });
   // M10 — start the metrics-ingestion consumer (agent heartbeats → DB last-sample
   // + downsampled series), gated on the selfhosted flag. A no-op when disabled.
   let stopMetricsIngestion: (() => void) | undefined;
@@ -366,11 +378,13 @@ export async function startApi() {
           { db: dbClient.db, settings, callout, observability },
           settings.natsUrl,
         );
-      } catch (error) {
+      } catch {
         // A responder start failure must not crash the API (other planes work); log
         // loudly — selfhosted agents will fail to connect until it is up.
         observability.error("OpenGeni NATS auth-callout responder failed to start", {
-          error: error instanceof Error ? error.message : String(error),
+          errorClass: "NatsAuthCalloutOperationError",
+          errorCode: "nats_auth_callout_start_failed",
+          origin: "api",
         });
       }
     } else {
@@ -391,6 +405,7 @@ export async function startApi() {
       stopSlackInteractionPump?.();
       stopMetricsIngestion?.();
       stopHelloIngestion?.();
+      await stopTemporalScheduleCleanupPump();
       await Promise.allSettled([
         authCalloutResponder?.close(),
         bus.close(),
@@ -422,7 +437,7 @@ export function shouldCreateScheduleAfterUpdateError(error: unknown): boolean {
 export function temporalScheduleSpec(schedule: ScheduledTaskScheduleSpec): ScheduleSpec {
   if (schedule.type === "interval") {
     return {
-      intervals: [{ every: `${schedule.everySeconds}s` }],
+      intervals: [temporalIntervalSpec(schedule)],
       ...(schedule.startAt ? { startAt: new Date(schedule.startAt) } : {}),
       ...(schedule.endAt ? { endAt: new Date(schedule.endAt) } : {}),
     };
@@ -453,6 +468,29 @@ export function temporalScheduleSpec(schedule: ScheduledTaskScheduleSpec): Sched
       },
     ],
     timezone: "UTC",
+  };
+}
+
+function temporalIntervalSpec(
+  schedule: Extract<ScheduledTaskScheduleSpec, { type: "interval" }>,
+): NonNullable<ScheduleSpec["intervals"]>[number] {
+  const every = `${schedule.everySeconds}s` as `${number}s`;
+  if (!schedule.startAt) {
+    return { every };
+  }
+
+  // Temporal interval schedules match Epoch + (n * every) + offset. Its
+  // top-level startAt only filters matching times before that boundary, so it
+  // does not itself anchor the cadence. Derive the phase from startAt to make
+  // the stored OpenGeni timestamp the first interval boundary rather than the
+  // next epoch-aligned match.
+  const everyMilliseconds = BigInt(schedule.everySeconds) * 1_000n;
+  const startMilliseconds = BigInt(new Date(schedule.startAt).getTime());
+  const offsetMilliseconds =
+    ((startMilliseconds % everyMilliseconds) + everyMilliseconds) % everyMilliseconds;
+  return {
+    every,
+    ...(offsetMilliseconds === 0n ? {} : { offset: `${offsetMilliseconds}ms` as `${number}ms` }),
   };
 }
 

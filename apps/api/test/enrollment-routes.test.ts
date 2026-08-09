@@ -26,6 +26,9 @@ import type { AppDependencies, SessionWorkflowClient } from "@opengeni/core";
 const DELEGATION_SECRET = "m5-delegation-secret";
 const SIGNING_SECRET = "m5-enrollment-signing-secret";
 
+const localAdminUrl = process.env.OPENGENI_ENROLLMENT_ROUTES_ADMIN_URL?.trim();
+const localAppUrl = process.env.OPENGENI_ENROLLMENT_ROUTES_APP_URL?.trim();
+
 let available = true;
 let shared: SharedTestDatabase | null = null;
 let admin: postgres.Sql;
@@ -95,6 +98,12 @@ async function bearer(
 }
 
 beforeAll(async () => {
+  if (localAdminUrl && localAppUrl) {
+    admin = postgres(localAdminUrl, { max: 2, prepare: false });
+    client = createDb(localAppUrl, { max: 4 });
+    db = client.db;
+    return;
+  }
   shared = await acquireSharedTestDatabase("enrollment-routes");
   if (!shared) {
     available = false;
@@ -112,6 +121,9 @@ afterAll(async () => {
     await client?.close();
   } catch {
     /* noop */
+  }
+  if (localAdminUrl) {
+    await admin?.end().catch(() => undefined);
   }
   await shared?.release();
 }, 180_000);
@@ -383,13 +395,42 @@ describe("M5 list + revoke + idempotent re-enroll", () => {
       },
     );
     expect(revokeRes.status).toBe(200);
-    expect(((await revokeRes.json()) as { revoked: boolean }).revoked).toBe(true);
+    const revoke = (await revokeRes.json()) as {
+      revoked: boolean;
+      outcome: string;
+      enrollmentId: string;
+      machineName: string | null;
+      message: string;
+      action: string;
+    };
+    expect(revoke).toMatchObject({
+      revoked: true,
+      outcome: "removed",
+      enrollmentId: approve.enrollmentId,
+      machineName: "node-a",
+    });
+    expect(revoke.message).toMatch(/history/i);
+    expect(revoke.action).toMatch(/fresh human-approved/i);
+    const defaultList = (await (
+      await app.request(`/v1/workspaces/${workspaceId}/enrollments`, {
+        headers: { authorization: manageBearer },
+      })
+    ).json()) as { enrollments: unknown[] };
+    expect(defaultList.enrollments.length).toBe(0);
     const activeList = (await (
       await app.request(`/v1/workspaces/${workspaceId}/enrollments?status=active`, {
         headers: { authorization: manageBearer },
       })
     ).json()) as { enrollments: unknown[] };
     expect(activeList.enrollments.length).toBe(0);
+    const revokedList = (await (
+      await app.request(`/v1/workspaces/${workspaceId}/enrollments?status=revoked`, {
+        headers: { authorization: manageBearer },
+      })
+    ).json()) as { enrollments: { id: string; status: string }[] };
+    expect(revokedList.enrollments).toEqual([
+      expect.objectContaining({ id: approve.enrollmentId, status: "revoked" }),
+    ]);
 
     // Idempotent re-enroll: a NEW device-flow for the SAME pubkey re-activates the
     // SAME enrollment (the M2 upsert) — not a duplicate machine.

@@ -52,6 +52,10 @@ let db: Database;
 const settings = testSettings({
   productAccessMode: "managed",
   sandboxSelfhostedEnabled: true,
+  // This fixture intentionally implements only the finite legacy request/reply
+  // protocol. Production's unbounded default requires the resumable op stream.
+  agentOpStreamEnabled: false,
+  sandboxSelfhostedExecTimeoutMs: 30_000,
   selfhostedRelayUrl: "wss://relay.example",
   publicBaseUrl: "https://app.example",
 });
@@ -241,6 +245,7 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     // A session row without a materialized/verified provider is not online.
     expect(group.liveness).toBe("offline");
     expect(group.attachable).toBe(false);
+    expect(group.operationAvailability).toBe("wakeable");
     expect(group.providerStatus).toBe("not_created");
     expect(group.leaseLiveness).toBeNull();
     expect(group.routeStatus).toBe("attached");
@@ -254,9 +259,72 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     expect(machine.consented).toBe(true);
     expect(machine.hasDisplay).toBe(true);
     expect(machine.attachable).toBe(true);
+    expect(machine.operationAvailability).toBe("ready");
 
     // Single-active invariant: exactly ONE active entry.
     expect(result.sandboxes.filter((s) => s.active).length).toBe(1);
+  }, 60_000);
+
+  test("a holderless draining Modal home is explicitly wakeable, not unavailable", async () => {
+    if (!available) return;
+    const { ctx, services, accountId, workspaceId } = await seedFleet();
+    await admin`
+      insert into sandbox_leases (
+        account_id,
+        workspace_id,
+        sandbox_group_id,
+        liveness,
+        instance_id,
+        backend,
+        lease_epoch,
+        workspace_generation,
+        archive_generation,
+        resume_state,
+        expires_at
+      ) values (
+        ${accountId},
+        ${workspaceId},
+        ${ctx.sessionGroupId},
+        'draining',
+        'sb-idle-home',
+        'modal',
+        7,
+        12,
+        12,
+        ${admin.json({
+          opengeniRecovery: {
+            provider: {
+              status: "exists",
+              instanceId: "sb-idle-home",
+              observedAt: "2026-08-05T16:30:00.000Z",
+            },
+            archive: { status: "none", current: null, previous: null },
+            restore: {
+              status: "not_required",
+              rematerializationId: null,
+              selectedRevision: null,
+              startedAt: null,
+              completedAt: null,
+            },
+            workspace: {
+              status: "ready",
+              verifiedRevision: "idle-home-ready",
+              verifiedAt: "2026-08-05T16:30:00.000Z",
+            },
+          },
+        })}::jsonb,
+        now() + interval '15 minutes'
+      )
+    `;
+
+    const result = await listFleet(services, ctx);
+    const group = result.sandboxes.find((sandbox) => sandbox.isSessionGroup)!;
+    expect(group.liveness).toBe("offline");
+    expect(group.leaseLiveness).toBe("draining");
+    expect(group.attachable).toBe(false);
+    expect(group.operationAvailability).toBe("wakeable");
+    expect(group.providerStatus).toBe("exists");
+    expect(group.workspaceStatus).toBe("ready");
   }, 60_000);
 
   test("attach/swap: the epoch-fenced CAS flips active_sandbox_id + bumps active_epoch", async () => {

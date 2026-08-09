@@ -560,7 +560,14 @@ async function freezeScenario(
       },
       ...humanInputRequests.map((request) => ({
         type: "session.humanInput.requested" as const,
-        payload: { request },
+        payload: {
+          request: {
+            id: request.id,
+            questions: request.questions,
+            allowSkip: request.allowSkip,
+            expiresAt: request.expiresAt?.toISOString() ?? null,
+          },
+        },
       })),
       { type: "session.status.changed", payload: { status: "requires_action" } },
     ],

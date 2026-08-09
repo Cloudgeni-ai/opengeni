@@ -11,6 +11,11 @@ import {
 import { spawnSync } from "node:child_process";
 import net from "node:net";
 
+import {
+  publicEndpointOrigin,
+  publicProbeErrorDiagnostic,
+} from "./deployment-preflight-diagnostics";
+
 interface Args {
   profile: string;
   productOverlay: string;
@@ -316,7 +321,9 @@ async function tcpConnectProbe(
     });
     socket.once("error", (error) => {
       clearTimeout(timeout);
-      resolve(failed(id, `failed to connect to ${host}:${port}: ${error.message}`));
+      resolve(
+        failed(id, `failed to connect to ${host}:${port}: ${publicProbeErrorDiagnostic(error)}`),
+      );
     });
   });
 }
@@ -325,17 +332,18 @@ async function httpReachabilityProbe(
   id: LiveProbeResult["id"],
   endpoint: string,
 ): Promise<LiveProbeResult> {
+  const publicEndpoint = publicEndpointOrigin(endpoint);
   try {
     const response = await fetch(endpoint, {
       method: "GET",
       signal: AbortSignal.timeout(5_000),
     });
     if (response.status >= 200 && response.status < 500) {
-      return passed(id, `HTTP ${response.status} from ${redactUrl(endpoint)}`);
+      return passed(id, `HTTP ${response.status} from ${publicEndpoint}`);
     }
-    return failed(id, `HTTP ${response.status} from ${redactUrl(endpoint)}`);
+    return failed(id, `HTTP ${response.status} from ${publicEndpoint}`);
   } catch (error) {
-    return failed(id, `failed to reach ${redactUrl(endpoint)}: ${errorMessage(error)}`);
+    return failed(id, `failed to reach ${publicEndpoint}: ${publicProbeErrorDiagnostic(error)}`);
   }
 }
 
@@ -354,21 +362,6 @@ function parseHostPort(value: string, defaultPort: number): { host: string; port
   }
   const port = Number(rawPort || defaultPort);
   return Number.isInteger(port) && port > 0 ? { host, port } : null;
-}
-
-function redactUrl(value: string): string {
-  try {
-    const url = new URL(value);
-    if (url.username) {
-      url.username = "redacted";
-    }
-    if (url.password) {
-      url.password = "redacted";
-    }
-    return url.toString();
-  } catch {
-    return value.replace(/\/\/([^:@/]+):([^@/]+)@/, "//redacted:redacted@");
-  }
 }
 
 function passed(id: LiveProbeResult["id"], detail: string): LiveProbeResult {

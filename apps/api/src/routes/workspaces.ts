@@ -19,14 +19,11 @@ import {
 } from "@opengeni/contracts";
 import {
   allWorkspacePermissions,
-  countActiveSessionsForWorkspace,
-  countWorkspacesForAccount,
   createWorkspace,
-  deleteWorkspace,
+  deleteWorkspaceIfQuiescent,
   getManagedUserByEmail,
   getWorkspaceModelPolicy,
   grantWorkspaceAccess,
-  listScheduledTasks,
   listWorkspaceMembers,
   listWorkspaceControlEvents,
   listWorkspacesForSubject,
@@ -47,7 +44,6 @@ import { hasPermission, requireAccessContext, requireAccessGrant } from "@openge
 import { requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
-  assertWorkspaceDeletable,
   assertWorkspaceMemberRemovable,
   controlHumanWorkspace,
   resolveMemberSubjectId,
@@ -55,6 +51,7 @@ import {
 import { boundedLimit } from "../http/common";
 import { sseWorkspaceControlStream } from "../http/sse";
 import { buildWorkspaceModelCatalog } from "../model-catalog";
+import { processTemporalScheduleCleanupClaims } from "../temporal-schedule-cleanup";
 import {
   AI_GATEWAY_REALTIME_MODELS,
   CODEX_REALTIME_MODEL_ID,
@@ -330,26 +327,46 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.delete("/v1/workspaces/:workspaceId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
-    // Refuse before any external/DB mutation: never delete the account's only
-    // workspace, and never delete while a session could still be running in
-    // Temporal (there is no clean per-session terminate to call, so deleting
-    // the row would orphan the workflow — the operator must stop them first).
-    const [workspaceCountForAccount, activeSessionCount] = await Promise.all([
-      countWorkspacesForAccount(deps.db, grant.accountId),
-      countActiveSessionsForWorkspace(deps.db, workspaceId),
-    ]);
-    assertWorkspaceDeletable({ workspaceCountForAccount, activeSessionCount });
-    // Clean external Temporal state the FK cascade can't reach: every scheduled
-    // task's schedule (best-effort, mirroring the scheduled-task delete path).
-    const tasks = await listScheduledTasks(deps.db, workspaceId, 1000);
-    await Promise.all(
-      tasks.map((task) =>
-        deps.workflowClient
-          .deleteScheduledTaskSchedule({ temporalScheduleId: task.temporalScheduleId })
-          .catch(() => undefined),
-      ),
+    // The DB transaction locks the account/workspace and every existing
+    // session/lease before checking runtime quiescence, then returns the exact
+    // external schedules removed by the cascade. A racing cold->warm transition
+    // can therefore never erase the only provider/capture ownership receipt.
+    const deleted = await deleteWorkspaceIfQuiescent(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+    });
+    if (deleted.status === "not_found") {
+      throw new HTTPException(404, { message: "workspace not found" });
+    }
+    if (deleted.status === "only_workspace") {
+      throw new HTTPException(409, { message: "cannot delete the account's only workspace" });
+    }
+    if (deleted.status === "active_sessions") {
+      throw new HTTPException(409, {
+        message: "stop the workspace's running sessions before deleting it",
+      });
+    }
+    if (deleted.status === "live_sandboxes") {
+      throw new HTTPException(409, {
+        message: "wait for the workspace's active sandboxes to finish draining before deleting it",
+      });
+    }
+    if (deleted.status !== "deleted") {
+      throw new Error(`Unhandled workspace deletion outcome: ${deleted.status}`);
+    }
+    // The cleanup claims were inserted in the same transaction as the cascade.
+    // Try them immediately; failures are released to the replica-safe outbox
+    // pump, so a process crash or Temporal outage cannot orphan the schedules.
+    await processTemporalScheduleCleanupClaims(
+      {
+        db: deps.db,
+        deleteSchedule: async (temporalScheduleId) => {
+          await deps.workflowClient.deleteScheduledTaskSchedule({ temporalScheduleId });
+        },
+        ...(deps.observability ? { observability: deps.observability } : {}),
+      },
+      deleted.temporalScheduleCleanups,
     );
-    await deleteWorkspace(deps.db, workspaceId);
     return c.body(null, 204);
   });
 

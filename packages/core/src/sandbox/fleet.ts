@@ -27,6 +27,7 @@ import {
 import type { EventBus } from "@opengeni/events";
 import {
   NatsControlRpc,
+  NatsOpStreamTransport,
   selfhostedLiveness,
   SelfhostedSession,
   swapTargetEstablishability,
@@ -34,6 +35,7 @@ import {
   type ControlRpc,
   type NatsRequestConnection,
   type SelfhostedRelayConfig,
+  type SelfhostedOpStreamDeps,
 } from "@opengeni/runtime/sandbox";
 import { HTTPException } from "hono/http-exception";
 import { relayConfigFromSettings } from "./routing";
@@ -95,6 +97,7 @@ export async function buildFleetContextForSession(
 
 /** The dominant liveness of a fleet member, surfaced to the dock + the agent. */
 export type FleetLiveness = "online" | "reconnecting" | "offline";
+export type FleetOperationAvailability = "ready" | "wakeable" | "recovering" | "unavailable";
 
 /**
  * A fleet member as the agent + the dock see it (the M8b/M9 UI seam — the
@@ -117,6 +120,11 @@ export type FleetSandboxEntry = {
   enrollmentId: string | null;
   /** Whether this target can be attached/swapped to right now (live + addressable). */
   attachable: boolean;
+  /** Whether an ordinary shell/files operation can use this target. This is
+   * deliberately separate from `attachable`: an idle managed home sandbox can
+   * be wakeable even while its holderless lease is cold/draining and therefore
+   * not an already-live swap target. */
+  operationAvailability: FleetOperationAvailability;
   /** Selfhosted only: whether whole-machine + screen-control consent is acked. */
   consented?: boolean;
   /** Selfhosted only: whether a display (real/Xvfb) is present. */
@@ -254,6 +262,22 @@ export async function listFleet(
       groupLease.recovery.restore.status === "restoring" ||
       groupLease.recovery.restore.status === "verifying"),
   );
+  const groupRecoveryUnavailable = Boolean(
+    groupLease &&
+    (groupLease.recovery.restore.status === "degraded" ||
+      groupLease.recovery.restore.status === "unrecoverable" ||
+      groupLease.recovery.workspace.status === "degraded" ||
+      groupLease.recovery.workspace.status === "unrecoverable"),
+  );
+  const groupOperationAvailability: FleetOperationAvailability = groupOnline
+    ? "ready"
+    : groupRecoveryUnavailable
+      ? "unavailable"
+      : groupRecovering
+        ? "recovering"
+        : ctx.sessionBackend === "selfhosted"
+          ? "unavailable"
+          : "wakeable";
   entries.push({
     id: ctx.sessionGroupId,
     kind: ctx.sessionBackend === "selfhosted" ? "selfhosted" : "modal",
@@ -263,6 +287,7 @@ export async function listFleet(
     isSessionGroup: true,
     enrollmentId: null,
     attachable: groupOnline,
+    operationAvailability: groupOperationAvailability,
     providerStatus: groupLease?.recovery.provider.status ?? "not_created",
     leaseLiveness: groupLease?.liveness ?? null,
     routeStatus: groupActive ? "attached" : "detached",
@@ -284,6 +309,11 @@ export async function listFleet(
       continue;
     }
     const enrollment = await getEnrollment(db, ctx.workspaceId, sandbox.enrollmentId);
+    if (!enrollment || enrollment.status !== "active") {
+      // Revoked enrollments remain durable audit/history records, but they are
+      // intentionally absent from the normal attach/run picker.
+      continue;
+    }
     const probe = enrollment
       ? await probeEnrollment(services, ctx.workspaceId, enrollment)
       : { liveness: "offline" as FleetLiveness, consented: false, hasDisplay: false };
@@ -296,6 +326,12 @@ export async function listFleet(
       isSessionGroup: false,
       enrollmentId: sandbox.enrollmentId,
       attachable: probe.liveness === "online",
+      operationAvailability:
+        probe.liveness === "online"
+          ? "ready"
+          : probe.liveness === "reconnecting"
+            ? "recovering"
+            : "unavailable",
       consented: probe.consented,
       hasDisplay: probe.hasDisplay,
       lastSeenAt: enrollment?.lastSeenAt ?? null,
@@ -533,6 +569,8 @@ export type RunOnSelfhostedMachine = {
   controlTimeoutMs: number;
   /** Longer agent-side process deadline for exec. */
   execTimeoutMs: number;
+  /** Streaming transport required when execTimeoutMs is 0 (unbounded). */
+  opStream?: SelfhostedOpStreamDeps;
 };
 
 /**
@@ -553,6 +591,7 @@ export async function executeRunOnSelfhostedMachine(
     relay: machine.relay,
     timeoutMs: machine.controlTimeoutMs,
     execTimeoutMs: machine.execTimeoutMs,
+    ...(machine.opStream !== undefined ? { opStream: machine.opStream } : {}),
   });
 
   try {
@@ -600,6 +639,11 @@ export async function executeRunOnSelfhostedMachine(
       // so leave `timedOut` absent while still reporting the enforced deadline.
       ...(op.kind === "exec" ? { deadlineMs: session.effectiveExecDeadlineMs } : {}),
     };
+  } finally {
+    // This one-off has no turn journal. Once its result has been accepted by
+    // this call, final-ack any settled stream so the runner can immediately
+    // release replay/output retention instead of waiting for TTL cleanup.
+    await session.finalizeOpStreamOps().catch(() => undefined);
   }
 }
 
@@ -655,6 +699,17 @@ export async function runOnSandbox(
       relay: relayConfigFromSettings(services.settings),
       controlTimeoutMs: services.settings.sandboxSelfhostedControlTimeoutMs,
       execTimeoutMs: services.settings.sandboxSelfhostedExecTimeoutMs,
+      ...(services.settings.agentOpStreamEnabled === true &&
+      enrollment.opStream === true &&
+      services.bus?.getOpStreamConnection
+        ? {
+            opStream: {
+              transport: new NatsOpStreamTransport(
+                async () => services.bus?.getOpStreamConnection?.() ?? null,
+              ),
+            },
+          }
+        : {}),
     },
     target,
     op,
@@ -692,7 +747,7 @@ export async function provisionSandbox(
     return {
       kind: "selfhosted",
       instructions:
-        "Share these instructions with a human operator. They install the OpenGeni agent on the machine, run `opengeni-agent enroll`, complete the device-flow at the verification URL (the loud whole-machine + screen-control consent), and the machine then appears here as an attachable selfhosted sandbox.",
+        "Share these instructions with a human operator. They install the OpenGeni agent on the machine, run `opengeni-agent connect`, complete the device-flow at the verification URL (the loud whole-machine + screen-control consent), and the machine then appears here as an attachable selfhosted sandbox. Existing connections to other OpenGeni workspaces or deployments are preserved.",
       // Install from THIS control plane's origin (not a hardcoded public CDN): the
       // served install script is rewritten to pull the per-SHA agent baked into
       // this exact deployment (see apps/api/src/routes/install.ts), so a deployed

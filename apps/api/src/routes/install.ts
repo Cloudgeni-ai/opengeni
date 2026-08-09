@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -27,7 +28,12 @@ import type { ApiRouteDeps } from "@opengeni/core";
 // The committed install artifacts, resolved relative to this module so the API
 // (run from source under /app via bun) locates the sibling agent/install/ dir at
 // runtime. apps/api/src/routes -> ../../../../agent/install.
-const INSTALL_DIR = new URL("../../../../agent/install/", import.meta.url);
+const INSTALL_DIR =
+  [
+    new URL("./assets/agent-install/", import.meta.url),
+    new URL("../../../../agent/install/", import.meta.url),
+  ].find((candidate) => existsSync(candidate)) ??
+  new URL("../../../../agent/install/", import.meta.url);
 
 // The baked release-binary dir (a sibling of the committed scripts). The build's
 // signing step writes the per-SHA Linux musl binaries + their `.sha256`/`.minisig`
@@ -200,6 +206,31 @@ export function registerInstallRoutes(app: Hono, deps: ApiRouteDeps): void {
     return serveAsset(asset, `${releasesBase}/download/${stableAgentTag}/${asset}`);
   });
 
+  // Signed self-update channel manifests. Each deployment exposes its own
+  // immutable promotion pointer, so an enrolled machine never depends on the
+  // public get.opengeni.ai hostname. The manifest and signature are ordinary
+  // assets on the selected immutable agent release.
+  for (const [channel, version] of [
+    ["stable", deps.settings.agentStableVersion],
+    ["beta", deps.settings.agentBetaVersion],
+  ] as const) {
+    app.get(`/agent/${channel}/:manifestAsset`, (c) => {
+      const manifestAsset = c.req.param("manifestAsset");
+      if (manifestAsset !== "manifest.json" && manifestAsset !== "manifest.json.minisig") {
+        throw new HTTPException(404, { message: "update manifest asset not found" });
+      }
+      if (!version) {
+        throw new HTTPException(404, { message: `${channel} agent channel is not configured` });
+      }
+      return new Response(null, {
+        status: 302,
+        headers: {
+          location: `${releasesBase}/download/agent-v${version}/${manifestAsset}`,
+        },
+      });
+    });
+  }
+
   // The version segment is the literal `v<ver>` (e.g. `v1.2.3`) — Hono cannot bind
   // a param glued to a literal prefix, so the whole segment is the param and the
   // `v` prefix is validated/stripped here. The release tag is `agent-v<ver>`.
@@ -220,5 +251,10 @@ export function registerInstallRoutes(app: Hono, deps: ApiRouteDeps): void {
 export const installExactPaths: ReadonlySet<string> = new Set(Object.keys(TEXT_ASSETS));
 
 export function isInstallRedirectPath(path: string): boolean {
-  return path.startsWith("/agent/latest/") || path.startsWith("/agent/v");
+  return (
+    path.startsWith("/agent/latest/") ||
+    path.startsWith("/agent/v") ||
+    path.startsWith("/agent/stable/") ||
+    path.startsWith("/agent/beta/")
+  );
 }

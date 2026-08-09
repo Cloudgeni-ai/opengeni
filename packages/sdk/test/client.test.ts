@@ -113,6 +113,36 @@ describe("OpenGeniClient", () => {
     await expect(request).rejects.toHaveProperty("name", "AbortError");
   });
 
+  test("removeEnrollment posts the workspace-scoped idempotent removal contract", async () => {
+    const enrollmentId = "11111111-1111-4111-8111-111111111111";
+    const response = {
+      revoked: true,
+      outcome: "removed",
+      enrollmentId,
+      machineName: "Jrgens-MacBook-Pro-2.local",
+      lastSeenAt: "2026-08-04T09:13:46.102Z",
+      revokedAt: "2026-08-04T10:00:00.000Z",
+      code: null,
+      message: "Machine access was revoked. History was retained for audit.",
+      action: "A fresh human-approved device-flow enrollment is required to reconnect.",
+    } as const;
+    const { client, requests } = makeClient(() => jsonResponse(response));
+    const result = await client.removeEnrollment(WORKSPACE_ID, enrollmentId, {
+      expectedUpdatedAt: "2026-08-04T09:00:00.000Z",
+      idempotencyKey: "remove-sdk-contract-1",
+    });
+
+    expect(result).toEqual(response);
+    expect(requests[0]).toMatchObject({
+      method: "POST",
+      url: `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/enrollments/${enrollmentId}/revoke`,
+    });
+    expect(JSON.parse(requests[0]!.body!)).toEqual({
+      expectedUpdatedAt: "2026-08-04T09:00:00.000Z",
+      idempotencyKey: "remove-sdk-contract-1",
+    });
+  });
+
   test("createSession posts the request with bearer auth and strips the trailing base slash", async () => {
     const session = {
       id: SESSION_ID,
@@ -206,6 +236,78 @@ describe("OpenGeniClient", () => {
     );
     expect(requests[1]!.url).toBe(
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events?after=2&before=9&limit=10&compact=1`,
+    );
+  });
+
+  test("coalesces simultaneous identical session projection reads", async () => {
+    let requests = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async (input) => {
+        requests += 1;
+        await gate;
+        return jsonResponse(
+          String(input).endsWith("/lineage")
+            ? { ancestors: [], children: [] }
+            : { id: SESSION_ID, workspaceId: WORKSPACE_ID },
+        );
+      },
+    });
+    const sessionReads = [
+      client.getSession(WORKSPACE_ID, SESSION_ID),
+      client.getSession(WORKSPACE_ID, SESSION_ID),
+    ];
+    const lineageReads = [
+      client.getSessionLineage(WORKSPACE_ID, SESSION_ID),
+      client.getSessionLineage(WORKSPACE_ID, SESSION_ID),
+    ];
+    const queueReads = [
+      client.getQueue(WORKSPACE_ID, SESSION_ID),
+      client.getQueue(WORKSPACE_ID, SESSION_ID),
+    ];
+    const goalReads = [
+      client.getGoal(WORKSPACE_ID, SESSION_ID),
+      client.getGoal(WORKSPACE_ID, SESSION_ID),
+    ];
+    await Bun.sleep(1);
+    expect(requests).toBe(4);
+    release();
+    await Promise.all([...sessionReads, ...lineageReads, ...queueReads, ...goalReads]);
+    expect(requests).toBe(4);
+  });
+
+  test("queues one fresh session read behind an existing projection read", async () => {
+    let requests = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async () => {
+        requests += 1;
+        const request = requests;
+        if (request === 1) await gate;
+        return jsonResponse({ id: SESSION_ID, workspaceId: WORKSPACE_ID, request });
+      },
+    });
+    const initial = client.getSession(WORKSPACE_ID, SESSION_ID);
+    const freshReads = [
+      client.getSession(WORKSPACE_ID, SESSION_ID, { fresh: true }),
+      client.getSession(WORKSPACE_ID, SESSION_ID, { fresh: true }),
+    ];
+    await Bun.sleep(1);
+    expect(requests).toBe(1);
+    release();
+    expect(((await initial) as Session & { request: number }).request).toBe(1);
+    const reconciled = await Promise.all(freshReads);
+    expect(requests).toBe(2);
+    expect(reconciled.map((session) => (session as Session & { request: number }).request)).toEqual(
+      [2, 2],
     );
   });
 

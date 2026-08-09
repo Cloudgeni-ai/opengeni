@@ -13,13 +13,14 @@ export function createAzureOpenAiTranscriptionProvider(input: {
   const url = `${input.endpoint}/openai/deployments/${encodeURIComponent(input.deployment)}/audio/transcriptions?api-version=${encodeURIComponent(input.apiVersion)}`;
   return {
     id: "azure-openai",
+    supportsServerDeadline: true,
     available: () => Boolean(input.apiKey || input.adToken),
-    async transcribe({ audio, mimeType, filename, signal }) {
+    async transcribe({ audio, mimeType, filename, requestId, signal }) {
       const form = new FormData();
       form.append("file", new Blob([Uint8Array.from(audio).buffer], { type: mimeType }), filename);
       const headers: Record<string, string> = input.apiKey
-        ? { "api-key": input.apiKey }
-        : { Authorization: `Bearer ${input.adToken}` };
+        ? { "api-key": input.apiKey, "x-opengeni-request-id": requestId }
+        : { Authorization: `Bearer ${input.adToken}`, "x-opengeni-request-id": requestId };
       let response: Response;
       try {
         response = await fetchImpl(url, {

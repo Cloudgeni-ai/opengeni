@@ -56,6 +56,31 @@ function sequences(events: SessionEvent[]): number[] {
 const FAST = { reconnectDelayMs: 1, maxReconnectDelayMs: 2 };
 
 describe("streamSessionEvents", () => {
+  test("a non-blocking open observer cannot delay live event delivery", async () => {
+    let releaseReconciliation = (): void => undefined;
+    const reconciliation = new Promise<void>((resolve) => {
+      releaseReconciliation = resolve;
+    });
+    let reconciled = false;
+    const events = await collect(
+      streamSessionEvents(scriptedTransport([{ events: [makeEvent(1)] }]), {
+        reconnect: false,
+        onOpen: () => {
+          void reconciliation.then(() => {
+            reconciled = true;
+          });
+        },
+      }),
+    );
+
+    expect(sequences(events)).toEqual([1]);
+    expect(reconciled).toBe(false);
+    releaseReconciliation();
+    await reconciliation;
+    await Promise.resolve();
+    expect(reconciled).toBe(true);
+  });
+
   test("awaits authoritative reconciliation before reporting Live", async () => {
     let reconciled = false;
     const states: string[] = [];
@@ -72,6 +97,68 @@ describe("streamSessionEvents", () => {
     expect((await events).map((event) => event.sequence)).toEqual([1]);
     expect(reconciled).toBe(true);
     expect(states).toEqual(["connecting", "live"]);
+  });
+  test("retries when reconciliation exceeds its hard bound", async () => {
+    let reconciliations = 0;
+    const transport = scriptedTransport([{ events: [makeEvent(1)] }, { events: [makeEvent(1)] }]);
+    const events = await collect(
+      streamSessionEvents(transport, {
+        reconnect: false,
+        reconnectJitterRatio: 0,
+        beforeLiveTimeoutMs: 2,
+        beforeLive: async () => {
+          reconciliations += 1;
+          if (reconciliations === 1) await new Promise<void>(() => {});
+        },
+      }),
+    ).catch(async (error) => {
+      // A non-reconnecting caller receives the bounded failure directly.
+      expect(error).toBeInstanceOf(TypeError);
+      return [];
+    });
+    expect(events).toEqual([]);
+
+    const recoveredTransport = scriptedTransport([
+      { events: [makeEvent(1)] },
+      { events: [makeEvent(1)] },
+    ]);
+    reconciliations = 0;
+    const controller = new AbortController();
+    const recovered: SessionEvent[] = [];
+    for await (const event of streamSessionEvents(recoveredTransport, {
+      ...FAST,
+      reconnectJitterRatio: 0,
+      beforeLiveTimeoutMs: 2,
+      beforeLive: async () => {
+        reconciliations += 1;
+        if (reconciliations === 1) await new Promise<void>(() => {});
+      },
+      signal: controller.signal,
+    })) {
+      recovered.push(event);
+      controller.abort();
+    }
+    expect(sequences(recovered)).toEqual([1]);
+    expect(recoveredTransport.openedAfter).toEqual([0, 0]);
+  });
+  test("reconnects when an established stream stops delivering heartbeat bytes", async () => {
+    const controller = new AbortController();
+    const transport = scriptedTransport([
+      { events: [], hang: true },
+      { events: [makeEvent(1)], hang: true },
+    ]);
+    const seen: SessionEvent[] = [];
+    for await (const event of streamSessionEvents(transport, {
+      ...FAST,
+      reconnectJitterRatio: 0,
+      heartbeatTimeoutMs: 3,
+      signal: controller.signal,
+    })) {
+      seen.push(event);
+      controller.abort();
+    }
+    expect(sequences(seen)).toEqual([1]);
+    expect(transport.openedAfter).toEqual([0, 0]);
   });
   test("yields ordered events from a single connection and ends when reconnect is off", async () => {
     const transport = scriptedTransport([{ events: [makeEvent(1), makeEvent(2), makeEvent(3)] }]);
@@ -302,6 +389,7 @@ describe("streamSessionEvents", () => {
     const startedAt = Date.now();
     for await (const event of streamSessionEvents(transport, {
       reconnectDelayMs: 100,
+      reconnectJitterRatio: 0,
       signal: controller.signal,
     })) {
       seen.push(event);

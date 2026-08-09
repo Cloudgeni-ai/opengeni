@@ -20,10 +20,58 @@ export type WorkerRunTarget = {
   shutdown(): void;
 };
 
+/** One process may poll several disjoint Temporal queues, but it still has one
+ * host lifecycle. Start and stop every poller as a unit; a failed poller drains
+ * its siblings and preserves the original failure. */
+export function combineWorkerRunTargets(targets: readonly WorkerRunTarget[]): WorkerRunTarget {
+  if (targets.length === 0) {
+    throw new Error("a worker service requires at least one Temporal poller");
+  }
+  let runPromise: Promise<void> | undefined;
+  const shutdown = (): void => {
+    let firstError: unknown;
+    for (const target of targets) {
+      try {
+        target.shutdown();
+      } catch (error) {
+        firstError ??= error;
+      }
+    }
+    if (firstError !== undefined) throw firstError;
+  };
+  return {
+    run: () => {
+      runPromise ??= (async () => {
+        const runs = targets.map((target) => {
+          try {
+            return target.run();
+          } catch (error) {
+            return Promise.reject(error);
+          }
+        });
+        try {
+          await Promise.all(runs);
+        } catch (error) {
+          try {
+            shutdown();
+          } catch {
+            // Preserve the poller failure. Every sibling still received its
+            // shutdown request even when one request itself failed.
+          }
+          await Promise.allSettled(runs);
+          throw error;
+        }
+      })();
+      return runPromise;
+    },
+    shutdown,
+  };
+}
+
 export type WorkerServiceLifecycle = {
   state(): WorkerLifecycleState;
   run(): Promise<void>;
-  drain(reason?: string): void;
+  drain(reason?: string): boolean;
   close(): Promise<void>;
 };
 
@@ -72,25 +120,39 @@ export function createWorkerServiceLifecycle(input: {
       })();
       return runPromise;
     },
-    drain: (reason = "host request") => {
+    drain: (_reason = "host request") => {
       if (state === "draining" || state === "stopped" || state === "failed") {
-        return;
+        return true;
       }
+      const previousState = state;
+      safeLifecycleLog(() =>
+        input.observability.info("OpenGeni worker draining (graceful shutdown)", {
+          role: input.role,
+          errorClass: "WorkerLifecycleOperation",
+          errorCode: "worker_draining",
+          origin: "worker-lifecycle",
+        }),
+      );
       state = "draining";
-      input.observability.info("OpenGeni worker draining (graceful shutdown)", {
-        role: input.role,
-        reason,
-      });
       try {
         input.worker.shutdown();
-      } catch (error) {
-        input.observability.warn("worker shutdown request failed", {
-          error: error instanceof Error ? error.message : String(error),
-        });
+        return true;
+      } catch {
+        state = previousState;
+        safeLifecycleLog(() =>
+          input.observability.warn("worker shutdown request failed", {
+            errorClass: "WorkerLifecycleOperationError",
+            errorCode: "worker_shutdown_request_failed",
+            origin: "worker-lifecycle",
+          }),
+        );
+        return false;
       }
     },
     close: async () => {
-      lifecycle.drain("service close");
+      if (!lifecycle.drain("service close")) {
+        throw new Error("worker shutdown request failed");
+      }
       if (runPromise) {
         await runPromise.catch(() => undefined);
       } else {
@@ -101,4 +163,12 @@ export function createWorkerServiceLifecycle(input: {
   };
 
   return lifecycle;
+}
+
+function safeLifecycleLog(log: () => void): void {
+  try {
+    log();
+  } catch {
+    // Telemetry cannot change worker lifecycle state or shutdown delivery.
+  }
 }

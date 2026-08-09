@@ -11,6 +11,7 @@ node_modules/
 .turbo/
 .vite/
 coverage/
+tmp/
 *.tsbuildinfo
 bun.lockb
 *.traineddata
@@ -21,6 +22,7 @@ bun.lockb
 terraform.tfvars
 terraform.tfvars.json
 .agent/
+deploy/observability/charts/
 /result
 # Staged bundled-skills copy created at runtime (packages/runtime bundledSkillsDir)
 .opengeni/

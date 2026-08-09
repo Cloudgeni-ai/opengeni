@@ -34,6 +34,15 @@ function ghApiCommands(source: string): string[] {
 }
 
 describe("release image workflow contract", () => {
+  test("stages Bun dependency patches before the workload image frozen install", async () => {
+    const dockerfile = await readFile(resolve(root, "docker/opengeni.Dockerfile"), "utf8");
+    const patchCopy = dockerfile.indexOf("COPY patches patches");
+    const frozenInstall = dockerfile.indexOf("RUN bun install --frozen-lockfile");
+
+    expect(patchCopy).toBeGreaterThan(-1);
+    expect(frozenInstall).toBeGreaterThan(patchCopy);
+  });
+
   test("coalesces mutable Version-PR work without cancelling immutable publication", async () => {
     const [release, ci] = await Promise.all([workflow("release.yml"), workflow("ci.yml")]);
     const versionProjection = release.slice(
@@ -74,7 +83,7 @@ describe("release image workflow contract", () => {
       (command) => command.includes("/actions/artifacts/") && command.includes("/zip"),
     );
 
-    expect(artifactDownloads).toHaveLength(5);
+    expect(artifactDownloads).toHaveLength(6);
     for (const command of artifactDownloads) {
       expect(command).toMatch(/\/zip["']?\s*\\?\s*(?:\n\s*)?>\s*[^\s]+/);
     }
@@ -319,13 +328,29 @@ describe("release image workflow contract", () => {
       "Compare an existing immutable distribution before image mutation",
     );
     const imagePromotion = release.indexOf("Promote exact candidate manifests");
+    const packageProvenance = release.indexOf("Resolve trusted package publication provenance");
+    const packagePublication = release.indexOf("Publish source-bound packages");
 
     expect(release).toContain("candidate_run_id:");
-    expect(release).toContain("bun scripts/verify-release-provenance.ts");
+    expect(release).toContain("package_source_sha:");
+    expect(release).toContain("package_run_id:");
+    expect(release).toContain("bun .release/controller/scripts/verify-release-provenance.ts");
+    expect(release).toContain("--kind package");
     expect(release).toContain("CANDIDATE_ARTIFACT_ID:");
     expect(release).toContain("CANDIDATE_ARTIFACT_DIGEST:");
     expect(release).toContain("CANDIDATE_SOURCE_TREE_SHA:");
+    expect(release).toContain("PACKAGE_ARTIFACT_ID:");
+    expect(release).toContain("PACKAGE_ARTIFACT_DIGEST:");
+    expect(release).toContain("evidence/package-publication-verified.json");
+    expect(release).toContain("evidence/package-provenance.json");
+    expect(release).toContain("OPENGENI_RELEASE_PACKAGE_BOM_RECEIPT:");
+    expect(release).toContain("OPENGENI_RELEASE_PACKAGE_BOM_SOURCE_SHA:");
+    expect(release).toContain("OPENGENI_RELEASE_PACKAGE_CLOSURE_ROOT:");
+    expect(release).toContain("bun .release/controller/scripts/verify-release-packages.ts");
     expect(release).toContain("bun scripts/release-candidate.ts");
+    expect(release).toContain('if [ -n "$EXPECTED_PACKAGES" ]; then');
+    expect(release).toContain('candidate_verify_args+=(--expected-packages "$EXPECTED_PACKAGES")');
+    expect(release).toContain('bun scripts/release-candidate.ts "${candidate_verify_args[@]}"');
     expect(release).toContain("bun scripts/release-version.ts deploy/helm/opengeni/Chart.yaml");
     expect(release).not.toContain('map(select(.name == "@opengeni/sdk"))');
     expect(release).toContain("bun run test:runtime-embedding-consumer");
@@ -357,6 +382,8 @@ describe("release image workflow contract", () => {
     expect(release).toContain("evidence/release-bom.json");
     expect(release).toContain('docker logout "$REGISTRY"');
     expect(registryReconcile).toBeGreaterThan(-1);
+    expect(packageProvenance).toBeGreaterThan(-1);
+    expect(packagePublication).toBeGreaterThan(packageProvenance);
     expect(existingReleasePreflight).toBeGreaterThan(registryReconcile);
     expect(imagePromotion).toBeGreaterThan(registryReconcile);
     expect(imagePromotion).toBeGreaterThan(existingReleasePreflight);
@@ -457,6 +484,21 @@ describe("release image workflow contract", () => {
     expect(agentRelease).not.toContain("softprops/action-gh-release@v2");
     expect(agentRelease).toContain("tag_name: agent-v${{ needs.guard.outputs.version }}");
     expect(agentRelease).toContain("OPENGENI_AGENT_STABLE_VERSION");
+    expect(agentRelease).toContain("Build and sign the stable update manifest");
+    expect(agentRelease).toContain("dist/manifest.json.minisig");
+    expect(agentRelease).toContain("rollout_percent 100");
+    expect(agentRelease).toContain("Require the release signing key");
+    expect(agentRelease).toContain('NOTARY_ARCHIVE="${{ matrix.asset }}.notary.zip"');
+    expect(agentRelease).toContain(
+      'ditto -c -k --keepParent "${{ matrix.asset }}" "$NOTARY_ARCHIVE"',
+    );
+    expect(agentRelease).toContain(
+      'rcodesign notary-submit --api-key-path /tmp/asc.json --wait "$NOTARY_ARCHIVE"',
+    );
+    expect(agentRelease).not.toContain(
+      'rcodesign notary-submit --api-key-path /tmp/asc.json --wait "${{ matrix.asset }}"',
+    );
+    expect(agentRelease).not.toContain("manifest publish is wired via");
     expect(agentRelease).not.toContain("gh release delete");
     expect(agentRelease).not.toContain("gh release create agent-latest");
     expect(agentRelease).not.toContain("releases/download/agent-latest");

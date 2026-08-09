@@ -2,6 +2,7 @@
 {{- $environment := default "production" (index .Values.config "OPENGENI_ENVIRONMENT") }}
 {{- $inventoryFreshnessSeconds := int (default 300 ((.Values.observability).prometheusRule).inventoryFreshnessSeconds) }}
 {{- $reaperPeriodMs := int (default "30000" (index .Values.config "OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS")) }}
+{{- $fullName := include "opengeni.fullname" . }}
 {{- if le $inventoryFreshnessSeconds 0 }}
 {{- fail "observability.prometheusRule.inventoryFreshnessSeconds must be positive" }}
 {{- end }}
@@ -71,6 +72,49 @@ spec:
               and on (job, instance)
               (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="expired_drains"} < {{ $inventoryFreshnessSeconds }})
             )
+        # Node-relative protection cannot rely on a container memory limit: the
+        # single-node profile intentionally leaves the resource-based turn worker
+        # unbounded so Temporal can tune concurrency against real headroom. These
+        # records map node-exporter instances onto Kubernetes nodes, then retain
+        # alerts only for nodes currently hosting this OpenGeni release.
+        - record: opengeni:workload_node:present
+          expr: |
+            max by (node) (
+              kube_pod_info{namespace="{{ .Release.Namespace }}", pod=~"{{ $fullName }}-.*"}
+              and on (namespace, pod)
+              (kube_pod_status_phase{namespace="{{ .Release.Namespace }}", phase="Running"} == 1)
+            )
+        - record: opengeni:node_exporter_instance:info
+          expr: |
+            max by (instance, node) (
+              label_replace(node_uname_info, "node", "$1", "nodename", "(.+)")
+            )
+        - record: opengeni:kubelet_instance:info
+          expr: |
+            max by (job, instance, node) (
+              kubelet_node_name{metrics_path="/metrics"}
+            )
+        - record: opengeni:node_memory_psi_stall_ratio
+          expr: |
+            max by (node) (
+              rate(node_pressure_memory_stalled_seconds_total[2m])
+              * on (instance) group_left (node)
+              opengeni:node_exporter_instance:info
+            )
+        - record: opengeni:node_io_psi_stall_ratio
+          expr: |
+            max by (node) (
+              rate(node_pressure_io_stalled_seconds_total[2m])
+              * on (instance) group_left (node)
+              opengeni:node_exporter_instance:info
+            )
+        - record: opengeni:node_swap_out_pages_per_second
+          expr: |
+            max by (node) (
+              rate(node_vmstat_pswpout[2m])
+              * on (instance) group_left (node)
+              opengeni:node_exporter_instance:info
+            )
         - alert: OpenGeniTurnStuck
           expr: opengeni_turn_oldest_inflight_age_seconds > 900
           for: 5m
@@ -103,10 +147,10 @@ spec:
             (
               sum by (backend, op) (increase(opengeni_sandbox_operations_total{outcome="failed"}[10m]))
               /
-              clamp_min(sum by (backend, op) (increase(opengeni_sandbox_operations_total[10m])), 1)
+              clamp_min(sum by (backend, op) (increase(opengeni_sandbox_operations_total{outcome=~"ok|failed"}[10m])), 1)
             ) > 0.2
             and
-            sum by (backend, op) (increase(opengeni_sandbox_operations_total[10m])) >= 5
+            sum by (backend, op) (increase(opengeni_sandbox_operations_total{outcome=~"ok|failed"}[10m])) >= 5
           for: 10m
           labels:
             severity: warning
@@ -187,6 +231,123 @@ spec:
             severity: critical
           annotations:
             summary: An OpenGeni service target is down
+        # ── Worker memory headroom ───────────────────────────────────────────
+        - alert: OpenGeniTurnWorkerMemoryHeadroomLow
+          expr: |
+            max by (instance, scope) (opengeni_turn_worker_memory_guard_utilization_ratio)
+            >= on (instance, scope)
+            max by (instance, scope) (opengeni_turn_worker_memory_guard_target_ratio)
+          for: 30s
+          labels:
+            severity: warning
+          annotations:
+            summary: A resource-based turn worker reached its admission target
+            description: Temporal should stop admitting more work while HPA or queued capacity absorbs load. This is backpressure, not a restart condition.
+        - alert: OpenGeniTurnWorkerMemoryEmergency
+          expr: |
+            max by (instance, scope) (opengeni_turn_worker_memory_guard_utilization_ratio)
+            >= on (instance, scope)
+            max by (instance, scope) (opengeni_turn_worker_memory_guard_emergency_ratio)
+          for: 30s
+          labels:
+            severity: critical
+          annotations:
+            summary: A turn worker crossed its emergency memory threshold
+            description: Admission already stopped, but in-flight work retained enough memory to enter the last-resort graceful drain window.
+        - alert: OpenGeniTurnWorkerMemoryConsumesReserve
+          expr: |
+            max by (instance, scope) (opengeni_turn_worker_memory_guard_process_rss_ratio)
+            > on (instance, scope)
+            clamp_min(
+              1 - max by (instance, scope) (opengeni_turn_worker_memory_guard_target_ratio),
+              0
+            )
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: One turn worker RSS consumes more than the configured memory reserve
+            description: The worker process alone is larger than the headroom reserved above ordinary admission. Reduce per-turn retention or isolate the worker before pressure reaches the emergency threshold.
+        - alert: OpenGeniTurnWorkerMemoryGuardDraining
+          expr: sum(increase(opengeni_turn_worker_memory_guard_drains_total[10m])) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: A turn worker requested a memory-pressure safety drain
+            description: Sustained host or finite-cgroup memory pressure triggered the normal graceful worker shutdown/checkpoint path. Inspect long-running turns and retained external memory before replacement capacity repeats the event.
+        - alert: OpenGeniTurnWorkerMemoryGuardFailure
+          expr: |
+            (sum(increase(opengeni_turn_worker_memory_guard_sample_failures_total[10m])) or vector(0))
+            +
+            (sum(increase(opengeni_turn_worker_memory_guard_drain_failures_total[10m])) or vector(0))
+            > 0
+          labels:
+            severity: critical
+          annotations:
+            summary: The turn-worker memory guard could not sample pressure or request a drain
+            description: The hard headroom protection is degraded. Restore readable host/cgroup memory signals and the graceful worker lifecycle before admitting sustained turn load.
+        # ── OpenGeni-hosting node pressure ───────────────────────────────────
+        - alert: OpenGeniNodeMemoryPressureStalled
+          expr: |
+            opengeni:node_memory_psi_stall_ratio > 0.1
+            and on (node)
+            opengeni:workload_node:present
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: An OpenGeni node is losing more than 10% of execution time to memory stalls
+            description: Sustained memory PSI indicates reclaim or swap contention across the node, even when no pod has a finite memory limit.
+        - alert: OpenGeniNodeIoPressureStalled
+          expr: |
+            opengeni:node_io_psi_stall_ratio > 0.1
+            and on (node)
+            opengeni:workload_node:present
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: An OpenGeni node is losing more than 10% of execution time to I/O stalls
+            description: Sustained I/O PSI can stall the container runtime, DNS, NATS, Temporal, and every worker together on a single node.
+        - alert: OpenGeniNodeSwapThrashing
+          expr: |
+            opengeni:node_swap_out_pages_per_second > 0
+            and on (node)
+            opengeni:node_memory_psi_stall_ratio > 0.1
+            and on (node)
+            opengeni:workload_node:present
+          labels:
+            severity: critical
+          annotations:
+            summary: An OpenGeni node is swapping while processes are stalled on memory
+            description: Active swap-out combined with memory PSI is a host-wide collapse signal, not an isolated provider or network error.
+        - alert: OpenGeniNodeContainerRuntimeErrors
+          expr: |
+            sum by (node, operation_type) (
+              increase(kubelet_runtime_operations_errors_total[5m])
+              * on (job, instance) group_left (node)
+              opengeni:kubelet_instance:info
+            ) > 0
+            and on (node)
+            opengeni:workload_node:present
+          labels:
+            severity: critical
+          annotations:
+            summary: Kubelet container-runtime operations are failing on an OpenGeni node
+            description: Runtime errors during node pressure can make unrelated services appear unavailable and can prevent clean replacement capacity from starting.
+        - alert: OpenGeniNodeNotReady
+          expr: |
+            max by (node) (
+              kube_node_status_condition{condition="Ready", status="true"}
+            ) == 0
+            and on (node)
+            opengeni:workload_node:present
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: A node hosting OpenGeni is NotReady
+            description: Treat simultaneous service, DNS, transport, and provider failures as a node incident until readiness and pressure signals recover.
         # ── Streaming health ─────────────────────────────────────────────────
         # SLIs from the token-streaming pipeline, split so an alert names the
         # layer: the model (TTFT), the durable write path (append), or delivery

@@ -348,7 +348,7 @@ describe("useTurnQueue", () => {
       streamEvents: (_ws, _session, options) => {
         streamedAfter.value = options?.after ?? null;
         return (async function* () {
-          await options?.beforeLive?.();
+          options?.onOpen?.();
           while (true) {
             const event = await new Promise<SessionEvent | null>((resolve) => {
               push = resolve;
@@ -383,13 +383,9 @@ describe("useTurnQueue", () => {
     await hook.unmount();
   });
 
-  test("a failed queue handoff rejects live, surfaces the error, then recovers", async () => {
+  test("a failed non-blocking queue handoff surfaces the error, then a live event recovers", async () => {
     let reads = 0;
-    let handoffRejections = 0;
-    let releaseRetry = (): void => undefined;
-    const retryGate = new Promise<void>((resolve) => {
-      releaseRetry = resolve;
-    });
+    let push: ((event: SessionEvent) => void) | null = null;
     const client = fakeClient({
       getQueue: async () => {
         reads += 1;
@@ -399,14 +395,9 @@ describe("useTurnQueue", () => {
       getSession: async () => ({ lastSequence: 41 }) as never,
       streamEvents: (_workspaceId, _sessionId, options) =>
         (async function* () {
-          try {
-            await options?.beforeLive?.();
-          } catch {
-            handoffRejections += 1;
-            await retryGate;
-            await options?.beforeLive?.();
-          }
+          options?.onOpen?.();
           const event = await new Promise<SessionEvent | null>((resolve) => {
+            push = resolve;
             options?.signal?.addEventListener("abort", () => resolve(null), {
               once: true,
             });
@@ -420,12 +411,13 @@ describe("useTurnQueue", () => {
     );
     await flush();
 
-    expect(handoffRejections).toBe(1);
     expect(hook.result.current.queue[0]?.id).toBe("stale");
     expect(hook.result.current.error?.message).toContain("queue handoff unavailable");
 
-    releaseRetry();
-    await flush();
+    await flushing(async () => {
+      push!(makeEvent(42, "turn.queued"));
+    });
+    await flush(250);
     expect(reads).toBe(3);
     expect(hook.result.current.queue[0]?.id).toBe("recovered");
     expect(hook.result.current.error).toBeNull();
@@ -450,14 +442,17 @@ describe("useTurnQueue", () => {
       getQueue: async () => {
         reads += 1;
         if (reads === 1) return queueSnapshot([fakeTurn({ id: "stale" })], { version: 1 });
-        if (reads === 2) return await handoffRead;
+        if (reads === 2) {
+          const value = await handoffRead;
+          markHandoffComplete?.();
+          return value;
+        }
         return await supersedingRead;
       },
       getSession: async () => ({ lastSequence: 41 }) as never,
       streamEvents: (_workspaceId, _sessionId, options) =>
         (async function* () {
-          await options?.beforeLive?.();
-          markHandoffComplete?.();
+          options?.onOpen?.();
           const event = await new Promise<SessionEvent | null>((resolve) => {
             options?.signal?.addEventListener("abort", () => resolve(null), {
               once: true,
@@ -1255,7 +1250,9 @@ describe("useSessionMcpApprovalPolicy", () => {
     await flushing(async () => {
       await hook.result.current.update(["write_record"]);
     });
-    expect(reads).toBe(2);
+    // The authoritative post-mutation read queues behind the older read rather
+    // than overlapping it. The mutation response remains the visible truth.
+    expect(reads).toBe(1);
     expect(hook.result.current.policy).toEqual(["write_record"]);
 
     await flushing(() => {
@@ -1265,6 +1262,7 @@ describe("useSessionMcpApprovalPolicy", () => {
         mcpServers: [metadata(false)],
       });
     });
+    expect(reads).toBe(2);
     expect(hook.result.current.policy).toEqual(["write_record"]);
 
     await flushing(() => {
@@ -1278,7 +1276,7 @@ describe("useSessionMcpApprovalPolicy", () => {
     await hook.unmount();
   });
 
-  test("providerless stream handoff reconciles policy state before going live", async () => {
+  test("providerless stream open reconciles policy state without blocking live delivery", async () => {
     let reads = 0;
     let currentPolicy: SessionMcpApprovalPolicy = false;
     const metadata = (): SessionMcpServerMetadata => ({
@@ -1303,7 +1301,7 @@ describe("useSessionMcpApprovalPolicy", () => {
         streamEvents: (_workspaceId, _sessionId, options) =>
           (async function* () {
             currentPolicy = ["write_record"];
-            await options?.beforeLive?.();
+            options?.onOpen?.();
             const event = await new Promise<SessionEvent | null>((resolve) => {
               options?.signal?.addEventListener("abort", () => resolve(null), {
                 once: true,
@@ -1780,7 +1778,7 @@ describe("useComposer queue-vs-steer", () => {
       },
       streamEvents: (_workspaceId, _sessionId, options) =>
         (async function* () {
-          await options?.beforeLive?.();
+          options?.onOpen?.();
           yield* [] as SessionEvent[];
         })(),
     });
@@ -3411,6 +3409,15 @@ describe("useEnvironments", () => {
         log.push(`set:${environmentId}:${name}`);
         return { name, version: 1, createdAt: "", updatedAt: "" };
       },
+      getVariableSetVariable: async (_ws, environmentId, name) => {
+        log.push(`read:${environmentId}:${name}`);
+        return {
+          variableSetId: environmentId,
+          name,
+          version: 1,
+          value: `const fake = "ghp_not_a_credential";\nprintf '%s\\n' "$VALUE"`,
+        };
+      },
       deleteEnvironmentVariable: async (_ws, environmentId, name) => {
         log.push(`unset:${environmentId}:${name}`);
       },
@@ -3435,6 +3442,13 @@ describe("useEnvironments", () => {
       "staging",
     ]);
     await flushing(async () => {
+      const secret = await hook.result.current.readVariable("env-1", "EXAMPLE_TOKEN");
+      expect(secret?.value).toBe(`const fake = "ghp_not_a_credential";\nprintf '%s\\n' "$VALUE"`);
+    });
+    // Plaintext is returned directly to the caller and never triggers a
+    // metadata-cache refresh that could retain it.
+    expect(log.at(-1)).toBe("read:env-1:EXAMPLE_TOKEN");
+    await flushing(async () => {
       await hook.result.current.setVariable("env-1", "EXAMPLE_TOKEN", "v2");
       await hook.result.current.deleteVariable("env-1", "EXAMPLE_TOKEN");
       await hook.result.current.remove("env-1");
@@ -3443,6 +3457,7 @@ describe("useEnvironments", () => {
       "list",
       "create:staging",
       "list",
+      "read:env-1:EXAMPLE_TOKEN",
       "set:env-1:EXAMPLE_TOKEN",
       "list",
       "unset:env-1:EXAMPLE_TOKEN",

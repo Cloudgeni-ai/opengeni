@@ -840,12 +840,19 @@ export async function recoverReleaseHeadEvidence(options = {}) {
       "release-head pull-request timeline",
     ),
   ]);
-  invariant(
-    source.treeSha === head.treeSha,
-    "release-head merged source tree differs from the reviewed head",
-  );
   assertProviderMergeEvent(timeline, context.sourceSha, pullIdentity);
-  const mergeMethod = await classifyMergeOutcome(api, source, pullIdentity);
+  // A provider squash can be based on a newer, disjoint main commit than the
+  // PR's event base. In that case the merged source tree correctly contains
+  // both the reviewed head delta and the intervening main delta, so whole-tree
+  // equality is not a valid retention precondition. The provider-owned merged
+  // PR identity and timeline event above bind the exact base, head, merge SHA,
+  // actor, and timestamp; historical source admission below independently
+  // proves the reviewed base→head file manifest. The ordinary release verifier
+  // remains responsible for proving the final source composition.
+  const mergeMethod =
+    source.treeSha === head.treeSha
+      ? await classifyMergeOutcome(api, source, pullIdentity)
+      : "provider-verified-moving-main";
   await assertSourceAncestorOfCurrentMain(api, context.sourceSha, context.sha);
   const historicalAdmission = await verifyHistoricalSourceAdmission({
     number: context.prNumber,

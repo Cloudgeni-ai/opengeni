@@ -9,7 +9,8 @@
 //   attach  -> acquireLease(kind:'viewer') under FOR UPDATE + cold->warming CAS.
 //              spawner role  -> establish the box in-process + commitWarmingToWarm.
 //              attached/rearmed -> the holder alone keeps the box warm.
-//              fenced -> release + surface a 409 (a newer epoch re-established it).
+//              lifecycle claim -> wait for settlement; true epoch supersession
+//              -> release + surface a 409.
 //   heartbeat -> heartbeatLeaseHolder (epoch-fenced) refreshes the holder TTL.
 //   detach  -> releaseLeaseHolder (idempotent); the reaper (P1.3) stop()s the
 //              box at refcount 0 past the drain grace.
@@ -24,7 +25,7 @@ import {
   hasGitCredentialRepositorySelection,
   hasGitHubRepositorySelection,
   resolveStreamTokenSecret,
-  sandboxArchiveCaptureTimeoutMs,
+  sandboxLifecycleTransitionWaitMs,
   stableSandboxEnvironmentForRun,
 } from "@opengeni/config";
 import type { Settings } from "@opengeni/config";
@@ -62,6 +63,8 @@ import {
   exposeStreamPort,
   desktopCapableBackend,
   NatsControlRpc,
+  SandboxResumeIdentityMismatchError,
+  SandboxResumeIdentityUnavailableError,
   SelfhostedSandboxClient,
   TERMINAL_STREAM_PORT,
   DisplayStackUnsupportedError,
@@ -74,6 +77,7 @@ import {
 } from "@opengeni/runtime/sandbox";
 import { relayConfigFromSettings } from "@opengeni/core";
 import { establishApiSandboxSpawner } from "./rematerialize";
+import { establishCachedChannelAHandle } from "./channel-a";
 
 /** The minimal services a viewer op needs: the DB + settings (lease cadence +
  *  the sandbox client construction the leaf reads from settings). The bus is
@@ -178,7 +182,14 @@ export async function sessionAttachEnvironment(
  */
 export async function attachViewer(
   services: ViewerServices,
-  input: { accountId: string; workspaceId: string; session: Session; viewerId?: string },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    session: Session;
+    viewerId?: string;
+    /** Cancel lifecycle waiting when the originating HTTP request disconnects. */
+    waitSignal?: AbortSignal;
+  },
 ): Promise<ViewerAttachResult> {
   const { db, settings } = services;
   const { accountId, workspaceId, session } = input;
@@ -210,7 +221,8 @@ export async function attachViewer(
       os: session.sandboxOs,
       leaseTtlMs,
       warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
-      captureWaitMs: sandboxArchiveCaptureTimeoutMs(settings),
+      captureWaitMs: sandboxLifecycleTransitionWaitMs(settings),
+      ...(input.waitSignal ? { waitSignal: input.waitSignal } : {}),
     });
   } catch (error) {
     if (error instanceof SandboxViewerAdmissionBlockedError) {
@@ -236,7 +248,10 @@ export async function attachViewer(
   if (acquired.role === "fenced") {
     await release();
     throw new HTTPException(409, {
-      message: `sandbox lease superseded (epoch ${acquired.lease.leaseEpoch}); re-read capabilities and re-attach`,
+      message:
+        acquired.reason === "superseded"
+          ? `sandbox lease superseded (epoch ${acquired.lease.leaseEpoch}); re-read capabilities and re-attach`
+          : `sandbox lifecycle transition in progress (${acquired.reason}, epoch ${acquired.lease.leaseEpoch}, backend ${acquired.lease.backend}, instance ${acquired.lease.instanceId ?? "none"}); retry`,
     });
   }
 
@@ -360,6 +375,12 @@ export async function attachViewer(
         throw new HTTPException(409, {
           message: `sandbox instance was lost; retry to restore it`,
         });
+      }
+      if (
+        error instanceof SandboxResumeIdentityMismatchError ||
+        error instanceof SandboxResumeIdentityUnavailableError
+      ) {
+        throw new HTTPException(409, { message: error.message });
       }
       throw error;
     } finally {
@@ -624,7 +645,7 @@ export type MintDesktopStreamInput = {
   session: Session;
   /** The viewer holder id the scoped token is minted for. */
   viewerId: string;
-  /** The live lease (must be warm/draining — the box is up). A selfhosted-active
+  /** The live lease (must be holder-confirmed warm). A selfhosted-active
    *  session may have no Modal group lease; omit and the selfhosted branch handles it. */
   lease?: LeaseSnapshot;
   /** The epoch the CALLER last observed the URL minted under. When the live
@@ -716,7 +737,7 @@ export async function mintDesktopStream(
 
   // GATE 2: the box must be live (the handshake never spins one up — a cold box
   // returns lease_cold; the viewer-attach path warms it first, then mints).
-  if (!lease || (lease.liveness !== "warm" && lease.liveness !== "draining")) {
+  if (!lease || lease.liveness !== "warm") {
     return null;
   }
 
@@ -730,18 +751,22 @@ export async function mintDesktopStream(
     // SAME stable run-env the turn declares, so a later turn finds no env delta.
     const environment = await sessionAttachEnvironment(services, workspaceId, session);
     try {
+      const establish = () =>
+        (services.establishSandboxSession ?? establishSandboxSessionFromEnvelope)(
+          settings,
+          envelope,
+          {
+            sessionId: session.id,
+            recovery: "resume-only",
+            backendOverride: session.sandboxBackend,
+            environment,
+          },
+        );
       established = input.establish
         ? await input.establish(envelope)
-        : await (services.establishSandboxSession ?? establishSandboxSessionFromEnvelope)(
-            settings,
-            envelope,
-            {
-              sessionId: session.id,
-              recovery: "resume-only",
-              backendOverride: session.sandboxBackend,
-              environment,
-            },
-          );
+        : services.establishSandboxSession
+          ? await establish()
+          : await establishCachedChannelAHandle(workspaceId, session.id, lease, establish);
     } catch (error) {
       await retireMissingWarmLease(services, { accountId, workspaceId, session, lease }, error);
       return null;
@@ -874,7 +899,7 @@ export type MintTerminalStreamInput = {
   session: Session;
   /** The viewer holder / principal id the scoped token is minted for. */
   viewerId: string;
-  /** The live lease (must be warm/draining — the box is up). A selfhosted-active
+  /** The live lease (must be holder-confirmed warm). A selfhosted-active
    *  session may have no Modal group lease; omit and the selfhosted branch handles it. */
   lease?: LeaseSnapshot;
   /** Test seam: override how the box is re-established by id (see
@@ -942,7 +967,7 @@ export async function mintTerminalStream(
   }
 
   // GATE 2: the box must be live (the handshake never spins one up).
-  if (!lease || (lease.liveness !== "warm" && lease.liveness !== "draining")) {
+  if (!lease || lease.liveness !== "warm") {
     return null;
   }
 
@@ -955,18 +980,22 @@ export async function mintTerminalStream(
     // declares, so a later turn finds no manifest-env delta.
     const environment = await sessionAttachEnvironment(services, workspaceId, session);
     try {
+      const establish = () =>
+        (services.establishSandboxSession ?? establishSandboxSessionFromEnvelope)(
+          settings,
+          envelope,
+          {
+            sessionId: session.id,
+            recovery: "resume-only",
+            backendOverride: session.sandboxBackend,
+            environment,
+          },
+        );
       established = input.establish
         ? await input.establish(envelope)
-        : await (services.establishSandboxSession ?? establishSandboxSessionFromEnvelope)(
-            settings,
-            envelope,
-            {
-              sessionId: session.id,
-              recovery: "resume-only",
-              backendOverride: session.sandboxBackend,
-              environment,
-            },
-          );
+        : services.establishSandboxSession
+          ? await establish()
+          : await establishCachedChannelAHandle(workspaceId, session.id, lease, establish);
     } catch (error) {
       await retireMissingWarmLease(services, { accountId, workspaceId, session, lease }, error);
       return null;

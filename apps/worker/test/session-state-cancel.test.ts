@@ -132,6 +132,8 @@ describe("session-state interrupt settlement", () => {
             publishedEvents.push(...events);
           },
         ),
+        countQueuedTurns: mock(async () => 0),
+        recordTurnsQueuedGauge: mock(() => undefined),
       },
     );
 
@@ -182,6 +184,8 @@ describe("session-state interrupt settlement", () => {
         settleSessionAttemptInterruptions: mock(async () => {
           throw new Error("logical settlement must not be repeated");
         }),
+        countQueuedTurns: mock(async () => 0),
+        recordTurnsQueuedGauge: mock(() => undefined),
       },
     );
 
@@ -364,6 +368,68 @@ describe("session-state interrupt settlement", () => {
     ]);
     expect(publishedEvents).toEqual([
       { type: "session.queue.changed", payload: { operation: "attempt_quiesced" } },
+    ]);
+  });
+
+  test("settles an already-quiesced paused projection without inspecting Temporal", async () => {
+    let inspected = false;
+    const reconcileCalls: unknown[] = [];
+    const activities = createSessionStateActivities(
+      async () =>
+        ({
+          db: fakeDb,
+          bus: { publish: async () => undefined },
+          settings: {},
+          observability: {},
+          wakeSessionWorkflow: null,
+          inspectSessionAttemptActivity: async () => {
+            inspected = true;
+            return "pending";
+          },
+        }) as any,
+      {
+        getSessionAttemptActivityRef: mock(async () => ({
+          workflowId: "session-session-1",
+          workflowRunId: "run-quiesced",
+          activityId: "activity-quiesced",
+          quiesced: true,
+        })),
+        reconcileSessionAttemptQuiescence: mock(async (_db, input) => {
+          reconcileCalls.push(input);
+          return {
+            action: "quiesced" as const,
+            events: [
+              {
+                type: "session.status.changed",
+                payload: { status: "idle", reason: "paused_recovery_settled" },
+              },
+            ],
+          } as any;
+        }),
+      },
+    );
+
+    expect(
+      await activities.reconcileSessionAttemptQuiescence({
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+        attemptId: "attempt-1",
+        workflowId: "session-session-1",
+      }),
+    ).toEqual({ action: "quiesced" });
+    expect(inspected).toBe(false);
+    expect(reconcileCalls).toEqual([
+      {
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+        attemptId: "attempt-1",
+        temporalWorkflowId: "session-session-1",
+        temporalWorkflowRunId: "run-quiesced",
+        temporalActivityId: "activity-quiesced",
+        activitySettled: true,
+      },
     ]);
   });
 

@@ -45,6 +45,27 @@ export function fakeClient(partial: Partial<SessionClientLike>): SessionClientLi
     }),
     ...partial,
   } as SessionClientLike;
+  if (!partial.fsListBatch) {
+    target.fsListBatch = async (workspaceId, sessionId, request, options) => ({
+      results: await Promise.all(
+        request.requests.map(
+          async (item) => await target.fsList(workspaceId, sessionId, item, options),
+        ),
+      ),
+    });
+  }
+  if (!partial.gitReadBatch) {
+    target.gitReadBatch = async (workspaceId, sessionId, request, options) => ({
+      results: await Promise.all(
+        request.requests.map(async (item) => ({
+          status: await target.gitStatus(workspaceId, sessionId, item.status, options),
+          ...(item.diff
+            ? { diff: await target.gitDiff(workspaceId, sessionId, item.diff, options) }
+            : {}),
+        })),
+      ),
+    });
+  }
   return new Proxy(target, {
     get(clientTarget, property) {
       const value = (clientTarget as Record<PropertyKey, unknown>)[property];

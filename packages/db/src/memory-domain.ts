@@ -431,7 +431,7 @@ export const MEMORY_SEARCH_TOOL_DESCRIPTION =
   "Search this workspace's shared long-lived memory (semantic + keyword). Use it before starting a new non-trivial task when the injected notes or current conversation do not already answer how the workspace does something. Results persist in conversation context: do not repeat the same search as routine setup on every continuation, resume, or interrupted turn. Returns scored records with ids.";
 
 export const MEMORY_SAVE_TOOL_DESCRIPTION =
-  "Save one durable, future-useful fact to this workspace's shared memory: a stable preference, an environment fact, a procedure that worked, or a decision and its reason. Write it compactly (1–3 sentences), self-contained (no 'this session/above' references, absolute dates, name concrete things), so a future session can act on it alone. Do NOT save: session-specific state, speculation, anything derivable from the repo/docs, near-duplicates of existing memories (search first — to refine or replace an existing record pass replaces_id), or secrets/tokens/credentials. Most turns have nothing worth saving.";
+  "Save one durable, future-useful fact to this workspace's shared memory: a stable preference, an environment fact, a procedure that worked, or a decision and its reason. Write it compactly (1–3 sentences), self-contained (no 'this session/above' references, absolute dates, name concrete things), so a future session can act on it alone. Do NOT save: session-specific state, speculation, anything derivable from the repo/docs, or near-duplicates of existing memories (search first — to refine or replace an existing record pass replaces_id). Most turns have nothing worth saving.";
 
 export const MEMORY_CORRECT_TOOL_DESCRIPTION =
   "Flag a workspace memory as wrong or outdated the moment you discover it — this is the most valuable memory action, because a wrong memory misleads every future session. Pass the record's id (as shown in [brackets]); optionally give replacement_text with the corrected fact, otherwise the record is archived.";
@@ -452,51 +452,12 @@ export function hashMemoryText(text: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Sanitization + secret redaction
+// Exact stored memory content
 // ---------------------------------------------------------------------------
 
-// Conservative secret patterns. This is slop/leak defense, not a guarantee; the
-// end-state reflector adds real scanning. Each match is replaced with [REDACTED].
-const SECRET_PATTERNS: readonly RegExp[] = [
-  /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g, // PEM private keys
-  /AKIA[0-9A-Z]{16}/g, // AWS access key id
-  /\bASIA[0-9A-Z]{16}/g, // AWS temporary access key id
-  /\bsk-[A-Za-z0-9_-]{20,}/g, // OpenAI-style secret keys
-  /\bgh[pousr]_[A-Za-z0-9]{20,}/g, // GitHub tokens
-  /\bxox[baprs]-[A-Za-z0-9-]{10,}/g, // Slack tokens
-  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, // JWT (three b64url segments)
-  /\bBearer\s+[A-Za-z0-9._~+/-]{16,}=*/gi, // bearer credentials
-  /\b(?:password|passwd|secret|api[_-]?key|token)\s*[=:]\s*\S{6,}/gi, // key=value secrets
-];
-
-// Strip C0/C1 control characters, collapse whitespace to single spaces, trim.
-function stripControlAndCollapse(raw: string): string {
-  // eslint-disable-next-line no-control-regex
-  const withoutControls = raw.replace(/[\u0000-\u001F\u007F-\u009F]/g, " ");
-  return withoutControls.replace(/\s+/g, " ").trim();
-}
-
-export type MemorySanitizeResult = {
-  text: string;
-  redactionCount: number;
-};
-
-// Produce the stored form of a memory text: control-stripped, single-line,
-// secret-redacted. Does NOT enforce the length cap (callers check
-// tooLong via isMemoryTextTooLong on the returned text so they can surface an
-// actionable error rather than silently truncating).
-export function sanitizeMemoryText(raw: string): MemorySanitizeResult {
-  let text = stripControlAndCollapse(raw);
-  let redactionCount = 0;
-  for (const pattern of SECRET_PATTERNS) {
-    text = text.replace(pattern, () => {
-      redactionCount += 1;
-      return "[REDACTED]";
-    });
-  }
-  // Redaction can leave doubled spaces; re-collapse.
-  text = text.replace(/\s+/g, " ").trim();
-  return { text, redactionCount };
+/** Accepted memory text is canonical content; validation must never rewrite it. */
+export function memoryTextForStorage(raw: string): string {
+  return raw;
 }
 
 export function isMemoryTextTooLong(text: string): boolean {

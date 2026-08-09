@@ -12,14 +12,13 @@ import { DropdownMenu } from "radix-ui";
 import {
   useEffect,
   useMemo,
-  useRef,
   useState,
   type CSSProperties,
   type ReactNode,
   type SVGProps,
 } from "react";
 import { cn } from "../lib/cn";
-import { usePortalTokenStyle } from "../lib/use-portal-token-style";
+import { usePortalTokenSource, usePortalTokenStyle } from "../lib/use-portal-token-style";
 import {
   coerceReasoningEffortForModel,
   effortOptionsForModel,
@@ -243,7 +242,7 @@ export function PickerNavRow(props: {
       onClick={props.onClick}
       data-testid={props.testId}
       className={cn(
-        "flex w-full cursor-pointer items-center gap-2 rounded-og-sm px-[var(--og-model-picker-row-padding-x)] py-[var(--og-model-picker-row-padding-y)] text-left text-og-fg outline-none transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40",
+        "flex w-full cursor-pointer items-center gap-2 rounded-og-sm px-[var(--og-model-picker-row-padding-x)] py-[var(--og-model-picker-row-padding-y)] text-left text-og-fg outline-hidden transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40",
         props.disabled && "cursor-not-allowed opacity-50",
       )}
     >
@@ -278,7 +277,7 @@ export function PickerBackHeader(props: {
         type="button"
         onClick={props.onBack}
         data-testid="model-picker-back"
-        className="flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 rounded-og-sm px-1.5 py-1.5 text-left text-og-fg outline-none transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40"
+        className="flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 rounded-og-sm px-1.5 py-1.5 text-left text-og-fg outline-hidden transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40"
       >
         <ChevronLeftIcon className="size-3.5 shrink-0 text-og-fg-subtle" />
         {props.icon}
@@ -455,7 +454,7 @@ export function ModelPolicyPickerMenu(
                   );
                 }}
                 className={cn(
-                  "flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-og-sm text-og-fg-subtle outline-none transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50",
+                  "flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-og-sm text-og-fg-subtle outline-hidden transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50",
                   activeModel && props.latencyMode === "fast" && "text-og-fg",
                 )}
               >
@@ -487,7 +486,7 @@ export function ModelPolicyPickerMenu(
                 disabled={!focusModel.selectable}
                 onClick={() => selectEffort(focusModel, effort)}
                 className={cn(
-                  "flex h-[var(--og-model-picker-effort-height)] w-full cursor-pointer items-center rounded-og-sm px-[var(--og-model-picker-row-padding-x)] text-left text-og-menu text-og-fg outline-none transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50",
+                  "flex h-[var(--og-model-picker-effort-height)] w-full cursor-pointer items-center rounded-og-sm px-[var(--og-model-picker-row-padding-x)] text-left text-og-menu text-og-fg outline-hidden transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50",
                   selected && "bg-og-surface-2",
                 )}
               >
@@ -542,8 +541,8 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
     if (props.open === undefined) setUncontrolledOpen(next);
     props.onOpenChange?.(next);
   };
-  const triggerRef = useRef<HTMLButtonElement | null>(null);
-  const portalStyle = usePortalTokenStyle(triggerRef);
+  const trigger = usePortalTokenSource<HTMLButtonElement>();
+  const portalStyle = usePortalTokenStyle(trigger.source);
   const messages = useMemo(
     () => ({ ...defaultModelPolicyPickerMessages, ...props.messages }),
     [props.messages],
@@ -556,7 +555,7 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
     return (
       <span
         className={cn(
-          "inline-flex h-8 w-40 shrink-0 animate-pulse rounded-full bg-og-surface-2",
+          "og-root inline-flex h-8 w-40 shrink-0 animate-pulse rounded-full bg-og-surface-2",
           props.className,
         )}
         aria-label={messages.loading}
@@ -568,12 +567,12 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
     <DropdownMenu.Root open={open} onOpenChange={setOpen}>
       <DropdownMenu.Trigger asChild>
         <button
-          ref={triggerRef}
+          ref={trigger.ref}
           type="button"
           disabled={props.disabled}
           aria-label={messages.label}
           className={cn(
-            "og-root inline-flex h-[var(--og-model-picker-trigger-height)] min-w-0 max-w-64 items-center gap-1 rounded-full border border-transparent px-2.5 text-og-control text-og-fg-muted outline-none transition-colors hover:border-og-border hover:bg-og-surface-2 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50 max-sm:h-[var(--og-model-picker-trigger-height-mobile)] max-sm:max-w-[7.5rem] max-sm:px-2",
+            "og-root og-model-policy-trigger inline-flex h-[var(--og-model-picker-trigger-height)] min-w-0 max-w-64 items-center gap-1 rounded-full border border-transparent px-2.5 text-og-control text-og-fg-muted outline-hidden transition-colors hover:border-og-border hover:bg-og-surface-2 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50 max-sm:h-11 max-sm:max-w-[7.5rem] max-sm:px-2",
             props.className,
           )}
         >
@@ -584,13 +583,15 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
             }
             className="text-og-fg"
           />
-          <span className="min-w-0 truncate font-medium text-og-fg max-sm:hidden">
+          <span className="og-model-policy-label-full min-w-0 truncate font-medium text-og-fg max-sm:hidden">
             {selected?.label ?? props.model}
           </span>
-          <span className="min-w-0 truncate font-medium text-og-fg sm:hidden">
+          <span className="og-model-policy-label-short min-w-0 truncate font-medium text-og-fg sm:hidden">
             {selected?.shortLabel ?? selected?.label ?? props.model}
           </span>
-          <span className="max-sm:hidden">{labelReasoningEffort(props.effort)}</span>
+          <span className="og-model-policy-effort max-sm:hidden">
+            {labelReasoningEffort(props.effort)}
+          </span>
           {props.latencyMode === "fast" ? (
             <ZapIcon
               className="size-3.5 shrink-0 fill-current stroke-current text-og-fg"
@@ -609,7 +610,7 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
           collisionPadding={12}
           onCloseAutoFocus={(event) => event.preventDefault()}
           className={cn(
-            "og-root z-50 flex max-h-[min(20rem,var(--radix-dropdown-menu-content-available-height))] w-[var(--og-model-picker-menu-width)] max-w-[calc(100vw-16px)] flex-col overflow-hidden rounded-og-lg border border-og-border bg-og-surface-1 p-[var(--og-model-picker-menu-padding)] text-og-fg shadow-og-lg",
+            "og-root og-model-policy-menu z-50 flex max-h-[min(20rem,var(--radix-dropdown-menu-content-available-height))] w-[var(--og-model-picker-menu-width)] max-w-[calc(100vw-16px)] flex-col overflow-hidden rounded-og-lg border border-og-border bg-og-surface-1 p-[var(--og-model-picker-menu-padding)] text-og-fg shadow-og-lg",
             props.contentClassName,
           )}
           style={{ ...portalStyle, ...props.contentStyle }}

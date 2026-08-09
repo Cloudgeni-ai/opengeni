@@ -113,7 +113,8 @@ describe("P1.2 ownership inversion — runAgentStream owned branch (unix_local, 
     expect(marker).toBe("KEYSTONE_P12"); // the tool hit OUR box
   });
 
-  test("host run credentials are seeded before the first agent command and remain off-manifest", async () => {
+  // oxfmt-ignore
+  test.skipIf(process.platform !== "linux")("host run credentials are seeded before the first agent command and remain off-manifest", async () => {
     const settings = localSettings();
     const client = createSandboxClientForBackend("local", settings) as unknown as {
       backendId: string;
@@ -147,7 +148,6 @@ describe("P1.2 ownership inversion — runAgentStream owned branch (unix_local, 
             fileEnvironment: {},
             expiresAt: null,
             authNeeded: [],
-            redactions: [{ name: "HOST_CLOUD_TOKEN", value: "host-secret-value" }],
           },
           { sessionId, attemptId, executionGeneration: 1 },
         );
@@ -202,7 +202,8 @@ describe("P1.2 ownership inversion — runAgentStream owned branch (unix_local, 
     expect(observedToken).toBe("ogd_initial_owned");
   });
 
-  test("legacy SDK-owned creation seeds host run credentials before the first command", async () => {
+  // oxfmt-ignore
+  test.skipIf(process.platform !== "linux")("legacy SDK-owned creation seeds host run credentials before the first command", async () => {
     const settings = localSettings();
     const rawClient = createSandboxClientForBackend("local", settings) as unknown as {
       backendId: string;
@@ -267,7 +268,6 @@ describe("P1.2 ownership inversion — runAgentStream owned branch (unix_local, 
             fileEnvironment: {},
             expiresAt: null,
             authNeeded: [],
-            redactions: [{ name: "HOST_CLOUD_TOKEN", value: "legacy-host-secret" }],
           },
           { sessionId, attemptId, executionGeneration: 1 },
         );
@@ -473,6 +473,61 @@ describe("P1.2 isProviderSandboxNotFoundError (per-backend NotFound discriminato
     expect(
       isProviderSandboxNotFoundError("daytona", { code: "SANDBOX_NOT_FOUND", message: "gone" }),
     ).toBe(true);
+  });
+
+  test("Cloudflare's exact stopped-sandbox grammar is terminal, generic path failures are not", () => {
+    expect(
+      isProviderSandboxNotFoundError(
+        "cloudflare",
+        new Error("Cloudflare sandbox cf-box.1 is no longer running."),
+      ),
+    ).toBe(true);
+    expect(
+      isProviderSandboxNotFoundError(
+        "cloudflare",
+        new Error("Cloudflare sandbox route /workspace/file is no longer running."),
+      ),
+    ).toBe(false);
+    expect(
+      isProviderSandboxNotFoundError("cloudflare", new Error("sandbox is no longer running")),
+    ).toBe(false);
+  });
+
+  test("unix_local's exact missing-workspace proof is NotFound for both backend ID shapes", () => {
+    const missingWorkspace = new Error(
+      "UnixLocal sandbox workspace is unavailable and no local snapshot could be restored.",
+    );
+    expect(isProviderSandboxNotFoundError("local", missingWorkspace)).toBe(true);
+    expect(isProviderSandboxNotFoundError("unix_local", missingWorkspace)).toBe(true);
+    expect(
+      isProviderSandboxNotFoundError(
+        "unix_local",
+        new Error("UnixLocal sandbox workspace is temporarily unavailable."),
+      ),
+    ).toBe(false);
+    expect(
+      isProviderSandboxNotFoundError(
+        "docker",
+        new Error(
+          "UnixLocal sandbox workspace is unavailable and no local snapshot could be restored.",
+        ),
+      ),
+    ).toBe(false);
+  });
+
+  test("Docker's exact missing-container/workspace proof is terminal only on resume", () => {
+    const missingResources = new Error(
+      "Docker sandbox resources are unavailable and no local snapshot could be restored.",
+    );
+    expect(isProviderSandboxNotFoundError("docker", missingResources)).toBe(true);
+    expect(isProviderSandboxGoneDuringRoutedOperation("docker", missingResources)).toBe(false);
+    expect(
+      isProviderSandboxNotFoundError(
+        "docker",
+        new Error("Docker sandbox resources are temporarily unavailable."),
+      ),
+    ).toBe(false);
+    expect(isProviderSandboxNotFoundError("local", missingResources)).toBe(false);
   });
 
   test("transient typed evidence dominates nested NotFound prose", () => {

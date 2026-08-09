@@ -1,4 +1,4 @@
-import type { GitFileDiff } from "@opengeni/sdk";
+import type { GitFileDiff, RetainedArtifactReference } from "@opengeni/sdk";
 import {
   BoxIcon,
   BrainCircuitIcon,
@@ -28,19 +28,20 @@ import {
   TerminalIcon,
   WrenchIcon,
 } from "lucide-react";
-import type { ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { stringifyPayload, tryParseJson } from "../lib/format";
 import { useTimelineComputeLabel } from "./compute-label";
 import {
   applyPatchOpsFromToolItem,
   controlCaret,
   execTruncated,
+  generatedImageReceipt,
   isExecSessionLostBanner,
   looksBinary,
   mediaPreviewFact,
   parseExecBannerSessionId,
   parseToolArgs,
-  redactSecrets,
+  retainedScreenshotMetadata,
   sandboxCommandExitCode,
   stripExecBanner,
   tailPeek,
@@ -559,7 +560,7 @@ function asComputerArgs(args: unknown): Partial<ComputerAction> {
   };
 }
 
-function ComputerCallRenderer({ item }: ToolRendererProps) {
+function ComputerCallRenderer({ item, loadRetainedScreenshot }: ToolRendererProps) {
   const raw = (item.raw ?? {}) as {
     action?: ComputerAction;
     actions?: ComputerAction[];
@@ -582,6 +583,7 @@ function ComputerCallRenderer({ item }: ToolRendererProps) {
   const rejected = raw.providerData?.approvalStatus === "rejected";
   const readOnly = typeof out === "string" && out.includes("read-only");
   const shotUrl = screenshotDataUrl(out);
+  const retained = retainedScreenshotMetadata(out);
   const omittedMedia = mediaPreviewFact(out);
   const empty = out === "" || out == null;
   const batched = actions.length > 1 ? actions.map((a) => computerVerb(a)).join(" · ") : null;
@@ -639,6 +641,44 @@ function ComputerCallRenderer({ item }: ToolRendererProps) {
 
   const isFailed = item.status === "failed";
   const isCancelled = item.status === "cancelled";
+
+  if (retained) {
+    if (!retained.available) {
+      const state =
+        retained.reason === "expired" || retained.reason === "deleted"
+          ? retained.reason
+          : "unavailable";
+      return (
+        <ActivityDisclosure
+          icon={<CameraOffIcon className={ICON_SIZE} />}
+          iconTone={isFailed ? "failed" : "muted"}
+          title={`${verb}${countSuffix} · ${state}`}
+          failed={isFailed}
+          cancelled={isCancelled}
+          preview={`screenshot ${state}`}
+          media={<MediaEmpty />}
+        >
+          <BodyNote tone={isFailed ? "error" : undefined}>
+            Screenshot {state}: {retained.reason.replaceAll("_", " ")}.
+          </BodyNote>
+        </ActivityDisclosure>
+      );
+    }
+    return (
+      <RetainedSessionImageDisclosure
+        artifact={retained}
+        load={loadRetainedScreenshot}
+        title={`${verb}${countSuffix}`}
+        caption={`${verb}${countSuffix}`}
+        noun="screenshot"
+        icon={<CameraIcon className={ICON_SIZE} />}
+        lightboxLabel="Screenshot"
+        batched={batched}
+        failed={isFailed}
+        cancelled={isCancelled}
+      />
+    );
+  }
 
   if (shotUrl) {
     const caption = `${verb}${actions.length > 1 ? ` (+${actions.length - 1} more)` : ""}`;
@@ -716,6 +756,285 @@ function ComputerCallRenderer({ item }: ToolRendererProps) {
       expandable={batched != null}
     >
       {batched ? <BodyNote>{batched}</BodyNote> : null}
+    </ActivityDisclosure>
+  );
+}
+
+type RetainedImageState =
+  | { kind: "loading" }
+  | { kind: "ready"; url: string }
+  | { kind: "unavailable"; label: string }
+  | { kind: "error"; message: string };
+
+function useRetainedImageObjectUrl(
+  artifact: RetainedArtifactReference,
+  load: ToolRendererProps["loadRetainedArtifact"],
+): RetainedImageState {
+  const [state, setState] = useState<RetainedImageState>({ kind: "loading" });
+  // Function outputs are commonly serialized JSON. Parsing them creates a new
+  // object on every render, so depend on the immutable wire value rather than
+  // object identity; otherwise the loader can refetch after its own setState.
+  const artifactValue = retainedArtifactValue(artifact);
+  const stableArtifactRef = useRef({ value: artifactValue, artifact });
+  if (stableArtifactRef.current.value !== artifactValue) {
+    stableArtifactRef.current = { value: artifactValue, artifact };
+  }
+  const stableArtifact = stableArtifactRef.current.artifact;
+  useEffect(() => {
+    if (!load) {
+      setState({ kind: "unavailable", label: "retrieval is not configured" });
+      return;
+    }
+    const controller = new AbortController();
+    let objectUrl: string | null = null;
+    setState({ kind: "loading" });
+    void load(stableArtifact, controller.signal)
+      .then((source) => {
+        if (controller.signal.aborted) return;
+        if (!source) {
+          setState({ kind: "unavailable", label: "bytes are unavailable" });
+          return;
+        }
+        if (!(source instanceof Uint8Array)) {
+          if (!source.url.trim()) {
+            setState({ kind: "unavailable", label: "URL is unavailable" });
+            return;
+          }
+          setState({ kind: "ready", url: source.url });
+          return;
+        }
+        objectUrl = URL.createObjectURL(
+          new Blob([source as unknown as BlobPart], { type: stableArtifact.contentType }),
+        );
+        setState({ kind: "ready", url: objectUrl });
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        const status =
+          error && typeof error === "object" && "status" in error
+            ? Number((error as { status?: unknown }).status)
+            : null;
+        setState(
+          status === 404
+            ? { kind: "unavailable", label: "deleted" }
+            : status === 410
+              ? { kind: "unavailable", label: "expired or unavailable" }
+              : { kind: "error", message: "retrieval failed" },
+        );
+      });
+    return () => {
+      controller.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [stableArtifact, load]);
+  return state;
+}
+
+function retainedArtifactValue(artifact: RetainedArtifactReference): string {
+  return [
+    artifact.artifactId,
+    artifact.kind,
+    artifact.contentType,
+    artifact.originalBytes,
+    artifact.sha256,
+    artifact.retainedAt,
+    artifact.dimensions?.width ?? "",
+    artifact.dimensions?.height ?? "",
+    artifact.retention.policy,
+    artifact.retention.expiresAt ?? "",
+    artifact.retrieval.method,
+    artifact.retrieval.path,
+    artifact.retrieval.acceptRanges,
+    artifact.retrieval.maxRangeBytes,
+  ].join("\0");
+}
+
+function RetainedSessionImageDisclosure({
+  artifact,
+  load,
+  title,
+  caption,
+  noun,
+  icon,
+  lightboxLabel,
+  batched,
+  failed,
+  cancelled,
+}: {
+  artifact: RetainedArtifactReference;
+  load: ToolRendererProps["loadRetainedScreenshot"];
+  title: string;
+  caption: string;
+  noun: "image" | "screenshot";
+  icon: ReactNode;
+  lightboxLabel: string;
+  batched: string | null;
+  failed: boolean;
+  cancelled: boolean;
+}) {
+  const state = useRetainedImageObjectUrl(artifact, load);
+
+  return (
+    <ActivityDisclosure
+      icon={icon}
+      iconTone={failed ? "failed" : state.kind === "ready" ? "accent" : "muted"}
+      title={title}
+      failed={failed}
+      cancelled={cancelled}
+      preview={
+        state.kind === "loading"
+          ? `loading retained ${noun}…`
+          : state.kind === "error"
+            ? `${noun} retrieval failed`
+            : state.kind === "unavailable"
+              ? `${noun} ${state.label}`
+              : undefined
+      }
+      media={
+        state.kind === "ready" ? (
+          <Thumbnail
+            src={state.url}
+            caption={caption}
+            alt={caption}
+            expandLabel={`Expand ${noun}`}
+            lightboxLabel={lightboxLabel}
+          />
+        ) : state.kind === "loading" ? (
+          <MediaSkeleton />
+        ) : (
+          <MediaEmpty />
+        )
+      }
+    >
+      {state.kind === "ready" ? (
+        <ScreenshotFigure
+          src={state.url}
+          caption={caption}
+          alt={caption}
+          expandLabel={`Expand ${noun}`}
+          lightboxLabel={lightboxLabel}
+        />
+      ) : state.kind === "loading" ? (
+        <BodyNote>Loading the retained {noun}…</BodyNote>
+      ) : state.kind === "unavailable" ? (
+        <BodyNote>
+          {noun === "screenshot" ? "Screenshot" : "Image"} {state.label}.
+        </BodyNote>
+      ) : (
+        <BodyNote tone="error">
+          {noun === "screenshot" ? "Screenshot" : "Image"} retrieval failed: {state.message}
+        </BodyNote>
+      )}
+      {batched ? <BodyNote>batched: {batched}</BodyNote> : null}
+    </ActivityDisclosure>
+  );
+}
+
+function GeneratedImageRenderer({ item, loadRetainedArtifact }: ToolRendererProps) {
+  const args = parseToolArgs(item.arguments);
+  const prompt = typeof args.prompt === "string" ? args.prompt : "";
+  const raw =
+    item.raw && typeof item.raw === "object" && !Array.isArray(item.raw)
+      ? (item.raw as Record<string, unknown>)
+      : null;
+  // Function tools settle through agent.toolCall.output; OpenAI's hosted image
+  // call is already complete on agent.toolCall.created and carries the compact
+  // receipt in raw.output. Both paths deliberately converge on one renderer.
+  const receipt = generatedImageReceipt(item.output) ?? generatedImageReceipt(raw?.output);
+  if (item.status === "running") {
+    return (
+      <ActivityDisclosure
+        icon={<ImageIcon className={ICON_SIZE} />}
+        iconTone="running"
+        title="Generating image"
+        running
+        preview={<RunningPreview>{truncatePreview(prompt, 72) || "creating…"}</RunningPreview>}
+        media={<MediaSkeleton />}
+      >
+        {prompt ? <BodyNote>{prompt}</BodyNote> : null}
+      </ActivityDisclosure>
+    );
+  }
+  if (!receipt) return <GenericRenderer item={item} />;
+  return (
+    <GeneratedImageDisclosure
+      receipt={receipt}
+      load={loadRetainedArtifact}
+      prompt={prompt}
+      failed={item.status === "failed"}
+      cancelled={item.status === "cancelled"}
+    />
+  );
+}
+
+function GeneratedImageDisclosure({
+  receipt,
+  load,
+  prompt,
+  failed,
+  cancelled,
+}: {
+  receipt: NonNullable<ReturnType<typeof generatedImageReceipt>>;
+  load: ToolRendererProps["loadRetainedArtifact"];
+  prompt: string;
+  failed: boolean;
+  cancelled: boolean;
+}) {
+  const state = useRetainedImageObjectUrl(receipt.artifact, load);
+  const dimensions = receipt.artifact.dimensions!;
+  const title = failed ? "Image generation failed" : "Generated image";
+  const caption = prompt || `Generated image · ${dimensions.width}×${dimensions.height}`;
+  return (
+    <ActivityDisclosure
+      icon={<ImageIcon className={ICON_SIZE} />}
+      iconTone={failed ? "failed" : state.kind === "ready" ? "accent" : "muted"}
+      title={title}
+      defaultOpen={!failed && !cancelled}
+      failed={failed}
+      cancelled={cancelled}
+      preview={
+        state.kind === "loading"
+          ? "loading image…"
+          : state.kind === "error"
+            ? "image retrieval failed"
+            : state.kind === "unavailable"
+              ? `image ${state.label}`
+              : truncatePreview(prompt, 88) || `${dimensions.width}×${dimensions.height}`
+      }
+      media={
+        state.kind === "ready" ? (
+          <Thumbnail
+            src={state.url}
+            caption={caption}
+            alt={caption}
+            expandLabel="Expand generated image"
+            lightboxLabel="Generated image"
+          />
+        ) : state.kind === "loading" ? (
+          <MediaSkeleton />
+        ) : (
+          <MediaEmpty />
+        )
+      }
+    >
+      {state.kind === "ready" ? (
+        <ScreenshotFigure
+          src={state.url}
+          caption={caption}
+          alt={caption}
+          expandLabel="Expand generated image"
+          lightboxLabel="Generated image"
+        />
+      ) : state.kind === "loading" ? (
+        <BodyNote>Loading the generated image…</BodyNote>
+      ) : state.kind === "unavailable" ? (
+        <BodyNote>Image {state.label}.</BodyNote>
+      ) : (
+        <BodyNote tone="error">Image retrieval failed.</BodyNote>
+      )}
+      <BodyNote>
+        {dimensions.width}×{dimensions.height} · {receipt.sandboxPath}
+      </BodyNote>
     </ActivityDisclosure>
   );
 }
@@ -871,11 +1190,12 @@ const VIEW_IMAGE_ERRORS = [
   "unable to read image",
 ];
 
-function ViewImageRenderer({ item }: ToolRendererProps) {
+function ViewImageRenderer({ item, loadRetainedScreenshot }: ToolRendererProps) {
   const args = parseToolArgs(item.arguments);
   const path = typeof args.path === "string" ? args.path : "";
   const out = item.output;
   const text = typeof out === "string" ? out : "";
+  const retained = retainedScreenshotMetadata(out);
   const omittedMedia = mediaPreviewFact(out);
 
   if (item.status === "running") {
@@ -895,6 +1215,45 @@ function ViewImageRenderer({ item }: ToolRendererProps) {
 
   const viewFailed = item.status === "failed";
   const viewCancelled = item.status === "cancelled";
+
+  if (retained) {
+    const title = `Viewed ${basename(path)}`;
+    if (!retained.available) {
+      const state =
+        retained.reason === "expired" || retained.reason === "deleted"
+          ? retained.reason
+          : "unavailable";
+      return (
+        <ActivityDisclosure
+          icon={<ImageIcon className={ICON_SIZE} />}
+          iconTone={viewFailed ? "failed" : "muted"}
+          title={`${title} · ${state}`}
+          failed={viewFailed}
+          cancelled={viewCancelled}
+          preview={`image ${state}`}
+          media={<MediaEmpty />}
+        >
+          <BodyNote tone={viewFailed ? "error" : undefined}>
+            Image {state}: {retained.reason.replaceAll("_", " ")}.
+          </BodyNote>
+        </ActivityDisclosure>
+      );
+    }
+    return (
+      <RetainedSessionImageDisclosure
+        artifact={retained}
+        load={loadRetainedScreenshot}
+        title={title}
+        caption={path || title}
+        noun="image"
+        icon={<ImageIcon className={ICON_SIZE} />}
+        lightboxLabel="Image"
+        batched={null}
+        failed={viewFailed}
+        cancelled={viewCancelled}
+      />
+    );
+  }
 
   const errMatch = VIEW_IMAGE_ERRORS.find((p) => text.includes(p));
   if (errMatch) {
@@ -995,7 +1354,7 @@ function SecretSetRenderer({ item }: ToolRendererProps) {
         running
         preview={<RunningPreview>setting…</RunningPreview>}
       >
-        <PayloadBlock label="Arguments" value={redactSecrets(args)} />
+        <PayloadBlock label="Arguments" value={args} />
       </ActivityDisclosure>
     );
   }
@@ -1010,7 +1369,7 @@ function SecretSetRenderer({ item }: ToolRendererProps) {
         failed
         preview={errorText ?? "variable write failed"}
       >
-        <PayloadBlock label="Arguments" value={redactSecrets(args)} />
+        <PayloadBlock label="Arguments" value={args} />
         {errorText ? (
           <PayloadBlock label="Error" value={errorText} failed />
         ) : (
@@ -1026,10 +1385,12 @@ function SecretSetRenderer({ item }: ToolRendererProps) {
       iconTone="muted"
       title={`Set ${name}`}
       cancelled={item.status === "cancelled"}
-      preview="value write-only · never returned"
+      preview="exact value preserved"
     >
-      <PayloadBlock label="Arguments" value={redactSecrets(args)} />
-      <BodyNote>the value is a secret — redacted in every view; the API never returns it.</BodyNote>
+      <PayloadBlock label="Arguments" value={args} />
+      <BodyNote>
+        The configured value is preserved exactly and available through authorized secret reads.
+      </BodyNote>
     </ActivityDisclosure>
   );
 }
@@ -1175,7 +1536,7 @@ function ToolSearchRenderer({ item }: ToolRendererProps) {
         }
       >
         {query ? <BodyNote>capability query: {query}</BodyNote> : null}
-        <PayloadBlock label="Arguments" value={redactSecrets(parseToolArgs(item.arguments))} />
+        <PayloadBlock label="Arguments" value={parseToolArgs(item.arguments)} />
       </ActivityDisclosure>
     );
   }
@@ -1191,7 +1552,7 @@ function ToolSearchRenderer({ item }: ToolRendererProps) {
         preview={truncatePreview(outText, 80) || queryPreview || "Lookup failed"}
       >
         {query ? <BodyNote>capability query: {query}</BodyNote> : null}
-        <PayloadBlock label="Arguments" value={redactSecrets(parseToolArgs(item.arguments))} />
+        <PayloadBlock label="Arguments" value={parseToolArgs(item.arguments)} />
         <PayloadBlock label="Error" value={outText} failed />
       </ActivityDisclosure>
     );
@@ -1226,7 +1587,7 @@ function ToolSearchRenderer({ item }: ToolRendererProps) {
       ) : tools && tools.length === 0 ? (
         <BodyNote>no deferred tools matched this capability query.</BodyNote>
       ) : null}
-      <PayloadBlock label="Arguments" value={redactSecrets(parseToolArgs(item.arguments))} />
+      <PayloadBlock label="Arguments" value={parseToolArgs(item.arguments)} />
       {tools == null && outText ? <PayloadBlock label="Result" value={outText} /> : null}
     </ActivityDisclosure>
   );
@@ -1249,7 +1610,7 @@ function DocsSearchRenderer({ item }: ToolRendererProps) {
         running
         preview={<RunningPreview>Searching…</RunningPreview>}
       >
-        <PayloadBlock label="Arguments" value={redactSecrets(args)} />
+        <PayloadBlock label="Arguments" value={args} />
       </ActivityDisclosure>
     );
   }
@@ -1264,7 +1625,7 @@ function DocsSearchRenderer({ item }: ToolRendererProps) {
         failed
         preview={truncatePreview(outText, 80) || "Search failed"}
       >
-        <PayloadBlock label="Arguments" value={redactSecrets(args)} />
+        <PayloadBlock label="Arguments" value={args} />
         <PayloadBlock label="Error" value={outText} failed />
       </ActivityDisclosure>
     );
@@ -1300,7 +1661,7 @@ function DocsSearchRenderer({ item }: ToolRendererProps) {
           ))}
         </ul>
       ) : null}
-      <PayloadBlock label="Arguments" value={redactSecrets(args)} />
+      <PayloadBlock label="Arguments" value={args} />
       <PayloadBlock label="Result" value={outText} />
     </ActivityDisclosure>
   );
@@ -1330,7 +1691,7 @@ function SetSessionTitleRenderer({ item }: ToolRendererProps) {
           )
         }
       >
-        <PayloadBlock label="Arguments" value={redactSecrets(args)} />
+        <PayloadBlock label="Arguments" value={args} />
       </ActivityDisclosure>
     );
   }
@@ -1345,7 +1706,7 @@ function SetSessionTitleRenderer({ item }: ToolRendererProps) {
         failed
         preview={truncatePreview(outText, 80) || "Rename failed"}
       >
-        <PayloadBlock label="Arguments" value={redactSecrets(args)} />
+        <PayloadBlock label="Arguments" value={args} />
         <PayloadBlock label="Error" value={outText} failed />
       </ActivityDisclosure>
     );
@@ -1371,7 +1732,7 @@ function SetSessionTitleRenderer({ item }: ToolRendererProps) {
       cancelled={item.status === "cancelled"}
       preview={item.status === "cancelled" ? undefined : settledTitle || undefined}
     >
-      <PayloadBlock label="Arguments" value={redactSecrets(args)} />
+      <PayloadBlock label="Arguments" value={args} />
       {outText ? <PayloadBlock label="Result" value={outText} /> : null}
     </ActivityDisclosure>
   );
@@ -1431,7 +1792,7 @@ function MemoryProposeRenderer({ item }: ToolRendererProps) {
         running
         preview={<RunningPreview>Proposing…</RunningPreview>}
       >
-        <PayloadBlock label="Arguments" value={redactSecrets(args)} />
+        <PayloadBlock label="Arguments" value={args} />
       </ActivityDisclosure>
     );
   }
@@ -1493,7 +1854,7 @@ function askToolPreview(args: unknown): string | null {
 }
 
 function AskRenderer({ item }: ToolRendererProps) {
-  const args = redactSecrets(parseToolArgs(item.arguments));
+  const args = parseToolArgs(item.arguments);
   const preview = askToolPreview(args);
   const icon = <MessageCircleQuestionIcon className={ICON_SIZE} />;
   const title = "Ask";
@@ -1583,7 +1944,7 @@ function runOnOpPreview(args: Record<string, unknown>): string | null {
 
 function RunOnRenderer({ item }: ToolRendererProps) {
   const parsedArgs = parseToolArgs(item.arguments);
-  const args = redactSecrets(parsedArgs);
+  const args = parsedArgs;
   const targetName = runOnTargetName(item.output);
   const title = targetName ? `Run on ${targetName}` : "Run on";
   const opPreview = runOnOpPreview(parsedArgs);
@@ -1648,7 +2009,7 @@ function RunOnRenderer({ item }: ToolRendererProps) {
  */
 function GenericRenderer({ item }: ToolRendererProps) {
   const running = item.status === "running";
-  const args = redactSecrets(parseToolArgs(item.arguments));
+  const args = parseToolArgs(item.arguments);
   const display = toolDisplayName(item.name);
   const icon = <GenericToolIcon name={item.name} />;
   // Goal tools: surface the objective text on the collapsed row so the in-cluster
@@ -1791,7 +2152,6 @@ const BASE_ENTRIES: ToolRegistryEntry[] = [
   // truth and is consulted first by the registry.
   { match: "rawType", type: "apply_patch_call", render: ApplyPatchRenderer },
   { match: "rawType", type: "computer_call", render: ComputerCallRenderer },
-  { match: "rawType", type: "hosted_tool_call", render: WebSearchRenderer },
   { match: "rawType", type: "tool_search_call", render: ToolSearchRenderer },
   // First-party sandbox + MCP tools resolve by name (exact or MCP leaf).
   { match: "name", name: "exec_command", render: ExecRenderer },
@@ -1811,6 +2171,8 @@ const BASE_ENTRIES: ToolRegistryEntry[] = [
   { match: "name", name: "computer_keypress", render: ComputerCallRenderer },
   { match: "name", name: "computer_drag", render: ComputerCallRenderer },
   { match: "name", name: "web_search_call", render: WebSearchRenderer },
+  { match: "name", name: "image_generation_call", render: GeneratedImageRenderer },
+  { match: "name", name: "generate_image", render: GeneratedImageRenderer },
   { match: "name", name: "tool_search", render: ToolSearchRenderer },
   { match: "name", name: "view_image", render: ViewImageRenderer },
   { match: "name", name: "environment_set_variable", render: SecretSetRenderer },

@@ -63,6 +63,21 @@ else
 fi
 export COMPOSE_PROJECT_NAME
 
+# A stopped host dev process intentionally leaves this worktree's dependency
+# containers running. Reuse the generated ports when those exact compose
+# services still exist; otherwise a restart mistakes its own containers for a
+# collision and needlessly moves Postgres/Temporal/MinIO to new ports.
+reuse_runtime_ports=0
+if [ -f .env.runtime ] &&
+  [ "$(sed -n 's/^COMPOSE_PROJECT_NAME=//p' .env.runtime | tail -1)" = "$COMPOSE_PROJECT_NAME" ] &&
+  [ -n "$(docker compose ps -q 2>/dev/null)" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . ./.env.runtime
+  set +a
+  reuse_runtime_ports=1
+fi
+
 port_available() {
   if command -v lsof >/dev/null 2>&1; then
     ! lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
@@ -102,6 +117,12 @@ choose_port() {
   local var_name="$1"
   local default_port="$2"
   local pinned="${!var_name:-}"
+
+  if [ "$reuse_runtime_ports" = "1" ] && [ -n "$pinned" ]; then
+    export "$var_name=$pinned"
+    claim_port "$pinned"
+    return
+  fi
 
   if [ "${OPENGENI_PIN_PORTS:-0}" = "1" ] && [ -n "$pinned" ]; then
     if ! port_claimed "$pinned" && port_available "$pinned"; then
@@ -208,6 +229,19 @@ else
   export OPENGENI_OBJECT_STORAGE_ENDPOINT="$(rewrite_loopback_port "$OPENGENI_OBJECT_STORAGE_ENDPOINT" "$OPENGENI_MINIO_HOST_PORT")"
 fi
 
+# API/workers run on the host in local development, so their authenticated
+# object-storage client must use the host endpoint. `minio:9000` is reachable
+# only from compose/sandbox containers and previously made every server-side
+# upload fail after the expensive provider work had already completed.
+default_internal_object_endpoint="http://minio:9000"
+if [ -z "${OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT:-}" ] ||
+  [ "${OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT}" = "$default_internal_object_endpoint" ] ||
+  [ "${OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT}" = "$default_object_endpoint" ]; then
+  export OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT="${OPENGENI_OBJECT_STORAGE_ENDPOINT}"
+else
+  export OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT="$(rewrite_loopback_port "$OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT" "$OPENGENI_MINIO_HOST_PORT")"
+fi
+
 default_sandbox_object_endpoint="http://host.docker.internal:9000"
 if [ -z "${OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT:-}" ] || [ "${OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT}" = "$default_sandbox_object_endpoint" ]; then
   # In-compose DNS; host port mapping is irrelevant inside the docker network.
@@ -245,6 +279,7 @@ fi
   printf 'OPENGENI_NATS_URL=%s\n' "${OPENGENI_NATS_URL}"
   printf 'OPENGENI_TEMPORAL_HOST=%s\n' "${OPENGENI_TEMPORAL_HOST}"
   printf 'OPENGENI_OBJECT_STORAGE_ENDPOINT=%s\n' "${OPENGENI_OBJECT_STORAGE_ENDPOINT}"
+  printf 'OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT=%s\n' "${OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT}"
   printf 'OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT=%s\n' "${OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT}"
   printf 'OPENGENI_CODEX_SUBSCRIPTION_ENABLED=%s\n' "${OPENGENI_CODEX_SUBSCRIPTION_ENABLED}"
   printf 'VITE_API_BASE_URL=%s\n' "${VITE_API_BASE_URL}"

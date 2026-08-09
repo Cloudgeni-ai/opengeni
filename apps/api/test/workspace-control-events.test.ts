@@ -87,6 +87,26 @@ async function authorization(subjectId = grant.subjectId): Promise<string> {
 }
 
 describe("workspace control event API", () => {
+  test("workspace admin can disable agent structured human input through settings", async () => {
+    const auth = await authorization();
+    const changed = await app.request(`http://x/v1/workspaces/${grant.workspaceId}/settings`, {
+      method: "PATCH",
+      headers: { authorization: auth, "content-type": "application/json" },
+      body: JSON.stringify({ agentHumanInputEnabled: false }),
+    });
+    expect(changed.status).toBe(200);
+    expect(await changed.json()).toMatchObject({
+      settings: { agentHumanInputEnabled: false },
+    });
+
+    const invalid = await app.request(`http://x/v1/workspaces/${grant.workspaceId}/settings`, {
+      method: "PATCH",
+      headers: { authorization: auth, "content-type": "application/json" },
+      body: JSON.stringify({ agentHumanInputEnabled: "false" }),
+    });
+    expect(invalid.status).toBe(400);
+  });
+
   test("one committed control revision is durable, published once, and replayable", async () => {
     const auth = await authorization();
     const rejected = await app.request(

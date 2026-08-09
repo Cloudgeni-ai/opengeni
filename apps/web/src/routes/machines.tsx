@@ -15,6 +15,7 @@ import {
   type MetricSample,
   type MetricWindow,
 } from "@opengeni/react/machines";
+import { usePageLiveActivity } from "@opengeni/react";
 import {
   ArrowLeftIcon,
   CheckIcon,
@@ -32,6 +33,7 @@ import { OpenGeniApiError } from "@opengeni/sdk";
 import { apiBaseUrl } from "@/api";
 import { PageHeader } from "@/components/common";
 import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Notice } from "@/components/ui/notice";
 import { deviceVerificationUri, installOneLiner } from "@/lib/deployment";
 import {
@@ -42,6 +44,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useAppContext } from "@/context";
+import type { MachineView } from "@opengeni/react/machines";
 
 /** Copy to the clipboard and toast the outcome — clipboard access can be denied
  *  (permissions, insecure context), so failures surface instead of vanishing. */
@@ -58,7 +61,9 @@ async function copyToClipboard(text: string, successMessage: string) {
 
 export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
   const machines = useMachines({ pollIntervalMs: 5000 });
+  const pageLive = usePageLiveActivity();
   const [enrollOpen, setEnrollOpen] = useState(false);
+  const [removeTarget, setRemoveTarget] = useState<MachineView | null>(null);
 
   // The machine whose telemetry detail is open (by sandboxId), and its history.
   const [detailId, setDetailId] = useState<string | null>(null);
@@ -91,7 +96,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
     .join(",");
   useEffect(() => {
     const enrolled = machines.machines.filter((m) => m.enrollmentId && !m.isSessionGroup);
-    if (enrolled.length === 0) {
+    if (!pageLive || enrolled.length === 0) {
       setCardSeries({});
       return;
     }
@@ -108,19 +113,22 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
       );
       if (!cancelled) setCardSeries(Object.fromEntries(entries));
     };
-    void load();
-    const id = setInterval(() => void load(), 30_000);
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const schedule = () => {
+      if (!cancelled) timer = setTimeout(() => void load().finally(schedule), 30_000);
+    };
+    void load().finally(schedule);
     return () => {
       cancelled = true;
-      clearInterval(id);
+      if (timer !== null) clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enrolledKey, fetchSeries]);
+  }, [enrolledKey, fetchSeries, pageLive]);
 
   // Fetch the open machine's detail history: on select, on window change, and on
   // a 10s refresh while open.
   useEffect(() => {
-    if (!selectedEnrollmentId) {
+    if (!pageLive || !selectedEnrollmentId) {
       setDetailSeries([]);
       return;
     }
@@ -136,13 +144,16 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
         if (!cancelled) setDetailLoading(false);
       }
     };
-    void load();
-    const id = setInterval(() => void load(), 10_000);
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const schedule = () => {
+      if (!cancelled) timer = setTimeout(() => void load().finally(schedule), 10_000);
+    };
+    void load().finally(schedule);
     return () => {
       cancelled = true;
-      clearInterval(id);
+      if (timer !== null) clearTimeout(timer);
     };
-  }, [selectedEnrollmentId, detailWindow, fetchSeries]);
+  }, [selectedEnrollmentId, detailWindow, fetchSeries, pageLive]);
 
   // "Machine connected" moment: watch the polled fleet and, once a machine first
   // shows online (a fresh enrollment coming up, or a reconnect), toast it. The
@@ -190,7 +201,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
       <PageHeader
         icon={<LaptopIcon className="size-4" />}
         title="Machines"
-        description="Your own computers, enrolled as agent sandboxes. Run the install one-liner on a machine and it appears here — usable from any session alongside the managed sandbox."
+        description="Your own computers, connected as agent sandboxes. One agent can serve this workspace alongside any other OpenGeni workspaces or deployments already connected to the machine."
       />
 
       <div className="mt-5">
@@ -207,6 +218,9 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
             onWindowChange={setDetailWindow}
             loadingSeries={detailLoading}
             onBack={() => setDetailId(null)}
+            {...(machines.canRemove
+              ? { onRemove: (machine: MachineView) => setRemoveTarget(machine) }
+              : {})}
             now={now}
           />
         ) : (
@@ -233,9 +247,10 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
       <Dialog open={enrollOpen} onOpenChange={setEnrollOpen}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>Enroll a machine</DialogTitle>
+            <DialogTitle>Connect a machine</DialogTitle>
             <DialogDescription>
-              Run a one-liner on the machine you want to share as an agent sandbox.
+              Run one command to install or update the agent and add this workspace. Existing
+              OpenGeni connections stay intact.
             </DialogDescription>
           </DialogHeader>
           {/* Gated on `enrollOpen` so the body mounts (and mints a fresh token)
@@ -244,6 +259,54 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
           {enrollOpen ? <EnrollDialogBody workspaceId={workspaceId} origin={origin} /> : null}
         </DialogContent>
       </Dialog>
+
+      <ConfirmDialog
+        open={removeTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setRemoveTarget(null);
+        }}
+        title={removeTarget ? `Remove machine “${removeTarget.name}”?` : "Remove machine?"}
+        description="Access will be revoked immediately while the machine is offline. Its session, route, lease, archive, and audit history will be kept; reconnecting later requires a fresh human-approved enrollment."
+        confirmLabel="Remove machine"
+        onConfirm={async () => {
+          const target = removeTarget;
+          if (!target?.enrollmentId) return false;
+          const result = await machines.remove(target.enrollmentId);
+          if (!result) {
+            toast.error("Machine removal is unavailable", {
+              description: "Refresh the page and try again.",
+            });
+            return false;
+          }
+          if (result.outcome === "blocked") {
+            toast.error(result.message, { description: result.action });
+            return false;
+          }
+          toast.success(
+            result.outcome === "already_removed"
+              ? `${target.name} was already removed`
+              : `${target.name} removed`,
+            { description: "It will disappear from the active machine list." },
+          );
+          setRemoveTarget(null);
+          setDetailId(null);
+          return true;
+        }}
+      >
+        {removeTarget ? (
+          <div className="space-y-2 rounded-og-md border border-og-border bg-og-surface-2/40 px-3 py-2 text-og-sm text-og-fg-muted">
+            <p>
+              <span className="font-medium text-og-fg">Machine:</span> {removeTarget.name}
+            </p>
+            <p>
+              <span className="font-medium text-og-fg">Last seen:</span>{" "}
+              {removeTarget.lastSeenAt
+                ? new Date(removeTarget.lastSeenAt).toLocaleString()
+                : "Never connected"}
+            </p>
+          </div>
+        ) : null}
+      </ConfirmDialog>
     </div>
   );
 }
@@ -296,7 +359,7 @@ function EnrollDialogBody({ workspaceId, origin }: { workspaceId: string; origin
         const message = err instanceof Error ? err.message : String(err);
         setError(message);
         setToken(null);
-        toast.error("Could not create an enroll token", { description: message });
+        toast.error("Could not create a connect command", { description: message });
       } finally {
         if (seq === mintSeq.current) {
           setMinting(false);
@@ -318,7 +381,7 @@ function EnrollDialogBody({ workspaceId, origin }: { workspaceId: string; origin
     if (!command) {
       return;
     }
-    void copyToClipboard(command, "Install command copied").then((ok) => {
+    void copyToClipboard(command, "Connect command copied").then((ok) => {
       if (ok) {
         setCopied(true);
       }
@@ -338,7 +401,7 @@ function EnrollDialogBody({ workspaceId, origin }: { workspaceId: string; origin
           onClick={() => setMode("token")}
         >
           <ArrowLeftIcon className="size-4" />
-          Back to one-click enroll
+          Back to one-command setup
         </Button>
         <EnrollmentDeviceFlow
           // The agent mints the real code via the device-flow start; until the
@@ -348,7 +411,7 @@ function EnrollDialogBody({ workspaceId, origin }: { workspaceId: string; origin
           verificationUri={verificationUri}
           installCommand={installCommand}
           phase={"pending" satisfies DeviceFlowPhase}
-          onCopyInstall={() => void copyToClipboard(installCommand, "Install command copied")}
+          onCopyInstall={() => void copyToClipboard(installCommand, "Connect command copied")}
           className="border-0 shadow-none"
         />
         <p className="text-center text-2xs text-fg-muted">
@@ -361,8 +424,8 @@ function EnrollDialogBody({ workspaceId, origin }: { workspaceId: string; origin
   return (
     <div className="flex flex-col gap-3">
       <p className="text-xs leading-4 text-fg-muted">
-        Run this on the machine you want to share. It enrolls instantly as an agent sandbox — no
-        approval step.
+        Run this once on the machine. It securely installs or updates the agent, adds this workspace
+        without removing any others, and keeps the machine online in the background.
       </p>
 
       <label className="flex items-start gap-2 rounded-md border border-border bg-bg/40 px-2.5 py-2 text-xs leading-4 text-fg">
@@ -386,18 +449,18 @@ function EnrollDialogBody({ workspaceId, origin }: { workspaceId: string; origin
       </label>
 
       <Notice tone="waiting" title="Secret — copy it now">
-        This command embeds a one-time enroll token that grants enrollment into this workspace until
-        it expires. Anyone who has it can enroll a machine here.
+        This command embeds a one-time token that can connect a machine to this workspace until it
+        expires. Anyone who has it can connect a machine here.
       </Notice>
 
       {minting ? (
         <Notice tone="muted" icon={<Loader2Icon className="size-4 animate-spin" />}>
-          Minting enroll token…
+          Preparing secure connect command…
         </Notice>
       ) : error ? (
         <Notice
           tone="failed"
-          title="Could not create an enroll token"
+          title="Could not create a connect command"
           action={
             <Button
               type="button"
@@ -439,7 +502,7 @@ function EnrollDialogBody({ workspaceId, origin }: { workspaceId: string; origin
             onClick={copyCommand}
           >
             {copied ? <CheckIcon className="size-4" /> : <CopyIcon className="size-4" />}
-            {copied ? "Copied" : "Copy install command"}
+            {copied ? "Copied" : "Copy connect command"}
           </Button>
         </>
       ) : null}

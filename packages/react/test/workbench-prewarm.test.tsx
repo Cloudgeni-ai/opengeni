@@ -21,12 +21,14 @@ import {
   fakeAttachResponse,
   fakeCapabilities,
   fakeColdCapabilities,
+  fakeEvent,
   fakeFileDiff,
 } from "./sandbox-fixtures";
 import { OpenGeniProvider } from "../src/provider";
 import type { MachinesResponse } from "../src/types/machines";
 import {
   useSandboxWorkspaceTabs,
+  initialWorkspaceTab,
   type UseSandboxWorkspaceTabsOptions,
   type UseSandboxWorkspaceTabsResult,
   SandboxWorkspace,
@@ -130,6 +132,7 @@ function fakeManifest(fileCount: number): WorkspaceCaptureManifest {
         behind: 0,
         status: [],
         diff,
+        branchDiff: diff,
       },
     ],
     files: Array.from({ length: fileCount }, (_, index) => {
@@ -320,6 +323,89 @@ describe("workbench surface allowlist", () => {
 // ── Refinement 1: prewarm gated to intent ────────────────────────────────────
 
 describe("workbench prewarm gating (Refinement 1)", () => {
+  test("pending capability negotiation cannot replay captured history into Channel-A", async () => {
+    const historicalEvents = [
+      fakeEvent(1, "git.changed", { revision: 3 }),
+      fakeEvent(2, "agent.toolCall.output", {}),
+    ];
+
+    for (const initialTab of [WORKBENCH_TAB_CHANGES, WORKBENCH_TAB_FILES]) {
+      let resolveCapabilities: (value: ReturnType<typeof fakeColdCapabilities>) => void = () => {};
+      const capabilitiesPromise = new Promise<ReturnType<typeof fakeColdCapabilities>>(
+        (resolve) => {
+          resolveCapabilities = resolve;
+        },
+      );
+      const reads = {
+        fsList: 0,
+        fsListBatch: 0,
+        gitStatus: 0,
+        gitDiff: 0,
+        gitReadBatch: 0,
+      };
+      const { client } = coldClient({
+        getStreamCapabilities: () => capabilitiesPromise,
+        getWorkspaceCapture: async () => captureAvailable(fakeManifest(1)),
+        fsList: async () => {
+          reads.fsList += 1;
+          throw new Error("unsettled capabilities must not list the provider filesystem");
+        },
+        fsListBatch: async () => {
+          reads.fsListBatch += 1;
+          throw new Error("unsettled capabilities must not batch-list the provider filesystem");
+        },
+        gitStatus: async () => {
+          reads.gitStatus += 1;
+          throw new Error("unsettled capabilities must not query provider Git status");
+        },
+        gitDiff: async () => {
+          reads.gitDiff += 1;
+          throw new Error("unsettled capabilities must not query a provider Git diff");
+        },
+        gitReadBatch: async () => {
+          reads.gitReadBatch += 1;
+          throw new Error("unsettled capabilities must not batch-read provider Git");
+        },
+      });
+      const hook = await renderTabsHook(client, {
+        sessionId: SESSION_ID,
+        events: historicalEvents,
+        initialTab,
+      });
+
+      // The capture wins the mount race and exposes the historical event tail while
+      // capabilities remain unresolved. Cross every event debounce window: no live
+      // request may start merely to be aborted when the cold document arrives.
+      await flush(1_150);
+      expect(reads).toEqual({
+        fsList: 0,
+        fsListBatch: 0,
+        gitStatus: 0,
+        gitDiff: 0,
+        gitReadBatch: 0,
+      });
+
+      await act(async () => resolveCapabilities(fakeColdCapabilities()));
+      await flush(60);
+      expect(reads).toEqual({
+        fsList: 0,
+        fsListBatch: 0,
+        gitStatus: 0,
+        gitDiff: 0,
+        gitReadBatch: 0,
+      });
+      const changes = hook.result.current.tabs.find((tab) => tab.id === WORKBENCH_TAB_CHANGES);
+      const files = hook.result.current.tabs.find((tab) => tab.id === WORKBENCH_TAB_FILES);
+      expect(
+        (changes!.content as ReactElement<{ git: { source: string | null } }>).props.git.source,
+      ).toBe("capture");
+      expect(
+        (files!.content as ReactElement<{ files: { source: string | null } }>).props.files.source,
+      ).toBe("capture");
+      await hook.unmount();
+    }
+  });
+
   test("cold capability negotiation cannot race a pending capture into Channel-A reads", async () => {
     let resolveCapture: (value: GetWorkspaceCaptureResponse) => void = () => {};
     const capturePromise = new Promise<GetWorkspaceCaptureResponse>((resolve) => {
@@ -367,6 +453,79 @@ describe("workbench prewarm gating (Refinement 1)", () => {
       (files!.content as ReactElement<{ files: { source: string | null } }>).props.files.source,
     ).toBe("capture");
     await hook.unmount();
+  });
+
+  test("a draining capture replays historical events with zero live Files or Git reads", async () => {
+    const historicalEvents = [
+      fakeEvent(1, "git.changed", { revision: 3 }),
+      fakeEvent(2, "fs.changed", {
+        changes: [{ path: "app.py", kind: "modified", isDir: false, sizeBytes: 10 }],
+        source: "agent",
+        revision: 3,
+        leaseEpoch: 1,
+      }),
+      fakeEvent(3, "agent.toolCall.output", {}),
+      fakeEvent(4, "sandbox.command.output.delta", { stream: "stdout", chunk: "done\n" }),
+    ];
+
+    for (const initialTab of [WORKBENCH_TAB_CHANGES, WORKBENCH_TAB_FILES]) {
+      const reads = {
+        fsList: 0,
+        fsListBatch: 0,
+        gitStatus: 0,
+        gitDiff: 0,
+        gitReadBatch: 0,
+      };
+      const { client, spy } = coldClient({
+        getStreamCapabilities: async () => fakeCapabilities({ liveness: "draining" }),
+        fsList: async () => {
+          reads.fsList += 1;
+          throw new Error("draining review must not list the provider filesystem");
+        },
+        fsListBatch: async () => {
+          reads.fsListBatch += 1;
+          throw new Error("draining review must not batch-list the provider filesystem");
+        },
+        gitStatus: async () => {
+          reads.gitStatus += 1;
+          throw new Error("draining review must not query provider Git status");
+        },
+        gitDiff: async () => {
+          reads.gitDiff += 1;
+          throw new Error("draining review must not query a provider Git diff");
+        },
+        gitReadBatch: async () => {
+          reads.gitReadBatch += 1;
+          throw new Error("draining review must not batch-read provider Git");
+        },
+      });
+      const hook = await renderTabsHook(client, {
+        sessionId: SESSION_ID,
+        events: historicalEvents,
+        initialTab,
+      });
+
+      // Cross the command-delta debounce window too: neither immediate nor
+      // delayed historical invalidation may escape the capture boundary.
+      await flush(1_150);
+      expect(reads).toEqual({
+        fsList: 0,
+        fsListBatch: 0,
+        gitStatus: 0,
+        gitDiff: 0,
+        gitReadBatch: 0,
+      });
+      expect(spy.attachCalls).toBe(0);
+      const changes = hook.result.current.tabs.find((tab) => tab.id === WORKBENCH_TAB_CHANGES);
+      const files = hook.result.current.tabs.find((tab) => tab.id === WORKBENCH_TAB_FILES);
+      expect(
+        (changes!.content as ReactElement<{ git: { source: string | null } }>).props.git.source,
+      ).toBe("capture");
+      expect(
+        (files!.content as ReactElement<{ files: { source: string | null } }>).props.files.source,
+      ).toBe("capture");
+      await hook.unmount();
+    }
   });
 
   test("a cold dock mount browsing capture-served surfaces warms NO box", async () => {
@@ -511,7 +670,7 @@ describe("workbench prewarm gating (Refinement 1)", () => {
     expect(rendered.container.textContent).not.toContain("Workspace is resting");
     expect(rendered.container.textContent).not.toContain("Open live workspace");
     expect(
-      rendered.container.querySelector('button[aria-label="Machine: Waking…"]'),
+      rendered.container.querySelector('[role="status"][aria-label="Machine: Waking…"]'),
     ).not.toBeNull();
     await rendered.unmount();
   });
@@ -621,6 +780,52 @@ describe("workbench prewarm gating (Refinement 1)", () => {
 // ── Refinement 2: capture-driven default tab ─────────────────────────────────
 
 describe("capture-driven default tab (Refinement 2)", () => {
+  test("committed-only capture signals default Changes while a truly empty capture defaults Files", async () => {
+    expect(
+      initialWorkspaceTab([
+        fakeEvent(1, "git.changed", {
+          head: "feature",
+          dirty: false,
+          ahead: 1,
+          behind: 0,
+          changedFileCount: 0,
+          reason: "commit",
+        }),
+        fakeEvent(2, "workspace.revision.captured", { stats: { fileCount: 0 } }),
+      ]),
+    ).toBe(WORKBENCH_TAB_CHANGES);
+    expect(
+      initialWorkspaceTab([
+        fakeEvent(1, "git.changed", {
+          head: "feature",
+          dirty: false,
+          ahead: 0,
+          behind: 0,
+          changedFileCount: 0,
+          reason: "worktree",
+        }),
+        fakeEvent(2, "workspace.revision.captured", { stats: { fileCount: 0 } }),
+      ]),
+    ).toBe(WORKBENCH_TAB_FILES);
+
+    const committedOnly = fakeManifest(0);
+    committedOnly.repos[0] = {
+      ...committedOnly.repos[0]!,
+      ahead: 1,
+      branchDiff: [fakeFileDiff({ path: "src/committed.ts" })],
+    };
+    const committedClient = coldClient({
+      getWorkspaceCapture: async () => captureAvailable(committedOnly),
+    });
+    const committedHook = await renderTabsHook(committedClient.client, {
+      sessionId: SESSION_ID,
+      events: [],
+    });
+    await flush();
+    expect(committedHook.result.current.defaultTab).toBe(WORKBENCH_TAB_CHANGES);
+    await committedHook.unmount();
+  });
+
   test("changes present → default Changes; empty → default Files", async () => {
     const withChanges = coldClient({
       getWorkspaceCapture: async () => captureAvailable(fakeManifest(2)),
@@ -692,6 +897,43 @@ describe("capture-driven default tab (Refinement 2)", () => {
     const hook = await renderTabsHook(client, { sessionId: SESSION_ID, events: [] });
     await flush();
     expect(hook.result.current.defaultTab).toBe(WORKBENCH_TAB_FILES);
+    await hook.unmount();
+  });
+
+  test("a missing remote default falls back to the live working tree", async () => {
+    const comparisons: Array<string | undefined> = [];
+    const diff = [fakeFileDiff({ path: "src/uncommitted.ts" })];
+    const { client } = coldClient({
+      getStreamCapabilities: async () => fakeCapabilities(),
+      getWorkspaceCapture: async () => ({ available: false }),
+      gitStatus: async () => ({
+        isRepo: true,
+        head: "local-only",
+        detached: false,
+        upstream: null,
+        ahead: 0,
+        behind: 0,
+        files: [],
+        revision: 1,
+      }),
+      gitDiff: async (_workspaceId, _sessionId, request) => {
+        comparisons.push(request?.fromRef);
+        if (request?.fromRef === "origin/HEAD") {
+          throw new Error("origin/HEAD is not configured");
+        }
+        return { files: diff, revision: 1 };
+      },
+    });
+    const hook = await renderTabsHook(client, { sessionId: SESSION_ID, events: [] });
+    await flush(60);
+
+    expect(comparisons).toContain("origin/HEAD");
+    expect(comparisons).toContain("HEAD");
+    expect(hook.result.current.defaultTab).toBe(WORKBENCH_TAB_CHANGES);
+    const changes = hook.result.current.tabs.find((tab) => tab.id === WORKBENCH_TAB_CHANGES);
+    expect(
+      (changes?.content as ReactElement<{ comparison: string }> | undefined)?.props.comparison,
+    ).toBe("working");
     await hook.unmount();
   });
 

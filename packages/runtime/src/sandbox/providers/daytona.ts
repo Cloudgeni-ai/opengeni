@@ -1,10 +1,13 @@
 import { DaytonaSandboxClient } from "@openai/agents-extensions/sandbox/daytona";
 import { CAPABILITY_DESCRIPTORS } from "../capabilities";
 import { SandboxConfigError } from "../errors";
-import type { ProviderRegistration } from "./types";
+import { REPEATABLE_CONFIGURED_WORKSPACE_CAPTURE, type ProviderRegistration } from "./types";
 
 export const daytonaProvider: ProviderRegistration = {
   backend: "daytona",
+  exactResumeMode: "custom",
+  instanceIdFields: ["sandboxId"],
+  workspaceCapturePolicy: () => REPEATABLE_CONFIGURED_WORKSPACE_CAPTURE,
   descriptor: CAPABILITY_DESCRIPTORS.daytona,
   validateCredentials(settings) {
     if (!settings.daytonaApiKey) {

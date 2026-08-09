@@ -1,16 +1,22 @@
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, mock, test } from "bun:test";
+import { fileURLToPath } from "node:url";
+import { describe, expect, mock, spyOn, test } from "bun:test";
 import { Manifest, type SandboxSessionLike } from "@openai/agents/sandbox";
+import { ModalSandboxClient } from "@openai/agents-extensions/sandbox/modal";
+import { testSettings } from "@opengeni/testing";
 import { ModalClient } from "modal";
 import {
+  OpenGeniModalSandboxClient,
   installOpenGeniModalSnapshotPolicy,
   isModalExecAlreadyCompletedError,
+  modalProvider,
 } from "../src/sandbox/providers/modal";
 import { discoverWorkspaceSkills } from "../src/workspace-skills";
 
 type Persistence = "tar" | "snapshot_filesystem" | "snapshot_directory";
+const SNAPSHOT_REQUEST_ID = "11111111-1111-4111-8111-111111111111";
 
 function fakeSession(
   persistence: Persistence,
@@ -25,7 +31,7 @@ function fakeSession(
     modal: { version: () => sdkVersion },
     sandbox,
     state,
-    persistWorkspace: mock(async () => {
+    persistWorkspace: mock(async (_options?: { requestId: string }) => {
       if (state.workspacePersistence === "snapshot_filesystem") {
         await (
           session.sandbox?.snapshotFilesystem as
@@ -83,6 +89,33 @@ function fakeModalFilesystemSession(root: string) {
 }
 
 describe("OpenGeni Modal 0.9 snapshot policy", () => {
+  test("the pinned Modal patch binds both native snapshot operations to caller UUIDs", async () => {
+    // This is deliberately a distribution-level assertion. The takeover
+    // contract depends on the request UUID reaching Modal's protobuf, beneath
+    // the adapter mock exercised by the tests below.
+    const source = await readFile(fileURLToPath(import.meta.resolve("modal")), "utf8");
+    const callerOwnedSnapshotIds = source.match(/params\?\.snapshotId \?\? uuidv4\w*\(\)/g) ?? [];
+    expect(callerOwnedSnapshotIds).toHaveLength(2);
+  });
+
+  test("the pinned Modal patch replaces a rotated command-router transport in place", async () => {
+    // ContainerProcess and Agents' active-process table retain this client
+    // object. Replacing only the outer Sandbox wrapper would strand yielded
+    // exec/PTY processes, so the patch must swap this object's channel + stub.
+    const source = await readFile(fileURLToPath(import.meta.resolve("modal")), "utf8");
+    expect(source).toContain("createTransport(routerUrl)");
+    expect(source).toContain("const attemptedJwt = this.jwt;");
+    expect(source).toContain("if (this.jwt !== failedJwt)");
+    expect(source).toContain(
+      "const replacement = routerChanged ? this.createTransport(resp.url) : null;",
+    );
+    expect(source).toContain("this.channel = replacement.channel;");
+    expect(source).toContain("this.stub = replacement.stub;");
+    expect(source).toContain("previousChannel?.close();");
+    expect(source).toContain("Task router URL changed during session; transport replaced");
+    expect(source).not.toContain('this.logger.warn("Task router URL changed during session");');
+  });
+
   test("the runtime resolves the exact supported Modal SDK", () => {
     const modal = new ModalClient({
       tokenId: "test-token-id",
@@ -100,29 +133,98 @@ describe("OpenGeni Modal 0.9 snapshot policy", () => {
     const session = fakeSession("snapshot_filesystem", { snapshotFilesystem });
 
     installOpenGeniModalSnapshotPolicy(session);
-    await session.persistWorkspace();
+    await session.persistWorkspace({ requestId: SNAPSHOT_REQUEST_ID });
 
     expect(snapshotFilesystem).toHaveBeenCalledTimes(1);
     expect(snapshotFilesystem.mock.calls[0]?.[0]).toEqual({
       timeoutMs: 120_000,
       ttlMs: null,
+      snapshotId: SNAPSHOT_REQUEST_ID,
     });
   });
 
-  test("passes snapshot_directory timeout and disables provider expiry", async () => {
+  test("refuses an unreceipted indefinite native snapshot", async () => {
+    const snapshotFilesystem = mock(async (_params?: unknown) => ({ imageId: "im-fs" }));
+    const session = fakeSession("snapshot_filesystem", { snapshotFilesystem });
+
+    installOpenGeniModalSnapshotPolicy(session);
+
+    await expect(session.persistWorkspace()).rejects.toThrow("requires a valid UUID request id");
+    expect(snapshotFilesystem).not.toHaveBeenCalled();
+  });
+
+  test("current configuration replaces a legacy resume-envelope snapshot timeout", async () => {
+    const resumed = fakeSession("snapshot_filesystem", {
+      snapshotFilesystem: async () => ({ imageId: "im-resumed" }),
+    });
+    const resume = spyOn(ModalSandboxClient.prototype, "resume").mockResolvedValue(
+      resumed as never,
+    );
+    const settings = testSettings({
+      sandboxBackend: "modal",
+      modalAppName: "opengeni-test",
+      modalTokenId: "test-token-id",
+      modalTokenSecret: "test-token-secret",
+      sandboxSnapshotTimeoutMs: 600_000,
+    });
+    const client = modalProvider.build({
+      settings,
+      environment: {},
+      exposedPorts: [],
+    }) as OpenGeniModalSandboxClient;
+    const legacyState = {
+      snapshotFilesystemTimeoutMs: 60_000,
+      durableIdentity: "preserve-me",
+    };
+
+    try {
+      await client.resume(legacyState as never);
+      expect(resume).toHaveBeenCalledTimes(1);
+      expect(resume.mock.calls[0]?.[0]).toEqual({
+        snapshotFilesystemTimeoutMs: 600_000,
+        durableIdentity: "preserve-me",
+      });
+      expect(legacyState.snapshotFilesystemTimeoutMs).toBe(60_000);
+    } finally {
+      resume.mockRestore();
+    }
+  });
+
+  test("passes snapshot_directory timeout, disables expiry, and reuses its durable id", async () => {
     const snapshotDirectory = mock(async (_path: string, _params?: unknown) => ({
       imageId: "im-dir",
     }));
     const session = fakeSession("snapshot_directory", { snapshotDirectory });
 
     installOpenGeniModalSnapshotPolicy(session);
-    await session.persistWorkspace();
+    await session.persistWorkspace({ requestId: SNAPSHOT_REQUEST_ID });
 
     expect(snapshotDirectory).toHaveBeenCalledTimes(1);
     expect(snapshotDirectory.mock.calls[0]?.[0]).toBe("/workspace");
     expect(snapshotDirectory.mock.calls[0]?.[1]).toEqual({
       timeoutMs: 120_000,
       ttlMs: null,
+      snapshotId: SNAPSHOT_REQUEST_ID,
+    });
+    expect(session.state.snapshotFilesystemTimeoutMs).toBe(120_000);
+  });
+
+  test("restores an explicitly present undefined directory timeout exactly", async () => {
+    const snapshotDirectory = mock(async (_path: string, _params?: unknown) => ({
+      imageId: "im-dir",
+    }));
+    const session = fakeSession("snapshot_directory", { snapshotDirectory });
+    session.state.snapshotFilesystemTimeoutMs = undefined as never;
+
+    installOpenGeniModalSnapshotPolicy(session);
+    await session.persistWorkspace({ requestId: SNAPSHOT_REQUEST_ID });
+
+    expect(Object.hasOwn(session.state, "snapshotFilesystemTimeoutMs")).toBe(true);
+    expect(session.state.snapshotFilesystemTimeoutMs).toBeUndefined();
+    expect(snapshotDirectory.mock.calls[0]?.[1]).toEqual({
+      timeoutMs: undefined,
+      ttlMs: null,
+      snapshotId: SNAPSHOT_REQUEST_ID,
     });
   });
 
@@ -134,17 +236,19 @@ describe("OpenGeni Modal 0.9 snapshot policy", () => {
     });
 
     installOpenGeniModalSnapshotPolicy(session);
-    await session.persistWorkspace();
+    await session.persistWorkspace({ requestId: SNAPSHOT_REQUEST_ID });
     session.sandbox = { snapshotFilesystem: secondSnapshot };
-    await session.persistWorkspace();
+    await session.persistWorkspace({ requestId: SNAPSHOT_REQUEST_ID });
 
     expect(firstSnapshot.mock.calls[0]?.[0]).toEqual({
       timeoutMs: 120_000,
       ttlMs: null,
+      snapshotId: SNAPSHOT_REQUEST_ID,
     });
     expect(secondSnapshot.mock.calls[0]?.[0]).toEqual({
       timeoutMs: 120_000,
       ttlMs: null,
+      snapshotId: SNAPSHOT_REQUEST_ID,
     });
   });
 
@@ -241,6 +345,66 @@ describe("OpenGeni Modal 0.9 snapshot policy", () => {
       [{ sessionId: 7, chars: "input" }],
       [{ sessionId: 7, chars: "" }],
     ]);
+  });
+
+  test("rotates only the stuck turn exec-start transport", async () => {
+    const originalDetach = mock(() => {});
+    let rejectExec!: (error: Error) => void;
+    let markExecStarted!: () => void;
+    const execStarted = new Promise<void>((resolve) => {
+      markExecStarted = resolve;
+    });
+    const execResult = new Promise<string>((_resolve, reject) => {
+      rejectExec = reject;
+    });
+    const execCommand = mock(async () => {
+      markExecStarted();
+      return await execResult;
+    });
+    const dedicatedDetach = mock(() => {
+      rejectExec(new Error("command-router closed"));
+    });
+    const dedicated = { detach: dedicatedDetach };
+    const replacementDetach = mock(() => {});
+    const replacement = { detach: replacementDetach };
+    let attaches = 0;
+    const fromId = mock(async (_sandboxId: string) => {
+      attaches += 1;
+      return attaches === 1 ? dedicated : replacement;
+    });
+    const session = Object.assign(fakeSession("tar", { detach: originalDetach }), {
+      modal: {
+        version: () => "0.9.0",
+        sandboxes: { fromId },
+      },
+      state: {
+        ...fakeSession("tar").state,
+        sandboxId: "sb-exact",
+      },
+      execCommand,
+    });
+
+    installOpenGeniModalSnapshotPolicy(session);
+    const invocation = session
+      .execCommand({ cmd: "sleep 60 # /tmp/opengeni-turn-shell/exact-token" })
+      .catch((error) => error);
+    await execStarted;
+    const cancelPending = (
+      session as typeof session & {
+        cancelPendingExecCommand(): Promise<void>;
+      }
+    ).cancelPendingExecCommand;
+    const first = cancelPending();
+    const second = cancelPending();
+    await Promise.all([first, second]);
+
+    expect(await invocation).toBeInstanceOf(Error);
+    expect(fromId).toHaveBeenCalledTimes(2);
+    expect(fromId.mock.calls).toEqual([["sb-exact"], ["sb-exact"]]);
+    expect(originalDetach).not.toHaveBeenCalled();
+    expect(dedicatedDetach).toHaveBeenCalledTimes(1);
+    expect(session.sandbox).toBe(replacement);
+    expect(replacementDetach).not.toHaveBeenCalled();
   });
 
   test("falls back to the exact lost-session result after typed completion cleanup fails", async () => {

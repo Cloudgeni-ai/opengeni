@@ -7,9 +7,12 @@ import {
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
+import { sandboxAcceptsLiveIo } from "../lib/sandbox-liveness";
+import { usePageLiveActivity } from "./internal";
 
-// "on-demand" is the boxless-benign resting state: the lease is cold and NOTHING
-// asked to warm a box (no viewer/consent action, no files-tab warm). Under lazy
+// "on-demand" is the boxless-benign resting state: the lease is not currently
+// holder-backed and NOTHING asked to warm a box (no viewer/consent action, no
+// files-tab warm). Under lazy
 // provisioning a chat-only turn never creates a box, so this is the correct calm
 // terminal state — NOT an error. It is distinct from "cold", which now means "a
 // warm-up is genuinely in flight" (a viewer attach was requested) and therefore
@@ -83,7 +86,8 @@ export type UseSessionCapabilitiesResult = {
   error: Error | null;
   /**
    * 409 from the desktop attach: the un-redacted (or shared) plane needs explicit
-   * acknowledgment before a viewer holder is granted. Drives the consent prompt.
+   * acknowledgment before a viewer holder is granted. The workbench uses this
+   * to complete acknowledgment automatically while Desktop is opening.
    */
   acknowledgmentRequired: "unredacted" | "shared" | null;
   /** 429 from the desktop attach: the per-session viewer cap is reached. */
@@ -148,8 +152,8 @@ function rotationsFrom(events: SessionEvent[]): StreamUrlRotatedPayload[] {
  *
  * Degradation is a value, never a crash: an unsupported surface comes back
  * `available:false`/`transport:null` + a `reason`; the components render the
- * reason-aware empty state. 409 (consent) and 429 (viewer cap) are surfaced as
- * typed signals, not thrown.
+ * reason-aware empty state. 409 (acknowledgment) and 429 (viewer cap) are
+ * surfaced as typed signals, not thrown.
  */
 export function useSessionCapabilities(
   sessionId: string | null | undefined,
@@ -157,6 +161,8 @@ export function useSessionCapabilities(
 ): UseSessionCapabilitiesResult {
   const { client, workspaceId } = useOpenGeni(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
+  const pageLive = usePageLiveActivity();
+  const lifecycleEnabled = enabled && pageLive;
   const attachDesktop = options.attachDesktop ?? false;
   const attachTerminal = options.attachTerminal ?? false;
   const attachFiles = options.attachFiles ?? false;
@@ -201,21 +207,21 @@ export function useSessionCapabilities(
       epochRef.current = 0;
       viewerIdRef.current = null;
     }
-    if (!enabled || !sessionId) {
+    if (!lifecycleEnabled || !sessionId) {
       setState("idle");
       setCapabilities(null);
       return;
     }
     let cancelled = false;
     let pollTimer: ReturnType<typeof setTimeout> | null = null;
-    let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+    let heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
     let localViewerId: string | null = null;
     const requestAbort = new AbortController();
     const startedAt = Date.now();
 
     const clearTimers = () => {
       if (pollTimer !== null) clearTimeout(pollTimer);
-      if (heartbeatTimer !== null) clearInterval(heartbeatTimer);
+      if (heartbeatTimer !== null) clearTimeout(heartbeatTimer);
       pollTimer = null;
       heartbeatTimer = null;
     };
@@ -231,27 +237,35 @@ export function useSessionCapabilities(
       if (!localViewerId || heartbeatTimer !== null) return;
       const intervalMs =
         caps.viewerHeartbeatIntervalMs > 0 ? caps.viewerHeartbeatIntervalMs : 30_000;
-      heartbeatTimer = setInterval(() => {
+      const schedule = () => {
         if (cancelled || !localViewerId) return;
-        void client
-          .heartbeatViewer(workspaceId, sessionId, localViewerId, { leaseEpoch: epochRef.current })
-          .then((res) => {
-            // alive:false ⇒ the holder was reaped or the epoch moved under us;
-            // re-negotiate to re-acquire against the new owner.
-            if (!res.alive && !cancelled) {
-              renegotiate();
-            }
-          })
-          .catch((cause) => {
-            if (cancelled) return;
-            if (
-              cause instanceof OpenGeniApiError &&
-              (cause.status === 409 || cause.status === 410)
-            ) {
-              renegotiate();
-            }
-          });
-      }, intervalMs);
+        heartbeatTimer = setTimeout(() => {
+          heartbeatTimer = null;
+          if (cancelled || !localViewerId) return;
+          void client
+            .heartbeatViewer(workspaceId, sessionId, localViewerId, {
+              leaseEpoch: epochRef.current,
+            })
+            .then((res) => {
+              // alive:false ⇒ the holder was reaped or the epoch moved under us;
+              // re-negotiate to re-acquire against the new owner.
+              if (!res.alive && !cancelled) {
+                renegotiate();
+              }
+            })
+            .catch((cause) => {
+              if (cancelled) return;
+              if (
+                cause instanceof OpenGeniApiError &&
+                (cause.status === 409 || cause.status === 410)
+              ) {
+                renegotiate();
+              }
+            })
+            .finally(schedule);
+        }, intervalMs);
+      };
+      schedule();
     };
 
     const pollUntilWarm = () => {
@@ -262,7 +276,7 @@ export function useSessionCapabilities(
           .then((caps) => {
             if (cancelled) return;
             settle(caps);
-            if (caps.liveness === "warm" || caps.liveness === "draining") {
+            if (sandboxAcceptsLiveIo(caps.liveness)) {
               setState("ready");
               return;
             }
@@ -297,8 +311,8 @@ export function useSessionCapabilities(
         // attach serves BOTH live planes — the desktop pixel stream AND the
         // interactive terminal (ttyd pty-ws) ride the same warm box and the same
         // holder; the response folds the minted address for each requested plane.
-        // The consent gate (409) and the viewer cap (429) surface as typed signals
-        // rather than throwing — the tabs degrade gracefully.
+        // The acknowledgment requirement (409) and viewer cap (429) surface as
+        // typed signals rather than throwing — the tabs degrade gracefully.
         //
         // KEY: the handshake (getStreamCapabilities) NEVER spins up a cold box, so
         // on a cold/warming lease the desktop cell comes back transport:null and
@@ -382,8 +396,8 @@ export function useSessionCapabilities(
             if (cause instanceof OpenGeniApiError) {
               if (cause.status === 409) {
                 // The un-redacted/shared consent gate is a DESKTOP requirement. A
-                // terminal-only warm attach needs no consent, so a 409 there is not
-                // a consent prompt — the terminal just stays on the read-only
+                // terminal-only warm attach needs no acknowledgment, so a 409 there
+                // is not a desktop-open signal — the terminal stays on the read-only
                 // firehose. Only raise the consent requirement when the desktop was
                 // the (or a) reason we attached.
                 if (wantDesktopAttach) {
@@ -407,16 +421,16 @@ export function useSessionCapabilities(
         }
 
         // Whether ANYTHING asked to warm a box this negotiation. Only then is a
-        // cold lease "warming in flight" — worth polling, and worth surfacing a
+        // non-warm lease "warming in flight" — worth polling, and worth surfacing a
         // stall as an error. With no warm-up requested a cold lease is the benign
         // boxless resting state (below), never an error.
         const warmUpRequested = wantDesktopAttach || wantTerminalAttach || wantFilesAttach;
-        if (caps.liveness === "warm" || caps.liveness === "draining" || localViewerId) {
+        if (sandboxAcceptsLiveIo(caps.liveness) || localViewerId) {
           setState("ready");
           startHeartbeat(caps);
         } else if (warmUpRequested) {
           // A warm-up is genuinely in flight (a viewer attach was requested) but the
-          // box isn't warm yet — poll until it warms, with the patience deadline so a
+          // box isn't holder-confirmed warm yet — poll until it is, with the deadline so a
           // real stall surfaces as an error.
           setState("cold");
           pollUntilWarm();
@@ -455,7 +469,7 @@ export function useSessionCapabilities(
     client,
     workspaceId,
     sessionId,
-    enabled,
+    lifecycleEnabled,
     attachDesktop,
     attachTerminal,
     attachFiles,

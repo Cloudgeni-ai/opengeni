@@ -178,7 +178,7 @@ wait for settlement before retrying.
    transcript survives as an audit trail (same pattern as compaction).
 2. Inserts **one neutral boundary marker** (`[context cleared]`, a sanitizer-
    clean user message) at `max(position)+1`.
-3. Resets `last_input_tokens` to 0 so the next turn's compaction trigger starts
+3. Resets `last_input_tokens` to null so the next turn's compaction trigger starts
    fresh.
 
 It is idempotent, and the API emits a `session.context.cleared` event carrying

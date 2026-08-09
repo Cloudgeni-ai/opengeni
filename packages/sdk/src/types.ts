@@ -1587,6 +1587,8 @@ export type FsListResponse = {
   revision: number;
   truncated: boolean;
 };
+export type FsListBatchRequest = { requests: FsListRequest[] };
+export type FsListBatchResponse = { results: FsListResponse[] };
 export type FsReadRequest = {
   path: string;
   encoding?: FsEncoding;
@@ -1695,6 +1697,16 @@ export type GitDiffRequest = {
   maxBytesPerFile?: number;
 };
 export type GitDiffResponse = { files: GitFileDiff[]; revision: number };
+export type GitReadBatchItemRequest = {
+  status: GitStatusRequest;
+  diff?: GitDiffRequest;
+};
+export type GitReadBatchRequest = { requests: GitReadBatchItemRequest[] };
+export type GitReadBatchItemResponse = {
+  status: GitStatusResponse;
+  diff?: GitDiffResponse;
+};
+export type GitReadBatchResponse = { results: GitReadBatchItemResponse[] };
 export type GitLogRequest = {
   path?: string;
   ref?: string;
@@ -1755,6 +1767,9 @@ export type WorkspaceCaptureRepo = {
   behind: number;
   status: GitFileStatus[];
   diff: GitFileDiff[];
+  /** Current branch vs the remote default branch. Absent on legacy captures or
+   *  repositories whose remote default ref could not be resolved. */
+  branchDiff?: GitFileDiff[] | undefined;
 };
 export type WorkspaceCaptureDegradedReason =
   | "repository_discovery_command_failed"
@@ -1875,7 +1890,7 @@ export type SessionStructuredCapabilities = {
 
 export type ScheduledTaskStatus = "active" | "paused";
 
-export type ScheduledTaskRunMode = "new_session_per_run" | "reusable_session";
+export type ScheduledTaskRunMode = "new_session_per_run" | "reusable_session" | "existing_session";
 
 export type ScheduledTaskOverlapPolicy = "allow_concurrent" | "skip" | "buffer_one";
 
@@ -1931,6 +1946,7 @@ export type ScheduledTask = {
   createdBy?: TurnInitiator | undefined;
   createdByContext?: TurnInitiatorContext | undefined;
   personalConnections?: McpPersonalConnectionSummary[] | undefined;
+  targetSessionId: string | null;
   reusableSessionId: string | null;
   variableSetId: string | null;
   /** @deprecated use variableSetId */
@@ -2038,8 +2054,14 @@ export const KNOWN_PERMISSIONS = [
   "connections:write",
   "environments:manage",
   "environments:use",
+  "variable-sets:list",
+  "variable-sets:read",
+  "variable-sets:write",
   "variable-sets:manage",
   "variable-sets:use",
+  "secrets:list",
+  "secrets:read",
+  "secrets:write",
   "mcp_servers:attach",
   "toolspace:call",
   "goals:manage",
@@ -2075,6 +2097,8 @@ export type FirstPartyMcpToolName =
   | "sandbox_swap"
   | "run_on"
   | "sandbox_provision"
+  | "connected_machine_remove"
+  | "connected_machine_remove"
   | "rig_list"
   | "rig_get"
   | "rig_propose_change"
@@ -2091,6 +2115,7 @@ export type FirstPartyMcpToolName =
   | "set_other_session_title"
   | "variable_set_list"
   | "environment_list"
+  | "variable_set_get_variable"
   | "variable_set_set_variable"
   | "environment_set_variable"
   | "github_connect_link"
@@ -2568,6 +2593,98 @@ export type ClientVoiceInputConfig = {
   maxDurationSeconds: number;
   maxSizeBytes: number;
   acceptedMimeTypes: string[];
+  resumable?: ClientResumableVoiceInputConfig | undefined;
+};
+
+export type ClientResumableVoiceInputConfig = {
+  maxDurationSeconds: number;
+  maxSizeBytes: number;
+  maxChunkSizeBytes: number;
+  providerSegmentSeconds: number;
+};
+
+export type TranscriptionRecordingErrorCode =
+  | "permission_denied"
+  | "not_supported"
+  | "network"
+  | "provider"
+  | "policy_blocked"
+  | "timeout"
+  | "cancelled"
+  | "unavailable"
+  | "too_large"
+  | "invalid_audio"
+  | "unknown";
+
+export type TranscriptionRecordingState =
+  | "uploading"
+  | "segmenting"
+  | "ready"
+  | "transcribing"
+  | "complete"
+  | "failed"
+  | "discarded";
+
+export type TranscriptionRecordingSegmentState =
+  | "preparing"
+  | "pending"
+  | "transcribing"
+  | "complete"
+  | "failed";
+
+export type TranscriptionRecordingSegment = {
+  segmentNumber: number;
+  state: TranscriptionRecordingSegmentState;
+  startMilliseconds: number;
+  durationMilliseconds: number;
+  byteLength: number;
+  errorCode: TranscriptionRecordingErrorCode | null;
+  retryable: boolean;
+};
+
+export type TranscriptionRecording = {
+  id: string;
+  workspaceId: string;
+  mimeType: string;
+  state: TranscriptionRecordingState;
+  nextChunkNumber: number;
+  chunkCount: number;
+  totalBytes: number;
+  totalDurationMilliseconds: number;
+  segmentCount: number;
+  completedSegmentCount: number;
+  transcriptText: string | null;
+  languages: string[];
+  errorCode: TranscriptionRecordingErrorCode | null;
+  retryable: boolean;
+  objectsCleaned: boolean;
+  createdAt: string;
+  updatedAt: string;
+  expiresAt: string;
+};
+
+export type TranscriptionRecordingResponse = {
+  recording: TranscriptionRecording;
+  segments: TranscriptionRecordingSegment[];
+  retryAfterMilliseconds?: number;
+};
+
+export type TranscriptionRecordingListResponse = {
+  recordings: TranscriptionRecording[];
+};
+
+export type TranscriptionRecordingChunk = {
+  chunkNumber: number;
+  byteLength: number;
+  sha256: string;
+  startMilliseconds: number;
+  durationMilliseconds: number;
+  deduplicated: boolean;
+};
+
+export type UploadTranscriptionRecordingChunkResponse = {
+  recording: TranscriptionRecording;
+  chunk: TranscriptionRecordingChunk;
 };
 
 /** Response from POST /v1/workspaces/:workspaceId/transcriptions. */
@@ -2644,6 +2761,8 @@ export type WorkspaceSettings = {
   maxNestedAgentDepth?: number | null | undefined;
   /** Default for new Codex sessions; absent ⇒ remote_v2. */
   codexCompactionDefault?: "remote_v2" | "portable" | undefined;
+  /** Whether agents may invoke the built-in structured human-input tool. */
+  agentHumanInputEnabled?: boolean | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
   [key: string]: unknown;
 };
@@ -2675,6 +2794,7 @@ export type UpdateWorkspaceSettingsRequest = {
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
   codexCompactionDefault?: "remote_v2" | "portable" | undefined;
+  agentHumanInputEnabled?: boolean | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
   [key: string]: unknown;
 };
@@ -3087,6 +3207,7 @@ export type CreateScheduledTaskRequest = {
   name: string;
   schedule: ScheduledTaskScheduleSpec;
   runMode?: ScheduledTaskRunMode | undefined;
+  targetSessionId?: string | null | undefined;
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   agentConfig: ScheduledTaskAgentConfigInput;
   status?: ScheduledTaskStatus | undefined;
@@ -3102,6 +3223,7 @@ export type UpdateScheduledTaskRequest = {
   name?: string | undefined;
   schedule?: ScheduledTaskScheduleSpec | undefined;
   runMode?: ScheduledTaskRunMode | undefined;
+  targetSessionId?: string | null | undefined;
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   agentConfig?: ScheduledTaskAgentConfigInput | undefined;
   status?: ScheduledTaskStatus | undefined;
@@ -3135,16 +3257,20 @@ export type ScheduledTaskRun = {
 
 // --- VariableSets -------------------------------------------------------------
 
-/**
- * Variable values are write-only by design: the API never returns a value, so
- * reads expose name + version metadata only. Values are decrypted exclusively
- * inside the worker at sandbox materialization time.
- */
+/** Generic variable-set reads expose name + version metadata only. */
 export type VariableSetVariableMetadata = {
   name: string;
   version: number;
   createdAt: string;
   updatedAt: string;
+};
+
+/** Dedicated permissioned plaintext response; never embedded in metadata reads. */
+export type VariableSetSecret = {
+  variableSetId: string;
+  name: string;
+  version: number;
+  value: string;
 };
 
 export type VariableSet = {
@@ -3320,12 +3446,16 @@ export type FileAsset = {
 /** Mirrors the closed, provider-neutral retained-output contract. */
 export const RETAINED_OUTPUT_DEFAULT_PAGE_BYTES = 256 * 1024;
 export const RETAINED_OUTPUT_MAX_PAGE_BYTES = 1024 * 1024;
+export const COMPUTER_SCREENSHOT_MAX_BYTES = 32 * 1024 * 1024;
+export const GENERATED_IMAGE_MAX_BYTES = 64 * 1024 * 1024;
 
 export type RetainedOutputKind =
   | "tool_result"
   | "assistant_completion"
   | "internal_update"
   | "event_media"
+  | "computer_screenshot"
+  | "generated_image"
   | "file";
 
 export type RetainedOutputUnavailableReason =
@@ -3336,6 +3466,9 @@ export type RetainedOutputUnavailableReason =
   | "deleted"
   | "missing_storage"
   | "storage_write_failed"
+  | "quota_exceeded"
+  | "invalid_content"
+  | "oversized"
   | "unsupported";
 
 export type RetainedArtifactReference = {
@@ -3346,7 +3479,10 @@ export type RetainedArtifactReference = {
   originalBytes: number;
   sha256: string;
   retainedAt: string;
-  retention: { policy: "workspace_file"; expiresAt: null };
+  dimensions?: { width: number; height: number } | undefined;
+  retention:
+    | { policy: "workspace_file"; expiresAt: null }
+    | { policy: "session_screenshot"; expiresAt: string };
   retrieval: {
     method: "GET";
     path: string;
@@ -3363,6 +3499,12 @@ export type RetainedArtifactUnavailable = {
 
 export type RetainedArtifactMetadata = RetainedArtifactReference | RetainedArtifactUnavailable;
 
+export type GeneratedImageReceipt = {
+  type: "generated_image";
+  artifact: RetainedArtifactReference;
+  sandboxPath: string;
+};
+
 export type RetainedArtifactContentOptions = {
   /** One RFC-style bytes range, for example `bytes=1048576-2097151`. */
   range?: string | undefined;
@@ -3376,6 +3518,25 @@ export type RetainedArtifactContent = {
   contentLength: number;
   contentRange: string | null;
   acceptRanges: "bytes";
+};
+
+export type RetainedArtifactDownloadOptions = {
+  signal?: AbortSignal | undefined;
+  /** Retry transient range failures; bounded to 0..3, default 2. */
+  maxRetries?: number | undefined;
+};
+
+export type RetainedScreenshotDownloadOptions = RetainedArtifactDownloadOptions;
+
+export type RetainedScreenshotDownload = {
+  metadata: RetainedArtifactMetadata;
+  /** Null when metadata truth says the screenshot is unavailable. */
+  bytes: Uint8Array | null;
+};
+
+export type RetainedArtifactDownload = {
+  artifact: RetainedArtifactReference;
+  bytes: Uint8Array;
 };
 
 export type CreateFileUploadRequest = {
@@ -3413,6 +3574,8 @@ export type UploadFileInput = {
   contentType: string;
   data: FileUploadData;
   sha256?: string | undefined;
+  /** Optional deadline for the signed object-storage PUT. */
+  timeoutMs?: number | undefined;
 };
 
 // --- Documents -------------------------------------------------------------------
@@ -4121,6 +4284,8 @@ export type InsightsRange = "today" | "week" | "month" | "ytd";
 
 export type InsightsBillingPath = "opengeni_credits" | "external";
 
+export type InsightsPricingSource = "configured_list_price" | "gateway_reported";
+
 export type InsightsModelUsageRow = {
   id: string;
   model: string;
@@ -4130,17 +4295,32 @@ export type InsightsModelUsageRow = {
   inputTokens: number;
   outputTokens: number;
   cachedTokens: number;
+  cacheInputTokens: number;
   cacheWriteTokens: number;
   reasoningTokens: number;
+  totalTokens: number;
+  tokenKnownCalls: number;
+  cacheKnownCalls: number;
   creditUsd: number;
+  estimatedProviderUsd: number;
+  estimatedProviderCostKnownCalls: number;
 };
 
 export type InsightsSeriesPoint = {
   label: string;
   modelCostUsd: number;
+  estimatedProviderUsd: number;
+  estimatedProviderCostKnownCalls: number;
   warmSeconds: number;
   inputTokens: number;
+  outputTokens: number;
   cachedTokens: number;
+  cacheInputTokens: number;
+  cacheWriteTokens: number;
+  reasoningTokens: number;
+  totalTokens: number;
+  tokenKnownCalls: number;
+  cacheKnownCalls: number;
   cacheHitPct: number;
   calls: number;
 };
@@ -4160,9 +4340,12 @@ export type InsightsSpendDriver = {
   groupBy: "root_session" | "schedule";
   label: string;
   creditUsd: number;
+  estimatedProviderUsd: number;
+  estimatedProviderCostKnownCalls: number;
   tokens: number;
   cacheHitPct: number;
   pctOfCreditUsd: number;
+  pctOfTokens: number;
   deltaUsdVsPrior: number;
 };
 
@@ -4202,9 +4385,33 @@ export type InsightsScheduleRow = {
   name: string;
   fires: number;
   creditUsd: number | null;
+  estimatedProviderUsd: number | null;
+  estimatedProviderCostKnownCalls: number | null;
   tokens: number | null;
   cacheHitPct: number | null;
   billing: InsightsBillingPath | null;
+};
+
+export type InsightsModelCallRow = {
+  id: string;
+  occurredAt: string;
+  recordedAt: string;
+  sessionId: string;
+  sessionTitle: string;
+  turnId: string;
+  provider: string;
+  providerApi: string;
+  model: string;
+  billing: InsightsBillingPath;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cachedTokens: number | null;
+  cacheWriteTokens: number | null;
+  reasoningTokens: number | null;
+  totalTokens: number | null;
+  creditUsd: number;
+  estimatedProviderUsd: number | null;
+  pricingSource: InsightsPricingSource | null;
 };
 
 export type WorkspaceInsightsSnapshot = {
@@ -4213,6 +4420,9 @@ export type WorkspaceInsightsSnapshot = {
   priorLabel: string;
   seriesLabel: string;
   cacheSeriesLabel: string;
+  windowStart: string;
+  windowEnd: string;
+  generatedAt: string;
   timezone: "UTC";
   models: InsightsModelUsageRow[];
   facets: InsightsModelFacet[];
@@ -4220,6 +4430,7 @@ export type WorkspaceInsightsSnapshot = {
   depth: InsightsDepthBucket[];
   drivers: InsightsSpendDriver[];
   schedules: InsightsScheduleRow[];
+  recentCalls: InsightsModelCallRow[];
   warmSeconds: number;
   priorWarmSeconds: number;
   warmGroups: InsightsWarmGroupRow[];
@@ -4231,7 +4442,13 @@ export type WorkspaceInsightsSnapshot = {
   priorWorkspaceCreditUsd: number;
   creditUsd: number;
   priorCreditUsd: number;
+  estimatedProviderUsd: number;
+  priorEstimatedProviderUsd: number;
+  estimatedProviderCostKnownCalls: number;
+  priorEstimatedProviderCostKnownCalls: number;
+  modelCalls: number;
   priorInputTokens: number;
+  priorTotalTokens: number;
   priorCacheHitPct: number;
   priorCalls: number;
   goalsActive: number;
@@ -4384,6 +4601,32 @@ export type MachinesResponse = {
  *  (~1/min) history the dashboard time-range reads. */
 export type MachineMetricsSeriesResponse = {
   samples: MetricSample[];
+};
+
+/** POST /v1/workspaces/:ws/enrollments/:id/revoke body. */
+export type RemoveEnrollmentRequest = {
+  expectedUpdatedAt?: string;
+  idempotencyKey?: string;
+};
+
+/** Typed removal/revocation outcome. Blocked outcomes preserve the exact
+ * dependency and the action needed to make removal safe. */
+export type RemoveEnrollmentResponse = {
+  revoked: boolean;
+  outcome: "removed" | "already_removed" | "blocked";
+  enrollmentId: string;
+  machineName: string | null;
+  lastSeenAt: string | null;
+  revokedAt: string | null;
+  code:
+    | "active_route"
+    | "active_commands"
+    | "active_lease"
+    | "recovery_pending"
+    | "not_selfhosted"
+    | null;
+  message: string;
+  action: string;
 };
 
 /** POST /v1/workspaces/:ws/sessions/:sessionId/active-sandbox — swap a session's

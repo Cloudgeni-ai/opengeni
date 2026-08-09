@@ -109,13 +109,36 @@ describe("OpenGeni Slack bot install controls", () => {
     );
   });
 
-  test("renders no actionable install control without connections:write", async () => {
+  test("renders a disabled install control and administrator guidance without connections:write", async () => {
+    const rendered = await renderControls({ canInstall: false });
+
+    try {
+      const install = rendered.container.querySelector<HTMLButtonElement>(
+        "[data-opengeni-slack-install]",
+      );
+      expect(install?.disabled).toBe(true);
+      expect(rendered.container.textContent).toContain(
+        "Ask a workspace administrator or connection manager",
+      );
+      await act(async () => install!.click());
+      expect(rendered.onInstall).not.toHaveBeenCalled();
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("renders a disabled reinstall control without offering another installation", async () => {
     const rendered = await renderControls({ canInstall: false, hasConnection: true });
 
     try {
-      expect(rendered.container.querySelector("[data-opengeni-slack-install]")).toBeNull();
-      expect(rendered.container.querySelectorAll("button")).toHaveLength(0);
+      const buttons = [...rendered.container.querySelectorAll<HTMLButtonElement>("button")];
+      expect(buttons).toHaveLength(1);
+      expect(buttons[0]?.textContent?.trim()).toBe("Reinstall");
+      expect(buttons[0]?.disabled).toBe(true);
       expect(rendered.container.textContent).not.toContain("Install in another workspace");
+      expect(rendered.container.textContent).toContain(
+        "Ask a workspace administrator or connection manager",
+      );
     } finally {
       await rendered.unmount();
     }

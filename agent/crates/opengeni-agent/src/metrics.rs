@@ -40,13 +40,16 @@
 //! with NO live host dependency — bounds, the null-when-absent contract, the CPU
 //! delta, and the disk fragment-size unit are all deterministic.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[cfg(target_os = "linux")]
+use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use opengeni_agent_proto::v1::{GpuSample, MetricsSample};
 
 /// The minimum interval between the two `/proc/stat` reads a CPU% delta needs.
 /// A short window keeps the synchronous sample cheap while still being long
 /// enough to register a non-trivial busy fraction.
+#[cfg(target_os = "linux")]
 const CPU_SAMPLE_INTERVAL: Duration = Duration::from_millis(200);
 
 /// Produces a best-effort point-in-time metrics sample.
@@ -179,9 +182,7 @@ fn read_cpu_percent() -> f64 {
     }
     #[cfg(target_os = "macos")]
     {
-        run_capture("top", &["-l", "2", "-n", "0"])
-            .map(|text| parse_top_cpu_busy(&text))
-            .unwrap_or(0.0)
+        run_capture("top", &["-l", "2", "-n", "0"]).map_or(0.0, |text| parse_top_cpu_busy(&text))
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
@@ -244,9 +245,7 @@ fn read_memory() -> (u64, u64) {
         // best-effort from `vm_stat`; if that is unreadable we still report the
         // correct total with used == 0 (the bounds invariant used <= total holds).
         if let Some(total) = run_sysctl("hw.memsize").and_then(|t| t.trim().parse::<u64>().ok()) {
-            let used = run_capture("vm_stat", &[])
-                .map(|t| parse_vm_stat_used(&t, total))
-                .unwrap_or(0);
+            let used = run_capture("vm_stat", &[]).map_or(0, |t| parse_vm_stat_used(&t, total));
             return (used.min(total), total);
         }
     }

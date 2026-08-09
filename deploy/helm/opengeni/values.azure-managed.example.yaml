@@ -15,21 +15,25 @@ worker:
   control:
     replicaCount: 2
   turns:
-    replicaCount: 4
-    # Turn pods hold the in-flight model history and sandbox clients. The
-    # worker process enforces an explicit activity cap; these requests and
-    # limits provide headroom for the temporary 16-turn density while density rollout
-    # measures the final concurrency/resource optimum.
+    replicaCount: 2
+    # Two failure-domain-spread replicas retain HA. Each process can admit at
+    # most 32 turns, preserving the previous fleet ceiling of 4 x 16 while the
+    # resource tuner and HPA add capacity from measured load instead of idle RAM.
+    strategy:
+      type: RollingUpdate
+      rollingUpdate:
+        maxSurge: 1
+        maxUnavailable: 0
     resources:
       requests:
         cpu: 500m
-        memory: 3Gi
+        memory: 1Gi
       limits:
         cpu: "2"
-        memory: 6Gi
+        memory: 4Gi
     autoscaling:
       enabled: true
-      minReplicas: 4
+      minReplicas: 2
       maxReplicas: 20
       targetCPUUtilizationPercentage: 70
       targetMemoryUtilizationPercentage: 80
@@ -158,6 +162,14 @@ config:
   OPENGENI_STARTUP_DEPENDENCY_RETRY_ATTEMPTS: "30"
   OPENGENI_STARTUP_DEPENDENCY_RETRY_INITIAL_DELAY_MS: "1000"
   OPENGENI_STARTUP_DEPENDENCY_RETRY_MAX_DELAY_MS: "5000"
+  # Resource-aware admission preserves the former 64-turn fleet ceiling at the
+  # two-replica floor without reserving peak memory while idle. HPA remains the
+  # horizontal owner; 90% is a separate last-resort drain threshold.
+  OPENGENI_TURN_WORKER_CONCURRENCY_MODE: resource-based
+  OPENGENI_TURN_WORKER_MAX_CONCURRENT_TURNS: "32"
+  OPENGENI_TURN_WORKER_TARGET_CPU_USAGE: "0.8"
+  OPENGENI_TURN_WORKER_TARGET_MEMORY_USAGE: "0.75"
+  OPENGENI_TURN_WORKER_EMERGENCY_MEMORY_USAGE: "0.9"
   OPENGENI_OBJECT_STORAGE_BACKEND: azure-blob
   OPENGENI_OBJECT_STORAGE_BUCKET: opengeni-files
   # Production readiness checks should use a real sandbox backend. Modal is

@@ -19,10 +19,16 @@ type GitHubRun = {
   event?: unknown;
   status?: unknown;
   conclusion?: unknown;
+  head_branch?: unknown;
   head_sha?: unknown;
   repository?: { full_name?: unknown };
   head_repository?: { full_name?: unknown };
   html_url?: unknown;
+};
+
+type GitHubComparison = {
+  status?: unknown;
+  merge_base_commit?: { sha?: unknown };
 };
 
 type GitHubCommit = {
@@ -42,6 +48,10 @@ type GitHubArtifact = {
 const sourceShaPattern = /^[0-9a-f]{40}$/;
 
 export type VerifiedReleaseProvenance = {
+  controller: {
+    headBranch: "main";
+    headSha: string;
+  };
   producer: ReleaseProducerMetadata;
   artifact: TrustedReleaseArtifact;
 };
@@ -72,23 +82,38 @@ export async function verifyReleaseProvenance(input: {
   if (headRepository !== RELEASE_REPOSITORY) {
     throw new Error("release producer head repository is not the trusted repository");
   }
-  const sourceSha = string(run.head_sha, "workflow run head SHA");
-  if (!sourceShaPattern.test(sourceSha)) {
+  if (run.head_branch !== "main") {
+    throw new Error("release producer workflow must run from main");
+  }
+  const runHeadSha = string(run.head_sha, "workflow run head SHA");
+  if (!sourceShaPattern.test(runHeadSha)) {
     throw new Error("workflow run head SHA must be a full lowercase SHA");
   }
+  if (input.kind !== "package" && runHeadSha !== input.sourceSha) {
+    throw new Error(`release producer source SHA ${runHeadSha} does not match ${input.sourceSha}`);
+  }
+  const comparison = asRecord<GitHubComparison>(
+    await input.api.get(`/repos/${RELEASE_REPOSITORY}/compare/${runHeadSha}...main`),
+  );
+  if (
+    (comparison.status !== "ahead" && comparison.status !== "identical") ||
+    comparison.merge_base_commit?.sha !== runHeadSha
+  ) {
+    throw new Error("release producer workflow head is no longer an ancestor of main");
+  }
   const sourceCommit = asRecord<GitHubCommit>(
-    await input.api.get(`/repos/${RELEASE_REPOSITORY}/commits/${sourceSha}`),
+    await input.api.get(`/repos/${RELEASE_REPOSITORY}/commits/${input.sourceSha}`),
   );
   const sourceTreeSha = string(sourceCommit.commit?.tree?.sha, "source tree SHA");
   const commitSha = string(sourceCommit.sha, "source commit SHA");
-  if (commitSha !== sourceSha)
+  if (commitSha !== input.sourceSha)
     throw new Error("source commit response does not match workflow head SHA");
 
   const producer = buildReleaseProducerMetadata({
     kind: input.kind,
     runId,
     runAttempt: run.run_attempt as number,
-    sourceSha,
+    sourceSha: input.sourceSha,
     sourceTreeSha,
     repository: string(
       (run.repository as { full_name?: unknown } | undefined)?.full_name,
@@ -100,17 +125,18 @@ export async function verifyReleaseProvenance(input: {
     runUrl: string(run.html_url, "workflow run URL"),
   });
 
-  if (sourceSha !== input.sourceSha) {
-    throw new Error(`release producer source SHA ${sourceSha} does not match ${input.sourceSha}`);
-  }
-
   const artifactsResponse = asRecord<{ artifacts?: unknown }>(
     await input.api.get(`/repos/${RELEASE_REPOSITORY}/actions/runs/${runId}/artifacts`),
   );
   const artifacts = Array.isArray(artifactsResponse.artifacts)
     ? artifactsResponse.artifacts.map((value) => asRecord<GitHubArtifact>(value))
     : [];
-  const expectedName = expectedArtifactName(input.kind, input.sourceSha);
+  const expectedName = expectedArtifactName(
+    input.kind,
+    input.sourceSha,
+    runId,
+    producer.runAttempt,
+  );
   const matches = artifacts.filter(
     (artifact) => artifact.name === expectedName && artifact.expired === false,
   );
@@ -125,11 +151,16 @@ export async function verifyReleaseProvenance(input: {
     throw new Error("release artifact is not owned by the selected workflow run");
   }
   return {
+    controller: {
+      headBranch: "main",
+      headSha: runHeadSha,
+    },
     producer,
     artifact: buildTrustedReleaseArtifact({
       kind: input.kind,
       sourceSha: input.sourceSha,
       runId,
+      runAttempt: producer.runAttempt,
       artifact: {
         id: positiveInteger(artifact.id, "artifact id"),
         name: string(artifact.name, "artifact name"),
@@ -161,6 +192,8 @@ async function main(): Promise<void> {
     await appendFile(
       process.env.GITHUB_OUTPUT,
       [
+        `${prefix}controller_head_branch=${verified.controller.headBranch}`,
+        `${prefix}controller_head_sha=${verified.controller.headSha}`,
         `${prefix}run_id=${verified.producer.runId}`,
         `${prefix}run_attempt=${verified.producer.runAttempt}`,
         `${prefix}source_tree_sha=${verified.producer.sourceTreeSha}`,
@@ -217,7 +250,9 @@ function parseArgs(values: string[]): {
     };
     if (flag === "--kind") {
       const kind = next();
-      if (kind !== "candidate" && kind !== "acceptance") throw new Error("--kind is invalid");
+      if (kind !== "candidate" && kind !== "acceptance" && kind !== "package") {
+        throw new Error("--kind is invalid");
+      }
       output.kind = kind;
     } else if (flag === "--source-sha") output.sourceSha = next();
     else if (flag === "--run-id") output.runId = next();

@@ -1,5 +1,105 @@
 # @opengeni/observability
 
+## 0.5.12
+
+### Patch Changes
+
+- e627d88: Keep known-cold sandbox views passive, fence delayed live-read invalidations across draining transitions, and expose bounded structural Channel-A failure diagnostics without leaking provider details.
+
+## 0.5.11
+
+### Patch Changes
+
+- Updated dependencies [e2edfbc]
+  - @opengeni/contracts@0.41.2
+
+## 0.5.10
+
+### Patch Changes
+
+- 56f612b: Isolate read handles from process-capable handles, replace Modal's transport in place when its command-router URL rotates, rebuild the exact lease-fenced handle once for side-effect-free reads after a typed provider outage, and correlate handle recovery safely across API and reaper logs.
+
+## 0.5.9
+
+### Patch Changes
+
+- 81a51ac: Settle abandoned turn workspace admissions only after the exact attempt's physical writers drain, while preserving eager cancellation holder release and late sandbox provisioning safety. Add privacy-preserving sandbox lease correlation keys to rendered lifecycle logs.
+
+## 0.5.8
+
+### Patch Changes
+
+- Updated dependencies [2727236]
+  - @opengeni/contracts@0.41.1
+
+## 0.5.7
+
+### Patch Changes
+
+- Updated dependencies [bb9a346]
+  - @opengeni/contracts@0.41.0
+
+## 0.5.6
+
+### Patch Changes
+
+- Updated dependencies [fed43cf]
+  - @opengeni/contracts@0.40.0
+
+## 0.5.5
+
+### Patch Changes
+
+- Updated dependencies [200586a]
+  - @opengeni/contracts@0.39.5
+
+## 0.5.4
+
+### Patch Changes
+
+- Updated dependencies [70ced80]
+  - @opengeni/contracts@0.39.4
+
+## 0.5.3
+
+### Patch Changes
+
+- Updated dependencies [5d8bb99]
+- Updated dependencies [34c5cdb]
+  - @opengeni/contracts@0.39.3
+
+## 0.5.2
+
+### Patch Changes
+
+- 78a1577: Separate expected sandbox path misses from actual provider-operation failures in metrics and alerts.
+- 30a0b9a: Preserve internal content exactly, replace heuristic rewriting with lossless persistence, and keep public telemetry on reviewed structural projections.
+- Updated dependencies [7dbd057]
+- Updated dependencies [30a0b9a]
+- Updated dependencies [23de73b]
+  - @opengeni/contracts@0.39.2
+
+## 0.5.1
+
+### Patch Changes
+
+- Updated dependencies [ce823ce]
+  - @opengeni/contracts@0.39.1
+
+## 0.5.0
+
+### Minor Changes
+
+- 33166b0: Export the canonical namespace and Grafana dashboard selectors used by the
+  shared self-hostable Prometheus and Grafana distribution.
+
+## 0.4.17
+
+### Patch Changes
+
+- Updated dependencies [6eb0b23]
+  - @opengeni/contracts@0.39.0
+
 ## 0.4.16
 
 ### Patch Changes

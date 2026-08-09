@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 import type { AccessContext, WorkspaceCaptureManifest } from "@opengeni/sdk";
 
 import {
+  axeManualContrastSelector,
   assertFixtureCapture,
   assertFixtureToolOutput,
   assertDedicatedCanaryEmail,
@@ -16,20 +17,33 @@ import {
   captureApiRegionalProbeEnvironment,
   controlCancellationDurationMs,
   fixturePrompt,
+  isDormantSandboxLiveness,
   isExpectedBrowserCancellation,
+  maskKnownPublicEvidenceValues,
   openWorkspaceIfCollapsed,
   parseCookieHeader,
   parseLiveAcceptanceArgs,
   parseProtectedEmails,
   runCaptureApiRegionalProbe,
-  sanitizeDiagnostic,
   selectTreeFile,
   validateCaptureApiRegionalProbeResult,
   waitForSandboxLiveness,
+  waitForSandboxFileViewerText,
   type CaptureApiRegionalProbeRequest,
 } from "./workbench-live-acceptance";
 
 describe("workbench live acceptance preflight", () => {
+  test("admits only concrete single-selector Axe targets to the manual contrast audit", () => {
+    expect(axeManualContrastSelector(['button[class="bg-primary"]'])).toBe(
+      'button[class="bg-primary"]',
+    );
+    expect(axeManualContrastSelector(["  div[data-description]  "])).toBe("div[data-description]");
+    expect(axeManualContrastSelector([])).toBeNull();
+    expect(axeManualContrastSelector([".host", ".shadow-child"])).toBeNull();
+    expect(axeManualContrastSelector([""])).toBeNull();
+    expect(axeManualContrastSelector(".bg-primary")).toBeNull();
+  });
+
   test("ignores only expected browser-cancelled background reads", () => {
     const path = "/v1/workspaces/workspace/sessions/session/workspace/capture/file";
     expect(isExpectedBrowserCancellation(path, "net::ERR_ABORTED")).toBe(true);
@@ -60,6 +74,63 @@ describe("workbench live acceptance preflight", () => {
 
     expect(selectors).toEqual(["[data-workspace-surface]"]);
     expect(lookedUpCollapseControl).toBe(false);
+  });
+
+  test("scopes restored file text to the file viewer when the transcript has duplicates", async () => {
+    const calls: unknown[] = [];
+    const page = {
+      locator(selector: string) {
+        calls.push(["locator", selector]);
+        return {
+          locator(innerSelector: string) {
+            calls.push(["viewer.locator", innerSelector]);
+            return {
+              filter(options: { hasText: string }) {
+                calls.push(["selected.filter", options]);
+                return {
+                  waitFor: async (waitOptions: { state: string; timeout: number }) => {
+                    calls.push(["selected.waitFor", waitOptions]);
+                  },
+                  textContent: async () => {
+                    calls.push(["selected.textContent"]);
+                    return " api/base.txt ";
+                  },
+                };
+              },
+            };
+          },
+          getByText(text: string, options: { exact: boolean }) {
+            calls.push(["viewer.getByText", text, options]);
+            return {
+              first() {
+                calls.push(["viewer.first"]);
+                return {
+                  waitFor: async (waitOptions: { state: string; timeout: number }) => {
+                    calls.push(["viewer.waitFor", waitOptions]);
+                  },
+                };
+              },
+            };
+          },
+        };
+      },
+      getByText() {
+        throw new Error("must not match duplicate transcript or session-title text");
+      },
+    } as never;
+
+    await waitForSandboxFileViewerText(page, "api/base.txt", "tracked but untouched", 30_000);
+
+    expect(calls).toEqual([
+      ["locator", "#sandbox-files-viewer"],
+      ["viewer.locator", "[data-opengeni-selected-file]"],
+      ["selected.filter", { hasText: "api/base.txt" }],
+      ["selected.waitFor", { state: "visible", timeout: 30_000 }],
+      ["selected.textContent"],
+      ["viewer.getByText", "tracked but untouched", { exact: false }],
+      ["viewer.first"],
+      ["viewer.waitFor", { state: "visible", timeout: 30_000 }],
+    ]);
   });
 
   test("observes the Changes default before requiring its layout to be visible", async () => {
@@ -571,7 +642,7 @@ describe("workbench live acceptance preflight", () => {
     ).toThrow("fields are invalid");
   });
 
-  test("passes the managed cookie only over probe stdin and redacts child failures", async () => {
+  test("passes the managed cookie only over probe stdin and masks it from public child failures", async () => {
     const directory = await mkdtemp(resolve(tmpdir(), "opengeni-regional-probe-"));
     const success = resolve(directory, "success.ts");
     const failure = resolve(directory, "failure.ts");
@@ -600,9 +671,12 @@ describe("workbench live acceptance preflight", () => {
       const result = await runCaptureApiRegionalProbe(success, request);
       expect(result.sampleCount).toBe(request.repetitions);
       expect(JSON.stringify(result)).not.toContain(request.cookieHeader);
-      await expect(runCaptureApiRegionalProbe(failure, request)).rejects.toThrow(
-        "exit code 7: [redacted]",
+      const failureMessage = await runCaptureApiRegionalProbe(failure, request).then(
+        () => "unexpected success",
+        (error: unknown) => (error instanceof Error ? error.message : String(error)),
       );
+      expect(failureMessage).toContain("exit code 7: [masked]");
+      expect(failureMessage).not.toContain(request.cookieHeader);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
@@ -625,15 +699,16 @@ describe("workbench live acceptance preflight", () => {
     });
   });
 
-  test("cookie parser preserves signed values and diagnostics strip URL credentials", () => {
+  test("cookie parsing stays exact and public evidence masks only exact known values", () => {
     expect(parseCookieHeader("better-auth.session_token=a.b%3D; second=x=y")).toEqual([
       { name: "better-auth.session_token", value: "a.b%3D" },
       { name: "second", value: "x=y" },
     ]);
-    const clean = sanitizeDiagnostic(
-      "GET https://blob.example/file?signature=secret&token=also-secret Bearer abc.def",
-    );
-    expect(clean).toBe("GET https://blob.example/file Bearer [redacted]");
+    expect(
+      maskKnownPublicEvidenceValues("cookie=known-value; unrelated=Bearer abc.def", [
+        "known-value",
+      ]),
+    ).toBe("cookie=[masked]; unrelated=Bearer abc.def");
   });
 
   test("control cancellation timing fails closed on invalid or impossible event order", () => {
@@ -670,6 +745,13 @@ describe("workbench live acceptance preflight", () => {
 
     expect(calls).toBe(2);
     expect(signals).toHaveLength(2);
+  });
+
+  test("accepts holderless draining as dormant without admitting a warm sandbox", () => {
+    expect(isDormantSandboxLiveness("cold")).toBe(true);
+    expect(isDormantSandboxLiveness("draining")).toBe(true);
+    expect(isDormantSandboxLiveness("warming")).toBe(false);
+    expect(isDormantSandboxLiveness("warm")).toBe(false);
   });
 
   test("requires interactive scopes only from the dedicated canary principal", () => {

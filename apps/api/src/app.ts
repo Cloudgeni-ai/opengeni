@@ -13,6 +13,7 @@ import {
   OPENGENI_CORRELATION_HEADER,
   resolveWorkspaceMemoryEnabled,
   VOICE_INPUT_ACCEPTED_MIME_TYPES,
+  TRANSCRIPTION_RECORDING_PROVIDER_SEGMENT_SECONDS,
   type AccessGrant,
   type ErrorCode,
 } from "@opengeni/contracts";
@@ -77,6 +78,7 @@ import { registerInsightsRoutes } from "./routes/insights";
 import { registerTranscriptionRoutes } from "./routes/transcriptions";
 import { projectClientModel } from "./model-catalog";
 import { createTranscriptionService } from "./transcription/service";
+import { createFfmpegTranscriptionSegmenter } from "./transcription/segmenter";
 import { registerSlackInteractionRoutes } from "./integrations/slack-interactions";
 
 export type {
@@ -103,8 +105,15 @@ export { replaySessionEvents, sseSessionStream, sseWorkspaceControlStream } from
 export const API_MAX_REQUEST_BODY_BYTES = 8 * 1024 * 1024;
 
 /** Effective Hono bodyLimit — API JSON ceiling or voice multipart + multipart overhead. */
-export function apiRequestBodyLimitBytes(settings: { voiceInputMaxSizeBytes: number }): number {
-  return Math.max(API_MAX_REQUEST_BODY_BYTES, settings.voiceInputMaxSizeBytes + 64 * 1024);
+export function apiRequestBodyLimitBytes(settings: {
+  voiceInputMaxSizeBytes: number;
+  voiceInputResumableMaxChunkSizeBytes?: number;
+}): number {
+  return Math.max(
+    API_MAX_REQUEST_BODY_BYTES,
+    settings.voiceInputMaxSizeBytes + 64 * 1024,
+    (settings.voiceInputResumableMaxChunkSizeBytes ?? 0) + 64 * 1024,
+  );
 }
 const API_PUBLIC_ERROR_MESSAGE_MAX_BYTES = 512;
 
@@ -204,6 +213,12 @@ export function createAppComposition(deps: AppDependencies): {
           ...(deps.codexFetch ? { codexFetch: deps.codexFetch } : {}),
         })
       : deps.transcription;
+  const transcriptionSegmenter =
+    deps.transcriptionSegmenter === undefined
+      ? createFfmpegTranscriptionSegmenter({
+          ffmpegPath: deps.settings.voiceInputFfmpegPath,
+        })
+      : deps.transcriptionSegmenter;
   const routeDeps: ApiRouteDeps = {
     ...deps,
     observability,
@@ -214,6 +229,7 @@ export function createAppComposition(deps: AppDependencies): {
     documentIndexer,
     getDocumentServices,
     transcription,
+    transcriptionSegmenter,
     ...(sandboxClient ? { sandboxClient } : {}),
     resumeBoxById,
   };
@@ -233,12 +249,18 @@ export function createAppComposition(deps: AppDependencies): {
       "Accept",
       "Authorization",
       "Content-Type",
+      "Range",
       "X-OpenGeni-Access-Key",
       "X-OpenGeni-Api-Contract",
       "X-OpenGeni-Correlation-Id",
       "X-OpenGeni-Subject",
     ],
-    exposeHeaders: ["X-OpenGeni-Api-Contract", "X-OpenGeni-Correlation-Id"],
+    exposeHeaders: [
+      "Accept-Ranges",
+      "Content-Range",
+      "X-OpenGeni-Api-Contract",
+      "X-OpenGeni-Correlation-Id",
+    ],
   };
   const publicApiCors = cors({
     ...corsHeaders,
@@ -291,7 +313,6 @@ export function createAppComposition(deps: AppDependencies): {
     const start = performance.now();
     const span = observability.startSpan(`HTTP ${c.req.method} ${route}`, {
       "http.request.method": c.req.method,
-      "url.path": url.pathname,
       "opengeni.route": route,
     });
     try {
@@ -350,7 +371,7 @@ export function createAppComposition(deps: AppDependencies): {
         spanId: span.spanId,
         correlationId,
         errorCode,
-        errorClass: error instanceof Error ? error.name : "NonErrorThrown",
+        errorClass: "HttpOperationError",
       });
       throw error;
     }
@@ -440,6 +461,24 @@ export function createAppComposition(deps: AppDependencies): {
           maxDurationSeconds: deps.settings.voiceInputMaxDurationSeconds,
           maxSizeBytes: deps.settings.voiceInputMaxSizeBytes,
           acceptedMimeTypes: [...VOICE_INPUT_ACCEPTED_MIME_TYPES],
+          ...(deps.settings.voiceInputResumableEnabled &&
+          objectStorage &&
+          transcription &&
+          transcriptionSegmenter &&
+          (await transcription.available()) &&
+          (await transcriptionSegmenter.available())
+            ? {
+                resumable: {
+                  maxDurationSeconds: deps.settings.voiceInputResumableMaxDurationSeconds,
+                  maxSizeBytes: deps.settings.voiceInputResumableMaxSizeBytes,
+                  maxChunkSizeBytes: deps.settings.voiceInputResumableMaxChunkSizeBytes,
+                  providerSegmentSeconds: Math.min(
+                    TRANSCRIPTION_RECORDING_PROVIDER_SEGMENT_SECONDS,
+                    deps.settings.voiceInputMaxDurationSeconds,
+                  ),
+                },
+              }
+            : {}),
         },
         productAccessMode: deps.settings.productAccessMode,
         auth: clientAuthConfig(deps.settings),
@@ -803,12 +842,12 @@ async function runReadinessChecks<const Checks extends Readonly<Record<string, R
       try {
         await withTimeout(Promise.resolve().then(check), timeoutMs);
         return [name, { ok: true }] as const;
-      } catch (error) {
+      } catch {
         return [
           name,
           {
             ok: false,
-            error: error instanceof Error ? error.message : String(error),
+            error: "dependency_unavailable",
           },
         ] as const;
       }
@@ -911,6 +950,23 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/inference-control$/,
     label: "/v1/workspaces/:workspaceId/inference-control",
+  },
+  {
+    pattern:
+      /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/fs\/(list|list-batch|read|write|delete|move|mkdir)$/,
+    label: "/v1/workspaces/:workspaceId/sessions/:id/fs/:operation",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/git\/(status|diff|read-batch|log|show)$/,
+    label: "/v1/workspaces/:workspaceId/sessions/:id/git/:operation",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/terminal\/(exec|pty)$/,
+    label: "/v1/workspaces/:workspaceId/sessions/:id/terminal/:operation",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/terminal\/pty\/(write|resize|close)$/,
+    label: "/v1/workspaces/:workspaceId/sessions/:id/terminal/pty/:action",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/events\/stream$/,

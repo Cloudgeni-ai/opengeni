@@ -68,6 +68,8 @@ import {
   type NoticeItem,
   type TimelineGroup,
   type TimelineItem,
+  type RetainedArtifactLoader,
+  type RetainedScreenshotLoader,
   type ToolRegistry,
   type TurnSummaryOptions,
   type UserMessageItem,
@@ -124,6 +126,12 @@ export type MessageTimelineProps = {
    */
   onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
   /**
+   * Decide which durable authentication notices this timeline presents.
+   * Defaults to showing every notice. Embedded hosts can suppress notices for
+   * credentials they manage elsewhere without discarding the underlying event.
+   */
+  shouldRenderAuthNeeded?: ((item: AuthNeededItem) => boolean) | undefined;
+  /**
    * Resolve a provider domain (from a reconnect card) to a logo URL the host
    * serves itself — the app maps it through its catalog + `catalogAssetUrl`.
    * Return null/undefined to fall back to a calm monogram. The library never
@@ -137,6 +145,10 @@ export type MessageTimelineProps = {
    * `createDefaultToolRegistry({ entries })` to add custom tool renderers.
    */
   toolRegistry?: ToolRegistry | undefined;
+  /** Resolve opaque retained screenshot receipts through the authenticated host SDK. */
+  loadRetainedScreenshot?: RetainedScreenshotLoader | undefined;
+  /** Resolve permanent generated-image receipts through the authenticated host SDK. */
+  loadRetainedArtifact?: RetainedArtifactLoader | undefined;
   /**
    * Display name of the session's active compute target (Connected Machine or
    * cloud sandbox). When set, exec_command collapsed previews prefix `on {label}`.
@@ -167,6 +179,8 @@ export type MessageTimelineProps = {
    * scrolls the in-memory window.
    */
   onJumpToLatest?: (() => void | Promise<void>) | undefined;
+  /** Host-owned content appended after timeline groups, such as startup progress. */
+  trailingState?: ReactNode | undefined;
   emptyState?: ReactNode | undefined;
   className?: string | undefined;
 };
@@ -277,8 +291,11 @@ export function MessageTimeline({
   onOpenSession,
   onMemoryClick,
   onReconnect,
+  shouldRenderAuthNeeded,
   resolveProviderLogo,
   toolRegistry = defaultToolRegistry,
+  loadRetainedScreenshot,
+  loadRetainedArtifact,
   computeLabel = null,
   turnSummary,
   autoFollow = true,
@@ -291,10 +308,17 @@ export function MessageTimeline({
   loadingNewer = false,
   onLoadNewer,
   onJumpToLatest,
+  trailingState,
   emptyState,
   className,
 }: MessageTimelineProps) {
-  const resolvedItems = useMemo(() => items ?? buildTimeline(events ?? []), [items, events]);
+  const resolvedItems = useMemo(() => {
+    const projected = items ?? buildTimeline(events ?? []);
+    if (!shouldRenderAuthNeeded) {
+      return projected;
+    }
+    return projected.filter((item) => item.kind !== "auth-needed" || shouldRenderAuthNeeded(item));
+  }, [items, events, shouldRenderAuthNeeded]);
   const allGroups = useMemo(() => groupTimeline(resolvedItems), [resolvedItems]);
   const groups = useStableTimelineGroupKeys(allGroups);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -1278,7 +1302,7 @@ export function MessageTimeline({
                     className={cn(
                       // tabIndex=-1 is programmatic only — never paint a focus ring on
                       // the whole scroller (click + Shift used to flash a blue outline).
-                      "min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-6 sm:px-6 outline-none",
+                      "min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-6 sm:px-6 outline-hidden",
                       autoFollow && pinned && !hasNewer
                         ? "[overflow-anchor:none]"
                         : "[overflow-anchor:auto]",
@@ -1325,6 +1349,8 @@ export function MessageTimeline({
                                 onReconnect,
                                 resolveProviderLogo,
                                 toolRegistry,
+                                loadRetainedScreenshot,
+                                loadRetainedArtifact,
                                 turnSummary,
                               ]}
                             >
@@ -1337,6 +1363,8 @@ export function MessageTimeline({
                                   onReconnect={onReconnect}
                                   resolveProviderLogo={resolveProviderLogo}
                                   toolRegistry={toolRegistry}
+                                  loadRetainedScreenshot={loadRetainedScreenshot}
+                                  loadRetainedArtifact={loadRetainedArtifact}
                                   turnSummary={turnSummary}
                                   foldLiveCluster={isAgentProgress(next)}
                                   trailingAgentText={trailingAgentTextAfterTurn(group, next)}
@@ -1349,6 +1377,9 @@ export function MessageTimeline({
                           </div>
                         );
                       })}
+                      {groups.length > 0 && trailingState ? (
+                        <div data-og-timeline-trailing-state="">{trailingState}</div>
+                      ) : null}
                       {hasNewer ? (
                         <div
                           ref={bottomSentinelRef}
@@ -1502,7 +1533,7 @@ export function MessageTimeline({
                           }
                         }}
                         className={cn(
-                          "absolute bottom-4 left-1/2 -translate-x-1/2",
+                          "absolute inset-x-0 bottom-4 mx-auto w-fit",
                           "inline-flex items-center gap-1.5 rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1.5",
                           "text-og-control font-medium text-og-fg shadow-og-md backdrop-blur",
                           "hover:border-og-border-strong",
@@ -1677,6 +1708,8 @@ const TimelineGroupView = memo(function TimelineGroupView({
   onReconnect,
   resolveProviderLogo,
   toolRegistry,
+  loadRetainedScreenshot,
+  loadRetainedArtifact,
   turnSummary,
   insideTurn = false,
   nestClusterChips = false,
@@ -1693,6 +1726,8 @@ const TimelineGroupView = memo(function TimelineGroupView({
   onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
   resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
   toolRegistry: ToolRegistry;
+  loadRetainedScreenshot?: RetainedScreenshotLoader | undefined;
+  loadRetainedArtifact?: RetainedArtifactLoader | undefined;
   turnSummary?: TurnSummaryOptions | undefined;
   /** A completed cluster of a still-RUNNING turn (not the live tail) folds
       behind a neutral chip — the one place activity without an outcome still
@@ -1727,13 +1762,16 @@ const TimelineGroupView = memo(function TimelineGroupView({
   const activityShouldFold =
     group.kind === "activity" &&
     Boolean(group.outcome || (foldLiveCluster && clusterIsSettled(group)));
+  const containsGeneratedImage = timelineGroupContainsGeneratedImage(group);
   // Latch live→folded so a top-level shell that was already mounted open can
   // start the settle beat without remounting bare rail → wrapper.
   const liveActivitySettle = useLiveSettleFold(activityShouldFold && !insideTurn);
   const turnDefaultOpen =
     !insideTurn &&
     group.kind === "turn" &&
-    (group.outcome === "failed" || timelineGroupContainsAuthNeeded(group));
+    (group.outcome === "failed" ||
+      timelineGroupContainsAuthNeeded(group) ||
+      containsGeneratedImage);
   // activity-* → turn-* remount: carry resting state so settleFold does not
   // re-open a chip the reader already watched collapse.
   if (group.kind === "turn" && foldMemory && !insideTurn) {
@@ -1758,7 +1796,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
         // settled closed pre-wrap was showing as a CHIP, so mounting it closed
         // is both the stable height and the honest state — force-opening it
         // was the "already-collapsed cluster auto-expands at the end" reopen.
-        const useNestedChip = nestClusterChips && activityShouldFold;
+        const useNestedChip = nestClusterChips && activityShouldFold && !containsGeneratedImage;
         if (!useNestedChip) {
           return (
             <ActivityRail
@@ -1766,6 +1804,8 @@ const TimelineGroupView = memo(function TimelineGroupView({
               onOpenSession={onOpenSession}
               onMemoryClick={onMemoryClick}
               toolRegistry={toolRegistry}
+              loadRetainedScreenshot={loadRetainedScreenshot}
+              loadRetainedArtifact={loadRetainedArtifact}
               bare
             />
           );
@@ -1787,6 +1827,8 @@ const TimelineGroupView = memo(function TimelineGroupView({
               onOpenSession={onOpenSession}
               onMemoryClick={onMemoryClick}
               toolRegistry={toolRegistry}
+              loadRetainedScreenshot={loadRetainedScreenshot}
+              loadRetainedArtifact={loadRetainedArtifact}
               bare
             />
           </TurnSummary>
@@ -1812,6 +1854,8 @@ const TimelineGroupView = memo(function TimelineGroupView({
                 onOpenSession={onOpenSession}
                 onMemoryClick={onMemoryClick}
                 toolRegistry={toolRegistry}
+                loadRetainedScreenshot={loadRetainedScreenshot}
+                loadRetainedArtifact={loadRetainedArtifact}
                 bare
               />
             </TurnRailFrame>
@@ -1838,6 +1882,8 @@ const TimelineGroupView = memo(function TimelineGroupView({
               onReconnect,
               resolveProviderLogo,
               toolRegistry,
+              loadRetainedScreenshot,
+              loadRetainedArtifact,
               turnSummary,
             ]}
           >
@@ -1849,6 +1895,8 @@ const TimelineGroupView = memo(function TimelineGroupView({
               onReconnect={onReconnect}
               resolveProviderLogo={resolveProviderLogo}
               toolRegistry={toolRegistry}
+              loadRetainedScreenshot={loadRetainedScreenshot}
+              loadRetainedArtifact={loadRetainedArtifact}
               turnSummary={turnSummary}
               insideTurn
               nestClusterChips={nestClusters}
@@ -1950,6 +1998,20 @@ function timelineGroupContainsAuthNeeded(group: TimelineGroup): boolean {
       return false;
     case "turn":
       return group.groups.some(timelineGroupContainsAuthNeeded);
+  }
+}
+
+/** Generated images are primary user-visible output, not incidental activity. */
+function timelineGroupContainsGeneratedImage(group: TimelineGroup): boolean {
+  switch (group.kind) {
+    case "item":
+      return false;
+    case "activity":
+      return group.items.some(
+        (item) => item.kind === "tool-call" && item.name === "generate_image",
+      );
+    case "turn":
+      return group.groups.some(timelineGroupContainsGeneratedImage);
   }
 }
 
@@ -2184,12 +2246,12 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
       : null;
   const title =
     item.phase === "started"
-      ? "Compacting conversation memory…"
+      ? "Compacting conversation history…"
       : item.phase === "compacted"
         ? before && after
-          ? `Conversation memory compacted · ~${before} → ~${after} tokens`
-          : "Conversation memory compacted"
-        : "Couldn’t compact conversation memory";
+          ? `Conversation history compacted · ~${before} → ~${after} estimated history tokens`
+          : "Conversation history compacted"
+        : "Couldn’t compact conversation history";
   const subtitle =
     item.phase === "compacted"
       ? "Chat history above is unchanged"
@@ -2247,7 +2309,7 @@ function MessageFooterTime({ occurredAt }: { occurredAt: string }) {
       className={cn(
         "shrink-0 tabular-nums text-og-xs text-og-fg-subtle",
         "opacity-0 transition-opacity duration-150",
-        "group-hover/copy:opacity-100 group-focus-within/copy:opacity-100 pointer-coarse:opacity-70",
+        "group-hover/copy:opacity-100 group-focus-within/copy:opacity-100 pointer-coarse:opacity-100",
       )}
     >
       {formatClockTime(occurredAt)}
@@ -2428,7 +2490,7 @@ function WorkerCompletionRow({
               onClick={() => onOpenSession(item.childSessionId)}
               className={cn(
                 "-my-0.5 -mr-1 inline-flex shrink-0 items-center gap-1 rounded-og-sm px-2 py-1 text-og-sm font-medium text-og-fg-muted pointer-coarse:py-2",
-                "outline-none transition-colors duration-150 hover:bg-og-surface-2 hover:text-og-fg",
+                "outline-hidden transition-colors duration-150 hover:bg-og-surface-2 hover:text-og-fg",
                 "focus-visible:ring-2 focus-visible:ring-og-accent",
               )}
             >
@@ -2444,7 +2506,7 @@ function WorkerCompletionRow({
                 type="button"
                 className={cn(
                   "group/wc -mx-1 inline-flex w-fit items-center gap-1 rounded-og-sm px-1 py-0.5 text-og-xs font-medium text-og-fg-subtle",
-                  "outline-none transition-colors duration-150 hover:text-og-fg-muted focus-visible:ring-2 focus-visible:ring-og-accent",
+                  "outline-hidden transition-colors duration-150 hover:text-og-fg-muted focus-visible:ring-2 focus-visible:ring-og-accent",
                 )}
               >
                 <ChevronRightIcon className="size-3 transition-transform duration-150 ease-og-in-out group-data-[state=open]/wc:rotate-90" />
@@ -2693,7 +2755,8 @@ function AuthNeededRow({
   const enter = useEntranceAnimation();
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
-  const provider = providerLabel(item.providerDomain);
+  const provider =
+    item.serverId === "codex_apps" ? "Codex Apps" : providerLabel(item.providerDomain);
   const unavailable =
     item.reason === "personal_authority_unavailable" ||
     item.reason === "unsupported_auth" ||

@@ -14,13 +14,13 @@
 //! * **Budgets** — every byte figure is derived from the measured
 //!   [`HostCapacity`] as a fraction with the old absolute defaults as FLOORS
 //!   (rule R), and the per-frame wire size is T-derived from the negotiated
-//!   NATS `max_payload` ([`Engine::set_negotiated_max_payload`]).
-//! * **Spool ledger** — the global disk budget (PROTOCOL.md ruling M2): each
-//!   job reserves its per-op spool quota against the shared budget at start
-//!   and releases it at teardown; when the budget is short the op's quota is
-//!   clamped (loudly) rather than the op refused.
-//! * **Routing** — `op_id → mailbox` for wire-command delivery and the
-//!   broadcast [`Engine::detach_all`] a link fires on connection loss.
+//!   NATS `max_payload` (the smallest active link value wins).
+//! * **Spool ledger** — the global disk budget (PROTOCOL.md ruling M2) is
+//!   shared by every job and charged only for bytes actually spooled. Starting
+//!   many commands consumes no disk budget; concurrent writes cannot
+//!   oversubscribe it.
+//! * **Routing** — connection-scoped `op_id → mailbox` for wire-command
+//!   delivery. A lost link detaches only the jobs it owns.
 //!
 //! Lock discipline: every mutex here is a plain `std::sync::Mutex` held only
 //! for map/state operations — never across an `.await`, a spawn, or a hook.
@@ -36,10 +36,10 @@ use opengeni_agent_engine::admission::{
 use opengeni_agent_engine::registry::{
     BeginOutcome, CancelOutcome, OpRegistry, QueryAnswer, RegistryConfig, RegistryCounters,
 };
-use opengeni_agent_engine::retention::RetentionConfig;
+use opengeni_agent_engine::retention::{GlobalSpoolBudget, RetentionConfig};
 use opengeni_agent_engine::{Frame, HostCapacity, OpId};
 use opengeni_agent_platform::ContainedExec;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Notify};
 use tracing::{info, warn};
 
 use crate::job::{run_job, JobCommand, JobConfig, JobEnd, JobExit, JobHooks, JobParams};
@@ -47,6 +47,21 @@ use crate::job::{run_job, JobCommand, JobConfig, JobEnd, JobExit, JobHooks, JobP
 /// The admission-fairness origin for legacy request/reply work (legacy
 /// requests carry no session identity; they share one fairness domain).
 pub const LEGACY_ORIGIN: &str = "legacy";
+
+/// Builds the process-internal operation identity. The wire id remains unchanged;
+/// the local connection scope prevents unrelated OpenGeni deployments from
+/// colliding in the shared registry/admission/router.
+#[must_use]
+pub fn scoped_op_id(scope: &str, wire_op_id: &str) -> OpId {
+    OpId::new(format!("{scope}:{wire_op_id}"))
+}
+
+/// Namespaces an admission fairness origin for the same reason as
+/// [`scoped_op_id`].
+#[must_use]
+pub fn scoped_origin(scope: &str, origin: &str) -> String {
+    format!("{scope}:{origin}")
+}
 
 /// Commands queued to one job. A pipe diameter, not a limit (queue rule):
 /// senders block/backpressure, the pump drains every loop iteration.
@@ -66,7 +81,7 @@ const FALLBACK_FRAME_BYTES: usize = 128 * 1024;
 pub struct EngineBudgets {
     /// Per-op retention template (memory ring + spool quota + segment size).
     pub retention_per_op: RetentionConfig,
-    /// The global spool budget every per-op quota is reserved against (M2).
+    /// The global budget for actual retained spool bytes (M2).
     pub spool_budget_bytes: u64,
     /// Circuit breaker on a legacy adapter's assembled reply buffer: far above
     /// any publishable reply (the transport caps those at `max_payload`), it
@@ -178,32 +193,12 @@ impl Drop for AdmissionTicket {
     }
 }
 
-/// A job's share of the global spool ledger (M2). Idempotent release: the
-/// legacy adapter returns it early at the terminal record (no consumer is
-/// ever coming for a legacy op's spool frames), the task-end guard returns
-/// whatever remains, and a double release is a no-op.
-struct SpoolReservation {
-    engine: Arc<Engine>,
-    granted: AtomicU64,
-}
-
-impl SpoolReservation {
-    fn release(&self) {
-        let granted = self.granted.swap(0, Ordering::AcqRel);
-        if granted > 0 {
-            self.engine.release_spool(granted);
-        }
-    }
-}
-
-/// Owned by the pump task: route removal + spool release run on Drop, so a
-/// PANICKING pump still cleans up (design-review fold-in — previously the
-/// cleanup ran after `run_job().await` and a panic leaked the route and the
-/// reservation until restart).
+/// Owned by the pump task: route removal runs on Drop, so a PANICKING pump
+/// still cleans up. The retention log independently owns and releases its
+/// actual spool-byte charge.
 struct JobCleanup {
     engine: Arc<Engine>,
     op_id: OpId,
-    reservation: Arc<SpoolReservation>,
 }
 
 impl Drop for JobCleanup {
@@ -213,7 +208,6 @@ impl Drop for JobCleanup {
             .lock()
             .expect("routes lock")
             .remove(&self.op_id);
-        self.reservation.release();
     }
 }
 
@@ -230,9 +224,13 @@ pub struct Engine {
     budgets: RwLock<EngineBudgets>,
     capacity: RwLock<HostCapacity>,
     spool_root: PathBuf,
-    spool_reserved: Mutex<u64>,
+    spool_budget: Arc<GlobalSpoolBudget>,
     /// T-derived per-frame data size (from the negotiated max_payload).
     max_frame_bytes: AtomicUsize,
+    /// Negotiated payload per active deployment link. The shared engine uses the
+    /// smallest active transport envelope so every emitted frame is publishable on
+    /// the link that owns it; removing a link recomputes the value.
+    transport_payloads: Mutex<HashMap<String, usize>>,
     /// Op frames dropped by the fire-and-forget publish path (bulk lane down
     /// or its channel full). Protocol-healed (gap-detect + replay), but per
     /// FAILURE-VISIBILITY healed faults are RECORDED — this feeds the
@@ -291,6 +289,7 @@ impl Engine {
         if let Some(v) = overrides.registry_tombstone_ttl_ms {
             registry.tombstone_ttl_ms = v;
         }
+        let spool_budget = Arc::new(GlobalSpoolBudget::new(budgets.spool_budget_bytes));
         Arc::new(Self {
             registry: Mutex::new(OpRegistry::new(registry)),
             admission: Mutex::new(AdmissionState::new(admission)),
@@ -299,8 +298,9 @@ impl Engine {
             budgets: RwLock::new(budgets),
             capacity: RwLock::new(capacity),
             spool_root,
-            spool_reserved: Mutex::new(0),
+            spool_budget,
             max_frame_bytes: AtomicUsize::new(FALLBACK_FRAME_BYTES),
+            transport_payloads: Mutex::new(HashMap::new()),
             frames_dropped: AtomicU64::new(0),
             started: std::time::Instant::now(),
         })
@@ -326,6 +326,7 @@ impl Engine {
         if let Some(v) = overrides.retention_spool_max_bytes {
             budgets.retention_per_op.spool_max_bytes = v;
         }
+        self.spool_budget.set_max_bytes(budgets.spool_budget_bytes);
         *self.budgets.write().expect("budgets lock") = budgets;
         *self.capacity.write().expect("capacity lock") = capacity;
     }
@@ -350,12 +351,45 @@ impl Engine {
 
     /// Derives the per-frame data size from the connection's negotiated
     /// `max_payload` (rule T: query the external constraint, derive from it).
+    #[cfg(test)]
     pub fn set_negotiated_max_payload(&self, max_payload: usize) {
-        let frame = if max_payload > 2 * FRAME_ENVELOPE_MARGIN {
-            max_payload - FRAME_ENVELOPE_MARGIN
-        } else {
-            FALLBACK_FRAME_BYTES
-        };
+        self.set_link_max_payload("default", max_payload);
+    }
+
+    /// Records one active link's negotiated payload and derives the safe shared
+    /// frame size from the smallest active transport.
+    pub fn set_link_max_payload(&self, scope: &str, max_payload: usize) {
+        self.transport_payloads
+            .lock()
+            .expect("transport payloads lock")
+            .insert(scope.to_string(), max_payload);
+        self.recompute_frame_bytes();
+    }
+
+    /// Removes a disconnected link's transport envelope from the shared minimum.
+    pub fn clear_link_max_payload(&self, scope: &str) {
+        self.transport_payloads
+            .lock()
+            .expect("transport payloads lock")
+            .remove(scope);
+        self.recompute_frame_bytes();
+    }
+
+    fn recompute_frame_bytes(&self) {
+        let min_payload = self
+            .transport_payloads
+            .lock()
+            .expect("transport payloads lock")
+            .values()
+            .copied()
+            .min();
+        let frame = min_payload.map_or(FALLBACK_FRAME_BYTES, |max_payload| {
+            if max_payload > 2 * FRAME_ENVELOPE_MARGIN {
+                max_payload - FRAME_ENVELOPE_MARGIN
+            } else {
+                FALLBACK_FRAME_BYTES
+            }
+        });
         self.max_frame_bytes.store(frame, Ordering::Relaxed);
     }
 
@@ -466,43 +500,12 @@ impl Engine {
 
     /// Idempotently starts a job (ruling B1: a known id NEVER re-runs — the
     /// registry is consulted BEFORE `spawn` so a duplicate has no side
-    /// effects). On the fresh path: reserves spool against the global budget,
-    /// spawns the child via `spawn`, wires the pump hooks (engine lifecycle
-    /// bookkeeping composed in front of the caller's `on_exit`), and launches
-    /// the pump task. The admission ticket rides inside `on_exit`, releasing
-    /// at completion (linger is not running work). Route removal + spool
-    /// release live in a task-owned Drop guard, so even a panicking pump
-    /// cleans up.
-    ///
-    /// Reserves the op's spool quota against the global ledger (M2); a short
-    /// budget clamps the quota (loudly) rather than refusing the op.
-    fn reserve_op_spool(
-        self: &Arc<Self>,
-        op_id: &OpId,
-        retention: &mut RetentionConfig,
-    ) -> Arc<SpoolReservation> {
-        let granted = self.reserve_spool(retention.spool_max_bytes);
-        if granted < retention.spool_max_bytes {
-            warn!(
-                op = %op_id,
-                wanted = retention.spool_max_bytes,
-                granted,
-                "global spool budget short; op spool quota clamped"
-            );
-        }
-        retention.spool_max_bytes = granted;
-        Arc::new(SpoolReservation {
-            engine: self.clone(),
-            granted: AtomicU64::new(granted),
-        })
-    }
-
-    /// `release_spool_at_exit`: LEGACY ops set this — their spool ledger
-    /// share returns at the terminal record instead of task end, because no
-    /// consumer ever collects a legacy op's spool frames post-exit (duplicate
-    /// replies serve the stashed ENCODED reply); the lingering pump's spool
-    /// residue is already ack-trimmed to ~nothing. Op-stream ops keep their
-    /// reservation through the linger — post-exit replay is their whole point.
+    /// effects). On the fresh path: spawns the child via `spawn`, wires the
+    /// pump hooks (engine lifecycle bookkeeping composed in front of the
+    /// caller's `on_exit`), and launches the pump task. The admission ticket
+    /// rides inside `on_exit`, releasing at completion (linger is not running
+    /// work). Route removal lives in a task-owned Drop guard; the retention
+    /// log owns exact shared-spool charging and release.
     #[allow(clippy::too_many_arguments)] // the job seams are irreducible; a builder would just rename them
     pub fn start_job<E>(
         self: &Arc<Self>,
@@ -510,7 +513,6 @@ impl Engine {
         ticket: AdmissionTicket,
         stdin: Vec<u8>,
         deadline: Option<tokio::time::Instant>,
-        release_spool_at_exit: bool,
         spawn: impl FnOnce() -> Result<ContainedExec, E>,
         emit: impl Fn(Frame) + Send + 'static,
         encode_exit: impl Fn(&JobExit) -> Vec<u8> + Send + 'static,
@@ -548,14 +550,14 @@ impl Engine {
             }
         };
 
-        let mut retention = self.budgets().retention_per_op;
-        let reservation = self.reserve_op_spool(op_id, &mut retention);
+        let retention = self.budgets().retention_per_op;
 
         let (mailbox_tx, mailbox_rx) = mpsc::channel(JOB_MAILBOX_DEPTH);
         let params = JobParams {
             child,
             stdin,
             retention,
+            spool_budget: self.spool_budget.clone(),
             spool_dir: self.spool_root.join(op_dir_name(op_id)),
             deadline,
             config: JobConfig {
@@ -574,7 +576,6 @@ impl Engine {
             let id = op_id.clone();
             let exit_stash = handles.exit.clone();
             let watermark = handles.watermark.clone();
-            let exit_reservation = release_spool_at_exit.then(|| reservation.clone());
             JobHooks::new(emit, encode_exit, move |exit_seq, exit: &JobExit| {
                 let _ = exit_stash.set(exit.clone());
                 engine.registry.lock().expect("registry lock").complete(
@@ -582,9 +583,6 @@ impl Engine {
                     exit_seq.unwrap_or_else(|| watermark.load(Ordering::Relaxed)),
                     engine.now_ms(),
                 );
-                if let Some(reservation) = exit_reservation {
-                    reservation.release();
-                }
                 drop(ticket);
                 on_exit(exit_seq, exit);
             })
@@ -598,11 +596,10 @@ impl Engine {
         let cleanup = JobCleanup {
             engine: self.clone(),
             op_id: op_id.clone(),
-            reservation,
         };
         tokio::spawn(async move {
-            // Owned here so a PANIC in the pump still removes the route and
-            // returns the spool reservation on unwind (Drop guard).
+            // Owned here so a PANIC in the pump still removes the route. The
+            // RetentionLog drop separately releases actual spool bytes.
             let cleanup = cleanup;
             let end = run_job(params, mailbox_rx, hooks).await;
             if end == JobEnd::FinalAcked {
@@ -659,19 +656,39 @@ impl Engine {
         self.registry.lock().expect("registry lock").counters()
     }
 
-    /// Broadcasts `Detach` to every live job — a link lost its connection.
-    /// Ops keep running and retaining output (op ⊥ connection); the server
-    /// re-attaches per op after reconnect.
-    pub fn detach_all(&self) {
+    /// Detaches only jobs owned by one deployment/workspace link. Other links
+    /// continue streaming uninterrupted when this transport reconnects.
+    pub async fn detach_scope(&self, scope: &str) {
+        let prefix = format!("{scope}:");
         let routes: Vec<mpsc::Sender<JobCommand>> = self
             .routes
             .lock()
             .expect("routes lock")
-            .values()
-            .cloned()
+            .iter()
+            .filter(|(op_id, _)| op_id.as_str().starts_with(&prefix))
+            .map(|(_, sender)| sender.clone())
             .collect();
+        let mut completions = Vec::with_capacity(routes.len());
         for sender in routes {
-            let _ = sender.try_send(JobCommand::Detach);
+            let completed = Arc::new(Notify::new());
+            if sender
+                .send(JobCommand::Detach {
+                    completed: Some(completed.clone()),
+                })
+                .await
+                .is_ok()
+            {
+                completions.push((sender, completed));
+            }
+        }
+        // FIFO mailbox ordering makes each receipt a hard generation fence:
+        // every earlier Ack/Attach has been handled and Detach has disabled
+        // emission before a successor bulk lane may become visible.
+        for (sender, completed) in completions {
+            tokio::select! {
+                () = completed.notified() => {}
+                () = sender.closed() => {}
+            }
         }
     }
 
@@ -739,26 +756,6 @@ impl Engine {
                 "engine gc pass"
             );
         }
-    }
-
-    /// Reserves up to `want` spool bytes against the global budget, returning
-    /// the granted amount.
-    fn reserve_spool(&self, want: u64) -> u64 {
-        let budget = self
-            .budgets
-            .read()
-            .expect("budgets lock")
-            .spool_budget_bytes;
-        let mut reserved = self.spool_reserved.lock().expect("spool ledger lock");
-        let granted = want.min(budget.saturating_sub(*reserved));
-        *reserved += granted;
-        granted
-    }
-
-    /// Returns a job's spool reservation to the global budget.
-    fn release_spool(&self, granted: u64) {
-        let mut reserved = self.spool_reserved.lock().expect("spool ledger lock");
-        *reserved = reserved.saturating_sub(granted);
     }
 }
 
@@ -840,18 +837,205 @@ mod tests {
         assert_eq!(engine.max_frame_bytes(), FALLBACK_FRAME_BYTES);
     }
 
+    #[test]
+    fn shared_frame_size_uses_smallest_active_connection() {
+        let (engine, _dir) = test_engine(AdmissionConfig::default());
+        engine.set_link_max_payload("large", 4 * 1024 * 1024);
+        engine.set_link_max_payload("small", 1024 * 1024);
+        assert_eq!(
+            engine.max_frame_bytes(),
+            1024 * 1024 - FRAME_ENVELOPE_MARGIN
+        );
+        engine.clear_link_max_payload("small");
+        assert_eq!(
+            engine.max_frame_bytes(),
+            4 * 1024 * 1024 - FRAME_ENVELOPE_MARGIN
+        );
+    }
+
+    #[test]
+    fn identical_wire_operation_ids_are_distinct_across_connections() {
+        let first = scoped_op_id("deployment-a", "call:0");
+        let second = scoped_op_id("deployment-b", "call:0");
+        assert_ne!(first, second);
+        assert_eq!(first.as_str(), "deployment-a:call:0");
+    }
+
+    #[tokio::test]
+    async fn detach_scope_waits_through_a_full_mailbox_for_the_pump_receipt() {
+        let (engine, _dir) = test_engine(AdmissionConfig::default());
+        let op = scoped_op_id("deployment-a", "slow-pump");
+        let (sender, mut receiver) = mpsc::channel(1);
+        engine
+            .routes
+            .lock()
+            .expect("routes lock")
+            .insert(op, sender.clone());
+
+        // Fill the mailbox so detach_scope must wait for pump capacity before
+        // it can even enqueue the generation fence.
+        sender
+            .send(JobCommand::Ack {
+                generation: 1,
+                acked_seq: 0,
+                credit_bytes: 0,
+                final_ack: false,
+            })
+            .await
+            .expect("prefill mailbox");
+
+        let detach = {
+            let engine = engine.clone();
+            tokio::spawn(async move { engine.detach_scope("deployment-a").await })
+        };
+        tokio::task::yield_now().await;
+        assert!(
+            !detach.is_finished(),
+            "a full pump mailbox must hold the generation fence"
+        );
+
+        assert!(matches!(
+            receiver.recv().await,
+            Some(JobCommand::Ack { .. })
+        ));
+        let completed = match receiver.recv().await {
+            Some(JobCommand::Detach {
+                completed: Some(completed),
+            }) => completed,
+            other => panic!("expected receipt-bearing detach, got {other:?}"),
+        };
+        tokio::task::yield_now().await;
+        assert!(
+            !detach.is_finished(),
+            "enqueue alone is not proof that the pump applied detach"
+        );
+
+        completed.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(1), detach)
+            .await
+            .expect("detach scope completes after the pump receipt")
+            .expect("detach task did not panic");
+    }
+
+    #[tokio::test]
+    async fn detach_scope_accepts_route_closure_as_terminal_proof() {
+        let (engine, _dir) = test_engine(AdmissionConfig::default());
+        let op = scoped_op_id("deployment-a", "dead-pump");
+        let (sender, receiver) = mpsc::channel(1);
+        engine
+            .routes
+            .lock()
+            .expect("routes lock")
+            .insert(op, sender);
+        drop(receiver);
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            engine.detach_scope("deployment-a"),
+        )
+        .await
+        .expect("a dead pump cannot strand generation teardown");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn detached_active_job_cannot_emit_into_a_successor_lane_before_reattach() {
+        let (engine, _dir) = test_engine(AdmissionConfig::default());
+        let op = scoped_op_id("deployment-a", "streaming-op");
+        let ticket = engine
+            .admit(&op, JobClass::Heavy, "o")
+            .await
+            .expect("admit");
+
+        // Mirrors the supervisor's shared bulk-lane cell: each emission reads
+        // whichever generation sender is currently installed.
+        let lane: Arc<RwLock<Option<mpsc::UnboundedSender<Frame>>>> = Arc::new(RwLock::new(None));
+        let (first_tx, mut first_rx) = mpsc::unbounded_channel();
+        *lane.write().expect("lane lock") = Some(first_tx);
+        let emit_lane = lane.clone();
+        let outcome = engine.start_job(
+            &op,
+            ticket,
+            Vec::new(),
+            None,
+            || {
+                Ok::<_, std::io::Error>(sh(
+                    "i=0; while [ $i -lt 200 ]; do printf '%08d' $i; i=$((i+1)); sleep 0.005; done",
+                ))
+            },
+            move |frame| {
+                if let Some(sender) = emit_lane.read().expect("lane lock").as_ref() {
+                    let _ = sender.send(frame);
+                }
+            },
+            |_| Vec::new(),
+            |_, _| {},
+        );
+        let StartOutcome::Started(started) = outcome else {
+            panic!("fresh op must start");
+        };
+        started
+            .mailbox
+            .send(JobCommand::Attach {
+                generation: 1,
+                from_seq: 0,
+                window_bytes: 1 << 20,
+            })
+            .await
+            .expect("initial attach");
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), first_rx.recv())
+            .await
+            .expect("first generation emits in time")
+            .expect("first lane remains open");
+
+        engine.detach_scope("deployment-a").await;
+        let (successor_tx, mut successor_rx) = mpsc::unbounded_channel();
+        *lane.write().expect("lane lock") = Some(successor_tx);
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), successor_rx.recv(),)
+                .await
+                .is_err(),
+            "a detached old pump must not emit through the successor lane"
+        );
+
+        started
+            .mailbox
+            .send(JobCommand::Attach {
+                generation: 2,
+                from_seq: first.seq,
+                window_bytes: 1 << 20,
+            })
+            .await
+            .expect("successor attach");
+        let replayed = tokio::time::timeout(std::time::Duration::from_secs(2), successor_rx.recv())
+            .await
+            .expect("reattached generation emits in time")
+            .expect("successor lane remains open");
+        assert!(
+            replayed.seq > first.seq,
+            "successor resumes strictly after the acknowledged floor"
+        );
+
+        engine.cancel(&op);
+    }
+
     #[tokio::test]
     async fn default_admission_admits_immediately() {
         let (engine, _dir) = test_engine(AdmissionConfig::default());
-        for i in 0..64 {
+        let mut tickets = Vec::new();
+        for i in 0..100 {
             let op = OpId::new(format!("op-{i}"));
             let ticket = engine
                 .admit(&op, JobClass::Heavy, "origin")
                 .await
                 .expect("unbounded default admits");
-            // Hold nothing: drop immediately; the point is no queueing.
-            drop(ticket);
+            // Hold every ticket simultaneously: the normal default must support
+            // at least 100 concurrent agent operations without an artificial
+            // queue or fixed process-count gate.
+            tickets.push(ticket);
         }
+        assert_eq!(tickets.len(), 100);
     }
 
     #[tokio::test]
@@ -948,7 +1132,6 @@ mod tests {
             ticket,
             Vec::new(),
             None,
-            false,
             || Ok::<_, std::io::Error>(sh("printf out; exit 4")),
             |_frame| {},
             |exit| format!("{exit:?}").into_bytes(),
@@ -990,7 +1173,6 @@ mod tests {
             ticket2,
             Vec::new(),
             None,
-            false,
             || -> Result<ContainedExec, std::io::Error> { panic!("a known op id must not spawn") },
             |_| {},
             |_| Vec::new(),
@@ -1033,13 +1215,13 @@ mod tests {
             })
             .await;
         for _ in 0..200 {
-            if !engine.route_command(&op, JobCommand::Detach) {
+            if !engine.route_command(&op, JobCommand::Detach { completed: None }) {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         assert!(
-            !engine.route_command(&op, JobCommand::Detach),
+            !engine.route_command(&op, JobCommand::Detach { completed: None }),
             "route removed once the pump task ends"
         );
     }
@@ -1057,7 +1239,6 @@ mod tests {
             ticket,
             Vec::new(),
             None,
-            false,
             || Err(std::io::Error::other("no such program")),
             |_| {},
             |_| Vec::new(),
@@ -1073,8 +1254,7 @@ mod tests {
                 ..
             }
         ));
-        // Nothing reserved: the ledger only moves for launched jobs.
-        assert_eq!(*engine.spool_reserved.lock().expect("ledger"), 0);
+        assert_eq!(engine.spool_budget.used_bytes(), 0);
     }
 
     #[tokio::test]
@@ -1096,7 +1276,6 @@ mod tests {
             ticket,
             Vec::new(),
             None,
-            false,
             || -> Result<ContainedExec, std::io::Error> {
                 panic!("a tombstoned op must not spawn")
             },
@@ -1110,10 +1289,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn panicking_pump_still_cleans_up_route_and_ledger() {
-        // The emit hook panics on the first frame: the pump task unwinds and
-        // the task-owned Drop guard must still remove the route and return
-        // the spool reservation (design-review fold-in — previously the
-        // cleanup ran only on the normal path).
+        // The emit hook panics on the first frame: task and retention-log Drop
+        // guards must still remove the route and release actual spool bytes.
         let (engine, _dir) = test_engine(AdmissionConfig::default());
         let op = OpId::from("panicky");
         let ticket = engine
@@ -1125,7 +1302,6 @@ mod tests {
             ticket,
             Vec::new(),
             None,
-            false,
             || Ok::<_, std::io::Error>(sh("printf boom")),
             |_frame| panic!("emit hook panic (deliberate)"),
             |_| Vec::new(),
@@ -1148,26 +1324,18 @@ mod tests {
         let route_alive =
             |engine: &Arc<Engine>| engine.routes.lock().expect("routes lock").contains_key(&op);
         for _ in 0..500 {
-            if !route_alive(&engine) && *engine.spool_reserved.lock().expect("ledger") == 0 {
+            if !route_alive(&engine) && engine.spool_budget.used_bytes() == 0 {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         assert!(!route_alive(&engine), "route removed on the panic path");
-        assert_eq!(
-            *engine.spool_reserved.lock().expect("ledger"),
-            0,
-            "spool reservation returned on the panic path"
-        );
+        assert_eq!(engine.spool_budget.used_bytes(), 0);
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn legacy_jobs_release_their_ledger_share_at_exit() {
-        // release_spool_at_exit: the ledger share returns at the terminal
-        // record while the pump still lingers (route alive) — legacy ops
-        // never serve post-exit spool replay, so holding the share through
-        // the linger only starves new ops under connection churn.
+    async fn starting_a_job_does_not_reserve_its_theoretical_spool_quota() {
         let (engine, _dir) = test_engine(AdmissionConfig::default());
         let op = OpId::from("legacy-early-release");
         let ticket = engine
@@ -1180,7 +1348,6 @@ mod tests {
             ticket,
             Vec::new(),
             None,
-            true,
             || Ok::<_, std::io::Error>(sh("printf done")),
             |_frame| {},
             |_| Vec::new(),
@@ -1195,14 +1362,10 @@ mod tests {
             .await
             .expect("exit in time")
             .expect("exit delivered");
-        assert_eq!(
-            *engine.spool_reserved.lock().expect("ledger"),
-            0,
-            "ledger share returned at the terminal record"
-        );
+        assert_eq!(engine.spool_budget.used_bytes(), 0);
         assert!(
-            engine.route_command(&op, JobCommand::Detach),
-            "the pump still lingers (route alive) after the early release"
+            engine.route_command(&op, JobCommand::Detach { completed: None }),
+            "the pump still lingers (route alive) after exit"
         );
         // Normal teardown still works.
         let _ = started
@@ -1222,19 +1385,6 @@ mod tests {
                 final_ack: true,
             })
             .await;
-    }
-
-    #[test]
-    fn spool_reservation_clamps_to_the_global_budget() {
-        let (engine, _dir) = test_engine(AdmissionConfig::default());
-        let budget = engine.budgets().spool_budget_bytes;
-        let first = engine.reserve_spool(budget - 100);
-        assert_eq!(first, budget - 100);
-        let second = engine.reserve_spool(1000);
-        assert_eq!(second, 100, "clamped to the remaining budget");
-        engine.release_spool(first);
-        engine.release_spool(second);
-        assert_eq!(*engine.spool_reserved.lock().expect("ledger"), 0);
     }
 
     #[test]

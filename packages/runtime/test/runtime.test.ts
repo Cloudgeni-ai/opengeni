@@ -22,7 +22,7 @@ import {
   getLogger,
   invalidateServerToolsCache,
 } from "@openai/agents";
-import { Usage } from "@openai/agents-core";
+import { RunToolApprovalItem, Usage } from "@openai/agents-core";
 import { ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import {
   AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
@@ -70,10 +70,12 @@ import {
   modelCallUsageTelemetry,
   normalizeModelCallUsage,
   modelResponseServiceTierFromSdkEvent,
+  modelTerminalResponseFromSdkEvent,
   modelResponseUsageFromSdkEvent,
   modelResponseUsageFromResponse,
   normalizeSdkEvent,
   normalizeToolOutputForEvent,
+  PrefixedMcpServer,
   prepareRunInput,
   runAgentStream,
   stripProviderItemIdsFilter,
@@ -88,7 +90,7 @@ import {
   runAzureCliLoginHook,
   runRepositoryCloneHook,
   runToolspaceTokenSeedHook,
-  safeMcpTransportError,
+  mcpTransportErrorWithRetryMetadata,
   serializeApprovals,
   serializeHumanInputRequests,
   refreshToolspaceTokenFile,
@@ -98,6 +100,7 @@ import {
   sandboxRunAs,
   toolspaceTokenSeedCommand,
   withSandboxFileDownloads,
+  withSandboxSessionReady,
   withSandboxLifecycleHooks,
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
@@ -108,6 +111,7 @@ import { Manifest } from "@openai/agents/sandbox";
 import { TurnSandboxCommandCancelledError } from "../src/sandbox/turn-tool-cancellation";
 import { CompactionNeededError } from "../src/context-compaction";
 import { readSkillLibraryArtifact, verifySkillLibraryArtifact } from "../src/skill-library";
+import { MCP_MAX_CONCURRENT_SERVER_OPERATIONS } from "../src/mcp-network";
 import { ScriptedModel, startTestMcpServer, testSettings } from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
 import {
@@ -149,6 +153,9 @@ const codexAppsTestFetch =
     return await globalThis.fetch(raw === CODEX_APPS_MCP_URL ? url : input, init);
   };
 
+const runtimeMcpServerId = (server: MCPServer): string =>
+  server instanceof PrefixedMcpServer ? server.registryId : server.name;
+
 test("Agents SDK debug logging omits model and tool payload data", () => {
   const logger = getLogger("opengeni:test-sensitive-logging");
 
@@ -159,13 +166,20 @@ test("Agents SDK debug logging omits model and tool payload data", () => {
 });
 
 test("forwards an explicit outer MCP connect timeout to the Agents SDK lifecycle", async () => {
-  const slowServer = {
-    name: "slow-connect",
-    connect: async () => {
-      await Bun.sleep(50);
-    },
-    close: async () => {},
-  } as unknown as MCPServer;
+  const slowServer = new PrefixedMcpServer(
+    {
+      name: "inner-slow-connect",
+      cacheToolsList: false,
+      connect: async () => {
+        await Bun.sleep(50);
+      },
+      close: async () => {},
+      listTools: async () => [],
+      callTool: async () => [],
+      invalidateToolsCache: async () => {},
+    } as MCPServer,
+    "slow-connect",
+  );
 
   await expect(
     connectMcpServersInBatches([slowServer], {
@@ -175,24 +189,21 @@ test("forwards an explicit outer MCP connect timeout to the Agents SDK lifecycle
   ).rejects.toThrow("MCP server connect timed out after 5ms");
 });
 
-test("sanitizes nested MCP connectivity failures into an allowlisted marker", () => {
+test("preserves nested MCP connectivity diagnostics while adding a typed retry marker", () => {
   const raw = new Error("MCP connect failed for https://private.example/token-value");
   raw.cause = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:8000"), {
     code: "ECONNREFUSED",
   });
 
-  const sanitized = safeMcpTransportError(raw);
-
   expect(isMcpTransportConnectivityError(raw)).toBe(false);
-  expect(isMcpTransportConnectivityError(sanitized)).toBe(true);
-  expect(sanitized).toMatchObject({
-    name: "McpTransportError",
-    message: "MCP transport operation failed (Error)",
-    mcpTransportFailureKind: "connectivity_unavailable",
+  const classified = mcpTransportErrorWithRetryMetadata(raw);
+
+  expect(isMcpTransportConnectivityError(classified)).toBe(true);
+  expect(classified).toBe(raw);
+  expect(classified.message).toContain("private.example");
+  expect(classified.cause).toMatchObject({
+    message: "connect ECONNREFUSED 127.0.0.1:8000",
   });
-  expect(JSON.stringify(sanitized)).not.toContain("private.example");
-  expect(JSON.stringify(sanitized)).not.toContain("token-value");
-  expect(JSON.stringify(sanitized)).not.toContain("127.0.0.1");
 });
 
 test("does not turn MCP client failures or arbitrary codes into connectivity recovery", () => {
@@ -205,9 +216,86 @@ test("does not turn MCP client failures or arbitrary codes into connectivity rec
   });
 
   expect(isMcpTransportConnectivityError(clientFailure)).toBe(false);
-  expect(isMcpTransportConnectivityError(safeMcpTransportError(clientFailure))).toBe(false);
+  expect(isMcpTransportConnectivityError(mcpTransportErrorWithRetryMetadata(clientFailure))).toBe(
+    false,
+  );
   expect(isMcpTransportConnectivityError(arbitrary)).toBe(false);
-  expect(safeMcpTransportError(arbitrary)).not.toHaveProperty("mcpTransportFailureKind");
+  expect(mcpTransportErrorWithRetryMetadata(arbitrary)).not.toHaveProperty(
+    "mcpTransportFailureKind",
+  );
+});
+
+test("fails closed on pathological MCP transport error wrappers", () => {
+  let deeplyWrapped: Record<string, unknown> = { code: "ECONNREFUSED" };
+  for (let depth = 0; depth < 10; depth += 1) {
+    deeplyWrapped = { cause: deeplyWrapped };
+  }
+  const throwingWrapper = {
+    code: "ECONNRESET",
+    get cause(): unknown {
+      throw new Error("unsafe transport getter");
+    },
+  };
+  const throwingFields = {
+    get code(): unknown {
+      throw new Error("unsafe code getter");
+    },
+  };
+
+  expect(isMcpTransportConnectivityError(mcpTransportErrorWithRetryMetadata(deeplyWrapped))).toBe(
+    false,
+  );
+  expect(isMcpTransportConnectivityError(mcpTransportErrorWithRetryMetadata(throwingWrapper))).toBe(
+    false,
+  );
+  expect(isMcpTransportConnectivityError(mcpTransportErrorWithRetryMetadata(throwingFields))).toBe(
+    false,
+  );
+});
+
+test("recovers only rollout-safe first-party MCP setup 404 and statusless Error shapes", () => {
+  const routeNotReady = Object.assign(new Error("temporary route body with secret detail"), {
+    status: 404,
+  });
+  const statuslessTransport = new Error("fetch failed for a secret first-party URL");
+  const typedCause = Object.assign(new Error("wrapped protocol failure"), {
+    cause: new TypeError("invalid MCP response shape"),
+  });
+  const authRejected = Object.assign(new Error("authentication failed"), { status: 401 });
+  const typedProtocolFailure = new TypeError("invalid MCP response shape");
+
+  expect(isMcpTransportConnectivityError(mcpTransportErrorWithRetryMetadata(routeNotReady))).toBe(
+    false,
+  );
+  expect(
+    isMcpTransportConnectivityError(
+      mcpTransportErrorWithRetryMetadata(routeNotReady, { recoverySafeSetup: true }),
+    ),
+  ).toBe(true);
+  expect(
+    isMcpTransportConnectivityError(
+      mcpTransportErrorWithRetryMetadata(statuslessTransport, { recoverySafeSetup: true }),
+    ),
+  ).toBe(true);
+  expect(
+    isMcpTransportConnectivityError(
+      mcpTransportErrorWithRetryMetadata(typedCause, { recoverySafeSetup: true }),
+    ),
+  ).toBe(false);
+  expect(
+    isMcpTransportConnectivityError(
+      mcpTransportErrorWithRetryMetadata(authRejected, { recoverySafeSetup: true }),
+    ),
+  ).toBe(false);
+  expect(
+    isMcpTransportConnectivityError(
+      mcpTransportErrorWithRetryMetadata(typedProtocolFailure, { recoverySafeSetup: true }),
+    ),
+  ).toBe(false);
+  expect(mcpTransportErrorWithRetryMetadata(routeNotReady, { recoverySafeSetup: true })).toBe(
+    routeNotReady,
+  );
+  expect(routeNotReady.message).toContain("secret detail");
 });
 
 describe("structured human-input runtime boundary", () => {
@@ -230,6 +318,22 @@ describe("structured human-input runtime boundary", () => {
       }),
     },
   };
+
+  test("workspace policy omits only the human-input tool while enabled control preserves it", () => {
+    const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: true });
+    const defaultTools = buildOpenGeniAgent(settings, []).tools.map((tool) => tool.name);
+    const enabledTools = buildOpenGeniAgent(settings, [], { humanInputEnabled: true }).tools.map(
+      (tool) => tool.name,
+    );
+    const disabledTools = buildOpenGeniAgent(settings, [], { humanInputEnabled: false }).tools.map(
+      (tool) => tool.name,
+    );
+
+    expect(defaultTools).toContain(HUMAN_INPUT_TOOL_NAME);
+    expect(enabledTools).toEqual(defaultTools);
+    expect(disabledTools).not.toContain(HUMAN_INPUT_TOOL_NAME);
+    expect(disabledTools).toEqual(defaultTools.filter((name) => name !== HUMAN_INPUT_TOOL_NAME));
+  });
 
   test("partitions human requests out of ordinary approval payloads", () => {
     const ordinary = {
@@ -263,6 +367,39 @@ describe("structured human-input runtime boundary", () => {
         },
       },
     ]);
+  });
+
+  test("normalizes SDK approval items before run-state and event persistence", () => {
+    const rawItem = {
+      type: "function_call",
+      callId: "approval-undefined",
+      name: "dangerous_tool",
+      arguments: "{}",
+      status: undefined,
+      providerData: { traceId: "trace-approval", optional: undefined },
+    };
+    const approval = new RunToolApprovalItem(
+      rawItem as any,
+      { tools: [], toJSON: () => ({ name: "reviewer" }) } as any,
+    );
+
+    expect(serializeApprovals([approval])).toEqual([
+      {
+        type: "tool_approval_item",
+        rawItem: {
+          type: "function_call",
+          callId: "approval-undefined",
+          name: "dangerous_tool",
+          arguments: "{}",
+          providerData: { traceId: "trace-approval" },
+        },
+        agent: { name: "reviewer" },
+        toolName: "dangerous_tool",
+        functionToolStateKey: '["bare","dangerous_tool"]',
+      },
+    ]);
+    expect(Object.hasOwn(rawItem, "status")).toBe(true);
+    expect(Object.hasOwn(rawItem.providerData, "optional")).toBe(true);
   });
 
   test("the built-in tool always interrupts and only returns its injected durable response", async () => {
@@ -415,6 +552,22 @@ describe("runtime event normalization", () => {
       },
     });
     expect(normalizeSdkEvent(event)).toEqual([]);
+  });
+
+  test("recognizes a terminal response when the provider omitted usage", () => {
+    const event = {
+      type: "raw_model_stream_event",
+      data: {
+        type: "response_done",
+        response: { id: "resp-without-usage" },
+      },
+    } as any;
+
+    expect(modelTerminalResponseFromSdkEvent(event)).toEqual({
+      responseId: "resp-without-usage",
+      usage: null,
+    });
+    expect(modelResponseUsageFromSdkEvent(event)).toBeNull();
   });
 
   test("extracts raw Responses usage without manufacturing a durable event", () => {
@@ -624,6 +777,20 @@ describe("runtime event normalization", () => {
         reasoningTokens: 12,
       },
       totalTokens: 3030,
+      requestUsageEntries: [
+        {
+          inputTokens: 1000,
+          outputTokens: 10,
+          totalTokens: 1010,
+          inputTokensDetails: { cached_tokens: 100 },
+        },
+        {
+          inputTokens: 2000,
+          outputTokens: 20,
+          totalTokens: 2020,
+          inputTokensDetails: { cached_tokens: 300 },
+        },
+      ],
       rejectedFields: [],
     });
   });
@@ -931,21 +1098,51 @@ describe("runtime event normalization", () => {
   });
 
   test("maps tool call stream items into tool events", () => {
+    const rawItem = {
+      callId: "call-1",
+      type: "shell_call",
+      action: { commands: ["terraform version"], optional: undefined },
+      status: undefined,
+    };
     const [event] = normalizeSdkEvent({
       type: "run_item_stream_event",
       item: {
         id: "item-1",
         type: "tool_call_item",
-        rawItem: {
-          callId: "call-1",
-          type: "shell_call",
-          action: { commands: ["terraform version"] },
-        },
+        rawItem,
       },
     } as any);
 
     expect(event?.type).toBe("agent.toolCall.created");
     expect((event?.payload as { id?: string } | undefined)?.id).toBe("call-1");
+    const raw = (event?.payload as { raw?: Record<string, unknown> } | undefined)?.raw;
+    expect(Object.hasOwn(raw!, "status")).toBe(false);
+    expect(Object.hasOwn(raw!.action as object, "optional")).toBe(false);
+    expect(Object.hasOwn(rawItem, "status")).toBe(true);
+    expect(Object.hasOwn(rawItem.action, "optional")).toBe(true);
+  });
+
+  test("normalizes tool outputs before durable event persistence", () => {
+    const output = {
+      type: "text",
+      text: "done",
+      structuredContent: undefined,
+    };
+    const [event] = normalizeSdkEvent({
+      type: "run_item_stream_event",
+      item: {
+        id: "item-output-1",
+        type: "tool_call_output_item",
+        rawItem: { callId: "call-output-1", type: "function_call_result" },
+        output,
+      },
+    } as any);
+
+    const persistedOutput = (event?.payload as { output?: Record<string, unknown> } | undefined)
+      ?.output;
+    expect(persistedOutput).toEqual({ type: "text", text: "done" });
+    expect(Object.hasOwn(persistedOutput!, "structuredContent")).toBe(false);
+    expect(Object.hasOwn(output, "structuredContent")).toBe(true);
   });
 
   test("compacts a codex computer_screenshot Uint8Array output to a non-retained media fact", () => {
@@ -1152,19 +1349,16 @@ describe("runtime event normalization", () => {
       expect(mcpToolErrorOutput("boom").content[0]?.text).toContain("boom");
     });
 
-    test("mcpToolErrorOutput redacts credential-bearing error details", () => {
-      const out = mcpToolErrorOutput(
-        new Error(
-          "upstream 401\nAuthorization: Bearer synthetic-bearer-value-123456\n" +
-            "Cookie: session=synthetic-cookie-value-123456",
-        ),
-      );
+    test("mcpToolErrorOutput preserves credential-shaped error details exactly", () => {
+      const bearer = "synthetic-bearer-value-123456";
+      const cookie = ["synthetic", "cookie", "value", "123456"].join("-");
+      const message = `upstream 401\nAuthorization: Bearer ${bearer}\nCookie: ${cookie}`;
+      const out = mcpToolErrorOutput(new Error(message));
       const text = out.content[0]?.text ?? "";
       expect(text).toContain("upstream 401");
-      expect(text).toContain("Authorization: Bearer [redacted]");
-      expect(text).toContain("Cookie: [redacted]");
-      expect(text).not.toContain("synthetic-bearer-value");
-      expect(text).not.toContain("synthetic-cookie-value");
+      expect(text).toContain(message);
+      expect(text).toContain(bearer);
+      expect(text).toContain(cookie);
     });
 
     test("every agent gets an mcpConfig.errorFunction that produces isError output", () => {
@@ -2934,7 +3128,37 @@ describe("runtime event normalization", () => {
     expect(sessions).toHaveLength(2);
   });
 
-  test("keeps repository resources as git repo manifest entries", () => {
+  test("runs sandbox-ready hydration before exposing an SDK-owned session", async () => {
+    const order: string[] = [];
+    const session = { state: { manifest: new Manifest({ root: "/workspace" }) } };
+    const client = withSandboxSessionReady(
+      {
+        backendId: "docker",
+        create: async () => {
+          order.push("create");
+          return session as any;
+        },
+        resume: async () => {
+          order.push("resume");
+          return session as any;
+        },
+        delete: async () => {
+          order.push("delete");
+        },
+      } as any,
+      async (readySession) => {
+        expect(readySession).toBe(session as any);
+        order.push("hydrate");
+      },
+    );
+
+    expect(await client.create!()).toBe(session as any);
+    expect(await client.resume!(session.state as any)).toBe(session as any);
+    await client.delete!(session.state as any);
+    expect(order).toEqual(["create", "hydrate", "resume", "delete"]);
+  });
+
+  test("keeps exact repository transport URIs in git repo manifest entries", () => {
     const manifest = buildManifest(testSettings(), [
       {
         kind: "repository",
@@ -2942,10 +3166,9 @@ describe("runtime event normalization", () => {
         ref: "main",
       },
     ]);
-    expect(manifest.entries["repos/github.com/acme/app"]).toMatchObject({
+    expect(manifest.entries["repos/github.com/acme/app.git"]).toMatchObject({
       type: "git_repo",
-      host: "github.com",
-      repo: "acme/app",
+      repo: "https://github.com/acme/app.git",
       ref: "main",
     });
   });
@@ -2956,16 +3179,19 @@ describe("runtime event normalization", () => {
         kind: "repository",
         uri: "https://github.com/acme/app.git",
         ref: "main",
+        provider: "github",
       },
       {
         kind: "repository",
         uri: "https://gitlab.com/acme/app.git",
         ref: "main",
+        provider: "gitlab",
       },
       {
         kind: "repository",
         uri: "https://dev.azure.com/acme/project/_git/app",
         ref: "main",
+        provider: "azure_devops",
       },
     ]);
     expect(Object.keys(manifest.entries).sort()).toEqual([
@@ -2983,10 +3209,9 @@ describe("runtime event normalization", () => {
         ref: "main",
       },
     ]);
-    expect(manifest.entries["repos/git.example.com%3A8443/acme/app"]).toMatchObject({
+    expect(manifest.entries["repos/git.example.com%3A8443/acme/app.git"]).toMatchObject({
       type: "git_repo",
-      host: "git.example.com:8443",
-      repo: "acme/app",
+      repo: "https://git.example.com:8443/acme/app.git",
     });
   });
 
@@ -3175,7 +3400,12 @@ describe("runtime event normalization", () => {
     expect(command).toContain("glab) provider=gitlab; token_env=GITLAB_TOKEN ;;");
     expect(command).toContain("az) provider=azure_devops; token_env=AZURE_DEVOPS_EXT_PAT ;;");
     expect(command).toContain('GH_TOKEN) export GH_TOKEN="$token" ;;');
-    expect(command).toContain('GITLAB_TOKEN) export GITLAB_TOKEN="$token" ;;');
+    expect(command).toContain(
+      'glpat-*) unset GITLAB_ACCESS_TOKEN OAUTH_TOKEN GLAB_IS_OAUTH2; export GITLAB_TOKEN="$token" ;;',
+    );
+    expect(command).toContain(
+      '*) unset GITLAB_TOKEN GITLAB_ACCESS_TOKEN; export OAUTH_TOKEN="$token"; export GLAB_IS_OAUTH2=true ;;',
+    );
     expect(command).toContain('AZURE_DEVOPS_EXT_PAT) export AZURE_DEVOPS_EXT_PAT="$token" ;;');
 
     // Helper writes MUST come BEFORE the fetch that consumes them (order matters:
@@ -3588,8 +3818,7 @@ describe("runtime event normalization", () => {
     ]);
     expect(manifest.entries["repos/acme/private/README.md"]).toMatchObject({
       type: "git_repo",
-      host: "github.com",
-      repo: "acme/private",
+      repo: "https://github.com/acme/private.git",
       ref: "main",
       subpath: "README.md",
     });
@@ -3626,7 +3855,7 @@ describe("runtime event normalization", () => {
       target,
     );
     expect(applied).toHaveLength(1);
-    expect(Object.keys(applied[0]!.entries)).toEqual(["repos/github.com/acme/two"]);
+    expect(Object.keys(applied[0]!.entries)).toEqual(["repos/github.com/acme/two.git"]);
   });
 
   test("refreshes manifest environment on OWNED resumed sessions and reports drift as key names", async () => {
@@ -3798,7 +4027,7 @@ describe("runtime event normalization", () => {
       JSON.parse(JSON.stringify(target)),
     );
     expect(applied).toHaveLength(1);
-    expect(Object.keys(applied[0]!.entries)).toEqual(["repos/github.com/acme/two"]);
+    expect(Object.keys(applied[0]!.entries)).toEqual(["repos/github.com/acme/two.git"]);
   });
 
   test("deserializes persisted sandbox envelopes through the sandbox client", async () => {
@@ -3864,7 +4093,7 @@ describe("runtime event normalization", () => {
       } as any,
       target,
     );
-    expect(materialized).toEqual(["repos/github.com/acme/two"]);
+    expect(materialized).toEqual(["repos/github.com/acme/two.git"]);
   });
 
   test("attaches selected MCP servers to built agents", () => {
@@ -4158,14 +4387,7 @@ describe("runtime event normalization", () => {
       expect(prepared.mcpServers).toHaveLength(0);
       expect(transportCalls).toEqual([]);
       expect(resolverCalls).toBeGreaterThan(0);
-      expect(authNeeded).toEqual([
-        expect.objectContaining({
-          serverId: "personal-slack",
-          providerDomain: "slack.com",
-          reason: "missing_connection",
-          toolName: null,
-        }),
-      ]);
+      expect(authNeeded).toEqual([]);
     } finally {
       await prepared.close();
     }
@@ -4353,7 +4575,7 @@ describe("runtime event normalization", () => {
       expect(text).toMatch(/did not replay/i);
       expect(text).toMatch(/do not retry automatically/i);
       expect(text).toMatch(/verify provider state/i);
-      expect(text).not.toContain("unauthorized");
+      expect(text).toContain("unauthorized");
       expect(mcp.requests.filter((request) => request.jsonRpcMethod === "tools/call")).toHaveLength(
         1,
       );
@@ -4559,6 +4781,126 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("preserves actionable auth for single and batched optional MCP tool calls", async () => {
+    const connectionId = "79797979-7979-4979-8979-797979797979";
+    const mcp = startTestMcpServer();
+    const authNeeded: ToolAuthNeededPayload[] = [];
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            id: "cap-batched-auth",
+            name: "Batched auth capability MCP",
+            url: mcp.url,
+            connectionRef: {
+              connectionId,
+              providerDomain: "api.example.com",
+              kind: "api_key",
+              subjectScope: "workspace",
+            },
+            cacheToolsList: false,
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "cap-batched-auth", optional: true }],
+      {
+        workspaceId: "89898989-8989-4989-8989-898989898989",
+        resolveCredential: async (input): Promise<ResolveConnectionCredentialResult> =>
+          input.toolName
+            ? {
+                status: "auth_needed",
+                reason: "expired",
+                providerDomain: "api.example.com",
+                connectionId,
+              }
+            : {
+                status: "ok",
+                connectionId,
+                headers: { authorization: "Bearer list-token" },
+              },
+        onAuthNeeded: (payload) => authNeeded.push(payload),
+      },
+    );
+    try {
+      const server = prepared.mcpServers[0]!;
+      await server.listTools();
+      const brokerFetch = (
+        server as unknown as {
+          inner: {
+            underlying: {
+              params: {
+                fetch: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+              };
+            };
+          };
+        }
+      ).inner.underlying.params.fetch;
+      const invoke = async (body: unknown) =>
+        await brokerFetch(mcp.url, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+      const expectedError = {
+        code: 40_101,
+        message: "Authentication required - a connection link was posted to the session.",
+      };
+
+      const single = await invoke({
+        jsonrpc: "2.0",
+        id: 101,
+        method: "tools/call",
+        params: { name: "create_issue", arguments: {} },
+      });
+      expect(single.status).toBe(200);
+      expect(await single.json()).toEqual({ jsonrpc: "2.0", id: 101, error: expectedError });
+      expect(authNeeded).toHaveLength(1);
+
+      const oneEntryBatch = await invoke([
+        {
+          jsonrpc: "2.0",
+          id: 102,
+          method: "tools/call",
+          params: { name: "create_issue", arguments: {} },
+        },
+      ]);
+      expect(oneEntryBatch.status).toBe(200);
+      expect(await oneEntryBatch.json()).toEqual([
+        { jsonrpc: "2.0", id: 102, error: expectedError },
+      ]);
+      expect(authNeeded).toHaveLength(2);
+
+      const mixedBatch = await invoke([
+        { jsonrpc: "2.0", id: 103, method: "tools/list" },
+        {
+          jsonrpc: "2.0",
+          id: 104,
+          method: "tools/call",
+          params: { name: "create_issue", arguments: {} },
+        },
+      ]);
+      expect(mixedBatch.status).toBe(200);
+      expect(await mixedBatch.json()).toEqual([
+        { jsonrpc: "2.0", id: 103, error: expectedError },
+        { jsonrpc: "2.0", id: 104, error: expectedError },
+      ]);
+      expect(authNeeded).toHaveLength(3);
+      expect(authNeeded).toEqual(
+        Array.from({ length: 3 }, () =>
+          expect.objectContaining({
+            serverId: "cap-batched-auth",
+            toolName: "create_issue",
+            reason: "expired",
+          }),
+        ),
+      );
+      expect(mcp.calls).toEqual([]);
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
   test("never classifies the MCP SDK request-timeout code as connection auth", async () => {
     let markStarted: (() => void) | null = null;
     let releaseCall: (() => void) | null = null;
@@ -4619,7 +4961,7 @@ describe("runtime event normalization", () => {
     }
   }, 10_000);
 
-  test("skips brokered MCP servers at connect time when auth is missing and emits auth-needed", async () => {
+  test("skips an optional brokered MCP at connect time without emitting setup auth-needed", async () => {
     const authNeeded: unknown[] = [];
     const originalWarn = console.warn;
     console.warn = () => {};
@@ -4640,7 +4982,53 @@ describe("runtime event normalization", () => {
             },
           ],
         }),
-        [{ kind: "mcp", id: "cap-missing" }],
+        [{ kind: "mcp", id: "cap-missing", optional: true }],
+        {
+          workspaceId: "99999999-9999-4999-8999-999999999999",
+          resolveCredential: async () => ({
+            status: "auth_needed",
+            reason: "missing_connection",
+            providerDomain: "api.example.com",
+            authorizationUrl: "https://api.example.com/oauth/start",
+          }),
+          onAuthNeeded: (payload) => {
+            authNeeded.push(payload);
+          },
+        },
+      );
+      try {
+        expect(prepared.mcpServers).toHaveLength(0);
+        expect(authNeeded).toEqual([]);
+      } finally {
+        await prepared.close();
+      }
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
+  test("keeps setup auth-needed for a non-optional brokered MCP selection", async () => {
+    const authNeeded: unknown[] = [];
+    const originalWarn = console.warn;
+    console.warn = () => {};
+    try {
+      const prepared = await prepareAgentTools(
+        testSettings({
+          mcpServers: [
+            {
+              id: "cap-required-auth",
+              name: "Required auth capability MCP",
+              url: "http://127.0.0.1:9/mcp",
+              connectionRef: {
+                providerDomain: "api.example.com",
+                kind: "api_key",
+                subjectScope: "workspace",
+              },
+              cacheToolsList: false,
+            },
+          ],
+        }),
+        [{ kind: "mcp", id: "cap-required-auth" }],
         {
           workspaceId: "99999999-9999-4999-8999-999999999999",
           resolveCredential: async () => ({
@@ -4658,10 +5046,10 @@ describe("runtime event normalization", () => {
         expect(prepared.mcpServers).toHaveLength(0);
         expect(authNeeded).toContainEqual(
           expect.objectContaining({
-            serverId: "cap-missing",
+            serverId: "cap-required-auth",
+            toolName: null,
             reason: "missing_connection",
             providerDomain: "api.example.com",
-            authorizationUrl: "https://api.example.com/oauth/start",
           }),
         );
       } finally {
@@ -4834,18 +5222,94 @@ describe("runtime event normalization", () => {
     const mcp = startTestMcpServer({
       requiredHeaders: { authorization: "Bearer tok-123" },
     });
+    const authNeeded: ToolAuthNeededPayload[] = [];
     // Inference authentication is deliberately not consulted as a fallback.
     const prepared = await prepareAgentTools(
       testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
       [{ kind: "mcp", id: "codex_apps" }],
-      { mcpFetchImpl: codexAppsTestFetch(mcp.url) },
+      {
+        mcpFetchImpl: codexAppsTestFetch(mcp.url),
+        onAuthNeeded: (payload) => authNeeded.push(payload),
+      },
     );
     try {
       expect(prepared.mcpServers).toHaveLength(0);
       expect(mcp.calls).toEqual([]);
+      expect(authNeeded).toContainEqual(
+        expect.objectContaining({
+          serverId: "codex_apps",
+          providerDomain: "chatgpt.com",
+          reason: "missing_connection",
+          toolName: null,
+        }),
+      );
     } finally {
       await prepared.close();
       mcp.close();
+    }
+  });
+
+  test("codex_apps: provider 401 publishes an actionable expired-auth signal", async () => {
+    const mcp = startTestMcpServer({
+      requiredHeaders: { authorization: "Bearer provider-rejected" },
+    });
+    const authNeeded: ToolAuthNeededPayload[] = [];
+    const prepared = await prepareAgentTools(
+      testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
+      [{ kind: "mcp", id: "codex_apps" }],
+      {
+        codexAppsAuth: makeCodexAppsAuth(),
+        mcpFetchImpl: codexAppsTestFetch(mcp.url),
+        onAuthNeeded: (payload) => authNeeded.push(payload),
+      },
+    );
+    try {
+      expect(prepared.mcpServers).toHaveLength(0);
+      expect(authNeeded).toContainEqual(
+        expect.objectContaining({
+          serverId: "codex_apps",
+          providerDomain: "chatgpt.com",
+          reason: "expired",
+          toolName: null,
+        }),
+      );
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("codex_apps: transport setup failure is retryable without a false refresh-auth signal", async () => {
+    const authNeeded: ToolAuthNeededPayload[] = [];
+    const warnings: unknown[][] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => warnings.push(args);
+    try {
+      const prepared = await prepareAgentTools(
+        testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
+        [{ kind: "mcp", id: "codex_apps" }],
+        {
+          codexAppsAuth: makeCodexAppsAuth(),
+          mcpFetchImpl: async () => {
+            throw Object.assign(new Error("socket closed with credential-shaped body"), {
+              code: "ECONNRESET",
+            });
+          },
+          onAuthNeeded: (payload) => authNeeded.push(payload),
+        },
+      );
+      try {
+        expect(prepared.mcpServers).toHaveLength(0);
+      } finally {
+        await prepared.close();
+      }
+      expect(authNeeded).toEqual([]);
+      const renderedWarnings = JSON.stringify(warnings);
+      expect(renderedWarnings).toContain('"serverId":"codex_apps"');
+      expect(renderedWarnings).toContain('"retryable":true');
+      expect(renderedWarnings).not.toContain("socket closed with credential-shaped body");
+    } finally {
+      console.warn = originalWarn;
     }
   });
 
@@ -4878,17 +5342,27 @@ describe("runtime event normalization", () => {
     const mcp = startTestMcpServer({
       requiredHeaders: { authorization: "Bearer tok-123" },
     });
+    const authNeeded: ToolAuthNeededPayload[] = [];
     const prepared = await prepareAgentTools(
       testSettings({ mcpServers: [CODEX_APPS_ENTRY()] }),
       [{ kind: "mcp", id: "codex_apps" }],
       {
         codexAppsAuth: makeCodexAppsAuth({ tokenError: new Error("needs_relogin") }),
         mcpFetchImpl: codexAppsTestFetch(mcp.url),
+        onAuthNeeded: (payload) => authNeeded.push(payload),
       },
     );
     try {
       expect(prepared.mcpServers).toHaveLength(0);
       expect(mcp.calls).toEqual([]);
+      expect(authNeeded).toContainEqual(
+        expect.objectContaining({
+          serverId: "codex_apps",
+          providerDomain: "chatgpt.com",
+          reason: "refresh_failed",
+          toolName: null,
+        }),
+      );
     } finally {
       await prepared.close();
       mcp.close();
@@ -4967,31 +5441,192 @@ describe("runtime event normalization", () => {
       } finally {
         await prepared.close();
       }
-      // A warning names the skipped server so the drop is observable.
-      const warned = warnings.some((args) =>
-        args.some((arg) => typeof arg === "string" && arg.includes("geni-notebook")),
-      );
-      expect(warned).toBe(true);
+      expect(warnings.length).toBeGreaterThan(0);
+      expect(JSON.stringify(warnings)).toContain('"serverId":"geni-notebook"');
+      expect(JSON.stringify(warnings)).toContain('"origin":"runtime"');
     } finally {
       console.warn = originalWarn;
       broken.close();
     }
   });
 
-  test("MCP connect logging never emits raw response bodies or credential material", async () => {
-    const syntheticCredential = "synthetic-mcp-log-secret-123456";
-    const server = Bun.serve({
-      hostname: "127.0.0.1",
-      port: 0,
-      fetch: () =>
-        new Response(
-          JSON.stringify({
-            error: "unauthorized",
-            echoed: `Authorization: Bearer ${syntheticCredential}`,
-            retry: `https://objects.example/file?X-Amz-Signature=${syntheticCredential}`,
-          }),
-          { status: 401, headers: { "content-type": "application/json" } },
-        ),
+  test("SDK MCP lifecycle logs are structural while callers receive exact errors", async () => {
+    const sentinel = "synthetic-mcp-lifecycle-boundary-123456";
+    const registryId = "registry-mcp-lifecycle-boundary";
+    const exactSourceError = Object.assign(new Error(`connect failed: ${sentinel}`), {
+      name: sentinel,
+      code: sentinel,
+      status: 503,
+      responseBody: { sentinel },
+      cause: { exact: sentinel },
+    });
+    const makeFacade = () =>
+      new PrefixedMcpServer(
+        {
+          name: `inner-${registryId}`,
+          cacheToolsList: false,
+          async connect() {
+            throw exactSourceError;
+          },
+          async close() {},
+          async listTools() {
+            return [];
+          },
+          async callTool() {
+            return [];
+          },
+          async invalidateToolsCache() {},
+        } as MCPServer,
+        registryId,
+      );
+    const warnings: unknown[][] = [];
+    const errors: unknown[][] = [];
+    const originalWarn = console.warn;
+    const originalError = console.error;
+    console.warn = (...args: unknown[]) => warnings.push(args);
+    console.error = (...args: unknown[]) => errors.push(args);
+    try {
+      const bestEffortFacade = makeFacade();
+      const bestEffort = await connectMcpServersInBatches([bestEffortFacade], { strict: false });
+      const returnedError = bestEffort.errors.get(bestEffortFacade);
+      expect(returnedError).toBe(exactSourceError);
+      await bestEffort.close();
+
+      const strictFacade = makeFacade();
+      const strictError = await connectMcpServersInBatches([strictFacade], { strict: true }).then(
+        () => null,
+        (error) => error as Error,
+      );
+      expect(strictError).toBe(exactSourceError);
+
+      const renderedLogs = [...warnings, ...errors]
+        .flat()
+        .map((value) => (value instanceof Error ? `${value.name}: ${value.message}` : value))
+        .map((value) => JSON.stringify(value))
+        .join("\n");
+      const lifecycleErrors = [...warnings, ...errors]
+        .flat()
+        .filter((value): value is Error => value instanceof Error);
+      expect(renderedLogs).toContain("McpLifecycleError");
+      expect(renderedLogs).toContain(registryId);
+      expect(lifecycleErrors).toContainEqual(
+        expect.objectContaining({
+          name: "McpLifecycleError",
+          code: "mcp_connect_failed",
+          serverId: registryId,
+          status: 503,
+          retryable: true,
+          origin: "runtime",
+        }),
+      );
+      expect(renderedLogs).not.toContain(sentinel);
+      expect(exactSourceError.message).toContain(sentinel);
+      expect(exactSourceError.responseBody).toEqual({ sentinel });
+      expect(exactSourceError.cause).toEqual({ exact: sentinel });
+    } finally {
+      console.warn = originalWarn;
+      console.error = originalError;
+    }
+  });
+
+  test("SDK MCP lifecycle status projection tolerates hostile proxies without replacing exact errors", async () => {
+    const sentinel = "synthetic-mcp-hostile-status-proxy-123456";
+    const source = new Error(`connect failed: ${sentinel}`);
+    const exactSourceError = new Proxy(source, {
+      get(target, property, receiver) {
+        if (property === "status" || property === "statusCode") {
+          throw new Error(`hostile public status getter: ${sentinel}`);
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const facade = new PrefixedMcpServer(
+      {
+        name: `inner-${sentinel}`,
+        cacheToolsList: false,
+        async connect() {
+          throw exactSourceError;
+        },
+        async close() {},
+        async listTools() {
+          return [];
+        },
+        async callTool() {
+          return [];
+        },
+        async invalidateToolsCache() {},
+      } as MCPServer,
+      "registry-hostile-status-proxy",
+    );
+    const warnings: unknown[][] = [];
+    const errors: unknown[][] = [];
+    const originalWarn = console.warn;
+    const originalError = console.error;
+    console.warn = (...args: unknown[]) => warnings.push(args);
+    console.error = (...args: unknown[]) => errors.push(args);
+    try {
+      const result = await connectMcpServersInBatches([facade], { strict: false });
+      expect(result.errors.get(facade)).toBe(exactSourceError);
+      await result.close();
+      const lifecycleErrors = [...warnings, ...errors]
+        .flat()
+        .filter((value): value is Error => value instanceof Error);
+      const renderedLogs = [...warnings, ...errors]
+        .flat()
+        .map((value) => (value instanceof Error ? `${value.name}: ${value.message}` : value))
+        .map((value) => JSON.stringify(value))
+        .join("\n");
+      expect(renderedLogs).toContain("McpLifecycleError");
+      expect(renderedLogs).toContain("registry-hostile-status-proxy");
+      expect(renderedLogs).not.toContain(sentinel);
+      expect(lifecycleErrors).toContainEqual(
+        expect.objectContaining({
+          name: "McpLifecycleError",
+          code: "mcp_connect_failed",
+          origin: "runtime",
+        }),
+      );
+      expect(lifecycleErrors.some((error) => "status" in error)).toBe(false);
+    } finally {
+      console.warn = originalWarn;
+      console.error = originalError;
+    }
+  });
+
+  test("MCP cleanup closes every batch and returns the first exact close error", async () => {
+    const sentinel = "synthetic-mcp-close-boundary-4d7e91";
+    const closeCalls: number[] = [];
+    const exactCloseErrors = new Map<number, Error>();
+    const servers = Array.from({ length: MCP_MAX_CONCURRENT_SERVER_OPERATIONS + 1 }, (_, index) => {
+      const exactCloseError = Object.assign(new Error(`close failed ${index}: ${sentinel}`), {
+        name: `${sentinel}-${index}`,
+        code: `${sentinel}-code-${index}`,
+        status: 502,
+        cause: { exact: `${sentinel}-cause-${index}` },
+      });
+      if (index === 0 || index === MCP_MAX_CONCURRENT_SERVER_OPERATIONS) {
+        exactCloseErrors.set(index, exactCloseError);
+      }
+      return new PrefixedMcpServer(
+        {
+          name: `inner-${sentinel}-${index}`,
+          cacheToolsList: false,
+          async connect() {},
+          async close() {
+            closeCalls.push(index);
+            const failure = exactCloseErrors.get(index);
+            if (failure) throw failure;
+          },
+          async listTools() {
+            return [];
+          },
+          async callTool() {
+            return [];
+          },
+          async invalidateToolsCache() {},
+        } as MCPServer,
+        `registry-close-boundary-${index}`,
+      );
     });
     const warnings: unknown[][] = [];
     const errors: unknown[][] = [];
@@ -5000,35 +5635,25 @@ describe("runtime event normalization", () => {
     console.warn = (...args: unknown[]) => warnings.push(args);
     console.error = (...args: unknown[]) => errors.push(args);
     try {
-      const prepared = await prepareAgentTools(
-        testSettings({
-          mcpServers: [
-            {
-              id: "synthetic-optional",
-              name: "Synthetic optional MCP",
-              url: `http://127.0.0.1:${server.port}/mcp`,
-              cacheToolsList: false,
-            },
-          ],
-        }),
-        [{ kind: "mcp", id: "synthetic-optional", optional: true }],
+      const connected = await connectMcpServersInBatches(servers, { strict: true });
+      const closeError = await connected.close().then(
+        () => null,
+        (error) => error as Error,
       );
-      await prepared.close();
-
-      const renderedLogs = [...warnings, ...errors]
-        .flat()
-        .map((value) => (value instanceof Error ? `${value.name}: ${value.message}` : value))
-        .map((value) => JSON.stringify(value))
-        .join("\n");
-      expect(renderedLogs).toContain("synthetic-optional");
-      expect(renderedLogs).toContain("401");
-      expect(renderedLogs).not.toContain(syntheticCredential);
-      expect(renderedLogs).not.toContain("Authorization: Bearer");
-      expect(renderedLogs).not.toContain("X-Amz-Signature");
+      expect(closeCalls.toSorted((left, right) => left - right)).toEqual(
+        servers.map((_, index) => index),
+      );
+      expect(closeError).toBe(exactCloseErrors.get(MCP_MAX_CONCURRENT_SERVER_OPERATIONS));
+      expect(closeError?.cause).toEqual({
+        exact: `${sentinel}-cause-${MCP_MAX_CONCURRENT_SERVER_OPERATIONS}`,
+      });
+      const renderedLogs = JSON.stringify([...warnings, ...errors]);
+      expect(renderedLogs).toContain("McpLifecycleError");
+      expect(renderedLogs).toContain("mcp_close_failed");
+      expect(renderedLogs).not.toContain(sentinel);
     } finally {
       console.warn = originalWarn;
       console.error = originalError;
-      server.stop(true);
     }
   });
 
@@ -5066,7 +5691,7 @@ describe("runtime event normalization", () => {
         ],
       );
       try {
-        expect(prepared.mcpServers.map((server) => server.name)).toEqual(["docs"]);
+        expect(prepared.mcpServers.map(runtimeMcpServerId)).toEqual(["docs"]);
         const tools = await prepared.mcpServers[0]!.listTools();
         expect(tools.map((tool) => tool.name)).toContain("docs__search_documents");
       } finally {
@@ -5076,6 +5701,127 @@ describe("runtime event normalization", () => {
       console.warn = originalWarn;
       broken.close();
       healthy.close();
+    }
+  });
+
+  test("parallel best-effort setup preserves active/failed registry identities", async () => {
+    const exactSlackError = Object.assign(new Error("provider socket failed"), {
+      code: "ECONNRESET",
+    });
+    const apps = new PrefixedMcpServer(
+      {
+        name: "inner-codex-apps",
+        cacheToolsList: false,
+        async connect() {},
+        async close() {},
+        async listTools() {
+          return [];
+        },
+        async callTool() {
+          return [];
+        },
+        async invalidateToolsCache() {},
+      } as MCPServer,
+      "codex_apps",
+      undefined,
+      true,
+    );
+    const slack = new PrefixedMcpServer(
+      {
+        name: "inner-slack",
+        cacheToolsList: false,
+        async connect() {
+          throw exactSlackError;
+        },
+        async close() {},
+        async listTools() {
+          return [];
+        },
+        async callTool() {
+          return [];
+        },
+        async invalidateToolsCache() {},
+      } as MCPServer,
+      "slack",
+      undefined,
+      true,
+      undefined,
+      "slack",
+      true,
+    );
+    const warnings: unknown[][] = [];
+    const errors: unknown[][] = [];
+    const originalWarn = console.warn;
+    const originalError = console.error;
+    console.warn = (...args: unknown[]) => warnings.push(args);
+    console.error = (...args: unknown[]) => errors.push(args);
+    try {
+      const connected = await connectMcpServersInBatches([apps, slack], { strict: false });
+      try {
+        expect(connected.active.map(runtimeMcpServerId)).toEqual(["codex_apps"]);
+        expect(connected.failed.map(runtimeMcpServerId)).toEqual(["slack"]);
+        expect(connected.errors.get(slack)).toBe(exactSlackError);
+        expect(apps.name).not.toBe(slack.name);
+        expect(apps.name).toContain("codex_apps");
+        expect(slack.name).toContain("slack");
+        const renderedLogs = JSON.stringify([...warnings, ...errors]);
+        expect(renderedLogs).toContain('"serverId":"slack"');
+        expect(renderedLogs).toContain('"retryable":true');
+        expect(renderedLogs).not.toContain("provider socket failed");
+      } finally {
+        await connected.close();
+      }
+    } finally {
+      console.warn = originalWarn;
+      console.error = originalError;
+    }
+  });
+
+  test("codex_apps survives a parallel best-effort sibling connect failure", async () => {
+    const broken = startTestMcpServer({
+      requiredHeaders: { "x-api-key": "capability-credential" },
+    });
+    const apps = startTestMcpServer({
+      requiredHeaders: {
+        authorization: "Bearer tok-123",
+        "chatgpt-account-id": "acct-9",
+      },
+    });
+    const originalWarn = console.warn;
+    console.warn = () => {};
+    try {
+      const prepared = await prepareAgentTools(
+        testSettings({
+          mcpServers: [
+            CODEX_APPS_ENTRY(),
+            {
+              id: "slack",
+              name: "Slack",
+              url: broken.url,
+              cacheToolsList: false,
+            },
+          ],
+        }),
+        [
+          { kind: "mcp", id: "codex_apps", optional: true },
+          { kind: "mcp", id: "slack", optional: true },
+        ],
+        {
+          codexAppsAuth: makeCodexAppsAuth(),
+          mcpFetchImpl: codexAppsTestFetch(apps.url),
+        },
+      );
+      try {
+        expect(prepared.mcpServers.map(runtimeMcpServerId)).toEqual(["codex_apps"]);
+        const tools = await prepared.mcpServers[0]!.listTools();
+        expect(tools.map((tool) => tool.name)).toContain("codex_apps__search_documents");
+      } finally {
+        await prepared.close();
+      }
+    } finally {
+      console.warn = originalWarn;
+      broken.close();
+      apps.close();
     }
   });
 
@@ -5106,6 +5852,63 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("required first-party setup 404 is recoverable while an external 404 remains terminal", async () => {
+    const unavailable = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: () => new Response("temporary route not found", { status: 404 }),
+    });
+    const url = `http://127.0.0.1:${unavailable.port}/mcp`;
+    const workspaceId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    try {
+      let firstPartyFailure: unknown;
+      try {
+        await prepareAgentTools(
+          testSettings({
+            opengeniMcpUrl: url,
+            mcpServers: [
+              {
+                id: "opengeni",
+                name: "OpenGeni",
+                url,
+                cacheToolsList: false,
+              },
+            ],
+          }),
+          [{ kind: "mcp", id: "opengeni" }],
+          { workspaceId },
+        );
+      } catch (error) {
+        firstPartyFailure = error;
+      }
+      expect(firstPartyFailure).toBeInstanceOf(Error);
+      expect(isMcpTransportConnectivityError(firstPartyFailure)).toBe(true);
+
+      let externalFailure: unknown;
+      try {
+        await prepareAgentTools(
+          testSettings({
+            mcpServers: [
+              {
+                id: "external-required",
+                name: "External required MCP",
+                url,
+                cacheToolsList: false,
+              },
+            ],
+          }),
+          [{ kind: "mcp", id: "external-required" }],
+        );
+      } catch (error) {
+        externalFailure = error;
+      }
+      expect(externalFailure).toBeInstanceOf(Error);
+      expect(isMcpTransportConnectivityError(externalFailure)).toBe(false);
+    } finally {
+      unavailable.stop(true);
+    }
+  });
+
   test("best-effort server whose tools/list throws at RUN time does not fail an unrelated turn", async () => {
     // Regression for the prod incident where a session turn hard-failed with
     // "Streamable HTTP error: Error POSTing to endpoint: authentication required"
@@ -5114,8 +5917,8 @@ describe("runtime event normalization", () => {
     // still-valid credential), so the connect-time best-effort isolation lets it
     // through — but the credential is gone by the time the SDK's run-time
     // getAllMcpTools calls tools/list, which throws OUTSIDE the connect guard. The
-    // invariant: that best-effort server drops to zero tools (with its
-    // tool.auth_needed preserved) while a healthy sibling's tools survive and the
+    // invariant: that optional server drops to zero tools without manufacturing
+    // a conversational auth card while a healthy sibling's tools survive and the
     // turn proceeds. Pre-fix, getAllMcpTools rethrows and the whole turn dies.
     const connectionId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     // The broker resolves a valid credential during connect (initialize), then the
@@ -5155,7 +5958,7 @@ describe("runtime event normalization", () => {
           ],
         }),
         [
-          { kind: "mcp", id: "cap-expired" },
+          { kind: "mcp", id: "cap-expired", optional: true },
           { kind: "mcp", id: "docs" },
         ],
         {
@@ -5182,10 +5985,7 @@ describe("runtime event normalization", () => {
       connected = true;
       try {
         // Both connected, so both are handed to the runner.
-        expect(prepared.mcpServers.map((server) => server.name).sort()).toEqual([
-          "cap-expired",
-          "docs",
-        ]);
+        expect(prepared.mcpServers.map(runtimeMcpServerId).sort()).toEqual(["cap-expired", "docs"]);
         // Drive the exact code path the agent runner uses. Pre-fix this REJECTS
         // (the expired server's tools/list 401 throws out of getAllMcpTools).
         const tools = await getAllMcpTools({ mcpServers: prepared.mcpServers });
@@ -5193,30 +5993,23 @@ describe("runtime event normalization", () => {
         // The healthy sibling's tools survive; the expired server contributes none.
         expect(toolNames).toContain("docs__search_documents");
         expect(toolNames.some((name) => name.startsWith("cap-expired__"))).toBe(false);
-        // The actionable signal is NOT silenced by the degrade.
-        expect(authNeeded).toContainEqual(
-          expect.objectContaining({
-            serverId: "cap-expired",
-            reason: "expired",
-            providerDomain: "api.integrations-example.com",
-            connectionId,
-          }),
-        );
+        expect(authNeeded).toEqual([]);
       } finally {
         await prepared.close();
       }
-      // The drop is observable in the log as a structured warn carrying the
-      // server id and the error class (failure-visibility doctrine).
+      // The drop is observable as an allowlisted structural warning with the
+      // safe registry identity needed to make recovery actionable.
       const warned = warnings.some((args) =>
         args.some(
           (arg) =>
             typeof arg === "object" &&
             arg !== null &&
-            (arg as { serverId?: unknown }).serverId === "cap-expired" &&
-            typeof (arg as { errorClass?: unknown }).errorClass === "string",
+            typeof (arg as { errorClass?: unknown }).errorClass === "string" &&
+            (arg as { origin?: unknown }).origin === "runtime",
         ),
       );
       expect(warned).toBe(true);
+      expect(JSON.stringify(warnings)).toContain('"serverId":"cap-expired"');
     } finally {
       console.warn = originalWarn;
       expired.close();
@@ -5264,7 +6057,7 @@ describe("runtime event normalization", () => {
       );
       try {
         // The optional server connects (initialize is fine); only tools/list 500s.
-        expect(prepared.mcpServers.map((server) => server.name).sort()).toEqual(["docs", "flaky"]);
+        expect(prepared.mcpServers.map(runtimeMcpServerId).sort()).toEqual(["docs", "flaky"]);
         const tools = await getAllMcpTools({ mcpServers: prepared.mcpServers });
         const toolNames = tools.map((tool) => tool.name);
         expect(toolNames).toContain("docs__search_documents");
@@ -5272,17 +6065,19 @@ describe("runtime event normalization", () => {
       } finally {
         await prepared.close();
       }
-      // The non-auth degrade is observable: server id + a real error class.
+      // The non-auth degrade is observable with safe registry identity and
+      // without leaking the provider's raw response through the public boundary.
       const warned = warnings.some((args) =>
         args.some(
           (arg) =>
             typeof arg === "object" &&
             arg !== null &&
-            (arg as { serverId?: unknown }).serverId === "flaky" &&
-            typeof (arg as { errorClass?: unknown }).errorClass === "string",
+            typeof (arg as { errorClass?: unknown }).errorClass === "string" &&
+            (arg as { origin?: unknown }).origin === "runtime",
         ),
       );
       expect(warned).toBe(true);
+      expect(JSON.stringify(warnings)).toContain('"serverId":"flaky"');
     } finally {
       console.warn = originalWarn;
       brokenOptional.close();
@@ -5356,7 +6151,7 @@ describe("runtime event normalization", () => {
         ],
       }),
       [
-        { kind: "mcp", id: "cap" },
+        { kind: "mcp", id: "cap", optional: true },
         { kind: "mcp", id: "docs" },
       ],
       {
@@ -5382,8 +6177,8 @@ describe("runtime event normalization", () => {
       },
     );
     try {
-      const cap = prepared.mcpServers.find((s) => s.name === "cap")!;
-      const docs = prepared.mcpServers.find((s) => s.name === "docs")!;
+      const cap = prepared.mcpServers.find((server) => runtimeMcpServerId(server) === "cap")!;
+      const docs = prepared.mcpServers.find((server) => runtimeMcpServerId(server) === "docs")!;
       await cap.listTools();
       const result = await cap.callTool("cap__search_documents", {
         query: "x",
@@ -5410,8 +6205,9 @@ describe("runtime event normalization", () => {
     // The prod case: a best-effort server's tool call throws a raw transport 401
     // that never became the broker's JSON-RPC short-circuit (e.g. a codex_apps
     // bearer expired mid-turn). callTool must return a tool-error RESULT the model
-    // sees — with LOOP-SAFE copy (do-not-retry) and only the safe error surface
-    // (class + status), never the raw response body — rather than throw.
+    // sees — with LOOP-SAFE copy (do-not-retry) and only the fixed public
+    // classification, never the raw response body or arbitrary Error fields —
+    // rather than throw.
     const flaky = startTestMcpServer({
       unauthorizedForMethods: ["tools/call"],
     });
@@ -5445,8 +6241,10 @@ describe("runtime event normalization", () => {
         ],
       );
       try {
-        const flakySrv = prepared.mcpServers.find((s) => s.name === "flaky")!;
-        const docs = prepared.mcpServers.find((s) => s.name === "docs")!;
+        const flakySrv = prepared.mcpServers.find(
+          (server) => runtimeMcpServerId(server) === "flaky",
+        )!;
+        const docs = prepared.mcpServers.find((server) => runtimeMcpServerId(server) === "docs")!;
         await flakySrv.listTools(); // fine — only tools/call 401s
         const result = await flakySrv.callTool("flaky__search_documents", {
           query: "x",
@@ -5455,9 +6253,9 @@ describe("runtime event normalization", () => {
         const text = JSON.stringify(result);
         // Loop-safety: the copy must steer the model away from re-calling it.
         expect(text).toMatch(/do not retry/i);
-        // Safe surface only: class (+ status), NEVER the raw 401 body.
-        expect(text).toContain("StreamableHTTPError");
-        expect(text).not.toContain("unauthorized");
+        // Exact provider text remains visible; no-retry guidance is additive.
+        expect(text).toContain("Streamable HTTP error");
+        expect(text).toContain("unauthorized");
         // Sibling unaffected.
         const ok = await docs.callTool("docs__search_documents", {
           query: "y",
@@ -5466,13 +6264,15 @@ describe("runtime event normalization", () => {
       } finally {
         await prepared.close();
       }
-      // Structured warn carries the safe fields, and never the raw body.
+      // The model-visible result above preserves the exact provider message;
+      // the public warning is an allowlisted structural projection only.
       const warned = warnings.find((args) =>
         args.some(
           (a) =>
             typeof a === "object" &&
             a !== null &&
-            (a as { serverId?: unknown }).serverId === "flaky",
+            (a as { errorClass?: unknown }).errorClass === "McpOperationError" &&
+            (a as { errorCode?: unknown }).errorCode === "mcp_tool_call_failed",
         ),
       );
       expect(warned).toBeDefined();
@@ -5481,12 +6281,14 @@ describe("runtime event normalization", () => {
         unknown
       >;
       expect(payload).toMatchObject({
-        serverId: "flaky",
-        toolName: "search_documents",
-        errorClass: "StreamableHTTPError",
-        status: 401,
+        errorClass: "McpOperationError",
+        errorCode: "mcp_tool_call_failed",
+        origin: "runtime",
       });
-      expect(JSON.stringify(payload)).not.toContain("unauthorized");
+      expect(payload.status).toBeUndefined();
+      expect(JSON.stringify(warnings)).toContain('"serverId":"flaky"');
+      expect(JSON.stringify(warnings)).not.toContain("search_documents");
+      expect(JSON.stringify(warnings)).not.toContain("unauthorized");
     } finally {
       console.warn = originalWarn;
       flaky.close();
@@ -6097,6 +6899,39 @@ describe("provider item id stripping", () => {
     expect(preserved.id).toBe("cu_abc");
   });
 
+  test("callModelInputFilterForSettings always restores generic-dispatch provider history", async () => {
+    const originalArguments = JSON.stringify({
+      name: "connected_tools__weather",
+      arguments: { city: "Oslo" },
+    });
+    const internal = {
+      type: "function_call",
+      callId: "lazy-1",
+      name: "connected_tools__weather",
+      arguments: JSON.stringify({ city: "Oslo" }),
+      providerData: {
+        providerCall: "kept",
+        "opengeni.lazy_dispatch.v1": { version: 1, arguments: originalArguments },
+      },
+    };
+    const filter = callModelInputFilterForSettings(testSettings())!;
+    const result = await filter({
+      modelData: { input: [internal] as any },
+      agent: {} as any,
+      context: undefined,
+    });
+
+    expect(result.input[0]).toEqual({
+      type: "function_call",
+      callId: "lazy-1",
+      name: "tool_invoke",
+      arguments: originalArguments,
+      providerData: { providerCall: "kept" },
+    });
+    expect(internal.name).toBe("connected_tools__weather");
+    expect("opengeni.lazy_dispatch.v1" in internal.providerData).toBe(true);
+  });
+
   test("exports the deprecated view_image elision helper as an identity no-op", () => {
     const prefix = [
       { type: "message", role: "user", content: "inspect twice" },
@@ -6155,6 +6990,20 @@ describe("provider item id stripping", () => {
           { type: "input_image", image: "data:image/png;base64,PREVIEW" },
         ],
       },
+      {
+        type: "function_call",
+        callId: "retained-direct-1",
+        name: "view_image",
+        arguments: '{"path":"/tmp/retained.png"}',
+      },
+      {
+        type: "function_call_result",
+        callId: "retained-direct-1",
+        output: {
+          type: "retained_artifact",
+          artifact: { available: false, artifactId: "placeholder", reason: "pending" },
+        },
+      },
       { type: "computer_call", callId: "computer-1", actions: [{ type: "screenshot" }] },
       {
         type: "computer_call_result",
@@ -6172,6 +7021,7 @@ describe("provider item id stripping", () => {
     const projected = projectModelInputForImageSupport(input, false);
 
     expect(JSON.stringify(projected)).not.toContain("data:image");
+    expect(JSON.stringify(projected)).not.toContain("retained_artifact");
     expect(projected.some((item) => item.name === "view_image")).toBe(true);
     expect(projected.some((item) => item.type === "computer_call")).toBe(false);
     expect(projected.find((item) => item.callId === "view-1" && "output" in item)).toEqual({
@@ -6374,6 +7224,58 @@ describe("provider item id stripping", () => {
     expect(JSON.stringify(model.requests[0]?.input)).not.toContain("data:image");
     expect(JSON.stringify(result.state.history)).toContain("data:image");
     expect(JSON.stringify(input)).toContain("data:image");
+  });
+
+  test("external history ownership borrows frozen input without mutating it", async () => {
+    const settings = testSettings({
+      sandboxBackend: "none",
+      webSearchEnabled: false,
+      openaiProviderItemIds: "strip",
+      modelToolOutputTruncationTokens: 100,
+    });
+    const model = new ScriptedModel("done");
+    const agent = buildOpenGeniAgent(settings, [], {
+      model,
+      supportsImageInput: true,
+      hostedWebSearch: false,
+    });
+    const input = [
+      {
+        id: "computer-provider-id",
+        type: "computer_call",
+        callId: "computer-1",
+        action: { type: "screenshot" },
+        actions: [{ type: "screenshot" }],
+      },
+      {
+        type: "computer_call_result",
+        callId: "computer-1",
+        output: { type: "computer_screenshot", data: "image" },
+      },
+      {
+        type: "function_call_result",
+        callId: "large-result",
+        output: { type: "text", text: "x".repeat(100_000) },
+      },
+    ] as Array<Record<string, unknown>>;
+    const freeze = (value: unknown): void => {
+      if (!value || typeof value !== "object" || Object.isFrozen(value)) return;
+      for (const nested of Object.values(value as Record<string, unknown>)) freeze(nested);
+      Object.freeze(value);
+    };
+    freeze(input);
+    const original = JSON.stringify(input);
+
+    const result = await runAgentStream(agent, { input: input as any }, settings);
+    for await (const event of result.toStream()) void event;
+    await result.completed;
+
+    expect((result.state as any)._originalInput[0]).toBe(input[0]);
+    expect(JSON.stringify(input)).toBe(original);
+    const wire = model.requests[0]!.input as unknown as Array<Record<string, unknown>>;
+    expect(wire[0]).not.toHaveProperty("id");
+    expect(wire[0]).not.toHaveProperty("action");
+    expect(JSON.stringify(wire[2])).toContain("tokens truncated");
   });
 
   test("callModelInputFilterForSettings preserves screenshot history prefixes across successive calls", async () => {
@@ -6627,7 +7529,7 @@ describe("provider item id stripping", () => {
     }
   });
 
-  test("a delayed provider usage signal cannot bind to a newer model request", async () => {
+  test("a delayed provider usage signal cannot bind or force estimated compaction", async () => {
     let signal: { revision: number; totalTokens: number } | null = null;
     const filter = contextRobustnessFilterForSettings(
       testSettings({
@@ -6668,21 +7570,16 @@ describe("provider item id stripping", () => {
       },
       { type: "message", role: "user", content: "continue again" },
     ] as any;
-    try {
-      await filter({
+    await expect(
+      filter({
         modelData: { input: third, instructions: "system" },
         agent: {} as any,
         context: undefined,
-      });
-      throw new Error("expected the complete estimate to trigger compaction");
-    } catch (error) {
-      expect(error).toBeInstanceOf(CompactionNeededError);
-      expect((error as CompactionNeededError).signalSource).toBe("estimate");
-      expect((error as CompactionNeededError).signalTokens).toBeGreaterThan(10_000);
-    }
+      }),
+    ).resolves.toMatchObject({ input: third });
   });
 
-  test("first-call accounting includes instructions and tool schemas", async () => {
+  test("a first call never compacts from estimated instructions and tool schemas", async () => {
     const filter = contextRobustnessFilterForSettings(
       testSettings({
         contextWindowTokens: 10_000,
@@ -6709,10 +7606,12 @@ describe("provider item id stripping", () => {
         agent,
         context: undefined,
       }),
-    ).rejects.toBeInstanceOf(CompactionNeededError);
+    ).resolves.toMatchObject({
+      input: [{ type: "message", role: "user", content: "small" }],
+    });
   });
 
-  test("first-call accounting does not discount a multilingual tool schema", async () => {
+  test("a first call never compacts from an estimated multilingual tool schema", async () => {
     const filter = contextRobustnessFilterForSettings(
       testSettings({
         contextWindowTokens: 12_000,
@@ -6742,7 +7641,9 @@ describe("provider item id stripping", () => {
         agent,
         context: undefined,
       }),
-    ).rejects.toBeInstanceOf(CompactionNeededError);
+    ).resolves.toMatchObject({
+      input: [{ type: "message", role: "user", content: "small" }],
+    });
   });
 
   test("first-call accounting excludes MCP schemas deferred behind Codex tool_search", async () => {
@@ -6780,6 +7681,7 @@ describe("provider item id stripping", () => {
     });
     const agent = buildOpenGeniAgent(settings, [], {
       structuredToolTransport: false,
+      lazyToolTransport: "codex_native",
       mcpServers: [selectedMcp, mandatoryMcp],
     });
     const filter = contextRobustnessFilterForSettings(settings, {
@@ -6800,6 +7702,30 @@ describe("provider item id stripping", () => {
     ).resolves.toMatchObject({
       input: [{ type: "message", role: "user", content: "small" }],
     });
+  });
+
+  test("structured sandbox transport no longer selects a lazy-tool protocol", () => {
+    let schemaAccountingDeferred = false;
+    const selectedMcp = {
+      name: "selected",
+      cacheToolsList: true,
+      connect: async () => undefined,
+      close: async () => undefined,
+      listTools: async () => [],
+      callTool: async () => ({ content: [] }),
+      deferModelToolSchemaAccounting: () => {
+        schemaAccountingDeferred = true;
+      },
+    } as unknown as MCPServer;
+    buildOpenGeniAgent(
+      testSettings({ codexToolSearchEnabled: true, webSearchEnabled: false }),
+      [],
+      {
+        structuredToolTransport: false,
+        mcpServers: [selectedMcp],
+      },
+    );
+    expect(schemaAccountingDeferred).toBe(false);
   });
 
   test("callModelInputFilterForSettings observes an operator compaction request before each model call", async () => {
@@ -6834,7 +7760,7 @@ describe("provider item id stripping", () => {
     } catch (error) {
       expect(error).toBeInstanceOf(CompactionNeededError);
       expect((error as CompactionNeededError).trigger).toBe("operator");
-      expect((error as CompactionNeededError).signalSource).toBe("estimate");
+      expect((error as CompactionNeededError).signalSource).toBe("operator");
     }
     expect(polls).toBe(2);
   });

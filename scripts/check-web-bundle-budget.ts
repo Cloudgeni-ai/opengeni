@@ -15,9 +15,10 @@ const budgets = {
   // rail + settings against the session graph; a dedicated Radix vendor chunk
   // keeps Popper scopes intact (otherwise /settings crashes). The shared
   // composer also carries the tiny app-action slot used by realtime voice.
-  // Human-input surface + session chrome polish grew the initial graph; keep
-  // modest measured headroom above CI's observed 1223/343 KiB raw/gzip.
-  initialRaw: 1260 * kib,
+  // Existing-session scheduling and authenticated retained screenshots grow
+  // the initial graph; keep modest headroom above the current 1284/357 KiB
+  // production build while the stricter gzip and per-chunk budgets stay fixed.
+  initialRaw: 1300 * kib,
   initialGzip: 360 * kib,
   initialFileGzip: 70 * kib,
   initialFiles: 16,

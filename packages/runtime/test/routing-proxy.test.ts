@@ -19,6 +19,7 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  ChannelANotFoundError,
   RoutingBackendRecoveryRequiredError,
   RoutingMutationOutcomeUnknownError,
   RoutingSandboxSession,
@@ -113,6 +114,44 @@ function mutablePointer(initial: ActivePointer = { activeSandboxId: null, active
 }
 
 describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () => {
+  test("finalizes every machine backend reached across route epochs", async () => {
+    const finalized: string[] = [];
+    const first: RoutableBackendSession = {
+      async exec() {
+        return { stdout: "first", exitCode: 0 };
+      },
+      async finalizeOpStreamOps() {
+        finalized.push("first");
+      },
+    };
+    const second: RoutableBackendSession = {
+      async exec() {
+        return { stdout: "second", exitCode: 0 };
+      },
+      async finalizeOpStreamOps() {
+        finalized.push("second");
+      },
+    };
+    let pointer: ActivePointer = { activeSandboxId: "first", activeEpoch: 1 };
+    const proxy = new RoutingSandboxSession({
+      defaultResolved: { session: first, sandboxId: "first", kind: "selfhosted" },
+      readPointer: async () => pointer,
+      resolveActiveBackend: async () =>
+        pointer.activeSandboxId === "first"
+          ? { session: first, sandboxId: "first", kind: "selfhosted" }
+          : { session: second, sandboxId: "second", kind: "selfhosted" },
+    });
+
+    await proxy.exec({ cmd: "one" });
+    pointer = { activeSandboxId: "second", activeEpoch: 2 };
+    await proxy.exec({ cmd: "two" });
+    await proxy.finalizeOpStreamOps();
+
+    expect(finalized).toEqual(["first", "second"]);
+    await proxy.finalizeOpStreamOps();
+    expect(finalized).toEqual(["first", "second"]);
+  });
+
   test("observes each physical provider attempt without changing provider outcomes", async () => {
     const observations: Array<{
       backend: string;
@@ -156,6 +195,36 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
       { backend: "docker", op: "readFile", outcome: "failed" },
     ]);
     expect(observations.every(({ durationMs }) => durationMs >= 0)).toBe(true);
+  });
+
+  test("separates expected path misses from provider failures", async () => {
+    const observations: Array<{ op: string; outcome: string }> = [];
+    const missing = new ChannelANotFoundError("directory path not found: .agents/skills");
+    const unavailable = new Error("provider unavailable");
+    const backend: RoutableBackendSession = {
+      async listDir() {
+        throw missing;
+      },
+      async readFile() {
+        throw unavailable;
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      onOperation: ({ op, outcome }) => observations.push({ op, outcome }),
+    });
+
+    expect(await proxy.listDir({ path: "/workspace/.agents/skills" }).catch((error) => error)).toBe(
+      missing,
+    );
+    expect(await proxy.readFile({ path: "/workspace/a" }).catch((error) => error)).toBe(
+      unavailable,
+    );
+    expect(observations).toEqual([
+      { op: "listDir", outcome: "not_found" },
+      { op: "readFile", outcome: "failed" },
+    ]);
   });
 
   test("an observer failure cannot change a provider result", async () => {
@@ -648,9 +717,12 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
       },
     });
 
-    await expect(proxy.execCommand({ cmd: "start" })).rejects.toBeInstanceOf(
-      RoutingMutationOutcomeUnknownError,
-    );
+    const error = await proxy.execCommand({ cmd: "start" }).catch((caught) => caught);
+    expect(error).toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+    expect((error as RoutingMutationOutcomeUnknownError).retainedProcess).toEqual({
+      id: expect.any(String),
+      providerSessionId: 76,
+    });
     expect(proxy.hasRetainedProcess(76)).toBe(true);
     ptr.swap("sbx-new");
 

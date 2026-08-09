@@ -2,7 +2,12 @@
 name: opengeni
 audience: repo-maintainer-agent
 description: >-
-  Use when working in, operating, extending, integrating, documenting, or debugging OpenGeni: the session-based agent service with an API, durable event log, Temporal worker, sandboxed OpenAI Agents SDK runtime, file/object storage, MCP tools, scheduled tasks, and self-hosted local stack. Trigger this skill for questions about OpenGeni architecture, client-side API integration, sessions/events, worker orchestration, sandbox backends, file uploads, tools/MCP, scheduling, storage, GitHub integration, configuration, deployment, or how to keep agents using OpenGeni correctly as the repo evolves.
+  Use when editing, operating, extending, documenting, or debugging the OpenGeni
+  source repository or deployment: architecture, sessions/events, worker
+  orchestration, sandbox backends, files/storage, tools/MCP, scheduling,
+  configuration, and deployment. For a customer product that consumes a
+  standalone OpenGeni deployment through the SDK or React packages, use the
+  separate opengeni-client skill instead.
 ---
 
 # OpenGeni
@@ -67,7 +72,7 @@ Keep these boundaries explicit:
 - Workspace scoping is core. Durable operational resources live under a workspace and public operational routes must use `/v1/workspaces/:workspaceId/...`.
 - Old unscoped operational routes are deleted, not soft-deprecated. Do not add compatibility aliases unless the user explicitly changes that product decision.
 - Better Auth is only the managed-mode browser human auth resolver. It is not the tenant model and should not appear in core session/file/document/schedule route code.
-- OpenGeni product API keys are owned by OpenGeni and use `Authorization: Bearer`. The optional deployment shared key uses `x-opengeni-access-key`.
+- OpenGeni product API keys are owned by OpenGeni and use the `Authorization` header. The optional deployment shared key uses `x-opengeni-access-key`.
 - Billing, Stripe, prepaid credits, entitlements, usage, and limits belong in billing/access modules. Core route/domain code should check local providers/interfaces, not call Stripe directly.
 - Product access mode (`local`, `configured`, `managed`) is separate from deployment/infrastructure profile (`azure-managed`, existing services, local Kubernetes, previews, and so on).
 - RLS is defense-in-depth. Do not claim RLS-backed isolation from app-level checks alone; verify policies with a non-owner DB role and current workspace/account settings.
@@ -83,8 +88,8 @@ Keep these concepts straight while working:
 - **Session**: durable user-facing work container. It owns status, resources, selected tools, model/sandbox settings, event cursor, and active turn.
 - **Turn**: one queued/running unit of agent work inside a session, run as one non-retryable Temporal activity (`runAgentTurn`). Follow-ups, goal continuations, and scheduled task firings become turns. Inside a turn the SDK makes as many model/tool calls as the work needs; run length is bounded by symptoms (no-progress, budget), not by counts or clocks. A graceful worker shutdown preempts an in-flight turn (checkpoint, requeue, resume on a healthy worker) instead of failing the session. See `docs/run-lifecycle.md`.
 - **Goal**: optional durable per-session objective that flips "stop" into an explicit act — while active, the session workflow synthesizes continuation turns until the agent calls `goal_complete`/`goal_pause` or a user interrupts. The mechanism behind long-running autonomous runs. See `docs/goals.md`.
-- **Session memory (three stores, three jobs)**: `session_history_items` is the conversation truth fed to the model (default read path); `agent_run_states` is the serialized RunState blob, used only to resume a turn paused for a human approval; `session_events` is the redacted/lossy human-audit timeline and is never fed back to the model. Sandbox recovery state lives separately in `sandbox_session_envelopes`. See `docs/run-lifecycle.md`.
-- **Workspace environment**: named per-workspace set of secret env vars, attached to a session/scheduled-task/pack and injected into the sandbox at run time; values are write-only. See `docs/variable-sets.md`.
+- **Session memory (three stores, three jobs)**: `session_history_items` is exact accepted conversation truth fed to the model (default read path); `agent_run_states` is the serialized RunState blob, used only to resume a turn paused for a human approval; `session_events` is the exact append-only human-audit timeline for accepted payloads and is never fed back to the model. Protocol/size projections are deterministic and must not classify or rewrite content. Sandbox recovery state lives separately in `sandbox_session_envelopes`. See `docs/run-lifecycle.md`.
+- **Workspace environment**: named per-workspace set of authenticated-encrypted secret env vars, attached to a session/scheduled-task/pack and injected into the sandbox at run time. Exact plaintext access is a separate explicit permissioned operation with metadata-only audit; never expose values through unrelated list/detail projections. See `docs/variable-sets.md`.
 - **Event log**: append-only session timeline with per-session sequence numbers. It supports replay, SSE reconnect, UI timeline projection, and auditing.
 - **SSE/NATS split**: Postgres is replay/source of truth. NATS is live fanout. If live events are missed, API should backfill from Postgres by sequence.
 - **Temporal**: orchestration, signals, timers, schedules, and worker dispatch. Token streams/tool output should not be pushed through workflow history unless the code intentionally changes that design.

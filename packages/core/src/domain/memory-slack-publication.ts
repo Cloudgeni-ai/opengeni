@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import {
-  redactSensitiveText,
   stableJson,
   type KnowledgeMemoryKind,
   type KnowledgeMemoryStatus,
@@ -109,13 +108,11 @@ export type MemorySlackPublicationProjection = {
   importance: MemorySlackImportance;
   deliveryMode: MemorySlackDeliveryMode;
   summary: string;
-  summaryRedacted: boolean;
   summaryTruncated: boolean;
   namespace: string;
   labels: string[];
   labelsTruncated: boolean;
   ownerLabel: string | null;
-  ownerLabelRedacted: boolean;
   ownerLabelTruncated: boolean;
   authoritativeRecord: {
     workspaceId: string;
@@ -201,9 +198,8 @@ export function evaluateMemorySlackPublication(
   if (!deliveryMode) return denied("below_noise_policy");
 
   const collapsedSummary = collapseText(input.distribution.shareSummary);
-  const redactedSummary = redactSensitiveText(collapsedSummary);
-  if (!redactedSummary) return denied("missing_summary");
-  const summary = truncateUtf8(redactedSummary, MEMORY_SLACK_SUMMARY_MAX_UTF8_BYTES);
+  if (!collapsedSummary) return denied("missing_summary");
+  const summary = truncateUtf8(collapsedSummary, MEMORY_SLACK_SUMMARY_MAX_UTF8_BYTES);
 
   const namespace = normalizeNamespace(input.memory.namespace);
   const labels = normalizeLabels(input.memory.labels);
@@ -221,13 +217,11 @@ export function evaluateMemorySlackPublication(
     importance: input.distribution.importance,
     deliveryMode,
     summary: summary.value,
-    summaryRedacted: redactedSummary !== collapsedSummary,
     summaryTruncated: summary.truncated,
     namespace,
     labels: labels.values,
     labelsTruncated: labels.truncated,
     ownerLabel: owner.value,
-    ownerLabelRedacted: owner.redacted,
     ownerLabelTruncated: owner.truncated,
     authoritativeRecord: {
       workspaceId: input.context.workspaceId,
@@ -368,10 +362,8 @@ function effectiveDeliveryMode(
 
 function normalizeNamespace(value: string): string | null {
   const trimmed = value.trim();
-  if (redactSensitiveText(trimmed) !== trimmed) return null;
   const namespace = trimmed.toLowerCase();
   if (!namespace || utf8Bytes(namespace) > MEMORY_SLACK_NAMESPACE_MAX_UTF8_BYTES) return null;
-  if (redactSensitiveText(namespace) !== namespace) return null;
   const segments = namespace.split("/");
   if (segments.some((segment) => !SELECTOR_SEGMENT_PATTERN.test(segment))) return null;
   return segments.join("/");
@@ -385,10 +377,8 @@ function normalizeLabels(
   for (const value of values) {
     if (typeof value !== "string") return null;
     const trimmed = value.trim();
-    if (redactSensitiveText(trimmed) !== trimmed) return null;
     const label = trimmed.toLowerCase();
     if (
-      redactSensitiveText(label) !== label ||
       !SELECTOR_SEGMENT_PATTERN.test(label) ||
       utf8Bytes(label) > MEMORY_SLACK_LABEL_MAX_UTF8_BYTES
     ) {
@@ -406,14 +396,12 @@ function normalizeLabels(
 function boundedOptionalText(
   value: string | null | undefined,
   maxBytes: number,
-): { value: string | null; redacted: boolean; truncated: boolean } {
+): { value: string | null; truncated: boolean } {
   const collapsed = collapseText(value ?? "");
-  if (!collapsed) return { value: null, redacted: false, truncated: false };
-  const redacted = redactSensitiveText(collapsed);
-  const bounded = truncateUtf8(redacted, maxBytes);
+  if (!collapsed) return { value: null, truncated: false };
+  const bounded = truncateUtf8(collapsed, maxBytes);
   return {
     value: bounded.value || null,
-    redacted: redacted !== collapsed,
     truncated: bounded.truncated,
   };
 }

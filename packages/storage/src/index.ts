@@ -69,6 +69,9 @@ export type ObjectStorage = {
    * the presigned-URL round-trip, which on split public/internal topologies (a
    * public `objectStorageEndpoint` with no in-cluster route) would otherwise 401.
    * Browser uploads keep using `createPutUrl`; this is the trusted-server twin.
+   * Repeating a PUT for the same deterministic key and verified sha256 is
+   * permitted: storage backends converge to the same bytes, while the database
+   * completion fence remains the source of truth.
    */
   putObject: (args: {
     key: string;
@@ -419,10 +422,18 @@ function isGcsNotFound(error: unknown): boolean {
 
 function createAzureBlobObjectStorage(settings: Settings): ObjectStorage | null {
   const sharedKey = azureSharedKeyCredential(settings);
-  const serviceClient = settings.objectStorageAzureConnectionString
+  const requestServiceClient = settings.objectStorageAzureConnectionString
     ? BlobServiceClient.fromConnectionString(settings.objectStorageAzureConnectionString)
     : new BlobServiceClient(azureBlobServiceUrl(settings), sharedKey);
-  const containerClient = serviceClient.getContainerClient(settings.objectStorageBucket);
+  const presignServiceClient = settings.objectStorageAzureEndpoint
+    ? new BlobServiceClient(azureBlobServiceUrl(settings), sharedKey)
+    : requestServiceClient;
+  const requestContainerClient = requestServiceClient.getContainerClient(
+    settings.objectStorageBucket,
+  );
+  const presignContainerClient = presignServiceClient.getContainerClient(
+    settings.objectStorageBucket,
+  );
 
   return {
     bucket: settings.objectStorageBucket,
@@ -431,7 +442,7 @@ function createAzureBlobObjectStorage(settings: Settings): ObjectStorage | null 
     async createPutUrl(args) {
       const expiresIn = args.expiresInSeconds ?? UPLOAD_URL_TTL_SECONDS;
       const expiresAt = new Date(Date.now() + expiresIn * 1000);
-      const blobClient = containerClient.getBlockBlobClient(args.key);
+      const blobClient = presignContainerClient.getBlockBlobClient(args.key);
       const sas = generateBlobSASQueryParameters(
         {
           containerName: settings.objectStorageBucket,
@@ -455,7 +466,7 @@ function createAzureBlobObjectStorage(settings: Settings): ObjectStorage | null 
     async createGetUrl(args) {
       const expiresIn = args.expiresInSeconds ?? DOWNLOAD_URL_TTL_SECONDS;
       const expiresAt = new Date(Date.now() + expiresIn * 1000);
-      const blobClient = containerClient.getBlobClient(args.key);
+      const blobClient = presignContainerClient.getBlobClient(args.key);
       const sas = generateBlobSASQueryParameters(
         {
           containerName: settings.objectStorageBucket,
@@ -472,7 +483,7 @@ function createAzureBlobObjectStorage(settings: Settings): ObjectStorage | null 
     },
     async putObject(args) {
       // Authenticated in-process upload via the shared-key Azure client (no SAS).
-      const blobClient = containerClient.getBlockBlobClient(args.key);
+      const blobClient = requestContainerClient.getBlockBlobClient(args.key);
       const body = Buffer.from(args.body);
       await blobClient.upload(body, body.byteLength, {
         blobHTTPHeaders: { blobContentType: args.contentType },
@@ -481,12 +492,12 @@ function createAzureBlobObjectStorage(settings: Settings): ObjectStorage | null 
     },
     async headFile(file) {
       return azureHeadToObjectHead(
-        await containerClient.getBlobClient(file.objectKey).getProperties(),
+        await requestContainerClient.getBlobClient(file.objectKey).getProperties(),
       );
     },
     async fileExists(file) {
       try {
-        await containerClient.getBlobClient(file.objectKey).getProperties();
+        await requestContainerClient.getBlobClient(file.objectKey).getProperties();
         return true;
       } catch (error) {
         if (isAzureNotFound(error)) return false;
@@ -495,14 +506,14 @@ function createAzureBlobObjectStorage(settings: Settings): ObjectStorage | null 
     },
     async getFileBytes(file) {
       return await azureDownloadToBytes(
-        await containerClient.getBlobClient(file.objectKey).download(),
+        await requestContainerClient.getBlobClient(file.objectKey).download(),
       );
     },
     async getFileRange(file, range) {
       const length = assertFileByteRange(file, range);
       try {
         return await azureDownloadToBoundedBytes(
-          await containerClient.getBlobClient(file.objectKey).download(range.start, length),
+          await requestContainerClient.getBlobClient(file.objectKey).download(range.start, length),
           file.objectKey,
           length,
         );
@@ -513,7 +524,7 @@ function createAzureBlobObjectStorage(settings: Settings): ObjectStorage | null 
     },
     async getObjectBytes(key) {
       try {
-        const download = await containerClient.getBlobClient(key).download();
+        const download = await requestContainerClient.getBlobClient(key).download();
         const bytes = await azureDownloadToBytes(download);
         return { bytes, ...(download.contentType ? { contentType: download.contentType } : {}) };
       } catch (error) {
@@ -525,7 +536,7 @@ function createAzureBlobObjectStorage(settings: Settings): ObjectStorage | null 
     },
     async deleteObject(key) {
       // deleteIfExists keeps the delete idempotent (a missing blob is a no-op).
-      await containerClient.getBlockBlobClient(key).deleteIfExists();
+      await requestContainerClient.getBlockBlobClient(key).deleteIfExists();
     },
   };
 }

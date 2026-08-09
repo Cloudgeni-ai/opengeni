@@ -445,6 +445,183 @@ describe("ComputerCallRenderer — failed status (flagged fix)", () => {
     await r.unmount();
   });
 
+  test("complete retained screenshot loads authenticated bytes into the timeline image", async () => {
+    const item = toolItem({
+      name: "computer_screenshot",
+      output: {
+        available: true,
+        artifactId: "11111111-1111-4111-8111-111111111111",
+        kind: "computer_screenshot",
+        contentType: "image/png",
+        originalBytes: 4,
+        sha256: "a".repeat(64),
+        retainedAt: "2026-08-05T00:00:00.000Z",
+        dimensions: { width: 1, height: 1 },
+        retention: {
+          policy: "session_screenshot",
+          expiresAt: "2026-09-04T00:00:00.000Z",
+        },
+        retrieval: {
+          method: "GET",
+          path: "/v1/workspaces/w/sessions/s/artifacts/11111111-1111-4111-8111-111111111111/content",
+          acceptRanges: "bytes",
+          maxRangeBytes: 1024 * 1024,
+        },
+      },
+      status: "complete",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const createDescriptor = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
+    const revokeDescriptor = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
+    const revoked: string[] = [];
+    let loads = 0;
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      value: () => "blob:retained-screenshot",
+    });
+    Object.defineProperty(URL, "revokeObjectURL", {
+      configurable: true,
+      value: (url: string) => revoked.push(url),
+    });
+    try {
+      const r = await renderComponent(
+        <Renderer
+          item={item}
+          loadRetainedScreenshot={async () => {
+            loads += 1;
+            return Uint8Array.of(0x89, 0x50, 0x4e, 0x47);
+          }}
+        />,
+      );
+      await flush();
+      await flush();
+
+      expect(loads).toBe(1);
+      expect(r.container.textContent).not.toContain("unavailable");
+      expect(r.container.querySelector('img[src="blob:retained-screenshot"]')).not.toBeNull();
+      await r.unmount();
+      expect(revoked).toEqual(["blob:retained-screenshot"]);
+    } finally {
+      if (createDescriptor) Object.defineProperty(URL, "createObjectURL", createDescriptor);
+      else Reflect.deleteProperty(URL, "createObjectURL");
+      if (revokeDescriptor) Object.defineProperty(URL, "revokeObjectURL", revokeDescriptor);
+      else Reflect.deleteProperty(URL, "revokeObjectURL");
+    }
+  });
+
+  test("serialized image receipt loads its permanent signed source exactly once", async () => {
+    const receipt = {
+      type: "generated_image",
+      artifact: {
+        available: true,
+        artifactId: "33333333-3333-4333-8333-333333333333",
+        kind: "generated_image",
+        contentType: "image/png",
+        originalBytes: 1024,
+        sha256: "c".repeat(64),
+        retainedAt: "2026-08-08T00:00:00.000Z",
+        dimensions: { width: 1024, height: 1024 },
+        retention: { policy: "workspace_file", expiresAt: null },
+        retrieval: {
+          method: "GET",
+          path: "/v1/workspaces/11111111-1111-4111-8111-111111111111/artifacts/33333333-3333-4333-8333-333333333333/content",
+          acceptRanges: "bytes",
+          maxRangeBytes: 1024 * 1024,
+        },
+      },
+      sandboxPath:
+        "/workspace/generated-images/generated-image-33333333-3333-4333-8333-333333333333.png",
+    };
+    const item = toolItem({
+      name: "generate_image",
+      output: JSON.stringify(receipt),
+      raw: {
+        type: "function_call",
+        name: "generate_image",
+        status: "completed",
+      },
+      status: "complete",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    let loads = 0;
+    const r = await renderComponent(
+      <Renderer
+        item={item}
+        loadRetainedArtifact={async () => {
+          loads += 1;
+          return { url: "https://objects.example/generated.png?signature=test" };
+        }}
+      />,
+    );
+    await flush();
+    await flush();
+
+    expect(loads).toBe(1);
+    expect(r.container.textContent).toContain("Generated image");
+    expect(
+      r.container.querySelector('img[src="https://objects.example/generated.png?signature=test"]'),
+    ).not.toBeNull();
+    expect(
+      r.container.querySelectorAll(
+        'img[src="https://objects.example/generated.png?signature=test"]',
+      ),
+    ).toHaveLength(1);
+    expect(r.container.textContent).toContain("1024×1024");
+    expect(r.container.textContent).toContain(receipt.sandboxPath);
+    expect(r.container.textContent).not.toContain("base64");
+    await r.unmount();
+  });
+
+  test("retained screenshot loader 404 and 410 states stay truthful and image-free", async () => {
+    for (const [status, label] of [
+      [404, "deleted"],
+      [410, "expired or unavailable"],
+    ] as const) {
+      const item = toolItem({
+        name: "computer_screenshot",
+        output: {
+          available: true,
+          artifactId: "22222222-2222-4222-8222-222222222222",
+          kind: "computer_screenshot",
+          contentType: "image/png",
+          originalBytes: 4,
+          sha256: "b".repeat(64),
+          retainedAt: "2026-08-05T00:00:00.000Z",
+          dimensions: { width: 1, height: 1 },
+          retention: {
+            policy: "session_screenshot",
+            expiresAt: "2026-09-04T00:00:00.000Z",
+          },
+          retrieval: {
+            method: "GET",
+            path: "/v1/workspaces/w/sessions/s/artifacts/22222222-2222-4222-8222-222222222222/content",
+            acceptRanges: "bytes",
+            maxRangeBytes: 1024 * 1024,
+          },
+        },
+        status: "complete",
+      });
+      const Renderer = defaultToolRegistry.resolve(item);
+      const r = await renderComponent(
+        <Renderer
+          item={item}
+          loadRetainedScreenshot={async () => {
+            throw Object.assign(new Error("unavailable"), { status });
+          }}
+        />,
+      );
+      await flush();
+      await flush();
+
+      const trigger = r.container.querySelector('[role="button"]') as HTMLElement | null;
+      await actRun(() => trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+      await flush();
+      expect(r.container.textContent).toContain(label);
+      expect(r.container.querySelector("img")).toBeNull();
+      await r.unmount();
+    }
+  });
+
   test("complete screenshot with omitted media says not retained instead of empty or success image", async () => {
     const item = toolItem({
       name: "computer_call",
@@ -492,6 +669,65 @@ describe("ComputerCallRenderer — failed status (flagged fix)", () => {
     expect(r.container.textContent).toContain("not retained");
     expect(r.container.querySelector("img")).toBeNull();
     await r.unmount();
+  });
+
+  test("view_image loads a newly retained session image instead of claiming it was omitted", async () => {
+    const item = toolItem({
+      name: "view_image",
+      arguments: JSON.stringify({ path: "/workspace/generated-images/dog.png" }),
+      output: {
+        available: true,
+        artifactId: "22222222-2222-4222-8222-222222222222",
+        kind: "computer_screenshot",
+        contentType: "image/png",
+        originalBytes: 4,
+        sha256: "b".repeat(64),
+        retainedAt: "2026-08-08T00:00:00.000Z",
+        dimensions: { width: 1, height: 1 },
+        retention: {
+          policy: "session_screenshot",
+          expiresAt: "2026-09-07T00:00:00.000Z",
+        },
+        retrieval: {
+          method: "GET",
+          path: "/v1/workspaces/w/sessions/s/artifacts/22222222-2222-4222-8222-222222222222/content",
+          acceptRanges: "bytes",
+          maxRangeBytes: 1024 * 1024,
+        },
+      },
+      status: "complete",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const createDescriptor = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
+    const revokeDescriptor = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      value: () => "blob:retained-view-image",
+    });
+    Object.defineProperty(URL, "revokeObjectURL", {
+      configurable: true,
+      value: () => undefined,
+    });
+    try {
+      const r = await renderComponent(
+        <Renderer
+          item={item}
+          loadRetainedScreenshot={async () => Uint8Array.of(0x89, 0x50, 0x4e, 0x47)}
+        />,
+      );
+      await flush();
+      await flush();
+
+      expect(r.container.textContent).toContain("Viewed dog.png");
+      expect(r.container.textContent).not.toContain("not retained");
+      expect(r.container.querySelector('img[src="blob:retained-view-image"]')).not.toBeNull();
+      await r.unmount();
+    } finally {
+      if (createDescriptor) Object.defineProperty(URL, "createObjectURL", createDescriptor);
+      else Reflect.deleteProperty(URL, "createObjectURL");
+      if (revokeDescriptor) Object.defineProperty(URL, "revokeObjectURL", revokeDescriptor);
+      else Reflect.deleteProperty(URL, "revokeObjectURL");
+    }
   });
 });
 

@@ -101,6 +101,7 @@ describe("EnrollTokenPayload sign/verify", () => {
       workspaceId: WORKSPACE_A,
       agentId: "33333333-3333-4333-8333-333333333333",
       enrollmentId: "33333333-3333-4333-8333-333333333333",
+      credentialGeneration: 1,
       subjectPrefix: `agent.${WORKSPACE_A}.x`,
       exp: Math.floor(Date.now() / 1000) + 3600,
     });

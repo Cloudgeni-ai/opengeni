@@ -64,6 +64,7 @@ export type {
   ComposerSubmitBlocker,
   ComposerSubmitMode,
   ComposerSurfaceProps,
+  ResponsiveBasis,
   UseChatComposerControllerOptions,
 } from "./components/composer";
 export { ComposerTranscriptionControl } from "./components/composer-transcription-control";
@@ -101,7 +102,9 @@ export type {
   VoiceRecordingChunk,
   VoiceRecordingChunkUploadState,
   VoiceRecordingFinalizationState,
+  VoiceRecordingHandoffMode,
   VoiceRecordingManifest,
+  VoiceRecordingRecoveryMode,
   VoiceRecordingStore,
   VoiceRecordingTranscriptionState,
   VoiceRecordingUploadState,

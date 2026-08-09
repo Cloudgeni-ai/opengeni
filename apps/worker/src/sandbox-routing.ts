@@ -14,7 +14,7 @@
 // target lookup), and the selfhosted ControlRpc built over the events bus's NATS
 // request/reply connection.
 
-import { sandboxArchiveCaptureTimeoutMs, type Settings } from "@opengeni/config";
+import { sandboxLifecycleTransitionWaitMs, type Settings } from "@opengeni/config";
 import {
   advanceWorkspaceGenerationForRetainedProcess,
   advanceWorkspaceGeneration,
@@ -25,6 +25,7 @@ import {
   verifyRetainedProcessMutationSettlement,
   verifyWorkspaceMutationSettlement,
   getSandbox,
+  getEnrollment,
   markWarmLeaseInstanceLost,
   readLease,
   readActiveSandbox,
@@ -44,6 +45,8 @@ import {
   RoutingBackendRecoveryRequiredError,
   RoutingSandboxSession,
   resolveModalCheckpointProviderBindingForSession,
+  sandboxProviderInstanceIdFromEnvelope,
+  sandboxBackendForSdkBackendId,
   verifySandboxExecReadiness,
   type ControlRpc,
   type EstablishedSandboxSession,
@@ -98,6 +101,15 @@ export type RoutingWiringServices = {
     established: EstablishedSandboxSession;
     leaseEpoch: number;
   }) => void;
+  /** Cancel bounded capture waits with the owning turn activity. */
+  waitSignal?: AbortSignal;
+};
+
+/** Worker-turn routing may final-ack streamed command output, so it must always
+ * carry the turn's durable frontier journal. Non-turn helpers may still omit it
+ * through the broader service shape above. */
+type TurnRoutingWiringServices = RoutingWiringServices & {
+  opJournal: OpStreamJournal;
 };
 
 export type RoutingWiringIds = {
@@ -171,8 +183,8 @@ export function relayConfigFromSettings(settings: Settings): SelfhostedRelayConf
 
 /** The selfhosted CONTROL vs EXEC op deadlines for a turn, from settings. Control
  *  ops (ping/fs/desktop/pty) stay on the short timeout so machine liveness is never
- *  masked by a slow op; exec gets its own much larger budget so a real command is not
- *  killed at the control wall. Threaded into every turn-path session build + resolver. */
+ *  masked by a slow op; exec has its own setting and defaults to no duration wall.
+ *  Threaded into every turn-path session build + resolver. */
 export function selfhostedTimeoutsFromSettings(settings: Settings): {
   timeoutMs: number;
   execTimeoutMs: number;
@@ -253,27 +265,7 @@ function homeRouteRecoveryError(
 export function providerIdentityFromResumeState(
   resumeState: Record<string, unknown>,
 ): string | null {
-  const sessionState =
-    resumeState.sessionState && typeof resumeState.sessionState === "object"
-      ? (resumeState.sessionState as Record<string, unknown>)
-      : null;
-  const providerState =
-    sessionState?.providerState && typeof sessionState.providerState === "object"
-      ? (sessionState.providerState as Record<string, unknown>)
-      : null;
-  for (const field of [
-    "sandboxId",
-    "instanceId",
-    "id",
-    "hostId",
-    "containerId",
-    "workspaceRootPath",
-    "agentId",
-  ]) {
-    const value = providerState?.[field];
-    if (typeof value === "string" && value.length > 0) return value;
-  }
-  return null;
+  return sandboxProviderInstanceIdFromEnvelope(resumeState);
 }
 
 /**
@@ -322,7 +314,8 @@ async function resolveCurrentHomeBackend(
   }
 
   const resumeState = lease.resumeState;
-  const resumeBackend = lease.resumeBackendId ?? lease.backend ?? ids.backend;
+  const durableResumeBackend = lease.resumeBackendId ?? lease.backend ?? ids.backend;
+  const resumeBackend = sandboxBackendForSdkBackendId(durableResumeBackend) ?? durableResumeBackend;
   if (
     !resumeState ||
     resumeBackend !== ids.backend ||
@@ -377,7 +370,8 @@ async function resolveCurrentHomeBackend(
   // The provider identity must agree with the exact durable lease row before
   // any caller can publish or route through this rebound handle. A mismatch is
   // unverifiable local state, not permission to try the old handle.
-  if (rebound.instanceId !== lease.instanceId || rebound.backendId !== resumeBackend) {
+  const reboundBackend = sandboxBackendForSdkBackendId(rebound.backendId) ?? rebound.backendId;
+  if (rebound.instanceId !== lease.instanceId || reboundBackend !== resumeBackend) {
     throw homeRouteRecoveryError(lease, lease.leaseEpoch);
   }
   services.onHomeSandboxRebound?.({
@@ -437,7 +431,8 @@ function beforePersistableHomeMutation(
       expectedEpoch: backend.leaseEpoch,
       expectedInstanceId: backend.providerInstanceId,
       operation: op,
-      captureWaitMs: sandboxArchiveCaptureTimeoutMs(services.settings),
+      captureWaitMs: sandboxLifecycleTransitionWaitMs(services.settings),
+      ...(services.waitSignal ? { waitSignal: services.waitSignal } : {}),
     });
     return { admission, providerBinding };
   };
@@ -572,7 +567,8 @@ function beforeRetainedProcessMutation(
       sessionId: ids.sessionId,
       processId: process.id,
       operation: op,
-      captureWaitMs: sandboxArchiveCaptureTimeoutMs(services.settings),
+      captureWaitMs: sandboxLifecycleTransitionWaitMs(services.settings),
+      ...(services.waitSignal ? { waitSignal: services.waitSignal } : {}),
     });
 }
 
@@ -683,7 +679,7 @@ function controlRpcFactory(bus: EventBus | undefined): () => ControlRpc {
  * swap's active_epoch.
  */
 export function wrapTurnBoxWithRouting(
-  services: RoutingWiringServices,
+  services: TurnRoutingWiringServices,
   ids: RoutingWiringIds,
   established: EstablishedSandboxSession,
 ): EstablishedSandboxSession {
@@ -709,6 +705,11 @@ export function wrapTurnBoxWithRouting(
         : null;
     },
     controlRpcFactory: controlRpcFactory(bus),
+    resolveSelfhostedOpStream: async (sandbox) => {
+      if (!sandbox.enrollmentId) return undefined;
+      const enrollment = await getEnrollment(db, ids.workspaceId, sandbox.enrollmentId);
+      return opStreamDepsFor(services, enrollment?.opStream === true);
+    },
     relay: relayConfigFromSettings(settings),
     // A selfhosted swap target runs real commands too, so give it the same split
     // deadlines the machine-primary establish path uses (short control, long exec).
@@ -843,7 +844,7 @@ export function wrapTurnBoxWithRouting(
 }
 
 export function wrapLazyTurnBoxWithRouting(
-  services: RoutingWiringServices,
+  services: TurnRoutingWiringServices,
   ids: RoutingWiringIds,
   args: {
     client: EstablishedSandboxSession["client"];
@@ -887,6 +888,11 @@ export function wrapLazyTurnBoxWithRouting(
         : null;
     },
     controlRpcFactory: controlRpcFactory(bus),
+    resolveSelfhostedOpStream: async (sandbox) => {
+      if (!sandbox.enrollmentId) return undefined;
+      const enrollment = await getEnrollment(db, ids.workspaceId, sandbox.enrollmentId);
+      return opStreamDepsFor(services, enrollment?.opStream === true);
+    },
     relay: relayConfigFromSettings(settings),
     ...selfhostedResolverTimeouts(settings),
     ...(onOp !== undefined ? { selfhostedOnOp: onOp } : {}),
@@ -1010,8 +1016,6 @@ export type SelfhostedTurnSessionArgs = {
   workingDir: string | null;
 };
 
-type LegacySelfhostedTurnSessionArgs = Omit<SelfhostedTurnSessionArgs, "opStream">;
-
 /**
  * Stage D machine-primary establish: bind the live SelfhostedSession for a turn
  * whose ACTIVE sandbox is a connected machine — WITHOUT establishing or leasing a
@@ -1031,11 +1035,10 @@ type LegacySelfhostedTurnSessionArgs = Omit<SelfhostedTurnSessionArgs, "opStream
  * The op-stream injection for a machine-primary turn: present iff the machine
  * advertised `Capabilities.op_stream` in its latest Hello AND the server flag
  * is on AND a bus exists to carry frames. The transport rides the SAME managed
- * NATS connection as the control rpc (the bus's op-stream accessor); a bus
- * without the accessor (a test double) simply yields no connection and the
- * session falls back to the legacy exec on first use. Swap TARGETS resolved
- * mid-turn stay legacy for now — their capability row is not at hand in the
- * resolver, and legacy is always correct.
+ * NATS connection as the control rpc (the bus's op-stream accessor). A bus
+ * without the accessor yields no stream; an unbounded exec then fails before
+ * starting instead of silently degrading to request/reply. Swap targets resolve
+ * the same enrollment capability through the injected backend-resolver seam.
  */
 function opStreamDepsFor(
   services: RoutingWiringServices,
@@ -1053,11 +1056,11 @@ function opStreamDepsFor(
 
 export async function establishSelfhostedTurnSession(
   services: RoutingWiringServices,
-  args: SelfhostedTurnSessionArgs | LegacySelfhostedTurnSessionArgs,
+  args: SelfhostedTurnSessionArgs,
 ): Promise<EstablishedSandboxSession> {
   const { settings, bus, onOp } = services;
   const { timeoutMs, execTimeoutMs } = selfhostedTimeoutsFromSettings(settings);
-  const opStream = opStreamDepsFor(services, "opStream" in args && args.opStream === true);
+  const opStream = opStreamDepsFor(services, args.opStream);
   const { client, session } = await buildSelfhostedBackendSession({
     workspaceId: args.workspaceId,
     agentId: args.agentId,
@@ -1073,8 +1076,8 @@ export async function establishSelfhostedTurnSession(
     // Meter every control op (out-of-band telemetry) — no-op when unwired.
     ...(onOp !== undefined ? { onOp } : {}),
     // The streaming exec transport — present iff the machine advertised the
-    // capability AND the server flag is on (latched per-op at OpStart; the
-    // legacy exec stays the permanent fallback wire form).
+    // capability AND the server flag is on. It is required when execTimeoutMs=0;
+    // legacy request/reply remains available only for explicitly bounded exec.
     ...(opStream !== undefined ? { opStream } : {}),
   });
   return {

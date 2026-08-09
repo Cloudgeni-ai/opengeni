@@ -4,6 +4,7 @@ import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../sessi
 import { buildTimeline, groupTimeline, sessionStatusFromEvents } from "../timeline/projection";
 import type { TimelineItem } from "../timeline/types";
 import type { EmbeddedSessionClientLike } from "../client";
+import { usePageLiveActivity } from "./internal";
 
 export type SessionEventsConnectionState = StreamConnectionState | "idle" | "ended" | "error";
 
@@ -135,6 +136,8 @@ export function useSessionEvents(
 ): UseSessionEventsResult {
   const { client, workspaceId, reconcileSession } = useEmbeddedSession(options);
   const enabled = options.enabled ?? true;
+  const pageLive = usePageLiveActivity();
+  const streamEnabled = enabled && pageLive;
   const after = options.after ?? 0;
   const replay = options.replay ?? "windowed";
   const fullReplay = replay === "full" || after !== 0;
@@ -224,7 +227,7 @@ export function useSessionEvents(
       loadingOlderRef.current = false;
       setLoadingOlder(false);
     }
-    if (!sessionId || !enabled) {
+    if (!sessionId || !streamEnabled) {
       setConnectionState("idle");
       return;
     }
@@ -338,7 +341,18 @@ export function useSessionEvents(
         const stream = client.streamEvents(workspaceId, sessionId, {
           after: streamResumeSequenceRef.current,
           signal: controller.signal,
-          beforeLive: async () => await reconcileSession(sessionId),
+          onOpen: () => {
+            // Reconciliation repairs projections, but it must not block reading
+            // the already-open SSE body. Otherwise live events accumulate in the
+            // browser and appear as one delayed burst after every reconciler ends.
+            void Promise.resolve()
+              .then(() => reconcileSession(sessionId))
+              .catch((cause) => {
+                if (isCurrent()) {
+                  setError(cause instanceof Error ? cause : new Error(String(cause)));
+                }
+              });
+          },
           onStateChange: (state) => {
             if (isCurrent()) {
               setConnectionState(state);
@@ -399,7 +413,7 @@ export function useSessionEvents(
     workspaceId,
     sessionId,
     after,
-    enabled,
+    streamEnabled,
     fullReplay,
     streamKey,
     streamEpoch,
@@ -1175,7 +1189,7 @@ async function loadPreviousPage(
     compact: true,
     // Monitoring summaries omit correlation fields once a bounded durable
     // payload exceeds their preview threshold. The browser timeline needs the
-    // sanitized stored payload so persisted tool outputs still match their
+    // exact stored payload so persisted tool outputs still match their
     // calls and expose truthful truncation telemetry after a reload.
     payloadMode: "full",
   });

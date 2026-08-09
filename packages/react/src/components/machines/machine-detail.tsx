@@ -6,7 +6,14 @@
 // how have they moved over the chosen window. Built entirely on the existing
 // `og-*` token system — no new visual language, just the missing depth.
 // ----------------------------------------------------------------------------
-import { ArrowLeftIcon, CpuIcon, LaptopIcon, RadioIcon, ServerIcon } from "lucide-react";
+import {
+  ArrowLeftIcon,
+  CpuIcon,
+  LaptopIcon,
+  RadioIcon,
+  ServerIcon,
+  Trash2Icon,
+} from "lucide-react";
 import { cn } from "../../lib/cn";
 import { formatRelativeTime } from "../../lib/format";
 import type { MachineView, MetricSample } from "../../types/machines";
@@ -23,6 +30,8 @@ export type MachineDetailProps = {
   onWindowChange: (w: MetricWindow) => void;
   loadingSeries?: boolean | undefined;
   onBack?: (() => void) | undefined;
+  /** Open the workspace-admin removal confirmation for a self-hosted machine. */
+  onRemove?: ((machine: MachineView) => void) | undefined;
   now?: number | undefined;
   className?: string | undefined;
 };
@@ -40,6 +49,7 @@ export function MachineDetail({
   onWindowChange,
   loadingSeries,
   onBack,
+  onRemove,
   now = Date.now(),
   className,
 }: MachineDetailProps) {
@@ -78,24 +88,38 @@ export function MachineDetail({
           </span>
         </div>
 
-        {/* range selector */}
-        <div className="flex shrink-0 items-center gap-0.5 rounded-og-md border border-og-border bg-og-surface-1 p-0.5">
-          {METRIC_WINDOWS.map((w) => (
+        <div className="flex shrink-0 items-center gap-2">
+          {onRemove && machine.enrollmentId && !machine.isSessionGroup ? (
             <button
-              key={w}
               type="button"
-              onClick={() => onWindowChange(w)}
-              data-active={w === window}
-              className={cn(
-                "rounded-og-sm px-2 py-1 font-og-mono text-og-xs transition-colors",
-                w === window
-                  ? "bg-og-surface-3 text-og-fg shadow-og-sm"
-                  : "text-og-fg-subtle hover:text-og-fg-muted",
-              )}
+              data-remove-machine
+              aria-label={`Remove machine ${machine.name}`}
+              onClick={() => onRemove(machine)}
+              className="inline-flex min-h-9 items-center gap-1.5 rounded-og-sm border border-og-status-failed/40 px-2.5 py-1 font-medium text-og-xs text-og-status-failed transition-colors hover:bg-og-status-failed/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-status-failed/50 pointer-coarse:min-h-11"
             >
-              {w}
+              <Trash2Icon className="size-3.5" aria-hidden />
+              <span className="hidden sm:inline">Remove machine</span>
             </button>
-          ))}
+          ) : null}
+          {/* range selector */}
+          <div className="flex items-center gap-0.5 rounded-og-md border border-og-border bg-og-surface-1 p-0.5">
+            {METRIC_WINDOWS.map((w) => (
+              <button
+                key={w}
+                type="button"
+                onClick={() => onWindowChange(w)}
+                data-active={w === window}
+                className={cn(
+                  "rounded-og-sm px-2 py-1 font-og-mono text-og-xs transition-colors",
+                  w === window
+                    ? "bg-og-surface-3 text-og-fg shadow-og-sm"
+                    : "text-og-fg-subtle hover:text-og-fg-muted",
+                )}
+              >
+                {w}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 

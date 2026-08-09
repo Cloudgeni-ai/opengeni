@@ -1,5 +1,186 @@
 # @opengeni/runtime
 
+## 0.18.33
+
+### Patch Changes
+
+- e2edfbc: Add provider-aware image generation with permanent verified artifacts,
+  prompt-cache-safe history, sandbox materialization, and SDK/React rendering.
+- db82911: Keep teardown-owned workspaces capture-backed until explicit reacquisition reaches warm, and prevent historical events or capability reads from issuing provider I/O during teardown.
+- 7f70d33: Bound long-running service memory, upgrade the OpenAI Agents SDK to 0.14.3, and preserve exact provider, streaming, and durable-resume semantics.
+- Updated dependencies [e2edfbc]
+- Updated dependencies [7f70d33]
+  - @opengeni/codex@0.2.14
+  - @opengeni/config@0.12.6
+  - @opengeni/contracts@0.41.2
+  - @opengeni/network@0.2.1
+
+## 0.18.32
+
+### Patch Changes
+
+- 56f612b: Isolate read handles from process-capable handles, replace Modal's transport in place when its command-router URL rotates, rebuild the exact lease-fenced handle once for side-effect-free reads after a typed provider outage, and correlate handle recovery safely across API and reaper logs.
+
+## 0.18.31
+
+### Patch Changes
+
+- b59e5bd: Wait for concurrent structured sandbox reads to settle and retry only typed transient failures once.
+
+## 0.18.30
+
+### Patch Changes
+
+- 2727236: Make sandbox draining crash-safe with durable capture and teardown ownership, idempotent Modal snapshots, scoped operator holds, parallel Temporal reaping, exact lifecycle errors, and verified Local/Docker workspace recovery.
+- c8eb465: Add explicit provider-contained lazy-tool transports: preserve Codex native search, use native client tool search for direct OpenAI/Azure Responses, and use a cache-stable ordinary search/invoke dispatcher for other function-calling providers.
+- Updated dependencies [2727236]
+- Updated dependencies [c8eb465]
+  - @opengeni/config@0.12.5
+  - @opengeni/contracts@0.41.1
+
+## 0.18.29
+
+### Patch Changes
+
+- bb9a346: Add token and cache coverage plus nullable provider-rate cost comparisons to Workspace Insights, preserving exact Gateway billing while keeping incomplete configured telemetry unpriced.
+- Updated dependencies [bb9a346]
+  - @opengeni/config@0.12.4
+  - @opengeni/contracts@0.41.0
+
+## 0.18.28
+
+### Patch Changes
+
+- a2099b1: Keep a stalled Modal cleanup-proof start and its provider cancellation inside the physical-quiescence fence until both settle.
+
+## 0.18.27
+
+### Patch Changes
+
+- 74e7a31: Cancel Modal commands that stall before provider yield without bypassing physical quiescence, and show the truthful stopping state while replacement work waits.
+
+## 0.18.26
+
+### Patch Changes
+
+- 909daef: Serialize SDK sandbox manifests once at the canonical lease-envelope field and normalize cross-realm provider JSON before persistence.
+- Updated dependencies [dec7ada]
+  - @opengeni/config@0.12.3
+
+## 0.18.25
+
+### Patch Changes
+
+- Updated dependencies [7d13f51]
+- Updated dependencies [7ac558e]
+  - @opengeni/config@0.12.2
+
+## 0.18.24
+
+### Patch Changes
+
+- fed43cf: Make embedded Files and Changes durable and responsive: capture complete branch comparisons, batch file-frontier and multi-repository Git reads behind one sandbox lease, preserve live stream responsiveness during reconciliation, harden portable sandbox reads, and polish the workbench's file tree, resizable panes, machine/terminal states, and embedded composer geometry.
+- Updated dependencies [fed43cf]
+- Updated dependencies [410835e]
+  - @opengeni/contracts@0.40.0
+  - @opengeni/config@0.12.1
+
+## 0.18.23
+
+### Patch Changes
+
+- 5dfb93d: Persist sandbox session state without the redundant hydrated provider manifest when the canonical serialized manifest is already present, so durable turn reconciliation remains JSON-safe.
+- 200586a: Allow workspace administrators to disable structured agent human-input requests while preserving ordinary user messages.
+- 5dfb93d: Make Connected Machine command duration unbounded by default over replayable op-stream execution, preserve explicit positive deadlines for constrained deployments, wire and finalize streaming across direct and swapped machine routes, remove the generated service's aggregate memory throttle while retaining accounting and OOM isolation, and bound transient reordering memory by bytes without limiting command resources or output.
+- Updated dependencies [f8eb9f9]
+- Updated dependencies [200586a]
+- Updated dependencies [5dfb93d]
+- Updated dependencies [5dfb93d]
+  - @opengeni/config@0.12.0
+  - @opengeni/contracts@0.39.5
+
+## 0.18.22
+
+### Patch Changes
+
+- 43fa8f4: Expose authorized Codex Apps through the server-authoritative tool catalog and make setup recovery actionable without widening explicit session policies.
+- 2c83ce5: Normalize JavaScript-only undefined object fields from SDK tool receipts, approval snapshots, and durable event projections before lossless JSON persistence.
+- Updated dependencies [70ced80]
+  - @opengeni/contracts@0.39.4
+  - @opengeni/config@0.11.5
+
+## 0.18.21
+
+### Patch Changes
+
+- Updated dependencies [43d45c6]
+  - @opengeni/codex@0.2.13
+  - @opengeni/config@0.11.4
+
+## 0.18.20
+
+### Patch Changes
+
+- b783f12: Keep optional MCP setup authentication out of unrelated chat timelines while preserving actionable tool-call reconnect events.
+- ece124b: Normalize JavaScript-only undefined object fields from SDK history before durable JSON persistence while rejecting other non-JSON values with an exact path.
+- 7a84e1b: Retry transient retained-process promotion transactions and hand ambiguous yielded processes to exact-route turn finalization so they cannot strand sandbox leases.
+- af24281: Keep Connected Machine outages inside the agent loop and reserve automatic Toolspace setup for managed sandboxes.
+- 34c5cdb: Retain validated computer screenshots as authenticated, integrity-checked session artifacts with bounded event/history receipts, SDK range assembly, and React rendering while preserving historical inline-image compatibility.
+
+  Fence screenshot cleanup and quota accounting across parent deletion, duplicate settlement, expiry, compensation, and garbage-collection races so provider objects are deleted only after durable lifecycle ownership and quota is released exactly once.
+
+- Updated dependencies [5d8bb99]
+- Updated dependencies [af24281]
+- Updated dependencies [34c5cdb]
+  - @opengeni/contracts@0.39.3
+  - @opengeni/config@0.11.3
+
+## 0.18.19
+
+### Patch Changes
+
+- 1fbb6e7: Bound nested MCP transport error inspection and fail closed on pathological wrappers.
+- 7dbd057: Preserve provider-defined repository clone paths and centralize provider-declared `.git` alias semantics across resource identity and credential routing.
+- 78a1577: Separate expected sandbox path misses from actual provider-operation failures in metrics and alerts.
+- 30a0b9a: Preserve internal content exactly, replace heuristic rewriting with lossless persistence, and keep public telemetry on reviewed structural projections.
+- 0b23696: Recover required first-party MCP setup across rolling API replacements when the route temporarily returns 404 or a statusless transport error, while preserving terminal authentication, external-server, tool-invocation, and typed protocol failures.
+- 4c7b956: Read routed sandbox command stdout exactly once so Modal screenshot size and chunk output remain machine-parseable.
+- 42c04ce: Bound sandbox screenshot readback size, provider calls, deadlines, cancellation, and cleanup with typed failures.
+- Updated dependencies [7dbd057]
+- Updated dependencies [30a0b9a]
+- Updated dependencies [23de73b]
+  - @opengeni/contracts@0.39.2
+  - @opengeni/codex@0.2.12
+  - @opengeni/config@0.11.2
+
+## 0.18.18
+
+### Patch Changes
+
+- 41f7ae3: Treat the SDK's exact UnixLocal missing-workspace proof as provider loss so stale local leases can recover or drain cleanly, and expose ordinary sandbox-operation availability separately from live attach/swap readiness.
+- Updated dependencies [ce823ce]
+  - @opengeni/contracts@0.39.1
+  - @opengeni/config@0.11.1
+
+## 0.18.17
+
+### Patch Changes
+
+- 55f6ad0: Use one terminal-response ordinal for provider context binding, and clear the
+  durable input-token signal when the latest provider response supplies no usable
+  usage instead of retaining an older response's count.
+- 18eea76: Apply the configured Modal snapshot timeout to new sandboxes, rebind legacy resume envelopes to the current operational timeout without changing provider identity, and normalize durable SDK backend identifiers before product-provider lookup.
+
+## 0.18.16
+
+### Patch Changes
+
+- 5b6d36e: Use provider-reported usage rather than whole-request approximations for automatic context compaction, preserve provider-only input-token state across context rewrites, and label timeline counts as estimated conversation-history tokens.
+- Updated dependencies [5b6d36e]
+- Updated dependencies [6eb0b23]
+  - @opengeni/config@0.11.0
+  - @opengeni/contracts@0.39.0
+
 ## 0.18.15
 
 ### Patch Changes

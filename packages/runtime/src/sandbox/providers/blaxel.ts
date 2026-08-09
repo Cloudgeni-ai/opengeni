@@ -1,10 +1,13 @@
 import { BlaxelSandboxClient } from "@openai/agents-extensions/sandbox/blaxel";
 import { CAPABILITY_DESCRIPTORS } from "../capabilities";
 import { SandboxConfigError } from "../errors";
-import type { ProviderRegistration } from "./types";
+import { REPEATABLE_CONFIGURED_WORKSPACE_CAPTURE, type ProviderRegistration } from "./types";
 
 export const blaxelProvider: ProviderRegistration = {
   backend: "blaxel",
+  exactResumeMode: "custom",
+  instanceIdFields: ["sandboxIdentity"],
+  workspaceCapturePolicy: () => REPEATABLE_CONFIGURED_WORKSPACE_CAPTURE,
   descriptor: CAPABILITY_DESCRIPTORS.blaxel,
   validateCredentials(settings) {
     if (!settings.blaxelApiKey) {
@@ -19,6 +22,10 @@ export const blaxelProvider: ProviderRegistration = {
     const options: NonNullable<ConstructorParameters<typeof BlaxelSandboxClient>[0]> = {
       apiKey: settings.blaxelApiKey!,
       env: environment,
+      // persistWorkspace() creates a remote tarball. Bound that provider-native
+      // operation by the same immutable deadline as the durable capture claim;
+      // OpenGeni's outer timeout still protects every provider uniformly.
+      timeouts: { workspaceTarTimeoutMs: settings.sandboxSnapshotTimeoutMs },
     };
     if (settings.blaxelImage) options.image = settings.blaxelImage;
     if (settings.blaxelRegion) options.region = settings.blaxelRegion;

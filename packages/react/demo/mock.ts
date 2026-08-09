@@ -29,6 +29,7 @@ import type {
   FileAsset,
   FileDownloadUrlResponse,
   FsListResponse,
+  FsListBatchResponse,
   FsReadResponse,
   FsWriteResponse,
   FsDeleteResponse,
@@ -36,6 +37,7 @@ import type {
   FsMkdirResponse,
   FsTreeNode,
   GitDiffResponse,
+  GitReadBatchResponse,
   GetWorkspaceCaptureResponse,
   GetWorkspaceCaptureFileResponse,
   GitStatusResponse,
@@ -76,6 +78,7 @@ import type {
   WorkspaceEnvironment,
   WorkspaceEnvironmentVariableMetadata,
   VariableSet,
+  VariableSetSecret,
   VariableSetVariableMetadata,
   WorkspaceRegisteredPack,
   WorkspaceRealtimeModelCatalogResponse,
@@ -166,6 +169,8 @@ export class MockOpenGeniClient implements SessionClientLike {
   private pausedSessions = new Set<string>();
   private drafts = new Map<string, ComposerDraft>();
   private scripted = false;
+  private managerScript: Promise<void> | null = null;
+  private responseQueues = new Map<string, Promise<void>>();
 
   bus(sessionId: string): SessionBus {
     let bus = this.buses.get(sessionId);
@@ -369,8 +374,22 @@ export class MockOpenGeniClient implements SessionClientLike {
   ): Promise<SessionEvent> {
     const bus = this.bus(sessionId);
     const text = typeof message === "string" ? message : message.text;
+    // The managed API accepts the message and clears the matching durable
+    // composer draft atomically. Mirror that ordering before publishing the
+    // user.message invalidation so a reconciliation read cannot resurrect the
+    // just-submitted text and leave the Send action enabled.
+    const currentDraft = await this.getComposerDraft(_workspaceId, sessionId);
+    this.drafts.set(sessionId, {
+      ...currentDraft,
+      revision: currentDraft.revision + 1,
+      text: "",
+      resources: [],
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    });
     const event = bus.append("user.message", { text });
-    void this.respond(bus, text);
+    this.queueResponse(bus, text);
     return event;
   }
 
@@ -398,7 +417,16 @@ export class MockOpenGeniClient implements SessionClientLike {
     const bus = this.bus(sessionId);
     if (sessionId === MANAGER_SESSION_ID && !this.scripted) {
       this.scripted = true;
-      void runOpsChannelScript(bus);
+      const script = runOpsChannelScript(bus);
+      this.managerScript = script;
+      void script.then(
+        () => {
+          if (this.managerScript === script) this.managerScript = null;
+        },
+        () => {
+          if (this.managerScript === script) this.managerScript = null;
+        },
+      );
     }
     options.onStateChange?.("live");
     return bus.stream(options.after ?? 0, options.signal);
@@ -754,6 +782,24 @@ export class MockOpenGeniClient implements SessionClientLike {
 
   async listVariableSets(): Promise<VariableSet[]> {
     return await this.listEnvironments();
+  }
+
+  async getVariableSetVariable(
+    _workspaceId: string,
+    variableSetId: string,
+    name: string,
+  ): Promise<VariableSetSecret> {
+    const variableSet = this.environments.find((candidate) => candidate.id === variableSetId);
+    const variable = variableSet?.variables.find((candidate) => candidate.name === name);
+    if (!variableSet || !variable) {
+      throw new Error("variable set variable not found");
+    }
+    return {
+      variableSetId,
+      name,
+      version: variable.version,
+      value: "demo-secret-value",
+    };
   }
 
   async createEnvironment(
@@ -1356,6 +1402,18 @@ export class MockOpenGeniClient implements SessionClientLike {
     return { root: dir(path, path, []), revision: 1, truncated: false };
   }
 
+  async fsListBatch(
+    workspaceId: string,
+    sessionId: string,
+    request: { requests: Array<{ path?: string }> },
+  ): Promise<FsListBatchResponse> {
+    return {
+      results: await Promise.all(
+        request.requests.map(async (item) => await this.fsList(workspaceId, sessionId, item)),
+      ),
+    };
+  }
+
   async fsRead(
     _workspaceId: string,
     _sessionId: string,
@@ -1536,6 +1594,26 @@ export class MockOpenGeniClient implements SessionClientLike {
     };
   }
 
+  async gitReadBatch(
+    workspaceId: string,
+    sessionId: string,
+    request: {
+      requests: Array<{
+        status: { path?: string };
+        diff?: { staged?: boolean };
+      }>;
+    },
+  ): Promise<GitReadBatchResponse> {
+    return {
+      results: await Promise.all(
+        request.requests.map(async (item) => ({
+          status: await this.gitStatus(),
+          ...(item.diff ? { diff: await this.gitDiff(workspaceId, sessionId, item.diff) } : {}),
+        })),
+      ),
+    };
+  }
+
   // The demo mock serves a live warm workspace (fsList/gitDiff above), so there
   // is no cold capture to read — the workbench falls back to the live path. M3/M4
   // add a fixture-capture mock for the cold-paint demo state.
@@ -1621,6 +1699,31 @@ export class MockOpenGeniClient implements SessionClientLike {
       updatedAt: now,
       ...overrides,
     };
+  }
+
+  /** Keep the scripted narrative and interactive turns ordered per session. */
+  private queueResponse(bus: SessionBus, text: string): void {
+    const previous = this.responseQueues.get(bus.sessionId) ?? Promise.resolve();
+    const script = bus.sessionId === MANAGER_SESSION_ID ? this.managerScript : null;
+    const queued = previous
+      .catch(() => undefined)
+      .then(async () => {
+        await script?.catch(() => undefined);
+        await this.respond(bus, text);
+      });
+    this.responseQueues.set(bus.sessionId, queued);
+    void queued.then(
+      () => {
+        if (this.responseQueues.get(bus.sessionId) === queued) {
+          this.responseQueues.delete(bus.sessionId);
+        }
+      },
+      () => {
+        if (this.responseQueues.get(bus.sessionId) === queued) {
+          this.responseQueues.delete(bus.sessionId);
+        }
+      },
+    );
   }
 
   /** Canned manager acknowledgment for anything typed into the composer. */
@@ -2190,6 +2293,7 @@ function scheduledTask(
     runMode: "new_session_per_run",
     overlapPolicy: "skip",
     agentConfig: { prompt, resources: [], tools: [], metadata: {} },
+    targetSessionId: null,
     reusableSessionId: null,
     variableSetId: null,
     environmentId: null,

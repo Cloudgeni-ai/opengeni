@@ -44,6 +44,8 @@ export type WorkspaceDockProps = {
   /** Controlled collapsed state for hosts that expose their own dock toggle. */
   collapsed?: boolean | undefined;
   onCollapsedChange?: ((collapsed: boolean) => void) | undefined;
+  /** Keep the built-in collapse control when the host controls collapsed state. */
+  showCollapseControl?: boolean | undefined;
   /** A status accessory pinned to the right of the tab strip, left of the
    *  maximize/collapse controls (e.g. the machine-state chip). Renders in both
    *  the docked header and the full-screen overlay header. */
@@ -129,6 +131,7 @@ export function WorkspaceDock({
   onActiveTabChange,
   collapsed: collapsedProp,
   onCollapsedChange,
+  showCollapseControl = false,
   headerAccessory,
   mobileLeadingControl,
   autoSaveId = "og.session.dock",
@@ -343,6 +346,11 @@ export function WorkspaceDock({
           className="fixed inset-0 z-40 flex flex-col bg-og-bg"
           hidden={collapsed}
           style={{
+            // Author utility classes can override the user-agent `[hidden]`
+            // rule (for example this surface's `flex` class). Keep an inline
+            // display guard so a collapsed mobile workspace is actually gone
+            // visually as well as from the accessibility tree.
+            display: collapsed ? "none" : undefined,
             paddingTop: "env(safe-area-inset-top)",
             paddingBottom: "env(safe-area-inset-bottom)",
           }}
@@ -367,7 +375,7 @@ export function WorkspaceDock({
             onClick={expand}
             title="Open workspace"
             aria-label="Open workspace"
-            className="absolute right-3 top-3 z-30 inline-flex size-11 items-center justify-center rounded-og-md border border-og-border bg-og-surface-1 text-og-fg-muted shadow-lg transition-colors hover:border-og-border-strong hover:text-og-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent"
+            className="absolute right-3 top-3 z-30 inline-flex size-11 items-center justify-center rounded-og-md border border-og-border bg-og-surface-1 text-og-fg-muted shadow-lg transition-colors hover:border-og-border-strong hover:text-og-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent"
             style={{ marginTop: "env(safe-area-inset-top)" }}
           >
             <ChevronsLeftRightIcon className="size-4" aria-hidden />
@@ -396,7 +404,7 @@ export function WorkspaceDock({
               <Maximize2Icon className="size-3.5" />
             )}
           </ChromeButton>
-          {hostControlled ? null : (
+          {hostControlled && !showCollapseControl ? null : (
             <ChromeButton onClick={collapse} title="Collapse" label="Collapse dock">
               <PanelRightCloseIcon className="size-3.5" />
             </ChromeButton>
@@ -426,7 +434,7 @@ export function WorkspaceDock({
         </Panel>
 
         {!collapsed && (
-          <Separator className="group relative z-10 w-1.5 shrink-0 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent max-[1023px]:-mx-[19px] max-[1023px]:w-11 pointer-coarse:-mx-[19px] pointer-coarse:w-11">
+          <Separator className="group relative z-10 w-1.5 shrink-0 outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent max-[1023px]:-mx-[19px] max-[1023px]:w-11 pointer-coarse:-mx-[19px] pointer-coarse:w-11">
             <span className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-og-border transition-colors group-hover:bg-og-accent group-focus-visible:bg-og-accent group-data-[separator-state=dragging]:bg-og-accent" />
           </Separator>
         )}
@@ -503,7 +511,7 @@ function ChromeButton({
       onClick={onClick}
       title={title}
       aria-label={label}
-      className="inline-flex size-7 items-center justify-center rounded-og-sm p-1 transition-colors hover:bg-og-surface-2 hover:text-og-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent max-[1023px]:size-11 pointer-coarse:size-11"
+      className="inline-flex size-7 items-center justify-center rounded-og-sm p-1 transition-colors hover:bg-og-surface-2 hover:text-og-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent max-[1023px]:size-11 pointer-coarse:size-11"
     >
       {children}
     </button>
@@ -664,7 +672,7 @@ function DockChrome({
               onClick={() => onTab(tab.id)}
               onKeyDown={(event) => onTabKeyDown(event, index)}
               className={cn(
-                "flex min-h-7 shrink-0 items-center justify-center gap-1 rounded-og-sm px-2 py-1 text-og-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent max-[1023px]:min-h-11 max-[1023px]:min-w-11 pointer-coarse:min-h-11 pointer-coarse:min-w-11",
+                "flex min-h-7 shrink-0 items-center justify-center gap-1 rounded-og-sm px-2 py-1 text-og-xs font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent max-[1023px]:min-h-11 max-[1023px]:min-w-11 pointer-coarse:min-h-11 pointer-coarse:min-w-11",
                 tab.id === current
                   ? "bg-og-accent-soft text-og-fg"
                   : "text-og-fg-subtle hover:text-og-fg",

@@ -80,6 +80,9 @@ export type TurnInputOptions = {
   unavailableSandboxFilesNote?: string;
   runCredentialsNote?: string;
   providerApi: HistoryProviderApi;
+  projectCanonicalHistory?: ModelHistoryAttachmentProjector;
+  materializeModelHistory?: ModelHistoryAttachmentProjector;
+  materializeSerializedRunState?: (serialized: string) => Promise<string>;
   projectModelHistory?: ModelHistoryAttachmentProjector;
 };
 
@@ -419,6 +422,8 @@ export async function turnInput(
       joinInternalContext(internalContext, attachmentContext),
       fileAttachments.map((attachment) => attachment.resource),
       options.providerApi,
+      options.projectCanonicalHistory,
+      options.materializeModelHistory,
       options.projectModelHistory,
     );
   }
@@ -435,6 +440,8 @@ export async function turnInput(
       internalContext,
       [],
       options.providerApi,
+      options.projectCanonicalHistory,
+      options.materializeModelHistory,
       options.projectModelHistory,
     );
   }
@@ -450,9 +457,12 @@ export async function turnInput(
     if (!state) {
       throw new Error("No saved run state is available for approval decision");
     }
+    const serializedRunState = resumeRunState(state);
     const prepared = await runtime.prepareInput(agent, {
       kind: "approval",
-      serializedRunState: resumeRunState(state),
+      serializedRunState: options.materializeSerializedRunState
+        ? await options.materializeSerializedRunState(serializedRunState)
+        : serializedRunState,
       approvalId: String(payload.approvalId ?? ""),
       decision: payload.decision === "approve" ? "approve" : "reject",
       ...(typeof payload.message === "string" ? { message: payload.message } : {}),
@@ -478,9 +488,12 @@ export async function turnInput(
     if (!resume) {
       throw new Error("Human-input response does not resolve to a durable request");
     }
+    const serializedRunState = resumeRunState(state);
     const prepared = await runtime.prepareInput(agent, {
       kind: "human_input",
-      serializedRunState: resumeRunState(state),
+      serializedRunState: options.materializeSerializedRunState
+        ? await options.materializeSerializedRunState(serializedRunState)
+        : serializedRunState,
       toolCallId: resume.toolCallId,
     });
     return {
@@ -511,6 +524,8 @@ async function messageInput(
   internalContext: string | undefined,
   currentAttachmentRefs: FileResourceRef[] = [],
   providerApi: HistoryProviderApi = "responses",
+  projectCanonicalHistory?: ModelHistoryAttachmentProjector,
+  materializeModelHistory?: ModelHistoryAttachmentProjector,
   projectModelHistory?: ModelHistoryAttachmentProjector,
 ): Promise<PreparedTurnInput> {
   const stored = await getActiveSessionHistoryItemsPaged(
@@ -520,11 +535,17 @@ async function messageInput(
   );
   const envelope = await getSandboxSessionEnvelope(db, trigger.workspaceId, trigger.sessionId);
   const canonicalView = projectRejectedProviderArtifacts(stored);
-  const providerView = projectHistoryForProvider(canonicalView, providerApi);
+  const canonicalProviderView = projectCanonicalHistory
+    ? await projectCanonicalHistory(canonicalView)
+    : canonicalView;
+  const providerView = projectHistoryForProvider(canonicalProviderView, providerApi);
   const referencedHistory = withCurrentUserAttachmentRefs(providerView, currentAttachmentRefs);
-  const historyItems = projectModelHistory
-    ? await projectModelHistory(referencedHistory)
+  const materializedHistory = materializeModelHistory
+    ? await materializeModelHistory(referencedHistory)
     : referencedHistory;
+  const historyItems = projectModelHistory
+    ? await projectModelHistory(materializedHistory)
+    : materializedHistory;
   const prepared = await runtime.prepareInput(agent, {
     kind: "message",
     ...(text ? { text } : {}),

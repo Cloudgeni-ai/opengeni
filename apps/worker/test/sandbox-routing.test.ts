@@ -42,6 +42,7 @@ import {
   RoutingBackendRecoveryRequiredError,
   subjectFor,
   type EstablishedSandboxSession,
+  type OpStreamJournal,
 } from "@opengeni/runtime";
 import { swapActiveSandbox, type FleetContext } from "@opengeni/core";
 import {
@@ -61,8 +62,16 @@ let db: Database;
 const settings = testSettings({
   productAccessMode: "managed",
   sandboxSelfhostedEnabled: true,
+  // These DB/routing tests use a request/reply-only MemoryEventBus responder;
+  // op-stream behavior has its dedicated runtime suite.
+  agentOpStreamEnabled: false,
+  sandboxSelfhostedExecTimeoutMs: 30_000,
   selfhostedRelayUrl: "wss://relay.example",
 });
+const testOpJournal: OpStreamJournal = {
+  attachGeneration: () => "1",
+  persistSettled: async () => undefined,
+};
 
 /** A MemoryEventBus whose responder echoes a marker hostname for exec — the
  *  enrolled machine. */
@@ -269,7 +278,7 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
 
     // Wrap the established group box in the routing proxy (what the turn does).
     const established = wrapTurnBoxWithRouting(
-      { db, settings, bus },
+      { db, settings, bus, opJournal: testOpJournal },
       {
         workspaceId,
         sessionId: session.id,
@@ -392,7 +401,7 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
       backendId: "modal",
     };
     const established = wrapTurnBoxWithRouting(
-      { db, settings, bus: new MemoryEventBus() as never },
+      { db, settings, bus: new MemoryEventBus() as never, opJournal: testOpJournal },
       {
         workspaceId,
         sessionId: session.id,
@@ -529,6 +538,7 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
         db,
         settings,
         bus: new MemoryEventBus() as never,
+        opJournal: testOpJournal,
         onHomeSandboxLost: async (event) => {
           lossEvents.push(event);
         },
@@ -660,7 +670,7 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
     let provisions = 0;
     const real = fakeGroupBox("lazy-real");
     const lazy = wrapLazyTurnBoxWithRouting(
-      { db, settings, bus: new MemoryEventBus() as never },
+      { db, settings, bus: new MemoryEventBus() as never, opJournal: testOpJournal },
       { workspaceId, sessionId: session.id, environment: { HOME: "/workspace", LAZY: "1" } },
       {
         client: { backendId: "modal" },
@@ -971,7 +981,7 @@ describe("M7 worker routing — turn-start reconcile (issue #341 invariant B)", 
     const before = (await readActiveSandbox(db, workspaceId, session.id))!;
 
     const established = wrapTurnBoxWithRouting(
-      { db, settings, bus },
+      { db, settings, bus, opJournal: testOpJournal },
       { workspaceId, sessionId: session.id },
       fakeGroupBox("group-box-marker"),
     );

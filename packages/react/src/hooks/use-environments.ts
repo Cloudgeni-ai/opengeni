@@ -2,6 +2,7 @@ import type {
   CreateVariableSetRequest,
   UpdateVariableSetRequest,
   VariableSet,
+  VariableSetSecret,
   VariableSetVariableMetadata,
 } from "@opengeni/sdk";
 import { useCallback, useMemo } from "react";
@@ -21,7 +22,12 @@ export type UseVariableSetsResult = {
   create: (request: CreateVariableSetRequest) => Promise<VariableSet | null>;
   update: (variableSetId: string, request: UpdateVariableSetRequest) => Promise<VariableSet | null>;
   remove: (variableSetId: string) => Promise<boolean>;
-  /** Set/rotate a variable. Values are write-only — reads expose metadata only. */
+  /**
+   * Read one exact value through the dedicated permissioned API. The hook never
+   * puts plaintext in its polled variable-set cache.
+   */
+  readVariable: (variableSetId: string, name: string) => Promise<VariableSetSecret | null>;
+  /** Set/rotate a variable. Generic reads expose metadata only. */
   setVariable: (
     variableSetId: string,
     name: string,
@@ -35,8 +41,9 @@ export type UseVariableSetsResult = {
 
 /**
  * Variable sets (named, encrypted variable sets attached to sessions
- * and scheduled tasks). Variable values are write-only end to end: this hook
- * never sees a value after it is sent.
+ * and scheduled tasks). Generic reads stay metadata-only. A dedicated,
+ * permissioned method can retrieve one value and returns it directly without
+ * adding plaintext to hook state or polling caches.
  */
 export function useVariableSets(options: UseVariableSetsOptions = {}): UseVariableSetsResult {
   const { client, workspaceId } = useOpenGeni(options);
@@ -89,6 +96,12 @@ export function useVariableSets(options: UseVariableSetsOptions = {}): UseVariab
     [client, workspaceId, run, refresh],
   );
 
+  const readVariable = useCallback(
+    async (variableSetId: string, name: string): Promise<VariableSetSecret | null> =>
+      await run(() => client.getVariableSetVariable(workspaceId, variableSetId, name)),
+    [client, workspaceId, run],
+  );
+
   const setVariable = useCallback(
     async (
       variableSetId: string,
@@ -128,6 +141,7 @@ export function useVariableSets(options: UseVariableSetsOptions = {}): UseVariab
     create,
     update,
     remove,
+    readVariable,
     setVariable,
     deleteVariable,
     mutating,
@@ -139,7 +153,9 @@ export function useVariableSets(options: UseVariableSetsOptions = {}): UseVariab
 /** @deprecated use UseVariableSetsOptions */
 export type UseEnvironmentsOptions = UseVariableSetsOptions;
 /** @deprecated use UseVariableSetsResult */
-export type UseEnvironmentsResult = UseVariableSetsResult & { environments: VariableSet[] };
+export type UseEnvironmentsResult = UseVariableSetsResult & {
+  environments: VariableSet[];
+};
 /** @deprecated use useVariableSets */
 export function useEnvironments(options: UseEnvironmentsOptions = {}): UseEnvironmentsResult {
   const legacyClient = useMemo(() => {
@@ -158,6 +174,9 @@ export function useEnvironments(options: UseEnvironmentsOptions = {}): UseEnviro
         options.client.deleteEnvironmentVariable ?? options.client.deleteVariableSetVariable,
     };
   }, [options.client]);
-  const result = useVariableSets({ ...options, ...(legacyClient ? { client: legacyClient } : {}) });
+  const result = useVariableSets({
+    ...options,
+    ...(legacyClient ? { client: legacyClient } : {}),
+  });
   return { ...result, environments: result.variableSets };
 }

@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/runtime",
-  "version": "0.18.15",
+  "version": "0.18.33",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -46,8 +46,9 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
     "@noble/hashes": "^1.8.0",
-    "@openai/agents": "0.13.3",
-    "@openai/agents-extensions": "0.13.3",
+    "@openai/agents": "0.14.3",
+    "@openai/agents-core": "0.14.3",
+    "@openai/agents-extensions": "0.14.3",
     "@opengeni/agent-proto": "workspace:*",
     "@opengeni/codex": "workspace:*",
     "@opengeni/config": "workspace:*",
@@ -59,7 +60,6 @@
     "ws": "8.21.1"
   },
   "devDependencies": {
-    "@openai/agents-core": "0.13.3",
     "tsup": "^8.5.0",
     "typescript": "7.0.2",
     "zod": "4.4.3"

@@ -16,6 +16,7 @@ build
 coverage
 htmlcov
 .coverage
+tmp
 .turbo
 .vite
 *.tsbuildinfo

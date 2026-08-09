@@ -52,6 +52,10 @@ const workerDeathTestTimeoutMs = 360_000;
 const temporalWorkflowTestTimeoutMs = 60_000;
 const workflowDefinitionsPath = new URL("../../apps/worker/src/workflows.ts", import.meta.url)
   .pathname;
+const legacySandboxReaperWorkflowPath = new URL(
+  "../../apps/worker/test/fixtures/legacy-sandbox-reaper-workflow.ts",
+  import.meta.url,
+).pathname;
 
 // This case follows two real 125-second heartbeat-timeout proofs. Temporal can
 // take more than the general 30-second budget to poll and drain its next worker
@@ -233,6 +237,67 @@ describe("Temporal workflow integration", () => {
         await handle.result();
         expect(attempts).toBe(1);
         expect(failures).toHaveLength(1);
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
+    "automatically re-dispatches the same turn after recoverable first-party MCP setup loss",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const sessionId = crypto.randomUUID();
+      const turn = queuedTurn("event-1");
+      const runs: Array<{ turn: WorkflowTestTurn; attemptId: string }> = [];
+      const goalChecksAtRunCount: number[] = [];
+      const failures: unknown[] = [];
+      const delayMs = 100;
+      let firstRecoveryReturnedAt = 0;
+      let secondAttemptStartedAt = 0;
+      const admission = createTurnAdmission([turn], async (input, admittedTurn) => {
+        runs.push({ turn: admittedTurn, attemptId: input.attemptId });
+        if (runs.length === 1) {
+          firstRecoveryReturnedAt = Date.now();
+          return { status: "recovering", continueDelayMs: delayMs };
+        }
+        secondAttemptStartedAt = Date.now();
+        return { status: "idle" };
+      });
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        ...admission.activities,
+        markSessionIdle: async () => undefined,
+        failSessionAttempt: async (input: unknown) => {
+          failures.push(input);
+        },
+        settleSessionInterruptions: async () => ({
+          action: "continue" as const,
+        }),
+        maybeContinueGoal: async () => {
+          goalChecksAtRunCount.push(runs.length);
+          return { action: "none" as const };
+        },
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId: `wf-${crypto.randomUUID()}`,
+          args: [{ ...scope, sessionId, initialEventId: turn.triggerEventId }],
+        });
+        await handle.result();
+
+        expect(runs.map((entry) => entry.turn)).toEqual([turn, turn]);
+        expect(runs[0]?.attemptId).not.toBe(runs[1]?.attemptId);
+        expect(secondAttemptStartedAt - firstRecoveryReturnedAt).toBeGreaterThanOrEqual(
+          delayMs - 25,
+        );
+        expect(goalChecksAtRunCount).toEqual([2]);
+        expect(failures).toHaveLength(0);
       } finally {
         worker.shutdown();
         await run;
@@ -1360,6 +1425,51 @@ describe("Temporal workflow integration", () => {
         worker.shutdown();
         await run;
       }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
+    "sandbox reaper schedule is replay-safe in both rolling-deploy directions",
+    async () => {
+      const execute = async (workflowsPath: string, label: string) => {
+        const taskQueue = `sandbox-reaper-replay-${label}-${crypto.randomUUID()}`;
+        const workflowId = `sandbox-reaper-replay-${label}-${crypto.randomUUID()}`;
+        const worker = await Worker.create({
+          connection: nativeConnection,
+          namespace: "default",
+          taskQueue,
+          workflowsPath,
+          activities: { reapSandboxLeases: async () => undefined },
+        });
+        const run = worker.run();
+        try {
+          const client = new Client({ connection });
+          const handle = await client.workflow.start("sandboxReaperWorkflow", {
+            taskQueue,
+            workflowId,
+          });
+          await handle.result();
+          return { history: await handle.fetchHistory(), workflowId };
+        } finally {
+          worker.shutdown();
+          await run;
+        }
+      };
+
+      const legacy = await execute(legacySandboxReaperWorkflowPath, "legacy");
+      await Worker.runReplayHistory(
+        { workflowsPath: workflowDefinitionsPath },
+        legacy.history,
+        legacy.workflowId,
+      );
+
+      const current = await execute(workflowDefinitionsPath, "current");
+      await Worker.runReplayHistory(
+        { workflowsPath: legacySandboxReaperWorkflowPath },
+        current.history,
+        current.workflowId,
+      );
     },
     temporalWorkflowTestTimeoutMs,
   );

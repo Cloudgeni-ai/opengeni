@@ -11,7 +11,7 @@ The personal connection must never be substituted with the workspace bot, and th
 
 ## Provider identity and deployment prerequisites
 
-`JorgeBot` is not configured anywhere in this repository. Slack renders the message author from the OAuth principal and renders `Sent using @…` from Slack app/provider metadata. If Slack currently displays `JorgeBot`, an authorized Slack app administrator must update the existing app rather than adding generated text or changing message payloads:
+No deployment-specific bot identity is configured in this repository. Slack renders the message author from the OAuth principal and renders `Sent using @…` from Slack app/provider metadata. If Slack displays an outdated identity, an authorized Slack app administrator must update the existing app rather than adding generated text or changing message payloads:
 
 1. Set the Slack app name to exactly `OpenGeni`.
 2. Set the bot user display name to exactly `OpenGeni`.
@@ -141,7 +141,7 @@ Authenticated Slack users can start work through four configured entry points:
 
 - mention `@OpenGeni` in a channel or existing thread;
 - invoke `/opengeni <task>` in a channel;
-- direct-message the OpenGeni bot, or use the **Open in OpenGeni** message shortcut when explicitly sending a human-to-human DM message.
+- direct-message the OpenGeni bot, or use the **Open in OpenGeni** message shortcut when explicitly sending a human-to-human DM message. A human-DM shortcut imports only the selected message into an initiating-user-private session, then moves acknowledgement, progress, results, and continuation into that user's OpenGeni bot-DM thread; the bot never joins, reads, or posts workspace output into the source human DM.
 - after a workspace admin enables **Capabilities → Slack connections → Reaction summon**, add the configured exact emoji reaction (default `:genie:`) to one message in an allowed bot-member conversation.
 
 Reaction summon is disabled by default. Only `workspace:admin` can enable it, choose the exact emoji name without colons, and select all bot-member conversations or an explicit allowlist. Existing installations without `reactions:read` remain usable for mentions, commands, DMs, shortcuts, and tools, but the admin UI blocks reaction enablement until the bot is reinstalled with the canonical manifest. Slack Connect/shared conversations fail closed.
@@ -150,7 +150,9 @@ On a matching reaction, OpenGeni rechecks the live workspace setting, installati
 
 Every top-level bot DM durably reserves a new private OpenGeni session ID for the linked OpenGeni subject before session creation begins. Authorization and listing use that reservation until the same ID is bound as the session root, so a crash or concurrent read before binding cannot expose the session to another workspace subject. A reply in its Slack thread continues that exact session; a separate top-level DM creates a separate session. Installing the bot for a workspace never converts private DM sessions into workspace-visible sessions.
 
-A channel mention, command, or message shortcut creates one workspace-visible session whose authorization follows both the Slack channel and live OpenGeni workspace grants. Mentioning OpenGeni inside an unmapped existing thread adopts that thread as the session surface. Once mapped, linked and authorized OpenGeni workspace participants can continue the same session by replying in that thread. An ordinary unmapped thread reply is ignored rather than creating work implicitly.
+A channel mention, command, or message shortcut creates one workspace-visible session whose authorization follows both the Slack channel and live OpenGeni workspace grants. Channel shortcuts retain the same bot-membership requirement as mentions and commands. A message shortcut from a one-to-one human DM is the deliberate exception to membership lookup: Slack's signed interaction supplies only the selected message, OpenGeni creates a private session for the invoking linked subject, and the durable route is rekeyed to a new thread in that subject's OpenGeni bot DM before any progress or result is delivered. Two linked users invoking the shortcut on the same human-DM message receive separate private sessions and bot-DM routes. Mentioning OpenGeni inside an unmapped existing thread adopts that thread as the session surface. Once mapped, linked and authorized OpenGeni workspace participants can continue the same session by replying in that thread. An ordinary unmapped thread reply is ignored rather than creating work implicitly.
+
+Top-level group-DM/MPIM messages do not start tasks in V1. In an MPIM, a message shortcut may be used only where the installed bot already has conversation access; otherwise it fails closed and the user should use a one-to-one bot DM or an authorized channel. Slack Connect and administratively restricted conversations remain unsupported unless the installation, bot membership, and workspace authority all pass the same checks.
 
 The bot acknowledges accepted work and keeps at most three progress posts globally per interaction, plus durable human-input questions, stop/cancellation, failures, blockers, and the final result in the originating thread. Each progress event durably claims one of those three slots and a stable Slack post-operation identity before provider delivery, so pages, retries, restarts, replicas, and duplicate claims cannot exceed the cap. Messages include an **Open in OpenGeni** session link. Reply `stop` in the mapped thread to pause the workstream; start a new top-level DM or invoke OpenGeni again to create a new session.
 

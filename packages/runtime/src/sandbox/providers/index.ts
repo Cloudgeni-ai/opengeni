@@ -6,7 +6,11 @@
 // contracts-only capabilities self-test.
 
 import type { Settings } from "@opengeni/config";
-import { SandboxBackend } from "@opengeni/contracts";
+import {
+  LEGACY_SANDBOX_PROVIDER_INSTANCE_ID_FIELDS,
+  SANDBOX_PROVIDER_INSTANCE_ID_FIELDS_BY_BACKEND,
+  SandboxBackend,
+} from "@opengeni/contracts";
 import { assertDescriptorRegistryInvariants } from "../capabilities";
 import { blaxelProvider } from "./blaxel";
 import { cloudflareProvider } from "./cloudflare";
@@ -18,7 +22,7 @@ import { modalProvider } from "./modal";
 import { noneProvider } from "./none";
 import { runloopProvider } from "./runloop";
 import { selfhostedProvider } from "./selfhosted";
-import type { ProviderRegistration } from "./types";
+import type { ProviderRegistration, ProviderWorkspaceCapturePolicy } from "./types";
 import { vercelProvider } from "./vercel";
 
 export const PROVIDER_REGISTRY: Record<SandboxBackend, ProviderRegistration> = {
@@ -39,7 +43,7 @@ export const PROVIDER_REGISTRY: Record<SandboxBackend, ProviderRegistration> = {
 // boot-time backendId assertion to construct each client without tripping
 // validateCredentials. The SDK client constructors are pure option-stores (the
 // underlying provider SDK is required lazily at create()/resume() time, never at
-// construction — verified against @openai/agents-extensions 0.11.6), so this is
+// construction — verified against the pinned @openai/agents-extensions 0.14.3), so this is
 // safe with no provider peer dep installed and no network.
 const ASSERTION_STUB_SETTINGS = {
   dockerImage: "opengeni-sandbox:local",
@@ -63,6 +67,7 @@ const ASSERTION_STUB_SETTINGS = {
  */
 export function assertProviderRegistryInvariants(): void {
   assertDescriptorRegistryInvariants();
+  const knownIdentityFields = new Set<string>(LEGACY_SANDBOX_PROVIDER_INSTANCE_ID_FIELDS);
   for (const backend of SandboxBackend.options) {
     const registration = PROVIDER_REGISTRY[backend];
     if (registration.backend !== backend) {
@@ -75,6 +80,16 @@ export function assertProviderRegistryInvariants(): void {
         `PROVIDER_REGISTRY["${backend}"].descriptor.backend mismatch (got "${registration.descriptor.backend}")`,
       );
     }
+    const identityFields = [...registration.instanceIdFields];
+    const contractIdentityFields = [...SANDBOX_PROVIDER_INSTANCE_ID_FIELDS_BY_BACKEND[backend]];
+    if (
+      new Set(identityFields).size !== identityFields.length ||
+      identityFields.some((field) => !knownIdentityFields.has(field)) ||
+      identityFields.length !== contractIdentityFields.length ||
+      identityFields.some((field, index) => field !== contractIdentityFields[index])
+    ) {
+      throw new Error(`Provider "${backend}" has an invalid live instance identity declaration`);
+    }
     if (backend === "none") {
       // "none" has no SDK client (build returns undefined); the descriptor
       // backendId "none" is self-consistent.
@@ -83,7 +98,13 @@ export function assertProviderRegistryInvariants(): void {
           `"none" descriptor.backendId must be "none" (got "${registration.descriptor.backendId}")`,
         );
       }
+      if (registration.exactResumeMode !== "none") {
+        throw new Error('Provider "none" must declare exactResumeMode="none"');
+      }
       continue;
+    }
+    if (registration.exactResumeMode === "none") {
+      throw new Error(`Provider "${backend}" cannot declare exactResumeMode="none"`);
     }
     const client = registration.build({
       settings: ASSERTION_STUB_SETTINGS,
@@ -99,7 +120,42 @@ export function assertProviderRegistryInvariants(): void {
         `Provider "${backend}" backendId mismatch: descriptor.backendId="${registration.descriptor.backendId}" but SDK client.backendId="${sdkBackendId}"`,
       );
     }
+    if (typeof (client as { resume?: unknown }).resume !== "function") {
+      throw new Error(`Provider "${backend}" SDK client exposes no resume()`);
+    }
+    if (
+      registration.exactResumeMode === "custom" &&
+      typeof (client as { resumeExact?: unknown }).resumeExact !== "function"
+    ) {
+      throw new Error(`Provider "${backend}" requires but exposes no non-replacing resumeExact()`);
+    }
+    if (registration.continuity && registration.exactResumeMode !== "custom") {
+      throw new Error(`Provider "${backend}" continuity requires custom exact resume`);
+    }
+    const capturePolicy = registration.workspaceCapturePolicy({});
+    if ((backend === "selfhosted") !== (capturePolicy === null)) {
+      throw new Error(
+        `Provider "${backend}" must explicitly ${
+          backend === "selfhosted" ? "omit" : "declare"
+        } workspace capture`,
+      );
+    }
+    if (capturePolicy?.strategy === "portable_tar" && capturePolicy.liveInstance !== "preserved") {
+      throw new Error(`Provider "${backend}" portable tar capture must preserve its instance`);
+    }
   }
+}
+
+export function providerWorkspaceCapturePolicy(
+  backend: string,
+  state: unknown,
+): ProviderWorkspaceCapturePolicy | null {
+  const registration = PROVIDER_REGISTRY[backend as SandboxBackend];
+  return registration?.workspaceCapturePolicy(state) ?? null;
+}
+
+export function prepareProviderForTeardownAfterCapture(backend: string, session: unknown): void {
+  PROVIDER_REGISTRY[backend as SandboxBackend]?.prepareForTeardownAfterCapture?.(session);
 }
 
 // Boot-validate the registry once at module load: the descriptor-table self-
@@ -110,4 +166,10 @@ export function assertProviderRegistryInvariants(): void {
 // and the installed @openai/agents-extensions.
 assertProviderRegistryInvariants();
 
-export type { ProviderRegistration, ProviderConstructionContext } from "./types";
+export type {
+  ProviderRegistration,
+  ProviderConstructionContext,
+  ProviderExactResumeMode,
+  ProviderWorkspaceCapturePolicy,
+  ProviderWorkspaceCaptureTakeover,
+} from "./types";

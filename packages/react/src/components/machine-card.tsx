@@ -81,7 +81,7 @@ export function MachineCard({
         "og-root group relative flex flex-col gap-3 overflow-hidden rounded-og-lg border border-og-border",
         "bg-og-surface-1 p-4 shadow-og-sm transition-colors",
         openable &&
-          "cursor-pointer hover:border-og-border-strong focus-visible:border-og-accent/60 focus-visible:outline-none",
+          "cursor-pointer hover:border-og-border-strong focus-visible:border-og-accent/60 focus-visible:outline-hidden",
         machine.active && "border-og-accent/40",
         className,
       )}

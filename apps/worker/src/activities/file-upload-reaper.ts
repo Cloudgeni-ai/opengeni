@@ -1,10 +1,51 @@
-import { claimExpiredFileUploadCleanup, completeExpiredFileUploadCleanup } from "@opengeni/db";
+import {
+  claimDueTranscriptionRecordingObjectCleanup,
+  claimExpiredFileUploadCleanup,
+  completeDueTranscriptionRecordingObjectCleanup,
+  completeExpiredFileUploadCleanup,
+  purgeExpiredTranscriptionRecordings,
+} from "@opengeni/db";
 import type { ObjectStorage } from "@opengeni/storage";
-import type { ActivityServices } from "./types";
+import type { ControlActivityServices } from "./types";
 
 export const FILE_UPLOAD_CLEANUP_GRACE_MS = 60 * 60 * 1_000;
 export const FILE_UPLOAD_CLEANUP_CLAIM_TIMEOUT_MS = 10 * 60 * 1_000;
 export const FILE_UPLOAD_CLEANUP_BATCH_SIZE = 100;
+const SAFE_CLEANUP_ERROR_CATEGORIES = new Set([
+  "aborted",
+  "conflict",
+  "invalid_response",
+  "network",
+  "not_found",
+  "permission_denied",
+  "provider",
+  "timeout",
+  "unavailable",
+]);
+
+function cleanupErrorAttributes(error: unknown): {
+  errorCategory: string;
+  errorStatus?: number;
+} {
+  let errorCategory = "provider_error";
+  let errorStatus: number | undefined;
+  if (error && typeof error === "object") {
+    const rawCode = (error as { code?: unknown }).code;
+    if (typeof rawCode === "string" && SAFE_CLEANUP_ERROR_CATEGORIES.has(rawCode)) {
+      errorCategory = rawCode;
+    } else if (rawCode !== undefined) {
+      errorCategory = "unknown";
+    }
+    const rawStatus = Number(
+      (error as { status?: unknown; statusCode?: unknown }).status ??
+        (error as { statusCode?: unknown }).statusCode,
+    );
+    if (Number.isInteger(rawStatus) && rawStatus >= 100 && rawStatus <= 599) {
+      errorStatus = rawStatus;
+    }
+  }
+  return { errorCategory, ...(errorStatus === undefined ? {} : { errorStatus }) };
+}
 
 export type ReapExpiredFileUploadsResult = {
   claimed: number;
@@ -18,6 +59,11 @@ export type FileUploadReaperActivityOptions = {
   batchSize?: number;
   /** Failure-injection seam; production uses the configured provider delete. */
   deleteObject?: (storage: ObjectStorage, key: string) => Promise<void>;
+  claimFileUploads?: typeof claimExpiredFileUploadCleanup;
+  completeFileUpload?: typeof completeExpiredFileUploadCleanup;
+  claimTranscriptionObjects?: typeof claimDueTranscriptionRecordingObjectCleanup;
+  completeTranscriptionObject?: typeof completeDueTranscriptionRecordingObjectCleanup;
+  purgeTranscriptionRecordings?: typeof purgeExpiredTranscriptionRecordings;
 };
 
 /**
@@ -26,21 +72,36 @@ export type FileUploadReaperActivityOptions = {
  * settled terminally. One provider failure never aborts the rest of the batch.
  */
 export function createFileUploadReaperActivities(
-  services: () => Promise<ActivityServices>,
+  services: () => Promise<ControlActivityServices>,
   options: FileUploadReaperActivityOptions = {},
 ) {
   const graceMs = options.graceMs ?? FILE_UPLOAD_CLEANUP_GRACE_MS;
   const claimTimeoutMs = options.claimTimeoutMs ?? FILE_UPLOAD_CLEANUP_CLAIM_TIMEOUT_MS;
   const batchSize = options.batchSize ?? FILE_UPLOAD_CLEANUP_BATCH_SIZE;
   const deleteObject = options.deleteObject ?? (async (storage, key) => storage.deleteObject(key));
+  const claimFileUploads = options.claimFileUploads ?? claimExpiredFileUploadCleanup;
+  const completeFileUpload = options.completeFileUpload ?? completeExpiredFileUploadCleanup;
+  const claimTranscriptionObjects =
+    options.claimTranscriptionObjects ?? claimDueTranscriptionRecordingObjectCleanup;
+  const completeTranscriptionObject =
+    options.completeTranscriptionObject ?? completeDueTranscriptionRecordingObjectCleanup;
+  const purgeTranscriptionRecordings =
+    options.purgeTranscriptionRecordings ?? purgeExpiredTranscriptionRecordings;
 
   async function reapExpiredFileUploads(): Promise<ReapExpiredFileUploadsResult> {
     const { db, objectStorage, observability } = await services();
     if (!objectStorage) {
+      try {
+        await purgeTranscriptionRecordings(db, { graceMs, limit: batchSize });
+      } catch (error) {
+        observability.warn("expired transcription recording metadata purge failed", {
+          ...cleanupErrorAttributes(error),
+        });
+      }
       return { claimed: 0, deleted: 0, failed: 0 };
     }
 
-    const claims = await claimExpiredFileUploadCleanup(db, {
+    const claims = await claimFileUploads(db, {
       graceMs,
       claimTimeoutMs,
       limit: batchSize,
@@ -50,7 +111,7 @@ export function createFileUploadReaperActivities(
     for (const claim of claims) {
       try {
         await deleteObject(objectStorage, claim.objectKey);
-        const settled = await completeExpiredFileUploadCleanup(db, claim);
+        const settled = await completeFileUpload(db, claim);
         if (!settled) {
           throw new Error("cleanup claim no longer owns a reclaimable upload");
         }
@@ -61,18 +122,58 @@ export function createFileUploadReaperActivities(
           workspaceId: claim.workspaceId,
           uploadId: claim.uploadId,
           fileId: claim.fileId,
-          error: error instanceof Error ? error.message : String(error),
+          ...cleanupErrorAttributes(error),
         });
       }
     }
-    if (claims.length > 0) {
-      observability.info("expired file upload cleanup swept", {
-        claimed: claims.length,
-        deleted,
-        failed,
+    const recordingClaims = await claimTranscriptionObjects(db, {
+      graceMs,
+      claimTimeoutMs,
+      limit: batchSize,
+    });
+    for (const claim of recordingClaims) {
+      try {
+        await deleteObject(objectStorage, claim.objectKey);
+        const settled = await completeTranscriptionObject(db, claim);
+        if (!settled) {
+          throw new Error("cleanup claim no longer owns a transcription recording object");
+        }
+        deleted += 1;
+      } catch (error) {
+        failed += 1;
+        observability.warn(
+          "expired transcription recording object cleanup failed; claim remains reclaimable",
+          {
+            workspaceId: claim.workspaceId,
+            recordingId: claim.recordingId,
+            ...cleanupErrorAttributes(error),
+          },
+        );
+      }
+    }
+    let transcriptionRecordingsPurged = 0;
+    try {
+      transcriptionRecordingsPurged = await purgeTranscriptionRecordings(db, {
+        graceMs,
+        limit: batchSize,
+      });
+    } catch (error) {
+      observability.warn("expired transcription recording metadata purge failed", {
+        ...cleanupErrorAttributes(error),
       });
     }
-    return { claimed: claims.length, deleted, failed };
+    const claimed = claims.length + recordingClaims.length;
+    if (claimed > 0 || transcriptionRecordingsPurged > 0) {
+      observability.info("expired file upload cleanup swept", {
+        claimed,
+        deleted,
+        failed,
+        fileUploads: claims.length,
+        transcriptionRecordingObjects: recordingClaims.length,
+        transcriptionRecordingsPurged,
+      });
+    }
+    return { claimed, deleted, failed };
   }
 
   return { reapExpiredFileUploads };

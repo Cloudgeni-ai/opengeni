@@ -9,7 +9,11 @@ import {
   cancellableShellCommand,
   createTurnToolCancellationController,
 } from "../src/sandbox/turn-tool-cancellation";
-import { RoutingMutationOutcomeUnknownError } from "../src/sandbox/routing/routing-session";
+import { parseExecResponseBanner } from "../src/sandbox/exec-banner";
+import {
+  RoutingMutationOutcomeUnknownError,
+  RoutingSandboxSession,
+} from "../src/sandbox/routing/routing-session";
 import { createSandboxClientForBackend } from "../src/index";
 import { testSettings } from "@opengeni/testing";
 
@@ -429,6 +433,147 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     expect(retained).toBe(false);
   });
 
+  test("retries ambiguous process promotion on the exact route before finalization drains it", async () => {
+    const controller = createTurnToolCancellationController();
+    let providerCalls = 0;
+    let promotions = 0;
+    let controlPolls = 0;
+    let processAlive = true;
+    const retainedIds: string[] = [];
+    const backend = {
+      supportsPty: () => true,
+      execCommand: async (args: unknown) => {
+        const cmd =
+          args && typeof args === "object" && typeof (args as { cmd?: unknown }).cmd === "string"
+            ? ((args as { cmd: string }).cmd ?? "")
+            : "";
+        if (cmd.includes("command cat '/tmp/opengeni-turn-shell/")) {
+          return exited(0, "6200 6200\n");
+        }
+        if (cmd.includes("command kill -TERM")) {
+          processAlive = false;
+          return exited(0);
+        }
+        if (cmd.includes("command kill -0")) {
+          return exited(processAlive ? 75 : 0);
+        }
+        providerCalls += 1;
+        return running(34, "started");
+      },
+      writeStdin: async () => {
+        controlPolls += 1;
+        processAlive = false;
+        return exited(143);
+      },
+    };
+    const session = new RoutingSandboxSession({
+      defaultResolved: {
+        session: backend,
+        sandboxId: null,
+        kind: "modal",
+        activeEpoch: 0,
+      },
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({
+        session: backend,
+        sandboxId: null,
+        kind: "modal",
+      }),
+      beforeMutation: async () => "parent",
+      afterMutation: async ({ retainedProcess }) => {
+        promotions += 1;
+        retainedIds.push(retainedProcess!.id);
+        if (promotions === 1) throw new Error("promotion transaction lost");
+      },
+    });
+    const exec = functionTool("exec_command", async (_runContext, input) => {
+      return await session.execCommand(JSON.parse(input) as Record<string, unknown>);
+    });
+    const [wrappedExec] = controller.wrapTools([exec], session) as Array<
+      Extract<Tool<unknown>, { type: "function" }>
+    >;
+
+    const error = await wrappedExec!
+      .invoke(runContext, JSON.stringify({ cmd: "sleep 60" }))
+      .catch((caught) => caught);
+    expect(error).toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+    expect((error as RoutingMutationOutcomeUnknownError).retainedProcess).toEqual({
+      id: expect.any(String),
+      providerSessionId: 34,
+    });
+
+    controller.cancel(new Error("turn finalized"));
+    await controller.waitForQuiescence();
+
+    expect(providerCalls).toBe(1);
+    expect(promotions).toBe(2);
+    expect(new Set(retainedIds).size).toBe(1);
+    expect(controlPolls).toBe(1);
+    expect(session.hasRetainedProcess(34)).toBe(false);
+  });
+
+  test("lifecycle command finalization drains an exact process whose promotion was ambiguous", async () => {
+    const controller = createTurnToolCancellationController();
+    let providerMutationCalls = 0;
+    let promotions = 0;
+    let controlPolls = 0;
+    const retainedIds: string[] = [];
+    const backend = {
+      supportsPty: () => true,
+      execCommand: async (args: unknown) => {
+        const cmd =
+          args && typeof args === "object" && typeof (args as { cmd?: unknown }).cmd === "string"
+            ? ((args as { cmd: string }).cmd ?? "")
+            : "";
+        if (!cmd.includes("sleep 60")) return exited(0, "6200 6200\n");
+        providerMutationCalls += 1;
+        return running(35, "started");
+      },
+      writeStdin: async () => {
+        controlPolls += 1;
+        return exited(143);
+      },
+    };
+    const session = new RoutingSandboxSession({
+      defaultResolved: {
+        session: backend,
+        sandboxId: null,
+        kind: "modal",
+        activeEpoch: 0,
+      },
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({
+        session: backend,
+        sandboxId: null,
+        kind: "modal",
+      }),
+      beforeMutation: async () => "parent",
+      afterMutation: async ({ retainedProcess }) => {
+        promotions += 1;
+        retainedIds.push(retainedProcess!.id);
+        if (promotions === 1) throw new Error("promotion transaction lost");
+      },
+    });
+
+    const error = await controller
+      .runSandboxCommandStructured(session, { cmd: "sleep 60", yieldTimeMs: 100 })
+      .catch((caught) => caught);
+    expect(error).toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+    expect((error as RoutingMutationOutcomeUnknownError).retainedProcess).toEqual({
+      id: expect.any(String),
+      providerSessionId: 35,
+    });
+
+    controller.cancel(new Error("lifecycle request finalized"));
+    await controller.waitForQuiescence();
+
+    expect(providerMutationCalls).toBe(1);
+    expect(promotions).toBe(2);
+    expect(new Set(retainedIds).size).toBe(1);
+    expect(controlPolls).toBe(1);
+    expect(session.hasRetainedProcess(35)).toBe(false);
+  });
+
   test("retained-process terminal settlement failure keeps the cancellation fence closed", async () => {
     const abort = new AbortController();
     const controller = createTurnToolCancellationController(abort.signal);
@@ -464,18 +609,19 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     expect(rawWrites).toBe(0);
   });
 
-  test("abort waits for an exec invocation that has not yielded its provider session yet", async () => {
+  test("abort cancels an exec invocation that has not yielded its provider session yet", async () => {
     const abort = new AbortController();
     const controller = createTurnToolCancellationController(abort.signal);
-    let releaseExec!: (output: string) => void;
+    let rejectExec!: (error: Error) => void;
     let execStarted!: () => void;
     const started = new Promise<void>((resolve) => {
       execStarted = resolve;
     });
-    const delayedOutput = new Promise<string>((resolve) => {
-      releaseExec = resolve;
+    const delayedOutput = new Promise<string>((_resolve, reject) => {
+      rejectExec = reject;
     });
     let firstExec = true;
+    const cancellationCommands: string[] = [];
     const exec = functionTool("exec_command", async (_context, rawInput) => {
       const cmd = String((JSON.parse(rawInput) as { cmd?: unknown }).cmd);
       if (firstExec) {
@@ -483,26 +629,102 @@ describe("turn sandbox-tool physical cancellation fence", () => {
         execStarted();
         return await delayedOutput;
       }
-      if (cmd.includes("command cat '/tmp/opengeni-turn-shell/")) {
-        return exited(0, "4300 4300\n");
-      }
-      if (cmd.includes("command kill -0")) return exited(0);
+      cancellationCommands.push(cmd);
       return exited(0);
     });
     const write = functionTool("write_stdin", async () => exited(130));
-    const wrapped = controller.wrapTools([exec, write]) as Array<
-      Extract<Tool<unknown>, { type: "function" }>
-    >;
+    let providerCancellations = 0;
+    const wrapped = controller.wrapTools([exec, write], {
+      supportsPty: () => true,
+      cancelPendingExecCommand: async () => {
+        providerCancellations += 1;
+        rejectExec(new Error("Modal command-router transport closed"));
+      },
+    }) as Array<Extract<Tool<unknown>, { type: "function" }>>;
 
-    const invocation = wrapped[0]!.invoke(runContext, JSON.stringify({ cmd: "sleep 60" }));
+    const invocation = wrapped[0]!
+      .invoke(runContext, JSON.stringify({ cmd: "sleep 60" }))
+      .catch((error) => error);
+    await started;
+    abort.abort(new Error("steered"));
+    await controller.waitForQuiescence();
+
+    expect(await invocation).toBeInstanceOf(Error);
+    expect(providerCancellations).toBe(1);
+    expect(cancellationCommands).toHaveLength(1);
+    expect(cancellationCommands[0]).toContain(".cancelled");
+    expect(cancellationCommands[0]).toContain("command kill -TERM");
+    expect(cancellationCommands[0]).toContain("command kill -KILL");
+  });
+
+  test("abort also cancels a cleanup exec that stalls before provider yield", async () => {
+    const abort = new AbortController();
+    const controller = createTurnToolCancellationController(abort.signal);
+    let rejectOriginal!: (error: Error) => void;
+    let rejectCleanup!: (error: Error) => void;
+    let execStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      execStarted = resolve;
+    });
+    const original = new Promise<string>((_resolve, reject) => {
+      rejectOriginal = reject;
+    });
+    const cleanup = new Promise<string>((_resolve, reject) => {
+      rejectCleanup = reject;
+    });
+    let releaseCleanupCancellation!: () => void;
+    const cleanupCancellation = new Promise<void>((resolve) => {
+      releaseCleanupCancellation = resolve;
+    });
+    let markCleanupCancellationStarted!: () => void;
+    const cleanupCancellationStarted = new Promise<void>((resolve) => {
+      markCleanupCancellationStarted = resolve;
+    });
+    const cancellationCommands: string[] = [];
+    let execCalls = 0;
+    const exec = functionTool("exec_command", async (_context, rawInput) => {
+      execCalls += 1;
+      const cmd = String((JSON.parse(rawInput) as { cmd?: unknown }).cmd);
+      if (execCalls === 1) {
+        execStarted();
+        return await original;
+      }
+      cancellationCommands.push(cmd);
+      if (execCalls === 2) return await cleanup;
+      return exited(0);
+    });
+    const write = functionTool("write_stdin", async () => exited(130));
+    let providerCancellations = 0;
+    const wrapped = controller.wrapTools([exec, write], {
+      supportsPty: () => true,
+      cancelPendingExecCommand: async () => {
+        providerCancellations += 1;
+        if (providerCancellations === 1) {
+          rejectOriginal(new Error("original Modal command-router transport closed"));
+        } else if (providerCancellations === 2) {
+          rejectCleanup(new Error("cleanup Modal command-router transport closed"));
+          markCleanupCancellationStarted();
+          await cleanupCancellation;
+        }
+      },
+    }) as Array<Extract<Tool<unknown>, { type: "function" }>>;
+
+    const invocation = wrapped[0]!
+      .invoke(runContext, JSON.stringify({ cmd: "sleep 60" }))
+      .catch((error) => error);
     await started;
     abort.abort(new Error("steered"));
     const quiescence = controller.waitForQuiescence();
+    await cleanupCancellationStarted;
     expect(await pendingAfterMicrotasks(quiescence)).toBe(true);
-
-    releaseExec(running(9));
-    await invocation;
+    releaseCleanupCancellation();
     await quiescence;
+
+    expect(await invocation).toBeInstanceOf(Error);
+    expect(providerCancellations).toBe(2);
+    expect(cancellationCommands).toHaveLength(2);
+    expect(cancellationCommands[0]).toContain(".cancelled");
+    expect(cancellationCommands[1]).toContain(".cancelled");
   });
 
   test("matching lost-session banners unregister ordinary and cancellation-finalizer PTYs", async () => {
@@ -672,6 +894,11 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     const session = {
       supportsPty: () => true,
       exec: async (input: { cmd: string; tty?: boolean; yieldTimeMs?: number }) => {
+        if (input.cmd.includes(": >")) {
+          signals.push("TERM", "KILL");
+          processAlive = false;
+          return { exitCode: 0, output: "" };
+        }
         if (input.cmd.includes("command cat '/tmp/opengeni-turn-shell/")) {
           return { exitCode: 0, output: "4400 4400\n" };
         }
@@ -724,6 +951,11 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     const session = {
       supportsPty: () => true,
       exec: async (input: { cmd: string; tty?: boolean; yieldTimeMs?: number }) => {
+        if (input.cmd.includes(": >")) {
+          signals.push("TERM", "KILL");
+          processAlive = false;
+          return { exitCode: 0, output: "" };
+        }
         if (input.cmd.includes("command cat '/tmp/opengeni-turn-shell/")) {
           return { exitCode: 0, output: "4500 4500\n" };
         }
@@ -848,7 +1080,7 @@ describe("turn sandbox-tool cancellation against a real local process", () => {
     else process.env.OPENAI_AGENTS_PYTHON = originalPython;
   });
 
-  test.skipIf(Bun.which("git") === null)(
+  test.skipIf(process.platform !== "linux" || Bun.which("git") === null)(
     "explicit non-TTY execution exposes pipe descriptors and bypasses the Git pager",
     async () => {
       const python = Bun.which("python3");
@@ -875,9 +1107,14 @@ describe("turn sandbox-tool cancellation against a real local process", () => {
         (tool): tool is Extract<Tool<unknown>, { type: "function" }> =>
           tool.type === "function" && tool.name === "exec_command",
       );
+      const write = tools.find(
+        (tool): tool is Extract<Tool<unknown>, { type: "function" }> =>
+          tool.type === "function" && tool.name === "write_stdin",
+      );
       expect(exec).toBeDefined();
+      expect(write).toBeDefined();
 
-      const output = await exec!.invoke(
+      let current = await exec!.invoke(
         runContext,
         JSON.stringify({
           tty: false,
@@ -898,7 +1135,23 @@ describe("turn sandbox-tool cancellation against a real local process", () => {
           ].join("\n"),
         }),
       );
+      let output = current;
+      for (let attempt = 0; attempt < 120; attempt += 1) {
+        const banner = parseExecResponseBanner(current);
+        if (banner.kind !== "running") break;
+        current = await write!.invoke(
+          runContext,
+          JSON.stringify({
+            session_id: banner.sessionId,
+            chars: "",
+            yield_time_ms: 250,
+            max_output_tokens: 4_096,
+          }),
+        );
+        output += `\n${current}`;
+      }
 
+      expect(parseExecResponseBanner(current)).toEqual({ kind: "exited", exitCode: 0 });
       expect(output).toContain("stdin=pipe stdout=pipe stderr=pipe");
       expect(output).toContain("pager=not-invoked");
       expect(existsSync(pagerMarker)).toBe(false);

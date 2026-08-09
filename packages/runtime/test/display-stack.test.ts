@@ -697,6 +697,44 @@ describe("P4.1 ensureDisplayStack — command sequence + flock-idempotency (fake
     expect(events.indexOf("second:work")).toBeGreaterThan(events.indexOf("first:cleanup"));
   });
 
+  test("(8a3) provider-specific Runloop and Blaxel identities share the physical fence", async () => {
+    for (const [field, providerId] of [
+      ["devboxId", "stable-runloop-display-box"],
+      ["sandboxIdentity", "stable-blaxel-display-box:created:workspace"],
+    ] as const) {
+      const events: string[] = [];
+      let oldProcessAlive = true;
+      const makeSession = (wrapper: "first" | "second") => ({
+        state: { [field]: providerId },
+        exec: async ({ cmd, signal }: { cmd: string; signal?: AbortSignal }) => {
+          if (cmd.includes("OPENGENI_DISPLAY_CLEANUP")) {
+            oldProcessAlive = false;
+            events.push(`${wrapper}:cleanup`);
+            return { output: "OPENGENI_DISPLAY_CLEANUP status=stopped", exitCode: 0 };
+          }
+          events.push(`${wrapper}:work`);
+          if (wrapper === "first") {
+            signal?.addEventListener("abort", () => events.push("first:aborted"), { once: true });
+            return await new Promise<{ output: string; exitCode: number }>(() => undefined);
+          }
+          expect(oldProcessAlive).toBe(false);
+          return {
+            output: `OPENGENI_DESKTOP_UP port=${STREAM_PORT} geometry=1280x800 dpi=96`,
+            exitCode: 0,
+          };
+        },
+      });
+
+      await expect(
+        ensureDisplayStack(makeSession("first"), { timeoutMs: 30 }),
+      ).rejects.toMatchObject({ stage: "timeout" });
+      await ensureDisplayStack(makeSession("second"), { timeoutMs: 500 });
+
+      expect(events).toContain("first:cleanup");
+      expect(events.indexOf("second:work")).toBeGreaterThan(events.indexOf("first:cleanup"));
+    }
+  });
+
   test("(8b) a wall-clock jump cannot extend the monotonic provider deadline", async () => {
     const originalDateNow = Date.now;
     const session = {
@@ -714,7 +752,8 @@ describe("P4.1 ensureDisplayStack — command sequence + flock-idempotency (fake
     expect(performance.now() - started).toBeLessThan(500);
   });
 
-  test("(8c) the in-box deadline kills a waiting flock tree before it can launch later", async () => {
+  // oxfmt-ignore
+  test.skipIf(process.platform !== "linux" || Bun.which("flock") === null)("(8c) the in-box deadline kills a waiting flock tree before it can launch later", async () => {
     const root = await mkdtemp(join(tmpdir(), "display-stack-timeout-"));
     const bin = join(root, "bin");
     const lock = join(root, "outer.lock");

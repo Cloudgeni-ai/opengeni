@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
   CODEX_TRANSPORT_ERROR_HEADER,
+  CODEX_REQUEST_BODY_NORMALIZED_HEADER,
+  CODEX_REQUEST_MODEL_HEADER,
   CODEX_RESPONSE_TIMEOUT_ERROR_TYPE,
   type CodexModelRequestEvent,
   type CodexRequestContext,
@@ -100,6 +102,46 @@ describe("Codex encrypted artifact rejection classifier", () => {
 });
 
 describe("codexSubscriptionFetch", () => {
+  test("CODEX_DEBUG request logs omit rewritten URLs, query values, and body keys", async () => {
+    const sentinel = "SECRET_SENTINEL_123_query_and_body_key";
+    const { base } = baseRecorder();
+    const errors: unknown[][] = [];
+    const originalDebug = process.env.CODEX_DEBUG;
+    const originalError = console.error;
+    process.env.CODEX_DEBUG = "1";
+    console.error = (...args: unknown[]) => errors.push(args);
+    try {
+      const url = new URL("https://chatgpt.com/backend-api/responses");
+      url.searchParams.set("credential", sentinel);
+      await codexRequestStorage.run(ctx(), () =>
+        codexSubscriptionFetch(base)(url, {
+          method: "POST",
+          body: JSON.stringify({
+            model: "gpt-5.6-sol",
+            stream: true,
+            [sentinel]: "exact internal request content",
+          }),
+        }),
+      );
+    } finally {
+      console.error = originalError;
+      if (originalDebug === undefined) delete process.env.CODEX_DEBUG;
+      else process.env.CODEX_DEBUG = originalDebug;
+    }
+
+    expect(errors[0]).toEqual([
+      "[codex-debug] request dispatched",
+      {
+        method: "POST",
+        origin: "codex-subscription",
+        route: "codex_responses",
+        stream: true,
+      },
+    ]);
+    expect(JSON.stringify(errors)).not.toContain(sentinel);
+    expect(JSON.stringify(errors)).not.toContain("chatgpt.com");
+  });
+
   test("rewrites /responses, swaps headers, normalizes the body", async () => {
     const { base, captures } = baseRecorder();
     const fetchImpl = codexSubscriptionFetch(base);
@@ -133,6 +175,22 @@ describe("codexSubscriptionFetch", () => {
     expect("max_output_tokens" in sent).toBe(false);
     expect(sent.include).toEqual(["reasoning.encrypted_content"]);
     expect("id" in sent.input[0]).toBe(false);
+  });
+
+  test("rejects a malformed model request before network I/O", async () => {
+    let calls = 0;
+    await expect(
+      codexRequestStorage.run(ctx(), () =>
+        codexSubscriptionFetch(async () => {
+          calls += 1;
+          return new Response("{}");
+        })("https://chatgpt.com/backend-api/responses", {
+          method: "POST",
+          body: "{not-json",
+        }),
+      ),
+    ).rejects.toThrow("Model request could not be prepared");
+    expect(calls).toBe(0);
   });
 
   test("reports only the exact opaque artifacts on the normalized wire request", async () => {
@@ -271,6 +329,49 @@ describe("codexSubscriptionFetch", () => {
       new Headers(captures[1]?.init?.headers).get("idempotency-key"),
     );
     expect(res.status).toBe(200);
+  });
+
+  test("replays a pristine streamed JSON body on the 401 refresh retry", async () => {
+    const bodies: string[] = [];
+    let calls = 0;
+    const base: FetchLike = async (_input, init) => {
+      calls += 1;
+      bodies.push(await new Response(init?.body).text());
+      return new Response(
+        'data: {"type":"response.completed","response":{"id":"r1","status":"completed","output":[]}}\n\n',
+        {
+          status: calls === 1 ? 401 : 200,
+          headers: { "content-type": "text/event-stream" },
+        },
+      );
+    };
+    const expected = JSON.stringify({ model: "gpt-5.6-sol", stream: true, input: [] });
+    const bytes = new TextEncoder().encode(expected);
+    const factory = () =>
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(bytes.slice());
+          controller.close();
+        },
+      });
+    const replayFactory = Symbol.for("opengeni.replayable-request-body-factory");
+    const init = {
+      method: "POST",
+      headers: {
+        [CODEX_REQUEST_BODY_NORMALIZED_HEADER]: "1",
+        [CODEX_REQUEST_MODEL_HEADER]: "gpt-5.6-sol",
+      },
+      body: factory(),
+      [replayFactory]: factory,
+    } as RequestInit & { [replayFactory]: () => ReadableStream<Uint8Array> };
+
+    const response = await codexRequestStorage.run(ctx(), () =>
+      codexSubscriptionFetch(base)("https://chatgpt.com/backend-api/responses", init),
+    );
+
+    expect(response.status).toBe(200);
+    expect(calls).toBe(2);
+    expect(bodies).toEqual([expected, expected]);
   });
 
   test("a second 401 is returned after exactly one refresh and two requests", async () => {
@@ -688,6 +789,45 @@ describe("codexSubscriptionFetch", () => {
     });
   });
 
+  test("slow first-byte audit persistence cannot manufacture an idle timeout", async () => {
+    const events: CodexModelRequestEvent[] = [];
+    const response = await codexRequestStorage.run(
+      ctx({
+        responseTimeoutPolicy: {
+          headersTimeoutMs: 100,
+          streamIdleTimeoutMs: 10,
+          wholeRequestTimeoutMs: 500,
+          noByteRetries: 0,
+          retryBackoffMs: 0,
+        },
+        onModelRequestEvent: async (event) => {
+          events.push(event);
+          if (event.phase === "first_byte") {
+            await new Promise((resolve) => setTimeout(resolve, 40));
+          }
+        },
+      }),
+      () =>
+        codexSubscriptionFetch(
+          async () =>
+            new Response(
+              'data: {"type":"response.completed","response":{"id":"r1","status":"completed","output":[]}}\n\n',
+              { status: 200 },
+            ),
+        )("https://chatgpt.com/backend-api/responses", {
+          method: "POST",
+          body: JSON.stringify({ stream: true }),
+        }),
+    );
+    expect(await response.text()).toContain("response.completed");
+    expect(events.map((event) => event.phase)).toEqual([
+      "started",
+      "headers",
+      "first_byte",
+      "completed",
+    ]);
+  });
+
   test("whole-request deadline wins over a longer stream-idle deadline", async () => {
     const events: CodexModelRequestEvent[] = [];
     const response = await codexRequestStorage.run(
@@ -765,8 +905,8 @@ describe("codexSubscriptionFetch", () => {
     expect(observed).toBe(abortReason);
   });
 
-  // A realistic codex stream: the terminal response.completed leaves output EMPTY,
-  // and the assistant message arrives via output_item.done (the quirk we repair).
+  // A realistic stream: response.completed leaves output empty and the assistant
+  // message arrives via output_item.done. The model reducer owns reconstruction.
   const CODEX_SSE = [
     'data: {"type":"response.created","response":{"id":"r1"}}',
     'data: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]}}',
@@ -1016,7 +1156,7 @@ describe("codexSubscriptionFetch", () => {
     expect(body).not.toContain("nested");
   });
 
-  test("streaming caller: stream is passed through with the terminal event's empty output repaired", async () => {
+  test("streaming caller: successful bytes pass through for model-level reconstruction", async () => {
     const fetchImpl = codexSubscriptionFetch(codexBase);
     const res = await codexRequestStorage.run(ctx(), () =>
       fetchImpl("https://chatgpt.com/backend-api/responses", {
@@ -1037,8 +1177,8 @@ describe("codexSubscriptionFetch", () => {
       .filter(Boolean)
       .map((d) => JSON.parse(d) as { type?: string; response?: { output?: unknown[] } })
       .find((e) => e.type === "response.completed");
-    expect(terminal?.response?.output).toHaveLength(1); // injected; the SDK parser now sees the message
-    expect(text).toContain("response.output_item.done"); // intermediate events still pass through for incremental UI
+    expect(terminal?.response?.output).toHaveLength(0);
+    expect(text).toBe(CODEX_SSE);
   });
 
   test.each([
@@ -1058,6 +1198,7 @@ describe("codexSubscriptionFetch", () => {
       },
       502,
       "upstream_failed",
+      "provider secret failure detail",
     ],
     [
       "nested response.error",
@@ -1075,6 +1216,7 @@ describe("codexSubscriptionFetch", () => {
       },
       502,
       "nested_stream_error",
+      "provider secret nested detail",
     ],
     [
       "top-level error",
@@ -1085,6 +1227,7 @@ describe("codexSubscriptionFetch", () => {
       },
       502,
       "service_unavailable",
+      "provider secret top-level detail",
     ],
     [
       "response.incomplete",
@@ -1098,6 +1241,7 @@ describe("codexSubscriptionFetch", () => {
       },
       502,
       "response_incomplete",
+      "The Codex response was incomplete (max_output_tokens)",
     ],
     [
       "non-retryable failed request",
@@ -1114,10 +1258,11 @@ describe("codexSubscriptionFetch", () => {
       },
       400,
       "context_length_exceeded",
+      "provider echoed private input",
     ],
   ] as const)(
-    "streaming caller: %s becomes a bounded marked provider failure without replay",
-    async (_name, event, expectedStatus, expectedCode) => {
+    "streaming caller: %s preserves the bounded exact provider failure without replay",
+    async (_name, event, expectedStatus, expectedCode, expectedMessage) => {
       let calls = 0;
       const response = await codexRequestStorage.run(ctx(), () =>
         codexSubscriptionFetch(async () => {
@@ -1151,8 +1296,8 @@ describe("codexSubscriptionFetch", () => {
         code: expectedCode,
       });
       expect(isCodexTransportError(observed)).toBe(true);
-      expect(String((observed as Error).message)).not.toContain("provider secret");
-      expect(JSON.stringify(observed)).not.toContain("provider secret");
+      expect(String((observed as Error).message)).toBe(expectedMessage);
+      expect(JSON.stringify(observed)).toContain(expectedMessage);
       expect(Buffer.byteLength(JSON.stringify(observed), "utf8")).toBeLessThan(4 * 1024);
       expect(calls).toBe(1);
     },
@@ -1220,7 +1365,7 @@ describe("codexSubscriptionFetch", () => {
     ["CRLF", "\r\n"],
     ["bare CR", "\r"],
   ] as const)(
-    "streaming caller: repairs %s SSE across one-byte chunk boundaries",
+    "streaming caller: preserves %s SSE across one-byte chunk boundaries",
     async (_name, lineEnding) => {
       const source = [
         ": keepalive",
@@ -1256,8 +1401,8 @@ describe("codexSubscriptionFetch", () => {
         }),
       );
 
-      const repaired = await response.text();
-      const terminal = repaired
+      const validated = await response.text();
+      const terminal = validated
         .replaceAll("\r\n", "\n")
         .replaceAll("\r", "\n")
         .split("\n\n")
@@ -1277,9 +1422,10 @@ describe("codexSubscriptionFetch", () => {
             },
         )
         .find((event) => event.type === "response.completed");
-      expect(terminal?.response?.output).toHaveLength(1);
-      expect(JSON.stringify(terminal?.response?.output)).toContain("hi 🙂");
-      expect(repaired).toContain(`${lineEnding}${lineEnding}`);
+      expect(terminal?.response?.output).toHaveLength(0);
+      expect(validated).toBe(source);
+      expect(validated).toContain("hi 🙂");
+      expect(validated).toContain(`${lineEnding}${lineEnding}`);
     },
   );
 
@@ -1345,6 +1491,37 @@ describe("codexSubscriptionFetch", () => {
     expect(res.headers.get("x-should-retry")).toBeNull(); // only usage caps are pinned non-retryable
     expect(JSON.parse(await res.text())).toEqual({
       error: { type: "server_error", message: "boom" },
+    });
+  });
+
+  test("bounds oversized provider error bodies and cancels the remainder", async () => {
+    let cancelled = false;
+    const base: FetchLike = async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new Uint8Array(128 * 1024).fill(97));
+          },
+          cancel() {
+            cancelled = true;
+          },
+        }),
+        { status: 500, headers: { "content-type": "text/plain" } },
+      );
+    const res = await codexRequestStorage.run(ctx(), () =>
+      codexSubscriptionFetch(base)("https://chatgpt.com/backend-api/responses", {
+        method: "POST",
+        body: JSON.stringify({ model: "gpt-5.6-sol", stream: true, input: [] }),
+      }),
+    );
+    expect(cancelled).toBe(true);
+    expect(res.headers.get("x-opengeni-provider-error-truncated")).toBe("1");
+    expect(await res.json()).toEqual({
+      error: {
+        type: "provider_error_body_too_large",
+        code: "provider_error_body_too_large",
+        message: "The provider returned an error body larger than 65536 bytes",
+      },
     });
   });
 

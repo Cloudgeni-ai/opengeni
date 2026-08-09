@@ -416,8 +416,8 @@ export function TurnSummary({
               // as a turn landmark above any nested cluster rows it groups.
               "group flex w-full items-center rounded-og-sm text-left transition-colors",
               // A folded turn is a touch target on coarse pointers: grow the row so it
-              // clears the 40px minimum without disturbing the calm desktop rhythm.
-              "pointer-coarse:py-2.5",
+              // clears the 44px minimum without disturbing the calm desktop rhythm.
+              "pointer-coarse:min-h-11 pointer-coarse:py-2.5",
               bare
                 ? "gap-2 px-1.5 py-1.5 text-og-sm text-og-fg-muted"
                 : "-mx-2 gap-2.5 px-2 py-1.5 text-og-base text-og-fg-muted",
@@ -437,8 +437,8 @@ export function TurnSummary({
               className={cn(
                 "size-3.5 shrink-0 text-og-fg-subtle transition-transform ease-og-in-out group-data-[state=open]:rotate-90",
                 settlePhase
-                  ? "duration-[var(--og-duration-disclose-settle)]"
-                  : "duration-[var(--og-duration-disclose)]",
+                  ? "duration-[var(--_og-duration-disclose-settle)]"
+                  : "duration-[var(--_og-duration-disclose)]",
               )}
             />
             {/* Completion is the quiet default and needs no repeated glyph. Failed,
@@ -646,8 +646,8 @@ const BUILT_IN_TURN_SUMMARY_FACETS: readonly TurnSummaryFacet[] = Object.freeze(
               contextCompactionCount === 1 ? "compacted" : `${contextCompactionCount} compacts`,
             ariaLabel:
               contextCompactionCount === 1
-                ? "Conversation memory compacted"
-                : `${contextCompactionCount} conversation memory compactions`,
+                ? "Conversation history compacted"
+                : `${contextCompactionCount} conversation history compactions`,
           }
         : null,
   },

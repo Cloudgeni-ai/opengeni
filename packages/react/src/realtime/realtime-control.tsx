@@ -297,6 +297,13 @@ export function SessionRealtimeControl(props: {
   onRealtimeAutostartConsumed?: (() => void) | undefined;
   /** Host hides dictate (and can choreograph layout) while realtime voice is live. */
   onVoiceActiveChange?: ((active: boolean) => void) | undefined;
+  /**
+   * `split` attaches the model chevron at every breakpoint (public default).
+   * `split-desktop` hides it below `sm` when the host owns mobile selection.
+   * Inside a container-responsive Composer.Root, `sm` follows that composer.
+   * `none` never attaches a model menu to the bar button.
+   */
+  modelMenu?: "split" | "split-desktop" | "none" | undefined;
   /** Deterministic browser-test/demo seam. Production hosts should use the SDK default. */
   controllerFactory?: SessionRealtimeControllerFactory | undefined;
 }) {
@@ -365,6 +372,7 @@ export function SessionRealtimeControl(props: {
       admissionBlocker={realtime.admissionBlocker}
       modelAvailable={selectedModel.available}
       menuSide="top"
+      modelMenu={props.modelMenu ?? "split"}
       audioRef={realtime.audioRef}
       selectedModel={selectedModel}
       models={selection.models}
@@ -475,6 +483,7 @@ export function NewSessionRealtimeControl(props: {
   /**
    * `split` attaches the model chevron at every breakpoint (public default).
    * `split-desktop` hides it below `sm` when the host owns mobile selection (e.g. “+”).
+   * Inside a container-responsive Composer.Root, `sm` follows that composer.
    * `none` never attaches a model menu to the bar button.
    */
   modelMenu?: "split" | "split-desktop" | "none" | undefined;
@@ -556,6 +565,7 @@ export function RealtimeVoiceControl(props: {
   /**
    * `split` = start + model chevron at every breakpoint (public SDK default).
    * `split-desktop` = chevron from `sm` up; below that the host owns selection.
+   * Inside a container-responsive Composer.Root, `sm` follows that composer.
    * `none` = start button only.
    */
   modelMenu?: "split" | "split-desktop" | "none" | undefined;
@@ -632,7 +642,8 @@ export function RealtimeVoiceControl(props: {
       role="group"
       aria-label="Realtime voice"
       data-picker-side={props.menuSide ?? "top"}
-      className="inline-flex shrink-0 items-center"
+      data-model-menu={modelMenu}
+      className="og-realtime-control inline-flex shrink-0 items-center"
     >
       <audio ref={props.audioRef} autoPlay className="hidden" aria-hidden="true" />
       <RealtimeComposerGlow phase={status.phase} reduceMotion={reduceMotion === true} />
@@ -719,7 +730,7 @@ export function RealtimeVoiceControl(props: {
             // Match transcription mic: ghost icon when idle; filled only when live.
             // Public contract: coarse pointers keep a 44px target; split menu uses
             // left-only rounding at `sm+` where the chevron attaches.
-            "relative inline-flex size-8 items-center justify-center outline-none",
+            "og-realtime-primary relative inline-flex size-8 items-center justify-center outline-hidden",
             "rounded-og-md transition-[background-color,border-color,color,box-shadow] duration-200 ease-og-out",
             "focus-visible:z-10 focus-visible:ring-2 focus-visible:ring-og-accent/45",
             "disabled:cursor-not-allowed disabled:opacity-45 pointer-coarse:size-11",
@@ -746,11 +757,11 @@ export function RealtimeVoiceControl(props: {
                 title={`Voice model: ${selectedModel.label}`}
                 disabled={props.selectionDisabled}
                 className={cn(
-                  // ≥24px wide so WCAG 2.2 target-size passes when the chevron is shown.
-                  "inline-flex h-8 w-6 items-center justify-center rounded-r-og-md outline-none",
+                  // Keep the split trigger compact on desktop while preserving a
+                  // full 44px mobile target independent of pointer-media support.
+                  "og-realtime-model-trigger inline-flex h-11 w-11 items-center justify-center rounded-r-og-md outline-hidden sm:h-8 sm:w-6",
                   "transition-[background-color,border-color,color] duration-200 ease-og-out",
                   "focus-visible:z-10 focus-visible:ring-2 focus-visible:ring-og-accent/45",
-                  "pointer-coarse:h-11 pointer-coarse:w-7",
                   desktopOnlyModelMenu && "hidden sm:inline-flex",
                   voiceChevronTone(status.phase),
                 )}
@@ -763,7 +774,7 @@ export function RealtimeVoiceControl(props: {
               align="end"
               sideOffset={8}
               collisionPadding={12}
-              className="flex w-72 max-h-[min(20rem,var(--radix-dropdown-menu-content-available-height))] flex-col overflow-hidden rounded-xl border-border bg-surface p-1.5 shadow-xl"
+              className="og-realtime-menu flex w-72 max-h-[min(20rem,var(--radix-dropdown-menu-content-available-height))] flex-col overflow-hidden rounded-xl border-border bg-surface p-1.5 shadow-xl"
               onCloseAutoFocus={(event) => event.preventDefault()}
             >
               <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
@@ -931,7 +942,7 @@ function RealtimeMuteButton(props: {
       {...(props.reduceMotion ? {} : { whileTap: { scale: 0.92 } })}
       onClick={props.onToggle}
       className={cn(
-        "inline-flex size-8 shrink-0 items-center justify-center rounded-og-md outline-none",
+        "inline-flex size-8 shrink-0 items-center justify-center rounded-og-md outline-hidden",
         "transition-[background-color,border-color,color] duration-150 ease-og-out",
         "focus-visible:ring-2 focus-visible:ring-og-accent/45 pointer-coarse:size-11",
         props.muted

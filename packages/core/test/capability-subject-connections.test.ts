@@ -18,7 +18,12 @@ import {
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
-import { applyCapabilityEnablement, buildCapabilityCatalog, enableCapability } from "../src";
+import {
+  applyCapabilityEnablement,
+  buildCapabilityCatalog,
+  codexAppsCatalogItem,
+  enableCapability,
+} from "../src";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -93,6 +98,33 @@ async function createMcpCapability(
 }
 
 describe("subject-owned capability connection references", () => {
+  test("projects Codex Apps with truthful designation state without generic built-in widening", () => {
+    const availableItem = codexAppsCatalogItem(true);
+    expect(availableItem).toMatchObject({
+      id: "mcp:codex_apps",
+      surfaceType: "codex_apps",
+      enabled: true,
+      runtime: { available: true, mcpServerId: "codex_apps" },
+      enabledReason: "designated Apps credential",
+    });
+    expect(applyCapabilityEnablement(availableItem, undefined, new Set())).toMatchObject({
+      enabled: true,
+      enabledReason: "designated Apps credential",
+    });
+
+    const unavailableItem = codexAppsCatalogItem(false);
+    expect(unavailableItem).toMatchObject({
+      enabled: false,
+      enabledReason: "no active Apps designation",
+      runtime: { available: false, notes: expect.stringContaining("active Codex Apps credential") },
+    });
+    expect(unavailableItem.runtime.mcpServerId).toBeUndefined();
+    expect(applyCapabilityEnablement(unavailableItem, undefined, new Set())).toMatchObject({
+      enabled: false,
+      enabledReason: "no active Apps designation",
+    });
+  });
+
   test("does not publish Personal Slack as a built-in catalog capability", async () => {
     const source = await Bun.file(new URL("../src/domain/capabilities.ts", import.meta.url)).text();
     expect(source).not.toContain('id: "mcp:personal-slack"');

@@ -16,6 +16,8 @@ import {
   WorkspaceCaptureManifest,
   WorkspaceRevisionCapturedPayload,
   WorkspaceRevisionDegradedPayload,
+  type WorkspaceCaptureFile,
+  type WorkspaceCaptureRepo,
 } from "@opengeni/contracts";
 import type { ObjectStorage } from "@opengeni/storage";
 import { ChannelAUnavailableError, type ChannelASession } from "@opengeni/runtime/sandbox";
@@ -23,6 +25,7 @@ import {
   blobKey,
   BoxExitingError,
   captureWorkspaceRevision,
+  changeFingerprint,
   isBoxExitingError,
   isUnderResidueDir,
   joinRepoPath,
@@ -68,6 +71,49 @@ const forbiddenDb = new Proxy(
   },
 ) as unknown as Database;
 const dummySession = {} as ChannelASession;
+
+function captureRepo(overrides: Partial<WorkspaceCaptureRepo> = {}): WorkspaceCaptureRepo {
+  return {
+    root: "",
+    head: "feature",
+    detached: false,
+    upstream: "origin/feature",
+    ahead: 0,
+    behind: 0,
+    status: [],
+    diff: [],
+    branchDiff: [],
+    ...overrides,
+  };
+}
+
+function committedBranchDiff(
+  text = "new",
+): NonNullable<WorkspaceCaptureRepo["branchDiff"]>[number] {
+  return {
+    path: "src/app.ts",
+    oldPath: null,
+    status: "modified",
+    isBinary: false,
+    isImage: false,
+    additions: 1,
+    deletions: 1,
+    hunks: [
+      {
+        oldStart: 1,
+        oldLines: 1,
+        newStart: 1,
+        newLines: 1,
+        header: "@@ -1 +1 @@",
+        lines: [
+          { type: "del", oldNo: 1, newNo: null, text: "old" },
+          { type: "add", oldNo: null, newNo: 1, text },
+        ],
+      },
+    ],
+    truncated: false,
+  };
+}
 
 function baseInput() {
   return {
@@ -242,7 +288,30 @@ describe("workspace-capture — repository read authority", () => {
       "api",
     );
 
+    expect(result).toEqual({ complete: true, status, diff, branchDiff: diff });
+  });
+
+  test("branch comparison failure remains additive to an authoritative working-tree capture", async () => {
+    const diff = { files: [], revision: 4 };
+    const fromRefs: Array<string | undefined> = [];
+    const result = await readCaptureRepository(
+      {
+        gitStatus: async () => status,
+        gitDiff: (_request) => {
+          fromRefs.push(_request.fromRef);
+          if (_request.fromRef === "origin/HEAD") {
+            // A host adapter can throw before returning a promise. This must not
+            // turn a valid working-tree capture into a degraded revision.
+            throw new Error("origin/HEAD is not configured");
+          }
+          return Promise.resolve(diff);
+        },
+      },
+      "api",
+    );
+
     expect(result).toEqual({ complete: true, status, diff });
+    expect(fromRefs).toEqual(["HEAD", "origin/HEAD"]);
   });
 });
 
@@ -255,6 +324,46 @@ describe("workspace-capture — path & key helpers", () => {
   });
   test("blobKey is content-addressed under the session prefix", () => {
     expect(blobKey("ws", "sess", "abc123")).toBe("workspace-captures/ws/sess/blobs/abc123");
+  });
+});
+
+describe("workspace-capture — durable change fingerprint", () => {
+  const noFiles: WorkspaceCaptureFile[] = [];
+
+  test("a committed-only branch diff cannot deduplicate against the prior clean revision", () => {
+    const cleanFingerprint = changeFingerprint([captureRepo()], noFiles);
+    const committedFingerprint = changeFingerprint(
+      [captureRepo({ ahead: 1, branchDiff: [committedBranchDiff()] })],
+      noFiles,
+    );
+
+    expect(committedFingerprint).not.toBe(cleanFingerprint);
+    expect(
+      changeFingerprint(
+        [captureRepo({ ahead: 1, branchDiff: [committedBranchDiff("newer")] })],
+        noFiles,
+      ),
+    ).not.toBe(committedFingerprint);
+    expect(
+      changeFingerprint([captureRepo({ ahead: 2, branchDiff: [committedBranchDiff()] })], noFiles),
+    ).not.toBe(committedFingerprint);
+  });
+
+  test("identical clean and committed states remain order-independent and empty-turn stable", () => {
+    expect(changeFingerprint([captureRepo()], noFiles)).toBe(
+      changeFingerprint([captureRepo()], noFiles),
+    );
+
+    const first = captureRepo({ ahead: 1, branchDiff: [committedBranchDiff()] });
+    const second = captureRepo({
+      root: "packages/web",
+      ahead: 1,
+      branchDiff: [{ ...committedBranchDiff(), path: "src/web.ts" }],
+    });
+
+    expect(changeFingerprint([first, second], noFiles)).toBe(
+      changeFingerprint([second, first], noFiles),
+    );
   });
 });
 

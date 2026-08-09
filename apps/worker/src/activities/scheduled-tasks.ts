@@ -23,6 +23,7 @@ import {
   isCodexBilledTurn,
   markScheduledTaskRunFailedIfQueued,
   recordUsageEvent,
+  requireScheduledTaskTargetInTransaction,
   requireSession,
   setTemporalWorkflowId,
   settleScheduledTaskRunInTransaction,
@@ -40,12 +41,12 @@ import {
 } from "./common";
 import { withFirstPartyTools } from "./goals";
 import type {
-  ActivityServices,
+  ControlActivityServices,
   DispatchScheduledTaskRunInput,
   DispatchScheduledTaskRunResult,
 } from "./types";
 
-export function createScheduledTaskActivities(services: () => Promise<ActivityServices>) {
+export function createScheduledTaskActivities(services: () => Promise<ControlActivityServices>) {
   return {
     dispatchScheduledTaskRun: async (
       input: DispatchScheduledTaskRunInput,
@@ -183,7 +184,15 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
         // Every dispatch carries the first-party MCP server; runtime visibility
         // still follows the session's exact selection and authorization.
         const taskTools = withFirstPartyTools(settings, task.agentConfig.tools);
-        if (task.runMode === "new_session_per_run" || !task.reusableSessionId) {
+        const existingSessionId =
+          task.runMode === "existing_session" ? task.targetSessionId : task.reusableSessionId;
+        if (task.runMode === "existing_session" && !existingSessionId) {
+          throw new Error("scheduled task target session is unavailable");
+        }
+        if (
+          task.runMode === "new_session_per_run" ||
+          (task.runMode === "reusable_session" && !existingSessionId)
+        ) {
           // The FK on scheduled_tasks.variable_set_id is ON DELETE RESTRICT, so
           // an attached variableSet must still exist here; fail closed if not.
           const variableSet = task.variableSetId
@@ -369,7 +378,7 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
             workflowWakeRevision: scheduledUpdate.workflowWakeRevision,
           };
         } else {
-          const session = await requireSession(db, task.workspaceId, task.reusableSessionId);
+          const session = await requireSession(db, task.workspaceId, existingSessionId!);
           // A user-cancelled (terminal) reusable session must not be revived and
           // re-billed on the next fire. Early check avoids the pre-lock goal
           // upsert side-effect; the locked-callback check below is the
@@ -394,7 +403,7 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
           // A recurring "maintain X" task re-establishes its objective on every
           // fire: replace the goal text, reactivate it, and reset the counters.
           const reusableGoal =
-            goalSpec && run.status === "queued"
+            task.runMode === "reusable_session" && goalSpec && run.status === "queued"
               ? await upsertSessionGoal(db, {
                   accountId: task.accountId,
                   workspaceId: task.workspaceId,
@@ -455,6 +464,13 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
               personalConnectionDelegations: taskPersonalConnectionDelegations,
             },
             async (tx, wakeEventId) => {
+              if (task.runMode === "existing_session") {
+                await requireScheduledTaskTargetInTransaction(tx, {
+                  workspaceId: task.workspaceId,
+                  taskId: task.id,
+                  targetSessionId: session.id,
+                });
+              }
               if (!wakeEventId) throw new Error("Scheduled delivery has no wake event");
               await settleScheduledTaskRunInTransaction(tx, {
                 workspaceId: task.workspaceId,
@@ -521,7 +537,7 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
 
 async function scheduledRunAdmissionDenial(
   settings: Settings,
-  db: ActivityServices["db"],
+  db: ControlActivityServices["db"],
   accountId: string,
   workspaceId: string,
   requestedAgentRuns: number,

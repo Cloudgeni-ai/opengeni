@@ -21,6 +21,7 @@ import {
   retryStartupDependency,
   SANDBOX_REQUIRED_ENV,
   sandboxArchiveCaptureTimeoutMs,
+  sandboxLifecycleTransitionWaitMs,
   sandboxEnvironmentVariableNames,
   sandboxLifecycleHookIds,
   stableSandboxEnvironmentForRun,
@@ -98,6 +99,31 @@ describe("browser analytics configuration", () => {
   });
 });
 
+describe("Codex progressive tool disclosure", () => {
+  test("is enabled by default and supports an explicit emergency opt-out", () => {
+    expect(withEnv({}, () => getSettings()).codexToolSearchEnabled).toBe(true);
+    expect(
+      withEnv({ OPENGENI_CODEX_TOOL_SEARCH_ENABLED: "false" }, () => getSettings())
+        .codexToolSearchEnabled,
+    ).toBe(false);
+  });
+});
+
+describe("provider-neutral progressive tool disclosure", () => {
+  test("is enabled by default and has an independent emergency opt-out", () => {
+    expect(withEnv({}, () => getSettings()).lazyToolSearchEnabled).toBe(true);
+    const settings = withEnv(
+      {
+        OPENGENI_LAZY_TOOL_SEARCH_ENABLED: "false",
+        OPENGENI_CODEX_TOOL_SEARCH_ENABLED: "true",
+      },
+      () => getSettings(),
+    );
+    expect(settings.lazyToolSearchEnabled).toBe(false);
+    expect(settings.codexToolSearchEnabled).toBe(true);
+  });
+});
+
 describe("Google Drive integration settings", () => {
   test("loads the split localhost browser and API origins", () => {
     const settings = withEnv(
@@ -171,7 +197,7 @@ describe("Docker workspace materialization", () => {
 
 describe("agent stable release selection", () => {
   test("uses an exact stable version and supports an explicit operator promotion", () => {
-    expect(withEnv({}, () => getSettings()).agentStableVersion).toBe("0.1.9");
+    expect(withEnv({}, () => getSettings()).agentStableVersion).toBe("0.1.14");
     expect(
       withEnv({ OPENGENI_AGENT_STABLE_VERSION: "1.4.2" }, () => getSettings()).agentStableVersion,
     ).toBe("1.4.2");
@@ -290,6 +316,9 @@ describe("turn worker concurrency", () => {
     expect(settings.turnWorkerMaxConcurrentTurns).toBe(16);
     expect(settings.turnWorkerTargetCpuUsage).toBe(0.8);
     expect(settings.turnWorkerTargetMemoryUsage).toBe(0.75);
+    expect(settings.turnWorkerEmergencyMemoryUsage).toBe(0.9);
+    expect(settings.turnWorkerMemoryGuardIntervalMs).toBe(5_000);
+    expect(settings.turnWorkerMemoryGuardSustainMs).toBe(30_000);
   });
 
   test("parses a bounded resource-based machine profile", () => {
@@ -299,6 +328,9 @@ describe("turn worker concurrency", () => {
         OPENGENI_TURN_WORKER_MAX_CONCURRENT_TURNS: "256",
         OPENGENI_TURN_WORKER_TARGET_CPU_USAGE: "0.85",
         OPENGENI_TURN_WORKER_TARGET_MEMORY_USAGE: "0.8",
+        OPENGENI_TURN_WORKER_EMERGENCY_MEMORY_USAGE: "0.94",
+        OPENGENI_TURN_WORKER_MEMORY_GUARD_INTERVAL_MS: "2500",
+        OPENGENI_TURN_WORKER_MEMORY_GUARD_SUSTAIN_MS: "15000",
       },
       () => getSettings(),
     );
@@ -306,6 +338,9 @@ describe("turn worker concurrency", () => {
     expect(settings.turnWorkerMaxConcurrentTurns).toBe(256);
     expect(settings.turnWorkerTargetCpuUsage).toBe(0.85);
     expect(settings.turnWorkerTargetMemoryUsage).toBe(0.8);
+    expect(settings.turnWorkerEmergencyMemoryUsage).toBe(0.94);
+    expect(settings.turnWorkerMemoryGuardIntervalMs).toBe(2_500);
+    expect(settings.turnWorkerMemoryGuardSustainMs).toBe(15_000);
   });
 
   test("rejects invalid modes, ceilings, and resource targets", () => {
@@ -315,6 +350,10 @@ describe("turn worker concurrency", () => {
       { OPENGENI_TURN_WORKER_MAX_CONCURRENT_TURNS: "2001" },
       { OPENGENI_TURN_WORKER_TARGET_CPU_USAGE: "1.1" },
       { OPENGENI_TURN_WORKER_TARGET_MEMORY_USAGE: "0.81" },
+      { OPENGENI_TURN_WORKER_EMERGENCY_MEMORY_USAGE: "0.84" },
+      { OPENGENI_TURN_WORKER_EMERGENCY_MEMORY_USAGE: "0.96" },
+      { OPENGENI_TURN_WORKER_MEMORY_GUARD_INTERVAL_MS: "999" },
+      { OPENGENI_TURN_WORKER_MEMORY_GUARD_SUSTAIN_MS: "4999" },
     ]) {
       expect(() => withEnv(env, () => getSettings())).toThrow();
     }
@@ -455,9 +494,9 @@ describe("sandbox preparation profiles", () => {
     ).toBe(2_000);
   });
 
-  test("selfhosted exec/control timeouts default to 2min/30s and parse their env vars", () => {
+  test("selfhosted exec defaults to unbounded while control stays at 30s", () => {
     const defaults = withEnv({}, () => getSettings());
-    expect(defaults.sandboxSelfhostedExecTimeoutMs).toBe(120_000);
+    expect(defaults.sandboxSelfhostedExecTimeoutMs).toBe(0);
     expect(defaults.sandboxSelfhostedControlTimeoutMs).toBe(30_000);
     const overridden = withEnv(
       {
@@ -622,12 +661,12 @@ describe("sandbox preparation profiles", () => {
     ).toBe(true);
   });
 
-  test("agent op-stream transport is gated off unless explicitly enabled", () => {
-    expect(withEnv({}, () => getSettings()).agentOpStreamEnabled).toBe(false);
+  test("agent op-stream transport defaults on and can be explicitly disabled", () => {
+    expect(withEnv({}, () => getSettings()).agentOpStreamEnabled).toBe(true);
     expect(
-      withEnv({ OPENGENI_AGENT_OP_STREAM_ENABLED: "true" }, () => getSettings())
+      withEnv({ OPENGENI_AGENT_OP_STREAM_ENABLED: "false" }, () => getSettings())
         .agentOpStreamEnabled,
-    ).toBe(true);
+    ).toBe(false);
   });
 
   test("retries startup dependency operations with bounded backoff", async () => {
@@ -901,7 +940,7 @@ describe("sandbox preparation profiles", () => {
     expect(env.PATH).toBeUndefined();
   });
 
-  test("preserves machine HOME and uses a shell-resolved Toolspace pointer for selfhosted", () => {
+  test("adds no Toolspace pointers for selfhosted", () => {
     const settings = withEnv(
       {
         OPENGENI_SANDBOX_BACKEND: "selfhosted",
@@ -912,9 +951,7 @@ describe("sandbox preparation profiles", () => {
     );
     const env = stableSandboxEnvironmentForRun(settings, {}, { workspaceId: "ws-1" });
 
-    expect(env.HOME).toBeUndefined();
-    expect(env.OPENGENI_TOOLSPACE_TOKEN_FILE).toBe("$HOME/.opengeni/toolspace-token");
-    expect(env.OPENGENI_TOOLSPACE_URL).toBe("http://127.0.0.1:8000/v1/workspaces/ws-1/mcp");
+    expect(env).toEqual({});
   });
 
   test("requires a delegation secret when toolspace is enabled", () => {
@@ -1440,9 +1477,41 @@ describe("backend-gated sandbox required-credential validation", () => {
 
 describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)", () => {
   test("the durable capture gate outlives provider snapshot settlement but remains bounded", () => {
-    expect(sandboxArchiveCaptureTimeoutMs({ sandboxSnapshotTimeoutMs: 10_000 })).toBe(40_000);
-    expect(sandboxArchiveCaptureTimeoutMs({ sandboxSnapshotTimeoutMs: 40_000 })).toBe(80_000);
+    expect(sandboxArchiveCaptureTimeoutMs({ sandboxSnapshotTimeoutMs: 10_000 })).toBe(20_000);
+    expect(sandboxArchiveCaptureTimeoutMs({ sandboxSnapshotTimeoutMs: 40_000 })).toBe(50_000);
     expect(sandboxArchiveCaptureTimeoutMs({ sandboxSnapshotTimeoutMs: 3_590_000 })).toBe(3_600_000);
+  });
+
+  test("caller transition waiting covers dispatch plus one successor without charging dead-holder TTL", () => {
+    expect(
+      sandboxLifecycleTransitionWaitMs({
+        sandboxSnapshotTimeoutMs: 60_000,
+        sandboxLeaseReaperPeriodMs: 30_000,
+      }),
+    ).toBe(110_000);
+    expect(
+      sandboxLifecycleTransitionWaitMs({
+        sandboxSnapshotTimeoutMs: 3_590_000,
+        sandboxLeaseReaperPeriodMs: 30_000,
+      }),
+    ).toBe(60 * 60_000);
+  });
+
+  test("snapshot configuration cannot consume the durable claim's settlement window", () => {
+    expect(() =>
+      withEnv({ OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS: String(60 * 60_000) }, () => getSettings()),
+    ).toThrow();
+    expect(
+      withEnv(
+        {
+          OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS: String(59 * 60_000 + 30_000),
+          // Preserve the independent rotation-safety invariant while probing
+          // the exact schema ceiling.
+          OPENGENI_SANDBOX_ROTATION_LEAD_MS: String(61 * 60_000),
+        },
+        () => getSettings(),
+      ).sandboxSnapshotTimeoutMs,
+    ).toBe(59 * 60_000 + 30_000);
   });
 
   test("idle timeout defaults to the hard lifetime and the default cadence passes boot", () => {
@@ -1452,7 +1521,7 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
     expect(effectiveModalIdleTimeoutSeconds(settings)).toBe(settings.modalTimeoutSeconds);
     expect(effectiveModalIdleTimeoutSeconds(settings)).toBe(86_400);
     expect(settings.sandboxRotationLeadMs).toBe(3_600_000);
-    expect(settings.sandboxRotationBatchSize).toBe(1);
+    expect(settings.sandboxRotationBatchSize).toBe(32);
     expect(settings.sandboxLeaseReaperPeriodMs + settings.sandboxIdleGraceMs).toBeLessThan(
       effectiveModalIdleTimeoutSeconds(settings) * 1000,
     );
@@ -1498,10 +1567,14 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
     ).toThrow(/rotation_lead_ms.*strictly less/i);
   });
 
-  test("boot reserves snapshot timeout plus two reaper ticks before rotation", () => {
+  test("boot reserves the full capture window plus one reaper tick before rotation", () => {
     expect(() =>
-      withEnv({ OPENGENI_SANDBOX_ROTATION_LEAD_MS: "120000" }, () => getSettings()),
-    ).toThrow(/must exceed the snapshot timeout/i);
+      withEnv({ OPENGENI_SANDBOX_ROTATION_LEAD_MS: "100000" }, () => getSettings()),
+    ).toThrow(/must exceed the durable capture timeout/i);
+    expect(
+      withEnv({ OPENGENI_SANDBOX_ROTATION_LEAD_MS: "100001" }, () => getSettings())
+        .sandboxRotationLeadMs,
+    ).toBe(100_001);
   });
 
   test("the rotation batch is positive and bounded", () => {

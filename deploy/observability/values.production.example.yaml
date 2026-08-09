@@ -1,0 +1,63 @@
+# Capacity and credential posture for a larger installation. Layer private
+# ingress/TLS, Alertmanager receivers, and provider-specific scheduling values
+# in an operator-controlled file rather than committing them here.
+
+kube-prometheus-stack:
+  prometheus:
+    prometheusSpec:
+      externalLabels:
+        environment: production
+      retention: 15d
+      retentionSize: 40GB
+      resources:
+        requests:
+          cpu: 500m
+          memory: 512Mi
+        limits:
+          cpu: 2
+          memory: 1Gi
+      storageSpec:
+        volumeClaimTemplate:
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 50Gi
+
+  alertmanager:
+    alertmanagerSpec:
+      resources:
+        requests:
+          cpu: 100m
+          memory: 64Mi
+        limits:
+          cpu: 500m
+          memory: 128Mi
+      storage:
+        volumeClaimTemplate:
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 5Gi
+
+  grafana:
+    admin:
+      existingSecret: opengeni-grafana-admin
+      userKey: admin-user
+      passwordKey: admin-password
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 384Mi
+    persistence:
+      enabled: true
+      type: pvc
+      accessModes:
+        - ReadWriteOnce
+      size: 5Gi

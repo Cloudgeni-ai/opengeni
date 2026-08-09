@@ -226,7 +226,9 @@ describe("ModelPolicyPicker", () => {
       />,
     );
 
-    expect(container.querySelector('[data-testid="model-picker-loading"]')).toBeTruthy();
+    const loading = container.querySelector('[data-testid="model-picker-loading"]');
+    expect(loading).toBeTruthy();
+    expect(loading?.classList.contains("og-root")).toBeTrue();
     expect(container.querySelector('button[aria-label="Model and effort"]')).toBeNull();
   });
 

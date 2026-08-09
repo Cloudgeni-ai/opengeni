@@ -53,18 +53,17 @@ projection contains only:
 - workspace id, memory id, and positive memory version;
 - created/corrected/superseded change identity and one related memory id;
 - occurrence timestamp, importance, and effective `auto|review` mode;
-- canonical secret-redacted summary with an explicit truncation fact;
-- normalized namespace and a sorted, de-duplicated bounded label subset, only
-  when the shared secret redactor leaves every selector unchanged;
-- an optional secret-redacted bounded owner label;
+- canonical exact summary with an explicit truncation fact;
+- normalized namespace and a sorted, de-duplicated bounded label subset;
+- an optional exact bounded owner label;
 - immutable workspace/memory identifiers for a later UI link.
 
 Memory bodies, metadata, source references/excerpts, embeddings, hidden prompts,
 connection ids, channel ids, credentials, and raw actor subject ids are not in
-the projection type. Recognized credential material in namespace or labels is a
-deterministic denial rather than a selector rewrite, and malformed summary,
-namespace, or labels input also denies instead of throwing. The final stable
-JSON projection is independently bounded to 4 KiB.
+the projection type. Token-shaped namespace, label, summary, and owner text is
+ordinary content and is never classified or rewritten. Malformed namespace or
+labels input still denies instead of throwing. The final stable JSON projection
+is independently bounded to 4 KiB.
 
 ## Loop prevention and idempotency
 

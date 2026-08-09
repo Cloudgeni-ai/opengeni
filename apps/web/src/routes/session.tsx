@@ -61,6 +61,8 @@ import {
 import { coerceReasoningEffortForModel, findPickerRow } from "@/lib/model-policy";
 import { resolveSessionComposerModel } from "@/lib/session-model";
 import { mergeSessionContextProjection } from "@/lib/session-pins";
+import { createWorkspaceRetainedArtifactLoader } from "@/lib/retained-artifact-loader";
+import { createSessionRetainedScreenshotLoader } from "@/lib/retained-screenshot-loader";
 import {
   firstPartySessionToolOptions,
   isIntelligenceEffort,
@@ -198,19 +200,29 @@ export function SessionRoute({
   );
 
   // Keep the workspace header (title, status badge, connection pill) in sync.
-  const { setSession: setContextSession, setConnectionState: setContextConnectionState } = context;
+  const {
+    setSession: setContextSession,
+    setConnectionState: setContextConnectionState,
+    sessionEventFeedStore,
+  } = context;
   useEffect(() => {
     setContextSession((current) => mergeSessionContextProjection(current, session));
   }, [session, setContextSession]);
   useEffect(() => {
     setContextConnectionState(connectionState);
   }, [connectionState, setContextConnectionState]);
+  useEffect(() => {
+    sessionEventFeedStore.set({ sessionId, events });
+  }, [events, sessionId, sessionEventFeedStore]);
   useEffect(
     () => () => {
       setContextSession(null);
       setContextConnectionState("idle");
+      if (sessionEventFeedStore.getSnapshot()?.sessionId === sessionId) {
+        sessionEventFeedStore.set(null);
+      }
     },
-    [setContextConnectionState, setContextSession],
+    [sessionId, sessionEventFeedStore, setContextConnectionState, setContextSession],
   );
   useEffect(() => {
     if (streamError && !isApiErrorStatus(streamError, 404)) {
@@ -259,6 +271,14 @@ export function SessionRoute({
   // calm inline error on the reconnect card.
   const onReconnect = useCallback(
     async (item: AuthNeededItem) => {
+      if (item.serverId === "codex_apps") {
+        // Codex Apps is authorized by the designated workspace subscription,
+        // not by the generic connection broker. Send the user to the existing
+        // Codex subscription control instead of starting a meaningless OAuth
+        // flow for chatgpt.com.
+        window.location.assign(`/workspaces/${encodeURIComponent(workspaceId)}/settings`);
+        return;
+      }
       const connections = await context.client
         .listConnections(workspaceId)
         .catch(() => [] as ConnectionMetadata[]);
@@ -504,7 +524,7 @@ function SessionDock(props: {
           size="icon-sm"
           aria-label="Open navigation"
           onClick={props.onOpenNavigation}
-          className="pointer-coarse:size-10"
+          className="size-11"
         >
           <MenuIcon className="size-4" />
         </Button>
@@ -555,6 +575,19 @@ function SessionChatPane(props: {
   const fleet = useMachines({ sessionId: props.session.id, pollIntervalMs: 5000 });
   const computeLabel =
     fleet.machines.find((machine) => machine.active)?.name ?? CLOUD_SANDBOX_LABEL;
+  const loadRetainedScreenshot = useMemo(
+    () =>
+      createSessionRetainedScreenshotLoader(
+        context.client,
+        props.session.workspaceId,
+        props.session.id,
+      ),
+    [context.client, props.session.id, props.session.workspaceId],
+  );
+  const loadRetainedArtifact = useMemo(
+    () => createWorkspaceRetainedArtifactLoader(context.client, props.session.workspaceId),
+    [context.client, props.session.workspaceId],
+  );
   const terminal = isTerminalSessionStatus(props.session.status);
   const agentsSignal = useMemo(() => {
     const agents = props.agentNodes;
@@ -972,6 +1005,8 @@ function SessionChatPane(props: {
               onMemoryClick={props.onMemoryClick}
               onReconnect={props.onReconnect}
               resolveProviderLogo={props.resolveProviderLogo}
+              loadRetainedScreenshot={loadRetainedScreenshot}
+              loadRetainedArtifact={loadRetainedArtifact}
               hasOlder={props.hasOlder}
               loadingOlder={props.loadingOlder}
               onLoadOlder={() => void props.onLoadOlder()}
@@ -982,7 +1017,24 @@ function SessionChatPane(props: {
               onJumpToStart={() => void props.onJumpToStart()}
               onJumpToLatest={() => void props.onJumpToLatest()}
               emptyState={
-                props.initialLoading ? (
+                props.queue.stoppingPreviousAttempt ? (
+                  <EmptyState
+                    className="min-h-[24rem]"
+                    icon={
+                      <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
+                    }
+                    title={
+                      props.queue.effectiveControl?.state === "paused"
+                        ? "Stopping current work"
+                        : "Stopping previous work"
+                    }
+                    description={
+                      props.queue.effectiveControl?.state === "paused"
+                        ? "Waiting for the current command to stop safely. Queued work stays saved."
+                        : "Your direction is saved. It starts after the previous command stops safely."
+                    }
+                  />
+                ) : props.initialLoading ? (
                   // History is still fetching — a quiet shimmer, not the
                   // "waiting for the first step" copy (that's for NEW sessions).
                   <div className="grid min-h-[24rem] place-items-center text-sm">
@@ -1071,19 +1123,21 @@ function SessionChatPane(props: {
 
       {/* Compact session chrome above the composer — incoming, queue, goal,
           and agents as one dock. Hides entirely when there are no signals. */}
-      <div className="mx-auto mb-2 w-full max-w-3xl shrink-0 px-4 sm:px-6">
-        <SessionChrome
-          queue={props.queue}
-          composer={terminal ? undefined : composer}
-          goal={props.goal}
-          readOnly={terminal}
-          agentsSignal={agentsSignal}
-          agentsPanel={
-            props.agentNodes.length > 0 ? (
-              <SubagentTree workspaceId={props.session.workspaceId} nodes={props.agentNodes} />
-            ) : null
-          }
-        />
+      <div className="mb-2 w-full shrink-0 px-4 sm:px-6">
+        <div className="mx-auto w-full max-w-3xl">
+          <SessionChrome
+            queue={props.queue}
+            composer={terminal ? undefined : composer}
+            goal={props.goal}
+            readOnly={terminal}
+            agentsSignal={agentsSignal}
+            agentsPanel={
+              props.agentNodes.length > 0 ? (
+                <SubagentTree workspaceId={props.session.workspaceId} nodes={props.agentNodes} />
+              ) : null
+            }
+          />
+        </div>
       </div>
 
       <div className="shrink-0 px-4 pb-4 pt-1 sm:px-6">

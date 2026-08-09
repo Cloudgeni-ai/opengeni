@@ -85,6 +85,7 @@ const skillLibraryEntries: readonly SkillLibraryEntry[] = Object.freeze([
 const skillLibraryRootCandidates = (): string[] => {
   const moduleDir = dirname(fileURLToPath(import.meta.url));
   return [
+    join(moduleDir, "assets", "runtime", "bundled_skill_library"),
     join(moduleDir, "bundled_skill_library"),
     join(moduleDir, "..", "src", "bundled_skill_library"),
   ];

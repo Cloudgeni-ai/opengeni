@@ -150,7 +150,12 @@ export function codexModelsForPicker(liveSlugs: readonly string[]): Array<{
   }));
 }
 import { createSignedState, readSignedState } from "@opengeni/github";
-import { hasPermission, requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
+import {
+  getManagedSession,
+  hasPermission,
+  requireAccessGrant,
+  type ApiRouteDeps,
+} from "@opengeni/core";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import * as z from "zod/v4";
@@ -190,9 +195,7 @@ async function managedCookieHuman(
   ) {
     return null;
   }
-  const session = await deps.managedAuth.api.getSession({
-    headers: c.req.raw.headers,
-  });
+  const session = await getManagedSession(c, deps.managedAuth);
   if (!session?.user?.id || !session.session?.id) return null;
   return {
     subjectId: `user:${session.user.id}`,

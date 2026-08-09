@@ -19,54 +19,63 @@ import {
   SandboxImageConflictError,
   SandboxLeaseRecoveryBlockedError,
   SandboxLeaseSupersededError,
+  SandboxLeaseTransitionError,
+  SandboxWorkspaceMutationFencedError,
   SessionEventPersistenceError,
 } from "@opengeni/db";
 import {
-  CompactionProviderResponseError,
   CompactionNeededError,
+  CompactionProviderResponseError,
   EmptyCompactionSummaryError,
   WorkspaceArchiveIntegrityError,
   contextRobustnessFilterForSettings,
   modelResponseUsageFromResponse,
-  safeMcpTransportError,
+  mcpTransportErrorWithRetryMetadata,
   sanitizeHistoryItemsForModel,
 } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
 import {
   acceptsPromptCacheKeyForTurn,
   agentRunFailurePayload,
+  assertWorkspaceHumanInputAllowed,
   assertModelResponseLatencyMode,
   assertPhysicalToolQuiescenceForCancellation,
   assertSessionAttemptQuiescenceRecoveryDurable,
   classifyContextWindowOverflowError,
   credentialSubjectIdForTurnInitiator,
   classifyMcpTransportTimeoutError,
+  clearAttemptCredentialsWithSettledFence,
   codexCredentialLeaseDeadlineExpired,
+  completedToolCallFromSdkEvent,
   computerToolModeForTurn,
   createCompactionModelUsageEventState,
-  createModelResponseUsageEventState,
+  createModelResponseEventState,
   createTurnSandboxProvisioner,
   drainAttemptOwnedSandboxWriters,
+  releaseTurnSandboxAfterWriterDrain,
   emitModelCallUsage,
   ensureTurnModalRegistryImage,
   escapedMcpTimeoutRecoveryFailure,
   filterUnmaterializedSandboxFileDownloads,
-  headerSecretRedactions,
+  finalizeDurableTurnOpStreams,
   historyRowsToAppend,
   hostedWebSearchForTurn,
   isLazySandboxProvisionRetryable,
   isTransientProviderError,
   isWorkerShutdownCancellation,
   legacyTurnExecutionPolicyInput,
+  MandatoryHistoryPersistenceError,
   modelAttachmentInputPolicyForTurn,
   modelSupportsImageInputForTurn,
+  openAiHostedImageProviderBindingForTurn,
   recordCompletedModelCallBeforeOwnershipFences,
   modelUsageSourceKey,
-  modelResponseUsageContextSignal,
+  modelResponseContextSignal,
   managedSandboxOwnershipForTurn,
+  pendingToolCallFromSdkEvent,
   pointerReconcileReason,
   processCompactionModelUsageEvent,
-  processModelResponseUsageEvent,
+  processModelResponseTerminalEvent,
   persistOrSignalSessionAttemptQuiescence,
   PROVIDER_BACKPRESSURE_DELAY_MS,
   providerRecoveryCountFromMetadata,
@@ -74,14 +83,16 @@ import {
   providerRecoveryResult,
   requiresSignedFileResourceDownloads,
   resolveActiveSandboxBackend,
+  runMandatoryHistoryPersistenceStep,
   safeErrorDiagnostic,
   sandboxDeadlineRotationRecoveryDelayMs,
-  secretRedactionModelInputFilter,
   shouldRecoverCompactionProviderFailure,
   shouldStartOnTurnRecording,
   shouldRunTurnEndWorkspacePersistence,
   stableHumanInputRequestId,
   structuredToolTransportForTurn,
+  toolCallProducesRetainableSessionImage,
+  lazyToolTransportForTurn,
   turnExecutionPolicyBillingIdentity,
   turnOperationCancellationFailure,
   unavailableMcpTurnInstructions,
@@ -89,8 +100,8 @@ import {
   waitForTurnFinalizerStep,
   waitForTurnStreamCleanup,
   TurnOperationCancelledError,
+  WorkspaceHumanInputDisabledError,
 } from "../src/activities/agent-turn";
-import { createSecretRedactor } from "../src/activities/redaction";
 import { sandboxLeaseHolderIdForAttempt } from "../src/sandbox-resume";
 import { settingsWithPackSandboxImage } from "../src/activities/packs";
 import { startGitCredentialRenewalLoop } from "../src/activities/git-credential-renewal";
@@ -105,6 +116,70 @@ describe("approval RunState materialization boundary", () => {
 
     expect(source).not.toContain("getLatestRunStateResumeMetadata(");
     expect(source).not.toMatch(/\bgetLatestRunState\s*\(/);
+  });
+});
+
+describe("workspace structured human-input policy", () => {
+  test("disabled policy rejects forged interruptions before requires-action settlement", () => {
+    const settle = mock(() => undefined);
+    const attemptSettlement = () => {
+      assertWorkspaceHumanInputAllowed(false, "interruption", true);
+      settle();
+    };
+
+    expect(attemptSettlement).toThrow(WorkspaceHumanInputDisabledError);
+    expect(settle).not.toHaveBeenCalled();
+  });
+
+  test("disabled policy rejects stale resumes while enabled control preserves both paths", () => {
+    expect(() => assertWorkspaceHumanInputAllowed(false, "resume", true)).toThrow(
+      /policy rejects structured human-input resume/i,
+    );
+    expect(() => assertWorkspaceHumanInputAllowed(true, "resume", true)).not.toThrow();
+    expect(() => assertWorkspaceHumanInputAllowed(true, "interruption", true)).not.toThrow();
+    expect(() => assertWorkspaceHumanInputAllowed(false, "interruption", false)).not.toThrow();
+  });
+
+  // No-Claim: these pure boundary tests do not prove that a deployed worker has
+  // reloaded a workspace setting or that an already-pending request was repaired.
+});
+
+describe("Connected Machine durable stream finalization", () => {
+  test("finalizes every routed proxy once and does not bypass them for the raw fallback", async () => {
+    const calls: string[] = [];
+    const eagerProxy = {
+      finalizeOpStreamOps: async () => {
+        calls.push("eager");
+      },
+    };
+    const lazyProxy = {
+      finalizeOpStreamOps: async () => {
+        calls.push("lazy");
+        throw new Error("runner unreachable");
+      },
+    };
+    const fallback = {
+      finalizeOpStreamOps: async () => {
+        calls.push("fallback");
+      },
+    };
+
+    await finalizeDurableTurnOpStreams(
+      [lazyProxy, eagerProxy, lazyProxy, null, { finalizeOpStreamOps: "not-a-function" }],
+      fallback,
+    );
+
+    expect(calls).toEqual(["lazy", "eager"]);
+  });
+
+  test("uses the machine-primary fallback when no routing proxy exists", async () => {
+    let finalized = 0;
+    await finalizeDurableTurnOpStreams([null, undefined], {
+      finalizeOpStreamOps: async () => {
+        finalized += 1;
+      },
+    });
+    expect(finalized).toBe(1);
   });
 });
 
@@ -318,21 +393,15 @@ function persistAcrossReconciles(snapshots: Array<Array<Record<string, unknown>>
   return [...persistedByPosition.entries()].sort((a, b) => a[0] - b[0]).map(([, item]) => item);
 }
 
-describe("turn secret-redaction boundaries", () => {
-  const syntheticSecret = "synthetic-turn-secret-value-123456";
-  const redact = createSecretRedactor([{ name: "TURN_SECRET", value: syntheticSecret }]);
+describe("turn exact-content boundaries", () => {
+  const syntheticValue = ["synthetic", "turn", "value", "123456"].join("-");
 
-  test("redacts current history before durable append", () => {
-    const result = historyRowsToAppend(
-      [userMessage(`tool output ${syntheticSecret}`)],
-      0,
-      0,
-      undefined,
-      redact,
-    );
+  test("preserves current history exactly before durable append", () => {
+    const item = userMessage(`tool output ${syntheticValue}`);
+    const result = historyRowsToAppend([item], 0);
 
-    expect(JSON.stringify(result.rows)).not.toContain(syntheticSecret);
-    expect(JSON.stringify(result.rows)).toContain("[redacted:TURN_SECRET]");
+    expect(result.rows).toEqual([{ position: 0, item }]);
+    expect(JSON.stringify(result.rows)).toContain(syntheticValue);
   });
 
   test("preserves provider citations in the structured durable assistant item", () => {
@@ -353,130 +422,246 @@ describe("turn secret-redaction boundaries", () => {
     });
   });
 
-  test("redacts replayed and current items at the literal model-call seam", async () => {
-    const filter = secretRedactionModelInputFilter(redact);
-    const output = await filter({
-      modelData: {
-        input: [
-          userMessage(`legacy ${syntheticSecret}`),
-          {
-            type: "function_call_result",
-            callId: "call_safe",
-            output: "Authorization: Bearer synthetic-bearer-value-123456",
-          },
-        ],
+  test("persists hosted SDK tool calls as protocol JSON when optional output is undefined", () => {
+    const hostedToolCall = {
+      type: "hosted_tool_call",
+      id: "ws_123",
+      name: "web_search_call",
+      status: "completed",
+      output: undefined,
+      providerData: {
+        type: "web_search_call",
+        id: "ws_123",
+        status: "completed",
+        action: { type: "search", query: "OpenGeni" },
       },
-    } as never);
+    };
 
-    const serialized = JSON.stringify(output);
-    expect(serialized).not.toContain(syntheticSecret);
-    expect(serialized).not.toContain("synthetic-bearer-value");
-    expect(serialized).toContain("[redacted:TURN_SECRET]");
-    expect(serialized).toContain("Authorization: Bearer [redacted]");
+    const result = historyRowsToAppend([hostedToolCall], 0);
+
+    expect(hostedToolCall).toHaveProperty("output", undefined);
+    expect(result.rows).toEqual([
+      {
+        position: 0,
+        item: {
+          type: "hosted_tool_call",
+          id: "ws_123",
+          name: "web_search_call",
+          status: "completed",
+          providerData: hostedToolCall.providerData,
+        },
+      },
+    ]);
+    expect(Object.hasOwn(hostedToolCall, "output")).toBe(true);
   });
 
-  test("safe logging diagnostics exclude stack, cause, and synthetic credentials", () => {
-    const error = Object.assign(new Error(`request rejected; token=${syntheticSecret}`), {
-      status: 401,
-      code: "AUTH_REJECTED",
-      cause: { responseBody: syntheticSecret },
+  test("normalizes pending SDK tool calls before the lossless receipt write", () => {
+    const rawItem = {
+      type: "function_call",
+      callId: "call_pending_undefined",
+      name: "example_tool",
+      arguments: "{}",
+      status: undefined,
+      providerData: {
+        traceId: "trace-1",
+        optional: undefined,
+      },
+    };
+
+    const pending = pendingToolCallFromSdkEvent({
+      type: "run_item_stream_event",
+      item: { type: "tool_call_item", rawItem },
     });
-    const diagnostic = safeErrorDiagnostic(error, (value) => String(redact(value)));
+
+    expect(pending).toEqual({
+      callId: "call_pending_undefined",
+      callType: "function_call",
+      callName: "example_tool",
+      callItem: {
+        type: "function_call",
+        callId: "call_pending_undefined",
+        name: "example_tool",
+        arguments: "{}",
+        providerData: { traceId: "trace-1" },
+      },
+    });
+    expect(Object.hasOwn(pending!.callItem, "status")).toBe(false);
+    expect(Object.hasOwn(pending!.callItem.providerData as object, "optional")).toBe(false);
+    expect(Object.hasOwn(rawItem, "status")).toBe(true);
+    expect(Object.hasOwn(rawItem.providerData, "optional")).toBe(true);
+  });
+
+  test("does not register a hosted image as a pending function call", () => {
+    expect(
+      pendingToolCallFromSdkEvent({
+        type: "run_item_stream_event",
+        item: {
+          type: "tool_call_item",
+          rawItem: {
+            type: "hosted_tool_call",
+            id: "ig_1",
+            name: "image_generation_call",
+            status: "completed",
+            output: "opaque",
+          },
+        },
+      }),
+    ).toBeNull();
+  });
+
+  test("retains intentional screenshot and view-image outputs, not incidental action frames", () => {
+    expect(toolCallProducesRetainableSessionImage("computer_screenshot")).toBe(true);
+    expect(toolCallProducesRetainableSessionImage("view_image")).toBe(true);
+    expect(toolCallProducesRetainableSessionImage("computer_click")).toBe(false);
+    expect(toolCallProducesRetainableSessionImage("computer_scroll")).toBe(false);
+  });
+
+  test("normalizes completed SDK tool results before the lossless receipt write", () => {
+    const rawItem = {
+      type: "function_call_result",
+      callId: "call_result_undefined",
+      status: "completed",
+      output: {
+        type: "text",
+        text: "done",
+        optional: undefined,
+      },
+      providerData: undefined,
+    };
+
+    const completed = completedToolCallFromSdkEvent({
+      type: "run_item_stream_event",
+      item: { type: "tool_call_output_item", rawItem },
+    });
+
+    expect(completed).toEqual({
+      callId: "call_result_undefined",
+      resultItem: {
+        type: "function_call_result",
+        callId: "call_result_undefined",
+        status: "completed",
+        output: { type: "text", text: "done" },
+      },
+    });
+    expect(Object.hasOwn(completed!.resultItem, "providerData")).toBe(false);
+    expect(Object.hasOwn(completed!.resultItem.output as object, "optional")).toBe(false);
+    expect(Object.hasOwn(rawItem, "providerData")).toBe(true);
+    expect(Object.hasOwn(rawItem.output, "optional")).toBe(true);
+  });
+
+  test("keeps non-object undefined values fail-closed at the pending receipt boundary", () => {
+    expect(() =>
+      pendingToolCallFromSdkEvent({
+        type: "run_item_stream_event",
+        item: {
+          type: "tool_call_item",
+          rawItem: {
+            type: "function_call",
+            callId: "call_invalid_array",
+            name: "example_tool",
+            arguments: "{}",
+            providerData: { values: ["ok", undefined] },
+          },
+        },
+      }),
+    ).toThrow(
+      'Protocol JSON value at $["item"]["rawItem"]["providerData"]["values"][1] cannot contain undefined',
+    );
+  });
+
+  test("public diagnostics exclude arbitrary bodies while internal failure events remain exact", () => {
+    const error = Object.assign(new Error(`request rejected; detail=${syntheticValue}`), {
+      status: 401,
+      name: syntheticValue,
+      code: syntheticValue,
+      cause: { responseBody: syntheticValue },
+    });
+    const diagnostic = safeErrorDiagnostic(error);
 
     expect(diagnostic).toEqual({
-      name: "Error",
-      message: "request rejected; token=[redacted:TURN_SECRET]",
+      errorClass: "WorkerOperationError",
+      errorCode: "worker_operation_failed",
       status: 401,
-      code: "AUTH_REJECTED",
+      origin: "worker",
     });
+    expect(agentRunFailurePayload(error).error).toBe(`request rejected; detail=${syntheticValue}`);
     expect(diagnostic).not.toHaveProperty("stack");
     expect(diagnostic).not.toHaveProperty("cause");
-    expect(JSON.stringify(diagnostic)).not.toContain(syntheticSecret);
+    expect(JSON.stringify(diagnostic)).not.toContain(syntheticValue);
   });
 
-  test("registers only credential-bearing MCP headers", () => {
-    expect(
-      headerSecretRedactions("MCP", {
-        authorization: "Bearer synthetic-mcp-auth-value-123456",
-        cookie: "session=synthetic-mcp-cookie-value-123456",
-        "x-api-key": "synthetic-mcp-api-key-value-123456",
-        "content-type": "application/json",
-        accept: "application/json",
-        "user-agent": "mcp-client/1.0",
-        "x-page-token": "page-2",
-        "x-signature": "sha256=public-digest",
-      }),
-    ).toEqual([
-      { name: "MCP_AUTHORIZATION", value: "Bearer synthetic-mcp-auth-value-123456" },
-      { name: "MCP_AUTHORIZATION_CREDENTIAL", value: "synthetic-mcp-auth-value-123456" },
-      { name: "MCP_COOKIE", value: "session=synthetic-mcp-cookie-value-123456" },
-      { name: "MCP_X_API_KEY", value: "synthetic-mcp-api-key-value-123456" },
-    ]);
-  });
-
-  test("registers explicit custom static MCP credential headers by provenance", () => {
-    expect(
-      headerSecretRedactions(
-        "MCP_CRM_STATIC",
-        { "Private-Token": "synthetic-static-private-token-123456" },
-        ["Private-Token"],
-      ),
-    ).toEqual([
-      {
-        name: "MCP_CRM_STATIC_PRIVATE_TOKEN",
-        value: "synthetic-static-private-token-123456",
+  test("public worker status projection tolerates hostile proxies", () => {
+    const source = new Error(`worker status getter ${syntheticValue}`);
+    const hostile = new Proxy(source, {
+      get(target, property, receiver) {
+        if (property === "status" || property === "statusCode") {
+          throw new Error(`hostile worker status ${syntheticValue}`);
+        }
+        return Reflect.get(target, property, receiver);
       },
-    ]);
-  });
-
-  test("registers every renewed MCP header returned by the credential broker", () => {
-    expect(
-      headerSecretRedactions("MCP", { "Private-Token": "synthetic-renewed-private-token-123456" }, [
-        "Private-Token",
-      ]),
-    ).toEqual([
-      {
-        name: "MCP_PRIVATE_TOKEN",
-        value: "synthetic-renewed-private-token-123456",
-      },
-    ]);
-  });
-
-  test("pairs renewed custom MCP values with current names, not stale session metadata", () => {
-    const currentValue = "synthetic-current-private-token-123456";
-    const currentResolvedServer = {
-      id: "crm",
-      headers: { "Private-Token": currentValue, "X-Page-Token": "page-2" },
-      headerNames: ["Private-Token"],
-    };
-    const staleSessionProjection = {
-      id: currentResolvedServer.id,
-      headerNames: ["Old-Private-Token"],
-    };
-    const staleRegistration = headerSecretRedactions(
-      "MCP_CRM_STATIC",
-      currentResolvedServer.headers,
-      staleSessionProjection.headerNames,
-    );
-    const currentHeaderNamesById = new Map([
-      [currentResolvedServer.id, currentResolvedServer.headerNames],
-    ]);
-    const currentRegistration = headerSecretRedactions(
-      "MCP_CRM_STATIC",
-      currentResolvedServer.headers,
-      currentHeaderNamesById.get(currentResolvedServer.id),
-    );
-    const redacted = createSecretRedactor(currentRegistration)(currentResolvedServer.headers);
-
-    expect(staleRegistration).toHaveLength(0);
-    expect(currentRegistration).toEqual([
-      { name: "MCP_CRM_STATIC_PRIVATE_TOKEN", value: currentValue },
-    ]);
-    expect(redacted).toMatchObject({
-      "Private-Token": "[redacted:MCP_CRM_STATIC_PRIVATE_TOKEN]",
-      "X-Page-Token": "page-2",
     });
-    expect(JSON.stringify(redacted)).not.toContain(currentValue);
+
+    expect(safeErrorDiagnostic(hostile)).toEqual({
+      errorClass: "WorkerOperationError",
+      errorCode: "worker_operation_failed",
+      origin: "worker",
+    });
+    expect(source.message).toContain(syntheticValue);
+    expect(JSON.stringify(safeErrorDiagnostic(hostile))).not.toContain(syntheticValue);
+  });
+
+  test("mandatory history failure keeps exact internal content and exposes only a safe stage", async () => {
+    const source = Object.assign(new Error(`history write rejected; detail=${syntheticValue}`), {
+      status: 503,
+      responseBody: syntheticValue,
+    });
+    const error = await runMandatoryHistoryPersistenceStep("history_append", async () => {
+      throw source;
+    }).catch((caught) => caught);
+
+    expect(error).toBeInstanceOf(MandatoryHistoryPersistenceError);
+    expect((error as MandatoryHistoryPersistenceError).cause).toBe(source);
+    const failure = agentRunFailurePayload(error);
+    expect(failure).toEqual({
+      error: `history write rejected; detail=${syntheticValue}`,
+      historyPersistenceStage: "history_append",
+    });
+    const diagnostic = safeErrorDiagnostic(error);
+    expect(diagnostic).toEqual({
+      errorClass: "WorkerOperationError",
+      errorCode: "worker_operation_failed",
+      status: 503,
+      origin: "worker",
+      historyPersistenceStage: "history_append",
+    });
+    expect(JSON.stringify(diagnostic)).not.toContain(syntheticValue);
+  });
+
+  test("mandatory history barriers precede completion and terminal failure emits no completion", async () => {
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn.ts", import.meta.url),
+    ).text();
+    const completionPath = source.indexOf('const finalOutput = String(stream.finalOutput ?? "");');
+    const mandatoryBarrier = source.indexOf(
+      "await reconcileConversationTruth({ requireDurable: true });",
+      completionPath,
+    );
+    const successCompletion = source.indexOf('type: "turn.completed"', mandatoryBarrier);
+    expect(completionPath).toBeGreaterThan(-1);
+    expect(mandatoryBarrier).toBeGreaterThan(completionPath);
+    expect(successCompletion).toBeGreaterThan(mandatoryBarrier);
+
+    const failureClassifier = source.indexOf("const failure = agentRunFailurePayload(error");
+    const terminalFailureStart = source.indexOf('activityStatus = "failed";', failureClassifier);
+    const terminalFailureEnd = source.indexOf(
+      'turnMetricOutcome = "failed";',
+      terminalFailureStart,
+    );
+    const terminalFailureBlock = source.slice(terminalFailureStart, terminalFailureEnd);
+    expect(terminalFailureStart).toBeGreaterThan(failureClassifier);
+    expect(terminalFailureEnd).toBeGreaterThan(terminalFailureStart);
+    expect(terminalFailureBlock).toContain('type: "turn.failed"');
+    expect(terminalFailureBlock).not.toContain('type: "turn.completed"');
   });
 });
 
@@ -1125,7 +1310,7 @@ describe("production model-response usage callback authority", () => {
       },
     };
     // These are the exact two terminal event shapes emitted, in order, by the
-    // repository-pinned @openai/agents-openai 0.13.3 stream implementation.
+    // repository-pinned @openai/agents-openai 0.14.3 stream implementation.
     const normalizedTerminal = new RunRawModelStreamEvent({
       type: "response_done",
       response: {
@@ -1175,11 +1360,11 @@ describe("production model-response usage callback authority", () => {
           };
         }),
       });
-      const fencedInputs: number[] = [];
-      const state = createModelResponseUsageEventState();
+      const fencedInputs: Array<number | null> = [];
+      const state = createModelResponseEventState();
       const emittedSourceKeys = new Set<string>();
       const process = (event: any, targetState = state, dispatchId = "activity-A") =>
-        processModelResponseUsageEvent({
+        processModelResponseTerminalEvent({
           event,
           state: targetState,
           dispatchId,
@@ -1215,7 +1400,7 @@ describe("production model-response usage callback authority", () => {
         }),
         {
           throwOnCompactionNeeded: true,
-          contextCompactionSignal: () => modelResponseUsageContextSignal(state),
+          contextCompactionSignal: () => modelResponseContextSignal(state),
         },
       );
       const first = [{ type: "message", role: "user", content: "start" }] as any;
@@ -1229,9 +1414,8 @@ describe("production model-response usage callback authority", () => {
 
       expect((await process(normalizedTerminal)).status).toBe("processed");
       expect((await process(rawTerminal)).status).toBe("duplicate");
-      expect(state.responseUsageCount).toBe(1);
-      expect(state.providerContextRevision).toBe(1);
-      expect(state.lastProviderContextTokensObserved).toBe(120);
+      expect(state.responseCount).toBe(1);
+      expect(state.contextSignal).toEqual({ revision: 1, totalTokens: 120 });
       expect(fencedInputs).toEqual([100]);
       expect(durableUsageSourceKeys).toEqual(new Set([response.id]));
       expect([...billingRows.values()]).toEqual([
@@ -1254,8 +1438,8 @@ describe("production model-response usage callback authority", () => {
       );
 
       // The duplicate terminal callback must not advance the old response to
-      // revision 2. Revision 1 cannot bind to request 2, so the complete estimate
-      // (including the large new assistant output) still triggers compaction.
+      // revision 2. Revision 1 cannot bind to request 2, and an unbound local
+      // estimate must not force compaction.
       const third = [
         ...second,
         {
@@ -1267,16 +1451,16 @@ describe("production model-response usage callback authority", () => {
       ] as any;
       await expect(
         filter({ modelData: { input: third, instructions: "system" }, agent: {} as any }),
-      ).rejects.toBeInstanceOf(CompactionNeededError);
+      ).resolves.toMatchObject({ input: third });
 
       // A worker restart/re-dispatch rebuilds local state. The stable provider
       // response id reaches the durable fences again, but duplicate authority
       // prevents every local metric/context/fenced-input effect and the DB-level
       // idempotency key keeps one billing row.
-      const restartedState = createModelResponseUsageEventState();
+      const restartedState = createModelResponseEventState();
       const restartedInputsBefore = fencedInputs.length;
       const restartedEmittedSourceKeys = new Set<string>();
-      const restarted = await processModelResponseUsageEvent({
+      const restarted = await processModelResponseTerminalEvent({
         event: normalizedTerminal as any,
         state: restartedState,
         dispatchId: "activity-B",
@@ -1309,15 +1493,124 @@ describe("production model-response usage callback authority", () => {
         authoritative: false,
         sourceKey: response.id,
       });
-      expect(restartedState.responseUsageCount).toBe(1);
-      expect(restartedState.providerContextRevision).toBe(0);
-      expect(restartedState.lastProviderContextTokensObserved).toBeNull();
+      expect(restartedState.responseCount).toBe(1);
+      expect(restartedState.contextSignal).toBeNull();
       expect(fencedInputs).toHaveLength(restartedInputsBefore);
       expect(billingRows).toHaveLength(1);
       const metricsAfterRestart = await observability.prometheusMetrics();
       expect(metricsAfterRestart).toMatch(
         /opengeni_model_input_tokens_count\{[^}]*provider="codex-subscription"[^}]*\} 1\b/,
       );
+    } finally {
+      recordUsageSpy.mockRestore();
+    }
+  });
+
+  test("clears missing usage and uses the same response ordinal when usage resumes", async () => {
+    const observability = createObservability(testSettings(), { component: "worker" });
+    const recordUsageSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(
+      async () => undefined,
+    );
+    try {
+      const state = createModelResponseEventState();
+      const fencedInputs: Array<number | null> = [];
+      const emittedSourceKeys = new Set<string>();
+      const publish = async (batch: any[]) => ({
+        accepted: true,
+        events: batch.map((event) => ({
+          ...event,
+          id: crypto.randomUUID(),
+          turnAssociation: "current" as const,
+        })),
+      });
+      const process = (event: RunRawModelStreamEvent) =>
+        processModelResponseTerminalEvent({
+          event,
+          state,
+          dispatchId: "activity-missing-usage",
+          settings: testSettings(),
+          db: {} as any,
+          observability,
+          publish: publish as any,
+          accountId: "acct-1",
+          workspaceId: "ws-1",
+          sessionId: "sess-1",
+          turnId: "turn-1",
+          turnAttemptId: "attempt-1",
+          provider: "codex-subscription",
+          providerApi: "responses",
+          model: "codex/gpt-5.6-sol",
+          metricProvider: "codex-subscription",
+          externallyBilled: true,
+          servingCredentialId: "credential-1",
+          priorSessionCredentialId: "credential-1",
+          emittedSourceKeys,
+          renewLease: async () => undefined,
+          leaseLost: () => false,
+          leaseLostMessage: "lease lost",
+          setLastInputTokens: async (tokens) => {
+            fencedInputs.push(tokens);
+          },
+        });
+      const filter = contextRobustnessFilterForSettings(
+        testSettings({
+          contextWindowTokens: 20_000,
+          contextAutoCompactThresholdTokens: 10_000,
+        }),
+        {
+          throwOnCompactionNeeded: true,
+          contextCompactionSignal: () => modelResponseContextSignal(state),
+        },
+      );
+
+      const first = [{ type: "message", role: "user", content: "start" }] as any;
+      await filter({ modelData: { input: first, instructions: "system" }, agent: {} as any });
+      const missingUsage = new RunRawModelStreamEvent({
+        type: "response_done",
+        response: { id: "resp-1", output: [] },
+      } as any);
+      expect(await process(missingUsage)).toMatchObject({
+        status: "processed",
+        authoritative: true,
+      });
+      expect(state).toMatchObject({
+        responseCount: 1,
+        contextSignal: null,
+      });
+      expect(fencedInputs).toEqual([null]);
+
+      const second = [
+        ...first,
+        { type: "message", role: "assistant", content: "first response" },
+        { type: "message", role: "user", content: "continue" },
+      ] as any;
+      await filter({ modelData: { input: second, instructions: "system" }, agent: {} as any });
+      const validUsage = new RunRawModelStreamEvent({
+        type: "response_done",
+        response: {
+          id: "resp-2",
+          output: [],
+          usage: { inputTokens: 11_000, outputTokens: 1_000, totalTokens: 12_000 },
+        },
+      } as any);
+      expect(await process(validUsage)).toMatchObject({
+        status: "processed",
+        authoritative: true,
+      });
+      expect(state).toMatchObject({
+        responseCount: 2,
+        contextSignal: { revision: 2, totalTokens: 12_000 },
+      });
+      expect(fencedInputs).toEqual([null, 11_000]);
+
+      const third = [
+        ...second,
+        { type: "message", role: "assistant", content: "second response" },
+        { type: "message", role: "user", content: "continue again" },
+      ] as any;
+      await expect(
+        filter({ modelData: { input: third, instructions: "system" }, agent: {} as any }),
+      ).rejects.toBeInstanceOf(CompactionNeededError);
     } finally {
       recordUsageSpy.mockRestore();
     }
@@ -1360,10 +1653,10 @@ describe("production model-response usage callback authority", () => {
             },
           },
         } as any);
-      const state = createModelResponseUsageEventState();
+      const state = createModelResponseEventState();
       const emittedSourceKeys = new Set<string>();
       const process = (event: RunRawModelStreamEvent) =>
-        processModelResponseUsageEvent({
+        processModelResponseTerminalEvent({
           event,
           state,
           dispatchId: "activity-A",
@@ -1392,7 +1685,7 @@ describe("production model-response usage callback authority", () => {
 
       const beforeCompaction = await process(terminal(100, 20));
       // The compaction retry re-enters the stream callback with this same
-      // activity-wide state rather than resetting responseUsageCount.
+      // activity-wide state rather than resetting responseCount.
       const afterCompaction = await process(terminal(200, 30));
 
       expect(beforeCompaction).toMatchObject({
@@ -1405,7 +1698,7 @@ describe("production model-response usage callback authority", () => {
         sourceKey: "activity-A:response-2",
         authoritative: true,
       });
-      expect(state.responseUsageCount).toBe(2);
+      expect(state.responseCount).toBe(2);
       expect(durableUsageSourceKeys).toEqual(
         new Set(["activity-A:response-1", "activity-A:response-2"]),
       );
@@ -1577,13 +1870,17 @@ describe("model call usage observability", () => {
       provider: "openai",
       providerApi: "responses",
       model: "gpt-5.6-sol",
-      sourceKey: "resp-1",
       inputTokens: 1200,
       outputTokens: 100,
       cachedTokens: 1024,
       cacheWriteTokens: 256,
       reasoningTokens: 12,
     });
+    expect(infos[0]).not.toHaveProperty("accountId");
+    expect(infos[0]).not.toHaveProperty("workspaceId");
+    expect(infos[0]).not.toHaveProperty("sessionId");
+    expect(infos[0]).not.toHaveProperty("turnId");
+    expect(infos[0]).not.toHaveProperty("sourceKey");
     expect(events).toEqual([
       {
         type: "agent.model.usage",
@@ -1644,12 +1941,16 @@ describe("model call usage observability", () => {
     });
 
     expect(infos[0]).toMatchObject({
-      sessionId: "sess-1",
       inputTokens: 1200,
       cachedTokens: 200,
       servingAccountHash: "abc123def456",
       accountChangedFromPrevCall: true,
     });
+    expect(infos[0]).not.toHaveProperty("accountId");
+    expect(infos[0]).not.toHaveProperty("workspaceId");
+    expect(infos[0]).not.toHaveProperty("sessionId");
+    expect(infos[0]).not.toHaveProperty("turnId");
+    expect(infos[0]).not.toHaveProperty("sourceKey");
   });
 
   test("does not log a duplicate usage observation as authoritative", async () => {
@@ -2134,13 +2435,12 @@ describe("on-turn recording gate (selfhosted machines have no in-box capture plu
 });
 
 describe("lazy sandbox provisioner single-flight", () => {
-  test("deadline rotation paces recovery for one capture and two reaper periods", () => {
+  test("deadline rotation uses only short anti-churn pacing", () => {
     expect(
       sandboxDeadlineRotationRecoveryDelayMs({
         sandboxLeaseReaperPeriodMs: 30_000,
-        sandboxSnapshotTimeoutMs: 60_000,
       }),
-    ).toBe(120_000);
+    ).toBe(5_000);
   });
 
   test("concurrent callers share one establish promise", async () => {
@@ -2239,6 +2539,18 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(isLazySandboxProvisionRetryable(new SandboxLeaseSupersededError("group-1", 1))).toBe(
       true,
     );
+    expect(
+      isLazySandboxProvisionRetryable(
+        new SandboxLeaseTransitionError(
+          "group-1",
+          1,
+          "capture_in_progress",
+          "modal",
+          "sb-1",
+          "draining",
+        ),
+      ),
+    ).toBe(true);
     expect(
       isLazySandboxProvisionRetryable(
         new WorkspaceArchiveIntegrityError(
@@ -2522,6 +2834,28 @@ describe("worker shutdown preemption", () => {
     expect(receipts).toBe(1);
   });
 
+  test("retries the proof-bearing turn release outside Temporal cancellation", async () => {
+    const proofFlags: boolean[] = [];
+    const delays: number[] = [];
+    await releaseTurnSandboxAfterWriterDrain(
+      {
+        release: async (options) => {
+          proofFlags.push(options?.workspaceWritersQuiesced === true);
+          if (proofFlags.length < 3) throw new Error("rollout connection reset");
+        },
+      },
+      {
+        maxAttempts: 3,
+        retryDelayMs: 25,
+        wait: async (delayMs) => {
+          delays.push(delayMs);
+        },
+      },
+    );
+    expect(proofFlags).toEqual([true, true, true]);
+    expect(delays).toEqual([25, 50]);
+  });
+
   test("retries one immutable quiescence proof after receipt exhaustion", async () => {
     const proof = {
       accountId: "account-1",
@@ -2653,6 +2987,88 @@ describe("worker shutdown preemption", () => {
   });
 });
 
+describe("settled run-credential finalization", () => {
+  for (const activityStatus of ["idle", "failed"] as const) {
+    test(`retries exact attempt cleanup after ${activityStatus} terminal settlement`, async () => {
+      const calls: string[] = [];
+      const fence = new SandboxWorkspaceMutationFencedError(
+        "attempt_fenced",
+        "terminal settlement closed the attempt",
+      );
+
+      await clearAttemptCredentialsWithSettledFence({
+        activityStatus,
+        runWorkspaceFencedClear: async () => {
+          calls.push("workspace-fenced");
+          throw fence;
+        },
+        onSettledAttemptFence: () => calls.push("observed"),
+        clearExactAttempt: async () => {
+          calls.push("exact-attempt-clear");
+        },
+      });
+
+      expect(calls).toEqual(["workspace-fenced", "observed", "exact-attempt-clear"]);
+    });
+  }
+
+  for (const [label, error, activityStatus] of [
+    ["wrong error name", Object.assign(new Error("fenced"), { code: "attempt_fenced" }), "idle"],
+    [
+      "wrong fence code",
+      new SandboxWorkspaceMutationFencedError("holder_fenced", "holder changed"),
+      "idle",
+    ],
+    [
+      "nonterminal activity",
+      new SandboxWorkspaceMutationFencedError("attempt_fenced", "attempt changed"),
+      "recovering",
+    ],
+  ] as const) {
+    test(`keeps ${label} fail-closed`, async () => {
+      let directClears = 0;
+      const caught = await clearAttemptCredentialsWithSettledFence({
+        activityStatus,
+        runWorkspaceFencedClear: async () => {
+          throw error;
+        },
+        onSettledAttemptFence: () => {
+          throw new Error("unexpected settled-fence callback");
+        },
+        clearExactAttempt: async () => {
+          directClears += 1;
+        },
+      }).catch((failure: unknown) => failure);
+
+      expect(caught).toBe(error);
+      expect(directClears).toBe(0);
+    });
+  }
+
+  test("keeps a direct exact-attempt deletion failure fail-closed", async () => {
+    const deletionFailure = new Error("exact credential deletion failed");
+    let settledFences = 0;
+    const caught = await clearAttemptCredentialsWithSettledFence({
+      activityStatus: "idle",
+      runWorkspaceFencedClear: async () => {
+        throw new SandboxWorkspaceMutationFencedError(
+          "attempt_fenced",
+          "terminal settlement closed the attempt",
+        );
+      },
+      onSettledAttemptFence: () => {
+        settledFences += 1;
+      },
+      clearExactAttempt: async () => {
+        throw deletionFailure;
+      },
+    }).catch((failure: unknown) => failure);
+
+    expect(caught).toBe(deletionFailure);
+    expect(settledFences).toBe(1);
+  });
+});
+
 describe("Codex credential lease deadline fence", () => {
   test("fails closed at the last database-confirmed expiry, including a missing deadline", () => {
     const now = Date.parse("2026-07-10T08:00:00.000Z");
@@ -2759,19 +3175,19 @@ describe("escaped MCP transport timeout classifier", () => {
       "MCP error -32001: Maximum total timeout exceeded",
     ];
     for (const message of sdkTimeoutMessages) {
-      const sanitized = safeMcpTransportError(
+      const classified = mcpTransportErrorWithRetryMetadata(
         Object.assign(new Error(message), {
           name: "McpError",
           code: -32_001,
         }),
       );
-      expect(classifyMcpTransportTimeoutError(sanitized)?.message).toBe(sanitized.message);
-      expect(agentRunFailurePayload(sanitized)).toEqual({
+      expect(classifyMcpTransportTimeoutError(classified)?.message).toBe(classified.message);
+      expect(agentRunFailurePayload(classified)).toEqual({
         error:
           "An MCP server request timed out. Any completed tool output was checkpointed; the session can continue safely.",
         code: "mcp_transport_timeout",
         retryable: true,
-        detail: sanitized.message,
+        detail: message,
       });
     }
 
@@ -2792,7 +3208,7 @@ describe("escaped MCP transport timeout classifier", () => {
       "MCP error -32001: Session not found",
       "MCP error -32001: operator cancelled this request",
     ]) {
-      const ambiguous = safeMcpTransportError(
+      const ambiguous = mcpTransportErrorWithRetryMetadata(
         Object.assign(new Error(message), {
           name: "McpError",
           code: -32_001,
@@ -2812,19 +3228,20 @@ describe("escaped MCP transport timeout classifier", () => {
     expect(classifyMcpTransportTimeoutError(new Error("Too Many Requests"))).toBeNull();
   });
 
-  test("recovers a sanitized nested MCP connection refusal without exposing transport detail", () => {
+  test("recovers an exact nested MCP connection refusal with typed retry metadata", () => {
     const raw = new Error("MCP connect failed for https://private.example/token-value");
     raw.cause = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:8000"), {
       code: "ECONNREFUSED",
     });
-    const sanitized = safeMcpTransportError(raw);
+    const classified = mcpTransportErrorWithRetryMetadata(raw);
 
-    expect(classifyMcpTransportTimeoutError(sanitized)).toBeNull();
-    expect(agentRunFailurePayload(sanitized)).toEqual({
+    expect(classifyMcpTransportTimeoutError(classified)).toBeNull();
+    expect(agentRunFailurePayload(classified)).toEqual({
       error:
         "A required MCP server was temporarily unreachable. The same turn will retry after a short delay.",
       code: "mcp_transport_unavailable",
       retryable: true,
+      detail: raw.message,
     });
     expect(
       providerRecoveryResult({
@@ -2835,30 +3252,74 @@ describe("escaped MCP transport timeout classifier", () => {
       status: "recovering",
       continueDelayMs: 2_000,
     });
-    expect(JSON.stringify({ sanitized, payload: agentRunFailurePayload(sanitized) })).not.toContain(
-      "private.example",
-    );
-    expect(JSON.stringify(sanitized)).not.toContain("127.0.0.1");
+    expect(classified).toBe(raw);
+    expect(classified.message).toBe(raw.message);
+    expect(classified.cause).toMatchObject({
+      message: "connect ECONNREFUSED 127.0.0.1:8000",
+      code: "ECONNREFUSED",
+    });
+    expect(agentRunFailurePayload(classified).detail).toContain("private.example");
   });
 
-  test("keeps sanitized MCP client and ambiguous failures terminal", () => {
-    const rejected = safeMcpTransportError(
+  test("keeps exact MCP client and ambiguous failures terminal", () => {
+    const rejected = mcpTransportErrorWithRetryMetadata(
       Object.assign(new Error("request rejected with secret body"), {
         status: 401,
         cause: Object.assign(new Error("socket closed"), { code: "ECONNRESET" }),
       }),
     );
-    const ambiguous = safeMcpTransportError(
+    const ambiguous = mcpTransportErrorWithRetryMetadata(
       Object.assign(new Error("policy refused the connection"), {
         code: "CONNECTION_REFUSED_BY_POLICY",
       }),
     );
 
     expect(agentRunFailurePayload(rejected)).toEqual({
-      error: "MCP transport operation failed (Error 401)",
+      error: "request rejected with secret body",
     });
     expect(agentRunFailurePayload(ambiguous)).toEqual({
-      error: "MCP transport operation failed (Error)",
+      error: "policy refused the connection",
+    });
+  });
+
+  test("recovers rollout-safe first-party setup loss but keeps auth and typed defects terminal", () => {
+    const routeNotReady = mcpTransportErrorWithRetryMetadata(
+      Object.assign(new Error("temporary first-party route"), { status: 404 }),
+      { recoverySafeSetup: true },
+    );
+    const statusless = mcpTransportErrorWithRetryMetadata(new Error("fetch failed"), {
+      recoverySafeSetup: true,
+    });
+    const authRejected = mcpTransportErrorWithRetryMetadata(
+      Object.assign(new Error("authentication failed"), { status: 401 }),
+      { recoverySafeSetup: true },
+    );
+    const typedProtocolFailure = mcpTransportErrorWithRetryMetadata(
+      new TypeError("invalid response"),
+      {
+        recoverySafeSetup: true,
+      },
+    );
+
+    expect(agentRunFailurePayload(routeNotReady)).toEqual({
+      error:
+        "A required MCP server was temporarily unreachable. The same turn will retry after a short delay.",
+      code: "mcp_transport_unavailable",
+      retryable: true,
+      detail: "temporary first-party route",
+    });
+    expect(agentRunFailurePayload(statusless)).toEqual({
+      error:
+        "A required MCP server was temporarily unreachable. The same turn will retry after a short delay.",
+      code: "mcp_transport_unavailable",
+      retryable: true,
+      detail: "fetch failed",
+    });
+    expect(agentRunFailurePayload(authRejected)).toEqual({
+      error: "authentication failed",
+    });
+    expect(agentRunFailurePayload(typedProtocolFailure)).toEqual({
+      error: "invalid response",
     });
   });
 
@@ -2981,7 +3442,7 @@ describe("transient provider error classifier", () => {
     expect(shouldRecoverCompactionProviderFailure(wrapped)).toBe(false);
   });
 
-  test("an actual streamed Codex server failure settles as redacted same-turn recovery", async () => {
+  test("an actual streamed Codex server failure preserves exact detail during same-turn recovery", async () => {
     const observed = await actualCodexStreamingFailure({
       type: "response.failed",
       response: {
@@ -2999,11 +3460,13 @@ describe("transient provider error classifier", () => {
     expect(observed.forwarded).toBe("");
     const payload = agentRunFailurePayload(observed.error);
     expect(payload).toEqual({
-      error: "The Codex response failed",
+      error: "SECRET worker server provider detail",
       code: "provider_unavailable",
       retryable: true,
     });
-    expect(JSON.stringify({ error: observed.error, payload })).not.toContain("SECRET");
+    expect(JSON.stringify({ error: observed.error, payload })).toContain(
+      "SECRET worker server provider detail",
+    );
     expect(
       providerRecoveryResult({ failureCode: "provider_unavailable", attemptNumber: 1 }),
     ).toEqual({
@@ -3012,7 +3475,7 @@ describe("transient provider error classifier", () => {
     });
   });
 
-  test("an actual streamed Codex context failure remains redacted and nonretryable", async () => {
+  test("an actual streamed Codex context failure remains exact and nonretryable", async () => {
     const observed = await actualCodexStreamingFailure({
       type: "response.failed",
       response: {
@@ -3032,9 +3495,11 @@ describe("transient provider error classifier", () => {
       "context_length_exceeded",
     );
     const payload = agentRunFailurePayload(observed.error);
-    expect(payload).toEqual({ error: "The Codex response failed" });
+    expect(payload).toEqual({ error: "SECRET worker context provider detail" });
     expect(payload.retryable).toBeUndefined();
-    expect(JSON.stringify({ error: observed.error, payload })).not.toContain("SECRET");
+    expect(JSON.stringify({ error: observed.error, payload })).toContain(
+      "SECRET worker context provider detail",
+    );
   });
 
   test("actual streamed Codex rate and usage terminals keep distinct truthful settlement", async () => {
@@ -3049,7 +3514,7 @@ describe("transient provider error classifier", () => {
       error: "Model provider rate limit hit. Try again in a minute or lower the reasoning effort.",
       code: "provider_rate_limited",
       retryable: true,
-      detail: "The Codex response stream reported an error",
+      detail: "SECRET worker rate provider detail",
     });
 
     const usage = await actualCodexStreamingFailure({
@@ -3069,10 +3534,12 @@ describe("transient provider error classifier", () => {
     const usagePayload = agentRunFailurePayload(usage.error);
     expect(usagePayload.code).toBe("codex_usage_limit_reached");
     expect(usagePayload.retryable).toBe(false);
-    expect(JSON.stringify({ rate, usage, usagePayload })).not.toContain("SECRET");
+    expect(JSON.stringify({ rate, usage, usagePayload })).toContain(
+      "SECRET worker usage provider detail",
+    );
   });
 
-  test("classifies nested database truth without retrying provider work or exposing SQL", () => {
+  test("classifies nested database truth without retrying provider work", () => {
     const error = new SessionEventPersistenceError({
       code: "db_deadlock",
       sqlState: "40P01",
@@ -3088,8 +3555,7 @@ describe("transient provider error classifier", () => {
     });
     const payload = agentRunFailurePayload(error);
     expect(payload).toEqual({
-      error:
-        "Database deadlock while persisting agent.model.usage. The completed provider call and external effects were not retried.",
+      error: "Database deadlock while persisting agent.model.usage",
       code: "db_deadlock",
       detail: "The idempotent persistence transaction failed after 3 attempts.",
       correlationId: "corr-safe",
@@ -3103,54 +3569,51 @@ describe("transient provider error classifier", () => {
       },
     });
     expect(payload.retryable).toBeUndefined();
-    expect(JSON.stringify(payload)).not.toContain("insert into");
-    expect(JSON.stringify(payload)).not.toContain("parameters");
+
+    const mandatory = new MandatoryHistoryPersistenceError("sandbox_envelope", error);
+    expect(agentRunFailurePayload(mandatory)).toEqual({
+      ...payload,
+      historyPersistenceStage: "sandbox_envelope",
+    });
+    expect(agentRunFailurePayload(mandatory).retryable).toBeUndefined();
   });
 
-  test("keeps no-SQLSTATE persistence failures safe for events, logs, and tracing", async () => {
+  test("preserves an exact non-SQLSTATE persistence failure in the session payload", async () => {
+    const syntheticValue = ["synthetic", "worker", "db", "123456"].join("-");
+    const source = Object.assign(new Error(`Failed query containing ${syntheticValue}`), {
+      query: "insert into session_events values ($1)",
+      params: [syntheticValue],
+      driverError: {
+        table_name: "session_events",
+        detail: syntheticValue,
+      },
+    });
     const error = await runIdempotentPersistenceTransaction(
       {
         stage: "session_events.append_for_turn_attempt",
         eventTypes: ["agent.model.usage"],
-        correlationId: "corr-unknown-safe",
+        correlationId: "corr-unknown-exact",
       },
       async () => {
-        throw Object.assign(new Error("Failed query containing private-token"), {
-          query: "insert into session_events values ($1)",
-          params: ["private-token"],
-          driverError: {
-            table_name: "session_events",
-            detail: "private-token",
-          },
-        });
+        throw source;
       },
     ).catch((caught) => caught);
 
     expect(error).toBeInstanceOf(SessionEventPersistenceError);
+    expect((error as SessionEventPersistenceError).cause).toBe(source);
     const payload = agentRunFailurePayload(error);
     expect(payload).toEqual({
-      error:
-        "Database failure while persisting agent.model.usage. The completed provider call and external effects were not retried.",
+      error: `Database failure while persisting agent.model.usage: Failed query containing ${syntheticValue}`,
       code: "db_failure",
       detail: "The database rejected the idempotent persistence transaction.",
-      correlationId: "corr-unknown-safe",
+      correlationId: "corr-unknown-exact",
       stage: "session_events.append_for_turn_attempt",
       sqlState: null,
       attempts: 1,
       retryOutcome: "not_retryable",
       database: { table: "session_events" },
     });
-    const telemetrySurface = JSON.stringify({
-      payload,
-      name: (error as Error).name,
-      message: (error as Error).message,
-      stack: (error as Error).stack,
-      details: (error as SessionEventPersistenceError).details,
-      cause: (error as Error & { cause?: unknown }).cause,
-    });
-    expect(telemetrySurface).not.toContain("private-token");
-    expect(telemetrySurface).not.toContain("insert into");
-    expect(telemetrySurface).not.toContain("values ($1)");
+    expect(JSON.stringify(payload)).toContain(syntheticValue);
   });
 
   test("classifies 5xx status codes as transient (status is authoritative)", () => {
@@ -3498,6 +3961,67 @@ describe("structuredToolTransportForTurn", () => {
   });
 });
 
+describe("lazyToolTransportForTurn", () => {
+  const resolved = (
+    kind: RegistryProviderKind,
+    api: ModelProviderApi,
+    options: { id?: string; builtin?: boolean; baseUrl?: string } = {},
+  ) =>
+    ({
+      provider: {
+        id: options.id ?? "registry",
+        kind,
+        api,
+        builtin: options.builtin ?? false,
+        ...(options.baseUrl ? { baseUrl: options.baseUrl } : {}),
+      },
+    }) as Parameters<typeof lazyToolTransportForTurn>[0];
+
+  test("keeps Codex on its pristine native transport", () => {
+    expect(lazyToolTransportForTurn(resolved("codex-subscription", "responses"))).toBe(
+      "codex_native",
+    );
+  });
+
+  test("uses native client search only for direct built-in OpenAI/Azure Responses", () => {
+    expect(
+      lazyToolTransportForTurn(resolved("api-key", "responses", { id: "openai", builtin: true })),
+    ).toBe("openai_native");
+    expect(
+      lazyToolTransportForTurn(
+        resolved("api-key", "responses", {
+          id: "azure",
+          builtin: true,
+          baseUrl: "https://example.openai.azure.com/openai/v1",
+        }),
+      ),
+    ).toBe("openai_native");
+    expect(lazyToolTransportForTurn(null)).toBe("openai_native");
+  });
+
+  test("contains a built-in OpenAI custom endpoint behind generic dispatch", () => {
+    expect(
+      lazyToolTransportForTurn(
+        resolved("api-key", "responses", {
+          id: "openai",
+          builtin: true,
+          baseUrl: "https://proxy.example.test/v1",
+        }),
+      ),
+    ).toBe("generic_dispatch");
+  });
+
+  test("contains Gateway and other providers behind generic dispatch", () => {
+    expect(lazyToolTransportForTurn(resolved("vercel-gateway-managed", "responses"))).toBe(
+      "generic_dispatch",
+    );
+    expect(lazyToolTransportForTurn(resolved("vercel-gateway-workspace", "responses"))).toBe(
+      "generic_dispatch",
+    );
+    expect(lazyToolTransportForTurn(resolved("api-key", "chat"))).toBe("generic_dispatch");
+  });
+});
+
 describe("hostedWebSearchForTurn (provider support)", () => {
   const resolved = (hostedWebSearch: boolean) =>
     ({ configured: { hostedWebSearch } }) as Parameters<typeof hostedWebSearchForTurn>[0];
@@ -3513,6 +4037,76 @@ describe("hostedWebSearchForTurn (provider support)", () => {
   test("applies the deployment capability gate to the legacy built-in path", () => {
     expect(hostedWebSearchForTurn(null, true)).toBe(true);
     expect(hostedWebSearchForTurn(null, false)).toBe(false);
+  });
+});
+
+describe("openAiHostedImageProviderBindingForTurn", () => {
+  const direct = {
+    provider: {
+      id: "openai",
+      kind: "api-key" as const,
+      builtin: true,
+      baseUrl: undefined,
+    },
+    configured: {
+      capabilities: { hostedTools: { imageGeneration: { runnable: true } } },
+    },
+  };
+
+  test("enables only the first-party OpenAI Responses endpoint", () => {
+    const settings = testSettings({
+      openaiProvider: "openai",
+      openaiApiKey: "direct-key",
+      openaiBaseUrl: undefined,
+    });
+    const binding = openAiHostedImageProviderBindingForTurn(settings, direct);
+    expect(binding?.providerId).toBe("openai");
+    expect(binding?.providerBindingHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(
+      openAiHostedImageProviderBindingForTurn(
+        { ...settings, openaiBaseUrl: "https://api.openai.com/v1/" },
+        {
+          provider: { ...direct.provider, baseUrl: "https://api.openai.com/v1" },
+          configured: direct.configured,
+        },
+      ),
+    ).toEqual(binding);
+    expect(
+      openAiHostedImageProviderBindingForTurn(settings, {
+        provider: { ...direct.provider, baseUrl: "https://proxy.example/v1" },
+        configured: direct.configured,
+      }),
+    ).toBeNull();
+  });
+
+  test("fails closed when the selected text model does not declare the hosted image tool", () => {
+    const settings = testSettings({
+      openaiProvider: "openai",
+      openaiApiKey: "direct-key",
+      openaiBaseUrl: undefined,
+    });
+    expect(
+      openAiHostedImageProviderBindingForTurn(settings, {
+        ...direct,
+        configured: {
+          capabilities: { hostedTools: { imageGeneration: { runnable: false } } },
+        },
+      }),
+    ).toBeNull();
+    expect(openAiHostedImageProviderBindingForTurn(settings, null)).toBeNull();
+  });
+
+  test("never assumes a custom legacy base URL supports the hosted image tool", () => {
+    expect(
+      openAiHostedImageProviderBindingForTurn(
+        testSettings({
+          openaiProvider: "openai",
+          openaiApiKey: "direct-key",
+          openaiBaseUrl: "https://proxy.example/v1",
+        }),
+        null,
+      ),
+    ).toBeNull();
   });
 });
 

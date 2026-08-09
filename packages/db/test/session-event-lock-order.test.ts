@@ -1800,7 +1800,7 @@ describe("event-ordering invariant canonical session-event lock order", () => {
     }
   }, 60_000);
 
-  test("sanitizes an exhausted Agent command persistence failure before external effects", async () => {
+  test("preserves an exhausted Agent command persistence failure before external effects", async () => {
     const workspace = await freshWorkspace();
     const ids = orderedParentChildIds("child-first");
     const actor = await seedRunningSession(workspace, { sessionId: ids.parentSessionId });
@@ -1836,8 +1836,8 @@ describe("event-ordering invariant canonical session-event lock order", () => {
       details: (error as SessionEventPersistenceError).details,
       cause: (error as Error & { cause?: unknown }).cause,
     });
-    expect(observable).not.toContain("private-token");
-    expect(observable).not.toContain("insert into");
+    expect(observable).toContain("private-token");
+    expect(observable).toContain("insert into");
     expect(wakes).toBe(0);
     expect(bus.published).toHaveLength(0);
     expect(await assertCommittedSequence(target, 0)).toEqual([]);
@@ -2033,7 +2033,7 @@ describe("event-ordering invariant canonical session-event lock order", () => {
     }
   }, 60_000);
 
-  test("sanitizes exhausted lifecycle persistence failures", async () => {
+  test("preserves exact exhausted lifecycle persistence failures", async () => {
     const workspace = await freshWorkspace();
     const parent = await seedRunningSession(workspace);
     const child = await seedRunningSession(workspace, { parentSessionId: parent.sessionId });
@@ -2068,8 +2068,8 @@ describe("event-ordering invariant canonical session-event lock order", () => {
       details: (error as SessionEventPersistenceError).details,
       cause: (error as Error & { cause?: unknown }).cause,
     });
-    expect(observable).not.toContain("private-token");
-    expect(observable).not.toContain("insert into");
+    expect(observable).toContain("private-token");
+    expect(observable).toContain("insert into");
     expect(await assertCommittedSequence(child, 0)).toEqual([]);
   }, 60_000);
 
@@ -2159,7 +2159,7 @@ describe("event-ordering invariant canonical session-event lock order", () => {
     }
   }, 60_000);
 
-  test("sanitizes an exhausted generic append with exact stage and SQLSTATE", async () => {
+  test("preserves an exhausted generic append with exact stage and SQLSTATE", async () => {
     const fixture = await seedRunningSession();
     const error = await appendSessionEvents(db, fixture.workspaceId, fixture.sessionId, [
       {
@@ -2184,8 +2184,8 @@ describe("event-ordering invariant canonical session-event lock order", () => {
       details: (error as SessionEventPersistenceError).details,
       cause: (error as Error & { cause?: unknown }).cause,
     });
-    expect(observable).not.toContain("private-token");
-    expect(observable).not.toContain("insert into");
+    expect(observable).toContain("private-token");
+    expect(observable).toContain("insert into");
     expect(await assertCommittedSequence(fixture, 0)).toEqual([]);
   }, 60_000);
 });

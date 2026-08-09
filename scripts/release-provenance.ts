@@ -1,10 +1,12 @@
 export const RELEASE_REPOSITORY = "Cloudgeni-ai/opengeni" as const;
 export const RELEASE_CANDIDATE_WORKFLOW = ".github/workflows/release-candidate.yml" as const;
 export const RELEASE_ACCEPTANCE_WORKFLOW = ".github/workflows/release-acceptance.yml" as const;
+export const PACKAGE_PUBLICATION_WORKFLOW = ".github/workflows/publish-packages.yml" as const;
 export const RELEASE_CANDIDATE_ARTIFACT_PREFIX = "release-candidate-" as const;
 export const RELEASE_ACCEPTANCE_ARTIFACT_PREFIX = "release-acceptance-" as const;
+export const PACKAGE_PUBLICATION_ARTIFACT_PREFIX = "package-publication-verified-" as const;
 
-export type ReleaseProducerKind = "candidate" | "acceptance";
+export type ReleaseProducerKind = "candidate" | "acceptance" | "package";
 
 export type ReleaseProducerMetadata = {
   repository: typeof RELEASE_REPOSITORY;
@@ -33,12 +35,21 @@ const runIdPattern = /^[1-9][0-9]{0,19}$/;
 const urlPattern = /^https:\/\/github\.com\/Cloudgeni-ai\/opengeni\/actions\/runs\/[1-9][0-9]*$/;
 
 export function expectedWorkflowPath(kind: ReleaseProducerKind): string {
-  return kind === "candidate" ? RELEASE_CANDIDATE_WORKFLOW : RELEASE_ACCEPTANCE_WORKFLOW;
+  if (kind === "candidate") return RELEASE_CANDIDATE_WORKFLOW;
+  if (kind === "acceptance") return RELEASE_ACCEPTANCE_WORKFLOW;
+  return PACKAGE_PUBLICATION_WORKFLOW;
 }
 
-export function expectedArtifactName(kind: ReleaseProducerKind, sourceSha: string): string {
+export function expectedArtifactName(
+  kind: ReleaseProducerKind,
+  sourceSha: string,
+  runId?: number | string,
+  runAttempt?: number | string,
+): string {
   if (!shaPattern.test(sourceSha)) throw new Error("source SHA must be a full lowercase SHA");
-  return `${kind === "candidate" ? RELEASE_CANDIDATE_ARTIFACT_PREFIX : RELEASE_ACCEPTANCE_ARTIFACT_PREFIX}${sourceSha}`;
+  if (kind === "candidate") return `${RELEASE_CANDIDATE_ARTIFACT_PREFIX}${sourceSha}`;
+  if (kind === "acceptance") return `${RELEASE_ACCEPTANCE_ARTIFACT_PREFIX}${sourceSha}`;
+  return `${PACKAGE_PUBLICATION_ARTIFACT_PREFIX}${sourceSha}-${positiveInteger(runId ?? "", "runId")}-${positiveInteger(runAttempt ?? "", "runAttempt")}`;
 }
 
 export function buildReleaseProducerMetadata(input: {
@@ -153,6 +164,7 @@ export function buildTrustedReleaseArtifact(input: {
   kind: ReleaseProducerKind;
   sourceSha: string;
   runId: number | string;
+  runAttempt?: number | string;
   artifact: {
     id: number | string;
     name: string;
@@ -163,7 +175,7 @@ export function buildTrustedReleaseArtifact(input: {
 }): TrustedReleaseArtifact {
   const runId = positiveInteger(input.runId, "runId");
   const id = positiveInteger(input.artifact.id, "artifact.id");
-  const expectedName = expectedArtifactName(input.kind, input.sourceSha);
+  const expectedName = expectedArtifactName(input.kind, input.sourceSha, runId, input.runAttempt);
   if (input.artifact.name !== expectedName) {
     throw new Error(`release artifact must be named ${expectedName}`);
   }
@@ -192,6 +204,7 @@ export function validateTrustedReleaseArtifact(
     kind: ReleaseProducerKind;
     sourceSha: string;
     runId: number;
+    runAttempt?: number;
     now?: number;
   },
 ): TrustedReleaseArtifact {
@@ -211,7 +224,12 @@ export function validateTrustedReleaseArtifact(
   if (!Number.isFinite(expiration) || expiration <= (expected.now ?? Date.now())) {
     throw new Error("trusted release artifact is expired or has an invalid expiry");
   }
-  const expectedName = expectedArtifactName(expected.kind, expected.sourceSha);
+  const expectedName = expectedArtifactName(
+    expected.kind,
+    expected.sourceSha,
+    expected.runId,
+    expected.runAttempt,
+  );
   if (name !== expectedName)
     throw new Error(`trusted release artifact must be named ${expectedName}`);
   if (!digestPattern.test(digest)) throw new Error("trusted release artifact digest is invalid");
@@ -227,6 +245,7 @@ export function validateTrustedReleaseArtifact(
 function kindFromWorkflow(value: unknown): ReleaseProducerKind {
   if (value === RELEASE_CANDIDATE_WORKFLOW) return "candidate";
   if (value === RELEASE_ACCEPTANCE_WORKFLOW) return "acceptance";
+  if (value === PACKAGE_PUBLICATION_WORKFLOW) return "package";
   throw new Error("release producer workflow is not canonical");
 }
 

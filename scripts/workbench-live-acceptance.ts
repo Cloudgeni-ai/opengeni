@@ -39,6 +39,7 @@ const OPTIONAL_ANALYTICS_CHUNK_PATH = /^\/assets\/analytics-consent-[A-Za-z0-9_-
 const MANAGED_SESSION_PATH = /^\/v1\/auth\/get-session$/;
 const WORKSPACE_SURFACE_SELECTOR = "[data-workspace-surface]";
 const CHANGES_LAYOUT_SELECTOR = "[data-workbench-changes-layout]";
+const SANDBOX_FILES_VIEWER_SELECTOR = "#sandbox-files-viewer";
 const FILE_TREE_READY_SELECTOR =
   '[role="tree"][aria-activedescendant]:not([aria-activedescendant=""])';
 const FILE_TREE_MAX_NAVIGATION_STEPS = 4_096;
@@ -48,6 +49,10 @@ const CAPTURE_API_P95_MS = maximumMillisecondBudget("performance.capture-api-res
 const CAPTURE_USABLE_WORKBENCH_P95_MS = maximumMillisecondBudget(
   "performance.capture-usable-workbench",
   "p95",
+);
+const CONTROL_CANCELLATION_WORST_MS = maximumMillisecondBudget(
+  "performance.control-cancellation",
+  "worst",
 );
 const shaPattern = /^[0-9a-f]{40}$/;
 const runIdPattern = /^[a-z0-9][a-z0-9-]{2,63}$/;
@@ -287,21 +292,6 @@ export function parseCookieHeader(header: string): Array<{ name: string; value: 
   return cookies;
 }
 
-export function sanitizeDiagnostic(value: string): string {
-  return value
-    .replace(/https?:\/\/[^\s"')]+/gi, (url) => {
-      try {
-        const parsed = new URL(url);
-        return `${parsed.origin}${parsed.pathname}`;
-      } catch {
-        return "[url-redacted]";
-      }
-    })
-    .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
-    .replace(/\b(sig|signature|token|se|sp|sv)=[^&\s]+/gi, "$1=[redacted]")
-    .slice(0, 500);
-}
-
 async function main(): Promise<void> {
   const args = parseLiveAcceptanceArgs(process.argv.slice(2));
   const productToken = secret("OPENGENI_ACCEPTANCE_PRODUCT_TOKEN");
@@ -397,7 +387,11 @@ async function main(): Promise<void> {
   );
 
   await waitForCold(cookieClient, workspaceId, session.id, args.coldTimeoutMs);
-  pass(checks, "functional.real-cold-lease", "The real Modal lease reached cold before UI review.");
+  pass(
+    checks,
+    "functional.real-cold-lease",
+    "The real Modal lease reached a dormant cold/draining state before UI review.",
+  );
 
   const captureApiRegionProbe = await runCaptureApiRegionalProbe(
     args.captureApiRegionProbeCommand,
@@ -494,13 +488,13 @@ async function main(): Promise<void> {
     }
 
     const afterPassiveBrowser = await cookieClient.getStreamCapabilities(workspaceId, session.id);
-    if (afterPassiveBrowser.liveness !== "cold") {
+    if (!isDormantSandboxLiveness(afterPassiveBrowser.liveness)) {
       throw new Error("passive browser acceptance unexpectedly warmed the sandbox");
     }
     pass(
       checks,
       "functional.capture-cold-zero-channel-a",
-      "Fresh desktop/mobile browsers rendered capture-backed Changes and Files with zero Channel-A requests and left the lease cold.",
+      "Fresh desktop/mobile browsers rendered capture-backed Changes and Files with zero Channel-A requests and left the lease dormant.",
     );
 
     const liveFlow = await runLiveWorkspaceFlow({
@@ -1011,9 +1005,8 @@ export async function waitForSandboxLiveness(
       lastTransportError = undefined;
       if (accepted.has(capabilities.liveness)) return;
     } catch (error) {
-      lastTransportError = sanitizeDiagnostic(
-        error instanceof Error ? `${error.name}: ${error.message}` : String(error),
-      );
+      lastTransportError =
+        error instanceof Error ? `${error.name}: ${error.message}` : String(error);
     }
     const sleepMs = Math.min(pollIntervalMs, Math.max(0, deadline - Date.now()));
     if (sleepMs > 0) await Bun.sleep(sleepMs);
@@ -1024,13 +1017,23 @@ export async function waitForSandboxLiveness(
   );
 }
 
+export function isDormantSandboxLiveness(liveness: string): boolean {
+  return liveness === "cold" || liveness === "draining";
+}
+
 async function waitForCold(
   client: OpenGeniClient,
   workspaceId: string,
   sessionId: string,
   timeoutMs: number,
 ): Promise<void> {
-  await waitForSandboxLiveness(client, workspaceId, sessionId, new Set(["cold"]), timeoutMs);
+  await waitForSandboxLiveness(
+    client,
+    workspaceId,
+    sessionId,
+    new Set(["cold", "draining"]),
+    timeoutMs,
+  );
 }
 
 async function waitForWarm(
@@ -1075,11 +1078,12 @@ async function runLiveWorkspaceFlow(input: {
     await assertChangesDefaultVisible(page);
     await page.getByRole("tab", { name: "Files", exact: true }).click();
     await selectTreeFile(page, "api", "base.txt");
-    await page.getByText("On machine", { exact: true }).waitFor();
+    await waitForSandboxFileViewerText(page, "api/base.txt", "On machine", 20_000);
+    const fileViewer = page.locator(SANDBOX_FILES_VIEWER_SELECTOR);
     const channelABeforeWake = problems.channelA.length;
-    await page.getByRole("button", { name: "Open live file" }).click();
+    await fileViewer.getByRole("button", { name: "Open live file" }).click();
     await waitForWarm(client, workspaceId, sessionId);
-    await page.getByText("tracked but untouched", { exact: false }).waitFor({ timeout: 30_000 });
+    await waitForSandboxFileViewerText(page, "api/base.txt", "tracked but untouched", 30_000);
     if (problems.channelA.length <= channelABeforeWake) {
       throw new Error("explicit live-file action warmed no observable Channel-A file request");
     }
@@ -1203,7 +1207,9 @@ async function runLiveWorkspaceFlow(input: {
         throw new Error("staging Modal session has no Desktop tab");
       await desktopTab.click();
       const consent = page.getByRole("button", { name: "I understand — show the desktop" });
-      if ((await consent.count()) === 1) await consent.click();
+      if ((await consent.count()) !== 0) {
+        throw new Error("Desktop still renders the removed confirmation step");
+      }
       const desktop = page.locator('[data-opengeni-desktop][data-ui-state="connected"]');
       await desktop.waitFor({ timeout: 60_000 });
       const pixelSurface = await page
@@ -1286,7 +1292,7 @@ async function runLiveWorkspaceFlow(input: {
     pass(
       checks,
       "performance.control-cancellation",
-      `Steer/Pause physical cancellation worst=${round(controlSummary.worst)}ms, p95=${round(controlSummary.p95)}ms across ${controlSummary.sampleCount} controls (hard budget 2000ms).`,
+      `Steer/Pause physical cancellation worst=${round(controlSummary.worst)}ms, p95=${round(controlSummary.p95)}ms across ${controlSummary.sampleCount} controls (hard budget ${CONTROL_CANCELLATION_WORST_MS}ms).`,
     );
 
     assertNoProblems(problems, false);
@@ -1298,6 +1304,29 @@ async function runLiveWorkspaceFlow(input: {
   } finally {
     await context.close();
   }
+}
+
+export async function waitForSandboxFileViewerText(
+  page: Page,
+  selectedPath: string,
+  text: string,
+  timeoutMs: number,
+): Promise<void> {
+  const viewer = page.locator(SANDBOX_FILES_VIEWER_SELECTOR);
+  const selectedFile = viewer
+    .locator("[data-opengeni-selected-file]")
+    .filter({ hasText: selectedPath });
+  await selectedFile.waitFor({ state: "visible", timeout: timeoutMs });
+  const observedPath = (await selectedFile.textContent())?.trim();
+  if (observedPath !== selectedPath) {
+    throw new Error(
+      `file viewer selected path mismatch: expected ${JSON.stringify(selectedPath)}, received ${JSON.stringify(observedPath)}`,
+    );
+  }
+  await viewer
+    .getByText(text, { exact: false })
+    .first()
+    .waitFor({ state: "visible", timeout: timeoutMs });
 }
 
 type ControlCancellationAudit = {
@@ -1429,16 +1458,18 @@ async function proveLiveSteerCancellation(input: {
     workspaceId,
     sessionId,
     ready.sequence,
-    2_000,
+    CONTROL_CANCELLATION_WORST_MS,
     (event) => event.type === "turn.started" && event.turnId === replacementTurnId,
-    "replacement turn start inside the 2s physical-cancellation budget",
+    "replacement turn start inside the physical-cancellation budget",
   );
   const controlCancellationMs = controlCancellationDurationMs(
     committedAt,
     Date.parse(replacementStarted.occurredAt),
   );
-  if (controlCancellationMs > 2_000) {
-    throw new Error(`Steer replacement took ${controlCancellationMs}ms; budget is 2000ms`);
+  if (controlCancellationMs > CONTROL_CANCELLATION_WORST_MS) {
+    throw new Error(
+      `Steer replacement took ${controlCancellationMs}ms; budget is ${CONTROL_CANCELLATION_WORST_MS}ms`,
+    );
   }
   const renderedStoppingState = await stoppingVisible;
   if (controlCancellationMs > 100 && !renderedStoppingState) {
@@ -1620,7 +1651,7 @@ async function proveLivePauseCancellation(input: {
     workspaceId,
     sessionId,
     ready.sequence,
-    2_000,
+    CONTROL_CANCELLATION_WORST_MS,
     (event) =>
       event.type === "session.control.paused" &&
       isRecord(event.payload) &&
@@ -1632,7 +1663,7 @@ async function proveLivePauseCancellation(input: {
     workspaceId,
     sessionId,
     pauseRequested.sequence,
-    2_000,
+    CONTROL_CANCELLATION_WORST_MS,
     (event) =>
       event.type === "session.queue.changed" &&
       event.turnId === predecessorTurnId &&
@@ -1644,9 +1675,9 @@ async function proveLivePauseCancellation(input: {
     committedAt,
     Date.parse(quiesced.occurredAt),
   );
-  if (controlCancellationMs > 2_000) {
+  if (controlCancellationMs > CONTROL_CANCELLATION_WORST_MS) {
     throw new Error(
-      `Pause physical cancellation took ${controlCancellationMs}ms; budget is 2000ms`,
+      `Pause physical cancellation took ${controlCancellationMs}ms; budget is ${CONTROL_CANCELLATION_WORST_MS}ms`,
     );
   }
   const renderedStoppingState = await stoppingState;
@@ -1859,12 +1890,11 @@ export async function runCaptureApiRegionalProbe(
     clearTimeout(timeout);
   }
   if (exitCode !== 0) {
-    const safe = sanitizeDiagnostic(stderr.replaceAll(request.cookieHeader, "[redacted]")).slice(
-      0,
-      512,
-    );
+    const detail = maskKnownPublicEvidenceValues(stderr, [request.cookieHeader])
+      .trim()
+      .slice(0, 2_048);
     throw new Error(
-      `capture API regional probe failed with exit code ${exitCode}${safe ? `: ${safe}` : ""}`,
+      `capture API regional probe failed with exit code ${exitCode}${detail ? `: ${detail}` : ""}`,
     );
   }
   let value: unknown;
@@ -1874,6 +1904,23 @@ export async function runCaptureApiRegionalProbe(
     throw new Error("capture API regional probe did not return one JSON object");
   }
   return validateCaptureApiRegionalProbeResult(value, request);
+}
+
+/**
+ * Mask exact values already known to this public CI/release evidence sink.
+ * This intentionally does not scan arbitrary OpenGeni content for patterns.
+ */
+export function maskKnownPublicEvidenceValues(
+  value: string,
+  knownSecretValues: readonly string[],
+): string {
+  const secrets = [...new Set(knownSecretValues.filter((candidate) => candidate.length > 0))].sort(
+    (left, right) => right.length - left.length,
+  );
+  return secrets.reduce(
+    (result, knownSecretValue) => result.replaceAll(knownSecretValue, "[masked]"),
+    value,
+  );
 }
 
 export function captureApiRegionalProbeEnvironment(
@@ -1982,7 +2029,7 @@ async function expectApiRejection(
     await operation();
   } catch (error) {
     if (error instanceof OpenGeniApiError && error.status === status) return;
-    throw new Error(`${label} failed unexpectedly: ${sanitizeDiagnostic(String(error))}`, {
+    throw new Error(`${label} failed unexpectedly: ${String(error)}`, {
       cause: error,
     });
   }
@@ -2020,10 +2067,10 @@ function observePage(page: Page): BrowserProblems {
   };
   page.on("console", (message) => {
     if (message.type() === "warning" || message.type() === "error") {
-      problems.console.push(sanitizeDiagnostic(message.text()));
+      problems.console.push(message.text());
     }
   });
-  page.on("pageerror", (error) => problems.page.push(sanitizeDiagnostic(String(error))));
+  page.on("pageerror", (error) => problems.page.push(String(error)));
   page.on("request", (request) => {
     const path = safePath(request.url());
     if (CHANNEL_A_PATH.test(path)) problems.channelA.push(path);
@@ -2032,7 +2079,7 @@ function observePage(page: Page): BrowserProblems {
     const path = safePath(request.url());
     const errorText = request.failure()?.errorText ?? "unknown request failure";
     if (isExpectedBrowserCancellation(path, errorText)) return;
-    problems.failedRequests.push(`${sanitizeDiagnostic(errorText)} ${path}`);
+    problems.failedRequests.push(`${errorText} ${path}`);
   });
   page.on("response", (response) => {
     if (response.status() >= 400) {
@@ -2307,11 +2354,14 @@ async function assertColdReview(page: Page, marker: string): Promise<void> {
 
   await page.getByRole("tab", { name: "Files", exact: true }).click();
   await selectTreeFile(page, "api", "server.ts");
-  await page.getByText(marker, { exact: false }).first().waitFor({ timeout: 15_000 });
+  await waitForSandboxFileViewerText(page, "api/server.ts", marker, 15_000);
 
   await selectTreeFile(page, "api", "base.txt");
-  await page.getByText("On machine", { exact: true }).waitFor();
-  await page.getByRole("button", { name: "Open live file" }).waitFor();
+  await waitForSandboxFileViewerText(page, "api/base.txt", "On machine", 15_000);
+  await page
+    .locator(SANDBOX_FILES_VIEWER_SELECTOR)
+    .getByRole("button", { name: "Open live file" })
+    .waitFor();
 }
 
 export async function assertRepositoryChangesVisible(
@@ -2356,6 +2406,14 @@ async function assertAccessibility(page: Page): Promise<void> {
   const report = await new AxeBuilder({ page: page as never })
     .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
     .analyze();
+  const manuallyAuditedContrastTargets = new Set(
+    await markIncompleteContrastTargetsForManualAudit(
+      page,
+      report.incomplete
+        .filter((rule) => rule.id === "color-contrast")
+        .flatMap((rule) => rule.nodes.map((node) => node.target)),
+    ),
+  );
   const manual = await manualAccessibilityAudit(page);
   if (report.violations.length > 0) {
     throw new Error(
@@ -2369,6 +2427,7 @@ async function assertAccessibility(page: Page): Promise<void> {
         if (rule.id === "aria-valid-attr-value") return false;
         if (rule.id === "color-contrast") {
           return (
+            !manuallyAuditedContrastTargets.has(target) &&
             !target.includes("diffs-container") &&
             !target.includes("data-line-number-content") &&
             !target.includes("data-contrast-audited") &&
@@ -2398,6 +2457,49 @@ async function assertAccessibility(page: Page): Promise<void> {
   if (manual.minimumContrast !== null && manual.minimumContrast < 4.5) {
     throw new Error(`manual text contrast ${manual.minimumContrast} is below WCAG AA 4.5:1`);
   }
+}
+
+export function axeManualContrastSelector(target: unknown): string | null {
+  if (!Array.isArray(target) || target.length !== 1 || typeof target[0] !== "string") return null;
+  const selector = target[0].trim();
+  return selector.length > 0 ? selector : null;
+}
+
+async function markIncompleteContrastTargetsForManualAudit(
+  page: Page,
+  targets: readonly unknown[],
+): Promise<string[]> {
+  const candidates = targets.flatMap((target) => {
+    const selector = axeManualContrastSelector(target);
+    return selector ? [{ selector, serializedTarget: JSON.stringify(target) }] : [];
+  });
+  return page.evaluate((browserCandidates) => {
+    const audited: string[] = [];
+    for (const { selector, serializedTarget } of browserCandidates) {
+      try {
+        const visibleMatches = Array.from(document.querySelectorAll<HTMLElement>(selector)).filter(
+          (element) => {
+            const style = getComputedStyle(element);
+            const rect = element.getBoundingClientRect();
+            return (
+              style.display !== "none" &&
+              style.visibility !== "hidden" &&
+              rect.width > 0 &&
+              rect.height > 0
+            );
+          },
+        );
+        if (visibleMatches.length === 0) continue;
+        for (const element of visibleMatches) {
+          element.setAttribute("data-contrast-audited", "");
+        }
+        audited.push(serializedTarget);
+      } catch {
+        // Invalid or non-DOM Axe target paths remain unresolved and fail below.
+      }
+    }
+    return audited;
+  }, candidates);
 }
 
 async function assertTouchTargets(page: Page, mobile: boolean): Promise<void> {

@@ -1,5 +1,186 @@
 # @opengeni/documents
 
+## 0.5.25
+
+### Patch Changes
+
+- 7f70d33: Bound long-running service memory, upgrade the OpenAI Agents SDK to 0.14.3, and preserve exact provider, streaming, and durable-resume semantics.
+- Updated dependencies [e2edfbc]
+- Updated dependencies [7f70d33]
+  - @opengeni/config@0.12.6
+  - @opengeni/contracts@0.41.2
+  - @opengeni/db@0.28.16
+  - @opengeni/storage@0.2.80
+
+## 0.5.24
+
+### Patch Changes
+
+- Updated dependencies [5806484]
+  - @opengeni/db@0.28.15
+
+## 0.5.23
+
+### Patch Changes
+
+- Updated dependencies [81a51ac]
+  - @opengeni/db@0.28.14
+
+## 0.5.22
+
+### Patch Changes
+
+- Updated dependencies [2727236]
+- Updated dependencies [c8eb465]
+  - @opengeni/config@0.12.5
+  - @opengeni/contracts@0.41.1
+  - @opengeni/db@0.28.13
+  - @opengeni/storage@0.2.79
+
+## 0.5.21
+
+### Patch Changes
+
+- Updated dependencies [bb9a346]
+  - @opengeni/config@0.12.4
+  - @opengeni/contracts@0.41.0
+  - @opengeni/db@0.28.12
+  - @opengeni/storage@0.2.78
+
+## 0.5.20
+
+### Patch Changes
+
+- Updated dependencies [dec7ada]
+  - @opengeni/config@0.12.3
+  - @opengeni/db@0.28.11
+  - @opengeni/storage@0.2.77
+
+## 0.5.19
+
+### Patch Changes
+
+- Updated dependencies [7d13f51]
+- Updated dependencies [7ac558e]
+  - @opengeni/config@0.12.2
+  - @opengeni/db@0.28.10
+  - @opengeni/storage@0.2.76
+
+## 0.5.18
+
+### Patch Changes
+
+- Updated dependencies [fed43cf]
+- Updated dependencies [410835e]
+  - @opengeni/contracts@0.40.0
+  - @opengeni/storage@0.2.75
+  - @opengeni/config@0.12.1
+  - @opengeni/db@0.28.9
+
+## 0.5.17
+
+### Patch Changes
+
+- Updated dependencies [f8eb9f9]
+- Updated dependencies [200586a]
+- Updated dependencies [5dfb93d]
+- Updated dependencies [5dfb93d]
+  - @opengeni/config@0.12.0
+  - @opengeni/contracts@0.39.5
+  - @opengeni/db@0.28.8
+  - @opengeni/storage@0.2.74
+
+## 0.5.16
+
+### Patch Changes
+
+- Updated dependencies [377180c]
+  - @opengeni/db@0.28.7
+
+## 0.5.15
+
+### Patch Changes
+
+- Updated dependencies [70ced80]
+  - @opengeni/contracts@0.39.4
+  - @opengeni/db@0.28.6
+  - @opengeni/config@0.11.5
+  - @opengeni/storage@0.2.73
+
+## 0.5.14
+
+### Patch Changes
+
+- @opengeni/config@0.11.4
+- @opengeni/db@0.28.5
+- @opengeni/storage@0.2.72
+
+## 0.5.13
+
+### Patch Changes
+
+- Updated dependencies [7a84e1b]
+- Updated dependencies [5d8bb99]
+- Updated dependencies [238fb7e]
+- Updated dependencies [af24281]
+- Updated dependencies [34c5cdb]
+  - @opengeni/db@0.28.4
+  - @opengeni/contracts@0.39.3
+  - @opengeni/config@0.11.3
+  - @opengeni/storage@0.2.71
+
+## 0.5.12
+
+### Patch Changes
+
+- Updated dependencies [7dbd057]
+- Updated dependencies [30a0b9a]
+- Updated dependencies [23de73b]
+- Updated dependencies [1503151]
+- Updated dependencies [a296081]
+  - @opengeni/contracts@0.39.2
+  - @opengeni/db@0.28.3
+  - @opengeni/config@0.11.2
+  - @opengeni/storage@0.2.70
+
+## 0.5.11
+
+### Patch Changes
+
+- Updated dependencies [110d255]
+- Updated dependencies [ce823ce]
+  - @opengeni/db@0.28.2
+  - @opengeni/contracts@0.39.1
+  - @opengeni/config@0.11.1
+  - @opengeni/storage@0.2.69
+
+## 0.5.10
+
+### Patch Changes
+
+- Updated dependencies [55f6ad0]
+  - @opengeni/db@0.28.1
+
+## 0.5.9
+
+### Patch Changes
+
+- Updated dependencies [49c7f9c]
+- Updated dependencies [5b6d36e]
+- Updated dependencies [6eb0b23]
+- Updated dependencies [5b6d36e]
+  - @opengeni/db@0.28.0
+  - @opengeni/config@0.11.0
+  - @opengeni/contracts@0.39.0
+  - @opengeni/storage@0.2.68
+
+## 0.5.8
+
+### Patch Changes
+
+- Updated dependencies [cbf165a]
+  - @opengeni/db@0.27.12
+
 ## 0.5.7
 
 ### Patch Changes

@@ -1,5 +1,13 @@
-import { normalizeMcpOutput, type GitFileDiff } from "@opengeni/sdk";
+import {
+  normalizeMcpOutput,
+  parseGeneratedImageReceipt,
+  type GeneratedImageReceipt,
+  type GitFileDiff,
+  type RetainedArtifactMetadata,
+} from "@opengeni/sdk";
 import { tryParseJson } from "../lib/format";
+
+export type { GeneratedImageReceipt };
 
 /* ----------------------------------------------------------------------------
    Pure parsers for the provider-native tool shapes that the timeline renders.
@@ -437,25 +445,6 @@ export function isApplyPatch(item: { name: string; raw: unknown }): boolean {
   return name === "apply_patch_call" || name === "apply_patch" || name.endsWith("__apply_patch");
 }
 
-/* --- secret redaction ------------------------------------------------------- */
-
-const SECRET_KEY = /^(value|secret|token|password|api[_-]?key|signing[_-]?key)$/i;
-
-/** Deep-redact secret-looking values so arguments never leak a key into the UI. */
-export function redactSecrets(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(redactSecrets);
-  }
-  if (value && typeof value === "object") {
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      out[k] = SECRET_KEY.test(k) ? "••••" : redactSecrets(v);
-    }
-    return out;
-  }
-  return value;
-}
-
 /** Parse tool arguments that may arrive as a JSON string or an object. */
 export function parseToolArgs(args: unknown): Record<string, unknown> {
   if (args == null) {
@@ -556,6 +545,43 @@ export function screenshotDataUrl(out: unknown): string | null {
     }
   }
   return null;
+}
+
+/** Parse the closed retained-screenshot receipt carried by new tool events. */
+export function retainedScreenshotMetadata(out: unknown): RetainedArtifactMetadata | null {
+  if (typeof out === "string" && (out.startsWith("{") || out.startsWith("["))) {
+    const parsed = tryParseJson(out);
+    if (parsed !== undefined && parsed !== out) return retainedScreenshotMetadata(parsed);
+  }
+  if (Array.isArray(out)) {
+    for (const entry of out) {
+      const metadata = retainedScreenshotMetadata(entry);
+      if (metadata) return metadata;
+    }
+    return null;
+  }
+  if (!out || typeof out !== "object") return null;
+  const value = out as Record<string, unknown>;
+  if (typeof value.artifactId !== "string" || typeof value.available !== "boolean") return null;
+  if (!value.available) {
+    return typeof value.reason === "string" ? (value as unknown as RetainedArtifactMetadata) : null;
+  }
+  return value.kind === "computer_screenshot" &&
+    value.contentType === "image/png" &&
+    typeof value.originalBytes === "number" &&
+    typeof value.sha256 === "string" &&
+    value.dimensions !== null &&
+    typeof value.dimensions === "object" &&
+    value.retention !== null &&
+    typeof value.retention === "object" &&
+    (value.retention as Record<string, unknown>).policy === "session_screenshot"
+    ? (value as unknown as RetainedArtifactMetadata)
+    : null;
+}
+
+/** Parse the closed permanent generated-image receipt from native/function tools. */
+export function generatedImageReceipt(out: unknown): GeneratedImageReceipt | null {
+  return parseGeneratedImageReceipt(out);
 }
 
 export type TimelineMediaPreview = {

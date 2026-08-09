@@ -276,19 +276,23 @@ id unreferenced and completes bounded garbage collection.
 This keeps one current and one previous checkpoint per lease. Old Images are not
 left around merely because another writer won a race.
 
-Modal exposes neither snapshot listing nor a public caller-supplied idempotency
-key in the pinned SDK. There is therefore one irreducible provider-API window:
-the worker process can die after Modal commits an Image but before the RPC result
-reveals its ID. OpenGeni cannot discover or delete that unknown ID. Local timeout
-and cancellation are handled—the still-running promise registers the late Image
-and hands it to GC. Registration itself is idempotently retried, so an unknown
-database commit outcome is reconciled by reading the immutable artifact row.
-OpenGeni never directly deletes after an ambiguous registration failure: the
-first transaction may have committed and that Image may already be durable
-truth. A hard process death or prolonged database outage in the
-response-before-registration interval still requires Modal to provide either
-list-by-tag/owner or caller-controlled idempotency. This residual must remain a
-tracked provider issue; it must not be hidden by claiming exactly-once creation.
+OpenGeni's pinned Modal 0.9.0 patch accepts the durable capture-operation UUID as
+the provider `snapshotId` for both native snapshot kinds. Temporal retries keep
+that UUID while receiving a new database callback/capture UUID. Repeating the
+same request from an independently resumed handle therefore returns the same
+Image receipt rather than creating an unowned Image. The live-service regression
+proves that overlap for both snapshot modes, that capture leaves the source box
+usable, and that restore is the fixed pre-mutation checkpoint.
+
+A worker death after Modal commits but before database publication is consequently
+recoverable: the next activity attempt reissues the same provider request, adopts
+the same immutable artifact through the unique provider-object ledger, and
+publishes under the current exact claim. An in-process timeout keeps the late
+promise attached to registration/publication; a process death needs no in-memory
+callback. Unknown database commit outcomes are reconciled by the artifact's
+immutable unique identity. OpenGeni still never directly deletes after an
+ambiguous registration failure because the first transaction may already have
+published the Image.
 
 ### Restore
 
@@ -330,16 +334,22 @@ can execute commands inside Modal without advancing `workspace_generation`.
 The durable sole-holder claim ensures no other normal worker can hold a second
 session handle while the exclusive provider operation begins.
 
-Publication must present the exact capture UUID and source generation and clears
-the claim in the same transaction that installs the checkpoint. Failure clears
-only that exact claim. A caller timeout does not abandon the provider promise:
-the owned capture continues to a durable artifact registration/publication or
-delete-pending handoff before releasing the gate. The stored deadline is
-diagnostic and a recovery threshold, never permission to clear ownership.
-Recovery may replace an expired drain claim only after proving zero holders,
-zero unsettled admissions, the same provider identity, and either exact command
-readiness or definitive provider loss; paused, missing-envelope, timeout, and
-ambiguous observations preserve the gate.
+Publication must present the exact source generation and either the current
+capture UUID or its stable provider-request lineage. A warm turn-end publication
+clears that exact claim; a drain publication retains it through provider teardown
+and clears it only in the atomic cold commit. An explicit pre-teardown failure
+releases only that exact claim. A caller timeout does not abandon the provider
+promise: the owned capture continues to durable artifact registration/publication
+or a delete-pending handoff.
+
+Migration 0186 records provider takeover semantics on the claim. Modal
+`same_request` and proven repeatable read-only captures may replace a dead
+activity attempt immediately while retaining the same provider request identity;
+the predecessor and successor cannot create conflicting artifacts. An
+`exclusive` provider waits for the claim deadline and may take over only after
+typed loss of the exact provider instance. A live or ambiguous exclusive
+operation remains fenced. Thus the deadline is a bounded recovery clock, never
+teardown ownership by itself; the durable claim is the ownership fence.
 
 Migration 0142 installs this protocol under an exclusive lease-table lock after
 all old application writers stop. Its database constraint makes a raw
@@ -402,8 +412,9 @@ state machine instead of inventing a second overlapping-box allocator:
    Ctrl-C to that exact retained provider session;
 5. once holders reach zero, the reaper captures/publishes once more, terminates
    the old box, and commits the lease cold;
-6. the workflow waits at least one snapshot timeout plus two reaper periods,
-   then the next fenced attempt restores a successor from the current artifact;
+6. the fenced attempt uses at most five seconds of workflow-visible anti-churn
+   pacing; admission itself waits on the exact durable teardown claim and can
+   restore a successor immediately after the cold commit;
 7. successor creation publishes a new instance, epoch, and deadline.
 
 Only one box is routable. No unowned successor exists between provider creation
@@ -555,9 +566,10 @@ the migration and application rollout.
    - start only the new API/control/turn image after 0138 commits; mixed old/new
      application versions are forbidden;
    - ensure new retained processes carry canonical provider bindings;
-   - keep the rotation batch size at its safe default of one and the lead at one
-     hour. This admits one newly due box per non-overlapping reaper sweep; it is
-     the production cohort control, not merely a SQL query cap.
+   - keep the lead at one hour. Rotation admission is now bounded to the control
+     worker's 32-activity provider concurrency and every admitted box gets an
+     independent durable drain child; the cap prevents a provider burst without
+     recreating the former one-box-per-sweep deadline backlog.
 4. **Canary and first production cohort**
    - complete the isolated short-lifetime canary in staging before production
      migration 0138 is allowed to start;
@@ -576,10 +588,10 @@ the migration and application rollout.
 6. **Cohort expansion**
    - watch overdue rotation, terminal-owner backlog, checkpoint deletion,
      expired drain, orphan termination, and provider API errors;
-   - leave the batch at one through at least two clean production rotation
-     cycles; raise `OPENGENI_SANDBOX_ROTATION_BATCH_SIZE` only through the
-   reviewed deployment configuration, and only when observed provider and
-   worker capacity justify servicing more fenced boxes per sweep.
+   - leave the batch at the worker-matched default through at least two clean
+     production rotation cycles; change `OPENGENI_SANDBOX_ROTATION_BATCH_SIZE`
+     only through reviewed deployment configuration and only when observed
+     provider and worker capacity justify a different concurrency envelope.
 
 Migration 0140 is a forward-only rolling repair on top of the completed 0138
 maintenance cutover. It replaces the checkpoint validator and the

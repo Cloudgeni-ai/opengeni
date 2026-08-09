@@ -1,5 +1,15 @@
 import type { TranscribeAudioResponse, VoiceInputErrorCode } from "@opengeni/contracts";
 
+/**
+ * Server-owned upstream budget for one provider attempt. Resumable recording
+ * claims remain fenced for longer than this budget before another worker may
+ * reclaim them. Provider adapters must honor the supplied AbortSignal and must
+ * not return while their upstream request is still live; OpenGeni does not
+ * claim remote-side idempotency or cancellation for vendors that cannot meet
+ * that adapter contract.
+ */
+export const TRANSCRIPTION_PROVIDER_REQUEST_TIMEOUT_MILLISECONDS = 10 * 60 * 1_000;
+
 export type TranscriptionLimits = {
   maxDurationSeconds: number;
   maxSizeBytes: number;
@@ -15,6 +25,10 @@ export type TranscriptionRequest = {
   durationSeconds?: number | undefined;
   signal?: AbortSignal | undefined;
   requestId: string;
+  /** Absolute server-owned provider deadline persisted for resumable attempts. */
+  providerDeadlineAt?: Date | undefined;
+  /** Exact provider selected before a resumable segment is first sent upstream. */
+  providerId?: string | undefined;
 };
 
 export type TranscriptionResult = TranscribeAudioResponse & {
@@ -82,6 +96,8 @@ export type TranscriptionAvailabilityContext = {
  */
 export type TranscriptionProvider = {
   readonly id: string;
+  /** The adapter guarantees that its upstream transport honors AbortSignal. */
+  readonly supportsServerDeadline: true;
   readonly experimental?: boolean | undefined;
   /**
    * Deployment readiness when called without a workspace. When `workspaceId` is
@@ -93,6 +109,7 @@ export type TranscriptionProvider = {
     mimeType: string;
     filename: string;
     workspaceId: string;
+    requestId: string;
     signal?: AbortSignal | undefined;
   }): Promise<{ text: string; languages: string[] }>;
 };
@@ -101,7 +118,30 @@ export type TranscriptionService = {
   limits(): TranscriptionLimits;
   /** True when at least one ready provider can serve requests. */
   available(context?: TranscriptionAvailabilityContext): boolean | Promise<boolean>;
+  /** Select one provider before a durable segment attempt; retries pin this id. */
+  selectProvider?(
+    context: TranscriptionAvailabilityContext,
+  ): string | null | Promise<string | null>;
   transcribe(request: TranscriptionRequest): Promise<TranscriptionResult>;
+};
+
+export type PreparedTranscriptionSegment = {
+  segmentNumber: number;
+  startMilliseconds: number;
+  durationMilliseconds: number;
+  mimeType: "audio/wav";
+  bytes: Uint8Array;
+};
+
+export type TranscriptionSegmenter = {
+  available(): boolean | Promise<boolean>;
+  segment(input: {
+    sourceMimeType: string;
+    totalDurationMilliseconds: number;
+    providerSegmentSeconds: number;
+    chunks: AsyncIterable<Uint8Array>;
+    signal?: AbortSignal | undefined;
+  }): AsyncIterable<PreparedTranscriptionSegment>;
 };
 
 export function normalizeMimeType(mimeType: string): string {

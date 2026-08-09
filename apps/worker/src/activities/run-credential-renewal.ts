@@ -22,7 +22,10 @@ export type RunCredentialRenewalOptions = {
   schedule?: (callback: () => void, delayMs: number) => RenewalTimer;
   clearSchedule?: (timer: RenewalTimer) => void;
   onSuccess?: (result: { nextDelayMs: number; authNeeded: boolean }) => void;
-  onFailure?: (failure: { retryDelayMs: number; errorClass: string }) => void;
+  onFailure?: (failure: {
+    retryDelayMs: number;
+    errorClass: "RunCredentialRenewalOperationError";
+  }) => void;
 };
 
 export function nextRunCredentialRenewalDelay(expiresAt: Date | null, nowMs = Date.now()): number {
@@ -42,11 +45,15 @@ export function nextRunCredentialRenewalDelay(expiresAt: Date | null, nowMs = Da
 export function startRunCredentialRenewalLoop(
   options: RunCredentialRenewalOptions,
 ): RunCredentialRenewalController {
-  return startExpiringMaterialRenewalLoop<NormalizedRunCredentialMaterial | null>({
+  return startExpiringMaterialRenewalLoop<
+    NormalizedRunCredentialMaterial | null,
+    "RunCredentialRenewalOperationError"
+  >({
     initialExpiresAt: options.initialExpiresAt,
     resolve: options.resolve,
     write: options.write,
     expiresAt: (material) => material?.expiresAt ?? null,
+    publicErrorClass: "RunCredentialRenewalOperationError",
     policy: {
       defaultRefreshMs: RUN_CREDENTIAL_DEFAULT_REFRESH_MS,
       expiryLeadMs: RUN_CREDENTIAL_EXPIRY_LEAD_MS,

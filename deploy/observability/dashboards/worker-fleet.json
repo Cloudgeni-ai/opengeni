@@ -1,7 +1,7 @@
 {
   "uid": "opengeni-worker-fleet",
   "title": "OpenGeni · Worker Fleet",
-  "description": "Eligible turn backlog, memory-aware slot saturation, worker memory vs limit, HPA replicas, sandbox leases, and compaction pressure.",
+  "description": "Eligible turn backlog, hard-reserved slot saturation, continuous worker memory headroom, node pressure, HPA replicas, sandbox leases, and compaction pressure.",
   "schemaVersion": 39,
   "version": 1,
   "editable": true,
@@ -328,7 +328,7 @@
     },
     {
       "type": "row",
-      "title": "Memory — working set vs the container limit (pre-OOM)",
+      "title": "Memory — hard reservation and continuous headroom",
       "collapsed": false,
       "panels": [],
       "id": 5,
@@ -341,8 +341,134 @@
     },
     {
       "type": "timeseries",
+      "title": "Turn-worker memory utilization vs drain target",
+      "description": "The resource-based turn worker continuously compares host and finite-cgroup utilization with its configured target. A sustained breach requests the ordinary graceful checkpoint/drain path.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": ["last", "max"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (instance, scope) (opengeni_turn_worker_memory_guard_utilization_ratio{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"})",
+          "legendFormat": "{{instance}} {{scope}} observed",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "max by (instance, scope) (opengeni_turn_worker_memory_guard_target_ratio{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"})",
+          "legendFormat": "{{instance}} {{scope}} admission target",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "max by (instance, scope) (opengeni_turn_worker_memory_guard_emergency_ratio{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"})",
+          "legendFormat": "{{instance}} {{scope}} emergency threshold",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "id": 6,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 18
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Turn-worker RSS relative to protected scope",
+      "description": "Worker RSS as a fraction of host or finite-cgroup memory. Crossing 1 - target means one process alone consumes more than the reserve intended for the rest of the node.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": ["last", "max"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (instance, scope) (opengeni_turn_worker_memory_guard_process_rss_ratio{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"})",
+          "legendFormat": "{{instance}} {{scope}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "id": 7,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 18
+      }
+    },
+    {
+      "type": "timeseries",
       "title": "Worker memory: fraction of limit",
-      "description": "cAdvisor working set ÷ kube-state-metrics limit. >0.9 sustained precedes an OOM kill mid-turn.",
+      "description": "cAdvisor working set ÷ kube-state-metrics limit. Complements the process guard with Kubernetes container truth; sustained values above 0.9 precede an OOM kill mid-turn.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -383,64 +509,12 @@
           "range": true
         }
       ],
-      "id": 6,
+      "id": 19,
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 18
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "App RSS by process (fallback when cluster infra is absent)",
-      "description": "App-emitted resident memory (prom-client default metrics) — works without cAdvisor.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "bytes",
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "fillOpacity": 8,
-            "showPoints": "never"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "calcs": ["last", "max"]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "opengeni_process_resident_memory_bytes{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",component=~\"worker-.*\"}",
-          "legendFormat": "{{instance}}",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "range": true
-        }
-      ],
-      "id": 7,
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 18
+        "y": 26
       }
     },
     {
@@ -453,7 +527,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 26
+        "y": 34
       }
     },
     {
@@ -516,7 +590,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 27
+        "y": 35
       }
     },
     {
@@ -581,7 +655,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 27
+        "y": 35
       }
     },
     {
@@ -633,7 +707,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 27
+        "y": 35
       }
     },
     {
@@ -710,7 +784,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 35
+        "y": 43
       }
     },
     {
@@ -772,7 +846,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 35
+        "y": 43
       }
     },
     {
@@ -785,7 +859,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 43
+        "y": 51
       }
     },
     {
@@ -837,7 +911,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 44
+        "y": 52
       }
     },
     {
@@ -900,7 +974,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 44
+        "y": 52
       }
     },
     {
@@ -952,7 +1026,198 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 52
+        "y": 60
+      }
+    },
+    {
+      "type": "row",
+      "title": "Node pressure — OpenGeni-hosting nodes only",
+      "collapsed": false,
+      "panels": [],
+      "id": 20,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 68
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Node memory and I/O PSI stall ratio",
+      "description": "Fraction of wall time all runnable work was stalled on memory reclaim/swap or I/O. Sustained values above 0.10 indicate host-wide contention rather than an isolated service failure.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": ["last", "max"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "opengeni:node_memory_psi_stall_ratio and on (node) opengeni:workload_node:present",
+          "legendFormat": "{{node}} memory",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "opengeni:node_io_psi_stall_ratio and on (node) opengeni:workload_node:present",
+          "legendFormat": "{{node}} I/O",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "id": 21,
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 69
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Node swap-out activity",
+      "description": "Pages swapped out per second. Any sustained activity alongside memory PSI indicates reclaim pressure that can cascade into container-runtime and control-plane stalls.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": ["last", "max"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "opengeni:node_swap_out_pages_per_second and on (node) opengeni:workload_node:present",
+          "legendFormat": "{{node}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "id": 22,
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 69
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Kubelet runtime errors and node readiness loss",
+      "description": "Runtime-operation errors and NotReady state on nodes hosting OpenGeni. Correlated service failures during pressure should be treated as one node incident.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": ["last", "max"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (node, operation_type) (rate(kubelet_runtime_operations_errors_total[5m]) * on (job, instance) group_left (node) opengeni:kubelet_instance:info) and on (node) opengeni:workload_node:present",
+          "legendFormat": "{{node}} {{operation_type}} errors/s",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "(1 - max by (node) (kube_node_status_condition{condition=\"Ready\", status=\"true\"})) and on (node) opengeni:workload_node:present",
+          "legendFormat": "{{node}} NotReady",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "id": 23,
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 69
       }
     }
   ]

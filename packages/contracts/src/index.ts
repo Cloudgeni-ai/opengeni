@@ -6,9 +6,11 @@ import {
   type SessionEventBoundarySurface,
 } from "./event-preview";
 import { WorkspaceInstructionPolicyRoleKeyInput } from "./workspace-instruction-policies";
+import { ClientResumableVoiceInputConfig } from "./transcription-recordings";
 
 export * from "./slack-bot-scopes";
 export * from "./connector-destinations";
+export * from "./image-generation";
 
 export {
   CreateWorkspaceArtifactRequest,
@@ -36,6 +38,19 @@ export {
 } from "./artifacts";
 
 export {
+  MCP_MUTATION_RECEIPT_MAX_BYTES,
+  MCP_MUTATION_RECEIPT_VERSION,
+  McpMutationReceipt,
+  McpMutationReceiptIdempotencyStatus,
+  McpMutationReceiptOutcome,
+  McpMutationResource,
+  type McpMutationReceipt as McpMutationReceiptType,
+  type McpMutationReceiptIdempotencyStatus as McpMutationReceiptIdempotencyStatusType,
+  type McpMutationReceiptOutcome as McpMutationReceiptOutcomeType,
+  type McpMutationResource as McpMutationResourceType,
+} from "./mcp-receipts";
+
+export {
   SESSION_EVENT_PAYLOAD_MAX_BYTES,
   approximateSessionEventTokens,
   boundSessionEventPayload,
@@ -52,6 +67,12 @@ export {
 } from "./event-preview";
 
 export {
+  COMPUTER_SCREENSHOT_MAX_BYTES,
+  COMPUTER_SCREENSHOT_MAX_DIMENSION,
+  COMPUTER_SCREENSHOT_MAX_PIXELS,
+  COMPUTER_SCREENSHOT_RETENTION_MS,
+  COMPUTER_SCREENSHOT_WORKSPACE_QUOTA_BYTES,
+  GENERATED_IMAGE_MAX_BYTES,
   RETAINED_OUTPUT_DEFAULT_PAGE_BYTES,
   RETAINED_OUTPUT_MAX_PAGE_BYTES,
   RETAINED_OUTPUT_RECEIPT_MAX_BYTES,
@@ -62,12 +83,16 @@ export {
   RetainedOutputKind,
   RetainedOutputUnavailableReason,
   retainedArtifactReferenceFromFile,
+  retainedGeneratedImageReferenceFromFile,
+  retainedScreenshotReferenceFromFile,
   retainedOutputUnavailable,
   resolveRetainedOutputRange,
   validateRetainedOutputEvidence,
   type RetainedArtifactFileInput,
   type RetainedArtifactMetadata,
   type RetainedArtifactReference,
+  type RetainedGeneratedImageArtifactInput,
+  type RetainedScreenshotArtifactInput,
   type RetainedArtifactUnavailable,
   type RetainedOutputAvailableEvidence,
   type RetainedOutputEvidence,
@@ -125,6 +150,54 @@ export const SandboxBackend = z.enum([
   "selfhosted",
 ]);
 export type SandboxBackend = z.infer<typeof SandboxBackend>;
+
+// OpenGeni-owned identity carried beside the provider's opaque SDK envelope.
+// Provider serializers intentionally use different keys (`sandboxId`,
+// `devboxId`, `sandboxName`, ...); durable lease logic must not need to learn a
+// new provider's private state shape. Existing envelopes remain readable via
+// the legacy keys below, while every newly-serialized envelope carries this
+// stable field.
+export const OPENGENI_SANDBOX_PROVIDER_INSTANCE_ID_FIELD = "opengeniProviderInstanceId" as const;
+export const SANDBOX_PROVIDER_INSTANCE_ID_FIELDS_BY_BACKEND = {
+  docker: ["containerId"],
+  modal: ["sandboxId"],
+  local: ["workspaceRootPath"],
+  none: [],
+  daytona: ["sandboxId"],
+  runloop: ["devboxId"],
+  e2b: ["sandboxId"],
+  // A Blaxel name is reusable after deletion. The SDK persists a canonical
+  // metadata identity (name + creation timestamp + workspace) specifically to
+  // distinguish a later sandbox created under the same name.
+  blaxel: ["sandboxIdentity"],
+  cloudflare: ["sandboxId"],
+  vercel: ["sandboxId"],
+  selfhosted: ["agentId"],
+} as const satisfies Record<SandboxBackend, readonly string[]>;
+export const LEGACY_SANDBOX_PROVIDER_INSTANCE_ID_FIELDS = [
+  "sandboxId",
+  "devboxId",
+  "sandboxName",
+  "sandboxIdentity",
+  "containerId",
+  "workspaceRootPath",
+  "agentId",
+] as const;
+
+/**
+ * Durable proof that a provider may replace an execution wrapper without
+ * replacing the workspace OpenGeni owns. This is intentionally narrower than
+ * generic provider resume: only a provider adapter that can prove the same
+ * continuity key may consume it, and only a cold->warming owner or teardown
+ * claimant may authorize that replacement.
+ */
+export type SandboxProviderContinuityRecovery = {
+  version: 1;
+  backend: SandboxBackend;
+  kind: "docker_workspace";
+  sourceInstanceId: string;
+  continuityKey: string;
+};
 
 // OS axis. Only "linux" is reachable in v1; macos/windows are seam placeholders.
 export const SandboxOs = z.enum(["linux", "macos", "windows"]);
@@ -595,9 +668,9 @@ export const Permission = z.enum([
   "sessions:control",
   // sandbox workspace (sandbox contract §C.3 / crosscut PART 1.2). stream:view is a
   // REAL, distinct permission — strictly BROADER than sessions:read — because the
-  // pixel plane (Channel B) is UN-REDACTED: a viewer of raw pixels can see cloud
-  // creds the agent cat's into a terminal, which the redacted Channel-A event log
-  // never exposes. sessions:read is NOT permission to watch raw pixels.
+  // pixel plane (Channel B) exposes raw pixels: a viewer can see content the
+  // structured Channel-A event log never captured. sessions:read is NOT
+  // permission to watch raw pixels.
   "stream:view",
   // SEPARATE from stream:view: raw input to the desktop (bypasses approvalQueue /
   // interrupt). NEVER granted by default in v1 (the input plane is OFF —
@@ -628,8 +701,14 @@ export const Permission = z.enum([
   "environments:manage",
   /** @deprecated alias of variable-sets:use */
   "environments:use",
+  "variable-sets:list",
+  "variable-sets:read",
+  "variable-sets:write",
   "variable-sets:manage",
   "variable-sets:use",
+  "secrets:list",
+  "secrets:read",
+  "secrets:write",
   // Attach or rotate per-session third-party MCP server credentials. Deliberately
   // not part of the worker's default first-party MCP permission set: a sandboxed
   // agent must not be able to hand itself new bearer credentials.
@@ -714,6 +793,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "sandbox_swap",
   "run_on",
   "sandbox_provision",
+  "connected_machine_remove",
   "rig_list",
   "rig_get",
   "rig_propose_change",
@@ -730,6 +810,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "set_other_session_title",
   "variable_set_list",
   "environment_list",
+  "variable_set_get_variable",
   "variable_set_set_variable",
   "environment_set_variable",
   "github_connect_link",
@@ -1155,6 +1236,7 @@ export const ClientVoiceInputConfig = z
       .positive()
       .max(25 * 1024 * 1024),
     acceptedMimeTypes: z.array(z.string().trim().min(1).max(128)).min(1).max(32),
+    resumable: ClientResumableVoiceInputConfig.optional(),
   })
   .strict();
 export type ClientVoiceInputConfig = z.infer<typeof ClientVoiceInputConfig>;
@@ -1183,6 +1265,8 @@ export const VOICE_INPUT_ACCEPTED_MIME_TYPES = [
   "audio/mp3",
   "audio/m4a",
 ] as const;
+
+export * from "./transcription-recordings";
 
 /** Per-session / workspace Codex compaction strategy. */
 export const CodexCompactionMode = z.enum(["remote_v2", "portable"]);
@@ -1258,6 +1342,9 @@ export const WorkspaceSettingsSchema = z
     // Default compaction strategy for NEW Codex sessions created in this
     // workspace. Absent ⇒ remote_v2. Non-Codex sessions always freeze portable.
     codexCompactionDefault: CodexCompactionMode.optional(),
+    // Whether agents may expose and invoke the built-in structured human-input
+    // tool. Absent preserves the historical enabled behavior.
+    agentHumanInputEnabled: z.boolean().optional(),
     // Optional Slack reaction invocation. Absent/invalid fails closed to the
     // disabled default via resolveWorkspaceSlackReactionSummonSettings.
     slackReactionSummon: WorkspaceSlackReactionSummonSettings.optional(),
@@ -1276,6 +1363,12 @@ export function resolveWorkspaceCodexCompactionDefault(settings: unknown): Codex
   const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
   if (!parsed.success) return "remote_v2";
   return parsed.data.codexCompactionDefault ?? "remote_v2";
+}
+
+/** Whether agents may request structured human input (enabled when unset). */
+export function resolveWorkspaceAgentHumanInputEnabled(settings: unknown): boolean {
+  const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
+  return parsed.success ? parsed.data.agentHumanInputEnabled !== false : true;
 }
 
 /**
@@ -1303,7 +1396,9 @@ export function resolveWorkspaceSlackReactionSummonSettings(
     return {
       enabled: DEFAULT_WORKSPACE_SLACK_REACTION_SUMMON_SETTINGS.enabled,
       emoji: DEFAULT_WORKSPACE_SLACK_REACTION_SUMMON_SETTINGS.emoji,
-      channelPolicy: { ...DEFAULT_WORKSPACE_SLACK_REACTION_SUMMON_SETTINGS.channelPolicy },
+      channelPolicy: {
+        ...DEFAULT_WORKSPACE_SLACK_REACTION_SUMMON_SETTINGS.channelPolicy,
+      },
     };
   }
   return configured.channelPolicy.mode === "allowlist"
@@ -1338,6 +1433,7 @@ export const UpdateWorkspaceSettingsRequest = z
     transcription: WorkspaceTranscriptionPolicy.optional(),
     maxNestedAgentDepth: NestedAgentDepthValue.nullable().optional(),
     codexCompactionDefault: CodexCompactionMode.optional(),
+    agentHumanInputEnabled: z.boolean().optional(),
     slackReactionSummon: WorkspaceSlackReactionSummonSettings.optional(),
   })
   .passthrough();
@@ -1665,6 +1761,11 @@ export const EnrollmentBearerPayload = z.object({
   workspaceId: z.string().uuid(),
   agentId: z.string().uuid(),
   enrollmentId: z.string().uuid(),
+  // Backward-compatible credential-family fence. Generationless bearers minted
+  // before migration 0061 parse ONLY as generation 1, matching the migration's
+  // default for existing rows. signEnrollmentBearer serializes the parsed output,
+  // so every newly signed bearer carries this claim explicitly.
+  credentialGeneration: z.number().int().positive().default(1),
   // The Account-scoped control-plane subject prefix the agent subscribes to.
   subjectPrefix: z.string().min(1),
   exp: z.number().int().positive(),
@@ -1699,7 +1800,13 @@ export async function verifyEnrollmentBearer(
   if (!constantTimeEqual(signature, expected)) {
     return null;
   }
-  const payload = EnrollmentBearerPayload.safeParse(JSON.parse(base64UrlDecode(encodedPayload)));
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(base64UrlDecode(encodedPayload));
+  } catch {
+    return null;
+  }
+  const payload = EnrollmentBearerPayload.safeParse(decoded);
   if (!payload.success || payload.data.exp < nowSeconds) {
     return null;
   }
@@ -2078,6 +2185,9 @@ export type InsightsRange = z.infer<typeof InsightsRange>;
 export const InsightsBillingPath = z.enum(["opengeni_credits", "external"]);
 export type InsightsBillingPath = z.infer<typeof InsightsBillingPath>;
 
+export const InsightsPricingSource = z.enum(["configured_list_price", "gateway_reported"]);
+export type InsightsPricingSource = z.infer<typeof InsightsPricingSource>;
+
 export const InsightsModelUsageRow = z.object({
   id: z.string().min(1),
   model: z.string().min(1),
@@ -2087,10 +2197,17 @@ export const InsightsModelUsageRow = z.object({
   inputTokens: z.number().nonnegative(),
   outputTokens: z.number().nonnegative(),
   cachedTokens: z.number().nonnegative(),
+  cacheInputTokens: z.number().nonnegative(),
   cacheWriteTokens: z.number().nonnegative(),
   reasoningTokens: z.number().nonnegative(),
+  totalTokens: z.number().nonnegative(),
+  tokenKnownCalls: z.number().int().nonnegative(),
+  cacheKnownCalls: z.number().int().nonnegative(),
   /** Priced OpenGeni credit $ for this model×provider (from model_call_facts). */
   creditUsd: z.number().nonnegative(),
+  /** Hypothetical provider-rate USD; never an OpenGeni charge. */
+  estimatedProviderUsd: z.number().nonnegative(),
+  estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
 });
 export type InsightsModelUsageRow = z.infer<typeof InsightsModelUsageRow>;
 
@@ -2098,9 +2215,19 @@ export const InsightsSeriesPoint = z.object({
   label: z.string().min(1),
   /** Day-bucketed sum of usage_events.model.cost (workspace-wide) or filtered facts when provider/model set. */
   modelCostUsd: z.number().nonnegative(),
+  /** Day-bucketed hypothetical provider-rate USD for calls with captured pricing. */
+  estimatedProviderUsd: z.number().nonnegative(),
+  estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
   warmSeconds: z.number().nonnegative(),
   inputTokens: z.number().nonnegative(),
+  outputTokens: z.number().nonnegative(),
   cachedTokens: z.number().nonnegative(),
+  cacheInputTokens: z.number().nonnegative(),
+  cacheWriteTokens: z.number().nonnegative(),
+  reasoningTokens: z.number().nonnegative(),
+  totalTokens: z.number().nonnegative(),
+  tokenKnownCalls: z.number().int().nonnegative(),
+  cacheKnownCalls: z.number().int().nonnegative(),
   cacheHitPct: z.number().int().min(0).max(100),
   calls: z.number().int().nonnegative(),
 });
@@ -2123,9 +2250,12 @@ export const InsightsSpendDriver = z.object({
   groupBy: z.enum(["root_session", "schedule"]),
   label: z.string().min(1),
   creditUsd: z.number().nonnegative(),
+  estimatedProviderUsd: z.number().nonnegative(),
+  estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
   tokens: z.number().nonnegative(),
   cacheHitPct: z.number().int().min(0).max(100),
   pctOfCreditUsd: z.number().int().min(0).max(100),
+  pctOfTokens: z.number().int().min(0).max(100),
   deltaUsdVsPrior: z.number(),
 });
 export type InsightsSpendDriver = z.infer<typeof InsightsSpendDriver>;
@@ -2172,11 +2302,38 @@ export const InsightsScheduleRow = z.object({
   fires: z.number().int().nonnegative(),
   /** Null when no facts carry scheduled_task_id for this window. */
   creditUsd: z.number().nonnegative().nullable(),
+  estimatedProviderUsd: z.number().nonnegative().nullable(),
+  estimatedProviderCostKnownCalls: z.number().int().nonnegative().nullable(),
   tokens: z.number().nonnegative().nullable(),
   cacheHitPct: z.number().int().min(0).max(100).nullable(),
   billing: InsightsBillingPath.nullable(),
 });
 export type InsightsScheduleRow = z.infer<typeof InsightsScheduleRow>;
+
+export const InsightsModelCallRow = z.object({
+  id: z.string().uuid(),
+  occurredAt: z.string().datetime(),
+  recordedAt: z.string().datetime(),
+  sessionId: z.string().uuid(),
+  sessionTitle: z.string(),
+  turnId: z.string().uuid(),
+  provider: z.string().min(1),
+  providerApi: z.string().min(1),
+  model: z.string().min(1),
+  billing: InsightsBillingPath,
+  inputTokens: z.number().nonnegative().nullable(),
+  outputTokens: z.number().nonnegative().nullable(),
+  cachedTokens: z.number().nonnegative().nullable(),
+  cacheWriteTokens: z.number().nonnegative().nullable(),
+  reasoningTokens: z.number().nonnegative().nullable(),
+  totalTokens: z.number().nonnegative().nullable(),
+  /** OpenGeni credit price for this call. External calls are always zero. */
+  creditUsd: z.number().nonnegative(),
+  /** Hypothetical provider-rate USD; null when historical pricing is unavailable. */
+  estimatedProviderUsd: z.number().nonnegative().nullable(),
+  pricingSource: InsightsPricingSource.nullable(),
+});
+export type InsightsModelCallRow = z.infer<typeof InsightsModelCallRow>;
 
 export const WorkspaceInsightsSnapshot = z.object({
   range: InsightsRange,
@@ -2184,6 +2341,9 @@ export const WorkspaceInsightsSnapshot = z.object({
   priorLabel: z.string().min(1),
   seriesLabel: z.string().min(1),
   cacheSeriesLabel: z.string().min(1),
+  windowStart: z.string().datetime(),
+  windowEnd: z.string().datetime(),
+  generatedAt: z.string().datetime(),
   /** All ranges/series are UTC. */
   timezone: z.literal("UTC"),
   models: z.array(InsightsModelUsageRow),
@@ -2193,6 +2353,7 @@ export const WorkspaceInsightsSnapshot = z.object({
   depth: z.array(InsightsDepthBucket),
   drivers: z.array(InsightsSpendDriver),
   schedules: z.array(InsightsScheduleRow),
+  recentCalls: z.array(InsightsModelCallRow),
   warmSeconds: z.number().nonnegative(),
   priorWarmSeconds: z.number().nonnegative(),
   warmGroups: z.array(InsightsWarmGroupRow),
@@ -2206,7 +2367,14 @@ export const WorkspaceInsightsSnapshot = z.object({
   /** Model-filterable credit $ from facts (equals workspace when unfiltered, ignoring late-reject drift). */
   creditUsd: z.number().nonnegative(),
   priorCreditUsd: z.number().nonnegative(),
+  /** Hypothetical provider-rate USD for calls whose historical price was captured. */
+  estimatedProviderUsd: z.number().nonnegative(),
+  priorEstimatedProviderUsd: z.number().nonnegative(),
+  estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
+  priorEstimatedProviderCostKnownCalls: z.number().int().nonnegative(),
+  modelCalls: z.number().int().nonnegative(),
   priorInputTokens: z.number().nonnegative(),
+  priorTotalTokens: z.number().nonnegative(),
   priorCacheHitPct: z.number().int().min(0).max(100),
   priorCalls: z.number().int().nonnegative(),
   /** Lifetime workspace topology (not scoped to the selected Insights range). */
@@ -2506,13 +2674,6 @@ export type RunCredentialAuthNeeded = {
   message?: string;
 };
 
-export type RunCredentialRedaction = {
-  /** Bounded diagnostic label used only in the replacement marker. */
-  name: string;
-  /** One atomic secret value that must be removed from streamed/audit output. */
-  value: string;
-};
-
 export type RunCredentialsRequest = {
   accountId: string;
   workspaceId: string;
@@ -2558,12 +2719,6 @@ export type RunCredentialsResolution =
       files?: RunCredentialFile[];
       /** Environment name to one returned relative file path. */
       fileEnvironment?: Record<string, string>;
-      /**
-       * Atomic sensitive values embedded inside credential files or derived
-       * material. Environment values are registered automatically; hosts list
-       * additional file-contained values here so chunked output is redacted.
-       */
-      redactions?: RunCredentialRedaction[];
       /** Earliest material expiry. Null/omitted uses a bounded refresh cadence. */
       expiresAt?: string | null;
       /** Partial degradation: usable material may coexist with reconnect notices. */
@@ -2955,6 +3110,93 @@ export function gitCredentialBindingIdForRepository(
   );
 }
 
+type GitRemotePathSemantics = "dot_git_alias" | "exact";
+
+/**
+ * Provider-declared remote-path behavior. Keeping this exhaustive makes a new
+ * provider choose its semantics instead of inheriting GitHub conventions.
+ */
+const GIT_REMOTE_PATH_SEMANTICS = {
+  github: "dot_git_alias",
+  gitlab: "dot_git_alias",
+  azure_devops: "exact",
+} as const satisfies Record<GitCredentialProvider, GitRemotePathSemantics>;
+
+function gitRemotePathSemantics(
+  provider: GitCredentialProvider | null | undefined,
+): GitRemotePathSemantics {
+  return provider ? GIT_REMOTE_PATH_SEMANTICS[provider] : "exact";
+}
+
+export class RepositoryUriError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RepositoryUriError";
+  }
+}
+
+/**
+ * Normalize only the safe, provider-neutral parts of an HTTPS clone URI.
+ *
+ * The provider-defined path is opaque: this helper never adds or removes a
+ * `.git` suffix. Embedded user info, query parameters, and fragments are not
+ * durable resource identity and are omitted, matching the existing secret-free
+ * resource contract.
+ */
+export function normalizeRepositoryTransportUri(uri: string): string {
+  let url: URL;
+  try {
+    url = new URL(uri.trim());
+  } catch {
+    throw new RepositoryUriError(`invalid repository URI: ${uri}`);
+  }
+  if (url.protocol !== "https:" || !url.hostname) {
+    throw new RepositoryUriError("repository resources must use HTTPS Git URLs");
+  }
+  const path = url.pathname.replace(/^\/+|\/+$/g, "");
+  if (path.split("/").filter(Boolean).length < 2) {
+    throw new RepositoryUriError("repository URL must include owner and repo");
+  }
+  return `https://${url.host.toLowerCase()}/${path}`;
+}
+
+/**
+ * Return every URI spelling that a provider explicitly declares equivalent.
+ * Exact-path and unqualified providers return only the normalized input URI.
+ */
+export function gitRemoteUriAliases(
+  uri: string,
+  provider: GitCredentialProvider | null | undefined,
+): string[] {
+  const normalizedUri = normalizeRepositoryTransportUri(uri);
+  if (gitRemotePathSemantics(provider) === "exact") {
+    return [normalizedUri];
+  }
+  const base = normalizedUri.replace(/\.git$/, "");
+  return [...new Set([normalizedUri, base, `${base}.git`])];
+}
+
+/** Stable remote identity for deduplication and credential-binding ownership. */
+export function gitRemoteIdentity(
+  uri: string,
+  provider: GitCredentialProvider | null | undefined,
+): string {
+  const normalizedUri = normalizeRepositoryTransportUri(uri);
+  return gitRemotePathSemantics(provider) === "dot_git_alias"
+    ? normalizedUri.replace(/\.git$/, "")
+    : normalizedUri;
+}
+
+/** Provider-aware Git credential-helper path aliases, without a leading slash. */
+export function gitRemotePathAliases(
+  uri: string,
+  provider: GitCredentialProvider | null | undefined,
+): string[] {
+  return gitRemoteUriAliases(uri, provider).map((alias) =>
+    new URL(alias).pathname.replace(/^\/+|\/+$/g, ""),
+  );
+}
+
 export const FileResourceRef = z.object({
   kind: z.literal("file"),
   fileId: z.string().uuid(),
@@ -3035,7 +3277,10 @@ export function resourceMountPathCollisionKey(path: string): string {
  * GitLab, Azure DevOps, or a custom host do not collide. Encoding the host keeps
  * IPv6/custom-port identities inside one portable path segment.
  */
-export function defaultRepositoryMountPath(uri: string): string {
+export function defaultRepositoryMountPath(
+  uri: string,
+  provider?: GitCredentialProvider | null,
+): string {
   let url: URL;
   try {
     url = new URL(uri);
@@ -3045,7 +3290,11 @@ export function defaultRepositoryMountPath(uri: string): string {
   if (url.protocol !== "https:" || !url.host) {
     throw new ResourceMountPathError(`invalid repository URI for mount path: ${uri}`);
   }
-  const repositoryPath = url.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
+  const remotePath = url.pathname.replace(/^\/+|\/+$/g, "");
+  const repositoryPath =
+    gitRemotePathSemantics(provider) === "dot_git_alias"
+      ? remotePath.replace(/\.git$/, "")
+      : remotePath;
   const segments = repositoryPath.split("/").filter(Boolean);
   if (segments.length < 2) {
     throw new ResourceMountPathError(`repository URI must include owner and repo: ${uri}`);
@@ -3062,7 +3311,7 @@ export function resourceMountPath(resource: ResourceRef): string {
   if (resource.mountPath) return normalizeResourceMountPath(resource.mountPath);
   return resource.kind === "file"
     ? normalizeResourceMountPath(`${DEFAULT_FILE_RESOURCE_MOUNT_ROOT}/${resource.fileId}`)
-    : defaultRepositoryMountPath(resource.uri);
+    : defaultRepositoryMountPath(resource.uri, gitCredentialProviderForRepository(resource));
 }
 
 /** Fail before sandbox execution when two resources share a portable path. */
@@ -3753,7 +4002,10 @@ export function resourceIdentityKey(resource: ResourceRef): string {
   if (resource.kind === "file") {
     return `file:${resource.fileId}`;
   }
-  return `repository:${resource.uri}`;
+  return `repository:${gitRemoteIdentity(
+    resource.uri,
+    gitCredentialProviderForRepository(resource),
+  )}`;
 }
 
 function sortJson(value: unknown): unknown {
@@ -4310,6 +4562,7 @@ export const SessionAuthorizationOperation = z.enum([
   "session.viewer.read",
   "session.viewer.control",
   "session.first_party_mcp.call",
+  "session.secret.read",
   "session.toolspace.call",
   "session.pin.write",
   "session.codex_account.write",
@@ -5031,9 +5284,9 @@ function withVariableSetIdAlias<T extends z.ZodRawShape>(shape: T) {
   }, z.object(shape));
 }
 
-// Metadata only by design: no schema in this file ever carries a variable value
-// back to a client. Values are write-only and decrypted exclusively inside the
-// worker at sandbox materialization time.
+// Generic variable-set reads remain metadata-only. Exact plaintext has one
+// dedicated response schema so callers cannot accidentally widen another
+// workspace/session response with secret material.
 export const VariableSetVariableMetadata = z.object({
   name: VariableSetVariableName,
   version: z.number().int().positive(),
@@ -5045,6 +5298,14 @@ export type VariableSetVariableMetadata = z.infer<typeof VariableSetVariableMeta
 export const WorkspaceEnvironmentVariableMetadata = VariableSetVariableMetadata;
 /** @deprecated use VariableSetVariableMetadata */
 export type WorkspaceEnvironmentVariableMetadata = VariableSetVariableMetadata;
+
+export const VariableSetSecret = z.object({
+  variableSetId: z.string().uuid(),
+  name: VariableSetVariableName,
+  version: z.number().int().positive(),
+  value: z.string(),
+});
+export type VariableSetSecret = z.infer<typeof VariableSetSecret>;
 
 export const VariableSet = z.object({
   id: z.string().uuid(),
@@ -5247,7 +5508,11 @@ export type ScheduledTaskStatus = z.infer<typeof ScheduledTaskStatus>;
 export const ScheduledTaskRunStatus = z.enum(["queued", "dispatched", "failed"]);
 export type ScheduledTaskRunStatus = z.infer<typeof ScheduledTaskRunStatus>;
 
-export const ScheduledTaskRunMode = z.enum(["new_session_per_run", "reusable_session"]);
+export const ScheduledTaskRunMode = z.enum([
+  "new_session_per_run",
+  "reusable_session",
+  "existing_session",
+]);
 export type ScheduledTaskRunMode = z.infer<typeof ScheduledTaskRunMode>;
 
 export const ScheduledTaskOverlapPolicy = z.enum(["allow_concurrent", "skip", "buffer_one"]);
@@ -5311,10 +5576,14 @@ export const ScheduledTask = z.object({
   runMode: ScheduledTaskRunMode,
   overlapPolicy: ScheduledTaskOverlapPolicy,
   agentConfig: ScheduledTaskAgentConfig,
-  createdBy: TurnInitiator.default({ kind: "service", subjectId: "unattributed-legacy" }),
+  createdBy: TurnInitiator.default({
+    kind: "service",
+    subjectId: "unattributed-legacy",
+  }),
   createdByContext: TurnInitiatorContext.default({}),
   personalConnections: z.array(McpPersonalConnectionSummary).default([]),
   reusableSessionId: z.string().uuid().nullable(),
+  targetSessionId: z.string().uuid().nullable().default(null),
   variableSetId: z.string().uuid().nullable().default(null),
   /** @deprecated use variableSetId */
   environmentId: z.string().uuid().nullable().default(null),
@@ -5350,6 +5619,7 @@ export const CreateScheduledTaskRequest = withVariableSetIdAlias({
   schedule: ScheduledTaskScheduleSpec,
   runMode: ScheduledTaskRunMode.default("new_session_per_run"),
   overlapPolicy: ScheduledTaskOverlapPolicy.default("allow_concurrent"),
+  targetSessionId: z.string().uuid().nullable().optional(),
   agentConfig: ScheduledTaskAgentConfig,
   status: ScheduledTaskStatus.default("active"),
   variableSetId: z.string().uuid().nullable().optional(),
@@ -5357,6 +5627,28 @@ export const CreateScheduledTaskRequest = withVariableSetIdAlias({
   // The rig each run binds to (M3); its active version is resolved per fire.
   rigId: z.string().uuid().nullable().optional(),
   metadata: z.record(z.string(), z.unknown()).default({}),
+}).superRefine((value, context) => {
+  if (value.runMode === "existing_session" && !value.targetSessionId) {
+    context.addIssue({
+      code: "custom",
+      path: ["targetSessionId"],
+      message: "targetSessionId is required when runMode=existing_session",
+    });
+  }
+  if (value.runMode !== "existing_session" && value.targetSessionId) {
+    context.addIssue({
+      code: "custom",
+      path: ["targetSessionId"],
+      message: "targetSessionId requires runMode=existing_session",
+    });
+  }
+  if (value.runMode === "existing_session" && value.agentConfig.goal) {
+    context.addIssue({
+      code: "custom",
+      path: ["agentConfig", "goal"],
+      message: "agentConfig.goal cannot be used with an existing-session target",
+    });
+  }
 });
 export type CreateScheduledTaskRequest = z.infer<typeof CreateScheduledTaskRequest>;
 
@@ -5365,6 +5657,7 @@ export const UpdateScheduledTaskRequest = withVariableSetIdAlias({
   schedule: ScheduledTaskScheduleSpec.optional(),
   runMode: ScheduledTaskRunMode.optional(),
   overlapPolicy: ScheduledTaskOverlapPolicy.optional(),
+  targetSessionId: z.string().uuid().nullable().optional(),
   agentConfig: ScheduledTaskAgentConfig.optional(),
   status: ScheduledTaskStatus.optional(),
   variableSetId: z.string().uuid().nullable().optional(),
@@ -5373,6 +5666,31 @@ export const UpdateScheduledTaskRequest = withVariableSetIdAlias({
   // resolved per fire, so an update takes effect on the next dispatch.
   rigId: z.string().uuid().nullable().optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
+}).superRefine((value, context) => {
+  if (value.targetSessionId && value.runMode && value.runMode !== "existing_session") {
+    context.addIssue({
+      code: "custom",
+      path: ["targetSessionId"],
+      message: "targetSessionId requires runMode=existing_session",
+    });
+  }
+  if (value.runMode === "existing_session" && value.targetSessionId === null) {
+    context.addIssue({
+      code: "custom",
+      path: ["targetSessionId"],
+      message: "targetSessionId cannot be null when runMode=existing_session",
+    });
+  }
+  if (
+    value.agentConfig?.goal &&
+    (value.runMode === "existing_session" || Boolean(value.targetSessionId))
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["agentConfig", "goal"],
+      message: "agentConfig.goal cannot be used with an existing-session target",
+    });
+  }
 });
 export type UpdateScheduledTaskRequest = z.infer<typeof UpdateScheduledTaskRequest>;
 
@@ -6253,9 +6571,9 @@ export const Session = z.object({
   createIdempotencyKey: z.string().nullable(),
   temporalWorkflowId: z.string().nullable(),
   activeTurnId: z.string().uuid().nullable(),
-  // Actual input tokens of the last model call of the most recent turn; the
-  // pre-turn portable context-compaction trigger reads it as its budget
-  // signal. Null until a turn with usage has completed.
+  // Provider-reported input tokens of the latest authoritative terminal
+  // response. Null after a context transition or whenever that latest response
+  // supplied no usable count, so an older response can never drive compaction.
   lastInputTokens: z.number().int().nonnegative().nullable(),
   queueVersion: z.number().int().nonnegative(),
   queueHeadPosition: z.number().int(),
@@ -6859,8 +7177,8 @@ export const RecordingFailedPayload = z.object({
   recordingId: z.string().uuid(),
   turnId: z.string().uuid().nullable(),
   reason: RecordingFailedReason,
-  // ffmpeg-stderr tail / error detail — agent/ffmpeg-controlled, so the producer
-  // caps + scrubs it before emit (it rides redact() like every payload).
+  // Exact ffmpeg stderr/error detail. Event transport limits must reject or
+  // paginate rather than rewriting this canonical diagnostic.
   detail: z.string().nullable().optional(),
 });
 export type RecordingFailedPayload = z.infer<typeof RecordingFailedPayload>;
@@ -6987,6 +7305,18 @@ export const FsListResponse = z.object({
   truncated: z.boolean(), // global cap hit
 });
 export type FsListResponse = z.infer<typeof FsListResponse>;
+
+/** Several independent directory listings served behind one Channel-A lease.
+ * The response order exactly matches `requests`; callers can paint a root and
+ * hydrate a bounded lazy-tree frontier without repeating provider attach work. */
+export const FsListBatchRequest = z.object({
+  requests: z.array(FsListRequest).min(1).max(16),
+});
+export type FsListBatchRequest = z.infer<typeof FsListBatchRequest>;
+export const FsListBatchResponse = z.object({
+  results: z.array(FsListResponse),
+});
+export type FsListBatchResponse = z.infer<typeof FsListBatchResponse>;
 
 export const FsEncoding = z.enum(["utf8", "base64"]);
 export type FsEncoding = z.infer<typeof FsEncoding>;
@@ -7156,6 +7486,27 @@ export const GitDiffResponse = z.object({
 });
 export type GitDiffResponse = z.infer<typeof GitDiffResponse>;
 
+/** One repository read unit: status metadata plus an optional comparison.
+ * Multiple units execute behind one Channel-A lease and preserve input order. */
+export const GitReadBatchItemRequest = z.object({
+  status: GitStatusRequest,
+  diff: GitDiffRequest.optional(),
+});
+export type GitReadBatchItemRequest = z.infer<typeof GitReadBatchItemRequest>;
+export const GitReadBatchRequest = z.object({
+  requests: z.array(GitReadBatchItemRequest).min(1).max(32),
+});
+export type GitReadBatchRequest = z.infer<typeof GitReadBatchRequest>;
+export const GitReadBatchItemResponse = z.object({
+  status: GitStatusResponse,
+  diff: GitDiffResponse.optional(),
+});
+export type GitReadBatchItemResponse = z.infer<typeof GitReadBatchItemResponse>;
+export const GitReadBatchResponse = z.object({
+  results: z.array(GitReadBatchItemResponse),
+});
+export type GitReadBatchResponse = z.infer<typeof GitReadBatchResponse>;
+
 // ─── Workbench v2 turn-end workspace capture ────────────
 // A capture is a point-in-time snapshot of the session workspace's CHANGES,
 // probed live off the box at turn end (detectRepos → gitStatus/gitDiff → fsRead
@@ -7187,10 +7538,10 @@ export const WorkspaceCaptureFile = z.object({
 });
 export type WorkspaceCaptureFile = z.infer<typeof WorkspaceCaptureFile>;
 
-// One repo discovered in the workspace. `diff` is `git diff HEAD` (combined
-// staged+unstaged tracked changes vs HEAD — the review diff); `status` is the
-// full porcelain file list (drives the rail glyphs incl. untracked, which the
-// HEAD diff omits). root "" = the workspace root repo.
+// One repo discovered in the workspace. `diff` is the working/index surface vs
+// HEAD; `branchDiff`, when available, is the complete current branch vs the
+// remote default branch and therefore retains committed agent work. `status`
+// is the full porcelain file list. root "" = the workspace root repo.
 export const WorkspaceCaptureRepo = z.object({
   root: z.string(),
   head: z.string().nullable(),
@@ -7200,6 +7551,7 @@ export const WorkspaceCaptureRepo = z.object({
   behind: z.number().int().nonnegative().default(0),
   status: z.array(GitFileStatus),
   diff: z.array(GitFileDiff),
+  branchDiff: z.array(GitFileDiff).optional(),
 });
 export type WorkspaceCaptureRepo = z.infer<typeof WorkspaceCaptureRepo>;
 
@@ -9263,8 +9615,25 @@ export type ListEnrollmentsResponse = z.infer<typeof ListEnrollmentsResponse>;
 
 export const RevokeEnrollmentResponse = z.object({
   revoked: z.boolean(),
+  outcome: z.enum(["removed", "already_removed", "blocked"]),
+  enrollmentId: z.string().uuid(),
+  machineName: z.string().nullable(),
+  lastSeenAt: z.string().datetime({ offset: true }).nullable(),
+  revokedAt: z.string().datetime({ offset: true }).nullable(),
+  code: z
+    .enum(["active_route", "active_commands", "active_lease", "recovery_pending", "not_selfhosted"])
+    .nullable(),
+  message: z.string(),
+  action: z.string(),
 });
 export type RevokeEnrollmentResponse = z.infer<typeof RevokeEnrollmentResponse>;
+
+/** POST /v1/workspaces/:workspaceId/enrollments/:id/revoke body. */
+export const RemoveEnrollmentRequest = z.object({
+  expectedUpdatedAt: z.string().datetime({ offset: true }).optional(),
+  idempotencyKey: z.string().trim().min(1).max(200).optional(),
+});
+export type RemoveEnrollmentRequest = z.infer<typeof RemoveEnrollmentRequest>;
 
 // =============================================================================
 // Enrollment UX (self-hosted enrollment UX, design 11): the click-Grant approve
@@ -9611,9 +9980,10 @@ export const TurnExecutionReasoningSourceV1 =
   );
 export type TurnExecutionReasoningSourceV1 = z.infer<typeof TurnExecutionReasoningSourceV1>;
 
-export const TurnExecutionLatencyModeSourceV1 = /* @__PURE__ */ defineModelContractSchema(() =>
-  z.enum(["explicit", "session", "deployment", "continuation"]),
-);
+export const TurnExecutionLatencyModeSourceV1 =
+  /* @__PURE__ */ defineModelContractSchema(() =>
+    z.enum(["explicit", "session", "deployment", "continuation"]),
+  );
 export type TurnExecutionLatencyModeSourceV1 = z.infer<typeof TurnExecutionLatencyModeSourceV1>;
 
 /**
@@ -10078,7 +10448,6 @@ export function evaluateWorkspaceModelPolicy(
 }
 
 export * from "./codex-fleet-policy";
-export * from "./secret-redaction";
 export * from "./workspace-instruction-policies";
 export * from "./workspace-state";
 export * from "./preference-registry";

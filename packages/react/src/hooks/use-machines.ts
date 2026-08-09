@@ -1,4 +1,5 @@
 import { useCallback, useRef, useState } from "react";
+import type { RemoveEnrollmentRequest, RemoveEnrollmentResponse } from "@opengeni/sdk";
 import { useOpenGeni, type ClientOverride } from "../provider";
 import { useMutationRunner, usePolledValue } from "./internal";
 import type { MachinesResponse, MachineView, MetricSample } from "../types/machines";
@@ -31,6 +32,12 @@ export type MachinesClientLike = {
     enrollmentId: string,
     options?: { window?: "15m" | "1h" | "6h" | "24h" },
   ) => Promise<MetricSample[]>;
+  /** POST .../enrollments/:enrollmentId/revoke — workspace-admin removal. */
+  removeEnrollment?: (
+    workspaceId: string,
+    enrollmentId: string,
+    request?: RemoveEnrollmentRequest,
+  ) => Promise<RemoveEnrollmentResponse>;
   /**
    * POST .../sessions/:sessionId/active-sandbox — swap the session's active
    * sandbox to a machine. The default swap path; the real SDK client provides it.
@@ -69,6 +76,13 @@ export type UseMachinesResult = {
   refresh: () => Promise<void>;
   /** Attach/swap the session's active sandbox to a machine (returns the new pointer). */
   attach: (sandboxId: string) => Promise<boolean>;
+  /** Remove a self-hosted enrollment while retaining history. */
+  remove: (
+    enrollmentId: string,
+    request?: RemoveEnrollmentRequest,
+  ) => Promise<RemoveEnrollmentResponse | null>;
+  canRemove: boolean;
+  removingEnrollmentId: string | null;
   /** Whether the host wired an attach/swap path (drives the card affordance). */
   canAttach: boolean;
   /** Fetch a downsampled metric series for one enrolled machine. */
@@ -128,6 +142,12 @@ export function useMachines(options: UseMachinesOptions = {}): UseMachinesResult
     sandboxId: string | null;
   }>(() => ({ identity: identityKey, sandboxId: null }));
   const attachingSandboxId = attachState.identity === identityKey ? attachState.sandboxId : null;
+  const [removeState, setRemoveState] = useState<{
+    identity: string;
+    enrollmentId: string | null;
+  }>(() => ({ identity: identityKey, enrollmentId: null }));
+  const removingEnrollmentId =
+    removeState.identity === identityKey ? removeState.enrollmentId : null;
 
   const data = loadedData ?? EMPTY;
   // The swap is session-scoped: a host adapter (`attachMachine`) wins; otherwise
@@ -137,6 +157,7 @@ export function useMachines(options: UseMachinesOptions = {}): UseMachinesResult
     sessionId !== undefined &&
     (typeof machinesClient.attachMachine === "function" ||
       typeof machinesClient.swapActiveSandbox === "function");
+  const canRemove = typeof machinesClient.removeEnrollment === "function";
 
   const attach = useCallback(
     async (sandboxId: string): Promise<boolean> => {
@@ -173,6 +194,28 @@ export function useMachines(options: UseMachinesOptions = {}): UseMachinesResult
     [machinesClient, workspaceId],
   );
 
+  const remove = useCallback(
+    async (
+      enrollmentId: string,
+      request: RemoveEnrollmentRequest = {},
+    ): Promise<RemoveEnrollmentResponse | null> => {
+      if (!machinesClient.removeEnrollment) return null;
+      const ownedIdentity = identityKey;
+      setRemoveState({ identity: ownedIdentity, enrollmentId });
+      const result = await run(() =>
+        machinesClient.removeEnrollment!(workspaceId, enrollmentId, request),
+      );
+      if (identityRef.current === ownedIdentity) {
+        setRemoveState({ identity: ownedIdentity, enrollmentId: null });
+        if (result?.outcome === "removed" || result?.outcome === "already_removed") {
+          await refresh();
+        }
+      }
+      return result;
+    },
+    [machinesClient, workspaceId, identityKey, run, refresh],
+  );
+
   return {
     machines: data.machines,
     activeSandboxId: data.activeSandboxId,
@@ -183,8 +226,11 @@ export function useMachines(options: UseMachinesOptions = {}): UseMachinesResult
     attach,
     canAttach,
     fetchSeries,
-    attaching: mutating,
+    attaching: mutating && attachingSandboxId !== null,
     attachingSandboxId,
+    remove,
+    canRemove,
+    removingEnrollmentId,
     mutationError,
     clearMutationError,
   };

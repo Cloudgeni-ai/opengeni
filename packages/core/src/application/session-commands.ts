@@ -46,6 +46,7 @@ import {
   type EventBus,
 } from "@opengeni/events";
 import type { SessionWorkflowClient } from "../dependencies";
+import { normalizeResources } from "../domain/resources";
 import {
   requireSessionAuthorization,
   type ResolvedSessionAuthorization,
@@ -200,10 +201,14 @@ async function publishAndWakeAgentCommand(
         ? { interruptionRequested: true }
         : {}),
     });
-  } catch (error) {
+  } catch {
     console.warn(
-      `[session-commands] immediate Agent command wake failed for ${input.workspaceId}/${input.sessionId}; durable outbox will retry`,
-      error,
+      "[session-commands] immediate Agent command wake failed; durable outbox will retry",
+      {
+        errorClass: "WorkflowWakeOperationError",
+        errorCode: "agent_command_wake_failed",
+        origin: "core",
+      },
     );
   }
 }
@@ -222,10 +227,15 @@ async function requestControlWakeDispatch(
   if (wakeCount === 0) return;
   try {
     await deps.workflowClient.requestSessionWorkflowWakeDispatch();
-  } catch (error) {
+  } catch {
     console.warn(
-      `[session-commands] immediate control wake dispatch failed for ${wakeCount} committed revisions; durable outbox will retry`,
-      error,
+      "[session-commands] immediate control wake dispatch failed; durable outbox will retry",
+      {
+        errorClass: "WorkflowWakeOperationError",
+        errorCode: "control_wake_dispatch_failed",
+        origin: "core",
+        wakeCount,
+      },
     );
   }
 }
@@ -565,7 +575,7 @@ export async function steerHumanQueuePrompt(
   return response;
 }
 
-export async function controlHumanSessionWorkstream(
+export async function controlHumanSessionWorkstreamWithOutcome(
   deps: {
     db: Database;
     bus: EventBus;
@@ -574,7 +584,7 @@ export async function controlHumanSessionWorkstream(
   },
   context: HumanSessionCommandContext,
   input: SessionControlRequest,
-): Promise<SessionControlResponse> {
+): Promise<{ response: SessionControlResponse; replay: boolean }> {
   const authorization = await authorizeHumanSessionCommand(deps, context, "session.control");
   const result = await withWorkspaceRls(deps.db, context.workspaceId, (scoped) =>
     scoped.transaction((tx) =>
@@ -607,7 +617,16 @@ export async function controlHumanSessionWorkstream(
   }
   await publishWorkspaceControlEvent(deps, context.workspaceId, result.workspaceControlEventId);
   await requestControlWakeDispatch(deps, result.wakeCount);
-  return response;
+  return { response, replay: result.replay };
+}
+
+/** Backward-compatible response path used by the REST control route. */
+export async function controlHumanSessionWorkstream(
+  deps: Parameters<typeof controlHumanSessionWorkstreamWithOutcome>[0],
+  context: Parameters<typeof controlHumanSessionWorkstreamWithOutcome>[1],
+  input: Parameters<typeof controlHumanSessionWorkstreamWithOutcome>[2],
+): Promise<SessionControlResponse> {
+  return (await controlHumanSessionWorkstreamWithOutcome(deps, context, input)).response;
 }
 
 export async function controlHumanWorkspace(
@@ -692,6 +711,7 @@ export async function saveHumanComposerDraft(
         saveComposerDraftInTransaction(tx as unknown as Database, {
           ...context,
           ...input,
+          resources: normalizeResources(input.resources),
           subjectId: context.subjectId,
         }),
       ),

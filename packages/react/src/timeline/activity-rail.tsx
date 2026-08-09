@@ -12,9 +12,9 @@ import { cn } from "../lib/cn";
 import { truncate } from "../lib/format";
 import { defaultToolRegistry } from "./tool-renderers";
 import { useEntranceAnimation, useEntranceAnimationLive } from "./entrance";
-import type { ToolRegistry } from "./registry";
+import type { RetainedArtifactLoader, RetainedScreenshotLoader, ToolRegistry } from "./registry";
 import { useSeenActivityIds } from "./seen-activity-ids";
-import { BodyNote, PayloadBlock, ActivityDisclosure } from "./shared";
+import { BodyNote, PayloadBlock, ActivityDisclosure, ToolCallTruncationProvider } from "./shared";
 import { toolDisplayName } from "./tool-display-name";
 import type { ActivityItem, MemoryItem, ReasoningItem, SandboxItem, WorkerItem } from "./types";
 
@@ -43,6 +43,9 @@ export type ActivityRailProps = {
    * row is then non-interactive rich content). See {@link MessageTimelineProps}.
    */
   onMemoryClick?: ((memoryId: string) => void) | undefined;
+  loadRetainedScreenshot?: RetainedScreenshotLoader | undefined;
+  /** Resolve permanent generated-image receipts through the authenticated host SDK. */
+  loadRetainedArtifact?: RetainedArtifactLoader | undefined;
   /** Drop the left rule + indent (used inside a folded turn summary). */
   bare?: boolean | undefined;
   className?: string | undefined;
@@ -65,6 +68,8 @@ export function ActivityRail({
   toolRegistry = defaultToolRegistry,
   onOpenSession,
   onMemoryClick,
+  loadRetainedScreenshot,
+  loadRetainedArtifact,
   bare,
   className,
 }: ActivityRailProps) {
@@ -112,7 +117,14 @@ export function ActivityRail({
     >
       {items.map((item, index) => {
         const newFamily = index > 0 && familyOf(item) !== familyOf(items[index - 1]!);
-        const row = renderActivity(item, toolRegistry, onOpenSession, onMemoryClick);
+        const row = renderActivity(
+          item,
+          toolRegistry,
+          onOpenSession,
+          onMemoryClick,
+          loadRetainedScreenshot,
+          loadRetainedArtifact,
+        );
         return (
           <div
             key={item.id}
@@ -137,13 +149,23 @@ function renderActivity(
   toolRegistry: ToolRegistry,
   onOpenSession: ((sessionId: string) => void) | undefined,
   onMemoryClick: ((memoryId: string) => void) | undefined,
+  loadRetainedScreenshot: RetainedScreenshotLoader | undefined,
+  loadRetainedArtifact: RetainedArtifactLoader | undefined,
 ) {
   switch (item.kind) {
     case "reasoning":
       return <ReasoningRow item={item} />;
     case "tool-call": {
       const Renderer = toolRegistry.resolve(item);
-      return <Renderer item={item} />;
+      return (
+        <ToolCallTruncationProvider value={item.truncation ?? null}>
+          <Renderer
+            item={item}
+            loadRetainedScreenshot={loadRetainedScreenshot}
+            loadRetainedArtifact={loadRetainedArtifact}
+          />
+        </ToolCallTruncationProvider>
+      );
     }
     case "worker":
       return <WorkerRow item={item} onOpenSession={onOpenSession} />;
@@ -281,7 +303,7 @@ function MemoryRow({
           onClick={() => onMemoryClick?.(targetId)}
           className={cn(
             "group/memlink -mx-1 inline-flex w-fit items-center gap-1 rounded-og-sm px-1 py-0.5 text-left text-og-sm text-og-fg-subtle",
-            "outline-none transition-colors duration-150 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent",
+            "outline-hidden transition-colors duration-150 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent",
           )}
         >
           View in memory
@@ -418,8 +440,8 @@ function WorkerRow({
         onClick={() => onOpenSession(sessionId)}
         className={cn(
           "group/worker -mx-1.5 flex w-full items-start gap-2 rounded-og-sm px-1.5 py-1.5 text-left",
-          "outline-none transition-colors duration-150 hover:bg-og-surface-1 focus-visible:ring-2 focus-visible:ring-og-accent",
-          "pointer-coarse:py-2.5",
+          "outline-hidden transition-colors duration-150 hover:bg-og-surface-1 focus-visible:ring-2 focus-visible:ring-og-accent",
+          "pointer-coarse:min-h-11 pointer-coarse:py-2.5",
         )}
       >
         {inner}

@@ -31,7 +31,7 @@ use opengeni_agent_proto::v1::{
 use prost::Message as _;
 use tracing::warn;
 
-use crate::engine::{Engine, StartOutcome, LEGACY_ORIGIN};
+use crate::engine::{scoped_op_id, scoped_origin, Engine, StartOutcome, LEGACY_ORIGIN};
 use crate::job::{JobCommand, JobExit, JobFailure, JobOutcome};
 
 /// Cancels the op if the adapter future is DROPPED before the terminal
@@ -78,14 +78,27 @@ const LOCAL_GENERATION: u64 = 1;
 /// wire reply. Admission, idempotent begin, containment, deadline enforcement
 /// (`timeout_ms` — caller-owned, rule C), and typed failures all ride the
 /// engine; the reply is byte-compatible with the pre-engine implementation.
+#[cfg(test)]
 pub async fn serve_exec<P: Platform>(
     engine: &Arc<Engine>,
     platform: &Arc<P>,
     request_id: String,
     req: v1::ExecRequest,
 ) -> ControlResponse {
-    let op_id = OpId::new(request_id.clone());
-    let ticket = match engine.admit(&op_id, JobClass::Heavy, LEGACY_ORIGIN).await {
+    serve_exec_scoped(engine, platform, "default", request_id, req).await
+}
+
+/// Multi-connection form of [`serve_exec`].
+pub async fn serve_exec_scoped<P: Platform>(
+    engine: &Arc<Engine>,
+    platform: &Arc<P>,
+    scope: &str,
+    request_id: String,
+    req: v1::ExecRequest,
+) -> ControlResponse {
+    let op_id = scoped_op_id(scope, &request_id);
+    let origin = scoped_origin(scope, LEGACY_ORIGIN);
+    let ticket = match engine.admit(&op_id, JobClass::Heavy, &origin).await {
         Ok(ticket) => ticket,
         Err(reason) => return crate::dispatch::breaker_reply_error(request_id, "exec", reason),
     };
@@ -110,8 +123,6 @@ pub async fn serve_exec<P: Platform>(
         ticket,
         stdin,
         deadline,
-        // Legacy: the spool ledger share returns at the terminal record.
-        true,
         || platform.spawn_exec(&req),
         emit,
         // The legacy consumer never replays the Exit frame; its record flows
@@ -194,14 +205,27 @@ pub async fn serve_exec<P: Platform>(
 /// [`assemble_git_response`]), but the git children now run CONTAINED with a
 /// per-op OOM cgroup leaf (a clone's page cache bills to the op, closing the
 /// #351 git-boundary hole). Heavy admission; idempotent by request id.
+#[cfg(test)]
 pub async fn serve_git<P: Platform>(
     engine: &Arc<Engine>,
     platform: &Arc<P>,
     request_id: String,
     req: v1::GitRequest,
 ) -> ControlResponse {
-    let op_id = OpId::new(request_id.clone());
-    let ticket = match engine.admit(&op_id, JobClass::Heavy, LEGACY_ORIGIN).await {
+    serve_git_scoped(engine, platform, "default", request_id, req).await
+}
+
+/// Multi-connection form of [`serve_git`].
+pub async fn serve_git_scoped<P: Platform>(
+    engine: &Arc<Engine>,
+    platform: &Arc<P>,
+    scope: &str,
+    request_id: String,
+    req: v1::GitRequest,
+) -> ControlResponse {
+    let op_id = scoped_op_id(scope, &request_id);
+    let origin = scoped_origin(scope, LEGACY_ORIGIN);
+    let ticket = match engine.admit(&op_id, JobClass::Heavy, &origin).await {
         Ok(ticket) => ticket,
         Err(reason) => return crate::dispatch::breaker_reply_error(request_id, "git", reason),
     };
@@ -219,8 +243,6 @@ pub async fn serve_git<P: Platform>(
         Vec::new(),
         // Rule C: git carries no caller deadline field; none is imposed.
         None,
-        // Legacy: the spool ledger share returns at the terminal record.
-        true,
         || platform.spawn_git(&req),
         emit,
         |_exit| Vec::new(),
@@ -759,7 +781,7 @@ mod tests {
         // by the chaos-nats harness scenario after the engine rework).
         let (engine, _dir) = test_engine();
         let platform = native();
-        let op_id = OpId::from("r-abort");
+        let op_id = scoped_op_id("default", "r-abort");
         let engine2 = engine.clone();
         let platform2 = platform.clone();
         let task = tokio::spawn(async move {

@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/documents",
-  "version": "0.5.7",
+  "version": "0.5.25",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -41,7 +41,7 @@
     "@opengeni/db": "workspace:*",
     "@opengeni/storage": "workspace:*",
     "drizzle-orm": "^0.45.2",
-    "openai": "6.36.0"
+    "openai": "6.47.0"
   },
   "devDependencies": {
     "@opengeni/testing": "workspace:*",

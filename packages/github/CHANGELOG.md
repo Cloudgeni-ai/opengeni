@@ -1,5 +1,117 @@
 # @opengeni/github
 
+## 0.4.43
+
+### Patch Changes
+
+- Updated dependencies [e2edfbc]
+- Updated dependencies [7f70d33]
+  - @opengeni/config@0.12.6
+  - @opengeni/contracts@0.41.2
+
+## 0.4.42
+
+### Patch Changes
+
+- Updated dependencies [2727236]
+- Updated dependencies [c8eb465]
+  - @opengeni/config@0.12.5
+  - @opengeni/contracts@0.41.1
+
+## 0.4.41
+
+### Patch Changes
+
+- Updated dependencies [bb9a346]
+  - @opengeni/config@0.12.4
+  - @opengeni/contracts@0.41.0
+
+## 0.4.40
+
+### Patch Changes
+
+- Updated dependencies [dec7ada]
+  - @opengeni/config@0.12.3
+
+## 0.4.39
+
+### Patch Changes
+
+- Updated dependencies [7d13f51]
+- Updated dependencies [7ac558e]
+  - @opengeni/config@0.12.2
+
+## 0.4.38
+
+### Patch Changes
+
+- Updated dependencies [fed43cf]
+- Updated dependencies [410835e]
+  - @opengeni/contracts@0.40.0
+  - @opengeni/config@0.12.1
+
+## 0.4.37
+
+### Patch Changes
+
+- Updated dependencies [f8eb9f9]
+- Updated dependencies [200586a]
+- Updated dependencies [5dfb93d]
+- Updated dependencies [5dfb93d]
+  - @opengeni/config@0.12.0
+  - @opengeni/contracts@0.39.5
+
+## 0.4.36
+
+### Patch Changes
+
+- Updated dependencies [70ced80]
+  - @opengeni/contracts@0.39.4
+  - @opengeni/config@0.11.5
+
+## 0.4.35
+
+### Patch Changes
+
+- @opengeni/config@0.11.4
+
+## 0.4.34
+
+### Patch Changes
+
+- Updated dependencies [5d8bb99]
+- Updated dependencies [af24281]
+- Updated dependencies [34c5cdb]
+  - @opengeni/contracts@0.39.3
+  - @opengeni/config@0.11.3
+
+## 0.4.33
+
+### Patch Changes
+
+- Updated dependencies [7dbd057]
+- Updated dependencies [30a0b9a]
+- Updated dependencies [23de73b]
+  - @opengeni/contracts@0.39.2
+  - @opengeni/config@0.11.2
+
+## 0.4.32
+
+### Patch Changes
+
+- Updated dependencies [ce823ce]
+  - @opengeni/contracts@0.39.1
+  - @opengeni/config@0.11.1
+
+## 0.4.31
+
+### Patch Changes
+
+- Updated dependencies [5b6d36e]
+- Updated dependencies [6eb0b23]
+  - @opengeni/config@0.11.0
+  - @opengeni/contracts@0.39.0
+
 ## 0.4.30
 
 ### Patch Changes

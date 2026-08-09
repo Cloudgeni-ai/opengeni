@@ -18,7 +18,11 @@
 // target is established via the injected `establishModalTarget` resolver (the
 // API/worker pass a resume-by-id closure for the sibling box's lease).
 
-import { buildSelfhostedBackendSession, type SelfhostedRelayConfig } from "../selfhosted/session";
+import {
+  buildSelfhostedBackendSession,
+  type SelfhostedOpStreamDeps,
+  type SelfhostedRelayConfig,
+} from "../selfhosted/session";
 import type { SelfhostedOpObserver } from "../selfhosted/op-observer";
 import type { ControlRpc } from "../selfhosted/control-rpc";
 import type {
@@ -66,6 +70,12 @@ export interface ActiveBackendResolverDeps {
    *  scoped NATS connection). Returns a ControlRpc whose offline/timeout maps to
    *  agent_offline/agent_reconnecting (never a NotFound). */
   controlRpcFactory(): ControlRpc;
+  /** Resolve the streaming exec transport for a selfhosted target. Returning
+   *  undefined means the runner is legacy-only. Kept as an injected callback so
+   *  this db-free leaf does not know enrollment capability storage. */
+  resolveSelfhostedOpStream?: (
+    sandbox: RoutableSandbox,
+  ) => Promise<SelfhostedOpStreamDeps | undefined>;
   /** The relay-URL shape config for selfhosted stream endpoints. */
   relay: SelfhostedRelayConfig;
   /** Establish (resume-by-id) a NON-DEFAULT modal target's box session for a swap.
@@ -293,6 +303,7 @@ export function makeActiveBackendResolver(
       // the epoch and rejects a stale op with ERROR_CODE_FENCED → the proxy
       // re-resolves + retries against the new active sandbox. The SAME factory the
       // worker turn's machine-primary establish branch uses (one build shape).
+      const opStream = await deps.resolveSelfhostedOpStream?.(sandbox);
       const { session } = await buildSelfhostedBackendSession({
         workspaceId: deps.workspaceId,
         relay: deps.relay,
@@ -304,6 +315,7 @@ export function makeActiveBackendResolver(
           ? { execTimeoutMs: deps.selfhostedExecTimeoutMs }
           : {}),
         ...(deps.selfhostedOnOp !== undefined ? { onOp: deps.selfhostedOnOp } : {}),
+        ...(opStream !== undefined ? { opStream } : {}),
         // The turn's declared environment → the session's manifest.environment, so
         // the SDK's per-turn manifest-env delta is empty (no "cannot change manifest
         // environment variables" throw on a pin-to-vm turn).

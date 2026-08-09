@@ -57,18 +57,20 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use opengeni_agent_engine::flow::{AckOutcome, AttachOutcome, CreditFlow};
-use opengeni_agent_engine::retention::{RetentionConfig, RetentionError, RetentionLog};
+use opengeni_agent_engine::retention::{
+    GlobalSpoolBudget, RetentionConfig, RetentionError, RetentionLog,
+};
 use opengeni_agent_engine::{Channel, Frame, FrameBody};
 use opengeni_agent_platform::ContainedExec;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tokio::time::{Instant, MissedTickBehavior};
 use tracing::{debug, warn};
 
 /// A command delivered to a running (or lingering completed) job through its
 /// mailbox. The supervisor translates wire messages (`OpAck`/`OpAttach`/…)
 /// into these; the pump never sees the transport.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum JobCommand {
     /// A cumulative ack + absolute credit grant from the consumer
     /// (wire: `OpAck`).
@@ -96,7 +98,12 @@ pub enum JobCommand {
     },
     /// The transport is gone (connection loss). Sending stops; the op keeps
     /// running and retention keeps accumulating (op ⊥ connection).
-    Detach,
+    Detach {
+        /// Optional teardown barrier. The pump signals this only after the
+        /// detach has been applied, allowing a transport generation to prove
+        /// every prior sink is quiescent before exposing its successor lane.
+        completed: Option<Arc<Notify>>,
+    },
     /// Kill the job (wire: `OpCancel`). Terminates the process group and
     /// produces `Exit{cancelled}`. Idempotent; a no-op once terminal.
     Cancel,
@@ -134,9 +141,10 @@ pub struct JobParams {
     /// Bytes to feed the child's stdin; the handle is closed after writing
     /// (empty ⇒ closed immediately so a stdin-reading child never hangs).
     pub stdin: Vec<u8>,
-    /// Retention bounds for this op (the supervisor already reserved the op's
-    /// share of the global spool budget — ruling M2).
+    /// Retention bounds for this op.
     pub retention: RetentionConfig,
+    /// Machine-wide actual-byte disk-spool ledger (ruling M2).
+    pub spool_budget: Arc<GlobalSpoolBudget>,
     /// The op-private spool directory (created lazily on first spill; removed
     /// when the job task ends).
     pub spool_dir: PathBuf,
@@ -201,7 +209,8 @@ impl JobFailure {
     /// Maps a typed retention failure onto the job-failure form.
     fn from_retention(error: &RetentionError) -> Self {
         match error {
-            RetentionError::Overflow { retained_bytes, .. } => JobFailure::Overflow {
+            RetentionError::Overflow { retained_bytes, .. }
+            | RetentionError::GlobalSpoolExhausted { retained_bytes, .. } => JobFailure::Overflow {
                 retained_bytes: *retained_bytes,
             },
             // SpoolIo — and ReplayBelowFloor, which cannot come out of an
@@ -304,6 +313,7 @@ pub async fn run_job(
         mut child,
         stdin,
         retention,
+        spool_budget,
         spool_dir,
         deadline,
         config,
@@ -316,7 +326,11 @@ pub async fn run_job(
     spawn_stdin_writer(child.stdin.take(), stdin);
 
     let pump = Pump {
-        retention: RetentionLog::new(retention.clone(), spool_dir.clone()),
+        retention: RetentionLog::with_spool_budget(
+            retention.clone(),
+            spool_dir.clone(),
+            spool_budget,
+        ),
         retention_config: retention,
         flow: CreditFlow::new(),
         hooks,
@@ -593,7 +607,15 @@ impl Pump {
                 from_seq,
                 window_bytes,
             } => self.apply_attach(generation, from_seq, window_bytes),
-            JobCommand::Detach => self.flow.detach(),
+            JobCommand::Detach { completed } => {
+                self.flow.detach();
+                if let Some(completed) = completed {
+                    // `notify_one` stores a permit when the supervisor has not
+                    // registered its waiter yet, so the completion receipt
+                    // cannot be lost in the send→wait handoff.
+                    completed.notify_one();
+                }
+            }
             JobCommand::Cancel => {
                 // Idempotent; once the child is done the natural result stands
                 // (the registry answers a late OpCancel with AlreadyComplete).
@@ -971,6 +993,7 @@ mod tests {
                 child,
                 stdin: self.stdin,
                 retention: self.retention,
+                spool_budget: Arc::new(GlobalSpoolBudget::unlimited()),
                 spool_dir: dir.path().join("spool"),
                 deadline: self.deadline_after.map(|after| Instant::now() + after),
                 config: self.config,
@@ -1221,7 +1244,7 @@ mod tests {
             job.ack(1, acked, 16 * 1024).await;
             frames.push(frame);
         }
-        job.send(JobCommand::Detach).await;
+        job.send(JobCommand::Detach { completed: None }).await;
 
         // Reconnect as the next consumer generation from the ack floor; the
         // window between our last ack and the detach replays (dedup-checked).

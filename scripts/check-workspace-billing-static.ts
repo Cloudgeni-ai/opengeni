@@ -1,3 +1,9 @@
+import {
+  declarationModuleSpecifiers,
+  runtimeModuleSpecifiers,
+  type RuntimeLoader,
+} from "./publish-closure-imports";
+
 const sourceRoots = [
   "apps",
   "packages",
@@ -10,40 +16,49 @@ const sourceRoots = [
   ".env.example",
 ];
 
-type Finding = {
+export type Finding = {
   file: string;
   message: string;
 };
 
-const files = await listFiles(sourceRoots);
-const findings: Finding[] = [];
+export async function auditWorkspaceBillingStatic(
+  roots: string[] = sourceRoots,
+): Promise<Finding[]> {
+  const files = await listFiles(roots);
+  const findings: Finding[] = [];
 
-for (const file of files) {
-  if (file === "scripts/check-workspace-billing-static.ts") {
-    continue;
+  for (const file of files) {
+    if (file === "scripts/check-workspace-billing-static.ts") {
+      continue;
+    }
+    const text = await Bun.file(file)
+      .text()
+      .catch(() => "");
+    if (!text) {
+      continue;
+    }
+    checkUnscopedOperationalRoutes(file, text, findings);
+    await checkForbiddenProviderImports(file, text, findings);
+    checkDeletedBillingPortal(file, text, findings);
+    checkGithubWebhookAdvertising(file, text, findings);
+    checkMcpDefaults(file, text, findings);
   }
-  const text = await Bun.file(file)
-    .text()
-    .catch(() => "");
-  if (!text) {
-    continue;
-  }
-  checkUnscopedOperationalRoutes(file, text, findings);
-  checkForbiddenProviderImports(file, text, findings);
-  checkDeletedBillingPortal(file, text, findings);
-  checkGithubWebhookAdvertising(file, text, findings);
-  checkMcpDefaults(file, text, findings);
+
+  return findings;
 }
 
-if (findings.length > 0) {
-  console.error("Workspace/billing static guard failed:");
-  for (const finding of findings) {
-    console.error(`- ${finding.file}: ${finding.message}`);
+async function main(): Promise<void> {
+  const findings = await auditWorkspaceBillingStatic();
+  if (findings.length > 0) {
+    console.error("Workspace/billing static guard failed:");
+    for (const finding of findings) {
+      console.error(`- ${finding.file}: ${finding.message}`);
+    }
+    process.exit(1);
   }
-  process.exit(1);
-}
 
-console.log("Workspace/billing static guard passed.");
+  console.log("Workspace/billing static guard passed.");
+}
 
 async function listFiles(roots: string[]): Promise<string[]> {
   const ripgrep = await runFileListCommand(["rg", "--files", ...roots]);
@@ -115,12 +130,19 @@ function checkUnscopedOperationalRoutes(file: string, text: string, out: Finding
   }
 }
 
-function checkForbiddenProviderImports(file: string, text: string, out: Finding[]): void {
+export async function checkForbiddenProviderImports(
+  file: string,
+  text: string,
+  out: Finding[],
+): Promise<void> {
   const normalized = file.replace(/\\/g, "/");
-  const betterAuthImport =
-    /(?:from\s+["']better-auth["']|import\s+["']better-auth["']|require\(["']better-auth["']\)|["@]better-auth\/)/.test(
-      text,
-    );
+  const moduleSpecifiers = await importedModuleSpecifiers(normalized, text);
+  const betterAuthImport = moduleSpecifiers.some(
+    (specifier) =>
+      specifier === "better-auth" ||
+      specifier.startsWith("better-auth/") ||
+      specifier.startsWith("@better-auth/"),
+  );
   // `@opengeni/core`'s ManagedAuth alias is a documented, deliberate exception: a
   // TYPE-ONLY `import type { Auth } from "better-auth"` that tsup fully erases at
   // build time, so it adds NO runtime dependency and NO pg driver to the published
@@ -138,11 +160,37 @@ function checkForbiddenProviderImports(file: string, text: string, out: Finding[
   ) {
     out.push({ file, message: "imports Better Auth outside the managed auth module" });
   }
-  if (/from\s+["']stripe["']/.test(text)) {
+  if (
+    moduleSpecifiers.some((specifier) => specifier === "stripe" || specifier.startsWith("stripe/"))
+  ) {
     if (normalized !== "apps/api/src/routes/billing.ts") {
       out.push({ file, message: "imports Stripe outside billing route/provider code" });
     }
   }
+}
+
+async function importedModuleSpecifiers(file: string, text: string): Promise<string[]> {
+  if (!text.includes("better-auth") && !text.includes("stripe")) {
+    return [];
+  }
+  const loader = runtimeLoader(file);
+  if (!loader) {
+    return [];
+  }
+  const source = text.startsWith("#!") ? text.replace(/^#![^\n]*(?:\n|$)/, "") : text;
+  const [runtime, declarations] = await Promise.all([
+    runtimeModuleSpecifiers(source, loader),
+    Promise.resolve(declarationModuleSpecifiers(source, file)),
+  ]);
+  return [...new Set([...runtime, ...declarations])];
+}
+
+function runtimeLoader(file: string): RuntimeLoader | null {
+  if (file.endsWith(".tsx")) return "tsx";
+  if (file.endsWith(".ts")) return "ts";
+  if (file.endsWith(".jsx")) return "jsx";
+  if (file.endsWith(".js")) return "js";
+  return null;
 }
 
 function checkDeletedBillingPortal(file: string, text: string, out: Finding[]): void {
@@ -189,4 +237,8 @@ function checkMcpDefaults(file: string, text: string, out: Finding[]): void {
 
 function isSourceLike(file: string): boolean {
   return /\.(ts|tsx|js|jsx|yaml|yml|json|md|example)$/.test(file);
+}
+
+if (import.meta.main) {
+  await main();
 }

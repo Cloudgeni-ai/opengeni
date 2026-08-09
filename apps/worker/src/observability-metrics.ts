@@ -54,11 +54,11 @@ function eventAttributes(attributes: Record<string, unknown> | undefined): Attri
   if (!attributes) {
     return undefined;
   }
-  const sanitized: Attributes = {};
+  const projected: Attributes = {};
   for (const [key, value] of Object.entries(attributes)) {
-    sanitized[key] = eventAttributeValue(value);
+    projected[key] = eventAttributeValue(value);
   }
-  return sanitized;
+  return projected;
 }
 
 function eventAttributeValue(value: unknown): AttributeValue {
@@ -337,6 +337,14 @@ export class TurnLifecycleMetrics {
   private now(): number {
     return this.options.now?.() ?? Date.now();
   }
+}
+
+export function recordTurnsQueuedGauge(observability: Observability, value: number): void {
+  observability.setGauge({
+    name: "opengeni_turns_queued",
+    help: "Current number of queued session turns.",
+    value,
+  });
 }
 
 /**

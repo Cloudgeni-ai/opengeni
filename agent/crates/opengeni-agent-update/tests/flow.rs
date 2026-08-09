@@ -19,13 +19,31 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use opengeni_agent_update::{
-    check_update, finalize_update, parse_manifest, CheckOutcome, DirSource, UpdateConfig,
-    UpdateError,
+    check_update, check_update_manifest, finalize_update, parse_manifest, CheckOutcome, DirSource,
+    ManifestCheckOutcome, UpdateConfig, UpdateError,
 };
 
 /// The test pubkey text (NOT the release key) the fixtures were signed with.
 fn test_pubkey() -> String {
     fs::read_to_string(fixtures_dir().join("test-key.pub")).expect("read test-key.pub")
+}
+
+#[test]
+fn manifest_only_check_does_not_download_the_artifact() {
+    let release = staged_release();
+    let artifact = release.path().join("agent/stable/agent-v1.0.1");
+    fs::remove_file(&artifact).expect("remove artifact");
+    fs::remove_file(format!("{}.minisig", artifact.display())).expect("remove artifact signature");
+    let source = DirSource::new(release.path());
+    let cfg = config_for(release.path());
+
+    match check_update_manifest(&source, &cfg).expect("manifest check") {
+        ManifestCheckOutcome::Available(plan) => {
+            assert_eq!(plan.version, "1.0.1");
+            assert!(plan.expected_size() > 0);
+        }
+        ManifestCheckOutcome::UpToDate(reason) => panic!("expected update plan: {reason}"),
+    }
 }
 
 fn fixtures_dir() -> PathBuf {

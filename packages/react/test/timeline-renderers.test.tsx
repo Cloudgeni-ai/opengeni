@@ -45,7 +45,45 @@ function timelineEvent(
   };
 }
 
+describe("context compaction rendering", () => {
+  test("labels before and after values as estimated history tokens", async () => {
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("session.context.compacted", {
+            trigger: "auto",
+            estimatedTokensBefore: 59_471,
+            estimatedTokensAfter: 2_858,
+          }),
+        ]}
+      />,
+    );
+    await flush();
+    expect(r.container.textContent).toContain(
+      "Conversation history compacted · ~59,471 → ~2,858 estimated history tokens",
+    );
+    await r.unmount();
+  });
+});
+
 describe("provider MCP unavailable rendering", () => {
+  test("labels Codex Apps auth failures as Codex Apps rather than ChatGPT domain text", async () => {
+    const r = await renderComponent(
+      <TimelineRow
+        item={authNeededItem({
+          serverId: "codex_apps",
+          providerDomain: "chatgpt.com",
+          reason: "refresh_failed",
+        })}
+        onReconnect={() => undefined}
+      />,
+    );
+    await flush();
+    expect(r.container.textContent).toContain("Reconnect Codex Apps");
+    expect(r.container.textContent).not.toContain("Reconnect Chatgpt");
+    await r.unmount();
+  });
+
   test("does not offer a duplicate reconnect flow for unsupported host-owned auth", async () => {
     let reconnects = 0;
     const r = await renderComponent(
@@ -53,6 +91,7 @@ describe("provider MCP unavailable rendering", () => {
         events={[
           timelineEvent("tool.auth_needed", {
             serverId: "gitlab-hosted",
+            toolName: "search_projects",
             provider: "gitlab",
             providerDomain: "gitlab.com",
             connectionId: "host-gitlab-one",
@@ -200,12 +239,70 @@ function toolItem(overrides: Partial<ToolCallItem>): ToolCallItem {
     name: "exec_command",
     arguments: {},
     output: undefined,
+    truncation: null,
     raw: undefined,
     status: "complete",
     occurredAt: new Date(0).toISOString(),
     ...overrides,
   };
 }
+
+describe("tool-output truncation disclosure", () => {
+  test("shows bounded delivery and non-retention facts only after expansion", async () => {
+    const item = toolItem({
+      arguments: { cmd: "incident-canary-telemetry" },
+      output: "bounded preview",
+      truncation: {
+        truncated: true,
+        surface: "browser_legacy_guard",
+        reason: "event_envelope_bytes_exceeded",
+        omittedBytes: 83_000,
+        fullEvidence: { available: false, reason: "not_retained" },
+      },
+    });
+    const r = await renderComponent(<ActivityRail items={[item]} bare />);
+    await flush();
+
+    expect(r.container.textContent).not.toContain("not_retained");
+    const disclosure = r.container.querySelector('[role="button"]');
+    expect(disclosure).not.toBeNull();
+    await act(async () => {
+      disclosure?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    expect(r.container.textContent).toContain("bounded preview");
+    expect(r.container.textContent).toContain("browser_legacy_guard");
+    expect(r.container.textContent).toContain("event_envelope_bytes_exceeded");
+    expect(r.container.textContent).toContain("not_retained");
+    expect(r.container.querySelector("[data-og-tool-output-truncation]")).not.toBeNull();
+
+    await r.unmount();
+  });
+
+  test("keeps the near-identical ordinary output free of truncation claims", async () => {
+    const item = toolItem({
+      arguments: { cmd: "incident-canary-telemetry" },
+      output: "bounded preview",
+    });
+    const r = await renderComponent(<ActivityRail items={[item]} bare />);
+    await flush();
+
+    const disclosure = r.container.querySelector('[role="button"]');
+    expect(disclosure).not.toBeNull();
+    await act(async () => {
+      disclosure?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    expect(r.container.textContent).toContain("bounded preview");
+    expect(r.container.textContent).not.toContain("browser_legacy_guard");
+    expect(r.container.textContent).not.toContain("not_retained");
+    expect(r.container.querySelector("[data-og-tool-output-truncation]")).toBeNull();
+
+    await r.unmount();
+  });
+});
 
 function fleetDecisionEventPayload(): Record<string, unknown> {
   return {
@@ -407,6 +504,7 @@ function authNeededItem(overrides: Partial<AuthNeededItem> = {}): AuthNeededItem
     kind: "auth-needed",
     id: "auth-1",
     turnId: "turn-1",
+    serverId: null,
     providerDomain: "linear.app",
     connectionId: null,
     reason: "missing_connection",
@@ -471,6 +569,7 @@ describe("MessageTimeline — settled turn folding", () => {
         "tool.auth_needed",
         {
           serverId: "mcp-linear",
+          toolName: "create_issue",
           providerDomain: "linear.app",
           reason: "missing_connection",
         },
@@ -491,6 +590,77 @@ describe("MessageTimeline — settled turn folding", () => {
     expect(disclosure?.getAttribute("aria-expanded")).toBe("true");
     expect(r.container.textContent).toContain("Connect Linear");
     expect(r.container.textContent).toContain("It isn't connected yet.");
+
+    await r.unmount();
+  });
+
+  test("keeps generated images visible as primary output with image-specific lightbox copy", async () => {
+    resetTimelineEvents();
+    const artifactId = "33333333-3333-4333-8333-333333333333";
+    const receipt = {
+      type: "generated_image",
+      artifact: {
+        available: true,
+        artifactId,
+        kind: "generated_image",
+        contentType: "image/png",
+        originalBytes: 1024,
+        sha256: "c".repeat(64),
+        retainedAt: "2026-08-08T00:00:00.000Z",
+        dimensions: { width: 1024, height: 1024 },
+        retention: { policy: "workspace_file", expiresAt: null },
+        retrieval: {
+          method: "GET",
+          path: `/v1/workspaces/11111111-1111-4111-8111-111111111111/artifacts/${artifactId}/content`,
+          acceptRanges: "bytes",
+          maxRangeBytes: 1024 * 1024,
+        },
+      },
+      sandboxPath: `/workspace/generated-images/generated-image-${artifactId}.png`,
+    };
+    const events = [
+      timelineEvent("user.message", { text: "Generate a teal sphere" }),
+      timelineEvent("turn.started", { triggerEventId: "timeline-evt-1" }),
+      timelineEvent("agent.toolCall.created", {
+        id: "call-image-1",
+        name: "generate_image",
+        arguments: { prompt: "A glossy teal sphere" },
+        raw: {
+          type: "function_call",
+          name: "generate_image",
+          status: "completed",
+        },
+      }),
+      timelineEvent("agent.toolCall.output", { id: "call-image-1", output: receipt }),
+      timelineEvent("agent.message.completed", { text: "Generated the image." }),
+      timelineEvent("turn.completed", {}),
+    ];
+    const r = await renderComponent(
+      <MessageTimeline
+        events={events}
+        loadRetainedArtifact={async () => ({
+          url: "https://objects.example/generated.png?signature=test",
+        })}
+      />,
+    );
+    await flush();
+    await flush();
+
+    expect(turnSummaryTrigger(r.container)?.getAttribute("aria-expanded")).toBe("true");
+    const generatedRow = Array.from(r.container.querySelectorAll('[role="button"]')).find(
+      (element) =>
+        element.hasAttribute("aria-expanded") && element.textContent?.includes("Generated image"),
+    );
+    expect(generatedRow?.getAttribute("aria-expanded")).toBe("true");
+    expect(r.container.querySelectorAll("img")).toHaveLength(1);
+    expect(r.container.textContent).toContain("1024×1024");
+    expect(r.container.textContent).toContain(receipt.sandboxPath);
+
+    const expand = r.container.querySelector(
+      'button[aria-label="Expand generated image"]',
+    ) as HTMLButtonElement | null;
+    expect(expand).not.toBeNull();
+    expect(r.container.querySelector('button[aria-label="Expand screenshot"]')).toBeNull();
 
     await r.unmount();
   });
@@ -1646,7 +1816,7 @@ describe("SecretSetRenderer — running state (in-flight affordance)", () => {
     await r.unmount();
   });
 
-  test("settled environment_set_variable shows write-only copy (regression guard)", async () => {
+  test("settled environment_set_variable confirms exact value preservation", async () => {
     const item = toolItem({
       name: "environment_set_variable",
       arguments: JSON.stringify({ name: "MY_SECRET", value: "hunter2" }),
@@ -1658,7 +1828,8 @@ describe("SecretSetRenderer — running state (in-flight affordance)", () => {
     await flush();
 
     const text = r.container.textContent ?? "";
-    expect(text.toLowerCase()).toContain("write-only");
+    expect(text.toLowerCase()).toContain("exact value preserved");
+    expect(text.toLowerCase()).not.toContain("write-only");
 
     await r.unmount();
   });

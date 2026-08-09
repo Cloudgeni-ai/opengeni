@@ -1,5 +1,158 @@
 # @opengeni/events
 
+## 0.3.96
+
+### Patch Changes
+
+- Updated dependencies [e2edfbc]
+  - @opengeni/contracts@0.41.2
+  - @opengeni/db@0.28.16
+
+## 0.3.95
+
+### Patch Changes
+
+- Updated dependencies [5806484]
+  - @opengeni/db@0.28.15
+
+## 0.3.94
+
+### Patch Changes
+
+- Updated dependencies [81a51ac]
+  - @opengeni/db@0.28.14
+
+## 0.3.93
+
+### Patch Changes
+
+- Updated dependencies [2727236]
+  - @opengeni/contracts@0.41.1
+  - @opengeni/db@0.28.13
+
+## 0.3.92
+
+### Patch Changes
+
+- e1daf06: Preserve exact retained session-event payloads for explicit forensic full replay while keeping ordinary HTTP event reads byte-bounded through the existing projection.
+
+## 0.3.91
+
+### Patch Changes
+
+- Updated dependencies [bb9a346]
+  - @opengeni/contracts@0.41.0
+  - @opengeni/db@0.28.12
+
+## 0.3.90
+
+### Patch Changes
+
+- @opengeni/db@0.28.11
+
+## 0.3.89
+
+### Patch Changes
+
+- @opengeni/db@0.28.10
+
+## 0.3.88
+
+### Patch Changes
+
+- Updated dependencies [fed43cf]
+  - @opengeni/contracts@0.40.0
+  - @opengeni/db@0.28.9
+
+## 0.3.87
+
+### Patch Changes
+
+- Updated dependencies [200586a]
+  - @opengeni/contracts@0.39.5
+  - @opengeni/db@0.28.8
+
+## 0.3.86
+
+### Patch Changes
+
+- Updated dependencies [377180c]
+  - @opengeni/db@0.28.7
+
+## 0.3.85
+
+### Patch Changes
+
+- Updated dependencies [70ced80]
+  - @opengeni/contracts@0.39.4
+  - @opengeni/db@0.28.6
+
+## 0.3.84
+
+### Patch Changes
+
+- @opengeni/db@0.28.5
+
+## 0.3.83
+
+### Patch Changes
+
+- Updated dependencies [7a84e1b]
+- Updated dependencies [5d8bb99]
+- Updated dependencies [238fb7e]
+- Updated dependencies [34c5cdb]
+  - @opengeni/db@0.28.4
+  - @opengeni/contracts@0.39.3
+
+## 0.3.82
+
+### Patch Changes
+
+- 30a0b9a: Preserve internal content exactly, replace heuristic rewriting with lossless persistence, and keep public telemetry on reviewed structural projections.
+- Updated dependencies [7dbd057]
+- Updated dependencies [30a0b9a]
+- Updated dependencies [23de73b]
+- Updated dependencies [1503151]
+- Updated dependencies [a296081]
+  - @opengeni/contracts@0.39.2
+  - @opengeni/db@0.28.3
+
+## 0.3.81
+
+### Patch Changes
+
+- 5d1d0c2: Make browser live streams visibility-aware, share one routed session feed,
+  bound reconciliation and heartbeat recovery, coalesce overlapping reads, and
+  expose the append, publish, and SSE connection lifecycle in metrics.
+- Updated dependencies [110d255]
+- Updated dependencies [ce823ce]
+  - @opengeni/db@0.28.2
+  - @opengeni/contracts@0.39.1
+
+## 0.3.80
+
+### Patch Changes
+
+- Updated dependencies [55f6ad0]
+  - @opengeni/db@0.28.1
+
+## 0.3.79
+
+### Patch Changes
+
+- Updated dependencies [49c7f9c]
+- Updated dependencies [6eb0b23]
+- Updated dependencies [5b6d36e]
+  - @opengeni/db@0.28.0
+  - @opengeni/contracts@0.39.0
+
+## 0.3.78
+
+### Patch Changes
+
+- Updated dependencies [cbf165a]
+  - @opengeni/db@0.27.12
+
 ## 0.3.77
 
 ### Patch Changes

@@ -39,6 +39,20 @@ export type FetchLike = (input: string | URL | Request, init?: RequestInit) => P
  * error that happened during the same Codex turn.
  */
 export const CODEX_TRANSPORT_ERROR_HEADER = "x-opengeni-codex-transport-error";
+/** Internal transport handoff; always removed before network I/O. */
+export const CODEX_REQUEST_BODY_NORMALIZED_HEADER = "x-opengeni-request-body-normalized";
+const REPLAYABLE_REQUEST_BODY_FACTORY = Symbol.for("opengeni.replayable-request-body-factory");
+
+type ReplayableRequestInit = RequestInit & {
+  [REPLAYABLE_REQUEST_BODY_FACTORY]?: () => ReadableStream<Uint8Array>;
+};
+/** Internal resolved-model handoff; always removed before network I/O. */
+export const CODEX_REQUEST_MODEL_HEADER = "x-opengeni-request-model";
+/** Internal durable request-identity handoff; always removed before network I/O. */
+export const CODEX_REQUEST_ID_HEADER = "x-opengeni-request-id";
+/** Internal original response-mode handoff; always removed before network I/O. */
+export const CODEX_REQUEST_CALLER_STREAM_HEADER = "x-opengeni-request-caller-stream";
+const MAX_CODEX_ERROR_BODY_BYTES = 64 * 1024;
 
 function headersCarryCodexTransportMarker(headers: unknown): boolean {
   if (!headers || typeof headers !== "object") return false;
@@ -357,16 +371,22 @@ async function observedResponse(
           controller.close();
           return;
         }
-        armIdle();
         if (!firstByte) {
           firstByte = true;
+          // Deliver the provider byte before durable audit I/O. Audit latency
+          // is not provider silence and must not manufacture an idle timeout.
+          if (idleTimer) clearTimeout(idleTimer);
+          controller.enqueue(chunk.value);
           await emitRequestEvent(audit, {
             phase: "first_byte",
             responseObserved: true,
             status: res.status,
             ...(requestId ? { providerRequestId: requestId } : {}),
           });
+          if (!terminal) armIdle();
+          return;
         }
+        armIdle();
         controller.enqueue(chunk.value);
       } catch (error) {
         if (terminal) return;
@@ -446,7 +466,8 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
     const rewritten = rawUrl.replace(/(?<!\/codex)\/responses(\b|$)/, "/codex/responses$1");
 
     const policy = resolveCodexResponseTimeoutPolicy(ctx.responseTimeoutPolicy);
-    const requestId = ctx.nextRequestId?.() ?? randomUUID();
+    const handedRequestId = new Headers(init?.headers).get(CODEX_REQUEST_ID_HEADER);
+    const requestId = handedRequestId ?? ctx.nextRequestId?.() ?? randomUUID();
     const logicalStartedAt = Date.now();
     let transportAttempt = 0;
 
@@ -455,6 +476,13 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
       authenticationAttempt: number,
     ): Promise<Response> => {
       const headers = new Headers(init?.headers);
+      const bodyAlreadyNormalized = headers.get(CODEX_REQUEST_BODY_NORMALIZED_HEADER) === "1";
+      const normalizedModel = headers.get(CODEX_REQUEST_MODEL_HEADER) ?? undefined;
+      const normalizedCallerStream = headers.get(CODEX_REQUEST_CALLER_STREAM_HEADER);
+      headers.delete(CODEX_REQUEST_BODY_NORMALIZED_HEADER);
+      headers.delete(CODEX_REQUEST_MODEL_HEADER);
+      headers.delete(CODEX_REQUEST_ID_HEADER);
+      headers.delete(CODEX_REQUEST_CALLER_STREAM_HEADER);
       headers.set("Authorization", `Bearer ${auth.accessToken}`);
       if (auth.chatgptAccountId) {
         headers.set("ChatGPT-Account-ID", auth.chatgptAccountId);
@@ -486,13 +514,20 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
       }
 
       // The backend is streaming-only; force stream=true on the wire but remember
-      // the caller's intent so a non-streaming caller (e.g. the compaction
-      // summarizer) still gets a single JSON Response back.
-      let callerWantsStream = true;
-      let model: string | undefined;
+      // the caller's intent for legacy/unowned non-streaming consumers. The owned
+      // compaction path consumes the same streaming model boundary as normal turns.
+      let callerWantsStream = bodyAlreadyNormalized ? normalizedCallerStream !== "0" : true;
+      let model: string | undefined = normalizedModel;
       let requestOpaqueArtifacts: string[] = [];
-      const nextInit: RequestInit = { ...init, headers };
-      if (typeof init?.body === "string") {
+      const replayableBodyFactory = (init as ReplayableRequestInit | undefined)?.[
+        REPLAYABLE_REQUEST_BODY_FACTORY
+      ];
+      const nextInit: RequestInit = {
+        ...init,
+        headers,
+        ...(replayableBodyFactory ? { body: replayableBodyFactory() } : {}),
+      };
+      if (!bodyAlreadyNormalized && typeof init?.body === "string") {
         try {
           const parsed = JSON.parse(init.body) as Record<string, unknown>;
           callerWantsStream = parsed.stream === true;
@@ -501,26 +536,27 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
           nextInit.body = JSON.stringify(normalized);
           requestOpaqueArtifacts = opaqueProviderArtifactFingerprints(normalized.input);
         } catch {
-          /* leave unparseable bodies untouched (already copied from init) */
+          // This is the final request-policy boundary for the strict Responses
+          // endpoint. Never let malformed bytes bypass the reviewed policy.
+          throw new Error("Model request could not be prepared");
         }
+      } else if (!bodyAlreadyNormalized) {
+        throw new Error("Model request could not be prepared");
       }
-      ctx.onRequestOpaqueArtifacts?.({ requestId, fingerprints: requestOpaqueArtifacts });
+      if (!bodyAlreadyNormalized) {
+        ctx.onRequestOpaqueArtifacts?.({ requestId, fingerprints: requestOpaqueArtifacts });
+      }
       headers.set(
         "Idempotency-Key",
         authenticationAttempt === 0 ? requestId : `${requestId}:auth-${authenticationAttempt}`,
       );
       if (process.env.CODEX_DEBUG) {
-        let keys: string[] = [];
-        if (typeof nextInit.body === "string") {
-          try {
-            keys = Object.keys(JSON.parse(nextInit.body) as Record<string, unknown>);
-          } catch {
-            /* an unparseable body is already passed through unchanged above */
-          }
-        }
-        console.error(
-          `[codex-debug] POST ${rewritten} stream=${callerWantsStream} bodyKeys=[${keys.join(",")}]`,
-        );
+        console.error("[codex-debug] request dispatched", {
+          method: "POST",
+          origin: "codex-subscription",
+          route: "codex_responses",
+          stream: callerWantsStream,
+        });
       }
       let res: Response;
       transportAttempt += 1;
@@ -587,18 +623,18 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
         ctx.onUsageHeaders?.(usage);
       }
       if (process.env.CODEX_DEBUG && !res.ok) {
-        // Never log provider bodies: they can contain request-derived content or
-        // account details. Status + request id is sufficient to correlate with
-        // the structured worker failure telemetry.
-        console.error(
-          `[codex-debug] <- ${res.status} requestId=${res.headers.get("x-request-id") ?? "unknown"}`,
-        );
+        // Never log provider bodies, identifiers, or headers: they can contain
+        // request-derived or account content. A bounded status is sufficient.
+        console.error("[codex-debug] request failed", {
+          origin: "codex-subscription",
+          route: "codex_responses",
+          status: res.status,
+        });
       }
-      // The codex backend leaves the terminal event's response.output empty and
-      // delivers the assistant items via output_item.done events instead. The
-      // @openai/agents parser (streaming AND non-streaming) reads response.output,
-      // so we must reconstruct it: collapse to one JSON Response for a non-streaming
-      // caller, or repair the live stream's terminal event for a streaming caller.
+      // The backend leaves terminal response.output empty and delivers assistant
+      // items through output_item.done. The typed model reducer reconstructs normal
+      // streaming calls; only the legacy non-streaming transport fallback collapses
+      // SSE into one JSON response here.
       if (!res.ok) {
         // Buffer the error body once and re-emit it as a concrete JSON Response.
         // A streaming responses request whose error body is left as the raw
@@ -611,7 +647,7 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
         // so the SDK does not burn its retry budget on a limit that won't lift.
         return await bufferCodexErrorResponse(res);
       }
-      return callerWantsStream ? repairCodexStream(res) : await sseToJsonResponse(res);
+      return callerWantsStream ? validateCodexStream(res) : await sseToJsonResponse(res);
     };
 
     try {
@@ -685,27 +721,86 @@ export function classifyCodexUsageLimitError(error: unknown): CodexUsageLimitInf
  * Reading the body here also drains the socket of a discarded 401 (no leak).
  */
 async function bufferCodexErrorResponse(res: Response): Promise<Response> {
-  const bodyText = await res.text().catch(() => "");
+  const { text: bodyText, truncated } = await readBoundedResponseText(
+    res,
+    MAX_CODEX_ERROR_BODY_BYTES,
+  );
   const headers = new Headers(res.headers);
   headers.set("content-type", "application/json");
   headers.set(CODEX_TRANSPORT_ERROR_HEADER, "1");
   headers.delete("content-length"); // body re-serialized
   headers.delete("content-encoding"); // text() already decoded any gzip
   let errorType: string | undefined;
+  let responseBody = bodyText;
   try {
     const parsed = JSON.parse(bodyText) as { error?: { type?: unknown } };
     errorType = typeof parsed.error?.type === "string" ? parsed.error.type : undefined;
   } catch {
     /* non-JSON error body — leave as-is, no retry-header override */
   }
+  if (truncated) {
+    responseBody = JSON.stringify({
+      error: {
+        type: "provider_error_body_too_large",
+        code: "provider_error_body_too_large",
+        message: `The provider returned an error body larger than ${MAX_CODEX_ERROR_BODY_BYTES} bytes`,
+      },
+    });
+    headers.set("x-opengeni-provider-error-truncated", "1");
+  }
   if (errorType === CODEX_USAGE_LIMIT_ERROR_TYPE) {
     headers.set("x-should-retry", "false");
   }
-  return new Response(bodyText, {
+  return new Response(responseBody, {
     status: res.status,
     statusText: res.statusText,
     headers,
   });
+}
+
+async function readBoundedResponseText(
+  response: Response,
+  maxBytes: number,
+): Promise<{ text: string; truncated: boolean }> {
+  if (!response.body) return { text: "", truncated: false };
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const parts: string[] = [];
+  let bytes = 0;
+  let truncated = false;
+  try {
+    while (bytes < maxBytes) {
+      const next = await reader.read();
+      if (next.done) {
+        parts.push(decoder.decode());
+        return { text: parts.join(""), truncated };
+      }
+      const remaining = maxBytes - bytes;
+      const accepted =
+        next.value.byteLength > remaining ? next.value.subarray(0, remaining) : next.value;
+      bytes += accepted.byteLength;
+      parts.push(decoder.decode(accepted, { stream: true }));
+      if (accepted.byteLength !== next.value.byteLength) {
+        truncated = true;
+        break;
+      }
+      if (bytes >= maxBytes) {
+        // Reaching the hard cap is sufficient to classify the body as
+        // oversized. Probing for one more chunk can wait forever when an
+        // upstream producer stops emitting without closing its stream.
+        truncated = true;
+        break;
+      }
+    }
+  } catch {
+    truncated = true;
+  } finally {
+    // Cancellation is advisory cleanup. Some Fetch/Streams implementations do
+    // not settle cancel() until the producer exits; never let an oversized
+    // provider error hold the request open behind that implementation detail.
+    if (truncated) void reader.cancel().catch(() => undefined);
+  }
+  return { text: parts.join(""), truncated };
 }
 
 /**
@@ -1016,9 +1111,9 @@ function codexSseFailureProjection(
  * A provider terminal carried inside an accepted HTTP-200 stream. The OpenAI
  * SDK cannot turn that late terminal into a non-2xx APIError because headers
  * have already been accepted, so the body transform throws this equivalent
- * bounded shape. Provider-supplied message/param text is intentionally absent:
- * the worker may persist Error.message, while identifiers/classifications are
- * sufficient for retry, compaction, and incident diagnostics.
+ * bounded shape. Provider-supplied message/param text remains exact within the
+ * explicit terminal-field byte contract; retry classification is additive and
+ * never substitutes for the source diagnostic.
  */
 export class CodexStreamingTerminalError extends Error {
   readonly status: number;
@@ -1030,8 +1125,8 @@ export class CodexStreamingTerminalError extends Error {
   readonly headers: Headers;
   readonly error: Record<string, unknown>;
 
-  constructor(projection: CodexSseFailureProjection, publicMessage: string) {
-    super(publicMessage);
+  constructor(projection: CodexSseFailureProjection) {
+    super(projection.error.message);
     this.name = "CodexStreamingTerminalError";
     this.status = projection.status;
     this.code = projection.error.code;
@@ -1049,6 +1144,8 @@ export class CodexStreamingTerminalError extends Error {
     this.error = {
       type: projection.error.type,
       code: projection.error.code,
+      message: projection.error.message,
+      ...(projection.error.param ? { param: projection.error.param } : {}),
       ...(projection.error.event_type ? { event_type: projection.error.event_type } : {}),
       ...(projection.error.response_id ? { response_id: projection.error.response_id } : {}),
       ...(projection.error.response_status
@@ -1072,16 +1169,16 @@ function codexSseFailureError(
 ): CodexStreamingTerminalError {
   return new CodexStreamingTerminalError(
     codexSseFailureProjection(source, rawError, fallbackCode, publicMessage, metadata),
-    publicMessage,
   );
 }
 
 /**
- * Repair a live Responses SSE stream for the @openai/agents streaming parser: pass
- * every event through unchanged, collect the output_item.done items, and inject
- * them into the terminal event's empty `output` so the parser sees the message.
+ * Preserve a live Responses SSE stream byte-for-byte while translating only
+ * provider-specific terminal failures into typed transport errors. Successful
+ * output reconstruction belongs to the model reducer, so this layer retains no
+ * duplicate output-item graph.
  */
-function repairCodexStream(res: Response): Response {
+function validateCodexStream(res: Response): Response {
   if (!res.body) {
     const error = codexSseFailureError(
       res,
@@ -1102,7 +1199,6 @@ function repairCodexStream(res: Response): Response {
       headers,
     });
   }
-  const items: unknown[] = [];
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let buffer = "";
@@ -1116,9 +1212,8 @@ function repairCodexStream(res: Response): Response {
       const block = buffer.slice(0, boundary.start);
       const separator = buffer.slice(boundary.start, boundary.end);
       buffer = buffer.slice(boundary.end);
-      const patched = patchSseBlock(block, items, res);
-      successfulTerminalSeen ||= patched.successfulTerminal;
-      controller.enqueue(encoder.encode(`${patched.block}${separator}`));
+      successfulTerminalSeen ||= inspectCodexSseBlock(block, res);
+      controller.enqueue(encoder.encode(`${block}${separator}`));
       boundary = findSseBlockBoundary(buffer, final);
     }
   };
@@ -1131,9 +1226,8 @@ function repairCodexStream(res: Response): Response {
       buffer += decoder.decode();
       emitCompleteBlocks(controller, true);
       if (buffer.length > 0) {
-        const patched = patchSseBlock(buffer, items, res);
-        successfulTerminalSeen ||= patched.successfulTerminal;
-        controller.enqueue(encoder.encode(patched.block));
+        successfulTerminalSeen ||= inspectCodexSseBlock(buffer, res);
+        controller.enqueue(encoder.encode(buffer));
         buffer = "";
       }
       if (!successfulTerminalSeen) {
@@ -1185,21 +1279,31 @@ function sseLineEndingEnd(value: string, index: number, final: boolean): number 
   return final ? index + 1 : null;
 }
 
-type PatchedSseBlock = { block: string; successfulTerminal: boolean };
+const CODEX_TERMINAL_TYPE_HINTS = [
+  '"response.completed"',
+  '"response.done"',
+  '"response.failed"',
+  '"response.incomplete"',
+  '"response.error"',
+  '"error"',
+] as const;
 
 /**
- * Collect output_item.done items and rewrite only a successful terminal event.
- * Failed/error/incomplete terminals throw before their provider message can be
- * exposed to Agents as an ordinary response_done event.
+ * Parse only blocks that can be terminal. Ordinary deltas and output items pass
+ * without object allocation; failed/error/incomplete terminals throw before the
+ * model can mistake them for an ordinary response_done event.
  */
-function patchSseBlock(block: string, items: unknown[], source: Response): PatchedSseBlock {
+function inspectCodexSseBlock(block: string, source: Response): boolean {
   const lines = block.split(/\r\n|\r|\n/);
   const dataStr = lines
     .filter((l) => l.startsWith("data:"))
     .map((l) => l.slice(5).trim())
     .join("\n");
   if (!dataStr || dataStr === "[DONE]") {
-    return { block, successfulTerminal: false };
+    return false;
+  }
+  if (!CODEX_TERMINAL_TYPE_HINTS.some((terminalType) => dataStr.includes(terminalType))) {
+    return false;
   }
   let ev: {
     type?: string;
@@ -1213,11 +1317,7 @@ function patchSseBlock(block: string, items: unknown[], source: Response): Patch
   try {
     ev = JSON.parse(dataStr);
   } catch {
-    return { block, successfulTerminal: false };
-  }
-  if (ev.type === "response.output_item.done" && ev.item !== undefined) {
-    items.push(ev.item);
-    return { block, successfulTerminal: false };
+    return false;
   }
   if (ev.type === "response.failed") {
     throw codexSseFailureError(
@@ -1271,8 +1371,7 @@ function patchSseBlock(block: string, items: unknown[], source: Response): Patch
   }
   if ((ev.type === "response.completed" || ev.type === "response.done") && ev.response) {
     if (
-      ev.response.status === "failed" ||
-      ev.response.status === "incomplete" ||
+      (ev.response.status !== undefined && ev.response.status !== "completed") ||
       (ev.response.error !== null && ev.response.error !== undefined)
     ) {
       throw codexSseFailureError(
@@ -1289,17 +1388,7 @@ function patchSseBlock(block: string, items: unknown[], source: Response): Patch
         },
       );
     }
-    const out = ev.response.output;
-    if ((!Array.isArray(out) || out.length === 0) && items.length > 0) {
-      ev.response = { ...ev.response, output: items };
-      const nonData = lines.filter((l) => !l.startsWith("data:"));
-      const lineEnding = block.match(/\r\n|\r|\n/)?.[0] ?? "\n";
-      return {
-        block: [...nonData, `data: ${JSON.stringify(ev)}`].join(lineEnding),
-        successfulTerminal: true,
-      };
-    }
-    return { block, successfulTerminal: true };
+    return true;
   }
-  return { block, successfulTerminal: false };
+  return false;
 }

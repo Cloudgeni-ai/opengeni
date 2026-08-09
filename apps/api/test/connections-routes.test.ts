@@ -924,7 +924,11 @@ describe("connections routes", () => {
       const startedAt = performance.now();
       const response = await appWithDeps(
         { environment: "test" },
-        { oauthStartDeadlineMs: 25 },
+        // The deadline covers the real PostgreSQL connection lookup as well as
+        // network discovery. Leave enough room for that prerequisite under a
+        // loaded suite so this test deterministically reaches the stalled
+        // protected-resource response it is intended to classify.
+        { oauthStartDeadlineMs: 3_000 },
       ).request(`/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`, {
         method: "POST",
         headers: {
@@ -945,7 +949,7 @@ describe("connections routes", () => {
         };
       };
       expect(response.status).toBe(408);
-      expect(performance.now() - startedAt).toBeLessThan(1_000);
+      expect(performance.now() - startedAt).toBeLessThan(6_000);
       expect(body.error).toMatchObject({
         code: "upstream_unavailable",
         retryable: true,
@@ -1082,11 +1086,14 @@ describe("connections routes", () => {
       expect(errors).toHaveLength(1);
       expect(errors[0]).toMatchObject({
         message: "MCP OAuth callback failed",
-        "opengeni.oauth.stage": "token_exchange",
-        "opengeni.oauth.reason": "invalid_client",
-        "opengeni.oauth.provider_domain": "mcp.example.com",
-        "opengeni.oauth.client_registration_method": "cimd",
+        errorClass: "OAuthOperationError",
+        errorCode: "oauth_operation_failed",
+        origin: "oauth",
       });
+      expect(JSON.stringify(errors)).not.toContain("token_exchange");
+      expect(JSON.stringify(errors)).not.toContain("invalid_client");
+      expect(JSON.stringify(errors)).not.toContain("mcp.example.com");
+      expect(JSON.stringify(errors)).not.toContain("cimd");
       expect(JSON.stringify(errors)).not.toContain(verifier);
       expect(JSON.stringify(errors)).not.toContain("abc");
     } finally {

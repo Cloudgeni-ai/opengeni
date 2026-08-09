@@ -21,7 +21,7 @@ import {
   applyGitAuthPointerEnvironment,
   hasGitCredentialRepositorySelection,
   hasGitHubRepositorySelection,
-  sandboxArchiveCaptureTimeoutMs,
+  sandboxLifecycleTransitionWaitMs,
   stableSandboxEnvironmentForRun,
   type Settings,
 } from "@opengeni/config";
@@ -30,17 +30,24 @@ import type { Session } from "@opengeni/contracts";
 import {
   acquireLease,
   getSandboxSessionEnvelope,
+  getEnrollment,
   getSandbox,
   loadWorkspaceEnvironmentForRun,
   markWarmLeaseInstanceLost,
   readActiveSandbox,
   readLease,
   releaseLeaseHolder,
+  SandboxProviderReadLockUnavailableError,
+  withSandboxProviderReadLock,
   type Database,
   type LeaseSnapshot,
 } from "@opengeni/db";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
-import { sandboxOperationMetricObserver, type Observability } from "@opengeni/observability";
+import {
+  sandboxLeaseTelemetryKey,
+  sandboxOperationMetricObserver,
+  type Observability,
+} from "@opengeni/observability";
 import { HTTPException } from "hono/http-exception";
 
 import {
@@ -49,6 +56,9 @@ import {
   isProviderSandboxNotFoundError,
   SandboxChannelAService,
   NatsControlRpc,
+  NatsOpStreamTransport,
+  SandboxResumeIdentityMismatchError,
+  SandboxResumeIdentityUnavailableError,
   ChannelAConflictError,
   ChannelANotFoundError,
   ChannelAUnsupportedError,
@@ -71,12 +81,54 @@ export type ChannelAServices = {
   observability?: Observability | undefined;
 };
 
+export type ChannelAOperation =
+  | "fs.list"
+  | "fs.list-batch"
+  | "fs.read"
+  | "fs.write"
+  | "fs.delete"
+  | "fs.move"
+  | "fs.mkdir"
+  | "git.status"
+  | "git.diff"
+  | "git.read-batch"
+  | "git.log"
+  | "git.show"
+  | "terminal.exec"
+  | "terminal.pty.open"
+  | "terminal.pty.write"
+  | "terminal.pty.resize"
+  | "terminal.pty.close";
+
 export type ChannelAContext = {
   accountId: string;
   workspaceId: string;
   session: Session;
   // The principal that drives the op (for emit attribution + pty opened_by).
   subjectId: string;
+  /** Cancel lifecycle waiting when the originating HTTP request disconnects. */
+  waitSignal?: AbortSignal | undefined;
+  /** Bounded route identity for metrics and safe operator diagnostics. */
+  operation?: ChannelAOperation | undefined;
+};
+
+export type ChannelAOperationFailureReason =
+  | "request_cancelled"
+  | "provider_read_busy"
+  | "provider_unavailable"
+  | "lifecycle_conflict"
+  | "request_rejected"
+  | "unexpected";
+
+export type ChannelAOperationFailureDiagnostic = {
+  reason: ChannelAOperationFailureReason;
+  status: number;
+  errorCode:
+    | "sandbox_channel_a_cancelled"
+    | "sandbox_channel_a_provider_busy"
+    | "sandbox_channel_a_provider_unavailable"
+    | "sandbox_channel_a_lifecycle_conflict"
+    | "sandbox_channel_a_operation_failed";
 };
 
 // The live op surface handed to a route's callback: the service + the live lease
@@ -89,6 +141,291 @@ export type ChannelAHandle = {
   routingSession: RoutingSandboxSession;
   requestId: string;
 };
+
+/**
+ * Provider handles are lightweight references to a lease-owned sandbox, but
+ * reconstructing one is not free: Modal resume-by-id plus its first command can
+ * dominate a small Git/files read. Workspace panels issue several independent
+ * Channel-A requests together, so reuse the exact fenced handle briefly instead
+ * of making every request reattach to the same warm instance.
+ *
+ * The key includes the session, lease epoch, and immutable provider instance id.
+ * A rotation can therefore never inherit an old handle. Entries are bounded and
+ * expire opportunistically; eviction only drops local references and never
+ * terminates the lease-owned sandbox.
+ */
+// Read/viewer handles and process-capable handles deliberately have separate
+// caches. The pinned Modal patch rotates a handle's command-router transport in
+// place, while a typed read failure below still gets one fresh-handle fallback.
+// Periodically rebuilding a healthy hot read handle would add multi-second
+// stalls, so both caches keep the pre-existing five-minute IDLE lifetime.
+//
+// Modal and Unix/Docker SDK sessions retain yielded exec/PTY process objects in
+// a process-local map; rebuilding the wrapper cannot reconstruct those objects
+// from the numeric provider session id. Reads therefore never enter or evict
+// the process cache merely to refresh their own transport.
+const CHANNEL_A_READ_HANDLE_CACHE_IDLE_TTL_MS = 5 * 60_000;
+const CHANNEL_A_PROCESS_HANDLE_CACHE_IDLE_TTL_MS = 5 * 60_000;
+const CHANNEL_A_HANDLE_CACHE_MAX_ENTRIES = 64;
+type CachedReadHandle = {
+  promise: Promise<EstablishedSandboxSession>;
+  lastUsedAtMonotonicMs: number;
+};
+type CachedProcessHandle = {
+  promise: Promise<EstablishedSandboxSession>;
+  lastUsedAtMonotonicMs: number;
+};
+export type EstablishedHandleCacheKind = "read" | "process" | "none";
+const establishedReadHandleCache = new Map<string, CachedReadHandle>();
+const establishedProcessHandleCache = new Map<string, CachedProcessHandle>();
+
+function establishedHandleCacheKey(
+  workspaceId: string,
+  sessionId: string,
+  lease: LeaseSnapshot,
+): string {
+  return [workspaceId, sessionId, lease.leaseEpoch, lease.instanceId ?? ""].join("\u0000");
+}
+
+export function isChannelAHandleCacheEntryFresh(
+  lastUsedAtMonotonicMs: number,
+  nowMonotonicMs: number,
+  idleTtlMs = CHANNEL_A_READ_HANDLE_CACHE_IDLE_TTL_MS,
+): boolean {
+  return nowMonotonicMs - lastUsedAtMonotonicMs < idleTtlMs;
+}
+
+export function isChannelAProcessHandleCacheEntryFresh(
+  lastUsedAtMonotonicMs: number,
+  nowMonotonicMs: number,
+  idleTtlMs = CHANNEL_A_PROCESS_HANDLE_CACHE_IDLE_TTL_MS,
+): boolean {
+  return nowMonotonicMs - lastUsedAtMonotonicMs < idleTtlMs;
+}
+
+function pruneEstablishedReadHandleCache(nowMonotonicMs: number): void {
+  for (const [key, entry] of establishedReadHandleCache) {
+    if (!isChannelAHandleCacheEntryFresh(entry.lastUsedAtMonotonicMs, nowMonotonicMs)) {
+      establishedReadHandleCache.delete(key);
+    }
+  }
+}
+
+function pruneEstablishedProcessHandleCache(nowMonotonicMs: number): void {
+  for (const [key, entry] of establishedProcessHandleCache) {
+    if (!isChannelAProcessHandleCacheEntryFresh(entry.lastUsedAtMonotonicMs, nowMonotonicMs)) {
+      establishedProcessHandleCache.delete(key);
+    }
+  }
+}
+
+function enforceEstablishedHandleCacheSize<T>(cache: Map<string, T>): void {
+  while (cache.size > CHANNEL_A_HANDLE_CACHE_MAX_ENTRIES) {
+    const oldestKey = cache.keys().next().value as string | undefined;
+    if (oldestKey === undefined) break;
+    cache.delete(oldestKey);
+  }
+}
+
+async function establishCachedReadHandle(
+  key: string,
+  establish: () => Promise<EstablishedSandboxSession>,
+): Promise<EstablishedSandboxSession> {
+  const now = performance.now();
+  pruneEstablishedReadHandleCache(now);
+  const cached = establishedReadHandleCache.get(key);
+  if (cached) {
+    cached.lastUsedAtMonotonicMs = now;
+    // Refresh insertion order so the bounded map evicts the least-recently used
+    // exact lease identity first.
+    establishedReadHandleCache.delete(key);
+    establishedReadHandleCache.set(key, cached);
+    return await cached.promise;
+  }
+
+  const promise = establish();
+  const entry: CachedReadHandle = { promise, lastUsedAtMonotonicMs: now };
+  establishedReadHandleCache.set(key, entry);
+  enforceEstablishedHandleCacheSize(establishedReadHandleCache);
+  try {
+    return await promise;
+  } catch (error) {
+    if (establishedReadHandleCache.get(key) === entry) establishedReadHandleCache.delete(key);
+    throw error;
+  }
+}
+
+async function establishCachedProcessHandle(
+  key: string,
+  establish: () => Promise<EstablishedSandboxSession>,
+): Promise<EstablishedSandboxSession> {
+  const now = performance.now();
+  pruneEstablishedProcessHandleCache(now);
+  const cached = establishedProcessHandleCache.get(key);
+  if (cached) {
+    cached.lastUsedAtMonotonicMs = now;
+    establishedProcessHandleCache.delete(key);
+    establishedProcessHandleCache.set(key, cached);
+    return await cached.promise;
+  }
+
+  const promise = establish();
+  const entry: CachedProcessHandle = { promise, lastUsedAtMonotonicMs: now };
+  establishedProcessHandleCache.set(key, entry);
+  enforceEstablishedHandleCacheSize(establishedProcessHandleCache);
+  try {
+    return await promise;
+  } catch (error) {
+    if (establishedProcessHandleCache.get(key) === entry) {
+      establishedProcessHandleCache.delete(key);
+    }
+    throw error;
+  }
+}
+
+/** Reuse the exact lease-fenced provider handle across API-direct surfaces.
+ * Stream capability negotiation and the first Files/Changes reads commonly run
+ * back-to-back; sharing this handle avoids paying the same Modal resume twice. */
+export async function establishCachedChannelAHandle(
+  workspaceId: string,
+  sessionId: string,
+  lease: LeaseSnapshot,
+  establish: () => Promise<EstablishedSandboxSession>,
+): Promise<EstablishedSandboxSession> {
+  return await establishCachedReadHandle(
+    establishedHandleCacheKey(workspaceId, sessionId, lease),
+    establish,
+  );
+}
+
+async function establishCachedChannelAProcessHandle(
+  workspaceId: string,
+  sessionId: string,
+  lease: LeaseSnapshot,
+  establish: () => Promise<EstablishedSandboxSession>,
+): Promise<EstablishedSandboxSession> {
+  return await establishCachedProcessHandle(
+    establishedHandleCacheKey(workspaceId, sessionId, lease),
+    establish,
+  );
+}
+
+/**
+ * Run independent, side-effect-free Channel-A reads concurrently without
+ * releasing the direct-request holder while sibling provider commands are
+ * still settling. A typed temporary-unavailable failure is retried exactly
+ * once after every first attempt has settled; validation, conflict, not-found,
+ * and unknown failures are never replayed.
+ */
+export async function runConcurrentChannelAReads<T>(
+  operations: readonly (() => Promise<T>)[],
+): Promise<T[]> {
+  const values = new Array<T>(operations.length);
+  const first = await Promise.allSettled(
+    operations.map((operation) => Promise.resolve().then(operation)),
+  );
+  const retryIndexes: number[] = [];
+
+  for (const [index, result] of first.entries()) {
+    if (result.status === "fulfilled") {
+      values[index] = result.value;
+      continue;
+    }
+    if (!(result.reason instanceof ChannelAUnavailableError)) {
+      throw result.reason;
+    }
+    retryIndexes.push(index);
+  }
+
+  if (retryIndexes.length === 0) return values;
+
+  const retried = await Promise.allSettled(
+    retryIndexes.map((index) => Promise.resolve().then(operations[index]!)),
+  );
+  for (const [retryIndex, result] of retried.entries()) {
+    if (result.status === "rejected") throw result.reason;
+    values[retryIndexes[retryIndex]!] = result.value;
+  }
+  return values;
+}
+
+type ChannelAReadRecoveryOptions = {
+  /** Modal may expose one more stale command-router route after the first
+   * successful handle rebuild. Keep this closed and statically bounded. */
+  maxFreshHandleRetries?: 1 | 2;
+  /** Never start another provider attempt after the originating request ends. */
+  waitSignal?: AbortSignal | undefined;
+};
+
+/** Retry a side-effect-free Channel-A read only after the caller has discarded
+ * and freshly re-established its provider handle. The ordinary provider-neutral
+ * contract allows one retry; Modal opts into one additional rebuild because a
+ * command-router rollover can outlive the first replacement handle. Provider
+ * commands are never replayed for validation/conflict/unknown errors, mutation
+ * routes never call this helper, and request cancellation stops recovery before
+ * another provider command begins. */
+export async function runChannelAReadWithFreshHandleRetry<T>(
+  run: () => Promise<T>,
+  refreshHandle: (attempt: 1 | 2) => Promise<void>,
+  options: ChannelAReadRecoveryOptions = {},
+): Promise<T> {
+  const maxFreshHandleRetries = options.maxFreshHandleRetries ?? 1;
+  for (let retries = 0; ; retries += 1) {
+    options.waitSignal?.throwIfAborted();
+    try {
+      return await run();
+    } catch (error) {
+      if (!(error instanceof ChannelAUnavailableError) || retries >= maxFreshHandleRetries) {
+        throw error;
+      }
+      options.waitSignal?.throwIfAborted();
+      const attempt = retries === 0 ? 1 : 2;
+      await refreshHandle(attempt);
+    }
+  }
+}
+
+export function shouldEvictChannelAHandleAfterError(
+  error: unknown,
+  cacheKind: EstablishedHandleCacheKind,
+): boolean {
+  return error instanceof ChannelAUnavailableError && cacheKind === "read";
+}
+
+function evictEstablishedHandle(key: string, cacheKind: EstablishedHandleCacheKind): void {
+  if (cacheKind === "read") establishedReadHandleCache.delete(key);
+  if (cacheKind === "process") establishedProcessHandleCache.delete(key);
+}
+
+function evictAllEstablishedHandles(key: string): void {
+  establishedReadHandleCache.delete(key);
+  establishedProcessHandleCache.delete(key);
+}
+
+function rememberEstablishedHandle(
+  key: string,
+  established: EstablishedSandboxSession,
+  cacheKind: Exclude<EstablishedHandleCacheKind, "none">,
+): void {
+  const now = performance.now();
+  if (cacheKind === "read") {
+    pruneEstablishedReadHandleCache(now);
+    establishedReadHandleCache.delete(key);
+    establishedReadHandleCache.set(key, {
+      promise: Promise.resolve(established),
+      lastUsedAtMonotonicMs: now,
+    });
+    enforceEstablishedHandleCacheSize(establishedReadHandleCache);
+    return;
+  }
+  pruneEstablishedProcessHandleCache(now);
+  establishedProcessHandleCache.delete(key);
+  establishedProcessHandleCache.set(key, {
+    promise: Promise.resolve(established),
+    lastUsedAtMonotonicMs: now,
+  });
+  enforceEstablishedHandleCacheSize(establishedProcessHandleCache);
+}
 
 /**
  * Run a Channel-A op against a live box, API-direct. Acquires an exact direct holder
@@ -104,6 +441,28 @@ export async function withChannelA<T>(
   ctx: ChannelAContext,
   fn: (handle: ChannelAHandle) => Promise<T>,
 ): Promise<T> {
+  return await withChannelAOperation(services, ctx, false, fn);
+}
+
+/** Read-only API-direct seam. Separate requests for the same exact live Modal
+ * instance are serialized across API replicas; each request's batched reads
+ * remain concurrent behind that one distributed boundary. A typed temporary
+ * provider-channel failure gets one retry only after rebuilding the exact
+ * lease-fenced handle. */
+export async function withChannelARead<T>(
+  services: ChannelAServices,
+  ctx: ChannelAContext,
+  fn: (handle: ChannelAHandle) => Promise<T>,
+): Promise<T> {
+  return await withChannelAOperation(services, ctx, true, fn);
+}
+
+async function withChannelAOperation<T>(
+  services: ChannelAServices,
+  ctx: ChannelAContext,
+  readOnly: boolean,
+  fn: (handle: ChannelAHandle) => Promise<T>,
+): Promise<T> {
   const { db, settings, bus } = services;
   const onSandboxOperation = services.observability
     ? sandboxOperationMetricObserver(services.observability)
@@ -117,6 +476,8 @@ export async function withChannelA<T>(
   const sandboxGroupId = session.sandboxGroupId;
   const requestId = crypto.randomUUID();
   const holderId = `direct:${requestId}`;
+  const operationStartedAt = performance.now();
+  const operation = ctx.operation ?? (readOnly ? "read" : "mutation");
   const leaseTtlMs = settings.sandboxLeaseTtlMs;
 
   // The STABLE run-environment used by both a cloud home and a machine home.
@@ -169,7 +530,12 @@ export async function withChannelA<T>(
       leaseEpoch: lease?.leaseEpoch ?? session.activeEpoch,
       emit,
     });
-    return await fn({ service, lease, routingSession, requestId });
+    const result = await fn({ service, lease, routingSession, requestId });
+    // The direct request has accepted the result in memory. Finalize every
+    // Connected Machine backend the routing proxy reached so a mid-request
+    // route transition cannot leave completed output retained until TTL.
+    await routingSession.finalizeOpStreamOps().catch(() => undefined);
+    return result;
   };
 
   // A machine-targeted top-level session has an honest selfhosted HOME label.
@@ -178,6 +544,7 @@ export async function withChannelA<T>(
   if (session.sandboxBackend === "selfhosted") {
     let established: EstablishedSandboxSession | undefined;
     try {
+      ctx.waitSignal?.throwIfAborted();
       const pointer = await readActiveSandbox(db, workspaceId, session.id);
       if (!pointer?.activeSandboxId) {
         throw new HTTPException(409, {
@@ -190,6 +557,7 @@ export async function withChannelA<T>(
           message: "machine-home session points to an unavailable Connected Machine",
         });
       }
+      const enrollment = await getEnrollment(db, workspaceId, sandbox.enrollmentId);
       const built = await buildSelfhostedBackendSession({
         workspaceId,
         agentId: sandbox.enrollmentId,
@@ -200,6 +568,17 @@ export async function withChannelA<T>(
         workingDir: pointer.workingDir,
         timeoutMs: settings.sandboxSelfhostedControlTimeoutMs,
         execTimeoutMs: settings.sandboxSelfhostedExecTimeoutMs,
+        ...(settings.agentOpStreamEnabled === true &&
+        enrollment?.opStream === true &&
+        bus.getOpStreamConnection
+          ? {
+              opStream: {
+                transport: new NatsOpStreamTransport(
+                  async () => bus.getOpStreamConnection?.() ?? null,
+                ),
+              },
+            }
+          : {}),
       });
       established = {
         client: built.client,
@@ -209,7 +588,13 @@ export async function withChannelA<T>(
         backendId: "selfhosted",
       };
       const routed = wrapChannelABoxWithRouting(
-        { db, settings, bus, ...(onSandboxOperation ? { onSandboxOperation } : {}) },
+        {
+          db,
+          settings,
+          bus,
+          ...(onSandboxOperation ? { onSandboxOperation } : {}),
+          ...(ctx.waitSignal ? { waitSignal: ctx.waitSignal } : {}),
+        },
         {
           accountId,
           workspaceId,
@@ -224,7 +609,16 @@ export async function withChannelA<T>(
       );
       return await runEstablished(routed, null);
     } catch (error) {
-      throw mapChannelAError(error);
+      observeChannelAOperationFailure(services, {
+        workspaceId,
+        sandboxGroupId,
+        backend: session.sandboxBackend,
+        operation,
+        durationMs: performance.now() - operationStartedAt,
+        error,
+        waitSignal: ctx.waitSignal,
+      });
+      throw mapChannelAError(error, ctx.waitSignal);
     } finally {
       await dropEstablishedHandle(established);
     }
@@ -241,36 +635,116 @@ export async function withChannelA<T>(
     });
   };
 
-  // Acquire exact request authority; the cold->warming CAS spawns the box when cold.
-  const acquired = await acquireLease(db, {
-    accountId,
-    workspaceId,
-    sandboxGroupId,
-    kind: "direct",
-    holderId,
-    subjectId: session.id,
-    backend: session.sandboxBackend,
-    os: session.sandboxOs,
-    leaseTtlMs,
-    warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
-    captureWaitMs: sandboxArchiveCaptureTimeoutMs(settings),
-  });
+  // Acquire exact request authority; the cold->warming CAS spawns the box when
+  // cold. This wait is request-abort aware and must pass through the same typed
+  // cancellation/diagnostic seam as provider execution below.
+  let acquired: Awaited<ReturnType<typeof acquireLease>>;
+  let acquisitionMayHaveCommitted = false;
+  try {
+    ctx.waitSignal?.throwIfAborted();
+    acquisitionMayHaveCommitted = true;
+    acquired = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId,
+      kind: "direct",
+      holderId,
+      subjectId: session.id,
+      backend: session.sandboxBackend,
+      os: session.sandboxOs,
+      leaseTtlMs,
+      warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
+      captureWaitMs: sandboxLifecycleTransitionWaitMs(settings),
+      ...(ctx.waitSignal ? { waitSignal: ctx.waitSignal } : {}),
+    });
+    // Close the commit/abort race before any provider handle is established.
+    // The catch below drops an exact holder committed just before disconnect.
+    ctx.waitSignal?.throwIfAborted();
 
-  if (acquired.role === "blocked") {
-    await release();
-    throw new HTTPException(409, {
-      message: `sandbox recovery ${acquired.lease.recovery.restore.status} at epoch ${acquired.lease.leaseEpoch}`,
+    if (acquired.role === "blocked") {
+      throw new HTTPException(409, {
+        message: `sandbox recovery ${acquired.lease.recovery.restore.status} at epoch ${acquired.lease.leaseEpoch}`,
+      });
+    }
+    if (acquired.role === "fenced") {
+      throw new HTTPException(409, {
+        message:
+          acquired.reason === "superseded"
+            ? `sandbox lease superseded (epoch ${acquired.lease.leaseEpoch}); retry`
+            : `sandbox lifecycle transition in progress (${acquired.reason}, epoch ${acquired.lease.leaseEpoch}, backend ${acquired.lease.backend}, instance ${acquired.lease.instanceId ?? "none"}); retry`,
+      });
+    }
+  } catch (error) {
+    // Release is idempotent. If acquisition committed before the request was
+    // cancelled, this removes that exact direct holder; a transient DB failure
+    // must not overwrite the original structural error (holder TTL is the final
+    // cleanup fence).
+    if (acquisitionMayHaveCommitted) await release().catch(() => undefined);
+    observeChannelAOperationFailure(services, {
+      workspaceId,
+      sandboxGroupId,
+      backend: session.sandboxBackend,
+      operation,
+      durationMs: performance.now() - operationStartedAt,
+      error,
+      waitSignal: ctx.waitSignal,
     });
-  }
-  if (acquired.role === "fenced") {
-    await release();
-    throw new HTTPException(409, {
-      message: `sandbox lease superseded (epoch ${acquired.lease.leaseEpoch}); retry`,
-    });
+    throw mapChannelAError(error, ctx.waitSignal);
   }
 
   let established: EstablishedSandboxSession | undefined;
   let leaseSnapshot: LeaseSnapshot = acquired.lease;
+  let establishedCacheKey: string | null = null;
+  let establishedCacheKind: EstablishedHandleCacheKind = "none";
+  const requestedCacheKind: Exclude<EstablishedHandleCacheKind, "none"> = readOnly
+    ? "read"
+    : "process";
+
+  const establishAttachedLiveHandle = async (
+    live: LeaseSnapshot,
+    cacheKind: EstablishedHandleCacheKind,
+  ): Promise<{ established: EstablishedSandboxSession; cacheKey: string }> => {
+    const cacheKey = establishedHandleCacheKey(workspaceId, session.id, live);
+    const establish = () =>
+      establishSandboxSessionFromEnvelope(settings, live.resumeState, {
+        sessionId: session.id,
+        recovery: "resume-only",
+        backendOverride: session.sandboxBackend,
+        environment,
+      });
+    try {
+      const attached =
+        cacheKind === "read"
+          ? await establishCachedChannelAHandle(workspaceId, session.id, live, establish)
+          : cacheKind === "process"
+            ? await establishCachedChannelAProcessHandle(workspaceId, session.id, live, establish)
+            : await establish();
+      return { established: attached, cacheKey };
+    } catch (error) {
+      if (!isProviderSandboxNotFoundError(session.sandboxBackend, error)) throw error;
+      // The exact provider instance is definitively gone, so neither a read nor
+      // a process wrapper for that lease identity may survive locally.
+      evictAllEstablishedHandles(cacheKey);
+      const marked = await markWarmLeaseInstanceLost(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId,
+        expectedEpoch: live.leaseEpoch,
+        expectedInstanceId: live.instanceId!,
+      });
+      if (marked.status === "marked") {
+        await appendAndPublishEvents(db, bus, workspaceId, session.id, [
+          {
+            type: "sandbox.box.lost",
+            payload: { sandboxId: live.instanceId },
+          },
+        ]);
+      }
+      throw new HTTPException(409, {
+        message: `sandbox instance was lost; retry to restore it`,
+      });
+    }
+  };
 
   try {
     const envelope = await getSandboxSessionEnvelope(db, workspaceId, session.id);
@@ -303,6 +777,9 @@ export async function withChannelA<T>(
         });
         established = result.established;
         leaseSnapshot = result.lease;
+        establishedCacheKey = establishedHandleCacheKey(workspaceId, session.id, leaseSnapshot);
+        establishedCacheKind = requestedCacheKind;
+        rememberEstablishedHandle(establishedCacheKey, established, establishedCacheKind);
       } catch (error) {
         throw new HTTPException(409, {
           message: `sandbox not available (${error instanceof Error ? error.message : "spawn failed"})`,
@@ -323,60 +800,150 @@ export async function withChannelA<T>(
         });
       }
       leaseSnapshot = live;
-      try {
-        established = await establishSandboxSessionFromEnvelope(settings, live.resumeState, {
-          sessionId: session.id,
-          recovery: "resume-only",
-          backendOverride: session.sandboxBackend,
-          environment,
-        });
-      } catch (error) {
-        if (!isProviderSandboxNotFoundError(session.sandboxBackend, error)) {
-          throw error;
-        }
-        const marked = await markWarmLeaseInstanceLost(db, {
-          accountId,
-          workspaceId,
-          sandboxGroupId,
-          expectedEpoch: live.leaseEpoch,
-          expectedInstanceId: live.instanceId,
-        });
-        if (marked.status === "marked") {
-          await appendAndPublishEvents(db, bus, workspaceId, session.id, [
-            {
-              type: "sandbox.box.lost",
-              payload: { sandboxId: live.instanceId },
-            },
-          ]);
-        }
-        throw new HTTPException(409, {
-          message: `sandbox instance was lost; retry to restore it`,
-        });
-      }
+      const attached = await establishAttachedLiveHandle(live, requestedCacheKind);
+      established = attached.established;
+      establishedCacheKey = attached.cacheKey;
+      establishedCacheKind = requestedCacheKind;
     }
 
-    // Route every call through the same proxy, even when hot-swap is disabled:
-    // routing may be dormant, but its direct mutation admission is mandatory for
-    // every persistable provider write.
-    const routed = wrapChannelABoxWithRouting(
-      { db, settings, bus, ...(onSandboxOperation ? { onSandboxOperation } : {}) },
-      {
-        accountId,
-        workspaceId,
-        sessionId: session.id,
-        homeLease: {
-          sandboxGroupId,
-          leaseEpoch: leaseSnapshot.leaseEpoch,
-          instanceId: leaseSnapshot.instanceId!,
-          backend: session.sandboxBackend,
+    const runProviderOperation = async (): Promise<T> => {
+      // Route every call through the same proxy, even when hot-swap is disabled:
+      // routing may be dormant, but its direct mutation admission is mandatory for
+      // every persistable provider write.
+      const routed = wrapChannelABoxWithRouting(
+        {
+          db,
+          settings,
+          bus,
+          ...(onSandboxOperation ? { onSandboxOperation } : {}),
+          ...(ctx.waitSignal ? { waitSignal: ctx.waitSignal } : {}),
         },
-        directRequest: { requestId, holderId },
-      },
-      established,
-    );
-    return await runEstablished(routed, leaseSnapshot);
+        {
+          accountId,
+          workspaceId,
+          sessionId: session.id,
+          homeLease: {
+            sandboxGroupId,
+            leaseEpoch: leaseSnapshot.leaseEpoch,
+            instanceId: leaseSnapshot.instanceId!,
+            backend: session.sandboxBackend,
+          },
+          directRequest: { requestId, holderId },
+        },
+        established!,
+      );
+      const run = async () => await runEstablished(routed, leaseSnapshot);
+      return readOnly && session.sandboxBackend === "modal"
+        ? await withSandboxProviderReadLock(
+            db,
+            {
+              workspaceId,
+              sandboxGroupId,
+              leaseEpoch: leaseSnapshot.leaseEpoch,
+              instanceId: leaseSnapshot.instanceId!,
+            },
+            ctx.waitSignal,
+            run,
+          )
+        : await run();
+    };
+
+    // A failed attempt leaves the advisory-lock transaction before refresh;
+    // the retry acquires a new transaction/lock against the same fenced lease.
+    return readOnly
+      ? await runChannelAReadWithFreshHandleRetry(
+          runProviderOperation,
+          async (attempt) => {
+            const refreshStartedAt = performance.now();
+            const observeRefresh = (outcome: "ok" | "failed"): void => {
+              if (!services.observability) return;
+              const attributes = {
+                sandboxLeaseKey: sandboxLeaseTelemetryKey(workspaceId, sandboxGroupId),
+                backend: session.sandboxBackend,
+                reason: "provider_handle_unavailable",
+                outcome,
+                attempt,
+                durationMs: Math.max(0, Math.round(performance.now() - refreshStartedAt)),
+              };
+              try {
+                services.observability.incrementCounter({
+                  name: "opengeni_channel_a_handle_refresh_total",
+                  help: "Channel-A provider handles rebuilt after a typed temporary-unavailable read.",
+                  labels: { backend: session.sandboxBackend, outcome },
+                });
+              } catch {
+                // Metrics can never alter lease or provider authority.
+              }
+              try {
+                if (outcome === "ok") {
+                  services.observability.info(
+                    "Channel-A provider handle refresh completed",
+                    attributes,
+                  );
+                } else {
+                  services.observability.warn(
+                    "Channel-A provider handle refresh failed",
+                    attributes,
+                  );
+                }
+              } catch {
+                // Logs can never alter lease or provider authority.
+              }
+            };
+            try {
+              if (establishedCacheKey) {
+                evictEstablishedHandle(establishedCacheKey, establishedCacheKind);
+              }
+              await dropEstablishedHandle(established);
+              // This request still owns its direct holder, so the exact live identity
+              // should be stable. Revalidate it before rebuilding the provider handle.
+              const live = await readLease(db, workspaceId, sandboxGroupId);
+              if (
+                !live ||
+                live.liveness !== "warm" ||
+                live.leaseEpoch !== leaseSnapshot.leaseEpoch ||
+                live.instanceId !== leaseSnapshot.instanceId
+              ) {
+                throw new HTTPException(409, {
+                  message: `sandbox lease changed while refreshing its provider handle; retry`,
+                });
+              }
+              const refreshed = await establishAttachedLiveHandle(live, "none");
+              established = refreshed.established;
+              establishedCacheKey = refreshed.cacheKey;
+              establishedCacheKind = "read";
+              leaseSnapshot = live;
+              rememberEstablishedHandle(refreshed.cacheKey, refreshed.established, "read");
+              observeRefresh("ok");
+            } catch (error) {
+              observeRefresh("failed");
+              throw error;
+            }
+          },
+          {
+            maxFreshHandleRetries: session.sandboxBackend === "modal" ? 2 : 1,
+            ...(ctx.waitSignal ? { waitSignal: ctx.waitSignal } : {}),
+          },
+        )
+      : await runProviderOperation();
   } catch (error) {
-    throw mapChannelAError(error);
+    // A read wrapper carries no yielded process state and is safe to discard.
+    // A mutation/terminal wrapper may own the SDK's only local process object;
+    // retain it after an ambiguous transport failure so a later control call
+    // can use the in-place provider transport recovery without losing the PTY.
+    if (establishedCacheKey && shouldEvictChannelAHandleAfterError(error, establishedCacheKind)) {
+      evictEstablishedHandle(establishedCacheKey, establishedCacheKind);
+    }
+    observeChannelAOperationFailure(services, {
+      workspaceId,
+      sandboxGroupId,
+      backend: session.sandboxBackend,
+      operation,
+      durationMs: performance.now() - operationStartedAt,
+      error,
+      waitSignal: ctx.waitSignal,
+    });
+    throw mapChannelAError(error, ctx.waitSignal);
   } finally {
     await release();
     await dropEstablishedHandle(established);
@@ -385,8 +952,20 @@ export async function withChannelA<T>(
 
 /** Map the service's typed errors to HTTP status (the §5.3 matrix). Re-throws an
  *  already-HTTPException unchanged. */
-export function mapChannelAError(error: unknown): unknown {
+export function mapChannelAError(error: unknown, waitSignal?: AbortSignal): unknown {
   if (error instanceof HTTPException) return error;
+  if (isChannelARequestCancellation(error, waitSignal))
+    return new HTTPException(499 as never, {
+      message: "request cancelled",
+      cause: error,
+    });
+  if (
+    error instanceof SandboxResumeIdentityMismatchError ||
+    error instanceof SandboxResumeIdentityUnavailableError
+  )
+    return new HTTPException(409, { message: error.message });
+  if (error instanceof SandboxProviderReadLockUnavailableError)
+    return new HTTPException(503, { message: error.message });
   if (error instanceof ChannelAUnavailableError)
     return new HTTPException(503, { message: error.message });
   if (error instanceof ChannelAValidationError)
@@ -398,6 +977,133 @@ export function mapChannelAError(error: unknown): unknown {
   if (error instanceof ChannelAUnsupportedError)
     return new HTTPException(409, { message: error.message });
   return error;
+}
+
+export function isChannelARequestCancellation(error: unknown, waitSignal?: AbortSignal): boolean {
+  if (waitSignal?.aborted !== true) return false;
+  const isSignalReason = waitSignal.reason !== undefined && error === waitSignal.reason;
+  const isAbortError =
+    (error instanceof DOMException && error.name === "AbortError") ||
+    (error instanceof Error && error.name === "AbortError");
+  return isSignalReason || isAbortError;
+}
+
+/** Structural classification only: exact provider exception text, codes, URLs,
+ * and identifiers never cross the telemetry boundary. */
+export function channelAOperationFailureDiagnostic(
+  error: unknown,
+  waitSignal?: AbortSignal,
+): ChannelAOperationFailureDiagnostic {
+  if (isChannelARequestCancellation(error, waitSignal)) {
+    return {
+      reason: "request_cancelled",
+      status: 499,
+      errorCode: "sandbox_channel_a_cancelled",
+    };
+  }
+  if (error instanceof SandboxProviderReadLockUnavailableError) {
+    return {
+      reason: "provider_read_busy",
+      status: 503,
+      errorCode: "sandbox_channel_a_provider_busy",
+    };
+  }
+  if (error instanceof ChannelAUnavailableError) {
+    return {
+      reason: "provider_unavailable",
+      status: 503,
+      errorCode: "sandbox_channel_a_provider_unavailable",
+    };
+  }
+  if (
+    error instanceof SandboxResumeIdentityMismatchError ||
+    error instanceof SandboxResumeIdentityUnavailableError ||
+    (error instanceof HTTPException && error.status === 409)
+  ) {
+    return {
+      reason: "lifecycle_conflict",
+      status: 409,
+      errorCode: "sandbox_channel_a_lifecycle_conflict",
+    };
+  }
+  if (
+    error instanceof ChannelAValidationError ||
+    error instanceof ChannelANotFoundError ||
+    error instanceof ChannelAConflictError ||
+    error instanceof ChannelAUnsupportedError
+  ) {
+    const mapped = mapChannelAError(error, waitSignal);
+    return {
+      reason: "request_rejected",
+      status: mapped instanceof HTTPException ? mapped.status : 500,
+      errorCode: "sandbox_channel_a_operation_failed",
+    };
+  }
+  if (error instanceof HTTPException) {
+    return {
+      reason: error.status >= 500 ? "unexpected" : "request_rejected",
+      status: error.status,
+      errorCode: "sandbox_channel_a_operation_failed",
+    };
+  }
+  return {
+    reason: "unexpected",
+    status: 500,
+    errorCode: "sandbox_channel_a_operation_failed",
+  };
+}
+
+function observeChannelAOperationFailure(
+  services: ChannelAServices,
+  input: {
+    workspaceId: string;
+    sandboxGroupId: string;
+    backend: string;
+    operation: string;
+    durationMs: number;
+    error: unknown;
+    waitSignal?: AbortSignal | undefined;
+  },
+): void {
+  if (!services.observability) return;
+  const diagnostic = channelAOperationFailureDiagnostic(input.error, input.waitSignal);
+  const attributes = {
+    sandboxLeaseKey: sandboxLeaseTelemetryKey(input.workspaceId, input.sandboxGroupId),
+    backend: input.backend,
+    op: input.operation,
+    outcome: "failed",
+    reason: diagnostic.reason,
+    status: diagnostic.status,
+    durationMs: Math.max(0, Math.round(input.durationMs)),
+    errorClass: "SandboxChannelAOperationError",
+    errorCode: diagnostic.errorCode,
+    origin: "api",
+  } as const;
+  try {
+    services.observability.incrementCounter({
+      name: "opengeni_channel_a_operation_failures_total",
+      help: "Channel-A failures by bounded operation and structural reason.",
+      labels: {
+        backend: input.backend,
+        op: input.operation,
+        reason: diagnostic.reason,
+        status: String(diagnostic.status),
+      },
+    });
+  } catch {
+    // Metrics can never alter request or lease settlement.
+  }
+  try {
+    if (diagnostic.reason === "request_cancelled") {
+      services.observability.info("Channel-A request cancelled", attributes);
+    } else if (diagnostic.reason === "request_rejected") {
+      services.observability.debug("Channel-A request rejected", attributes);
+    } else {
+      services.observability.warn("Channel-A operation failed", attributes);
+    }
+  } catch {
+    // Logs can never alter request or lease settlement.
+  }
 }
 
 // Drop a transiently-established, NON-OWNED handle WITHOUT terminating the box.
