@@ -95,8 +95,13 @@ export type CodeEditorProps = {
   path: string;
   /** The decoded text contents to seed the editor with. */
   initialContents: string;
-  /** Persist the current buffer. Resolves when the write lands; rejects to surface an error. */
-  onSave: (contents: string) => Promise<unknown>;
+  /**
+   * Persist the current buffer against the exact contents it was edited from.
+   * The second argument is the immutable compare-and-swap baseline; hosts must
+   * not replace it with a newer remote snapshot or concurrent writes can be
+   * silently overwritten.
+   */
+  onSave: (contents: string, expectedContents: string) => Promise<unknown>;
   /** Explicitly overwrite after a visible expected-content conflict. */
   onOverwrite?: ((contents: string) => Promise<unknown>) | undefined;
   /** Re-read the selected file after a visible save conflict. */
@@ -114,6 +119,41 @@ export type CodeEditorProps = {
   fallback?: ReactNode | undefined;
   className?: string | undefined;
 };
+
+export type EditorBufferState = {
+  path: string;
+  value: string;
+  baseline: string;
+};
+
+/**
+ * Reconcile a remote file snapshot without destroying unsaved local work.
+ *
+ * A different path is a new document and always resets. For the same path, a
+ * clean editor follows the remote snapshot while a dirty editor retains both
+ * its local value and the original CAS baseline. The eventual save will then
+ * either succeed against that baseline or surface a typed conflict.
+ */
+export function reconcileEditorBuffer(
+  current: EditorBufferState,
+  incoming: { path: string; contents: string },
+): EditorBufferState {
+  if (current.path === incoming.path && current.value !== current.baseline) {
+    return current;
+  }
+  if (
+    current.path === incoming.path &&
+    current.value === incoming.contents &&
+    current.baseline === incoming.contents
+  ) {
+    return current;
+  }
+  return {
+    path: incoming.path,
+    value: incoming.contents,
+    baseline: incoming.contents,
+  };
+}
 
 /**
  * The EDITABLE single-file pane: CodeMirror 6 with a per-language grammar chosen
@@ -143,42 +183,45 @@ export function CodeEditor({
   const [failed, setFailed] = useState(false);
   const [bundle, setBundle] = useState<EditorBundle | null>(null);
 
-  // The live buffer + the baseline it's compared against for dirtiness. The
-  // baseline resets whenever a *new* file is loaded (path/initialContents change)
-  // or after a successful save.
-  const [value, setValue] = useState(initialContents);
-  const [baseline, setBaseline] = useState(initialContents);
+  // The live buffer and its compare-and-swap baseline are one state value so a
+  // remote refresh cannot update one without the other.
+  const [buffer, setBuffer] = useState<EditorBufferState>(() => ({
+    path,
+    value: initialContents,
+    baseline: initialContents,
+  }));
+  const { value, baseline } = buffer;
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<Error | null>(null);
   const [savedTick, setSavedTick] = useState(false);
+  const saveInFlightRef = useRef(false);
 
   const dirty = value !== baseline;
   const saveConflict =
     saveError !== null && (saveError as Error & { code?: unknown }).code === "file_write_conflict";
 
-  // Reload the buffer when the file identity changes. Guard on initialContents
-  // too so an external refresh of the SAME path (e.g. fs.changed re-read) reseeds
-  // a clean buffer — but only when the user hasn't got unsaved edits in flight.
-  // Fire the wake-on-edit intent at most once per opened file — reset on re-seed.
+  // Follow path changes and clean same-file refreshes. Dirty same-file buffers
+  // intentionally ignore remote snapshots: the original baseline must survive
+  // until guarded save, explicit reload, or navigation.
   const editIntentFiredRef = useRef(false);
-  const lastSeed = useRef<{ path: string; contents: string }>({ path, contents: initialContents });
   useEffect(() => {
-    const seedChanged =
-      lastSeed.current.path !== path || lastSeed.current.contents !== initialContents;
-    if (!seedChanged) return;
-    lastSeed.current = { path, contents: initialContents };
+    setBuffer((current) => reconcileEditorBuffer(current, { path, contents: initialContents }));
+  }, [path, initialContents]);
+
+  // A new document is a new edit-intent/error lifecycle. The normal
+  // SandboxFiles host also keys the component by path; this keeps standalone
+  // consumers correct without relying on that implementation detail.
+  useEffect(() => {
     editIntentFiredRef.current = false;
-    setValue(initialContents);
-    setBaseline(initialContents);
     setSaveError(null);
     setSavedTick(false);
-  }, [path, initialContents]);
+  }, [path]);
 
   // Record a buffer change: the FIRST divergence from the baseline is the edit
   // intent that warms the box (idempotent — latched per opened file).
   const noteEdit = useCallback(
     (next: string) => {
-      setValue(next);
+      setBuffer((current) => ({ ...current, value: next }));
       setSavedTick(false);
       if (!editIntentFiredRef.current && next !== baseline) {
         editIntentFiredRef.current = true;
@@ -246,40 +289,46 @@ export function CodeEditor({
   const saveRef = useRef<() => void>(() => {});
 
   const save = useCallback(async () => {
-    if (readOnly) return;
+    if (readOnly || saveInFlightRef.current) return;
     // Snapshot the buffer at call time so an in-flight edit can't race the write.
     const snapshot = value;
     if (snapshot === baseline) return; // nothing to persist
+    saveInFlightRef.current = true;
     setSaving(true);
     setSaveError(null);
     setSavedTick(false);
     try {
-      await onSave(snapshot);
-      setBaseline(snapshot);
-      lastSeed.current = { path, contents: snapshot };
+      await onSave(snapshot, baseline);
+      setBuffer((current) =>
+        current.path === path ? { ...current, baseline: snapshot } : current,
+      );
       setSavedTick(true);
     } catch (cause) {
       setSaveError(cause instanceof Error ? cause : new Error(String(cause)));
     } finally {
+      saveInFlightRef.current = false;
       setSaving(false);
     }
   }, [readOnly, value, baseline, onSave, path]);
 
   const overwrite = useCallback(async () => {
-    if (readOnly || !onOverwrite) return;
+    if (readOnly || !onOverwrite || saveInFlightRef.current) return;
     const snapshot = value;
     if (snapshot === baseline) return;
+    saveInFlightRef.current = true;
     setSaving(true);
     setSaveError(null);
     setSavedTick(false);
     try {
       await onOverwrite(snapshot);
-      setBaseline(snapshot);
-      lastSeed.current = { path, contents: snapshot };
+      setBuffer((current) =>
+        current.path === path ? { ...current, baseline: snapshot } : current,
+      );
       setSavedTick(true);
     } catch (cause) {
       setSaveError(cause instanceof Error ? cause : new Error(String(cause)));
     } finally {
+      saveInFlightRef.current = false;
       setSaving(false);
     }
   }, [readOnly, onOverwrite, value, baseline, path]);
@@ -306,10 +355,19 @@ export function CodeEditor({
 
   const Editor = bundle?.Editor;
 
+  const reload = useCallback(() => {
+    setBuffer({ path, value: initialContents, baseline: initialContents });
+    editIntentFiredRef.current = false;
+    setSaveError(null);
+    setSavedTick(false);
+    onReload?.();
+  }, [initialContents, onReload, path]);
+
   return (
     <div
       className={cn("flex h-full min-h-0 flex-col", className)}
       data-opengeni-code-editor
+      data-opengeni-editor-dirty={dirty ? "true" : "false"}
       style={editorVars}
     >
       {/* Save bar: dirty indicator + status + the explicit Save button. */}
@@ -375,8 +433,7 @@ export function CodeEditor({
               <button
                 type="button"
                 onClick={() => {
-                  setSaveError(null);
-                  onReload();
+                  reload();
                 }}
                 className="min-h-8 rounded-og-sm border border-og-border bg-og-surface-1 px-2 text-og-xs font-medium text-og-fg hover:bg-og-surface-2 pointer-coarse:min-h-11"
               >

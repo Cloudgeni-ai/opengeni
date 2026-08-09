@@ -1139,15 +1139,20 @@ async function runLiveWorkspaceFlow(input: {
       "Reads and mutations through file and parent-directory symlink escapes returned HTTP 400 and left every outside target byte-for-byte unchanged.",
     );
 
-    await page.getByRole("button", { name: "Edit", exact: true }).click();
-    const editor = page.locator("[data-opengeni-code-editor]");
+    await fileViewer.getByRole("button", { name: "Edit", exact: true }).click();
+    const editor = fileViewer.locator("[data-opengeni-code-editor]");
     await editor.waitFor({ timeout: 30_000 });
     const editable = editor.locator(".cm-content");
     await editable.waitFor({ timeout: 30_000 });
     await editable.click();
-    await page.keyboard.press("Control+End");
-    await page.keyboard.type(`\nui edit ${marker}`);
-    await editor.getByRole("button", { name: "Save", exact: true }).click();
+    await editable.press("Control+End");
+    await editable.press("Enter");
+    await editable.pressSequentially(`ui edit ${marker}`);
+    await fileViewer
+      .locator('[data-opengeni-code-editor][data-opengeni-editor-dirty="true"]')
+      .waitFor({ state: "visible", timeout: 20_000 });
+    const saveButton = editor.getByRole("button", { name: "Save", exact: true });
+    await saveButton.click();
     await editor.getByText("Saved", { exact: true }).waitFor({ timeout: 20_000 });
     const saved = await client.fsRead(workspaceId, sessionId, { path: "api/base.txt" });
     if (!saved.content.includes(`ui edit ${marker}`)) {
@@ -1161,9 +1166,13 @@ async function runLiveWorkspaceFlow(input: {
       overwrite: true,
     });
     await editable.click();
-    await page.keyboard.press("Control+End");
-    await page.keyboard.type("\nlocal conflict candidate");
-    await editor.getByRole("button", { name: "Save", exact: true }).click();
+    await editable.press("Control+End");
+    await editable.press("Enter");
+    await editable.pressSequentially("local conflict candidate");
+    await fileViewer
+      .locator('[data-opengeni-code-editor][data-opengeni-editor-dirty="true"]')
+      .waitFor({ state: "visible", timeout: 20_000 });
+    await saveButton.click();
     await editor
       .getByText("File changed on machine.", { exact: true })
       .waitFor({ timeout: 20_000 });
