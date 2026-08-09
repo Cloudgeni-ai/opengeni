@@ -7136,6 +7136,11 @@ describe("API component integration", () => {
         initialMessage: "workspace memory MCP session",
         resources: [],
         metadata: {},
+        createdBy: {
+          kind: "subject",
+          subjectId: grant.subjectId,
+          label: grant.subjectLabel,
+        },
         model: "scripted-model",
         sandboxBackend: "none",
       });
