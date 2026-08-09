@@ -28,6 +28,7 @@ import {
   selectTreeFile,
   validateCaptureApiRegionalProbeResult,
   waitForSandboxLiveness,
+  waitForSandboxFileViewerText,
   type CaptureApiRegionalProbeRequest,
 } from "./workbench-live-acceptance";
 
@@ -73,6 +74,63 @@ describe("workbench live acceptance preflight", () => {
 
     expect(selectors).toEqual(["[data-workspace-surface]"]);
     expect(lookedUpCollapseControl).toBe(false);
+  });
+
+  test("scopes restored file text to the file viewer when the transcript has duplicates", async () => {
+    const calls: unknown[] = [];
+    const page = {
+      locator(selector: string) {
+        calls.push(["locator", selector]);
+        return {
+          locator(innerSelector: string) {
+            calls.push(["viewer.locator", innerSelector]);
+            return {
+              filter(options: { hasText: string }) {
+                calls.push(["selected.filter", options]);
+                return {
+                  waitFor: async (waitOptions: { state: string; timeout: number }) => {
+                    calls.push(["selected.waitFor", waitOptions]);
+                  },
+                  textContent: async () => {
+                    calls.push(["selected.textContent"]);
+                    return " api/base.txt ";
+                  },
+                };
+              },
+            };
+          },
+          getByText(text: string, options: { exact: boolean }) {
+            calls.push(["viewer.getByText", text, options]);
+            return {
+              first() {
+                calls.push(["viewer.first"]);
+                return {
+                  waitFor: async (waitOptions: { state: string; timeout: number }) => {
+                    calls.push(["viewer.waitFor", waitOptions]);
+                  },
+                };
+              },
+            };
+          },
+        };
+      },
+      getByText() {
+        throw new Error("must not match duplicate transcript or session-title text");
+      },
+    } as never;
+
+    await waitForSandboxFileViewerText(page, "api/base.txt", "tracked but untouched", 30_000);
+
+    expect(calls).toEqual([
+      ["locator", "#sandbox-files-viewer"],
+      ["viewer.locator", "[data-opengeni-selected-file]"],
+      ["selected.filter", { hasText: "api/base.txt" }],
+      ["selected.waitFor", { state: "visible", timeout: 30_000 }],
+      ["selected.textContent"],
+      ["viewer.getByText", "tracked but untouched", { exact: false }],
+      ["viewer.first"],
+      ["viewer.waitFor", { state: "visible", timeout: 30_000 }],
+    ]);
   });
 
   test("observes the Changes default before requiring its layout to be visible", async () => {

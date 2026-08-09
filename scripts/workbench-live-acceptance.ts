@@ -39,6 +39,7 @@ const OPTIONAL_ANALYTICS_CHUNK_PATH = /^\/assets\/analytics-consent-[A-Za-z0-9_-
 const MANAGED_SESSION_PATH = /^\/v1\/auth\/get-session$/;
 const WORKSPACE_SURFACE_SELECTOR = "[data-workspace-surface]";
 const CHANGES_LAYOUT_SELECTOR = "[data-workbench-changes-layout]";
+const SANDBOX_FILES_VIEWER_SELECTOR = "#sandbox-files-viewer";
 const FILE_TREE_READY_SELECTOR =
   '[role="tree"][aria-activedescendant]:not([aria-activedescendant=""])';
 const FILE_TREE_MAX_NAVIGATION_STEPS = 4_096;
@@ -1077,11 +1078,12 @@ async function runLiveWorkspaceFlow(input: {
     await assertChangesDefaultVisible(page);
     await page.getByRole("tab", { name: "Files", exact: true }).click();
     await selectTreeFile(page, "api", "base.txt");
-    await page.getByText("On machine", { exact: true }).waitFor();
+    await waitForSandboxFileViewerText(page, "api/base.txt", "On machine", 20_000);
+    const fileViewer = page.locator(SANDBOX_FILES_VIEWER_SELECTOR);
     const channelABeforeWake = problems.channelA.length;
-    await page.getByRole("button", { name: "Open live file" }).click();
+    await fileViewer.getByRole("button", { name: "Open live file" }).click();
     await waitForWarm(client, workspaceId, sessionId);
-    await page.getByText("tracked but untouched", { exact: false }).waitFor({ timeout: 30_000 });
+    await waitForSandboxFileViewerText(page, "api/base.txt", "tracked but untouched", 30_000);
     if (problems.channelA.length <= channelABeforeWake) {
       throw new Error("explicit live-file action warmed no observable Channel-A file request");
     }
@@ -1302,6 +1304,29 @@ async function runLiveWorkspaceFlow(input: {
   } finally {
     await context.close();
   }
+}
+
+export async function waitForSandboxFileViewerText(
+  page: Page,
+  selectedPath: string,
+  text: string,
+  timeoutMs: number,
+): Promise<void> {
+  const viewer = page.locator(SANDBOX_FILES_VIEWER_SELECTOR);
+  const selectedFile = viewer
+    .locator("[data-opengeni-selected-file]")
+    .filter({ hasText: selectedPath });
+  await selectedFile.waitFor({ state: "visible", timeout: timeoutMs });
+  const observedPath = (await selectedFile.textContent())?.trim();
+  if (observedPath !== selectedPath) {
+    throw new Error(
+      `file viewer selected path mismatch: expected ${JSON.stringify(selectedPath)}, received ${JSON.stringify(observedPath)}`,
+    );
+  }
+  await viewer
+    .getByText(text, { exact: false })
+    .first()
+    .waitFor({ state: "visible", timeout: timeoutMs });
 }
 
 type ControlCancellationAudit = {
@@ -2329,11 +2354,14 @@ async function assertColdReview(page: Page, marker: string): Promise<void> {
 
   await page.getByRole("tab", { name: "Files", exact: true }).click();
   await selectTreeFile(page, "api", "server.ts");
-  await page.getByText(marker, { exact: false }).first().waitFor({ timeout: 15_000 });
+  await waitForSandboxFileViewerText(page, "api/server.ts", marker, 15_000);
 
   await selectTreeFile(page, "api", "base.txt");
-  await page.getByText("On machine", { exact: true }).waitFor();
-  await page.getByRole("button", { name: "Open live file" }).waitFor();
+  await waitForSandboxFileViewerText(page, "api/base.txt", "On machine", 15_000);
+  await page
+    .locator(SANDBOX_FILES_VIEWER_SELECTOR)
+    .getByRole("button", { name: "Open live file" })
+    .waitFor();
 }
 
 export async function assertRepositoryChangesVisible(
