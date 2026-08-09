@@ -11,6 +11,7 @@ import { ClientResumableVoiceInputConfig } from "./transcription-recordings";
 export * from "./slack-bot-scopes";
 export * from "./connector-destinations";
 export * from "./image-generation";
+export * from "./durable-learning";
 
 export {
   CreateWorkspaceArtifactRequest,
