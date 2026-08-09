@@ -9651,19 +9651,21 @@ export type SessionCapabilities = z.infer<typeof SessionCapabilities>;
 // POST .../viewers — acquire a viewer holder. An omitted viewerId mints a fresh
 // one (returned in the response, to carry through heartbeats + detach).
 //
-// `desktop` declares intent to attach the UN-REDACTED pixel plane (noVNC). ONLY
-// that plane carries the consent gate (the un-redacted/shared acknowledgment). A
-// terminal-only warm attach (`desktop:false`, the default) needs NO consent — a
-// shell is interactive by nature and the gate is the scoped tunnel URL + stream
-// token — so it warms the box and mints the pty-ws terminal cell WITHOUT a 409.
-// Omitted defaults to `false` so a terminal-only client never trips the gate.
-export const AttachViewerRequest = z.object({
+// Each optional plane flag declares exactly which live capability is being
+// acquired. The holder itself is shared liveness; credentials are minted only
+// for explicitly requested planes. `desktop` alone carries the un-redacted pixel
+// consent gate, `terminal` carries terminal:attach, and `files` carries
+// files:write. For compatibility, an entirely omitted plane set retains the old
+// terminal-only meaning; new clients always send all three flags explicitly.
+export const AttachViewerRequest = /* @__PURE__ */ z.object({
   viewerId: z.string().uuid().optional(),
   desktop: z.boolean().optional(),
+  terminal: z.boolean().optional(),
+  files: z.boolean().optional(),
 });
 export type AttachViewerRequest = z.infer<typeof AttachViewerRequest>;
 
-export const ViewerHolder = z.object({
+export const ViewerHolder = /* @__PURE__ */ z.object({
   viewerId: z.string().uuid(),
   sandboxGroupId: z.string().uuid(),
   liveness: z.enum(["cold", "warming", "warm", "draining"]),
@@ -9679,6 +9681,21 @@ export const ViewerHolder = z.object({
 });
 export type ViewerHolder = z.infer<typeof ViewerHolder>;
 
+/** Exact POST /viewers response. Keep the credential cells in the contracts
+ * package so API and zero-runtime SDK mirrors cannot silently drift. */
+export const AttachViewerResponse = /* @__PURE__ */ ViewerHolder.extend({
+  streamToken: z.string().nullable(),
+  streamExpiresAt: z.string().nullable(),
+  resolution: z.tuple([z.number().int().positive(), z.number().int().positive()]).nullable(),
+  transport: z.enum(["vnc-ws", "relay-frames"]).nullable(),
+  client: z.enum(["novnc", "frames"]).nullable(),
+  terminalUrl: z.string().nullable(),
+  terminalToken: z.string().nullable(),
+  terminalExpiresAt: z.string().nullable(),
+  terminalTransport: z.literal("pty-ws").nullable(),
+});
+export type AttachViewerResponse = z.infer<typeof AttachViewerResponse>;
+
 // POST .../stream-capabilities/acknowledge — record the calling principal's
 // acknowledgment of the un-redacted pixel plane. Reuses the acknowledgment
 // machinery — no new endpoint
@@ -9688,7 +9705,7 @@ export type ViewerHolder = z.infer<typeof ViewerHolder>;
 // session): the un-redacted desktop path returns 409 shared_acknowledgment_required
 // until a shared box is acknowledged WITH the shared-exposure consent. For a
 // solo box `acknowledgeShared` is irrelevant (the un-redacted ack alone gates).
-export const AcknowledgeStreamRequest = z.object({
+export const AcknowledgeStreamRequest = /* @__PURE__ */ z.object({
   // The principal accepts that the desktop pixel plane is un-redacted (can show
   // cloud creds the agent cat's into a terminal). Always true to record consent;
   // present for self-documentation + a future explicit withdraw.
@@ -9699,7 +9716,7 @@ export const AcknowledgeStreamRequest = z.object({
 });
 export type AcknowledgeStreamRequest = z.infer<typeof AcknowledgeStreamRequest>;
 
-export const AcknowledgeStreamResponse = z.object({
+export const AcknowledgeStreamResponse = /* @__PURE__ */ z.object({
   acknowledged: z.boolean(),
   acknowledgedShared: z.boolean(),
 });
@@ -9707,12 +9724,12 @@ export type AcknowledgeStreamResponse = z.infer<typeof AcknowledgeStreamResponse
 
 // POST .../viewers/:viewerId/heartbeat — refresh the holder TTL. Epoch-fenced:
 // a stale-epoch beat (a box re-established under a newer epoch) is rejected.
-export const ViewerHeartbeatRequest = z.object({
+export const ViewerHeartbeatRequest = /* @__PURE__ */ z.object({
   leaseEpoch: z.number().int().nonnegative(),
 });
 export type ViewerHeartbeatRequest = z.infer<typeof ViewerHeartbeatRequest>;
 
-export const ViewerHeartbeatResponse = z.object({
+export const ViewerHeartbeatResponse = /* @__PURE__ */ z.object({
   // false ⇒ the holder was reaped or the epoch is stale; the client re-attaches.
   alive: z.boolean(),
 });

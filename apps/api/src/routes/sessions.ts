@@ -55,6 +55,8 @@ import {
   ViewerHeartbeatRequest,
   WORKSPACE_CONTROL_ACTOR_MAX_BYTES,
   workspaceControlUtf8Bytes,
+  type AccessGrant,
+  type AttachViewerResponse,
   type SandboxBackend,
   type LineageNode,
   type Session,
@@ -156,6 +158,7 @@ import type { Context, Hono, MiddlewareHandler } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import {
+  hasPermission,
   requireAccessGrant,
   requirePermission,
   requireSessionAuthorization,
@@ -212,6 +215,19 @@ import {
 } from "./workspace-capture";
 
 type SessionRouteDeps = ApiRouteDeps & Pick<ViewerServices, "establishSandboxSession">;
+
+const VIEWER_LIFECYCLE_PERMISSIONS = ["stream:view", "terminal:attach", "files:write"] as const;
+
+function requireViewerLifecyclePermission(grant: AccessGrant): void {
+  if (
+    VIEWER_LIFECYCLE_PERMISSIONS.some((permission) => hasPermission(grant.permissions, permission))
+  ) {
+    return;
+  }
+  throw new HTTPException(403, {
+    message: `missing permission: ${VIEWER_LIFECYCLE_PERMISSIONS.join(" or ")}`,
+  });
+}
 
 export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
@@ -2064,8 +2080,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   // GET .../stream-capabilities — the capability-negotiation read. Returns the
   // SessionCapabilities doc (descriptor + lease liveness/epoch + os + the
   // shared-exposure disclosure + the calling principal's acknowledgment state),
-  // API-direct. The desktop URL/token stay null until P4 mints them (gated by
-  // liveness=cold until a box is warm); the read is non-mutating.
+  // API-direct. It is a pure descriptor read: every URL/token stays null until an
+  // exact, permission-checked POST /viewers grant mints it just in time.
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/stream-capabilities", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
@@ -2082,12 +2098,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const { shared, sharedSessionIds } = await resolveSharedExposure(workspaceId, session);
     const visibleSharedSessionIds = relatedSessionAccessFor(c) === "root" ? sharedSessionIds : [];
     // Per-principal acknowledgment: A acknowledging does not consent for B. The
-    // un-redacted desktop stream ALWAYS requires the un-redacted ack; a shared box
-    // ADDITIONALLY requires the shared-exposure ack. Both must match the POST
-    // /viewers gate EXACTLY — otherwise a principal who recorded shared consent
-    // WITHOUT un-redacted consent could be handed a live VNC URL + scoped token
-    // from this read path while being correctly 409'd on attach (a consent-gate
-    // bypass of the un-redacted pixel plane).
+    // Surface consent state so the UI can decide whether an explicit desktop
+    // grant may be requested. This descriptor read never mints a credential; the
+    // POST /viewers grant below re-checks both consent bits and stream:view.
     const ack = await getStreamAcknowledgment(db, {
       workspaceId,
       sandboxGroupId: session.sandboxGroupId,
@@ -2097,61 +2110,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       ? ack.acknowledgedUnredacted && (!shared || ack.acknowledgedShared)
       : false;
 
-    // P4.2 — the pixel DATA PLANE, served API-direct. When the backend is
-    // desktop-capable AND sandboxDesktopEnabled AND the (shared, if shared)
-    // acknowledgment is present AND the box is WARM, mint the REAL DesktopStream
-    // cell IN-PROCESS: resume the box by id, ensureDisplayStack (idempotent),
-    // exposeStreamPort (resolve the 6080 tunnel + mint the scoped token), record
-    // data_plane_url under the epoch fence, and emit stream.url.rotated to other
-    // viewers on a box rollover. The handshake never SPINS UP a cold box (that is
-    // the viewer-attach path) — a cold lease stays lease_cold. A degraded mint
-    // (no secret / display-stack or tunnel failure) returns null → transport:null.
-    let desktopStream: DesktopStreamMint | null = null;
-    const desktopUnlocked =
-      settings.sandboxDesktopEnabled &&
-      !streamTokenDegraded(settings) &&
-      acknowledged &&
-      (session.activeSandboxId != null || lease?.liveness === "warm");
-    if (desktopUnlocked) {
-      desktopStream = await mintDesktopStream(
-        { db, settings, bus },
-        {
-          accountId: grant.accountId,
-          workspaceId,
-          session,
-          // The handshake's token is scoped to the calling principal (it is a read,
-          // not a viewer-holder acquire); the per-holder token is re-minted on
-          // POST /viewers. A previousEpoch != current would have rotated already
-          // via the warming-commit; the read does not itself drive rotation.
-          viewerId: grant.subjectId,
-          ...(lease ? { lease } : {}),
-        },
-      );
-    }
-
-    // P5.t — the REAL PTY terminal cell, served API-DIRECT. Independent of the
-    // desktop: it gates ONLY on sandboxTerminalEnabled + a real-PTY backend + a
-    // WARM box (NO un-redacted ack — the terminal cell has no acknowledgment
-    // gate). A degraded mint (terminal off / no secret / ttyd or tunnel failure)
-    // returns null → the Terminal cell falls back to the sse-events firehose.
-    let terminalStream: TerminalStreamMint | null = null;
-    const terminalUnlocked =
-      settings.sandboxTerminalEnabled &&
-      !streamTokenDegraded(settings) &&
-      (session.activeSandboxId != null || lease?.liveness === "warm");
-    if (terminalUnlocked) {
-      terminalStream = await mintTerminalStream(
-        { db, settings, bus },
-        {
-          accountId: grant.accountId,
-          workspaceId,
-          session,
-          viewerId: grant.subjectId,
-          ...(lease ? { lease } : {}),
-        },
-      );
-    }
-
+    // This GET is deliberately descriptor-only: no provider resume, display/ttyd
+    // startup, port exposure, or short-lived bearer mint. Besides enforcing least
+    // privilege, that keeps the 120-second stream credentials from aging before a
+    // user opens their surface. POST /viewers is the sole credential grant.
     const capabilities = negotiateCapabilities({
       sessionId,
       backend: session.sandboxBackend as SandboxBackend,
@@ -2178,31 +2140,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       desktopAcknowledged: acknowledged,
       shared,
       sharedSessionIds: visibleSharedSessionIds,
-      // The minted live address (null when not unlocked/degraded). The resolver
-      // only folds it in when the desktop gates pass + the ack is present.
-      ...(desktopStream
-        ? {
-            desktopStream: {
-              url: desktopStream.url,
-              token: desktopStream.token,
-              expiresAt: desktopStream.expiresAt,
-              resolution: desktopStream.resolution,
-            },
-          }
-        : {}),
-      // P5.t — the terminal policy toggle + the minted pty-ws address. The
-      // resolver advertises sse-events (firehose) on a cold/disabled terminal and
-      // folds the live pty-ws url/token in only when the gates passed + minted.
+      // Plane policy only. Live addresses are intentionally absent on a
+      // descriptor read and arrive from an authorized viewer grant.
       terminalEnabled: settings.sandboxTerminalEnabled,
-      ...(terminalStream
-        ? {
-            terminalStream: {
-              url: terminalStream.url,
-              token: terminalStream.token,
-              expiresAt: terminalStream.expiresAt,
-            },
-          }
-        : {}),
     });
 
     const repositoryRoots = [
@@ -2320,20 +2260,29 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         message: "invalid viewer attach request",
       });
     }
-    // Consent gate (P3.2 / addendum E.1): ONLY the un-redacted DESKTOP pixel plane
-    // requires the calling principal's acknowledgment (recorded per group+subject;
-    // a shared box additionally needs the shared-exposure consent). A TERMINAL-ONLY
-    // warm attach (`desktop:false`, the default) carries NO consent gate — a shell
-    // is interactive by nature and the gate is the scoped tunnel URL + stream token
-    // — so it warms the box and mints the pty-ws terminal cell without a 409. Gating
-    // the terminal attach behind the desktop ack (the bug this fixes) dead-ended the
-    // interactive terminal: the box never warmed → the Terminal cell stayed on the
-    // read-only sse-events firehose forever ("read only"), and with the desktop tier
-    // off by default there was no consent flow to ever clear the gate.
+    // Resolve exact requested planes before authorization. Empty and
+    // `desktop:false` v1 bodies remain terminal-only during rolling upgrades;
+    // either new plane flag selects exact semantics. This closes desktop→terminal
+    // privilege bleed and lets file edits avoid unrelated terminal bearers.
     const wantDesktop = parsed.data.desktop ?? false;
-    requirePermission(grant, wantDesktop ? "stream:view" : "terminal:attach");
-    const { shared } = await resolveSharedExposure(workspaceId, session);
+    const wantFiles = parsed.data.files ?? false;
+    const hasExactPlaneSet = parsed.data.terminal !== undefined || parsed.data.files !== undefined;
+    // v1 clients sent only `desktop:false` for both terminal and file warming;
+    // retain its terminal-only grant during rolling upgrades. Presence of either
+    // v2 flag switches to exact-plane semantics.
+    const wantTerminal = parsed.data.terminal ?? (!hasExactPlaneSet && !wantDesktop);
+    if (!wantDesktop && !wantTerminal && !wantFiles) {
+      throw new HTTPException(400, { message: "viewer attach requires a live plane" });
+    }
+    if (wantDesktop) requirePermission(grant, "stream:view");
+    if (wantTerminal) requirePermission(grant, "terminal:attach");
+    if (wantFiles) requirePermission(grant, "files:write");
+
+    // Consent gate (P3.2 / addendum E.1): only the explicitly requested,
+    // un-redacted desktop plane needs acknowledgment. Terminal and files retain
+    // their independent permission boundaries.
     if (wantDesktop) {
+      const { shared } = await resolveSharedExposure(workspaceId, session);
       const ack = await getStreamAcknowledgment(db, {
         workspaceId,
         sandboxGroupId: session.sandboxGroupId,
@@ -2376,7 +2325,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         dataPlaneUrl: null,
       };
       if (
-        (settings.sandboxDesktopEnabled || settings.sandboxTerminalEnabled) &&
+        ((wantDesktop && settings.sandboxDesktopEnabled) ||
+          (wantTerminal && settings.sandboxTerminalEnabled)) &&
         !streamTokenDegraded(settings)
       ) {
         if (wantDesktop && settings.sandboxDesktopEnabled) {
@@ -2388,7 +2338,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             // No Modal lease for selfhosted-active; the mint routes to the relay.
           });
         }
-        if (settings.sandboxTerminalEnabled) {
+        if (wantTerminal && settings.sandboxTerminalEnabled) {
           terminal = await mintTerminalStream(viewerServices, {
             accountId: grant.accountId,
             workspaceId,
@@ -2415,7 +2365,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       // box is warm here (attachViewer spun it up or attached), so the handshake's
       // never-spin-up rule does not apply.
       if (
-        (settings.sandboxDesktopEnabled || settings.sandboxTerminalEnabled) &&
+        ((wantDesktop && settings.sandboxDesktopEnabled) ||
+          (wantTerminal && settings.sandboxTerminalEnabled)) &&
         !streamTokenDegraded(settings)
       ) {
         const lease = await readGroupLease(
@@ -2423,9 +2374,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           { workspaceId, sandboxGroupId: session.sandboxGroupId },
         );
         if (lease) {
-          // The pixel cell is minted only when the caller asked for the desktop plane
-          // (and consented above). A terminal-only attach skips it — the box is warm,
-          // the terminal mint below still runs.
+          // Mint only explicitly authorized plane credentials. The shared holder
+          // supplies liveness; it is not itself authority for another plane.
           if (wantDesktop && settings.sandboxDesktopEnabled) {
             stream = await mintDesktopStream(viewerServices, {
               accountId: grant.accountId,
@@ -2435,10 +2385,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
               lease,
             });
           }
-          // P5.t — the same warm-box viewer attach also mints the REAL PTY terminal
-          // address (independent of the desktop toggle). A degraded mint leaves the
-          // terminal fields null → the client falls back to the sse-events firehose.
-          if (settings.sandboxTerminalEnabled) {
+          if (wantTerminal && settings.sandboxTerminalEnabled) {
             terminal = await mintTerminalStream(viewerServices, {
               accountId: grant.accountId,
               workspaceId,
@@ -2450,42 +2397,42 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         }
       }
     }
-    return c.json(
-      {
-        ...result,
-        dataPlaneUrl: stream?.url ?? result.dataPlaneUrl,
-        streamToken: stream?.token ?? null,
-        streamExpiresAt: stream?.expiresAt ?? null,
-        resolution: stream?.resolution ?? null,
-        // Transport MUST match where the pixels were minted: a selfhosted-active box
-        // serves the RELAY framebuffer (relay-frames/frames), a Modal box serves noVNC
-        // (vnc-ws/novnc). Hardcoding vnc-ws here handed a machine's relay URL to the
-        // noVNC renderer (and vice-versa on the swap-away case) → "closed before it
-        // opened". Key off the SAME selfhostedActive the mint routed on.
-        transport: stream
-          ? selfhostedActive
-            ? ("relay-frames" as const)
-            : ("vnc-ws" as const)
-          : null,
-        client: stream ? (selfhostedActive ? ("frames" as const) : ("novnc" as const)) : null,
-        // The REAL PTY terminal address (pty-ws), null when degraded.
-        terminalUrl: terminal?.url ?? null,
-        terminalToken: terminal?.token ?? null,
-        terminalExpiresAt: terminal?.expiresAt ?? null,
-        terminalTransport: terminal ? ("pty-ws" as const) : null,
-      },
-      201,
-    );
+    const response = {
+      ...result,
+      dataPlaneUrl: stream?.url ?? null,
+      streamToken: stream?.token ?? null,
+      streamExpiresAt: stream?.expiresAt ?? null,
+      resolution: stream?.resolution ?? null,
+      // Transport MUST match where the pixels were minted: a selfhosted-active box
+      // serves the RELAY framebuffer (relay-frames/frames), a Modal box serves noVNC
+      // (vnc-ws/novnc). Hardcoding vnc-ws here handed a machine's relay URL to the
+      // noVNC renderer (and vice-versa on the swap-away case) → "closed before it
+      // opened". Key off the SAME selfhostedActive the mint routed on.
+      transport: stream
+        ? selfhostedActive
+          ? ("relay-frames" as const)
+          : ("vnc-ws" as const)
+        : null,
+      client: stream ? (selfhostedActive ? ("frames" as const) : ("novnc" as const)) : null,
+      // The REAL PTY terminal address (pty-ws), null when degraded.
+      terminalUrl: terminal?.url ?? null,
+      terminalToken: terminal?.token ?? null,
+      terminalExpiresAt: terminal?.expiresAt ?? null,
+      terminalTransport: terminal ? ("pty-ws" as const) : null,
+    } satisfies AttachViewerResponse;
+    return c.json(response, 201);
   });
 
   // POST .../viewers/:viewerId/heartbeat — refresh the holder TTL (epoch-fenced).
-  // A holder can represent the terminal-only plane, so lifecycle control uses
-  // terminal:attach. Desktop callers continue to pass via workspace:admin.
+  // A holder may belong to any exact live plane. Lifecycle control accepts any
+  // permission that could have minted it; the unguessable holder id and workspace
+  // grant remain the ownership boundary.
   app.post(
     "/v1/workspaces/:workspaceId/sessions/:sessionId/viewers/:viewerId/heartbeat",
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
-      const grant = await requireAccessGrant(c, deps, workspaceId, "terminal:attach");
+      const grant = await requireAccessGrant(c, deps, workspaceId);
+      requireViewerLifecyclePermission(grant);
       assertOwnershipEnabled();
       const sessionId = c.req.param("sessionId");
       const session = await getSession(db, workspaceId, sessionId);
@@ -2515,7 +2462,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   // DELETE .../viewers/:viewerId — release the holder (idempotent).
   app.delete("/v1/workspaces/:workspaceId/sessions/:sessionId/viewers/:viewerId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "terminal:attach");
+    const grant = await requireAccessGrant(c, deps, workspaceId);
+    requireViewerLifecyclePermission(grant);
     assertOwnershipEnabled();
     const sessionId = c.req.param("sessionId");
     const session = await getSession(db, workspaceId, sessionId);

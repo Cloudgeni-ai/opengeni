@@ -1282,6 +1282,7 @@ export class MockOpenGeniClient implements SessionClientLike {
         shell: "/bin/bash",
         url: null,
         token: null,
+        expiresAt: null,
         reason: null,
       },
       Git: { available: true, repos: ["."], reason: null },
@@ -1328,6 +1329,7 @@ export class MockOpenGeniClient implements SessionClientLike {
       client: null,
       terminalUrl: null,
       terminalToken: null,
+      terminalExpiresAt: null,
       terminalTransport: null,
     };
   }

@@ -378,6 +378,12 @@ describe("P3.2 consent gate — un-redacted acknowledgment (solo box)", () => {
     ).json();
     expect(capsX.DesktopStream.acknowledged).toBe(true);
     expect(capsY.DesktopStream.acknowledged).toBe(false);
+    // Negotiation is descriptor-only even for a warm, acknowledged box. A
+    // sessions:read principal never receives a short-lived stream bearer.
+    expect(capsX.DesktopStream.url).toBeNull();
+    expect(capsX.DesktopStream.token).toBeNull();
+    expect(capsX.Terminal.url).toBeNull();
+    expect(capsX.Terminal.token).toBeNull();
     // Solo box: not shared, no sibling ids disclosed.
     expect(capsX.DesktopStream.shared).toBe(false);
     expect(capsX.DesktopStream.sharedSessionIds).toEqual([]);
@@ -652,6 +658,67 @@ describe("P3.2 viewer revocation (OD-6 v1) — holder-drop drains iff last holde
 });
 
 describe("P3.2 route auth (stream:view / stream:acknowledge)", () => {
+  test("an exact files holder requires files:write and mints no unrelated plane", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, sessionId } = await soloSession();
+    const terminalOnly = await bearer({
+      accountId,
+      workspaceId,
+      subjectId: "terminal-only",
+      permissions: ["terminal:attach"],
+    });
+    const denied = await app.request(url(workspaceId, sessionId, "/viewers"), {
+      method: "POST",
+      headers: { authorization: terminalOnly, "content-type": "application/json" },
+      body: JSON.stringify({ desktop: false, terminal: false, files: true }),
+    });
+    expect(denied.status).toBe(403);
+
+    const fileWriter = await bearer({
+      accountId,
+      workspaceId,
+      subjectId: "file-writer",
+      permissions: ["files:write"],
+    });
+    const allowed = await app.request(url(workspaceId, sessionId, "/viewers"), {
+      method: "POST",
+      headers: { authorization: fileWriter, "content-type": "application/json" },
+      body: JSON.stringify({ desktop: false, terminal: false, files: true }),
+    });
+    expect(allowed.status).toBe(201);
+    const holder = await allowed.json();
+    expect(holder).toMatchObject({
+      dataPlaneUrl: null,
+      streamToken: null,
+      terminalUrl: null,
+      terminalToken: null,
+      terminalExpiresAt: null,
+      terminalTransport: null,
+    });
+    const heartbeat = await app.request(
+      url(workspaceId, sessionId, `/viewers/${holder.viewerId}/heartbeat`),
+      {
+        method: "POST",
+        headers: { authorization: fileWriter, "content-type": "application/json" },
+        body: JSON.stringify({ leaseEpoch: holder.leaseEpoch }),
+      },
+    );
+    expect(heartbeat.status).toBe(200);
+    const detached = await app.request(url(workspaceId, sessionId, `/viewers/${holder.viewerId}`), {
+      method: "DELETE",
+      headers: { authorization: fileWriter },
+    });
+    expect(detached.status).toBe(204);
+
+    // Rolling compatibility: v1 sent only desktop:false for terminal intent.
+    const legacy = await app.request(url(workspaceId, sessionId, "/viewers"), {
+      method: "POST",
+      headers: { authorization: terminalOnly, "content-type": "application/json" },
+      body: JSON.stringify({ desktop: false }),
+    });
+    expect(legacy.status).toBe(201);
+  }, 60_000);
+
   test("the viewer-attach (desktop-stream) path requires stream:view — sessions:read alone is 403", async () => {
     if (!available) return;
     const { accountId, workspaceId, sessionId } = await soloSession();

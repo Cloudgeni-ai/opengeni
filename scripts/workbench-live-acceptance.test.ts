@@ -132,7 +132,11 @@ describe("workbench live acceptance preflight", () => {
       ["page.locator", "[data-opengeni-terminal]"],
       ["terminal.waitFor", { state: "visible", timeout: 90_000 }],
       ["terminal.click"],
-      ["page.locator", '[data-opengeni-terminal][data-opengeni-terminal-interactive="true"]'],
+      [
+        "page.locator",
+        '[data-opengeni-terminal][data-opengeni-terminal-status="open"]' +
+          '[data-opengeni-terminal-interactive="true"]',
+      ],
       ["interactive.waitFor", { state: "visible", timeout: 90_000 }],
       ["interactive.locator", ".xterm-helper-textarea"],
       ["input.waitFor", { state: "attached", timeout: 90_000 }],

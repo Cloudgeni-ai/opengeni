@@ -287,6 +287,7 @@ export type SessionCapabilities = {
     shell: string;
     url: string | null;
     token: string | null;
+    expiresAt: string | null;
     reason: CapabilityUnavailableReason | null;
   };
   Git: {
@@ -374,12 +375,14 @@ export type StreamRevokedPayload = {
 
 // Mirror of `@opengeni/contracts` AttachViewerRequest. Omitting `viewerId` mints
 // a fresh holder id (returned on the response, carried through heartbeat/detach).
-// `desktop:true` opts into the un-redacted pixel plane (the consent-gated noVNC
-// stream); a terminal/files-only warm attach omits it (defaults false) so it
-// warms the box + mints the pty-ws terminal cell WITHOUT tripping the consent 409.
+// Plane flags are exact: credentials are minted only for the requested live
+// surfaces and each surface enforces its own permission. An omitted plane set is
+// retained as the legacy terminal-only request; current clients send all flags.
 export type AttachViewerRequest = {
   viewerId?: string | undefined;
   desktop?: boolean | undefined;
+  terminal?: boolean | undefined;
+  files?: boolean | undefined;
 };
 
 // Mirror of `@opengeni/contracts` ViewerHolder + the P4.2 desktop-stream fields
@@ -402,8 +405,8 @@ export type AttachViewerResponse = ViewerHolder & {
   streamToken: string | null;
   streamExpiresAt: string | null;
   resolution: [number, number] | null;
-  transport: "vnc-ws" | null;
-  client: "novnc" | null;
+  transport: "vnc-ws" | "relay-frames" | null;
+  client: "novnc" | "frames" | null;
   // The scoped ttyd PTY-over-websocket address minted for THIS holder — the REAL
   // interactive terminal, symmetric with the desktop pixel plane (same Modal
   // tunnel, same scoped stream token). Populated on a warm box; null when the
@@ -412,6 +415,7 @@ export type AttachViewerResponse = ViewerHolder & {
   // `terminalTransport` is "pty-ws" iff a live `terminalUrl` was minted.
   terminalUrl: string | null;
   terminalToken: string | null;
+  terminalExpiresAt: string | null;
   terminalTransport: "pty-ws" | null;
 };
 

@@ -531,6 +531,23 @@ describe("negotiateCapabilities — coherent doc, degrades as a value", () => {
     expect(caps.Terminal.url).toBeNull();
   });
 
+  test("missing stream-token authority disables every credentialed live plane", () => {
+    const caps = negotiateCapabilities({
+      ...base,
+      backend: "modal",
+      liveness: "warm",
+      streamTokenSecretAvailable: false,
+    });
+    expect(caps.DesktopStream.transport).toBeNull();
+    expect(caps.DesktopStream.reason).toBe("disabled_by_policy");
+    expect(caps.DesktopStream.url).toBeNull();
+    expect(caps.DesktopStream.token).toBeNull();
+    expect(caps.Terminal.transport).toBe("sse-events");
+    expect(caps.Terminal.reason).toBe("disabled_by_policy");
+    expect(caps.Terminal.url).toBeNull();
+    expect(caps.Terminal.token).toBeNull();
+  });
+
   // The ack gate is NOT weakened by honouring a cold-but-minted desktop: a minted
   // url with NO acknowledgment is still withheld (the un-redacted-pixel consent
   // gate). The cell stays available (liveness honoured) but the live url is dropped.

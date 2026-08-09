@@ -20,12 +20,12 @@ import {
 } from "../src/lib/xterm-theme";
 import {
   clearTerminalBootStatus,
-  guardTerminalEngagement,
   subscribeTerminalInput,
-  terminalInputEngagementAllowed,
   terminalSurfaceState,
   type XtermTheme,
 } from "../src/components/sandbox-terminal";
+import { terminalStreamCredentialUsable } from "../src/hooks/use-terminal-stream";
+import { terminalCanAcquirePty } from "../src/lib/terminal-capability";
 
 const tick = () => new Promise<void>((r) => setTimeout(r, 0));
 
@@ -118,25 +118,7 @@ describe("terminal semantic readiness", () => {
     ).toBe("interactive");
   });
 
-  test("pre-connect engagement does not focus, advertise, or send input", () => {
-    const calls: string[] = [];
-    let emit: ((data: string) => void) | undefined;
-    const term = {
-      onData(callback: (data: string) => void) {
-        emit = callback;
-        calls.push("subscribed");
-        return { dispose: () => calls.push("disposed") };
-      },
-    };
-    const sent: string[] = [];
-    const subscription = subscribeTerminalInput(term, (data) => sent.push(data), false);
-    const event = {
-      preventDefault: () => calls.push("prevented"),
-      stopPropagation: () => calls.push("stopped"),
-      target: { blur: () => calls.push("blurred") },
-    };
-
-    expect(subscription).toBeNull();
+  test("reports queued pre-connect input as connecting, not live", () => {
     expect(
       terminalSurfaceState({
         ready: true,
@@ -146,87 +128,56 @@ describe("terminal semantic readiness", () => {
         booting: false,
       }),
     ).toBe("connecting");
-    expect(guardTerminalEngagement(event, false, true)).toBe(true);
-    emit?.("lost input");
-    expect(sent).toEqual([]);
-    expect(calls).toEqual(["prevented", "stopped", "blurred"]);
   });
 
-  test("post-connect engagement stays focusable and typed bytes reach the PTY sink", () => {
-    const calls: string[] = [];
+  test("subscribes xterm before the live PTY opens so first input reaches the bounded sink", () => {
     let emit: ((data: string) => void) | undefined;
     const term = {
       onData(callback: (data: string) => void) {
         emit = callback;
-        calls.push("subscribed");
-        return { dispose: () => calls.push("disposed") };
+        return { dispose() {} };
       },
     };
-    const sent: string[] = [];
-    const subscription = subscribeTerminalInput(term, (data) => sent.push(data), true);
-    const event = {
-      preventDefault: () => calls.push("prevented"),
-      stopPropagation: () => calls.push("stopped"),
-      target: { blur: () => calls.push("blurred") },
-    };
-
+    const captured: string[] = [];
+    const subscription = subscribeTerminalInput(term, (data) => captured.push(data), true);
+    emit?.("first command\r");
     expect(subscription).not.toBeNull();
-    expect(
-      terminalSurfaceState({
-        ready: true,
-        acceptsInput: subscription !== null,
-        inputPending: false,
-        ptyStatus: "open",
-        booting: false,
-      }),
-    ).toBe("interactive");
-    expect(guardTerminalEngagement(event, true, true)).toBe(false);
-    emit?.("printf 'ready'\r");
-    expect(sent).toEqual(["printf 'ready'\r"]);
-    expect(calls).toEqual(["subscribed"]);
-    subscription?.dispose();
-    expect(calls).toEqual(["subscribed", "disposed"]);
+    expect(captured).toEqual(["first command\r"]);
   });
+});
 
-  test("permanent output-only capability still activates without blocking selection", () => {
-    const calls: string[] = [];
-    const event = {
-      preventDefault: () => calls.push("prevented"),
-      stopPropagation: () => calls.push("stopped"),
-      target: { blur: () => calls.push("blurred") },
-    };
-    calls.push("activated");
-    const inputAllowed = terminalInputEngagementAllowed({
-      acceptsInput: false,
-      readOnly: false,
-      ptyCapable: false,
-      ptyWs: false,
-      hasWrite: false,
-    });
+test("terminal websocket handshakes reject stale grants but retain unexpiring URLs", () => {
+  const now = Date.parse("2026-08-09T12:00:00.000Z");
+  const capability = {
+    transport: "pty-ws" as const,
+    ptyCapable: true,
+    shell: "/bin/bash",
+    url: "https://terminal.example/pty",
+    token: "scoped",
+    expiresAt: "2026-08-09T12:00:04.000Z",
+    reason: null,
+  };
+  expect(terminalStreamCredentialUsable(capability, now)).toBe(false);
+  expect(
+    terminalStreamCredentialUsable({ ...capability, expiresAt: "2026-08-09T12:00:06.000Z" }, now),
+  ).toBe(true);
+  expect(terminalStreamCredentialUsable({ ...capability, expiresAt: null }, now)).toBe(true);
+});
 
-    expect(guardTerminalEngagement(event, inputAllowed, true)).toBe(false);
-    expect(calls).toEqual(["activated"]);
-  });
-
-  test("cold PTY-capable engagement activates warm-up but blocks pre-connect focus", () => {
-    const calls: string[] = [];
-    const event = {
-      preventDefault: () => calls.push("prevented"),
-      stopPropagation: () => calls.push("stopped"),
-      target: { blur: () => calls.push("blurred") },
-    };
-    calls.push("activated");
-    const inputAllowed = terminalInputEngagementAllowed({
-      acceptsInput: false,
-      readOnly: false,
-      ptyCapable: true,
-      ptyWs: false,
-      hasWrite: false,
-    });
-
-    expect(guardTerminalEngagement(event, inputAllowed, true)).toBe(true);
-    expect(calls).toEqual(["activated", "prevented", "stopped", "blurred"]);
-  });
+test("only a real PTY or transiently cold real-PTY cell can request a grant", () => {
+  const base = {
+    transport: "sse-events" as const,
+    ptyCapable: true,
+    shell: "/bin/bash",
+    url: null,
+    token: null,
+    expiresAt: null,
+    reason: "lease_cold" as const,
+  };
+  expect(terminalCanAcquirePty(base)).toBe(true);
+  expect(terminalCanAcquirePty({ ...base, reason: "not_provisioned" })).toBe(true);
+  expect(terminalCanAcquirePty({ ...base, reason: "disabled_by_policy" })).toBe(false);
+  expect(terminalCanAcquirePty({ ...base, ptyCapable: false, reason: null })).toBe(false);
 });
 
 // ── E1: renderer fallback ladder ─────────────────────────────────────────────

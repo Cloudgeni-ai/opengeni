@@ -335,6 +335,7 @@ function caps(
       shell: "/bin/bash",
       url: null,
       token: null,
+      expiresAt: null,
       reason: null,
     },
     Git: { available: true, repos: ["."], reason: null },
@@ -369,6 +370,7 @@ function capsCold(overrides: Partial<SessionCapabilities> = {}): SessionCapabili
       shell: "/bin/bash",
       url: null,
       token: null,
+      expiresAt: null,
       reason: "lease_cold",
     },
     DesktopStream: {
@@ -593,6 +595,7 @@ export const DOCK_STATES: Record<string, DockState> = {
         shell: "/bin/bash",
         url: null,
         token: null,
+        expiresAt: null,
         reason: "agent_offline",
       },
       DesktopStream: {
@@ -725,6 +728,7 @@ export const DOCK_STATES: Record<string, DockState> = {
         shell: "/bin/bash",
         url: null,
         token: null,
+        expiresAt: null,
         reason: "disabled_by_policy",
       },
       DesktopStream: {

@@ -17,7 +17,7 @@ export type UseTerminalStreamOptions = {
    *  The stream connects ONLY when `transport === "pty-ws"` and `url` is set; on a
    *  cold box (`transport === "sse-events"` / no url) it stays idle and the caller
    *  falls back to the Channel-A read-only firehose. */
-  capability: Pick<TerminalCapability, "transport" | "url" | "token"> | null;
+  capability: Pick<TerminalCapability, "transport" | "url" | "token" | "expiresAt"> | null;
   /** Called for each OUTPUT payload from ttyd (write verbatim into xterm). */
   onOutput?: ((data: string) => void) | undefined;
   /** Called when ttyd sends a SET_WINDOW_TITLE frame. */
@@ -31,13 +31,35 @@ export type UseTerminalStreamResult = {
   /** True once the ttyd socket is open (and the auth frame has been sent). */
   connected: boolean;
   status: TerminalStreamStatus;
-  /** Pipe a keystroke/paste to the PTY stdin. No-op until the socket is open. */
+  /** Pipe a keystroke/paste to PTY stdin. Input during CONNECTING is bounded and
+   *  replayed only after ttyd authentication succeeds. */
   write: (data: string) => void;
   /** Tell ttyd the PTY window changed size (on xterm fit/resize). */
   resize: (cols: number, rows: number) => void;
   /** Tear the socket down (the effect also tears down on unmount / url change). */
   disconnect: () => void;
 };
+
+// Keystrokes entered during the websocket handshake are held until ttyd has
+// accepted its auth/resize frames. Bound the queue by UTF-16 code units (a hard
+// <=128 KiB string payload in current JS engines) so a paste cannot turn a slow
+// handshake into unbounded renderer memory. Overflow rejects the whole pending
+// input rather than ever executing a truncated shell command.
+export const MAX_PENDING_TERMINAL_INPUT_CODE_UNITS = 64 * 1024;
+const TERMINAL_CONNECT_EXPIRY_SKEW_MS = 5_000;
+
+/** A bearer must remain valid long enough to finish a new websocket handshake.
+ * Existing open sockets are unaffected: this is evaluated only when the
+ * credential identity changes and the connection effect attempts a new socket. */
+export function terminalStreamCredentialUsable(
+  capability: Pick<TerminalCapability, "transport" | "url" | "expiresAt"> | null | undefined,
+  nowMs = Date.now(),
+): boolean {
+  if (capability?.transport !== "pty-ws" || !capability.url) return false;
+  if (!capability.expiresAt) return true;
+  const expiresAt = Date.parse(capability.expiresAt);
+  return Number.isFinite(expiresAt) && expiresAt > nowMs + TERMINAL_CONNECT_EXPIRY_SKEW_MS;
+}
 
 /** Decode an inbound ttyd frame's payload (everything after the 1-char command).
  *  ttyd may send either a text frame (string) or a binary frame (ArrayBuffer);
@@ -50,6 +72,14 @@ function decodeFrame(data: string | ArrayBuffer): { command: string; payload: st
   const command = bytes.length > 0 ? String.fromCharCode(bytes[0]!) : "";
   const payload = bytes.length > 1 ? new TextDecoder().decode(bytes.subarray(1)) : "";
   return { command, payload };
+}
+
+function closeSocket(socket: WebSocket | null): void {
+  try {
+    socket?.close();
+  } catch {
+    // Already closed or rejected by the host WebSocket implementation.
+  }
 }
 
 /**
@@ -73,6 +103,9 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
   const { capability, onOutput, onTitle, initialCols, initialRows } = options;
   const [status, setStatus] = useState<TerminalStreamStatus>("closed");
   const wsRef = useRef<WebSocket | null>(null);
+  const pendingInputRef = useRef("");
+  const socketFailedRef = useRef(false);
+  const socketAuthenticatedRef = useRef(false);
   // Latest size, so a resize() before the socket opens is replayed on open, and a
   // reconnect seeds the right geometry.
   const sizeRef = useRef<{ cols: number; rows: number }>({
@@ -89,12 +122,35 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
   const transport = capability?.transport ?? null;
   const url = capability?.url ?? null;
   const token = capability?.token ?? null;
+  const expiresAt = capability?.expiresAt ?? null;
 
   useEffect(() => {
     // SSR / no WebSocket / not a live pty-ws cell: stay closed; the caller falls
     // back to the Channel-A read-only firehose.
     if (typeof window === "undefined" || typeof WebSocket === "undefined") return;
-    if (transport !== "pty-ws" || !url) {
+    if (transport !== "pty-ws") {
+      // A transport downgrade is a real semantic boundary. Do not replay input
+      // captured for a PTY if this surface later changes back from firehose mode.
+      pendingInputRef.current = "";
+      socketAuthenticatedRef.current = false;
+      setStatus("closed");
+      return;
+    }
+    // A changed/cleared credential is a new connection attempt boundary. It may
+    // receive input while its exact grant is pending even if the prior socket
+    // failed; the unchanged failed identity remains fenced because this effect
+    // does not re-run for a status-only render.
+    socketFailedRef.current = false;
+    socketAuthenticatedRef.current = false;
+    if (!url) {
+      // Exact grants arrive asynchronously. Preserve the bounded first input
+      // while the descriptor remains pty-ws, but never open without a credential.
+      setStatus("closed");
+      return;
+    }
+    if (!terminalStreamCredentialUsable({ transport, url, expiresAt })) {
+      // A descriptor from an older rolling server may still carry a bearer that
+      // aged out before this surface mounted. Wait for the exact fresh grant.
       setStatus("closed");
       return;
     }
@@ -107,6 +163,7 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
       // it. The scoped token is already in the tunnel `url`.
       socket = new WebSocket(terminalSocketUrl({ url }), TTYD_SUBPROTOCOL);
     } catch {
+      socketFailedRef.current = true;
       setStatus("error");
       return;
     }
@@ -121,8 +178,18 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
       try {
         socket.send(ttydAuthFrame({ columns: sizeRef.current.cols, rows: sizeRef.current.rows }));
         socket.send(ttydResizeFrame(sizeRef.current.cols, sizeRef.current.rows));
+        if (pendingInputRef.current.length > 0) {
+          // One websocket frame makes the pre-open queue all-or-nothing from this
+          // client's perspective; never execute a prefix of a buffered command.
+          socket.send(ttydInputFrame(pendingInputRef.current));
+          pendingInputRef.current = "";
+        }
+        socketAuthenticatedRef.current = true;
       } catch {
-        // a closed socket between open and send — onclose handles state.
+        socketFailedRef.current = true;
+        setStatus("error");
+        closeSocket(socket);
+        return;
       }
       setStatus("open");
     };
@@ -144,46 +211,60 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
     };
 
     socket.onerror = () => {
-      if (!disposed) setStatus("error");
+      if (!disposed) {
+        socketFailedRef.current = true;
+        setStatus("error");
+      }
     };
     socket.onclose = () => {
-      if (!disposed) setStatus("closed");
+      if (wsRef.current === socket) wsRef.current = null;
+      socketAuthenticatedRef.current = false;
+      if (!disposed) setStatus(socketFailedRef.current ? "error" : "closed");
     };
 
     return () => {
       disposed = true;
       wsRef.current = null;
+      socketAuthenticatedRef.current = false;
       // Drop handlers so an in-flight close/error doesn't mutate state post-unmount.
       socket.onopen = null;
       socket.onmessage = null;
       socket.onerror = null;
       socket.onclose = null;
-      try {
-        socket.close();
-      } catch {
-        // ignore teardown errors
-      }
+      closeSocket(socket);
     };
     // A url/token change (rotation) re-runs this effect → close old, open new.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transport, url, token]);
+  }, [transport, url, token, expiresAt]);
 
   return useMemo<UseTerminalStreamResult>(() => {
     const write = (data: string) => {
       const ws = wsRef.current;
-      if (ws && ws.readyState === WebSocket.OPEN) {
+      if (ws && ws.readyState === WebSocket.OPEN && socketAuthenticatedRef.current) {
         try {
           ws.send(ttydInputFrame(data));
         } catch {
-          // socket raced closed — the reconnect effect will re-establish.
+          socketFailedRef.current = true;
+          setStatus("error");
+          closeSocket(ws);
         }
+      } else if (transport === "pty-ws" && !socketFailedRef.current) {
+        const nextSize = pendingInputRef.current.length + data.length;
+        if (nextSize > MAX_PENDING_TERMINAL_INPUT_CODE_UNITS) {
+          pendingInputRef.current = "";
+          socketFailedRef.current = true;
+          setStatus("error");
+          closeSocket(ws);
+          return;
+        }
+        pendingInputRef.current += data;
       }
     };
     const resize = (cols: number, rows: number) => {
       if (cols <= 0 || rows <= 0) return;
       sizeRef.current = { cols, rows };
       const ws = wsRef.current;
-      if (ws && ws.readyState === WebSocket.OPEN) {
+      if (ws && ws.readyState === WebSocket.OPEN && socketAuthenticatedRef.current) {
         try {
           ws.send(ttydResizeFrame(cols, rows));
         } catch {
@@ -194,14 +275,12 @@ export function useTerminalStream(options: UseTerminalStreamOptions): UseTermina
     const disconnect = () => {
       const ws = wsRef.current;
       wsRef.current = null;
-      if (ws) {
-        try {
-          ws.close();
-        } catch {
-          // ignore
-        }
-      }
+      pendingInputRef.current = "";
+      socketFailedRef.current = false;
+      socketAuthenticatedRef.current = false;
+      setStatus("closed");
+      closeSocket(ws);
     };
     return { connected: status === "open", status, write, resize, disconnect };
-  }, [status]);
+  }, [status, transport]);
 }

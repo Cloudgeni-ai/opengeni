@@ -34,6 +34,7 @@ export function fakeCapabilities(
       shell: "/bin/bash",
       url: null,
       token: null,
+      expiresAt: null,
       reason: null,
     },
     Git: { available: true, repos: ["."], reason: null },
@@ -88,6 +89,15 @@ export function fakeColdCapabilities(): SessionCapabilities {
   return fakeCapabilities({
     liveness: "cold",
     leaseEpoch: 0,
+    Terminal: {
+      transport: "sse-events",
+      ptyCapable: true,
+      shell: "/bin/bash",
+      url: null,
+      token: null,
+      expiresAt: null,
+      reason: "lease_cold",
+    },
     DesktopStream: {
       transport: null,
       client: null,
@@ -126,6 +136,7 @@ export function fakeAttachResponse(
     client: "novnc",
     terminalUrl: null,
     terminalToken: null,
+    terminalExpiresAt: null,
     terminalTransport: null,
     ...overrides,
   };

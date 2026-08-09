@@ -70,9 +70,9 @@ export interface NegotiationContext {
   sharedSessionIds?: string[];
   /**
    * The minted pixel-plane endpoint (P4.2): the direct-to-provider WS URL + the
-   * scoped stream token + its expiry + the framebuffer geometry. Threaded by the
-   * API-direct handshake AFTER it has resumed the box, ensured the display stack,
-   * and resolved the provider tunnel. When ABSENT (the negotiation-only read, a
+   * scoped stream token + its expiry + the framebuffer geometry. Threaded only by
+   * the explicit viewer grant AFTER it has resumed the box, ensured the display
+   * stack, and resolved the provider tunnel. When ABSENT (the descriptor read, a
    * cold lease, or a degraded desktop) the DesktopStream cell reports url/token/
    * expiresAt as null — the capability is advertised, the live address is not yet
    * minted (the caller POSTs to /viewers to mint it). Presence does NOT override
@@ -93,7 +93,7 @@ export interface NegotiationContext {
   /**
    * The minted terminal-plane endpoint (P5.t): the direct-to-provider ttyd
    * PTY-over-websocket URL + the scoped stream token + its expiry. Threaded by the
-   * API-direct handshake AFTER it has resumed the box, ensured the terminal
+   * explicit viewer grant AFTER it has resumed the box, ensured the terminal
    * server, and resolved the provider tunnel (mintTerminalStream) — SYMMETRIC with
    * `desktopStream`. When ABSENT (the negotiation-only read, a cold lease, or a
    * degraded terminal) the Terminal cell reports url/token/expiresAt as null and
@@ -261,7 +261,7 @@ export function negotiateCapabilities(ctx: NegotiationContext): SessionCapabilit
     const ptyCapable = cap.pty;
     let transport: "pty-ws" | "sse-events" = ptyCapable ? "pty-ws" : "sse-events";
     let reason: CapabilityUnavailableReason | null = null;
-    if (ptyCapable && ctx.terminalEnabled === false) {
+    if (ptyCapable && (ctx.terminalEnabled === false || ctx.streamTokenSecretAvailable === false)) {
       transport = "sse-events";
       reason = "disabled_by_policy";
     } else if (ptyCapable && ctx.liveness !== "warm" && !ctx.terminalStream) {
