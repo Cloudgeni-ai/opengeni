@@ -9724,8 +9724,7 @@ export async function saveWorkspaceMemory(
         )
         .limit(1);
       if (resource && operationRows.superseded.status === "superseded") {
-        const reason =
-          operationRows.superseded.metadata["durableLearningSupersededByDedupeReason"];
+        const reason = operationRows.superseded.metadata["durableLearningSupersededByDedupeReason"];
         return await complete({
           memory: mapKnowledgeMemory(resource),
           deduped: reason === "exact" || reason === "near",
