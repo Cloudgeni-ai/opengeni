@@ -11,6 +11,8 @@ node_modules/
 .turbo/
 .vite/
 coverage/
+/impact-plan.json
+/ci-profile/
 tmp/
 *.tsbuildinfo
 bun.lockb

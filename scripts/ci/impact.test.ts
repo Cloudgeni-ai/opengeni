@@ -323,6 +323,12 @@ describe("workflow fail-closed contracts", () => {
     expect(ci).toContain("changedCount:(.changedFiles|length)");
   });
 
+  test("CI-generated planning and profiling files stay outside source formatting", () => {
+    const ignorePatterns = readFileSync(".gitignore", "utf8").split("\n");
+    expect(ignorePatterns).toContain("/impact-plan.json");
+    expect(ignorePatterns).toContain("/ci-profile/");
+  });
+
   test("CI retains exact aggregate names and every current release/image lane", () => {
     const ci = readFileSync(".github/workflows/ci.yml", "utf8");
     expect(ci).toContain("name: Typecheck and unit tests");
