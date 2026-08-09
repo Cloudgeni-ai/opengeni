@@ -629,20 +629,19 @@ ${parser}`,
       "artifact-outbox-dispatcher-image",
       "relay-image",
       "sandbox-image",
-    ].flatMap(
-      (jobName) =>
-        parsed.jobs[jobName]!.steps.filter(
-          (step): step is { name: string; uses: string; with: Record<string, string> } =>
-            typeof step === "object" &&
-            step !== null &&
-            "uses" in step &&
-            step.uses === "docker/build-push-action@v7.3.0",
-        ).map((step) => ({
-          jobName,
-          name: step.name,
-          step,
-          fingerprint: createHash("sha256").update(JSON.stringify(step)).digest("hex"),
-        })),
+    ].flatMap((jobName) =>
+      parsed.jobs[jobName]!.steps.filter(
+        (step): step is { name: string; uses: string; with: Record<string, string> } =>
+          typeof step === "object" &&
+          step !== null &&
+          "uses" in step &&
+          step.uses === "docker/build-push-action@v7.3.0",
+      ).map((step) => ({
+        jobName,
+        name: step.name,
+        step,
+        fingerprint: createHash("sha256").update(JSON.stringify(step)).digest("hex"),
+      })),
     );
     expect(imageSteps.map(({ step: _step, ...identity }) => identity)).toEqual([
       {

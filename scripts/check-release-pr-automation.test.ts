@@ -2875,8 +2875,7 @@ describe("workflow contracts", () => {
     const exactSelectorJobs = new Set([
       "deployment",
       "api-image",
-      "worker-image",
-      "web-image",
+      "worker-web-images",
       "artifact-materializer-image",
       "artifact-outbox-dispatcher-image",
       "relay-image",

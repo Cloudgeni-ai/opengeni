@@ -111,13 +111,15 @@ describe("artifact runtime workflow contract", () => {
     }
 
     const serverBuilds = [
-      "api-image",
-      "worker-image",
-      "web-image",
-      "artifact-materializer-image",
-      "artifact-outbox-dispatcher-image",
-    ].map((jobName) =>
-      parsed.jobs[jobName]?.steps?.find((step) => step.uses === "docker/build-push-action@v7.3.0"),
+      ["api-image", "api_image"],
+      ["worker-web-images", "worker_image"],
+      ["worker-web-images", "web_image"],
+      ["artifact-materializer-image", "artifact_materializer_image"],
+      ["artifact-outbox-dispatcher-image", "artifact_outbox_dispatcher_image"],
+    ].map(([jobName, stepId]) =>
+      parsed.jobs[jobName]?.steps?.find(
+        (step) => step.uses === "docker/build-push-action@v7.3.0" && step.id === stepId,
+      ),
     );
     expect(serverBuilds.map((step) => step?.id)).toEqual([
       "api_image",
