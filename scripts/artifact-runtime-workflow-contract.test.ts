@@ -17,6 +17,8 @@ describe("artifact runtime workflow contract", () => {
     expect(source).not.toContain("pull_request_target");
     expect(source.match(/target: (?:darwin|linux|win32)-[a-z0-9-]+$/gmu)).toHaveLength(7);
     expect(source).toContain("bun scripts/build-artifact-runtime-target.ts --target wasm-web");
+    expect(source).toContain('--target "$TARGET" --output /output/runtime');
+    expect(source).toContain("path: ${{ runner.temp }}/artifact-runtime-assets/runtime");
     expect(source).toContain('artifact-kernel-build-receipt.json -type f | wc -l)" -eq 8');
     expect(source).toContain("--target all");
     expect(source).toContain("--platform linux/amd64,linux/arm64");

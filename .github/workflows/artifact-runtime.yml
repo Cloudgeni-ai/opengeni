@@ -142,8 +142,8 @@ jobs:
               test "$(bun --version)" = 1.3.14
               test "$(rustc --version | cut -d" " -f2)" = 1.97.0
               bun install --frozen-lockfile
-              bun scripts/build-artifact-runtime-target.ts --target "$TARGET" --output /output
-              chmod -R a+rX /output
+              bun scripts/build-artifact-runtime-target.ts --target "$TARGET" --output /output/runtime
+              chmod -R a+rX /output/runtime
             '
 
       - name: Upload exact target receipt and asset
@@ -152,7 +152,7 @@ jobs:
           name: artifact-runtime-target-${{ inputs.source_sha }}-${{ matrix.target }}
           if-no-files-found: error
           retention-days: 3
-          path: ${{ runner.temp }}/artifact-runtime-assets
+          path: ${{ runner.temp }}/artifact-runtime-assets/runtime
 
   wasm:
     name: WASM smoke receipt

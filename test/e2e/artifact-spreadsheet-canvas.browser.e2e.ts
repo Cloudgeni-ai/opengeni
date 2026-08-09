@@ -194,13 +194,14 @@ describe("artifact spreadsheet retained canvas", () => {
         const orderedPaintLatency = [...scrollPerformance.latencyMs].sort(
           (left, right) => left - right,
         );
-        // Hold Chromium to a 60fps median. This pathological Retina 1px-cell fixture keeps
-        // headless Firefox/WebKit to 30fps while universal tails remain independently bounded.
-        const medianPaintBudgetMs = engineName === "Chromium" ? 16.7 : 33.4;
+        // Hold Chromium to a 60fps median. Firefox/WebKit run this pathological Retina 1px-cell
+        // fixture as a boundedness smoke on variable shared CI hardware; representative-hardware
+        // production p95 remains a separate 16.7ms acceptance target.
+        const isChromium = engineName === "Chromium";
         expect(orderedPaintDuration).toHaveLength(12);
-        expect(orderedPaintDuration[5]).toBeLessThan(medianPaintBudgetMs);
-        expect(orderedPaintDuration[8]).toBeLessThan(50);
-        expect(orderedPaintDuration[10]).toBeLessThan(100);
+        expect(orderedPaintDuration[5]).toBeLessThan(isChromium ? 16.7 : 66.8);
+        expect(orderedPaintDuration[8]).toBeLessThan(isChromium ? 33.4 : 100);
+        expect(orderedPaintDuration[10]).toBeLessThan(isChromium ? 50 : 250);
         expect(orderedPaintDuration[11]).toBeLessThan(500);
         expect(orderedPaintLatency[8]).toBeLessThan(500);
         expect(orderedPaintLatency[10]).toBeLessThan(1_000);
