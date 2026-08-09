@@ -4,6 +4,7 @@ import { join } from "node:path";
 import {
   RELEASE_AUTOMATION_CONTRACT,
   beginVersionPrChecks,
+  completeVersionPrChecks,
   recoverReleaseHeadEvidence,
   sealReleaseHeadEvidence,
   validateVersionPrCiAdmission,
@@ -115,6 +116,16 @@ function versionPull(
     },
     commits: 1,
     changed_files: 1,
+  };
+}
+
+function mergedVersionPull(overrides: { merge?: string } = {}) {
+  return {
+    ...versionPull(),
+    state: "closed",
+    merged: true,
+    merge_commit_sha: overrides.merge ?? mergeSha,
+    merged_at: "2026-08-09T06:08:35Z",
   };
 }
 
@@ -1673,6 +1684,9 @@ describe("release head retention recovery", () => {
 
 function checksFixture(
   options: {
+    merged?: boolean;
+    mergedTreeSha?: string;
+    missingVersionBranch?: boolean;
     releaseHeadSha?: string;
     release?: Record<string, unknown> | null;
   } = {},
@@ -1702,14 +1716,26 @@ function checksFixture(
     if (method === "GET" && url.pathname === `${prefix}/git/ref/heads/main`)
       return response(mainRef());
     if (method === "GET" && url.pathname === `${prefix}/pulls/${pullNumber}`)
-      return response(versionPull());
+      return response(options.merged ? mergedVersionPull() : versionPull());
     if (method === "GET" && url.pathname === `${prefix}/git/ref/heads/changeset-release/main`)
-      return response({
-        ref: "refs/heads/changeset-release/main",
-        object: { type: "commit", sha: headSha },
-      });
+      return options.missingVersionBranch
+        ? response({ message: "missing version branch" }, 404)
+        : response({
+            ref: "refs/heads/changeset-release/main",
+            object: { type: "commit", sha: headSha },
+          });
     if (method === "GET" && url.pathname === `${prefix}/git/commits/${headSha}`)
-      return response({ sha: headSha, parents: [{ sha: baseSha }] });
+      return response({
+        sha: headSha,
+        tree: { sha: headTreeSha },
+        parents: [{ sha: baseSha }],
+      });
+    if (method === "GET" && url.pathname === `${prefix}/git/commits/${mergeSha}`)
+      return response({
+        sha: mergeSha,
+        tree: { sha: options.mergedTreeSha ?? headTreeSha },
+        parents: [{ sha: baseSha }],
+      });
     if (method === "GET" && url.pathname === `${prefix}/git/ref/tags/${releaseHeadTag}`)
       return releaseHeadRef === null
         ? response({ message: "missing release head ref" }, 404)
@@ -1794,6 +1820,75 @@ test("exact-head check markers update idempotently instead of duplicating", asyn
     ),
   ).toHaveLength(3);
   expect(fixture.requests.filter((request) => request.method === "PATCH")).toHaveLength(3);
+});
+
+test("exact-head check completion succeeds while the Version PR remains unchanged", async () => {
+  const fixture = checksFixture();
+  const options = {
+    env: automationCiEnv(),
+    fetchImpl: fixture.fetchImpl,
+    now: () => new Date("2026-08-09T06:00:00Z"),
+  };
+  await beginVersionPrChecks(options);
+  await completeVersionPrChecks({
+    ...options,
+    kind: "automation-ci",
+    conclusion: "success",
+  });
+  expect(
+    fixture.checks.find((check) => check.name === RELEASE_AUTOMATION_CONTRACT.checks.automationCi),
+  ).toMatchObject({ status: "completed", conclusion: "success" });
+});
+
+test("exact-head check completion accepts an exact-tree merge after branch deletion", async () => {
+  const fixtureOptions = { merged: false, missingVersionBranch: false };
+  const fixture = checksFixture(fixtureOptions);
+  const options = {
+    env: automationCiEnv(),
+    fetchImpl: fixture.fetchImpl,
+    now: () => new Date("2026-08-09T06:11:17Z"),
+  };
+  await beginVersionPrChecks(options);
+  fixtureOptions.merged = true;
+  fixtureOptions.missingVersionBranch = true;
+
+  await completeVersionPrChecks({
+    ...options,
+    kind: "automation-ci",
+    conclusion: "success",
+  });
+
+  expect(
+    fixture.checks.find((check) => check.name === RELEASE_AUTOMATION_CONTRACT.checks.automationCi),
+  ).toMatchObject({ status: "completed", conclusion: "success" });
+});
+
+test("exact-head check completion rejects a merged tree that differs from the admitted head", async () => {
+  const fixtureOptions = {
+    merged: false,
+    mergedTreeSha: "1".repeat(40),
+    missingVersionBranch: false,
+  };
+  const fixture = checksFixture(fixtureOptions);
+  const options = {
+    env: automationCiEnv(),
+    fetchImpl: fixture.fetchImpl,
+    now: () => new Date("2026-08-09T06:11:17Z"),
+  };
+  await beginVersionPrChecks(options);
+  fixtureOptions.merged = true;
+  fixtureOptions.missingVersionBranch = true;
+
+  await expect(
+    completeVersionPrChecks({
+      ...options,
+      kind: "automation-ci",
+      conclusion: "success",
+    }),
+  ).rejects.toThrow("merged Version commit tree differs from its exact head");
+  expect(
+    fixture.checks.find((check) => check.name === RELEASE_AUTOMATION_CONTRACT.checks.automationCi),
+  ).toMatchObject({ status: "completed", conclusion: "failure" });
 });
 
 test("exact-head check creation rejects a conflicting retained release head", async () => {

@@ -336,6 +336,38 @@ function assertVersionPull(pull, expected) {
   return headSha;
 }
 
+function assertMergedVersionPull(pull, expected) {
+  const expectedNumber = expected.prNumber ?? expected.number;
+  invariant(pull?.number === expectedNumber, "merged Version PR number changed");
+  invariant(pull?.state === "closed" && pull?.merged === true, "Version PR is not merged");
+  invariant(pull?.draft === false, "merged Version PR is a draft");
+  assertIdentity(pull?.user, RELEASE_AUTOMATION_CONTRACT.versionAuthor, "merged Version PR author");
+  invariant(
+    pull?.base?.ref === RELEASE_AUTOMATION_CONTRACT.defaultBranch,
+    "merged Version PR base branch changed",
+  );
+  invariant(
+    pull?.base?.repo?.full_name === RELEASE_AUTOMATION_CONTRACT.repository,
+    "merged Version PR base repository changed",
+  );
+  invariant(pull?.base?.sha === expected.baseSha, "merged Version PR base SHA changed");
+  invariant(
+    pull?.head?.ref === RELEASE_AUTOMATION_CONTRACT.versionBranch,
+    "merged Version PR head branch changed",
+  );
+  invariant(
+    pull?.head?.repo?.full_name === RELEASE_AUTOMATION_CONTRACT.repository,
+    "merged Version PR is not from the base repository",
+  );
+  invariant(pull?.head?.sha === expected.headSha, "merged Version PR head SHA changed");
+  invariant(pull?.commits === 1, "merged Version PR is not one commit");
+  invariant(
+    Number.isSafeInteger(pull?.changed_files) && pull.changed_files > 0,
+    "merged Version PR changed-file count is invalid",
+  );
+  return assertSha(pull?.merge_commit_sha, "merged Version PR commit SHA");
+}
+
 function versionBranchProjection(value) {
   invariant(
     value?.ref === `refs/heads/${RELEASE_AUTOMATION_CONTRACT.versionBranch}`,
@@ -470,6 +502,48 @@ async function terminalVersionIdentity(api, context) {
     "terminal Version head parent changed",
   );
   return pull;
+}
+
+async function terminalMergedVersionIdentity(api, context, pull) {
+  const mergeSha = assertMergedVersionPull(pull, context);
+  const [headCommit, mergeCommit] = await Promise.all([
+    api.get(repositoryPath(`/git/commits/${context.headSha}`)),
+    api.get(repositoryPath(`/git/commits/${mergeSha}`)),
+  ]);
+  invariant(
+    versionHeadParent(headCommit, context.headSha) === context.baseSha,
+    "merged Version head parent changed",
+  );
+  invariant(
+    assertSha(headCommit?.tree?.sha, "merged Version head tree SHA") ===
+      assertSha(mergeCommit?.tree?.sha, "merged Version commit tree SHA"),
+    "merged Version commit tree differs from its exact head",
+  );
+  invariant(
+    assertSha(mergeCommit?.sha, "merged Version commit SHA") === mergeSha,
+    "merged Version commit changed",
+  );
+  invariant(
+    Array.isArray(mergeCommit?.parents) &&
+      ((mergeCommit.parents.length === 1 && mergeCommit.parents[0]?.sha === context.baseSha) ||
+        (mergeCommit.parents.length === 2 &&
+          mergeCommit.parents[0]?.sha === context.baseSha &&
+          mergeCommit.parents[1]?.sha === context.headSha)),
+    "merged Version commit topology changed",
+  );
+  return pull;
+}
+
+async function terminalCompletableVersionIdentity(api, context) {
+  try {
+    return await terminalVersionIdentity(api, context);
+  } catch (openError) {
+    // Completion can race the approved merge and automatic deletion/reuse of
+    // changeset-release/main. Accept only provider-proved exact-tree landing.
+    const pull = await api.get(repositoryPath(`/pulls/${context.prNumber}`));
+    if (pull?.state !== "closed" || pull?.merged !== true) throw openError;
+    return terminalMergedVersionIdentity(api, context, pull);
+  }
 }
 
 async function convergedVersionHeadSha(api, context, options = {}) {
@@ -1309,7 +1383,7 @@ export async function completeVersionPrChecks(options = {}) {
   let terminalError;
   if (conclusion === "success") {
     try {
-      await terminalVersionIdentity(api, context);
+      await terminalCompletableVersionIdentity(api, context);
     } catch (error) {
       conclusion = "failure";
       terminalError = error;
