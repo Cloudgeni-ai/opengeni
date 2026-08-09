@@ -345,7 +345,11 @@ export function WorkbenchChanges({
         <div className="flex min-h-0 flex-1">
           {/* File rail — virtualized (virtua): a dense change set is fine. */}
           <div className="w-[clamp(12rem,28%,15rem)] shrink-0 border-r border-og-border bg-og-surface-1/35">
+            {/* A capture-to-live refresh can shrink the rail before Virtua has
+                reconciled its cached visible range. Remount on count changes so
+                it never asks React for a now-out-of-range child. */}
             <VList
+              key={rows.length}
               className="h-full"
               itemSize={coarsePointer ? 44 : 28}
               ssrCount={Math.min(30, rows.length)}

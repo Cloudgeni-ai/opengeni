@@ -79,6 +79,20 @@ describe("WorkbenchChanges — windowing (D2)", () => {
 });
 
 describe("WorkbenchChanges — rail, badge, guard", () => {
+  test("the virtual rail survives a captured-to-live list shrink", async () => {
+    const r = await renderComponent(
+      <WorkbenchChanges diff={manyFiles(40)} source="capture" capturedAt="2026-08-09T12:00:00Z" />,
+    );
+    await flush();
+
+    await r.rerender(<WorkbenchChanges diff={manyFiles(1)} source="live" capturedAt={null} />);
+    await flush();
+
+    expect(container(r).textContent).toContain("file-000.ts");
+    expect(container(r).querySelectorAll("[data-rail-file]")).toHaveLength(1);
+    await r.unmount();
+  });
+
   test("a compact surface replaces the cramped rail with a full-width file picker", async () => {
     const original = globalThis.ResizeObserver;
     class CompactResizeObserver {
