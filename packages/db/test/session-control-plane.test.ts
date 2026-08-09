@@ -5666,6 +5666,122 @@ describe("clean session control plane", () => {
     }
   });
 
+  test("legacy session MCP approval admits one execution and denies an ambiguous replay", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "run one approved legacy MCP action");
+
+    const firstAttemptId = crypto.randomUUID();
+    const firstClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      attemptId: firstAttemptId,
+      trigger: { kind: "next" },
+    });
+    if (firstClaim.action !== "claimed") throw new Error(`claim failed: ${firstClaim.reason}`);
+    const firstIdentity = {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: firstClaim.turn.id,
+      attemptId: firstAttemptId,
+      executionGeneration: firstClaim.turn.executionGeneration,
+      initiator: firstClaim.turn.initiator,
+    };
+    const call = {
+      approvalId: "legacy-mcp-approved-call",
+      connectionId: `session-mcp:legacy:${"a".repeat(64)}`,
+      serverId: "legacy",
+      toolName: "perform_action",
+      arguments: { action: "create_issue", title: "exactly once" },
+      approvalMode: "session_mcp" as const,
+    };
+
+    expect(await prepareConnectorActionApproval(client.db, firstIdentity, call)).toMatchObject({
+      managed: true,
+      decision: "ask",
+    });
+    expect(
+      await saveRunState(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: firstClaim.turn.id,
+        expectedExecutionGeneration: firstClaim.turn.executionGeneration,
+        expectedAttemptId: firstAttemptId,
+        serializedRunState: "legacy-mcp-approval-state",
+        pendingApprovals: [{ id: call.approvalId }],
+      }),
+    ).toBe(true);
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: firstClaim.turn.id,
+      triggerEventId: firstClaim.turn.triggerEventId,
+      attemptId: firstAttemptId,
+      turnStatus: "requires_action",
+      sessionStatus: "requires_action",
+      activeTurnId: firstClaim.turn.id,
+      events: [{ type: "session.requiresAction", payload: { approvalId: call.approvalId } }],
+    });
+    const accepted = await acceptSessionApprovalDecision(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      subjectId: grant.subjectId,
+      payload: { approvalId: call.approvalId, decision: "approve" },
+      clientEventId: crypto.randomUUID(),
+    });
+    if (accepted.action !== "accepted") throw new Error("legacy MCP approval was not accepted");
+
+    const resumedAttemptId = crypto.randomUUID();
+    const resumedClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      attemptId: resumedAttemptId,
+      trigger: { kind: "approval", triggerEventId: accepted.event.id },
+    });
+    if (resumedClaim.action !== "claimed") {
+      throw new Error(`approval resume failed: ${resumedClaim.reason}`);
+    }
+    const resumedIdentity = {
+      ...firstIdentity,
+      attemptId: resumedAttemptId,
+      executionGeneration: resumedClaim.turn.executionGeneration,
+      initiator: resumedClaim.turn.initiator,
+    };
+    expect(await beginConnectorActionExecution(client.db, resumedIdentity, call)).toMatchObject({
+      allowed: true,
+      managed: true,
+    });
+
+    // Planted near-identical negative: a retry at the exact provider-started
+    // boundary must become outcome-unknown and never receive execution admission.
+    expect(await beginConnectorActionExecution(client.db, resumedIdentity, call)).toMatchObject({
+      allowed: false,
+      managed: true,
+      reason: "uncertain_retry",
+    });
+
+    const [request] = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db
+        .select()
+        .from(schema.connectorActionRequests)
+        .where(eq(schema.connectorActionRequests.approvalId, call.approvalId)),
+    );
+    expect(request).toMatchObject({
+      status: "uncertain",
+      policySource: "explicit",
+      policyDecision: "ask",
+      policyId: null,
+      actionName: "create_issue",
+      executionAttemptId: resumedAttemptId,
+      outcome: "retry_after_execution_started",
+    });
+  });
+
   test("a committed session control command replays before its stale control fence is checked", async () => {
     const { grant, session } = await fixture();
     const before = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>

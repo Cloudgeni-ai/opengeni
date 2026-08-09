@@ -1751,6 +1751,125 @@ describe("runtime event normalization", () => {
       }
     });
 
+    test("legacy approved MCP execution is durably admitted once and replay is denied", async () => {
+      const mcp = startTestMcpServer();
+      const serverConfig = {
+        id: "docs",
+        name: "Document Search",
+        url: mcp.url,
+        cacheToolsList: false,
+        requireApproval: true as const,
+      };
+      const settings = testSettings({ sandboxBackend: "none", mcpServers: [serverConfig] });
+      const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "docs" }]);
+      const policyCalls: Array<{ phase: string; call: Record<string, unknown> }> = [];
+      let begins = 0;
+      const hooks: ConnectorActionPolicyHooks = {
+        prepare: async (call) => {
+          policyCalls.push({ phase: "prepare", call });
+          return { managed: true, decision: "ask" };
+        },
+        begin: async (call) => {
+          policyCalls.push({ phase: "begin", call });
+          begins += 1;
+          return begins === 1
+            ? { allowed: true, managed: true, requestId: "legacy-request" }
+            : {
+                allowed: false,
+                managed: true,
+                requestId: "legacy-request",
+                reason: "already_executed",
+              };
+        },
+        complete: async ({ requestId, outcome }) => {
+          policyCalls.push({ phase: `complete:${requestId}:${outcome}`, call: {} });
+        },
+      };
+      const agent = buildOpenGeniAgent(settings, [], {
+        mcpServers: prepared.mcpServers,
+        connectorActionPolicy: hooks,
+      });
+
+      try {
+        const [tool] = (await agent.getMcpTools(new RunContext())).filter(
+          (candidate) =>
+            candidate.type === "function" && candidate.name === "docs__search_documents",
+        );
+        if (!tool || tool.type !== "function") throw new Error("legacy MCP tool missing");
+        const input = { query: "create-once" };
+        const callId = "legacy-approved-call";
+        expect(await tool.needsApproval(new RunContext(), input, callId)).toBe(true);
+        const details = { toolCall: { callId } } as any;
+
+        await expect(
+          tool.invoke(new RunContext(), JSON.stringify(input), details),
+        ).resolves.toBeDefined();
+        await expect(tool.invoke(new RunContext(), JSON.stringify(input), details)).rejects.toThrow(
+          "already_executed",
+        );
+
+        expect(mcp.calls).toEqual([{ tool: "search_documents", args: input }]);
+        expect(policyCalls.map(({ phase }) => phase)).toEqual([
+          "prepare",
+          "begin",
+          "complete:legacy-request:completed",
+          "begin",
+        ]);
+        for (const { call } of policyCalls.filter(({ phase }) => !phase.startsWith("complete:"))) {
+          expect(call).toMatchObject({
+            approvalId: callId,
+            approvalMode: "session_mcp",
+            serverId: "docs",
+            toolName: "search_documents",
+            arguments: input,
+          });
+          expect(call.connectionId).toMatch(/^session-mcp:docs:[0-9a-f]{64}$/);
+        }
+      } finally {
+        await prepared.close();
+        mcp.close();
+      }
+    });
+
+    test("legacy approved MCP execution fails closed without durable admission hooks", async () => {
+      const mcp = startTestMcpServer();
+      const settings = testSettings({
+        sandboxBackend: "none",
+        mcpServers: [
+          {
+            id: "docs",
+            name: "Document Search",
+            url: mcp.url,
+            cacheToolsList: false,
+            requireApproval: true,
+          },
+        ],
+      });
+      const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "docs" }]);
+      const agent = buildOpenGeniAgent(settings, [], { mcpServers: prepared.mcpServers });
+
+      try {
+        const [tool] = (await agent.getMcpTools(new RunContext())).filter(
+          (candidate) =>
+            candidate.type === "function" && candidate.name === "docs__search_documents",
+        );
+        if (!tool || tool.type !== "function") throw new Error("legacy MCP tool missing");
+        const input = { query: "must-not-run" };
+        expect(await tool.needsApproval(new RunContext(), input, "legacy-unfenced-call")).toBe(
+          true,
+        );
+        await expect(
+          tool.invoke(new RunContext(), JSON.stringify(input), {
+            toolCall: { callId: "legacy-unfenced-call" },
+          } as any),
+        ).rejects.toThrow("durable execution policy is unavailable");
+        expect(mcp.calls).toEqual([]);
+      } finally {
+        await prepared.close();
+        mcp.close();
+      }
+    });
+
     test("subject-scoped generic refs enforce Allow/Ask/Block with the broker-frozen connection", async () => {
       const connectionId = "11111111-1111-4111-8111-111111111111";
       const initiatingSubjectId = "user:immutable-initiator";

@@ -1911,6 +1911,7 @@ export type ConnectorActionToolCall = {
   serverId: string;
   toolName: string;
   arguments: unknown;
+  approvalMode?: "session_mcp";
 };
 
 export type ConnectorActionPolicyPreparation =
@@ -2833,6 +2834,12 @@ function mcpToolRequiresApproval(
   return policy === true || (policy !== false && policy.has(unprefixedName));
 }
 
+/** Stable, secret-free execution identity for an MCP server without a connection row. */
+function sessionMcpApprovalConnectionId(serverId: string, url: string): string {
+  const targetHash = createHash("sha256").update(url, "utf8").digest("hex");
+  return `session-mcp:${serverId}:${targetHash}`;
+}
+
 /** A per-server approval policy keyed by the server's `<id>__` tool prefix. */
 type McpApprovalPolicy = {
   prefix: string;
@@ -2884,8 +2891,12 @@ function installMcpApprovalPolicy(
       const unprefixed = tool.name.slice(policy.prefix.length);
       const originalNeedsApproval = tool.needsApproval.bind(tool);
       const originalInvoke = tool.invoke.bind(tool);
-      const connectorManaged = Boolean(connectorActionPolicy && policy.connectorBacked);
-      if (!connectorManaged && !mcpToolRequiresApproval(policy.requireApproval, unprefixed)) {
+      const legacyApproval =
+        !policy.connectorBacked && mcpToolRequiresApproval(policy.requireApproval, unprefixed);
+      const durableManaged = Boolean(
+        connectorActionPolicy && (policy.connectorBacked || legacyApproval),
+      );
+      if (!durableManaged && !legacyApproval) {
         return tool;
       }
       const connectorCall = (approvalId: string, args: unknown): ConnectorActionToolCall => {
@@ -2898,6 +2909,7 @@ function installMcpApprovalPolicy(
           serverId: policy.serverId,
           toolName: unprefixed,
           arguments: args,
+          ...(legacyApproval ? { approvalMode: "session_mcp" as const } : {}),
         };
       };
       return {
@@ -2907,22 +2919,27 @@ function installMcpApprovalPolicy(
           parsedInput: Parameters<typeof originalNeedsApproval>[1],
           callId: Parameters<typeof originalNeedsApproval>[2],
         ) => {
-          if (connectorManaged && !callId) {
+          if (durableManaged && !callId) {
             throw new Error("Connector action is missing its durable approval identity");
           }
-          const preparation = connectorManaged
+          const preparation = durableManaged
             ? await connectorActionPolicy!.prepare(connectorCall(callId!, parsedInput))
             : ({ managed: false, decision: "unmanaged" } as const);
           if (preparation.managed && preparation.decision === "block") {
             return false;
           }
-          const legacyApproval =
+          const approvalRequired =
             mcpToolRequiresApproval(policy.requireApproval, unprefixed) ||
             (await originalNeedsApproval(runContext, parsedInput, callId));
-          return (preparation.managed && preparation.decision === "ask") || legacyApproval;
+          return (preparation.managed && preparation.decision === "ask") || approvalRequired;
         },
         invoke: async (runContext, input, details) => {
-          if (!connectorManaged) {
+          if (legacyApproval && !connectorActionPolicy) {
+            throw new Error(
+              "Approval-gated MCP action was not executed: durable execution policy is unavailable",
+            );
+          }
+          if (!durableManaged) {
             return await originalInvoke(runContext, input, details);
           }
           const callId = details?.toolCall?.callId;
@@ -3024,7 +3041,10 @@ function applyMcpApprovalPolicy(
         requireApproval:
           server.requireApproval === true ? true : new Set(server.requireApproval as string[]),
         connectorBacked: Boolean(server.connectionRef),
-        connectionId: resolvedConnectionId ?? staticConnectionId,
+        connectionId:
+          resolvedConnectionId ??
+          staticConnectionId ??
+          (server.connectionRef ? null : sessionMcpApprovalConnectionId(server.id, server.url)),
       };
     })
     .sort((a, b) => b.prefix.length - a.prefix.length);

@@ -17836,6 +17836,8 @@ export type ConnectorActionInvocation = {
   serverId: string;
   toolName: string;
   arguments: unknown;
+  /** Explicit per-session MCP approval, rather than a connector-policy decision. */
+  approvalMode?: "session_mcp";
 };
 
 export type PrepareConnectorActionApprovalResult =
@@ -17895,7 +17897,14 @@ function connectorActionPolicySelector(toolName: string, args: unknown): string 
 function connectorActionEvidenceName(
   resolved: Exclude<ResolvedConnectorActionPolicy, { managed: false }>,
 ): string {
-  return resolved.entry?.actionName ?? "*";
+  return resolved.entry?.actionName ?? ("actionName" in resolved ? resolved.actionName : "*");
+}
+
+function connectorActionPolicyDecision(
+  resolved: Exclude<ResolvedConnectorActionPolicy, { managed: false }>,
+): ConnectorActionPolicyDecision {
+  if (resolved.entry) return resolved.entry.policy;
+  return resolved.decision;
 }
 
 function connectorActionFingerprint(input: {
@@ -17927,6 +17936,13 @@ type ResolvedConnectorActionPolicy =
       managed: true;
       source: "explicit";
       entry: ConnectorActionPolicySnapshotEntry;
+    }
+  | {
+      managed: true;
+      source: "explicit";
+      entry: null;
+      decision: "ask";
+      actionName: string;
     }
   | {
       managed: true;
@@ -18042,6 +18058,7 @@ function normalizedConnectorActionInvocation(
   toolName: string;
   policyActionSelector: string;
   arguments: unknown;
+  approvalMode: "connector" | "session_mcp";
 } {
   const approvalId = boundedConnectorActionText(
     invocation.approvalId,
@@ -18066,6 +18083,13 @@ function normalizedConnectorActionInvocation(
         CONNECTOR_ACTION_CONNECTION_ID_MAX,
       )
     : null;
+  const approvalMode = invocation.approvalMode ?? "connector";
+  if (approvalMode !== "connector" && approvalMode !== "session_mcp") {
+    throw new Error("connector approval mode is unsupported");
+  }
+  if (approvalMode === "session_mcp" && !connectionId?.startsWith("session-mcp:")) {
+    throw new Error("session MCP approval is missing its synthetic connection identity");
+  }
   return {
     approvalId,
     connectionId,
@@ -18073,6 +18097,19 @@ function normalizedConnectorActionInvocation(
     toolName,
     policyActionSelector,
     arguments: invocation.arguments,
+    approvalMode,
+  };
+}
+
+function resolvedSessionMcpApproval(
+  actionName: string,
+): Exclude<ResolvedConnectorActionPolicy, { managed: false }> {
+  return {
+    managed: true,
+    source: "explicit",
+    entry: null,
+    decision: "ask",
+    actionName,
   };
 }
 
@@ -18171,7 +18208,7 @@ function connectorActionRequestMatches(
     row.policyId === (entry?.id ?? null) &&
     row.policyVersion === (entry?.version ?? null) &&
     row.policySource === input.resolved.source &&
-    row.policyDecision === (entry?.policy ?? "block") &&
+    row.policyDecision === connectorActionPolicyDecision(input.resolved) &&
     row.actionFingerprint === input.invocation.actionFingerprint
   );
 }
@@ -18237,7 +18274,7 @@ async function insertConnectorActionRequest(
       policyId: entry?.id ?? null,
       policyVersion: entry?.version ?? null,
       policySource: input.resolved.source,
-      policyDecision: entry?.policy ?? "block",
+      policyDecision: connectorActionPolicyDecision(input.resolved),
       actionFingerprint: input.invocation.actionFingerprint!,
       status: input.status,
       ...(input.status === "executing"
@@ -18405,19 +18442,22 @@ export async function prepareConnectorActionApproval(
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
         const snapshot = await connectorActionAttemptSnapshot(tx as unknown as Database, identity);
-        const resolved = resolveConnectorActionPolicy(snapshot, {
-          connectionId: normalized.connectionId!,
-          serverId: normalized.serverId,
-          toolName: normalized.toolName,
-          actionName: normalized.policyActionSelector,
-        });
+        const resolved =
+          normalized.approvalMode === "session_mcp"
+            ? resolvedSessionMcpApproval(normalized.policyActionSelector)
+            : resolveConnectorActionPolicy(snapshot, {
+                connectionId: normalized.connectionId!,
+                serverId: normalized.serverId,
+                toolName: normalized.toolName,
+                actionName: normalized.policyActionSelector,
+              });
         if (!resolved.managed) return { managed: false, decision: "unmanaged" } as const;
         const durable = durableConnectorActionInvocation(
           identity,
           { ...normalized, connectionId: normalized.connectionId! },
           resolved,
         );
-        const decision = resolved.entry?.policy ?? "block";
+        const decision = connectorActionPolicyDecision(resolved);
         if (decision === "allow") {
           return {
             managed: true,
@@ -18486,19 +18526,22 @@ export async function beginConnectorActionExecution(
         let row = existing;
         let inserted = false;
         if (!row) {
-          const resolved = resolveConnectorActionPolicy(snapshot, {
-            connectionId: normalized.connectionId!,
-            serverId: normalized.serverId,
-            toolName: normalized.toolName,
-            actionName: normalized.policyActionSelector,
-          });
+          const resolved =
+            normalized.approvalMode === "session_mcp"
+              ? resolvedSessionMcpApproval(normalized.policyActionSelector)
+              : resolveConnectorActionPolicy(snapshot, {
+                  connectionId: normalized.connectionId!,
+                  serverId: normalized.serverId,
+                  toolName: normalized.toolName,
+                  actionName: normalized.policyActionSelector,
+                });
           if (!resolved.managed) return { allowed: true, managed: false } as const;
           const durable = durableConnectorActionInvocation(
             identity,
             { ...normalized, connectionId: normalized.connectionId! },
             resolved,
           );
-          const decision = resolved.entry?.policy ?? "block";
+          const decision = connectorActionPolicyDecision(resolved);
           const created = await insertConnectorActionRequest(tx as unknown as Database, {
             identity,
             invocation: durable,
