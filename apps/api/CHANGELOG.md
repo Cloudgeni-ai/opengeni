@@ -1,5 +1,12 @@
 # @opengeni/api-router
 
+## 0.24.1
+
+### Patch Changes
+
+- Updated dependencies [df985c0]
+  - @opengeni/core@0.22.1
+
 ## 0.24.0
 
 ### Minor Changes
