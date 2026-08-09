@@ -1899,7 +1899,8 @@ export function SpreadsheetProjectionGrid({
       {commandFailure ? (
         <div
           role="alert"
-          className="absolute bottom-2 left-2 z-50 flex max-w-[calc(100%-1rem)] items-center gap-2 rounded-og-sm border border-og-status-failed/30 bg-og-surface-1/95 px-2 py-1 text-og-xs text-og-status-failed shadow-og-sm"
+          className="absolute bottom-2 left-2 z-50 flex items-center gap-2 rounded-og-sm border border-og-status-failed/30 bg-og-surface-1/95 px-2 py-1 text-og-xs text-og-status-failed shadow-og-sm"
+          style={{ maxWidth: "calc(100% - 1rem)" }}
         >
           <span className="truncate">{commandFailure.message}</span>
           {commandFailure.retry ? (

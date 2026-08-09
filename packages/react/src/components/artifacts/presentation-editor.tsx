@@ -1234,7 +1234,8 @@ function PresentationEditorCore({
 
   return (
     <div
-      className={cn("flex size-full min-h-[22rem] min-w-0 flex-col bg-og-surface-1", className)}
+      className={cn("flex size-full min-w-0 flex-col bg-og-surface-1", className)}
+      style={{ minHeight: "22rem" }}
       data-og-presentation-editor
       data-og-painted-object-count={visibleObjectIndexes.length}
       data-og-command-state={commandFailure ? "error" : pendingCommands > 0 ? "pending" : "idle"}
@@ -1415,12 +1416,12 @@ function PresentationEditorCore({
                   aria-label={`Slide ${index + 1}${slide.title ? `: ${slide.title}` : ""}`}
                   onClick={() => selectSlide(slide, index)}
                   className={cn(
-                    "absolute left-0 flex h-[116px] w-full items-start gap-2 px-2 py-2 text-left transition-colors",
+                    "absolute left-0 flex w-full items-start gap-2 px-2 py-2 text-left transition-colors",
                     active
                       ? "bg-og-surface-3 text-og-fg"
                       : "text-og-fg-muted hover:bg-og-surface-3/70",
                   )}
-                  style={{ top: index * RAIL_ITEM_HEIGHT }}
+                  style={{ top: index * RAIL_ITEM_HEIGHT, height: 116 }}
                   data-og-slide-index={index}
                 >
                   <span className="w-5 shrink-0 pt-0.5 text-right text-og-xs tabular-nums text-og-fg-subtle">
@@ -1428,9 +1429,10 @@ function PresentationEditorCore({
                   </span>
                   <span
                     className={cn(
-                      "block aspect-video min-w-0 flex-1 overflow-hidden rounded-[3px] border bg-white shadow-og-sm",
+                      "block min-w-0 flex-1 overflow-hidden border bg-white shadow-og-sm",
                       active ? "border-og-accent" : "border-og-border",
                     )}
+                    style={{ aspectRatio: "16 / 9", borderRadius: 3 }}
                   >
                     <SlideThumbnail
                       slide={slide}
@@ -1468,7 +1470,8 @@ function PresentationEditorCore({
           {commandFailure ? (
             <div
               role="alert"
-              className="absolute left-2 top-2 z-30 flex w-fit max-w-[calc(100%-1rem)] items-center gap-2 rounded-og-sm border border-og-status-failed/30 bg-og-surface-1/95 px-2 py-1 text-og-xs text-og-status-failed shadow-og-sm"
+              className="absolute left-2 top-2 z-30 flex w-fit items-center gap-2 rounded-og-sm border border-og-status-failed/30 bg-og-surface-1/95 px-2 py-1 text-og-xs text-og-status-failed shadow-og-sm"
+              style={{ maxWidth: "calc(100% - 1rem)" }}
             >
               <span className="truncate">{commandFailure.message}</span>
               <button
@@ -1483,8 +1486,8 @@ function PresentationEditorCore({
           {activeSlide ? (
             <div
               ref={stageRef}
-              className="relative mx-auto shrink-0 overflow-hidden bg-white shadow-og-lg"
-              style={{ width: stageWidth, height: stageHeight }}
+              className="relative mx-auto shrink-0 overflow-hidden shadow-og-lg"
+              style={{ width: stageWidth, height: stageHeight, backgroundColor: "#fff" }}
               data-og-presentation-stage
             >
               <canvas
@@ -1574,12 +1577,13 @@ function PresentationEditorCore({
                       finishTextEdit();
                     }
                   }}
-                  className="absolute resize-none overflow-hidden border-2 border-og-accent bg-white/95 p-1 outline-hidden"
+                  className="absolute resize-none overflow-hidden border-2 border-og-accent p-1 outline-hidden"
                   style={{
                     left: effectiveSelectedPosition.left * zoom,
                     top: effectiveSelectedPosition.top * zoom,
                     width: effectiveSelectedPosition.width * zoom,
                     height: effectiveSelectedPosition.height * zoom,
+                    backgroundColor: "#fffffff2",
                     color: resolveColor(textEdit.shape.text.style.color ?? "slate-950"),
                     fontFamily: textEdit.shape.text.style.fontFamily ?? "Arial, sans-serif",
                     fontSize: Math.max(8, (textEdit.shape.text.style.fontSize ?? 18) * zoom),
@@ -3112,10 +3116,11 @@ function randomPresentationId(): string {
 function resolveRadius(value: number | string | undefined, position: PresentationPosition): number {
   if (typeof value === "number") return value;
   const min = Math.min(position.width, position.height);
-  if (value === "rounded-full") return min / 2;
-  if (value === "rounded-2xl") return 16;
-  if (value === "rounded-xl") return 12;
-  if (value === "rounded-lg") return 8;
+  const preset = value?.startsWith("rounded-") ? value.slice("rounded-".length) : undefined;
+  if (preset === "full") return min / 2;
+  if (preset === "2xl") return 16;
+  if (preset === "xl") return 12;
+  if (preset === "lg") return 8;
   return 6;
 }
 

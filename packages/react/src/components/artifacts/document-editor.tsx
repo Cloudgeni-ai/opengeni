@@ -877,7 +877,8 @@ function DocumentEditorCore({
         {commandFailure ? (
           <div
             role="alert"
-            className="absolute left-2 top-2 z-30 flex w-fit max-w-[calc(100%-1rem)] items-center gap-2 rounded-og-sm border border-og-status-failed/30 bg-og-surface-1/95 px-2 py-1 text-og-xs text-og-status-failed shadow-og-sm"
+            className="absolute left-2 top-2 z-30 flex w-fit items-center gap-2 rounded-og-sm border border-og-status-failed/30 bg-og-surface-1/95 px-2 py-1 text-og-xs text-og-status-failed shadow-og-sm"
+            style={{ maxWidth: "calc(100% - 1rem)" }}
           >
             <span className="truncate">{commandFailure.message}</span>
             <button
@@ -920,13 +921,16 @@ function DocumentEditorCore({
                   data-og-page-width-pt={page.page.widthPt}
                   data-og-page-height-pt={page.page.heightPt}
                   className={cn(
-                    "absolute overflow-hidden text-[#171717]",
+                    "absolute overflow-hidden",
                     layout === "paginated"
-                      ? "left-1/2 -translate-x-1/2 border border-black/10 bg-white shadow-og-sm"
+                      ? "left-1/2 -translate-x-1/2 border shadow-og-sm"
                       : "left-0 right-0 border-b border-og-border bg-og-surface-1 text-og-fg",
                   )}
                   style={{
                     top,
+                    color: layout === "paginated" ? "#171717" : undefined,
+                    backgroundColor: layout === "paginated" ? "#fff" : undefined,
+                    borderColor: layout === "paginated" ? "#0000001a" : undefined,
                     width:
                       layout === "paginated"
                         ? page.page.widthPt * POINT_TO_CSS_PIXEL * page.renderScale
@@ -939,17 +943,17 @@ function DocumentEditorCore({
                     measureToken={documentRevision}
                     onHeight={recordPageHeight}
                     className={cn(
-                      layout === "paginated"
-                        ? "absolute left-0 top-0 origin-top-left overflow-hidden"
-                        : "mx-auto max-w-[68rem]",
+                      layout === "paginated" ? "absolute left-0 top-0 overflow-hidden" : "mx-auto",
                     )}
                     style={{
                       ...pageContentStyle(page.page, layout),
+                      maxWidth: layout === "continuous" ? "68rem" : undefined,
                       ...(layout === "paginated"
                         ? {
                             width: page.page.widthPt * POINT_TO_CSS_PIXEL,
                             minHeight: page.naturalHeight,
                             transform: `scale(${page.renderScale})`,
+                            transformOrigin: "top left",
                           }
                         : {}),
                     }}
@@ -1138,8 +1142,11 @@ function DocumentBlockView({
       {marker ? (
         <span
           aria-hidden
-          className="w-7 shrink-0 select-none pt-[0.1em] text-right text-current opacity-70"
-          style={{ paddingLeft: `${(block.style.list?.level ?? 0) * 12}px` }}
+          className="w-7 shrink-0 select-none text-right opacity-70"
+          style={{
+            paddingLeft: `${(block.style.list?.level ?? 0) * 12}px`,
+            paddingTop: "0.1em",
+          }}
         >
           {marker}
         </span>
@@ -1366,8 +1373,9 @@ function DocumentTableView({
       className="overflow-x-auto py-2"
     >
       <table
-        className="w-full border-collapse text-left text-[0.92em]"
+        className="w-full border-collapse text-left"
         style={{
+          fontSize: "0.92em",
           width: table.style.widthPt ? `${table.style.widthPt}pt` : undefined,
         }}
       >

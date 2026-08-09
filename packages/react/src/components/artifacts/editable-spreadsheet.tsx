@@ -297,7 +297,8 @@ export function EditableSpreadsheetGrid({
       {state.error ? (
         <output
           role="status"
-          className="pointer-events-none absolute bottom-2 left-2 z-50 max-w-[min(28rem,calc(100%-1rem))] rounded-og-sm border border-og-status-failed/30 bg-og-surface-1/95 px-2 py-1 text-og-xs text-og-status-failed shadow-og-sm"
+          className="pointer-events-none absolute bottom-2 left-2 z-50 rounded-og-sm border border-og-status-failed/30 bg-og-surface-1/95 px-2 py-1 text-og-xs text-og-status-failed shadow-og-sm"
+          style={{ maxWidth: "min(28rem, calc(100% - 1rem))" }}
         >
           {state.error.message}
         </output>
