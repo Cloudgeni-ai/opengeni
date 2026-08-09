@@ -1401,7 +1401,7 @@ async function runLiveWorkspaceFlow(input: {
     pass(
       checks,
       "performance.control-cancellation",
-      `Steer/Pause physical cancellation worst=${round(controlSummary.worst)}ms, p95=${round(controlSummary.p95)}ms across ${controlSummary.sampleCount} controls (hard budget ${CONTROL_CANCELLATION_WORST_MS}ms).`,
+      `Steer replacement/Pause quiescence worst=${round(controlSummary.worst)}ms, p95=${round(controlSummary.p95)}ms across ${controlSummary.sampleCount} controls (shared hard budget ${CONTROL_CANCELLATION_WORST_MS}ms).`,
     );
 
     assertNoProblems(problems, false);
@@ -1585,28 +1585,59 @@ async function proveLiveSteerCancellation(input: {
   if (typeof replacementTurnId !== "string" || !Number.isFinite(committedAt)) {
     throw new Error("live Steer receipt omitted its turn identity or commit time");
   }
-  const replacementStarted = await waitForSessionEvent(
+  const observationDeadline = performance.now() + CONTROL_CANCELLATION_WORST_MS;
+  const remainingBudgetMs = (label: string): number => {
+    const remaining = Math.ceil(observationDeadline - performance.now());
+    if (remaining <= 0) {
+      throw new Error(
+        `Steer ${label} exhausted the shared ${CONTROL_CANCELLATION_WORST_MS}ms control budget`,
+      );
+    }
+    return remaining;
+  };
+  const quiesced = await waitForSessionEvent(
     client,
     workspaceId,
     sessionId,
     ready.sequence,
-    CONTROL_CANCELLATION_WORST_MS,
-    (event) => event.type === "turn.started" && event.turnId === replacementTurnId,
-    "replacement turn start inside the physical-cancellation budget",
+    remainingBudgetMs("physical quiescence"),
+    (event) =>
+      event.type === "session.queue.changed" &&
+      event.turnId === predecessorTurnId &&
+      event.turnAttemptId === predecessorAttemptId &&
+      isRecord(event.payload) &&
+      event.payload.operation === "attempt_quiesced" &&
+      event.payload.attemptId === predecessorAttemptId,
+    "predecessor physical quiescence inside the shared control budget",
   );
-  const controlCancellationMs = controlCancellationDurationMs(
+  const replacementStarted = await waitForSessionEvent(
+    client,
+    workspaceId,
+    sessionId,
+    quiesced.sequence,
+    remainingBudgetMs("replacement admission"),
+    (event) => event.type === "turn.started" && event.turnId === replacementTurnId,
+    "replacement turn start inside the shared control budget",
+  );
+  const cancellationTimeline = controlCancellationTimelineMs(
     committedAt,
+    Date.parse(quiesced.occurredAt),
     Date.parse(replacementStarted.occurredAt),
   );
-  if (controlCancellationMs > CONTROL_CANCELLATION_WORST_MS) {
+  if (cancellationTimeline.physicalQuiescenceMs > CONTROL_CANCELLATION_WORST_MS) {
     throw new Error(
-      `Steer replacement took ${controlCancellationMs}ms; budget is ${CONTROL_CANCELLATION_WORST_MS}ms`,
+      `Steer physical cancellation took ${cancellationTimeline.physicalQuiescenceMs}ms; budget is ${CONTROL_CANCELLATION_WORST_MS}ms`,
+    );
+  }
+  if (cancellationTimeline.replacementStartedMs > CONTROL_CANCELLATION_WORST_MS) {
+    throw new Error(
+      `Steer replacement took ${cancellationTimeline.replacementStartedMs}ms; budget is ${CONTROL_CANCELLATION_WORST_MS}ms`,
     );
   }
   const renderedStoppingState = await stoppingVisible;
-  if (controlCancellationMs > 100 && !renderedStoppingState) {
+  if (cancellationTimeline.physicalQuiescenceMs > 100 && !renderedStoppingState) {
     throw new Error(
-      `Steer spent ${controlCancellationMs}ms behind the physical fence without rendering its stopping state`,
+      `Steer spent ${cancellationTimeline.physicalQuiescenceMs}ms behind the physical fence without rendering its stopping state`,
     );
   }
   await page.getByTestId("stopping-previous-attempt").waitFor({ state: "hidden", timeout: 5_000 });
@@ -1639,16 +1670,6 @@ async function proveLiveSteerCancellation(input: {
   if (!steerRequested) {
     throw new Error("Steer receipt had no matching durable control-request event");
   }
-  const quiesced = finalEvents.find(
-    (event) =>
-      event.type === "session.queue.changed" &&
-      event.turnId === predecessorTurnId &&
-      isRecord(event.payload) &&
-      event.payload.operation === "attempt_quiesced",
-  );
-  if (!quiesced) {
-    throw new Error("Steer predecessor had no durable quiescence receipt");
-  }
   if (
     quiesced.sequence <= steerRequested.sequence ||
     quiesced.sequence >= replacementStarted.sequence
@@ -1658,7 +1679,7 @@ async function proveLiveSteerCancellation(input: {
   audit.fences.set(predecessorAttemptId, {
     control: "Steer",
     controlRequestedSequence: steerRequested.sequence,
-    physicallyStoppedSequence: replacementStarted.sequence,
+    physicallyStoppedSequence: quiesced.sequence,
   });
   await auditCancelledPredecessorEvents(client, workspaceId, sessionId, audit);
   if (verifyReplacementCapture) {
@@ -1680,7 +1701,7 @@ async function proveLiveSteerCancellation(input: {
       );
     }
   }
-  return controlCancellationMs;
+  return cancellationTimeline.replacementStartedMs;
 }
 
 async function proveLivePauseCancellation(input: {
@@ -1948,6 +1969,19 @@ export function controlCancellationDurationMs(committedAt: number, replacementSt
     throw new Error("physical cancellation completed before its control commit timestamp");
   }
   return replacementStartedAt - committedAt;
+}
+
+export function controlCancellationTimelineMs(
+  committedAt: number,
+  quiescedAt: number,
+  replacementStartedAt: number,
+): { physicalQuiescenceMs: number; replacementStartedMs: number } {
+  const physicalQuiescenceMs = controlCancellationDurationMs(committedAt, quiescedAt);
+  const replacementStartedMs = controlCancellationDurationMs(committedAt, replacementStartedAt);
+  if (replacementStartedAt < quiescedAt) {
+    throw new Error("replacement turn started before physical quiescence");
+  }
+  return { physicalQuiescenceMs, replacementStartedMs };
 }
 
 async function waitForSessionEvent(

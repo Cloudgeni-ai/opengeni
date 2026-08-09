@@ -43022,25 +43022,35 @@ export type SessionAttemptInterruptionSettlement = {
  * that recovery event is the logical settlement cause in place of a
  * Pause/Steer interruption row.
  */
-export async function markSessionAttemptQuiesced(
+export type MarkSessionAttemptQuiescedInput = {
+  accountId?: string;
+  workspaceId: string;
+  sessionId: string;
+  attemptId: string;
+  temporalWorkflowId: string;
+  /** When supplied, both values bind an activity-owned recovery proof to the
+   * exact persisted Temporal dispatch. Legacy v1 replay callers omit them. */
+  temporalWorkflowRunId?: string;
+  temporalActivityId?: string;
+  /** The dying activity also reaches this boundary for non-control ownership
+   * fences. It may no-op when no Pause/Steer interruption exists; replacement
+   * admission remains strict because only a durable interruption needs this
+   * receipt. */
+  allowUninterrupted?: boolean;
+};
+
+export type SessionAttemptQuiescenceCommit = {
+  events: SessionEvent[];
+  /** The exact still-undelivered outbox fact created by this commit, or found
+   * on an idempotent replay after a post-commit caller failure. Postgres remains
+   * the durable fallback; callers may deliver this fact immediately. */
+  workflowWake: SessionWorkflowWake | null;
+};
+
+export async function commitSessionAttemptQuiescence(
   db: Database,
-  input: {
-    accountId?: string;
-    workspaceId: string;
-    sessionId: string;
-    attemptId: string;
-    temporalWorkflowId: string;
-    /** When supplied, both values bind an activity-owned recovery proof to the
-     * exact persisted Temporal dispatch. Legacy v1 replay callers omit them. */
-    temporalWorkflowRunId?: string;
-    temporalActivityId?: string;
-    /** The dying activity also reaches this boundary for non-control ownership
-     * fences. It may no-op when no Pause/Steer interruption exists; replacement
-     * admission remains strict because only a durable interruption needs this
-     * receipt. */
-    allowUninterrupted?: boolean;
-  },
-): Promise<SessionEvent[]> {
+  input: MarkSessionAttemptQuiescedInput,
+): Promise<SessionAttemptQuiescenceCommit> {
   const persistence = {
     stage: "session_attempts.mark_quiesced",
     eventTypes: ["session.queue.changed"],
@@ -43139,7 +43149,7 @@ export async function markSessionAttemptQuiesced(
       attempt.state === "closed" &&
       attempt.outcome === "interrupted_recoverable";
     if (!interruption && !recoveryQuiescence) {
-      if (input.allowUninterrupted) return [];
+      if (input.allowUninterrupted) return { events: [], workflowWake: null };
       throw new SessionControlInvariantError(
         `Attempt ${input.attemptId} cannot acknowledge quiescence without its interruption or recovery request`,
       );
@@ -43270,6 +43280,35 @@ export async function markSessionAttemptQuiesced(
     };
 
     const clientEventId = `opengeni:attempt-quiesced:${input.attemptId}`;
+    const pendingWorkflowWake = async (): Promise<SessionWorkflowWake | null> => {
+      const [wake] = await scopedDb
+        .select({
+          accountId: schema.sessionWorkflowWakeOutbox.accountId,
+          workspaceId: schema.sessionWorkflowWakeOutbox.workspaceId,
+          sessionId: schema.sessionWorkflowWakeOutbox.sessionId,
+          temporalWorkflowId: schema.sessionWorkflowWakeOutbox.temporalWorkflowId,
+          wakeRevision: schema.sessionWorkflowWakeOutbox.wakeRevision,
+          deliveredRevision: schema.sessionWorkflowWakeOutbox.deliveredRevision,
+          controlRevision: schema.sessionWorkflowWakeOutbox.controlRevision,
+        })
+        .from(schema.sessionWorkflowWakeOutbox)
+        .where(
+          and(
+            eq(schema.sessionWorkflowWakeOutbox.workspaceId, input.workspaceId),
+            eq(schema.sessionWorkflowWakeOutbox.sessionId, input.sessionId),
+          ),
+        )
+        .limit(1);
+      if (!wake || wake.wakeRevision <= wake.deliveredRevision) return null;
+      return {
+        accountId: wake.accountId,
+        workspaceId: wake.workspaceId,
+        sessionId: wake.sessionId,
+        temporalWorkflowId: wake.temporalWorkflowId,
+        wakeRevision: wake.wakeRevision,
+        interruptionRequested: wake.controlRevision > wake.deliveredRevision,
+      };
+    };
     if (attempt.quiescedAt) {
       const [existing] = await scopedDb
         .select()
@@ -43287,9 +43326,15 @@ export async function markSessionAttemptQuiesced(
       // workflow may still execute this idempotent fallback after rollout. It
       // has no queue receipt to republish, but paused recovery projection still
       // converges through the same exact-attempt transaction.
-      return (
-        await projectPausedRecovery(existing ? [mapEvent(existing)] : [], session.lastSequence)
-      ).events;
+      const projected = await projectPausedRecovery(
+        existing ? [mapEvent(existing)] : [],
+        session.lastSequence,
+      );
+      return {
+        events: projected.events,
+        workflowWake:
+          projected.effectiveControl.state === "active" ? await pendingWorkflowWake() : null,
+      };
     }
 
     const now = new Date();
@@ -43350,6 +43395,7 @@ export async function markSessionAttemptQuiesced(
       );
     const projected = await projectPausedRecovery([mapEvent(event)], event.sequence);
     const effectiveControl = projected.effectiveControl;
+    let workflowWake: SessionWorkflowWake | null = null;
     if (effectiveControl.state === "active") {
       await enqueueSessionWorkflowWakeInTransaction(scopedDb, {
         accountId: session.accountId,
@@ -43358,9 +43404,26 @@ export async function markSessionAttemptQuiesced(
         temporalWorkflowId: input.temporalWorkflowId,
         reason: "attempt_quiesced",
       });
+      // Derive the transport kind from the coalesced row. An older undelivered
+      // control revision keeps priority even though this producer is an
+      // ordinary queue wake.
+      workflowWake = await pendingWorkflowWake();
+      if (!workflowWake) {
+        throw new Error(`Attempt-quiescence wake was not pending for session ${input.sessionId}`);
+      }
     }
-    return projected.events;
+    return { events: projected.events, workflowWake };
   });
+}
+
+/** Compatibility projection for callers that only publish the committed
+ * events. The turn activity uses `commitSessionAttemptQuiescence` so it can
+ * immediately deliver the returned durable wake without waiting for repair. */
+export async function markSessionAttemptQuiesced(
+  db: Database,
+  input: MarkSessionAttemptQuiescedInput,
+): Promise<SessionEvent[]> {
+  return (await commitSessionAttemptQuiescence(db, input)).events;
 }
 
 export type ReconcileSessionAttemptQuiescenceResult =

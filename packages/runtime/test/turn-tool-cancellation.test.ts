@@ -409,25 +409,19 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     expect(performance.now() - startedAt).toBeLessThan(providerLatencyMs * 3);
   });
 
-  test("retained cancellation retries inconclusive proof and a validated live group before settlement", async () => {
+  test("retained cancellation revalidates authority after inconclusive and live-group retries", async () => {
     const abort = new AbortController();
     const controller = createTurnToolCancellationController(abort.signal);
     let retained = true;
     const helperCommands: string[] = [];
-    let settlementCalls = 0;
     const exec = functionTool("exec_command", async () => running(321));
     const session = {
       hasRetainedProcess: (sessionId: number) => sessionId === 321 && retained,
       execCommandForProcessControl: async (_sessionId: number, args: { cmd: string }) => {
         helperCommands.push(args.cmd);
-        if (helperCommands.length === 1) return exited(76);
-        if (helperCommands.length === 2) {
-          return exited(75, "OPENGENI_RETAINED_SHELL_IDENTITY 5200 5200\n");
-        }
-        return exited(0);
+        return exited(helperCommands.length === 1 ? 76 : helperCommands.length === 2 ? 75 : 0);
       },
       writeStdinForProcessControl: async () => {
-        settlementCalls += 1;
         retained = false;
         return exited(137);
       },
@@ -441,12 +435,12 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     await controller.waitForQuiescence();
 
     expect(helperCommands).toHaveLength(3);
-    expect(helperCommands[0]).toContain("__opengeni_process_args");
-    expect(helperCommands[1]).toContain("__opengeni_process_args");
-    expect(helperCommands[2]).not.toContain("__opengeni_process_args");
-    expect(helperCommands[2]).toContain("__opengeni_pgid=5200");
-    expect(helperCommands[2]).toContain("command kill -KILL");
-    expect(settlementCalls).toBe(1);
+    for (const command of helperCommands) {
+      expect(command).toContain("read -r __opengeni_pid __opengeni_pgid");
+      expect(command).toContain('__opengeni_process_args "$__opengeni_pid"');
+      expect(command).toContain('"$__opengeni_token"');
+      expect(command).toContain('__opengeni_process_group_id "$__opengeni_pid"');
+    }
   });
 
   test("registers a durably promoted process even when stale authority rejects the exec output", async () => {
