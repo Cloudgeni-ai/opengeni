@@ -1,5 +1,12 @@
 # @opengeni/db
 
+## 0.28.17
+
+### Patch Changes
+
+- 8485ff5: Fence approved session MCP tool execution against worker-shutdown replay.
+- 1385585: Bound active turn memory, make worker admission cgroup-aware, and replace paused-prompt queue pressure with eligible Temporal backlog and slot saturation metrics.
+
 ## 0.28.16
 
 ### Patch Changes
