@@ -1,5 +1,4 @@
 import type { DraftTimelineAnnotation } from "@opengeni/sdk";
-import { MessageSquarePlusIcon } from "lucide-react";
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import type { TimelineAnnotationSourceDescriptor } from "../timeline";
@@ -213,11 +212,10 @@ export function TimelineAnnotationSelection({
         setCandidate(null);
       }}
     >
-      <span className="inline-flex items-center gap-1.5">
-        <MessageSquarePlusIcon aria-hidden="true" className="size-3.5" />
-        Annotate
-      </span>
+      Annotate
     </button>,
     document.body,
   );
 }
+
+export default TimelineAnnotationSelection;

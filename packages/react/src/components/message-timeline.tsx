@@ -23,6 +23,8 @@ import { AnimatePresence, motion } from "motion/react";
 import { Collapsible } from "radix-ui";
 import {
   Component,
+  Suspense,
+  lazy,
   memo,
   useCallback,
   useEffect,
@@ -94,9 +96,10 @@ import { SESSION_STATUS_META, StatusDot } from "./session-status";
 import { TimelineComputeLabelProvider } from "../timeline/compute-label";
 import { EntranceAnimationProvider, useEntranceAnimation } from "../timeline/entrance";
 import { SeenActivityIdsProvider } from "../timeline/seen-activity-ids";
-import { TooltipProvider } from "./tooltip";
-import { TimelineAnnotationSelection } from "./timeline-annotation-selection";
 import { TimelineAnnotationsChip } from "./timeline-annotations";
+import { TooltipProvider } from "./tooltip";
+
+const TimelineAnnotationSelection = lazy(() => import("./timeline-annotation-selection"));
 
 export type MessageTimelineProps = {
   /** Raw session events (projected internally) … */
@@ -1306,11 +1309,15 @@ export function MessageTimeline({
             <EntranceAnimationProvider value={!bulkRender}>
               <TooltipProvider delayDuration={400}>
                 <div className={cn("og-root relative flex min-h-0 flex-col", className)}>
-                  <TimelineAnnotationSelection
-                    rootRef={scrollRef}
-                    sources={annotationSources}
-                    onAnnotate={onAnnotate}
-                  />
+                  {onAnnotate ? (
+                    <Suspense fallback={null}>
+                      <TimelineAnnotationSelection
+                        rootRef={scrollRef}
+                        sources={annotationSources}
+                        onAnnotate={onAnnotate}
+                      />
+                    </Suspense>
+                  ) : null}
                   {/* Pinned: anchoring off so the tip-follow camera owns the motion.
           Unpinned: native scroll anchoring holds the reader's place. */}
                   <div
