@@ -1,5 +1,11 @@
 # @opengeni/react
 
+## 0.49.6
+
+### Patch Changes
+
+- 49be13b: Preserve dirty code-editor buffers and their guarded-save baseline across live same-file refreshes.
+
 ## 0.49.5
 
 ### Patch Changes
