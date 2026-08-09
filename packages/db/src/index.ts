@@ -9277,6 +9277,7 @@ export type SaveWorkspaceMemoryInput = {
   sessionId?: string | null | undefined; // provenance + event linkage
   origin?: WorkspaceMemoryOrigin | undefined;
   metadata?: Record<string, unknown> | undefined;
+  durableLearningOperation?: { attemptId: string; inputHash: string } | null | undefined;
 };
 
 export type SaveWorkspaceMemoryResult = {
@@ -9402,6 +9403,13 @@ function saveMemoryMetadata(input: SaveWorkspaceMemoryInput): Record<string, unk
   return {
     ...(input.metadata ?? {}),
     ...(input.origin ? { origin: input.origin } : {}),
+    ...(input.durableLearningOperation
+      ? {
+          durableLearningAttemptId: input.durableLearningOperation.attemptId,
+          durableLearningInputHash: input.durableLearningOperation.inputHash,
+          durableLearningOperationKind: input.replacesId ? "supersede" : "create",
+        }
+      : {}),
   };
 }
 
@@ -9409,7 +9417,11 @@ function inPlaceSaveMemoryMetadata(
   existing: Record<string, unknown>,
   input: SaveWorkspaceMemoryInput,
 ): Record<string, unknown> | undefined {
-  if (input.metadata === undefined && (!input.origin || hasMetadataOrigin(existing))) {
+  if (
+    input.metadata === undefined &&
+    (!input.origin || hasMetadataOrigin(existing)) &&
+    !input.durableLearningOperation
+  ) {
     return undefined;
   }
   const merged = {
@@ -9421,7 +9433,64 @@ function inPlaceSaveMemoryMetadata(
   } else if (input.origin) {
     merged.origin = input.origin;
   }
+  if (input.durableLearningOperation) {
+    merged.durableLearningAttemptId = input.durableLearningOperation.attemptId;
+    merged.durableLearningInputHash = input.durableLearningOperation.inputHash;
+    merged.durableLearningOperationKind = "update";
+  }
   return merged;
+}
+
+function supersededMemoryOperationMetadata(
+  existing: Record<string, unknown>,
+  input: SaveWorkspaceMemoryInput,
+  resourceId: string,
+  dedupeReason: "exact" | "near" | null,
+): Record<string, unknown> {
+  if (!input.durableLearningOperation) return existing;
+  return {
+    ...existing,
+    durableLearningSupersededByAttemptId: input.durableLearningOperation.attemptId,
+    durableLearningSupersededByInputHash: input.durableLearningOperation.inputHash,
+    durableLearningSupersededByResourceId: resourceId,
+    durableLearningSupersededByDedupeReason: dedupeReason,
+  };
+}
+
+async function findDurableLearningMemoryOperationRows(
+  scopedDb: Database,
+  input: SaveWorkspaceMemoryInput,
+): Promise<{
+  owned: typeof schema.knowledgeMemories.$inferSelect | null;
+  superseded: typeof schema.knowledgeMemories.$inferSelect | null;
+}> {
+  const operation = input.durableLearningOperation;
+  if (!operation) return { owned: null, superseded: null };
+  const owned = await scopedDb
+    .select()
+    .from(schema.knowledgeMemories)
+    .where(
+      and(
+        eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
+        sql`${schema.knowledgeMemories.metadata} ->> 'durableLearningAttemptId' = ${operation.attemptId}`,
+        sql`${schema.knowledgeMemories.metadata} ->> 'durableLearningInputHash' = ${operation.inputHash}`,
+      ),
+    )
+    .orderBy(desc(schema.knowledgeMemories.updatedAt))
+    .limit(1);
+  const superseded = await scopedDb
+    .select()
+    .from(schema.knowledgeMemories)
+    .where(
+      and(
+        eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
+        sql`${schema.knowledgeMemories.metadata} ->> 'durableLearningSupersededByAttemptId' = ${operation.attemptId}`,
+        sql`${schema.knowledgeMemories.metadata} ->> 'durableLearningSupersededByInputHash' = ${operation.inputHash}`,
+      ),
+    )
+    .orderBy(desc(schema.knowledgeMemories.updatedAt))
+    .limit(1);
+  return { owned: owned[0] ?? null, superseded: superseded[0] ?? null };
 }
 
 // Resolve a short prefix or full uuid to the full id within a workspace. Full
@@ -9513,12 +9582,64 @@ export async function saveWorkspaceMemory(
   }
 
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const operationRows = await findDurableLearningMemoryOperationRows(scopedDb, input);
+    if (operationRows.superseded?.supersededById) {
+      const [resource] = await scopedDb
+        .select()
+        .from(schema.knowledgeMemories)
+        .where(
+          and(
+            eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
+            eq(schema.knowledgeMemories.id, operationRows.superseded.supersededById),
+          ),
+        )
+        .limit(1);
+      if (resource && operationRows.superseded.status === "superseded") {
+        const reason = operationRows.superseded.metadata["durableLearningSupersededByDedupeReason"];
+        return {
+          memory: mapKnowledgeMemory(resource),
+          deduped: reason === "exact" || reason === "near",
+          dedupeReason: reason === "exact" || reason === "near" ? reason : null,
+          superseded: mapKnowledgeMemory(operationRows.superseded),
+          supersededId: operationRows.superseded.id,
+          updated: false,
+          embedded: embedding !== null,
+        };
+      }
+    }
+    const ownedOperationKind = operationRows.owned?.metadata["durableLearningOperationKind"];
+    if (operationRows.owned && ownedOperationKind === "create" && !input.replacesId) {
+      return {
+        memory: mapKnowledgeMemory(operationRows.owned),
+        deduped: false,
+        dedupeReason: null,
+        superseded: null,
+        supersededId: null,
+        updated: false,
+        embedded: embedding !== null,
+      };
+    }
+    if (operationRows.owned && ownedOperationKind === "update") {
+      return {
+        memory: mapKnowledgeMemory(operationRows.owned),
+        deduped: false,
+        dedupeReason: null,
+        superseded: null,
+        supersededId: null,
+        updated: true,
+        embedded: embedding !== null,
+      };
+    }
+
     // Resolve the supersession target first so an invalid replaces_id fails before
     // we insert anything (cross-workspace ids are RLS-invisible → treated as not found).
-    let replacesFullId: string | null = null;
+    let replacesFullId: string | null =
+      operationRows.owned && ownedOperationKind === "supersede"
+        ? operationRows.owned.supersedesId
+        : null;
     let replacesRow: typeof schema.knowledgeMemories.$inferSelect | null = null;
     if (input.replacesId) {
-      replacesFullId = await resolveWorkspaceMemoryId(
+      replacesFullId ??= await resolveWorkspaceMemoryId(
         scopedDb,
         input.workspaceId,
         input.replacesId,
@@ -9628,6 +9749,12 @@ export async function saveWorkspaceMemory(
             status: "superseded",
             supersededById: row.id,
             validUntil: new Date(),
+            metadata: supersededMemoryOperationMetadata(
+              replacesRow?.metadata ?? {},
+              input,
+              row.id,
+              dedupeReason,
+            ),
             updatedAt: new Date(),
           })
           .where(
@@ -9801,6 +9928,12 @@ export async function saveWorkspaceMemory(
           status: "superseded",
           supersededById: inserted.id,
           validUntil: new Date(),
+          metadata: supersededMemoryOperationMetadata(
+            replacesRow?.metadata ?? {},
+            input,
+            inserted.id,
+            null,
+          ),
           updatedAt: new Date(),
         })
         .where(

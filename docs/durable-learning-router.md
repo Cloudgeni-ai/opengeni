@@ -51,10 +51,12 @@ guesses.
 
 Every non-migration attempt retains exact account, workspace, actor, immutable
 initiating human, and optional session identity. An agent or service actor does
-not become human authority. User scope must equal the immutable initiating
-human; workspace, organization, role, session, and ephemeral scopes require an
-exact frozen grant. Labels, collections, source ids, service identity, session
-creator metadata, and provenance cannot widen scope.
+not become human authority. A human actor must be that exact initiating human;
+the router deterministically rejects a mismatched human actor before routing.
+User scope must equal the immutable initiating human; workspace, organization,
+role, session, and ephemeral scopes require an exact frozen grant. Labels,
+collections, source ids, service identity, session creator metadata, and
+provenance cannot widen scope.
 
 The planner supports only scopes already owned by each canonical authority:
 
@@ -107,18 +109,26 @@ rather than invoking a second adapter. The terminal receipt records:
 - effective boundary (`immediate`, `next_accepted_attempt`, or not applicable);
 - rollback support and an opaque authority-owned rollback token.
 
-Adapter/provider diagnostics do not become the public receipt. A failed write
-receives `AUTHORITY_WRITE_FAILED`; canonical authority audit data remains in its
-own ledger.
+Adapter/provider diagnostics do not become the public receipt. A thrown adapter
+error or claim-heartbeat failure is outcome-unknown because the authority may
+already have committed. It never creates a false terminal failure receipt: the
+immutable attempt remains pending, its claim prevents overlap until expiry, and
+the caller retries the same attempt id. An adapter may expose a definitive
+`AUTHORITY_WRITE_FAILED` receipt only when it can prove no authority effect
+occurred; canonical authority audit data remains in its own ledger.
 
 ## Rollback
 
 Rollback is a new immutable router attempt that references the original
 completed attempt. The router retrieves the original receipt, uses only its
 destination and opaque rollback token, and invokes the same authority adapter.
-It never translates rollback into a write on another surface. Missing,
-cross-scope, terminally unsupported, or adapter-less targets receive a
-deterministic rejection.
+Before invocation it reauthorizes the original initiating human, exact target
+scope, resolved authority level, and current surface availability. A different
+human cannot roll back another human's user-scoped write, and active-authority
+rollback requires a current activation grant. The router never translates
+rollback into a write on another surface. Missing, cross-scope, unauthorized,
+terminally unsupported, or adapter-less targets receive a deterministic
+rejection.
 
 Authority adapters preserve their native history semantics: Memory correction
 or archival, Preference Registry correction/supersession lifecycle,
@@ -134,6 +144,16 @@ origin for another surface, scope, or proposal mode. Legacy procedural or
 preference-shaped Memory remains retrievable until a separate deterministic
 promotion/supersession writes the Preference Registry; the router does not
 rewrite historical Memory or create duplicate prompt injection.
+
+Compatibility callers never mint a process-local random router id. First-party
+MCP derives the id from the immutable logical turn and exact tool arguments;
+the human REST path derives it from the authenticated subject and canonical
+request payload. The compatibility helper also has a deterministic fallback.
+Workspace Memory stamps the exact attempt/input identity onto a created or
+in-place-updated resource and stamps supersession convergence evidence onto the
+retired target. A retry can therefore reconstruct create, update,
+insert-and-supersede, or dedupe-to-existing outcomes even when a short target id
+became terminal after the first commit.
 
 This slice deliberately does not implement:
 

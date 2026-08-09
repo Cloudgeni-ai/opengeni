@@ -63,6 +63,15 @@ export class DurableLearningAttemptInProgressError extends Error {
   readonly code = "ATTEMPT_IN_PROGRESS" as const;
 }
 
+export class DurableLearningAuthorityOutcomeUnknownError extends Error {
+  readonly name = "DurableLearningAuthorityOutcomeUnknownError";
+  readonly code = "AUTHORITY_OUTCOME_UNKNOWN" as const;
+
+  constructor(message: string, cause?: unknown) {
+    super(message, cause === undefined ? undefined : { cause });
+  }
+}
+
 export type DurableLearningAttemptReservation = {
   attempt: DurableLearningAttempt;
   receipt: DurableLearningReceipt | null;
@@ -115,6 +124,7 @@ export type DurableLearningRouterPorts = {
   ledger: DurableLearningAttemptLedger;
   authorities: Partial<Record<DurableLearningResolvedSurface, DurableLearningAuthorityAdapter>>;
   now?: () => Date;
+  claimHeartbeatMs?: number;
 };
 
 function canonicalize(value: unknown): unknown {
@@ -137,6 +147,20 @@ export function durableLearningInputHash(
   return createHash("sha256")
     .update(JSON.stringify(canonicalize({ request, context })), "utf8")
     .digest("hex");
+}
+
+/** Stable UUID for a caller-owned durable operation identity. */
+export function durableLearningStableAttemptId(operationIdentity: unknown): string {
+  const canonicalIdentity = JSON.stringify(canonicalize(operationIdentity)) ?? "null";
+  const bytes = createHash("sha256")
+    .update("opengeni:durable-learning-attempt:v1\0", "utf8")
+    .update(canonicalIdentity, "utf8")
+    .digest()
+    .subarray(0, 16);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 function decision(input: {
@@ -201,6 +225,14 @@ function surfaceAvailable(
     case "documents_evidence":
       return context.availableSurfaces.documentsEvidence;
   }
+}
+
+function humanActorMatchesInitiator(context: DurableLearningAuthorityContext): boolean {
+  return (
+    context.actor.kind !== "human" ||
+    (context.initiatingHumanSubjectId !== null &&
+      context.actor.subjectId === context.initiatingHumanSubjectId)
+  );
 }
 
 function activeAuthority(
@@ -283,6 +315,14 @@ export function planDurableLearningWrite(
 ): DurableLearningRouteDecision {
   const request = DurableLearningRequest.parse(rawRequest) as DurableLearningWriteRequest;
   const context = DurableLearningAuthorityContext.parse(rawContext);
+
+  if (!humanActorMatchesInitiator(context)) {
+    return decision({
+      disposition: "rejected",
+      code: "ACTOR_INITIATING_HUMAN_MISMATCH",
+      reasons: ["A human durable-learning actor must be the exact initiating human."],
+    });
+  }
 
   const clarificationFields: Array<"requestedScope" | "requestedAuthority" | "targetSurface"> = [];
   if (request.requestedScope.kind === "unspecified") clarificationFields.push("requestedScope");
@@ -493,7 +533,7 @@ async function withClaimHeartbeat<T>(
       .catch((error: unknown) => {
         heartbeatFailure = error;
       });
-  }, DURABLE_LEARNING_CLAIM_HEARTBEAT_MS);
+  }, ports.claimHeartbeatMs ?? DURABLE_LEARNING_CLAIM_HEARTBEAT_MS);
   timer.unref?.();
 
   try {
@@ -565,6 +605,8 @@ export async function routeDurableLearning(
       );
     }
     const destination = target.receipt.decision.destination;
+    const targetScope = target.receipt.decision.scope;
+    const targetAuthority = target.receipt.decision.authority;
     const rollbackToken = target.receipt.rollback.token;
     const adapter = destination ? ports.authorities[destination] : undefined;
     if (!target.receipt.rollback.supported || rollbackToken === null || !adapter) {
@@ -581,6 +623,136 @@ export async function routeDurableLearning(
             code: "ROLLBACK_NOT_SUPPORTED",
             destination,
             reasons: ["The target receipt does not expose an authorized rollback operation."],
+          }),
+          resource: target.receipt.resource,
+          effectiveBoundary: "not_applicable",
+          rollback: { supported: false, targetAttemptId: request.targetAttemptId, token: null },
+          createdAt: receiptCreatedAt,
+        },
+        claimId,
+      );
+    }
+    if (
+      !humanActorMatchesInitiator(context) ||
+      context.initiatingHumanSubjectId === null ||
+      target.attempt.initiatingHumanSubjectId === null ||
+      context.initiatingHumanSubjectId !== target.attempt.initiatingHumanSubjectId ||
+      (target.attempt.actor.kind === "human" &&
+        target.attempt.actor.subjectId !== target.attempt.initiatingHumanSubjectId)
+    ) {
+      return await complete(
+        ports,
+        attempt,
+        {
+          contractVersion: DURABLE_LEARNING_CONTRACT_VERSION,
+          attemptId: attempt.id,
+          inputHash: attempt.inputHash,
+          outcome: "rejected",
+          decision: decision({
+            disposition: "rejected",
+            code: "ROLLBACK_NOT_AUTHORIZED",
+            destination,
+            reasons: [
+              "Rollback requires the exact initiating human recorded on the target attempt.",
+            ],
+          }),
+          resource: target.receipt.resource,
+          effectiveBoundary: "not_applicable",
+          rollback: { supported: false, targetAttemptId: request.targetAttemptId, token: null },
+          createdAt: receiptCreatedAt,
+        },
+        claimId,
+      );
+    }
+    if (targetScope === null || targetScope.kind === "unspecified" || targetAuthority === null) {
+      return await complete(
+        ports,
+        attempt,
+        {
+          contractVersion: DURABLE_LEARNING_CONTRACT_VERSION,
+          attemptId: attempt.id,
+          inputHash: attempt.inputHash,
+          outcome: "rejected",
+          decision: decision({
+            disposition: "rejected",
+            code: "ROLLBACK_NOT_SUPPORTED",
+            destination,
+            reasons: ["The target receipt has no complete scope and authority boundary."],
+          }),
+          resource: target.receipt.resource,
+          effectiveBoundary: "not_applicable",
+          rollback: { supported: false, targetAttemptId: request.targetAttemptId, token: null },
+          createdAt: receiptCreatedAt,
+        },
+        claimId,
+      );
+    }
+    if (!scopeAuthorized(targetScope, context)) {
+      return await complete(
+        ports,
+        attempt,
+        {
+          contractVersion: DURABLE_LEARNING_CONTRACT_VERSION,
+          attemptId: attempt.id,
+          inputHash: attempt.inputHash,
+          outcome: "rejected",
+          decision: decision({
+            disposition: "rejected",
+            code: "SCOPE_NOT_AUTHORIZED",
+            destination,
+            scope: targetScope,
+            authority: targetAuthority,
+            reasons: ["The current frozen authority context does not grant the target scope."],
+          }),
+          resource: target.receipt.resource,
+          effectiveBoundary: "not_applicable",
+          rollback: { supported: false, targetAttemptId: request.targetAttemptId, token: null },
+          createdAt: receiptCreatedAt,
+        },
+        claimId,
+      );
+    }
+    if (targetAuthority === "active" && !context.grants.activate) {
+      return await complete(
+        ports,
+        attempt,
+        {
+          contractVersion: DURABLE_LEARNING_CONTRACT_VERSION,
+          attemptId: attempt.id,
+          inputHash: attempt.inputHash,
+          outcome: "rejected",
+          decision: decision({
+            disposition: "rejected",
+            code: "ACTIVATION_NOT_AUTHORIZED",
+            destination,
+            scope: targetScope,
+            authority: targetAuthority,
+            reasons: ["Rollback of active authority requires a current activation grant."],
+          }),
+          resource: target.receipt.resource,
+          effectiveBoundary: "not_applicable",
+          rollback: { supported: false, targetAttemptId: request.targetAttemptId, token: null },
+          createdAt: receiptCreatedAt,
+        },
+        claimId,
+      );
+    }
+    if (!surfaceAvailable(destination!, context)) {
+      return await complete(
+        ports,
+        attempt,
+        {
+          contractVersion: DURABLE_LEARNING_CONTRACT_VERSION,
+          attemptId: attempt.id,
+          inputHash: attempt.inputHash,
+          outcome: "rejected",
+          decision: decision({
+            disposition: "rejected",
+            code: "SURFACE_NOT_AVAILABLE",
+            destination,
+            scope: targetScope,
+            authority: targetAuthority,
+            reasons: ["The target authority surface is not currently available."],
           }),
           resource: target.receipt.resource,
           effectiveBoundary: "not_applicable",
@@ -615,6 +787,9 @@ export async function routeDurableLearning(
           disposition: "route",
           code: "ROUTED",
           destination,
+          scope: targetScope,
+          authority: targetAuthority,
+          policySnapshotId: target.receipt.decision.policySnapshotId,
           reasons: [`Rollback routed to the original ${destination} authority.`],
         }),
         resource: result.resource,
@@ -686,30 +861,10 @@ export async function routeDurableLearning(
       claimId,
       async () => await adapter.write({ attempt, request, decision: routeDecision }),
     );
-  } catch {
-    return await complete(
-      ports,
-      attempt,
-      {
-        contractVersion: DURABLE_LEARNING_CONTRACT_VERSION,
-        attemptId: attempt.id,
-        inputHash: attempt.inputHash,
-        outcome: "failed",
-        decision: decision({
-          disposition: "rejected",
-          code: "AUTHORITY_WRITE_FAILED",
-          destination,
-          scope: routeDecision.scope as DurableLearningResolvedScope,
-          authority: routeDecision.authority,
-          policySnapshotId: routeDecision.policySnapshotId,
-          reasons: ["The selected canonical authority did not complete the write."],
-        }),
-        resource: null,
-        effectiveBoundary: "not_applicable",
-        rollback: { supported: false, targetAttemptId: null, token: null },
-        createdAt: receiptCreatedAt,
-      },
-      claimId,
+  } catch (error) {
+    throw new DurableLearningAuthorityOutcomeUnknownError(
+      "The selected canonical authority may have committed; retry the same attempt id after its execution claim expires",
+      error,
     );
   }
   return await complete(

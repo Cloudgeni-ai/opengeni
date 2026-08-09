@@ -12,6 +12,7 @@ import {
   createDb,
   createDurableLearningAttemptLedger,
   DurableLearningLedgerConflictError,
+  saveWorkspaceMemory,
   withWorkspaceRls,
 } from "../src/index";
 import * as schema from "../src/schema";
@@ -221,5 +222,122 @@ describe("durable learning Postgres ledger", () => {
     expect(errorChainMessage(failure)).toContain(
       "permission denied for table durable_learning_attempts",
     );
+  });
+
+  test("converges durable Memory create, update, and supersession retries", async () => {
+    if (!client) return;
+    const grant = await workspace("memory-convergence");
+    const created = await saveWorkspaceMemory(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      text: "Original durable memory",
+      kind: "semantic",
+      origin: "human",
+    });
+
+    const updateOperation = {
+      attemptId: randomUUID(),
+      inputHash: "d".repeat(64),
+    };
+    const updated = await saveWorkspaceMemory(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      text: "Original durable memory",
+      kind: "decision",
+      replacesId: created.memory.id.slice(0, 8),
+      origin: "human",
+      durableLearningOperation: updateOperation,
+    });
+    const updatedReplay = await saveWorkspaceMemory(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      text: "Original durable memory",
+      kind: "decision",
+      replacesId: created.memory.id.slice(0, 8),
+      origin: "human",
+      durableLearningOperation: updateOperation,
+    });
+    expect(updated.updated).toBe(true);
+    expect(updatedReplay).toMatchObject({
+      memory: { id: updated.memory.id },
+      updated: true,
+      superseded: null,
+    });
+
+    const supersedeOperation = {
+      attemptId: randomUUID(),
+      inputHash: "e".repeat(64),
+    };
+    const superseded = await saveWorkspaceMemory(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      text: "Replacement durable memory",
+      kind: "decision",
+      replacesId: updated.memory.id.slice(0, 8),
+      origin: "human",
+      durableLearningOperation: supersedeOperation,
+    });
+    const supersededReplay = await saveWorkspaceMemory(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      text: "Replacement durable memory",
+      kind: "decision",
+      replacesId: updated.memory.id.slice(0, 8),
+      origin: "human",
+      durableLearningOperation: supersedeOperation,
+    });
+    expect(superseded.superseded?.id).toBe(updated.memory.id);
+    expect(supersededReplay).toMatchObject({
+      memory: { id: superseded.memory.id },
+      superseded: { id: updated.memory.id },
+      updated: false,
+    });
+
+    const existing = await saveWorkspaceMemory(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      text: "Existing dedupe winner",
+      kind: "semantic",
+      origin: "human",
+    });
+    const old = await saveWorkspaceMemory(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      text: "Memory to supersede into a winner",
+      kind: "semantic",
+      origin: "human",
+    });
+    const dedupeOperation = {
+      attemptId: randomUUID(),
+      inputHash: "f".repeat(64),
+    };
+    const deduped = await saveWorkspaceMemory(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      text: existing.memory.text,
+      kind: "semantic",
+      replacesId: old.memory.id.slice(0, 8),
+      origin: "human",
+      durableLearningOperation: dedupeOperation,
+    });
+    const dedupedReplay = await saveWorkspaceMemory(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      text: existing.memory.text,
+      kind: "semantic",
+      replacesId: old.memory.id.slice(0, 8),
+      origin: "human",
+      durableLearningOperation: dedupeOperation,
+    });
+    expect(deduped).toMatchObject({
+      memory: { id: existing.memory.id },
+      deduped: true,
+      superseded: { id: old.memory.id },
+    });
+    expect(dedupedReplay).toMatchObject({
+      memory: { id: existing.memory.id },
+      deduped: true,
+      superseded: { id: old.memory.id },
+    });
   });
 });

@@ -4,11 +4,14 @@ import {
   type DurableLearningAttempt,
   type DurableLearningAuthorityContext,
   type DurableLearningReceipt,
+  type DurableLearningRollbackRequest,
   type DurableLearningWriteRequest,
 } from "@opengeni/contracts";
 import {
+  DurableLearningAuthorityOutcomeUnknownError,
   DurableLearningAttemptConflictError,
   DurableLearningAttemptInProgressError,
+  durableLearningStableAttemptId,
   planDurableLearningWrite,
   routeDurableLearning,
   type DurableLearningAttemptLedger,
@@ -123,7 +126,7 @@ function memoryLedger() {
       return { attempt, receipt };
     },
   };
-  return { ledger, attempts, receipts };
+  return { ledger, attempts, receipts, claims };
 }
 
 describe("durable learning route planner", () => {
@@ -265,6 +268,29 @@ describe("durable learning route planner", () => {
       clarificationFields: ["requestedScope", "requestedAuthority", "targetSurface"],
     });
   });
+
+  test("rejects a human actor that is not the exact initiating human", () => {
+    const result = planDurableLearningWrite(
+      request(),
+      context({
+        actor: { kind: "human", subjectId: "human:actor" },
+        initiatingHumanSubjectId: "human:owner",
+      }),
+    );
+    expect(result).toMatchObject({
+      disposition: "rejected",
+      code: "ACTOR_INITIATING_HUMAN_MISMATCH",
+    });
+  });
+
+  test("derives stable UUID attempts from durable operation identity", () => {
+    const first = durableLearningStableAttemptId({ turnId: "turn-1", text: "remember this" });
+    const reordered = durableLearningStableAttemptId({ text: "remember this", turnId: "turn-1" });
+    const changed = durableLearningStableAttemptId({ turnId: "turn-2", text: "remember this" });
+    expect(first).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(reordered).toBe(first);
+    expect(changed).not.toBe(first);
+  });
 });
 
 describe("durable learning router service", () => {
@@ -362,5 +388,211 @@ describe("durable learning router service", () => {
     );
     releaseWrite();
     expect((await first).receipt.outcome).toBe("applied");
+  });
+
+  test("reauthorizes rollback against the target human, scope, and authority", async () => {
+    const { ledger } = memoryLedger();
+    let rollbackCalls = 0;
+    const ports = {
+      ledger,
+      authorities: {
+        memory: {
+          async write() {
+            return {
+              outcome: "applied" as const,
+              resource: {
+                surface: "memory" as const,
+                id: "memory-owner",
+                version: "1",
+                status: "active",
+              },
+              effectiveBoundary: "next_accepted_attempt" as const,
+              rollback: { supported: true, targetAttemptId: null, token: "rollback-owner" },
+            };
+          },
+          async rollback() {
+            rollbackCalls += 1;
+            return {
+              resource: {
+                surface: "memory" as const,
+                id: "memory-owner",
+                version: "2",
+                status: "archived",
+              },
+              effectiveBoundary: "next_accepted_attempt" as const,
+            };
+          },
+        },
+      },
+    };
+    const owner = "human:owner";
+    await routeDurableLearning(
+      request({ requestedScope: { kind: "user", subjectId: owner } }),
+      context({
+        actor: { kind: "human", subjectId: owner },
+        initiatingHumanSubjectId: owner,
+      }),
+      ports,
+    );
+    const rollback = (attemptId: string): DurableLearningRollbackRequest => ({
+      contractVersion: DURABLE_LEARNING_CONTRACT_VERSION,
+      operation: "rollback",
+      attemptId,
+      origin: "human_admin",
+      targetAttemptId: ATTEMPT_ID,
+      reason: "undo the owner memory",
+    });
+
+    const wrongHuman = await routeDurableLearning(
+      rollback("10000000-0000-4000-8000-000000000011"),
+      context({
+        actor: { kind: "human", subjectId: "human:other" },
+        initiatingHumanSubjectId: "human:other",
+        grants: {
+          organization: false,
+          workspace: false,
+          selfUser: false,
+          roleKeys: [],
+          sessionIds: [],
+          ephemeralSessionIds: [],
+          activate: false,
+        },
+      }),
+      ports,
+    );
+    expect(wrongHuman.receipt.decision.code).toBe("ROLLBACK_NOT_AUTHORIZED");
+
+    const missingScope = await routeDurableLearning(
+      rollback("10000000-0000-4000-8000-000000000012"),
+      context({
+        actor: { kind: "human", subjectId: owner },
+        initiatingHumanSubjectId: owner,
+        grants: { ...context().grants, selfUser: false },
+      }),
+      ports,
+    );
+    expect(missingScope.receipt.decision.code).toBe("SCOPE_NOT_AUTHORIZED");
+
+    const missingAuthority = await routeDurableLearning(
+      rollback("10000000-0000-4000-8000-000000000013"),
+      context({
+        actor: { kind: "human", subjectId: owner },
+        initiatingHumanSubjectId: owner,
+        grants: { ...context().grants, activate: false },
+      }),
+      ports,
+    );
+    expect(missingAuthority.receipt.decision.code).toBe("ACTIVATION_NOT_AUTHORIZED");
+
+    const applied = await routeDurableLearning(
+      rollback("10000000-0000-4000-8000-000000000014"),
+      context({
+        actor: { kind: "human", subjectId: owner },
+        initiatingHumanSubjectId: owner,
+      }),
+      ports,
+    );
+    expect(applied.receipt.outcome).toBe("rolled_back");
+    expect(applied.receipt.decision).toMatchObject({
+      destination: "memory",
+      scope: { kind: "user", subjectId: owner },
+      authority: "active",
+    });
+    expect(rollbackCalls).toBe(1);
+  });
+
+  test("keeps an ambiguous adapter result nonterminal and converges on retry", async () => {
+    const { ledger, claims, receipts } = memoryLedger();
+    let committed = false;
+    let sideEffects = 0;
+    const result = {
+      outcome: "applied" as const,
+      resource: {
+        surface: "memory" as const,
+        id: "memory-ambiguous",
+        version: "1",
+        status: "active",
+      },
+      effectiveBoundary: "next_accepted_attempt" as const,
+      rollback: { supported: true, targetAttemptId: null, token: "rollback-ambiguous" },
+    };
+    const ports = {
+      ledger,
+      authorities: {
+        memory: {
+          async write() {
+            if (!committed) {
+              committed = true;
+              sideEffects += 1;
+              throw new Error("connection lost after commit");
+            }
+            return result;
+          },
+          async rollback() {
+            throw new Error("not used");
+          },
+        },
+      },
+    };
+    await expect(routeDurableLearning(request(), context(), ports)).rejects.toBeInstanceOf(
+      DurableLearningAuthorityOutcomeUnknownError,
+    );
+    expect(receipts.has(ATTEMPT_ID)).toBe(false);
+    expect(sideEffects).toBe(1);
+
+    // Model the durable execution claim expiring after the outcome-unknown crash gap.
+    claims.delete(ATTEMPT_ID);
+    const retried = await routeDurableLearning(request(), context(), ports);
+    expect(retried.receipt.outcome).toBe("applied");
+    expect(sideEffects).toBe(1);
+  });
+
+  test("does not terminalize a completed write when its heartbeat claim is lost", async () => {
+    const { ledger, claims, receipts } = memoryLedger();
+    let allowRenewal = false;
+    const originalRenew = ledger.renewAttemptClaim;
+    ledger.renewAttemptClaim = async (attempt, claimId) =>
+      allowRenewal && (await originalRenew(attempt, claimId));
+    let sideEffects = 0;
+    let committed = false;
+    const ports = {
+      ledger,
+      claimHeartbeatMs: 1,
+      authorities: {
+        memory: {
+          async write() {
+            if (!committed) {
+              committed = true;
+              sideEffects += 1;
+            }
+            await Bun.sleep(10);
+            return {
+              outcome: "applied" as const,
+              resource: {
+                surface: "memory" as const,
+                id: "memory-heartbeat",
+                version: "1",
+                status: "active",
+              },
+              effectiveBoundary: "next_accepted_attempt" as const,
+              rollback: { supported: false, targetAttemptId: null, token: null },
+            };
+          },
+          async rollback() {
+            throw new Error("not used");
+          },
+        },
+      },
+    };
+    await expect(routeDurableLearning(request(), context(), ports)).rejects.toBeInstanceOf(
+      DurableLearningAuthorityOutcomeUnknownError,
+    );
+    expect(receipts.has(ATTEMPT_ID)).toBe(false);
+    claims.delete(ATTEMPT_ID);
+    allowRenewal = true;
+    expect((await routeDurableLearning(request(), context(), ports)).receipt.outcome).toBe(
+      "applied",
+    );
+    expect(sideEffects).toBe(1);
   });
 });

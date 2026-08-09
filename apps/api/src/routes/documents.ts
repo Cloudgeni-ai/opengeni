@@ -42,6 +42,7 @@ import { HTTPException } from "hono/http-exception";
 import {
   requireAccessGrant,
   requireAccessGrantAuthorization,
+  durableLearningStableAttemptId,
   routeLegacyWorkspaceMemoryWrite,
 } from "@opengeni/core";
 import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
@@ -577,6 +578,13 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
           sessionId: payload.createdBySessionId ?? null,
           actor: { kind: "human", subjectId: grant.subjectId },
           initiatingHumanSubjectId: grant.subjectId,
+          attemptId: durableLearningStableAttemptId({
+            source: "rest:knowledge-memory-create",
+            accountId: grant.accountId,
+            workspaceId,
+            subjectId: grant.subjectId,
+            payload,
+          }),
           text: payload.text,
           kind: payload.kind,
           confidence: payload.confidence,

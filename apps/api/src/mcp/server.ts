@@ -103,6 +103,7 @@ import {
   hasLiteralPermission,
   hasPermission,
   authorizedSocialConnectionsForGrant,
+  durableLearningStableAttemptId,
   requireLiveAgentAttemptAuthorization,
   requireSessionAuthorization,
   requireSessionAuthorizationListScope,
@@ -2124,6 +2125,18 @@ function registerMemoryTools(
         sessionId,
         actor: { kind: "agent", subjectId: `agent:${sessionId}` },
         initiatingHumanSubjectId: authority.initiatingHumanSubjectId,
+        attemptId: durableLearningStableAttemptId({
+          source: "first-party-mcp:memory_save",
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: claims.sessionId,
+          turnId: claims.turnId,
+          initiatingHumanSubjectId: authority.initiatingHumanSubjectId,
+          text,
+          kind,
+          confidence: confidence ?? null,
+          replacesId: replaces_id ?? null,
+        }),
         text,
         kind,
         ...(confidence !== undefined ? { confidence } : {}),
@@ -2135,18 +2148,20 @@ function registerMemoryTools(
           `Durable learning did not complete the Memory write: ${routed.router.receipt.decision.code}`,
         );
       }
-      await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [
-        {
-          type: "memory.saved",
-          payload: {
-            memoryId: result.memory.id,
-            kind: result.memory.kind,
-            preview: memoryPreview(result.memory.text),
-            deduped: result.deduped,
-            ...(result.superseded ? { supersededMemoryId: result.superseded.id } : {}),
+      if (routed.router.idempotency === "created") {
+        await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [
+          {
+            type: "memory.saved",
+            payload: {
+              memoryId: result.memory.id,
+              kind: result.memory.kind,
+              preview: memoryPreview(result.memory.text),
+              deduped: result.deduped,
+              ...(result.superseded ? { supersededMemoryId: result.superseded.id } : {}),
+            },
           },
-        },
-      ]);
+        ]);
+      }
       const changed = !result.deduped || result.updated || result.superseded !== null;
       const outcome =
         result.updated || result.superseded !== null
@@ -2175,7 +2190,9 @@ function registerMemoryTools(
               ]
             : undefined,
           timestamp: result.memory.updatedAt,
-          idempotency: { status: "not_supported" },
+          idempotency: {
+            status: routed.router.idempotency === "replayed" ? "replayed" : "applied",
+          },
           warnings: !result.embedded
             ? ["Memory committed without a vector embedding; keyword search remains available."]
             : [],

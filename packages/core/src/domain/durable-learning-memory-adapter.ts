@@ -3,7 +3,7 @@ import type {
   DurableLearningAuthorityWriteResult,
 } from "./durable-learning-router";
 import { routeDurableLearning } from "./durable-learning-router";
-import { randomUUID } from "node:crypto";
+import { durableLearningStableAttemptId } from "./durable-learning-router";
 import {
   DURABLE_LEARNING_CONTRACT_VERSION,
   type DurableLearningRouterResponse,
@@ -99,8 +99,10 @@ export function createWorkspaceMemoryDurableLearningAdapter(
               : {}),
             metadata: {
               ...(legacy?.metadata ?? {}),
-              durableLearningAttemptId: attempt.id,
-              durableLearningInputHash: attempt.inputHash,
+            },
+            durableLearningOperation: {
+              attemptId: attempt.id,
+              inputHash: attempt.inputHash,
             },
             origin: attempt.actor.kind === "human" ? "human" : "agent",
           },
@@ -187,73 +189,120 @@ export async function routeLegacyWorkspaceMemoryWrite(
 }> {
   let memory: SaveWorkspaceMemoryResult | null = null;
   let writeError: unknown = null;
-  const attemptId = input.attemptId ?? randomUUID();
-  const router = await routeDurableLearning(
-    {
-      contractVersion: DURABLE_LEARNING_CONTRACT_VERSION,
-      operation: "write",
-      attemptId,
-      origin: "legacy_memory_save",
-      requestedAuthority: "active",
-      requestedScope: { kind: "workspace" },
-      targetSurface: "memory",
-      subject: {
-        kind: subjectKindForLegacyMemory(input.kind),
-        content: input.text,
-        stableKey: null,
-        title: null,
-        summary: null,
-        roleKey: null,
-        replacesResourceId: input.replacesId ?? null,
-        legacyMemory: {
-          kind: input.kind,
-          confidence: input.confidence ?? null,
-          pinned: input.pinned ?? null,
-          metadata: input.metadata ?? {},
-        },
-      },
-      evidence: [],
-    },
-    {
+  const attemptId =
+    input.attemptId ??
+    durableLearningStableAttemptId({
+      source: "legacy-workspace-memory",
       accountId: input.accountId,
       workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
       actor: input.actor,
       initiatingHumanSubjectId: input.initiatingHumanSubjectId,
-      sessionId: input.sessionId,
-      grants: {
-        organization: false,
-        workspace: true,
-        selfUser: false,
-        roleKeys: [],
-        sessionIds: input.sessionId ? [input.sessionId] : [],
-        ephemeralSessionIds: [],
-        activate: true,
-      },
-      learningPolicy: null,
-      availableSurfaces: {
-        memory: true,
-        preferenceRegistry: false,
-        instructionPolicy: false,
-        companyProfile: false,
-        documentsEvidence: false,
-      },
-    },
-    {
-      ledger: createDurableLearningAttemptLedger(input.db),
-      authorities: {
-        memory: createWorkspaceMemoryDurableLearningAdapter({
-          db: input.db,
-          ...(input.embedder ? { embedder: input.embedder } : {}),
-          onWriteResult: (result) => {
-            memory = result;
+      text: input.text,
+      kind: input.kind,
+      confidence: input.confidence ?? null,
+      pinned: input.pinned ?? null,
+      replacesId: input.replacesId ?? null,
+      metadata: input.metadata ?? {},
+    });
+  let router: DurableLearningRouterResponse;
+  try {
+    router = await routeDurableLearning(
+      {
+        contractVersion: DURABLE_LEARNING_CONTRACT_VERSION,
+        operation: "write",
+        attemptId,
+        origin: "legacy_memory_save",
+        requestedAuthority: "active",
+        requestedScope: { kind: "workspace" },
+        targetSurface: "memory",
+        subject: {
+          kind: subjectKindForLegacyMemory(input.kind),
+          content: input.text,
+          stableKey: null,
+          title: null,
+          summary: null,
+          roleKey: null,
+          replacesResourceId: input.replacesId ?? null,
+          legacyMemory: {
+            kind: input.kind,
+            confidence: input.confidence ?? null,
+            pinned: input.pinned ?? null,
+            metadata: input.metadata ?? {},
           },
-          onWriteError: (error) => {
-            writeError = error;
-          },
-        }),
+        },
+        evidence: [],
       },
-    },
-  );
+      {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        actor: input.actor,
+        initiatingHumanSubjectId: input.initiatingHumanSubjectId,
+        sessionId: input.sessionId,
+        grants: {
+          organization: false,
+          workspace: true,
+          selfUser: false,
+          roleKeys: [],
+          sessionIds: input.sessionId ? [input.sessionId] : [],
+          ephemeralSessionIds: [],
+          activate: true,
+        },
+        learningPolicy: null,
+        availableSurfaces: {
+          memory: true,
+          preferenceRegistry: false,
+          instructionPolicy: false,
+          companyProfile: false,
+          documentsEvidence: false,
+        },
+      },
+      {
+        ledger: createDurableLearningAttemptLedger(input.db),
+        authorities: {
+          memory: createWorkspaceMemoryDurableLearningAdapter({
+            db: input.db,
+            ...(input.embedder ? { embedder: input.embedder } : {}),
+            onWriteResult: (result) => {
+              memory = result;
+            },
+            onWriteError: (error) => {
+              writeError = error;
+            },
+          }),
+        },
+      },
+    );
+  } catch (error) {
+    if (writeError !== null) throw writeError;
+    throw error;
+  }
   if (writeError !== null) throw writeError;
+  if (
+    memory === null &&
+    (router.receipt.outcome === "applied" || router.receipt.outcome === "noop") &&
+    router.receipt.resource?.surface === "memory"
+  ) {
+    memory = await saveWorkspaceMemory(
+      input.db,
+      {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        text: input.text,
+        kind: input.kind,
+        ...(input.confidence !== undefined ? { confidence: input.confidence } : {}),
+        ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
+        ...(input.replacesId ? { replacesId: input.replacesId } : {}),
+        metadata: input.metadata ?? {},
+        durableLearningOperation: {
+          attemptId: router.receipt.attemptId,
+          inputHash: router.receipt.inputHash,
+        },
+        origin: input.actor.kind === "human" ? "human" : "agent",
+      },
+      input.embedder,
+    );
+  }
   return { router, memory };
 }
