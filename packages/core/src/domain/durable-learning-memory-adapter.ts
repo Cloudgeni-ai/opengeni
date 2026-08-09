@@ -22,6 +22,7 @@ export type WorkspaceMemoryDurableLearningAdapterOptions = {
   db: Database;
   embedder?: MemoryEmbedder;
   onWriteResult?: (result: SaveWorkspaceMemoryResult) => void;
+  onWriteError?: (error: unknown) => void;
 };
 
 export type LegacyWorkspaceMemoryLearningWriteInput = {
@@ -77,32 +78,38 @@ export function createWorkspaceMemoryDurableLearningAdapter(
         );
       }
       const legacy = request.origin === "legacy_memory_save" ? request.subject.legacyMemory : null;
-      const result = await saveWorkspaceMemory(
-        options.db,
-        {
-          accountId: attempt.accountId,
-          workspaceId: attempt.workspaceId,
-          sessionId: attempt.sessionId,
-          text: request.subject.content,
-          kind: legacy?.kind ?? memoryKindForSubject(request.subject.kind),
-          ...(legacy?.confidence !== null && legacy?.confidence !== undefined
-            ? { confidence: legacy.confidence }
-            : {}),
-          ...(legacy?.pinned !== null && legacy?.pinned !== undefined
-            ? { pinned: legacy.pinned }
-            : {}),
-          ...(request.subject.replacesResourceId
-            ? { replacesId: request.subject.replacesResourceId }
-            : {}),
-          metadata: {
-            ...(legacy?.metadata ?? {}),
-            durableLearningAttemptId: attempt.id,
-            durableLearningInputHash: attempt.inputHash,
+      let result: SaveWorkspaceMemoryResult;
+      try {
+        result = await saveWorkspaceMemory(
+          options.db,
+          {
+            accountId: attempt.accountId,
+            workspaceId: attempt.workspaceId,
+            sessionId: attempt.sessionId,
+            text: request.subject.content,
+            kind: legacy?.kind ?? memoryKindForSubject(request.subject.kind),
+            ...(legacy?.confidence !== null && legacy?.confidence !== undefined
+              ? { confidence: legacy.confidence }
+              : {}),
+            ...(legacy?.pinned !== null && legacy?.pinned !== undefined
+              ? { pinned: legacy.pinned }
+              : {}),
+            ...(request.subject.replacesResourceId
+              ? { replacesId: request.subject.replacesResourceId }
+              : {}),
+            metadata: {
+              ...(legacy?.metadata ?? {}),
+              durableLearningAttemptId: attempt.id,
+              durableLearningInputHash: attempt.inputHash,
+            },
+            origin: attempt.actor.kind === "human" ? "human" : "agent",
           },
-          origin: attempt.actor.kind === "human" ? "human" : "agent",
-        },
-        options.embedder,
-      );
+          options.embedder,
+        );
+      } catch (error) {
+        options.onWriteError?.(error);
+        throw error;
+      }
       options.onWriteResult?.(result);
       const ownedByAttempt =
         result.memory.metadata.durableLearningAttemptId === attempt.id &&
@@ -179,6 +186,7 @@ export async function routeLegacyWorkspaceMemoryWrite(
   memory: SaveWorkspaceMemoryResult | null;
 }> {
   let memory: SaveWorkspaceMemoryResult | null = null;
+  let writeError: unknown = null;
   const attemptId = input.attemptId ?? randomUUID();
   const router = await routeDurableLearning(
     {
@@ -239,9 +247,13 @@ export async function routeLegacyWorkspaceMemoryWrite(
           onWriteResult: (result) => {
             memory = result;
           },
+          onWriteError: (error) => {
+            writeError = error;
+          },
         }),
       },
     },
   );
+  if (writeError !== null) throw writeError;
   return { router, memory };
 }
