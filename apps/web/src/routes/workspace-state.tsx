@@ -13,10 +13,10 @@ import { Link } from "@tanstack/react-router";
 import {
   BookOpenIcon,
   BrainCircuitIcon,
+  ChevronDownIcon,
   CircleAlertIcon,
   Clock3Icon,
   FileSearchIcon,
-  MapIcon,
   NetworkIcon,
   PlugIcon,
   ServerCogIcon,
@@ -31,6 +31,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
 import { hasWorkspacePermission } from "@/lib/permissions";
 
+import { BrainOverview } from "./agent-brain-overview";
 import {
   useWorkspaceInstructionPolicyOnboardingProposals,
   useWorkspaceStateInventory,
@@ -99,7 +100,7 @@ function Metric({ label, value }: { label: string; value: ReactNode }) {
 
 function WorkspaceStateLoading() {
   return (
-    <div aria-label="Loading workspace state" className="grid gap-4">
+    <div aria-label="Loading Agent Brain" className="grid gap-4">
       <Skeleton className="h-28 w-full" />
       <div className="grid gap-4 lg:grid-cols-2">
         <Skeleton className="h-64 w-full" />
@@ -222,7 +223,7 @@ function onboardingProposalErrorMessage(error: unknown): string {
       case "WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_OVERSIZED":
         return "The proposal is larger than the instruction-policy draft limit.";
       case "WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_STALE":
-        return "The active policy changed. Refresh Workspace State and review the new baseline.";
+        return "The active policy changed. Refresh Agent Brain and review the new baseline.";
       case "WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_CONFLICT":
         return "That source version already proposed a draft for this policy target.";
       case "WORKSPACE_INSTRUCTION_POLICY_OPERATION_REUSED":
@@ -893,7 +894,7 @@ function ExistingSources({ workspaceId }: { workspaceId: string }) {
   return (
     <StateCard
       title="Authoritative source surfaces"
-      description="Workspace State links to each existing authority and hosts only bounded governance actions where the canonical backend already exists."
+      description="Agent Brain is an overview, not a duplicate editor. Use each authority's existing surface or canonical lifecycle panel for detail and permitted changes."
     >
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
         {links.map((item) => (
@@ -916,6 +917,7 @@ export function WorkspaceStateRoute({ workspaceId }: { workspaceId: string }) {
   const { client } = useAppContext();
   const [attemptInput, setAttemptInput] = useState("");
   const [attemptId, setAttemptId] = useState<string | undefined>();
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const { state, error, loading, reload } = useWorkspaceStateInventory(
     client,
     workspaceId,
@@ -933,14 +935,14 @@ export function WorkspaceStateRoute({ workspaceId }: { workspaceId: string }) {
   return (
     <ContentPage width="standard">
       <PageHeader
-        icon={<MapIcon className="size-4" />}
-        title="Workspace State"
-        description="Inspect policy and knowledge authorities, administer structured preferences, compare accepted-attempt governance, and create inactive onboarding drafts."
+        icon={<BrainCircuitIcon className="size-4" />}
+        title="Agent Brain"
+        description="Understand what agents always know, what they retrieve when relevant, and which authority owns every change."
       />
       {loading && !state ? <WorkspaceStateLoading /> : null}
       {error && !state ? (
         <LoadErrorState
-          title="Couldn't load workspace state"
+          title="Couldn't load Agent Brain"
           error={error}
           onRetry={() => void reload()}
         />
@@ -949,7 +951,7 @@ export function WorkspaceStateRoute({ workspaceId }: { workspaceId: string }) {
         <div className="grid gap-4">
           {error ? (
             <LoadErrorState
-              title="Couldn't refresh workspace state"
+              title="Couldn't refresh Agent Brain"
               error={error}
               onRetry={() => void reload()}
             />
@@ -960,26 +962,50 @@ export function WorkspaceStateRoute({ workspaceId }: { workspaceId: string }) {
             onboarding mutations use explicit canonical lifecycle APIs; imported evidence never
             activates prompt authority directly.
           </div>
-          <PolicyInventory state={state} />
-          <PreferenceInventory state={state} />
-          <PreferenceRegistryAdministration
-            workspaceId={workspaceId}
-            onWorkspaceStateReload={reload}
-          />
-          <OnboardingProposalInventory
+          <BrainOverview
             state={state}
             workspaceId={workspaceId}
-            onWorkspaceStateReload={reload}
+            onOpenDiagnostics={() => setDiagnosticsOpen(true)}
           />
-          <AttemptGovernanceInventory
-            state={state}
-            attemptInput={attemptInput}
-            onAttemptInput={setAttemptInput}
-            onInspect={inspectAttempt}
-            onClear={clearAttempt}
-          />
-          <KnowledgeInventory state={state} workspaceId={workspaceId} />
-          <ExistingSources workspaceId={workspaceId} />
+          <details
+            id="brain-diagnostics"
+            className="group scroll-mt-4 rounded-lg border border-border bg-surface"
+            open={diagnosticsOpen}
+            onToggle={(event) => setDiagnosticsOpen(event.currentTarget.open)}
+          >
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 text-left transition-colors hover:bg-surface-2/50 [&::-webkit-details-marker]:hidden">
+              <div>
+                <h2 className="text-sm font-semibold text-fg">Advanced & diagnostics</h2>
+                <p className="mt-1 text-xs leading-5 text-fg-muted">
+                  Authority inventories, structured preference lifecycle controls, immutable hashes,
+                  accepted-attempt drift, inactive policy drafts, and bounded structural gaps.
+                </p>
+              </div>
+              <ChevronDownIcon className="size-4 shrink-0 text-fg-muted transition-transform group-open:rotate-180" />
+            </summary>
+            <div className="grid gap-4 border-t border-border p-4">
+              <PolicyInventory state={state} />
+              <PreferenceInventory state={state} />
+              <PreferenceRegistryAdministration
+                workspaceId={workspaceId}
+                onWorkspaceStateReload={reload}
+              />
+              <OnboardingProposalInventory
+                state={state}
+                workspaceId={workspaceId}
+                onWorkspaceStateReload={reload}
+              />
+              <AttemptGovernanceInventory
+                state={state}
+                attemptInput={attemptInput}
+                onAttemptInput={setAttemptInput}
+                onInspect={inspectAttempt}
+                onClear={clearAttempt}
+              />
+              <KnowledgeInventory state={state} workspaceId={workspaceId} />
+              <ExistingSources workspaceId={workspaceId} />
+            </div>
+          </details>
         </div>
       ) : null}
     </ContentPage>
