@@ -12,6 +12,7 @@ export * from "./slack-bot-scopes";
 export * from "./connector-destinations";
 export * from "./image-generation";
 export * from "./durable-learning";
+export * from "./explicit-durable-writes";
 
 export {
   CreateWorkspaceArtifactRequest,
