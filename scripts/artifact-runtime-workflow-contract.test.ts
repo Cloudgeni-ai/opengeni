@@ -3,6 +3,20 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "..");
+const exactCiSource =
+  "${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}";
+
+type CiStep = Readonly<{
+  id?: string;
+  name?: string;
+  uses?: string;
+  with?: Readonly<Record<string, unknown>>;
+}>;
+
+type CiJob = Readonly<{
+  steps?: readonly CiStep[];
+  with?: Readonly<Record<string, unknown>>;
+}>;
 
 describe("artifact runtime workflow contract", () => {
   test("keeps byte-hashed kernel sources identical on every checkout platform", async () => {
@@ -73,5 +87,46 @@ describe("artifact runtime workflow contract", () => {
     ]) {
       expect(ci).toContain(suite);
     }
+  });
+
+  test("pins PR runtime production and every runtime consumer to the exact head", async () => {
+    const source = await readFile(resolve(root, ".github/workflows/ci.yml"), "utf8");
+    const parsed = Bun.YAML.parse(source) as { jobs: Record<string, CiJob> };
+
+    expect(parsed.jobs["artifact-runtime"]?.with?.source_sha).toBe(exactCiSource);
+
+    const service = parsed.jobs["service-images"];
+    const sandbox = parsed.jobs["sandbox-image"];
+    for (const job of [service, sandbox]) {
+      expect(job?.steps?.find((step) => step.name === "Check out repository")?.with?.ref).toBe(
+        exactCiSource,
+      );
+      expect(
+        job?.steps?.find((step) => step.name === "Download exact artifact runtime inputs")?.with
+          ?.name,
+      ).toBe("${{ needs.artifact-runtime.outputs.artifact_name }}");
+    }
+
+    const serviceBuilds = service?.steps?.filter(
+      (step) => step.uses === "docker/build-push-action@v7.3.0",
+    );
+    expect(serviceBuilds?.map((step) => step.id)).toEqual([
+      "api_image",
+      "worker_image",
+      "artifact_materializer_image",
+      "artifact_outbox_dispatcher_image",
+      "web_image",
+    ]);
+    for (const step of serviceBuilds ?? []) {
+      const buildArgs = step.with?.["build-args"];
+      expect(typeof buildArgs).toBe("string");
+      expect(buildArgs).toContain(`OPENGENI_SERVER_VERSION=sha-${exactCiSource}`);
+    }
+    expect(serviceBuilds?.find((step) => step.id === "web_image")?.with?.["build-args"]).toContain(
+      `OPENGENI_DEPLOYMENT_REVISION=${exactCiSource}`,
+    );
+
+    const sandboxBuild = sandbox?.steps?.find((step) => step.id === "sandbox_image");
+    expect(sandboxBuild?.with?.["build-args"]).toBe(`OPENGENI_SOURCE_SHA=${exactCiSource}`);
   });
 });

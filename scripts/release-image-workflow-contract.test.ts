@@ -5,6 +5,8 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "..");
+const exactCiSource =
+  "${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}";
 
 async function workflow(name: string): Promise<string> {
   return readFile(resolve(root, ".github/workflows", name), "utf8");
@@ -226,8 +228,8 @@ describe("release image workflow contract", () => {
     expect(images.match(/push: \$\{\{ github\.event_name == 'push' \}\}/g)).toHaveLength(7);
     expect(images.match(/:dogfood-sha-\{0\}', github\.sha\)/g)).toHaveLength(7);
     expect(images).not.toMatch(/format\('ghcr\.io\/cloudgeni-ai\/opengeni-[^']+:sha-\{0\}'/);
-    expect(images.match(/OPENGENI_SERVER_VERSION=sha-\$\{\{ github\.event_name/g)).toHaveLength(3);
-    expect(images).toContain("OPENGENI_DEPLOYMENT_REVISION=${{ github.event_name");
+    expect(images.split(`OPENGENI_SERVER_VERSION=sha-${exactCiSource}`).length - 1).toBe(5);
+    expect(images).toContain(`OPENGENI_DEPLOYMENT_REVISION=${exactCiSource}`);
     expect(images).toContain("Write exact-main-SHA dogfood receipt");
     expect(images).toContain("Upload exact-main-SHA dogfood receipt");
     expect(images).toContain("API_DIGEST: ${{ needs.api-image.outputs.api_digest }}");
@@ -626,7 +628,7 @@ ${parser}`,
       {
         jobName: "sandbox-image",
         name: "Build headless sandbox image",
-        fingerprint: "1c5f95c76e4f086750b16d04d46a10bd3b23498fc1adaf6671eceeefe5ff475e",
+        fingerprint: "a336e75d1ba14e166a4ae30a53d0a6aa4a4bec663f4b14ec2b2607015d1cd6c1",
       },
     ]);
 
