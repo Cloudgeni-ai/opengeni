@@ -1,5 +1,11 @@
 # @opengeni/contracts
 
+## 0.41.3
+
+### Patch Changes
+
+- dfcf698: Enable Slack's hosted MCP surface in the generated app manifest with its full user-tool scope set.
+
 ## 0.41.2
 
 ### Patch Changes
