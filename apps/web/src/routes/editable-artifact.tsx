@@ -21,6 +21,7 @@ import { useAppContext } from "@/context";
 import {
   createConsoleEditableArtifactReplicaId,
   createConsoleEditableArtifactAuthority,
+  resolveConsoleEditableArtifactWorkerUrl,
 } from "@/lib/editable-artifact-browser";
 
 type OpenArtifact = Readonly<{
@@ -115,7 +116,10 @@ export function EditableArtifactRoute({
           replicaId,
           runtime: {
             ...runtime,
-            workerUrl: artifactWorkerUrl,
+            workerUrl: resolveConsoleEditableArtifactWorkerUrl(
+              artifactWorkerUrl,
+              window.location.origin,
+            ),
             applicationOrigin: window.location.origin,
             ...(insecureLoopback ? { allowInsecureDevelopmentAssets: true } : {}),
           },

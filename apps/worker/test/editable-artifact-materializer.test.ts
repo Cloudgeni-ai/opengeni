@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 
-import { BoundedObjectWriteError } from "@opengeni/storage";
+import { BoundedObjectReadError, BoundedObjectWriteError } from "@opengeni/storage";
 
 import {
   EDITABLE_ARTIFACT_MATERIALIZER_DATABASE_ROLE,
@@ -166,6 +166,22 @@ describe("editable artifact materializer", () => {
     expect(fixture.store.succeeded).toHaveLength(0);
   });
 
+  test("independent readback rejection is classified as output verification", async () => {
+    const fixture = createFixture({
+      verify: async () => {
+        throw new BoundedObjectReadError("object_changed");
+      },
+    });
+
+    const summary = await fixture.service().dispatchOnce();
+
+    expect(summary.deadLettered).toBe(1);
+    expect(fixture.store.failed[0]).toMatchObject({
+      errorCode: "output_verification_failed",
+    });
+    expect(fixture.store.succeeded).toHaveLength(0);
+  });
+
   test("one poisoned manifest does not block a healthy job in the same batch", async () => {
     const poisoned = makeJob({
       jobId: "22222222222222222222222222222222",
@@ -279,6 +295,7 @@ type FixtureOptions = {
   batchSize?: number;
   maxAttempts?: number;
   materialize?: NativeEditableArtifactMaterializerPort["materialize"];
+  verify?: EditableArtifactMaterializationVerifierPort["verify"];
 };
 
 function createFixture(options: FixtureOptions = {}) {
@@ -393,6 +410,7 @@ function createFixture(options: FixtureOptions = {}) {
   const outputVerifier: EditableArtifactMaterializationVerifierPort = {
     async verify(input) {
       verifierCalls.push(input);
+      if (options.verify) return await options.verify(input);
       const bytes = objects.get(input.objectReference);
       if (!bytes) throw new Error("missing output");
       const verified: VerifiedEditableArtifactMaterialization = {

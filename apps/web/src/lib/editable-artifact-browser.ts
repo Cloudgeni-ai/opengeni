@@ -53,6 +53,15 @@ export function createConsoleEditableArtifactReplicaId(
   return replicaId;
 }
 
+/** Resolve bundler-emitted Worker paths against the page that owns the Worker. */
+export function resolveConsoleEditableArtifactWorkerUrl(
+  workerUrl: string,
+  applicationOrigin: string,
+): string {
+  const origin = new URL(applicationOrigin).origin;
+  return new URL(workerUrl, `${origin}/`).href;
+}
+
 async function sha256(value: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
   return `sha256:${[...new Uint8Array(digest)]

@@ -269,12 +269,7 @@ async function assertOfficePackage(
     const name = new TextDecoder("utf-8", { fatal: true }).decode(
       await readExact(handle, offset + 46, nameLength),
     );
-    if (
-      name.startsWith("/") ||
-      name.includes("\\") ||
-      name.split("/").some((segment) => segment === ".." || segment.length === 0) ||
-      names.has(name)
-    ) {
+    if (!isSafeZipEntryName(name) || names.has(name)) {
       throw new Error("unsafe ZIP entry name");
     }
     names.add(name);
@@ -283,6 +278,19 @@ async function assertOfficePackage(
   if (offset !== eocd || !names.has("[Content_Types].xml") || !names.has(requiredPart)) {
     throw new Error("Office package is missing required parts");
   }
+}
+
+function isSafeZipEntryName(name: string): boolean {
+  if (name.startsWith("/") || name.includes("\\")) return false;
+  const segments = name.split("/");
+  // Office writers commonly include explicit directory entries. A single
+  // trailing slash is canonical for those entries; empty interior segments
+  // remain forbidden so no alternate path spelling reaches a parser.
+  if (segments.at(-1) === "") segments.pop();
+  return (
+    segments.length > 0 &&
+    segments.every((segment) => segment.length > 0 && segment !== "." && segment !== "..")
+  );
 }
 
 function findEndOfCentralDirectory(bytes: Uint8Array): number {

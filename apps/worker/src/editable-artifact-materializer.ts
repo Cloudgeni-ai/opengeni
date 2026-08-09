@@ -522,18 +522,26 @@ export class EditableArtifactMaterializer {
         ...(output.contentHash !== undefined ? { expectedContentHash: output.contentHash } : {}),
         signal: combined.signal,
       });
-      const verified = await this.dependencies.outputVerifier.verify({
-        objectReference: written.opaqueReference,
-        expectedByteSize: written.byteSize,
-        expectedContentHash: written.contentHash,
-        expectedMimeType: output.mimeType,
-        format: job.format,
-        codecId: job.codecId,
-        codecVersion: job.codecVersion,
-        expectedSemanticHash: output.semanticHash,
-        maxBytes: this.#options.maxOutputBytes,
-        signal: combined.signal,
-      });
+      let verified: VerifiedEditableArtifactMaterialization;
+      try {
+        verified = await this.dependencies.outputVerifier.verify({
+          objectReference: written.opaqueReference,
+          expectedByteSize: written.byteSize,
+          expectedContentHash: written.contentHash,
+          expectedMimeType: output.mimeType,
+          format: job.format,
+          codecId: job.codecId,
+          codecVersion: job.codecVersion,
+          expectedSemanticHash: output.semanticHash,
+          maxBytes: this.#options.maxOutputBytes,
+          signal: combined.signal,
+        });
+      } catch (error) {
+        if (error instanceof BoundedObjectReadError) {
+          throw new EditableArtifactMaterializerPermanentError("output_verification_failed");
+        }
+        throw error;
+      }
       validateIndependentVerification(job, written, verified);
 
       renewalAbort.abort();

@@ -25,7 +25,7 @@ describe("editable artifact materializer object storage", () => {
         expect(await consume(input.chunks)).toEqual(bytes);
       },
     });
-    const bytes = minimalZip(["[Content_Types].xml", "xl/workbook.xml"]);
+    const bytes = minimalZip(["[Content_Types].xml", "xl/", "xl/worksheets/", "xl/workbook.xml"]);
     const contentHash = hash(bytes);
     const mimeType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 

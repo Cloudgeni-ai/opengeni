@@ -4,6 +4,7 @@ import type { AccessContext, Workspace } from "@opengeni/sdk";
 import {
   createConsoleEditableArtifactReplicaId,
   createConsoleEditableArtifactAuthority,
+  resolveConsoleEditableArtifactWorkerUrl,
 } from "./editable-artifact-browser";
 
 const workspace = {
@@ -77,6 +78,21 @@ describe("editable artifact browser identity", () => {
 
     expect(createConsoleEditableArtifactReplicaId(createReplicaId)).toBe("1111111111111111");
     expect(createConsoleEditableArtifactReplicaId(createReplicaId)).toBe("2222222222222222");
+  });
+
+  test("resolves bundler-relative Worker assets against the application origin", () => {
+    expect(
+      resolveConsoleEditableArtifactWorkerUrl(
+        "/assets/editable-artifact-worker.js",
+        "https://console.example.test/workspaces/one",
+      ),
+    ).toBe("https://console.example.test/assets/editable-artifact-worker.js");
+    expect(
+      resolveConsoleEditableArtifactWorkerUrl(
+        "https://cdn.example.test/editable-artifact-worker.js",
+        "https://console.example.test",
+      ),
+    ).toBe("https://cdn.example.test/editable-artifact-worker.js");
   });
 
   test("fails closed for mismatched grants and malformed writer identities", async () => {
