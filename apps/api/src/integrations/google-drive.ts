@@ -821,21 +821,31 @@ function readGoogleDriveOAuthState(
   if (iat === undefined || now < iat || now - iat > oauthStateTtlMs / 1000) {
     throw new HTTPException(400, { message: "invalid or expired Google Drive OAuth state" });
   }
+  const accountId = requiredString(payload.accountId, "state.accountId");
+  const workspaceId = requiredString(payload.workspaceId, "state.workspaceId");
+  const subjectId = requiredString(payload.subjectId, "state.subjectId");
+  const returnPath = requiredString(payload.returnPath, "state.returnPath");
+  if (returnPath !== GOOGLE_DRIVE_RETURN_PATH(workspaceId)) {
+    throw new HTTPException(400, { message: "invalid Google Drive OAuth return path" });
+  }
+  const connectionId = optionalString(payload.connectionId) ?? undefined;
+  const connectionVersion = numberValue(payload.connectionVersion);
+  if (
+    (connectionVersion !== undefined && !Number.isInteger(connectionVersion)) ||
+    Boolean(connectionId) !== Boolean(connectionVersion)
+  ) {
+    throw new HTTPException(400, { message: "invalid Google Drive reconnect state" });
+  }
   return {
-    accountId: requiredString(payload.accountId, "state.accountId"),
-    workspaceId: requiredString(payload.workspaceId, "state.workspaceId"),
-    subjectId: requiredString(payload.subjectId, "state.subjectId"),
-    returnPath: requiredString(payload.returnPath, "state.returnPath"),
+    accountId,
+    workspaceId,
+    subjectId,
+    returnPath,
     encryptedPkceVerifier: requiredString(
       payload.encryptedPkceVerifier,
       "state.encryptedPkceVerifier",
     ),
-    ...(optionalString(payload.connectionId)
-      ? { connectionId: optionalString(payload.connectionId)! }
-      : {}),
-    ...(numberValue(payload.connectionVersion) !== undefined
-      ? { connectionVersion: numberValue(payload.connectionVersion)! }
-      : {}),
+    ...(connectionId ? { connectionId, connectionVersion: connectionVersion! } : {}),
     nonce: requiredString(payload.nonce, "state.nonce"),
     iat,
   };
