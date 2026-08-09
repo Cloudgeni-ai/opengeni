@@ -1194,7 +1194,30 @@ describe("API component integration", () => {
       workspaceName: "Local delegation workspace",
       subjectId: `test:local-delegation:${crypto.randomUUID()}`,
     });
-    const sessionId = crypto.randomUUID();
+    const delegatedGrant = delegatedWorkspace.workspaceGrants[0]!;
+    const delegatedSession = await createSession(dbClient.db, {
+      accountId: delegatedGrant.accountId,
+      workspaceId: delegatedGrant.workspaceId,
+      initialMessage: "exercise local delegated MCP access",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await initializeSessionStartAtomically(dbClient.db, {
+      accountId: delegatedGrant.accountId,
+      workspaceId: delegatedGrant.workspaceId,
+      sessionId: delegatedSession.id,
+      clientEventId: `initial:${delegatedSession.id}`,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    const delegatedAttempt = await claimCreatedSessionForRun(
+      dbClient.db,
+      delegatedGrant,
+      delegatedSession.id,
+    );
+    const sessionId = delegatedSession.id;
     const token = await signDelegatedAccessToken(delegationSecret, {
       accountId: delegatedWorkspace.defaultAccountId!,
       workspaceId: delegatedWorkspace.defaultWorkspaceId!,
@@ -1257,6 +1280,9 @@ describe("API component integration", () => {
           accountId: delegatedWorkspace.defaultAccountId!,
           workspaceId: delegatedWorkspace.defaultWorkspaceId!,
           sessionId,
+          turnId: delegatedAttempt.turnId,
+          attemptId: delegatedAttempt.attemptId,
+          executionGeneration: delegatedAttempt.executionGeneration,
         },
       );
       const toolNames = (await prepared.mcpServers[0]!.listTools()).map((tool) => tool.name);
@@ -2806,7 +2832,7 @@ describe("API component integration", () => {
     const mcp = startTestMcpServer({
       requiredHeaders: { authorization: bearer },
     });
-    const providerDomain = new URL(mcp.url).host;
+    const providerDomain = new URL(mcp.url).hostname;
     const capabilityId = `mcp:i1accept-${crypto.randomUUID()}`;
     const mcpServerId = "i1accept";
     try {
@@ -2918,6 +2944,10 @@ describe("API component integration", () => {
       const resolveCredential = buildConnectionTokenResolver(dbClient.db, runSettings);
       const prepared = await prepareAgentTools(runSettings, [{ kind: "mcp", id: mcpServerId }], {
         workspaceId,
+        sessionId: session.id,
+        turnId: claimed.turn.id,
+        attemptId,
+        executionGeneration: claimed.turn.executionGeneration,
         subjectId: "worker:first-party-mcp",
         resolveCredential,
       });
@@ -4139,7 +4169,10 @@ describe("API component integration", () => {
       }),
     });
     expect(createResponse.status).toBe(201);
-    const task = (await createResponse.json()) as { id: string; targetSessionId: string | null };
+    const task = (await createResponse.json()) as {
+      id: string;
+      targetSessionId: string | null;
+    };
     expect(task.targetSessionId).toBe(target.id);
 
     const triggerResponse = await app.request(
@@ -4165,7 +4198,10 @@ describe("API component integration", () => {
         schedule: { type: "interval", everySeconds: 3600 },
         runMode: "existing_session",
         targetSessionId: target.id,
-        agentConfig: { prompt: "continue", goal: { text: "replace target goal" } },
+        agentConfig: {
+          prompt: "continue",
+          goal: { text: "replace target goal" },
+        },
       }),
     });
     expect(goalResponse.status).toBe(400);
@@ -4540,7 +4576,9 @@ describe("API component integration", () => {
         turnId: approvalWaitClaim.turn.id,
         expectedExecutionGeneration: approvalWaitClaim.turn.executionGeneration,
         expectedAttemptId: approvalWaitAttemptId,
-        serializedRunState: "api-integration-approval-state",
+        serializedRunState: JSON.stringify({
+          kind: "api-integration-approval-state",
+        }),
         pendingApprovals: [{ id: "x" }],
       }),
     ).toBe(true);
@@ -4834,6 +4872,7 @@ describe("API component integration", () => {
     let authorityCalls = 0;
     let installationLifecycle: "active" | "suspended" | "deleted" | "outage" = "active";
     const githubAppApi = {
+      discoverInstallationBindingCandidates: async () => [],
       authorizeInstallationBinding: async () => {
         authorityCalls += 1;
         return {
@@ -4953,10 +4992,23 @@ describe("API component integration", () => {
     const connect = await app.request(beforeInfo.installUrl!);
     expect(connect.status).toBe(302);
     expect(connect.headers.get("location")).toContain("https://github.com/login/oauth/authorize");
-    const connectCookie = connect.headers.get("set-cookie")!.split(";", 1)[0]!;
+    const discoveryLocation = new URL(connect.headers.get("location")!);
+    const discoveryState = discoveryLocation.searchParams.get("state")!;
+    const discoveryCookie = connect.headers.get("set-cookie")!.split(";", 1)[0]!;
+    const discovery = await app.request(
+      `/v1/github/oauth/callback?code=discover-owner-installations&state=${encodeURIComponent(discoveryState)}`,
+      { headers: { cookie: discoveryCookie } },
+    );
+    expect(discovery.status).toBe(302);
+    const installLocation = new URL(discovery.headers.get("location")!);
+    expect(installLocation.origin + installLocation.pathname).toBe(
+      "https://github.com/apps/opengeni-test-app/installations/new",
+    );
+    const installState = installLocation.searchParams.get("state")!;
+    const installCookie = discovery.headers.get("set-cookie")!.split(";", 1)[0]!;
     const setup = await app.request(
-      `/v1/github/setup?installation_id=${installationId}&setup_action=install&state=${encodeURIComponent(initialState)}`,
-      { headers: { cookie: connectCookie } },
+      `/v1/github/setup?installation_id=${installationId}&setup_action=install&state=${encodeURIComponent(installState)}`,
+      { headers: { cookie: installCookie } },
     );
     expect(setup.status).toBe(302);
     const oauthLocation = new URL(setup.headers.get("location")!);
@@ -5340,6 +5392,7 @@ describe("API component integration", () => {
       workflowClient: new FakeWorkflowClient(),
       githubStateSecret: stateSecret,
       githubAppApi: {
+        discoverInstallationBindingCandidates: async () => [],
         authorizeInstallationBinding: async () => {
           authorityCalls += 1;
           return {
@@ -5374,13 +5427,24 @@ describe("API component integration", () => {
     ).json()) as { status: string; installUrl: string | null };
     expect(useOnlyInfo).toMatchObject({ status: "unbound", installUrl: null });
 
-    const initialState = new URL(managerInfo.installUrl!).searchParams.get("state")!;
     const connect = await app.request(managerInfo.installUrl!);
     expect(connect.status).toBe(302);
-    const connectStateHeader = connect.headers.get(responseStateHeaderName)!.split(";", 1)[0]!;
+    const discoveryState = new URL(connect.headers.get("location")!).searchParams.get("state")!;
+    const discoveryStateHeader = connect.headers.get(responseStateHeaderName)!.split(";", 1)[0]!;
+    const discovery = await app.request(
+      `/v1/github/oauth/callback?code=discover-configured-owner&state=${encodeURIComponent(discoveryState)}`,
+      { headers: { [requestStateHeaderName]: discoveryStateHeader } },
+    );
+    expect(discovery.status).toBe(302);
+    const installLocation = new URL(discovery.headers.get("location")!);
+    expect(installLocation.origin + installLocation.pathname).toBe(
+      "https://github.com/apps/opengeni-test-app/installations/new",
+    );
+    const installState = installLocation.searchParams.get("state")!;
+    const installStateHeader = discovery.headers.get(responseStateHeaderName)!.split(";", 1)[0]!;
     const setup = await app.request(
-      `/v1/github/setup?installation_id=${installationId}&setup_action=install&state=${encodeURIComponent(initialState)}`,
-      { headers: { [requestStateHeaderName]: connectStateHeader } },
+      `/v1/github/setup?installation_id=${installationId}&setup_action=install&state=${encodeURIComponent(installState)}`,
+      { headers: { [requestStateHeaderName]: installStateHeader } },
     );
     expect(setup.status).toBe(302);
     const oauthState = new URL(setup.headers.get("location")!).searchParams.get("state")!;
@@ -6207,13 +6271,23 @@ describe("API component integration", () => {
   });
 
   test("serializes concurrent first knowledge drops into one Default base", async () => {
+    const delegationSecret = "test-knowledge-drop-delegation";
+    const grant = await bootstrapMcpGrant(dbClient.db);
     const app = createApp({
-      settings: objectStorageSettings(services.databaseUrl, services.objectStorageEndpoint!),
+      settings: {
+        ...objectStorageSettings(services.databaseUrl, services.objectStorageEndpoint!),
+        productAccessMode: "configured",
+        delegationSecret,
+      },
       db: dbClient.db,
       bus: new MemoryEventBus(),
       workflowClient: new FakeWorkflowClient(),
     });
-    const workspaceId = await defaultWorkspaceId(app);
+    const workspaceId = grant.workspaceId;
+    const authorization = await signDelegatedBearer(delegationSecret, grant, {
+      subjectId: grant.subjectId,
+      permissions: grant.permissions,
+    });
     const responses = await Promise.all(
       Array.from({ length: 6 }, (_, index) =>
         app.request(workspacePath(workspaceId, "/knowledge/drops"), {
@@ -6221,7 +6295,7 @@ describe("API component integration", () => {
           body: JSON.stringify({
             text: `Concurrent knowledge note ${index}\n\nThis drop must share one deterministic Default base.`,
           }),
-          headers: { "content-type": "application/json" },
+          headers: { authorization, "content-type": "application/json" },
         }),
       ),
     );
@@ -6233,7 +6307,9 @@ describe("API component integration", () => {
     expect(new Set(documents.map((document) => document.baseId)).size).toBe(1);
 
     const bases = (await (
-      await app.request(workspacePath(workspaceId, "/document-bases"))
+      await app.request(workspacePath(workspaceId, "/document-bases"), {
+        headers: { authorization },
+      })
     ).json()) as Array<{ id: string; name: string }>;
     const defaultBases = bases.filter((base) => base.name.trim().toLowerCase() === "default");
     expect(defaultBases).toHaveLength(1);
@@ -6241,6 +6317,7 @@ describe("API component integration", () => {
     const listed = (await (
       await app.request(
         workspacePath(workspaceId, `/document-bases/${defaultBases[0]!.id}/documents`),
+        { headers: { authorization } },
       )
     ).json()) as Array<{ id: string }>;
     expect(listed.map((document) => document.id).sort()).toEqual(
@@ -6638,9 +6715,13 @@ describe("API component integration", () => {
   });
 
   test("document indexing enforces exact chunk limits before embedding", async () => {
+    const delegationSecret = "test-document-limit-delegation";
+    const grant = await bootstrapMcpGrant(dbClient.db);
     const app = createApp({
       settings: {
         ...objectStorageSettings(services.databaseUrl, services.objectStorageEndpoint!),
+        productAccessMode: "configured",
+        delegationSecret,
         usageLimitsMode: "static",
         staticUsageLimitsJson: JSON.stringify({
           maxDocumentIndexedChunksPerWorkspace: 2,
@@ -6677,9 +6758,12 @@ describe("API component integration", () => {
         },
       },
     });
-    const context = await defaultAccessContext(app);
-    const workspaceId = context.defaultWorkspaceId!;
-    const accountId = context.defaultAccountId!;
+    const workspaceId = grant.workspaceId;
+    const accountId = grant.accountId;
+    const authorization = await signDelegatedBearer(delegationSecret, grant, {
+      subjectId: grant.subjectId,
+      permissions: grant.permissions,
+    });
     const oversizedBody = "This document is intentionally long enough to become many chunks.";
     const uploadResponse = await app.request(workspacePath(workspaceId, "/files/uploads"), {
       method: "POST",
@@ -6688,7 +6772,7 @@ describe("API component integration", () => {
         contentType: "text/plain",
         sizeBytes: new TextEncoder().encode(oversizedBody).byteLength,
       }),
-      headers: { "content-type": "application/json" },
+      headers: { authorization, "content-type": "application/json" },
     });
     expect(uploadResponse.status).toBe(201);
     const upload = (await uploadResponse.json()) as {
@@ -6706,7 +6790,7 @@ describe("API component integration", () => {
       (
         await app.request(
           workspacePath(workspaceId, `/files/uploads/${upload.uploadId}/complete`),
-          { method: "POST" },
+          { method: "POST", headers: { authorization } },
         )
       ).status,
     ).toBe(200);
@@ -6714,7 +6798,7 @@ describe("API component integration", () => {
     const baseResponse = await app.request(workspacePath(workspaceId, "/document-bases"), {
       method: "POST",
       body: JSON.stringify({ name: "Limited docs" }),
-      headers: { "content-type": "application/json" },
+      headers: { authorization, "content-type": "application/json" },
     });
     expect(baseResponse.status).toBe(201);
     const base = (await baseResponse.json()) as { id: string };
@@ -6730,7 +6814,7 @@ describe("API component integration", () => {
       {
         method: "POST",
         body: JSON.stringify({ fileId: upload.fileId }),
-        headers: { "content-type": "application/json" },
+        headers: { authorization, "content-type": "application/json" },
       },
     );
     expect(addResponse.status).toBe(201);
@@ -6807,6 +6891,9 @@ describe("API component integration", () => {
       const access = await defaultAccessContext(app);
       const workspaceId = access.defaultWorkspaceId!;
       const accountId = access.defaultAccountId!;
+      const accessGrant = access.workspaceGrants.find(
+        (candidate) => candidate.workspaceId === workspaceId,
+      )!;
       const serverSession = await createSession(dbClient.db, {
         accountId,
         workspaceId,
@@ -6816,6 +6903,19 @@ describe("API component integration", () => {
         model: "scripted-model",
         sandboxBackend: "none",
       });
+      await initializeSessionStartAtomically(dbClient.db, {
+        accountId,
+        workspaceId,
+        sessionId: serverSession.id,
+        clientEventId: `initial:${serverSession.id}`,
+        reasoningEffortFallback: "low",
+        createdEventPayload: {},
+      });
+      const serverAttempt = await claimCreatedSessionForRun(
+        dbClient.db,
+        accessGrant,
+        serverSession.id,
+      );
       const forgedSession = await createSession(dbClient.db, {
         accountId,
         workspaceId,
@@ -6879,6 +6979,9 @@ describe("API component integration", () => {
           accountId,
           workspaceId,
           sessionId: serverSession.id,
+          turnId: serverAttempt.turnId,
+          attemptId: serverAttempt.attemptId,
+          executionGeneration: serverAttempt.executionGeneration,
           subjectId: "test:mcp-client",
         },
       );
@@ -7023,11 +7126,23 @@ describe("API component integration", () => {
         model: "scripted-model",
         sandboxBackend: "none",
       });
+      await initializeSessionStartAtomically(dbClient.db, {
+        accountId,
+        workspaceId,
+        sessionId: session.id,
+        clientEventId: `initial:${session.id}`,
+        reasoningEffortFallback: "low",
+        createdEventPayload: {},
+      });
+      const sessionAttempt = await claimCreatedSessionForRun(dbClient.db, grant, session.id);
 
       prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "opengeni" }], {
         accountId,
         workspaceId,
         sessionId: session.id,
+        turnId: sessionAttempt.turnId,
+        attemptId: sessionAttempt.attemptId,
+        executionGeneration: sessionAttempt.executionGeneration,
         subjectId: "test:mcp-memory-disabled",
         firstPartyTools: ["memory_search", "memory_save", "memory_correct"],
       });
@@ -7052,6 +7167,9 @@ describe("API component integration", () => {
         accountId,
         workspaceId,
         sessionId: session.id,
+        turnId: sessionAttempt.turnId,
+        attemptId: sessionAttempt.attemptId,
+        executionGeneration: sessionAttempt.executionGeneration,
         subjectId: "test:mcp-memory-enabled",
         firstPartyTools: ["memory_search", "memory_save", "memory_correct"],
       });
@@ -7336,7 +7454,9 @@ describe("API component integration", () => {
       body: JSON.stringify({ name: `nokey-${crypto.randomUUID()}` }),
     });
     expect(createResponse.status).toBe(503);
-    const createError = (await createResponse.json()) as { error: { code: string } };
+    const createError = (await createResponse.json()) as {
+      error: { code: string };
+    };
     expect(createError.error.code).toBe("upstream_unavailable");
     expect(JSON.stringify(createError)).not.toContain("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY");
 
@@ -7925,7 +8045,13 @@ describe("API component integration", () => {
         turnId: callerClaim.turn.id,
         attemptId: callerAttemptId,
         executionGeneration: callerClaim.turn.executionGeneration,
-        firstPartyMcpTools: ["session_send_message"],
+        firstPartyMcpTools: [
+          "session_send_message",
+          "session_create",
+          "session_pause",
+          "session_resume",
+          "session_steer",
+        ],
       },
     });
     const beforeInternalTurnIds = (
@@ -8344,6 +8470,7 @@ describe("API component integration", () => {
       "sessions:read",
       "sessions:create",
     ]);
+    const managerAttempt = await claimCreatedSessionForRun(dbClient.db, grant, managerSession.id);
 
     // The delegated token the runtime mints for a session's first-party MCP
     // connection carries the session's permission set, which gates manager
@@ -8375,6 +8502,9 @@ describe("API component integration", () => {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId,
           sessionId: managerSession.id,
+          turnId: managerAttempt.turnId,
+          attemptId: managerAttempt.attemptId,
+          executionGeneration: managerAttempt.executionGeneration,
           firstPartyPermissions: [
             "workspace:read",
             "sessions:read",
@@ -8396,6 +8526,9 @@ describe("API component integration", () => {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId: managerSession.id,
+        turnId: managerAttempt.turnId,
+        attemptId: managerAttempt.attemptId,
+        executionGeneration: managerAttempt.executionGeneration,
       });
       const workerTools = (await workerPrepared.mcpServers[0]!.listTools()).map(
         (tool) => tool.name,
@@ -8513,7 +8646,7 @@ describe("API component integration", () => {
     expect(session.mcpServers[0]?.headers).toBeUndefined();
 
     const key = new Uint8Array(Buffer.from(environmentsTestKey, "base64"));
-    const attemptId = await claimCreatedSessionForRun(dbClient.db, grant, session.id);
+    const { attemptId } = await claimCreatedSessionForRun(dbClient.db, grant, session.id);
     const runServers = await listSessionMcpServersForRun(
       dbClient.db,
       grant.workspaceId,
@@ -8708,7 +8841,9 @@ describe("API component integration", () => {
       },
     });
     expect(missingKey.status).toBe(503);
-    const missingKeyError = (await missingKey.json()) as { error: { code: string } };
+    const missingKeyError = (await missingKey.json()) as {
+      error: { code: string };
+    };
     expect(missingKeyError.error.code).toBe("upstream_unavailable");
     expect(JSON.stringify(missingKeyError)).not.toContain("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY");
 
@@ -8751,7 +8886,11 @@ describe("API component integration", () => {
       requireApproval: false,
       connectionRef: hostConnectionRef,
     });
-    const hostAttemptId = await claimCreatedSessionForRun(dbClient.db, grant, hostSession.id);
+    const { attemptId: hostAttemptId } = await claimCreatedSessionForRun(
+      dbClient.db,
+      grant,
+      hostSession.id,
+    );
     const hostRunServers = await listSessionMcpServersForRun(
       dbClient.db,
       grant.workspaceId,
@@ -9298,9 +9437,28 @@ describe("API component integration", () => {
       }),
     ).rejects.toThrow("goal-bearing sessions require goals:manage");
 
+    const authorizedParent = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "authorized goal manager parent",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+      firstPartyMcpPermissions: [
+        "workspace:read",
+        "sessions:create",
+        "sessions:read",
+        "goals:manage",
+      ],
+    });
     const authorizedGrant = {
       ...managerGrant,
       permissions: [...managerGrant.permissions, "goals:manage"] as Permission[],
+      metadata: {
+        ...managerGrant.metadata,
+        sessionId: authorizedParent.id,
+      },
     };
     const authorizedMcp = buildOpenGeniMcpServer(mcpDeps, authorizedGrant);
     const spawned = await callMcpTool<{
@@ -10152,11 +10310,17 @@ async function bootstrapMcpGrant(db: ReturnType<typeof createDb>["db"]) {
 
 type TestWorkspaceGrant = AccessContext["workspaceGrants"][number];
 
+type ClaimedSessionAttempt = {
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+};
+
 async function claimCreatedSessionForRun(
   db: ReturnType<typeof createDb>["db"],
   grant: TestWorkspaceGrant,
   sessionId: string,
-): Promise<string> {
+): Promise<ClaimedSessionAttempt> {
   const attemptId = crypto.randomUUID();
   const claimed = await claimSessionWorkForAttempt(db, grant.workspaceId, {
     sessionId,
@@ -10169,7 +10333,11 @@ async function claimCreatedSessionForRun(
   if (claimed.action !== "claimed") {
     throw new Error(`failed to claim session ${sessionId}: ${claimed.reason}`);
   }
-  return attemptId;
+  return {
+    turnId: claimed.turn.id,
+    attemptId,
+    executionGeneration: claimed.turn.executionGeneration,
+  };
 }
 
 async function readStoredSessionMcpServer(
