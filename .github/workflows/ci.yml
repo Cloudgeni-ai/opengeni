@@ -820,7 +820,7 @@ jobs:
           push: ${{ github.event_name == 'push' }}
           tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-api:dogfood-sha-{0}', github.sha) || 'opengeni-api:ci' }}
           cache-from: type=gha,scope=opengeni-ci-api
-          cache-to: type=gha,mode=min,scope=opengeni-ci-api,ignore-error=true
+          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=min,scope=opengeni-ci-api,ignore-error=true' || '' }}
           build-args: |
             OPENGENI_SERVER_VERSION=sha-${{ github.sha }}
 
@@ -835,7 +835,7 @@ jobs:
           push: ${{ github.event_name == 'push' }}
           tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-worker:dogfood-sha-{0}', github.sha) || 'opengeni-worker:ci' }}
           cache-from: type=gha,scope=opengeni-ci-worker
-          cache-to: type=gha,mode=min,scope=opengeni-ci-worker,ignore-error=true
+          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=min,scope=opengeni-ci-worker,ignore-error=true' || '' }}
           build-args: |
             OPENGENI_SERVER_VERSION=sha-${{ github.sha }}
 
@@ -850,7 +850,7 @@ jobs:
           push: ${{ github.event_name == 'push' }}
           tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-web:dogfood-sha-{0}', github.sha) || 'opengeni-web:ci' }}
           cache-from: type=gha,scope=opengeni-ci-web
-          cache-to: type=gha,mode=min,scope=opengeni-ci-web,ignore-error=true
+          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=min,scope=opengeni-ci-web,ignore-error=true' || '' }}
           build-args: |
             OPENGENI_SERVER_VERSION=sha-${{ github.sha }}
             OPENGENI_DEPLOYMENT_REVISION=${{ github.sha }}
@@ -895,7 +895,7 @@ jobs:
           push: ${{ github.event_name == 'push' }}
           tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-relay:dogfood-sha-{0}', github.sha) || 'opengeni-relay:ci' }}
           cache-from: type=gha,scope=opengeni-ci-relay
-          cache-to: type=gha,mode=min,scope=opengeni-ci-relay,ignore-error=true
+          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=min,scope=opengeni-ci-relay,ignore-error=true' || '' }}
   sandbox-image:
     name: Build headless sandbox workload image
     needs: automation-admission
@@ -935,7 +935,7 @@ jobs:
           push: ${{ github.event_name == 'push' }}
           tags: ${{ github.event_name == 'push' && format('ghcr.io/cloudgeni-ai/opengeni-sandbox:dogfood-sha-{0}', github.sha) || 'opengeni-sandbox:ci' }}
           cache-from: type=gha,scope=opengeni-ci-sandbox
-          cache-to: type=gha,mode=min,scope=opengeni-ci-sandbox,ignore-error=true
+          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=min,scope=opengeni-ci-sandbox,ignore-error=true' || '' }}
 
   images:
     name: Workload image builds

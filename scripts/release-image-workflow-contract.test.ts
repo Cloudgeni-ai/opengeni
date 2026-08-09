@@ -597,27 +597,27 @@ ${parser}`,
       {
         jobName: "service-images",
         name: "Build API image",
-        fingerprint: "05ac3061343c2e148b0d18d8a1288c38dbf165354d16cc1d1542c99303f8d37c",
+        fingerprint: "200e6507d925ce5608edcefa9a4f51af2a25af4f116a9dc71ac3f583031b4e71",
       },
       {
         jobName: "service-images",
         name: "Build worker image",
-        fingerprint: "79436eb9c77b0a919099815ce1a9cbbbf480e538f72cb204d276dc3adf877749",
+        fingerprint: "1f0f09b8087ce5131969fb3fa104c477d60ce41213c4dfb9ea960a40f00a787d",
       },
       {
         jobName: "service-images",
         name: "Build web image",
-        fingerprint: "6fc459016eb3fa26809d7861c74281aac840a72d4da3af7b6678999a083c97c7",
+        fingerprint: "64b1fb64bbcacd194132e5f4d91f6e09b85044b4cc01b577230272910ab5c66b",
       },
       {
         jobName: "relay-image",
         name: "Build relay image",
-        fingerprint: "7a94a29a7561d8edfa3c9871d27f8ea312799079ad0857635eed6c67a2f25af7",
+        fingerprint: "1464aec087ebbbd792371ceb86f67c41ecd75ba500b824a784ed94affb8e6a9f",
       },
       {
         jobName: "sandbox-image",
         name: "Build headless sandbox image",
-        fingerprint: "60cecf54236dc84c7752ba02b8c48e67e7dd614f0083b35673d4a4ebd426cff3",
+        fingerprint: "0985451362b8a06fe51d1a56186445a7311c916f3908e56c48c9fd4d9a1ec46f",
       },
     ]);
 
@@ -636,7 +636,8 @@ ${parser}`,
         return (
           scope !== undefined &&
           step.with["cache-from"] === `type=gha,scope=${scope}` &&
-          step.with["cache-to"] === `type=gha,mode=min,scope=${scope},ignore-error=true`
+          step.with["cache-to"] ===
+            `\${{ github.event_name == 'push' && 'type=gha,mode=min,scope=${scope},ignore-error=true' || '' }}`
         );
       });
 
@@ -644,5 +645,9 @@ ${parser}`,
     const missingExporter = structuredClone(imageSteps);
     delete missingExporter[0]!.step.with["cache-to"];
     expect(hasCompleteCacheContract(missingExporter)).toBe(false);
+    const unconditionalPullRequestExporter = structuredClone(imageSteps);
+    unconditionalPullRequestExporter[0]!.step.with["cache-to"] =
+      "type=gha,mode=min,scope=opengeni-ci-api,ignore-error=true";
+    expect(hasCompleteCacheContract(unconditionalPullRequestExporter)).toBe(false);
   });
 });
