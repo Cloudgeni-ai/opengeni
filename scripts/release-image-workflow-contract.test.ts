@@ -581,7 +581,7 @@ ${parser}`,
 
     const imageSteps = ["service-images", "relay-image", "sandbox-image"].flatMap((jobName) =>
       parsed.jobs[jobName]!.steps.filter(
-        (step): step is { name: string; uses: string } =>
+        (step): step is { name: string; uses: string; with: Record<string, string> } =>
           typeof step === "object" &&
           step !== null &&
           "uses" in step &&
@@ -589,35 +589,65 @@ ${parser}`,
       ).map((step) => ({
         jobName,
         name: step.name,
+        step,
         fingerprint: createHash("sha256").update(JSON.stringify(step)).digest("hex"),
       })),
     );
-    expect(imageSteps).toEqual([
+    expect(imageSteps.map(({ step: _step, ...identity }) => identity)).toEqual([
       {
         jobName: "service-images",
         name: "Build API image",
-        fingerprint: "4f1bf9e5979e86bc78b8813e4c2ed834bd9e24781d8906a493be33d235113231",
+        fingerprint: "200e6507d925ce5608edcefa9a4f51af2a25af4f116a9dc71ac3f583031b4e71",
       },
       {
         jobName: "service-images",
         name: "Build worker image",
-        fingerprint: "df6c0eea3a346c6ad9f71bb5545044a062179ffd9447553a1e21f467d85c65f4",
+        fingerprint: "1f0f09b8087ce5131969fb3fa104c477d60ce41213c4dfb9ea960a40f00a787d",
       },
       {
         jobName: "service-images",
         name: "Build web image",
-        fingerprint: "a535f3fae1f58cdd9d47273d2340c26d4e3c143c4e69c59f2de984fcfec37714",
+        fingerprint: "64b1fb64bbcacd194132e5f4d91f6e09b85044b4cc01b577230272910ab5c66b",
       },
       {
         jobName: "relay-image",
         name: "Build relay image",
-        fingerprint: "1e26cd74190f9b806413e6943324c20a9da0e8f84dd42406555fca5b5c11c4f9",
+        fingerprint: "1464aec087ebbbd792371ceb86f67c41ecd75ba500b824a784ed94affb8e6a9f",
       },
       {
         jobName: "sandbox-image",
         name: "Build headless sandbox image",
-        fingerprint: "6d1ce559070b6825ff5684da724e4c69baad72f6346ab3db04acb46f3cdccbff",
+        fingerprint: "0985451362b8a06fe51d1a56186445a7311c916f3908e56c48c9fd4d9a1ec46f",
       },
     ]);
+
+    const expectedCacheScopes = new Map([
+      ["Build API image", "opengeni-ci-api"],
+      ["Build worker image", "opengeni-ci-worker"],
+      ["Build web image", "opengeni-ci-web"],
+      ["Build relay image", "opengeni-ci-relay"],
+      ["Build headless sandbox image", "opengeni-ci-sandbox"],
+    ]);
+    const hasCompleteCacheContract = (
+      steps: Array<{ name: string; step: { with: Record<string, string> } }>,
+    ) =>
+      steps.every(({ name, step }) => {
+        const scope = expectedCacheScopes.get(name);
+        return (
+          scope !== undefined &&
+          step.with["cache-from"] === `type=gha,scope=${scope}` &&
+          step.with["cache-to"] ===
+            `\${{ github.event_name == 'push' && 'type=gha,mode=min,scope=${scope},ignore-error=true' || '' }}`
+        );
+      });
+
+    expect(hasCompleteCacheContract(imageSteps)).toBe(true);
+    const missingExporter = structuredClone(imageSteps);
+    delete missingExporter[0]!.step.with["cache-to"];
+    expect(hasCompleteCacheContract(missingExporter)).toBe(false);
+    const unconditionalPullRequestExporter = structuredClone(imageSteps);
+    unconditionalPullRequestExporter[0]!.step.with["cache-to"] =
+      "type=gha,mode=min,scope=opengeni-ci-api,ignore-error=true";
+    expect(hasCompleteCacheContract(unconditionalPullRequestExporter)).toBe(false);
   });
 });
