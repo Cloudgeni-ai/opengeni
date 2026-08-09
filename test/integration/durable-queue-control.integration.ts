@@ -929,12 +929,21 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
           async () => {
             events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 2_000);
             const state = await getSession(dbClient.db, grant.workspaceId, session.id);
+            const quiesced = events.find(
+              (event) =>
+                event.type === "session.queue.changed" &&
+                event.payload.operation === "attempt_quiesced",
+            );
             return (
-              state?.status === "recovering" &&
+              state?.status === "idle" &&
+              quiesced !== undefined &&
               events.some(
                 (event) =>
-                  event.type === "session.queue.changed" &&
-                  event.payload.operation === "attempt_quiesced",
+                  event.type === "session.status.changed" &&
+                  event.clientEventId ===
+                    `opengeni:paused-recovery-settled:${quiesced.turnAttemptId}` &&
+                  event.payload.status === "idle" &&
+                  event.payload.reason === "paused_recovery_settled",
               )
             );
           },
@@ -953,10 +962,22 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
             event.type === "session.queue.changed" &&
             event.payload.operation === "attempt_quiesced",
         );
+        const parked = events.find(
+          (event) =>
+            event.type === "session.status.changed" &&
+            event.clientEventId === `opengeni:paused-recovery-settled:${quiesced?.turnAttemptId}` &&
+            event.payload.status === "idle" &&
+            event.payload.reason === "paused_recovery_settled",
+        );
         expect(pauseEvent).toBeDefined();
         expect(quiesced).toBeDefined();
+        expect(parked).toBeDefined();
         expect(quiesced!.sequence).toBeGreaterThan(pauseEvent!.sequence);
+        expect(parked!.sequence).toBeGreaterThan(quiesced!.sequence);
         expect(Date.parse(quiesced!.occurredAt) - Date.parse(pauseEvent!.occurredAt)).toBeLessThan(
+          2_000,
+        );
+        expect(Date.parse(parked!.occurredAt) - Date.parse(pauseEvent!.occurredAt)).toBeLessThan(
           2_000,
         );
         expect(
@@ -969,7 +990,20 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
         ).toHaveLength(0);
         expect(model.calls).toBe(1);
         expect(await getSession(dbClient.db, grant.workspaceId, session.id)).toMatchObject({
-          status: "recovering",
+          status: "idle",
+          activeTurnId: initial.turn.id,
+          effectiveControl: { state: "paused" },
+        });
+        expect(await listSessionTurns(dbClient.db, grant.workspaceId, session.id)).toEqual([
+          expect.objectContaining({
+            id: initial.turn.id,
+            status: "recovering",
+            activeAttemptId: null,
+          }),
+        ]);
+        expect(quiesced).toMatchObject({
+          turnId: initial.turn.id,
+          turnAttemptId: parked!.turnAttemptId,
         });
       } finally {
         worker.shutdown();
