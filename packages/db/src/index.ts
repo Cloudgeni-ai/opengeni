@@ -288,6 +288,7 @@ export * from "./session-realtime-context";
 export * from "./session-realtime-ledger";
 export * from "./new-session-drafts";
 export * from "./workspace-instruction-policies";
+export * from "./workspace-learning-policy";
 export * from "./preference-registry";
 export * from "./memory-governance";
 export * from "./scoped-knowledge";

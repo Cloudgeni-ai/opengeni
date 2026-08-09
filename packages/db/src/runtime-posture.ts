@@ -139,6 +139,10 @@ export const FORCE_RLS_TABLES = [
   "workspace_instruction_policy_onboarding_proposals",
   "workspace_instruction_policy_revisions",
   "workspace_instruction_policy_snapshots",
+  "workspace_learning_policy_activation_events",
+  "workspace_learning_policy_heads",
+  "workspace_learning_policy_revisions",
+  "workspace_learning_policy_snapshots",
   "workspace_model_policies",
   "workspace_packs",
   "workspace_screenshot_quotas",
@@ -291,6 +295,9 @@ export const RUNTIME_READ_ONLY_TABLES = [
   "preference_registry_events",
   "preference_registry_snapshots",
   "workspace_instruction_policy_snapshots",
+  "workspace_learning_policy_activation_events",
+  "workspace_learning_policy_heads",
+  "workspace_learning_policy_snapshots",
 ] as const;
 
 /** Append-only evidence/revision tables are insertable and queryable, never mutable. */
@@ -319,6 +326,7 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "workspace_instruction_policy_activation_events",
   "workspace_instruction_policy_onboarding_proposals",
   "workspace_instruction_policy_revisions",
+  "workspace_learning_policy_revisions",
 ] as const;
 
 /**
