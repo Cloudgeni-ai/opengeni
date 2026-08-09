@@ -821,6 +821,27 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       threadTimestamp: rootTimestamp,
     });
     expect(value.slack.posts[0]!.text).toContain("started from the :genie: reaction");
+    expect(value.slack.posts[0]!.text).toContain("Open in OpenGeni:");
+
+    const postsBeforeCompletion = value.slack.posts.length;
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      {
+        type: "agent.message.completed",
+        payload: { text: "The requested Slack check is complete." },
+      },
+      {
+        type: "turn.completed",
+        payload: { output: "The requested Slack check is complete." },
+      },
+    ]);
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(false);
+    const completionPosts = value.slack.posts.slice(postsBeforeCompletion);
+    expect(completionPosts).toHaveLength(1);
+    expect(completionPosts[0]!.text).toBe(
+      "The requested Slack check is complete.\n\nReply in this thread to continue.",
+    );
+    expect(completionPosts[0]!.text).not.toContain("Open in OpenGeni:");
 
     const [session] = await shared!.admin<
       {
@@ -3900,7 +3921,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(delivered.filter((post) => post.text.startsWith("Progress"))).toHaveLength(3);
     expect(delivered.some((post) => post.text === "Progress 4")).toBe(false);
     expect(delivered.at(-1)?.text).toContain("Final bounded result");
-    expect(delivered.at(-1)?.text).toContain("Open in OpenGeni:");
+    expect(delivered.at(-1)?.text).not.toContain("Open in OpenGeni:");
     expect(delivered.every((post) => post.threadTimestamp === "1740000000.000001")).toBe(true);
     const progressLedger = await shared!.admin<
       { session_event_sequence: number; slot: number; operation_id: string }[]

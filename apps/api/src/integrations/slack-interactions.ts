@@ -1308,14 +1308,37 @@ async function deliverSlackSessionEvents(
   let lastSequence = interaction.lastDeliveredSessionEventSequence;
   let terminal: Exclude<SlackInteraction["terminalDeliveryState"], "open"> | null = null;
   let latestAssistantText = "";
+  const orderedEvents = [...page.events].sort((left, right) => left.sequence - right.sequence);
+  const terminalAssistantSequences = new Set<number>();
+  for (let index = 0; index < orderedEvents.length; index += 1) {
+    const event = orderedEvents[index]!;
+    if (event.type !== "turn.completed") continue;
+    const finalOutput = safePayloadText(event.payload, "output").trim();
+    for (let candidateIndex = index - 1; candidateIndex >= 0; candidateIndex -= 1) {
+      const candidate = orderedEvents[candidateIndex]!;
+      if (
+        candidate.type === "turn.completed" ||
+        candidate.type === "turn.failed" ||
+        candidate.type === "turn.cancelled"
+      ) {
+        break;
+      }
+      if (candidate.type !== "agent.message.completed") continue;
+      const assistantText = safePayloadText(candidate.payload, "text").trim();
+      if (assistantText && (!finalOutput || assistantText === finalOutput)) {
+        terminalAssistantSequences.add(candidate.sequence);
+      }
+      break;
+    }
+  }
   // Monitoring pages are newest-first. Slack delivery is a timeline surface:
   // replay oldest-to-newest so progress cannot appear after a terminal result
   // and the final message remains the final message in the thread.
-  for (const event of [...page.events].sort((left, right) => left.sequence - right.sequence)) {
+  for (const event of orderedEvents) {
     lastSequence = Math.max(lastSequence, event.sequence);
     if (event.type === "agent.message.completed") {
       latestAssistantText = safePayloadText(event.payload, "text");
-      if (latestAssistantText) {
+      if (latestAssistantText && !terminalAssistantSequences.has(event.sequence)) {
         const progress = await claimSlackInteractionProgressDelivery(deps.db, {
           accountId: interaction.accountId,
           workspaceId: interaction.workspaceId,
@@ -1351,7 +1374,7 @@ async function deliverSlackSessionEvents(
           client,
           interaction,
           event,
-          `OpenGeni needs your input:\n${formatQuestions(request.questions)}\nReply in this thread, or use ${openSessionText(deps, interaction.workspaceId, interaction.sessionId)}.`,
+          `OpenGeni needs your input:\n${formatQuestions(request.questions)}\nReply in this thread.`,
           "human-input",
         );
       }
@@ -1361,7 +1384,7 @@ async function deliverSlackSessionEvents(
         client,
         interaction,
         event,
-        `${output || "OpenGeni finished this task."}\n\n${openSessionText(deps, interaction.workspaceId, interaction.sessionId)} Reply in this thread to continue.`,
+        `${output || "OpenGeni finished this task."}\n\nReply in this thread to continue.`,
         "final",
       );
       terminal = "completed";
@@ -1370,7 +1393,7 @@ async function deliverSlackSessionEvents(
         client,
         interaction,
         event,
-        `OpenGeni could not complete this task. ${openSessionText(deps, interaction.workspaceId, interaction.sessionId)} for the bounded failure details.`,
+        "OpenGeni could not complete this task. Reply in this thread to retry or ask for details.",
         "failed",
       );
       terminal = "failed";
