@@ -1,5 +1,5 @@
 import type { SessionEvent, SessionStatus, TimelineAnnotation } from "@opengeni/sdk";
-const { default: fleetDecisionItem } = await import("./fleet-decision-projection");
+import fleetDecisionItem from "./fleet-decision-projection";
 import {
   CREDIT_EXHAUSTION_MESSAGE,
   humanizeFailureReason,
