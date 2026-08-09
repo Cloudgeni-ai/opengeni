@@ -457,9 +457,35 @@ CREATE TRIGGER workspace_learning_policy_events_immutable
   BEFORE UPDATE OR DELETE ON "workspace_learning_policy_activation_events"
   FOR EACH ROW EXECUTE FUNCTION workspace_learning_policy_reject_history_mutation();
 
+CREATE OR REPLACE FUNCTION workspace_learning_policy_reject_snapshot_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  -- Parent lifecycle deletion is the sole mutation exception. PostgreSQL's
+  -- cascading constraint trigger runs only after its parent row is absent;
+  -- require both nested trigger context and one missing ownership edge so
+  -- direct or unrelated-trigger deletes remain fail-closed.
+  IF TG_OP = 'DELETE'
+    AND pg_trigger_depth() > 1
+    AND (
+      NOT EXISTS (SELECT 1 FROM "managed_accounts" WHERE "id" = OLD."account_id")
+      OR NOT EXISTS (SELECT 1 FROM "workspaces" WHERE "id" = OLD."workspace_id")
+      OR NOT EXISTS (SELECT 1 FROM "sessions" WHERE "id" = OLD."session_id")
+      OR NOT EXISTS (SELECT 1 FROM "session_turns" WHERE "id" = OLD."turn_id")
+      OR NOT EXISTS (SELECT 1 FROM "session_turn_attempts" WHERE "id" = OLD."attempt_id")
+    )
+  THEN
+    RETURN OLD;
+  END IF;
+  RAISE EXCEPTION 'workspace learning-policy snapshots are immutable'
+    USING ERRCODE = '55000';
+END;
+$$;
+
 CREATE TRIGGER workspace_learning_policy_snapshots_immutable
   BEFORE UPDATE OR DELETE ON "workspace_learning_policy_snapshots"
-  FOR EACH ROW EXECUTE FUNCTION workspace_learning_policy_reject_history_mutation();
+  FOR EACH ROW EXECUTE FUNCTION workspace_learning_policy_reject_snapshot_mutation();
 
 CREATE OR REPLACE FUNCTION workspace_learning_policy_canonical_at(
   p_account_id uuid,
@@ -603,7 +629,7 @@ BEGIN
       current_head record;
       existing_event record;
       next_activation_version bigint;
-      event_created_at timestamptz := clock_timestamp();
+      event_created_at timestamptz;
       context_account_id uuid;
       context_workspace_id uuid;
       context_subject_id text;
@@ -700,6 +726,10 @@ BEGIN
         END IF;
       END IF;
 
+      -- The event timestamp is accepted-order evidence. Stamp it only after
+      -- workspace/head serialization and successful CAS so a dependent
+      -- activation that began earlier cannot sort before its predecessor.
+      event_created_at := clock_timestamp();
       next_activation_version := coalesce(current_head."activation_version", 0) + 1;
       PERFORM set_config(
         'opengeni.workspace_learning_policy_lifecycle_workspace_id',

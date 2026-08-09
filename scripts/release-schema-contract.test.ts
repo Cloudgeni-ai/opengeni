@@ -211,7 +211,7 @@ describe("release schema contract", () => {
         (migrations.has("0192_workspace_learning_policy.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "a780e197f24db1a1ac3b7dc60e642ec900465e0790682a71db071faeb96ff150",
+      "5a2c7f026d1e29aaad50ef4ee9dc81f400530fa760d89f91b268003ac0b024ff",
     );
     expect(contract.latestMigration).toBe("0192_workspace_learning_policy.sql");
     expect(migrations.get("0065_enrollment_credential_generation.sql")).toMatchObject({
@@ -227,7 +227,7 @@ describe("release schema contract", () => {
       deploymentMode: "rolling",
     });
     expect(migrations.get("0192_workspace_learning_policy.sql")).toMatchObject({
-      sha256: "0ea724449f587c6d83384a3a9849a726db4e98b333a129b88b78f5d3a305145f",
+      sha256: "92286a9bbe8982fde66780bbe03fd92c0e5dbf1c9ff1fbf08a1d17fd2f8d595f",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0183_model_call_provider_cost_estimates.sql")).toMatchObject({

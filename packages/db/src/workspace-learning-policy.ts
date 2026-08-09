@@ -98,6 +98,18 @@ function headFromRow(row: HeadRow): WorkspaceLearningPolicyHead {
   };
 }
 
+function headFromEventRow(row: EventRow): WorkspaceLearningPolicyHead {
+  return {
+    accountId: row.accountId,
+    workspaceId: row.workspaceId,
+    revisionId: row.newRevisionId,
+    revision: row.newRevision,
+    policyHash: row.newPolicyHash,
+    activationVersion: row.activationVersion,
+    activatedAt: iso(row.createdAt),
+  };
+}
+
 function eventFromRow(row: EventRow): WorkspaceLearningPolicyActivationEvent {
   return {
     id: row.id,
@@ -219,6 +231,60 @@ async function currentHeadInTransaction(
   return row ? headFromRow(row) : null;
 }
 
+async function lockWorkspace(
+  db: Database,
+  input: { accountId: string; workspaceId: string },
+): Promise<void> {
+  const [workspace] = await db
+    .select({ id: schema.workspaces.id })
+    .from(schema.workspaces)
+    .where(
+      and(
+        eq(schema.workspaces.id, input.workspaceId),
+        eq(schema.workspaces.accountId, input.accountId),
+      ),
+    )
+    .for("update")
+    .limit(1);
+  if (!workspace) throw new WorkspaceLearningPolicyNotFoundError("Workspace was not found");
+}
+
+async function revisionByOperationInTransaction(
+  db: Database,
+  workspaceId: string,
+  operationId: string,
+): Promise<RevisionRow | null> {
+  const [row] = await db
+    .select()
+    .from(schema.workspaceLearningPolicyRevisions)
+    .where(
+      and(
+        eq(schema.workspaceLearningPolicyRevisions.workspaceId, workspaceId),
+        eq(schema.workspaceLearningPolicyRevisions.operationId, operationId),
+      ),
+    )
+    .limit(1);
+  return row ?? null;
+}
+
+async function eventByOperationInTransaction(
+  db: Database,
+  workspaceId: string,
+  operationId: string,
+): Promise<EventRow | null> {
+  const [row] = await db
+    .select()
+    .from(schema.workspaceLearningPolicyActivationEvents)
+    .where(
+      and(
+        eq(schema.workspaceLearningPolicyActivationEvents.workspaceId, workspaceId),
+        eq(schema.workspaceLearningPolicyActivationEvents.operationId, operationId),
+      ),
+    )
+    .limit(1);
+  return row ?? null;
+}
+
 export async function createWorkspaceLearningPolicyRevision(
   db: Database,
   input: {
@@ -250,32 +316,25 @@ export async function createWorkspaceLearningPolicyRevision(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
-      const [existing] = await scopedDb
-        .select()
-        .from(schema.workspaceLearningPolicyRevisions)
-        .where(
-          and(
-            eq(schema.workspaceLearningPolicyRevisions.workspaceId, input.workspaceId),
-            eq(schema.workspaceLearningPolicyRevisions.operationId, operationId),
-          ),
-        )
-        .limit(1);
+      // Revision creation and activation share this lock, making their
+      // workspace-local operation-id namespace exact under concurrency.
+      await lockWorkspace(scopedDb, input);
+      const existing = await revisionByOperationInTransaction(
+        scopedDb,
+        input.workspaceId,
+        operationId,
+      );
       if (existing) {
         if (existing.requestFingerprint !== requestFingerprint) {
           throw new WorkspaceLearningPolicyOperationReuseError();
         }
         return revisionFromRow(existing);
       }
-      const [eventReuse] = await scopedDb
-        .select({ id: schema.workspaceLearningPolicyActivationEvents.id })
-        .from(schema.workspaceLearningPolicyActivationEvents)
-        .where(
-          and(
-            eq(schema.workspaceLearningPolicyActivationEvents.workspaceId, input.workspaceId),
-            eq(schema.workspaceLearningPolicyActivationEvents.operationId, operationId),
-          ),
-        )
-        .limit(1);
+      const eventReuse = await eventByOperationInTransaction(
+        scopedDb,
+        input.workspaceId,
+        operationId,
+      );
       if (eventReuse) throw new WorkspaceLearningPolicyOperationReuseError();
 
       try {
@@ -294,13 +353,19 @@ export async function createWorkspaceLearningPolicyRevision(
             supersedesRevisionId,
             createdBySubjectId: input.actorSubjectId,
           })
+          .onConflictDoNothing()
           .returning();
-        if (!row) throw new Error("Workspace learning-policy revision was not recorded");
-        return revisionFromRow(row);
-      } catch (error) {
-        if (nestedPostgresSqlState(error) === "23505") {
+        if (row) return revisionFromRow(row);
+        const winner = await revisionByOperationInTransaction(
+          scopedDb,
+          input.workspaceId,
+          operationId,
+        );
+        if (!winner || winner.requestFingerprint !== requestFingerprint) {
           throw new WorkspaceLearningPolicyOperationReuseError();
         }
+        return revisionFromRow(winner);
+      } catch (error) {
         if (nestedPostgresSqlState(error) === "23514") {
           throw new WorkspaceLearningPolicyInvalidOperationError(
             "Workspace learning-policy revision failed immutable scope validation",
@@ -365,20 +430,13 @@ async function changeActiveWorkspaceLearningPolicy(
               )`,
         );
         if (!receipt) throw new Error("Workspace learning-policy activation returned no receipt");
-        const [[event], [head]] = await Promise.all([
-          scopedDb
-            .select()
-            .from(schema.workspaceLearningPolicyActivationEvents)
-            .where(eq(schema.workspaceLearningPolicyActivationEvents.id, receipt.eventId))
-            .limit(1),
-          scopedDb
-            .select()
-            .from(schema.workspaceLearningPolicyHeads)
-            .where(eq(schema.workspaceLearningPolicyHeads.workspaceId, input.workspaceId))
-            .limit(1),
-        ]);
-        if (!event || !head) throw new Error("Workspace learning-policy activation was incomplete");
-        return { head: headFromRow(head), event: eventFromRow(event) };
+        const [event] = await scopedDb
+          .select()
+          .from(schema.workspaceLearningPolicyActivationEvents)
+          .where(eq(schema.workspaceLearningPolicyActivationEvents.id, receipt.eventId))
+          .limit(1);
+        if (!event) throw new Error("Workspace learning-policy activation was incomplete");
+        return { head: headFromEventRow(event), event: eventFromRow(event) };
       },
     );
   } catch (error) {

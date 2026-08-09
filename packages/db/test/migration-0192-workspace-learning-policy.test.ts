@@ -41,6 +41,23 @@ type Attempt = {
   executionGeneration: number;
 };
 
+type PolicyFixture = {
+  accountId: string;
+  workspaceId: string;
+};
+
+async function seedPolicyFixture(label: string): Promise<PolicyFixture> {
+  const [account] = await shared!.admin<{ id: string }[]>`
+    insert into managed_accounts (name) values (${`learning policy ${label} account`}) returning id`;
+  const [workspace] = await shared!.admin<{ id: string }[]>`
+    insert into workspaces (account_id, name)
+    values (${account!.id}, ${`learning policy ${label} workspace`}) returning id`;
+  await shared!.admin`
+    insert into workspace_inference_controls (workspace_id, account_id)
+    values (${workspace!.id}, ${account!.id})`;
+  return { accountId: account!.id, workspaceId: workspace!.id };
+}
+
 async function seedAttempt(input: {
   accountId: string;
   workspaceId: string;
@@ -94,6 +111,19 @@ async function sqlState(operation: Promise<unknown>): Promise<string | null> {
   } catch (error) {
     return nestedPostgresSqlState(error);
   }
+}
+
+async function waitForApplicationLock(applicationName: string): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const [activity] = await shared!.admin<{ waitEventType: string | null }[]>`
+      select wait_event_type as "waitEventType"
+      from pg_stat_activity
+      where application_name = ${applicationName}
+        and state = 'active'`;
+    if (activity?.waitEventType === "Lock") return;
+    await Bun.sleep(10);
+  }
+  throw new Error(`Timed out waiting for ${applicationName} to block on the workspace lock`);
 }
 
 beforeAll(async () => {
@@ -374,5 +404,247 @@ describe("migration 0192 workspace learning policy", () => {
       workspaceMode: "off",
       sourceOverrides: [],
     });
+  }, 180_000);
+
+  test("serializes operation ids and replays the original activation receipt", async () => {
+    if (!available) return;
+    const isolated = await seedPolicyFixture("operation namespace");
+    const common = {
+      ...isolated,
+      actorSubjectId: "user:operation-admin",
+      principalKind: "human_session" as const,
+    };
+    const first = await createWorkspaceLearningPolicyRevision(client.db, {
+      ...common,
+      workspaceMode: "off",
+    });
+    const second = await createWorkspaceLearningPolicyRevision(client.db, {
+      ...common,
+      workspaceMode: "suggest",
+      supersedesRevisionId: first.id,
+    });
+    const firstActivationInput = {
+      ...common,
+      operationId: crypto.randomUUID(),
+      revisionId: first.id,
+      expectedCurrentRevisionId: null,
+      expectedActivationVersion: 0,
+      reason: "Activate the first revision",
+    };
+    const firstActivation = await activateWorkspaceLearningPolicyRevision(
+      client.db,
+      firstActivationInput,
+    );
+    await activateWorkspaceLearningPolicyRevision(client.db, {
+      ...common,
+      revisionId: second.id,
+      expectedCurrentRevisionId: first.id,
+      expectedActivationVersion: 1,
+      reason: "Activate the second revision",
+    });
+    expect(await activateWorkspaceLearningPolicyRevision(client.db, firstActivationInput)).toEqual(
+      firstActivation,
+    );
+
+    const identicalOperationId = crypto.randomUUID();
+    const identicalInput = {
+      ...common,
+      operationId: identicalOperationId,
+      workspaceMode: "automatic" as const,
+      supersedesRevisionId: second.id,
+    };
+    const identical = await Promise.all([
+      createWorkspaceLearningPolicyRevision(client.db, identicalInput),
+      createWorkspaceLearningPolicyRevision(client.db, identicalInput),
+    ]);
+    expect(identical[1]).toEqual(identical[0]);
+    const [identicalCount] = await shared!.admin<{ count: number }[]>`
+      select count(*)::int as count
+      from workspace_learning_policy_revisions
+      where workspace_id = ${isolated.workspaceId}
+        and operation_id = ${identicalOperationId}`;
+    expect(identicalCount?.count).toBe(1);
+
+    const crossOperationId = crypto.randomUUID();
+    const third = identical[0]!;
+    const crossRace = await Promise.allSettled([
+      createWorkspaceLearningPolicyRevision(client.db, {
+        ...common,
+        operationId: crossOperationId,
+        workspaceMode: "off",
+        supersedesRevisionId: third.id,
+      }),
+      activateWorkspaceLearningPolicyRevision(client.db, {
+        ...common,
+        operationId: crossOperationId,
+        revisionId: third.id,
+        expectedCurrentRevisionId: second.id,
+        expectedActivationVersion: 2,
+        reason: "Race activation against revision creation",
+      }),
+    ]);
+    expect(crossRace.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(crossRace.filter((result) => result.status === "rejected")).toHaveLength(1);
+    expect(
+      (crossRace.find((result) => result.status === "rejected") as PromiseRejectedResult).reason,
+    ).toBeInstanceOf(WorkspaceLearningPolicyOperationReuseError);
+    const [crossCount] = await shared!.admin<{ count: number }[]>`
+      select (
+        select count(*) from workspace_learning_policy_revisions
+        where workspace_id = ${isolated.workspaceId} and operation_id = ${crossOperationId}
+      ) + (
+        select count(*) from workspace_learning_policy_activation_events
+        where workspace_id = ${isolated.workspaceId} and operation_id = ${crossOperationId}
+      ) as count`;
+    expect(Number(crossCount?.count)).toBe(1);
+  }, 180_000);
+
+  test("orders dependent CAS events by serialized acceptance time", async () => {
+    if (!available) return;
+    const isolated = await seedPolicyFixture("dependent CAS");
+    const actorSubjectId = "user:dependent-cas-admin";
+    const common = {
+      ...isolated,
+      actorSubjectId,
+      principalKind: "human_session" as const,
+    };
+    const first = await createWorkspaceLearningPolicyRevision(client.db, {
+      ...common,
+      workspaceMode: "off",
+    });
+    const second = await createWorkspaceLearningPolicyRevision(client.db, {
+      ...common,
+      workspaceMode: "suggest",
+      supersedesRevisionId: first.id,
+    });
+    const third = await createWorkspaceLearningPolicyRevision(client.db, {
+      ...common,
+      workspaceMode: "automatic",
+      supersedesRevisionId: second.id,
+    });
+    await activateWorkspaceLearningPolicyRevision(client.db, {
+      ...common,
+      revisionId: first.id,
+      expectedCurrentRevisionId: null,
+      expectedActivationVersion: 0,
+      reason: "Establish the first dependent-CAS revision",
+    });
+
+    const owner = postgres(shared!.appUrl, { max: 1, prepare: false });
+    const dependent = postgres(shared!.appUrl, { max: 1, prepare: false });
+    const ownerOperationId = crypto.randomUUID();
+    const dependentOperationId = crypto.randomUUID();
+    const dependentApplicationName = `learning-policy-dependent-${dependentOperationId}`;
+    let dependentCall: Promise<unknown> | undefined;
+    try {
+      await owner.begin(async (sql) => {
+        await sql`select set_config('opengeni.account_id', ${isolated.accountId}, true)`;
+        await sql`select set_config('opengeni.workspace_id', ${isolated.workspaceId}, true)`;
+        await sql`select set_config('opengeni.subject_id', ${actorSubjectId}, true)`;
+        await sql`select set_config('opengeni.principal_kind', 'human_session', true)`;
+        await sql`select id from workspaces where id = ${isolated.workspaceId} for update`;
+
+        dependentCall = dependent.begin(async (dependentSql) => {
+          await dependentSql`select set_config('application_name', ${dependentApplicationName}, false)`;
+          await dependentSql`select set_config('opengeni.account_id', ${isolated.accountId}, true)`;
+          await dependentSql`select set_config('opengeni.workspace_id', ${isolated.workspaceId}, true)`;
+          await dependentSql`select set_config('opengeni.subject_id', ${actorSubjectId}, true)`;
+          await dependentSql`select set_config('opengeni.principal_kind', 'human_session', true)`;
+          return await dependentSql`
+            select event_id
+            from workspace_learning_policy_apply_activation(
+              ${dependentOperationId}::uuid,
+              ${"b".repeat(64)},
+              ${isolated.accountId}::uuid,
+              ${isolated.workspaceId}::uuid,
+              ${third.id}::uuid,
+              ${second.id}::uuid,
+              2::bigint,
+              'activate',
+              ${actorSubjectId},
+              'Apply the dependent revision after its predecessor'
+            )`;
+        });
+        await waitForApplicationLock(dependentApplicationName);
+        await sql`
+          select event_id
+          from workspace_learning_policy_apply_activation(
+            ${ownerOperationId}::uuid,
+            ${"a".repeat(64)},
+            ${isolated.accountId}::uuid,
+            ${isolated.workspaceId}::uuid,
+            ${second.id}::uuid,
+            ${first.id}::uuid,
+            1::bigint,
+            'activate',
+            ${actorSubjectId},
+            'Apply the predecessor while retaining the workspace lock'
+          )`;
+      });
+      await dependentCall;
+    } finally {
+      await dependent.end();
+      await owner.end();
+    }
+
+    const events = await shared!.admin<
+      { operationId: string; activationVersion: number; createdAt: Date }[]
+    >`
+      select operation_id as "operationId", activation_version::int as "activationVersion",
+        created_at as "createdAt"
+      from workspace_learning_policy_activation_events
+      where workspace_id = ${isolated.workspaceId}
+        and operation_id in (${ownerOperationId}, ${dependentOperationId})
+      order by activation_version`;
+    expect(events.map((event) => event.activationVersion)).toEqual([2, 3]);
+    expect(events[1]!.createdAt.getTime()).toBeGreaterThan(events[0]!.createdAt.getTime());
+
+    const accepted = await seedAttempt({
+      ...isolated,
+      subjectId: actorSubjectId,
+    });
+    const snapshot = await getOrCreateWorkspaceLearningPolicySnapshot(client.db, {
+      ...isolated,
+      ...accepted,
+    });
+    expect(snapshot).toMatchObject({
+      revision: { id: third.id },
+      activationVersion: 3,
+      workspaceMode: "automatic",
+    });
+  }, 180_000);
+
+  test("permits snapshot cleanup through attempt, turn, and session lifecycle deletion", async () => {
+    if (!available) return;
+    const isolated = await seedPolicyFixture("snapshot cascade");
+    const accepted = await seedAttempt({
+      ...isolated,
+      subjectId: "user:snapshot-cascade-admin",
+    });
+    const snapshot = await getOrCreateWorkspaceLearningPolicySnapshot(client.db, {
+      ...isolated,
+      ...accepted,
+    });
+
+    await shared!.admin`
+      update sessions set active_turn_id = null where id = ${accepted.sessionId}`;
+    await shared!.admin`
+      update session_turns set active_attempt_id = null where id = ${accepted.turnId}`;
+    await shared!.admin`
+      delete from session_turn_attempts where id = ${accepted.attemptId}`;
+    const [afterAttempt] = await shared!.admin<{ count: number }[]>`
+      select count(*)::int as count from workspace_learning_policy_snapshots
+      where id = ${snapshot.id}`;
+    expect(afterAttempt?.count).toBe(0);
+
+    await shared!.admin`delete from session_turns where id = ${accepted.turnId}`;
+    const [afterTurn] = await shared!.admin<{ count: number }[]>`
+      select count(*)::int as count from session_turns where id = ${accepted.turnId}`;
+    expect(afterTurn?.count).toBe(0);
+
+    await shared!.admin`delete from sessions where id = ${accepted.sessionId}`;
+    const [afterSession] = await shared!.admin<{ count: number }[]>`
+      select count(*)::int as count from sessions where id = ${accepted.sessionId}`;
+    expect(afterSession?.count).toBe(0);
   }, 180_000);
 });
