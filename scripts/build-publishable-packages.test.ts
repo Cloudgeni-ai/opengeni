@@ -446,6 +446,21 @@ test("reclaims an ownerless stale lock without waiting for the lock deadline", a
   expect(readFileSync(outputPath(root), "utf8")).toBe("BASE|A|644\n");
 });
 
+test("reclaims a stale lock with malformed owner metadata", async () => {
+  const root = createFixture();
+  const lockPath = join(root, ".opengeni", "build-cache", "packages", "_opengeni_demo.json.lock");
+  mkdirSync(lockPath, { recursive: true });
+  writeFileSync(join(lockPath, "owner"), "{");
+  const staleTime = new Date(Date.now() - 2_000);
+  utimesSync(lockPath, staleTime, staleTime);
+
+  const startedAt = Date.now();
+  const result = await runBuilder(root, { OPENGENI_BUILD_VARIANT: "BASE" });
+  expect(Date.now() - startedAt).toBeLessThan(2_000);
+  expect(result.code).toBe(0);
+  expect(readFileSync(outputPath(root), "utf8")).toBe("BASE|A|644\n");
+});
+
 test("admits one builder when many waiters reclaim a dead-owner lock", async () => {
   const root = createFixture();
   const lockPath = join(root, ".opengeni", "build-cache", "packages", "_opengeni_demo.json.lock");

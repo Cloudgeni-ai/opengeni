@@ -118,7 +118,9 @@ describe("secret-safe command profile parsing", () => {
   });
 
   test("cancellation is forwarded and recorded", async () => {
-    const output = join(mkdtempSync(join(tmpdir(), "opengeni-profile-cancel-")), "result.json");
+    const root = mkdtempSync(join(tmpdir(), "opengeni-profile-cancel-"));
+    const output = join(root, "result.json");
+    const ready = join(root, "ready");
     const child = Bun.spawn(
       [
         "bun",
@@ -128,12 +130,16 @@ describe("secret-safe command profile parsing", () => {
         "--output",
         output,
         "--",
-        "sleep",
-        "30",
+        "sh",
+        "-c",
+        `echo ready > ${JSON.stringify(ready)}; exec sleep 30`,
       ],
       { stdout: "ignore", stderr: "ignore" },
     );
-    await Bun.sleep(150);
+    for (let attempt = 0; attempt < 40 && !existsSync(ready); attempt += 1) {
+      await Bun.sleep(25);
+    }
+    expect(existsSync(ready)).toBe(true);
     child.kill("SIGTERM");
     expect(await child.exited).not.toBe(0);
     const profile = JSON.parse(readFileSync(output, "utf8")) as {

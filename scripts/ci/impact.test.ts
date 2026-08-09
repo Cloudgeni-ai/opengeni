@@ -67,7 +67,11 @@ describe("fail-closed change impact", () => {
     );
     expect(sdk.typecheckProjects).toContain("packages/sdk");
     expect(sdk.unitTests).toContain("packages/sdk/test/client.test.ts");
-    expect(sdk.e2eTests).toEqual([]);
+    expect(sdk.e2eTests).toEqual([
+      "test/e2e/composer-responsive.browser.e2e.ts",
+      "test/e2e/connected-machine-removal.browser.e2e.ts",
+      "test/e2e/react-compiled-css.browser.e2e.ts",
+    ]);
     expect(sdk.buildPackages).toEqual(expect.arrayContaining(["@opengeni/sdk", "@opengeni/react"]));
 
     const react = createImpactPlan(["packages/react/src/index.ts"]);
@@ -81,7 +85,11 @@ describe("fail-closed change impact", () => {
     expect(() => assertTestTierMapComplete()).not.toThrow();
     const tests = discoverTestFiles();
     expect(tests.integration.length).toBeGreaterThan(0);
-    expect(tests.e2e).toEqual([]);
+    expect(tests.e2e).toEqual([
+      "test/e2e/composer-responsive.browser.e2e.ts",
+      "test/e2e/connected-machine-removal.browser.e2e.ts",
+      "test/e2e/react-compiled-css.browser.e2e.ts",
+    ]);
     expect(tests.e2e).not.toContain("test/e2e/codex-overview.e2e.ts");
     expect(OPT_IN_TESTS["test/e2e/codex-overview.e2e.ts"]).toContain("browser-acceptance");
     expect(tests.e2e).not.toContain("test/e2e/opstream-runner.e2e.ts");
