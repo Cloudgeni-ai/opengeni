@@ -1,5 +1,19 @@
 # @opengeni/worker-bundle
 
+## 0.16.44
+
+### Patch Changes
+
+- 1385585: Bound active turn memory, make worker admission cgroup-aware, and replace paused-prompt queue pressure with eligible Temporal backlog and slot saturation metrics.
+- Updated dependencies [8485ff5]
+- Updated dependencies [1385585]
+  - @opengeni/runtime@0.18.35
+  - @opengeni/db@0.28.17
+  - @opengeni/observability@0.5.13
+  - @opengeni/core@0.21.25
+  - @opengeni/documents@0.5.26
+  - @opengeni/events@0.3.97
+
 ## 0.16.43
 
 ### Patch Changes

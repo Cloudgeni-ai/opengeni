@@ -1,5 +1,11 @@
 # @opengeni/observability
 
+## 0.5.13
+
+### Patch Changes
+
+- 1385585: Bound active turn memory, make worker admission cgroup-aware, and replace paused-prompt queue pressure with eligible Temporal backlog and slot saturation metrics.
+
 ## 0.5.12
 
 ### Patch Changes
