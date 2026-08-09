@@ -1521,7 +1521,7 @@ describe("connections routes", () => {
     }
   });
 
-  test("oauth start uses configured operator credentials for Slack-shaped authorization servers", async () => {
+  test("workspace Slack MCP uses configured operator credentials and persists workspace ownership", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const as = startFakeAuthorizationServer({
@@ -1548,6 +1548,7 @@ describe("connections routes", () => {
         body: JSON.stringify({
           providerDomain: "slack.com",
           mcpUrl: mcp.url,
+          ownership: "workspace",
           returnPath: "/capabilities?connect_item=slack",
         }),
       });
@@ -1561,6 +1562,7 @@ describe("connections routes", () => {
 
       const state = readSignedState(body.state, STATE_SECRET) as Record<string, unknown> | null;
       expect(state?.providerDomain).toBe("slack.com");
+      expect(state?.ownership).toBe("workspace");
       expect(state?.clientRegistrationMethod).toBe("operator");
       expect(state?.clientId).toBe("slack-client-id");
       expect(JSON.stringify(state)).not.toContain("slack-client-secret");
@@ -1572,7 +1574,17 @@ describe("connections routes", () => {
         `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`,
       );
       expect(callback.status).toBe(302);
-      expect(callback.headers.get("location")).toContain("integration_oauth=success");
+      const callbackLocation = new URL(
+        callback.headers.get("location")!,
+        "https://api.opengeni.test",
+      );
+      expect(callbackLocation.searchParams.get("integration_oauth")).toBe("success");
+      expect(callbackLocation.searchParams.get("ownership")).toBe("workspace");
+      const connectionId = callbackLocation.searchParams.get("connectionId");
+      expect(connectionId).not.toBeNull();
+      expect(
+        await getConnectionMetadata(client.db, workspace.workspaceId, connectionId!, "subject-a"),
+      ).toMatchObject({ subjectId: null, providerDomain: "slack.com", kind: "oauth2" });
       expect(as.tokenRequests).toHaveLength(1);
       expect(as.tokenRequests[0]!.get("client_id")).toBe("slack-client-id");
       expect(as.tokenRequests[0]!.get("client_secret")).toBe("slack-client-secret");
@@ -1583,7 +1595,68 @@ describe("connections routes", () => {
     }
   });
 
-  test("personal Slack rejects browser-provided OAuth clients before discovery", async () => {
+  test("explicit personal Slack MCP ownership remains bound to the authenticating subject", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const as = startFakeAuthorizationServer({
+      issuer: "https://slack.com/mcp",
+      clientIdMetadataDocumentSupported: false,
+      tokenEndpointAuthMethodsSupported: ["client_secret_post"],
+      scopesSupported: ["search:read.public", "chat:write"],
+    });
+    const mcp = startTestMcpServer({
+      requiredAuthorization: "Bearer mcp-access-token",
+      unauthorizedAuthenticateHeader: `Bearer resource_metadata="${as.url}/.well-known/oauth-protected-resource", scope="search:read.public chat:write"`,
+    });
+    try {
+      const response = await app({
+        environment: "test",
+        slackClientId: "slack-client-id",
+        slackClientSecret: "slack-client-secret",
+      }).request(`/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`, {
+        method: "POST",
+        headers: {
+          authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          providerDomain: "slack.com",
+          mcpUrl: mcp.url,
+          ownership: "personal",
+          returnPath: "/capabilities?connect_item=slack",
+        }),
+      });
+
+      const responseText = await response.clone().text();
+      expect(response.status, responseText).toBe(200);
+      const body = (await response.json()) as { state: string };
+      const state = readSignedState(body.state, STATE_SECRET) as Record<string, unknown> | null;
+      expect(state?.ownership).toBe("personal");
+
+      const callback = await publicApp(client.db, {
+        slackClientId: "slack-client-id",
+        slackClientSecret: "slack-client-secret",
+      }).request(
+        `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`,
+      );
+      expect(callback.status).toBe(302);
+      const callbackLocation = new URL(
+        callback.headers.get("location")!,
+        "https://api.opengeni.test",
+      );
+      expect(callbackLocation.searchParams.get("ownership")).toBe("personal");
+      const connectionId = callbackLocation.searchParams.get("connectionId");
+      expect(connectionId).not.toBeNull();
+      expect(
+        await getConnectionMetadata(client.db, workspace.workspaceId, connectionId!, "subject-a"),
+      ).toMatchObject({ subjectId: "subject-a", providerDomain: "slack.com", kind: "oauth2" });
+    } finally {
+      mcp.close();
+      as.close();
+    }
+  });
+
+  test("Slack MCP rejects browser-provided OAuth clients before discovery", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const response = await app({
@@ -1610,7 +1683,7 @@ describe("connections routes", () => {
     expect(await response.text()).toContain("deployment-managed");
   });
 
-  test("personal Slack requires deployment OAuth settings and the exact hosted MCP resource", async () => {
+  test("Slack MCP requires deployment OAuth settings and the exact hosted MCP resource", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const request = async (overrides: Partial<Settings>, mcpUrl: string) =>
@@ -1627,7 +1700,7 @@ describe("connections routes", () => {
     const missingDeploymentClient = await request({}, "https://mcp.slack.com/mcp");
     expect(missingDeploymentClient.status).toBe(503);
     expect(await missingDeploymentClient.text()).toContain(
-      "personal Slack OAuth requires OPENGENI_SLACK_CLIENT_ID and OPENGENI_SLACK_CLIENT_SECRET",
+      "Slack MCP OAuth requires OPENGENI_SLACK_CLIENT_ID and OPENGENI_SLACK_CLIENT_SECRET",
     );
 
     const nonOfficialResource = await request(

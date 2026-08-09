@@ -96,11 +96,13 @@ export function personalSlackAccountState(
 export function personalSlackOAuthTarget(item: CapabilityCatalogItem | null): {
   providerDomain: "slack.com";
   mcpUrl: typeof OPENGENI_PERSONAL_SLACK_MCP_URL;
+  ownership: "personal";
 } | null {
   if (!item || personalSlackCapability([item]) === null) return null;
   return {
     providerDomain: PERSONAL_SLACK_PROVIDER_DOMAIN,
     mcpUrl: OPENGENI_PERSONAL_SLACK_MCP_URL,
+    ownership: "personal",
   };
 }
 

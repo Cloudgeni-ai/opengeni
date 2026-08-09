@@ -11,6 +11,7 @@ import {
   OPENGENI_MANAGED_PUBLIC_BASE_URL,
   OPENGENI_SLACK_BOT_EVENTS,
   OPENGENI_SLACK_BOT_REQUESTED_SCOPES,
+  OPENGENI_SLACK_MCP_USER_SCOPES,
   OPENGENI_SLACK_REACTION_REQUIRED_SCOPE,
 } from "../src/slack-bot-scopes";
 
@@ -56,6 +57,8 @@ describe("Slack reaction summon workspace settings", () => {
     const managed = buildOpenGeniSlackBotManifest(OPENGENI_MANAGED_PUBLIC_BASE_URL);
     expect(managed.oauth_config.scopes.bot).toEqual([...OPENGENI_SLACK_BOT_REQUESTED_SCOPES]);
     expect(managed.oauth_config.scopes.bot).not.toContain("reactions:write");
+    expect(managed.oauth_config.scopes.user).toEqual([...OPENGENI_SLACK_MCP_USER_SCOPES]);
+    expect(managed.settings.is_mcp_enabled).toBe(true);
     expect(managed.settings.event_subscriptions.bot_events).toEqual([...OPENGENI_SLACK_BOT_EVENTS]);
     expect(managed.settings.event_subscriptions.request_url).toBe(
       "https://app.opengeni.ai/v1/integrations/slack/events",

@@ -41,6 +41,35 @@ export const OPENGENI_SLACK_BOT_EVENTS = [
   "reaction_added",
 ] as const;
 
+/** Full user-token scope set for every tool currently exposed by Slack's hosted MCP server. */
+export const OPENGENI_SLACK_MCP_USER_SCOPES = [
+  "search:read.public",
+  "search:read.private",
+  "search:read.mpim",
+  "search:read.im",
+  "search:read.files",
+  "files:read",
+  "emoji:read",
+  "search:read.users",
+  "chat:write",
+  "channels:history",
+  "groups:history",
+  "mpim:history",
+  "im:history",
+  "channels:write",
+  "groups:write",
+  "im:write",
+  "mpim:write",
+  "reactions:write",
+  "canvases:read",
+  "canvases:write",
+  "users:read",
+  "users:read.email",
+  "channels:read",
+  "groups:read",
+  "mpim:read",
+] as const;
+
 export const OPENGENI_MANAGED_PUBLIC_BASE_URL = "https://app.opengeni.ai" as const;
 
 function normalizedSlackManifestBaseUrl(publicBaseUrl: string): string {
@@ -83,7 +112,10 @@ export function buildOpenGeniSlackBotManifest(publicBaseUrl: string) {
         `${baseUrl}/v1/integrations/oauth/callback`,
         `${baseUrl}/v1/integrations/slack/callback`,
       ],
-      scopes: { bot: [...OPENGENI_SLACK_BOT_REQUESTED_SCOPES] },
+      scopes: {
+        bot: [...OPENGENI_SLACK_BOT_REQUESTED_SCOPES],
+        user: [...OPENGENI_SLACK_MCP_USER_SCOPES],
+      },
     },
     settings: {
       event_subscriptions: {
@@ -94,6 +126,7 @@ export function buildOpenGeniSlackBotManifest(publicBaseUrl: string) {
         is_enabled: true,
         request_url: `${baseUrl}/v1/integrations/slack/interactions`,
       },
+      is_mcp_enabled: true,
       org_deploy_enabled: false,
       socket_mode_enabled: false,
       token_rotation_enabled: false,
