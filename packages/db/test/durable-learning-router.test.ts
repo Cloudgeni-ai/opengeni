@@ -20,6 +20,18 @@ let shared: SharedTestDatabase | null = null;
 let client: ReturnType<typeof createDb> | null = null;
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
+function errorChainMessage(error: unknown): string {
+  const messages: string[] = [];
+  const seen = new Set<Error>();
+  let current = error;
+  while (current instanceof Error && !seen.has(current) && messages.length < 16) {
+    seen.add(current);
+    messages.push(current.message);
+    current = current.cause;
+  }
+  return messages.join("\n");
+}
+
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("durable-learning-router");
   if (!shared && requireRealDatabase) {
@@ -192,13 +204,20 @@ describe("durable learning Postgres ledger", () => {
       subjectId: grant.subjectId,
     });
     await ledger.reserveAttempt(writeAttempt);
-    await expect(
-      withWorkspaceRls(client.db, grant.workspaceId, async (scopedDb) =>
+    let failure: unknown;
+    try {
+      await withWorkspaceRls(client.db, grant.workspaceId, async (scopedDb) =>
         scopedDb
           .update(schema.durableLearningAttempts)
           .set({ inputHash: "c".repeat(64) })
           .where(eq(schema.durableLearningAttempts.id, writeAttempt.id)),
-      ),
-    ).rejects.toThrow("durable learning attempts and receipts are immutable");
+      );
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeDefined();
+    expect(errorChainMessage(failure)).toContain(
+      "durable learning attempts and receipts are immutable",
+    );
   });
 });
