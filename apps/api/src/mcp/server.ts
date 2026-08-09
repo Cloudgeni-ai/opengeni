@@ -16,8 +16,11 @@ import {
   compactSessionEventResult,
   sessionEventLatestClassToSemanticClass,
   SessionMcpCredentialUpdateInput,
+  ToolAuthNeededPayload,
   VariableSetVariableName,
+  capabilityCatalogItemIsTrustedForExposure,
   type AccessGrant,
+  type CapabilityCatalogItem,
   type GitHubRepository,
   type FirstPartyMcpToolName,
   type Permission,
@@ -85,7 +88,11 @@ import {
   publishWorkspaceArtifactVersion,
   rollbackWorkspaceArtifact,
 } from "@opengeni/db";
-import { appendAndPublishEvents, publishDurableSessionEvents } from "@opengeni/events";
+import {
+  appendAndPublishEvents,
+  appendAndPublishTurnEventsFenced,
+  publishDurableSessionEvents,
+} from "@opengeni/events";
 import {
   createSignedState,
   GitHubAppConfigurationError,
@@ -103,11 +110,13 @@ import {
   hasLiteralPermission,
   hasPermission,
   authorizedSocialConnectionsForGrant,
+  buildCapabilityCatalog,
   durableLearningStableAttemptId,
   requireLiveAgentAttemptAuthorization,
   requireSessionAuthorization,
   requireSessionAuthorizationListScope,
   routeLegacyWorkspaceMemoryWrite,
+  searchCapabilityCatalogItems,
   type ResolvedSessionAuthorization,
 } from "@opengeni/core";
 import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
@@ -259,6 +268,11 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
     allOf: ["variable-sets:write", "secrets:write"],
   },
   environment_set_variable: { allOf: ["variable-sets:write", "secrets:write"] },
+  capability_catalog_search: { sessionRequired: true, allOf: ["workspace:read"] },
+  capability_authorization_request: {
+    sessionRequired: true,
+    allOf: ["workspace:read"],
+  },
   github_connect_link: { allOf: ["github:use"] },
   github_repositories_list: { allOf: ["github:use"] },
   social_connections_list: { allOf: ["connections:read"] },
@@ -491,6 +505,9 @@ export function buildOpenGeniMcpServer(
   // the creator's own grant); operators still cap what any session can be given.
   registerWorkspaceOrchestrationTools(server, deps, grant, can, sessionId, toolspaceMode, json);
   registerVariableSetTools(server, deps, grant, can, sessionId, toolspaceMode, json);
+  if (!toolspaceMode && sessionId !== null && can("workspace:read")) {
+    registerCapabilityDiscoveryTools(server, deps, grant, sessionId, json);
+  }
   if (can("github:use")) {
     registerGitHubConnectTool(server, deps, grant, options, json);
   }
@@ -3630,6 +3647,234 @@ function registerVariableSetTools(
       "(deprecated alias of variable_set_set_variable) Set or rotate one variable in a variable set. Target by variableSetId, or by variableSetName (created if it does not exist). The value is encrypted at rest and injected into sandboxes of sessions the variable set is attached to. Reading it requires the dedicated permissioned secret-read operation.",
     );
   }
+}
+
+type CapabilitySetupProjection =
+  | { status: "ready"; action: null; detail: string }
+  | {
+      status: "authorization_required";
+      action: "connect" | "add_credentials" | "enable";
+      detail: string;
+    }
+  | { status: "unavailable"; action: null; detail: string };
+
+function registerCapabilityDiscoveryTools(
+  server: McpServer,
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  sessionId: string,
+  json: JsonResult,
+): void {
+  const catalog = () =>
+    buildCapabilityCatalog({
+      db: deps.db,
+      workspaceId: grant.workspaceId,
+      settings: deps.settings,
+      subjectId: grant.subjectId,
+    });
+  const authorize = async () => {
+    await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+  };
+
+  server.registerTool(
+    "capability_catalog_search",
+    {
+      description:
+        "Search OpenGeni's reviewed workspace capability catalog when the user asks to add an integration or the task needs a capability that is not currently usable. Search by the outcome needed (for example `GitHub repositories`, `product analytics`, or `Slack notifications`), compare the returned candidates, and prefer a ready or verified exact match. This only reads secret-free metadata; it never installs, connects, or authorizes anything.",
+      inputSchema: {
+        query: z4.string().min(1).max(500),
+        limit: z4.number().int().min(1).max(20).optional(),
+      },
+    },
+    async ({ query, limit }) => {
+      await authorize();
+      const current = await catalog();
+      const ranked = searchCapabilityCatalogItems(current.items, query, limit ?? 8);
+      const matches = await Promise.all(
+        ranked.map(async ({ item, matchedOn }) => ({
+          capabilityId: item.id,
+          name: item.name,
+          description: item.description,
+          kind: item.kind,
+          source: item.source,
+          category: item.category,
+          tags: item.tags.slice(0, 16),
+          providerDomain: item.providerDomain,
+          authKind: item.authKind,
+          tier: item.tier,
+          matchedOn,
+          setup: {
+            ...(await capabilitySetupProjection(deps, grant.workspaceId, item)),
+            requiredVariables: capabilityRequiredVariables(item),
+          },
+        })),
+      );
+      return json({ query, matches });
+    },
+  );
+
+  server.registerTool(
+    "capability_authorization_request",
+    {
+      description:
+        "After capability_catalog_search and after explaining one chosen recommendation to the user, post exactly one in-session human authorization card for that catalog capability. This tool never grants access, enables a capability, reads a secret, or mints provider credentials; the authenticated user must click and confirm the provider/domain flow. Do not call it for a candidate reported ready or unavailable.",
+      inputSchema: {
+        capabilityId: z4.string().min(1).max(512),
+        rationale: z4.string().min(1).max(2000),
+      },
+    },
+    async ({ capabilityId, rationale }) => {
+      await authorize();
+      const current = await catalog();
+      const item = current.items.find((candidate) => candidate.id === capabilityId);
+      if (!item || !capabilityCatalogItemIsTrustedForExposure(item)) {
+        throw new Error("Unknown or untrusted capability; search the catalog again.");
+      }
+      const setup = await capabilitySetupProjection(deps, grant.workspaceId, item);
+      if (setup.status === "ready") {
+        return json({
+          capabilityId: item.id,
+          status: "ready",
+          message: setup.detail,
+        });
+      }
+      if (setup.status === "unavailable") {
+        return json({
+          capabilityId: item.id,
+          status: "unavailable",
+          message: setup.detail,
+        });
+      }
+      const claims = exactAgentCommandContext(grant, sessionId);
+      const payload = ToolAuthNeededPayload.parse({
+        serverId: item.runtime.mcpServerId ?? "opengeni",
+        toolName: "capability_authorization_request",
+        providerDomain: capabilityProviderDomain(item),
+        reason: "missing_connection",
+        capability: {
+          id: item.id,
+          name: item.name,
+          kind: item.kind,
+          source: item.source,
+          action: setup.action,
+          rationale,
+          requiredVariables: capabilityRequiredVariables(item),
+        },
+      });
+      const appended = await appendAndPublishTurnEventsFenced(
+        deps.db,
+        deps.bus,
+        grant.workspaceId,
+        sessionId,
+        claims.callerTurnId,
+        claims.callerExecutionGeneration,
+        claims.callerAttemptId,
+        [{ type: "tool.auth_needed", payload }],
+      );
+      if (!appended.accepted) {
+        throw new Error(
+          "The calling turn was replaced before the authorization request committed.",
+        );
+      }
+      return json({
+        capabilityId: item.id,
+        status: "authorization_requested",
+        action: setup.action,
+        eventId: appended.events[0]?.id ?? null,
+        message:
+          "The recommendation was posted for human confirmation. No access has been granted yet.",
+      });
+    },
+  );
+}
+
+async function capabilitySetupProjection(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+  item: CapabilityCatalogItem,
+): Promise<CapabilitySetupProjection> {
+  if (item.id === "api:github-app" || item.surfaceType === "first_party_github") {
+    const missing = githubAppMissingSettings(deps.settings);
+    if (missing.length > 0) {
+      return {
+        status: "unavailable",
+        action: null,
+        detail:
+          deps.settings.productAccessMode === "managed"
+            ? "GitHub is not available on this deployment."
+            : `The operator must configure the GitHub App first (${missing.join(", ")}).`,
+      };
+    }
+    const installations = await listWorkspaceGitHubInstallationBindings(deps, workspaceId);
+    if (githubBindingStatus(true, installations) === "bound") {
+      return { status: "ready", action: null, detail: "GitHub is connected and ready." };
+    }
+    return {
+      status: "authorization_required",
+      action: "connect",
+      detail: "A GitHub owner must approve an installation and repository allowlist.",
+    };
+  }
+  if (item.surfaceType === "codex_apps") {
+    return item.enabled
+      ? { status: "ready", action: null, detail: "Codex Apps is connected and ready." }
+      : {
+          status: "authorization_required",
+          action: "connect",
+          detail: "A workspace admin must designate an authorized Codex Apps subscription.",
+        };
+  }
+  if (item.enabled) {
+    return { status: "ready", action: null, detail: "This capability is already enabled." };
+  }
+  if (!item.runtime.available) {
+    return {
+      status: "unavailable",
+      action: null,
+      detail: item.runtime.notes ?? "This catalog entry has no executable runtime adapter.",
+    };
+  }
+  if (item.authKind === "oauth2" || item.surfaceType === "first_party_social") {
+    return {
+      status: "authorization_required",
+      action: "connect",
+      detail: "The user must confirm the provider domain and complete sign-in.",
+    };
+  }
+  if (item.authKind === "api_key" || item.authModel?.toLowerCase().includes("key")) {
+    return {
+      status: "authorization_required",
+      action: "add_credentials",
+      detail: "The user must provide the required credential through the protected setup form.",
+    };
+  }
+  return {
+    status: "authorization_required",
+    action: "enable",
+    detail: "A workspace admin must review and enable this capability.",
+  };
+}
+
+function capabilityRequiredVariables(item: CapabilityCatalogItem): string[] {
+  const variableSet = item.metadata.variableSet;
+  if (!variableSet || typeof variableSet !== "object" || Array.isArray(variableSet)) return [];
+  const required = (variableSet as Record<string, unknown>).requiredVariables;
+  return Array.isArray(required)
+    ? required.filter((name): name is string => typeof name === "string").slice(0, 64)
+    : [];
+}
+
+function capabilityProviderDomain(item: CapabilityCatalogItem): string {
+  if (item.providerDomain?.trim()) return item.providerDomain.trim();
+  for (const candidate of [item.homepageUrl, item.endpointUrl, item.mcpUrl]) {
+    if (!candidate) continue;
+    try {
+      return new URL(candidate).hostname;
+    } catch {
+      // Continue to the local, non-provider fallback below.
+    }
+  }
+  return "opengeni.local";
 }
 
 function registerGitHubConnectTool(

@@ -46,7 +46,13 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { Notice } from "@/components/ui/notice";
 import type { WorkspaceTab } from "@opengeni/react";
 import { useAppContext } from "@/context";
-import { normalizeProviderDomain } from "@/lib/capabilities";
+import {
+  normalizeProviderDomain,
+  oauthConnectionOwnership,
+  oauthConnectionRef,
+} from "@/lib/capabilities";
+import { startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
+import { hasWorkspacePermission } from "@/lib/permissions";
 import {
   isTerminalSessionStatus,
   projectSessionTimeline,
@@ -242,8 +248,12 @@ export function SessionRoute({
   // the original tool call was settled as an error and is never replayed. Strip
   // the params and tell the user to start a new turn.
   const oauthReturnHandled = useRef(false);
+  const capabilityClient = context.client;
+  const capabilityCatalog = context.workspaceCapabilityCatalog;
+  const capabilityCatalogReady = context.workspaceMcpCatalogReady;
+  const refreshCapabilityCatalog = context.refreshWorkspaceMcpServers;
   useEffect(() => {
-    if (oauthReturnHandled.current) {
+    if (oauthReturnHandled.current || !capabilityCatalogReady) {
       return;
     }
     const params = new URLSearchParams(window.location.search);
@@ -253,15 +263,57 @@ export function SessionRoute({
     }
     oauthReturnHandled.current = true;
     window.history.replaceState(null, "", window.location.pathname);
-    if (outcome === "success") {
-      toast.success("Connection restored", {
-        description: "The earlier tool call wasn't replayed. Send a new message to try again.",
-      });
-    } else {
+    const capabilityId = params.get("capability_auth");
+    if (outcome !== "success") {
       toast.error("Reconnect failed", {
         description: params.get("reason") ?? undefined,
       });
+      return;
     }
+    if (!capabilityId) {
+      toast.success("Connection restored", {
+        description: "The earlier tool call wasn't replayed. Send a new message to try again.",
+      });
+      return;
+    }
+    void (async () => {
+      const item = capabilityCatalog.find((candidate) => candidate.id === capabilityId);
+      const connectionId = params.get("connectionId");
+      const providerDomain = params.get("providerDomain");
+      const ownership = oauthConnectionOwnership(params.get("ownership"));
+      if (!item || item.kind !== "mcp" || !connectionId || !providerDomain || !ownership) {
+        throw new Error("The authorized capability could not be resolved from the live catalog.");
+      }
+      await capabilityClient.enableCapability(workspaceId, item.id, {
+        connectionRef: oauthConnectionRef(ownership, connectionId, providerDomain),
+      });
+      await refreshCapabilityCatalog(workspaceId);
+      toast.success(`${item.name} connected`, {
+        description: "It is available to new tool calls in this session.",
+      });
+    })().catch((error) => {
+      toast.error("Connection succeeded, but setup needs attention", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }, [
+    capabilityCatalog,
+    capabilityCatalogReady,
+    capabilityClient,
+    refreshCapabilityCatalog,
+    workspaceId,
+  ]);
+
+  const githubReturnHandled = useRef(false);
+  useEffect(() => {
+    if (githubReturnHandled.current) return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("github") !== "connected") return;
+    githubReturnHandled.current = true;
+    window.history.replaceState(null, "", window.location.pathname);
+    toast.success("GitHub connected", {
+      description: "Repository access is now available to new tool calls in this session.",
+    });
   }, []);
 
   // Start the recovery flow for a lapsed connection surfaced inline in the
@@ -271,6 +323,58 @@ export function SessionRoute({
   // calm inline error on the reconnect card.
   const onReconnect = useCallback(
     async (item: AuthNeededItem) => {
+      if (item.capability) {
+        const returnPath = `${window.location.pathname}?capability_auth=${encodeURIComponent(item.capability.id)}`;
+        if (item.capability.id === "api:github-app") {
+          const status = await context.client.getGitHubApp(workspaceId, { returnPath });
+          if (status.status === "bound") {
+            toast.success("GitHub is already connected");
+            return;
+          }
+          if (!status.linkUrl) {
+            throw new Error(
+              status.configured
+                ? "Your account cannot manage this workspace's GitHub connection."
+                : "GitHub is not configured on this deployment.",
+            );
+          }
+          window.location.assign(status.linkUrl);
+          return;
+        }
+        if (item.capability.id === "mcp:codex_apps") {
+          window.location.assign(`/workspaces/${encodeURIComponent(workspaceId)}/settings`);
+          return;
+        }
+        const catalogItem = context.workspaceCapabilityCatalog.find(
+          (candidate) => candidate.id === item.capability?.id,
+        );
+        const canInstall =
+          hasWorkspacePermission(context.accessContext, workspaceId, "workspace:admin") &&
+          hasWorkspacePermission(context.accessContext, workspaceId, "connections:write");
+        const mcpUrl = catalogItem?.mcpUrl ?? catalogItem?.endpointUrl ?? null;
+        if (
+          canInstall &&
+          catalogItem?.kind === "mcp" &&
+          catalogItem.authKind === "oauth2" &&
+          mcpUrl
+        ) {
+          const response = await startMcpOAuthWithTimeout(context.client, workspaceId, {
+            mcpUrl,
+            ...(catalogItem.providerDomain ? { providerDomain: catalogItem.providerDomain } : {}),
+            ownership: "workspace",
+            returnPath,
+          });
+          if (!response.authorizationUrl) {
+            throw new Error("The provider did not return an authorization link.");
+          }
+          window.location.assign(response.authorizationUrl);
+          return;
+        }
+        window.location.assign(
+          `/workspaces/${encodeURIComponent(workspaceId)}/capabilities?suggested_capability=${encodeURIComponent(item.capability.id)}`,
+        );
+        return;
+      }
       if (item.serverId === "codex_apps") {
         // Codex Apps is authorized by the designated workspace subscription,
         // not by the generic connection broker. Send the user to the existing
@@ -303,7 +407,7 @@ export function SessionRoute({
       }
       window.location.assign(response.authorizationUrl);
     },
-    [context.client, workspaceId],
+    [context.accessContext, context.client, context.workspaceCapabilityCatalog, workspaceId],
   );
 
   // The workspace shell already needs the capability catalog for session tool

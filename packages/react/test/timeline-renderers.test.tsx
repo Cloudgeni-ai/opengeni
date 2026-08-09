@@ -518,6 +518,43 @@ function authNeededItem(overrides: Partial<AuthNeededItem> = {}): AuthNeededItem
 }
 
 describe("TimelineRow — connection recovery", () => {
+  test("renders a capability recommendation as ungranted access with one review action", async () => {
+    let selected = "";
+    const r = await renderComponent(
+      <TimelineRow
+        item={authNeededItem({
+          source: "capability",
+          providerDomain: "github.com",
+          capability: {
+            id: "api:github-app",
+            name: "GitHub App",
+            kind: "api",
+            source: "built_in",
+            action: "connect",
+            rationale: "Use the repositories selected for this workspace.",
+            requiredVariables: [],
+          },
+        })}
+        onReconnect={(item) => {
+          selected = item.capability?.id ?? "";
+        }}
+      />,
+    );
+    await flush();
+
+    expect(r.container.textContent).toContain("Connect GitHub App");
+    expect(r.container.textContent).toContain("Provider: github.com");
+    expect(r.container.textContent).toContain("No access has been granted");
+    expect(r.container.textContent).not.toContain("wasn't replayed");
+    await act(async () => {
+      r.container
+        .querySelector("button")
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(selected).toBe("api:github-app");
+    await r.unmount();
+  });
+
   test("says a missing connection starts a new-message retry rather than replaying the call", async () => {
     const r = await renderComponent(<TimelineRow item={authNeededItem()} />);
     await flush();

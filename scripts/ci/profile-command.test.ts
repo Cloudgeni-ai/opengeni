@@ -206,9 +206,9 @@ set -eu
 trap 'exit 0' TERM
 (
   trap '' TERM
-  echo "$BASHPID" > "$1"
   while :; do sleep 1; done
 ) &
+echo "$!" > "$1"
 wait
 `,
     );

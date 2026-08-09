@@ -91,42 +91,50 @@ describe("rigSetupScriptCommand (M3)", () => {
     expect(command).toContain("echo hi");
   });
 
-  test("hard timeout kills setup and leaves the marker absent", async () => {
-    const root = await mkdtemp(join(tmpdir(), "opengeni-rig-timeout-"));
-    try {
-      const versionId = "22222222-2222-4222-8222-222222222222";
-      const command = rigSetupScriptCommand("sleep 3", versionId, 1_000, root);
-      const proc = Bun.spawn(["bash", "-lc", command], { stdout: "pipe", stderr: "pipe" });
-      const exitCode = await proc.exited;
-      expect(exitCode).not.toBe(0);
-      expect(existsSync(join(root, `rig-setup-${versionId}.done`))).toBe(false);
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  }, 10_000);
+  test.skipIf(Bun.which("timeout") === null)(
+    "hard timeout kills setup and leaves the marker absent",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "opengeni-rig-timeout-"));
+      try {
+        const versionId = "22222222-2222-4222-8222-222222222222";
+        const command = rigSetupScriptCommand("sleep 3", versionId, 1_000, root);
+        const proc = Bun.spawn(["bash", "-lc", command], { stdout: "pipe", stderr: "pipe" });
+        const exitCode = await proc.exited;
+        expect(exitCode).not.toBe(0);
+        expect(existsSync(join(root, `rig-setup-${versionId}.done`))).toBe(false);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+    10_000,
+  );
 
-  test("concurrent first attach runs the setup body once", async () => {
-    const root = await mkdtemp(join(tmpdir(), "opengeni-rig-lock-"));
-    try {
-      const versionId = "22222222-2222-4222-8222-222222222222";
-      const proof = join(root, "proof.log");
-      const command = rigSetupScriptCommand(
-        `printf 'setup\\n' >> ${JSON.stringify(proof)}\nsleep 1`,
-        versionId,
-        10_000,
-        root,
-      );
-      const first = Bun.spawn(["bash", "-lc", command], { stdout: "pipe", stderr: "pipe" });
-      const second = Bun.spawn(["bash", "-lc", command], { stdout: "pipe", stderr: "pipe" });
-      expect(await first.exited).toBe(0);
-      expect(await second.exited).toBe(0);
-      const proofLines = (await readFile(proof, "utf8")).trim().split("\n");
-      expect(proofLines).toEqual(["setup"]);
-      expect(existsSync(join(root, `rig-setup-${versionId}.done`))).toBe(true);
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  }, 15_000);
+  test.skipIf(Bun.which("timeout") === null)(
+    "concurrent first attach runs the setup body once",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "opengeni-rig-lock-"));
+      try {
+        const versionId = "22222222-2222-4222-8222-222222222222";
+        const proof = join(root, "proof.log");
+        const command = rigSetupScriptCommand(
+          `printf 'setup\\n' >> ${JSON.stringify(proof)}\nsleep 1`,
+          versionId,
+          10_000,
+          root,
+        );
+        const first = Bun.spawn(["bash", "-lc", command], { stdout: "pipe", stderr: "pipe" });
+        const second = Bun.spawn(["bash", "-lc", command], { stdout: "pipe", stderr: "pipe" });
+        expect(await first.exited).toBe(0);
+        expect(await second.exited).toBe(0);
+        const proofLines = (await readFile(proof, "utf8")).trim().split("\n");
+        expect(proofLines).toEqual(["setup"]);
+        expect(existsSync(join(root, `rig-setup-${versionId}.done`))).toBe(true);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+    15_000,
+  );
 });
 
 // A fake sandbox session whose exec returns a scripted result, capturing the args.

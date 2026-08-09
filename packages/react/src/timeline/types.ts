@@ -329,7 +329,7 @@ export type AuthNeededItem = {
   /** The runtime surface that requested recovery, when the event is an MCP auth signal. */
   serverId: string | null;
   /** Durable event family that produced this notice. */
-  source?: "tool" | "credential" | undefined;
+  source?: "tool" | "credential" | "capability" | undefined;
   /** The connection's registrable domain, e.g. "linear.app". */
   providerDomain: string;
   /** The lapsed connection to reconnect, when the row survived. */
@@ -343,6 +343,8 @@ export type AuthNeededItem = {
   toolName: string | null;
   /** A pre-minted authorization URL, when the broker already produced one. */
   authorizationUrl: string | null;
+  /** Agent-selected catalog recommendation. The host still owns authorization. */
+  capability?: NonNullable<ToolAuthNeededPayload["capability"]> | null | undefined;
   occurredAt: string;
 };
 

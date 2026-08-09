@@ -414,6 +414,43 @@ describe("contracts", () => {
     ).toBe("host:cloud:7");
   });
 
+  test("auth-needed events keep capability recommendations secret-free and bounded", () => {
+    expect(
+      ToolAuthNeededPayload.parse({
+        serverId: "opengeni",
+        toolName: "capability_authorization_request",
+        providerDomain: "github.com",
+        reason: "missing_connection",
+        capability: {
+          id: "api:github-app",
+          name: "GitHub App",
+          kind: "api",
+          source: "built_in",
+          action: "connect",
+          rationale: "Repository access is needed for this task.",
+        },
+      }).capability,
+    ).toMatchObject({
+      id: "api:github-app",
+      requiredVariables: [],
+    });
+    expect(
+      ToolAuthNeededPayload.safeParse({
+        serverId: "opengeni",
+        providerDomain: "github.com",
+        reason: "missing_connection",
+        capability: {
+          id: "api:github-app",
+          name: "GitHub App",
+          kind: "api",
+          source: "built_in",
+          action: "connect",
+          rationale: "x".repeat(2_001),
+        },
+      }).success,
+    ).toBe(false);
+  });
+
   test("extracts approval identity from every serialized interruption shape", () => {
     expect(approvalIdentifier({ id: "approval-direct" })).toBe("approval-direct");
     expect(approvalIdentifier({ rawItem: { callId: "approval-call" } })).toBe("approval-call");
