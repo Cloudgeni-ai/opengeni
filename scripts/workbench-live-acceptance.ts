@@ -47,7 +47,8 @@ const FILE_TREE_MAX_DIAGNOSTIC_ROWS = 8;
 const FILE_TREE_DIAGNOSTIC_FIELD_LENGTH = 80;
 const TERMINAL_SELECTOR = "[data-opengeni-terminal]";
 const INTERACTIVE_TERMINAL_SELECTOR =
-  '[data-opengeni-terminal][data-opengeni-terminal-interactive="true"]';
+  '[data-opengeni-terminal][data-opengeni-terminal-status="open"]' +
+  '[data-opengeni-terminal-interactive="true"]';
 const CAPTURE_API_P95_MS = maximumMillisecondBudget("performance.capture-api-response", "p95");
 const CAPTURE_USABLE_WORKBENCH_P95_MS = maximumMillisecondBudget(
   "performance.capture-usable-workbench",

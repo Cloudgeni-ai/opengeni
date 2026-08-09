@@ -8,6 +8,7 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 import { sandboxAcceptsLiveIo } from "../lib/sandbox-liveness";
+import { terminalCanAcquirePty } from "../lib/terminal-capability";
 import { usePageLiveActivity } from "./internal";
 
 // "on-demand" is the boxless-benign resting state: the lease is not currently
@@ -115,24 +116,10 @@ function desktopAttachable(cell: SessionCapabilities["DesktopStream"]): boolean 
 
 /**
  * Whether warming the box for the interactive terminal (pty-ws) is worth it.
- * The Terminal cell is ALWAYS feasible when the backend advertises a transport at
- * all (`sse-events` on a cold box, `pty-ws` once warm) — only a genuinely
- * terminal-less backend reports transport:null with a hard reason. The attach is
- * what flips `sse-events` → `pty-ws` by warming the box and minting the ttyd
- * tunnel URL, so we attach whenever the terminal is not hard-unavailable.
+ * A real-PTY descriptor is attachable when already routed as `pty-ws`, or while
+ * transiently cold. A firehose-only backend and policy/OS/backend degradation
+ * cannot become interactive, so attaching there would only waste a holder.
  */
-function terminalAttachable(cell: SessionCapabilities["Terminal"]): boolean {
-  if (cell.transport === null) {
-    // No terminal at all unless the only blocker is a transient cold state.
-    return (
-      cell.reason === "lease_cold" || cell.reason === "not_provisioned" || cell.reason === null
-    );
-  }
-  // Already pty-ws (warm) is fine to (re)attach; sse-events is the cold state the
-  // attach upgrades. Either way it's attachable.
-  return true;
-}
-
 /** Read `stream.url.rotated` payloads off the live event log, newest last. */
 function rotationsFrom(events: SessionEvent[]): StreamUrlRotatedPayload[] {
   const out: StreamUrlRotatedPayload[] = [];
@@ -210,8 +197,15 @@ export function useSessionCapabilities(
     if (!lifecycleEnabled || !sessionId) {
       setState("idle");
       setCapabilities(null);
+      viewerIdRef.current = null;
+      setViewerId(null);
       return;
     }
+    // The preceding effect cleanup released any old holder before this fresh
+    // lifecycle starts. Never project that stale id while re-negotiating or if
+    // the replacement grant degrades.
+    viewerIdRef.current = null;
+    setViewerId(null);
     let cancelled = false;
     let pollTimer: ReturnType<typeof setTimeout> | null = null;
     let heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
@@ -324,7 +318,7 @@ export function useSessionCapabilities(
         // already live OR cold-but-feasible — and let POST /viewers warm the box and
         // mint the URLs. Only a genuinely-unsupported reason suppresses the attach.
         const wantDesktopAttach = attachDesktop && desktopAttachable(caps.DesktopStream);
-        const wantTerminalAttach = attachTerminal && terminalAttachable(caps.Terminal);
+        const wantTerminalAttach = attachTerminal && terminalCanAcquirePty(caps.Terminal);
         // The Files attach warms the box for a file WRITE (wake-on-edit intent). It
         // folds no live URL (files are stateless HTTP) — the attach is purely a
         // liveness refcount. Unlike the previous "keep the box warm while the Files
@@ -342,6 +336,8 @@ export function useSessionCapabilities(
             // pty-ws terminal cell WITHOUT tripping the desktop consent 409.
             const holder = await client.attachViewer(workspaceId, sessionId, {
               desktop: wantDesktopAttach,
+              terminal: wantTerminalAttach,
+              files: wantFilesAttach,
             });
             if (cancelled) {
               // The attach crossed an identity/unmount boundary after the server
@@ -350,6 +346,18 @@ export function useSessionCapabilities(
               // reaper runs. Release that exact old-session holder immediately.
               void client.detachViewer(workspaceId, sessionId, holder.viewerId).catch(() => {});
               return;
+            }
+            if (
+              (wantDesktopAttach &&
+                (!holder.dataPlaneUrl || !holder.transport || !holder.client)) ||
+              (wantTerminalAttach && (!holder.terminalUrl || !holder.terminalTransport))
+            ) {
+              // Nullable plane cells are valid graceful-degradation values at
+              // the raw API boundary, but an explicit UI grant must not become
+              // a successful holder that waits forever. Release it and surface
+              // a retryable error instead of retaining stale credentials.
+              await client.detachViewer(workspaceId, sessionId, holder.viewerId).catch(() => {});
+              throw new Error("requested live plane grant was unavailable");
             }
             localViewerId = holder.viewerId;
             viewerIdRef.current = holder.viewerId;
@@ -370,24 +378,24 @@ export function useSessionCapabilities(
                           ...prev.DesktopStream,
                           transport: holder.transport ?? prev.DesktopStream.transport,
                           client: holder.client ?? prev.DesktopStream.client,
-                          url: holder.dataPlaneUrl ?? prev.DesktopStream.url,
-                          token: holder.streamToken ?? prev.DesktopStream.token,
-                          expiresAt: holder.streamExpiresAt ?? prev.DesktopStream.expiresAt,
+                          url: holder.dataPlaneUrl,
+                          token: holder.streamToken,
+                          expiresAt: holder.streamExpiresAt,
                           resolution: holder.resolution ?? prev.DesktopStream.resolution,
                         }
                       : prev.DesktopStream,
-                    Terminal:
-                      holder.terminalUrl && holder.terminalTransport
-                        ? {
-                            ...prev.Terminal,
-                            transport: holder.terminalTransport,
-                            url: holder.terminalUrl,
-                            token: holder.terminalToken ?? prev.Terminal.token,
-                            // A live pty-ws means the box is pty-capable for real.
-                            ptyCapable: true,
-                            reason: null,
-                          }
-                        : prev.Terminal,
+                    Terminal: wantTerminalAttach
+                      ? {
+                          ...prev.Terminal,
+                          transport: holder.terminalTransport ?? prev.Terminal.transport,
+                          url: holder.terminalUrl,
+                          token: holder.terminalToken,
+                          expiresAt: holder.terminalExpiresAt,
+                          // A live pty-ws means the box is pty-capable for real.
+                          ptyCapable: holder.terminalTransport ? true : prev.Terminal.ptyCapable,
+                          reason: holder.terminalTransport ? null : prev.Terminal.reason,
+                        }
+                      : prev.Terminal,
                   }
                 : prev,
             );
@@ -411,6 +419,8 @@ export function useSessionCapabilities(
                 setState("error");
                 setError(cause);
                 return;
+              } else {
+                throw cause;
               }
               // 409/429 are recoverable: structured surfaces still negotiated;
               // keep going to set ready/cold below.

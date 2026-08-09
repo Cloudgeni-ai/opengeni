@@ -5,6 +5,7 @@ import {
   AcknowledgeStreamResponse as ContractAcknowledgeStreamResponse,
   AddWorkspaceMemberRequest as ContractAddWorkspaceMemberRequest,
   AttachViewerRequest as ContractAttachViewerRequest,
+  AttachViewerResponse as ContractAttachViewerResponse,
   BeginSessionRealtimeRequest as ContractBeginSessionRealtimeRequest,
   CAPABILITY_DESCRIPTORS,
   ClientConfig as ContractClientConfig,
@@ -93,6 +94,7 @@ import type {
   AcknowledgeStreamResponse,
   AddWorkspaceMemberRequest,
   AttachViewerRequest,
+  AttachViewerResponse,
   BeginSessionRealtimeRequest,
   CreateKnowledgeMemoryRequest,
   FirstPartyMcpToolName,
@@ -770,6 +772,12 @@ describe("SDK / contracts parity", () => {
       v: z.infer<typeof ContractWorkspaceModelCatalogResponse>,
     ): WorkspaceModelCatalogResponse => v;
     const acceptViewerHolder = (v: z.infer<typeof ContractViewerHolder>): ViewerHolder => v;
+    const acceptAttachResponse = (
+      v: z.infer<typeof ContractAttachViewerResponse>,
+    ): AttachViewerResponse => v;
+    const acceptContractAttachResponse = (
+      v: AttachViewerResponse,
+    ): z.infer<typeof ContractAttachViewerResponse> => v;
     const acceptHeartbeatResponse = (
       v: z.infer<typeof ContractViewerHeartbeatResponse>,
     ): ViewerHeartbeatResponse => v;
@@ -788,6 +796,8 @@ describe("SDK / contracts parity", () => {
       acceptClientConfig,
       acceptWorkspaceModelCatalog,
       acceptViewerHolder,
+      acceptAttachResponse,
+      acceptContractAttachResponse,
       acceptHeartbeatResponse,
       acceptAckResponse,
       acceptRotated,
@@ -798,6 +808,9 @@ describe("SDK / contracts parity", () => {
     // Client -> server: SDK-sent request bodies parse under the contracts schema.
     const attach: AttachViewerRequest = {
       viewerId: "33333333-3333-4333-8333-333333333333",
+      desktop: false,
+      terminal: false,
+      files: true,
     };
     const ack: AcknowledgeStreamRequest = {
       acknowledgeUnredacted: true,

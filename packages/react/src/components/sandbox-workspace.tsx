@@ -345,12 +345,15 @@ export function useSandboxWorkspaceTabs(
   const filesEditable = fileSystemOn && !fsReadOnly && sandboxAcceptsLiveIo(liveness);
   const gitOn = capabilities?.Git.available ?? false;
   const terminalOn = terminalEnabled && (capabilities?.Terminal.transport ?? null) !== null;
-  // The REAL interactive terminal is the ttyd pty-ws stream. When it's live the
-  // legacy HTTP PTY must NOT run; `useSandboxTerminal` opens its HTTP PTY only as
-  // the firehose-mode fallback (a backend without ttyd).
-  const ptyWsLive =
-    capabilities?.Terminal.transport === "pty-ws" && Boolean(capabilities?.Terminal.url);
-  const ptyCapable = (capabilities?.Terminal.ptyCapable ?? false) && !ptyWsLive;
+  // A descriptor-only pty-ws cell intentionally has no short-lived URL until
+  // terminal intent acquires one. Do not mistake that grant boundary for a
+  // legacy HTTP PTY and eagerly open a second terminal. The fallback exists only
+  // for a genuinely firehose-transport backend with no typed degradation.
+  const ptyCapable =
+    warmTerminal &&
+    (capabilities?.Terminal.ptyCapable ?? false) &&
+    capabilities?.Terminal.transport === "sse-events" &&
+    capabilities?.Terminal.reason === null;
   const terminal = useSandboxTerminal(sessionId, {
     events: terminalEnabled ? events : [],
     interactive: terminalEnabled && ptyCapable,
@@ -715,6 +718,7 @@ export function useSandboxWorkspaceTabs(
         content: (
           <div className="h-full bg-og-bg p-1">
             <SandboxTerminal
+              key={sessionId}
               result={terminal}
               terminalCapability={capabilities?.Terminal ?? null}
               onActivate={() => requestWarmIntent("warmTerminal")}

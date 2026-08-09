@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { constants } from "node:os";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -132,6 +132,22 @@ export function parseGnuTime(output: string): GnuTimeMetrics {
   };
 }
 
+function resolveGnuTime(): string | null {
+  // `/usr/bin/time` is BSD time on macOS and rejects GNU-only `-v -o --` with
+  // exit 1. Probe the binary rather than treating path existence as a wire
+  // contract; Homebrew exposes GNU time as `gtime`.
+  for (const candidate of ["/usr/bin/time", "gtime"]) {
+    const probe = spawnSync(candidate, ["--version"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    if (probe.status === 0 && /gnu time/i.test(`${probe.stdout ?? ""}\n${probe.stderr ?? ""}`)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const separator = args.indexOf("--");
@@ -170,8 +186,9 @@ async function main(): Promise<void> {
   let peakMemoryBytes = before.memoryBytes;
   const startedAt = new Date();
   const started = performance.now();
-  const wrapped = existsSync("/usr/bin/time")
-    ? ["/usr/bin/time", "-v", "-o", temporaryTimePath, "--", ...command]
+  const gnuTimeExecutable = resolveGnuTime();
+  const wrapped = gnuTimeExecutable
+    ? [gnuTimeExecutable, "-v", "-o", temporaryTimePath, "--", ...command]
     : command;
   const useProcessGroup = process.platform !== "win32";
   const child = spawn(wrapped[0] as string, wrapped.slice(1), {

@@ -2093,13 +2093,11 @@ export class OpenGeniClient {
   }
 
   /** Attach a viewer holder (refcounted liveness — keeps the box warm while
-   *  watched/used), spinning the box up in-process when cold, and mint the scoped
-   *  direct-to-provider URLs for the requested plane(s). `request.desktop:true`
-   *  opts into the un-redacted pixel plane and mints the noVNC URL — that plane
-   *  alone throws `OpenGeniApiError(409)` when the un-redacted/shared
-   *  acknowledgment is missing (the consent gate). A terminal-only attach
-   *  (`desktop` omitted/false) warms the box + mints the pty-ws terminal cell with
-   *  NO consent gate. An omitted `viewerId` mints a fresh one. */
+   *  watched/used), spinning the box up in-process when cold. Exact plane flags
+   *  mint only the requested short-lived credentials and enforce that plane's
+   *  permission. `desktop:true` alone carries the un-redacted/shared consent
+   *  gate. An entirely omitted plane set retains the legacy terminal-only
+   *  meaning; current clients should send all three flags. */
   async attachViewer(
     workspaceId: string,
     sessionId: string,

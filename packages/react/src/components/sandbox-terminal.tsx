@@ -1,18 +1,11 @@
 import type { TerminalCapability } from "@opengeni/sdk";
-import {
-  type FocusEvent as ReactFocusEvent,
-  type MouseEvent as ReactMouseEvent,
-  type PointerEvent as ReactPointerEvent,
-  type ReactNode,
-  useEffect,
-  useRef,
-  useState,
-} from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { cn } from "../lib/cn";
 import { type TerminalStreamStatus, useTerminalStream } from "../hooks/use-terminal-stream";
 import type { UseSandboxTerminalResult } from "../hooks/use-sandbox-terminal";
 import { resolveTerminalFont, xtermThemeFromTokens } from "../lib/xterm-theme";
 import { sandboxAcceptsLiveIo } from "../lib/sandbox-liveness";
+import { terminalCanAcquirePty } from "../lib/terminal-capability";
 import { attachRenderer, type RendererLoaders, type RendererTier } from "../lib/xterm-renderer";
 
 /**
@@ -157,42 +150,6 @@ export function subscribeTerminalInput(
   return term.onData(sink);
 }
 
-export function terminalInputEngagementAllowed(input: {
-  acceptsInput: boolean;
-  readOnly: boolean;
-  ptyCapable: boolean;
-  ptyWs: boolean;
-  hasWrite: boolean;
-}): boolean {
-  const expectsInteractiveInput =
-    !input.readOnly && (input.ptyCapable || input.ptyWs || input.hasWrite);
-  return input.acceptsInput || !expectsInteractiveInput;
-}
-
-type TerminalEngagementEvent = {
-  preventDefault: () => void;
-  stopPropagation: () => void;
-  target?: unknown;
-};
-
-/**
- * A pre-connect click still warms the terminal, but must not reach xterm and
- * focus its hidden textarea. Otherwise the user's first keystrokes are accepted
- * visually and then silently dropped while the PTY socket is still connecting.
- */
-export function guardTerminalEngagement(
-  event: TerminalEngagementEvent,
-  inputAllowed: boolean,
-  blurTarget = false,
-): boolean {
-  if (inputAllowed) return false;
-  event.preventDefault();
-  event.stopPropagation();
-  const target = event.target as { blur?: unknown } | null | undefined;
-  if (blurTarget && typeof target?.blur === "function") target.blur();
-  return true;
-}
-
 /** Clear the transient wake line and put the first live prompt at cell 1,1.
  * `Terminal.clear()` removes scrollback but deliberately preserves the cursor,
  * which lets the first PTY frame append to the old wake message. */
@@ -280,53 +237,52 @@ export function SandboxTerminal({
   const [activated, setActivated] = useState(false);
 
   // ── Interactive transport switch ─────────────────────────────────────────────
-  const ptyWs = terminalCapability?.transport === "pty-ws" && Boolean(terminalCapability?.url);
-  // Output frames buffer here until xterm has mounted; the write effect drains it.
-  const ptyOutputQueueRef = useRef<string[]>([]);
+  const ptyDescriptor = terminalCapability?.transport === "pty-ws";
+  const ptyAttachable = terminalCanAcquirePty(terminalCapability);
   const {
     status: ptyStatus,
     write: ptyWrite,
     resize: resizePty,
     connected: ptyConnected,
   } = useTerminalStream({
-    capability: ptyWs
-      ? {
-          transport: terminalCapability!.transport,
-          url: terminalCapability!.url,
-          token: terminalCapability!.token,
-        }
-      : null,
+    // Connect only after xterm exists. This makes the renderer the sole output
+    // owner from the first websocket frame and removes an otherwise unbounded
+    // pre-mount output queue during large command bursts.
+    capability:
+      ptyAttachable && ready
+        ? {
+            transport: "pty-ws",
+            url: ptyDescriptor ? terminalCapability!.url : null,
+            token: ptyDescriptor ? terminalCapability!.token : null,
+            expiresAt: ptyDescriptor ? terminalCapability!.expiresAt : null,
+          }
+        : null,
     onOutput: (data) => {
-      const term = termRef.current;
-      if (term) term.write(data);
-      else ptyOutputQueueRef.current.push(data);
+      termRef.current?.write(data);
     },
   });
 
-  // PTY mode = a live ttyd socket drives the screen. Firehose mode = the
-  // read-only projection (or the legacy HTTP-write fallback).
-  const ptyMode = ptyWs && ptyStatus !== "closed";
-  const interactive = !readOnly && (ptyMode ? ptyConnected : result.write !== null);
-  const acceptsInput = interactive && inputReady;
-  const inputPending = interactive && !inputReady;
-  const inputEngagementAllowed = terminalInputEngagementAllowed({
-    acceptsInput,
-    readOnly: Boolean(readOnly),
-    ptyCapable: terminalCapability?.ptyCapable === true,
-    ptyWs,
-    hasWrite: result.write !== null,
-  });
-  const terminalModeLabel = acceptsInput
-    ? null
-    : readOnly
-      ? "read-only"
-      : inputPending
-        ? "connecting"
-        : ptyMode && ptyStatus === "connecting"
-          ? "connecting"
-          : ptyMode && ptyStatus === "error"
-            ? "connection error"
-            : "output only";
+  // A pty-ws capability exclusively owns the screen even while connecting or
+  // after a visible connection failure; never silently switch one terminal UI
+  // between two PTYs. Input is enabled during the handshake because the stream
+  // hook buffers it strictly and flushes only after ttyd auth succeeds.
+  const ptyMode = ptyDescriptor;
+  // Keep xterm stdin live for an attachable descriptor even before its URL has
+  // arrived. Focus/click triggers the grant; any immediately following input is
+  // bounded in the stream hook instead of disappearing in that HTTP interval.
+  const ptyCapturesInput = ptyAttachable && ptyStatus !== "error";
+  const interactive = !readOnly && (ptyAttachable ? ptyCapturesInput : result.write !== null);
+  // Public "interactive" means the mounted input subscription can reach a live
+  // PTY now. Before that point xterm still captures into the bounded queue, but
+  // acceptance and embedders see an explicit connecting state.
+  const acceptsInput = inputReady && (!ptyAttachable || ptyConnected);
+  const inputPending = inputReady && ptyAttachable && !ptyConnected && activated;
+  let terminalModeLabel: string | null;
+  if (readOnly) terminalModeLabel = "read-only";
+  else if (!ptyAttachable) terminalModeLabel = acceptsInput ? null : "output only";
+  else if (ptyStatus === "error") terminalModeLabel = "connection error";
+  else if (acceptsInput) terminalModeLabel = null;
+  else terminalModeLabel = activated ? "connecting" : "connect on input";
 
   // Boot-in-terminal: after the user engages a not-yet-warm box, show styled
   // status lines INSIDE xterm instead of an overlay — but only when there is no
@@ -350,20 +306,6 @@ export function SandboxTerminal({
   function handleActivate() {
     if (!activated) setActivated(true);
     onActivate?.();
-  }
-
-  function handlePointerDownCapture(event: ReactPointerEvent<HTMLDivElement>) {
-    handleActivate();
-    guardTerminalEngagement(event, inputEngagementAllowed);
-  }
-
-  function handleMouseDownCapture(event: ReactMouseEvent<HTMLDivElement>) {
-    guardTerminalEngagement(event, inputEngagementAllowed);
-  }
-
-  function handleFocusCapture(event: ReactFocusEvent<HTMLDivElement>) {
-    handleActivate();
-    guardTerminalEngagement(event, inputEngagementAllowed, true);
   }
 
   // Mount xterm once (client-only). Never re-mounts on interactive/theme flips —
@@ -477,10 +419,6 @@ export function SandboxTerminal({
       requestAnimationFrame(() => {
         if (disposed) return;
         settle();
-        if (ptyOutputQueueRef.current.length > 0) {
-          for (const data of ptyOutputQueueRef.current) term.write(data);
-          ptyOutputQueueRef.current = [];
-        }
         el.setAttribute("data-og-term-ready", "true");
         if (typeof globalThis.__OG_TERMINAL_DEBUG__ === "function") {
           globalThis.__OG_TERMINAL_DEBUG__({
@@ -579,11 +517,15 @@ export function SandboxTerminal({
       setInputReady(false);
       return;
     }
-    const sink = ptyMode ? ptyWrite : result.write;
+    const sink = ptyAttachable ? ptyWrite : result.write;
+    if (!sink) {
+      setInputReady(false);
+      return;
+    }
     const sub = subscribeTerminalInput(term, sink, true);
     setInputReady(sub !== null);
     return () => sub?.dispose();
-  }, [ready, interactive, ptyMode, ptyWrite, result.write]);
+  }, [ready, interactive, ptyAttachable, ptyWrite, result.write]);
 
   // In PTY mode, tell ttyd the window size on the xterm resize event.
   useEffect(() => {
@@ -659,9 +601,8 @@ export function SandboxTerminal({
           12px inset + `--og-color-bg` ground match the dock surface. */}
       <div
         className="relative min-h-0 flex-1 bg-og-bg p-3"
-        onPointerDownCapture={handlePointerDownCapture}
-        onMouseDownCapture={handleMouseDownCapture}
-        onFocusCapture={handleFocusCapture}
+        onPointerDownCapture={handleActivate}
+        onFocusCapture={handleActivate}
       >
         {!ready && (placeholder ?? <TerminalPlaceholder />)}
         {/* Kept `visibility:hidden` until the first successful fit so the first
@@ -674,6 +615,7 @@ export function SandboxTerminal({
           data-opengeni-terminal-ready={ready ? "true" : "false"}
           data-opengeni-terminal-interactive={surfaceState === "interactive" ? "true" : "false"}
           data-opengeni-terminal-state={surfaceState}
+          data-opengeni-terminal-status={ptyAttachable ? ptyStatus : "firehose"}
         />
       </div>
     </div>

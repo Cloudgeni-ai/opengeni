@@ -4,7 +4,7 @@
    terminal/files/git hooks project Channel-A data; stream.url.rotated folds in.
    -------------------------------------------------------------------------- */
 import { describe, expect, test } from "bun:test";
-import { OpenGeniApiError, type SessionEvent } from "@opengeni/sdk";
+import { OpenGeniApiError, type AttachViewerRequest, type SessionEvent } from "@opengeni/sdk";
 import { actRun, registerDom, renderHook, flush } from "./render-hook";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import {
@@ -283,6 +283,25 @@ describe("useSessionCapabilities", () => {
     await hook.unmount();
   });
 
+  test("attachTerminal on a firehose-only backend never acquires a holder", async () => {
+    let attachCalls = 0;
+    const client = fakeClient({
+      getStreamCapabilities: async () => fakeHeadlessCapabilities(),
+      attachViewer: async () => {
+        attachCalls += 1;
+        return fakeAttachResponse();
+      },
+    });
+    const hook = await renderHook(
+      () => useSessionCapabilities(SESSION_ID, { ...ctx, client, attachTerminal: true }),
+      undefined,
+    );
+    await flush();
+    expect(attachCalls).toBe(0);
+    expect(hook.result.current.state).toBe("ready");
+    await hook.unmount();
+  });
+
   test.each(["cold", "draining"] as const)(
     "attachFiles explicitly reacquires a %s box for wake-on-edit",
     async (liveness) => {
@@ -290,14 +309,18 @@ describe("useSessionCapabilities", () => {
       // across teardown. Passive review stays capture-backed; this explicit path
       // asks the server to cold-create or safely re-arm before returning warm.
       let attachCalls = 0;
-      let attachOpts: { desktop?: boolean } | null = null;
+      const attachRequests: AttachViewerRequest[] = [];
       const client = fakeClient({
         getStreamCapabilities: async () =>
           liveness === "cold" ? fakeColdCapabilities() : fakeCapabilities({ liveness: "draining" }),
-        attachViewer: async (_w: string, _s: string, opts: { desktop?: boolean }) => {
+        attachViewer: async (_w: string, _s: string, opts: AttachViewerRequest) => {
           attachCalls += 1;
-          attachOpts = opts;
-          return fakeAttachResponse();
+          attachRequests.push(opts);
+          return fakeAttachResponse({
+            terminalUrl: "https://terminal.example/should-not-fold",
+            terminalToken: "unrequested",
+            terminalTransport: "pty-ws",
+          });
         },
         heartbeatViewer: async () => ({ alive: true }),
         detachViewer: async () => {},
@@ -308,13 +331,78 @@ describe("useSessionCapabilities", () => {
       );
       await flush();
       expect(attachCalls).toBe(1);
-      expect(attachOpts).not.toBeNull();
-      expect((attachOpts as unknown as { desktop?: boolean }).desktop).toBe(false);
+      expect(attachRequests[0]).toEqual({ desktop: false, terminal: false, files: true });
+      expect(hook.result.current.capabilities?.Terminal.url).toBeNull();
       // A holder was minted → the box is live, not resting on the benign on-demand state.
       expect(hook.result.current.state).toBe("ready");
       await hook.unmount();
     },
   );
+
+  test("terminal intent requests and folds only a fresh terminal grant", async () => {
+    const attachRequests: AttachViewerRequest[] = [];
+    const client = fakeClient({
+      getStreamCapabilities: async () => fakeColdCapabilities(),
+      attachViewer: async (_w, _s, opts = {}) => {
+        attachRequests.push(opts);
+        return fakeAttachResponse({
+          dataPlaneUrl: null,
+          streamToken: null,
+          streamExpiresAt: null,
+          transport: null,
+          client: null,
+          terminalUrl: "https://terminal.example/fresh",
+          terminalToken: "fresh-terminal-token",
+          terminalExpiresAt: "2026-08-09T12:02:00.000Z",
+          terminalTransport: "pty-ws",
+        });
+      },
+      heartbeatViewer: async () => ({ alive: true }),
+      detachViewer: async () => {},
+    });
+    const hook = await renderHook(
+      () => useSessionCapabilities(SESSION_ID, { ...ctx, client, attachTerminal: true }),
+      undefined,
+    );
+    await flush();
+
+    expect(attachRequests[0]).toEqual({ desktop: false, terminal: true, files: false });
+    expect(hook.result.current.capabilities?.Terminal).toMatchObject({
+      transport: "pty-ws",
+      url: "https://terminal.example/fresh",
+      token: "fresh-terminal-token",
+      expiresAt: "2026-08-09T12:02:00.000Z",
+    });
+    expect(hook.result.current.capabilities?.DesktopStream.url).toBeNull();
+    await hook.unmount();
+  });
+
+  test("an explicit terminal grant that degrades releases its holder and surfaces an error", async () => {
+    const detached: string[] = [];
+    const client = fakeClient({
+      getStreamCapabilities: async () => fakeColdCapabilities(),
+      attachViewer: async () =>
+        fakeAttachResponse({
+          terminalUrl: null,
+          terminalToken: null,
+          terminalExpiresAt: null,
+          terminalTransport: null,
+        }),
+      detachViewer: async (_workspaceId, _sessionId, viewerId) => {
+        detached.push(viewerId);
+      },
+    });
+    const hook = await renderHook(
+      () => useSessionCapabilities(SESSION_ID, { ...ctx, client, attachTerminal: true }),
+      undefined,
+    );
+    await flush();
+
+    expect(hook.result.current.state).toBe("error");
+    expect(hook.result.current.error?.message).toContain("grant was unavailable");
+    expect(detached).toEqual([fakeAttachResponse().viewerId]);
+    await hook.unmount();
+  });
 
   test("no attach intent: a cold session NEVER calls attachViewer — browsing is free (Refinement 1)", async () => {
     // With no desktop/terminal/edit intent, a cold lease must warm nothing: reviewing

@@ -9651,15 +9651,17 @@ export type SessionCapabilities = z.infer<typeof SessionCapabilities>;
 // POST .../viewers — acquire a viewer holder. An omitted viewerId mints a fresh
 // one (returned in the response, to carry through heartbeats + detach).
 //
-// `desktop` declares intent to attach the UN-REDACTED pixel plane (noVNC). ONLY
-// that plane carries the consent gate (the un-redacted/shared acknowledgment). A
-// terminal-only warm attach (`desktop:false`, the default) needs NO consent — a
-// shell is interactive by nature and the gate is the scoped tunnel URL + stream
-// token — so it warms the box and mints the pty-ws terminal cell WITHOUT a 409.
-// Omitted defaults to `false` so a terminal-only client never trips the gate.
+// Each optional plane flag declares exactly which live capability is being
+// acquired. The holder itself is shared liveness; credentials are minted only
+// for explicitly requested planes. `desktop` alone carries the un-redacted pixel
+// consent gate, `terminal` carries terminal:attach, and `files` carries
+// files:write. For compatibility, an entirely omitted plane set retains the old
+// terminal-only meaning; new clients always send all three flags explicitly.
 export const AttachViewerRequest = z.object({
   viewerId: z.string().uuid().optional(),
   desktop: z.boolean().optional(),
+  terminal: z.boolean().optional(),
+  files: z.boolean().optional(),
 });
 export type AttachViewerRequest = z.infer<typeof AttachViewerRequest>;
 
@@ -9678,6 +9680,21 @@ export const ViewerHolder = z.object({
   dataPlaneUrl: z.string().nullable(),
 });
 export type ViewerHolder = z.infer<typeof ViewerHolder>;
+
+/** Exact POST /viewers response. Keep the credential cells in the contracts
+ * package so API and zero-runtime SDK mirrors cannot silently drift. */
+export const AttachViewerResponse = ViewerHolder.extend({
+  streamToken: z.string().nullable(),
+  streamExpiresAt: z.string().nullable(),
+  resolution: z.tuple([z.number().int().positive(), z.number().int().positive()]).nullable(),
+  transport: z.enum(["vnc-ws", "relay-frames"]).nullable(),
+  client: z.enum(["novnc", "frames"]).nullable(),
+  terminalUrl: z.string().nullable(),
+  terminalToken: z.string().nullable(),
+  terminalExpiresAt: z.string().nullable(),
+  terminalTransport: z.literal("pty-ws").nullable(),
+});
+export type AttachViewerResponse = z.infer<typeof AttachViewerResponse>;
 
 // POST .../stream-capabilities/acknowledge — record the calling principal's
 // acknowledgment of the un-redacted pixel plane. Reuses the acknowledgment
