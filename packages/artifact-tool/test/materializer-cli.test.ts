@@ -23,6 +23,7 @@ import {
 } from "../src/runtime";
 import { SpreadsheetXlsxCodec } from "../src/spreadsheet-xlsx-codec";
 import {
+  productionTestNativeAssetPath,
   productionTestRuntime,
   productionTestRuntimeAvailable,
 } from "./production-runtime-fixture";
@@ -302,18 +303,8 @@ async function installRuntime(
   const runtimeRoot = join(root, "runtime");
   const kernelRoot = join(runtimeRoot, "kernel");
   await mkdir(kernelRoot, { recursive: true });
-  const sourceAsset = join(
-    import.meta.dir,
-    "..",
-    "kernel",
-    "bindings",
-    "dist",
-    "native",
-    `${process.platform}-${process.arch}`,
-    "opengeni_artifact_kernel.node",
-  );
   const assetPath = join(kernelRoot, "opengeni_artifact_kernel.node");
-  await copyFile(sourceAsset, assetPath);
+  await copyFile(productionTestNativeAssetPath(), assetPath);
   const assetBytes = new Uint8Array(await readFile(assetPath));
   const identity: ArtifactKernelPackageIdentity = {
     schemaVersion: 1,

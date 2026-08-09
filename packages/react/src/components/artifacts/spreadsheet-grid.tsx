@@ -1802,6 +1802,8 @@ export function SpreadsheetProjectionGrid({
     const renderer = canvasRendererRef.current;
     if (!canvas || !viewportElement || !renderer) return;
     const normalized = normalizeSelection(selection);
+    const theme = spreadsheetCanvasTheme(viewportElement);
+    const paintStartedAt = performance.now();
     const stats = renderer.paint({
       canvas,
       projection,
@@ -1820,8 +1822,9 @@ export function SpreadsheetProjectionGrid({
       columnHeaderHeight: COLUMN_HEADER_HEIGHT,
       dimensionRevision,
       devicePixelRatio: viewport.devicePixelRatio,
-      theme: spreadsheetCanvasTheme(viewportElement),
+      theme,
     });
+    const paintDurationMs = performance.now() - paintStartedAt;
     if (!stats) {
       if (canvasReady) setCanvasReady(false);
       return;
@@ -1833,6 +1836,7 @@ export function SpreadsheetProjectionGrid({
     canvas.dataset.ogDevicePixelRatio = String(stats.devicePixelRatio);
     canvas.dataset.ogLogicalScrollLeft = String(logicalScrollLeft);
     canvas.dataset.ogLogicalScrollTop = String(logicalScrollTop);
+    canvas.dataset.ogPaintDurationMs = String(paintDurationMs);
     if (!canvasReady) setCanvasReady(true);
   }, [
     canvasColumns,

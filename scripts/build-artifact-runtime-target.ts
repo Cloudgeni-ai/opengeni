@@ -16,6 +16,7 @@ type TargetDefinition = Readonly<{
   kind: "native" | "wasm";
   rustTarget: string;
   os: string;
+  libc?: "glibc" | "musl";
 }>;
 
 export type BuildArtifactRuntimeTargetOptions = Readonly<{
@@ -63,6 +64,9 @@ export async function buildArtifactRuntimeTarget(
 }
 
 async function buildNativeTarget(outputRoot: string, definition: TargetDefinition): Promise<void> {
+  if (process.env.RUSTFLAGS || process.env.CARGO_ENCODED_RUSTFLAGS) {
+    throw new Error("ambient Rust flags make the native artifact build identity ambiguous");
+  }
   const napiRoot = join(
     import.meta.dir,
     "..",
@@ -73,16 +77,19 @@ async function buildNativeTarget(outputRoot: string, definition: TargetDefinitio
     "napi",
   );
   await run(["rustup", "target", "add", definition.rustTarget]);
-  await run([
-    "cargo",
-    "build",
-    "--locked",
-    "--manifest-path",
-    join(napiRoot, "Cargo.toml"),
-    "--release",
-    "--target",
-    definition.rustTarget,
-  ]);
+  await run(
+    [
+      "cargo",
+      "build",
+      "--locked",
+      "--manifest-path",
+      join(napiRoot, "Cargo.toml"),
+      "--release",
+      "--target",
+      definition.rustTarget,
+    ],
+    artifactRuntimeNativeCargoEnvironment(definition.target),
+  );
   const targetRoot = join(outputRoot, "native", definition.target);
   await mkdir(targetRoot, { recursive: true });
   const nativeOutput = join(targetRoot, "opengeni_artifact_kernel.node");
@@ -93,6 +100,19 @@ async function buildNativeTarget(outputRoot: string, definition: TargetDefinitio
   await run(["bun", "run", join(napiRoot, "scripts", "smoke.mjs")], {
     OPENGENI_ARTIFACT_KERNEL_NATIVE_PATH: nativeOutput,
   });
+}
+
+/** Returns the deterministic Cargo environment required by one native release target. */
+export function artifactRuntimeNativeCargoEnvironment(
+  target: ArtifactRuntimeTarget,
+): Readonly<Record<string, string>> {
+  const definition = targetDefinition(target);
+  if (definition.kind !== "native") {
+    throw new TypeError(`Target ${target} is not native`);
+  }
+  return definition.libc === "musl"
+    ? { CARGO_ENCODED_RUSTFLAGS: "-Ctarget-feature=-crt-static" }
+    : {};
 }
 
 async function buildWasmTarget(outputRoot: string): Promise<void> {

@@ -3,6 +3,7 @@ import {
   chromium,
   firefox,
   webkit,
+  type BrowserContext,
   type BrowserType,
   type ChromiumBrowser,
   type FirefoxBrowser,
@@ -12,13 +13,25 @@ import {
 import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
-const engines: Array<
-  readonly [string, BrowserType<ChromiumBrowser | FirefoxBrowser | WebKitBrowser>]
-> = [
-  ["Chromium", chromium],
-  ["Firefox", firefox],
-  ["WebKit", webkit],
+type EngineId = "chromium" | "firefox" | "webkit";
+type Engine = readonly [
+  EngineId,
+  string,
+  BrowserType<ChromiumBrowser | FirefoxBrowser | WebKitBrowser>,
 ];
+
+const availableEngines: readonly Engine[] = [
+  ["chromium", "Chromium", chromium],
+  ["firefox", "Firefox", firefox],
+  ["webkit", "WebKit", webkit],
+];
+const requestedEngine = process.env.OPENGENI_ARTIFACT_CANVAS_BROWSER_ENGINE;
+const engines = requestedEngine
+  ? availableEngines.filter(([engineId]) => engineId === requestedEngine)
+  : availableEngines;
+if (requestedEngine && engines.length !== 1) {
+  throw new TypeError(`Unsupported artifact canvas browser engine: ${requestedEngine}`);
+}
 
 describe("artifact spreadsheet retained canvas", () => {
   let web: StartedProcess;
@@ -58,15 +71,16 @@ describe("artifact spreadsheet retained canvas", () => {
     await web?.stop();
   }, 60_000);
 
-  for (const [engineName, engine] of engines) {
+  for (const [, engineName, engine] of engines) {
     test(`${engineName}: paints a Retina 1px-dense viewport with bounded semantic DOM`, async () => {
       const browser = await engine.launch({ headless: true });
-      const context = await browser.newContext({
-        viewport: { width: 1_200, height: 800 },
-        deviceScaleFactor: 2,
-      });
-      const page = await context.newPage();
+      let context: BrowserContext | undefined;
       try {
+        context = await browser.newContext({
+          viewport: { width: 1_200, height: 800 },
+          deviceScaleFactor: 2,
+        });
+        const page = await context.newPage();
         await prewarmDenseFixture(page, baseUrl);
         await mountDenseFixture(page, baseUrl);
 
@@ -152,38 +166,45 @@ describe("artifact spreadsheet retained canvas", () => {
           () => document.querySelector('[data-og-cell="CW101"]')?.textContent === "dense edit",
         );
 
-        const scrollFrames = await grid.evaluate(async (element) => {
-          const samples: number[] = [];
-          for (let index = 1; index <= 12; index += 1) {
-            const target = index * 64;
-            const started = performance.now();
-            element.scrollLeft = target;
-            await new Promise<void>((resolve, reject) => {
-              const deadline = performance.now() + 2_000;
-              const observePaint = () => {
-                const canvas = element.querySelector<HTMLCanvasElement>(
-                  "canvas[data-og-spreadsheet-canvas]",
-                );
-                if (Number(canvas?.dataset.ogLogicalScrollLeft) === target) {
-                  resolve();
-                  return;
-                }
-                if (performance.now() >= deadline) {
-                  reject(new Error(`canvas did not paint scroll position ${target}`));
-                  return;
-                }
-                requestAnimationFrame(observePaint);
-              };
-              requestAnimationFrame(observePaint);
-            });
-            samples.push(performance.now() - started);
-          }
-          return samples;
-        });
-        const orderedScrollFrames = [...scrollFrames].sort((left, right) => left - right);
-        expect(orderedScrollFrames[8]).toBeLessThan(100);
-        expect(orderedScrollFrames[10]).toBeLessThan(250);
-        expect(orderedScrollFrames[11]).toBeLessThan(1_000);
+        const scrollPerformance = { latencyMs: [] as number[], paintDurationMs: [] as number[] };
+        const canvasLocator = grid.locator("canvas[data-og-spreadsheet-canvas]");
+        for (let index = 1; index <= 12; index += 1) {
+          const target = index * 64;
+          const started = performance.now();
+          await grid.evaluate((element, logicalScrollLeft) => {
+            element.scrollLeft = logicalScrollLeft;
+          }, target);
+          await page.waitForFunction(
+            (logicalScrollLeft) =>
+              Number(
+                document.querySelector<HTMLCanvasElement>("canvas[data-og-spreadsheet-canvas]")
+                  ?.dataset.ogLogicalScrollLeft,
+              ) === logicalScrollLeft,
+            target,
+            { timeout: 2_000 },
+          );
+          scrollPerformance.paintDurationMs.push(
+            await canvasLocator.evaluate((element) => Number(element.dataset.ogPaintDurationMs)),
+          );
+          scrollPerformance.latencyMs.push(performance.now() - started);
+        }
+        const orderedPaintDuration = [...scrollPerformance.paintDurationMs].sort(
+          (left, right) => left - right,
+        );
+        const orderedPaintLatency = [...scrollPerformance.latencyMs].sort(
+          (left, right) => left - right,
+        );
+        // Hold Chromium to a 60fps median. This pathological Retina 1px-cell fixture keeps
+        // headless Firefox/WebKit to 30fps while universal tails remain independently bounded.
+        const medianPaintBudgetMs = engineName === "Chromium" ? 16.7 : 33.4;
+        expect(orderedPaintDuration).toHaveLength(12);
+        expect(orderedPaintDuration[5]).toBeLessThan(medianPaintBudgetMs);
+        expect(orderedPaintDuration[8]).toBeLessThan(50);
+        expect(orderedPaintDuration[10]).toBeLessThan(100);
+        expect(orderedPaintDuration[11]).toBeLessThan(500);
+        expect(orderedPaintLatency[8]).toBeLessThan(500);
+        expect(orderedPaintLatency[10]).toBeLessThan(1_000);
+        expect(orderedPaintLatency[11]).toBeLessThan(2_000);
         await grid.evaluate((element) => {
           element.scrollLeft = 260;
         });
@@ -254,7 +275,8 @@ describe("artifact spreadsheet retained canvas", () => {
         );
         expect(await page.locator('[data-og-cell="E5"]').textContent()).toBe("日本語");
       } finally {
-        await Promise.allSettled([page.close(), context.close(), browser.close()]);
+        await context?.close();
+        await browser.close();
       }
     }, 60_000);
   }
