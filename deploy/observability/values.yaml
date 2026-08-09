@@ -216,6 +216,7 @@ kube-prometheus-stack:
       - kube_deployment_status_observed_generation
       - kube_deployment_status_replicas_available
       - kube_deployment_status_replicas_updated
+      - kube_horizontalpodautoscaler_labels
       - kube_horizontalpodautoscaler_spec_max_replicas
       - kube_horizontalpodautoscaler_spec_min_replicas
       - kube_horizontalpodautoscaler_status_current_replicas
@@ -239,6 +240,7 @@ kube-prometheus-stack:
       - kube_pod_container_resource_requests
       - kube_pod_container_status_waiting_reason
       - kube_pod_info
+      - kube_pod_labels
       - kube_pod_owner
       - kube_pod_status_phase
       - kube_pod_status_ready
@@ -258,6 +260,9 @@ kube-prometheus-stack:
       - kube_statefulset_status_replicas_ready
       - kube_statefulset_status_replicas_updated
       - kube_statefulset_status_update_revision
+    metricLabelsAllowlist:
+      - "horizontalpodautoscalers=[app.kubernetes.io/instance,app.kubernetes.io/component]"
+      - "pods=[app.kubernetes.io/instance,app.kubernetes.io/component]"
     prometheus:
       monitor:
         additionalLabels:

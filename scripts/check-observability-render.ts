@@ -168,6 +168,22 @@ for (const metric of referencedMetrics) {
     );
   }
 }
+const labelsAllowlistArgument = kubeStateArgs.find((value) =>
+  value.startsWith("--metric-labels-allowlist="),
+);
+assert(
+  labelsAllowlistArgument,
+  "kube-state-metrics must render an explicit metric labels allowlist",
+);
+for (const expected of [
+  "horizontalpodautoscalers=[app.kubernetes.io/instance,app.kubernetes.io/component]",
+  "pods=[app.kubernetes.io/instance,app.kubernetes.io/component]",
+]) {
+  assert(
+    labelsAllowlistArgument.includes(expected),
+    `kube-state-metrics labels allowlist would remove required dashboard labels for ${expected}`,
+  );
+}
 
 const prometheusMonitor = serviceMonitorEndingIn(serviceMonitors, "-prometheus");
 const alertmanagerMonitor = serviceMonitorEndingIn(serviceMonitors, "-alertmanager");
