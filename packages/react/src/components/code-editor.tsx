@@ -392,7 +392,9 @@ export function CodeEditor({
               {saveError.message}
             </span>
           )}
-          {!saveError && savedTick && <span className="text-og-xs text-og-status-idle">Saved</span>}
+          {!saveError && savedTick && !dirty && (
+            <span className="text-og-xs text-og-status-idle">Saved</span>
+          )}
           {readOnly ? (
             <span className="text-og-xs uppercase tracking-wide text-og-fg-subtle">Read-only</span>
           ) : !saveConflict ? (
