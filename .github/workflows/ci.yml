@@ -781,6 +781,9 @@ jobs:
           --timeout-seconds 1200
           -- bun scripts/ci/run-build-plan.ts --plan impact-plan.json
 
+      - name: React Native Metro to Hermes session bundle
+        run: bun run test:react-native-hermes-bundle
+
       - name: Publish closure guard
         run: bun scripts/publish-closure-guard.ts
 

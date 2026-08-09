@@ -341,6 +341,8 @@ describe("workflow fail-closed contracts", () => {
     expect(ci).toContain("name: Browser and visual acceptance");
     expect(ci).toContain("name: Real-service and recovery tests");
     expect(ci).toContain("name: Package and bundle contracts");
+    expect(ci).toContain("name: React Native Metro to Hermes session bundle");
+    expect(ci).toContain("run: bun run test:react-native-hermes-bundle");
     expect(ci).toContain("api_digest: ${{ steps.api_image.outputs.digest }}");
     expect(ci).toContain("worker_digest: ${{ steps.worker_image.outputs.digest }}");
     expect(ci).toContain("web_digest: ${{ steps.web_image.outputs.digest }}");
