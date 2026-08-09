@@ -8056,8 +8056,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // the frozen RunState blob (the only representation of a turn
           // paused mid-flight), so swapping the trigger for a resume notice
           // could drop the user's decision. Re-applying an already-consumed
-          // approval re-executes at most the single approved step — the same
-          // bound every recovery already accepts.
+          // approval re-enters at most the single approved step. Every
+          // approval-gated MCP action crosses the durable execution admission
+          // fence before its provider invocation, so a consumed step resumes
+          // as already-executed or outcome-unknown rather than calling MCP again.
           const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
             sessionId: input.sessionId,
             turnId: recoveryTurnId,

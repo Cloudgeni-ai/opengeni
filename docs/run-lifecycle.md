@@ -745,6 +745,14 @@ explicit checkpoint/resume, not an automatic Temporal retry. A newer control
 revision, terminal state, or successor attempt wins instead of being
 overwritten.
 
+Approval-gated MCP execution has an additional provider-side-effect fence.
+Connection-backed actions and legacy per-session MCP servers configured with
+`requireApproval` both create a durable action request keyed by the logical turn
+and approval id before invocation. The approved transition admits the provider
+once; a replay after execution started is recorded as outcome-unknown, and a
+replay after completion is rejected as already executed. Recovery may therefore
+re-enter the SDK approval step without issuing the MCP request again.
+
 Resource-based turn workers use that exact graceful path only as emergency
 memory protection. Temporal's cgroup-aware slot tuner closes new admission at
 `OPENGENI_TURN_WORKER_TARGET_MEMORY_USAGE`; reaching that target is ordinary
