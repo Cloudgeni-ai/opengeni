@@ -1,5 +1,11 @@
 # @opengeni/react
 
+## 0.49.7
+
+### Patch Changes
+
+- 422d1d8: Expose semantic terminal readiness, prevent pre-connect focus from silently dropping keystrokes, and let browser automation wait for live PTY input.
+
 ## 0.49.6
 
 ### Patch Changes
