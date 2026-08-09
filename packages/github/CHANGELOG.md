@@ -1,5 +1,13 @@
 # @opengeni/github
 
+## 0.4.44
+
+### Patch Changes
+
+- Updated dependencies [dfcf698]
+  - @opengeni/contracts@0.41.3
+  - @opengeni/config@0.12.7
+
 ## 0.4.43
 
 ### Patch Changes
