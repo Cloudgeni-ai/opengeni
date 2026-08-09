@@ -113,7 +113,7 @@ function candidateOffsets(sourceText: string, quote: string): number[] {
     const index = sourceText.indexOf(quote, cursor);
     if (index < 0) break;
     matches.push(index);
-    cursor = index + Math.max(1, quote.length);
+    cursor = index + 1;
   }
   return matches;
 }

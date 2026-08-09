@@ -1856,6 +1856,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const payload = parseSteerSessionAdmission(await c.req.json().catch(() => null));
     const result = await acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
       text: payload.text,
+      annotations: payload.annotations,
       turnInstructions: payload.turnInstructions ?? null,
       resources: payload.resources,
       model: payload.model ?? null,

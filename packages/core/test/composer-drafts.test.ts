@@ -77,6 +77,12 @@ describe("established-session composer drafts", () => {
         payload: { text: "alpha beta omega" },
       },
     ]);
+    const [ambiguousSourceEvent] = await appendSessionEvents(db, workspaceId, sourceSession.id, [
+      {
+        type: "agent.message.completed",
+        payload: { text: "aaa" },
+      },
+    ]);
     const annotation = {
       id: crypto.randomUUID(),
       source: {
@@ -124,6 +130,44 @@ describe("established-session composer drafts", () => {
         },
       },
     ]);
+
+    await expect(
+      saveHumanComposerDraft(
+        { db },
+        {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId: sourceSession.id,
+          subjectId: grant.subjectId,
+        },
+        {
+          expectedRevision: saved.revision,
+          text: "",
+          annotations: [
+            {
+              id: crypto.randomUUID(),
+              source: {
+                kind: "assistant_message",
+                eventId: ambiguousSourceEvent!.id,
+                eventType: "agent.message.completed",
+                sequence: ambiguousSourceEvent!.sequence,
+                turnId: null,
+                startOffset: 5,
+                endOffset: 7,
+                contextBefore: "",
+                contextAfter: "",
+              },
+              quote: "aa",
+              note: "",
+            },
+          ],
+          resources: [],
+          model: "gpt-5.6-sol",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+        },
+      ),
+    ).rejects.toMatchObject({ status: 422 });
 
     await expect(
       saveHumanComposerDraft(

@@ -63,7 +63,7 @@ function occurrenceOffsets(text: string, quote: string): number[] {
     const offset = text.indexOf(quote, cursor);
     if (offset < 0) break;
     offsets.push(offset);
-    cursor = offset + Math.max(1, quote.length);
+    cursor = offset + 1;
   }
   return offsets;
 }

@@ -210,6 +210,22 @@ describe("structured human-input HTTP surface (real PostgreSQL)", () => {
       principalKind: "human_session",
       exp: Math.floor(Date.now() / 1_000) + 3_600,
     });
+    const annotation = {
+      id: crypto.randomUUID(),
+      source: {
+        kind: "assistant_message" as const,
+        eventId: source!.id,
+        eventType: "agent.message.completed" as const,
+        sequence: source!.sequence,
+        turnId: null,
+        startOffset: 6,
+        endOffset: 10,
+        contextBefore: "alpha ",
+        contextAfter: " omega",
+      },
+      quote: "beta",
+      note: "Use this exact source.",
+    };
 
     const response = await app.request(
       `http://x/v1/workspaces/${grant.workspaceId}/sessions/${session.id}/events`,
@@ -221,24 +237,7 @@ describe("structured human-input HTTP surface (real PostgreSQL)", () => {
           clientEventId: crypto.randomUUID(),
           payload: {
             text: "",
-            annotations: [
-              {
-                id: crypto.randomUUID(),
-                source: {
-                  kind: "assistant_message",
-                  eventId: source!.id,
-                  eventType: "agent.message.completed",
-                  sequence: source!.sequence,
-                  turnId: null,
-                  startOffset: 6,
-                  endOffset: 10,
-                  contextBefore: "alpha ",
-                  contextAfter: " omega",
-                },
-                quote: "beta",
-                note: "Use this exact source.",
-              },
-            ],
+            annotations: [annotation],
           },
         }),
       },
@@ -256,6 +255,32 @@ describe("structured human-input HTTP surface (real PostgreSQL)", () => {
             source: { eventId: source!.id, startOffset: 6, endOffset: 10 },
           },
         ],
+      },
+    });
+
+    const steerResponse = await app.request(
+      `http://x/v1/workspaces/${grant.workspaceId}/sessions/${session.id}/steer`,
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          text: "",
+          clientEventId: crypto.randomUUID(),
+          annotations: [{ ...annotation, id: crypto.randomUUID() }],
+        }),
+      },
+    );
+    expect(steerResponse.status).toBe(202);
+    expect(await steerResponse.json()).toMatchObject({
+      accepted: {
+        payload: {
+          text: "",
+          annotations: [{ ordinal: 1, quote: "beta", source: { eventId: source!.id } }],
+        },
+      },
+      turn: {
+        prompt: "",
+        annotations: [{ ordinal: 1, quote: "beta", source: { eventId: source!.id } }],
       },
     });
   });
