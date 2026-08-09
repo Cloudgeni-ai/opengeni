@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
-import { verifyDelegatedAccessToken, type FileAsset } from "@opengeni/contracts";
+import {
+  OPENGENI_API_CONTRACT_HEADER,
+  OPENGENI_API_CONTRACT_REVISION,
+  verifyDelegatedAccessToken,
+  type FileAsset,
+} from "@opengeni/contracts";
 import type { Database, PrepareEditableArtifactSourceFileInput } from "@opengeni/db";
 import type { ObjectStorage } from "@opengeni/storage";
 import { createHash } from "node:crypto";
@@ -257,6 +262,9 @@ describe("editable artifact publication operation", () => {
         );
         const authorization = new Headers(init?.headers).get("authorization");
         expect(authorization).toStartWith("Bearer ogd_");
+        expect(new Headers(init?.headers).get(OPENGENI_API_CONTRACT_HEADER)).toBe(
+          OPENGENI_API_CONTRACT_REVISION,
+        );
         const claims = await verifyDelegatedAccessToken(
           "publication-test-secret",
           authorization!.slice("Bearer ".length),

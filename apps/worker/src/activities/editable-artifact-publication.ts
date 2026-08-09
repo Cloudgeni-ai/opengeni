@@ -1,4 +1,9 @@
-import { signDelegatedAccessToken, type FileAsset } from "@opengeni/contracts";
+import {
+  OPENGENI_API_CONTRACT_HEADER,
+  OPENGENI_API_CONTRACT_REVISION,
+  signDelegatedAccessToken,
+  type FileAsset,
+} from "@opengeni/contracts";
 import {
   PreparedEditableArtifactPublicationSchema,
   PublishEditableArtifactReceiptSchema,
@@ -416,6 +421,7 @@ async function importPublication(
     headers: {
       authorization: `Bearer ${bearer}`,
       "content-type": "application/json",
+      [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
       ...(input.settings.authRequired && input.settings.accessKey
         ? { "x-opengeni-access-key": input.settings.accessKey }
         : {}),
