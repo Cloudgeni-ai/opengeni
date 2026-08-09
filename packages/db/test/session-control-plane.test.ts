@@ -3960,6 +3960,72 @@ describe("clean session control plane", () => {
     ).toHaveLength(1);
   });
 
+  test("quiescence before interruption settlement parks the same paused recovery", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "run until the quiescence-first race settles");
+    const attemptId = crypto.randomUUID();
+    const workflowId = `session-${session.id}`;
+    const workflowRunId = crypto.randomUUID();
+    const dispatchId = `dispatch-${crypto.randomUUID()}`;
+    const predecessor = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      workflowId,
+      { attemptId, workflowRunId, dispatchId },
+    );
+    expect(predecessor).not.toBeNull();
+
+    await controlSession(grant, session.id, "pause");
+    const quiescenceEvents = await markSessionAttemptQuiesced(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      attemptId,
+      temporalWorkflowId: workflowId,
+      temporalWorkflowRunId: workflowRunId,
+      temporalActivityId: dispatchId,
+    });
+    expect(quiescenceEvents).toEqual([
+      expect.objectContaining({
+        type: "session.queue.changed",
+        clientEventId: `opengeni:attempt-quiesced:${attemptId}`,
+      }),
+    ]);
+
+    const settlement = await settleSessionAttemptInterruptions(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      attemptId,
+    );
+    expect(settlement).toMatchObject({ action: "paused", attemptId });
+    expect(settlement.events).toContainEqual(
+      expect.objectContaining({
+        type: "session.status.changed",
+        clientEventId: `opengeni:paused-recovery-settled:${attemptId}`,
+        payload: expect.objectContaining({ status: "idle", reason: "paused_recovery_settled" }),
+      }),
+    );
+    expect(await getSession(client.db, grant.workspaceId!, session.id)).toMatchObject({
+      status: "idle",
+      activeTurnId: predecessor!.id,
+      effectiveControl: { state: "paused" },
+    });
+    expect(await getSessionTurn(client.db, grant.workspaceId!, predecessor!.id)).toMatchObject({
+      status: "recovering",
+      activeAttemptId: null,
+    });
+    expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+      kind: "idle",
+    });
+    expect(
+      (await listSessionEvents(client.db, grant.workspaceId!, session.id)).filter(
+        (event) => event.clientEventId === `opengeni:paused-recovery-settled:${attemptId}`,
+      ),
+    ).toHaveLength(1);
+  });
+
   test("quiescence reconciliation finds an older rejected-stale predecessor", async () => {
     const { grant, session } = await fixture();
     await send(grant, session.id, "run the predecessor");

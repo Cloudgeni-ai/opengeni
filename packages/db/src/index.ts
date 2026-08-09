@@ -43615,6 +43615,13 @@ export async function settleSessionAttemptInterruptions(
         : steer
           ? "superseded"
           : "interrupted_recoverable";
+      // Logical interruption and physical quiescence can commit in either
+      // order. If quiescence won, park the paused public session projection in
+      // this transaction so both lock orders converge on the same durable state.
+      const pausedRecoveryAlreadyQuiesced =
+        outcome === "interrupted_recoverable" &&
+        effectiveControl.state === "paused" &&
+        attempt.quiescedAt !== null;
       const reason = terminalCancel
         ? "session_cancelled"
         : steer
@@ -43716,6 +43723,24 @@ export async function settleSessionAttemptInterruptions(
                 payload: { status: "recovering" },
                 occurredAt: now,
               },
+              ...(pausedRecoveryAlreadyQuiesced
+                ? [
+                    {
+                      accountId: session.accountId,
+                      workspaceId,
+                      sessionId,
+                      sequence: ++sequence,
+                      type: "session.status.changed" as const,
+                      turnId: turn.id,
+                      turnGeneration: turn.executionGeneration,
+                      turnAttemptId: attemptId,
+                      turnAssociation: null,
+                      payload: { status: "idle", reason: "paused_recovery_settled" },
+                      clientEventId: `opengeni:paused-recovery-settled:${attemptId}`,
+                      occurredAt: now,
+                    },
+                  ]
+                : []),
             ];
       const eventRows = await tx
         .insert(schema.sessionEvents)
@@ -43759,7 +43784,13 @@ export async function settleSessionAttemptInterruptions(
       await tx
         .update(schema.sessions)
         .set({
-          status: terminalCancel ? "cancelled" : steer ? "queued" : "recovering",
+          status: terminalCancel
+            ? "cancelled"
+            : steer
+              ? "queued"
+              : pausedRecoveryAlreadyQuiesced
+                ? "idle"
+                : "recovering",
           activeTurnId: terminalCancel || steer ? null : turn.id,
           lastSequence: sequence,
           updatedAt: now,
