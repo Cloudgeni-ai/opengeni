@@ -167,10 +167,11 @@ describe("OpenGeni Slack interaction settings", () => {
     OPENGENI_SLACK_CLIENT_SECRET: "slack-client-secret",
   };
 
-  test("requires the request signing secret whenever the Slack app is configured", () => {
-    expect(() => withEnv(slackEnv, () => getSettings())).toThrow(
-      "OPENGENI_SLACK_SIGNING_SECRET is required when the OpenGeni Slack app is configured",
-    );
+  test("allows hosted Slack OAuth without enabling signed Slack interactions", () => {
+    const settings = withEnv(slackEnv, () => getSettings());
+    expect(settings.slackClientId).toBe("slack-client-id");
+    expect(settings.slackClientSecret).toBe("slack-client-secret");
+    expect(settings.slackSigningSecret).toBeUndefined();
   });
 
   test("loads the signing secret without projecting it into any public contract", () => {
