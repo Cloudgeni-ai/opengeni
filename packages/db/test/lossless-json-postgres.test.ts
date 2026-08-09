@@ -20,6 +20,7 @@ import {
   createDb,
   createSession,
   deadLetterHostExportHead,
+  getActiveSessionHistoryItemsPaged,
   getSession,
   getSessionHistoryItems,
   initializeSessionStartAtomically,
@@ -534,6 +535,7 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
     const unsafeText =
       `before${nul}middle${loneHigh}low${loneLow}after` +
       `${LOSSLESS_JSON_STRING_PREFIX}${LOSSLESS_TEXT_PREFIX}`;
+    const literalPrefixCollision = `${LOSSLESS_JSON_STRING_PREFIX}literal-prefix-collision`;
     const exactCommand = 'stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")';
     const initialMessage = `run exactly: ${exactCommand}\n${unsafeText}`;
 
@@ -679,7 +681,10 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
     const historyItem = {
       type: "message",
       role: "user",
-      content: [{ type: "input_text", text: `${exactCommand}\n${unsafeText}` }],
+      content: [
+        { type: "input_text", text: `${exactCommand}\n${unsafeText}` },
+        { type: "input_text", text: literalPrefixCollision },
+      ],
     };
     const [initialHistory] = await withWorkspaceRls(app.db, workspaceId, (db) =>
       db
@@ -732,6 +737,16 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       select item ->> 'type' as type from session_history_items
       where workspace_id = ${workspaceId} and session_id = ${session.id} and position = 1`;
     expect(rawHistory).toEqual({ type: "message" });
+    const pagedHistory = await getActiveSessionHistoryItemsPaged(
+      app.db,
+      workspaceId,
+      session.id,
+      1,
+    );
+    expect(pagedHistory.map((entry) => entry.item)).toEqual([
+      { type: "message", role: "user", content: initialMessage },
+      historyItem,
+    ]);
 
     const callId = "pending-synthetic-call";
     const callItem = {

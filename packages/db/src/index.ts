@@ -23887,12 +23887,14 @@ export async function getActiveSessionHistoryItemsPaged(
           id: string;
           position: number;
           item: Record<string, unknown>;
+          itemCodecVersion: number | null;
           providerArtifactInvalidatedAt: Date | null;
         }> = await scopedDb
           .select({
             id: schema.sessionHistoryItems.id,
             position: schema.sessionHistoryItems.position,
             item: schema.sessionHistoryItems.item,
+            itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
             providerArtifactInvalidatedAt: schema.sessionHistoryItems.providerArtifactInvalidatedAt,
           })
           .from(schema.sessionHistoryItems)
@@ -23908,7 +23910,12 @@ export async function getActiveSessionHistoryItemsPaged(
           )
           .orderBy(schema.sessionHistoryItems.position)
           .limit(pageSize);
-        rows.push(...page);
+        rows.push(
+          ...page.map(({ itemCodecVersion, ...row }) => ({
+            ...row,
+            item: fromPostgresLosslessJson(row.item, itemCodecVersion),
+          })),
+        );
         if (page.length < pageSize) return rows;
         const nextPosition = page.at(-1)!.position;
         if (afterPosition !== null && nextPosition <= afterPosition) {
