@@ -43,6 +43,12 @@ function mountedIndices(root: HTMLElement): number[] {
     .sort((a, b) => a - b);
 }
 
+function changesRailScroller(root: HTMLElement): HTMLElement {
+  const scroller = root.querySelector("[data-opengeni-changes-rail]")?.firstElementChild;
+  if (!(scroller instanceof HTMLElement)) throw new Error("Changes rail scroller was not mounted");
+  return scroller;
+}
+
 describe("WorkbenchChanges — windowing (D2)", () => {
   test("a 40-file change set mounts a BOUNDED window, not all 40 sections", async () => {
     const r = await renderComponent(
@@ -85,11 +91,68 @@ describe("WorkbenchChanges — rail, badge, guard", () => {
     );
     await flush();
 
+    const beforeScroller = changesRailScroller(container(r));
+    const beforeFocused = container(r).querySelector<HTMLButtonElement>("[data-rail-file]");
+    beforeScroller.scrollTop = 196;
+    beforeFocused?.focus();
+
     await r.rerender(<WorkbenchChanges diff={manyFiles(1)} source="live" capturedAt={null} />);
     await flush();
 
+    const afterScroller = changesRailScroller(container(r));
+    const afterFocused = container(r).querySelector<HTMLButtonElement>("[data-rail-file]");
+    expect(afterScroller).not.toBe(beforeScroller);
+    expect(afterScroller.scrollTop).toBeLessThanOrEqual(28);
+    expect(document.activeElement).toBe(afterFocused);
     expect(container(r).textContent).toContain("file-000.ts");
     expect(container(r).querySelectorAll("[data-rail-file]")).toHaveLength(1);
+    await r.unmount();
+  });
+
+  test("a shrink reset preserves a surviving focused row and rail scroll", async () => {
+    const r = await renderComponent(
+      <WorkbenchChanges diff={manyFiles(80)} source="live" capturedAt={null} />,
+    );
+    await flush();
+
+    const beforeScroller = changesRailScroller(container(r));
+    const beforeFocused = container(r).querySelector<HTMLButtonElement>("[data-rail-file]");
+    expect(beforeFocused?.dataset.railFilePath).toBe("src/file-000.ts");
+    beforeFocused?.focus();
+    beforeScroller.scrollTop = 196;
+
+    await r.rerender(<WorkbenchChanges diff={manyFiles(79)} source="live" capturedAt={null} />);
+    await flush();
+
+    const afterScroller = changesRailScroller(container(r));
+    const afterFocused = container(r).querySelector<HTMLButtonElement>(
+      '[data-rail-file-path="src/file-000.ts"]',
+    );
+    expect(afterScroller).not.toBe(beforeScroller);
+    expect(afterScroller.scrollTop).toBe(196);
+    expect(document.activeElement).toBe(afterFocused);
+
+    await r.rerender(<WorkbenchChanges diff={manyFiles(80)} source="live" capturedAt={null} />);
+    await flush();
+    expect(changesRailScroller(container(r))).toBe(afterScroller);
+    expect(document.activeElement).toBe(afterFocused);
+    await r.unmount();
+  });
+
+  test("a shrink reset does not focus a different row when the focused file disappears", async () => {
+    const r = await renderComponent(
+      <WorkbenchChanges diff={manyFiles(2)} source="live" capturedAt={null} />,
+    );
+    await flush();
+    const rows = container(r).querySelectorAll<HTMLButtonElement>("[data-rail-file]");
+    rows.item(1).focus();
+
+    await r.rerender(<WorkbenchChanges diff={manyFiles(1)} source="live" capturedAt={null} />);
+    await flush();
+
+    const survivingRow = container(r).querySelector<HTMLButtonElement>("[data-rail-file]");
+    expect(survivingRow?.dataset.railFilePath).toBe("src/file-000.ts");
+    expect(document.activeElement).not.toBe(survivingRow);
     await r.unmount();
   });
 
