@@ -184,6 +184,19 @@ describe("Slack event classification and safe projection", () => {
     expect(
       slackEventInboxEntry(
         envelope({
+          type: "message",
+          user: "U1",
+          channel: "C1",
+          ts: "1.3",
+          thread_ts: "1.1",
+          text: "<@U_OPEN_GENI> Slack delivered this threaded mention as a message",
+        }),
+        bot,
+      )?.triggerKind,
+    ).toBe("app_mention");
+    expect(
+      slackEventInboxEntry(
+        envelope({
           type: "app_mention",
           user: "U1",
           channel: "C1",

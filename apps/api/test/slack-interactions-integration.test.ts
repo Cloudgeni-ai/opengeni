@@ -95,6 +95,8 @@ type SlackCall = {
   method: string;
   channel: string | null;
   timestamp: string | null;
+  latest?: string | null;
+  inclusive?: string | null;
 };
 
 type SlackReactionContextPage = {
@@ -124,6 +126,7 @@ function fakeSlack(
   const posts: SlackPost[] = [];
   const calls: SlackCall[] = [];
   const reactionContexts = new Map<string, SlackReactionContext>();
+  const channelHistories = new Map<string, SlackReactionContextPage>();
   const reactionContextHits: string[] = [];
   const failuresByText = new Map<
     string,
@@ -173,6 +176,8 @@ function fakeSlack(
       method,
       channel: form.get("channel"),
       timestamp: form.get("ts"),
+      ...(form.has("latest") ? { latest: form.get("latest") } : {}),
+      ...(form.has("inclusive") ? { inclusive: form.get("inclusive") } : {}),
     });
     if (method === "conversations.info") {
       const channel = form.get("channel") ?? "";
@@ -213,6 +218,24 @@ function fakeSlack(
       const context = cursor ? rootContext?.pages?.[cursor] : rootContext;
       if (!context) return Response.json({ ok: false, error: "message_not_found" });
       reactionContextHits.push(cursor ? `${key}:${cursor}` : key);
+      const status = context.status ?? 200;
+      if (status !== 200 || context.error) {
+        return Response.json(status === 200 ? { ok: false, error: context.error } : { ok: false }, {
+          status,
+          headers: context.retryAfterSeconds
+            ? { "retry-after": String(context.retryAfterSeconds) }
+            : undefined,
+        });
+      }
+      return Response.json({
+        ok: true,
+        messages: context.messages,
+        response_metadata: { next_cursor: context.nextCursor ?? "" },
+      });
+    }
+    if (method === "conversations.history") {
+      const channel = form.get("channel") ?? "";
+      const context = channelHistories.get(channel) ?? { messages: [] };
       const status = context.status ?? 200;
       if (status !== 200 || context.error) {
         return Response.json(status === 200 ? { ok: false, error: context.error } : { ok: false }, {
@@ -293,6 +316,7 @@ function fakeSlack(
     posts,
     calls,
     reactionContexts,
+    channelHistories,
     reactionContextHits,
     failuresByText,
     postFailuresByChannel,
@@ -2731,18 +2755,35 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
   test("channel mentions adopt existing threads and any linked workspace participant can continue", async () => {
     if (!available) return;
     const value = await fixture({ linkOther: true });
+    const rootTimestamp = "1720000000.000001";
+    const mentionTimestamp = "1720000000.000002";
+    value.slack.reactionContexts.set(`C_TEAM:${rootTimestamp}`, {
+      messages: [
+        {
+          ts: rootTimestamp,
+          user: value.ownerSlackUserId,
+          text: "Do we support Google Drive integration in OpenGeni currently?",
+        },
+        {
+          ts: mentionTimestamp,
+          thread_ts: rootTimestamp,
+          user: value.ownerSlackUserId,
+          text: `<@${value.botUserId}> Can check this out?`,
+        },
+      ],
+    });
     expect(
       (
         await postEvent(value.app, {
           teamId: value.teamId,
           eventId: `E_MENTION_${crypto.randomUUID()}`,
           event: {
-            type: "app_mention",
+            type: "message",
             user: value.ownerSlackUserId,
             channel: "C_TEAM",
-            ts: "1720000000.000002",
-            thread_ts: "1720000000.000001",
-            text: `<@${value.botUserId}> take over this thread`,
+            ts: mentionTimestamp,
+            thread_ts: rootTimestamp,
+            text: `<@${value.botUserId}> Can check this out?`,
           },
         })
       ).status,
@@ -2754,6 +2795,18 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       visibility: "workspace",
       slack_thread_ts: "1720000000.000001",
     });
+    const [initialMessage] = await shared!.admin<{ text: string }[]>`
+      select event.payload ->> 'text' as text
+      from session_events event
+      where event.workspace_id = ${value.owner.workspaceId}
+        and event.session_id = ${route!.session_id}
+        and event.type = 'user.message'
+      order by event.sequence asc
+      limit 1`;
+    expect(initialMessage!.text).toContain(
+      "Do we support Google Drive integration in OpenGeni currently?",
+    );
+    expect(initialMessage!.text).toContain("Can check this out?");
 
     expect(
       (
@@ -2780,6 +2833,62 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         and session_id = ${route!.session_id}
         and type = 'user.message'`;
     expect(messages!.count).toBe(2);
+  });
+
+  test("top-level mentions receive bounded preceding channel context", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const mentionTimestamp = "1721000000.000002";
+    value.slack.channelHistories.set("C_TEAM", {
+      messages: [
+        {
+          ts: mentionTimestamp,
+          user: value.ownerSlackUserId,
+          text: `<@${value.botUserId}> Can you answer this question?`,
+        },
+        {
+          ts: "1721000000.000001",
+          user: value.ownerSlackUserId,
+          text: "What deployment is currently running in production?",
+        },
+      ],
+    });
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_TOP_LEVEL_CONTEXT_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: value.ownerSlackUserId,
+            channel: "C_TEAM",
+            ts: mentionTimestamp,
+            text: `<@${value.botUserId}> Can you answer this question?`,
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+
+    const [initialMessage] = await shared!.admin<{ text: string }[]>`
+      select event.payload ->> 'text' as text
+      from session_events event
+      join slack_interactions interaction
+        on interaction.workspace_id = event.workspace_id
+        and interaction.session_id = event.session_id
+      where event.workspace_id = ${value.owner.workspaceId}
+        and event.type = 'user.message'
+      order by event.sequence asc
+      limit 1`;
+    expect(initialMessage!.text).toContain("What deployment is currently running in production?");
+    expect(value.slack.calls).toContainEqual(
+      expect.objectContaining({
+        method: "conversations.history",
+        channel: "C_TEAM",
+        latest: mentionTimestamp,
+        inclusive: "true",
+      }),
+    );
   });
 
   test("slash commands and explicit message shortcuts each create one durable session surface", async () => {
