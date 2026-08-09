@@ -830,6 +830,10 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         payload: { text: "The requested Slack check is complete." },
       },
       {
+        type: "agent.message.completed",
+        payload: { text: "The requested Slack check is complete." },
+      },
+      {
         type: "turn.completed",
         payload: { output: "The requested Slack check is complete." },
       },
@@ -3937,6 +3941,79 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     );
     expect((await interactions(value.owner.workspaceId))[0]).toMatchObject({
       progress_count: 3,
+      terminal_delivery_state: "completed",
+    });
+  }, 60_000);
+
+  test("reconciles production-shaped final output across pages and replica claims", async () => {
+    if (!available) return;
+    const value = await fixture();
+    await postEvent(value.app, {
+      teamId: value.teamId,
+      eventId: `E_PAGED_FINAL_${crypto.randomUUID()}`,
+      event: {
+        type: "message",
+        channel_type: "im",
+        user: value.ownerSlackUserId,
+        channel: "D_PAGED_FINAL",
+        ts: "1745000000.000001",
+        text: "Run a task whose final output crosses a delivery page",
+      },
+    });
+    await drainAll(value.deps);
+    const [route] = await interactions(value.owner.workspaceId);
+    const postsBeforeResult = value.slack.posts.length;
+
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      ...Array.from({ length: 101 }, (_, index) => ({
+        type: "session.status.changed",
+        payload: { status: "running", pageFixture: index },
+      })),
+      {
+        type: "agent.message.completed",
+        payload: { text: "Production-shaped final result" },
+      },
+    ]);
+
+    // Delivery pages are chronological. The first page advances across only
+    // the oldest status events; the streamed assistant result is on page two.
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+    expect(value.slack.posts).toHaveLength(postsBeforeResult);
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+    expect(value.slack.posts.slice(postsBeforeResult).map((post) => post.text)).toEqual([
+      "Production-shaped final result",
+    ]);
+
+    // The terminal settlement writes a second identical assistant event plus
+    // turn.completed atomically. Two replicas converge on the already-used
+    // progress operation instead of posting a second result.
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      {
+        type: "agent.message.completed",
+        payload: { text: "Production-shaped final result" },
+      },
+      {
+        type: "turn.completed",
+        payload: { output: "Production-shaped final result" },
+      },
+    ]);
+    const replicaDeps = {
+      ...value.deps,
+      bus: new MemoryEventBus(),
+    } as ApiRouteDeps;
+    expect(
+      (
+        await Promise.all([
+          drainSlackInteractionsOnce(value.deps),
+          drainSlackInteractionsOnce(replicaDeps),
+        ])
+      ).sort(),
+    ).toEqual([false, true]);
+    const resultPosts = value.slack.posts.slice(postsBeforeResult);
+    expect(resultPosts).toHaveLength(1);
+    expect(resultPosts[0]!.text).toBe("Production-shaped final result");
+    expect(resultPosts[0]!.text).not.toContain("Open in OpenGeni:");
+    expect((await interactions(value.owner.workspaceId))[0]).toMatchObject({
       terminal_delivery_state: "completed",
     });
   }, 60_000);
