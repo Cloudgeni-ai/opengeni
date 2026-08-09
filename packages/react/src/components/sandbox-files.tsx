@@ -319,8 +319,8 @@ export function SandboxFiles({
                   path={viewPath}
                   initialContents={fileView.content}
                   themeType={resolvedTheme}
-                  onSave={(contents) =>
-                    files.writeFile(viewPath, contents, { expectedContent: fileView.content! })
+                  onSave={(contents, expectedContents) =>
+                    files.writeFile(viewPath, contents, { expectedContent: expectedContents })
                   }
                   onOverwrite={(contents) => files.writeFile(viewPath, contents, { force: true })}
                   onReload={() => setViewReloadRevision((revision) => revision + 1)}

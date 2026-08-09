@@ -4,7 +4,8 @@ This is the orientation for how an OpenGeni agent run actually executes over
 time. It ties together three subsystems a contributor touching the session
 workflow, the worker activity, or the runtime must keep straight. Code wins
 over this doc; the canonical sources are `apps/worker/src/workflows/session.ts`,
-`apps/worker/src/activities/agent-turn.ts`, and `packages/runtime/src/index.ts`.
+`apps/worker/src/activities/agent-turn.ts`, `packages/runtime/src/index.ts`,
+`packages/runtime/src/model-input.ts`, and `packages/runtime/src/run-events.ts`.
 
 ## Turns
 
