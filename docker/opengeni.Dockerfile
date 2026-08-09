@@ -127,8 +127,9 @@ FROM base AS artifact-outbox-dispatcher
 ENV OPENGENI_ARTIFACT_OUTBOX_ENABLED=true \
   OPENGENI_ARTIFACT_OUTBOX_DATABASE_ROLE=opengeni_artifact_outbox_dispatcher \
   OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT=9466
+RUN bun scripts/build-runtime-processes.ts artifact-outbox
 EXPOSE 9466
-CMD ["bun", "run", "--cwd", "apps/worker", "start:artifact-outbox"]
+CMD ["bun", "apps/worker/dist/process/artifact-outbox/artifact-outbox-entry.js"]
 
 # Dedicated artifact materializer image. It inherits the same exact runtime
 # authority as API and never compiles, downloads, or substitutes kernel bytes.
@@ -153,8 +154,9 @@ ENV OPENGENI_ARTIFACT_MATERIALIZER_ENABLED=true \
   OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT=9465
 # Build-time load verifies the complete manifest/file chain and native ABI.
 RUN /opt/opengeni/bin/opengeni-artifact-materializer --opengeni-materializer-identity-v1
+RUN bun scripts/build-runtime-processes.ts artifact-materializer
 EXPOSE 9465
-CMD ["bun", "run", "--cwd", "apps/worker", "start:artifact-materializer"]
+CMD ["bun", "apps/worker/dist/process/artifact-materializer/artifact-materializer-entry.js"]
 
 FROM base AS web-build
 ARG OPENGENI_DEPLOYMENT_REVISION=dev
