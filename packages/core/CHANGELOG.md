@@ -1,5 +1,13 @@
 # @opengeni/core
 
+## 0.22.1
+
+### Patch Changes
+
+- df985c0: Keep turn-activity heartbeats and the Temporal SDK cancellation throttle at 500
+  milliseconds so Pause and Steer retain the full four-second physical-cancellation
+  budget for writer drain and receipt-gated replacement admission.
+
 ## 0.22.0
 
 ### Minor Changes
