@@ -1,5 +1,11 @@
 # @opengeni/react
 
+## 0.49.9
+
+### Patch Changes
+
+- 727b186: Keep the session timeline entry compatible with React Native Metro and Hermes bundles.
+
 ## 0.49.8
 
 ### Patch Changes
