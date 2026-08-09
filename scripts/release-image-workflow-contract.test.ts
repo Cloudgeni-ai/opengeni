@@ -45,6 +45,27 @@ describe("release image workflow contract", () => {
     expect(frozenInstall).toBeGreaterThan(patchCopy);
   });
 
+  test("dedicated artifact sidecars run self-contained production bundles", async () => {
+    const [dockerfile, builder] = await Promise.all([
+      readFile(resolve(root, "docker/opengeni.Dockerfile"), "utf8"),
+      readFile(resolve(root, "scripts/build-runtime-processes.ts"), "utf8"),
+    ]);
+
+    for (const target of ["artifact-materializer", "artifact-outbox"]) {
+      expect(builder).toContain(`"${target}"`);
+      expect(dockerfile).toContain(`RUN bun scripts/build-runtime-processes.ts ${target}`);
+    }
+    expect(builder).toContain("splitting: false");
+    expect(dockerfile).toContain(
+      'CMD ["bun", "apps/worker/dist/process/artifact-materializer/artifact-materializer-entry.js"]',
+    );
+    expect(dockerfile).toContain(
+      'CMD ["bun", "apps/worker/dist/process/artifact-outbox/artifact-outbox-entry.js"]',
+    );
+    expect(dockerfile).not.toContain('"start:artifact-materializer"');
+    expect(dockerfile).not.toContain('"start:artifact-outbox"');
+  });
+
   test("coalesces mutable Version-PR work without cancelling immutable publication", async () => {
     const [release, ci] = await Promise.all([workflow("release.yml"), workflow("ci.yml")]);
     const versionProjection = release.slice(

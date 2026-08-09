@@ -40,6 +40,32 @@ const profiles: Array<{ profile: string; path: string; role?: Role; smol?: boole
     role: "turn",
     smol: true,
   },
+  {
+    profile: "artifact-materializer-source",
+    path: "apps/worker/src/artifact-materializer-entry.ts",
+  },
+  {
+    profile: "artifact-materializer-bundle",
+    path: "apps/worker/dist/process/artifact-materializer/artifact-materializer-entry.js",
+  },
+  {
+    profile: "artifact-materializer-bundle-smol",
+    path: "apps/worker/dist/process/artifact-materializer/artifact-materializer-entry.js",
+    smol: true,
+  },
+  {
+    profile: "artifact-outbox-source",
+    path: "apps/worker/src/artifact-outbox-entry.ts",
+  },
+  {
+    profile: "artifact-outbox-bundle",
+    path: "apps/worker/dist/process/artifact-outbox/artifact-outbox-entry.js",
+  },
+  {
+    profile: "artifact-outbox-bundle-smol",
+    path: "apps/worker/dist/process/artifact-outbox/artifact-outbox-entry.js",
+    smol: true,
+  },
 ];
 
 function median(values: number[]): number {
@@ -83,7 +109,13 @@ for (const profile of profiles) {
 const medians = Object.fromEntries(
   [...samples.entries()].map(([profile, values]) => [profile, median(values)]),
 ) as Record<string, number>;
-const comparisons = ["api", "worker-control", "worker-turn"].map((profile) => {
+const comparisons = [
+  "api",
+  "worker-control",
+  "worker-turn",
+  "artifact-materializer",
+  "artifact-outbox",
+].map((profile) => {
   const sourceMiB = medians[`${profile}-source`]!;
   const bundleMiB = medians[`${profile}-bundle`]!;
   const smolBundleMiB = medians[`${profile}-bundle-smol`]!;

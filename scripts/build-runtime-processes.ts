@@ -4,15 +4,20 @@ import { cp, mkdir, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-type ProcessTarget = "api" | "worker";
+type ProcessTarget = "api" | "worker" | "artifact-materializer" | "artifact-outbox";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const requested = process.argv.slice(2);
 const targets: ProcessTarget[] =
   requested.length === 0
-    ? ["api", "worker"]
+    ? ["api", "worker", "artifact-materializer", "artifact-outbox"]
     : requested.map((target) => {
-        if (target !== "api" && target !== "worker") {
+        if (
+          target !== "api" &&
+          target !== "worker" &&
+          target !== "artifact-materializer" &&
+          target !== "artifact-outbox"
+        ) {
           throw new Error(`Unknown runtime process target: ${target}`);
         }
         return target;
@@ -93,8 +98,29 @@ async function buildWorker(): Promise<void> {
   );
 }
 
+async function buildArtifactSidecar(
+  target: "artifact-materializer" | "artifact-outbox",
+): Promise<void> {
+  const entrypoint =
+    target === "artifact-materializer"
+      ? "artifact-materializer-entry.ts"
+      : "artifact-outbox-entry.ts";
+  const outdir = join(repositoryRoot, `apps/worker/dist/process/${target}`);
+  await rm(outdir, { recursive: true, force: true });
+  await checkedBuild({
+    ...sharedBuild,
+    // Each sidecar is shipped in a different image. Keep its dependency graph
+    // self-contained so it never loads source maps, TypeScript, Temporal, or a
+    // shared worker chunk at runtime.
+    splitting: false,
+    entrypoints: [join(repositoryRoot, `apps/worker/src/${entrypoint}`)],
+    outdir,
+  });
+}
+
 for (const target of targets) {
   if (target === "api") await buildApi();
-  else await buildWorker();
+  else if (target === "worker") await buildWorker();
+  else await buildArtifactSidecar(target);
   process.stdout.write(`[runtime-process] built ${target}\n`);
 }
