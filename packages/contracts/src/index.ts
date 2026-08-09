@@ -3211,6 +3211,12 @@ export type FileResourceRef = z.infer<typeof FileResourceRef>;
  * reconstruct the same typed attachment input after a model switch or retry.
  */
 export const MODEL_ATTACHMENT_REFS_FIELD = "opengeni_attachment_refs" as const;
+/**
+ * Structured timeline annotations retained beside the deterministic user-text
+ * projection in canonical history. Provider adapters remove this OpenGeni
+ * extension field; the numbered projection in `content` remains model-visible.
+ */
+export const MODEL_TIMELINE_ANNOTATIONS_FIELD = "opengeni_timeline_annotations" as const;
 
 export const ResourceRef = z.discriminatedUnion("kind", [RepositoryResourceRef, FileResourceRef]);
 export type ResourceRef = z.infer<typeof ResourceRef>;
@@ -4677,44 +4683,276 @@ export type SessionAuthorizationPort = {
   ): Promise<SessionAuthorizationListScope>;
 };
 
-export const SessionTurn = z.object({
-  id: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  sessionId: z.string().uuid(),
-  triggerEventId: z.string().uuid(),
-  temporalWorkflowId: z.string(),
-  status: SessionTurnStatus,
-  source: SessionTurnSource,
-  position: z.number().int(),
-  prompt: z.string().min(1),
-  resources: z.array(ResourceRef),
-  tools: z.array(ToolRef),
-  // Omitted/default discovery and explicit `tools: []` are distinct. False
-  // inherits the durable session policy; true replaces it for this turn after
-  // admission proves the selection is a subset.
-  toolsProvided: z.boolean().optional(),
-  model: z.string().min(1),
-  reasoningEffort: ReasoningEffort,
-  latencyMode: LatencyMode.default("standard"),
-  sandboxBackend: SandboxBackend,
-  // Per-turn OS override. NULL = inherit the session's sandboxOs.
-  sandboxOs: SandboxOs.nullable(),
-  metadata: z.record(z.string(), z.unknown()),
-  version: z.number().int().positive(),
-  executionGeneration: z.number().int().nonnegative(),
-  activeAttemptId: z.string().uuid().nullable(),
-  lineage: z.record(z.string(), z.unknown()),
-  initiator: TurnInitiator,
-  initiatorContext: TurnInitiatorContext,
-  /** Secret-safe projection of the exact personal authority frozen on this turn. */
-  personalConnections: z.array(McpPersonalConnectionSummary).default([]),
-  cancelledBy: z.string().nullable(),
-  cancelReason: z.string().nullable(),
-  startedAt: z.string().nullable(),
-  finishedAt: z.string().nullable(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
+export const TIMELINE_ANNOTATION_MAX_COUNT = 12;
+export const TIMELINE_ANNOTATION_QUOTE_MAX_BYTES = 16 * 1024;
+export const TIMELINE_ANNOTATION_NOTE_MAX_BYTES = 2 * 1024;
+export const TIMELINE_ANNOTATION_CONTEXT_MAX_BYTES = 512;
+export const TIMELINE_ANNOTATION_LABEL_MAX_BYTES = 256;
+export const TIMELINE_ANNOTATIONS_MAX_BYTES = 64 * 1024;
+
+export const TimelineAnnotationSourceKind = z.enum([
+  "user_message",
+  "assistant_message",
+  "tool_output",
+]);
+export type TimelineAnnotationSourceKind = z.infer<typeof TimelineAnnotationSourceKind>;
+
+export const TimelineAnnotationSourceEventType = z.enum([
+  "user.message",
+  "agent.message.completed",
+  "agent.toolCall.output",
+]);
+export type TimelineAnnotationSourceEventType = z.infer<typeof TimelineAnnotationSourceEventType>;
+
+function timelineAnnotationUtf8Bytes(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
+
+function timelineAnnotationBoundedText(maxBytes: number, label: string) {
+  return z.string().superRefine((value, ctx) => {
+    if (timelineAnnotationUtf8Bytes(value) > maxBytes) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `${label} must be at most ${maxBytes} UTF-8 bytes`,
+      });
+    }
+  });
+}
+
+export const TimelineAnnotationSource = z
+  .object({
+    kind: TimelineAnnotationSourceKind,
+    eventId: z.string().uuid(),
+    eventType: TimelineAnnotationSourceEventType,
+    sequence: z.number().int().positive(),
+    turnId: z.string().uuid().nullable(),
+    startOffset: z.number().int().nonnegative(),
+    endOffset: z.number().int().nonnegative(),
+    contextBefore: timelineAnnotationBoundedText(
+      TIMELINE_ANNOTATION_CONTEXT_MAX_BYTES,
+      "annotation source contextBefore",
+    ),
+    contextAfter: timelineAnnotationBoundedText(
+      TIMELINE_ANNOTATION_CONTEXT_MAX_BYTES,
+      "annotation source contextAfter",
+    ),
+    label: timelineAnnotationBoundedText(
+      TIMELINE_ANNOTATION_LABEL_MAX_BYTES,
+      "annotation source label",
+    ).optional(),
+  })
+  .strict()
+  .superRefine((source, ctx) => {
+    if (source.endOffset < source.startOffset) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["endOffset"],
+        message: "annotation source endOffset must not precede startOffset",
+      });
+    }
+    const expectedKind =
+      source.eventType === "user.message"
+        ? "user_message"
+        : source.eventType === "agent.message.completed"
+          ? "assistant_message"
+          : "tool_output";
+    if (source.kind !== expectedKind) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["kind"],
+        message: "annotation source kind does not match eventType",
+      });
+    }
+  });
+export type TimelineAnnotationSource = z.infer<typeof TimelineAnnotationSource>;
+
+export const DraftTimelineAnnotation = z
+  .object({
+    id: z.string().uuid(),
+    source: TimelineAnnotationSource,
+    quote: timelineAnnotationBoundedText(TIMELINE_ANNOTATION_QUOTE_MAX_BYTES, "annotation quote"),
+    note: timelineAnnotationBoundedText(TIMELINE_ANNOTATION_NOTE_MAX_BYTES, "annotation note"),
+  })
+  .strict()
+  .superRefine((annotation, ctx) => {
+    if (!annotation.quote.trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["quote"],
+        message: "annotation quote must contain non-whitespace text",
+      });
+    }
+  });
+export type DraftTimelineAnnotation = z.infer<typeof DraftTimelineAnnotation>;
+
+export const SubmittedTimelineAnnotation = DraftTimelineAnnotation.superRefine(
+  (annotation, ctx) => {
+    if (!annotation.note.trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["note"],
+        message: "annotation note must contain non-whitespace text",
+      });
+    }
+  },
+);
+export type SubmittedTimelineAnnotation = z.infer<typeof SubmittedTimelineAnnotation>;
+
+export const TimelineAnnotation = z
+  .object({
+    id: z.string().uuid(),
+    source: TimelineAnnotationSource,
+    quote: timelineAnnotationBoundedText(TIMELINE_ANNOTATION_QUOTE_MAX_BYTES, "annotation quote"),
+    note: timelineAnnotationBoundedText(
+      TIMELINE_ANNOTATION_NOTE_MAX_BYTES,
+      "annotation note",
+    ).refine((value) => value.trim().length > 0, {
+      message: "annotation note must contain non-whitespace text",
+    }),
+    ordinal: z.number().int().positive(),
+  })
+  .strict();
+export type TimelineAnnotation = z.infer<typeof TimelineAnnotation>;
+
+function timelineAnnotationArray<T extends z.ZodTypeAny>(item: T) {
+  return z
+    .array(item)
+    .max(TIMELINE_ANNOTATION_MAX_COUNT)
+    .superRefine((annotations, ctx) => {
+      const ids = new Set<string>();
+      for (let index = 0; index < annotations.length; index += 1) {
+        const id = (annotations[index] as { id?: unknown }).id;
+        if (typeof id === "string" && ids.has(id)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [index, "id"],
+            message: "annotation ids must be unique",
+          });
+        }
+        if (typeof id === "string") ids.add(id);
+      }
+      if (
+        timelineAnnotationUtf8Bytes(JSON.stringify(annotations)) > TIMELINE_ANNOTATIONS_MAX_BYTES
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `annotations must be at most ${TIMELINE_ANNOTATIONS_MAX_BYTES} UTF-8 bytes`,
+        });
+      }
+    });
+}
+
+export const DraftTimelineAnnotations = timelineAnnotationArray(DraftTimelineAnnotation);
+export type DraftTimelineAnnotations = z.infer<typeof DraftTimelineAnnotations>;
+
+export const SubmittedTimelineAnnotations = timelineAnnotationArray(SubmittedTimelineAnnotation);
+export type SubmittedTimelineAnnotations = z.infer<typeof SubmittedTimelineAnnotations>;
+
+export const TimelineAnnotations = timelineAnnotationArray(TimelineAnnotation).superRefine(
+  (annotations, ctx) => {
+    for (let index = 0; index < annotations.length; index += 1) {
+      if (annotations[index]!.ordinal !== index + 1) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [index, "ordinal"],
+          message: "annotation ordinals must be contiguous and match array order",
+        });
+      }
+    }
+  },
+);
+export type TimelineAnnotations = z.infer<typeof TimelineAnnotations>;
+
+export function numberTimelineAnnotations(
+  annotations: readonly SubmittedTimelineAnnotation[],
+): TimelineAnnotation[] {
+  return annotations.map((annotation, index) => ({
+    ...annotation,
+    source: { ...annotation.source },
+    ordinal: index + 1,
+  }));
+}
+
+export function renderTimelineAnnotationsForModel(
+  text: string,
+  annotations: readonly TimelineAnnotation[],
+): string {
+  if (annotations.length === 0) return text;
+  const sections = annotations.flatMap((annotation) => [
+    `Annotation ${annotation.ordinal}`,
+    `Source: ${JSON.stringify({
+      kind: annotation.source.kind,
+      eventId: annotation.source.eventId,
+      eventType: annotation.source.eventType,
+      sequence: annotation.source.sequence,
+      turnId: annotation.source.turnId,
+      startOffset: annotation.source.startOffset,
+      endOffset: annotation.source.endOffset,
+      contextBefore: annotation.source.contextBefore,
+      contextAfter: annotation.source.contextAfter,
+      ...(annotation.source.label ? { label: annotation.source.label } : {}),
+    })}`,
+    `Exact quote: ${JSON.stringify(annotation.quote)}`,
+    `User note: ${JSON.stringify(annotation.note)}`,
+  ]);
+  return [
+    ...(text.length > 0 ? [text, ""] : []),
+    "[OpenGeni timeline annotations]",
+    ...sections.flatMap((line, index) =>
+      index > 0 && line.startsWith("Annotation ") ? ["", line] : [line],
+    ),
+  ].join("\n");
+}
+
+export const SessionTurn = z
+  .object({
+    id: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    triggerEventId: z.string().uuid(),
+    temporalWorkflowId: z.string(),
+    status: SessionTurnStatus,
+    source: SessionTurnSource,
+    position: z.number().int(),
+    prompt: z.string(),
+    annotations: TimelineAnnotations.default([]),
+    resources: z.array(ResourceRef),
+    tools: z.array(ToolRef),
+    // Omitted/default discovery and explicit `tools: []` are distinct. False
+    // inherits the durable session policy; true replaces it for this turn after
+    // admission proves the selection is a subset.
+    toolsProvided: z.boolean().optional(),
+    model: z.string().min(1),
+    reasoningEffort: ReasoningEffort,
+    latencyMode: LatencyMode.default("standard"),
+    sandboxBackend: SandboxBackend,
+    // Per-turn OS override. NULL = inherit the session's sandboxOs.
+    sandboxOs: SandboxOs.nullable(),
+    metadata: z.record(z.string(), z.unknown()),
+    version: z.number().int().positive(),
+    executionGeneration: z.number().int().nonnegative(),
+    activeAttemptId: z.string().uuid().nullable(),
+    lineage: z.record(z.string(), z.unknown()),
+    initiator: TurnInitiator,
+    initiatorContext: TurnInitiatorContext,
+    /** Secret-safe projection of the exact personal authority frozen on this turn. */
+    personalConnections: z.array(McpPersonalConnectionSummary).default([]),
+    cancelledBy: z.string().nullable(),
+    cancelReason: z.string().nullable(),
+    startedAt: z.string().nullable(),
+    finishedAt: z.string().nullable(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  })
+  .superRefine((turn, ctx) => {
+    if (turn.prompt.length === 0 && turn.annotations.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["prompt"],
+        message: "turn prompt or annotations are required",
+      });
+    }
+  });
 export type SessionTurn = z.infer<typeof SessionTurn>;
 
 export const EffectiveControlBlocker = z.object({
@@ -4783,6 +5021,7 @@ export type SessionCommandReceipt = z.infer<typeof SessionCommandReceipt>;
 export const ComposerDraft = z.object({
   revision: z.number().int().nonnegative(),
   text: z.string(),
+  annotations: DraftTimelineAnnotations.default([]),
   resources: z.array(ResourceRef),
   model: z.string().min(1),
   reasoningEffort: ReasoningEffort,
@@ -4824,6 +5063,7 @@ export type DeleteSessionQueueItemRequest = z.infer<typeof DeleteSessionQueueIte
 
 export const SaveComposerDraftRequest = ComposerDraft.pick({
   text: true,
+  annotations: true,
   resources: true,
   model: true,
   reasoningEffort: true,
@@ -9116,27 +9356,45 @@ export function approvalIdentifier(value: unknown): string | null {
   return String(candidate);
 }
 
+function requireMessageTextOrAnnotations(
+  value: { text: string; annotations: readonly unknown[] },
+  ctx: z.RefinementCtx,
+): void {
+  if (value.text.length === 0 && value.annotations.length === 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["text"],
+      message: "message text or annotations are required",
+    });
+  }
+}
+
+export const SessionUserMessagePayload = z
+  .object({
+    text: z.string().default(""),
+    annotations: SubmittedTimelineAnnotations.default([]),
+    // System-level host context for this exact turn only. Persisted on the
+    // turn for retry/recovery, never copied into the visible user message.
+    turnInstructions: z.string().trim().min(1).max(32768).optional(),
+    resources: z.array(ResourceRef).default([]),
+    model: z.string().min(1).optional(),
+    reasoningEffort: ReasoningEffort.optional(),
+    latencyMode: LatencyMode.optional(),
+    controlEtag: z.string().min(1).optional(),
+    expectedDraftRevision: z.number().int().nonnegative().optional(),
+    // Header-value rotation only. URL/name/tool settings are immutable after
+    // session create; persisted events expose metadata, never header values.
+    mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
+  })
+  .strict()
+  .superRefine(requireMessageTextOrAnnotations);
+export type SessionUserMessagePayload = z.infer<typeof SessionUserMessagePayload>;
+
 export const ClientSessionEvent = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("user.message"),
     clientEventId: SessionOperationKey.optional(),
-    payload: z
-      .object({
-        text: z.string().min(1),
-        // System-level host context for this exact turn only. Persisted on the
-        // turn for retry/recovery, never copied into the visible user message.
-        turnInstructions: z.string().trim().min(1).max(32768).optional(),
-        resources: z.array(ResourceRef).default([]),
-        model: z.string().min(1).optional(),
-        reasoningEffort: ReasoningEffort.optional(),
-        latencyMode: LatencyMode.optional(),
-        controlEtag: z.string().min(1).optional(),
-        expectedDraftRevision: z.number().int().nonnegative().optional(),
-        // Header-value rotation only. URL/name/tool settings are immutable after
-        // session create; persisted events expose metadata, never header values.
-        mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
-      })
-      .strict(),
+    payload: SessionUserMessagePayload,
   }),
   z.object({
     type: z.literal("user.approvalDecision"),
@@ -9160,7 +9418,8 @@ export type ClientSessionEvent = z.infer<typeof ClientSessionEvent>;
 
 export const SteerSessionMessageRequest = z
   .object({
-    text: z.string().min(1),
+    text: z.string().default(""),
+    annotations: SubmittedTimelineAnnotations.default([]),
     // Same per-turn system-level context as a queued user.message.
     turnInstructions: z.string().trim().min(1).max(32768).optional(),
     resources: z.array(ResourceRef).default([]),
@@ -9172,7 +9431,8 @@ export const SteerSessionMessageRequest = z
     expectedDraftRevision: z.number().int().nonnegative().optional(),
     mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine(requireMessageTextOrAnnotations);
 export type SteerSessionMessageRequest = z.infer<typeof SteerSessionMessageRequest>;
 
 export const SteerSessionMessageResponse = z.object({

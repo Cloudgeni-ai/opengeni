@@ -129,6 +129,9 @@ export function ActivityRail({
           <div
             key={item.id}
             data-og-timeline-row-anchor=""
+            data-og-annotation-source-key={
+              item.kind === "tool-call" ? item.annotationSource?.eventId : undefined
+            }
             className={cn(newFamily && "mt-3", enteringIds.has(item.id) && "animate-og-row-enter")}
           >
             {row}

@@ -373,6 +373,76 @@ describe("buildTimeline", () => {
     // Footer "finished at" uses the completed event time, not the first delta.
     expect(message.occurredAt).toBe(done.occurredAt);
     expect(message.occurredAt).not.toBe(deltaA.occurredAt);
+    expect(message.annotationSource).toEqual({
+      kind: "assistant_message",
+      eventId: done.id,
+      eventType: "agent.message.completed",
+      sequence: done.sequence,
+      turnId: done.turnId ?? null,
+      text: "On it — checking the cluster.",
+    });
+  });
+
+  test("projects sent annotations and canonical source descriptors", () => {
+    reset();
+    const sourceEventId = "00000000-0000-4000-8000-000000000402";
+    const user = event("user.message", {
+      text: "Use the selected source",
+      annotations: [
+        {
+          id: "00000000-0000-4000-8000-000000000401",
+          ordinal: 1,
+          source: {
+            kind: "assistant_message",
+            eventId: sourceEventId,
+            eventType: "agent.message.completed",
+            sequence: 9,
+            turnId: "00000000-0000-4000-8000-000000000403",
+            startOffset: 0,
+            endOffset: 5,
+            contextBefore: "",
+            contextAfter: "",
+          },
+          quote: "Exact",
+          note: "Preserve this.",
+        },
+      ],
+    });
+    const [message] = buildTimeline([user]);
+    expect(message).toMatchObject({
+      kind: "user-message",
+      annotations: [{ ordinal: 1, quote: "Exact", note: "Preserve this." }],
+      annotationSource: {
+        kind: "user_message",
+        eventId: user.id,
+        eventType: "user.message",
+        sequence: user.sequence,
+        text: "Use the selected source",
+      },
+    });
+  });
+
+  test("normalizes settled tool output into the server-compatible annotation source", () => {
+    reset();
+    const created = eventAt(1, "agent.toolCall.created", {
+      id: "call-annotation",
+      name: "exec_command",
+      arguments: { cmd: "printf ok" },
+    });
+    const output = eventAt(2, "agent.toolCall.output", {
+      id: "call-annotation",
+      output: "Chunk ID: abc\nProcess exited with code 0\nOutput:\n\u001b[32mok\u001b[0m",
+    });
+    const [tool] = buildTimeline([created, output]);
+    expect((tool as ToolCallItem).annotationSource).toEqual({
+      kind: "tool_output",
+      eventId: output.id,
+      eventType: "agent.toolCall.output",
+      sequence: output.sequence,
+      turnId: output.turnId ?? null,
+      text: "ok",
+      label: "exec_command",
+    });
   });
 
   test("keeps accumulated text when completed text does not extend it", () => {
@@ -384,6 +454,7 @@ describe("buildTimeline", () => {
     const message = items[0] as AgentMessageItem;
     expect(message.text).toBe("Streamed body");
     expect(message.streaming).toBe(false);
+    expect(message.annotationSource).toBeUndefined();
   });
 
   test("completed reconciles the same-turn message even after intervening activity", () => {

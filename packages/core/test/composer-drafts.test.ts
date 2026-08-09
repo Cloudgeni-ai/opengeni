@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { ResourceRef } from "@opengeni/contracts";
 import {
   bootstrapWorkspace,
+  appendSessionEvents,
   createDb,
   createSession,
   submitHumanPromptInTransaction,
@@ -37,6 +38,159 @@ afterAll(async () => {
 }, 180_000);
 
 describe("established-session composer drafts", () => {
+  test("validates annotation quotes against canonical same-session events", async () => {
+    if (!available) return;
+
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(db, {
+      accountExternalSource: "test",
+      accountExternalId: `annotation-account-${suffix}`,
+      accountName: "Timeline annotation drafts",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `annotation-workspace-${suffix}`,
+      workspaceName: "Timeline annotation drafts",
+      subjectId: `annotation-subject-${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const workspaceId = grant.workspaceId!;
+    const sourceSession = await createSession(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      initialMessage: "initial",
+      resources: [],
+      metadata: {},
+      model: "gpt-5.6-sol",
+      sandboxBackend: "none",
+    });
+    const otherSession = await createSession(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      initialMessage: "initial",
+      resources: [],
+      metadata: {},
+      model: "gpt-5.6-sol",
+      sandboxBackend: "none",
+    });
+    const [sourceEvent] = await appendSessionEvents(db, workspaceId, sourceSession.id, [
+      {
+        type: "agent.message.completed",
+        payload: { text: "alpha beta omega" },
+      },
+    ]);
+    const [ambiguousSourceEvent] = await appendSessionEvents(db, workspaceId, sourceSession.id, [
+      {
+        type: "agent.message.completed",
+        payload: { text: "aaa" },
+      },
+    ]);
+    const annotation = {
+      id: crypto.randomUUID(),
+      source: {
+        kind: "assistant_message" as const,
+        eventId: sourceEvent!.id,
+        eventType: "agent.message.completed" as const,
+        sequence: sourceEvent!.sequence,
+        turnId: null,
+        // Stale client offsets are recoverable when the exact quote is unique.
+        startOffset: 0,
+        endOffset: 4,
+        contextBefore: "",
+        contextAfter: "",
+      },
+      quote: "beta",
+      note: "",
+    };
+
+    const saved = await saveHumanComposerDraft(
+      { db },
+      {
+        accountId: grant.accountId,
+        workspaceId,
+        sessionId: sourceSession.id,
+        subjectId: grant.subjectId,
+      },
+      {
+        expectedRevision: 0,
+        text: "",
+        annotations: [annotation],
+        resources: [],
+        model: "gpt-5.6-sol",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+      },
+    );
+    expect(saved.annotations).toMatchObject([
+      {
+        quote: "beta",
+        source: {
+          startOffset: 6,
+          endOffset: 10,
+          contextBefore: "alpha ",
+          contextAfter: " omega",
+        },
+      },
+    ]);
+
+    await expect(
+      saveHumanComposerDraft(
+        { db },
+        {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId: sourceSession.id,
+          subjectId: grant.subjectId,
+        },
+        {
+          expectedRevision: saved.revision,
+          text: "",
+          annotations: [
+            {
+              id: crypto.randomUUID(),
+              source: {
+                kind: "assistant_message",
+                eventId: ambiguousSourceEvent!.id,
+                eventType: "agent.message.completed",
+                sequence: ambiguousSourceEvent!.sequence,
+                turnId: null,
+                startOffset: 5,
+                endOffset: 7,
+                contextBefore: "",
+                contextAfter: "",
+              },
+              quote: "aa",
+              note: "",
+            },
+          ],
+          resources: [],
+          model: "gpt-5.6-sol",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+        },
+      ),
+    ).rejects.toMatchObject({ status: 422 });
+
+    await expect(
+      saveHumanComposerDraft(
+        { db },
+        {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId: otherSession.id,
+          subjectId: grant.subjectId,
+        },
+        {
+          expectedRevision: 0,
+          text: "",
+          annotations: [annotation],
+          resources: [],
+          model: "gpt-5.6-sol",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+        },
+      ),
+    ).rejects.toMatchObject({ status: 422 });
+  }, 180_000);
+
   test("normalizes repository resources before the Send content fence", async () => {
     if (!available) return;
 

@@ -16,7 +16,7 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import type { SessionPendingInputPreview, SessionTurn } from "@opengeni/sdk";
+import type { SessionPendingInputPreview, SessionTurn, TimelineAnnotation } from "@opengeni/sdk";
 import {
   ArrowDownToLineIcon,
   ArrowUpToLineIcon,
@@ -46,6 +46,7 @@ import {
 } from "../lib/use-portal-token-style";
 import { requestQueueDraftEdit } from "./queue-draft-policy";
 import { QueueErrorAlert, QueueStoppingStatus } from "./queue-surface-state";
+import { TimelineAnnotationsChip } from "./timeline-annotations";
 
 /** The sole pending-input surface: compact above Goal, Agents, and composer. */
 type QueueSurfaceCommonProps = {
@@ -99,14 +100,15 @@ export function QueueSurface({
     (input) => !attachedInputIds.includes(input.id),
   );
   const canEditInComposer = queueComposerCheckoutEnabled(composer, readOnly);
-  const collapsedPreview = useMemo(
-    () =>
-      queuePromptPreview(
-        queue.queue[0]?.prompt ?? queue.pendingInputs[0]?.summary ?? "",
-        QUEUE_COLLAPSED_PREVIEW_CHARACTERS,
-      ),
-    [queue.pendingInputs, queue.queue],
-  );
+  const collapsedPreview = useMemo(() => {
+    const firstTurn = queue.queue[0];
+    return firstTurn
+      ? queueTurnPreview(firstTurn, QUEUE_COLLAPSED_PREVIEW_CHARACTERS)
+      : queuePromptPreview(
+          queue.pendingInputs[0]?.summary ?? "",
+          QUEUE_COLLAPSED_PREVIEW_CHARACTERS,
+        );
+  }, [queue.pendingInputs, queue.queue]);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
 
   const displayedQueue = useMemo(() => {
@@ -409,8 +411,8 @@ export function QueueSurface({
                     dir="auto"
                   >
                     {
-                      queuePromptPreview(
-                        queue.queue.find((turn) => turn.id === draggedTurnId)?.prompt ?? "",
+                      queueTurnPreview(
+                        queue.queue.find((turn) => turn.id === draggedTurnId),
                         QUEUE_ROW_PREVIEW_CHARACTERS,
                       ).summary
                     }
@@ -489,6 +491,29 @@ type QueuePromptPreview = {
   visibleIdentityLabel: "End" | "Safe boundary" | null;
   isFallback: boolean;
 };
+
+function annotationOnlyQueuePreview(count: number): QueuePromptPreview {
+  const summary = `${count} timeline ${count === 1 ? "annotation" : "annotations"}`;
+  return {
+    summary,
+    collapsedVisual: summary,
+    visibleStart: summary,
+    visibleIdentity: null,
+    visibleIdentityLabel: null,
+    isFallback: false,
+  };
+}
+
+function queueTurnPreview(
+  turn: SessionTurn | undefined,
+  maxCharacters: number,
+): QueuePromptPreview {
+  if (!turn) return queuePromptPreview("", maxCharacters);
+  const annotations = turn.annotations ?? [];
+  return turn.prompt.length === 0 && annotations.length > 0
+    ? annotationOnlyQueuePreview(annotations.length)
+    : queuePromptPreview(turn.prompt, maxCharacters);
+}
 
 /**
  * Build a bounded head/tail summary of an arbitrary queued prompt. Sampling
@@ -752,73 +777,94 @@ function isLowSurrogate(codeUnit: number): boolean {
 
 function QueuePrompt({
   prompt,
+  annotations,
   index,
   onDisclosureChange,
 }: {
   prompt: string;
+  annotations: readonly TimelineAnnotation[];
   index: number;
   onDisclosureChange: (expanded: boolean) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const fullContentId = useId();
-  const preview = useMemo(() => queuePromptPreview(prompt, QUEUE_ROW_PREVIEW_CHARACTERS), [prompt]);
+  const preview = useMemo(
+    () =>
+      prompt.length === 0 && annotations.length > 0
+        ? annotationOnlyQueuePreview(annotations.length)
+        : queuePromptPreview(prompt, QUEUE_ROW_PREVIEW_CHARACTERS),
+    [annotations.length, prompt],
+  );
 
   return (
     <div className="w-full min-w-0 max-w-full">
-      <div
-        aria-label={`Queued prompt ${index + 1} summary: ${preview.summary}`}
-        className="max-w-full overflow-hidden text-og-control leading-5 text-fg"
-        data-testid={`queue-prompt-preview-${index + 1}`}
-        dir="auto"
-        role="note"
-      >
-        <span aria-hidden="true" className="flex min-w-0 max-w-full items-baseline gap-2 sm:block">
+      {prompt ? (
+        <div
+          aria-label={`Queued prompt ${index + 1} summary: ${preview.summary}`}
+          className="max-w-full overflow-hidden text-og-control leading-5 text-fg"
+          data-testid={`queue-prompt-preview-${index + 1}`}
+          dir="auto"
+          role="note"
+        >
           <span
-            className={`${preview.isFallback ? "" : "line-clamp-1 sm:line-clamp-2"} min-w-0 flex-1 whitespace-pre-wrap break-all [unicode-bidi:plaintext]`}
-            data-testid={`queue-prompt-start-${index + 1}`}
-            dir="auto"
+            aria-hidden="true"
+            className="flex min-w-0 max-w-full items-baseline gap-2 sm:block"
           >
-            {preview.visibleStart}
-          </span>
-          {preview.visibleIdentity && preview.visibleIdentityLabel ? (
             <span
-              className="flex min-w-0 max-w-[70%] shrink-0 items-center gap-1 text-og-xs leading-4 text-fg-muted sm:mt-0.5 sm:max-w-full"
-              data-testid={`queue-prompt-identity-row-${index + 1}`}
+              className={`${preview.isFallback ? "" : "line-clamp-1 sm:line-clamp-2"} min-w-0 flex-1 whitespace-pre-wrap break-all [unicode-bidi:plaintext]`}
+              data-testid={`queue-prompt-start-${index + 1}`}
+              dir="auto"
             >
-              <span className="shrink-0 font-medium text-fg-subtle">
-                {preview.visibleIdentityLabel}
-              </span>
-              <span
-                className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap font-mono [unicode-bidi:plaintext]"
-                data-testid={`queue-prompt-identity-${index + 1}`}
-                dir="auto"
-              >
-                {preview.visibleIdentity}
-              </span>
+              {preview.visibleStart}
             </span>
-          ) : null}
-        </span>
-      </div>
-      <button
-        type="button"
-        aria-controls={fullContentId}
-        aria-expanded={expanded}
-        aria-label={`${expanded ? "Hide" : "Show"} full content for queued prompt ${index + 1}`}
-        className="mt-1 inline-flex min-h-7 min-w-0 max-w-full items-center gap-1 whitespace-normal rounded-md text-left text-og-xs font-medium text-fg outline-hidden focus-visible:ring-2 focus-visible:ring-ring/40 pointer-coarse:min-h-[44px]"
-        data-testid={`queue-prompt-disclosure-${index + 1}`}
-        onClick={() => {
-          const next = !expanded;
-          setExpanded(next);
-          onDisclosureChange(next);
-        }}
-      >
-        <ChevronDownIcon
-          aria-hidden="true"
-          className={`size-3 shrink-0 transition-transform ${expanded ? "rotate-180" : ""}`}
+            {preview.visibleIdentity && preview.visibleIdentityLabel ? (
+              <span
+                className="flex min-w-0 max-w-[70%] shrink-0 items-center gap-1 text-og-xs leading-4 text-fg-muted sm:mt-0.5 sm:max-w-full"
+                data-testid={`queue-prompt-identity-row-${index + 1}`}
+              >
+                <span className="shrink-0 font-medium text-fg-subtle">
+                  {preview.visibleIdentityLabel}
+                </span>
+                <span
+                  className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap font-mono [unicode-bidi:plaintext]"
+                  data-testid={`queue-prompt-identity-${index + 1}`}
+                  dir="auto"
+                >
+                  {preview.visibleIdentity}
+                </span>
+              </span>
+            ) : null}
+          </span>
+        </div>
+      ) : null}
+      {annotations.length > 0 ? (
+        <TimelineAnnotationsChip
+          annotations={annotations}
+          className={prompt ? "mt-1" : undefined}
         />
-        {expanded ? "Hide full prompt" : "View full prompt"}
-      </button>
-      {expanded ? (
+      ) : null}
+      {prompt ? (
+        <button
+          type="button"
+          aria-controls={fullContentId}
+          aria-expanded={expanded}
+          aria-label={`${expanded ? "Hide" : "Show"} full content for queued prompt ${index + 1}`}
+          className="mt-1 inline-flex min-h-7 min-w-0 max-w-full items-center gap-1 whitespace-normal rounded-md text-left text-og-xs font-medium text-fg outline-hidden focus-visible:ring-2 focus-visible:ring-ring/40 pointer-coarse:min-h-[44px]"
+          data-testid={`queue-prompt-disclosure-${index + 1}`}
+          onClick={() => {
+            const next = !expanded;
+            setExpanded(next);
+            onDisclosureChange(next);
+          }}
+        >
+          <ChevronDownIcon
+            aria-hidden="true"
+            className={`size-3 shrink-0 transition-transform ${expanded ? "rotate-180" : ""}`}
+          />
+          {expanded ? "Hide full prompt" : "View full prompt"}
+        </button>
+      ) : null}
+      {expanded && prompt ? (
         <pre
           id={fullContentId}
           role="region"
@@ -850,7 +896,12 @@ function ReadOnlyQueueRow({
     <li className="flex min-w-0 items-start gap-2 bg-surface px-3 py-2">
       <span className="mt-1 shrink-0 font-mono text-og-xs text-fg-subtle">{index + 1}</span>
       <div className="min-w-0 flex-1">
-        <QueuePrompt prompt={turn.prompt} index={index} onDisclosureChange={onDisclosureChange} />
+        <QueuePrompt
+          prompt={turn.prompt}
+          annotations={turn.annotations ?? []}
+          index={index}
+          onDisclosureChange={onDisclosureChange}
+        />
         {attachedInputs.length > 0 ? (
           <PendingMachineInputs inputs={attachedInputs} attached />
         ) : null}
@@ -941,7 +992,12 @@ function SortableQueueRow({
           {index + 1}
         </span>
         <div className="col-span-full row-start-2 min-w-0 sm:col-span-1 sm:col-start-3 sm:row-start-1">
-          <QueuePrompt prompt={turn.prompt} index={index} onDisclosureChange={onDisclosureChange} />
+          <QueuePrompt
+            prompt={turn.prompt}
+            annotations={turn.annotations ?? []}
+            index={index}
+            onDisclosureChange={onDisclosureChange}
+          />
           {attachedInputs.length > 0 ? (
             <PendingMachineInputs inputs={attachedInputs} attached />
           ) : null}

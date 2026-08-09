@@ -1,4 +1,11 @@
-import type { ResourceRef, SessionStatus, ToolAuthNeededPayload, ToolRef } from "@opengeni/sdk";
+import type {
+  ResourceRef,
+  SessionStatus,
+  TimelineAnnotation,
+  TimelineAnnotationSource,
+  ToolAuthNeededPayload,
+  ToolRef,
+} from "@opengeni/sdk";
 
 /* ----------------------------------------------------------------------------
    Timeline item types
@@ -9,10 +16,19 @@ import type { ResourceRef, SessionStatus, ToolAuthNeededPayload, ToolRef } from 
    and the component demo.
    -------------------------------------------------------------------------- */
 
+export type TimelineAnnotationSourceDescriptor = Omit<
+  TimelineAnnotationSource,
+  "startOffset" | "endOffset" | "contextBefore" | "contextAfter"
+> & {
+  text: string;
+};
+
 export type UserMessageItem = {
   kind: "user-message";
   id: string;
   text: string;
+  annotations?: TimelineAnnotation[] | undefined;
+  annotationSource?: TimelineAnnotationSourceDescriptor | undefined;
   presentation?: {
     kind: "realtime_voice" | "realtime_voice_handoff";
     /** Full bounded execution context sent with this visible voice request. */
@@ -33,6 +49,8 @@ export type AgentMessageItem = {
   /** Still receiving deltas (no completed/turn-end seen yet). */
   streaming: boolean;
   occurredAt: string;
+  /** Available only after the canonical completed event lands. */
+  annotationSource?: TimelineAnnotationSourceDescriptor | undefined;
 };
 
 export type ReasoningItem = {
@@ -80,6 +98,8 @@ export type ToolCallItem = {
   raw: unknown;
   status: "running" | "complete" | "failed" | "cancelled";
   occurredAt: string;
+  /** Canonical textual projection of the settled tool output. */
+  annotationSource?: TimelineAnnotationSourceDescriptor | undefined;
 };
 
 /**

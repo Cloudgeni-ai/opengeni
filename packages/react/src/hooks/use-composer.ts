@@ -1,6 +1,7 @@
 import {
   DEFAULT_FILE_RESOURCE_MOUNT_ROOT,
   type ComposerDraft,
+  type DraftTimelineAnnotation,
   type EffectiveControlResumeOption,
   type EffectiveSessionControl,
   type OpenGeniApiError,
@@ -13,7 +14,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
 import { useSessionEventTrigger, type SessionEventFeedOptions } from "./internal";
 
-export type ComposerSendExtras = Omit<SendMessageInput, "text" | "clientEventId">;
+export type ComposerSendExtras = Omit<SendMessageInput, "text" | "clientEventId" | "annotations">;
 
 export type UseComposerOptions = EmbeddedSessionClientOverride &
   SessionEventFeedOptions & {
@@ -42,6 +43,7 @@ export type UseComposerOptions = EmbeddedSessionClientOverride &
 type ComposerDraftShadow = {
   text: string;
   resources: ResourceRef[];
+  annotations: DraftTimelineAnnotation[];
 };
 
 type PendingComposerOperation = {
@@ -49,6 +51,7 @@ type PendingComposerOperation = {
   input: SendMessageInput;
   draftAtSend: string;
   resourcesAtSend: ResourceRef[];
+  annotationsAtSend: DraftTimelineAnnotation[];
   /** Latest local text/resources that must survive an uncertain delivery. */
   newerShadow: ComposerDraftShadow;
   clearDraftOnAccept: boolean;
@@ -103,6 +106,41 @@ function resourceList(value: unknown): value is ResourceRef[] {
   );
 }
 
+function timelineAnnotationList(value: unknown): value is DraftTimelineAnnotation[] {
+  return (
+    Array.isArray(value) &&
+    value.every((candidate) => {
+      if (typeof candidate !== "object" || candidate === null) return false;
+      const annotation = candidate as Record<string, unknown>;
+      const source = annotation.source;
+      if (typeof source !== "object" || source === null) return false;
+      const sourceRecord = source as Record<string, unknown>;
+      return (
+        typeof annotation.id === "string" &&
+        typeof annotation.quote === "string" &&
+        typeof annotation.note === "string" &&
+        typeof sourceRecord.eventId === "string" &&
+        typeof sourceRecord.eventType === "string" &&
+        typeof sourceRecord.sequence === "number" &&
+        (typeof sourceRecord.turnId === "string" || sourceRecord.turnId === null) &&
+        typeof sourceRecord.startOffset === "number" &&
+        typeof sourceRecord.endOffset === "number" &&
+        typeof sourceRecord.contextBefore === "string" &&
+        typeof sourceRecord.contextAfter === "string"
+      );
+    })
+  );
+}
+
+function cloneAnnotations(
+  annotations: readonly DraftTimelineAnnotation[],
+): DraftTimelineAnnotation[] {
+  return annotations.map((annotation) => ({
+    ...annotation,
+    source: { ...annotation.source },
+  }));
+}
+
 function readStoredPendingComposerOperation(
   key: string | null,
 ): StoredPendingComposerOperation | null {
@@ -128,18 +166,34 @@ function readStoredPendingComposerOperation(
       (record.delivery !== "send" && record.delivery !== "steer") ||
       typeof record.draftAtSend !== "string" ||
       !resourceList(record.resourcesAtSend) ||
+      (record.annotationsAtSend !== undefined &&
+        !timelineAnnotationList(record.annotationsAtSend)) ||
       typeof shadowRecord.text !== "string" ||
       !resourceList(shadowRecord.resources) ||
+      (shadowRecord.annotations !== undefined &&
+        !timelineAnnotationList(shadowRecord.annotations)) ||
       typeof record.clearDraftOnAccept !== "boolean" ||
       typeof record.hasMcpCredentialUpdates !== "boolean" ||
       typeof inputRecord.text !== "string" ||
       typeof inputRecord.clientEventId !== "string" ||
       "mcpCredentialUpdates" in inputRecord ||
-      ("resources" in inputRecord && !resourceList(inputRecord.resources))
+      ("resources" in inputRecord && !resourceList(inputRecord.resources)) ||
+      ("annotations" in inputRecord && !timelineAnnotationList(inputRecord.annotations))
     ) {
       return null;
     }
-    return record as StoredPendingComposerOperation;
+    return {
+      ...(record as StoredPendingComposerOperation),
+      annotationsAtSend: timelineAnnotationList(record.annotationsAtSend)
+        ? record.annotationsAtSend
+        : [],
+      newerShadow: {
+        ...(shadow as ComposerDraftShadow),
+        annotations: timelineAnnotationList(shadowRecord.annotations)
+          ? shadowRecord.annotations
+          : [],
+      },
+    };
   } catch {
     return null;
   }
@@ -168,6 +222,7 @@ function restorePendingComposerOperation(key: string | null): PendingComposerOpe
     newerShadow: stored.newerShadow ?? {
       text: stored.draftAtSend,
       resources: stored.resourcesAtSend,
+      annotations: stored.annotationsAtSend,
     },
     canRetry: !stored.hasMcpCredentialUpdates,
   };
@@ -188,6 +243,7 @@ function rememberPendingComposerOperation(
     newerShadow: {
       text: operation.newerShadow.text,
       resources: [...operation.newerShadow.resources],
+      annotations: cloneAnnotations(operation.newerShadow.annotations),
     },
   } satisfies StoredPendingComposerOperation;
   pendingComposerOperations.set(key, stored);
@@ -212,7 +268,14 @@ function updatePendingComposerShadow(
   shadow: ComposerDraftShadow,
 ): PendingComposerOperation | null {
   if (!key || !operation) return operation;
-  const next = { ...operation, newerShadow: { ...shadow, resources: [...shadow.resources] } };
+  const next = {
+    ...operation,
+    newerShadow: {
+      ...shadow,
+      resources: [...shadow.resources],
+      annotations: cloneAnnotations(shadow.annotations),
+    },
+  };
   rememberPendingComposerOperation(key, next);
   return next;
 }
@@ -220,6 +283,13 @@ function updatePendingComposerShadow(
 export type ComposerState = {
   value: string;
   setValue: (value: string) => void;
+  annotations?: DraftTimelineAnnotation[] | undefined;
+  addAnnotation?: ((annotation: DraftTimelineAnnotation) => void) | undefined;
+  updateAnnotation?: ((id: string, note: string) => void) | undefined;
+  removeAnnotation?: ((id: string) => void) | undefined;
+  /** Newly captured annotation the review surface should focus. */
+  annotationReviewTargetId?: string | null | undefined;
+  clearAnnotationReviewTarget?: (() => void) | undefined;
   /** Read the current draft synchronously before a destructive replacement. */
   hasDraftContent: () => boolean;
   /** Append the draft behind prompts already visible in the queue. */
@@ -323,6 +393,10 @@ export function useComposer(
   const initialPendingOperation = restorePendingComposerOperation(pendingOperationKey);
   const initialShadow = initialPendingOperation?.newerShadow;
   const [value, setValue] = useState(() => initialShadow?.text ?? "");
+  const [annotations, setAnnotations] = useState<DraftTimelineAnnotation[]>(
+    () => initialShadow?.annotations ?? [],
+  );
+  const [annotationReviewTargetId, setAnnotationReviewTargetId] = useState<string | null>(null);
   // Keep rendered state behind the committed target identity for one frame:
   // a parent may switch sessionId without remounting this public hook.
   const [stateTargetKey, setStateTargetKey] = useState(targetKey);
@@ -355,6 +429,7 @@ export function useComposer(
     initialPendingOperation?.input.clientEventId ?? null,
   );
   const valueRef = useRef(initialShadow?.text ?? "");
+  const annotationsRef = useRef<DraftTimelineAnnotation[]>(initialShadow?.annotations ?? []);
   const draftRef = useRef<ComposerDraft | null>(null);
   const restoredResourcesRef = useRef<ResourceRef[]>(initialShadow?.resources ?? []);
   const localEditRevision = useRef(initialShadow ? 1 : 0);
@@ -397,6 +472,7 @@ export function useComposer(
     const shadow = pendingOperationRef.current?.newerShadow;
     localEditRevision.current = shadow ? 1 : 0;
     valueRef.current = shadow?.text ?? "";
+    annotationsRef.current = shadow?.annotations ?? [];
     draftRef.current = null;
     restoredResourcesRef.current = shadow?.resources ?? [];
     lastSavedSignature.current = null;
@@ -405,6 +481,8 @@ export function useComposer(
     saveChain.current = Promise.resolve();
     setStateTargetKey(targetKey);
     setValue(shadow?.text ?? "");
+    setAnnotations(shadow?.annotations ?? []);
+    setAnnotationReviewTargetId(null);
     setSending(false);
     setSteering(
       pendingOperationRef.current?.delivery === "steer"
@@ -433,11 +511,13 @@ export function useComposer(
       if (!durableDrafts) {
         localEditRevision.current += 1;
         valueRef.current = next.text;
+        annotationsRef.current = next.annotations ?? [];
         restoredResourcesRef.current = next.resources;
         draftRef.current = null;
         lastSavedSignature.current = null;
         setDraft(null);
         setValue(next.text);
+        setAnnotations(next.annotations ?? []);
         setRestoredResources(next.resources);
         pendingOperationRef.current = updatePendingComposerShadow(
           pendingOperationKey,
@@ -448,18 +528,21 @@ export function useComposer(
               next.resources,
               resolveSendExtras(sendExtrasRef.current).resources ?? [],
             ),
+            annotations: next.annotations ?? [],
           },
         );
         setDraftConflict(null);
         return;
       }
       valueRef.current = next.text;
+      annotationsRef.current = next.annotations ?? [];
       draftRef.current = next;
       restoredResourcesRef.current = next.resources;
       lastSavedSignature.current = draftSignature(draftPayload(next));
       localEditRevision.current += 1;
       setDraft(next);
       setValue(next.text);
+      setAnnotations(next.annotations ?? []);
       setRestoredResources(next.resources);
       pendingOperationRef.current = updatePendingComposerShadow(
         pendingOperationKey,
@@ -470,6 +553,7 @@ export function useComposer(
             next.resources,
             resolveSendExtras(sendExtrasRef.current).resources ?? [],
           ),
+          annotations: next.annotations ?? [],
         },
       );
       setDraftConflict(null);
@@ -496,6 +580,7 @@ export function useComposer(
               baseAtStart,
               valueRef.current,
               restoredResourcesRef.current,
+              annotationsRef.current,
               extrasAtStart,
             ),
           )
@@ -531,9 +616,11 @@ export function useComposer(
             // newer local edits while that operation is still uncertain.
             valueRef.current = shadow.text;
             restoredResourcesRef.current = shadow.resources;
+            annotationsRef.current = shadow.annotations;
             localEditRevision.current ||= 1;
             setValue(shadow.text);
             setRestoredResources(shadow.resources);
+            setAnnotations(shadow.annotations);
           } else if (
             replaceLocal ||
             (!localWasDirtyAtStart && localAtStart === localEditRevision.current)
@@ -549,9 +636,11 @@ export function useComposer(
               extrasNow.latencyMode !== extrasAtStart.latencyMode;
             valueRef.current = fetched.text;
             restoredResourcesRef.current = fetched.resources;
+            annotationsRef.current = fetched.annotations ?? [];
             lastSavedSignature.current = draftSignature(draftPayload(fetched));
             setValue(fetched.text);
             setRestoredResources(fetched.resources);
+            setAnnotations(fetched.annotations ?? []);
             if (replaceLocal || !pickerChangedDuringFetch) {
               onDraftAppliedRef.current?.(fetched);
             }
@@ -680,8 +769,8 @@ export function useComposer(
     const base = draftRef.current;
     if (!base) return null;
     const extras = resolveSendExtras(sendExtrasRef.current);
-    return composerDraftPayload(base, value, restoredResources, extras);
-  }, [durableDrafts, restoredResources, targetKey, value]);
+    return composerDraftPayload(base, value, restoredResources, annotations, extras);
+  }, [annotations, durableDrafts, restoredResources, targetKey, value]);
 
   const persistPayload = useCallback(
     async (payload: SaveComposerDraftRequest): Promise<boolean> => {
@@ -769,10 +858,12 @@ export function useComposer(
           restoredResourcesRef.current,
           resolveSendExtras(sendExtrasRef.current).resources ?? [],
         ),
+        annotations: annotationsRef.current,
       };
       if (
         pending.newerShadow.text !== shadow.text ||
-        JSON.stringify(pending.newerShadow.resources) !== JSON.stringify(shadow.resources)
+        JSON.stringify(pending.newerShadow.resources) !== JSON.stringify(shadow.resources) ||
+        JSON.stringify(pending.newerShadow.annotations) !== JSON.stringify(shadow.annotations)
       ) {
         pendingOperationRef.current = updatePendingComposerShadow(
           pendingOperationKey,
@@ -818,14 +909,19 @@ export function useComposer(
         pendingClientEventId.current = pending.input.clientEventId ?? null;
       }
       const draftAtSend = value;
+      const annotationsAtSend = annotations;
       const rawText = explicit ?? draftAtSend;
       const hasText = rawText.trim().length > 0;
+      const hasAnnotations = annotationsAtSend.length > 0;
+      const annotationsComplete = annotationsAtSend.every(
+        (annotation) => annotation.note.trim().length > 0,
+      );
       // Resolve the extras once: a file-only message (empty text + ≥1 ready
       // resource) is legitimate, so we must not bail on empty text alone.
       const extras = pending ? {} : resolveSendExtras(sendExtrasRef.current);
       const hasResources = restoredResources.length > 0 || (extras.resources?.length ?? 0) > 0;
       if (
-        (!pending && !hasText && !hasResources) ||
+        (!pending && (!annotationsComplete || (!hasText && !hasResources && !hasAnnotations))) ||
         !sessionId ||
         sending ||
         sendBlockedRef.current?.() === true ||
@@ -848,6 +944,8 @@ export function useComposer(
         const resourcesWereUnchanged =
           JSON.stringify(restoredResourcesRef.current) ===
           JSON.stringify(operation.resourcesAtSend);
+        const annotationsWereUnchanged =
+          JSON.stringify(annotationsRef.current) === JSON.stringify(operation.annotationsAtSend);
         const previousDraft = draftRef.current;
         if (previousDraft) {
           const cleared = {
@@ -855,6 +953,7 @@ export function useComposer(
             revision: 0,
             text: "",
             resources: [],
+            annotations: [],
             sourceTurnId: null,
             sourceTurnVersion: null,
             updatedAt: null,
@@ -866,6 +965,11 @@ export function useComposer(
         if (resourcesWereUnchanged) {
           restoredResourcesRef.current = [];
           setRestoredResources([]);
+        }
+        if (annotationsWereUnchanged) {
+          annotationsRef.current = [];
+          setAnnotations([]);
+          setAnnotationReviewTargetId(null);
         }
         if (operation.clearDraftOnAccept && draftWasUnchanged) {
           valueRef.current = "";
@@ -981,7 +1085,7 @@ export function useComposer(
         // and submitted byte-for-byte, while file-only sends use the same
         // placeholder for both operations so the server content fence cannot
         // reject its own client.
-        const sendText = hasText ? rawText : FILE_ONLY_MESSAGE_TEXT;
+        const sendText = hasText ? rawText : hasAnnotations ? "" : FILE_ONLY_MESSAGE_TEXT;
         const currentPayload = currentDraftPayload();
         const payload = currentPayload ? { ...currentPayload, text: sendText } : null;
         if (payload && !(await persistPayload(payload))) return false;
@@ -1003,15 +1107,18 @@ export function useComposer(
             ? { expectedDraftRevision: draftRef.current.revision }
             : {}),
           resources: mergeResources(restoredResources, extras.resources ?? []),
+          annotations: cloneAnnotations(annotationsAtSend),
         });
         const operation: PendingComposerOperation = {
           delivery,
           input,
           draftAtSend,
           resourcesAtSend: [...restoredResources],
+          annotationsAtSend: cloneAnnotations(annotationsAtSend),
           newerShadow: {
             text: draftAtSend,
             resources: mergeResources(restoredResources, extras.resources ?? []),
+            annotations: cloneAnnotations(annotationsAtSend),
           },
           clearDraftOnAccept: explicit === undefined,
           canRetry: true,
@@ -1079,6 +1186,7 @@ export function useComposer(
       options.effectiveControl?.controlEtag,
       persistPayload,
       restoredResources,
+      annotations,
       sending,
       sessionId,
       targetKey,
@@ -1099,6 +1207,7 @@ export function useComposer(
     restoredResources.length > 0 ||
     (resolveSendExtras(sendExtrasRef.current).resources?.length ?? 0) > 0;
   const hasPendingOperation = pendingOperationRef.current !== null;
+  const annotationsComplete = annotations.every((annotation) => annotation.note.trim().length > 0);
 
   const pause = useCallback(
     async (reason?: string): Promise<void> => {
@@ -1241,12 +1350,70 @@ export function useComposer(
             restoredResourcesRef.current,
             resolveSendExtras(sendExtrasRef.current).resources ?? [],
           ),
+          annotations: annotationsRef.current,
         },
       );
       setValue(next);
     },
     [pendingOperationKey, targetKey],
   );
+
+  const updateAnnotations = useCallback(
+    (next: DraftTimelineAnnotation[], reviewTargetId: string | null = null) => {
+      if (targetKeyRef.current !== targetKey) return;
+      localEditRevision.current += 1;
+      annotationsRef.current = next;
+      pendingOperationRef.current = updatePendingComposerShadow(
+        pendingOperationKey,
+        pendingOperationRef.current,
+        {
+          text: valueRef.current,
+          resources: mergeResources(
+            restoredResourcesRef.current,
+            resolveSendExtras(sendExtrasRef.current).resources ?? [],
+          ),
+          annotations: next,
+        },
+      );
+      setAnnotations(next);
+      setAnnotationReviewTargetId(reviewTargetId);
+    },
+    [pendingOperationKey, targetKey],
+  );
+
+  const addAnnotation = useCallback(
+    (annotation: DraftTimelineAnnotation) => {
+      if (annotationsRef.current.length >= 12) {
+        setError(new Error("A message can include at most 12 timeline annotations."));
+        return;
+      }
+      const next = [...annotationsRef.current, annotation];
+      updateAnnotations(next, annotation.id);
+    },
+    [updateAnnotations],
+  );
+
+  const updateAnnotation = useCallback(
+    (id: string, note: string) => {
+      updateAnnotations(
+        annotationsRef.current.map((annotation) =>
+          annotation.id === id ? { ...annotation, note } : annotation,
+        ),
+      );
+    },
+    [updateAnnotations],
+  );
+
+  const removeAnnotation = useCallback(
+    (id: string) => {
+      updateAnnotations(annotationsRef.current.filter((annotation) => annotation.id !== id));
+    },
+    [updateAnnotations],
+  );
+
+  const clearAnnotationReviewTarget = useCallback(() => {
+    setAnnotationReviewTargetId(null);
+  }, []);
 
   const removeRestoredResource = useCallback(
     (index: number) => {
@@ -1260,6 +1427,7 @@ export function useComposer(
         {
           text: valueRef.current,
           resources: mergeResources(next, resolveSendExtras(sendExtrasRef.current).resources ?? []),
+          annotations: annotationsRef.current,
         },
       );
       setRestoredResources(next);
@@ -1272,6 +1440,7 @@ export function useComposer(
     const extras = resolveSendExtras(sendExtrasRef.current);
     return (
       valueRef.current.length > 0 ||
+      annotationsRef.current.length > 0 ||
       restoredResourcesRef.current.length > 0 ||
       (extras.resources?.length ?? 0) > 0 ||
       (current?.sourceTurnId !== null && current?.sourceTurnId !== undefined)
@@ -1322,6 +1491,12 @@ export function useComposer(
   return {
     value: identityMatches ? value : "",
     setValue: updateValue,
+    annotations: identityMatches ? annotations : [],
+    addAnnotation,
+    updateAnnotation,
+    removeAnnotation,
+    annotationReviewTargetId: identityMatches ? annotationReviewTargetId : null,
+    clearAnnotationReviewTarget,
     hasDraftContent,
     send,
     steer,
@@ -1332,7 +1507,11 @@ export function useComposer(
       Boolean(sessionId) &&
       !sending &&
       sendBlockedRef.current?.() !== true &&
-      (hasPendingOperation || value.trim().length > 0 || hasReadyResources),
+      annotationsComplete &&
+      (hasPendingOperation ||
+        value.trim().length > 0 ||
+        hasReadyResources ||
+        annotations.length > 0),
     pause,
     pausing: identityMatches ? pausing : false,
     resume,
@@ -1477,6 +1656,7 @@ function draftPayload(draft: ComposerDraft): SaveComposerDraftRequest {
     expectedRevision: draft.revision,
     text: draft.text,
     resources: draft.resources,
+    annotations: draft.annotations ?? [],
     model: draft.model,
     reasoningEffort: draft.reasoningEffort,
     latencyMode: draft.latencyMode ?? "standard",
@@ -1487,12 +1667,14 @@ function composerDraftPayload(
   base: ComposerDraft,
   text: string,
   restoredResources: ResourceRef[],
+  annotations: DraftTimelineAnnotation[],
   extras: ComposerSendExtras,
 ): SaveComposerDraftRequest {
   return {
     expectedRevision: base.revision,
     text,
     resources: mergeResources(restoredResources, extras.resources ?? []),
+    annotations,
     model: extras.model ?? base.model,
     reasoningEffort: extras.reasoningEffort ?? base.reasoningEffort,
     latencyMode: extras.latencyMode ?? base.latencyMode ?? "standard",

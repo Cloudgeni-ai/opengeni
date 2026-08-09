@@ -358,6 +358,54 @@ describe("durable attachment history projection", () => {
 });
 
 describe("turnInput attachment projection", () => {
+  test("accepts annotation-only user-message triggers backed by canonical history", async () => {
+    const workspaceId = "00000000-0000-4000-8000-000000000040";
+    const sessionId = "00000000-0000-4000-8000-000000000041";
+    const storedUser = user("[OpenGeni timeline annotations]\nAnnotation 1");
+    let preparedInput: AgentSegmentInput | undefined;
+    const listUpdates = spyOn(opengeniDb, "listSessionSystemUpdatesForTurn").mockResolvedValue([]);
+    const getEnvelope = spyOn(opengeniDb, "getSandboxSessionEnvelope").mockResolvedValue(null);
+    const runtime = {
+      prepareInput: async (_agent: unknown, input: AgentSegmentInput) => {
+        preparedInput = input;
+        return { input: [], persistedHistoryCount: 1 };
+      },
+    } as unknown as OpenGeniRuntime;
+
+    try {
+      await turnInput(
+        {} as Database,
+        runtime,
+        {},
+        {
+          id: "00000000-0000-4000-8000-000000000042",
+          workspaceId,
+          sessionId,
+          sequence: 1,
+          type: "user.message",
+          payload: { text: "", annotations: [{ ordinal: 1 }], resources: [] },
+          occurredAt: "2026-08-09T00:00:00.000Z",
+        },
+        {
+          turnId: "00000000-0000-4000-8000-000000000043",
+          providerApi: "responses",
+          loadActiveHistory: async () => [
+            {
+              id: "00000000-0000-4000-8000-000000000044",
+              position: 0,
+              item: storedUser,
+              providerArtifactInvalidatedAt: null,
+            },
+          ],
+        },
+      );
+      expect(preparedInput?.historyItems).toEqual([storedUser]);
+    } finally {
+      listUpdates.mockRestore();
+      getEnvelope.mockRestore();
+    }
+  });
+
   test("keeps sandbox path context and adds object bytes to the model-only user row", async () => {
     const imageBytes = new TextEncoder().encode("image");
     const image = {

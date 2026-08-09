@@ -1,4 +1,4 @@
-import type { SessionEvent, SessionStatus } from "@opengeni/sdk";
+import type { SessionEvent, SessionStatus, TimelineAnnotation } from "@opengeni/sdk";
 const { default: fleetDecisionItem } = await import("./fleet-decision-projection");
 import {
   CREDIT_EXHAUSTION_MESSAGE,
@@ -62,6 +62,56 @@ const WORKER_MESSAGE_TOOL = "session_send_message";
  * render as machine-input rows.
  */
 const LANDMARK_ONLY_TOOL_LEAVES = new Set(["memory_save", "memory_correct"]);
+const TIMELINE_ANNOTATION_ANSI_SEQUENCE = new RegExp("\\u001B\\[[0-?]*[ -/]*[@-~]", "g");
+
+function safeTimelineAnnotationJson(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? "";
+  } catch {
+    return String(value ?? "");
+  }
+}
+
+function timelineAnnotationToolOutputValue(value: unknown, depth = 0): string {
+  if (depth > 8 || value === null || value === undefined) {
+    return value == null ? "" : safeTimelineAnnotationJson(value);
+  }
+  if (typeof value === "string") return value;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    return safeTimelineAnnotationJson(value);
+  }
+  const record = value as Record<string, unknown>;
+  if (record.type === "text" && typeof record.text === "string") return record.text;
+  if (Array.isArray(record.content)) {
+    const text = record.content.find(
+      (part) =>
+        part !== null &&
+        typeof part === "object" &&
+        (part as { type?: unknown }).type === "text" &&
+        typeof (part as { text?: unknown }).text === "string",
+    ) as { text: string } | undefined;
+    if (text) return text.text;
+  }
+  if ("structuredContent" in record) {
+    return timelineAnnotationToolOutputValue(record.structuredContent, depth + 1);
+  }
+  if ("result" in record) return timelineAnnotationToolOutputValue(record.result, depth + 1);
+  return safeTimelineAnnotationJson(value);
+}
+
+/** Browser mirror of the server's canonical annotation source projection. */
+function timelineAnnotationToolOutputText(output: unknown): string | null {
+  const raw = timelineAnnotationToolOutputValue(output);
+  const marker = raw.indexOf("\nOutput:\n");
+  const text = (
+    marker >= 0
+      ? raw.slice(marker + "\nOutput:\n".length)
+      : raw.startsWith("Output:\n")
+        ? raw.slice("Output:\n".length)
+        : raw
+  ).replace(TIMELINE_ANNOTATION_ANSI_SEQUENCE, "");
+  return text.length > 0 ? text : null;
+}
 
 export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
   const items: TimelineItem[] = [];
@@ -135,6 +185,15 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           kind: "user-message",
           id: event.id,
           text: voiceMessage?.text ?? stringValue(payload.text),
+          annotations: timelineAnnotations(payload.annotations),
+          annotationSource: {
+            kind: "user_message",
+            eventId: event.id,
+            eventType: "user.message",
+            sequence: event.sequence,
+            turnId,
+            text: voiceMessage?.text ?? stringValue(payload.text),
+          },
           ...(voiceMessage ? { presentation: voiceMessage.presentation } : {}),
           resources: resourceRefs(payload.resources),
           tools: toolRefs(payload.tools),
@@ -213,6 +272,17 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           // Completion time is what the footer shows ("finished at"); keep the
           // first-delta stamp only until this event arrives.
           open.occurredAt = event.occurredAt;
+          open.annotationSource =
+            text && open.text === text
+              ? {
+                  kind: "assistant_message",
+                  eventId: event.id,
+                  eventType: "agent.message.completed",
+                  sequence: event.sequence,
+                  turnId,
+                  text,
+                }
+              : undefined;
           // The SDK can emit a hosted-tool item only after its provider-native
           // operation has completed, even though answer deltas were already
           // streamed. The completed message event is the durable ordering
@@ -232,6 +302,14 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
             text,
             streaming: false,
             occurredAt: event.occurredAt,
+            annotationSource: {
+              kind: "assistant_message",
+              eventId: event.id,
+              eventType: "agent.message.completed",
+              sequence: event.sequence,
+              turnId,
+              text,
+            },
           });
         }
         break;
@@ -346,6 +424,22 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
             ? payload.preview
             : payload.output;
         target.truncation = truncation;
+        const sourceText = timelineAnnotationToolOutputText(
+          Object.prototype.hasOwnProperty.call(payload, "output")
+            ? payload.output
+            : payload.preview,
+        );
+        if (sourceText !== null) {
+          target.annotationSource = {
+            kind: "tool_output",
+            eventId: event.id,
+            eventType: "agent.toolCall.output",
+            sequence: event.sequence,
+            turnId,
+            text: sourceText,
+            label: target.name,
+          };
+        }
         break;
       }
 
@@ -1383,6 +1477,25 @@ function resourceRefs(value: unknown): import("@opengeni/sdk").ResourceRef[] {
       return typeof record.uri === "string" && typeof record.ref === "string";
     }
     return record.kind === "file" && typeof record.fileId === "string";
+  });
+}
+
+function timelineAnnotations(value: unknown): TimelineAnnotation[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((candidate): candidate is TimelineAnnotation => {
+    const annotation = asRecord(candidate);
+    const source = asRecord(annotation.source);
+    return (
+      typeof annotation.id === "string" &&
+      typeof annotation.ordinal === "number" &&
+      typeof annotation.quote === "string" &&
+      typeof annotation.note === "string" &&
+      typeof source.eventId === "string" &&
+      typeof source.eventType === "string" &&
+      typeof source.sequence === "number" &&
+      typeof source.startOffset === "number" &&
+      typeof source.endOffset === "number"
+    );
   });
 }
 

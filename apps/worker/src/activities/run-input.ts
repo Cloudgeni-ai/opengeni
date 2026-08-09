@@ -84,6 +84,7 @@ export type TurnInputOptions = {
   materializeModelHistory?: ModelHistoryAttachmentProjector;
   materializeSerializedRunState?: (serialized: string) => Promise<string>;
   projectModelHistory?: ModelHistoryAttachmentProjector;
+  loadActiveHistory?: typeof getActiveSessionHistoryItemsPaged;
 };
 
 export const MAX_INLINE_MODEL_ATTACHMENT_BYTES = 20 * 1024 * 1024;
@@ -402,9 +403,14 @@ export async function turnInput(
     options.runCredentialsNote,
   );
   if (trigger.type === "user.message") {
-    const payload = trigger.payload as { text?: unknown; resources?: unknown };
-    if (typeof payload.text !== "string" || payload.text.trim().length === 0) {
-      throw new Error("user.message payload is missing text");
+    const payload = trigger.payload as {
+      text?: unknown;
+      annotations?: unknown;
+      resources?: unknown;
+    };
+    const hasAnnotations = Array.isArray(payload.annotations) && payload.annotations.length > 0;
+    if (typeof payload.text !== "string" || (payload.text.trim().length === 0 && !hasAnnotations)) {
+      throw new Error("user.message payload is missing text and annotations");
     }
     const resources = Array.isArray(payload.resources) ? (payload.resources as ResourceRef[]) : [];
     const fileAttachments = await resolveUserMessageFileAttachments(
@@ -425,6 +431,7 @@ export async function turnInput(
       options.projectCanonicalHistory,
       options.materializeModelHistory,
       options.projectModelHistory,
+      options.loadActiveHistory,
     );
   }
   if (trigger.type === "system.update.delivered") {
@@ -443,6 +450,7 @@ export async function turnInput(
       options.projectCanonicalHistory,
       options.materializeModelHistory,
       options.projectModelHistory,
+      options.loadActiveHistory,
     );
   }
   if (trigger.type === "user.approvalDecision") {
@@ -527,12 +535,9 @@ async function messageInput(
   projectCanonicalHistory?: ModelHistoryAttachmentProjector,
   materializeModelHistory?: ModelHistoryAttachmentProjector,
   projectModelHistory?: ModelHistoryAttachmentProjector,
+  loadActiveHistory: typeof getActiveSessionHistoryItemsPaged = getActiveSessionHistoryItemsPaged,
 ): Promise<PreparedTurnInput> {
-  const stored = await getActiveSessionHistoryItemsPaged(
-    db,
-    trigger.workspaceId,
-    trigger.sessionId,
-  );
+  const stored = await loadActiveHistory(db, trigger.workspaceId, trigger.sessionId);
   const envelope = await getSandboxSessionEnvelope(db, trigger.workspaceId, trigger.sessionId);
   const canonicalView = projectRejectedProviderArtifacts(stored);
   const canonicalProviderView = projectCanonicalHistory

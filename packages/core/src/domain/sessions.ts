@@ -35,6 +35,8 @@ import {
   type SessionMcpCredentialUpdateInput,
   type SessionMcpServerInput,
   type SessionMcpServerMetadata,
+  type SubmittedTimelineAnnotation,
+  type TimelineAnnotation,
   type UpdateSessionMcpApprovalPolicyResponse,
   type UpdateSessionToolPolicyRequest,
   type SessionAuthorizationPort,
@@ -99,6 +101,7 @@ import type {
 import { requireSessionAuthorization } from "../session-authorization";
 import { swapActiveSandbox, type FleetContext } from "../sandbox/fleet";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
+import { validateSubmittedTimelineAnnotations } from "./timeline-annotations";
 import { requireVariableSetEncryption, validateVariableSetAttachment } from "./environments";
 import {
   freezePersonalConnectionDelegations,
@@ -1023,6 +1026,7 @@ export async function postUserMessageTurn(input: {
   workspaceId: string;
   sessionId: string;
   text: string;
+  annotations?: TimelineAnnotation[];
   turnInstructions?: string | null;
   resources: ResourceRef[];
   model?: string | null;
@@ -1078,6 +1082,7 @@ export async function postUserMessageTurn(input: {
           controlEtag: input.controlEtag ?? null,
           expectedDraftRevision: input.expectedDraftRevision ?? null,
           text: input.text,
+          annotations: input.annotations ?? [],
           turnInstructions: input.turnInstructions ?? null,
           resources: input.resources,
           model: requestedModel,
@@ -1810,6 +1815,7 @@ export async function acceptSessionUserMessageWithOutcome(
   sessionId: string,
   input: {
     text: string;
+    annotations?: SubmittedTimelineAnnotation[];
     turnInstructions?: string | null;
     resources?: ResourceRef[];
     model?: string | null;
@@ -1864,6 +1870,12 @@ export async function acceptSessionUserMessageWithOutcome(
     latencyModeSource: input.latencyMode == null ? "session" : "explicit",
   });
   const requestedResources = normalizeResources(input.resources ?? []);
+  const annotations = await validateSubmittedTimelineAnnotations(
+    db,
+    workspaceId,
+    sessionId,
+    input.annotations ?? [],
+  );
   await requireLimit(deps, {
     accountId: grant.accountId,
     workspaceId,
@@ -1903,6 +1915,7 @@ export async function acceptSessionUserMessageWithOutcome(
     workspaceId,
     sessionId,
     text: input.text,
+    annotations,
     turnInstructions: input.turnInstructions ?? null,
     resources: requestedResources,
     model: input.model ?? null,

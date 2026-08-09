@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { MODEL_TIMELINE_ANNOTATIONS_FIELD } from "@opengeni/contracts";
 import {
   computerCallNormalizingFetch,
   elideSupersededViewImagePairs,
@@ -66,6 +67,16 @@ function toolSearchOutput(callId: string) {
 }
 
 describe("sanitizeHistoryItemsForModel", () => {
+  test("strips structured timeline annotations only at the provider boundary", () => {
+    const item = {
+      ...userMessage("annotated model text"),
+      [MODEL_TIMELINE_ANNOTATIONS_FIELD]: [{ id: "annotation-1" }],
+    };
+    const [sanitized] = sanitizeHistoryItemsForModel([item]);
+    expect(sanitized).toEqual(userMessage("annotated model text"));
+    expect(item).toHaveProperty(MODEL_TIMELINE_ANNOTATIONS_FIELD);
+  });
+
   test("drops an orphaned function_call_result whose function_call is absent", () => {
     // This is the session-bricking corruption: a tool output replayed without
     // its tool call (observed live for journal / goal-pause tools near turn

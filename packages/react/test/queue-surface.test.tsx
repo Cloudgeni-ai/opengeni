@@ -429,6 +429,44 @@ describe("QueueSurface", () => {
     expect(mounted.container.textContent).toContain("second queued prompt");
   });
 
+  test("renders annotation-only queued turns as a read-only annotation chip", async () => {
+    const annotationTurn = fakeTurn({
+      id: "11111111-1111-4111-8111-111111111119",
+      prompt: "",
+      annotations: [
+        {
+          id: "00000000-0000-4000-8000-000000000701",
+          ordinal: 1,
+          source: {
+            kind: "user_message",
+            eventId: "00000000-0000-4000-8000-000000000702",
+            eventType: "user.message",
+            sequence: 2,
+            turnId: null,
+            startOffset: 0,
+            endOffset: 5,
+            contextBefore: "",
+            contextAfter: "",
+          },
+          quote: "hello",
+          note: "Use this exact source.",
+        },
+      ],
+    });
+    mounted = await renderLoadedQueueSurface(
+      <QueueSurface queue={queue({ queue: [annotationTurn] })} readOnly />,
+    );
+
+    expect(
+      mounted.container.querySelector('[data-testid="queue-collapsed-preview"]')?.textContent,
+    ).toBe("1 timeline annotation");
+    await click(mounted.container.querySelector('button[aria-expanded="false"]'));
+    expect(mounted.container.textContent).toContain("1 annotation");
+    expect(
+      mounted.container.querySelector('button[aria-label="Show full content for queued prompt 1"]'),
+    ).toBeNull();
+  });
+
   test("withholds durable queue checkout from a local-only composer", () => {
     expect(queueComposerCheckoutEnabled(composer({ draftPersistence: "disabled" }), false)).toBe(
       false,

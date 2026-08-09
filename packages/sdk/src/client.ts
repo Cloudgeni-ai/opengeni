@@ -138,6 +138,7 @@ import type {
   SyncSessionRealtimeLedgerResponse,
   RenewSessionRealtimeRequest,
   SessionMcpCredentialUpdateInput,
+  SubmittedTimelineAnnotation,
   UpdateSessionMcpApprovalPolicyRequest,
   UpdateSessionMcpApprovalPolicyResponse,
   SessionQueueSnapshot,
@@ -319,6 +320,7 @@ export type OpenGeniRequestOptions = {
 
 export type SendMessageInput = {
   text: string;
+  annotations?: SubmittedTimelineAnnotation[];
   /** System instructions scoped to this exact turn; never visible timeline text. */
   turnInstructions?: string;
   resources?: ResourceRef[];
