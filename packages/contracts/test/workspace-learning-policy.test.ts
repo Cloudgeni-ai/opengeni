@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
+  WORKSPACE_LEARNING_POLICY_DEFAULT_OFF_REVISION_ID,
   canonicalizeWorkspaceLearningSourceOverrides,
   resolveWorkspaceLearningPolicyEffectiveMode,
+  workspaceLearningPolicyRouterContext,
   type WorkspaceLearningPolicySnapshot,
 } from "../src/workspace-learning-policy";
 
@@ -59,12 +61,38 @@ describe("workspace learning-policy contracts", () => {
         kind: "slack-channel",
         id: "C01",
       }),
-    ).toMatchObject({ mode: "off", inherited: false, policyRevision: accepted.revision });
+    ).toMatchObject({
+      mode: "off",
+      inherited: false,
+      policyRevision: accepted.revision,
+      revisionId: accepted.revision.id,
+      snapshotId: accepted.id,
+    });
     expect(
       resolveWorkspaceLearningPolicyEffectiveMode(accepted, {
         kind: "meeting-transcript",
         id: "meeting:1",
       }),
     ).toMatchObject({ mode: "suggest", inherited: true, policyRevision: accepted.revision });
+  });
+
+  test("projects the exact immutable router context, including the default-off sentinel", () => {
+    const withoutActiveRevision = {
+      ...snapshot(),
+      revision: null,
+      activationVersion: 0,
+      activatedAt: null,
+      workspaceMode: "off" as const,
+      sourceOverrides: [],
+    } satisfies WorkspaceLearningPolicySnapshot;
+    const effective = resolveWorkspaceLearningPolicyEffectiveMode(withoutActiveRevision, {
+      kind: "meeting-transcript",
+      id: "meeting:1",
+    });
+    expect(workspaceLearningPolicyRouterContext(effective)).toEqual({
+      mode: "off",
+      snapshotId: withoutActiveRevision.id,
+      revisionId: WORKSPACE_LEARNING_POLICY_DEFAULT_OFF_REVISION_ID,
+    });
   });
 });

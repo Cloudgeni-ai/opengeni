@@ -16,7 +16,7 @@ Source references are provider-neutral `{kind,id}` identities. They may identify
 
 ## Durable lifecycle
 
-Migration `0191_workspace_learning_policy.sql` adds four FORCE-RLS tables:
+Migration `0192_workspace_learning_policy.sql` adds four FORCE-RLS tables:
 
 - `workspace_learning_policy_revisions`: immutable workspace mode plus sparse source overrides and a canonical policy hash.
 - `workspace_learning_policy_heads`: one current revision per workspace. The ordinary runtime role has read-only access; a trigger rejects inserts, updates, and deletes outside the lifecycle function.
@@ -35,6 +35,7 @@ Workspaces without an active revision snapshot deterministically as `off`, with 
 2. It matches one exact `{kind,id}` override.
 3. It returns the override mode when present; otherwise it returns the workspace mode with `inherited: true`.
 4. Its receipt retains the snapshot id/hash, policy revision identity, activation version, and source reference.
+5. `workspaceLearningPolicyRouterContext(effectiveMode)` projects the exact immutable `{mode,snapshotId,revisionId}` object consumed by the canonical router. A snapshot with no active revision uses the explicit stable `workspace-learning-policy:default-off:v1` revision sentinel, preserving the deterministic `off` policy instead of misrepresenting it as a missing snapshot.
 
 The canonical durable-learning router may consume this result, but this policy domain does not implement routing. Destination ownership remains:
 
@@ -55,4 +56,4 @@ This slice does not implement:
 - Workspace State/API/SDK/UI administration;
 - Slack notification delivery.
 
-Canonical code: `packages/contracts/src/workspace-learning-policy.ts`, `packages/db/src/workspace-learning-policy.ts`, `packages/db/src/workspace-learning-policy-schema.ts`, and migration `0191_workspace_learning_policy.sql`.
+Canonical code: `packages/contracts/src/workspace-learning-policy.ts`, `packages/db/src/workspace-learning-policy.ts`, `packages/db/src/workspace-learning-policy-schema.ts`, and migration `0192_workspace_learning_policy.sql`.

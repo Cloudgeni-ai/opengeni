@@ -4,6 +4,8 @@ export const WORKSPACE_LEARNING_POLICY_MAX_SOURCE_OVERRIDES = 256;
 export const WORKSPACE_LEARNING_POLICY_SOURCE_KIND_MAX_CHARS = 96;
 export const WORKSPACE_LEARNING_POLICY_SOURCE_ID_MAX_CHARS = 1_024;
 export const WORKSPACE_LEARNING_POLICY_REASON_MAX_CHARS = 4_096;
+export const WORKSPACE_LEARNING_POLICY_DEFAULT_OFF_REVISION_ID =
+  "workspace-learning-policy:default-off:v1";
 
 export const WorkspaceLearningMode = z.enum(["off", "suggest", "automatic"]);
 export type WorkspaceLearningMode = z.infer<typeof WorkspaceLearningMode>;
@@ -181,13 +183,20 @@ export const WorkspaceLearningPolicySnapshot = z.object({
 });
 export type WorkspaceLearningPolicySnapshot = z.infer<typeof WorkspaceLearningPolicySnapshot>;
 
-export const WorkspaceLearningPolicyEffectiveMode = z.object({
+export const WorkspaceLearningPolicyRouterContext = z.object({
   mode: WorkspaceLearningMode,
+  snapshotId: z.string().uuid(),
+  revisionId: z.string().min(1).max(512),
+});
+export type WorkspaceLearningPolicyRouterContext = z.infer<
+  typeof WorkspaceLearningPolicyRouterContext
+>;
+
+export const WorkspaceLearningPolicyEffectiveMode = WorkspaceLearningPolicyRouterContext.extend({
   inherited: z.boolean(),
   source: WorkspaceLearningSourceRef,
   policyRevision: WorkspaceLearningPolicyRevisionIdentity.nullable(),
   activationVersion: z.number().int().nonnegative(),
-  snapshotId: z.string().uuid(),
   snapshotHash: z.string().regex(/^[0-9a-f]{64}$/),
 });
 export type WorkspaceLearningPolicyEffectiveMode = z.infer<
@@ -211,6 +220,14 @@ export function resolveWorkspaceLearningPolicyEffectiveMode(
     policyRevision: parsedSnapshot.revision,
     activationVersion: parsedSnapshot.activationVersion,
     snapshotId: parsedSnapshot.id,
+    revisionId: parsedSnapshot.revision?.id ?? WORKSPACE_LEARNING_POLICY_DEFAULT_OFF_REVISION_ID,
     snapshotHash: parsedSnapshot.snapshotHash,
   });
+}
+
+/** Exact provider-neutral context consumed by the canonical durable-learning router. */
+export function workspaceLearningPolicyRouterContext(
+  effectiveMode: WorkspaceLearningPolicyEffectiveMode,
+): WorkspaceLearningPolicyRouterContext {
+  return WorkspaceLearningPolicyRouterContext.parse(effectiveMode);
 }

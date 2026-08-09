@@ -208,12 +208,12 @@ describe("release schema contract", () => {
         (migrations.has("0188_image_generation_retention_failure.sql") ? 1 : 0) +
         (migrations.has("0189_retained_session_image_formats.sql") ? 1 : 0) +
         (migrations.has("0190_timeline_annotations.sql") ? 1 : 0) +
-        (migrations.has("0191_workspace_learning_policy.sql") ? 1 : 0),
+        (migrations.has("0192_workspace_learning_policy.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "e72f4a390182dbfe3d3b71fb80620f632a64d3ff679d89fff77887852c3e48d6",
+      "a780e197f24db1a1ac3b7dc60e642ec900465e0790682a71db071faeb96ff150",
     );
-    expect(contract.latestMigration).toBe("0191_workspace_learning_policy.sql");
+    expect(contract.latestMigration).toBe("0192_workspace_learning_policy.sql");
     expect(migrations.get("0065_enrollment_credential_generation.sql")).toMatchObject({
       sha256: "2e25fa2dfb8a95a7a9ba1ef5aa9bd219755af998b3317bcdf4d7acc4f67264fe",
       deploymentMode: "rolling",
@@ -226,7 +226,7 @@ describe("release schema contract", () => {
       sha256: "c15bd3b6d71f15be9e163481c3cb698d8f46620d655a72a5e56d193bc16310cd",
       deploymentMode: "rolling",
     });
-    expect(migrations.get("0191_workspace_learning_policy.sql")).toMatchObject({
+    expect(migrations.get("0192_workspace_learning_policy.sql")).toMatchObject({
       sha256: "0ea724449f587c6d83384a3a9849a726db4e98b333a129b88b78f5d3a305145f",
       deploymentMode: "rolling",
     });
