@@ -31,8 +31,6 @@ import {
   normalizeResourceMountPath,
   prefixedMcpToolName as sharedPrefixedMcpToolName,
   resourceMountPath,
-  sessionEventMediaPreview,
-  sessionEventMediaPreviewFromDataUrl,
   signDelegatedAccessToken,
   GenerateImageToolInput,
   RequestHumanInputToolInput,
@@ -45,8 +43,6 @@ import {
   type LatencyMode,
   type ReasoningEffort,
   type ResourceRef,
-  type SessionEventType,
-  type SessionEventMediaPreview,
   type ToolAuthNeededPayload,
   type ToolRef,
 } from "@opengeni/contracts";
@@ -66,14 +62,11 @@ import {
   undiciFetch,
   type McpRequestReplayInfo,
 } from "./mcp-network";
-import { normalizeProtocolJsonValue } from "./protocol-json";
 import { AppendOnlyOpenAIResponsesModel } from "./append-only-responses-model";
 import {
   LazyToolModelProvider,
   installLazyToolRuntime,
   lazyToolRuntimeForAgent,
-  restoreGenericDispatchHistoryItem,
-  restoreGenericDispatchHistoryItems,
   type LazyToolTransport,
 } from "./lazy-tool-transport";
 import {
@@ -94,7 +87,6 @@ import {
   // provider without touching the global default client.
   OpenAIChatCompletionsModel,
   RunState,
-  isOpenAIResponsesRawModelStreamEvent,
   run,
   Runner,
   Usage,
@@ -125,7 +117,6 @@ import {
   type ModelRequest,
   type ModelResponse,
   type ModelProvider,
-  type RunStreamEvent,
   type SerializedTool,
   type Tool,
 } from "@openai/agents";
@@ -165,7 +156,6 @@ import {
   CODEX_REQUEST_ID_HEADER,
   CODEX_REQUEST_MODEL_HEADER,
   CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS,
-  boundModelToolOutputItem,
   codexRequestStorage,
   codexAppsSanitizingFetch,
   codexSubscriptionFetch,
@@ -178,25 +168,18 @@ import { dirname, isAbsolute, join, posix as posixPath, relative } from "node:pa
 import { fileURLToPath } from "node:url";
 
 import {
-  normalizeComputerCallAction,
-  normalizeComputerCallActions,
-  repairHistoryProtocolItems,
   rewriteComputerCallsToActionsOnly,
   rewriteEmptyComputerCallOutputImageUrls,
   sanitizeHistoryItemsForModel,
 } from "./history-sanitizer";
 import { installCodexToolSearch } from "./codex-tool-search";
 import {
-  CompactionNeededError,
   CompactionProviderResponseError,
   EmptyCompactionSummaryError,
   SUMMARY_BUFFER_TOKENS,
   buildRemoteCompactionV2PromptInput,
   extractRemoteCompactionV2OutputItem,
-  compactionThresholdTokens,
-  estimateCompleteModelInputTokens,
   estimateSerializedValueTokens,
-  hasModelGeneratedItem,
   renderCompactionPromptInputForChat,
   type ProviderContextTokenSignal,
 } from "./context-compaction";
@@ -234,6 +217,24 @@ import type { RuntimeMetricsHooks } from "./metrics";
 import { workspaceSkills, type WorkspaceSkillSearchPath } from "./workspace-skills";
 import { appendWorkspaceGovernance } from "./workspace-governance";
 import { ReplayableJsonOpenAI, type ModelJsonRequestPolicy } from "./replayable-json-body";
+import {
+  baseModelInputFilterForSettings,
+  boundModelToolOutputsFilterForSettings,
+  composeCallModelInputFilters,
+  contextRobustnessFilterForSettings,
+  incrementalModelInputProjectionFilter,
+} from "./model-input";
+import {
+  HUMAN_INPUT_TOOL_NAME,
+  modelResponseUsageFromResponse,
+  serializeApprovals,
+  serializeHumanInputRequests,
+} from "./run-events";
+import type {
+  ModelResponseUsage,
+  NormalizedRuntimeEvent,
+  SerializedHumanInputInterruption,
+} from "./run-events";
 
 // The Agents SDK's debug namespaces can otherwise serialize complete model
 // inputs/outputs and tool arguments/results. These getters read process.env on
@@ -300,6 +301,37 @@ export {
 // barrel surface is unchanged for apps/worker while @opengeni/runtime/sandbox
 // stays importable by the API without the agent loop.
 export * from "./sandbox";
+export {
+  boundModelToolOutputsFilterForSettings,
+  callModelInputFilterForSettings,
+  contextRobustnessFilterForSettings,
+  incrementalModelInputProjectionFilter,
+  normalizeComputerCallsFilter,
+  projectModelInputForCapabilities,
+  projectModelInputForImageSupport,
+  restoreLazyToolProviderHistoryFilter,
+  stripProviderItemIdsFilter,
+} from "./model-input";
+export type { ContextRobustnessFilterOptions, ModelInputProjectionPolicy } from "./model-input";
+export {
+  HUMAN_INPUT_TOOL_NAME,
+  modelResponseServiceTierFromSdkEvent,
+  modelResponseUsageFromResponse,
+  modelResponseUsageFromSdkEvent,
+  modelTerminalResponseFromSdkEvent,
+  normalizeSdkEvent,
+  normalizeToolOutputForEvent,
+  serializeApprovals,
+  serializeHumanInputRequests,
+} from "./run-events";
+export type {
+  ModelResponseServiceTierEvent,
+  ModelResponseUsage,
+  ModelTerminalResponse,
+  NormalizedRuntimeEvent,
+  NormalizeSdkEventOptions,
+  SerializedHumanInputInterruption,
+} from "./run-events";
 
 // Inject the SDK's V4A `applyDiff` into the selfhosted session's apply_patch editor
 // at module load. The leaf can't import `applyDiff` (agent-loop root), so the
@@ -409,52 +441,6 @@ ensureReadableStreamFrom();
 
 const SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS = 120_000;
 
-export type NormalizedRuntimeEvent = {
-  type: SessionEventType;
-  payload: unknown;
-  retainedOutputEvidence?: unknown;
-};
-
-export type NormalizeSdkEventOptions = {
-  /** Trusted worker replacement for one tool output (for example an artifact receipt). */
-  toolOutputOverride?: unknown;
-  /** Separately trusted receipt for the event truncation boundary. */
-  retainedOutputEvidence?: unknown;
-};
-
-export type ModelResponseUsage = {
-  responseId?: string;
-  serviceTier?: string;
-  gatewayBilling?: {
-    finalProvider: string;
-    inferenceCostUsd: string;
-  };
-  usage: {
-    inputTokens?: number;
-    outputTokens?: number;
-    totalTokens?: number;
-    inputTokensDetails?: Record<string, number> | Array<Record<string, number>>;
-    outputTokensDetails?: Record<string, number> | Array<Record<string, number>>;
-    requestUsageEntries?: Array<{
-      inputTokens?: number;
-      input_tokens?: number;
-      outputTokens?: number;
-      output_tokens?: number;
-      totalTokens?: number;
-      total_tokens?: number;
-      inputTokensDetails?: Record<string, number>;
-      input_tokens_details?: Record<string, number>;
-      outputTokensDetails?: Record<string, number>;
-      output_tokens_details?: Record<string, number>;
-    }>;
-  };
-};
-
-export type ModelTerminalResponse = {
-  responseId?: string;
-  usage: ModelResponseUsage | null;
-};
-
 type RuntimeMcpTool = Awaited<ReturnType<MCPServer["listTools"]>>[number];
 
 type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
@@ -555,13 +541,6 @@ export type PreparedAgentInput = {
   persistedHistoryCount: number;
   sandboxSessionState?: SandboxSessionState;
   modelInputAlreadyProjected?: boolean;
-};
-
-export const HUMAN_INPUT_TOOL_NAME = "request_human_input";
-
-export type SerializedHumanInputInterruption = {
-  toolCallId: string;
-  input: ReturnType<typeof RequestHumanInputToolInput.parse>;
 };
 
 export type SandboxFileDownload = {
@@ -5236,12 +5215,6 @@ export type RunAgentStreamOptions = {
   callModelInputFilter?: CallModelInputFilter;
 };
 
-export type ContextRobustnessFilterOptions = {
-  contextCompactionSignal?: () => ProviderContextTokenSignal | null | undefined;
-  contextCompactionRequested?: () => boolean | Promise<boolean>;
-  throwOnCompactionNeeded?: boolean;
-};
-
 // One-shot directive injected into the FIRST model call on the genesis turn
 // (see buildOpenGeniAgent's genesisTitleHint). Delivered through the
 // authoritative instructions channel so the model reliably obeys; references
@@ -5288,426 +5261,6 @@ function takeGenesisTitleInputFilter(agent: Agent<any, any>): CallModelInputFilt
 export const TOOLSPACE_PROGRAMMATIC_DIRECTIVE =
   "Every tool on your MCP surface is also callable programmatically from the sandbox shell, so scripts can invoke tools without a model round trip per call. If `ogtool` is installed, run `ogtool list` to see the available tools and their input schemas (from tools/list), then `ogtool call <tool-name> '<json-args>'`. If it is absent and both npm and $OPENGENI_OGTOOL_PACKAGE_SPEC are available, run the exact deployment-pinned package with `npm exec --yes --package=\"$OPENGENI_OGTOOL_PACKAGE_SPEC\" -- ogtool ...`; never guess a version or install `latest`. Otherwise POST MCP JSON-RPC directly to $OPENGENI_TOOLSPACE_URL with the bearer token read from $OPENGENI_TOOLSPACE_TOKEN_FILE. Prefer programmatic calls for loops, polling, and bulk filtering: their results stay in the sandbox and do not consume your context window. Tools that require human approval must still be invoked normally — called programmatically they return a typed error.";
 
-/**
- * callModelInputFilter that removes provider-assigned item ids (rs_/msg_/fc_…)
- * from every input item immediately before each model call. Responses-API
- * requests that carry item ids are resolved against the provider's stored
- * responses, and that store is not durable enough to anchor long runs on: a
- * response that streamed successfully can be missing from the store on the
- * very next call, which then fails with 400 "Item with id ... not found"
- * (observed live on Azure OpenAI mid-turn). All item content — including the
- * encrypted reasoning payload carried in providerData when
- * `openaiReasoningEncryptedContent` is on — is sent inline, so the ids add
- * fragility without adding information. Pairing fields (`call_id`/`callId`)
- * are separate properties and stay untouched; items are cloned, never mutated.
- */
-export const stripProviderItemIdsFilter: CallModelInputFilter = ({ modelData }) => {
-  let projected: AgentInputItem[] | null = null;
-  for (const [index, item] of modelData.input.entries()) {
-    const next = stripProviderItemId(item);
-    if (next !== item && projected === null) projected = modelData.input.slice(0, index);
-    projected?.push(next);
-  }
-  return projected ? { ...modelData, input: projected } : modelData;
-};
-
-function stripProviderItemId(item: AgentInputItem): AgentInputItem {
-  if (!item || typeof item !== "object" || !("id" in item)) return item;
-  const { id: _id, ...rest } = item as Record<string, unknown>;
-  return rest as AgentInputItem;
-}
-
-/**
- * callModelInputFilter that normalizes every `computer_call` carrying BOTH
- * `action` and `actions` down to EXACTLY ONE (keeps `actions`, drops `action`).
- * The Azure computer-use endpoint rejects a request whose computer_call has
- * both with `400 Computer call input must include exactly one of `action` or
- * `actions``; and (live-proven against gpt-5.6-sol's GA computer tool) it also
- * rejects the `action`-only form, accepting ONLY the batched plural `actions`.
- * The SDK 0.14.3 schema allows both, so a freshly-emitted
- * screenshot call carries the redundant pair. This filter runs before EVERY
- * model call — the turn-start history replay AND every mid-turn follow-up — so
- * it covers the just-emitted (non-replayed) computer_call on the same turn,
- * which the turn-start `prepareRunInput` sanitizer never sees. Items are cloned,
- * never mutated.
- */
-export const normalizeComputerCallsFilter: CallModelInputFilter = ({ modelData }) => ({
-  ...modelData,
-  input: normalizeComputerCallActions(
-    modelData.input as unknown as Array<Record<string, unknown>>,
-  ) as unknown as AgentInputItem[],
-});
-
-/** Keep persisted generic-dispatch internals out of every provider request. */
-export const restoreLazyToolProviderHistoryFilter: CallModelInputFilter = ({ modelData }) => {
-  const input = restoreGenericDispatchHistoryItems(
-    modelData.input as unknown as Array<Record<string, unknown>>,
-  );
-  return input === modelData.input
-    ? modelData
-    : { ...modelData, input: input as unknown as AgentInputItem[] };
-};
-
-/**
- * Canonical Codex-style tool-result bound at the final model-input seam. The
- * identical pure normalizer also runs before conversation rows are persisted,
- * so this is a live-turn defense rather than a request-only alternate history.
- */
-export function boundModelToolOutputsFilterForSettings(settings: Settings): CallModelInputFilter {
-  return memoizedInputItemProjectionFilter(
-    (item) =>
-      boundModelToolOutputItem(
-        item as unknown as Record<string, unknown>,
-        settings.modelToolOutputTruncationTokens,
-      ) as unknown as AgentInputItem,
-  );
-}
-
-function estimateAgentToolSchemaTokens(agent: Agent<any, any>): number {
-  const localTools = Array.isArray((agent as { tools?: unknown }).tools)
-    ? ((agent as { tools: unknown[] }).tools ?? [])
-    : [];
-  const localDescriptors = localTools.map((candidate) => {
-    if (!candidate || typeof candidate !== "object") return candidate;
-    const tool = candidate as Record<string, unknown>;
-    return {
-      type: tool.type,
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.parameters,
-      inputSchema: tool.inputSchema,
-      strict: tool.strict,
-      providerData: tool.providerData,
-    };
-  });
-  const mcpServers = Array.isArray((agent as { mcpServers?: unknown }).mcpServers)
-    ? ((agent as { mcpServers: unknown[] }).mcpServers ?? [])
-    : [];
-  const mcpTokens = mcpServers.reduce<number>((total, server) => {
-    const getter = (server as { modelToolSchemaTokens?: () => number } | null)
-      ?.modelToolSchemaTokens;
-    return total + (typeof getter === "function" ? getter.call(server) : 0);
-  }, 0);
-  return estimateSerializedValueTokens(localDescriptors) + mcpTokens;
-}
-
-export function contextRobustnessFilterForSettings(
-  settings: Settings,
-  options: ContextRobustnessFilterOptions = {},
-): CallModelInputFilter {
-  const thresholdTokens = compactionThresholdTokens(settings);
-  let previousRequest: {
-    revision: number;
-    instructionsTokens: number;
-    toolSchemaTokens: number;
-  } | null = null;
-  let requestRevision = 0;
-  return async ({ modelData, agent }) => {
-    const input = modelData.input;
-    if (options.throwOnCompactionNeeded) {
-      const reported = options.contextCompactionSignal?.();
-      const instructionsTokens = estimateSerializedValueTokens(modelData.instructions ?? "");
-      const toolSchemaTokens = estimateAgentToolSchemaTokens(agent);
-      // Stream consumption can lag the SDK's background model loop. A provider
-      // usage signal is safe only when its response revision belongs to the
-      // immediately preceding request. Never attach a delayed response count to
-      // a newer footprint: doing so can hide all model output produced between
-      // them and recreate an under-counting compaction loop.
-      const boundProvider =
-        reported &&
-        previousRequest &&
-        reported.revision === previousRequest.revision &&
-        hasModelGeneratedItem(input as unknown as Array<Record<string, unknown>>)
-          ? reported
-          : null;
-      // Without an exact provider response bound to the immediately preceding
-      // request, do not turn a whole-request approximation into a compaction
-      // decision. Let the provider accept the request or return its typed
-      // context-window error, which the worker already compacts and retries.
-      const signalTokens = boundProvider
-        ? (estimateCompleteModelInputTokens({
-            currentInput: input as unknown as Array<Record<string, unknown>>,
-            currentInstructionsTokens: instructionsTokens,
-            currentToolSchemaTokens: toolSchemaTokens,
-            provider: boundProvider,
-            previousRequest: previousRequest!,
-          }) ?? 0)
-        : 0;
-      previousRequest = {
-        revision: ++requestRevision,
-        instructionsTokens,
-        toolSchemaTokens,
-      };
-      if (await options.contextCompactionRequested?.()) {
-        throw new CompactionNeededError({
-          signalTokens,
-          thresholdTokens,
-          signalSource: boundProvider ? "provider" : "operator",
-          trigger: "operator",
-        });
-      }
-      if (boundProvider && signalTokens >= thresholdTokens) {
-        throw new CompactionNeededError({
-          signalTokens,
-          thresholdTokens,
-          signalSource: "provider",
-        });
-      }
-    }
-    return modelData.input === input ? modelData : { ...modelData, input };
-  };
-}
-
-/**
- * Compose a list of callModelInputFilters into one, applied left-to-right so
- * each sees the prior filter's output.
- */
-function composeCallModelInputFilters(filters: CallModelInputFilter[]): CallModelInputFilter {
-  return async (args) => {
-    let modelData = args.modelData;
-    for (const filter of filters) {
-      modelData = await filter({ ...args, modelData });
-    }
-    return modelData;
-  };
-}
-
-/**
- * Memoize immutable protocol-item projections for one run. The SDK rebuilds the
- * input array before each call but reuses item identities; caching by identity
- * avoids cloning/bounding the whole historical prefix hundreds of times while
- * still returning a fresh array only when at least one item differs on wire.
- */
-function memoizedInputItemProjectionFilter(
-  project: (item: AgentInputItem) => AgentInputItem,
-): CallModelInputFilter {
-  const cache = new WeakMap<object, AgentInputItem>();
-  return ({ modelData }) => {
-    let projected: AgentInputItem[] | null = null;
-    for (const [index, item] of modelData.input.entries()) {
-      let next = item;
-      if (item && typeof item === "object") {
-        const cached = cache.get(item);
-        if (cached) {
-          next = cached;
-        } else {
-          next = project(item);
-          cache.set(item, next);
-        }
-      }
-      if (next !== item && projected === null) projected = modelData.input.slice(0, index);
-      projected?.push(next);
-    }
-    return projected ? { ...modelData, input: projected } : modelData;
-  };
-}
-
-const IMAGE_CONTENT_TYPES = new Set([
-  "image",
-  "input_image",
-  "image_url",
-  "computer_screenshot",
-  // Compact durable marker used for a direct function-image result before
-  // attempt-local artifact materialization. Text-only wires project it out
-  // without reading the retained object back into RAM.
-  "retained_artifact",
-]);
-const FILE_CONTENT_TYPES = new Set(["file", "input_file"]);
-const IMAGE_OMITTED_TEXT =
-  "[Image content omitted because the selected model does not support image input.]";
-const FILE_OMITTED_TEXT =
-  "[File content omitted because the selected model does not support this file type.]";
-
-function modelInputItemType(value: unknown): string | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const type = (value as Record<string, unknown>).type;
-  return typeof type === "string" ? type : null;
-}
-
-function modelInputFileMediaType(value: unknown): string | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const record = value as Record<string, unknown>;
-  for (const field of ["contentType", "content_type", "mediaType", "media_type", "mimeType"]) {
-    const candidate = record[field];
-    if (typeof candidate === "string" && candidate.trim()) {
-      return candidate.toLowerCase().split(";", 1)[0]!.trim();
-    }
-  }
-  const fileValue = record.file;
-  if (typeof fileValue === "string") {
-    const match = /^data:([^;,]+)[;,]/i.exec(fileValue);
-    if (match?.[1]) return match[1].toLowerCase();
-  }
-  if (fileValue && typeof fileValue === "object") return modelInputFileMediaType(fileValue);
-  return null;
-}
-
-function acceptsModelInputFile(value: unknown, accepted: readonly string[] | undefined): boolean {
-  if (accepted === undefined) return true;
-  const mediaType = modelInputFileMediaType(value);
-  if (!mediaType) return false;
-  return accepted.some(
-    (candidate) =>
-      candidate === mediaType ||
-      (candidate.endsWith("/*") && mediaType.startsWith(candidate.slice(0, -1))),
-  );
-}
-
-export type ModelInputProjectionPolicy = {
-  supportsImageInput: boolean;
-  inputFileMediaTypes?: readonly string[];
-};
-
-function omittedContentTextPart(kind: "image" | "file"): Record<string, string> {
-  return { type: "input_text", text: kind === "image" ? IMAGE_OMITTED_TEXT : FILE_OMITTED_TEXT };
-}
-
-function unsupportedContentKind(
-  value: unknown,
-  policy: ModelInputProjectionPolicy,
-): "image" | "file" | null {
-  const type = modelInputItemType(value) ?? "";
-  if (IMAGE_CONTENT_TYPES.has(type) && !policy.supportsImageInput) return "image";
-  if (FILE_CONTENT_TYPES.has(type) && !acceptsModelInputFile(value, policy.inputFileMediaTypes)) {
-    return "file";
-  }
-  return null;
-}
-
-function stripUnsupportedContentParts(
-  value: unknown,
-  policy: ModelInputProjectionPolicy,
-): { value: unknown; removed: boolean } {
-  if (Array.isArray(value)) {
-    let removed = false;
-    const kept: unknown[] = [];
-    for (const part of value) {
-      const kind = unsupportedContentKind(part, policy);
-      if (kind) {
-        removed = true;
-        kept.push(omittedContentTextPart(kind));
-        continue;
-      }
-      kept.push(part);
-    }
-    return { value: removed ? kept : value, removed };
-  }
-  if (unsupportedContentKind(value, policy)) {
-    return { value: undefined, removed: true };
-  }
-  return { value, removed: false };
-}
-
-function stripUnsupportedContentFromModelInputItem<T extends Record<string, unknown>>(
-  item: T,
-  policy: ModelInputProjectionPolicy,
-): T | null {
-  if (unsupportedContentKind(item, policy)) return null;
-  let clone: Record<string, unknown> | null = null;
-  for (const field of ["content", "output"] as const) {
-    if (!(field in item)) continue;
-    const originalField = item[field];
-    const projected = stripUnsupportedContentParts(originalField, policy);
-    if (!projected.removed) continue;
-    clone ??= { ...item };
-    const omittedKind = unsupportedContentKind(originalField, policy) ?? "file";
-    clone[field] =
-      projected.value === undefined ||
-      (Array.isArray(projected.value) && projected.value.length === 0)
-        ? [omittedContentTextPart(omittedKind)]
-        : projected.value;
-  }
-  return (clone ?? item) as T;
-}
-
-/** Build the non-mutating model-wire view for images and typed files. */
-export function projectModelInputForCapabilities<T extends Record<string, unknown>>(
-  items: readonly T[],
-  policy: ModelInputProjectionPolicy,
-): T[] {
-  if (policy.supportsImageInput && policy.inputFileMediaTypes === undefined) return items as T[];
-
-  let changed = false;
-  const projected: T[] = [];
-  for (const item of items) {
-    const type = modelInputItemType(item);
-    if (!policy.supportsImageInput && type === "computer_call") {
-      while (modelInputItemType(projected.at(-1)) === "reasoning") projected.pop();
-      changed = true;
-      continue;
-    }
-    if (!policy.supportsImageInput && type === "computer_call_result") {
-      changed = true;
-      continue;
-    }
-    const stripped = stripUnsupportedContentFromModelInputItem(item, policy);
-    if (!stripped) {
-      changed = true;
-      continue;
-    }
-    if (stripped !== item) changed = true;
-    projected.push(stripped);
-  }
-  return changed ? (repairHistoryProtocolItems(projected) as T[]) : (items as T[]);
-}
-
-/**
- * Build the per-request view for a model's input modalities. Image-capable
- * models receive the exact original array. Text-only models replace ordinary
- * image parts with a visible text marker. Hosted computer call/result pairs are
- * removed because `computer_call_result.output` cannot legally carry text.
- * Durable history is never mutated.
- */
-export function projectModelInputForImageSupport<T extends Record<string, unknown>>(
-  items: readonly T[],
-  supportsImageInput: boolean,
-): T[] {
-  return projectModelInputForCapabilities(items, { supportsImageInput });
-}
-
-export function incrementalModelInputProjectionFilter(
-  policy: ModelInputProjectionPolicy,
-  initialInputAlreadyProjected: boolean,
-): CallModelInputFilter | undefined {
-  if (policy.supportsImageInput && policy.inputFileMediaTypes === undefined) return undefined;
-  let sourcePrefixLength: number | null = initialInputAlreadyProjected ? null : -1;
-  let cachedProjectedPrefix: Array<Record<string, unknown>> | null = null;
-  return async ({ modelData }) => ({
-    ...modelData,
-    input: (() => {
-      const input = modelData.input as unknown as Array<Record<string, unknown>>;
-      if (sourcePrefixLength === null) {
-        // This exact prefix was projected before SDK state construction. Record
-        // its length; future calls inspect only items generated this turn.
-        sourcePrefixLength = input.length;
-        return modelData.input;
-      }
-      if (sourcePrefixLength < 0 || input.length < sourcePrefixLength) {
-        // Approval/human resumes restore an SDK RunState rather than receiving a
-        // preprojected durable array. Project that request once and retain only
-        // its request-local view; later calls reuse it without mutating RunState.
-        const projected = projectModelInputForCapabilities(input, policy);
-        sourcePrefixLength = input.length;
-        cachedProjectedPrefix = projected === input ? null : projected;
-        return projected as typeof modelData.input;
-      }
-      const tail = input.slice(sourcePrefixLength);
-      if (tail.length === 0) return modelData.input;
-      const projectedTail = projectModelInputForCapabilities(tail, policy);
-      const tailUnchanged =
-        projectedTail.length === tail.length &&
-        projectedTail.every((item, index) => item === tail[index]);
-      if (tailUnchanged && cachedProjectedPrefix === null) {
-        return modelData.input;
-      }
-      return [
-        ...(cachedProjectedPrefix ?? input.slice(0, sourcePrefixLength)),
-        ...projectedTail,
-      ] as typeof modelData.input;
-    })(),
-  });
-}
-
 function modelModalityProjectionFilterForAgent(
   agent: object,
   initialInputAlreadyProjected: boolean,
@@ -5721,38 +5274,6 @@ function modelModalityProjectionFilterForAgent(
     },
     initialInputAlreadyProjected,
   );
-}
-
-/**
- * The model-input filter applied before every model call. The computer_call
- * action/actions normalizer is ALWAYS on (the Azure endpoint 400s without it);
- * the provider-item-id strip is layered on top when the configured policy
- * selects it; the context-robustness guard then raises the proactive durable
- * compaction signal on the client-compaction path. Model-specific modality
- * projection is composed by runAgentStream immediately before that final
- * accounting guard.
- */
-export function callModelInputFilterForSettings(
-  settings: Settings,
-  options: ContextRobustnessFilterOptions = {},
-): CallModelInputFilter | undefined {
-  return composeCallModelInputFilters([
-    baseModelInputFilterForSettings(settings),
-    boundModelToolOutputsFilterForSettings(settings),
-    contextRobustnessFilterForSettings(settings, options),
-  ]);
-}
-
-/** Rules that normalize history but do not impose final bounds/accounting. */
-function baseModelInputFilterForSettings(settings: Settings): CallModelInputFilter {
-  const stripProviderIds = settings.openaiProviderItemIds === "strip";
-  return memoizedInputItemProjectionFilter((source) => {
-    let item = restoreGenericDispatchHistoryItem(source);
-    item = normalizeComputerCallAction(
-      item as unknown as Record<string, unknown>,
-    ) as unknown as AgentInputItem;
-    return stripProviderIds ? stripProviderItemId(item) : item;
-  });
 }
 
 export async function runAgentStream(
@@ -6801,564 +6322,6 @@ function ensureManifest(
     environment: manifest.environment ?? {},
     ...(manifest.extraPathGrants?.length ? { extraPathGrants: manifest.extraPathGrants } : {}),
   });
-}
-
-function base64DecodedByteLength(value: string): number {
-  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
-  return Math.max(0, Math.floor((value.length * 3) / 4) - padding);
-}
-
-/** Determine image byte length without allocating another binary/base64 copy. */
-function imageDataByteLength(data: unknown): number | null {
-  if (ArrayBuffer.isView(data)) return data.byteLength;
-  if (data instanceof ArrayBuffer) return data.byteLength;
-  if (Array.isArray(data)) {
-    return data.every((value) => typeof value === "number") ? data.length : null;
-  }
-  if (!data || typeof data !== "object") return null;
-  const record = data as Record<string, unknown>;
-  if (record.type === "Buffer" && Array.isArray(record.data)) {
-    return record.data.every((value) => typeof value === "number") ? record.data.length : null;
-  }
-  const keys = Object.keys(record);
-  return keys.length > 0 &&
-    keys.every((key) => /^\d+$/.test(key) && typeof record[key] === "number")
-    ? keys.length
-    : null;
-}
-
-/**
- * Convert one image-shaped tool result into a content-free audit fact. This is
- * intentionally different from model history: the model keeps its structured
- * image item, while `session_events` never becomes an implicit image blob store.
- */
-function toolOutputMediaPreview(value: unknown): SessionEventMediaPreview | null {
-  if (typeof value === "string") {
-    return sessionEventMediaPreviewFromDataUrl(value);
-  }
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const record = value as Record<string, unknown>;
-  if (record.type === "input_image") {
-    const source = record.image ?? record.image_url ?? record.imageUrl;
-    const url =
-      typeof source === "string"
-        ? source
-        : source && typeof source === "object"
-          ? (source as Record<string, unknown>).url
-          : null;
-    if (typeof url !== "string" || url.length === 0) return null;
-    return sessionEventMediaPreviewFromDataUrl(url) ?? sessionEventMediaPreview("image/*", null);
-  }
-  if (record.type !== "image" || !record.image || typeof record.image !== "object") return null;
-  const image = record.image as Record<string, unknown>;
-  const mediaType =
-    typeof image.mediaType === "string" && image.mediaType.length > 0
-      ? image.mediaType
-      : "image/png";
-  if (typeof image.url === "string" && image.url.length > 0) {
-    return (
-      sessionEventMediaPreviewFromDataUrl(image.url) ?? sessionEventMediaPreview(mediaType, null)
-    );
-  }
-  if (typeof image.data === "string") {
-    return (
-      sessionEventMediaPreviewFromDataUrl(image.data) ??
-      sessionEventMediaPreview(mediaType, base64DecodedByteLength(image.data))
-    );
-  }
-  const byteLength = imageDataByteLength(image.data);
-  return byteLength === null ? null : sessionEventMediaPreview(mediaType, byteLength);
-}
-
-/**
- * Normalize a tool-call output for the lossy `agent.toolCall.output` audit event.
- * Inline image bytes/data URLs become a compact `media_preview` with exact byte
- * length where knowable and `fullOutputAvailable:false`. The model-facing output
- * is not changed here, and mixed arrays retain their non-image text/error facts.
- */
-export function normalizeToolOutputForEvent(output: unknown): unknown {
-  const single = toolOutputMediaPreview(output);
-  if (single !== null) {
-    return single;
-  }
-  if (Array.isArray(output)) {
-    const normalized = output.map((el) => toolOutputMediaPreview(el) ?? el);
-    if (normalized.length === 1 && normalized[0]?.type === "media_preview") {
-      return normalized[0];
-    }
-    return normalized;
-  }
-  return output;
-}
-
-/**
- * Hosted web_search progresses on the raw Responses stream
- * (`response.output_item.added/done` with `web_search_call`) long before the SDK
- * materializes a `RunToolCallItem` at `response_done`. Without this mapping the
- * timeline only sees search cards after the whole model round finishes — or
- * never mid-turn — while assistant prose ("Search 1/5") streams live.
- */
-function hostedWebSearchToolCallFromResponsesEvent(raw: unknown): NormalizedRuntimeEvent | null {
-  if (!raw || typeof raw !== "object") {
-    return null;
-  }
-  const event = raw as {
-    type?: unknown;
-    item?: {
-      id?: unknown;
-      type?: unknown;
-      status?: unknown;
-      action?: unknown;
-      [key: string]: unknown;
-    };
-  };
-  const eventType = typeof event.type === "string" ? event.type : "";
-  if (
-    !(
-      (eventType === "response.output_item.added" || eventType === "response.output_item.done") &&
-      event.item?.type === "web_search_call"
-    )
-  ) {
-    // Progress-only `response.web_search_call.*` events lack the action
-    // payload; added/done are enough for a live, query-bearing card.
-    return null;
-  }
-  const item = event.item;
-  const itemId = typeof item.id === "string" ? item.id : null;
-  if (!itemId) {
-    return null;
-  }
-  const status =
-    typeof item.status === "string"
-      ? item.status
-      : eventType === "response.output_item.done"
-        ? "completed"
-        : "in_progress";
-  const action = item.action ?? null;
-  // Codex frequently emits `output_item.added` for web_search_call before the
-  // action payload exists. Persist that so the timeline can show "Searching…",
-  // then the matching `done` (same id) fills in query/queries via merge.
-  const { status: _status, ...providerData } = item;
-
-  return {
-    type: "agent.toolCall.created",
-    payload: {
-      id: itemId,
-      name: "web_search_call",
-      arguments: action,
-      raw: {
-        type: "hosted_tool_call",
-        id: itemId,
-        name: "web_search_call",
-        status,
-        providerData,
-      },
-    },
-  };
-}
-
-export function normalizeSdkEvent(
-  event: RunStreamEvent,
-  options: NormalizeSdkEventOptions = {},
-): NormalizedRuntimeEvent[] {
-  const out: NormalizedRuntimeEvent[] = [];
-  const pushProtocolEvent = (normalized: NormalizedRuntimeEvent): void => {
-    out.push(normalizeProtocolJsonValue(normalized, '$["event"]'));
-  };
-  if (event.type === "raw_model_stream_event") {
-    const data = (event as any).data;
-    if (data?.type === "output_text_delta" && typeof data.delta === "string") {
-      out.push({ type: "agent.message.delta", payload: { text: data.delta } });
-      return out;
-    }
-    if (data?.type === "response_done") {
-      return out;
-    }
-  }
-  if (isOpenAIResponsesRawModelStreamEvent(event)) {
-    const raw = (event as any).data?.event;
-    if (raw?.type === "response.reasoning_summary_text.delta" && typeof raw.delta === "string") {
-      out.push({ type: "agent.reasoning.delta", payload: { text: raw.delta } });
-    }
-    const webSearch = hostedWebSearchToolCallFromResponsesEvent(raw);
-    if (webSearch) {
-      pushProtocolEvent(webSearch);
-    }
-    return out;
-  }
-  if (event.type === "agent_updated_stream_event") {
-    out.push({
-      type: "agent.updated",
-      payload: { agent: (event as any).agent?.name ?? null },
-    });
-    return out;
-  }
-  if (event.type !== "run_item_stream_event") {
-    return out;
-  }
-  const item = (event as any).item;
-  if (!item) {
-    return out;
-  }
-  if (item.type === "tool_call_item") {
-    const raw = item.rawItem ?? {};
-    pushProtocolEvent({
-      type: "agent.toolCall.created",
-      payload: {
-        id: raw.callId ?? raw.id ?? item.id ?? null,
-        name: raw.name ?? raw.type ?? "tool",
-        arguments: raw.arguments ?? raw.input ?? null,
-        raw,
-      },
-    });
-  } else if (item.type === "tool_call_output_item") {
-    pushProtocolEvent({
-      type: "agent.toolCall.output",
-      payload: {
-        id: item.rawItem?.callId ?? item.id ?? null,
-        // Inline media becomes a content-free audit fact. Model history keeps
-        // the provider's real structured image output on its separate path.
-        output:
-          "toolOutputOverride" in options
-            ? options.toolOutputOverride
-            : normalizeToolOutputForEvent(item.output),
-      },
-      ...(options.retainedOutputEvidence !== undefined
-        ? { retainedOutputEvidence: options.retainedOutputEvidence }
-        : {}),
-    });
-  } else if (item.type === "tool_search_call_item") {
-    // Progressive connector disclosure: surface the model's tool search as a
-    // regular tool-call event so the session stream shows the step (parity with
-    // the Codex CLI, which renders its searches). Arguments may be an object
-    // (the live wire shape) or a string.
-    const raw = item.rawItem ?? {};
-    pushProtocolEvent({
-      type: "agent.toolCall.created",
-      payload: {
-        id: raw.call_id ?? raw.callId ?? raw.id ?? item.id ?? null,
-        name: "tool_search",
-        arguments: raw.arguments ?? null,
-        raw,
-      },
-    });
-  } else if (item.type === "tool_search_output_item") {
-    const raw = item.rawItem ?? {};
-    const disclosed = Array.isArray(raw.tools)
-      ? raw.tools
-          .map((tool: { name?: unknown }) => (typeof tool?.name === "string" ? tool.name : ""))
-          .filter(Boolean)
-      : [];
-    pushProtocolEvent({
-      type: "agent.toolCall.output",
-      payload: {
-        id: raw.call_id ?? raw.callId ?? item.id ?? null,
-        output: {
-          type: "text",
-          text:
-            disclosed.length > 0
-              ? `Disclosed tools: ${disclosed.join(", ")}`
-              : "No matching tools found.",
-        },
-      },
-    });
-  } else if (item.type === "message_output_item") {
-    const text = typeof item.text === "string" ? item.text : undefined;
-    if (text) {
-      out.push({ type: "agent.message.completed", payload: { text } });
-    }
-  }
-  return out;
-}
-
-export function modelResponseUsageFromSdkEvent(event: RunStreamEvent): ModelResponseUsage | null {
-  return modelTerminalResponseFromSdkEvent(event)?.usage ?? null;
-}
-
-/** Recognize a terminal response even when the provider omitted usage. */
-export function modelTerminalResponseFromSdkEvent(
-  event: RunStreamEvent,
-): ModelTerminalResponse | null {
-  const response = modelResponseFromSdkEvent(event);
-  if (!response) {
-    return null;
-  }
-  const responseId = modelResponseIdFromResponse(response);
-  return {
-    ...(responseId ? { responseId } : {}),
-    usage: modelResponseUsageFromResponse(response),
-  };
-}
-
-/** Normalize usage from either a Responses or Chat Completions result. */
-export function modelResponseUsageFromResponse(response: unknown): ModelResponseUsage | null {
-  const usage = usageFromResponse(response);
-  if (!usage) {
-    return null;
-  }
-  const responseId = modelResponseIdFromResponse(response);
-  const serviceTier = modelResponseServiceTierFromResponse(response);
-  const gatewayBilling = gatewayBillingFromResponse(response);
-  return {
-    ...(responseId ? { responseId } : {}),
-    ...(serviceTier ? { serviceTier } : {}),
-    ...(gatewayBilling ? { gatewayBilling } : {}),
-    usage,
-  };
-}
-
-function modelResponseIdFromResponse(response: unknown): string | undefined {
-  return typeof (response as { id?: unknown } | null)?.id === "string"
-    ? (response as { id: string }).id
-    : typeof (response as { responseId?: unknown } | null)?.responseId === "string"
-      ? (response as { responseId: string }).responseId
-      : undefined;
-}
-
-/** Extract only the bounded, non-secret Gateway billing facts we consume. */
-function gatewayBillingFromResponse(
-  response: unknown,
-): ModelResponseUsage["gatewayBilling"] | null {
-  if (!response || typeof response !== "object" || Array.isArray(response)) {
-    return null;
-  }
-  const record = response as Record<string, unknown>;
-  const providerData =
-    record.providerData &&
-    typeof record.providerData === "object" &&
-    !Array.isArray(record.providerData)
-      ? (record.providerData as Record<string, unknown>)
-      : null;
-  const metadataCandidate =
-    record.provider_metadata ??
-    record.providerMetadata ??
-    providerData?.provider_metadata ??
-    providerData?.providerMetadata;
-  if (
-    !metadataCandidate ||
-    typeof metadataCandidate !== "object" ||
-    Array.isArray(metadataCandidate)
-  ) {
-    return null;
-  }
-  const gateway = (metadataCandidate as Record<string, unknown>).gateway;
-  if (!gateway || typeof gateway !== "object" || Array.isArray(gateway)) {
-    return null;
-  }
-  const gatewayRecord = gateway as Record<string, unknown>;
-  const routing = gatewayRecord.routing;
-  const routingRecord =
-    routing && typeof routing === "object" && !Array.isArray(routing)
-      ? (routing as Record<string, unknown>)
-      : null;
-  const finalProvider = routingRecord?.finalProvider ?? routingRecord?.final_provider;
-  const inferenceCostUsd =
-    gatewayRecord.inferenceCost ?? gatewayRecord.inference_cost ?? gatewayRecord.cost;
-  if (
-    typeof finalProvider !== "string" ||
-    !/^[a-z0-9][a-z0-9-]{0,63}$/.test(finalProvider) ||
-    typeof inferenceCostUsd !== "string" ||
-    !/^(0|[1-9]\d*)(?:\.\d{1,18})?$/.test(inferenceCostUsd)
-  ) {
-    return null;
-  }
-  return { finalProvider, inferenceCostUsd };
-}
-
-export type ModelResponseServiceTierEvent = {
-  source: "normalized" | "provider";
-  serviceTier: string | null;
-};
-
-/**
- * Read the provider's terminal service tier without depending on usage being
- * present. The normalized terminal can omit provider-only fields, so callers
- * should treat the raw provider response as the fail-closed authority.
- */
-export function modelResponseServiceTierFromSdkEvent(
-  event: RunStreamEvent,
-): ModelResponseServiceTierEvent | null {
-  if (event.type === "raw_model_stream_event") {
-    const data = (event as any).data;
-    if (data?.type === "response_done") {
-      return {
-        source: "normalized",
-        serviceTier: modelResponseServiceTierFromResponse(data.response),
-      };
-    }
-  }
-  if (isOpenAIResponsesRawModelStreamEvent(event)) {
-    const raw = (event as any).data?.event;
-    if (raw?.type === "response.completed") {
-      return {
-        source: "provider",
-        serviceTier: modelResponseServiceTierFromResponse(raw.response),
-      };
-    }
-  }
-  return null;
-}
-
-function modelResponseServiceTierFromResponse(response: unknown): string | null {
-  if (!response || typeof response !== "object") {
-    return null;
-  }
-  const record = response as Record<string, unknown>;
-  const direct = record.service_tier ?? record.serviceTier;
-  if (typeof direct === "string" && direct.length > 0) {
-    return direct;
-  }
-  const providerData =
-    record.providerData && typeof record.providerData === "object"
-      ? (record.providerData as Record<string, unknown>)
-      : null;
-  const nested = providerData?.service_tier ?? providerData?.serviceTier;
-  return typeof nested === "string" && nested.length > 0 ? nested : null;
-}
-
-function modelResponseFromSdkEvent(event: RunStreamEvent): any {
-  if (event.type === "raw_model_stream_event") {
-    const data = (event as any).data;
-    if (data?.type === "response_done") {
-      return data.response;
-    }
-  }
-  if (isOpenAIResponsesRawModelStreamEvent(event)) {
-    const raw = (event as any).data?.event;
-    if (raw?.type === "response.completed") {
-      return raw.response;
-    }
-  }
-  return null;
-}
-
-function usageFromResponse(response: unknown): ModelResponseUsage["usage"] | null {
-  const raw = (response as { usage?: unknown } | null)?.usage;
-  if (!raw || typeof raw !== "object") {
-    return null;
-  }
-  const record = raw as Record<string, unknown>;
-  const usage = {
-    ...numberProp(
-      record,
-      "inputTokens",
-      "inputTokens",
-      "input_tokens",
-      "promptTokens",
-      "prompt_tokens",
-    ),
-    ...numberProp(
-      record,
-      "outputTokens",
-      "outputTokens",
-      "output_tokens",
-      "completionTokens",
-      "completion_tokens",
-    ),
-    ...numberProp(record, "totalTokens", "totalTokens", "total_tokens"),
-    ...inputTokenDetailsProp(record),
-    ...outputTokenDetailsProp(record),
-    ...requestUsageEntriesProp(record),
-  };
-  return Object.keys(usage).length > 0 ? usage : null;
-}
-
-function numberProp(
-  raw: Record<string, unknown>,
-  outputKey: "inputTokens" | "outputTokens" | "totalTokens",
-  ...keys: string[]
-): Partial<ModelResponseUsage["usage"]> {
-  const value = keys.map((key) => raw[key]).find((candidate) => candidate !== undefined);
-  // Preserve numeric provider values verbatim here, including malformed ones.
-  // The shared usage normalizer is the single bounded validation boundary and
-  // needs to see NaN/infinite/fractional/oversized values so it can emit safe
-  // field-path diagnostics rather than silently erasing the evidence.
-  return typeof value === "number" ? { [outputKey]: value } : {};
-}
-
-function inputTokenDetailsProp(raw: Record<string, unknown>): Partial<ModelResponseUsage["usage"]> {
-  const details =
-    raw.inputTokensDetails ??
-    raw.input_tokens_details ??
-    raw.promptTokensDetails ??
-    raw.prompt_tokens_details;
-  if (details === undefined || details === null) {
-    return {};
-  }
-  return {
-    inputTokensDetails: details as Record<string, number> | Array<Record<string, number>>,
-  };
-}
-
-function outputTokenDetailsProp(
-  raw: Record<string, unknown>,
-): Partial<ModelResponseUsage["usage"]> {
-  const details = raw.outputTokensDetails ?? raw.output_tokens_details;
-  const normalized = details ?? raw.completionTokensDetails ?? raw.completion_tokens_details;
-  if (normalized === undefined || normalized === null) {
-    return {};
-  }
-  return {
-    outputTokensDetails: normalized as Record<string, number> | Array<Record<string, number>>,
-  };
-}
-
-function requestUsageEntriesProp(
-  raw: Record<string, unknown>,
-): Partial<ModelResponseUsage["usage"]> {
-  const entries = raw.requestUsageEntries ?? raw.request_usage_entries;
-  if (entries === undefined || entries === null) {
-    return {};
-  }
-  return {
-    // The normalizer validates every entry and all supported field aliases.
-    // Preserve the SDK objects rather than rebuilding them and accidentally
-    // dropping provider detail fields such as cache_write_tokens.
-    requestUsageEntries: entries as NonNullable<ModelResponseUsage["usage"]["requestUsageEntries"]>,
-  };
-}
-
-export function serializeApprovals(interruptions: unknown[]): unknown[] {
-  const approvals = interruptions
-    .filter((item) => interruptionToolName(item) !== HUMAN_INPUT_TOOL_NAME)
-    .map((item: any) => {
-      if (typeof item?.toJSON === "function") {
-        return item.toJSON();
-      }
-      return {
-        id: approvalIdentifier(item) ?? "approval",
-        name: item?.name ?? item?.rawItem?.name ?? "tool",
-        arguments: item?.arguments ?? item?.rawItem?.arguments ?? null,
-        raw: item,
-      };
-    });
-  return normalizeProtocolJsonValue(approvals, '$["approvals"]');
-}
-
-export function serializeHumanInputRequests(
-  interruptions: unknown[],
-): SerializedHumanInputInterruption[] {
-  return interruptions
-    .filter((item) => interruptionToolName(item) === HUMAN_INPUT_TOOL_NAME)
-    .map((item: any) => {
-      const rawArguments = item?.arguments ?? item?.rawItem?.arguments;
-      let parsedArguments: unknown = rawArguments;
-      if (typeof rawArguments === "string") {
-        try {
-          parsedArguments = JSON.parse(rawArguments);
-        } catch {
-          throw new Error("Human-input interruption contains invalid JSON arguments");
-        }
-      }
-      const toolCallId = approvalIdentifier(item);
-      if (!toolCallId) {
-        throw new Error("Human-input interruption is missing a stable tool-call identity");
-      }
-      return {
-        toolCallId,
-        input: RequestHumanInputToolInput.parse(parsedArguments),
-      };
-    });
 }
 
 export function buildManifest(
@@ -9745,13 +8708,4 @@ function sortJson(value: unknown): unknown {
     );
   }
   return value;
-}
-function interruptionToolName(item: unknown): string {
-  const candidate = item as {
-    toolName?: unknown;
-    name?: unknown;
-    rawItem?: { name?: unknown };
-  };
-  const name = candidate?.toolName ?? candidate?.name ?? candidate?.rawItem?.name;
-  return typeof name === "string" ? name : "";
 }

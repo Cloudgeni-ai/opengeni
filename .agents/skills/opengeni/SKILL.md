@@ -45,7 +45,9 @@ Then open the smallest source files that answer the question:
 - Database/state: `packages/db/src/schema.ts`, `packages/db/src/index.ts`, `packages/db/drizzle/`.
 - Event bus/SSE: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`.
 - Worker/orchestration: `apps/worker/src/workflows/`, `apps/worker/src/activities/`.
-- Runtime/sandbox/tools: `packages/runtime/src/index.ts`.
+- Runtime/sandbox/tools: `packages/runtime/src/index.ts` is the public agent-loop facade;
+  `packages/runtime/src/model-input.ts` owns final model-wire shaping and context guards;
+  `packages/runtime/src/run-events.ts` owns SDK stream/usage/interruption normalization.
 - Files/object storage: `apps/api/src/routes/files.ts`, `packages/storage/src/index.ts`.
 - Deployment/operator sources: `packages/deployment`, `docs/deployment.md`, `deploy/helm/opengeni`, `deploy/terraform/`, and `deploy/stacks/`.
 - Documents/retrieval/knowledge memory: `apps/api/src/routes/documents.ts`, `packages/documents/src/index.ts`, `apps/api/src/mcp/`, and the `knowledge_memories` schema/helpers in `packages/db`.
