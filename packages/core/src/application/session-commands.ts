@@ -713,7 +713,7 @@ export async function saveHumanComposerDraft(
     deps.db,
     context.workspaceId,
     context.sessionId,
-    input.annotations,
+    input.annotations ?? [],
   );
   const row = await withWorkspaceSubjectRls(
     deps.db,

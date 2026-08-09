@@ -84,6 +84,7 @@ export type TurnInputOptions = {
   materializeModelHistory?: ModelHistoryAttachmentProjector;
   materializeSerializedRunState?: (serialized: string) => Promise<string>;
   projectModelHistory?: ModelHistoryAttachmentProjector;
+  loadActiveHistory?: typeof getActiveSessionHistoryItemsPaged;
 };
 
 export const MAX_INLINE_MODEL_ATTACHMENT_BYTES = 20 * 1024 * 1024;
@@ -430,6 +431,7 @@ export async function turnInput(
       options.projectCanonicalHistory,
       options.materializeModelHistory,
       options.projectModelHistory,
+      options.loadActiveHistory,
     );
   }
   if (trigger.type === "system.update.delivered") {
@@ -448,6 +450,7 @@ export async function turnInput(
       options.projectCanonicalHistory,
       options.materializeModelHistory,
       options.projectModelHistory,
+      options.loadActiveHistory,
     );
   }
   if (trigger.type === "user.approvalDecision") {
@@ -532,12 +535,9 @@ async function messageInput(
   projectCanonicalHistory?: ModelHistoryAttachmentProjector,
   materializeModelHistory?: ModelHistoryAttachmentProjector,
   projectModelHistory?: ModelHistoryAttachmentProjector,
+  loadActiveHistory: typeof getActiveSessionHistoryItemsPaged = getActiveSessionHistoryItemsPaged,
 ): Promise<PreparedTurnInput> {
-  const stored = await getActiveSessionHistoryItemsPaged(
-    db,
-    trigger.workspaceId,
-    trigger.sessionId,
-  );
+  const stored = await loadActiveHistory(db, trigger.workspaceId, trigger.sessionId);
   const envelope = await getSandboxSessionEnvelope(db, trigger.workspaceId, trigger.sessionId);
   const canonicalView = projectRejectedProviderArtifacts(stored);
   const canonicalProviderView = projectCanonicalHistory

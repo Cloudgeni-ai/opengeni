@@ -364,9 +364,6 @@ describe("turnInput attachment projection", () => {
     const storedUser = user("[OpenGeni timeline annotations]\nAnnotation 1");
     let preparedInput: AgentSegmentInput | undefined;
     const listUpdates = spyOn(opengeniDb, "listSessionSystemUpdatesForTurn").mockResolvedValue([]);
-    const getHistory = spyOn(opengeniDb, "getActiveSessionHistoryItems").mockResolvedValue([
-      { item: storedUser },
-    ]);
     const getEnvelope = spyOn(opengeniDb, "getSandboxSessionEnvelope").mockResolvedValue(null);
     const runtime = {
       prepareInput: async (_agent: unknown, input: AgentSegmentInput) => {
@@ -392,12 +389,19 @@ describe("turnInput attachment projection", () => {
         {
           turnId: "00000000-0000-4000-8000-000000000043",
           providerApi: "responses",
+          loadActiveHistory: async () => [
+            {
+              id: "00000000-0000-4000-8000-000000000044",
+              position: 0,
+              item: storedUser,
+              providerArtifactInvalidatedAt: null,
+            },
+          ],
         },
       );
       expect(preparedInput?.historyItems).toEqual([storedUser]);
     } finally {
       listUpdates.mockRestore();
-      getHistory.mockRestore();
       getEnvelope.mockRestore();
     }
   });
