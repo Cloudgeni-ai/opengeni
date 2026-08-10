@@ -32,6 +32,10 @@
     "./mcp-network": {
       "types": "./src/mcp-network.ts",
       "default": "./src/mcp-network.ts"
+    },
+    "./gmail-rest-mcp": {
+      "types": "./src/gmail-rest-mcp.ts",
+      "default": "./src/gmail-rest-mcp.ts"
     }
   },
   "publishConfig": {

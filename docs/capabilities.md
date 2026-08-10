@@ -213,6 +213,18 @@ contract is reviewed and updated. Draft creation and label/unlabel tools require
 the ordinary durable human approval; search, message/thread reads, draft lists,
 and label lists do not.
 
+While hosted MCP enrollment is pending, a deployment can set
+`OPENGENI_GMAIL_REST_ADAPTER_ENABLED=true`. This opt-in substitutes a bounded
+Gmail REST implementation for that exact official MCP endpoint in agent turns
+and Toolspace; it does not create a second capability or connection. The
+adapter preserves the reviewed ten-tool allowlist, tool names, subject-owned
+delegation, and approval policy. Its credential broker binding permits only
+`https://gmail.googleapis.com/gmail/v1/users/me/...`: it cannot call another
+Google API or address another mailbox. Read-only calls may refresh after one
+401 and retry once; a mutation is never replayed after an ambiguous provider
+response. Keep the flag off by default and disable it after the hosted endpoint
+works for the enrolled account and project.
+
 Before importing/enabling the capability in a deployment:
 
 1. Join the [Google Workspace Developer Preview

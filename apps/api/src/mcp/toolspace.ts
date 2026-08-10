@@ -50,6 +50,7 @@ import {
   mcpSerializedSizeBytes,
   type McpRequestReplayInfo,
 } from "@opengeni/runtime/mcp-network";
+import { GmailRestMcpServer, isOfficialGmailMcpConfig } from "@opengeni/runtime/gmail-rest-mcp";
 import { Buffer } from "node:buffer";
 
 export type ToolspaceCallResult = CallToolResult;
@@ -70,7 +71,10 @@ export type ToolspaceMcpSurface = {
 
 type ConnectedToolspaceServer = {
   config: McpServerConfig;
-  client: Client;
+  client: {
+    listTools: () => Promise<{ tools: McpTool[] }>;
+    callTool: (toolName: string, args: Record<string, unknown>) => Promise<ToolspaceCallResult>;
+  };
   close: () => Promise<void>;
 };
 
@@ -409,15 +413,13 @@ async function resolveToolListing(input: {
       return;
     }
     try {
-      const listed = await connection.client
-        .listTools(undefined, toolspaceRequestOptions(config))
-        .catch((error) => {
-          deps.observability?.warn(
-            "toolspace upstream tool list failed",
-            toolspacePublicErrorFields(error),
-          );
-          return { tools: [] };
-        });
+      const listed = await connection.client.listTools().catch((error) => {
+        deps.observability?.warn(
+          "toolspace upstream tool list failed",
+          toolspacePublicErrorFields(error),
+        );
+        return { tools: [] };
+      });
       let boundedTools: readonly McpTool[];
       try {
         boundedTools = assertMcpToolListWithinBounds(listed.tools as McpTool[]) as McpTool[];
@@ -537,6 +539,72 @@ async function connectToolspaceServer(input: {
   turn: SessionTurn;
   personalConnectionDelegations: McpPersonalConnectionDelegation[];
 }): Promise<ConnectedToolspaceServer> {
+  if (
+    input.deps.settings.gmailRestAdapterEnabled &&
+    isOfficialGmailMcpConfig(input.config.url, input.config.connectionRef)
+  ) {
+    const hostCredentialPort = input.deps.connectionCredentials?.mcpCredentials;
+    const rawResolveCredential = hostCredentialPort
+      ? buildHostConnectionTokenResolver(hostCredentialPort, {
+          accountId: input.grant.accountId,
+          workspaceId: input.grant.workspaceId,
+          sessionId: input.sessionId,
+          rootSessionId: input.rootSessionId,
+          turnId: input.turn.id,
+          attemptId: input.turn.activeAttemptId,
+          executionGeneration: input.turn.executionGeneration,
+          initiator: input.turn.initiator,
+          initiatorContext: { ...input.turn.initiatorContext },
+          surface: "toolspace",
+        })
+      : buildConnectionTokenResolver(input.deps.db, input.deps.settings);
+    const membershipChecks = new Map<string, Promise<boolean>>();
+    const resolveCredential = withFrozenPersonalConnectionDelegations({
+      resolveCredential: rawResolveCredential,
+      settings: { mcpServers: [input.config] },
+      personalConnectionDelegations: input.personalConnectionDelegations,
+      ownerHasWorkspaceMembership: async (subjectId) => {
+        const existing = membershipChecks.get(subjectId);
+        if (existing) return await existing;
+        const check = getWorkspaceGrant(input.deps.db, subjectId, input.grant.workspaceId).then(
+          Boolean,
+        );
+        membershipChecks.set(subjectId, check);
+        return await check;
+      },
+    });
+    const server = new GmailRestMcpServer({
+      workspaceId: input.grant.workspaceId,
+      serverId: input.config.id,
+      connectionRef: input.config.connectionRef!,
+      resolveCredential,
+      onAuthNeeded: async (payload) => {
+        await appendAndPublishEvents(
+          input.deps.db,
+          input.deps.bus,
+          input.grant.workspaceId,
+          input.sessionId,
+          [
+            {
+              type: "tool.auth_needed",
+              producerId: input.grant.subjectId,
+              payload: { ...payload, subjectId: input.grant.subjectId },
+            },
+          ],
+        ).catch(() => undefined);
+      },
+    });
+    await server.connect();
+    return {
+      config: input.config,
+      client: {
+        listTools: async () => ({ tools: (await server.listTools()) as McpTool[] }),
+        callTool: async (toolName, args) =>
+          (await server.callTool(toolName, args)) as ToolspaceCallResult,
+      },
+      close: async () => await server.close(),
+    };
+  }
   // npm Undici's dispatcher transport is not reliable under Bun. The worker's
   // model-visible MCP path already uses Bun's native fetch while retaining the
   // same pre-request destination-policy check; Toolspace must do the same or an
@@ -570,7 +638,18 @@ async function connectToolspaceServer(input: {
   }
   return {
     config: input.config,
-    client,
+    client: {
+      listTools: async () => {
+        const listed = await client.listTools(undefined, toolspaceRequestOptions(input.config));
+        return { tools: listed.tools as McpTool[] };
+      },
+      callTool: async (toolName, args) =>
+        (await client.callTool(
+          { name: toolName, arguments: args },
+          undefined,
+          toolspaceRequestOptions(input.config),
+        )) as ToolspaceCallResult,
+    },
     close: async () => {
       await client.close().catch(() => undefined);
     },
@@ -744,14 +823,7 @@ async function callRemoteTool(
   args: Record<string, unknown>,
 ): Promise<ToolspaceCallResult> {
   try {
-    const output = (await server.client.callTool(
-      {
-        name: toolName,
-        arguments: args,
-      },
-      undefined,
-      toolspaceRequestOptions(server.config),
-    )) as ToolspaceCallResult;
+    const output = await server.client.callTool(toolName, args);
     assertMcpPayloadWithinBytes(output, MCP_MAX_TOOL_RESULT_BYTES, "MCP tool result");
     return output;
   } catch (error) {

@@ -63,6 +63,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     integrationsStateSecret: undefined,
     integrationsAllowPrivateNetworkTargets: false,
     integrationsOauthClientsJson: "{}",
+    gmailRestAdapterEnabled: false,
     socialOauthClientsJson: "{}",
     goalMaxAutoContinuations: 20,
     goalNoProgressLimit: 3,

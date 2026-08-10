@@ -653,7 +653,12 @@ its exact Google authorization and token origins are pinned. Signed OAuth state
 records that Google's endpoints omit RFC 8707 `resource` while requesting
 offline consent, and refresh preserves that compatibility flag. Its reviewed
 catalog metadata also freezes the current tool allowlist and requires ordinary
-durable approval for draft and mailbox-label mutations.
+durable approval for draft and mailbox-label mutations. The opt-in Gmail REST
+adapter substitutes only the transport for that same catalog identity in the
+worker runtime and API Toolspace: it reuses the exact frozen connection
+delegation and permits credentials only for the canonical Gmail
+`users/me` REST subtree. Read-only authentication recovery is bounded to one
+retry, while mutations are never replayed after an ambiguous result.
 
 The authenticated workspace model catalog projects static definitions through
 four ordered gates: runnable definition → secret-safe credential readiness →
