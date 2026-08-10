@@ -4,7 +4,7 @@ import {
   KnowledgeSourceSyncRunSummary,
   type ScheduledTask,
 } from "@opengeni/contracts";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { setSubjectRlsContext, withRlsContext } from "./database";
 import { recordKnowledgeLifecycleEvent } from "./scoped-knowledge";
@@ -388,6 +388,7 @@ export async function settleKnowledgeSourceSyncLease(
     sourceSyncGeneration: number;
     completedSourceSyncGeneration?: number | null;
     executionCheckpoint?: Record<string, unknown> | null;
+    providerCursor?: Record<string, unknown> | null;
   },
 ): Promise<{ bufferedWake: boolean; bufferedScheduledTaskRunId: string | null }> {
   const summary = KnowledgeSourceSyncRunSummary.parse(input.summary);
@@ -457,6 +458,9 @@ export async function settleKnowledgeSourceSyncLease(
             leaseId: null,
             leaseUntil: null,
             executionCheckpoint: input.executionCheckpoint ?? null,
+            ...(input.status === "succeeded" && Object.hasOwn(input, "providerCursor")
+              ? { providerCursor: input.providerCursor ?? null }
+              : {}),
             bufferedWake: false,
             bufferedScheduledTaskRunId: null,
             reconnectRequired: summary.reconnectRequired,
@@ -519,6 +523,35 @@ export async function settleKnowledgeSourceSyncLease(
           bufferedScheduledTaskRunId: nextWake?.scheduledTaskRunId ?? null,
         };
       }),
+  );
+}
+
+export async function listObservedKnowledgeSourceSyncExternalObjectIds(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sourceId: string;
+    externalObjectIds: string[];
+  },
+): Promise<Set<string>> {
+  const ids = [...new Set(input.externalObjectIds)].filter((id) => id.length > 0).slice(0, 1_000);
+  if (ids.length === 0) return new Set();
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb
+        .select({ externalObjectId: schema.knowledgeSourceSyncObjectObservations.externalObjectId })
+        .from(schema.knowledgeSourceSyncObjectObservations)
+        .where(
+          and(
+            eq(schema.knowledgeSourceSyncObjectObservations.sourceId, input.sourceId),
+            inArray(schema.knowledgeSourceSyncObjectObservations.externalObjectId, ids),
+          ),
+        );
+      return new Set(rows.map((row) => row.externalObjectId));
+    },
   );
 }
 

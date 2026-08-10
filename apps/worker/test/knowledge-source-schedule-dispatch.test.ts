@@ -2018,4 +2018,248 @@ describe("knowledge-source schedule dispatch", () => {
       where state.source_id = ${source.id}`;
     expect(released).toEqual({ leaseId: null, status: "failed" });
   }, 120_000);
+
+  test("advances the Drive provider cursor only with successful generation-fenced settlement", async () => {
+    if (!available) return;
+    const [account] = await admin<{ id: string }[]>`
+      insert into managed_accounts (name) values ('drive cursor settlement') returning id`;
+    const [workspace] = await admin<{ id: string }[]>`
+      insert into workspaces (account_id, name)
+      values (${account!.id}, 'drive cursor settlement') returning id`;
+    const actor = {
+      kind: "human" as const,
+      subjectId: "user:drive-cursor",
+      initiatingHumanSubjectId: "user:drive-cursor",
+    };
+    const scope = {
+      kind: "workspace" as const,
+      workspaceId: workspace!.id,
+      subjectId: null,
+    };
+    const provider = await upsertKnowledgeProvider(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      scope,
+      providerKey: "google-drive",
+      externalTenantId: "permission-cursor",
+      operationId: "cursor-provider",
+      actor,
+    });
+    const source = await upsertKnowledgeSource(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      scope,
+      providerId: provider.id,
+      externalSourceId: "cursor-folder",
+      sourceKind: "google-drive-folder",
+      operationId: "cursor-source",
+      actor,
+    });
+    const task = await createScheduledTask(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      name: "Drive cursor source",
+      status: "active",
+      schedule: { type: "manual" },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "new_session_per_run",
+      overlapPolicy: "buffer_one",
+      action: {
+        kind: "knowledge_source_sync",
+        sourceId: source.id,
+        sourceGeneration: source.syncGeneration,
+        sourceLifecycleGeneration: source.lifecycleGeneration,
+        sourceConfigGeneration: 1,
+        controlWorkspaceId: workspace!.id,
+        providerCoordinationKey: "google-drive:permission-cursor:my-drive",
+        destination: scope,
+        initiatingSubjectId: actor.subjectId,
+        allDescendants: true,
+        connection: {
+          connectionId: "00000000-0000-4000-8000-000000000128",
+          connectionVersion: 1,
+          providerDomain: "googleapis.com",
+          kind: "oauth2",
+          ownerSubjectId: actor.subjectId,
+        },
+        limits: {
+          maxItems: 10,
+          maxBytes: 1_000,
+          maxFileBytes: 1_000,
+          maxProviderRequests: 10,
+          maxElapsedSeconds: 10,
+          maxConcurrency: 1,
+          maxFailureDetails: 5,
+        },
+      },
+      agentConfig: { prompt: "sync", resources: [], tools: [], metadata: {} },
+      metadata: {},
+    });
+    await ensureKnowledgeSourceSyncState(client.db, task);
+    const run = await createScheduledTaskRun(client.db, {
+      workspaceId: workspace!.id,
+      taskId: task.id,
+      triggerType: "initial",
+      producerKey: "cursor-initial",
+    });
+    await recordKnowledgeSourceSyncWake(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      sourceId: source.id,
+      scheduledTaskId: task.id,
+      scheduledTaskRunId: run.id,
+      cause: "initial",
+      producerKey: "cursor-initial",
+      sourceConfigGeneration: 1,
+      sourceLifecycleGeneration: source.lifecycleGeneration,
+    });
+    expect(
+      (
+        await claimKnowledgeSourceSyncLease(client.db, {
+          accountId: account!.id,
+          workspaceId: workspace!.id,
+          sourceId: source.id,
+          scheduledTaskRunId: run.id,
+          overlapPolicy: "buffer_one",
+        })
+      ).action,
+    ).toBe("claimed");
+    const knowledgeRun = await beginKnowledgeSyncRun(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      sourceId: source.id,
+      expectedSourceLifecycleGeneration: source.lifecycleGeneration,
+      expectedSyncGeneration: 0,
+      inputCursor: null,
+      operationId: "cursor-sync-run",
+      actor,
+    });
+    const providerCursor = {
+      version: 1,
+      kind: "google_drive_changes",
+      connectionId:
+        task.action.kind === "knowledge_source_sync" ? task.action.connection.connectionId : "",
+      googlePermissionId: "permission-cursor",
+      sourceId: "cursor-folder",
+      driveId: null,
+      pageToken: "start-page-2",
+      cursorGeneration: 1,
+      lastFullReconciliationAt: "2026-08-10T00:00:00.000Z",
+      nextFullReconciliationAt: "2026-08-11T00:00:00.000Z",
+    };
+    await completeKnowledgeSyncRun(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      initiatingSubjectId: actor.subjectId,
+      runId: knowledgeRun.id,
+      state: "succeeded",
+      outputCursor: null,
+      watermark: "2026-08-10T00:00:00.000Z",
+      metadata: { providerCursor },
+      reasonCode: "drive_cursor_test",
+    });
+    const summary = {
+      phase: "completed" as const,
+      scanned: 0,
+      imported: 0,
+      unchanged: 0,
+      skipped: 0,
+      failed: 0,
+      bytes: 0,
+      providerRequests: 1,
+      elapsedMs: 1,
+      indexed: 0,
+      aclPending: 0,
+      retryable: false,
+      limitReached: null,
+      checkpointed: false,
+      reconnectRequired: false,
+      failures: [],
+    };
+    await settleKnowledgeSourceSyncLease(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      sourceId: source.id,
+      scheduledTaskRunId: run.id,
+      knowledgeSyncRunId: knowledgeRun.id,
+      status: "succeeded",
+      summary,
+      sourceConfigGeneration: 1,
+      sourceLifecycleGeneration: source.lifecycleGeneration,
+      sourceSyncGeneration: 0,
+      completedSourceSyncGeneration: 1,
+      providerCursor,
+    });
+    expect((await ensureKnowledgeSourceSyncState(client.db, task)).providerCursor).toEqual(
+      providerCursor,
+    );
+
+    const failedRun = await createScheduledTaskRun(client.db, {
+      workspaceId: workspace!.id,
+      taskId: task.id,
+      triggerType: "retry",
+      producerKey: "cursor-failed-retry",
+    });
+    await recordKnowledgeSourceSyncWake(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      sourceId: source.id,
+      scheduledTaskId: task.id,
+      scheduledTaskRunId: failedRun.id,
+      cause: "retry",
+      producerKey: "cursor-failed-retry",
+      sourceConfigGeneration: 1,
+      sourceLifecycleGeneration: source.lifecycleGeneration,
+    });
+    expect(
+      (
+        await claimKnowledgeSourceSyncLease(client.db, {
+          accountId: account!.id,
+          workspaceId: workspace!.id,
+          sourceId: source.id,
+          scheduledTaskRunId: failedRun.id,
+          overlapPolicy: "buffer_one",
+        })
+      ).action,
+    ).toBe("claimed");
+    const failedKnowledgeRun = await beginKnowledgeSyncRun(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      sourceId: source.id,
+      expectedSourceLifecycleGeneration: source.lifecycleGeneration,
+      expectedSyncGeneration: 1,
+      inputCursor: null,
+      operationId: "cursor-failed-sync-run",
+      actor,
+    });
+    const rejectedCursor = { ...providerCursor, pageToken: "must-not-commit" };
+    await completeKnowledgeSyncRun(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      initiatingSubjectId: actor.subjectId,
+      runId: failedKnowledgeRun.id,
+      state: "failed",
+      outputCursor: null,
+      watermark: null,
+      metadata: { providerCursor: rejectedCursor },
+      errorCode: "provider_unavailable",
+      reasonCode: "drive_cursor_failed_test",
+    });
+    await settleKnowledgeSourceSyncLease(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      sourceId: source.id,
+      scheduledTaskRunId: failedRun.id,
+      knowledgeSyncRunId: failedKnowledgeRun.id,
+      status: "failed",
+      summary: { ...summary, phase: "failed", failed: 1 },
+      sourceConfigGeneration: 1,
+      sourceLifecycleGeneration: source.lifecycleGeneration,
+      sourceSyncGeneration: 1,
+      providerCursor: rejectedCursor,
+    });
+    expect((await ensureKnowledgeSourceSyncState(client.db, task)).providerCursor).toEqual(
+      providerCursor,
+    );
+  }, 120_000);
 });

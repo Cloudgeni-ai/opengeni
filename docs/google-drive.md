@@ -55,9 +55,9 @@ contract:
   persistence, model context, agent sandboxes, source metadata, logs, or webhook
   payloads.
 - The first enabled sync inventories existing supported files. Later scheduled
-  runs are bounded repair scans that skip unchanged provider revisions; they are
-  not a Changes-API-only flow. Google Changes API event production remains a
-  separate follow-on.
+  runs drain the Google Drive Changes feed and periodically perform a bounded
+  full repair that skips unchanged provider revisions. Workspace Events/Pub/Sub
+  delivery remains a separate, default-off release follow-on.
 
 ## Launch OAuth scope decision
 
@@ -163,12 +163,24 @@ any visible subfolder; selecting a parent includes every nested folder. Multiple
 locations can be connected in one setup. A Shared Drive or shared folder can be
 added by pasting its full `https://drive.google.com/.../folders/...` URL or ID.
 
-The first successful run recursively inventories all existing supported
-documents inside an enabled boundary. Scheduled inventory currently remains a
-bounded repair scan: stable provider revisions avoid downloading unchanged
-objects, while a provider-specific change cursor is reserved for the separate
-Google Changes API follow-on. OpenGeni does not overload the scoped-knowledge
-`sync_cursor` column with execution checkpoint state.
+The first successful run captures a Google Drive Changes start page token before
+recursively inventorying all existing supported documents inside an enabled
+boundary. After that complete inventory settles, normal scheduled runs drain the
+Changes feed page by page and durably advance the provider cursor only with the
+successful source lease settlement. Shared Drive token, change, metadata, and
+inventory requests carry the exact drive identity plus Google's all-drives
+support parameters. OpenGeni does not overload the scoped-knowledge
+`sync_cursor` column with provider cursor or execution checkpoint state.
+
+Changes that cannot be represented safely as a bounded object update trigger a
+full repair instead of guessing. This includes known removals, trashing,
+reparenting or moves outside the configured boundary, and folder topology
+changes. A rejected or invalid Changes cursor similarly captures a fresh start
+token and completes a full repair before adopting that token; it never skips
+directly to the new cursor. Google documents start page tokens as non-expiring,
+so renewal is driven by explicit invalidation rather than a guessed TTL. A
+bounded daily full reconciliation remains an independent safety repair for
+missed provider history even when no invalid-cursor response is observed.
 
 Each repair scan has its own durable scan generation. Every object observed
 across checkpointed pages is stamped into that generation; only a provider
@@ -271,16 +283,22 @@ removal, re-consent/reconnect requirements, and permission loss also advance a
 deny ACL generation, invalidate outstanding index obligations, revoke Document
 agent access, and delete materialized chunks. Resume or reconnect never restores
 the old retrieval eligibility: a newly observed immutable version, successful
-index obligation, and fresh generation-fenced ACL evidence are required. Durable
-Google Changes API event delivery and live Drive ACL/citation reauthorization
-remain separate follow-ons.
+index obligation, and fresh generation-fenced ACL evidence are required.
+
+As of August 10, 2026, Google Drive support in Workspace Events remains a
+Developer Preview. `OPENGENI_GOOGLE_DRIVE_WORKSPACE_EVENTS_ENABLED` is therefore
+default-off and exposes only an internal, deterministic `provider_event` wake
+seam. Event payloads never mutate source truth or advance provider cursors; the
+authoritative Changes drain and periodic full repair still do that work.
+Workspace Events subscription/Pub/Sub provisioning and live provider acceptance
+remain release work, as does Drive ACL/citation reauthorization.
 
 The **Only me**, **This workspace**, and **Company** options are immutable
 knowledge authority, not presentation labels. **Hourly**, **Daily**, and **On
 demand** seed the newly created shared Schedule; later edits happen there.
 **Allow**, **Ask**, and **Block** remain
 the connector read-policy configuration used by the common connector-action
-boundary. Google Changes API eventing, provider ACL projection,
+boundary. Workspace Events subscription provisioning, provider ACL projection,
 policy-UI wiring, and memory updates are not activated by the inventory planner.
 
 Disconnecting revokes the OpenGeni connection locally. The confirmation dialog
@@ -312,9 +330,10 @@ demo video, privacy policy, user help, and security-assessment evidence:
 3. Saving a selection is inert. Content access begins only after the separate
    **Enable synchronization** decision, and the user can manage cadence and
    source pause state through Schedules.
-4. The first sync inventories existing supported files. Later runs use bounded
-   repair scans and provider revisions to avoid unchanged downloads. Google
-   Changes API eventing is not currently shipped.
+4. The first sync inventories existing supported files. Later runs drain the
+   Google Drive Changes feed and use bounded full repairs plus provider
+   revisions to avoid unchanged downloads. Workspace Events/Pub/Sub delivery is
+   not currently shipped.
 5. OpenGeni reads supported file metadata and content within enabled selected
    boundaries. It does not create, edit, rename, move, share, or delete Google
    Drive files.
@@ -371,8 +390,8 @@ following without widening the claims beyond shipped behavior:
 - demo-video narration showing Connect, consent, boundary selection, destination
   authority, explicit sync enablement, pause, local disconnect, and separate
   provider-side revocation guidance;
-- launch gating that does not claim Google Changes API eventing, Drive writes,
-  live Google ACL/citation reauthorization, or production deployment.
+- launch gating that does not claim Workspace Events/Pub/Sub delivery, Drive
+  writes, live Google ACL/citation reauthorization, or production deployment.
 
 ### Privacy, Limited Use, retention, and deletion packet
 

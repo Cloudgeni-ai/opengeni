@@ -125,6 +125,18 @@ describe("provider-neutral progressive tool disclosure", () => {
 });
 
 describe("Google Drive integration settings", () => {
+  test("keeps Workspace Events wake hints default-off", () => {
+    expect(withEnv({}, () => getSettings()).googleDriveWorkspaceEventsEnabled).toBeUndefined();
+    expect(
+      withEnv({ OPENGENI_GOOGLE_DRIVE_WORKSPACE_EVENTS_ENABLED: "false" }, () => getSettings())
+        .googleDriveWorkspaceEventsEnabled,
+    ).toBe(false);
+    expect(
+      withEnv({ OPENGENI_GOOGLE_DRIVE_WORKSPACE_EVENTS_ENABLED: "true" }, () => getSettings())
+        .googleDriveWorkspaceEventsEnabled,
+    ).toBe(true);
+  });
+
   test("loads the split localhost browser and API origins", () => {
     const settings = withEnv(
       {

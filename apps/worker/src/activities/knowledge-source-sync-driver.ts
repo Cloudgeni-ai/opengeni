@@ -3,6 +3,9 @@ export type KnowledgeSourceSyncDriverInventory<Entry, StopReason extends string>
   stopReason: StopReason | null;
   entries: Entry[];
   checkpoint: Record<string, unknown> | null;
+  providerCursor: Record<string, unknown> | null;
+  authoritativeFullScan: boolean;
+  cursorInvalidated: boolean;
   providerRequests: number;
   elapsedMs: number;
 };
@@ -16,6 +19,7 @@ export type KnowledgeSourceSyncDriver<Entry, StopReason extends string> = {
   providerCoordinationKey: string;
   inventory: (
     executionCheckpoint: Record<string, unknown> | null,
+    providerCursor: Record<string, unknown> | null,
   ) => Promise<KnowledgeSourceSyncDriverInventory<Entry, StopReason>>;
   fetchContent: (entry: Entry, maxBytes: number) => Promise<Uint8Array>;
   citationLocator: (entry: Entry) => Record<string, unknown>;

@@ -1502,7 +1502,7 @@ export async function completeKnowledgeSyncRun(
             ${input.runId}::uuid,
             ${input.state},
             ${input.state === "succeeded" ? outputCursor : null},
-            ${input.watermark ? new Date(input.watermark) : null}::timestamptz,
+            ${input.watermark ?? null}::timestamptz,
             ${JSON.stringify(metadata)}::jsonb,
             ${input.state === "failed" ? errorCode : null},
             ${completionHash},
