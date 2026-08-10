@@ -6,7 +6,10 @@ import { createRoot } from "react-dom/client";
 
 import type { PersonalSlackAccountState } from "@/lib/personal-slack";
 import type { ConnectionMetadata } from "@/types";
-import { PersonalSlackAccountCard } from "./personal-slack-account-card";
+import {
+  PersonalSlackAccountCard,
+  personalSlackAccountStatusLabel,
+} from "./personal-slack-account-card";
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -79,6 +82,37 @@ async function renderCard(accountState: PersonalSlackAccountState) {
 }
 
 describe("PersonalSlackAccountCard", () => {
+  test("keeps the embedded control free of repeated status and explanation copy", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      const state: PersonalSlackAccountState = { state: "not_connected" };
+      await act(async () => {
+        root.render(
+          <PersonalSlackAccountCard
+            available
+            canManage
+            busy={false}
+            accountState={state}
+            embedded
+            onConnect={() => {}}
+            onReconnect={() => {}}
+            onDisconnect={() => {}}
+          />,
+        );
+      });
+
+      expect(personalSlackAccountStatusLabel(state, true)).toBe("Not connected");
+      expect(container.textContent).toContain("Connect my Slack account");
+      expect(container.textContent).not.toContain("Not connected");
+      expect(container.textContent).not.toContain("Connect only when");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("renders a subject-owned status without exposing its private row id", async () => {
     const rendered = await renderCard({
       state: "connected",
@@ -96,13 +130,11 @@ describe("PersonalSlackAccountCard", () => {
       expect(rendered.container.textContent).not.toContain("Required bot scopes");
 
       const buttons = [...rendered.container.querySelectorAll<HTMLButtonElement>("button")];
-      await act(async () =>
-        buttons.find((button) => button.textContent?.includes("Reconnect"))!.click(),
-      );
+      expect(buttons.some((button) => button.textContent?.includes("Reconnect"))).toBe(false);
       await act(async () =>
         buttons.find((button) => button.textContent?.includes("Disconnect"))!.click(),
       );
-      expect(rendered.onReconnect).toHaveBeenCalledTimes(1);
+      expect(rendered.onReconnect).not.toHaveBeenCalled();
       expect(rendered.onDisconnect).toHaveBeenCalledTimes(1);
       expect(rendered.onConnect).not.toHaveBeenCalled();
     } finally {

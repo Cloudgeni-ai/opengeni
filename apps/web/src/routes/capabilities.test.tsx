@@ -9,6 +9,7 @@ import {
   canInstallOpenGeniSlackBot,
   canManageSlackReactionSummon,
   canWriteWorkspaceConnections,
+  localConnectedSlackPreview,
   SlackBotInstallControls,
   WorkspaceSlackBotRequestedScopes,
 } from "./capabilities";
@@ -73,6 +74,15 @@ function accessContext(
 }
 
 describe("OpenGeni Slack bot install controls", () => {
+  test("offers a local-only connected Slack preview without changing persisted connections", () => {
+    expect(localConnectedSlackPreview("?previewSlack=connected", "workspace-a", false)).toBeNull();
+
+    const preview = localConnectedSlackPreview("?previewSlack=connected", "workspace-a", true);
+    expect(preview?.bot.workspaceId).toBe("workspace-a");
+    expect(preview?.bot.status).toBe("active");
+    expect(preview?.personal.state).toBe("connected");
+  });
+
   test("renders every requested workspace-bot scope including read-only reactions", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);

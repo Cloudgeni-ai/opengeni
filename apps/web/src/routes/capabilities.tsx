@@ -32,7 +32,10 @@ import {
 import { CapabilityLogo } from "@/components/capabilities/capability-logo";
 import { CapabilityTile } from "@/components/capabilities/capability-tile";
 import { PacksSection } from "@/components/capabilities/packs-section";
-import { PersonalSlackAccountCard } from "@/components/capabilities/personal-slack-account-card";
+import {
+  PersonalSlackAccountCard,
+  personalSlackAccountStatusLabel,
+} from "@/components/capabilities/personal-slack-account-card";
 import { SlackReactionSummonCard } from "@/components/capabilities/slack-reaction-summon-card";
 import { LoadErrorState, PageHeader } from "@/components/common";
 import { Button } from "@/components/ui/button";
@@ -74,6 +77,7 @@ import {
   personalSlackCapability,
   personalSlackOAuthTarget,
   preferredPersonalSlackConnection,
+  type PersonalSlackAccountState,
 } from "@/lib/personal-slack";
 import {
   openGeniSlackBotConnections,
@@ -100,6 +104,65 @@ import type {
 
 const PAGE_SIZE = 48;
 const FILTERS: CapabilityFilter[] = ["all", "pack", "mcp", "api", "skill", "plugin"];
+
+export function localConnectedSlackPreview(
+  search: string,
+  workspaceId: string,
+  enabled = import.meta.env.DEV,
+): { bot: ConnectionMetadata; personal: PersonalSlackAccountState } | null {
+  if (!enabled || new URLSearchParams(search).get("previewSlack") !== "connected") {
+    return null;
+  }
+
+  const now = new Date().toISOString();
+  const shared = {
+    accountId: "00000000-0000-4000-8000-000000000001",
+    workspaceId,
+    providerDomain: "slack.com",
+    status: "active" as const,
+    expiresAt: null,
+    lastRefreshAt: now,
+    lastUsedAt: now,
+    lastError: null,
+    version: 1,
+    createdBySubjectId: "preview-user",
+    updatedBySubjectId: "preview-user",
+    createdAt: now,
+    updatedAt: now,
+  };
+  const personalConnection: ConnectionMetadata = {
+    ...shared,
+    id: "00000000-0000-4000-8000-000000000002",
+    subjectId: "preview-user",
+    kind: "oauth2",
+    grantedScopes: ["search:read.public", "channels:history", "chat:write"],
+    metadata: {},
+  };
+
+  return {
+    bot: {
+      ...shared,
+      id: "00000000-0000-4000-8000-000000000003",
+      subjectId: null,
+      kind: "app_install",
+      grantedScopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES],
+      verifiedInstallAt: now,
+      verifiedInstallVersion: 1,
+      metadata: {
+        credentialRole: "opengeni_slack_bot",
+        credentialLabel: "OpenGeni Slack bot",
+        slackTeamId: "T_CLOUDGENI_PREVIEW",
+        slackTeamName: "CloudGeni",
+        botDisplayName: "OpenGeni",
+      },
+    },
+    personal: {
+      state: "connected",
+      connection: personalConnection,
+      accessTokenRefreshDue: false,
+    },
+  };
+}
 
 export function canWriteWorkspaceConnections(
   accessContext: AccessContext | null,
@@ -285,10 +348,12 @@ export function CapabilitiesRoute({
   const enabledItems = useMemo(() => filtered.filter((item) => item.enabled), [filtered]);
   const browseItems = useMemo(() => filtered.filter((item) => !item.enabled), [filtered]);
   const visibleBrowse = browseItems.slice(0, visibleCount);
+  const slackPreview = localConnectedSlackPreview(window.location.search, workspaceId);
   const slackBotConnections = openGeniSlackBotConnections(connections ?? []);
   const slackBotConnection = preferredOpenGeniSlackBotConnection(slackBotConnections);
-  const slackBotMetadata = slackBotConnection
-    ? openGeniSlackBotUiMetadata(slackBotConnection)
+  const visibleSlackBotConnection = slackPreview?.bot ?? slackBotConnection;
+  const visibleSlackBotMetadata = visibleSlackBotConnection
+    ? openGeniSlackBotUiMetadata(visibleSlackBotConnection)
     : null;
   const slackWorkspaceGrant = context.accessContext?.workspaceGrants.find(
     (grant) => grant.workspaceId === workspaceId,
@@ -316,6 +381,8 @@ export function CapabilitiesRoute({
   const personalSlackItem = personalSlackCapability(items);
   const personalSlackConnection = preferredPersonalSlackConnection(connections ?? []);
   const personalSlackStatus = personalSlackAccountState(personalSlackConnection, connectionsLoaded);
+  const visiblePersonalSlackStatus = slackPreview?.personal ?? personalSlackStatus;
+  const personalSlackAvailable = personalSlackItem !== null || slackPreview !== null;
   const canManagePersonalSlack = canWriteWorkspaceConnections(context.accessContext, workspaceId);
 
   useEffect(() => {
@@ -1195,18 +1262,18 @@ export function CapabilitiesRoute({
               </div>
             </div>
 
-            {slackBotConnection && slackBotMetadata ? (
+            {visibleSlackBotConnection && visibleSlackBotMetadata ? (
               <>
                 <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-brand/20 bg-brand/5 p-3">
                   <div className="flex items-center gap-2">
                     <CheckCircle2Icon className="size-4 shrink-0 text-brand" />
                     <p className="text-sm font-medium text-fg">
-                      {slackBotConnection.status === "active"
-                        ? `Connected to ${slackBotMetadata.slackTeamName}`
-                        : `${slackBotMetadata.slackTeamName} needs to be reconnected`}
+                      {visibleSlackBotConnection.status === "active"
+                        ? `Connected to ${visibleSlackBotMetadata.slackTeamName}`
+                        : `${visibleSlackBotMetadata.slackTeamName} needs to be reconnected`}
                     </p>
                   </div>
-                  {slackBotConnection.status !== "active" ? (
+                  {visibleSlackBotConnection.status !== "active" ? (
                     <SlackBotInstallControls
                       canInstall={canInstallSlackBot}
                       hasConnection
@@ -1283,7 +1350,7 @@ export function CapabilitiesRoute({
                   <div className="mt-3">
                     <SlackReactionSummonCard
                       workspaceId={workspaceId}
-                      connection={slackBotConnection}
+                      connection={visibleSlackBotConnection}
                       canManage={canManageSlackReaction}
                       installBusy={slackBotBusy}
                       onReinstall={() => void installSlackBot(false)}
@@ -1302,8 +1369,8 @@ export function CapabilitiesRoute({
                       </p>
                       <p className="mt-2 text-2xs text-fg-subtle">
                         Bot connection ID:{" "}
-                        <span className="font-mono">{slackBotConnection.id}</span>
-                        {slackBotConnections.length > 1
+                        <span className="font-mono">{visibleSlackBotConnection.id}</span>
+                        {(slackPreview ? 1 : slackBotConnections.length) > 1
                           ? ` · ${slackBotConnections.length} Slack installations`
                           : ""}
                       </p>
@@ -1315,7 +1382,7 @@ export function CapabilitiesRoute({
                           void installSlackBot(createNewConnection)
                         }
                       />
-                      {slackBotConnection.status === "active" ? (
+                      {visibleSlackBotConnection.status === "active" ? (
                         <Button
                           type="button"
                           variant="ghost"
@@ -1360,21 +1427,30 @@ export function CapabilitiesRoute({
                   <PlugIcon className="size-4" />
                 </span>
                 <div>
-                  <p className="text-sm font-medium text-fg">Use Slack as me</p>
+                  <p className="text-sm font-medium text-fg">Personal Slack</p>
                   <p className="mt-0.5 text-xs text-fg-muted">
-                    Optional. Only needed when an agent should act through your account.
+                    Let agents act through your Slack account.
                   </p>
                 </div>
               </div>
-              <ChevronDownIcon className="size-4 shrink-0 text-fg-subtle transition-transform group-open:rotate-180" />
+              <div className="flex shrink-0 items-center gap-2 text-xs text-fg-muted">
+                <span>
+                  {personalSlackAccountStatusLabel(
+                    visiblePersonalSlackStatus,
+                    personalSlackAvailable,
+                  )}
+                </span>
+                <ChevronDownIcon className="size-4 text-fg-subtle transition-transform group-open:rotate-180" />
+              </div>
             </summary>
             <div className="mt-3 border-t border-border/70 pt-3">
               <PersonalSlackAccountCard
-                available={personalSlackItem !== null}
+                available={personalSlackAvailable}
                 canManage={canManagePersonalSlack}
                 busy={personalSlackBusy}
-                accountState={personalSlackStatus}
+                accountState={visiblePersonalSlackStatus}
                 embedded
+                readOnly={slackPreview !== null}
                 onConnect={() => void startPersonalSlackOAuth()}
                 onReconnect={() => void startPersonalSlackOAuth()}
                 onDisconnect={() => setPersonalSlackDisconnectOpen(true)}

@@ -19,6 +19,7 @@ export function PersonalSlackAccountCard({
   busy,
   accountState,
   embedded = false,
+  readOnly = false,
   onConnect,
   onReconnect,
   onDisconnect,
@@ -28,6 +29,7 @@ export function PersonalSlackAccountCard({
   busy: boolean;
   accountState: PersonalSlackAccountState;
   embedded?: boolean;
+  readOnly?: boolean;
   onConnect: () => void;
   onReconnect: () => void;
   onDisconnect: () => void;
@@ -46,17 +48,7 @@ export function PersonalSlackAccountCard({
       aria-label={embedded ? "Personal Slack access" : undefined}
       aria-labelledby={embedded ? undefined : "personal-slack-heading"}
     >
-      {embedded ? (
-        <div
-          className={cn(
-            "flex items-center gap-1.5 text-xs font-medium",
-            view.attention ? "text-status-waiting" : "text-fg-muted",
-          )}
-        >
-          <view.Icon className={cn("size-4 shrink-0", !view.attention && "text-brand")} />
-          {view.label}
-        </div>
-      ) : (
+      {!embedded ? (
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
             <h3 id="personal-slack-heading" className="text-sm font-semibold text-fg">
@@ -76,23 +68,27 @@ export function PersonalSlackAccountCard({
             {view.label}
           </div>
         </div>
-      )}
+      ) : null}
 
-      <p className="mt-2 text-xs leading-5 text-fg-muted">{view.description}</p>
+      {!embedded ? (
+        <p className="mt-2 text-xs leading-5 text-fg-muted">{view.description}</p>
+      ) : null}
 
-      <div className="mt-3 flex flex-wrap items-center gap-2">
+      <div className={cn("flex flex-wrap items-center gap-2", !embedded && "mt-3")}>
         {accountState.state === "not_connected" ? (
-          <Button type="button" disabled={!canManage || !canStartOAuth || busy} onClick={onConnect}>
+          <Button
+            type="button"
+            disabled={readOnly || !canManage || !canStartOAuth || busy}
+            onClick={onConnect}
+          >
             {busy ? <Loader2Icon className="animate-spin" /> : <UserRoundIcon />}
             Connect my Slack account
           </Button>
-        ) : accountState.state === "connected" ||
-          accountState.state === "reconnect_required" ||
-          accountState.state === "disconnected" ? (
+        ) : accountState.state === "reconnect_required" || accountState.state === "disconnected" ? (
           <Button
             type="button"
             variant={accountState.state === "reconnect_required" ? "default" : "outline"}
-            disabled={!canManage || !canStartOAuth || busy}
+            disabled={readOnly || !canManage || !canStartOAuth || busy}
             onClick={onReconnect}
           >
             {busy ? <Loader2Icon className="animate-spin" /> : <RefreshCwIcon />}
@@ -104,7 +100,7 @@ export function PersonalSlackAccountCard({
             type="button"
             variant="ghost"
             className="text-status-failed hover:bg-status-failed/10 hover:text-status-failed"
-            disabled={!canManage || busy}
+            disabled={readOnly || !canManage || busy}
             onClick={onDisconnect}
           >
             <UnplugIcon />
@@ -113,7 +109,7 @@ export function PersonalSlackAccountCard({
         ) : null}
       </div>
 
-      {!canManage ? (
+      {!canManage && !readOnly ? (
         <p className="mt-3 text-2xs text-fg-subtle">
           Connection management permission is required to change this personal link.
         </p>
@@ -143,6 +139,13 @@ export function PersonalSlackAccountCard({
       ) : null}
     </section>
   );
+}
+
+export function personalSlackAccountStatusLabel(
+  state: PersonalSlackAccountState,
+  available: boolean,
+): string {
+  return personalSlackStateView(state, available).label;
 }
 
 function personalSlackStateView(
