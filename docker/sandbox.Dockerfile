@@ -4,8 +4,7 @@ ARG CHECKOV_VERSION=3.2.526
 
 RUN set -eux; \
     python -m venv /opt/checkov; \
-    /opt/checkov/bin/pip install --no-cache-dir "checkov==${CHECKOV_VERSION}"; \
-    /opt/checkov/bin/checkov --version
+    /opt/checkov/bin/pip install --no-cache-dir "checkov==${CHECKOV_VERSION}"
 
 FROM node:22.22.0-bookworm-slim AS node-runtime
 
