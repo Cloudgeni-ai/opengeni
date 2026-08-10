@@ -1027,6 +1027,24 @@ describe("OpenGeniClient", () => {
     );
   });
 
+  test("lists compact topology roots, children, and searches through the dedicated endpoint", async () => {
+    const { client, requests } = makeClient(() =>
+      jsonResponse({ sessions: [], total: 0, hasMore: false, nextCursor: null }),
+    );
+    await client.listAgentTopology(WORKSPACE_ID, { limit: 25, parentSessionId: null });
+    await client.listAgentTopology(WORKSPACE_ID, {
+      limit: 10,
+      parentSessionId: SESSION_ID,
+      cursor: "opaque",
+    });
+    await client.listAgentTopology(WORKSPACE_ID, { search: "  rollout  " });
+    expect(requests.map((request) => request.url)).toEqual([
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/agent-topology?limit=25&parentSessionId=null`,
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/agent-topology?limit=10&parentSessionId=${SESSION_ID}&cursor=opaque`,
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/agent-topology?search=rollout`,
+    ]);
+  });
+
   test("listSessionPage falls back to an older server's array endpoint", async () => {
     const legacy = [
       { id: SESSION_ID, workspaceId: WORKSPACE_ID },

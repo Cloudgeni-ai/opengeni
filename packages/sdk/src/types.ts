@@ -967,6 +967,47 @@ export type SessionListResponse = {
   nextCursor: string | null;
 };
 
+/** Compact, bounded session projection for workspace agent-topology browsers. */
+export type AgentTopologySession = {
+  id: string;
+  title: string | null;
+  titleTruncated: boolean;
+  parentSessionId: string | null;
+  rootSessionId: string;
+  nestedAgentDepth: number;
+  ancestorPath: Array<{ id: string; title: string | null; titleTruncated: boolean }>;
+  status: SessionStatus;
+  pause: {
+    state: "active" | "paused";
+    additionalBlockerCount: number;
+    source: {
+      kind: "session" | "workspace";
+      sessionId?: string | undefined;
+      displayName: string;
+      displayNameTruncated: boolean;
+    } | null;
+  };
+  children: {
+    directChildren: number;
+    totalDescendants: number;
+    runningDescendants: number;
+    queuedDescendants: number;
+    attentionDescendants: number;
+    pausedDescendants: number;
+    failedDescendants: number;
+    truncated: boolean;
+  };
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AgentTopologyPageResponse = {
+  sessions: AgentTopologySession[];
+  total: number;
+  hasMore: boolean;
+  nextCursor: string | null;
+};
+
 export type UpdateSessionPinRequest = {
   pinned: boolean;
   expectedVersion?: number;
@@ -2864,7 +2905,7 @@ export type WorkspaceSettings = {
 
 export type WorkspaceSlackReactionSummonSettings = {
   enabled: boolean;
-  emoji: string;
+  emoji: "genie";
   channelPolicy: { mode: "bot_member" } | { mode: "allowlist"; channelIds: string[] };
 };
 
