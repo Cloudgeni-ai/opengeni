@@ -554,6 +554,7 @@ export const modalProvider: ProviderRegistration = {
         imageId,
         imageDigest: null,
         providerBindingKey: binding.key,
+        providerBinding: binding.binding,
       };
     } finally {
       snapshotHandle.detach?.();

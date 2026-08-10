@@ -4768,13 +4768,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ),
         rigVersion?.image ?? null,
       );
+      const providerImageSettings = await settingsWithRigProviderImage(
+        logicalSandboxSettings,
+        rigVersion,
+        turn.sandboxBackend,
+      );
       const baseRunSettings = {
         // IMAGE PRECEDENCE (M3): rig > pack > deployment. settingsWithRigImage runs
         // OUTERMOST so a rig-pinned image overrides both the pack image and the
         // deployment default; a rig with no image (or a rig-less turn) is a
         // pass-through. A matching verified provider-native ID is then applied
         // only to fresh creation without changing the logical lease image.
-        ...settingsWithRigProviderImage(logicalSandboxSettings, rigVersion, turn.sandboxBackend),
+        ...providerImageSettings,
         openaiModel: turn.model,
         openaiReasoningEffort: turn.reasoningEffort,
         sandboxBackend: turn.sandboxBackend,
@@ -6004,6 +6009,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               {
                 db,
                 settings: runSettings,
+                logicalFallbackSettings: logicalSandboxSettings,
                 cancellationSignal: sandboxResumeSignal,
                 sandboxMetrics: runtimeMetricsHooksForObservability(observability),
                 onSandboxLost: publishSandboxLost,
@@ -6632,6 +6638,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               {
                 db,
                 settings: runSettings,
+                logicalFallbackSettings: logicalSandboxSettings,
                 cancellationSignal: sandboxResumeSignal,
                 sandboxMetrics: runtimeMetricsHooksForObservability(observability),
                 onSandboxLost: publishSandboxLost,

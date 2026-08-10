@@ -3389,6 +3389,7 @@ export type RigProviderImage = {
   buildRequestId: string;
   imageId: string | null;
   imageDigest: string | null;
+  artifactId: string | null;
   providerBindingKeyHash: string | null;
   provenance: {
     kind: "rig_verification";

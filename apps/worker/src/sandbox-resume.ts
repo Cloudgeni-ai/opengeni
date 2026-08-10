@@ -105,6 +105,10 @@ export function isRetryableDegradedRestore(restore: {
 export type SandboxResumeServices = {
   db: Database;
   settings: Settings;
+  /** Exact settings before a verified rig provider image overlaid the logical
+   * pack/deployment image. Fresh-create NotFound fallback must preserve an
+   * ID-only logical base instead of selecting the provider default. */
+  logicalFallbackSettings?: Settings;
   sandboxMetrics?: RuntimeMetricsHooks;
   /**
    * The logical turn-attempt lifetime, not merely the provider request lifetime.
@@ -1024,6 +1028,9 @@ export async function resumeBoxForTurn(
         backendOverride: ids.backend as never,
         ...(ids.environment ? { environment: ids.environment } : {}),
         ...(services.sandboxMetrics ? { metrics: services.sandboxMetrics } : {}),
+        ...(services.logicalFallbackSettings
+          ? { logicalFallbackSettings: services.logicalFallbackSettings }
+          : {}),
         onSandboxCreated: async (created) => {
           createdEstablished = created;
           throwIfReleasedOrCancelled();

@@ -250,6 +250,12 @@ describe("modalProvider immutable rig image build", () => {
         workspaceName: "workspace-a",
         environment: "main",
       }),
+      providerBinding: {
+        version: 1,
+        serverUrl: "https://api.modal.com",
+        workspaceName: "workspace-a",
+        environment: "main",
+      },
     });
   });
 });

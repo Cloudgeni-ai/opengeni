@@ -1,9 +1,16 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import type { RigProviderImage } from "@opengeni/contracts";
+import {
+  canonicalModalCheckpointProviderBinding,
+  encodeNativeSnapshotRef,
+  type NativeSnapshotDescriptor,
+  type RigProviderImage,
+} from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { createHash, randomUUID } from "node:crypto";
 import {
   activateRigVersion,
   claimRigVersionProviderImageBuild,
+  claimSandboxCheckpointArtifactsForGc,
   countRigs,
   countSessionsUsingRig,
   createDb,
@@ -22,6 +29,8 @@ import {
   listRigChanges,
   listRigVersions,
   listRigs,
+  markSandboxCheckpointArtifactDeletePending,
+  registerSandboxCheckpointArtifact,
   RigActiveVersionChangedError,
   RigChangeTransitionError,
   updateRig,
@@ -96,6 +105,7 @@ function rigProviderImage(overrides: Partial<RigProviderImage> = {}): RigProvide
     buildRequestId: "77777777-7777-4777-8777-777777777777",
     imageId: status === "ready" ? "im-rig-version" : null,
     imageDigest: null,
+    artifactId: status === "ready" ? "66666666-6666-4666-8666-666666666666" : null,
     providerBindingKeyHash: status === "ready" ? `sha256:${"c".repeat(64)}` : null,
     provenance: {
       kind: "rig_verification",
@@ -113,6 +123,56 @@ function rigProviderImage(overrides: Partial<RigProviderImage> = {}): RigProvide
           }
         : null,
     ...overrides,
+  };
+}
+
+async function registerRigProviderImageArtifact(
+  ws: { accountId: string; workspaceId: string },
+  versionId: string,
+  imageId: string,
+): Promise<{ artifactId: string; providerBindingKeyHash: string }> {
+  const providerBinding = canonicalModalCheckpointProviderBinding({
+    version: 1,
+    serverUrl: "https://api.modal.com",
+    workspaceName: "rig-provider-image-test",
+    environment: "main",
+  })!;
+  const archive = encodeNativeSnapshotRef({
+    provider: "modal_snapshot_filesystem",
+    snapshotId: imageId,
+    workspacePersistence: "snapshot_filesystem",
+  });
+  const archiveSha256 = createHash("sha256").update(archive).digest("hex");
+  const capturedAt = new Date();
+  const descriptor: NativeSnapshotDescriptor = {
+    version: 2,
+    kind: "provider_snapshot",
+    revision: `wa2:${capturedAt.getTime()}:${archiveSha256}`,
+    archiveSha256,
+    archiveBytes: archive.length,
+    capturedAt: capturedAt.toISOString(),
+    provider: "modal_snapshot_filesystem",
+    snapshotId: imageId,
+    workspacePersistence: "snapshot_filesystem",
+  };
+  const artifact = await registerSandboxCheckpointArtifact(db, {
+    accountId: ws.accountId,
+    workspaceId: ws.workspaceId,
+    sandboxGroupId: versionId,
+    sourceLeaseId: randomUUID(),
+    sourceLeaseEpoch: 1,
+    sourceInstanceId: "sb-rig-provider-image-test",
+    sourceWorkspaceGeneration: 1,
+    providerBindingKey: providerBinding.key,
+    providerBinding: providerBinding.binding,
+    workspaceArchive: Buffer.from(archive).toString("base64"),
+    workspaceArchiveMeta: descriptor,
+  });
+  return {
+    artifactId: artifact.id,
+    providerBindingKeyHash: `sha256:${createHash("sha256")
+      .update(providerBinding.key, "utf8")
+      .digest("hex")}`,
   };
 }
 
@@ -341,11 +401,13 @@ describe("rig provider image build ledger", () => {
     });
     expect(duplicate.status).toBe("in_progress");
 
+    const artifact = await registerRigProviderImageArtifact(ws, versionId, "im-rig-version");
     const ready = rigProviderImage({
       ...first.image,
       status: "ready",
       imageId: "im-rig-version",
-      providerBindingKeyHash: `sha256:${"c".repeat(64)}`,
+      artifactId: artifact.artifactId,
+      providerBindingKeyHash: artifact.providerBindingKeyHash,
       finishedAt: new Date().toISOString(),
       error: null,
     });
@@ -388,6 +450,8 @@ describe("rig provider image build ledger", () => {
           ...plantedDrift,
           status: "ready",
           imageId: "im-planted",
+          artifactId: randomUUID(),
+          providerBindingKeyHash: `sha256:${"c".repeat(64)}`,
           finishedAt: new Date().toISOString(),
           error: null,
         }),
@@ -395,6 +459,76 @@ describe("rig provider image build ledger", () => {
     ).toBe(false);
     expect((await getRigVersionById(db, ws.workspaceId, versionId))?.providerImages.modal).toEqual(
       ready,
+    );
+
+    expect(
+      await markSandboxCheckpointArtifactDeletePending(db, {
+        accountId: ws.accountId,
+        workspaceId: ws.workspaceId,
+        artifactId: artifact.artifactId,
+        reason: "must remain protected while the rig version is ready",
+      }),
+    ).toBe(false);
+
+    expect(await deleteRig(db, ws.workspaceId, rig.id)).toBe(true);
+    expect(
+      await markSandboxCheckpointArtifactDeletePending(db, {
+        accountId: ws.accountId,
+        workspaceId: ws.workspaceId,
+        artifactId: artifact.artifactId,
+        reason: "rig deleted",
+      }),
+    ).toBe(true);
+    const orphanClaims = await claimSandboxCheckpointArtifactsForGc(db, {
+      claimId: randomUUID(),
+      limit: 10,
+      claimTtlMs: 60_000,
+    });
+    expect(orphanClaims.some((claim) => claim.id === artifact.artifactId)).toBe(true);
+  });
+
+  test("rejects a ready image that has no exact artifact ownership row", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const rig = await createRig(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      name: "provider-image-missing-artifact",
+      initialVersion: { image: "ubuntu:24.04", setupScript: "echo ready" },
+    });
+    const versionId = rig.activeVersion!.id;
+    const building = rigProviderImage({
+      provenance: {
+        kind: "rig_verification",
+        targetKind: "version",
+        targetId: versionId,
+      },
+    });
+    const claim = await claimRigVersionProviderImageBuild(db, {
+      workspaceId: ws.workspaceId,
+      versionId,
+      image: building,
+      staleAfterMs: 60_000,
+    });
+    expect(claim.status).toBe("claimed");
+
+    expect(
+      await finalizeRigVersionProviderImageBuild(db, {
+        workspaceId: ws.workspaceId,
+        versionId,
+        image: rigProviderImage({
+          ...claim.image,
+          status: "ready",
+          imageId: "im-unowned",
+          artifactId: randomUUID(),
+          providerBindingKeyHash: `sha256:${"c".repeat(64)}`,
+          finishedAt: new Date().toISOString(),
+          error: null,
+        }),
+      }),
+    ).toBe(false);
+    expect((await getRigVersionById(db, ws.workspaceId, versionId))?.providerImages.modal).toEqual(
+      claim.image,
     );
   });
 

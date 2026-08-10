@@ -7,6 +7,7 @@ import type { RigProviderImage, RigVersion } from "@opengeni/contracts";
 import {
   rigProviderImageBuildRequestId,
   rigProviderImageContentHash,
+  rigProviderImageProviderBindingKeyHash,
   rigProviderImageSetupHash,
 } from "@opengeni/core";
 import { rigSetupScriptCommand } from "@opengeni/runtime";
@@ -15,10 +16,20 @@ import {
   resolveRigProviderImageSelection,
   rigProviderImageSourceImage,
   settingsWithRigImage,
+  settingsWithRigProviderImage,
 } from "../src/activities/packs";
-import { rigProviderImageContentMarkerCommand } from "../src/activities/rig-verification";
+import {
+  rigProviderImageContentMarkerCommand,
+  settingsForRigVerification,
+} from "../src/activities/rig-verification";
 
 const VERSION_ID = "11111111-1111-4111-8111-111111111111";
+const PROVIDER_BINDING_KEY = JSON.stringify({
+  version: 1,
+  serverUrl: "https://api.modal.com",
+  workspaceName: "workspace-a",
+  environment: "main",
+});
 
 function version(overrides: Partial<RigVersion> = {}): RigVersion {
   return {
@@ -60,7 +71,8 @@ function readyImage(settings: Settings, definition: RigVersion): RigProviderImag
     }),
     imageId: "im-reused-rig-image",
     imageDigest: null,
-    providerBindingKeyHash: `sha256:${"5".repeat(64)}`,
+    artifactId: "44444444-4444-4444-8444-444444444444",
+    providerBindingKeyHash: rigProviderImageProviderBindingKeyHash(PROVIDER_BINDING_KEY),
     provenance: {
       kind: "rig_verification",
       targetKind: "version",
@@ -92,8 +104,18 @@ describe("build-once rig provider image runtime", () => {
     const image = readyImage(logicalSettings, base);
     const verified = { ...base, providerImages: { modal: image } };
 
-    const first = resolveRigProviderImageSelection(logicalSettings, verified, "modal");
-    const second = resolveRigProviderImageSelection(logicalSettings, verified, "modal");
+    const first = resolveRigProviderImageSelection(
+      logicalSettings,
+      verified,
+      "modal",
+      image.providerBindingKeyHash,
+    );
+    const second = resolveRigProviderImageSelection(
+      logicalSettings,
+      verified,
+      "modal",
+      image.providerBindingKeyHash,
+    );
     expect(first.reason).toBe("selected");
     expect(second.reason).toBe("selected");
     expect(first.settings.modalImageId).toBe(image.imageId);
@@ -142,7 +164,12 @@ describe("build-once rig provider image runtime", () => {
       providerImages: { modal: oldImage },
     });
 
-    const selected = resolveRigProviderImageSelection(logicalSettings, changedVersion, "modal");
+    const selected = resolveRigProviderImageSelection(
+      logicalSettings,
+      changedVersion,
+      "modal",
+      oldImage.providerBindingKeyHash,
+    );
     expect(selected.reason).toBe("content_mismatch");
     expect(selected.settings.modalImageId).toBeUndefined();
     expect(selected.contentHash).not.toBe(oldImage.contentHash);
@@ -168,7 +195,7 @@ describe("build-once rig provider image runtime", () => {
 
   test("unsupported backends preserve runtime setup fallback without changing settings", () => {
     const settings = testSettings({ sandboxBackend: "docker", dockerImage: "ubuntu:24.04" });
-    const selected = resolveRigProviderImageSelection(settings, version(), "docker");
+    const selected = resolveRigProviderImageSelection(settings, version(), "docker", null);
     expect(selected).toEqual({
       settings,
       reason: "provider_unsupported",
@@ -187,14 +214,95 @@ describe("build-once rig provider image runtime", () => {
     const image = readyImage(baseSettings, base);
     const verified = { ...base, providerImages: { modal: image } };
 
-    const selected = resolveRigProviderImageSelection(baseSettings, verified, "modal");
+    const selected = resolveRigProviderImageSelection(
+      baseSettings,
+      verified,
+      "modal",
+      image.providerBindingKeyHash,
+    );
     expect(selected.reason).toBe("selected");
     expect(image.sourceImage).toBe("im-base-image-a");
     expect(selected.settings.modalImageId).toBe(image.imageId);
 
     const rotatedBase = { ...baseSettings, modalImageId: "im-base-image-b" };
-    const rejected = resolveRigProviderImageSelection(rotatedBase, verified, "modal");
+    const rejected = resolveRigProviderImageSelection(
+      rotatedBase,
+      verified,
+      "modal",
+      image.providerBindingKeyHash,
+    );
     expect(rejected.reason).toBe("content_mismatch");
     expect(rejected.settings.modalImageId).toBe("im-base-image-b");
+  });
+
+  test("provider binding rotation falls back before passing a stale Modal image ID", async () => {
+    const logicalSettings = settingsWithRigImage(
+      testSettings({ sandboxBackend: "modal" }),
+      "ubuntu:24.04",
+    );
+    const base = version();
+    const image = readyImage(logicalSettings, base);
+    const verified = { ...base, providerImages: { modal: image } };
+    const rotatedHash = rigProviderImageProviderBindingKeyHash(
+      PROVIDER_BINDING_KEY.replace("workspace-a", "workspace-b"),
+    );
+
+    const mismatch = resolveRigProviderImageSelection(
+      logicalSettings,
+      verified,
+      "modal",
+      rotatedHash,
+    );
+    expect(mismatch.reason).toBe("provider_binding_mismatch");
+    expect(mismatch.settings.modalImageId).toBeUndefined();
+
+    const selected = await settingsWithRigProviderImage(
+      logicalSettings,
+      verified,
+      "modal",
+      async () => ({
+        key: PROVIDER_BINDING_KEY,
+        binding: {
+          version: 1,
+          serverUrl: "https://api.modal.com",
+          workspaceName: "workspace-a",
+          environment: "main",
+        },
+      }),
+    );
+    expect(selected.modalImageId).toBe(image.imageId);
+
+    const unavailable = await settingsWithRigProviderImage(
+      logicalSettings,
+      verified,
+      "modal",
+      async () => {
+        throw new Error("identity unavailable");
+      },
+    );
+    expect(unavailable.modalImageId).toBeUndefined();
+    expect(unavailable.modalImageRef).toBe("ubuntu:24.04");
+  });
+
+  test("verification resolves the same pack then rig image precedence as real turns", () => {
+    const deployment = testSettings({
+      sandboxBackend: "modal",
+      modalImageRef: "deployment:latest",
+      modalImageId: "im-deployment",
+    });
+    const packRuntime = {
+      sandboxImage: "pack:stable",
+      sandboxProviderImages: { modal: { imageId: "im-pack" } },
+      skills: [],
+    };
+
+    const verification = settingsForRigVerification(deployment, packRuntime, null);
+    expect(verification.modalImageRef).toBe("pack:stable");
+    expect(verification.modalImageId).toBe("im-pack");
+    expect(rigProviderImageSourceImage(verification, "modal")).toBe("im-pack");
+
+    const rigOverride = settingsForRigVerification(deployment, packRuntime, "rig:pinned");
+    expect(rigOverride.modalImageRef).toBe("rig:pinned");
+    expect(rigOverride.modalImageId).toBeUndefined();
   });
 });

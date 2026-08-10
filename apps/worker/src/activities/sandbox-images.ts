@@ -1,6 +1,11 @@
 import type { Settings } from "@opengeni/config";
 import type { CapabilityPack, RigVersion, SandboxBackend } from "@opengeni/contracts";
-import { rigProviderImageContentHash, rigProviderImageMatchesDefinition } from "@opengeni/core";
+import {
+  rigProviderImageContentHash,
+  rigProviderImageMatchesDefinition,
+  rigProviderImageProviderBindingKeyHash,
+} from "@opengeni/core";
+import { resolveModalCheckpointProviderBinding } from "@opengeni/runtime/sandbox";
 
 export function settingsWithPackSandboxImage(
   settings: Settings,
@@ -43,12 +48,15 @@ export type RigProviderImageSelectionReason =
   | "missing"
   | "provider_unsupported"
   | "not_ready"
-  | "content_mismatch";
+  | "content_mismatch"
+  | "provider_binding_unavailable"
+  | "provider_binding_mismatch";
 
 export function resolveRigProviderImageSelection(
   settings: Settings,
   version: RigVersion | null,
   backend: SandboxBackend,
+  currentProviderBindingKeyHash: string | null,
 ): {
   settings: Settings;
   reason: RigProviderImageSelectionReason;
@@ -91,6 +99,22 @@ export function resolveRigProviderImageSelection(
       imageId: null,
     };
   }
+  if (!image.providerBindingKeyHash || !currentProviderBindingKeyHash) {
+    return {
+      settings,
+      reason: "provider_binding_unavailable",
+      contentHash: expectedContentHash,
+      imageId: null,
+    };
+  }
+  if (image.providerBindingKeyHash !== currentProviderBindingKeyHash) {
+    return {
+      settings,
+      reason: "provider_binding_mismatch",
+      contentHash: expectedContentHash,
+      imageId: null,
+    };
+  }
   return {
     // Keep modalImageRef unchanged: the lease continues to fence the logical
     // rig/pack/deployment image, so a newly available build optimization never
@@ -103,10 +127,32 @@ export function resolveRigProviderImageSelection(
   };
 }
 
-export function settingsWithRigProviderImage(
+export async function settingsWithRigProviderImage(
   settings: Settings,
   version: RigVersion | null,
   backend: SandboxBackend,
-): Settings {
-  return resolveRigProviderImageSelection(settings, version, backend).settings;
+  resolveBinding: typeof resolveModalCheckpointProviderBinding = resolveModalCheckpointProviderBinding,
+): Promise<Settings> {
+  const image = backend === "modal" ? version?.providerImages.modal : null;
+  if (image?.status !== "ready" || !image.providerBindingKeyHash) {
+    return resolveRigProviderImageSelection(settings, version, backend, null).settings;
+  }
+  const structural = resolveRigProviderImageSelection(
+    settings,
+    version,
+    backend,
+    image.providerBindingKeyHash,
+  );
+  if (structural.reason !== "selected") return structural.settings;
+  let currentProviderBindingKeyHash: string | null = null;
+  try {
+    const binding = await resolveBinding(settings);
+    currentProviderBindingKeyHash = rigProviderImageProviderBindingKeyHash(binding.key);
+  } catch {
+    // Provider identity is an authority check, not a reason to fail the turn.
+    // Preserve the logical image so fresh creation and runtime setup remain the
+    // truthful fallback when the identity lookup is unavailable.
+  }
+  return resolveRigProviderImageSelection(settings, version, backend, currentProviderBindingKeyHash)
+    .settings;
 }

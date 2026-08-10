@@ -103,6 +103,7 @@ describe("rig contracts", () => {
       buildRequestId: "66666666-6666-4666-8666-666666666666",
       imageId: "im-rig-v1",
       imageDigest: null,
+      artifactId: "77777777-7777-4777-8777-777777777777",
       providerBindingKeyHash: `sha256:${"3".repeat(64)}`,
       provenance: {
         kind: "rig_verification",
@@ -129,6 +130,21 @@ describe("rig contracts", () => {
         ...version,
         providerImages: {
           modal: { ...providerImage, status: "failed", error: null },
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      RigVersion.safeParse({
+        ...version,
+        providerImages: {
+          modal: {
+            ...providerImage,
+            status: "failed",
+            imageId: null,
+            artifactId: providerImage.artifactId,
+            finishedAt: "2026-07-08T00:00:02.000Z",
+            error: { code: "failed", message: "failed", retryable: true },
+          },
         },
       }).success,
     ).toBe(false);

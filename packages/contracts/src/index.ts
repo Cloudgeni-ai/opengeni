@@ -108,6 +108,7 @@ export {
   WORKSPACE_ARCHIVE_DESCRIPTOR_VERSION,
   backendForNativeSnapshotProvider,
   decodeNativeSnapshotRef,
+  encodeNativeSnapshotRef,
   parseWorkspaceArchiveDescriptor,
   type NativeSnapshotDescriptor,
   type NativeSnapshotProvider,
@@ -5633,6 +5634,7 @@ export const RigProviderImage = z
     buildRequestId: z.string().uuid(),
     imageId: z.string().min(1).max(512).nullable(),
     imageDigest: z.string().min(1).max(512).nullable(),
+    artifactId: z.string().uuid().nullable(),
     providerBindingKeyHash: z
       .string()
       .regex(/^sha256:[0-9a-f]{64}$/u)
@@ -5658,6 +5660,24 @@ export const RigProviderImage = z
         code: "custom",
         path: ["imageId"],
         message: "ready provider images require an immutable image id or digest",
+      });
+    }
+    if (
+      value.status === "ready" &&
+      value.backend === "modal" &&
+      (value.artifactId === null || value.providerBindingKeyHash === null)
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: [value.artifactId === null ? "artifactId" : "providerBindingKeyHash"],
+        message: "ready Modal provider images require durable artifact ownership and binding",
+      });
+    }
+    if (value.status !== "ready" && value.artifactId !== null) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["artifactId"],
+        message: "only ready provider images may retain a durable artifact",
       });
     }
     if (value.status === "building") {

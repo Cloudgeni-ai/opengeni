@@ -18,6 +18,10 @@ describe("migration 0196 rig provider images", () => {
     expect(migration.split(/\r?\n/, 1)[0]).toBe("-- deployment-mode: rolling");
     expect(migration).toContain("ADD COLUMN provider_images jsonb NOT NULL DEFAULT '{}'::jsonb");
     expect(migration).toContain("CHECK (jsonb_typeof(provider_images) = 'object')");
+    expect(migration).toContain("FROM %1$I.rig_versions version");
+    expect(migration).toContain("provider_image.value ->> 'artifactId' = artifact.id::text");
+    expect(migration).toContain("FROM %1$I.rig_changes change");
+    expect(migration).toContain("change.verification #>> '{providerImage,artifactId}'");
     expect(migration).not.toMatch(/UPDATE\s+rig_versions/iu);
     expect(migration).not.toMatch(/ACCESS\s+EXCLUSIVE/iu);
 
@@ -57,6 +61,14 @@ describe("migration 0196 rig provider images", () => {
         where conname = 'rig_versions_provider_images_object_chk'`;
       expect(constraint?.validated).toBe(true);
       expect(constraint?.definition).toContain("jsonb_typeof(provider_images) = 'object'::text");
+      const [gcFunction] = await sql<Array<{ definition: string }>>`
+        select pg_get_functiondef(
+          'opengeni_private.claim_sandbox_checkpoint_artifacts(uuid,integer,bigint)'::regprocedure
+        ) as definition`;
+      expect(gcFunction?.definition).toContain("rig_versions version");
+      expect(gcFunction?.definition).toContain("provider_image.value ->> 'artifactId'");
+      expect(gcFunction?.definition).toContain("rig_changes change");
+      expect(gcFunction?.definition).toContain("{providerImage,artifactId}");
     } finally {
       await sql.end();
       await blank.release();

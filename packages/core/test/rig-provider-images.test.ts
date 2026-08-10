@@ -43,6 +43,7 @@ function readyImage(definition: RigVersion = version): RigProviderImage {
     }),
     imageId: "im-rig-version-one",
     imageDigest: null,
+    artifactId: "55555555-5555-4555-8555-555555555555",
     providerBindingKeyHash: `sha256:${"4".repeat(64)}`,
     provenance: {
       kind: "rig_verification",

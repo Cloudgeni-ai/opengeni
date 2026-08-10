@@ -27,6 +27,8 @@ export type ProviderImmutableImageBuildResult = {
   imageDigest: string | null;
   /** Exact provider account/workspace binding. Persist only a hash publicly. */
   providerBindingKey: string | null;
+  /** Non-secret canonical binding retained only for durable provider artifact ownership. */
+  providerBinding: Record<string, unknown> | null;
 };
 
 export type ProviderImmutableImageBuildInput = {

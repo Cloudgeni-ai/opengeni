@@ -18,6 +18,10 @@ function sha256(value: string): string {
   return `sha256:${createHash("sha256").update(value, "utf8").digest("hex")}`;
 }
 
+export function rigProviderImageProviderBindingKeyHash(bindingKey: string): string {
+  return sha256(bindingKey);
+}
+
 export function rigProviderImageSetupHash(
   definition: Pick<RigProviderImageDefinition, "setupScript">,
 ): string {
