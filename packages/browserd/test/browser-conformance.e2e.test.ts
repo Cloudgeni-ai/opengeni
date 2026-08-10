@@ -210,6 +210,27 @@ e2e(
         source: "clear",
       });
 
+      page = await act(driver, page, {
+        type: "permission",
+        permission: "geolocation",
+        setting: "denied",
+      });
+      page = await act(driver, page, clickRole("button", "Check fixture location permission"));
+      page = await waitForName(driver, page, "Permission denied");
+      page = await act(driver, page, {
+        type: "permission",
+        permission: "geolocation",
+        setting: "prompt",
+      });
+      page = await act(driver, page, clickRole("button", "Check fixture location permission"));
+      page = await waitForName(driver, page, "Permission prompt");
+      page = await act(driver, page, {
+        type: "permission",
+        permission: "geolocation",
+        setting: "granted",
+      });
+      page = await act(driver, page, clickRole("button", "Check fixture location permission"));
+      page = await waitForName(driver, page, "Permission granted");
       page = await act(driver, page, clickRole("button", "Read fixture location"));
       page = await waitForName(driver, page, "59.9139,10.7522");
 

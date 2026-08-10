@@ -14,6 +14,8 @@ import type {
   BrowserIdentityMutationResponse,
   BrowserLocator,
   BrowserObservation,
+  BrowserPermission,
+  BrowserPermissionSetting,
   BrowserRevisionListResponse,
   BrowserSession,
   BrowserSessionMutationResponse,
@@ -542,6 +544,15 @@ export class CodemodeBrowserTab {
 
   async navigate(url: string, callOptions: CodemodeCallOptions = {}) {
     return await this.act({ type: "navigate", url }, {}, callOptions);
+  }
+
+  async setPermission(
+    permission: BrowserPermission,
+    setting: BrowserPermissionSetting,
+    fences: BrowserActionFences = {},
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<BrowserActionReceipt> {
+    return await this.act({ type: "permission", permission, setting }, fences, callOptions);
   }
 
   async requestHuman(

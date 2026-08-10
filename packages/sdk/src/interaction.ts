@@ -112,6 +112,7 @@ export type BrowserSessionCapabilities = {
   downloads: boolean;
   uploads: boolean;
   clipboard: boolean;
+  permissions: boolean;
   diagnostics: boolean;
   rawCdp: boolean;
   linkedComputer: boolean;
@@ -718,6 +719,20 @@ export type BrowserLocator =
   | { kind: "test_id"; value: string }
   | { kind: "css"; selector: string };
 
+export type BrowserPermission =
+  | "geolocation"
+  | "notifications"
+  | "camera"
+  | "microphone"
+  | "midi"
+  | "midi_sysex"
+  | "sensors"
+  | "idle_detection"
+  | "local_fonts"
+  | "window_management";
+
+export type BrowserPermissionSetting = "granted" | "denied" | "prompt";
+
 export type BrowserAction =
   | { type: "navigate"; url: string }
   | {
@@ -762,6 +777,11 @@ export type BrowserAction =
       text?: string | undefined;
       locator?: BrowserLocator | undefined;
       content?: "selection" | "value" | "text" | undefined;
+    }
+  | {
+      type: "permission";
+      permission: BrowserPermission;
+      setting: BrowserPermissionSetting;
     }
   | {
       type: "wait";

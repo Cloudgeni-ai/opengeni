@@ -131,6 +131,7 @@ function browserActionMode(action: BrowserActionRequest["action"]): string {
     return "keyboard";
   }
   if (actions.some((candidate) => candidate.type === "clipboard")) return "clipboard";
+  if (actions.some((candidate) => candidate.type === "permission")) return "permission";
   return "semantic";
 }
 

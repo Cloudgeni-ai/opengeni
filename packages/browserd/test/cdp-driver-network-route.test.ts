@@ -122,9 +122,11 @@ test("installs route emulation on about:blank before the first external navigati
     },
     close() {},
   };
+  const browserSessionId = randomUUID();
+  const controllerGeneration = "controller-1";
   const driver = new AgentBrowserDriver({
-    browserSessionId: randomUUID(),
-    controllerGeneration: "controller-1",
+    browserSessionId,
+    controllerGeneration,
     runner,
     connect: async () => connection,
     emulation: {
@@ -180,6 +182,29 @@ test("installs route emulation on about:blank before the first external navigati
     expect(
       cdpCalls.find((call) => call.method === "Emulation.setGeolocationOverride")?.params,
     ).toEqual({ latitude: 59.9139, longitude: 10.7522, accuracy: 25 });
+    await driver.dispatch({
+      protocolVersion: 1,
+      operationId: randomUUID(),
+      browserSessionId,
+      controllerGeneration,
+      targetId: observation.target.id,
+      expectedTargetGeneration: observation.target.targetGeneration,
+      expectedDocumentGeneration: observation.target.documentGeneration,
+      expectedFrameId: observation.frameId,
+      actor: { kind: "agent", subjectId: "agent:test" },
+      action: { type: "permission", permission: "notifications", setting: "denied" },
+    });
+    expect([...cdpCalls].reverse().find((call) => call.method === "Browser.setPermission")).toEqual(
+      {
+        method: "Browser.setPermission",
+        params: {
+          permission: { name: "notifications" },
+          setting: "denied",
+          origin: "https://route.example.test",
+        },
+        sessionId: undefined,
+      },
+    );
   } finally {
     await driver.close();
   }

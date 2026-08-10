@@ -148,6 +148,8 @@ function mainPage(crossOrigin: string): string {
           <button onclick="console.error('Conformance console error')">Log conformance error</button>
           <button onclick="fetch('/failed-request')">Request fixture failure</button>
           <button onclick="setTimeout(() => { throw new Error('Conformance page error') }, 0)">Throw page error</button>
+          <button onclick="navigator.permissions.query({name:'geolocation'}).then(result => permissionOutput.textContent = 'Permission ' + result.state)">Check fixture location permission</button>
+          <p id="permissionOutput"></p>
           <button onclick="navigator.geolocation.getCurrentPosition(position => geoOutput.textContent = position.coords.latitude + ',' + position.coords.longitude, error => geoOutput.textContent = 'geo-error:' + error.code)">Read fixture location</button>
           <p id="geoOutput"></p>
 

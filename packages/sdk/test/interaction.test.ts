@@ -98,6 +98,7 @@ function browserSession(overrides: Partial<BrowserSession> = {}): BrowserSession
       downloads: true,
       uploads: true,
       clipboard: false,
+      permissions: true,
       diagnostics: true,
       rawCdp: false,
       linkedComputer: false,

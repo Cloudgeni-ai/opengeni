@@ -521,7 +521,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "act"],
     title: "Act in browser tab",
     description:
-      "Perform one semantic-first browser action or bounded batch. Omit generation fences to use a fresh observation automatically; provide them to require exact previously observed state. Returns the durable receipt and changed observation.",
+      "Perform one semantic-first browser action or bounded batch, including setting a managed browser's web permission for this tab's exact current top-level origin. Omit generation fences to use a fresh observation automatically; provide them to require exact previously observed state. Returns the durable receipt and changed observation.",
     input: BrowserActInput,
     output: BrowserActionReceipt,
     readOnly: false,

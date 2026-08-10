@@ -64,6 +64,19 @@ const PROTECTED_AUTH_DIAGNOSTIC_QUIET_MS = 5_000;
 const MAX_FRAME_TREES = 512;
 const ACCESSIBILITY_FRAME_CONCURRENCY = 16;
 const ACCESSIBILITY_SNAPSHOT_ATTEMPTS = 3;
+type BrowserPermissionAction = Extract<BrowserAction, { type: "permission" }>;
+const CDP_PERMISSION_NAMES: Record<BrowserPermissionAction["permission"], string> = {
+  geolocation: "geolocation",
+  notifications: "notifications",
+  camera: "videoCapture",
+  microphone: "audioCapture",
+  midi: "midi",
+  midi_sysex: "midiSysex",
+  sensors: "sensors",
+  idle_detection: "idleDetection",
+  local_fonts: "localFonts",
+  window_management: "windowManagement",
+};
 const USER_AGENT_METADATA_EXPRESSION = `(async () => {
   const data = navigator.userAgentData;
   if (!data || typeof data.getHighEntropyValues !== "function") return null;
@@ -204,6 +217,7 @@ export type AgentBrowserDriverOptions = {
   connect?: (endpoint: string) => Promise<BrowserCdpConnection>;
   engine?: "chromium" | "chrome";
   emulation?: BrowserSessionEmulation;
+  permissionControl?: boolean;
 };
 
 export type BrowserSessionEmulation = {
@@ -256,6 +270,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly createId: () => string;
   private readonly engine: "chromium" | "chrome";
   private readonly emulation: BrowserSessionEmulation | null;
+  private readonly permissionControl: boolean;
   private userAgentMetadataPromise: Promise<BrowserUserAgentMetadata> | null = null;
   private readonly resolveWorkspaceFiles:
     | ((operationId: string, workspaceFileIds: readonly string[]) => Promise<readonly string[]>)
@@ -287,6 +302,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     this.createId = options.createId ?? randomUUID;
     this.engine = options.engine ?? "chromium";
     this.emulation = hasBrowserEmulation(options.emulation) ? options.emulation : null;
+    this.permissionControl = options.permissionControl ?? true;
     this.resolveWorkspaceFiles = options.resolveWorkspaceFiles;
     this.downloadDirectory = options.downloadDirectory
       ? resolvePath(options.downloadDirectory)
@@ -1910,6 +1926,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       case "clipboard":
         await this.dispatchClipboardAction(state, action);
         return;
+      case "permission":
+        await this.dispatchPermissionAction(state, action);
+        return;
       case "wait":
         await this.waitForCondition(state, action);
         return;
@@ -1947,6 +1966,38 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
     if (text) {
       await this.sendActionTarget(state, "Input.insertText", { text });
+    }
+  }
+
+  private async dispatchPermissionAction(
+    state: TargetState,
+    action: BrowserPermissionAction,
+  ): Promise<void> {
+    if (!this.permissionControl) {
+      throw new InteractionDefiniteDriverError(
+        "unsupported",
+        "this browser placement cannot set web permissions programmatically",
+      );
+    }
+    const origin = webOrigin(state.frame.url);
+    try {
+      await (
+        await this.ensureConnection()
+      ).send("Browser.setPermission", {
+        permission: { name: CDP_PERMISSION_NAMES[action.permission] },
+        setting: action.setting,
+        origin,
+      });
+    } catch (error) {
+      if (error instanceof CdpProtocolError) {
+        throw new InteractionDefiniteDriverError(
+          error.code === -32_601 ? "unsupported" : "invalid_action",
+          error.code === -32_601
+            ? "this browser engine does not support programmatic permission control"
+            : "the browser rejected this permission setting",
+        );
+      }
+      throw error;
     }
   }
 
@@ -3327,6 +3378,25 @@ function userAgentMetadataString(value: unknown): string {
 
 function normalizeLocale(value: string): string {
   return value.replaceAll("_", "-").toLocaleLowerCase();
+}
+
+function webOrigin(value: string): string {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new InteractionDefiniteDriverError(
+      "invalid_action",
+      "browser permission control requires an HTTP(S) top-level document",
+    );
+  }
+  if ((url.protocol !== "http:" && url.protocol !== "https:") || url.origin === "null") {
+    throw new InteractionDefiniteDriverError(
+      "invalid_action",
+      "browser permission control requires an HTTP(S) top-level document",
+    );
+  }
+  return url.origin;
 }
 
 function parseFrameTree(

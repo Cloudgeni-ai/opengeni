@@ -1139,6 +1139,7 @@ async function createBrowserDriver(
       runner: attached.runner,
       connect: async () => attached.connection,
       engine: "chrome",
+      permissionControl: false,
     });
   }
   const route = context.networkRoute;

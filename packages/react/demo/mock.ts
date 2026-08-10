@@ -3114,6 +3114,7 @@ function fabricateBrowserSession(
       downloads: true,
       uploads: true,
       clipboard: true,
+      permissions: true,
       diagnostics: true,
       rawCdp: false,
       linkedComputer: true,

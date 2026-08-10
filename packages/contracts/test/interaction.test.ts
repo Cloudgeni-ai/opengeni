@@ -427,6 +427,34 @@ describe("interaction contracts", () => {
     }
   });
 
+  test("bounds browser web-permission control to typed origin-fenced settings", () => {
+    const base = {
+      operationId,
+      targetId: "target-1",
+      expectedTargetGeneration: "target-4",
+      expectedDocumentGeneration: "document-9",
+      expectedFrameId: "frame-12",
+    };
+    expect(
+      BrowserActionRequest.parse({
+        ...base,
+        action: { type: "permission", permission: "geolocation", setting: "denied" },
+      }).action,
+    ).toEqual({ type: "permission", permission: "geolocation", setting: "denied" });
+    for (const action of [
+      { type: "permission", permission: "unknown", setting: "granted" },
+      { type: "permission", permission: "camera", setting: "reset" },
+      {
+        type: "permission",
+        permission: "notifications",
+        setting: "prompt",
+        origin: "https://unfenced.example",
+      },
+    ]) {
+      expect(BrowserActionRequest.safeParse({ ...base, action }).success).toBe(false);
+    }
+  });
+
   test("bounds browser workspace-file staging and aggregate upload batches", () => {
     const fileId = randomUUID();
     const authority = {

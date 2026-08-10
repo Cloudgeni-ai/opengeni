@@ -35,6 +35,9 @@ describe("OpenGeni Codemode interaction facade", () => {
     const receipt = await tab
       .getByRole("button", { name: "Save" })
       .click({ button: "left" }, { operationId: "33333333-3333-4333-8333-333333333333" });
+    await tab.setPermission("geolocation", "denied", {
+      expectedDocumentGeneration: "document-1",
+    });
 
     expect(browser.id).toBe(browserSessionId);
     expect(tab.id).toBe("tab-1");
@@ -62,6 +65,20 @@ describe("OpenGeni Codemode interaction facade", () => {
           },
         },
         options: { operationId: "33333333-3333-4333-8333-333333333333" },
+      },
+      {
+        path: "interaction.browser.act",
+        args: {
+          browserSessionId,
+          targetId: "tab-1",
+          expectedDocumentGeneration: "document-1",
+          action: {
+            type: "permission",
+            permission: "geolocation",
+            setting: "denied",
+          },
+        },
+        options: {},
       },
     ]);
   });
