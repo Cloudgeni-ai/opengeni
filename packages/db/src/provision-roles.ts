@@ -615,6 +615,18 @@ BEGIN
     END IF;
     IF to_regprocedure(
       format(
+        '%I.company_profile_apply_activation(uuid,text,uuid,uuid,uuid,uuid,bigint,text,text,text,text)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.company_profile_apply_activation(uuid, text, uuid, uuid, uuid, uuid, bigint, text, text, text, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
         '%I.company_profile_get_or_create_snapshot(uuid,uuid,uuid,uuid,uuid,integer)',
         ${literal(schema)}
       )

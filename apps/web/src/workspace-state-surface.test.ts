@@ -86,6 +86,8 @@ describe("Agent Brain authority surface", () => {
     expect(loader).toContain("getPreferenceRegistry");
     expect(loader).toContain("listCompanyProfile");
     expect(route).toContain("CompanyProfileInventory");
+    expect(route).toContain("inventory.response?.activeRevision");
+    expect(route).not.toContain("inventory.response.revisions.find");
     for (const required of [
       "Organization company profile",
       "Concise mandatory context shared across the organization",

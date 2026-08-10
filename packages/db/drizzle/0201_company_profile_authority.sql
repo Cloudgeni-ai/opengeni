@@ -257,6 +257,48 @@ CREATE TRIGGER company_profile_heads_validate
   BEFORE INSERT OR UPDATE ON "company_profile_heads"
   FOR EACH ROW EXECUTE FUNCTION company_profile_validate_head();
 
+CREATE OR REPLACE FUNCTION company_profile_guard_head_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  lifecycle_account_id text;
+BEGIN
+  IF TG_OP = 'DELETE'
+    AND pg_trigger_depth() > 1
+    AND NOT EXISTS (
+      SELECT 1 FROM managed_accounts account WHERE account.id = OLD.account_id
+    )
+  THEN
+    RETURN OLD;
+  END IF;
+  lifecycle_account_id := current_setting(
+    'opengeni.company_profile_lifecycle_account_id',
+    true
+  );
+  IF lifecycle_account_id IS DISTINCT FROM coalesce(NEW.account_id, OLD.account_id)::text THEN
+    RAISE EXCEPTION 'company-profile heads change only through the lifecycle function'
+      USING ERRCODE = '55000';
+  END IF;
+  IF TG_OP = 'UPDATE' THEN
+    IF NEW.account_id IS DISTINCT FROM OLD.account_id
+      OR NEW.activation_version IS DISTINCT FROM OLD.activation_version + 1
+    THEN
+      RAISE EXCEPTION 'invalid company-profile head transition'
+        USING ERRCODE = '23514';
+    END IF;
+  END IF;
+  IF TG_OP = 'DELETE' THEN
+    RETURN OLD;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER company_profile_heads_lifecycle_only
+  BEFORE INSERT OR UPDATE OR DELETE ON "company_profile_heads"
+  FOR EACH ROW EXECUTE FUNCTION company_profile_guard_head_mutation();
+
 CREATE OR REPLACE FUNCTION company_profile_validate_event()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -463,6 +505,190 @@ CREATE POLICY workspace_isolation ON "company_profile_snapshots"
   USING (opengeni_private.workspace_rls_visible("account_id", "workspace_id"))
   WITH CHECK (opengeni_private.workspace_rls_visible("account_id", "workspace_id"));
 
+DO $activation_function$
+DECLARE target_schema text := current_schema();
+BEGIN
+  EXECUTE format($ddl$
+    CREATE OR REPLACE FUNCTION %I.company_profile_apply_activation(
+      p_operation_id uuid,
+      p_request_fingerprint text,
+      p_account_id uuid,
+      p_workspace_id uuid,
+      p_target_revision_id uuid,
+      p_expected_current_revision_id uuid,
+      p_expected_activation_version bigint,
+      p_type text,
+      p_actor_subject_id text,
+      p_principal_kind text,
+      p_reason text
+    ) RETURNS TABLE (event_id uuid)
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = %I, pg_catalog
+    AS $body$
+    DECLARE
+      target_revision company_profile_revisions%%ROWTYPE;
+      current_head company_profile_heads%%ROWTYPE;
+      existing_event company_profile_activation_events%%ROWTYPE;
+      revision_operation company_profile_revisions%%ROWTYPE;
+      next_activation_version bigint;
+      event_created_at timestamptz;
+      context_account_id uuid;
+      context_workspace_id uuid;
+      context_subject_id text;
+      context_principal_kind text;
+    BEGIN
+      context_account_id := NULLIF(current_setting('opengeni.account_id', true), '')::uuid;
+      context_workspace_id := NULLIF(current_setting('opengeni.workspace_id', true), '')::uuid;
+      context_subject_id := NULLIF(current_setting('opengeni.subject_id', true), '');
+      context_principal_kind := NULLIF(current_setting('opengeni.principal_kind', true), '');
+      IF context_account_id IS DISTINCT FROM p_account_id
+        OR context_workspace_id IS DISTINCT FROM p_workspace_id
+        OR context_subject_id IS DISTINCT FROM p_actor_subject_id
+        OR context_principal_kind IS DISTINCT FROM p_principal_kind
+        OR p_principal_kind NOT IN ('human_session', 'agent_attempt', 'service')
+      THEN
+        RAISE EXCEPTION 'company-profile activation requires exact tenant and actor authority'
+          USING ERRCODE = '42501';
+      END IF;
+      IF p_request_fingerprint !~ '^[0-9a-f]{64}$'
+        OR p_expected_activation_version < 0
+        OR p_type NOT IN ('activate', 'rollback')
+        OR (p_target_revision_id IS NULL AND p_type <> 'rollback')
+        OR length(btrim(p_actor_subject_id)) NOT BETWEEN 1 AND 1024
+        OR length(btrim(p_reason)) NOT BETWEEN 1 AND 4096
+      THEN
+        RAISE EXCEPTION 'company-profile activation input is invalid'
+          USING ERRCODE = '22023';
+      END IF;
+
+      PERFORM 1
+      FROM managed_accounts account
+      JOIN workspaces workspace ON workspace.account_id = account.id
+      WHERE account.id = p_account_id AND workspace.id = p_workspace_id
+      FOR UPDATE OF account;
+      IF NOT FOUND THEN
+        RAISE EXCEPTION 'organization workspace was not found' USING ERRCODE = '42501';
+      END IF;
+
+      SELECT * INTO existing_event
+      FROM company_profile_activation_events event
+      WHERE event.account_id = p_account_id
+        AND event.operation_id = p_operation_id;
+      IF FOUND THEN
+        IF existing_event.request_fingerprint IS DISTINCT FROM p_request_fingerprint THEN
+          RAISE EXCEPTION 'company-profile operation id was reused'
+            USING ERRCODE = 'P1851';
+        END IF;
+        event_id := existing_event.id;
+        RETURN NEXT;
+        RETURN;
+      END IF;
+
+      SELECT * INTO revision_operation
+      FROM company_profile_revisions revision
+      WHERE revision.account_id = p_account_id
+        AND revision.operation_id = p_operation_id;
+      IF FOUND AND (
+        revision_operation.request_fingerprint IS DISTINCT FROM p_request_fingerprint
+        OR revision_operation.id IS DISTINCT FROM p_target_revision_id
+      ) THEN
+        RAISE EXCEPTION 'company-profile operation id was reused'
+          USING ERRCODE = 'P1851';
+      END IF;
+
+      IF p_target_revision_id IS NOT NULL THEN
+        SELECT * INTO target_revision
+        FROM company_profile_revisions revision
+        WHERE revision.id = p_target_revision_id
+          AND revision.account_id = p_account_id;
+        IF NOT FOUND THEN
+          RAISE EXCEPTION 'company-profile revision was not found' USING ERRCODE = '23503';
+        END IF;
+      END IF;
+
+      SELECT * INTO current_head
+      FROM company_profile_heads head
+      WHERE head.account_id = p_account_id
+      FOR UPDATE;
+      IF coalesce(current_head.activation_version, 0) IS DISTINCT FROM p_expected_activation_version
+        OR current_head.revision_id IS DISTINCT FROM p_expected_current_revision_id
+      THEN
+        RAISE EXCEPTION 'company-profile active revision changed'
+          USING ERRCODE = '40001';
+      END IF;
+      IF current_head.revision_id IS NOT NULL
+        AND current_head.revision_id IS NOT DISTINCT FROM p_target_revision_id
+      THEN
+        RAISE EXCEPTION 'company-profile revision is already active'
+          USING ERRCODE = '23514';
+      END IF;
+      IF current_head.revision_id IS NULL AND p_target_revision_id IS NULL THEN
+        RAISE EXCEPTION 'company-profile is already inactive'
+          USING ERRCODE = '23514';
+      END IF;
+      IF p_type = 'rollback' AND p_target_revision_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1
+        FROM company_profile_activation_events event
+        WHERE event.account_id = p_account_id
+          AND event.new_revision_id = p_target_revision_id
+      ) THEN
+        RAISE EXCEPTION 'company-profile rollback target was not previously active'
+          USING ERRCODE = '23514';
+      END IF;
+
+      event_created_at := clock_timestamp();
+      next_activation_version := coalesce(current_head.activation_version, 0) + 1;
+      PERFORM set_config(
+        'opengeni.company_profile_lifecycle_account_id',
+        p_account_id::text,
+        true
+      );
+      IF p_target_revision_id IS NULL THEN
+        DELETE FROM company_profile_heads WHERE account_id = p_account_id;
+      ELSIF current_head.account_id IS NULL THEN
+        INSERT INTO company_profile_heads (
+          account_id, revision_id, revision, content_hash, activation_version, activated_at
+        ) VALUES (
+          p_account_id, target_revision.id, target_revision.revision,
+          target_revision.content_hash, next_activation_version, event_created_at
+        );
+      ELSE
+        UPDATE company_profile_heads
+        SET revision_id = target_revision.id,
+          revision = target_revision.revision,
+          content_hash = target_revision.content_hash,
+          activation_version = next_activation_version,
+          activated_at = event_created_at
+        WHERE account_id = p_account_id;
+      END IF;
+      PERFORM set_config('opengeni.company_profile_lifecycle_account_id', '', true);
+
+      INSERT INTO company_profile_activation_events (
+        operation_id, request_fingerprint, account_id, type, activation_version,
+        old_revision_id, old_revision, old_content_hash,
+        new_revision_id, new_revision, new_content_hash,
+        actor_subject_id, reason, created_at
+      ) VALUES (
+        p_operation_id, p_request_fingerprint, p_account_id, p_type, next_activation_version,
+        current_head.revision_id, current_head.revision, current_head.content_hash,
+        target_revision.id, target_revision.revision, target_revision.content_hash,
+        p_actor_subject_id, p_reason, event_created_at
+      ) RETURNING id INTO event_id;
+      RETURN NEXT;
+    END
+    $body$
+  $ddl$, target_schema, target_schema);
+  EXECUTE format(
+    'REVOKE ALL ON FUNCTION %I.company_profile_apply_activation(uuid,text,uuid,uuid,uuid,uuid,bigint,text,text,text,text) FROM PUBLIC',
+    target_schema
+  );
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
+    EXECUTE format(
+      'GRANT EXECUTE ON FUNCTION %I.company_profile_apply_activation(uuid, text, uuid, uuid, uuid, uuid, bigint, text, text, text, text) TO opengeni_app',
+      target_schema
+    );
+  END IF;
+END $activation_function$;
+
 DO $snapshot_function$
 DECLARE target_schema text := current_schema();
 BEGIN
@@ -615,8 +841,8 @@ DO $runtime_grants$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
     GRANT SELECT, INSERT ON TABLE company_profile_revisions TO opengeni_app;
-    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE company_profile_heads TO opengeni_app;
-    GRANT SELECT, INSERT ON TABLE company_profile_activation_events TO opengeni_app;
+    GRANT SELECT ON TABLE company_profile_heads TO opengeni_app;
+    GRANT SELECT ON TABLE company_profile_activation_events TO opengeni_app;
     GRANT SELECT ON TABLE company_profile_snapshots TO opengeni_app;
     GRANT USAGE, SELECT ON SEQUENCE company_profile_revision_seq TO opengeni_app;
   END IF;

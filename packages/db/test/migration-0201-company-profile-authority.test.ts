@@ -9,14 +9,17 @@ import {
   CompanyProfileConflictError,
   createDb,
   createSession,
+  dbSql,
   FORCE_RLS_TABLES,
   getOrCreateCompanyProfileSnapshot,
   listCompanyProfile,
+  nestedPostgresSqlState,
   RUNTIME_FULL_DML_TABLES,
   RUNTIME_READ_INSERT_TABLES,
   RUNTIME_READ_ONLY_TABLES,
   rollbackCompanyProfileLearning,
   updateCompanyProfile,
+  withRlsContext,
   writeCompanyProfileLearning,
   type DbClient,
 } from "../src";
@@ -28,9 +31,15 @@ const migrationPath = join(
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
+const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("migration-0201-company-profile");
+  if (!shared && requireRealDatabase) {
+    throw new Error(
+      "[migration-0201-company-profile] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
+    );
+  }
   if (!shared) return;
   client = createDb(shared.appUrl, { max: 4 });
 }, 180_000);
@@ -106,10 +115,16 @@ describe("migration 0201 company-profile authority", () => {
     ] as const) {
       expect(FORCE_RLS_TABLES).toContain(table);
     }
-    expect(RUNTIME_FULL_DML_TABLES).toContain("company_profile_heads");
-    expect(RUNTIME_READ_INSERT_TABLES).toContain("company_profile_activation_events");
+    expect(RUNTIME_FULL_DML_TABLES).not.toContain("company_profile_heads");
+    expect(RUNTIME_READ_ONLY_TABLES).toContain("company_profile_heads");
+    expect(RUNTIME_READ_ONLY_TABLES).toContain("company_profile_activation_events");
     expect(RUNTIME_READ_INSERT_TABLES).toContain("company_profile_revisions");
     expect(RUNTIME_READ_ONLY_TABLES).toContain("company_profile_snapshots");
+    expect(migration).toContain("company_profile_heads_lifecycle_only");
+    expect(migration).toContain("company_profile_apply_activation");
+    expect(migration).not.toContain(
+      "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE company_profile_heads TO opengeni_app",
+    );
   });
 
   test("isolates organizations, converges learning writes, freezes accepted turns, and rolls back", async () => {
@@ -160,27 +175,41 @@ describe("migration 0201 company-profile authority", () => {
       expectedCurrentRevisionId: null,
       expectedActivationVersion: 0,
       actorSubjectId: first.subjectId,
+      principalKind: "human_session",
       reason: "Initial organization profile",
     });
     expect(initial.head?.revisionId).toBe(initial.revision?.id);
-    expect(
-      (
-        await listCompanyProfile(client.db, {
-          accountId: second.accountId,
-          workspaceId: second.workspaceId,
-          limit: 50,
-        })
-      ).current?.revisionId,
-    ).toBe(initial.revision?.id);
-    expect(
-      (
-        await listCompanyProfile(client.db, {
-          accountId: foreign.accountId,
-          workspaceId: foreign.workspaceId,
-          limit: 50,
-        })
-      ).current,
-    ).toBeNull();
+    const sharedInventory = await listCompanyProfile(client.db, {
+      accountId: second.accountId,
+      workspaceId: second.workspaceId,
+      limit: 50,
+    });
+    expect(sharedInventory.current?.revisionId).toBe(initial.revision?.id);
+    expect(sharedInventory.activeRevision?.id).toBe(initial.revision?.id);
+    const foreignInventory = await listCompanyProfile(client.db, {
+      accountId: foreign.accountId,
+      workspaceId: foreign.workspaceId,
+      limit: 50,
+    });
+    expect(foreignInventory.current).toBeNull();
+    expect(foreignInventory.activeRevision).toBeNull();
+
+    let directHeadDmlFailure: unknown;
+    try {
+      await withRlsContext(
+        client.db,
+        { accountId: first.accountId, workspaceId: first.workspaceId },
+        async (scopedDb) =>
+          await scopedDb.execute(dbSql`
+            update company_profile_heads
+            set activated_at = activated_at
+            where account_id = ${first.accountId}::uuid
+          `),
+      );
+    } catch (error) {
+      directHeadDmlFailure = error;
+    }
+    expect(nestedPostgresSqlState(directHeadDmlFailure)).toBe("42501");
 
     await expect(
       updateCompanyProfile(client.db, {
@@ -190,6 +219,7 @@ describe("migration 0201 company-profile authority", () => {
         expectedCurrentRevisionId: null,
         expectedActivationVersion: 0,
         actorSubjectId: first.subjectId,
+        principalKind: "human_session",
         reason: "Stale update",
       }),
     ).rejects.toBeInstanceOf(CompanyProfileConflictError);
@@ -200,6 +230,7 @@ describe("migration 0201 company-profile authority", () => {
       accountId: first.accountId,
       workspaceId: first.workspaceId,
       actorSubjectId: "agent:profile",
+      actorKind: "agent",
       authority: "proposal",
       subject: {
         kind: "company_goal",
@@ -216,6 +247,7 @@ describe("migration 0201 company-profile authority", () => {
         accountId: first.accountId,
         workspaceId: first.workspaceId,
         actorSubjectId: "agent:profile",
+        actorKind: "agent",
         authority: "proposal",
         subject: {
           kind: "company_goal",
@@ -233,9 +265,37 @@ describe("migration 0201 company-profile authority", () => {
       expectedCurrentRevisionId: initial.revision!.id,
       expectedActivationVersion: initial.head!.activationVersion,
       actorSubjectId: first.subjectId,
+      principalKind: "human_session",
       reason: "Approve routed company goal",
     });
     expect(activatedProposal.head?.revisionId).toBe(proposal.revision.id);
+
+    for (let index = 0; index < 51; index += 1) {
+      const operationId = crypto.randomUUID();
+      await writeCompanyProfileLearning(client.db, {
+        operationId,
+        accountId: first.accountId,
+        workspaceId: first.workspaceId,
+        actorSubjectId: "agent:profile",
+        actorKind: "agent",
+        authority: "proposal",
+        subject: {
+          kind: "company_goal",
+          content: `Bounded newer proposal ${index}`,
+          stableKey: `newer-${index}`,
+        },
+        sourceId: `durable-learning-attempt:${operationId}`,
+      });
+    }
+    const boundedInventory = await listCompanyProfile(client.db, {
+      accountId: first.accountId,
+      workspaceId: first.workspaceId,
+      limit: 50,
+    });
+    expect(boundedInventory.revisions).toHaveLength(50);
+    expect(boundedInventory.revisions.some(({ id }) => id === proposal.revision.id)).toBe(false);
+    expect(boundedInventory.current?.revisionId).toBe(proposal.revision.id);
+    expect(boundedInventory.activeRevision?.id).toBe(proposal.revision.id);
 
     const session = await createSession(client.db, {
       accountId: first.accountId,
@@ -255,6 +315,7 @@ describe("migration 0201 company-profile authority", () => {
       accountId: first.accountId,
       workspaceId: first.workspaceId,
       actorSubjectId: "agent:profile",
+      actorKind: "agent",
       authority: "active",
       subject: {
         kind: "company_constraint",
@@ -282,10 +343,56 @@ describe("migration 0201 company-profile authority", () => {
       accountId: first.accountId,
       workspaceId: first.workspaceId,
       actorSubjectId: "agent:profile",
+      actorKind: "agent",
       token: activeWrite.rollbackToken!,
       reason: "Undo routed constraint",
     });
     expect(rolledBack.head?.revisionId).toBe(proposal.revision.id);
+
+    const absenceWriteOperationId = crypto.randomUUID();
+    const absenceWrite = await writeCompanyProfileLearning(client.db, {
+      operationId: absenceWriteOperationId,
+      accountId: foreign.accountId,
+      workspaceId: foreign.workspaceId,
+      actorSubjectId: "agent:profile",
+      actorKind: "agent",
+      authority: "active",
+      subject: {
+        kind: "company_identity",
+        content: "Temporary routed identity",
+        stableKey: null,
+      },
+      sourceId: `durable-learning-attempt:${absenceWriteOperationId}`,
+    });
+    const absenceRollbackOperationId = crypto.randomUUID();
+    const absenceRollbackInput = {
+      operationId: absenceRollbackOperationId,
+      accountId: foreign.accountId,
+      workspaceId: foreign.workspaceId,
+      actorSubjectId: "agent:profile",
+      actorKind: "agent" as const,
+      token: absenceWrite.rollbackToken!,
+      reason: "Simulate router receipt crash after authority commit",
+    };
+    const absenceRollback = await rollbackCompanyProfileLearning(client.db, absenceRollbackInput);
+    const absenceRollbackReplay = await rollbackCompanyProfileLearning(
+      client.db,
+      absenceRollbackInput,
+    );
+    expect(absenceRollback.head).toBeNull();
+    expect(absenceRollbackReplay).toEqual(absenceRollback);
+
+    let directOwnerHeadFailure: unknown;
+    try {
+      await shared.admin`
+        update company_profile_heads
+        set activated_at = activated_at
+        where account_id = ${first.accountId}
+      `;
+    } catch (error) {
+      directOwnerHeadFailure = error;
+    }
+    expect(nestedPostgresSqlState(directOwnerHeadFailure)).toBe("55000");
 
     let immutableFailure: unknown;
     try {
@@ -297,6 +404,6 @@ describe("migration 0201 company-profile authority", () => {
     } catch (error) {
       immutableFailure = error;
     }
-    expect(immutableFailure).toMatchObject({ code: "55000" });
+    expect(nestedPostgresSqlState(immutableFailure)).toBe("55000");
   });
 });

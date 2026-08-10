@@ -50,6 +50,7 @@ describe("company-profile contracts", () => {
       accountId: "00000000-0000-4000-8000-000000000002",
       workspaceId: "00000000-0000-4000-8000-000000000003",
       actorSubjectId: "agent:session",
+      actorKind: "agent" as const,
       authority: "proposal" as const,
       sourceId: "durable-learning-attempt:00000000-0000-4000-8000-000000000001",
     };

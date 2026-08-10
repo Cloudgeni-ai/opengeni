@@ -260,11 +260,7 @@ export function CompanyProfileInventory({ workspaceId }: { workspaceId: string }
     workspaceGrant?.accountId &&
     hasAccountPermission(context.accessContext, workspaceGrant.accountId, "account:admin"),
   );
-  const currentRevision = inventory.response?.current
-    ? (inventory.response.revisions.find(
-        (revision) => revision.id === inventory.response?.current?.revisionId,
-      ) ?? null)
-    : null;
+  const currentRevision = inventory.response?.activeRevision ?? null;
   const [identity, setIdentity] = useState("");
   const [mission, setMission] = useState("");
   const [products, setProducts] = useState("");

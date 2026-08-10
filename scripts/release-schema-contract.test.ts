@@ -218,7 +218,7 @@ describe("release schema contract", () => {
         (migrations.has("0201_company_profile_authority.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "625e9401217b2a7f041888f5fda0f8883f2fc699f57d58c71224cab139253d0b",
+      "3395d7dc3212287deb9b73d4e2f1f5b8c6d250095d3b257463d5d22da2cf26b4",
     );
     expect(contract.latestMigration).toBe("0201_company_profile_authority.sql");
     expect(migrations.get("0065_enrollment_credential_generation.sql")).toMatchObject({
@@ -294,7 +294,7 @@ describe("release schema contract", () => {
       deploymentMode: "rolling",
     });
     expect(migrations.get("0201_company_profile_authority.sql")).toMatchObject({
-      sha256: "a61e7a0abeef2b552fbc42fc73d3bfbe1835b3f143bd45db151c9fb17b881e39",
+      sha256: "780eb3550bbe5a6811cde7f8cfd69cf8f98e3181e03d1700f325961e71b1b272",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0180_retained_screenshot_lifecycle_fences.sql")).toMatchObject({

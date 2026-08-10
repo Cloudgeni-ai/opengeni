@@ -12,6 +12,7 @@ import {
   type CompanyProfileLearningSubjectKind,
   type CompanyProfileListResponse,
   type CompanyProfileMutationResponse,
+  type CompanyProfilePrincipalKind,
   type CompanyProfileProvenanceSource,
   type CompanyProfileRevision,
   type CompanyProfileRevisionIntent,
@@ -19,7 +20,7 @@ import {
 } from "@opengeni/contracts";
 import { and, desc, eq, lt, sql } from "drizzle-orm";
 import type { Database } from "./database";
-import { withRlsContext, withWorkspaceRls } from "./database";
+import { rawRows, withRlsContext, withWorkspaceRls } from "./database";
 import { nestedPostgresSqlState } from "./persistence-errors";
 import * as schema from "./schema";
 
@@ -98,6 +99,14 @@ function operationFingerprint(operation: string, fields: unknown): string {
   return sha256(JSON.stringify(["company_profile_operation", 1, operation, fields]));
 }
 
+function principalKindForActor(
+  actorKind: "human" | "agent" | "service",
+): CompanyProfilePrincipalKind {
+  if (actorKind === "human") return "human_session";
+  if (actorKind === "agent") return "agent_attempt";
+  return "service";
+}
+
 function revisionFromRow(row: RevisionRow): CompanyProfileRevision {
   return {
     id: row.id,
@@ -172,7 +181,6 @@ async function getHeadInTransaction(db: Database, accountId: string): Promise<He
     .select()
     .from(schema.companyProfileHeads)
     .where(eq(schema.companyProfileHeads.accountId, accountId))
-    .for("update")
     .limit(1);
   return head ?? null;
 }
@@ -286,85 +294,52 @@ async function activateRevisionInTransaction(
     operationId: string;
     requestFingerprint: string;
     accountId: string;
+    workspaceId: string;
     target: RevisionRow | null;
-    current: HeadRow | null;
+    expectedCurrentRevisionId: string | null;
+    expectedActivationVersion: number;
     actorSubjectId: string;
+    principalKind: CompanyProfilePrincipalKind;
     reason: string;
     type: CompanyProfileActivationType;
   },
 ): Promise<{ head: HeadRow | null; event: EventRow }> {
-  const existing = await getEventByOperation(db, input.accountId, input.operationId);
-  if (existing) {
-    if (existing.requestFingerprint !== input.requestFingerprint) {
-      throw new CompanyProfileOperationReuseError();
-    }
-    const replayHead = existing.newRevisionId
-      ? ({
-          accountId: existing.accountId,
-          revisionId: existing.newRevisionId,
-          revision: existing.newRevision!,
-          contentHash: existing.newContentHash!,
-          activationVersion: existing.activationVersion,
-          activatedAt: existing.createdAt,
-        } satisfies HeadRow)
-      : null;
-    return { head: replayHead, event: existing };
-  }
-  const activationVersion = (input.current?.activationVersion ?? 0) + 1;
-  const createdAt = new Date();
+  await db.execute(sql`select set_config('opengeni.subject_id', ${input.actorSubjectId}, true)`);
+  await db.execute(sql`select set_config('opengeni.principal_kind', ${input.principalKind}, true)`);
+  const [receipt] = await rawRows<{ eventId: string }>(
+    db,
+    sql`select event_id as "eventId"
+        from company_profile_apply_activation(
+          ${input.operationId}::uuid,
+          ${input.requestFingerprint},
+          ${input.accountId}::uuid,
+          ${input.workspaceId}::uuid,
+          ${input.target?.id ?? null}::uuid,
+          ${input.expectedCurrentRevisionId}::uuid,
+          ${input.expectedActivationVersion}::bigint,
+          ${input.type},
+          ${input.actorSubjectId},
+          ${input.principalKind},
+          ${input.reason}
+        )`,
+  );
+  if (!receipt) throw new Error("Company-profile activation returned no lifecycle receipt");
   const [event] = await db
-    .insert(schema.companyProfileActivationEvents)
-    .values({
-      operationId: input.operationId,
-      requestFingerprint: input.requestFingerprint,
-      accountId: input.accountId,
-      type: input.type,
-      activationVersion,
-      oldRevisionId: input.current?.revisionId ?? null,
-      oldRevision: input.current?.revision ?? null,
-      oldContentHash: input.current?.contentHash ?? null,
-      newRevisionId: input.target?.id ?? null,
-      newRevision: input.target?.revision ?? null,
-      newContentHash: input.target?.contentHash ?? null,
-      actorSubjectId: input.actorSubjectId,
-      reason: input.reason,
-      createdAt,
-    })
-    .returning();
+    .select()
+    .from(schema.companyProfileActivationEvents)
+    .where(eq(schema.companyProfileActivationEvents.id, receipt.eventId))
+    .limit(1);
   if (!event) throw new Error("Company-profile activation event was not recorded");
-
-  if (input.target === null) {
-    if (input.current) {
-      await db
-        .delete(schema.companyProfileHeads)
-        .where(eq(schema.companyProfileHeads.accountId, input.accountId));
-    }
-    return { head: null, event };
-  }
-  const [head] = input.current
-    ? await db
-        .update(schema.companyProfileHeads)
-        .set({
-          revisionId: input.target.id,
-          revision: input.target.revision,
-          contentHash: input.target.contentHash,
-          activationVersion,
-          activatedAt: createdAt,
-        })
-        .where(eq(schema.companyProfileHeads.accountId, input.accountId))
-        .returning()
-    : await db
-        .insert(schema.companyProfileHeads)
-        .values({
-          accountId: input.accountId,
-          revisionId: input.target.id,
-          revision: input.target.revision,
-          contentHash: input.target.contentHash,
-          activationVersion,
-          activatedAt: createdAt,
-        })
-        .returning();
-  if (!head) throw new Error("Company-profile active head was not recorded");
+  const head = event.newRevisionId
+    ? ({
+        accountId: event.accountId,
+        revisionId: event.newRevisionId,
+        revision: event.newRevision!,
+        contentHash: event.newContentHash!,
+        activationVersion: event.activationVersion,
+        activatedAt: event.createdAt,
+      } satisfies HeadRow)
+    : null;
   return { head, event };
 }
 
@@ -389,6 +364,7 @@ export async function updateCompanyProfile(
     expectedCurrentRevisionId: string | null;
     expectedActivationVersion: number;
     actorSubjectId: string;
+    principalKind: CompanyProfilePrincipalKind;
     reason: string;
   },
 ): Promise<CompanyProfileMutationResponse> {
@@ -421,9 +397,12 @@ export async function updateCompanyProfile(
             operationId,
             requestFingerprint,
             accountId: input.accountId,
+            workspaceId: input.workspaceId,
             target: existingRevision,
-            current: null,
+            expectedCurrentRevisionId: input.expectedCurrentRevisionId,
+            expectedActivationVersion: input.expectedActivationVersion,
             actorSubjectId: input.actorSubjectId,
+            principalKind: input.principalKind,
             reason: input.reason,
             type: "activate",
           }),
@@ -451,9 +430,12 @@ export async function updateCompanyProfile(
         operationId,
         requestFingerprint,
         accountId: input.accountId,
+        workspaceId: input.workspaceId,
         target: revision,
-        current,
+        expectedCurrentRevisionId: input.expectedCurrentRevisionId,
+        expectedActivationVersion: input.expectedActivationVersion,
         actorSubjectId: input.actorSubjectId,
+        principalKind: input.principalKind,
         reason: input.reason,
         type: "activate",
       });
@@ -472,16 +454,21 @@ async function changeActiveRevision(
     expectedCurrentRevisionId: string | null;
     expectedActivationVersion: number;
     actorSubjectId: string;
+    principalKind: CompanyProfilePrincipalKind;
     reason: string;
     type: CompanyProfileActivationType;
     requirePreviouslyActive: boolean;
+    requestFingerprintOverride?: string;
   },
 ): Promise<CompanyProfileMutationResponse> {
   const operationId = input.operationId ?? randomUUID();
-  const requestFingerprint = operationFingerprint(`change_active:${input.type}`, {
-    ...input,
-    operationId: undefined,
-  });
+  const requestFingerprint =
+    input.requestFingerprintOverride ??
+    operationFingerprint(`change_active:${input.type}`, {
+      ...input,
+      operationId: undefined,
+      requestFingerprintOverride: undefined,
+    });
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -507,9 +494,12 @@ async function changeActiveRevision(
             operationId,
             requestFingerprint,
             accountId: input.accountId,
+            workspaceId: input.workspaceId,
             target,
-            current: null,
+            expectedCurrentRevisionId: input.expectedCurrentRevisionId,
+            expectedActivationVersion: input.expectedActivationVersion,
             actorSubjectId: input.actorSubjectId,
+            principalKind: input.principalKind,
             reason: input.reason,
             type: input.type,
           }),
@@ -552,9 +542,12 @@ async function changeActiveRevision(
         operationId,
         requestFingerprint,
         accountId: input.accountId,
+        workspaceId: input.workspaceId,
         target,
-        current,
+        expectedCurrentRevisionId: input.expectedCurrentRevisionId,
+        expectedActivationVersion: input.expectedActivationVersion,
         actorSubjectId: input.actorSubjectId,
+        principalKind: input.principalKind,
         reason: input.reason,
         type: input.type,
       });
@@ -573,6 +566,7 @@ export async function activateCompanyProfileRevision(
     expectedCurrentRevisionId: string | null;
     expectedActivationVersion: number;
     actorSubjectId: string;
+    principalKind: CompanyProfilePrincipalKind;
     reason: string;
   },
 ) {
@@ -594,6 +588,7 @@ export async function rollbackCompanyProfileRevision(
     expectedCurrentRevisionId: string;
     expectedActivationVersion: number;
     actorSubjectId: string;
+    principalKind: CompanyProfilePrincipalKind;
     reason: string;
   },
 ) {
@@ -732,9 +727,12 @@ export async function writeCompanyProfileLearning(
         operationId: input.operationId,
         requestFingerprint,
         accountId: input.accountId,
+        workspaceId: input.workspaceId,
         target: revision,
-        current,
+        expectedCurrentRevisionId: current?.revisionId ?? null,
+        expectedActivationVersion: current?.activationVersion ?? 0,
         actorSubjectId: input.actorSubjectId,
+        principalKind: principalKindForActor(input.actorKind),
         reason: `Durable learning attempt ${input.operationId}`,
         type: "activate",
       });
@@ -756,6 +754,7 @@ export async function rollbackCompanyProfileLearning(
     accountId: string;
     workspaceId: string;
     actorSubjectId: string;
+    actorKind: "human" | "agent" | "service";
     token: string;
     reason: string;
   },
@@ -765,6 +764,7 @@ export async function rollbackCompanyProfileLearning(
     throw new CompanyProfileInvalidOperationError("Invalid company-profile rollback token");
   const priorRevisionId = match[1] === "none" ? null : match[1]!;
   const appliedRevisionId = match[2]!;
+  const requestFingerprint = operationFingerprint("durable_learning_rollback", input);
   return await changeActiveRevision(db, {
     operationId: input.operationId,
     accountId: input.accountId,
@@ -773,9 +773,11 @@ export async function rollbackCompanyProfileLearning(
     expectedCurrentRevisionId: appliedRevisionId,
     expectedActivationVersion: await currentActivationVersion(db, input),
     actorSubjectId: input.actorSubjectId,
+    principalKind: principalKindForActor(input.actorKind),
     reason: input.reason,
     type: "rollback",
     requirePreviouslyActive: priorRevisionId !== null,
+    requestFingerprintOverride: requestFingerprint,
   });
 }
 
@@ -789,8 +791,7 @@ async function currentActivationVersion(
       .from(schema.companyProfileHeads)
       .where(eq(schema.companyProfileHeads.accountId, input.accountId))
       .limit(1);
-    if (!head) throw new CompanyProfileConflictError(null);
-    return head.activationVersion;
+    return head?.activationVersion ?? 0;
   });
 }
 
@@ -826,8 +827,18 @@ export async function listCompanyProfile(
         .limit(100),
     ]);
     const page = revisions.slice(0, input.limit);
+    const head = headRows[0] ?? null;
+    const activeRevision = head
+      ? await getRevisionInTransaction(scopedDb, input.accountId, head.revisionId)
+      : null;
+    if (head && !activeRevision) {
+      throw new CompanyProfileInvalidOperationError(
+        "The active company-profile revision is missing",
+      );
+    }
     return {
-      current: headRows[0] ? headFromRow(headRows[0]) : null,
+      current: head ? headFromRow(head) : null,
+      activeRevision: activeRevision ? revisionFromRow(activeRevision) : null,
       revisions: page.map(revisionFromRow),
       activationEvents: events.map(eventFromRow),
       nextAfterRevision: revisions.length > input.limit ? page.at(-1)!.revision : null,

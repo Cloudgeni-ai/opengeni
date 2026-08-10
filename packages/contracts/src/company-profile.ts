@@ -106,6 +106,9 @@ export type CompanyProfileRevisionIntent = z.infer<typeof CompanyProfileRevision
 export const CompanyProfileProvenanceSource = z.enum(["human", "durable_learning", "migration"]);
 export type CompanyProfileProvenanceSource = z.infer<typeof CompanyProfileProvenanceSource>;
 
+export const CompanyProfilePrincipalKind = z.enum(["human_session", "agent_attempt", "service"]);
+export type CompanyProfilePrincipalKind = z.infer<typeof CompanyProfilePrincipalKind>;
+
 export const CompanyProfileActivationType = z.enum(["activate", "rollback"]);
 export type CompanyProfileActivationType = z.infer<typeof CompanyProfileActivationType>;
 
@@ -195,6 +198,7 @@ export type CompanyProfileListQuery = z.infer<typeof CompanyProfileListQuery>;
 
 export const CompanyProfileListResponse = z.object({
   current: CompanyProfileHead.nullable(),
+  activeRevision: CompanyProfileRevision.nullable(),
   revisions: z.array(CompanyProfileRevision),
   activationEvents: z.array(CompanyProfileActivationEvent),
   nextAfterRevision: z.number().int().positive().nullable(),
@@ -291,6 +295,7 @@ export const CompanyProfileLearningWrite = z.object({
   accountId: z.string().uuid(),
   workspaceId: z.string().uuid(),
   actorSubjectId: z.string().min(1).max(1_024),
+  actorKind: z.enum(["human", "agent", "service"]),
   authority: z.enum(["active", "proposal"]),
   subject: z.discriminatedUnion("kind", [
     CompanyProfileScalarLearningSubject,

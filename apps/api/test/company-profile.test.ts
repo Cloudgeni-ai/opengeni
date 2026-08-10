@@ -108,6 +108,7 @@ describe("company-profile API authority", () => {
     expect(read.status).toBe(200);
     expect(await read.json()).toMatchObject({
       current: { revisionId: created.revision.id },
+      activeRevision: { id: created.revision.id },
       revisions: [expect.objectContaining({ id: created.revision.id })],
     });
   });

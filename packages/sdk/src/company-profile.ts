@@ -49,6 +49,7 @@ export type CompanyProfileActivationEvent = {
 export type CompanyProfileListOptions = { afterRevision?: number; limit?: number };
 export type CompanyProfileListResponse = {
   current: CompanyProfileHead | null;
+  activeRevision: CompanyProfileRevision | null;
   revisions: CompanyProfileRevision[];
   activationEvents: CompanyProfileActivationEvent[];
   nextAfterRevision: number | null;

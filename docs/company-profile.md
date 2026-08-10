@@ -15,6 +15,8 @@ Canonical implementation:
   `0201_company_profile_authority.sql`;
 - HTTP/SDK administration: `apps/api/src/routes/company-profile.ts` and
   `packages/sdk/src/company-profile.ts`;
+- concrete durable-learning adapter:
+  `packages/core/src/domain/company-profile-durable-learning-adapter.ts`;
 - the only prompt composer: `packages/runtime/src/workspace-governance.ts`,
   resolved by `apps/worker/src/activities/agent-turn.ts`;
 - admin presentation: the existing Agent Brain / Workspace State route at
@@ -68,19 +70,30 @@ used operation UUID is rejected.
 
 `company_profile_heads` is the one mutable active projection.
 `company_profile_activation_events` is immutable audit history. Activation and
-rollback serialize on the account row, require the caller's exact expected head
-and activation version, and atomically advance the activation version. A stale
+rollback serialize on the account row and run only through
+`company_profile_apply_activation`, a tenant-, actor-, principal-, and
+compare-and-swap-validated `SECURITY DEFINER` lifecycle function. The ordinary
+runtime role has read-only access to the head and event tables; trigger fencing
+also rejects direct owner mutation outside that function. Each successful call
+atomically changes the head and appends exactly one activation event. A stale
 writer receives `COMPANY_PROFILE_CONFLICT`; it never silently overwrites newer
 truth.
 
 Rollback creates another immutable event and moves the head to a previously
 active revision. Router rollback tokens restore the exact prior head, including
-absence for a first activation. No history row is edited or deleted.
+absence for a first activation. The rollback operation fingerprint depends only
+on immutable router input, and the lifecycle function checks an existing event
+before inspecting the mutable head, so retry after an authority/receipt crash
+gap returns the original result even after the head was deleted or advanced by
+that operation. No history row is edited or deleted.
 
 The API below `/v1/workspaces/:workspaceId/company-profile` exposes current and
 historical revisions, one revision, deterministic JSON diff, direct-admin
 update-and-activate, proposal activation, and rollback. The Agent Brain UI uses
-only this API.
+only this API. List responses contain a separate bounded `activeRevision`
+lookup in addition to the bounded newest-revision page, so more than 50 newer
+proposals cannot hide the effective profile or initialize the editor from an
+empty value.
 
 ## Durable-learning adapter contract
 
@@ -96,6 +109,14 @@ The canonical router sends only organization-scope `company_profile` subjects he
 | `company_constraint` | stable-key upsert in `constraints` |
 
 Repeatable list subjects require a valid stable key and fail closed without one.
+`createCompanyProfileDurableLearningAdapter` is the concrete structural adapter
+installed under canonical durable-learning router's `authorities.company_profile` port. It accepts the
+router's attempt/request/decision envelope, requires the resolved organization
+scope and company-profile destination, maps the router attempt id to the
+authority operation id, and delegates only to `writeCompanyProfileLearning` or
+`rollbackCompanyProfileLearning`. It neither imports nor implements the router,
+attempt ledger, or workspace learning-policy resolver.
+
 `authority=proposal` appends an inactive proposal revision and never changes the
 head. `authority=active` appends and activates one full-profile revision, returns
 `effectiveBoundary=next_accepted_attempt`, and returns an opaque rollback token.
