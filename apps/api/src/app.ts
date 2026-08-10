@@ -71,6 +71,7 @@ import { registerSessionRoutes } from "./routes/sessions";
 import { registerSocialRoutes } from "./routes/social";
 import { registerWorkspaceRoutes } from "./routes/workspaces";
 import { registerWorkspaceInstructionPolicyRoutes } from "./routes/workspace-instruction-policies";
+import { registerCompanyProfileRoutes } from "./routes/company-profile";
 import { registerWorkspaceStateRoutes } from "./routes/workspace-state";
 import { registerWorkspaceArtifactRoutes } from "./routes/workspace-artifacts";
 import { registerPreferenceRegistryRoutes } from "./routes/preference-registry";
@@ -573,6 +574,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerWorkspaceRoutes(app, routeDeps);
   registerInsightsRoutes(app, routeDeps);
   registerWorkspaceInstructionPolicyRoutes(app, routeDeps);
+  registerCompanyProfileRoutes(app, routeDeps);
   registerWorkspaceStateRoutes(app, routeDeps);
   registerWorkspaceArtifactRoutes(app, routeDeps);
   registerPreferenceRegistryRoutes(app, routeDeps);

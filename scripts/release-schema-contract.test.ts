@@ -215,12 +215,13 @@ describe("release schema contract", () => {
         (migrations.has("0195_editable_artifact_import_authorization.sql") ? 1 : 0) +
         (migrations.has("0196_rig_provider_images.sql") ? 1 : 0) +
         (migrations.has("0197_knowledge_source_sync_schedules.sql") ? 1 : 0) +
-        (migrations.has("0199_workspace_learning_policy.sql") ? 1 : 0),
+        (migrations.has("0199_workspace_learning_policy.sql") ? 1 : 0) +
+        (migrations.has("0201_company_profile_authority.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "4b5d27d8d8531b5f0af5c2f62a51f431f44a7befb0e662f09df48cde21d30f0d",
+      "e470fc6e4241dbd50fbdeb8dcf775df65fb45177c45d102d029b95f879adf71a",
     );
-    expect(contract.latestMigration).toBe("0199_workspace_learning_policy.sql");
+    expect(contract.latestMigration).toBe("0201_company_profile_authority.sql");
     expect(migrations.get("0197_knowledge_source_sync_schedules.sql")).toMatchObject({
       sha256: "edd425be4e4db07f4fcab1e520ece71dc1a692072ce28256ec2b86248442f3c8",
       deploymentMode: "maintenance",
@@ -295,6 +296,10 @@ describe("release schema contract", () => {
     });
     expect(migrations.get("0196_rig_provider_images.sql")).toMatchObject({
       sha256: "0d47354968aeec0ba9d329351593fd8f3b5469a3157e74f837dbdb16b64bc07f",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0201_company_profile_authority.sql")).toMatchObject({
+      sha256: "780eb3550bbe5a6811cde7f8cfd69cf8f98e3181e03d1700f325961e71b1b272",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0180_retained_screenshot_lifecycle_fences.sql")).toMatchObject({
