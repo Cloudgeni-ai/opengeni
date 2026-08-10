@@ -1,5 +1,11 @@
 # @opengeni/runtime
 
+## 0.18.40
+
+### Patch Changes
+
+- eade67f: Allow Modal cold filesystem-snapshot restores up to 60 seconds to become command-ready before failing lease warm-up.
+
 ## 0.18.39
 
 ### Patch Changes
