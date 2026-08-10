@@ -3539,6 +3539,56 @@ export const DocumentSearchResponse = z.object({
 });
 export type DocumentSearchResponse = z.infer<typeof DocumentSearchResponse>;
 
+export const IndexedDocumentSource = z.object({
+  kind: KnowledgeSourceKind,
+  uri: z.string().nullable(),
+  externalId: z.string().nullable(),
+  title: z.string().nullable(),
+  author: z.string().nullable(),
+  createdAt: z.string().nullable(),
+  updatedAt: z.string().nullable(),
+  version: z.string().nullable(),
+});
+export type IndexedDocumentSource = z.infer<typeof IndexedDocumentSource>;
+
+export const IndexedDocumentProvenance = z.object({
+  ingestionWorkspaceId: z.string().uuid(),
+  baseId: z.string().uuid(),
+  fileId: z.string().uuid(),
+  authorityKind: DocumentAuthorityKind,
+  authorityWorkspaceId: z.string().uuid().nullable(),
+  authoritySubjectId: z.string().nullable(),
+  createdBy: z.string().nullable(),
+  createdAt: z.string(),
+});
+export type IndexedDocumentProvenance = z.infer<typeof IndexedDocumentProvenance>;
+
+export const IndexedDocumentSummary = z.object({
+  id: z.string().uuid(),
+  title: z.string(),
+  parser: z.string(),
+  chunkCount: z.number().int().nonnegative(),
+  indexedAt: z.string(),
+  summary: z.string().nullable(),
+  topics: z.array(z.string()),
+  source: IndexedDocumentSource,
+  provenance: IndexedDocumentProvenance,
+});
+export type IndexedDocumentSummary = z.infer<typeof IndexedDocumentSummary>;
+
+export const ListIndexedDocumentsRequest = z.object({
+  checkpoint: z.string().min(1).max(1_024).optional(),
+  limit: z.number().int().positive().max(100).default(50),
+});
+export type ListIndexedDocumentsRequest = z.infer<typeof ListIndexedDocumentsRequest>;
+
+export const ListIndexedDocumentsResponse = z.object({
+  documents: z.array(IndexedDocumentSummary),
+  nextCheckpoint: z.string().min(1).max(1_024),
+  hasMore: z.boolean(),
+});
+export type ListIndexedDocumentsResponse = z.infer<typeof ListIndexedDocumentsResponse>;
+
 export const CreateDocumentBaseRequest = z.object({
   name: z.string().min(1),
   description: z.string().optional(),
