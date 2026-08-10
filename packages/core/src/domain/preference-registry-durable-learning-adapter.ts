@@ -51,6 +51,7 @@ function parseAttempt(value: unknown) {
   const actor = record(attempt.actor, "durable-learning actor");
   return {
     id: text(attempt.id, "durable-learning attempt id"),
+    inputHash: text(attempt.inputHash, "durable-learning input hash"),
     accountId: text(attempt.accountId, "durable-learning account id"),
     workspaceId: text(attempt.workspaceId, "durable-learning workspace id"),
     actorSubjectId: text(actor.subjectId, "durable-learning actor subject"),
@@ -123,7 +124,9 @@ export function createPreferenceRegistryDurableLearningAdapter(options: {
         accountId: attempt.accountId,
         workspaceId: attempt.workspaceId,
         actorSubjectId: attempt.actorSubjectId,
-        principalKind: "human_session",
+        principalKind: "agent_attempt",
+        durableLearningAttemptId: attempt.id,
+        durableLearningInputHash: attempt.inputHash,
         authorizeScope: authorizeExactScope(preferenceScope),
       } as const;
       if (subject.action === "correct") {
@@ -179,7 +182,9 @@ export function createPreferenceRegistryDurableLearningAdapter(options: {
         accountId: attempt.accountId,
         workspaceId: attempt.workspaceId,
         actorSubjectId: attempt.actorSubjectId,
-        principalKind: "human_session",
+        principalKind: "agent_attempt",
+        durableLearningAttemptId: attempt.id,
+        durableLearningInputHash: attempt.inputHash,
         scope: preferenceScope,
         stableKey: text(subject.stableKey, "preference stable key"),
         title: text(subject.title, "preference title"),
@@ -259,7 +264,9 @@ export function createPreferenceRegistryDurableLearningAdapter(options: {
         accountId: attempt.accountId,
         workspaceId: attempt.workspaceId,
         actorSubjectId: attempt.actorSubjectId,
-        principalKind: "human_session",
+        principalKind: "agent_attempt",
+        durableLearningAttemptId: attempt.id,
+        durableLearningInputHash: attempt.inputHash,
         preferenceId: text(token.preferenceId, "preference rollback id"),
         expectedCurrentRevisionId: text(token.appliedRevisionId, "applied preference revision"),
         expectedScopeVersion: integer(token.scopeVersion, "preference rollback scope version"),

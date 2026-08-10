@@ -7,6 +7,7 @@ import {
   createDb,
   createSession,
   createWorkspaceInstructionPolicyDraft,
+  getDurableLearningAttemptWithReceipt,
   getPreferenceRegistryDetail,
   listCompanyProfile,
   listWorkspaceInstructionPolicyRevisions,
@@ -259,19 +260,106 @@ describe("durable-learning router PostgreSQL authorities", () => {
       rollback: { supported: true },
     });
     const preferenceId = preference.resource!.id;
-    expect(
-      await getPreferenceRegistryDetail(client.db, {
-        workspaceId: grant.workspaceId,
-        subjectId,
-        preferenceId,
-      }),
-    ).toMatchObject({
+    const createdPreference = await getPreferenceRegistryDetail(client.db, {
+      workspaceId: grant.workspaceId,
+      subjectId,
+      preferenceId,
+    });
+    expect(createdPreference).toMatchObject({
       preference: {
         status: "active",
         createdBySubjectId: subjectId,
-        activeRevision: { createdBySubjectId: subjectId },
+        activeRevision: {
+          createdBySubjectId: subjectId,
+          provenance: { source: "human", sourceId: null },
+        },
       },
     });
+    expect(createdPreference.events.every((event) => event.actorSubjectId === subjectId)).toBe(
+      true,
+    );
+    const createdRevisionId = createdPreference.preference.activeRevision!.id;
+
+    const correctionRequest = {
+      operationId: crypto.randomUUID(),
+      authority,
+      confirmation: { state: "confirmed" as const },
+      activation: "active" as const,
+      subject: {
+        kind: "preference" as const,
+        action: "correct" as const,
+        scope: "user" as const,
+        preferenceId,
+        expectedCurrentRevisionId: createdRevisionId,
+        expectedScopeVersion: createdPreference.preference.scopeVersion,
+        title: "Bounded implementation updates",
+        description: "Keep implementation updates concise and evidence-bearing.",
+        content: "Use short implementation updates that include concrete evidence.",
+        precedenceRank: 0,
+        conflictStrategy: "override" as const,
+        conflictsWith: [],
+        expiresAt: null,
+        reason: "Correct the confirmed personal preference.",
+      },
+    };
+    const correction = await router.write(correctionRequest);
+    expect(await router.write(correctionRequest)).toEqual(correction);
+    expect(correction).toMatchObject({
+      outcome: "applied",
+      resource: { surface: "preference_registry", status: "active" },
+      rollback: { supported: true },
+    });
+    const correctedPreference = await getPreferenceRegistryDetail(client.db, {
+      workspaceId: grant.workspaceId,
+      subjectId,
+      preferenceId,
+    });
+    expect(correctedPreference).toMatchObject({
+      preference: {
+        activeRevision: {
+          contentHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+          correctsRevisionId: createdRevisionId,
+          createdBySubjectId: subjectId,
+          provenance: { source: "human" },
+        },
+      },
+    });
+    expect(correctedPreference.revisions).toHaveLength(2);
+    expect(correctedPreference.events.every((event) => event.actorSubjectId === subjectId)).toBe(
+      true,
+    );
+    expect(
+      await getDurableLearningAttemptWithReceipt(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        attemptId: correction.attemptId,
+      }),
+    ).toMatchObject({
+      initiatingHumanSubjectId: subjectId,
+      receipt: correction,
+    });
+
+    const correctionRollback = await router.rollback({
+      operationId: crypto.randomUUID(),
+      authority,
+      confirmation: { state: "confirmed" },
+      targetAttemptId: correction.attemptId,
+      rollbackToken: correction.rollback.token,
+      reason: "Restore the prior confirmed preference revision.",
+    });
+    expect(correctionRollback).toMatchObject({
+      outcome: "rolled_back",
+      resource: { surface: "preference_registry", status: "active" },
+    });
+    expect(
+      (
+        await getPreferenceRegistryDetail(client.db, {
+          workspaceId: grant.workspaceId,
+          subjectId,
+          preferenceId,
+        })
+      ).preference.activeRevision?.id,
+    ).toBe(createdRevisionId);
 
     const companyRollback = await router.rollback({
       operationId: crypto.randomUUID(),
@@ -334,5 +422,54 @@ describe("durable-learning router PostgreSQL authorities", () => {
         preferenceId,
       }),
     ).toMatchObject({ preference: { status: "inactive", activeRevision: null } });
+  });
+
+  test("concurrent identical confirmed preference writes converge on one lifecycle", async () => {
+    if (!shared || !client) return;
+    const subjectId = `human:router-concurrent-${crypto.randomUUID()}`;
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `router-concurrent-account-${crypto.randomUUID()}`,
+      accountName: "Durable router concurrent account",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `router-concurrent-workspace-${crypto.randomUUID()}`,
+      workspaceName: "Durable router concurrent workspace",
+      subjectId,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const authority = await seedAcceptedAttempt({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId,
+    });
+    const router = createDurableLearningRouter({ db: client.db });
+    const request = {
+      operationId: crypto.randomUUID(),
+      authority,
+      confirmation: { state: "confirmed" as const },
+      activation: "active" as const,
+      subject: {
+        kind: "preference" as const,
+        action: "create" as const,
+        scope: "user" as const,
+        stableKey: "concurrent-confirmed-preference",
+        title: "Concurrent confirmed preference",
+        description: "Converge identical concurrent confirmed writes.",
+        content: "Apply one lifecycle for identical concurrent operations.",
+      },
+    };
+    const [left, right] = await Promise.all([router.write(request), router.write(request)]);
+    expect(right).toEqual(left);
+    const detail = await getPreferenceRegistryDetail(client.db, {
+      workspaceId: grant.workspaceId,
+      subjectId,
+      preferenceId: left.resource!.id,
+    });
+    expect(detail.revisions).toHaveLength(1);
+    expect(detail.events.map((event) => event.type).sort()).toEqual([
+      "activated",
+      "proposal_created",
+    ]);
+    expect(detail.events.every((event) => event.actorSubjectId === subjectId)).toBe(true);
   });
 });

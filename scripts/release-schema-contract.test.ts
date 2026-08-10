@@ -217,12 +217,13 @@ describe("release schema contract", () => {
         (migrations.has("0197_knowledge_source_sync_schedules.sql") ? 1 : 0) +
         (migrations.has("0199_workspace_learning_policy.sql") ? 1 : 0) +
         (migrations.has("0201_company_profile_authority.sql") ? 1 : 0) +
-        (migrations.has("0202_document_index_checkpoints.sql") ? 1 : 0),
+        (migrations.has("0202_document_index_checkpoints.sql") ? 1 : 0) +
+        (migrations.has("0205_durable_learning_router_ledger.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "c9b19caabb946d91e6e2ec4b34bb48323a61efbfc76628fe338a277f5dcbe343",
+      "2cccb084d47128eccf2af040eff5ce652cb284e727287c36d9631974bacbfd86",
     );
-    expect(contract.latestMigration).toBe("0202_document_index_checkpoints.sql");
+    expect(contract.latestMigration).toBe("0205_durable_learning_router_ledger.sql");
     expect(migrations.get("0197_knowledge_source_sync_schedules.sql")).toMatchObject({
       sha256: "edd425be4e4db07f4fcab1e520ece71dc1a692072ce28256ec2b86248442f3c8",
       deploymentMode: "maintenance",
@@ -245,6 +246,10 @@ describe("release schema contract", () => {
     });
     expect(migrations.get("0202_document_index_checkpoints.sql")).toMatchObject({
       sha256: "93b24b48e587fca5288af6042947f4592a3767bc6882fc8d5f52c973214e94ea",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0205_durable_learning_router_ledger.sql")).toMatchObject({
+      sha256: "1e5aad43da980135fd8ecb39b63ee289f79af73b35fccf670e133896bf026a52",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0183_model_call_provider_cost_estimates.sql")).toMatchObject({

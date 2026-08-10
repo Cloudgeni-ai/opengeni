@@ -101,6 +101,7 @@ function adapterInput(admission: DurableLearningAttemptAdmission) {
   return {
     attempt: {
       id: admission.id,
+      inputHash: admission.inputHash,
       accountId: admission.authority.accountId,
       workspaceId: admission.authority.workspaceId,
       sessionId: admission.authority.sessionId,

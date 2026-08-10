@@ -84,15 +84,20 @@ revision and retain the corrected revision. Rejected and superseded records are
 terminal. Expiry is derived at read time: expired heads remain historical truth
 but do not produce descriptors.
 
-All governance mutations require a positively identified `human_session`
+Direct governance mutations require a positively identified `human_session`
 principal. Delegated bearer principal kind is a mandatory immutable HMAC-signed
 claim; agent-attempt, service, API-key, configured-key, and missing principal
-kinds fail closed even when their permission strings would otherwise be
-sufficient. Mixed or mismatched authenticated subject/account contexts also
+kinds fail closed at the HTTP governance surface even when their permission
+strings would otherwise be sufficient. The sole agent exception is the
+confirmed-write router: the canonical lifecycle accepts `agent_attempt` only
+inside the exact transaction-local, confirmed, unreceipted durable-learning
+operation for the same account, workspace, initiating human, preference scope,
+surface, and lifecycle operation. It never relabels that execution as a direct
+human session. Mixed or mismatched authenticated subject/account contexts also
 fail closed. Organization authorization uses the matching account grant rather
-than copying `account:admin` into workspace permissions. The verified kind is
-propagated into the database transaction and rechecked by the lifecycle
-function. Each successful transition
+than copying `account:admin` into workspace permissions. The verified principal
+and initiating-human actor are propagated into the database transaction and
+rechecked by the lifecycle function. Each successful transition
 records the actor, bounded reason, old/new revision or target, related
 preference where applicable, and monotonic event version.
 

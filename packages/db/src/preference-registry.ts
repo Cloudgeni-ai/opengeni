@@ -293,12 +293,29 @@ async function withPreferenceRegistryGovernanceRls<T>(
     workspaceId: string;
     actorSubjectId: string;
     principalKind: string | undefined;
+    durableLearningAttemptId?: string | undefined;
+    durableLearningInputHash?: string | undefined;
   },
   fn: (db: Database) => Promise<T>,
 ): Promise<T> {
-  if (input.principalKind !== "human_session") {
+  const directHuman = input.principalKind === "human_session";
+  const admittedAgent =
+    input.principalKind === "agent_attempt" &&
+    typeof input.durableLearningAttemptId === "string" &&
+    input.durableLearningAttemptId.length > 0 &&
+    typeof input.durableLearningInputHash === "string" &&
+    /^[0-9a-f]{64}$/u.test(input.durableLearningInputHash);
+  if (!directHuman && !admittedAgent) {
     throw new PreferenceRegistryInitiatorError(
-      "Preference governance requires an authenticated human session principal",
+      "Preference governance requires an authenticated human session or exact admitted durable-learning attempt",
+    );
+  }
+  if (
+    directHuman &&
+    (input.durableLearningAttemptId !== undefined || input.durableLearningInputHash !== undefined)
+  ) {
+    throw new PreferenceRegistryInitiatorError(
+      "Direct human preference governance cannot carry durable-learning authority",
     );
   }
   return await withWorkspaceSubjectRls(
@@ -308,11 +325,33 @@ async function withPreferenceRegistryGovernanceRls<T>(
     async (scopedDb) => {
       const rows = (await scopedDb.execute(sql`
         SELECT set_config('opengeni.principal_kind', ${input.principalKind}, true)
-          AS principal_kind
-      `)) as unknown as Array<{ principal_kind: string }>;
-      if (rows[0]?.principal_kind !== "human_session") {
+            AS principal_kind,
+          CASE WHEN ${input.principalKind} = 'agent_attempt' THEN EXISTS (
+            SELECT 1
+            FROM durable_learning_attempts admitted
+            WHERE admitted.id = ${input.durableLearningAttemptId ?? null}::uuid
+              AND admitted.input_hash = ${input.durableLearningInputHash ?? null}
+              AND admitted.account_id = opengeni_private.current_account_id()
+              AND admitted.workspace_id = opengeni_private.current_workspace_id()
+              AND admitted.initiating_human_subject_id = opengeni_private.current_subject_id()
+              AND admitted.target_surface = 'preference_registry'
+              AND admitted.request#>>'{confirmation,state}' = 'confirmed'
+              AND admitted.id::text = current_setting(
+                'opengeni.durable_learning_attempt_id', true
+              )
+              AND admitted.input_hash = current_setting(
+                'opengeni.durable_learning_input_hash', true
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM durable_learning_attempt_receipts receipt
+                WHERE receipt.attempt_id = admitted.id
+              )
+          ) ELSE true END AS admitted
+      `)) as unknown as Array<{ principal_kind: string; admitted: boolean }>;
+      if (rows[0]?.principal_kind !== input.principalKind || rows[0]?.admitted !== true) {
         throw new PreferenceRegistryInitiatorError(
-          "Preference governance principal kind was not applied to the transaction",
+          "Preference governance principal authority was not applied to the admitted transaction",
         );
       }
       return await fn(scopedDb);
@@ -446,6 +485,8 @@ export async function createPreferenceRegistryProposal(
     workspaceId: string;
     actorSubjectId: string;
     principalKind: string | undefined;
+    durableLearningAttemptId?: string | undefined;
+    durableLearningInputHash?: string | undefined;
   },
 ) {
   const target = targetFor(input.scope, input.workspaceId, input.actorSubjectId);

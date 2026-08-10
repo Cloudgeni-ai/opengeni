@@ -8,7 +8,7 @@ then validates the exact running attempt, chooses one authority from the typed
 subject, records immutable input and outcome evidence, and applies the authority
 mutation atomically with its receipt.
 
-Migration `0203_durable_learning_router_ledger.sql` adds the immutable attempt
+Migration `0205_durable_learning_router_ledger.sql` adds the immutable attempt
 and receipt ledger. The public contracts live in
 `packages/contracts/src/durable-learning.ts`, persistence and admission live in
 `packages/db/src/durable-learning.ts`, and the canonical router plus authority
@@ -48,6 +48,14 @@ until the destination authority mutation and immutable receipt commit together.
 A stale generation, replaced attempt, interrupted attempt, missing initiating
 human, mismatched tenant, or insufficient authority fails closed before any
 destination write.
+
+Preference Registry writes retain `agent_attempt` as their execution principal;
+they never spoof `human_session`. Its canonical lifecycle admits that principal
+only while the exact transaction-local operation ID and input hash identify the
+confirmed, unreceipted router attempt for the same tenant, initiating human,
+surface, resolved scope, and write/rollback operation. Direct HTTP agent and
+service governance remains denied, while lifecycle revision and event actor
+provenance remains the immutable initiating human.
 
 ## Deterministic routing
 
@@ -96,7 +104,9 @@ completion requires that transaction-local marker plus the exact operation and
 input hash, so a standalone or later completion call cannot manufacture a
 receipt. The authority callback and receipt insert run in the same database
 transaction: an authority failure rolls back the attempt row, destination
-mutation, and receipt together.
+mutation, and receipt together. A deferred constraint also rejects commit of a
+new attempt without its exact immutable receipt, so even a lower-level caller
+cannot commit an admitted destination mutation while skipping completion.
 
 ## Receipts, visibility, and effective boundary
 
