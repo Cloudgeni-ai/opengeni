@@ -465,7 +465,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
             idempotencyKey: fixture.name,
           },
         });
-        expect(result.isError).toBe(!fixture.allowed);
+        expect(result.isError === true).toBe(!fixture.allowed);
         expect(objectPutCount).toBe(putsBefore + (fixture.allowed ? 1 : 0));
       } finally {
         await Promise.all([mcp.close(), server.close()]);
