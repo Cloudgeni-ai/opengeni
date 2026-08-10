@@ -544,6 +544,11 @@ process or parallel tool operation stopped. The turn activity heartbeat timer
 and worker SDK throttle share a 500 ms bound, leaving the unchanged four-second
 live control budget for physical writer drain and receipt-gated replacement
 admission independently of the two-minute heartbeat timeout.
+Each streamed SDK event read uses Temporal's activity cancellation signal with
+one listener that is removed when the iterator advances. Never race every event
+against `Context.cancelled`: that promise intentionally never settles on normal
+completion and would retain one losing promise reaction per token/event for the
+activity lifetime.
 
 The dying `runAgentTurn` activity owns physical proof. It cancels the exact
 turn's tool/sandbox controller, waits for all controller-owned operations to
