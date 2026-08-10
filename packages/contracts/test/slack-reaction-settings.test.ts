@@ -25,12 +25,21 @@ describe("Slack reaction summon workspace settings", () => {
     ).toEqual(DEFAULT_WORKSPACE_SLACK_REACTION_SUMMON_SETTINGS);
   });
 
-  test("validates exact emoji names and normalizes allowlist duplicates", () => {
+  test("accepts only the genie emoji and normalizes allowlist duplicates", () => {
     expect(
       UpdateWorkspaceSettingsRequest.safeParse({
         slackReactionSummon: {
           enabled: true,
           emoji: ":genie:",
+          channelPolicy: { mode: "bot_member" },
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      UpdateWorkspaceSettingsRequest.safeParse({
+        slackReactionSummon: {
+          enabled: true,
+          emoji: "sparkles",
           channelPolicy: { mode: "bot_member" },
         },
       }).success,

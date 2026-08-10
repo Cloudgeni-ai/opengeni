@@ -9,22 +9,23 @@ import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { useAppContext } from "@/context";
 import type { ConnectionMetadata } from "@/types";
+
+const OPENGENI_REACTION_EMOJI = "genie" as const;
 
 export function SlackReactionSummonCard({
   workspaceId,
   connection,
   canManage,
   installBusy,
-  onReinstall,
+  onUpdatePermissions,
 }: {
   workspaceId: string;
   connection: ConnectionMetadata;
   canManage: boolean;
   installBusy: boolean;
-  onReinstall: () => void;
+  onUpdatePermissions: () => void;
 }) {
   const context = useAppContext();
   const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId);
@@ -91,7 +92,7 @@ export function SlackReactionSummonCard({
 
   async function save() {
     if (draft.enabled && !installReady) {
-      toast.error("Reinstall the Slack bot before enabling reaction summon");
+      toast.error("Update Slack permissions before enabling the emoji shortcut");
       return;
     }
     if (
@@ -104,10 +105,14 @@ export function SlackReactionSummonCard({
     }
     setSaving(true);
     try {
+      const next = { ...draft, emoji: OPENGENI_REACTION_EMOJI };
       const updated = await context.updateWorkspaceSettings(workspaceId, {
-        slackReactionSummon: draft,
+        slackReactionSummon: next,
       });
-      if (updated) toast.success("Slack reaction summon settings saved");
+      if (updated) {
+        setDraft(next);
+        toast.success("Slack emoji shortcut saved");
+      }
     } finally {
       setSaving(false);
     }
@@ -120,20 +125,20 @@ export function SlackReactionSummonCard({
     else selected.delete(channelId);
     setDraft({
       ...draft,
-      channelPolicy: { mode: "allowlist", channelIds: [...selected].slice(0, 100) },
+      channelPolicy: {
+        mode: "allowlist",
+        channelIds: [...selected].slice(0, 100),
+      },
     });
   }
 
   return (
-    <div className="mt-4 rounded-lg border border-border bg-bg/40 p-3">
+    <div className="rounded-lg border border-border bg-bg/40 p-3">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <p className="text-xs font-semibold text-fg">Summon OpenGeni with an emoji</p>
+          <p className="text-xs font-semibold text-fg">Emoji shortcut</p>
           <p className="mt-1 max-w-2xl text-2xs leading-5 text-fg-muted">
-            Disabled by default. A linked, authorized user can react to one message; OpenGeni reads
-            only that message and bounded containing-thread context, then replies in the same
-            thread. This does not authorize channel ingestion or automatic Knowledge, Memory,
-            preference, or policy writes.
+            React with 🧞 to ask OpenGeni about a message.
           </p>
         </div>
         <label className="flex items-center gap-2 text-xs font-medium text-fg">
@@ -152,38 +157,21 @@ export function SlackReactionSummonCard({
           <div className="flex items-start gap-2">
             <AlertTriangleIcon className="mt-0.5 size-4 shrink-0 text-warning" />
             <p className="text-2xs leading-5 text-fg-muted">
-              <strong className="text-fg">Reinstall required.</strong> This installation is missing
-              the least-privilege <code>reactions:read</code> scope. Existing Slack tools remain
-              available, but reaction summon stays disabled until an admin reinstalls the bot.
+              Slack needs permission to read the 🧞 reaction before this shortcut can be enabled.
             </p>
           </div>
           {canManage ? (
-            <Button type="button" size="sm" disabled={installBusy} onClick={onReinstall}>
+            <Button type="button" size="sm" disabled={installBusy} onClick={onUpdatePermissions}>
               {installBusy ? <Loader2Icon className="animate-spin" /> : null}
-              Reinstall Slack bot
+              Update Slack permissions
             </Button>
           ) : null}
         </div>
       ) : null}
 
-      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+      <div className="mt-3">
         <label className="text-2xs font-medium text-fg-muted">
-          Emoji name
-          <Input
-            className="mt-1"
-            value={draft.emoji}
-            disabled={!canManage || saving}
-            maxLength={64}
-            placeholder="genie"
-            onChange={(event) => setDraft({ ...draft, emoji: event.target.value.trim() })}
-          />
-          <span className="mt-1 block font-normal text-fg-subtle">
-            Exact Slack emoji name without surrounding colons, for example <code>genie</code>.
-          </span>
-        </label>
-
-        <label className="text-2xs font-medium text-fg-muted">
-          Conversation policy
+          Where it works
           <select
             className="mt-1 h-9 w-full rounded-md border border-border bg-bg px-3 text-xs text-fg"
             value={draft.channelPolicy.mode}
@@ -198,12 +186,9 @@ export function SlackReactionSummonCard({
               })
             }
           >
-            <option value="bot_member">Every conversation where the bot is already a member</option>
-            <option value="allowlist">Only selected conversations</option>
+            <option value="bot_member">Anywhere OpenGeni is a member</option>
+            <option value="allowlist">Selected conversations</option>
           </select>
-          <span className="mt-1 block font-normal text-fg-subtle">
-            OpenGeni never auto-joins a channel and shared Slack Connect conversations fail closed.
-          </span>
         </label>
       </div>
 
@@ -242,11 +227,15 @@ export function SlackReactionSummonCard({
         </div>
       ) : null}
 
+      <p className="mt-3 text-2xs leading-5 text-fg-subtle">
+        This reads the selected message and its thread. It does not sync the channel.
+      </p>
+
       {canManage ? (
         <div className="mt-3 flex justify-end">
           <Button type="button" size="sm" disabled={saving} onClick={() => void save()}>
             {saving ? <Loader2Icon className="animate-spin" /> : null}
-            Save reaction settings
+            Save
           </Button>
         </div>
       ) : (

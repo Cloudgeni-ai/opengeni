@@ -1,4 +1,4 @@
-import { FolderOpenIcon, HardDriveIcon, Loader2Icon } from "lucide-react";
+import { FolderOpenIcon, Loader2Icon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
@@ -21,6 +21,7 @@ import {
   googleDriveAccountState,
   googleDriveConnectionMetadata,
   googleDriveDisconnectAttempt,
+  localConnectedGoogleDrivePreview,
   preferredGoogleDriveConnection,
   type GoogleDriveAccountState,
   type GoogleDriveDisconnectAttempt,
@@ -84,8 +85,17 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
   const [syncEnabled, setSyncEnabled] = useState(false);
   const [readPolicy, setReadPolicy] = useState<GoogleDriveReadPolicy>("allow");
 
-  const connection = useMemo(() => preferredGoogleDriveConnection(connections), [connections]);
-  const accountState = googleDriveAccountState(connection, !loading);
+  const previewConnection = useMemo(
+    () => localConnectedGoogleDrivePreview(window.location.search, workspaceId),
+    [workspaceId],
+  );
+  const connection = useMemo(
+    () => previewConnection ?? preferredGoogleDriveConnection(connections),
+    [connections, previewConnection],
+  );
+  const readOnly = previewConnection !== null;
+  const visibleLoading = loading && !readOnly;
+  const accountState = googleDriveAccountState(connection, readOnly || !loading);
   const metadata = connection
     ? (googleDriveConnectionMetadata(connection.metadata) ?? undefined)
     : undefined;
@@ -374,11 +384,17 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
 
   return (
     <>
-      <section className="mt-5 rounded-lg border border-border bg-surface/35 p-4">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-          <div className="flex min-w-0 gap-3">
-            <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-brand/10 text-brand">
-              <HardDriveIcon className="size-4" />
+      <section className="mt-12 rounded-lg border border-border bg-surface/35 p-4">
+        <div className="flex items-center gap-3">
+          <div className="flex min-w-0 flex-1 gap-3">
+            <div className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-border bg-bg">
+              <img
+                src="https://www.gstatic.com/images/branding/productlogos/drive_2026/v2/web-64dp/logo_drive_2026_color_2x_web_64dp.png"
+                alt=""
+                aria-hidden="true"
+                draggable={false}
+                className="size-5 object-contain"
+              />
             </div>
             <div className="min-w-0">
               <div className="text-sm font-medium">Google Drive</div>
@@ -388,7 +404,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
             </div>
           </div>
           <div className="flex shrink-0 flex-wrap gap-2">
-            {loading ? (
+            {visibleLoading ? (
               <Button type="button" variant="secondary" size="sm" disabled>
                 <Loader2Icon className="size-3.5 animate-spin" />
                 Loading
@@ -396,55 +412,45 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
             ) : connection && accountState.state !== "disconnected" ? (
               <>
                 {accountState.state === "connected" ? (
-                  <>
-                    <Button
-                      type="button"
-                      size="sm"
-                      disabled={busy || !canWrite}
-                      onClick={openBrowser}
-                    >
-                      <FolderOpenIcon className="size-3.5" />
-                      {savedSources.length > 0 ? "Manage folders" : "Connect folders"}
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="secondary"
-                      size="sm"
-                      disabled={busy || !canWrite}
-                      onClick={() => void transitionLifecycle("pause")}
-                    >
-                      Pause
-                    </Button>
-                  </>
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={busy || !canWrite || readOnly}
+                    onClick={openBrowser}
+                  >
+                    <FolderOpenIcon className="size-3.5" />
+                    {savedSources.length > 0 ? "Manage folders" : "Connect folders"}
+                  </Button>
                 ) : null}
                 {accountState.state === "paused" ? (
                   <Button
                     type="button"
                     size="sm"
-                    disabled={busy || !canWrite}
+                    disabled={busy || !canWrite || readOnly}
                     onClick={() => void transitionLifecycle("resume")}
                   >
                     Resume
                   </Button>
                 ) : null}
-                <Button
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  disabled={busy || !canWrite}
-                  onClick={() => void connect(true)}
-                >
-                  {accountState.state === "reconsent_required"
-                    ? "Re-consent"
-                    : accountState.state === "app_removed"
-                      ? "Retry reconnect"
-                      : "Reconnect"}
-                </Button>
+                {accountState.state !== "connected" && accountState.state !== "paused" ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={busy || !canWrite || readOnly}
+                    onClick={() => void connect(true)}
+                  >
+                    {accountState.state === "reconsent_required"
+                      ? "Re-consent"
+                      : accountState.state === "app_removed"
+                        ? "Retry"
+                        : "Reconnect"}
+                  </Button>
+                ) : null}
                 <Button
                   type="button"
                   variant="ghost"
                   size="sm"
-                  disabled={busy || !canWrite}
+                  disabled={busy || !canWrite || readOnly}
                   onClick={() => setDisconnectOpen(true)}
                 >
                   Disconnect
@@ -454,15 +460,11 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
               <Button
                 type="button"
                 size="sm"
-                disabled={busy || !canWrite}
+                disabled={busy || !canWrite || readOnly}
                 onClick={() => void connect()}
               >
-                {busy ? (
-                  <Loader2Icon className="size-3.5 animate-spin" />
-                ) : (
-                  <HardDriveIcon className="size-3.5" />
-                )}
-                Connect Google Drive
+                {busy ? <Loader2Icon className="size-3.5 animate-spin" /> : null}
+                Connect
               </Button>
             )}
           </div>
@@ -499,9 +501,11 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
           </div>
         ) : null}
 
-        <Notice tone={stateNotice.tone} title={stateNotice.title} className="mt-3">
-          {stateNotice.description}
-        </Notice>
+        {stateNotice ? (
+          <Notice tone={stateNotice.tone} title={stateNotice.title} className="mt-3">
+            {stateNotice.description}
+          </Notice>
+        ) : null}
       </section>
 
       <ConfirmDialog
@@ -876,7 +880,7 @@ function googleDriveStateNotice(state: GoogleDriveAccountState["state"]): {
   tone: NoticeTone;
   title: string;
   description: string;
-} {
+} | null {
   if (state === "paused") {
     return {
       tone: "waiting",
@@ -915,24 +919,5 @@ function googleDriveStateNotice(state: GoogleDriveAccountState["state"]): {
         "Reconnect with the same Google account and approve the requested read access for configured locations.",
     };
   }
-  if (state === "disconnected") {
-    return {
-      tone: "muted",
-      title: "Google Drive is disconnected",
-      description:
-        "OpenGeni will not use this local connection. You can connect a different Google account; Google may still list the prior project-wide OAuth grant.",
-    };
-  }
-  if (state === "connected") {
-    return {
-      tone: "info",
-      title: "Google Drive is connected",
-      description: "Folder setup works locally; document import is not built yet.",
-    };
-  }
-  return {
-    tone: "waiting",
-    title: "Google Drive is not connected",
-    description: "Connect an account to select folders and Shared Drives.",
-  };
+  return null;
 }

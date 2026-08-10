@@ -9,8 +9,10 @@ import {
   canInstallOpenGeniSlackBot,
   canManageSlackReactionSummon,
   canWriteWorkspaceConnections,
+  googleDriveStatusLabel,
+  localConnectedSlackPreview,
+  slackBotDocumentDestinationAuthority,
   SlackBotInstallControls,
-  WorkspaceSlackBotRequestedScopes,
 } from "./capabilities";
 
 beforeAll(() => {
@@ -73,19 +75,36 @@ function accessContext(
 }
 
 describe("OpenGeni Slack bot install controls", () => {
-  test("renders every requested workspace-bot scope including read-only reactions", async () => {
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
-    try {
-      await act(async () => root.render(<WorkspaceSlackBotRequestedScopes />));
-      expect(container.textContent).toBe(OPENGENI_SLACK_BOT_REQUESTED_SCOPES.join(", "));
-      expect(container.textContent).toContain("reactions:read");
-      expect(container.textContent).not.toContain("reactions:write");
-    } finally {
-      await act(async () => root.unmount());
-      container.remove();
-    }
+  test("summarizes Google Drive state for the compact app catalog", () => {
+    expect(googleDriveStatusLabel("connected")).toBe("Connected");
+    expect(googleDriveStatusLabel("paused")).toBe("Paused");
+    expect(googleDriveStatusLabel("not_connected")).toBe("Not connected");
+    expect(googleDriveStatusLabel("disconnected")).toBe("Not connected");
+    expect(googleDriveStatusLabel("reconsent_required")).toBe("Needs attention");
+    expect(googleDriveStatusLabel("unverified")).toBe("Loading");
+  });
+
+  test("offers a local-only connected Slack preview without changing persisted connections", () => {
+    expect(localConnectedSlackPreview("?previewSlack=connected", "workspace-a", false)).toBeNull();
+
+    const preview = localConnectedSlackPreview("?previewSlack=connected", "workspace-a", true);
+    expect(preview?.bot.workspaceId).toBe("workspace-a");
+    expect(preview?.bot.status).toBe("active");
+    expect(preview?.bot.grantedScopes).toEqual([...OPENGENI_SLACK_BOT_REQUESTED_SCOPES]);
+    expect(preview?.personal.state).toBe("connected");
+  });
+
+  test("keeps workspace-bot knowledge out of personal scope", () => {
+    expect(
+      slackBotDocumentDestinationAuthority({
+        documentDestination: { authorityKind: "personal" },
+      }),
+    ).toBe("workspace");
+    expect(
+      slackBotDocumentDestinationAuthority({
+        documentDestination: { authorityKind: "organization" },
+      }),
+    ).toBe("organization");
   });
 
   test("uses the authoritative workspace permission grant", () => {
@@ -127,13 +146,13 @@ describe("OpenGeni Slack bot install controls", () => {
     }
   });
 
-  test("renders a disabled reinstall control without offering another installation", async () => {
+  test("renders a disabled reconnect control without offering another installation", async () => {
     const rendered = await renderControls({ canInstall: false, hasConnection: true });
 
     try {
       const buttons = [...rendered.container.querySelectorAll<HTMLButtonElement>("button")];
       expect(buttons).toHaveLength(1);
-      expect(buttons[0]?.textContent?.trim()).toBe("Reinstall");
+      expect(buttons[0]?.textContent?.trim()).toBe("Reconnect");
       expect(buttons[0]?.disabled).toBe(true);
       expect(rendered.container.textContent).not.toContain("Install in another workspace");
       expect(rendered.container.textContent).toContain(
@@ -162,15 +181,15 @@ describe("OpenGeni Slack bot install controls", () => {
 
     try {
       const buttons = [...connected.container.querySelectorAll<HTMLButtonElement>("button")];
-      const reinstall = buttons.find((button) => button.textContent?.trim() === "Reinstall");
+      const reconnect = buttons.find((button) => button.textContent?.trim() === "Reconnect");
       const installAnother = [
         ...connected.container.querySelectorAll<HTMLButtonElement>("button"),
       ].find((button) => button.textContent?.trim() === "Install in another workspace");
       expect(connected.container.querySelector("[data-opengeni-slack-install]")).toBeNull();
-      expect(reinstall).not.toBeUndefined();
+      expect(reconnect).not.toBeUndefined();
       expect(installAnother).not.toBeUndefined();
 
-      await act(async () => reinstall!.click());
+      await act(async () => reconnect!.click());
       await act(async () => installAnother!.click());
       expect(connected.onInstall).toHaveBeenNthCalledWith(1, false);
       expect(connected.onInstall).toHaveBeenNthCalledWith(2, true);

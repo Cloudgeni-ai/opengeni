@@ -3257,8 +3257,8 @@ describe("OpenGeni Slack bot connection", () => {
       new URL("../../web/src/routes/capabilities.tsx", import.meta.url),
     ).text();
     expect(capabilitiesSource).toContain("Slack knowledge destination");
-    expect(capabilitiesSource).toContain("slackBotDestinationLabel");
+    expect(capabilitiesSource).toContain("slackDestinationAuthority");
     expect(capabilitiesSource).toContain("collectionId: null");
-    expect(capabilitiesSource).toMatch(/No\s+user-created collection is required/);
+    expect(capabilitiesSource).toContain("Save imported Slack messages");
   });
 });
