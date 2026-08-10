@@ -1,5 +1,18 @@
 # @opengeni/db
 
+## 0.30.0
+
+### Minor Changes
+
+- 31666e2: Add immutable workspace learning-policy revisions, lifecycle-only activation and rollback, accepted-attempt snapshots, and deterministic effective-mode resolution for `off`, `suggest`, and `automatic`.
+
+### Patch Changes
+
+- 7954468: Recognize threaded Slack mentions delivered as message events, include bounded invocation context, and avoid duplicate final replies or repeated session links.
+- Updated dependencies [31666e2]
+  - @opengeni/contracts@0.43.0
+  - @opengeni/config@0.12.11
+
 ## 0.29.1
 
 ### Patch Changes
