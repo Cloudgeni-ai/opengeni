@@ -1,7 +1,8 @@
-import { DocumentSearchResponse } from "@opengeni/contracts";
+import { DocumentSearchResponse, ListIndexedDocumentsResponse } from "@opengeni/contracts";
 import {
   getDocumentChunk,
   listDocumentBases,
+  listEffectiveIndexedDocuments,
   searchEffectiveDocuments,
   type DocumentAccessFilter,
   type DocumentServices,
@@ -111,6 +112,36 @@ export function buildDocumentsMcpServer(
         options.initiatingSubjectId,
         true,
       ),
+  );
+
+  server.registerTool(
+    "list_indexed_documents",
+    {
+      description:
+        "List agent-authorized documents that became ready after an opaque checkpoint, ordered by durable indexing completion. Results include source and authority/ingestion provenance. Persist nextCheckpoint only after successfully processing the returned page, then pass it on the next scheduled run to avoid repeats.",
+      inputSchema: {
+        checkpoint: z.string().min(1).max(1_024).optional(),
+        limit: z.number().int().positive().max(100).optional(),
+      },
+    },
+    async ({ checkpoint, limit }) => ({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            ListIndexedDocumentsResponse.parse(
+              await listEffectiveIndexedDocuments(db, {
+                accountId,
+                workspaceId,
+                initiatingSubjectId: options.initiatingSubjectId,
+                ...(checkpoint ? { checkpoint } : {}),
+                ...(limit ? { limit } : {}),
+              }),
+            ),
+          ),
+        },
+      ],
+    }),
   );
 
   server.registerTool(
