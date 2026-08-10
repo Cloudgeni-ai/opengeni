@@ -216,7 +216,12 @@ import {
   type TurnSandboxCommandSession,
   type TurnToolCancellationFence,
 } from "./sandbox/turn-tool-cancellation";
-import { computerUse, type ComputerToolMode } from "./sandbox-computer";
+import {
+  computerUse,
+  withRetainableSessionImageOutputHook,
+  type ComputerToolMode,
+  type RetainableSessionImageOutputHook,
+} from "./sandbox-computer";
 import type { RuntimeMetricsHooks } from "./metrics";
 import { workspaceSkills, type WorkspaceSkillSearchPath } from "./workspace-skills";
 import { appendWorkspaceGovernance } from "./workspace-governance";
@@ -298,6 +303,8 @@ export {
   type SandboxComputerOptions,
   type ComputerUseArgs,
   type ComputerToolMode,
+  type RetainableSessionImageOutputHook,
+  type RetainableSessionImageToolName,
   type ScreenshotReadErrorCode,
 } from "./sandbox-computer";
 
@@ -2018,6 +2025,8 @@ export type BuildAgentOptions = {
    * shell/filesystem turns never pay that cost.
    */
   onComputerUseReady?: (session: SandboxSessionLike) => Promise<void>;
+  /** Persist intentional image outputs before the SDK can add them to history. */
+  onRetainableSessionImageOutput?: RetainableSessionImageOutputHook;
   // The LIVE, by-reference connector-namespace Set from prepareAgentTools
   // (codexConnectorNamespaces): fills during each turn's codex_apps tools/list,
   // read per model call by the codex tool_search description so the model sees
@@ -2748,6 +2757,9 @@ export function buildOpenGeniAgent(
         ? { computerToolMode: options.computerToolMode }
         : {}),
       ...(options.onComputerUseReady ? { onComputerUseReady: options.onComputerUseReady } : {}),
+      ...(options.onRetainableSessionImageOutput
+        ? { onRetainableSessionImageOutput: options.onRetainableSessionImageOutput }
+        : {}),
       ...(options.turnCancellationSignal
         ? { turnCancellationSignal: options.turnCancellationSignal }
         : {}),
@@ -3254,6 +3266,7 @@ export function buildAgentCapabilities(
     // Omitted/unproven transport fails closed with no computer tools.
     computerToolMode?: ComputerToolMode;
     onComputerUseReady?: (session: SandboxSessionLike) => Promise<void>;
+    onRetainableSessionImageOutput?: RetainableSessionImageOutputHook;
     turnCancellationSignal?: AbortSignal;
     onToolCancellationFence?: (fence: TurnToolCancellationFence) => void;
   } = {},
@@ -3275,12 +3288,19 @@ export function buildAgentCapabilities(
       options.structuredToolTransport === false
         ? withStructuredViewImageFunctionResults(tools)
         : tools;
-    return options.supportsImageInput === false
-      ? withoutImageInputTools(transportTools)
-      : transportTools;
+    const imageCapableTools =
+      options.supportsImageInput === false
+        ? withoutImageInputTools(transportTools)
+        : transportTools;
+    return withRetainableSessionImageOutputHook(
+      imageCapableTools,
+      options.onRetainableSessionImageOutput,
+    );
   };
   const filesystemCapability = filesystem({
-    ...(options.structuredToolTransport === false || options.supportsImageInput === false
+    ...(options.structuredToolTransport === false ||
+    options.supportsImageInput === false ||
+    options.onRetainableSessionImageOutput
       ? { configureTools: configureFilesystemTools }
       : {}),
   });
@@ -3347,6 +3367,9 @@ export function buildAgentCapabilities(
       readOnly: settings.computerUseReadOnly,
       ...(options.turnCancellationSignal ? { abortSignal: options.turnCancellationSignal } : {}),
       ...(options.onComputerUseReady ? { onReady: options.onComputerUseReady } : {}),
+      ...(options.onRetainableSessionImageOutput
+        ? { onRetainableSessionImageOutput: options.onRetainableSessionImageOutput }
+        : {}),
       toolMode: options.computerToolMode ?? "disabled",
     });
     caps.push(computerCapability as unknown as ReturnType<typeof Capabilities.default>[number]);

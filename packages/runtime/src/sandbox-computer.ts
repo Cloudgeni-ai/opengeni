@@ -1777,6 +1777,48 @@ export function computerFunctionTools(
  */
 export type ComputerToolMode = "hosted" | "function-image" | "disabled" | "function-text";
 
+export type RetainableSessionImageToolName = "view_image" | "computer_screenshot";
+
+export type RetainableSessionImageOutputHook = (input: {
+  toolName: RetainableSessionImageToolName;
+  toolCallId: string;
+  output: unknown;
+}) => Promise<void>;
+
+/**
+ * Retain an intentional image result before the Agents SDK can add it to live
+ * history. The original result is returned unchanged so the current model call
+ * still receives the exact SDK-native image representation.
+ */
+export function withRetainableSessionImageOutputHook(
+  tools: Tool<unknown>[],
+  hook?: RetainableSessionImageOutputHook,
+): Tool<unknown>[] {
+  if (!hook) return tools;
+  return tools.map((capabilityTool) => {
+    if (
+      capabilityTool.type !== "function" ||
+      (capabilityTool.name !== "view_image" && capabilityTool.name !== "computer_screenshot")
+    ) {
+      return capabilityTool;
+    }
+    const invoke = capabilityTool.invoke;
+    const toolName = capabilityTool.name;
+    return {
+      ...capabilityTool,
+      invoke: async (runContext, input, details) => {
+        const output = await invoke(runContext, input, details);
+        const toolCallId = details?.toolCall?.callId;
+        if (!toolCallId) {
+          throw new Error(`${toolName} completed without a tool-call identity`);
+        }
+        await hook({ toolName, toolCallId, output });
+        return output;
+      },
+    };
+  });
+}
+
 export type ComputerUseArgs = {
   dimensions?: [number, number];
   readOnly?: boolean;
@@ -1791,6 +1833,8 @@ export type ComputerUseArgs = {
   toolMode?: ComputerToolMode;
   /** Called after the display is ready on the first actual computer action. */
   onReady?: (session: SandboxSessionLike) => Promise<void>;
+  /** Persist intentional image results before they enter SDK history. */
+  onRetainableSessionImageOutput?: RetainableSessionImageOutputHook;
 };
 
 export function computerUse(args: ComputerUseArgs = {}): ComputerUseCapability {
@@ -1850,11 +1894,14 @@ export class ComputerUseCapability extends Capability {
       case "hosted":
         return [this.hostedComputerTool(computer)];
       case "function-image":
-        return computerFunctionTools(
-          computer,
-          this.args.readOnly ?? false,
-          this.args.needsApproval,
-          true,
+        return withRetainableSessionImageOutputHook(
+          computerFunctionTools(
+            computer,
+            this.args.readOnly ?? false,
+            this.args.needsApproval,
+            true,
+          ),
+          this.args.onRetainableSessionImageOutput,
         );
       case "disabled":
       case "function-text":
