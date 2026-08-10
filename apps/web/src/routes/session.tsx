@@ -29,9 +29,12 @@ import { isApiErrorStatus } from "@/api";
 import { ConsoleComposer } from "@/components/Composer";
 import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
+import {
+  FollowUpRepositoryMenuBody,
+  FollowUpRepositoryPicker,
+} from "@/components/follow-up-repository-picker";
 import { MarkdownText } from "@/components/markdown";
 import { ModelPicker, SessionToolPicker, type SessionToolSelection } from "@/components/pickers";
-import { RepositoryContextMenuBody, RepositoryContextPicker } from "@/components/repository-picker";
 import {
   FailedSessionBanner,
   TerminalSessionArchive,
@@ -1287,7 +1290,7 @@ function SessionChatPane(props: {
                 repositories={{
                   selectedCount: repositories.selectionCount,
                   disabled: terminal || composer.sending,
-                  panel: <RepositoryContextMenuBody {...repositoryPickerProps} />,
+                  panel: <FollowUpRepositoryMenuBody {...repositoryPickerProps} />,
                 }}
               />
             }
@@ -1362,7 +1365,7 @@ function SessionChatPane(props: {
                   saving={durableToolsSaving}
                   onChange={(next) => void saveDurableToolPolicy(next)}
                 />
-                <RepositoryContextPicker
+                <FollowUpRepositoryPicker
                   {...repositoryPickerProps}
                   triggerClassName="max-sm:hidden"
                 />

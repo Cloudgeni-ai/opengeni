@@ -1,10 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
 
-import {
-  RepositoryContextMenuBody,
-  repositoryBindingPresentation,
-} from "@/components/repository-picker";
+import { FollowUpRepositoryMenuBody } from "@/components/follow-up-repository-picker";
+import { repositoryBindingPresentation } from "@/components/repository-picker";
 import { registerDom, renderComponent } from "../../../packages/react/test/render-hook";
 import type { GitHubRepository } from "@/types";
 
@@ -89,7 +87,7 @@ describe("additive repository picker", () => {
       accountType: "Organization",
     };
     const rendered = await renderComponent(
-      createElement(RepositoryContextMenuBody, {
+      createElement(FollowUpRepositoryMenuBody, {
         setupMode: "platform",
         configured: true,
         status: "bound",

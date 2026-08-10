@@ -1760,6 +1760,26 @@ describe("GitHub repository resources", () => {
     ).toThrow("resource mount path is already attached");
   });
 
+  test("rejects a follow-up repository that conflicts with a mounted file", () => {
+    const repository = githubRepository();
+    const pendingRepository = gitHubRepositoryResource(repository, "main");
+    const mountedFile: ResourceRef = {
+      kind: "file",
+      fileId: "934d5479-1848-49e3-b6fa-f1d015b5508e",
+      mountPath: pendingRepository.mountPath,
+    };
+
+    expect(() =>
+      buildAdditionalRepositoryResources({
+        mountedResources: [mountedFile],
+        manualRepos: [],
+        repositories: [repository],
+        selectedRepoIds: new Set([repository.id]),
+        selectedRepoRefs: { [repository.id]: "main" },
+      }),
+    ).toThrow("resource mount path is already attached");
+  });
+
   test("hydrates private repositories by identity, drops revoked entries, and keeps manual refs", () => {
     const privateRepo = githubRepository({ private: true });
     const publicRepo = githubRepository({

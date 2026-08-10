@@ -31,13 +31,13 @@ export function useFollowUpRepositories(session: Session): {
   const [optimisticMountedRepos, setOptimisticMountedRepos] = useState<ResourceRef[]>([]);
   const nextManualRepoId = useRef(1);
 
-  const sessionRepositoryResources = useMemo(
-    () => session.resources.filter((resource) => resource.kind === "repository"),
-    [session.resources],
+  const mountedResources = useMemo(
+    () => mergeResourceRefs(session.resources, optimisticMountedRepos),
+    [optimisticMountedRepos, session.resources],
   );
   const mountedRepositoryResources = useMemo(
-    () => mergeResourceRefs(sessionRepositoryResources, optimisticMountedRepos),
-    [optimisticMountedRepos, sessionRepositoryResources],
+    () => mountedResources.filter((resource) => resource.kind === "repository"),
+    [mountedResources],
   );
   const mountedRepositorySelection = useMemo(
     () => repositorySelectionFromResources(mountedRepositoryResources, context.githubRepos),
@@ -73,7 +73,7 @@ export function useFollowUpRepositories(session: Session): {
     try {
       return {
         resources: buildAdditionalRepositoryResources({
-          mountedResources: mountedRepositoryResources,
+          mountedResources,
           manualRepos: pendingManualRepos,
           repositories: context.githubRepos,
           selectedRepoIds: pendingRepoIds,
@@ -87,13 +87,7 @@ export function useFollowUpRepositories(session: Session): {
         error: error instanceof Error ? error.message : String(error),
       };
     }
-  }, [
-    context.githubRepos,
-    mountedRepositoryResources,
-    pendingManualRepos,
-    pendingRepoIds,
-    pendingRepoRefs,
-  ]);
+  }, [context.githubRepos, mountedResources, pendingManualRepos, pendingRepoIds, pendingRepoRefs]);
   const selectionCount =
     selectedRepoIds.size +
     [...mountedManualRepos, ...pendingManualRepos].filter((repo) => repo.url.trim().length > 0)
