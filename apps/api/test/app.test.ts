@@ -979,12 +979,16 @@ describe("API helpers", () => {
         id: "cap-brokered",
         name: "Brokered MCP",
         url: "https://brokered.example/mcp",
+        allowedTools: ["search", "create_draft"],
+        requireApproval: ["create_draft"],
         connectionRef,
       },
     ]);
 
     const server = merged.mcpServers.find((candidate) => candidate.id === "cap-brokered");
     expect(server?.connectionRef).toEqual(connectionRef);
+    expect(server?.allowedTools).toEqual(["search", "create_draft"]);
+    expect(server?.requireApproval).toEqual(["create_draft"]);
     expect(server?.headers).toBeUndefined();
   });
 

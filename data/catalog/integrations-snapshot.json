@@ -3,8 +3,8 @@
   "source": "integrations.sh",
   "cleanedAt": "2026-07-25T06:53:44.741Z",
   "cleaning": {
-    "inputRows": 884,
-    "outputRows": 620,
+    "inputRows": 885,
+    "outputRows": 621,
     "skippedRows": 264,
     "quarantinedRows": 0,
     "duplicateDomainNameRows": 0,
@@ -13,9 +13,9 @@
     "controlCharacterFields": 0
   },
   "probe": {
-    "kept": 620,
+    "kept": 621,
     "dropped": 125,
-    "real": 620,
+    "real": 621,
     "unverified": 121,
     "googleapisDropped": 0
   },
@@ -5298,6 +5298,56 @@
         "status": "real",
         "reason": "auth_challenge",
         "httpStatus": 401
+      }
+    },
+    {
+      "domain": "gmailmcp.googleapis.com",
+      "name": "Gmail",
+      "description": "Search and read Gmail, create drafts, and organize messages through Google's official hosted MCP server.",
+      "mcpUrl": "https://gmailmcp.googleapis.com/mcp/v1",
+      "transport": "streamable-http",
+      "authKind": "oauth2",
+      "scopesHint": [
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.compose"
+      ],
+      "allowedTools": [
+        "create_draft",
+        "get_message",
+        "get_thread",
+        "label_message",
+        "label_thread",
+        "list_drafts",
+        "list_labels",
+        "search_threads",
+        "unlabel_message",
+        "unlabel_thread"
+      ],
+      "requireApproval": [
+        "create_draft",
+        "label_message",
+        "label_thread",
+        "unlabel_message",
+        "unlabel_thread"
+      ],
+      "credentialFacts": [
+        {
+          "id": "google_oauth_client",
+          "type": "oauth2",
+          "generateUrl": "https://console.cloud.google.com/auth/clients",
+          "setup": "Create a Google OAuth web client for OpenGeni's integration callback, enable the Gmail API and Gmail MCP API, and approve the documented Gmail read-only and compose scopes."
+        }
+      ],
+      "tier": "verified",
+      "provenance": "official:developers.google.com/workspace/gmail/api/reference/mcp",
+      "logoSourceUrl": null,
+      "homepageUrl": "https://developers.google.com/workspace/gmail/api/reference/mcp",
+      "installUrl": "https://developers.google.com/workspace/gmail/api/guides/configure-mcp-server",
+      "documentationUrl": "https://developers.google.com/workspace/gmail/api/reference/mcp",
+      "probe": {
+        "status": "real",
+        "reason": "mcp_json_rpc",
+        "httpStatus": 200
       }
     },
     {

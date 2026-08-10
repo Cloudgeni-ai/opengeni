@@ -209,6 +209,60 @@ describe("integrations.sh catalog import normalization", () => {
     });
   });
 
+  test("promotes Google's official Gmail MCP contract with its documented scopes", () => {
+    const normalized = normalizeCatalogSnapshot({
+      generatedAt: "2026-08-10T00:00:00.000Z",
+      importRows: [
+        row({
+          domain: "gmailmcp.googleapis.com",
+          name: "unreviewed Gmail name",
+          mcpUrl: "https://gmailmcp.googleapis.com/mcp/v1",
+          authKind: "none",
+          scopesHint: ["https://mail.google.com/"],
+          provenance: "discovered",
+          probe: { status: "real", reason: "mcp_json_rpc", httpStatus: 200 },
+        }),
+      ],
+    });
+
+    expect(normalized.rows).toHaveLength(1);
+    expect(normalized.rows[0]).toMatchObject({
+      domain: "gmailmcp.googleapis.com",
+      name: "Gmail",
+      description:
+        "Search and read Gmail, create drafts, and organize messages through Google's official hosted MCP server.",
+      mcpUrl: "https://gmailmcp.googleapis.com/mcp/v1",
+      tier: "verified",
+      provenance: "official:developers.google.com/workspace/gmail/api/reference/mcp",
+      authKind: "oauth2",
+      scopesHint: [
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.compose",
+      ],
+      allowedTools: [
+        "create_draft",
+        "get_message",
+        "get_thread",
+        "label_message",
+        "label_thread",
+        "list_drafts",
+        "list_labels",
+        "search_threads",
+        "unlabel_message",
+        "unlabel_thread",
+      ],
+      requireApproval: [
+        "create_draft",
+        "label_message",
+        "label_thread",
+        "unlabel_message",
+        "unlabel_thread",
+      ],
+      logoSourceUrl: null,
+      installUrl: "https://developers.google.com/workspace/gmail/api/guides/configure-mcp-server",
+    });
+  });
+
   test("pins Mobbin to its reviewed official Registry and OAuth contract", () => {
     const normalized = normalizeCatalogSnapshot({
       generatedAt: "2026-07-28T00:00:00.000Z",

@@ -201,7 +201,12 @@ export type RequiredHeaderField = {
 export type CapabilityConnectPlan =
   | { mode: "enable" }
   | { mode: "social_oauth"; provider: "x" | "reddit" }
-  | { mode: "oauth"; providerDomain: string; mcpUrl: string | null }
+  | {
+      mode: "oauth";
+      providerDomain: string;
+      mcpUrl: string | null;
+      requestedScopes: string[];
+    }
   | { mode: "api_key"; providerDomain: string; fields: RequiredHeaderField[] };
 
 export function capabilityConnectPlan(item: CapabilityCatalogItem): CapabilityConnectPlan {
@@ -218,7 +223,12 @@ export function capabilityConnectPlan(item: CapabilityCatalogItem): CapabilityCo
   const providerDomain =
     item.providerDomain ?? domainFromUrl(item.mcpUrl ?? item.endpointUrl) ?? "";
   if (item.authKind === "oauth2") {
-    return { mode: "oauth", providerDomain, mcpUrl: item.mcpUrl ?? item.endpointUrl };
+    return {
+      mode: "oauth",
+      providerDomain,
+      mcpUrl: item.mcpUrl ?? item.endpointUrl,
+      requestedScopes: stringArray(item.metadata.scopesHint),
+    };
   }
   const requiredHeaders = stringArray((item.metadata as Record<string, unknown>).requiredHeaders);
   if (requiredHeaders.length > 0) {

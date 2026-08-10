@@ -25,7 +25,14 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { createApp } from "../src/app";
-import { assertSlackAuthorizationServer } from "../src/integrations/oauth-client";
+import {
+  OFFICIAL_GMAIL_MCP_SCOPES,
+  OFFICIAL_GMAIL_MCP_URL,
+  assertGoogleAuthorizationServer,
+  assertSlackAuthorizationServer,
+  buildAuthorizationUrl,
+  chooseMcpAuthorizeScopes,
+} from "../src/integrations/oauth-client";
 
 const DELEGATION_SECRET = "connections-routes-delegation-secret";
 const STATE_SECRET = "connections-routes-state-secret";
@@ -325,6 +332,70 @@ describe("personal Slack OAuth origin binding", () => {
         authorizationServer: "https://mcp-slack.example",
       } as never),
     ).toThrow("did not remain bound to slack.com");
+  });
+});
+
+describe("official Gmail MCP OAuth compatibility", () => {
+  const google = {
+    issuer: "https://accounts.google.com",
+    authorizationServer: "https://accounts.google.com",
+    authorizationEndpoint: "https://accounts.google.com/o/oauth2/v2/auth",
+    tokenEndpoint: "https://oauth2.googleapis.com/token",
+  };
+
+  test("accepts only Google-owned authorization and token endpoints", () => {
+    expect(() => assertGoogleAuthorizationServer(google as never)).not.toThrow();
+    expect(() =>
+      assertGoogleAuthorizationServer({
+        ...google,
+        tokenEndpoint: "https://attacker.example/token",
+      } as never),
+    ).toThrow("did not remain bound to Google");
+    expect(() =>
+      assertGoogleAuthorizationServer({
+        ...google,
+        authorizationEndpoint: "https://attacker.example/authorize",
+      } as never),
+    ).toThrow("did not remain bound to Google");
+  });
+
+  test("requests offline consent without sending Google's unsupported resource parameter", () => {
+    const authorizationUrl = new URL(
+      buildAuthorizationUrl({
+        endpoint: google.authorizationEndpoint,
+        settings: testSettings({ environment: "test" }) as Settings,
+        clientId: "google-client-id",
+        redirectUri: "https://api.opengeni.test/v1/integrations/oauth/callback",
+        state: "signed-state",
+        resource: "https://gmailmcp.googleapis.com/mcp/v1",
+        verifier: "test-pkce-verifier",
+        scopes: [
+          "https://www.googleapis.com/auth/gmail.readonly",
+          "https://www.googleapis.com/auth/gmail.compose",
+        ],
+        resourceParameterSupported: false,
+      }),
+    );
+
+    expect(authorizationUrl.searchParams.get("resource")).toBeNull();
+    expect(authorizationUrl.searchParams.get("access_type")).toBe("offline");
+    expect(authorizationUrl.searchParams.get("include_granted_scopes")).toBe("true");
+    expect(authorizationUrl.searchParams.get("prompt")).toBe("consent");
+    expect(authorizationUrl.searchParams.get("scope")?.split(" ")).toEqual([
+      "https://www.googleapis.com/auth/gmail.readonly",
+      "https://www.googleapis.com/auth/gmail.compose",
+    ]);
+  });
+
+  test("cannot be widened beyond the reviewed Gmail scopes by an OAuth start caller", () => {
+    expect(
+      chooseMcpAuthorizeScopes({
+        mcpUrl: OFFICIAL_GMAIL_MCP_URL,
+        requested: ["https://mail.google.com/"],
+        challenged: undefined,
+        supported: ["https://mail.google.com/"],
+      }),
+    ).toEqual([...OFFICIAL_GMAIL_MCP_SCOPES]);
   });
 });
 

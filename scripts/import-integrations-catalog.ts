@@ -81,6 +81,8 @@ export type CatalogIntegrationRow = {
   transport: "streamable-http";
   authKind: CatalogAuthKind;
   scopesHint: string[];
+  allowedTools?: string[];
+  requireApproval?: boolean | string[];
   credentialFacts: Array<Record<string, unknown>>;
   tier: CatalogTier;
   provenance: string;
@@ -131,6 +133,8 @@ const officialCatalogContractsByMcpUrl = new Map<
       Pick<
         CatalogIntegrationRow,
         | "description"
+        | "allowedTools"
+        | "requireApproval"
         | "logoSourceUrl"
         | "homepageUrl"
         | "installUrl"
@@ -146,6 +150,50 @@ const officialCatalogContractsByMcpUrl = new Map<
       >
     >
 >([
+  [
+    "https://gmailmcp.googleapis.com/mcp/v1",
+    {
+      name: "Gmail",
+      description:
+        "Search and read Gmail, create drafts, and organize messages through Google's official hosted MCP server.",
+      tier: "verified",
+      provenance: "official:developers.google.com/workspace/gmail/api/reference/mcp",
+      authKind: "oauth2",
+      // Keep the consent surface to the two scopes Google documents for the
+      // Gmail MCP server instead of requesting every scope advertised by PRM.
+      scopesHint: [
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.compose",
+      ],
+      // Freeze the reviewed Developer Preview surface. Newly introduced
+      // remote tools remain unavailable until the catalog contract is reviewed.
+      allowedTools: [
+        "create_draft",
+        "get_message",
+        "get_thread",
+        "label_message",
+        "label_thread",
+        "list_drafts",
+        "list_labels",
+        "search_threads",
+        "unlabel_message",
+        "unlabel_thread",
+      ],
+      requireApproval: [
+        "create_draft",
+        "label_message",
+        "label_thread",
+        "unlabel_message",
+        "unlabel_thread",
+      ],
+      // Google has not published a reusable Gmail MCP logo asset. Keep the
+      // catalog's self-hosted monogram instead of hotlinking a brand asset.
+      logoSourceUrl: null,
+      homepageUrl: "https://developers.google.com/workspace/gmail/api/reference/mcp",
+      installUrl: "https://developers.google.com/workspace/gmail/api/guides/configure-mcp-server",
+      documentationUrl: "https://developers.google.com/workspace/gmail/api/reference/mcp",
+    },
+  ],
   [
     "https://mcp.slack.com/mcp",
     {
@@ -354,6 +402,10 @@ export function normalizeCatalogSnapshot(
       transport: "streamable-http",
       authKind,
       scopesHint: official?.scopesHint ?? stringArray(candidate.scopesHint),
+      ...(official?.allowedTools ? { allowedTools: official.allowedTools } : {}),
+      ...(official?.requireApproval !== undefined
+        ? { requireApproval: official.requireApproval }
+        : {}),
       credentialFacts: recordArray(candidate.credentialFacts),
       tier: official?.tier ?? (provenance === "detected" ? "verified" : "community"),
       provenance: official?.provenance ?? provenance,
@@ -597,6 +649,8 @@ export function catalogRowToDbInput(
     metadata: {
       logoSource: row.logoSourceUrl ? "integrations.sh" : "generic_monogram",
       originalLogoUrl: row.logoSourceUrl,
+      ...(row.allowedTools ? { allowedTools: row.allowedTools } : {}),
+      ...(row.requireApproval !== undefined ? { requireApproval: row.requireApproval } : {}),
       ...(row.documentationUrl ? { documentationUrl: row.documentationUrl } : {}),
       ...(row.registryName
         ? {

@@ -240,6 +240,29 @@ describe("capabilityConnectPlan", () => {
       mode: "oauth",
       providerDomain: "linear.app",
       mcpUrl: "https://mcp.linear.app/sse",
+      requestedScopes: [],
+    });
+  });
+
+  test("OAuth-capable MCP carries its reviewed least-privilege scopes", () => {
+    const requestedScopes = [
+      "https://www.googleapis.com/auth/gmail.readonly",
+      "https://www.googleapis.com/auth/gmail.compose",
+    ];
+    expect(
+      capabilityConnectPlan(
+        item({
+          authKind: "oauth2",
+          providerDomain: "gmailmcp.googleapis.com",
+          mcpUrl: "https://gmailmcp.googleapis.com/mcp/v1",
+          metadata: { scopesHint: requestedScopes },
+        }),
+      ),
+    ).toEqual({
+      mode: "oauth",
+      providerDomain: "gmailmcp.googleapis.com",
+      mcpUrl: "https://gmailmcp.googleapis.com/mcp/v1",
+      requestedScopes,
     });
   });
 

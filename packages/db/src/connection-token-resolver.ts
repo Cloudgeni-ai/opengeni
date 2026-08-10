@@ -877,7 +877,10 @@ export async function refreshOAuthConnectionCredential(
   }
   const resource =
     ref.resource ?? stringValue((cred.credential as { resource?: unknown }).resource);
-  if (resource) {
+  const resourceParameterSupported =
+    (cred.credential as { resource_parameter_supported?: unknown }).resource_parameter_supported !==
+    false;
+  if (resource && resourceParameterSupported) {
     body.set("resource", resource);
   }
   if (ref.scopes?.length) {

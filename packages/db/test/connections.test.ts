@@ -1415,6 +1415,54 @@ describe("buildConnectionTokenResolver", () => {
     }
   });
 
+  test("Google-compatible refresh omits the unsupported resource parameter", async () => {
+    const originalFetch = globalThis.fetch;
+    let capturedBody: URLSearchParams | null = null;
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      capturedBody = new URLSearchParams(String(init?.body));
+      return Response.json({ access_token: "AC2", token_type: "Bearer", expires_in: 3600 });
+    }) as typeof fetch;
+    try {
+      const refreshed = await refreshOAuthConnectionCredential(
+        brokerCredential({
+          kind: "oauth2",
+          credential: {
+            access_token: "AC",
+            refresh_token: "RF",
+            token_type: "Bearer",
+            token_endpoint: "https://oauth2.googleapis.com/token",
+            client_id: "google-client-id",
+            client_secret: "google-client-secret",
+            token_endpoint_auth_method: "client_secret_post",
+            resource: "https://gmailmcp.googleapis.com/mcp/v1",
+            resource_parameter_supported: false,
+          },
+        }),
+        {
+          providerDomain: "gmailmcp.googleapis.com",
+          kind: "oauth2",
+          resource: "https://gmailmcp.googleapis.com/mcp/v1",
+        },
+        settings,
+        {
+          fetchImpl: globalThis.fetch,
+          dnsLookup: async () => [{ address: "142.250.74.106", family: 4 }],
+        },
+      );
+
+      expect(capturedBody!.get("resource")).toBeNull();
+      expect(capturedBody!.get("client_id")).toBe("google-client-id");
+      expect(capturedBody!.get("client_secret")).toBe("google-client-secret");
+      expect(refreshed.credential).toMatchObject({
+        access_token: "AC2",
+        resource: "https://gmailmcp.googleapis.com/mcp/v1",
+        resource_parameter_supported: false,
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("a rejected refresh grant (4xx) marks the connection needs_reauth", async () => {
     const stale = brokerCredential({
       id: "conn_oauth",

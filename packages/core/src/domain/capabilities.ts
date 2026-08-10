@@ -848,6 +848,9 @@ export function settingsWithMcpCapabilityServers(
           ...(server.allowedTools ? { allowedTools: server.allowedTools } : {}),
           ...(server.timeoutMs ? { timeoutMs: server.timeoutMs } : {}),
           cacheToolsList: server.cacheToolsList ?? false,
+          ...(server.requireApproval !== undefined
+            ? { requireApproval: server.requireApproval }
+            : {}),
           ...(headers && headers !== "unavailable" ? { headers } : {}),
           ...(server.connectionRef ? { connectionRef: server.connectionRef } : {}),
         },
