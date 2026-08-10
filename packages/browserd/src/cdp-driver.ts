@@ -342,6 +342,18 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     return await this.observe(target.targetId);
   }
 
+  /** Bounded liveness probe for the supervisor's recovery path. It never
+   * starts or repairs the browser, preserving one recovery authority. */
+  async isAvailable(): Promise<boolean> {
+    if (!this.started || !this.connection) return false;
+    try {
+      await this.connection.send("Browser.getVersion", {}, { timeoutMs: 2_000 });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   async listTargets(): Promise<BrowserTargetValue[]> {
     const connection = await this.ensureConnection();
     const infos = visibleTargets(await this.targetInfos(connection));

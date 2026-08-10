@@ -178,6 +178,10 @@ export type BrowserSupervisorDriver = BrowserInteractionDriver & {
   readClipboard(): BrowserClipboard;
   runtimeSnapshot(): Promise<BrowserRuntimeSnapshot>;
   protectedFill(command: BrowserProtectedAuthFillCommand): Promise<BrowserProtectedAuthObservation>;
+  /** Provider liveness probe used only after another operation reports a
+   * failure. Managed Chromium implements it; unsupported providers fail
+   * honestly without implicit recovery. */
+  isAvailable?(): Promise<boolean>;
   close(): Promise<void>;
 };
 
@@ -225,7 +229,10 @@ type Runtime = {
   protectedAuthController: BrowserProtectedAuthController;
   workspaceFileStager: BrowserWorkspaceFileStager;
   downloadStore: BrowserDownloadStore | null;
-  lifecycle: "active" | "capturing" | "captured" | "ending";
+  lastSnapshot: BrowserRuntimeSnapshot;
+  lastTargets: BrowserTarget[];
+  recovery: Promise<void> | null;
+  lifecycle: "active" | "recovering" | "capturing" | "captured" | "ending";
 };
 
 type BrowserRuntimeOptions = Omit<
@@ -367,34 +374,59 @@ export class BrowserSupervisor {
 
   listSessions(): BrowserSessionReference[] {
     return [...this.sessions.values()]
-      .filter((runtime) => runtime.lifecycle === "active")
+      .filter((runtime) => runtime.lifecycle === "active" || runtime.lifecycle === "recovering")
       .map(binding);
   }
 
   async listTargets(reference: BrowserSessionReference): Promise<BrowserTarget[]> {
-    return await this.requireActive(reference).driver.listTargets();
+    const runtime = this.requireActive(reference);
+    const targets = await this.readWithRecovery(runtime, async () => {
+      return await runtime.driver.listTargets();
+    });
+    this.rememberTargets(runtime, targets);
+    return targets;
   }
 
   async openTarget(reference: BrowserSessionReference, url?: string): Promise<BrowserObservation> {
-    return await this.requireActive(reference).driver.openTarget(url);
+    const runtime = this.requireActive(reference);
+    const observation = await this.mutateWithRecovery(runtime, async () => {
+      return await runtime.driver.openTarget(url);
+    });
+    this.rememberObservation(runtime, observation);
+    return observation;
   }
 
   async selectTarget(
     reference: BrowserSessionReference,
     targetId: string,
   ): Promise<BrowserObservation> {
-    return await this.requireActive(reference).driver.selectTarget(targetId);
+    const runtime = this.requireActive(reference);
+    const observation = await this.mutateWithRecovery(runtime, async () => {
+      return await runtime.driver.selectTarget(targetId);
+    });
+    this.rememberObservation(runtime, observation);
+    return observation;
   }
 
   async closeTarget(
     reference: BrowserSessionReference,
     targetId: string,
   ): Promise<BrowserTarget[]> {
-    return await this.requireActive(reference).driver.closeTarget(targetId);
+    const runtime = this.requireActive(reference);
+    const targets = await this.mutateWithRecovery(runtime, async () => {
+      return await runtime.driver.closeTarget(targetId);
+    });
+    this.rememberTargets(runtime, targets);
+    return targets;
   }
 
   async observe(reference: BrowserSessionReference, targetId: string): Promise<BrowserObservation> {
-    return await this.requireActive(reference).controller.observe(targetId);
+    const runtime = this.requireActive(reference);
+    const observation = await this.readWithRecovery(runtime, async () => {
+      return await runtime.controller.observe(targetId);
+    });
+    this.rememberObservation(runtime, observation);
+    return observation;
   }
 
   readClipboard(reference: BrowserSessionReference): BrowserClipboard {
@@ -407,6 +439,10 @@ export class BrowserSupervisor {
       controllerGeneration: command.controllerGeneration,
     });
     const receipt = await runtime.controller.run(command);
+    if (receipt.observation) this.rememberObservation(runtime, receipt.observation);
+    if (receipt.error?.code === "controller_lost" || receipt.error?.code === "driver_failed") {
+      await this.recoverIfUnavailable(runtime).catch(() => false);
+    }
     if (
       browserActionUsesWorkspaceFiles(command.action) &&
       receipt.state === "failed" &&
@@ -424,11 +460,17 @@ export class BrowserSupervisor {
     return await this.requireActive(reference).workspaceFileStager.stage(request);
   }
 
-  protectedAuthFill(command: BrowserProtectedAuthFillCommand) {
-    return this.requireActive({
+  async protectedAuthFill(command: BrowserProtectedAuthFillCommand) {
+    const runtime = this.requireActive({
       browserSessionId: command.browserSessionId,
       controllerGeneration: command.controllerGeneration,
-    }).protectedAuthController.run(command);
+    });
+    const receipt = await runtime.protectedAuthController.run(command);
+    if (receipt.observation) this.rememberTarget(runtime, receipt.observation.target);
+    if (receipt.error?.code === "controller_lost" || receipt.error?.code === "driver_failed") {
+      await this.recoverIfUnavailable(runtime).catch(() => false);
+    }
+    return receipt;
   }
 
   receipt(reference: BrowserSessionReference, operationId: string): BrowserActionReceipt | null {
@@ -444,7 +486,10 @@ export class BrowserSupervisor {
     targetId: string,
     options?: BrowserScreenshotOptions,
   ): Promise<BrowserImageFrame> {
-    return await this.requireActive(reference).driver.captureScreenshot(targetId, options);
+    const runtime = this.requireActive(reference);
+    return await this.readWithRecovery(runtime, async () => {
+      return await runtime.driver.captureScreenshot(targetId, options);
+    });
   }
 
   async subscribeFrames(
@@ -452,7 +497,10 @@ export class BrowserSupervisor {
     targetId: string,
     options?: BrowserFrameStreamOptions,
   ): Promise<BrowserFrameSubscription> {
-    return await this.requireActive(reference).driver.subscribeFrames(targetId, options);
+    const runtime = this.requireActive(reference);
+    return await this.readWithRecovery(runtime, async () => {
+      return await runtime.driver.subscribeFrames(targetId, options);
+    });
   }
 
   async debug(
@@ -464,7 +512,10 @@ export class BrowserSupervisor {
       limit?: number;
     },
   ): Promise<BrowserDiagnosticBatch> {
-    return await this.requireActive(reference).driver.debug(targetId, options);
+    const runtime = this.requireActive(reference);
+    return await this.readWithRecovery(runtime, async () => {
+      return await runtime.driver.debug(targetId, options);
+    });
   }
 
   async listDownloads(reference: BrowserSessionReference): Promise<BrowserDownload[]> {
@@ -555,6 +606,9 @@ export class BrowserSupervisor {
     const runtime = this.requireBound(reference);
     const existing = this.ending.get(reference.browserSessionId);
     if (existing) return await existing;
+    if (runtime.recovery) await runtime.recovery.catch(() => undefined);
+    const raced = this.ending.get(reference.browserSessionId);
+    if (raced) return await raced;
     const driverAlreadyClosed = runtime.lifecycle === "captured";
     runtime.lifecycle = "ending";
     const ending = this.disposeRuntime(runtime, options.removeState ?? false, driverAlreadyClosed);
@@ -694,7 +748,7 @@ export class BrowserSupervisor {
       const initialJournal = journal.loadAndRecover();
       const initialProtectedAuthJournal = protectedAuthJournal.loadAndRecover();
       driver = await this.createDriver(driverContext);
-      const runtime = {
+      const runtime: Runtime = {
         options: runtimeOptions(options),
         sessionDirectory,
         driverContext,
@@ -707,6 +761,13 @@ export class BrowserSupervisor {
         protectedAuthController: null as unknown as BrowserProtectedAuthController,
         workspaceFileStager,
         downloadStore,
+        lastSnapshot: {
+          engine: options.transport.kind === "attached_chrome" ? "chrome" : "chromium",
+          engineVersion: null,
+          tabs: [],
+        },
+        lastTargets: [],
+        recovery: null,
       };
       runtime.controller = this.createController(runtime, driver, initialJournal);
       runtime.protectedAuthController = this.createProtectedAuthController(
@@ -721,10 +782,14 @@ export class BrowserSupervisor {
             ? [{ url: options.initialUrl, selected: true }]
             : restoredManifest.tabs,
         );
-        assertRestoredRuntimeCompatible(restoredManifest, await driver.runtimeSnapshot());
+        runtime.lastSnapshot = await driver.runtimeSnapshot();
+        assertRestoredRuntimeCompatible(restoredManifest, runtime.lastSnapshot);
       } else {
         await driver.start(options.initialUrl);
+        runtime.lastSnapshot = await driver.runtimeSnapshot();
       }
+      runtime.lastTargets = await driver.listTargets();
+      runtime.lastSnapshot = snapshotWithTargets(runtime.lastSnapshot, runtime.lastTargets);
       return runtime;
     } catch (error) {
       const failures: unknown[] = [error];
@@ -883,6 +948,8 @@ export class BrowserSupervisor {
     const driver = await this.createDriver(runtime.driverContext);
     try {
       await restoreTabs(driver, snapshot.tabs);
+      const currentSnapshot = await driver.runtimeSnapshot();
+      const currentTargets = await driver.listTargets();
       runtime.driver = driver;
       runtime.controller = this.createController(runtime, driver, runtime.journal.loadAndRecover());
       runtime.protectedAuthController = this.createProtectedAuthController(
@@ -890,10 +957,108 @@ export class BrowserSupervisor {
         driver,
         runtime.protectedAuthJournal.loadAndRecover(),
       );
+      runtime.lastTargets = currentTargets;
+      runtime.lastSnapshot = snapshotWithTargets(currentSnapshot, currentTargets);
     } catch (error) {
       await driver.close().catch(() => undefined);
       throw error;
     }
+  }
+
+  private async readWithRecovery<T>(runtime: Runtime, operation: () => Promise<T>): Promise<T> {
+    try {
+      return await operation();
+    } catch (error) {
+      if (!(await this.recoverIfUnavailable(runtime))) throw error;
+      return await operation();
+    }
+  }
+
+  private async mutateWithRecovery<T>(runtime: Runtime, operation: () => Promise<T>): Promise<T> {
+    try {
+      return await operation();
+    } catch (error) {
+      try {
+        await this.recoverIfUnavailable(runtime);
+      } catch (recoveryError) {
+        throw aggregateFailure(
+          [error, recoveryError],
+          "browser mutation failed and its runtime could not recover",
+          error,
+        );
+      }
+      // Never replay a mutation whose dispatch boundary is not represented by
+      // the durable action journal. Recovery only makes later calls usable.
+      throw error;
+    }
+  }
+
+  private async recoverIfUnavailable(runtime: Runtime): Promise<boolean> {
+    if (runtime.options.transport.kind !== "managed" || !runtime.driver.isAvailable) return false;
+    if (await runtime.driver.isAvailable()) return false;
+    await this.recoverRuntimeAfterLoss(runtime);
+    return true;
+  }
+
+  private async recoverRuntimeAfterLoss(runtime: Runtime): Promise<void> {
+    if (runtime.recovery) return await runtime.recovery;
+    const recovery = this.performRuntimeRecovery(runtime);
+    runtime.recovery = recovery;
+    try {
+      await recovery;
+    } finally {
+      if (runtime.recovery === recovery) runtime.recovery = null;
+    }
+  }
+
+  private async performRuntimeRecovery(runtime: Runtime): Promise<void> {
+    if (runtime.lifecycle !== "active") {
+      throw new InteractionControllerError(
+        "resource_unavailable",
+        "browser session cannot recover while changing state",
+        true,
+      );
+    }
+    runtime.lifecycle = "recovering";
+    const previousDriver = runtime.driver;
+    const snapshot = runtime.lastSnapshot;
+    try {
+      await Promise.all([
+        runtime.controller.waitForIdle(),
+        runtime.protectedAuthController.waitForIdle(),
+      ]);
+      await runtime.downloadStore?.interruptInProgress("browser_restarted");
+      await previousDriver.close();
+      await this.restartRuntime(runtime, snapshot);
+      runtime.lifecycle = "active";
+    } catch (error) {
+      // Keep the binding addressable so a later request can retry recovery;
+      // the old driver remains unavailable and no operation is replayed.
+      runtime.lifecycle = "active";
+      throw error;
+    }
+  }
+
+  private rememberObservation(runtime: Runtime, observation: BrowserObservation): void {
+    this.rememberTarget(runtime, observation.target);
+  }
+
+  private rememberTarget(runtime: Runtime, target: BrowserTarget): void {
+    const index = runtime.lastTargets.findIndex((entry) => entry.id === target.id);
+    if (target.selected) {
+      runtime.lastTargets = runtime.lastTargets.map((entry) => ({
+        ...entry,
+        selected: false,
+      }));
+    }
+    if (index >= 0) runtime.lastTargets[index] = target;
+    else runtime.lastTargets.push(target);
+    runtime.lastSnapshot = snapshotWithTargets(runtime.lastSnapshot, runtime.lastTargets);
+  }
+
+  private rememberTargets(runtime: Runtime, targets: readonly BrowserTarget[]): void {
+    runtime.lastTargets = targets.map((target) => ({ ...target }));
+    runtime.lastSnapshot = snapshotWithTargets(runtime.lastSnapshot, runtime.lastTargets);
   }
 
   private createController(
@@ -961,10 +1126,23 @@ export class BrowserSupervisor {
   }
 
   private async currentObservation(runtime: Runtime): Promise<BrowserObservation> {
-    const targets = await runtime.driver.listTargets();
+    const targets = await this.readWithRecovery(runtime, async () => {
+      return await runtime.driver.listTargets();
+    });
+    this.rememberTargets(runtime, targets);
     const selected = targets.find((target) => target.selected) ?? targets[0];
-    if (selected) return await runtime.controller.observe(selected.id);
-    return await runtime.driver.openTarget();
+    if (selected) {
+      const observation = await this.readWithRecovery(runtime, async () => {
+        return await runtime.controller.observe(selected.id);
+      });
+      this.rememberObservation(runtime, observation);
+      return observation;
+    }
+    const observation = await this.mutateWithRecovery(runtime, async () => {
+      return await runtime.driver.openTarget();
+    });
+    this.rememberObservation(runtime, observation);
+    return observation;
   }
 
   private assertSameBinding(
@@ -1001,7 +1179,11 @@ export class BrowserSupervisor {
   private requireActive(reference: BrowserSessionReference): Runtime {
     const runtime = this.requireBound(reference);
     if (runtime.lifecycle !== "active") {
-      throw new InteractionControllerError("resource_unavailable", "browser session is ending");
+      throw new InteractionControllerError(
+        "resource_unavailable",
+        "browser session is changing state",
+        true,
+      );
     }
     return runtime;
   }
@@ -1110,6 +1292,18 @@ function aggregateFailure(
   cause: unknown,
 ): AggregateError {
   return new AggregateError(errors, message, { cause });
+}
+
+function snapshotWithTargets(
+  snapshot: BrowserRuntimeSnapshot,
+  targets: readonly BrowserTarget[],
+): BrowserRuntimeSnapshot {
+  return {
+    ...snapshot,
+    tabs: targets
+      .filter((target) => target.kind === "page" || target.kind === "popup")
+      .map((target) => ({ url: target.url, selected: target.selected })),
+  };
 }
 
 function browserActionUsesWorkspaceFiles(action: BrowserActionCommand["action"]): boolean {

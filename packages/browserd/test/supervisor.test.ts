@@ -61,6 +61,54 @@ describe("BrowserSupervisor", () => {
     });
   });
 
+  test("repairs a lost managed browser without replaying an ambiguous action", async () => {
+    let firstDriverLost = false;
+    let factoryCalls = 0;
+    let dispatches = 0;
+    await withSupervisor(
+      async ({ supervisor }) => {
+        const session = reference(11);
+        const created = await supervisor.createSession({
+          ...session,
+          headed: false,
+          initialUrl: "https://recovery.test/",
+        });
+        const operationId = randomUUID();
+        const receipt = await supervisor.action(command(created.observation, operationId));
+        expect(receipt.state).toBe("outcome_unknown");
+        expect(receipt.error?.code).toBe("controller_lost");
+        expect(dispatches).toBe(1);
+        expect(factoryCalls).toBe(2);
+
+        const recovered = await supervisor.listTargets(session);
+        expect(recovered).toHaveLength(1);
+        expect(recovered[0]!.id).not.toBe(created.observation.target.id);
+        expect(recovered[0]!.url).toBe("https://recovery.test/");
+
+        expect(await supervisor.action(command(created.observation, operationId))).toEqual(receipt);
+        expect(dispatches).toBe(1);
+        const stale = await supervisor.action(command(created.observation));
+        expect(stale.state).toBe("failed");
+        expect(stale.error?.code).toBe("target_not_found");
+      },
+      {
+        onFactory: () => {
+          factoryCalls += 1;
+        },
+        driverHooks: {
+          available: (instance) => instance > 1 || !firstDriverLost,
+          async dispatch(instance) {
+            dispatches += 1;
+            if (instance === 1) {
+              firstDriverLost = true;
+              throw new Error("fixture browser transport disappeared after dispatch");
+            }
+          },
+        },
+      },
+    );
+  });
+
   test("deduplicates concurrent creation and rejects stale or conflicting bindings", async () => {
     let factoryCalls = 0;
     await withSupervisor(
@@ -102,7 +150,10 @@ describe("BrowserSupervisor", () => {
         ...session,
         headed: true,
         linkedComputer,
-        launchEnvironment: { DISPLAY: ":101", DBUS_SESSION_BUS_ADDRESS: "unix:path=/tmp/bus" },
+        launchEnvironment: {
+          DISPLAY: ":101",
+          DBUS_SESSION_BUS_ADDRESS: "unix:path=/tmp/bus",
+        },
       });
       expect(contexts.get(session.browserSessionId)).toMatchObject({
         launchEnvironment: {
@@ -114,7 +165,10 @@ describe("BrowserSupervisor", () => {
         supervisor.createSession({
           ...session,
           headed: true,
-          linkedComputer: { ...linkedComputer, controllerGeneration: "computer-controller-2" },
+          linkedComputer: {
+            ...linkedComputer,
+            controllerGeneration: "computer-controller-2",
+          },
           launchEnvironment: { DISPLAY: ":101" },
         }),
       ).rejects.toMatchObject({ code: "operation_conflict" });
@@ -229,7 +283,11 @@ describe("BrowserSupervisor", () => {
     await withSupervisor(async ({ supervisor, contexts }) => {
       const session = reference(1);
       const route = proxyRoute("http://user:password@proxy.test:8443/");
-      await supervisor.createSession({ ...session, headed: false, networkRoute: route });
+      await supervisor.createSession({
+        ...session,
+        headed: false,
+        networkRoute: route,
+      });
       expect(contexts.get(session.browserSessionId)?.networkRoute).toEqual(route);
 
       await expect(
@@ -250,7 +308,10 @@ describe("BrowserSupervisor", () => {
         supervisor.createSession({
           ...session,
           headed: false,
-          networkRoute: { ...route, proxyUrl: "http://user:other@proxy.test:8443/" },
+          networkRoute: {
+            ...route,
+            proxyUrl: "http://user:other@proxy.test:8443/",
+          },
         }),
       ).rejects.toMatchObject({ code: "operation_conflict" });
     });
@@ -263,7 +324,10 @@ describe("BrowserSupervisor", () => {
           headed: false,
           networkRoute: withoutProxyAuthority(proxyRoute()),
         }),
-      ).rejects.toMatchObject({ code: "resource_unavailable", retryable: true });
+      ).rejects.toMatchObject({
+        code: "resource_unavailable",
+        retryable: true,
+      });
     });
   });
 
@@ -587,8 +651,9 @@ async function withSupervisor(
     maxSessions?: number;
     onFactory?: () => void;
     driverHooks?: {
-      dispatch?: () => void | Promise<void>;
+      dispatch?: (instance: number) => void | Promise<void>;
       engineVersion?: () => string;
+      available?: (instance: number) => boolean;
     };
     uploadArtifact?: (path: string, authority: BrowserStateUploadAuthority) => Promise<void>;
   } = {},
@@ -619,8 +684,9 @@ async function withSupervisor(
 function fakeDriver(
   context: BrowserSupervisorDriverContext,
   hooks: {
-    dispatch?: () => void | Promise<void>;
+    dispatch?: (instance: number) => void | Promise<void>;
     engineVersion?: () => string;
+    available?: (instance: number) => boolean;
   } = {},
   instance = 1,
 ): BrowserSupervisorDriver {
@@ -659,6 +725,7 @@ function fakeDriver(
   });
   const requireOpen = () => {
     if (closed) throw new Error("driver closed");
+    if (hooks.available && !hooks.available(instance)) throw new Error("driver unavailable");
   };
   return {
     async start(url) {
@@ -693,7 +760,7 @@ function fakeDriver(
     },
     async dispatch() {
       requireOpen();
-      await hooks.dispatch?.();
+      await hooks.dispatch?.(instance);
       return observation();
     },
     async protectedFill() {
@@ -754,6 +821,9 @@ function fakeDriver(
         tabs: [{ url: target.url, selected: target.selected }],
       };
     },
+    async isAvailable() {
+      return !closed && (hooks.available?.(instance) ?? true);
+    },
     async close() {
       closed = true;
     },
@@ -779,7 +849,11 @@ function proxyRoute(proxyUrl = "http://user:password@proxy.test:8443/") {
       expectedRegion: null,
       locale: "en-US",
       timezone: "Europe/Oslo",
-      geolocation: { latitude: 59.9139, longitude: 10.7522, accuracyMeters: 50 },
+      geolocation: {
+        latitude: 59.9139,
+        longitude: 10.7522,
+        accuracyMeters: 50,
+      },
       webRtc: "disable_non_proxied_udp" as const,
       stability: "session" as const,
     },
