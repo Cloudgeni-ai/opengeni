@@ -302,6 +302,7 @@ export * from "./memory-governance";
 export * from "./scoped-knowledge";
 export * from "./knowledge-source-sync";
 export * from "./generated-images";
+export * from "./slack-user-link-access";
 export { interruptedToolCallResult } from "./session-tool-call-settlement";
 export { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 export {

@@ -241,13 +241,8 @@ const workspaceCapabilitiesRoute = createRoute({
   path: "capabilities",
   // `?section=packs` focuses the Packs subsection (used by the legacy
   // /packs redirect and the nav). Unknown values fall back to the catalog.
-  validateSearch: (
-    search: Record<string, unknown>,
-  ): { section?: "packs"; slack_link?: string } => ({
+  validateSearch: (search: Record<string, unknown>): { section?: "packs" } => ({
     ...(search.section === "packs" ? { section: "packs" as const } : {}),
-    ...(typeof search.slack_link === "string" && search.slack_link
-      ? { slack_link: search.slack_link }
-      : {}),
   }),
   component: Capabilities,
 });
@@ -478,14 +473,8 @@ function PacksRedirect() {
 
 function Capabilities() {
   const { workspaceId } = workspaceCapabilitiesRoute.useParams();
-  const { section, slack_link: slackLinkToken } = workspaceCapabilitiesRoute.useSearch();
-  return (
-    <LazyCapabilitiesRoute
-      workspaceId={workspaceId}
-      initialSection={section}
-      slackLinkToken={slackLinkToken}
-    />
-  );
+  const { section } = workspaceCapabilitiesRoute.useSearch();
+  return <LazyCapabilitiesRoute workspaceId={workspaceId} initialSection={section} />;
 }
 
 function Schedules() {

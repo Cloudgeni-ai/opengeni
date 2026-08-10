@@ -218,12 +218,13 @@ describe("release schema contract", () => {
         (migrations.has("0199_workspace_learning_policy.sql") ? 1 : 0) +
         (migrations.has("0201_company_profile_authority.sql") ? 1 : 0) +
         (migrations.has("0202_document_index_checkpoints.sql") ? 1 : 0) +
-        (migrations.has("0203_slack_installation_bindings.sql") ? 1 : 0),
+        (migrations.has("0203_slack_installation_bindings.sql") ? 1 : 0) +
+        (migrations.has("0204_slack_user_link_access_requests.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "4fbbfc1d0c1e3aa08cd1c343eb2b9dad064808b0f9e216e2fb39739b01613246",
+      "940c249ab1b197f7aed07e4a7799b23b8ca98d4937f72816a8254e32537849b2",
     );
-    expect(contract.latestMigration).toBe("0203_slack_installation_bindings.sql");
+    expect(contract.latestMigration).toBe("0204_slack_user_link_access_requests.sql");
     expect(migrations.get("0197_knowledge_source_sync_schedules.sql")).toMatchObject({
       sha256: "edd425be4e4db07f4fcab1e520ece71dc1a692072ce28256ec2b86248442f3c8",
       deploymentMode: "maintenance",

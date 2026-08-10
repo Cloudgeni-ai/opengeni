@@ -181,6 +181,8 @@ export const FORCE_RLS_TABLES = [
   "slack_interaction_inbox",
   "slack_interaction_progress_deliveries",
   "slack_interactions",
+  "slack_user_link_access_request_operations",
+  "slack_user_link_access_requests",
   "social_connections",
   "social_posts",
   "temporal_schedule_cleanup_outbox",
@@ -403,6 +405,7 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "preference_registry_preferences",
   "preference_registry_revisions",
   "session_spawn_denials",
+  "slack_user_link_access_request_operations",
   "temporal_schedule_cleanup_outbox",
   "workspace_artifact_events",
   "workspace_artifact_versions",
@@ -413,7 +416,10 @@ export const RUNTIME_READ_INSERT_TABLES = [
 ] as const;
 
 /** Mutable authorities that intentionally forbid runtime deletion. */
-export const RUNTIME_READ_INSERT_UPDATE_TABLES = ["editable_artifacts"] as const;
+export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
+  "editable_artifacts",
+  "slack_user_link_access_requests",
+] as const;
 
 /**
  * These FORCE-RLS tables are owned by security-definer host-export routines.

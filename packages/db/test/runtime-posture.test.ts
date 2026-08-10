@@ -92,14 +92,14 @@ function safePosture(): RuntimeDatabasePosture {
 describe("runtime database posture evaluator", () => {
   test("freezes the unique, sorted current-ledger table privilege classes", () => {
     const contracts = [
-      [FORCE_RLS_TABLES, 162],
+      [FORCE_RLS_TABLES, 164],
       [NON_RLS_RUNTIME_TABLES, 11],
       [RUNTIME_FULL_DML_TABLES, 114],
       [RUNTIME_READ_ONLY_TABLES, 14],
-      [RUNTIME_READ_INSERT_TABLES, 37],
-      [RUNTIME_READ_INSERT_UPDATE_TABLES, 1],
+      [RUNTIME_READ_INSERT_TABLES, 38],
+      [RUNTIME_READ_INSERT_UPDATE_TABLES, 2],
       [PROTECTED_NO_DIRECT_DML_TABLES, 7],
-      [RUNTIME_DML_TABLES, 166],
+      [RUNTIME_DML_TABLES, 168],
     ] as const;
     for (const [tables, length] of contracts) {
       expect(tables).toHaveLength(length);
@@ -108,8 +108,17 @@ describe("runtime database posture evaluator", () => {
     }
 
     expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(173);
-    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(173);
+    expect(RUNTIME_TABLE_PRIVILEGES.slack_user_link_access_requests).toEqual([
+      "SELECT",
+      "INSERT",
+      "UPDATE",
+    ]);
+    expect(RUNTIME_TABLE_PRIVILEGES.slack_user_link_access_request_operations).toEqual([
+      "SELECT",
+      "INSERT",
+    ]);
+    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(175);
+    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(175);
     expect(
       FORCE_RLS_TABLES.every(
         (table) =>

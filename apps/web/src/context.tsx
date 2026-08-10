@@ -108,6 +108,10 @@ export type AppContextValue = {
   authSession: AuthSession | null;
   accessContext: AccessContext;
   workspaces: Workspace[];
+  /** Raw signed Slack bearer held in memory only until its server-side exchange. */
+  pendingSlackLink: PendingSlackLink | null;
+  clearPendingSlackLink: () => void;
+  clearSlackLinkContinuation: () => void;
   accessKeyVersion: number;
   keyAuthRequired: boolean;
   model: string;
@@ -228,6 +232,30 @@ export type AppContextValue = {
   resetWorkspaceIntegrations: () => void;
 };
 
+export type PendingSlackLink = {
+  workspaceId: string;
+  token: string;
+};
+
+export function createOneShotPendingSlackLink(value: PendingSlackLink | null) {
+  let pending = value;
+  return () => {
+    const current = pending;
+    pending = null;
+    return current;
+  };
+}
+
+// Capture and scrub the signed fragment while this module is loading, before
+// TanStack Router canonicalizes the initial location. The consumable slot is
+// intentionally one-shot: a later Root/provider remount cannot resurrect an
+// already exchanged, cancelled, or completed bearer.
+const bootstrappedPendingSlackLink = pendingSlackLinkFromBrowserLocation();
+stripSlackLinkFromBrowserLocation();
+const takeBootstrappedPendingSlackLink = createOneShotPendingSlackLink(
+  bootstrappedPendingSlackLink,
+);
+
 type SessionEventFeed = { sessionId: string; events: SessionEvent[] } | null;
 
 type SessionEventFeedStore = {
@@ -285,12 +313,21 @@ export function workspaceLabel(workspace: Workspace, workspaces: Workspace[]): s
 }
 
 export function RootRouteComponent() {
+  const [initialPendingSlackLink] = useState<PendingSlackLink | null>(
+    takeBootstrappedPendingSlackLink,
+  );
   const [session, setSessionState] = useState<Session | null>(null);
   const [clientConfig, setClientConfig] = useState<ClientConfig | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
   const [authSession, setAuthSession] = useState<AuthSession | null | undefined>(undefined);
   const [accessContext, setAccessContext] = useState<AccessContext | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [pendingSlackLink, setPendingSlackLink] = useState<PendingSlackLink | null>(
+    initialPendingSlackLink,
+  );
+  const [slackLinkContinuationWorkspaceId, setSlackLinkContinuationWorkspaceId] = useState<
+    string | null
+  >(initialPendingSlackLink?.workspaceId ?? null);
   const [accessLoading, setAccessLoading] = useState(false);
   const [accessError, setAccessError] = useState<string | null>(null);
   const [model, setModel] = useState("gpt-5.6-sol");
@@ -357,6 +394,7 @@ export function RootRouteComponent() {
     accessContext?.workspaceGrants[0]?.workspaceId ??
     null;
   const navigate = useNavigate();
+
   // Public routes render ahead of every auth/config gate: a user completing a
   // password reset is signed out by definition, so `/reset-password` must never
   // be intercepted by the sign-in panel or workspace-access loading.
@@ -1119,6 +1157,11 @@ export function RootRouteComponent() {
   const contextDisconnectGitHubInstallation = useLatestCallback(disconnectGitHubInstallation);
   const contextToggleGitHubRepository = useLatestCallback(toggleGitHubRepository);
   const contextStartSession = useLatestCallback(startSession);
+  const clearPendingSlackLink = useCallback(() => setPendingSlackLink(null), []);
+  const clearSlackLinkContinuation = useCallback(() => {
+    setPendingSlackLink(null);
+    setSlackLinkContinuationWorkspaceId(null);
+  }, []);
 
   const appContext = useMemo<AppContextValue | null>(() => {
     return clientConfig && accessContext
@@ -1128,6 +1171,9 @@ export function RootRouteComponent() {
           authSession: authSession ?? null,
           accessContext,
           workspaces,
+          pendingSlackLink,
+          clearPendingSlackLink,
+          clearSlackLinkContinuation,
           accessKeyVersion,
           keyAuthRequired: keyAuthRequired === true,
           model,
@@ -1203,6 +1249,8 @@ export function RootRouteComponent() {
     accessKeyVersion,
     authSession,
     busy,
+    clearPendingSlackLink,
+    clearSlackLinkContinuation,
     client,
     clientConfig,
     connectionState,
@@ -1233,6 +1281,7 @@ export function RootRouteComponent() {
     manualRepos,
     manualReposOpen,
     model,
+    pendingSlackLink,
     modelForSession,
     ensureModelForSession,
     latencyMode,
@@ -1315,7 +1364,7 @@ export function RootRouteComponent() {
         />
       ) : accessLoading || !appContext ? (
         <LoadingPanel label="Loading workspace access" />
-      ) : !defaultWorkspaceId ? (
+      ) : !defaultWorkspaceId && !slackLinkContinuationWorkspaceId ? (
         <ProblemPanel
           title="No workspace access"
           description="You don't have access to any workspace yet."
@@ -1345,6 +1394,37 @@ function submitGitHubManifest(actionUrl: string, manifest: Record<string, unknow
   form.append(input);
   document.body.append(form);
   form.submit();
+}
+
+export function pendingSlackLinkFromUrl(value: string): PendingSlackLink | null {
+  const url = new URL(value, "https://opengeni.invalid");
+  const match = /^\/workspaces\/([^/]+)\/capabilities\/?$/.exec(url.pathname);
+  if (!match?.[1]) return null;
+  const fragment = new URLSearchParams(url.hash.startsWith("#") ? url.hash.slice(1) : url.hash);
+  const token = fragment.get("slack_link");
+  if (!token || token.length > 2_048) return null;
+  return { workspaceId: decodeURIComponent(match[1]), token };
+}
+
+function pendingSlackLinkFromBrowserLocation(): PendingSlackLink | null {
+  return typeof window === "undefined" ? null : pendingSlackLinkFromUrl(window.location.href);
+}
+
+function stripSlackLinkFromBrowserLocation(): void {
+  if (typeof window === "undefined") return;
+  const url = new URL(window.location.href);
+  const queryHasSlackLink = url.searchParams.has("slack_link");
+  const rawFragment = url.hash.startsWith("#") ? url.hash.slice(1) : url.hash;
+  const fragment = new URLSearchParams(rawFragment);
+  const fragmentHasSlackLink = fragment.has("slack_link");
+  if (!queryHasSlackLink && !fragmentHasSlackLink) return;
+  url.searchParams.delete("slack_link");
+  if (fragmentHasSlackLink) {
+    fragment.delete("slack_link");
+    const nextFragment = fragment.toString();
+    url.hash = nextFragment ? `#${nextFragment}` : "";
+  }
+  window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
 }
 
 function AccessKeyPanel(props: {

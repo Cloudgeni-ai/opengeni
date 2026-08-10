@@ -407,6 +407,64 @@ describe("OpenGeniClient access + workspaces", () => {
     expect(result.models[0]?.availability.selectable).toBe(true);
     expect(result.models[0]?.credentialReadiness.status).toBe("ready");
   });
+
+  test("Slack user-link access methods use token-free continuation routes", async () => {
+    const requestId = "00000000-0000-4000-8000-000000000099";
+    const accessRequest = {
+      id: requestId,
+      workspaceId: WORKSPACE_ID,
+      workspaceDisplayName: "Platform",
+      subjectLabel: "Ada",
+      status: "pending" as const,
+      version: 2,
+      expiresAt: "2026-08-10T14:00:00.000Z",
+      requestedAt: "2026-08-10T13:45:00.000Z",
+      decidedAt: null,
+      completedAt: null,
+      createdAt: "2026-08-10T13:44:00.000Z",
+      updatedAt: "2026-08-10T13:45:00.000Z",
+    };
+    const { client, requests } = makeClient((request) =>
+      request.url.endsWith("/members/access-requests/slack")
+        ? jsonResponse({ requests: [accessRequest] })
+        : jsonResponse(accessRequest),
+    );
+
+    await client.prepareSlackUserLinkAccess(WORKSPACE_ID, { linkToken: "signed-link" });
+    await client.getSlackUserLinkAccess(WORKSPACE_ID, requestId);
+    await client.requestSlackUserLinkWorkspaceAccess(WORKSPACE_ID, requestId, {
+      expectedVersion: 1,
+      idempotencyKey: "request-1",
+    });
+    await client.cancelSlackUserLinkAccess(WORKSPACE_ID, requestId, {
+      expectedVersion: 2,
+      idempotencyKey: "cancel-1",
+    });
+    await client.listSlackUserLinkAccessRequests(WORKSPACE_ID);
+    await client.approveSlackUserLinkAccessRequest(WORKSPACE_ID, requestId, {
+      expectedVersion: 2,
+      idempotencyKey: "approve-1",
+      permissions: ["sessions:create"],
+    });
+    await client.denySlackUserLinkAccessRequest(WORKSPACE_ID, requestId, {
+      expectedVersion: 2,
+      idempotencyKey: "deny-1",
+    });
+
+    expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
+      [
+        `POST /v1/workspaces/${WORKSPACE_ID}/integrations/slack/user-link-intents`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/integrations/slack/user-link-intents/${requestId}`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/integrations/slack/user-link-intents/${requestId}/request-access`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/integrations/slack/user-link-intents/${requestId}/cancel`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/members/access-requests/slack`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/members/access-requests/slack/${requestId}/approve`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/members/access-requests/slack/${requestId}/deny`,
+      ],
+    );
+    expect(JSON.parse(requests[0]!.body!)).toEqual({ linkToken: "signed-link" });
+    expect(requests.slice(1).every((request) => !request.url.includes("signed-link"))).toBe(true);
+  });
 });
 
 describe("OpenGeniClient scheduled tasks", () => {

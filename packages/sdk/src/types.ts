@@ -3037,6 +3037,48 @@ export type UpdateWorkspaceMemberRequest = {
   permissions: Permission[];
 };
 
+export type SlackUserLinkAccessRequestStatus =
+  | "prepared"
+  | "pending"
+  | "completed"
+  | "denied"
+  | "cancelled"
+  | "expired";
+
+/** Token-free durable projection of one signed Slack identity-link intent. */
+export type SlackUserLinkAccessRequest = {
+  id: string;
+  workspaceId: string;
+  workspaceDisplayName: string | null;
+  subjectLabel: string | null;
+  status: SlackUserLinkAccessRequestStatus;
+  version: number;
+  expiresAt: string;
+  requestedAt: string | null;
+  decidedAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type PrepareSlackUserLinkAccessRequest = {
+  linkToken: string;
+};
+
+export type SlackUserLinkAccessMutationRequest = {
+  expectedVersion: number;
+  idempotencyKey: string;
+};
+
+export type ApproveSlackUserLinkAccessRequest = SlackUserLinkAccessMutationRequest & {
+  role?: string | undefined;
+  permissions: Permission[];
+};
+
+export type ListSlackUserLinkAccessRequestsResponse = {
+  requests: SlackUserLinkAccessRequest[];
+};
+
 // --- Goals -------------------------------------------------------------------
 
 export type SessionGoalStatus = "active" | "paused" | "completed";

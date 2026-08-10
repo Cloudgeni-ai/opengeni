@@ -106,6 +106,19 @@ async function botConnection(
   });
 }
 
+async function expectSlackBindingConflict(operation: Promise<unknown>) {
+  let failure: unknown;
+  try {
+    await operation;
+  } catch (error) {
+    failure = error;
+  }
+  expect(failure).toBeInstanceOf(Error);
+  expect((failure as Error & { cause?: { message?: string } }).cause?.message).toContain(
+    "OPENGENI_SLACK_BINDING_CONFLICT",
+  );
+}
+
 function inboxInput(input: {
   accountId: string;
   workspaceId: string;
@@ -211,21 +224,21 @@ describe("Slack interaction migration and durable database boundary", () => {
       botId: "B_RESOLVER",
       botUserId: "U_RESOLVER_BOT",
     });
-    await expect(
+    await expectSlackBindingConflict(
       botConnection(first, "T_RESOLVER", {
         botId: "B_RESOLVER",
         botUserId: "U_RESOLVER_BOT",
       }),
-    ).rejects.toThrow("OPENGENI_SLACK_BINDING_CONFLICT");
+    );
     expect((await resolveSlackInstallationRoute(db, "T_RESOLVER"))?.connectionId).toBe(original.id);
 
     const second = await workspace("resolver-b");
-    await expect(
+    await expectSlackBindingConflict(
       botConnection(second, "T_RESOLVER", {
         botId: "B_OTHER",
         botUserId: "U_OTHER_BOT",
       }),
-    ).rejects.toThrow("OPENGENI_SLACK_BINDING_CONFLICT");
+    );
     expect((await resolveSlackInstallationRoute(db, "T_RESOLVER"))?.workspaceId).toBe(
       first.workspaceId,
     );
