@@ -339,6 +339,8 @@ export type SteerMessageResult = {
   accepted: SessionEvent;
   /** The exact turn created for this message in the same server transaction. */
   turn: SessionTurn;
+  /** Number of live attempts durably asked to stop by this atomic Steer. */
+  interruptionCount?: number;
 };
 
 export type TranscribeAudioInput = {

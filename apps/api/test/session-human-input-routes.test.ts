@@ -272,6 +272,7 @@ describe("structured human-input HTTP surface (real PostgreSQL)", () => {
     );
     expect(steerResponse.status).toBe(202);
     expect(await steerResponse.json()).toMatchObject({
+      interruptionCount: 0,
       accepted: {
         payload: {
           text: "",

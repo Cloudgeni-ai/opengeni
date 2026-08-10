@@ -272,7 +272,14 @@ export function SessionChrome({
       queuedTurns: currentTurnId ? turns.filter((turn) => turn.id !== currentTurnId) : turns,
     };
   }, [composerSteering, queue.pendingByTurn, turns]);
-  const stopping = queue.stoppingPreviousAttempt;
+  const stoppingKind =
+    composer?.stoppingAttempt ??
+    (queue.stoppingPreviousAttempt
+      ? queue.effectiveControl?.state === "paused"
+        ? "current"
+        : "previous"
+      : null);
+  const stopping = stoppingKind !== null;
   const canMutateQueue = !readOnly && composer !== undefined;
 
   const liveGoal =
@@ -312,7 +319,7 @@ export function SessionChrome({
       rows.push({
         id: "steering",
         label: stopping
-          ? queue.effectiveControl?.state === "paused"
+          ? stoppingKind === "current"
             ? "Stopping current work…"
             : "Stopping previous work…"
           : "Changing direction…",
@@ -389,11 +396,11 @@ export function SessionChrome({
     elapsed,
     goalState,
     incoming,
-    queue.effectiveControl,
     queuedTurns,
     record,
     steering,
     stopping,
+    stoppingKind,
   ]);
 
   const [activeUncontrolled, setActiveUncontrolled] = useState<SessionChromeSignalId | null>(
@@ -497,6 +504,7 @@ export function SessionChrome({
     ) : active === "steering" && (steering || stopping) ? (
       <SteeringPanel
         phase={stopping ? "stopping" : (steering?.phase ?? "accepted")}
+        stoppingKind={stoppingKind}
         text={steering?.text}
       />
     ) : active === "queue" ? (
@@ -782,9 +790,11 @@ function IncomingPanel({
 
 function SteeringPanel({
   phase,
+  stoppingKind,
   text,
 }: {
   phase: "submitting" | "accepted" | "stopping";
+  stoppingKind?: "current" | "previous" | null | undefined;
   text?: string | undefined;
 }) {
   return (
@@ -809,7 +819,7 @@ function SteeringPanel({
           {phase === "submitting"
             ? "Sending your latest direction…"
             : phase === "stopping"
-              ? text
+              ? stoppingKind === "previous"
                 ? "Direction saved. Waiting for the previous command to stop safely."
                 : "Waiting for the current command to stop safely."
               : "Direction accepted. The agent will continue from it."}

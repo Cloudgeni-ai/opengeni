@@ -298,6 +298,8 @@ export type ComposerState = {
   steer: (text?: string) => Promise<boolean>;
   /** Optimistic-to-durable projection for a Steer that has not started yet. */
   steering?: ComposerSteeringState | null | undefined;
+  /** Immediate mutation-receipt projection while physical cancellation settles. */
+  stoppingAttempt?: "current" | "previous" | null | undefined;
   sending: boolean;
   canSend: boolean;
   /** Pause the session without deleting its prompt queue. */
@@ -329,6 +331,13 @@ export type ComposerSteeringState = {
   clientEventId: string | null;
   triggerEventId: string | null;
   turnId: string | null;
+  /** True only when the accepted Steer durably interrupted a live attempt. */
+  stoppingPreviousAttempt?: boolean | undefined;
+};
+
+type ComposerControlStoppingState = {
+  controlVersion: number;
+  controlEtag: string;
 };
 
 const STEERING_SETTLEMENT_EVENT_TYPES = new Set([
@@ -413,6 +422,7 @@ export function useComposer(
       : null,
   );
   const [pausing, setPausing] = useState(false);
+  const [controlStopping, setControlStopping] = useState<ComposerControlStoppingState | null>(null);
   const [resuming, setResuming] = useState(false);
   const [error, setError] = useState<Error | null>(null);
   const [draft, setDraft] = useState<ComposerDraft | null>(null);
@@ -496,6 +506,7 @@ export function useComposer(
         : null,
     );
     setPausing(false);
+    setControlStopping(null);
     setResuming(false);
     setError(null);
     setDraft(null);
@@ -763,6 +774,22 @@ export function useComposer(
     steeringSettlementEventsRef.current = [];
     setSteering(null);
   }, [options.events, steering]);
+
+  useEffect(() => {
+    if (!controlStopping) return;
+    const effectiveControl = options.effectiveControl;
+    if (!effectiveControl || effectiveControl.controlVersion < controlStopping.controlVersion) {
+      return;
+    }
+    if (
+      effectiveControl.controlVersion === controlStopping.controlVersion &&
+      effectiveControl.controlEtag !== controlStopping.controlEtag
+    ) {
+      return;
+    }
+    if (effectiveControl.settlement !== null) return;
+    setControlStopping((current) => (current === controlStopping ? null : current));
+  }, [controlStopping, options.effectiveControl]);
 
   const currentDraftPayload = useCallback((): SaveComposerDraftRequest | null => {
     if (!durableDrafts || targetKeyRef.current !== targetKey) return null;
@@ -1059,6 +1086,7 @@ export function useComposer(
                 clientEventId: pending.input.clientEventId ?? null,
                 triggerEventId: result.accepted.id,
                 turnId: result.turn.id,
+                stoppingPreviousAttempt: (result.interruptionCount ?? 0) > 0,
               });
             }
           } catch (cause) {
@@ -1144,6 +1172,7 @@ export function useComposer(
               clientEventId: input.clientEventId ?? null,
               triggerEventId: result.accepted.id,
               turnId: result.turn.id,
+              stoppingPreviousAttempt: (result.interruptionCount ?? 0) > 0,
             });
           }
         } catch (cause) {
@@ -1219,12 +1248,25 @@ export function useComposer(
       setPausing(true);
       setError(null);
       try {
-        await client.pauseSession(workspaceId, sessionId, {
+        const result = await client.pauseSession(workspaceId, sessionId, {
           ...(reason !== undefined ? { reason } : {}),
           ...(options.effectiveControl?.controlEtag
             ? { expectedControlEtag: options.effectiveControl.controlEtag }
             : {}),
         });
+        if (
+          targetKeyRef.current === ownedTargetKey &&
+          targetGeneration.current === ownedGeneration
+        ) {
+          setControlStopping(
+            result.interruptionCount > 0 && result.effectiveControl.settlement !== null
+              ? {
+                  controlVersion: result.effectiveControl.controlVersion,
+                  controlEtag: result.effectiveControl.controlEtag,
+                }
+              : null,
+          );
+        }
       } catch (cause) {
         if (
           targetKeyRef.current === ownedTargetKey &&
@@ -1481,6 +1523,7 @@ export function useComposer(
   );
 
   const identityMatches = stateTargetKey === targetKey;
+  const visibleSteering = identityMatches ? steering : null;
   const reloadDraft = useCallback(async () => await loadDraft(true), [loadDraft]);
   const clearError = useCallback(() => {
     if (targetKeyRef.current !== targetKey) return;
@@ -1500,7 +1543,14 @@ export function useComposer(
     hasDraftContent,
     send,
     steer,
-    steering: identityMatches ? steering : null,
+    steering: visibleSteering,
+    stoppingAttempt: identityMatches
+      ? controlStopping
+        ? "current"
+        : visibleSteering?.phase === "accepted" && visibleSteering.stoppingPreviousAttempt === true
+          ? "previous"
+          : null
+      : null,
     sending: identityMatches ? sending : false,
     canSend:
       identityMatches &&
