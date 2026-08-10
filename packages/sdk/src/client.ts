@@ -13,6 +13,10 @@ import {
   type WorkspaceControlStreamTransport,
 } from "./workspace-control-stream";
 import {
+  streamWorkspaceInteractionRevisions,
+  type WorkspaceInteractionRevisionStreamTransport,
+} from "./interaction-revision-stream";
+import {
   OpenGeniInteractionClient,
   type AuthRun,
   type AuthRunListOptions,
@@ -80,6 +84,7 @@ import {
   type UpdateNetworkRouteRequest,
   type UpdateSiteAuthConnectionRequest,
   type VerifyAuthRunRequest,
+  type WorkspaceInteractionRevisionEvent,
 } from "./interaction";
 import type {
   AccessContext,
@@ -2300,6 +2305,56 @@ export class OpenGeniClient {
   }
 
   // --- Browser / Computer interaction resources --------------------------------
+
+  streamWorkspaceInteractionRevisions(
+    workspaceId: string,
+    options: StreamSessionEventsOptions = {},
+  ): AsyncGenerator<WorkspaceInteractionRevisionEvent, void, void> {
+    return streamWorkspaceInteractionRevisions(
+      this.workspaceInteractionRevisionStreamTransport(workspaceId),
+      options,
+    );
+  }
+
+  workspaceInteractionRevisionStreamTransport(
+    workspaceId: string,
+  ): WorkspaceInteractionRevisionStreamTransport {
+    return {
+      openStream: async (after, signal) =>
+        await this.openWorkspaceInteractionRevisionStream(workspaceId, {
+          after,
+          ...(signal ? { signal } : {}),
+        }),
+    };
+  }
+
+  async openWorkspaceInteractionRevisionStream(
+    workspaceId: string,
+    options: { after?: number; signal?: AbortSignal } = {},
+  ): Promise<ReadableStream<Uint8Array>> {
+    const correlationId = crypto.randomUUID();
+    const response = await this.fetchImpl(
+      this.url(`/v1/workspaces/${workspaceId}/interaction-events/stream`, {
+        after: String(options.after ?? 0),
+      }),
+      {
+        method: "GET",
+        headers: {
+          ...this.headers(correlationId),
+          Accept: "text/event-stream",
+        },
+        ...(options.signal ? { signal: options.signal } : {}),
+      },
+    );
+    assertApiContractResponse(response);
+    if (!response.ok) {
+      throw await apiErrorFromResponse(response, { method: "GET", correlationId });
+    }
+    if (!response.body) {
+      throw new OpenGeniApiError(response.status, "SSE response did not include a readable body");
+    }
+    return response.body;
+  }
 
   async listNetworkRoutes(
     workspaceId: string,

@@ -17,6 +17,26 @@ export const INTERACTION_MAX_CHANGED_NODES = 2_000;
 export const INTERACTION_MAX_DIAGNOSTIC_ENTRIES = 1_000;
 export const INTERACTION_MAX_ACTIONS_PER_BATCH = 32;
 
+/**
+ * Latest-wins workspace invalidation for Browser/Computer resources. This is
+ * deliberately a cursor snapshot rather than a durable event-log entry:
+ * consumers refetch authoritative resource lists whenever `revision` advances.
+ */
+export const WorkspaceInteractionRevisionEvent = z
+  .object({
+    workspaceId: z.string().uuid(),
+    sequence: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    type: z.literal("workspace.interaction.changed"),
+    occurredAt: z.string().datetime({ offset: true }),
+  })
+  .strict()
+  .refine((event) => event.sequence === event.revision, {
+    message: "interaction event sequence must equal revision",
+    path: ["sequence"],
+  });
+export type WorkspaceInteractionRevisionEvent = z.infer<typeof WorkspaceInteractionRevisionEvent>;
+
 const opaqueGeneration = z
   .string()
   .min(1)

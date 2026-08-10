@@ -55,8 +55,22 @@ import {
 import { publishDurableSessionEvents } from "@opengeni/events";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
+import { sseWorkspaceInteractionRevisionStream } from "../http/sse";
 
 export function registerInteractionResourceRoutes(app: Hono, deps: ApiRouteDeps): void {
+  app.get("/v1/workspaces/:workspaceId/interaction-events/stream", async (context) => {
+    const { workspaceId, grant } = await preamble(context, deps, "sessions:read");
+    const after = nonnegativeSafeIntegerQuery(context, "after", 0);
+    return await sseWorkspaceInteractionRevisionStream(
+      deps.db,
+      grant.accountId,
+      workspaceId,
+      after,
+      context.req.raw.signal,
+      { observability: deps.observability },
+    );
+  });
+
   app.get("/v1/workspaces/:workspaceId/network-routes", async (context) => {
     const { workspaceId, grant } = await preamble(context, deps, "sessions:read");
     try {
@@ -505,6 +519,19 @@ function optionalResourceKind(context: Context): "browser_session" | "computer_s
   if (value === undefined) return null;
   if (value !== "browser_session" && value !== "computer_session") {
     throw new HTTPException(400, { message: "resourceKind is invalid" });
+  }
+  return value;
+}
+
+function nonnegativeSafeIntegerQuery(context: Context, name: string, fallback: number): number {
+  const raw = context.req.query(name);
+  if (raw === undefined || raw === "") return fallback;
+  if (!/^(0|[1-9][0-9]*)$/u.test(raw)) {
+    throw new HTTPException(400, { message: `${name} must be a non-negative integer` });
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value)) {
+    throw new HTTPException(400, { message: `${name} exceeds the supported integer range` });
   }
   return value;
 }

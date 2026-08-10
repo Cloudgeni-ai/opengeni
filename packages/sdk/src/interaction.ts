@@ -11,6 +11,15 @@ export const BROWSER_FRAME_MAX_BYTES = 24 * 1024 * 1024;
 export const BROWSER_FRAME_MAX_DIMENSION = 32_768;
 export const BROWSER_FRAME_MAX_PIXELS = 100_000_000;
 
+/** Latest-wins invalidation cursor for workspace Browser/Computer resources. */
+export type WorkspaceInteractionRevisionEvent = {
+  workspaceId: string;
+  sequence: number;
+  revision: number;
+  type: "workspace.interaction.changed";
+  occurredAt: string;
+};
+
 export type InteractionJsonValue =
   | null
   | string

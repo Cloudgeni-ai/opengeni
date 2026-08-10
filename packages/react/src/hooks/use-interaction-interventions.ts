@@ -10,6 +10,7 @@ import {
   type EmbeddedInterventionClientOverride,
   useEmbeddedInterventions,
 } from "../session-context";
+import { useInteractionInvalidation } from "./use-interaction-invalidation";
 
 export type UseInteractionInterventionsOptions = EmbeddedInterventionClientOverride & {
   enabled?: boolean | undefined;
@@ -43,12 +44,12 @@ export type UseInteractionInterventionsResult = {
 export function useInteractionInterventions(
   options: UseInteractionInterventionsOptions = {},
 ): UseInteractionInterventionsResult {
-  const { client, workspaceId } = useEmbeddedInterventions(options);
+  const { client, workspaceId, workspaceInteractionEvent, workspaceInteractionConnectionState } =
+    useEmbeddedInterventions(options);
   const enabled = (options.enabled ?? true) && options.resourceId !== null;
   const resourceKind = options.resourceKind;
   const resourceId = options.resourceId ?? undefined;
   const includeSettled = options.includeSettled ?? false;
-  const pollIntervalMs = boundedPollInterval(options.pollIntervalMs ?? 2_000);
   const key = `${workspaceId}:${resourceKind ?? "*"}:${resourceId ?? "*"}:${includeSettled}`;
   const [state, setState] = useState(() => emptyState(key, enabled));
   const [mutationCount, setMutationCount] = useState(0);
@@ -121,13 +122,21 @@ export function useInteractionInterventions(
       return;
     }
     void load(true);
-    const timer = setInterval(() => void load(false, false), pollIntervalMs);
     return () => {
       mountedRef.current = false;
-      clearInterval(timer);
       cancelLoad();
     };
-  }, [cancelLoad, enabled, key, load, pollIntervalMs]);
+  }, [cancelLoad, enabled, key, load]);
+
+  useInteractionInvalidation({
+    workspaceId,
+    key,
+    enabled,
+    event: workspaceInteractionEvent,
+    connectionState: workspaceInteractionConnectionState,
+    refresh,
+    fallbackPollIntervalMs: options.pollIntervalMs ?? 2_000,
+  });
 
   const mutate = useCallback(async <T>(operation: () => Promise<T>): Promise<T> => {
     setMutationCount((count) => count + 1);
@@ -224,11 +233,6 @@ function sortInterventions(
   return [...interventions].sort(
     (left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt),
   );
-}
-
-function boundedPollInterval(value: number): number {
-  if (!Number.isFinite(value)) return 2_000;
-  return Math.max(500, Math.min(60_000, Math.round(value)));
 }
 
 function asError(cause: unknown): Error {

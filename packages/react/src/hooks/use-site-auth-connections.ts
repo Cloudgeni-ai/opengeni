@@ -10,6 +10,7 @@ import {
   type EmbeddedBrowserInteractionClientOverride,
   useEmbeddedBrowserInteraction,
 } from "../session-context";
+import { useInteractionInvalidation } from "./use-interaction-invalidation";
 
 export type UseSiteAuthConnectionsOptions = EmbeddedBrowserInteractionClientOverride & {
   enabled?: boolean | undefined;
@@ -39,7 +40,8 @@ export type UseSiteAuthConnectionsResult = {
 export function useSiteAuthConnections(
   options: UseSiteAuthConnectionsOptions = {},
 ): UseSiteAuthConnectionsResult {
-  const { client, workspaceId } = useEmbeddedBrowserInteraction(options);
+  const { client, workspaceId, workspaceInteractionEvent, workspaceInteractionConnectionState } =
+    useEmbeddedBrowserInteraction(options);
   const enabled = options.enabled ?? true;
   const includeArchived = options.includeArchived ?? false;
   const key = `${workspaceId}:${includeArchived ? "all" : "active"}`;
@@ -115,6 +117,16 @@ export function useSiteAuthConnections(
       cancelLoad();
     };
   }, [cancelLoad, enabled, key, load]);
+
+  useInteractionInvalidation({
+    workspaceId,
+    key,
+    enabled,
+    event: workspaceInteractionEvent,
+    connectionState: workspaceInteractionConnectionState,
+    knownRevision: visible.revision,
+    refresh,
+  });
 
   const mutate = useCallback(async <T>(operation: () => Promise<T>): Promise<T> => {
     setMutationCount((count) => count + 1);

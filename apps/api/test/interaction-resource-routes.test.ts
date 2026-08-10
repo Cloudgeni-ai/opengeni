@@ -14,6 +14,7 @@ describe("interaction resource routes", () => {
   test("registers canonical network, auth, run, and intervention resources", async () => {
     const source = await readFile(routeUrl, "utf8");
     for (const route of [
+      '"/v1/workspaces/:workspaceId/interaction-events/stream"',
       '"/v1/workspaces/:workspaceId/network-routes"',
       '"/v1/workspaces/:workspaceId/network-routes/:networkRouteId"',
       '"/v1/workspaces/:workspaceId/site-auth-connections"',

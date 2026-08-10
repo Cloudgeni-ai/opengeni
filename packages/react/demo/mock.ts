@@ -148,6 +148,7 @@ import type {
   UninstallPackResult,
   Workspace,
   WorkspaceControlEvent,
+  WorkspaceInteractionRevisionEvent,
   WorkspaceEnvironment,
   WorkspaceEnvironmentVariableMetadata,
   VariableSet,
@@ -1408,6 +1409,18 @@ export class MockOpenGeniClient implements SessionClientLike {
     options: StreamSessionEventsOptions = {},
   ): AsyncGenerator<WorkspaceControlEvent, void, void> {
     yield* [] as WorkspaceControlEvent[];
+    options.onStateChange?.("live");
+    await new Promise<void>((resolve) => {
+      if (options.signal?.aborted) return resolve();
+      options.signal?.addEventListener("abort", () => resolve(), { once: true });
+    });
+  }
+
+  async *streamWorkspaceInteractionRevisions(
+    _workspaceId: string,
+    options: StreamSessionEventsOptions = {},
+  ): AsyncGenerator<WorkspaceInteractionRevisionEvent, void, void> {
+    yield* [] as WorkspaceInteractionRevisionEvent[];
     options.onStateChange?.("live");
     await new Promise<void>((resolve) => {
       if (options.signal?.aborted) return resolve();

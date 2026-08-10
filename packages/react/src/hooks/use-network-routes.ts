@@ -10,6 +10,7 @@ import {
   type EmbeddedBrowserInteractionClientOverride,
   useEmbeddedBrowserInteraction,
 } from "../session-context";
+import { useInteractionInvalidation } from "./use-interaction-invalidation";
 
 export type UseNetworkRoutesOptions = EmbeddedBrowserInteractionClientOverride & {
   enabled?: boolean | undefined;
@@ -35,7 +36,8 @@ export type UseNetworkRoutesResult = {
 
 /** Workspace network-route registry. Route mutations never expose brokered credentials. */
 export function useNetworkRoutes(options: UseNetworkRoutesOptions = {}): UseNetworkRoutesResult {
-  const { client, workspaceId } = useEmbeddedBrowserInteraction(options);
+  const { client, workspaceId, workspaceInteractionEvent, workspaceInteractionConnectionState } =
+    useEmbeddedBrowserInteraction(options);
   const enabled = options.enabled ?? true;
   const includeArchived = options.includeArchived ?? false;
   const key = `${workspaceId}:${includeArchived ? "all" : "active"}`;
@@ -110,6 +112,17 @@ export function useNetworkRoutes(options: UseNetworkRoutesOptions = {}): UseNetw
     };
   }, [cancelLoad, enabled, key, load]);
 
+  const refresh = useCallback(async () => await load(false), [load]);
+  useInteractionInvalidation({
+    workspaceId,
+    key,
+    enabled,
+    event: workspaceInteractionEvent,
+    connectionState: workspaceInteractionConnectionState,
+    knownRevision: visible.revision,
+    refresh,
+  });
+
   const mutate = useCallback(async <T>(operation: () => Promise<T>): Promise<T> => {
     setMutationCount((count) => count + 1);
     try {
@@ -169,7 +182,7 @@ export function useNetworkRoutes(options: UseNetworkRoutesOptions = {}): UseNetw
     refreshing: visible.refreshing,
     mutating: mutationCount > 0,
     error: visible.error,
-    refresh: useCallback(async () => await load(false), [load]),
+    refresh,
     create,
     update,
   };

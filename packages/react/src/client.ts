@@ -94,6 +94,7 @@ export type SessionClientLike = Pick<
   | "getWorkspaceModelCatalog"
   | "listWorkspaceControlEvents"
   | "streamWorkspaceControlEvents"
+  | "streamWorkspaceInteractionRevisions"
   | "getBillingUsage"
   // Stream surfacing (Phase 5): capability negotiation + viewer lifecycle
   | "getClientConfig"
@@ -248,6 +249,7 @@ export type EmbeddedRealtimeSessionClientLike = Pick<
 /** Exact public SDK surface required by cross-surface human interventions. */
 export type EmbeddedInterventionClientLike = Pick<
   OpenGeniClient,
+  | "streamWorkspaceInteractionRevisions"
   | "listInteractionInterventions"
   | "getInteractionIntervention"
   | "createInteractionIntervention"
@@ -257,6 +259,7 @@ export type EmbeddedInterventionClientLike = Pick<
 /** Exact public SDK surface required by BrowserSession hooks and components. */
 export type EmbeddedBrowserInteractionClientLike = Pick<
   OpenGeniClient,
+  | "streamWorkspaceInteractionRevisions"
   | "listNetworkRoutes"
   | "getNetworkRoute"
   | "createNetworkRoute"
@@ -304,6 +307,7 @@ export type EmbeddedBrowserInteractionClientLike = Pick<
 /** Exact public SDK surface required by ComputerSession hooks and components. */
 export type EmbeddedComputerInteractionClientLike = Pick<
   OpenGeniClient,
+  | "streamWorkspaceInteractionRevisions"
   | "listComputerSessions"
   | "getComputerSession"
   | "createComputerSession"

@@ -1,4 +1,8 @@
-import type { StreamConnectionState, WorkspaceControlEvent } from "@opengeni/sdk";
+import type {
+  StreamConnectionState,
+  WorkspaceControlEvent,
+  WorkspaceInteractionRevisionEvent,
+} from "@opengeni/sdk";
 import { createContext, useContext } from "react";
 import type {
   EmbeddedFileAttachmentClientLike,
@@ -21,6 +25,8 @@ export type OpenGeniContextValue = {
   workspaceId: string;
   workspaceControlEvent: WorkspaceControlEvent | null;
   workspaceControlConnectionState: StreamConnectionState | "idle" | "error";
+  workspaceInteractionEvent: WorkspaceInteractionRevisionEvent | null;
+  workspaceInteractionConnectionState: StreamConnectionState | "idle" | "error";
   registerSessionReconciler: (
     sessionId: string,
     key: string,
@@ -138,6 +144,8 @@ function useEmbeddedClientRefinement<TClient extends object>(
     workspaceId,
     workspaceControlEvent: context?.workspaceControlEvent ?? null,
     workspaceControlConnectionState: context?.workspaceControlConnectionState ?? "idle",
+    workspaceInteractionEvent: context?.workspaceInteractionEvent ?? null,
+    workspaceInteractionConnectionState: context?.workspaceInteractionConnectionState ?? "idle",
     registerSessionReconciler: context?.registerSessionReconciler ?? NOOP_REGISTER_RECONCILER,
     reconcileSession: context?.reconcileSession ?? NOOP_RECONCILE_SESSION,
   };
@@ -164,12 +172,15 @@ export function useOpenGeni(override: ClientOverride = {}): OpenGeniContextValue
     workspaceId,
     workspaceControlEvent: context?.workspaceControlEvent ?? null,
     workspaceControlConnectionState: context?.workspaceControlConnectionState ?? "idle",
+    workspaceInteractionEvent: context?.workspaceInteractionEvent ?? null,
+    workspaceInteractionConnectionState: context?.workspaceInteractionConnectionState ?? "idle",
     registerSessionReconciler: context?.registerSessionReconciler ?? NOOP_REGISTER_RECONCILER,
     reconcileSession: context?.reconcileSession ?? NOOP_RECONCILE_SESSION,
   };
 }
 
 const BROWSER_INTERACTION_METHODS = [
+  "streamWorkspaceInteractionRevisions",
   "listNetworkRoutes",
   "getNetworkRoute",
   "createNetworkRoute",
@@ -214,6 +225,7 @@ const BROWSER_INTERACTION_METHODS = [
 ] as const;
 
 const COMPUTER_INTERACTION_METHODS = [
+  "streamWorkspaceInteractionRevisions",
   "listInteractionInterventions",
   "getInteractionIntervention",
   "createInteractionIntervention",
@@ -231,6 +243,7 @@ const COMPUTER_INTERACTION_METHODS = [
 ] as const;
 
 const INTERVENTION_METHODS = [
+  "streamWorkspaceInteractionRevisions",
   "listInteractionInterventions",
   "getInteractionIntervention",
   "createInteractionIntervention",

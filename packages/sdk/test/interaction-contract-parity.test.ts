@@ -39,6 +39,7 @@ import {
   INTERACTION_PROTOCOL_VERSION as CONTRACT_INTERACTION_PROTOCOL_VERSION,
   PublishBrowserRevisionRequest as ContractPublishBrowserRevisionRequest,
   PublishBrowserRevisionResponse as ContractPublishBrowserRevisionResponse,
+  WorkspaceInteractionRevisionEvent as ContractWorkspaceInteractionRevisionEvent,
 } from "@opengeni/contracts";
 import type { z } from "zod";
 import {
@@ -81,6 +82,7 @@ import {
   type CreateComputerSessionRequest,
   type PublishBrowserRevisionRequest,
   type PublishBrowserRevisionResponse,
+  type WorkspaceInteractionRevisionEvent,
 } from "../src/interaction";
 
 describe("SDK interaction / contracts parity", () => {
@@ -90,6 +92,15 @@ describe("SDK interaction / contracts parity", () => {
     expect(BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX).toBe(CONTRACT_BEARER_PREFIX);
     expect(BROWSER_CONTROL_MAX_FRAME_HEADER_BYTES).toBe(CONTRACT_FRAME_HEADER_BYTES);
     expect(COMPUTER_CONTROL_WEBSOCKET_PROTOCOL).toBe(CONTRACT_COMPUTER_WEBSOCKET_PROTOCOL);
+  });
+
+  test("pins workspace interaction invalidation shape", () => {
+    expect(
+      exact<
+        WorkspaceInteractionRevisionEvent,
+        z.infer<typeof ContractWorkspaceInteractionRevisionEvent>
+      >(true),
+    ).toBe(true);
   });
 
   test("pins ComputerSession read and mutation response shapes bidirectionally", () => {
