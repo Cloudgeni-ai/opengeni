@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import type { ClaimedMemorySlackPublication } from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
-import { formatMemorySlackPublicationMessage } from "../src/memory-slack-delivery";
+import { SlackBotProviderError } from "../src/integrations/slack-bot";
+import {
+  formatMemorySlackPublicationMessage,
+  memorySlackDestinationDrift,
+} from "../src/memory-slack-delivery";
 
 function publication(
   overrides: Partial<ClaimedMemorySlackPublication> = {},
@@ -136,5 +140,18 @@ describe("Memory Slack delivery projection", () => {
       expect(text).not.toContain(item.initiatorSubjectId);
       expect(text).not.toContain(item.initiatingHumanSubjectId ?? "never");
     }
+  });
+
+  test("classifies live destination drift for terminal cancellation receipts", () => {
+    for (const code of [
+      "channel_not_found",
+      "is_archived",
+      "not_in_channel",
+      "slack_connect_unsupported",
+    ]) {
+      expect(memorySlackDestinationDrift(new SlackBotProviderError(code))).toBe(true);
+    }
+    expect(memorySlackDestinationDrift(new SlackBotProviderError("invalid_auth"))).toBe(false);
+    expect(memorySlackDestinationDrift(new Error("transport unavailable"))).toBe(false);
   });
 });

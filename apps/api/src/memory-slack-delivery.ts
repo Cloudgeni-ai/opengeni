@@ -43,6 +43,7 @@ export async function drainMemorySlackPublicationsOnce(deps: ApiRouteDeps): Prom
       operationId: publication.operationId,
       channelId: publication.slackChannelId,
       text: formatMemorySlackPublicationMessage(deps, publication),
+      requireActiveNonSharedChannel: true,
     });
     const completed = await completeMemorySlackPublication(deps.db, {
       publication,
@@ -53,7 +54,14 @@ export async function drainMemorySlackPublicationsOnce(deps: ApiRouteDeps): Prom
     if (!completed) throw new Error("Memory Slack publication lost its durable claim");
   } catch (error) {
     const errorCode = deliveryErrorCode(error);
-    if (publication.attemptCount >= MAX_DELIVERY_ATTEMPTS || permanentDeliveryError(error)) {
+    if (memorySlackDestinationDrift(error)) {
+      await failMemorySlackPublication(deps.db, {
+        publication,
+        claimHolderId,
+        errorCode,
+        cancelled: true,
+      }).catch(() => undefined);
+    } else if (publication.attemptCount >= MAX_DELIVERY_ATTEMPTS || permanentDeliveryError(error)) {
       await failMemorySlackPublication(deps.db, {
         publication,
         claimHolderId,
@@ -149,6 +157,19 @@ const PERMANENT_DELIVERY_CODES = new Set([
   "token_expired",
   "token_revoked",
 ]);
+
+const MEMORY_SLACK_DESTINATION_DRIFT_CODES = new Set([
+  "channel_not_found",
+  "is_archived",
+  "not_in_channel",
+  "slack_connect_unsupported",
+]);
+
+export function memorySlackDestinationDrift(error: unknown) {
+  return (
+    error instanceof SlackBotProviderError && MEMORY_SLACK_DESTINATION_DRIFT_CODES.has(error.code)
+  );
+}
 
 function permanentDeliveryError(error: unknown) {
   if (!(error instanceof SlackBotProviderError)) return false;

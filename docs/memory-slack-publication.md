@@ -80,10 +80,16 @@ and appends an immutable `delivery_claimed` receipt. Expired claims are safely
 reclaimed after process failure.
 
 Delivery revalidates the exact verified workspace bot and uses the existing
-Slack post-operation idempotency fence. Provider success records only the Slack
+Slack post-operation idempotency fence. After claiming that post identity and
+immediately before `chat.postMessage`, it re-reads the exact channel and requires
+the bot still to be a member, the channel still to be active, and all Slack
+Connect/shared flags still to be false. Membership, archive, deletion, or shared
+channel drift makes no provider post and enters terminal cancellation with an
+explicit immutable error receipt. Provider success records only the Slack
 channel id and message timestamp. Transient errors enter exponential or
 provider-directed retry wait; permanent errors and the eighth failed attempt
-enter terminal failure. Exact configuration drift enters terminal cancellation.
+enter terminal failure. Exact configuration drift also enters terminal
+cancellation.
 
 Receipts are append-only and sequence every state transition:
 
