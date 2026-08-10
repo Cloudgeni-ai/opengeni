@@ -124,6 +124,7 @@ import type {
   ScheduledTaskRun,
   Session,
   SessionListResponse,
+  AgentTopologyPageResponse,
   UpdateSessionPinRequest,
   SessionEvent,
   SessionEventCompactResult,
@@ -788,6 +789,32 @@ export class OpenGeniClient {
       return { pinned: [], sessions: response, nextCursor: null };
     }
     return response;
+  }
+
+  /** Compact, bounded workspace agent hierarchy page. */
+  async listAgentTopology(
+    workspaceId: string,
+    options: {
+      limit?: number;
+      parentSessionId?: string | null;
+      cursor?: string;
+      search?: string;
+    } = {},
+  ): Promise<AgentTopologyPageResponse> {
+    const search = options.search?.trim();
+    return await this.requestJson<AgentTopologyPageResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/agent-topology`,
+      undefined,
+      {
+        ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+        ...(options.parentSessionId === undefined
+          ? {}
+          : { parentSessionId: options.parentSessionId ?? "null" }),
+        ...(options.cursor ? { cursor: options.cursor } : {}),
+        ...(search ? { search } : {}),
+      },
+    );
   }
 
   /** Set this authenticated member's personal workspace pin for a session. */

@@ -5,6 +5,7 @@
 //   /workspaces/:id/agent                    → sessions redirect (legacy URL)
 //   /workspaces/:id/sessions                 → sessions index + create
 //   /workspaces/:id/sessions/:sessionId      → session view (queue/goal rail)
+//   /workspaces/:id/agents                   → workspace agent topology
 //   /sessions/:sessionId                     → authorized compatibility redirect
 //   /workspaces/:id/variable-sets            → variable sets + variables
 //   /workspaces/:id/rigs                     → rigs list + create
@@ -21,6 +22,7 @@
 //   /billing?checkout=success|cancelled      → Stripe return → default organization
 //   /device?user_code=…                      → self-hosted enrollment approve page
 //   /dev/composer-chrome                     → DEV-only SessionChrome harness (mocked)
+//   /dev/agent-topology                      → DEV-only agent tree preview (mocked)
 import {
   Navigate,
   RouterProvider,
@@ -39,6 +41,11 @@ export { workspaceAgentPath, workspaceSessionPath, workspaceSessionsPath } from 
 const LazyCapabilitiesRoute = lazyRouteComponent(
   () => import("@/routes/capabilities"),
   "CapabilitiesRoute",
+);
+const LazyAgentsRoute = lazyRouteComponent(() => import("@/routes/agents"), "AgentsRoute");
+const LazyAgentTopologyPreviewRoute = lazyRouteComponent(
+  () => import("@/routes/agents"),
+  "AgentTopologyPreviewRoute",
 );
 const LazyDeviceRoute = lazyRouteComponent(() => import("@/routes/device"), "DeviceRoute");
 const LazyDocumentsRoute = lazyRouteComponent(() => import("@/routes/documents"), "DocumentsRoute");
@@ -151,6 +158,11 @@ const composerChromeGalleryRoute = createRoute({
   path: "dev/composer-chrome",
   component: ComposerChromeGallery,
 });
+const agentTopologyPreviewRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "dev/agent-topology",
+  component: AgentTopologyPreview,
+});
 const workspaceRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "workspaces/$workspaceId",
@@ -180,6 +192,11 @@ const workspaceSessionRoute = createRoute({
   validateSearch: (search: Record<string, unknown>): ComposerLaunchSearch =>
     parseComposerLaunchSearch(search),
   component: SessionView,
+});
+const workspaceAgentsRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "agents",
+  component: Agents,
 });
 const workspaceVariableSetsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
@@ -312,12 +329,13 @@ const routeTree = rootRoute.addChildren([
   billingReturnRoute,
   deviceRoute,
   resetPasswordRoute,
-  ...(import.meta.env.DEV ? [composerChromeGalleryRoute] : []),
+  ...(import.meta.env.DEV ? [composerChromeGalleryRoute, agentTopologyPreviewRoute] : []),
   workspaceRoute.addChildren([
     workspaceIndexRoute,
     workspaceAgentRoute,
     workspaceSessionsRoute,
     workspaceSessionRoute,
+    workspaceAgentsRoute,
     workspaceVariableSetsRoute,
     workspaceEnvironmentsRoute,
     workspaceRigsRoute,
@@ -394,6 +412,11 @@ function SessionView() {
       realtimeAutostartModel={launch.realtime}
     />
   );
+}
+
+function Agents() {
+  const { workspaceId } = workspaceAgentsRoute.useParams();
+  return <LazyAgentsRoute workspaceId={workspaceId} />;
 }
 
 function SessionDeepLink() {
@@ -535,6 +558,10 @@ function ResetPassword() {
 
 function ComposerChromeGallery() {
   return <LazyComposerChromeGalleryRoute />;
+}
+
+function AgentTopologyPreview() {
+  return <LazyAgentTopologyPreviewRoute />;
 }
 
 function BillingReturnRoute() {

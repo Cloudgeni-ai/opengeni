@@ -533,6 +533,8 @@ export type {
   ScheduledTaskTriggerType,
   Session,
   SessionCapabilities,
+  AgentTopologyPageResponse,
+  AgentTopologySession,
   SessionListResponse,
   SessionLineageResponse,
   SessionEffectiveToolPolicy,

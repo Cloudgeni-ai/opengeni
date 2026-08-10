@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   AcknowledgeStreamRequest as ContractAcknowledgeStreamRequest,
+  AgentTopologyPageResponse as ContractAgentTopologyPageResponse,
   ActivateCodexRealtimeConnectionRequest as ContractActivateCodexRealtimeConnectionRequest,
   AcknowledgeStreamResponse as ContractAcknowledgeStreamResponse,
   AddWorkspaceMemberRequest as ContractAddWorkspaceMemberRequest,
@@ -90,6 +91,7 @@ import {
 } from "../src/types";
 import type {
   AcknowledgeStreamRequest,
+  AgentTopologyPageResponse,
   ActivateCodexRealtimeConnectionRequest,
   AcknowledgeStreamResponse,
   AddWorkspaceMemberRequest,
@@ -280,6 +282,9 @@ describe("SDK / contracts parity", () => {
   test("contract-parsed payloads are assignable to SDK types (compile-time)", () => {
     // Server -> client shapes: anything the contracts produce, the SDK accepts.
     const acceptSession = (value: z.infer<typeof ContractSessionSchema>): Session => value;
+    const acceptAgentTopologyPage = (
+      value: z.infer<typeof ContractAgentTopologyPageResponse>,
+    ): AgentTopologyPageResponse => value;
     const acceptCreateResponse = (
       value: z.infer<typeof ContractCreateSessionResponse>,
     ): CreateSessionResponse => value;
@@ -326,6 +331,7 @@ describe("SDK / contracts parity", () => {
     };
     const checks = [
       acceptSession,
+      acceptAgentTopologyPage,
       acceptCreateResponse,
       acceptEvent,
       acceptHumanInputRequest,
