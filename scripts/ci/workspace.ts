@@ -32,8 +32,14 @@ export type ShardWeightResolution = {
 export const OPT_IN_TESTS: Readonly<Record<string, string>> = {
   "test/integration/workspace-capture.integration.ts":
     "requires an already-running real dev stack and is owned by the live workspace-capture gate",
+  "test/e2e/artifact-spreadsheet-canvas.browser.e2e.ts":
+    "requires cross-browser artifact evidence and is owned by the curated browser-acceptance gate",
+  "test/e2e/artifact-spreadsheet-scroll.browser.e2e.ts":
+    "requires artifact workbench setup and is owned by the curated browser-acceptance gate",
   "test/e2e/artifact-static-renderer.browser.e2e.ts":
-    "is retained for the explicit full E2E command outside default CI",
+    "requires artifact workbench setup and is owned by the curated browser-acceptance gate",
+  "test/e2e/editable-artifacts.browser.e2e.ts":
+    "requires native artifact setup and visual evidence and is owned by the curated browser-acceptance gate",
   "test/e2e/browser.e2e.ts": "is retained for the explicit full E2E command outside default CI",
   "test/e2e/capabilities.browser.e2e.ts":
     "is retained for dedicated capability acceptance outside default CI",

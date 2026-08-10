@@ -22,7 +22,7 @@ import {
   usesBrowserRunner,
 } from "./workspace";
 
-const ARTIFACT_BROWSER_E2E = [
+const CURATED_ARTIFACT_BROWSER_E2E = [
   "test/e2e/artifact-spreadsheet-canvas.browser.e2e.ts",
   "test/e2e/artifact-spreadsheet-scroll.browser.e2e.ts",
   "test/e2e/editable-artifacts.browser.e2e.ts",
@@ -36,6 +36,8 @@ describe("fail-closed change impact", () => {
     expect(plan.unitTests).toEqual([]);
     expect(plan.integrationTests).toEqual([]);
     expect(plan.e2eTests).toEqual([]);
+    expect(plan.browserAcceptanceLanes).toEqual([]);
+    expect(plan.artifactRuntimeRequired).toBe(false);
     expect(plan.buildPackages).toEqual([]);
     expect(plan.guards).toEqual(["format", "docs-refs", "generated-fonts", "public-hygiene"]);
   });
@@ -75,14 +77,13 @@ describe("fail-closed change impact", () => {
     expect(sdk.typecheckProjects).toContain("packages/sdk");
     expect(sdk.unitTests).toContain("packages/sdk/test/client.test.ts");
     expect(sdk.e2eTests).toEqual([
-      "test/e2e/artifact-spreadsheet-canvas.browser.e2e.ts",
-      "test/e2e/artifact-spreadsheet-scroll.browser.e2e.ts",
       "test/e2e/code-editor.browser.e2e.ts",
       "test/e2e/composer-responsive.browser.e2e.ts",
       "test/e2e/connected-machine-removal.browser.e2e.ts",
-      "test/e2e/editable-artifacts.browser.e2e.ts",
       "test/e2e/react-compiled-css.browser.e2e.ts",
     ]);
+    expect(sdk.browserAcceptanceLanes).toEqual(["interaction", "knowledge", "workbench"]);
+    expect(sdk.artifactRuntimeRequired).toBe(false);
     expect(sdk.buildPackages).toEqual(expect.arrayContaining(["@opengeni/sdk", "@opengeni/react"]));
 
     const react = createImpactPlan(["packages/react/src/index.ts"]);
@@ -110,12 +111,14 @@ describe("fail-closed change impact", () => {
       ]),
     );
     expect(plan.integrationTests).toContain("test/integration/api.integration.ts");
-    expect(plan.e2eTests).toEqual(expect.arrayContaining([...ARTIFACT_BROWSER_E2E]));
+    for (const path of CURATED_ARTIFACT_BROWSER_E2E) expect(plan.e2eTests).not.toContain(path);
     expect(plan.buildPackages).toEqual(
       expect.arrayContaining(["@opengeni/artifact-tool", "@opengeni/react", "@opengeni/sdk"]),
     );
-    // Browser acceptance, artifact-runtime production, and image builds all use non-doc mode.
-    expect(plan.mode).not.toBe("docs");
+    // Focused artifact changes retain impacted browser/E2E coverage; the full
+    // cross-platform runtime and multiarch image matrix remains a full-mode gate.
+    expect(plan.browserAcceptanceLanes).toContain("workbench");
+    expect(plan.artifactRuntimeRequired).toBe(true);
   });
 
   test("artifact runtime scripts and canonical skills stay focused without skipping consumers", () => {
@@ -143,7 +146,9 @@ describe("fail-closed change impact", () => {
       ]),
     );
     expect(runtime.integrationTests).toContain("test/integration/worker-activity.integration.ts");
-    expect(runtime.e2eTests).toEqual(expect.arrayContaining([...ARTIFACT_BROWSER_E2E]));
+    for (const path of CURATED_ARTIFACT_BROWSER_E2E) expect(runtime.e2eTests).not.toContain(path);
+    expect(runtime.browserAcceptanceLanes).toContain("workbench");
+    expect(runtime.artifactRuntimeRequired).toBe(true);
     expect(runtime.buildPackages).toEqual(
       expect.arrayContaining([
         "@opengeni/artifact-kernel-wasm-document",
@@ -182,7 +187,9 @@ describe("fail-closed change impact", () => {
         "packages/react/test/editable-artifact-workbench.test.tsx",
       ]),
     );
-    expect(plan.e2eTests).toEqual(expect.arrayContaining([...ARTIFACT_BROWSER_E2E]));
+    for (const path of CURATED_ARTIFACT_BROWSER_E2E) expect(plan.e2eTests).not.toContain(path);
+    expect(plan.browserAcceptanceLanes).toEqual(["interaction", "knowledge", "workbench"]);
+    expect(plan.artifactRuntimeRequired).toBe(false);
     expect(plan.buildPackages).toEqual(
       expect.arrayContaining(["@opengeni/react", "@opengeni/sdk"]),
     );
@@ -191,7 +198,10 @@ describe("fail-closed change impact", () => {
   test("artifact browser dependency rules do not widen unrelated leaf package plans", () => {
     const plan = createImpactPlan(["packages/ogtool/src/index.ts"]);
     expect(plan.mode).toBe("focused");
-    for (const path of ARTIFACT_BROWSER_E2E) expect(plan.e2eTests).not.toContain(path);
+    for (const path of CURATED_ARTIFACT_BROWSER_E2E) expect(plan.e2eTests).not.toContain(path);
+    expect(plan.e2eTests).toEqual([]);
+    expect(plan.browserAcceptanceLanes).toEqual([]);
+    expect(plan.artifactRuntimeRequired).toBe(false);
   });
 
   test("artifact database migrations retain the full schema and service safety net", () => {
@@ -200,7 +210,7 @@ describe("fail-closed change impact", () => {
     expect(plan.affectedPackages).toContain("@opengeni/db");
     expect(plan.unitTests).toContain("packages/db/test/editable-artifacts-postgres.test.ts");
     expect(plan.integrationTests).toContain("test/integration/db.integration.ts");
-    expect(plan.e2eTests).toEqual(expect.arrayContaining([...ARTIFACT_BROWSER_E2E]));
+    for (const path of CURATED_ARTIFACT_BROWSER_E2E) expect(plan.e2eTests).not.toContain(path);
     expect(plan.buildPackages).toEqual(
       expect.arrayContaining(["@opengeni/db", "@opengeni/worker-bundle"]),
     );
@@ -212,12 +222,9 @@ describe("fail-closed change impact", () => {
     const tests = discoverTestFiles();
     expect(tests.integration.length).toBeGreaterThan(0);
     expect(tests.e2e).toEqual([
-      "test/e2e/artifact-spreadsheet-canvas.browser.e2e.ts",
-      "test/e2e/artifact-spreadsheet-scroll.browser.e2e.ts",
       "test/e2e/code-editor.browser.e2e.ts",
       "test/e2e/composer-responsive.browser.e2e.ts",
       "test/e2e/connected-machine-removal.browser.e2e.ts",
-      "test/e2e/editable-artifacts.browser.e2e.ts",
       "test/e2e/react-compiled-css.browser.e2e.ts",
     ]);
     expect(tests.e2e).not.toContain("test/e2e/codex-overview.e2e.ts");
@@ -231,6 +238,8 @@ describe("fail-closed change impact", () => {
     expect(plan.unitTests).toEqual(tests.unit);
     expect(plan.integrationTests).toEqual(tests.integration);
     expect(plan.e2eTests).toEqual(tests.e2e);
+    expect(plan.browserAcceptanceLanes).toEqual(["interaction", "knowledge", "workbench"]);
+    expect(plan.artifactRuntimeRequired).toBe(true);
     expect(plan.typecheckProjects).toEqual(typecheckProjects());
     expect(plan.typecheckProjects).toEqual(
       expect.arrayContaining(["scripts/ci", "scripts/operator", "scripts/release"]),
@@ -246,6 +255,7 @@ describe("fail-closed change impact", () => {
     expect(summary.length).toBeLessThan(512);
     expect(summary).toContain(`unit=${plan.unitTests.length}`);
     expect(summary).toContain(`integration=${plan.integrationTests.length}`);
+    expect(summary).toContain(`browser=${plan.browserAcceptanceLanes.length}`);
     expect(summary).toContain("output=impact-plan.json");
     expect(summary).not.toContain(plan.unitTests[0]!);
   });
@@ -344,6 +354,9 @@ function requiredResult(
     mode: "docs" | "focused" | "full";
     unit: number;
     integration: number;
+    e2e: number;
+    browser: number;
+    artifactRuntime: boolean;
     build: number;
   },
 ): boolean {
@@ -364,6 +377,15 @@ function requiredResult(
       "integration",
       String(options.integration),
       "--argjson",
+      "e2e",
+      String(options.e2e),
+      "--argjson",
+      "browser",
+      String(options.browser),
+      "--argjson",
+      "artifactRuntime",
+      String(options.artifactRuntime),
+      "--argjson",
       "build",
       String(options.build),
       "-f",
@@ -380,8 +402,9 @@ describe("workflow fail-closed contracts", () => {
       plan: { result: "success" },
       "source-contracts": { result: "success" },
       "unit-shards": { result: "success" },
-      "unit-safety": { result: "skipped" },
       "integration-shards": { result: "success" },
+      "e2e-shards": { result: "success" },
+      "artifact-runtime": { result: "success" },
       "test-suite": { result: "success" },
       "browser-acceptance": { result: "success" },
       "package-contracts": { result: "success" },
@@ -394,6 +417,9 @@ describe("workflow fail-closed contracts", () => {
         mode: "full",
         unit: 1,
         integration: 1,
+        e2e: 1,
+        browser: 1,
+        artifactRuntime: true,
         build: 1,
       }),
     ).toBe(true);
@@ -405,6 +431,9 @@ describe("workflow fail-closed contracts", () => {
           mode: "full",
           unit: 1,
           integration: 1,
+          e2e: 1,
+          browser: 1,
+          artifactRuntime: true,
           build: 1,
         },
       ),
@@ -414,8 +443,9 @@ describe("workflow fail-closed contracts", () => {
         {
           ...full,
           "unit-shards": { result: "skipped" },
-          "unit-safety": { result: "skipped" },
           "integration-shards": { result: "skipped" },
+          "e2e-shards": { result: "skipped" },
+          "artifact-runtime": { result: "skipped" },
           "test-suite": { result: "skipped" },
           "browser-acceptance": { result: "skipped" },
           "package-contracts": { result: "skipped" },
@@ -427,7 +457,30 @@ describe("workflow fail-closed contracts", () => {
           mode: "docs",
           unit: 0,
           integration: 0,
+          e2e: 0,
+          browser: 0,
+          artifactRuntime: false,
           build: 0,
+        },
+      ),
+    ).toBe(true);
+    expect(
+      requiredResult(
+        {
+          ...full,
+          "browser-acceptance": { result: "skipped" },
+          "artifact-runtime": { result: "skipped" },
+          images: { result: "skipped" },
+        },
+        {
+          event: "pull_request",
+          mode: "focused",
+          unit: 1,
+          integration: 1,
+          e2e: 1,
+          browser: 0,
+          artifactRuntime: false,
+          build: 1,
         },
       ),
     ).toBe(true);
