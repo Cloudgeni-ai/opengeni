@@ -31,6 +31,8 @@ CREATE TABLE "slack_user_link_access_requests" (
   CONSTRAINT "slack_user_link_access_requests_workspace_account_fk"
     FOREIGN KEY ("workspace_id", "account_id")
     REFERENCES "workspaces"("id", "account_id") ON DELETE CASCADE,
+  CONSTRAINT "slack_user_link_access_requests_tenant_uq"
+    UNIQUE ("id", "workspace_id", "account_id"),
   CONSTRAINT "slack_user_link_access_requests_identity_check"
     CHECK (
       length("token_digest") = 64
@@ -84,8 +86,7 @@ CREATE TABLE "slack_user_link_access_request_operations" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   "account_id" uuid NOT NULL REFERENCES "managed_accounts"("id") ON DELETE CASCADE,
   "workspace_id" uuid NOT NULL REFERENCES "workspaces"("id") ON DELETE CASCADE,
-  "request_id" uuid NOT NULL
-    REFERENCES "slack_user_link_access_requests"("id") ON DELETE CASCADE,
+  "request_id" uuid NOT NULL,
   "actor_subject_id" text NOT NULL,
   "operation" text NOT NULL,
   "idempotency_key" text NOT NULL,
@@ -93,10 +94,15 @@ CREATE TABLE "slack_user_link_access_request_operations" (
   "expected_version" integer NOT NULL,
   "result_version" integer NOT NULL,
   "result_status" text NOT NULL,
+  "result" jsonb NOT NULL,
   "created_at" timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT "slack_user_link_access_request_operations_workspace_account_fk"
     FOREIGN KEY ("workspace_id", "account_id")
     REFERENCES "workspaces"("id", "account_id") ON DELETE CASCADE,
+  CONSTRAINT "slack_user_link_access_request_operations_request_tenant_fk"
+    FOREIGN KEY ("request_id", "workspace_id", "account_id")
+    REFERENCES "slack_user_link_access_requests"("id", "workspace_id", "account_id")
+    ON DELETE CASCADE,
   CONSTRAINT "slack_user_link_access_request_operations_identity_check"
     CHECK (
       length("actor_subject_id") BETWEEN 1 AND 512
@@ -108,6 +114,31 @@ CREATE TABLE "slack_user_link_access_request_operations" (
       AND "result_version" = "expected_version" + 1
       AND "operation" IN ('request', 'cancel', 'approve', 'deny')
       AND "result_status" IN ('pending', 'completed', 'denied', 'cancelled')
+      AND jsonb_typeof("result") = 'object'
+      AND "result" ?& ARRAY[
+        'id', 'workspaceId', 'workspaceDisplayName', 'subjectLabel', 'status', 'version',
+        'expiresAt', 'requestedAt', 'decidedAt', 'completedAt', 'createdAt', 'updatedAt'
+      ]
+      AND "result" - ARRAY[
+        'id', 'workspaceId', 'workspaceDisplayName', 'subjectLabel', 'status', 'version',
+        'expiresAt', 'requestedAt', 'decidedAt', 'completedAt', 'createdAt', 'updatedAt'
+      ] = '{}'::jsonb
+      AND jsonb_typeof("result"->'id') = 'string'
+      AND jsonb_typeof("result"->'workspaceId') = 'string'
+      AND jsonb_typeof("result"->'workspaceDisplayName') IN ('string', 'null')
+      AND jsonb_typeof("result"->'subjectLabel') IN ('string', 'null')
+      AND jsonb_typeof("result"->'status') = 'string'
+      AND jsonb_typeof("result"->'version') = 'number'
+      AND jsonb_typeof("result"->'expiresAt') = 'string'
+      AND jsonb_typeof("result"->'requestedAt') IN ('string', 'null')
+      AND jsonb_typeof("result"->'decidedAt') IN ('string', 'null')
+      AND jsonb_typeof("result"->'completedAt') IN ('string', 'null')
+      AND jsonb_typeof("result"->'createdAt') = 'string'
+      AND jsonb_typeof("result"->'updatedAt') = 'string'
+      AND "result"->>'id' = "request_id"::text
+      AND "result"->>'workspaceId' = "workspace_id"::text
+      AND "result"->>'status' = "result_status"
+      AND "result"->'version' = to_jsonb("result_version")
     )
 );
 

@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import {
   OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
+  type SlackUserLinkAccessRequest,
 } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
@@ -116,6 +117,39 @@ async function preparedFixture(label: string, subjectId = `user:${randomUUID()}`
   return { target, connection, token, expiresAt, subjectId, prepared };
 }
 
+function pendingResult(
+  prepared: SlackUserLinkAccessRequest,
+  workspaceId = prepared.workspaceId,
+): SlackUserLinkAccessRequest {
+  const now = new Date().toISOString();
+  return {
+    ...prepared,
+    workspaceId,
+    status: "pending",
+    version: 2,
+    requestedAt: now,
+    updatedAt: now,
+  };
+}
+
+async function insertOperationReceipt(input: {
+  accountId: string;
+  workspaceId: string;
+  requestId: string;
+  result: postgres.JSONValue;
+}) {
+  return await admin`
+    insert into slack_user_link_access_request_operations (
+      account_id, workspace_id, request_id, actor_subject_id, operation,
+      idempotency_key, request_digest, expected_version, result_version,
+      result_status, result
+    ) values (
+      ${input.accountId}, ${input.workspaceId}, ${input.requestId},
+      ${`user:${randomUUID()}`}, 'request', ${randomUUID()}, ${"a".repeat(64)},
+      1, 2, 'pending', ${admin.json(input.result)}
+    )`;
+}
+
 describe("Slack user-link access migration and lifecycle", () => {
   test("declares rolling FORCE-RLS tables, exact constraints, policies, and runtime DML", async () => {
     const candidates = (await readdir(migrationsDir)).filter((file) =>
@@ -130,6 +164,11 @@ describe("Slack user-link access migration and lifecycle", () => {
     ).toHaveLength(2);
     expect(sql).toContain("slack_user_link_access_requests_active_principal_uq");
     expect(sql).toContain("slack_user_link_access_request_operations_idempotency_uq");
+    expect(sql).toContain("slack_user_link_access_requests_tenant_uq");
+    expect(sql).toContain("slack_user_link_access_request_operations_request_tenant_fk");
+    expect(sql).toContain('"result" jsonb NOT NULL');
+    expect(sql).toContain('"result" - ARRAY[');
+    expect(sql).toContain("] = '{}'::jsonb");
     expect(sql).toContain("slack_user_link_access_requests_lifecycle_check");
     expect(sql).toContain(
       'GRANT SELECT, INSERT, UPDATE ON TABLE "slack_user_link_access_requests" TO "opengeni_app"',
@@ -200,6 +239,84 @@ describe("Slack user-link access migration and lifecycle", () => {
     await expect(
       Promise.resolve(runtime`delete from slack_user_link_access_request_operations where false`),
     ).rejects.toMatchObject({ code: "42501" });
+  });
+
+  test("binds operation receipts to one tenant and an exact token-free result shape", async () => {
+    if (!available) return;
+
+    const tenantFixture = await preparedFixture("receipt-tenant");
+    const otherTenant = await workspace("receipt-other-tenant");
+    await expect(
+      insertOperationReceipt({
+        ...otherTenant,
+        requestId: tenantFixture.prepared.id,
+        result: pendingResult(tenantFixture.prepared, otherTenant.workspaceId),
+      }),
+    ).rejects.toMatchObject({ code: "23503" });
+
+    const shapeFixture = await preparedFixture("receipt-shape");
+    const exact = pendingResult(shapeFixture.prepared);
+    await expect(
+      insertOperationReceipt({
+        ...shapeFixture.target,
+        requestId: shapeFixture.prepared.id,
+        result: { ...exact, linkToken: "must-not-persist" },
+      }),
+    ).rejects.toMatchObject({ code: "23514" });
+    await expect(
+      insertOperationReceipt({
+        ...shapeFixture.target,
+        requestId: shapeFixture.prepared.id,
+        result: { ...exact, rawToken: "must-not-persist" },
+      }),
+    ).rejects.toMatchObject({ code: "23514" });
+    await expect(
+      insertOperationReceipt({
+        ...shapeFixture.target,
+        requestId: shapeFixture.prepared.id,
+        result: { ...exact, subjectLabel: { bearer: "must-not-persist" } },
+      }),
+    ).rejects.toMatchObject({ code: "23514" });
+    await expect(
+      insertOperationReceipt({
+        ...shapeFixture.target,
+        requestId: shapeFixture.prepared.id,
+        result: { ...exact, version: "2" },
+      }),
+    ).rejects.toMatchObject({ code: "23514" });
+    await expect(
+      insertOperationReceipt({
+        ...shapeFixture.target,
+        requestId: shapeFixture.prepared.id,
+        result: { ...exact, version: 2.5 },
+      }),
+    ).rejects.toMatchObject({ code: "23514" });
+
+    await insertOperationReceipt({
+      ...shapeFixture.target,
+      requestId: shapeFixture.prepared.id,
+      result: exact,
+    });
+    const [stored] = await admin<{ result: SlackUserLinkAccessRequest }[]>`
+      select result from slack_user_link_access_request_operations
+      where request_id = ${shapeFixture.prepared.id}`;
+    expect(stored?.result).toEqual(exact);
+    expect(Object.keys(stored!.result).sort()).toEqual(
+      [
+        "completedAt",
+        "createdAt",
+        "decidedAt",
+        "expiresAt",
+        "id",
+        "requestedAt",
+        "status",
+        "subjectLabel",
+        "updatedAt",
+        "version",
+        "workspaceDisplayName",
+        "workspaceId",
+      ].sort(),
+    );
   });
 
   test("stores only the digest, binds exact claims and subject, and supersedes only a fresh exact-subject intent", async () => {
@@ -320,21 +437,194 @@ describe("Slack user-link access migration and lifecycle", () => {
     });
     expect(link?.subjectId).toBe(fixture.subjectId);
 
-    const audits = await admin<{ action: string; metadata: unknown }[]>`
+    const audits = await admin<
+      {
+        action: string;
+        metadata: {
+          membershipPermissions?: string[];
+          membershipRole?: string;
+          status: string;
+          version: number;
+        };
+      }[]
+    >`
       select action, metadata from audit_events
       where target_type = 'slack_user_link_access_request'
-        and target_id = ${fixture.prepared.id}
-      order by occurred_at, id`;
-    expect(audits.map((row) => row.action).sort()).toEqual(
-      [
-        "slack.user_link.prepared",
-        "workspace.access_request.created",
-        "workspace.access_request.approved",
-        "slack.user_link.completed",
-      ].sort(),
-    );
+        and target_id = ${fixture.prepared.id}`;
+    expect(audits).toHaveLength(4);
+    const auditCounts = audits.reduce<Record<string, number>>((counts, row) => {
+      counts[row.action] = (counts[row.action] ?? 0) + 1;
+      return counts;
+    }, {});
+    expect(auditCounts).toEqual({
+      "slack.user_link.prepared": 1,
+      "workspace.access_request.created": 1,
+      "workspace.access_request.approved": 1,
+      "slack.user_link.completed": 1,
+    });
+    const auditsByAction = Object.fromEntries(audits.map((row) => [row.action, row.metadata]));
+    expect(Object.keys(auditsByAction).sort()).toEqual([
+      "slack.user_link.completed",
+      "slack.user_link.prepared",
+      "workspace.access_request.approved",
+      "workspace.access_request.created",
+    ]);
+    expect(auditsByAction["slack.user_link.prepared"]).toMatchObject({
+      status: "prepared",
+      version: 1,
+    });
+    expect(auditsByAction["workspace.access_request.created"]).toMatchObject({
+      status: "pending",
+      version: 2,
+    });
+    expect(auditsByAction["workspace.access_request.approved"]).toMatchObject({
+      status: "completed",
+      version: 3,
+      membershipRole: "member",
+      membershipPermissions: ["sessions:create", "sessions:read"],
+    });
+    expect(auditsByAction["slack.user_link.completed"]).toMatchObject({
+      status: "completed",
+      version: 3,
+    });
     expect(JSON.stringify(audits)).not.toContain(fixture.token);
     expect(JSON.stringify(audits)).not.toContain(digest(fixture.token));
+  });
+
+  test("replays the stored original result before expiry or later approval without side effects", async () => {
+    if (!available) return;
+
+    const expiring = await preparedFixture("replay-expiry");
+    const expiringKey = randomUUID();
+    const originalPending = await requestSlackUserLinkWorkspaceAccess(db, {
+      workspaceId: expiring.target.workspaceId,
+      requestId: expiring.prepared.id,
+      actorSubjectId: expiring.subjectId,
+      expectedVersion: expiring.prepared.version,
+      idempotencyKey: expiringKey,
+    });
+    const [expiryAuditCountBefore] = await admin<{ count: number }[]>`
+      select count(*)::int as count from audit_events
+      where target_type = 'slack_user_link_access_request'
+        and target_id = ${expiring.prepared.id}`;
+    const [expiryReceiptBefore] = await admin<
+      { count: number; result: SlackUserLinkAccessRequest }[]
+    >`
+      select count(*)::int as count, min(result::text)::jsonb as result
+      from slack_user_link_access_request_operations
+      where request_id = ${expiring.prepared.id}`;
+    expect(expiryReceiptBefore).toMatchObject({ count: 1, result: originalPending });
+    expect(Object.keys(expiryReceiptBefore!.result).sort()).toEqual(
+      Object.keys(originalPending).sort(),
+    );
+    expect(
+      await requestSlackUserLinkWorkspaceAccess(
+        db,
+        {
+          workspaceId: expiring.target.workspaceId,
+          requestId: expiring.prepared.id,
+          actorSubjectId: expiring.subjectId,
+          expectedVersion: expiring.prepared.version,
+          idempotencyKey: expiringKey,
+        },
+        new Date(expiring.expiresAt.getTime() + 1),
+      ),
+    ).toEqual(originalPending);
+    const [afterExpiryReplay] = await admin<{ status: string; version: number }[]>`
+      select status, version from slack_user_link_access_requests
+      where id = ${expiring.prepared.id}`;
+    const [expiryAuditCountAfter] = await admin<{ count: number }[]>`
+      select count(*)::int as count from audit_events
+      where target_type = 'slack_user_link_access_request'
+        and target_id = ${expiring.prepared.id}`;
+    const [expiryReceiptAfter] = await admin<{ count: number }[]>`
+      select count(*)::int as count from slack_user_link_access_request_operations
+      where request_id = ${expiring.prepared.id}`;
+    expect(afterExpiryReplay).toEqual({ status: "pending", version: 2 });
+    expect(expiryAuditCountAfter).toEqual(expiryAuditCountBefore);
+    expect(expiryReceiptAfter).toEqual({ count: expiryReceiptBefore!.count });
+
+    const approvedFixture = await preparedFixture("replay-approval");
+    const approvedKey = randomUUID();
+    const pendingBeforeApproval = await requestSlackUserLinkWorkspaceAccess(db, {
+      workspaceId: approvedFixture.target.workspaceId,
+      requestId: approvedFixture.prepared.id,
+      actorSubjectId: approvedFixture.subjectId,
+      expectedVersion: approvedFixture.prepared.version,
+      idempotencyKey: approvedKey,
+    });
+    const approved = await approveSlackUserLinkAccessRequest(db, {
+      workspaceId: approvedFixture.target.workspaceId,
+      requestId: approvedFixture.prepared.id,
+      actorSubjectId: `user:admin-${randomUUID()}`,
+      expectedVersion: pendingBeforeApproval.version,
+      idempotencyKey: randomUUID(),
+      permissions: ["sessions:create"],
+    });
+    const [approvalAuditCountBefore] = await admin<{ count: number }[]>`
+      select count(*)::int as count from audit_events
+      where target_type = 'slack_user_link_access_request'
+        and target_id = ${approvedFixture.prepared.id}`;
+    const [membershipCountBefore] = await admin<{ count: number }[]>`
+      select count(*)::int as count from workspace_memberships
+      where workspace_id = ${approvedFixture.target.workspaceId}
+        and subject_id = ${approvedFixture.subjectId}`;
+    const [linkCountBefore] = await admin<{ count: number }[]>`
+      select count(*)::int as count from slack_bot_user_links
+      where workspace_id = ${approvedFixture.target.workspaceId}
+        and connection_id = ${approvedFixture.connection.id}
+        and slack_user_id = 'U_replay-approval'`;
+    const [approvalReceiptBefore] = await admin<
+      { count: number; result: SlackUserLinkAccessRequest }[]
+    >`
+      select count(*)::int as count,
+        (min(result::text) filter (where operation = 'request'))::jsonb as result
+      from slack_user_link_access_request_operations
+      where request_id = ${approvedFixture.prepared.id}`;
+    expect(approvalReceiptBefore).toMatchObject({ count: 2, result: pendingBeforeApproval });
+    expect(
+      await requestSlackUserLinkWorkspaceAccess(db, {
+        workspaceId: approvedFixture.target.workspaceId,
+        requestId: approvedFixture.prepared.id,
+        actorSubjectId: approvedFixture.subjectId,
+        expectedVersion: approvedFixture.prepared.version,
+        idempotencyKey: approvedKey,
+      }),
+    ).toEqual(pendingBeforeApproval);
+    const [afterApprovalReplay] = await admin<{ status: string; version: number }[]>`
+      select status, version from slack_user_link_access_requests
+      where id = ${approvedFixture.prepared.id}`;
+    const [approvalAuditCountAfter] = await admin<{ count: number }[]>`
+      select count(*)::int as count from audit_events
+      where target_type = 'slack_user_link_access_request'
+        and target_id = ${approvedFixture.prepared.id}`;
+    const [membershipCountAfter] = await admin<{ count: number }[]>`
+      select count(*)::int as count from workspace_memberships
+      where workspace_id = ${approvedFixture.target.workspaceId}
+        and subject_id = ${approvedFixture.subjectId}`;
+    const [linkCountAfter] = await admin<{ count: number }[]>`
+      select count(*)::int as count from slack_bot_user_links
+      where workspace_id = ${approvedFixture.target.workspaceId}
+        and connection_id = ${approvedFixture.connection.id}
+        and slack_user_id = 'U_replay-approval'`;
+    const [approvalReceiptAfter] = await admin<{ count: number }[]>`
+      select count(*)::int as count from slack_user_link_access_request_operations
+      where request_id = ${approvedFixture.prepared.id}`;
+    expect(afterApprovalReplay).toEqual({ status: approved.status, version: approved.version });
+    expect(approvalAuditCountAfter).toEqual(approvalAuditCountBefore);
+    expect(membershipCountAfter).toEqual(membershipCountBefore);
+    expect(linkCountAfter).toEqual(linkCountBefore);
+    expect(approvalReceiptAfter).toEqual({ count: approvalReceiptBefore!.count });
+
+    await expect(
+      requestSlackUserLinkWorkspaceAccess(db, {
+        workspaceId: approvedFixture.target.workspaceId,
+        requestId: approvedFixture.prepared.id,
+        actorSubjectId: approvedFixture.subjectId,
+        expectedVersion: pendingBeforeApproval.version,
+        idempotencyKey: approvedKey,
+      }),
+    ).rejects.toMatchObject({ code: "idempotency_conflict" });
   });
 
   test("cancel and expiry never grant or link, and another workspace cannot read the request", async () => {

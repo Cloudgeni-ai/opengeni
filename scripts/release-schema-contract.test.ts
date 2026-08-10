@@ -222,7 +222,7 @@ describe("release schema contract", () => {
         (migrations.has("0204_slack_user_link_access_requests.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "6dea5d32229ecfeb3f14542aab10875e1fb2373a400dac49dc208963d9032813",
+      "6d91a45a361867b1519157075532277f5b6f4a8798047d5f1f8e58e3936b693c",
     );
     expect(contract.latestMigration).toBe("0204_slack_user_link_access_requests.sql");
     expect(migrations.get("0197_knowledge_source_sync_schedules.sql")).toMatchObject({

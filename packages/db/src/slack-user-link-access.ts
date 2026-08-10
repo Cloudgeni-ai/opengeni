@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 
-import type {
-  Permission,
-  SlackUserLinkAccessRequest,
-  SlackUserLinkAccessRequestStatus,
+import {
+  type Permission,
+  SlackUserLinkAccessRequest as SlackUserLinkAccessRequestSchema,
+  type SlackUserLinkAccessRequest,
+  type SlackUserLinkAccessRequestStatus,
 } from "@opengeni/contracts";
 import { and, asc, eq, gt, inArray, ne } from "drizzle-orm";
 
@@ -482,7 +483,6 @@ async function mutateRequest(
         .for("update")
         .limit(1);
       if (!found) throw new SlackUserLinkAccessPersistenceError("not_found");
-      const row = await expireLockedRequest(database, found, now);
       const [replay] = await tx
         .select()
         .from(schema.slackUserLinkAccessRequestOperations)
@@ -502,12 +502,14 @@ async function mutateRequest(
         ) {
           throw new SlackUserLinkAccessPersistenceError("idempotency_conflict");
         }
-        return mapRequest(row);
+        return SlackUserLinkAccessRequestSchema.parse(replay.result);
       }
+      const row = await expireLockedRequest(database, found, now);
       if (row.version !== input.expectedVersion) {
         throw new SlackUserLinkAccessPersistenceError("version_conflict");
       }
       const updated = await transition(database, row);
+      const result = mapRequest(updated);
       await tx.insert(schema.slackUserLinkAccessRequestOperations).values({
         accountId: updated.accountId,
         workspaceId: updated.workspaceId,
@@ -519,8 +521,9 @@ async function mutateRequest(
         expectedVersion: input.expectedVersion,
         resultVersion: updated.version,
         resultStatus: updated.status,
+        result,
       });
-      return mapRequest(updated);
+      return result;
     });
   });
 }

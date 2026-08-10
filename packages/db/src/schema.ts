@@ -5,6 +5,7 @@ import type {
   McpServerConnectionRef,
   RigProviderImages,
   SessionMcpApprovalPolicy,
+  SlackUserLinkAccessRequest,
   TimelineAnnotation,
 } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
@@ -23,6 +24,7 @@ import {
   pgTable,
   text,
   timestamp,
+  unique,
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
@@ -985,6 +987,11 @@ export const slackUserLinkAccessRequests = pgTable(
       columns: [table.workspaceId, table.accountId],
       foreignColumns: [workspaces.id, workspaces.accountId],
     }).onDelete("cascade"),
+    tenantIdentity: unique("slack_user_link_access_requests_tenant_uq").on(
+      table.id,
+      table.workspaceId,
+      table.accountId,
+    ),
     tokenDigestUnique: uniqueIndex("slack_user_link_access_requests_token_digest_uq").on(
       table.tokenDigest,
     ),
@@ -1036,9 +1043,7 @@ export const slackUserLinkAccessRequestOperations = pgTable(
     workspaceId: uuid("workspace_id")
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
-    requestId: uuid("request_id")
-      .notNull()
-      .references(() => slackUserLinkAccessRequests.id, { onDelete: "cascade" }),
+    requestId: uuid("request_id").notNull(),
     actorSubjectId: text("actor_subject_id").notNull(),
     operation: text("operation").notNull(),
     idempotencyKey: text("idempotency_key").notNull(),
@@ -1046,6 +1051,7 @@ export const slackUserLinkAccessRequestOperations = pgTable(
     expectedVersion: integer("expected_version").notNull(),
     resultVersion: integer("result_version").notNull(),
     resultStatus: text("result_status").notNull(),
+    result: jsonb("result").$type<SlackUserLinkAccessRequest>().notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -1053,6 +1059,15 @@ export const slackUserLinkAccessRequestOperations = pgTable(
       name: "slack_user_link_access_request_operations_workspace_account_fk",
       columns: [table.workspaceId, table.accountId],
       foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    requestTenant: foreignKey({
+      name: "slack_user_link_access_request_operations_request_tenant_fk",
+      columns: [table.requestId, table.workspaceId, table.accountId],
+      foreignColumns: [
+        slackUserLinkAccessRequests.id,
+        slackUserLinkAccessRequests.workspaceId,
+        slackUserLinkAccessRequests.accountId,
+      ],
     }).onDelete("cascade"),
     idempotency: uniqueIndex("slack_user_link_access_request_operations_idempotency_uq").on(
       table.requestId,
@@ -1073,7 +1088,32 @@ export const slackUserLinkAccessRequestOperations = pgTable(
         and ${table.expectedVersion} > 0
         and ${table.resultVersion} = ${table.expectedVersion} + 1
         and ${table.operation} in ('request', 'cancel', 'approve', 'deny')
-        and ${table.resultStatus} in ('pending', 'completed', 'denied', 'cancelled')`,
+        and ${table.resultStatus} in ('pending', 'completed', 'denied', 'cancelled')
+        and jsonb_typeof(${table.result}) = 'object'
+        and ${table.result} ?& array[
+          'id', 'workspaceId', 'workspaceDisplayName', 'subjectLabel', 'status', 'version',
+          'expiresAt', 'requestedAt', 'decidedAt', 'completedAt', 'createdAt', 'updatedAt'
+        ]
+        and ${table.result} - array[
+          'id', 'workspaceId', 'workspaceDisplayName', 'subjectLabel', 'status', 'version',
+          'expiresAt', 'requestedAt', 'decidedAt', 'completedAt', 'createdAt', 'updatedAt'
+        ] = '{}'::jsonb
+        and jsonb_typeof(${table.result}->'id') = 'string'
+        and jsonb_typeof(${table.result}->'workspaceId') = 'string'
+        and jsonb_typeof(${table.result}->'workspaceDisplayName') in ('string', 'null')
+        and jsonb_typeof(${table.result}->'subjectLabel') in ('string', 'null')
+        and jsonb_typeof(${table.result}->'status') = 'string'
+        and jsonb_typeof(${table.result}->'version') = 'number'
+        and jsonb_typeof(${table.result}->'expiresAt') = 'string'
+        and jsonb_typeof(${table.result}->'requestedAt') in ('string', 'null')
+        and jsonb_typeof(${table.result}->'decidedAt') in ('string', 'null')
+        and jsonb_typeof(${table.result}->'completedAt') in ('string', 'null')
+        and jsonb_typeof(${table.result}->'createdAt') = 'string'
+        and jsonb_typeof(${table.result}->'updatedAt') = 'string'
+        and ${table.result}->>'id' = ${table.requestId}::text
+        and ${table.result}->>'workspaceId' = ${table.workspaceId}::text
+        and ${table.result}->>'status' = ${table.resultStatus}
+        and ${table.result}->'version' = to_jsonb(${table.resultVersion})`,
     ),
   }),
 );
