@@ -608,8 +608,12 @@ review state, reviewed head, and submission time:
   single-maintainer PR whose author, exact-head reviewer, and merge actor are
   that same human; it is never a substitute for approving a bot-authored
   Version PR;
-- any base/head update invalidates the prior verdict, and a review submitted
-  after merge is not release evidence.
+- a candidate-head update invalidates a head-bound verdict. For the structured
+  admin-PASS form, changing the explicitly selected `reviewedBaseSha` also
+  requires replacement evidence on the same candidate head. Ordinary protected
+  `main` movement is not itself a candidate update and must not trigger a source
+  merge/rebase; and
+- a review submitted after merge is not release evidence.
 
 Candidate or operator admission must fail closed when those provider identities
 do not match; do not weaken the provenance check or recreate approval from a
@@ -643,8 +647,13 @@ bun scripts/release-review.ts \
   --digest
 ```
 
-Regenerate the body and verdict after every head or base movement. Do not edit a
-submitted review after merge to manufacture evidence retroactively.
+Regenerate the body and verdict when the candidate head or the explicitly
+selected reviewed-base identity changes. If protected `main` advances while the
+candidate stays unchanged, refresh any required base-bound evidence on that
+same head and let the merge authority perform fresh latest-main compatibility
+checks. Do not merge or rebase `main` into the source branch solely to refresh
+evidence, and do not edit a submitted review after merge to manufacture
+evidence retroactively.
 
 GitHub check lookup is ref-sensitive: a checked head can become undiscoverable
 after its source branch is deleted or rewritten even though the check itself

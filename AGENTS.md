@@ -140,6 +140,46 @@ cutover drains and terminates every old session workflow before the new worker
 starts, so no removed activity/signal identifier or replay adapter belongs in
 the new runtime.
 
+## Pull-request delivery across moving `main`
+
+Treat a candidate as an immutable semantic source revision, not as a snapshot of
+the latest protected branch. Create the branch from current `main` initially,
+then keep the exact head frozen while CI, review, and merge admission run.
+
+- A protected-branch advance alone is **not** a source revision, does not
+  invalidate a head-bound review, and must not produce another candidate label.
+  “Current-main compatible” means that the frozen candidate's patch and
+  resulting merge tree have been checked against current `main`; it does not
+  mean that current `main` must be an ancestor of the candidate head.
+- When `main` moves, leave the source branch untouched. Re-run the base-owned
+  Source Admission check when needed, inspect provider mergeability, and have
+  the merge authority prove the fresh latest-main conflict, patch-equivalence,
+  protected-path, migration/generated-file, and targeted compatibility checks.
+  The source admission contract deliberately accepts immutable stale-event
+  heads while protected `main` advances.
+- Mutate the candidate only for a source defect, an actual merge conflict, or a
+  material semantic incompatibility that requires source changes. Record that
+  reason explicitly. A conflict-free merge or rebase performed only to include
+  unrelated `main` commits is prohibited.
+- A structured release-review artifact that explicitly binds a reviewed base
+  may need replacement evidence when that selected base identity changes. That
+  evidence refresh stays on the same candidate head; it is not permission to
+  merge or rebase `main` into the source branch.
+- Watchers and continuation goals must say “verify compatibility without source
+  mutation.” They must never direct a source owner to “reconcile again” merely
+  because `main` advanced. Candidate/version numbers count substantive source
+  changes only.
+- Run independent review as soon as the candidate is ready; CI and review may
+  proceed concurrently, while merge still waits for both. After two substantive
+  repair revisions, pause for an explicit incident/scope review before creating
+  another source revision.
+
+See the executable moving-main admission contract in
+`.github/workflows/source-admission.yml`, `scripts/check-source-admission.mjs`,
+and `scripts/check-source-admission.test.ts`. Do not weaken it by reintroducing
+an exact-current-main ancestry requirement in prompts, goals, documentation, or
+operator procedure.
+
 ## Keeping these notes current
 
 If a change alters architecture, terminology, the run lifecycle, the memory model, or a "do not" guardrail above, update this file, [`docs/architecture.md`](docs/architecture.md), and the relevant `docs/*.md` in the same change. In particular, structural changes (an app/package/sandbox backend added, removed, or renamed; a moved responsibility; a changed invariant, data-flow, or canonical source) belong in `docs/architecture.md` — see its "Keeping this current" section. An out-of-date AGENTS.md or doc is a bug, not a nicety.
