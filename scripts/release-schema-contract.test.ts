@@ -217,7 +217,7 @@ describe("release schema contract", () => {
         (migrations.has("0198_memory_slack_publication_delivery.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "c828c8dfcb5d66381e36a771409458c5897dc06913b4024df0022a45d7960da1",
+      "478a1d78e45bf0a7dc34ffd605bcf112956461d0fc9973852700c26d236a3bc6",
     );
     expect(contract.latestMigration).toBe("0198_memory_slack_publication_delivery.sql");
     expect(migrations.get("0065_enrollment_credential_generation.sql")).toMatchObject({

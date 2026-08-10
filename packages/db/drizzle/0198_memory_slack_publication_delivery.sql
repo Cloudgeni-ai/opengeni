@@ -323,6 +323,9 @@ BEGIN
 END;
 $function$;
 
+REVOKE ALL ON FUNCTION opengeni_private.reject_memory_slack_immutable_mutation()
+  FROM PUBLIC;
+
 CREATE TRIGGER memory_slack_publication_configurations_immutable
   BEFORE UPDATE OR DELETE ON "memory_slack_publication_configurations"
   FOR EACH ROW EXECUTE FUNCTION opengeni_private.reject_memory_slack_immutable_mutation();
@@ -360,6 +363,9 @@ BEGIN
   RETURN NEW;
 END;
 $function$;
+
+REVOKE ALL ON FUNCTION opengeni_private.guard_memory_slack_publication_identity()
+  FROM PUBLIC;
 
 CREATE TRIGGER memory_slack_publications_identity_immutable
   BEFORE UPDATE ON "memory_slack_publications"

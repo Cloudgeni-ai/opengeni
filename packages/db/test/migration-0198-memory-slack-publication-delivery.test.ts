@@ -19,6 +19,12 @@ describe("migration 0198 Memory Slack publication delivery", () => {
     expect(source).toContain(
       "REVOKE ALL ON FUNCTION opengeni_private.claim_memory_slack_publication(uuid, integer)",
     );
+    expect(source).toContain(
+      "REVOKE ALL ON FUNCTION opengeni_private.reject_memory_slack_immutable_mutation()",
+    );
+    expect(source).toContain(
+      "REVOKE ALL ON FUNCTION opengeni_private.guard_memory_slack_publication_identity()",
+    );
     expect(source).toContain("TO opengeni_app");
     expect(source).toContain("memory_slack_publication_configurations_immutable");
     expect(source).toContain("memory_slack_publication_receipts_immutable");
