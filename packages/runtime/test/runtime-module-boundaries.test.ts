@@ -9,7 +9,7 @@ const packageJson = JSON.parse(readFileSync(join(runtimeRoot, "package.json"), "
   exports?: Record<string, unknown>;
 };
 
-const implementationModules = ["model-input", "run-events"] as const;
+const implementationModules = ["model-input", "model-provider", "run-events"] as const;
 
 function importSpecifiersOf(source: string): string[] {
   const specifiers: string[] = [];
@@ -37,14 +37,16 @@ describe("runtime implementation module boundaries", () => {
   test("extracted domains remain private implementation details", () => {
     const publicSubpaths = Object.keys(packageJson.exports ?? {});
 
-    expect(publicSubpaths).not.toContain("./model-input");
-    expect(publicSubpaths).not.toContain("./run-events");
+    for (const moduleName of implementationModules) {
+      expect(publicSubpaths).not.toContain(`./${moduleName}`);
+    }
   });
 
   test("the public facade re-exports each domain without wrappers", async () => {
-    const [barrel, modelInput, runEvents] = await Promise.all([
+    const [barrel, modelInput, modelProvider, runEvents] = await Promise.all([
       import("../src/index"),
       import("../src/model-input"),
+      import("../src/model-provider"),
       import("../src/run-events"),
     ]);
 
@@ -54,6 +56,13 @@ describe("runtime implementation module boundaries", () => {
       "projectModelInputForCapabilities",
     ] as const) {
       expect(barrel[name]).toBe(modelInput[name]);
+    }
+    for (const name of [
+      "buildProviderClient",
+      "modelRequestPolicyForProvider",
+      "resolveTurnModel",
+    ] as const) {
+      expect(barrel[name]).toBe(modelProvider[name]);
     }
     for (const name of [
       "modelTerminalResponseFromSdkEvent",
