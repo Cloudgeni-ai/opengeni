@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { readFile } from "node:fs/promises";
+import type postgres from "postgres";
 
 const migrationUrl = new URL(
   "../drizzle/0198_memory_slack_publication_delivery.sql",
@@ -8,15 +9,30 @@ const migrationUrl = new URL(
 );
 
 let shared: SharedTestDatabase | null = null;
+let sql: postgres.ReservedSql | null = null;
+
+async function expectPostgresRejection(
+  query: PromiseLike<unknown>,
+  operation: string,
+): Promise<void> {
+  try {
+    await query;
+  } catch {
+    return;
+  }
+  throw new Error(`Expected PostgreSQL to reject ${operation}`);
+}
 
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("migration-0198-memory-slack");
   if (!shared) return;
-  await shared.admin`set lock_timeout = '5s'`;
-  await shared.admin`set statement_timeout = '10s'`;
+  sql = await shared.admin.reserve();
+  await sql`set lock_timeout = '5s'`;
+  await sql`set statement_timeout = '10s'`;
 });
 
 afterAll(async () => {
+  sql?.release();
   await shared?.release();
 });
 
@@ -53,8 +69,8 @@ describe("migration 0198 Memory Slack publication delivery", () => {
     // test process, then clones a clean database. Replaying all migrations in
     // this one file caused shard-dependent CI stalls after migration 0198 had
     // already committed, without adding coverage beyond this runtime proof.
-    if (!shared) return;
-    const sql = shared.admin;
+    if (!sql) return;
+    const runtimeSql = sql;
     const [account] = await sql<{ id: string }[]>`
         insert into managed_accounts (name) values ('migration-0198-account') returning id`;
     const [workspace] = await sql<{ id: string }[]>`
@@ -130,7 +146,8 @@ describe("migration 0198 Memory Slack publication delivery", () => {
           ${account!.id}, ${workspace!.id}, 2, true, ${crypto.randomUUID()},
           'T_TEST', 'C_OTHER', array['major'], array['normal'], 'subject-1'
         )`;
-    await expect(sql`
+    await expectPostgresRejection(
+      sql`
         insert into memory_slack_publications (
           account_id, workspace_id, configuration_id, configuration_revision,
           connection_id, slack_team_id, slack_channel_id, source_type, source_id,
@@ -143,7 +160,9 @@ describe("migration 0198 Memory Slack publication delivery", () => {
           '1', 'memory-1:v1', ${sql.json({ summary: "Durable decision" })}::jsonb,
           ${"a".repeat(64)},
           'major', 'auto', 'queued', ${crypto.randomUUID()}, 'human', 'subject-1'
-        )`).rejects.toThrow();
+        )`,
+      "a duplicate source publication",
+    );
 
     const holderOne = crypto.randomUUID();
     const claimed = await sql<Array<{ id: string; state: string; attempt_count: number }>>`
@@ -177,15 +196,24 @@ describe("migration 0198 Memory Slack publication delivery", () => {
         from opengeni_private.claim_memory_slack_publication(${holderTwo}::uuid, 1000)`;
     expect([...reclaimed]).toEqual([{ attempt_count: 2 }]);
 
-    for (const mutation of [
-      () =>
-        sql`update memory_slack_publication_configurations set enabled = false where id = ${configuration!.id}`,
-      () =>
-        sql`update memory_slack_publication_receipts set actor_subject_id = 'other' where publication_id = ${publicationId}`,
-      () =>
-        sql`update memory_slack_publications set initiating_human_subject_id = 'user:other' where id = ${publicationId}`,
-    ]) {
-      await expect(mutation()).rejects.toThrow();
+    for (const [operation, mutation] of [
+      [
+        "configuration mutation",
+        () =>
+          runtimeSql`update memory_slack_publication_configurations set enabled = false where id = ${configuration!.id}`,
+      ],
+      [
+        "receipt mutation",
+        () =>
+          runtimeSql`update memory_slack_publication_receipts set actor_subject_id = 'other' where publication_id = ${publicationId}`,
+      ],
+      [
+        "publication identity mutation",
+        () =>
+          runtimeSql`update memory_slack_publications set initiating_human_subject_id = 'user:other' where id = ${publicationId}`,
+      ],
+    ] as const) {
+      await expectPostgresRejection(mutation(), operation);
     }
 
     const tables = await sql<Array<{ relname: string; forced: boolean }>>`
