@@ -6663,7 +6663,9 @@ describe("runtime event normalization", () => {
       }),
       [{ kind: "mcp", id: "inventory_api" }],
       {
-        localMcpServers: [{ id: "inventory_api", server: local, resolvedConnectionId: connectionId }],
+        localMcpServers: [
+          { id: "inventory_api", server: local, resolvedConnectionId: connectionId },
+        ],
         mcpFetchImpl: async () => {
           remoteFetchCalled = true;
           throw new Error("local adapters must not use the remote MCP transport");
@@ -6677,12 +6679,9 @@ describe("runtime event normalization", () => {
       const tools = await prepared.mcpServers[0]!.listTools();
       expect(tools.map((tool) => tool.name)).toEqual(["inventory_api__list_items"]);
       const controller = new AbortController();
-      await prepared.mcpServers[0]!.callTool(
-        "inventory_api__list_items",
-        {},
-        null,
-        { signal: controller.signal },
-      );
+      await prepared.mcpServers[0]!.callTool("inventory_api__list_items", {}, null, {
+        signal: controller.signal,
+      });
       expect(observedSignal).toBe(controller.signal);
     } finally {
       await prepared.close();

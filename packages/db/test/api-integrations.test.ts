@@ -75,8 +75,10 @@ beforeAll(async () => {
 }, 180_000);
 
 afterAll(async () => {
-  if (client && first?.workspaceId) await deleteWorkspace(client.db, first.workspaceId).catch(() => undefined);
-  if (client && second?.workspaceId) await deleteWorkspace(client.db, second.workspaceId).catch(() => undefined);
+  if (client && first?.workspaceId)
+    await deleteWorkspace(client.db, first.workspaceId).catch(() => undefined);
+  if (client && second?.workspaceId)
+    await deleteWorkspace(client.db, second.workspaceId).catch(() => undefined);
   await client?.close();
   await shared?.release();
 }, 60_000);
@@ -265,9 +267,7 @@ describe("API Integration persistence", () => {
     expect(preview).toMatchObject({
       removesRuntimeIntegration: false,
       removesDefinition: false,
-      remainingOwners: [
-        { kind: "pack", id: "pack:inventory-operations", removable: false },
-      ],
+      remainingOwners: [{ kind: "pack", id: "pack:inventory-operations", removable: false }],
     });
     expect(
       await uninstallApiIntegration(client.db, {
@@ -283,9 +283,7 @@ describe("API Integration persistence", () => {
       capabilityId: input.capabilityId,
       instanceKey: installed.instanceKey,
       status: "retained_by_other_owners",
-      remainingOwners: [
-        { kind: "pack", id: "pack:inventory-operations", removable: false },
-      ],
+      remainingOwners: [{ kind: "pack", id: "pack:inventory-operations", removable: false }],
       definitionStatus: "retained",
     });
     expect(await listInstalledApiIntegrations(client.db, first.workspaceId)).toHaveLength(1);
@@ -369,9 +367,9 @@ describe("API Integration persistence", () => {
       installationVersion: sales.installationVersion + 1,
       revisionId: "openapi:222222222222222222222222",
     });
-    const afterUpgrade = (
-      await listInstalledApiIntegrations(client.db, first.workspaceId)
-    ).filter((integration) => integration.capabilityId === base.capabilityId);
+    const afterUpgrade = (await listInstalledApiIntegrations(client.db, first.workspaceId)).filter(
+      (integration) => integration.capabilityId === base.capabilityId,
+    );
     expect(afterUpgrade).toHaveLength(2);
     expect(
       afterUpgrade.map((integration) => ({
@@ -463,6 +461,9 @@ describe("API Integration persistence", () => {
         getConnectionMetadata(client.db, first.workspaceId, financeConnection.id),
         getConnectionMetadata(client.db, first.workspaceId, salesConnection.id),
       ]),
-    ).toEqual([expect.objectContaining({ status: "active" }), expect.objectContaining({ status: "active" })]);
+    ).toEqual([
+      expect.objectContaining({ status: "active" }),
+      expect.objectContaining({ status: "active" }),
+    ]);
   }, 60_000);
 });

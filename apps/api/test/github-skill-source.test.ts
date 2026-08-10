@@ -6,28 +6,25 @@ import { createGitHubSkillSourceClient } from "../src/integrations/github-skill-
 describe("GitHub Skill source transport", () => {
   test("uses exact GitHub APIs and validates commit, tree, and blob payloads", async () => {
     const requests: Array<{ path: string; maxBytes: number; label: string }> = [];
-    const client = createGitHubSkillSourceClient(
-      testSettings(),
-      async (path, maxBytes, label) => {
-        requests.push({ path, maxBytes, label });
-        if (path.includes("/commits/")) return { sha: "A".repeat(40) };
-        if (path.includes("/git/trees/")) {
-          return {
-            truncated: false,
-            tree: [
-              {
-                path: "release/SKILL.md",
-                type: "blob",
-                mode: "100644",
-                sha: "b".repeat(40),
-                size: 5,
-              },
-            ],
-          };
-        }
-        return { encoding: "base64", content: Buffer.from("hello").toString("base64"), size: 5 };
-      },
-    );
+    const client = createGitHubSkillSourceClient(testSettings(), async (path, maxBytes, label) => {
+      requests.push({ path, maxBytes, label });
+      if (path.includes("/commits/")) return { sha: "A".repeat(40) };
+      if (path.includes("/git/trees/")) {
+        return {
+          truncated: false,
+          tree: [
+            {
+              path: "release/SKILL.md",
+              type: "blob",
+              mode: "100644",
+              sha: "b".repeat(40),
+              size: 5,
+            },
+          ],
+        };
+      }
+      return { encoding: "base64", content: Buffer.from("hello").toString("base64"), size: 5 };
+    });
 
     expect(await client.resolveCommit("acme corp", "skills/tools", "feature/x")).toBe(
       "a".repeat(40),
@@ -44,9 +41,7 @@ describe("GitHub Skill source transport", () => {
     expect(new TextDecoder().decode(await client.readBlob("acme", "skills", "b".repeat(40)))).toBe(
       "hello",
     );
-    expect(requests[0]!.path).toBe(
-      "/repos/acme%20corp/skills%2Ftools/commits/feature%2Fx",
-    );
+    expect(requests[0]!.path).toBe("/repos/acme%20corp/skills%2Ftools/commits/feature%2Fx");
     expect(requests.map((request) => request.label)).toEqual([
       "GitHub Skill commit",
       "GitHub Skill tree",
@@ -59,9 +54,7 @@ describe("GitHub Skill source transport", () => {
       truncated: true,
       tree: [],
     }));
-    await expect(truncated.listTree("acme", "skills", "a".repeat(40))).rejects.toThrow(
-      "too large",
-    );
+    await expect(truncated.listTree("acme", "skills", "a".repeat(40))).rejects.toThrow("too large");
 
     const malformed = createGitHubSkillSourceClient(testSettings(), async () => ({
       encoding: "base64",

@@ -1,8 +1,4 @@
-import type {
-  CallToolResultContent,
-  MCPCallToolOptions,
-  MCPServer,
-} from "@openai/agents";
+import type { CallToolResultContent, MCPCallToolOptions, MCPServer } from "@openai/agents";
 import { load as parseYaml } from "js-yaml";
 
 import { applyCredentialPlacements } from "./auth";
@@ -23,10 +19,7 @@ import type {
   IntegrationTransport,
   JsonSchema,
 } from "./types";
-import {
-  IntegrationInvocationError,
-  IntegrationProtocolError,
-} from "./types";
+import { IntegrationInvocationError, IntegrationProtocolError } from "./types";
 
 export type OpenApiHttpMethod =
   | "get"
@@ -102,7 +95,12 @@ const methods = new Set<OpenApiHttpMethod>([
   "options",
   "trace",
 ]);
-const forbiddenParameterHeaders = new Set(["host", "content-length", "connection", "transfer-encoding"]);
+const forbiddenParameterHeaders = new Set([
+  "host",
+  "content-length",
+  "connection",
+  "transfer-encoding",
+]);
 
 export function parseOpenApiDocument(source: string | Uint8Array): Record<string, unknown> {
   const bytes = typeof source === "string" ? Buffer.byteLength(source) : source.byteLength;
@@ -112,15 +110,26 @@ export function parseOpenApiDocument(source: string | Uint8Array): Record<string
       `OpenAPI document must be between 1 and ${MAX_INTEGRATION_SPEC_BYTES} bytes`,
     );
   }
-  const text = typeof source === "string" ? source : new TextDecoder("utf-8", { fatal: true }).decode(source);
+  const text =
+    typeof source === "string" ? source : new TextDecoder("utf-8", { fatal: true }).decode(source);
   let parsed: unknown;
   try {
     parsed = parseYaml(text, { json: true });
   } catch {
-    throw new IntegrationProtocolError("openapi_parse", "OpenAPI document is not valid JSON or YAML");
+    throw new IntegrationProtocolError(
+      "openapi_parse",
+      "OpenAPI document is not valid JSON or YAML",
+    );
   }
-  if (!isRecord(parsed) || typeof parsed.openapi !== "string" || !/^3\.(?:0|1)(?:\.|$)/.test(parsed.openapi)) {
-    throw new IntegrationProtocolError("openapi_version", "Only OpenAPI 3.0 and 3.1 documents are supported");
+  if (
+    !isRecord(parsed) ||
+    typeof parsed.openapi !== "string" ||
+    !/^3\.(?:0|1)(?:\.|$)/.test(parsed.openapi)
+  ) {
+    throw new IntegrationProtocolError(
+      "openapi_version",
+      "Only OpenAPI 3.0 and 3.1 documents are supported",
+    );
   }
   if (!isRecord(parsed.paths)) {
     throw new IntegrationProtocolError("openapi_paths", "OpenAPI document has no paths object");
@@ -142,7 +151,9 @@ export function compileOpenApiRevision(
   const bindings: Record<string, OpenApiOperationBinding> = {};
   const seen = new Map<string, number>();
 
-  for (const [pathTemplate, rawPathItem] of Object.entries(document.paths as Record<string, unknown>)) {
+  for (const [pathTemplate, rawPathItem] of Object.entries(
+    document.paths as Record<string, unknown>,
+  )) {
     const pathItem = resolveObject(document, rawPathItem, "path item");
     const sharedParameters = readParameters(document, pathItem.parameters);
     const pathServers = readServers(pathItem.servers, undefined, undefined);
@@ -163,9 +174,7 @@ export function compileOpenApiRevision(
         documentServers,
       );
       const requiredScopeAlternatives =
-        operation.security === undefined
-          ? documentSecurity
-          : readSecurity(operation.security);
+        operation.security === undefined ? documentSecurity : readSecurity(operation.security);
       const safety = classifyHttpSafety(method, operation);
       const inputSchema = operationInputSchema(parameters, requestBody);
       const outputSchema = operationOutputSchema(document, operation.responses);
@@ -260,23 +269,24 @@ export class OpenApiMcpServer implements MCPServer {
   async invalidateToolsCache(): Promise<void> {}
 
   async listTools(): Promise<LocalMcpTool[]> {
-    return this.options.revision.tools.map((tool) =>
-      ({
-        name: tool.id,
-        description: tool.description,
-        inputSchema: normalizeMcpSchema(tool.inputSchema),
-        annotations: {
-          readOnlyHint: tool.safety === "read",
-          destructiveHint: tool.safety === "destructive",
-          idempotentHint: isIdempotentMethod(this.options.revision.bindings[tool.id]?.method),
-          openWorldHint: true,
-        },
-        _meta: {
-          "opengeni/approvalMode": tool.approvalMode,
-          "opengeni/operationKey": tool.operationKey,
-          "opengeni/revisionId": this.options.revision.id,
-        },
-      }) as LocalMcpTool,
+    return this.options.revision.tools.map(
+      (tool) =>
+        ({
+          name: tool.id,
+          description: tool.description,
+          inputSchema: normalizeMcpSchema(tool.inputSchema),
+          annotations: {
+            readOnlyHint: tool.safety === "read",
+            destructiveHint: tool.safety === "destructive",
+            idempotentHint: isIdempotentMethod(this.options.revision.bindings[tool.id]?.method),
+            openWorldHint: true,
+          },
+          _meta: {
+            "opengeni/approvalMode": tool.approvalMode,
+            "opengeni/operationKey": tool.operationKey,
+            "opengeni/revisionId": this.options.revision.id,
+          },
+        }) as LocalMcpTool,
     );
   }
 
@@ -286,7 +296,12 @@ export class OpenApiMcpServer implements MCPServer {
     _meta?: Record<string, unknown> | null,
     callOptions?: MCPCallToolOptions,
   ): Promise<CallToolResultContent> {
-    const result = await invokeOpenApiOperation(this.options, toolName, args ?? {}, callOptions?.signal);
+    const result = await invokeOpenApiOperation(
+      this.options,
+      toolName,
+      args ?? {},
+      callOptions?.signal,
+    );
     const content = [
       {
         type: "text" as const,
@@ -320,11 +335,7 @@ export async function invokeOpenApiOperation(
   }
   const firstCredential = await resolveOpenApiCredential(options, binding, toolId, args, false);
   let response = await sendOpenApiRequest(options, binding, args, firstCredential, signal);
-  if (
-    response.status === 401 &&
-    options.credentialResolver &&
-    options.authority.connectionRef
-  ) {
+  if (response.status === 401 && options.credentialResolver && options.authority.connectionRef) {
     const refreshed = await resolveOpenApiCredential(options, binding, toolId, args, true);
     if (isReplaySafeMethod(binding.method) && refreshed) {
       await response.body?.cancel().catch(() => undefined);
@@ -492,18 +503,24 @@ function readParameters(
     const location = parameter.in;
     if (
       typeof parameter.name !== "string" ||
-      (location !== "path" && location !== "query" && location !== "header" && location !== "cookie")
+      (location !== "path" &&
+        location !== "query" &&
+        location !== "header" &&
+        location !== "cookie")
     ) {
       return [];
     }
-    if (location === "header" && forbiddenParameterHeaders.has(parameter.name.toLowerCase())) return [];
+    if (location === "header" && forbiddenParameterHeaders.has(parameter.name.toLowerCase()))
+      return [];
     return [
       {
         name: parameter.name,
         location,
         required: location === "path" || parameter.required === true,
         schema: dereferenceSchema(document, parameter.schema),
-        ...(stringValue(parameter.description) ? { description: stringValue(parameter.description)! } : {}),
+        ...(stringValue(parameter.description)
+          ? { description: stringValue(parameter.description)! }
+          : {}),
       },
     ];
   });
@@ -602,7 +619,8 @@ function classifyHttpSafety(
   operation: Record<string, unknown>,
 ): IntegrationToolDefinition["safety"] {
   if (method === "get" || method === "head" || method === "options") return "read";
-  const text = `${stringValue(operation.operationId) ?? ""} ${stringValue(operation.summary) ?? ""}`.toLowerCase();
+  const text =
+    `${stringValue(operation.operationId) ?? ""} ${stringValue(operation.summary) ?? ""}`.toLowerCase();
   return method === "delete" || /\b(delete|destroy|remove|revoke|cancel|purge)\b/.test(text)
     ? "destructive"
     : "write";
@@ -621,22 +639,26 @@ function toolDescription(
   safety: IntegrationToolDefinition["safety"],
 ): string {
   const description = stringValue(operation.description) ?? stringValue(operation.summary);
-  const approval = safety === "read" ? "Read-only." : "Changes external state and requires approval.";
+  const approval =
+    safety === "read" ? "Read-only." : "Changes external state and requires approval.";
   return `${description ? `${description.trim()} ` : ""}${method.toUpperCase()} ${path}. ${approval}`.trim();
 }
 
 function isIdempotentMethod(method: OpenApiHttpMethod | undefined): boolean {
-  return method === "get" || method === "head" || method === "options" || method === "put" || method === "delete";
+  return (
+    method === "get" ||
+    method === "head" ||
+    method === "options" ||
+    method === "put" ||
+    method === "delete"
+  );
 }
 
 function isReplaySafeMethod(method: OpenApiHttpMethod): boolean {
   return method === "get" || method === "head" || method === "options";
 }
 
-function buildOperationUrl(
-  binding: OpenApiOperationBinding,
-  args: Record<string, unknown>,
-): URL {
+function buildOperationUrl(binding: OpenApiOperationBinding, args: Record<string, unknown>): URL {
   const pathArgs = objectValue(args.path);
   const path = binding.pathTemplate.replace(/\{([^}]+)\}/g, (_match, name: string) => {
     const value = pathArgs[name];
@@ -651,7 +673,10 @@ function buildOperationUrl(
     return encodeURIComponent(scalarString(value));
   });
   const base = new URL(binding.serverUrl);
-  const url = new URL(path.replace(/^\//, ""), base.toString().endsWith("/") ? base : new URL(`${base}/`));
+  const url = new URL(
+    path.replace(/^\//, ""),
+    base.toString().endsWith("/") ? base : new URL(`${base}/`),
+  );
   const query = objectValue(args.query);
   for (const [name, value] of Object.entries(query)) appendQueryValue(url, name, value);
   return url;
@@ -671,7 +696,8 @@ function buildOperationHeaders(
   );
   if (cookies.length > 0) headers.set("cookie", cookies.join("; "));
   if (binding.requestBody && args.body !== undefined) {
-    const requested = typeof args.contentType === "string" ? args.contentType.toLowerCase() : undefined;
+    const requested =
+      typeof args.contentType === "string" ? args.contentType.toLowerCase() : undefined;
     const contentType =
       requested && binding.requestBody.contentTypes.includes(requested)
         ? requested
@@ -690,7 +716,8 @@ function buildOperationBody(
   const contentType = headers.get("content-type") ?? "application/json";
   if (contentType === "application/x-www-form-urlencoded") {
     const params = new URLSearchParams();
-    for (const [key, value] of Object.entries(objectValue(args.body))) appendSearchParam(params, key, value);
+    for (const [key, value] of Object.entries(objectValue(args.body)))
+      appendSearchParam(params, key, value);
     return params;
   }
   if (contentType === "application/json" || contentType.endsWith("+json")) {

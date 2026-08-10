@@ -52,8 +52,7 @@ export interface IntegrationInvocationAuthority {
   readonly connectionRef?: string;
 }
 
-export interface ResolveIntegrationCredentialRequest
-  extends IntegrationInvocationAuthority {
+export interface ResolveIntegrationCredentialRequest extends IntegrationInvocationAuthority {
   readonly protocol: Exclude<IntegrationProtocol, "mcp">;
   readonly integrationId: string;
   readonly revisionId: string;

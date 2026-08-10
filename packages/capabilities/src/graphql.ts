@@ -1,8 +1,4 @@
-import type {
-  CallToolResultContent,
-  MCPCallToolOptions,
-  MCPServer,
-} from "@openai/agents";
+import type { CallToolResultContent, MCPCallToolOptions, MCPServer } from "@openai/agents";
 import {
   buildClientSchema,
   getIntrospectionQuery,
@@ -39,10 +35,7 @@ import type {
   IntegrationTransport,
   JsonSchema,
 } from "./types";
-import {
-  IntegrationInvocationError,
-  IntegrationProtocolError,
-} from "./types";
+import { IntegrationInvocationError, IntegrationProtocolError } from "./types";
 
 export interface GraphqlOperationBinding {
   readonly kind: "query" | "mutation";
@@ -201,11 +194,7 @@ export async function fetchGraphqlIntrospection(
     false,
   );
   let response = await sendGraphqlRequest(options, request, firstCredential);
-  if (
-    response.status === 401 &&
-    options.credentialResolver &&
-    options.authority.connectionRef
-  ) {
+  if (response.status === 401 && options.credentialResolver && options.authority.connectionRef) {
     const refreshed = await resolveGraphqlCredential(
       options,
       "graphql-introspection",
@@ -262,23 +251,24 @@ export class GraphqlMcpServer implements MCPServer {
   async invalidateToolsCache(): Promise<void> {}
 
   async listTools(): Promise<LocalMcpTool[]> {
-    return this.options.revision.tools.map((tool) =>
-      ({
-        name: tool.id,
-        description: tool.description,
-        inputSchema: normalizeMcpSchema(tool.inputSchema),
-        annotations: {
-          readOnlyHint: tool.safety === "read",
-          destructiveHint: false,
-          idempotentHint: tool.safety === "read",
-          openWorldHint: true,
-        },
-        _meta: {
-          "opengeni/approvalMode": tool.approvalMode,
-          "opengeni/operationKey": tool.operationKey,
-          "opengeni/revisionId": this.options.revision.id,
-        },
-      }) as LocalMcpTool,
+    return this.options.revision.tools.map(
+      (tool) =>
+        ({
+          name: tool.id,
+          description: tool.description,
+          inputSchema: normalizeMcpSchema(tool.inputSchema),
+          annotations: {
+            readOnlyHint: tool.safety === "read",
+            destructiveHint: false,
+            idempotentHint: tool.safety === "read",
+            openWorldHint: true,
+          },
+          _meta: {
+            "opengeni/approvalMode": tool.approvalMode,
+            "opengeni/operationKey": tool.operationKey,
+            "opengeni/revisionId": this.options.revision.id,
+          },
+        }) as LocalMcpTool,
     );
   }
 
@@ -294,7 +284,9 @@ export class GraphqlMcpServer implements MCPServer {
       args ?? {},
       callOptions?.signal,
     );
-    const content = [{ type: "text" as const, text: JSON.stringify(result) }] as CallToolResultContent;
+    const content = [
+      { type: "text" as const, text: JSON.stringify(result) },
+    ] as CallToolResultContent;
     content.structuredContent = result;
     content.isError = result.ok === false;
     return content;
@@ -322,7 +314,7 @@ export async function invokeGraphqlOperation(
   }
   const select = binding.selectionAllowed
     ? validateGraphqlSelection(
-        typeof args.select === "string" ? args.select : binding.defaultSelection ?? "__typename",
+        typeof args.select === "string" ? args.select : (binding.defaultSelection ?? "__typename"),
       )
     : undefined;
   const variables = Object.fromEntries(
@@ -344,11 +336,7 @@ export async function invokeGraphqlOperation(
     false,
   );
   let response = await sendGraphqlRequest(options, request, firstCredential, signal);
-  if (
-    response.status === 401 &&
-    options.credentialResolver &&
-    options.authority.connectionRef
-  ) {
+  if (response.status === 401 && options.credentialResolver && options.authority.connectionRef) {
     const refreshed = await resolveGraphqlCredential(
       options,
       options.revision.integrationId,
@@ -453,9 +441,7 @@ async function sendGraphqlRequest(
   );
 }
 
-function graphqlEndpoint(
-  options: Pick<GraphqlServerOptions, "endpoint" | "staticQuery">,
-): URL {
+function graphqlEndpoint(options: Pick<GraphqlServerOptions, "endpoint" | "staticQuery">): URL {
   const endpoint = new URL(validateGraphqlEndpoint(options.endpoint));
   for (const [name, value] of Object.entries(options.staticQuery ?? {})) {
     endpoint.searchParams.set(name, value);
@@ -529,19 +515,26 @@ function validateGraphqlEndpoint(value: string): string {
   try {
     endpoint = new URL(value);
   } catch {
-    throw new IntegrationProtocolError("graphql_endpoint_invalid", "GraphQL endpoint URL is invalid");
+    throw new IntegrationProtocolError(
+      "graphql_endpoint_invalid",
+      "GraphQL endpoint URL is invalid",
+    );
   }
-  if (!/^https?:$/.test(endpoint.protocol) || endpoint.username || endpoint.password || endpoint.hash) {
-    throw new IntegrationProtocolError("graphql_endpoint_invalid", "GraphQL endpoint URL is invalid");
+  if (
+    !/^https?:$/.test(endpoint.protocol) ||
+    endpoint.username ||
+    endpoint.password ||
+    endpoint.hash
+  ) {
+    throw new IntegrationProtocolError(
+      "graphql_endpoint_invalid",
+      "GraphQL endpoint URL is invalid",
+    );
   }
   return endpoint.toString();
 }
 
-function inputTypeSchema(
-  input: GraphQLInputType,
-  seen: Set<string>,
-  depth: number,
-): JsonSchema {
+function inputTypeSchema(input: GraphQLInputType, seen: Set<string>, depth: number): JsonSchema {
   if (depth > 12) return {};
   if (isNonNullType(input)) return inputTypeSchema(input.ofType, seen, depth + 1);
   if (isListType(input)) {
@@ -549,7 +542,8 @@ function inputTypeSchema(
   }
   const type = getNamedType(input);
   if (isScalarType(type)) return scalarSchema(type.name);
-  if (isEnumType(type)) return { type: "string", enum: type.getValues().map((entry) => entry.name) };
+  if (isEnumType(type))
+    return { type: "string", enum: type.getValues().map((entry) => entry.name) };
   if (isInputObjectType(type)) {
     if (seen.has(type.name)) return { type: "object", additionalProperties: true };
     const nextSeen = new Set(seen).add(type.name);
@@ -595,7 +589,9 @@ function buildDefaultSelection(
   const scalarFields = fields.filter((field) => isLeafType(getNamedType(field.type))).slice(0, 20);
   const selections = scalarFields.map((field) => field.name);
   if (selections.length < 3 && depth < 2) {
-    const nested = fields.find((field) => field.args.length === 0 && !isLeafType(getNamedType(field.type)));
+    const nested = fields.find(
+      (field) => field.args.length === 0 && !isLeafType(getNamedType(field.type)),
+    );
     if (nested) {
       const child = buildDefaultSelection(nested.type, nextSeen, depth + 1);
       if (child) selections.push(`${nested.name} { ${child} }`);

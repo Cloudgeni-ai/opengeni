@@ -801,7 +801,10 @@ export async function settingsWithEnabledCapabilityMcpServers(
   ]);
   options?.onResolvedApiIntegrations?.(apiIntegrations);
   return settingsWithCodexAppsMcpServer(
-    settingsWithApiIntegrationServers(settingsWithMcpCapabilityServers(settings, enabled), apiIntegrations),
+    settingsWithApiIntegrationServers(
+      settingsWithMcpCapabilityServers(settings, enabled),
+      apiIntegrations,
+    ),
     codexAppsCredentialId !== null,
   );
 }

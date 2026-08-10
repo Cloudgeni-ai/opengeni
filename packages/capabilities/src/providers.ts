@@ -203,9 +203,10 @@ export function googleDiscoveryToOpenApi(discovery: unknown): Record<string, unk
       "Google Discovery document exposes no methods",
     );
   }
-  const scopes = isRecord(discovery.auth) && isRecord(discovery.auth.oauth2)
-    ? discovery.auth.oauth2.scopes
-    : undefined;
+  const scopes =
+    isRecord(discovery.auth) && isRecord(discovery.auth.oauth2)
+      ? discovery.auth.oauth2.scopes
+      : undefined;
   const scopeMap = isRecord(scopes)
     ? Object.fromEntries(
         Object.entries(scopes).map(([scope, value]) => [
@@ -225,10 +226,9 @@ export function googleDiscoveryToOpenApi(discovery: unknown): Record<string, unk
     paths,
     components: {
       schemas: Object.fromEntries(
-        Object.entries(isRecord(discovery.schemas) ? discovery.schemas : {}).map(([name, schema]) => [
-          name,
-          convertGoogleSchema(schema),
-        ]),
+        Object.entries(isRecord(discovery.schemas) ? discovery.schemas : {}).map(
+          ([name, schema]) => [name, convertGoogleSchema(schema)],
+        ),
       ),
       securitySchemes: {
         googleOAuth2: {
@@ -271,25 +271,29 @@ function collectGoogleMethods(
     const path = stringValue(rawMethod.path);
     const httpMethod = stringValue(rawMethod.httpMethod)?.toLowerCase();
     if (!path || !httpMethod) continue;
-    const parameters = Object.entries(isRecord(rawMethod.parameters) ? rawMethod.parameters : {}).flatMap(
-      ([name, rawParameter]): Record<string, unknown>[] => {
-        if (!isRecord(rawParameter)) return [];
-        const location = rawParameter.location === "path" ? "path" : "query";
-        return [
-          {
-            name,
-            in: location,
-            required: location === "path" || rawParameter.required === true,
-            ...(stringValue(rawParameter.description)
-              ? { description: stringValue(rawParameter.description) }
-              : {}),
-            schema: convertGoogleSchema(rawParameter),
-          },
-        ];
-      },
-    );
-    const requestRef = isRecord(rawMethod.request) ? stringValue(rawMethod.request.$ref) : undefined;
-    const responseRef = isRecord(rawMethod.response) ? stringValue(rawMethod.response.$ref) : undefined;
+    const parameters = Object.entries(
+      isRecord(rawMethod.parameters) ? rawMethod.parameters : {},
+    ).flatMap(([name, rawParameter]): Record<string, unknown>[] => {
+      if (!isRecord(rawParameter)) return [];
+      const location = rawParameter.location === "path" ? "path" : "query";
+      return [
+        {
+          name,
+          in: location,
+          required: location === "path" || rawParameter.required === true,
+          ...(stringValue(rawParameter.description)
+            ? { description: stringValue(rawParameter.description) }
+            : {}),
+          schema: convertGoogleSchema(rawParameter),
+        },
+      ];
+    });
+    const requestRef = isRecord(rawMethod.request)
+      ? stringValue(rawMethod.request.$ref)
+      : undefined;
+    const responseRef = isRecord(rawMethod.response)
+      ? stringValue(rawMethod.response.$ref)
+      : undefined;
     const operation: Record<string, unknown> = {
       operationId: stringValue(rawMethod.id) ?? fallbackId,
       summary: stringValue(rawMethod.description) ?? stringValue(rawMethod.id) ?? fallbackId,
@@ -337,7 +341,14 @@ function convertGoogleSchema(value: unknown, depth = 0): Record<string, unknown>
   const result: Record<string, unknown> = {};
   const type = stringValue(value.type);
   if (type) result.type = type === "any" ? undefined : type;
-  for (const key of ["description", "format", "pattern", "minimum", "maximum", "default"] as const) {
+  for (const key of [
+    "description",
+    "format",
+    "pattern",
+    "minimum",
+    "maximum",
+    "default",
+  ] as const) {
     if (value[key] !== undefined) result[key] = value[key];
   }
   if (Array.isArray(value.enum)) result.enum = value.enum;

@@ -189,9 +189,7 @@ describe("portable Skill persistence", () => {
     expect(preview).toMatchObject({
       installed: true,
       installationVersion: 1,
-      remainingOwners: [
-        { kind: "pack", id: "pack:production-operations", removable: false },
-      ],
+      remainingOwners: [{ kind: "pack", id: "pack:production-operations", removable: false }],
       removesRuntimeSkill: false,
     });
     expect(
@@ -204,9 +202,7 @@ describe("portable Skill persistence", () => {
     ).toEqual({
       capabilityId: input.capabilityId,
       status: "retained_by_other_owners",
-      remainingOwners: [
-        { kind: "pack", id: "pack:production-operations", removable: false },
-      ],
+      remainingOwners: [{ kind: "pack", id: "pack:production-operations", removable: false }],
     });
     expect(await listInstalledPortableSkills(client.db, first.workspaceId)).toEqual([
       expect.objectContaining({ capabilityId: input.capabilityId }),

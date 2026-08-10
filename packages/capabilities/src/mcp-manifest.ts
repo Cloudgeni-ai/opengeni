@@ -75,7 +75,8 @@ export function deriveMcpNamespace(input: {
   readonly endpoint?: string | null;
   readonly command?: string | null;
 }): string {
-  const candidate = input.name?.trim() || hostname(input.endpoint) || basename(input.command) || "mcp";
+  const candidate =
+    input.name?.trim() || hostname(input.endpoint) || basename(input.command) || "mcp";
   return stableToolId(candidate);
 }
 

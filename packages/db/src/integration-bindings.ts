@@ -78,7 +78,12 @@ export async function ensureIntegrationFeatureFacet(
   input: {
     integrationFacetId: string;
     featureKey: string;
-    kind: "tools" | "knowledge_source" | "inbound_trigger" | "delivery_destination" | "identity_link";
+    kind:
+      | "tools"
+      | "knowledge_source"
+      | "inbound_trigger"
+      | "delivery_destination"
+      | "identity_link";
     configSchema?: Record<string, unknown>;
     capabilities?: Record<string, unknown>;
   },
@@ -386,10 +391,7 @@ export async function integrationDefinitionHasBindingOwner(
     .from(schema.integrationFeatureBindingOwners)
     .innerJoin(
       schema.integrationFeatureBindings,
-      eq(
-        schema.integrationFeatureBindings.id,
-        schema.integrationFeatureBindingOwners.bindingId,
-      ),
+      eq(schema.integrationFeatureBindings.id, schema.integrationFeatureBindingOwners.bindingId),
     )
     .innerJoin(
       schema.capabilityFacetInstallations,
@@ -403,10 +405,7 @@ export async function integrationDefinitionHasBindingOwner(
         eq(schema.integrationFeatureBindingOwners.workspaceId, input.workspaceId),
         eq(schema.integrationFeatureBindingOwners.ownerKind, input.owner.kind),
         eq(schema.integrationFeatureBindingOwners.ownerId, input.owner.id),
-        eq(
-          schema.capabilityFacetInstallations.pluginInstallationId,
-          input.pluginInstallationId,
-        ),
+        eq(schema.capabilityFacetInstallations.pluginInstallationId, input.pluginInstallationId),
         or(
           eq(schema.integrationFeatureBindings.status, "active"),
           eq(schema.integrationFeatureBindings.status, "needs_attention"),
@@ -421,10 +420,7 @@ export async function integrationDefinitionHasBindingOwner(
 async function addIntegrationFeatureBindingOwner(
   db: Database,
   bindingId: string,
-  input: Pick<
-    UpsertIntegrationFeatureBindingInput,
-    "accountId" | "workspaceId" | "owner"
-  >,
+  input: Pick<UpsertIntegrationFeatureBindingInput, "accountId" | "workspaceId" | "owner">,
 ): Promise<void> {
   await db
     .insert(schema.integrationFeatureBindingOwners)
