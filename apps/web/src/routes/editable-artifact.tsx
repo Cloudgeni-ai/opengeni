@@ -106,7 +106,7 @@ export function EditableArtifactRoute({
     absoluteApiBaseUrl.protocol === "http:" && isLoopbackHost(absoluteApiBaseUrl.hostname);
   const headers = authHeadersForAccessKey(getStoredAccessKey());
   return (
-    <div className="h-full min-h-0 bg-og-bg text-og-fg">
+    <div data-workspace-scroll-owner="self-managed" className="h-full min-h-0 bg-og-bg text-og-fg">
       <BrowserEditableArtifactWorkbench
         options={{
           baseUrl: absoluteApiBaseUrl,
