@@ -26,6 +26,7 @@ export function ContentPage({
   return (
     <div
       data-slot="content-page"
+      data-workspace-scroll-owner="page"
       className="flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-x-hidden overflow-y-auto overscroll-y-contain"
       {...props}
     >

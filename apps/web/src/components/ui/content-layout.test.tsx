@@ -37,6 +37,7 @@ describe("ContentPage scroll contract", () => {
       const inner = container.querySelector<HTMLElement>('[data-slot="content-page-inner"]');
       expect(page).not.toBeNull();
       expect(inner).not.toBeNull();
+      expect(page!.dataset.workspaceScrollOwner).toBe("page");
 
       // Scrollport is the full-width shell child — not the centered column.
       expect(page!.className).toContain("min-h-0");

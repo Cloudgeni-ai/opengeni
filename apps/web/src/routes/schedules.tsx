@@ -23,6 +23,7 @@ import { SchedulePersonalConnectionDisclosure } from "@/components/capabilities/
 import { ScheduledTaskRepositoryPicker } from "@/components/repository-picker";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { ContentPage } from "@/components/ui/content-layout";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -277,7 +278,7 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col px-4 py-5 sm:px-6 lg:px-8">
+    <ContentPage width="standard">
       <PageHeader
         icon={<CalendarClockIcon className="size-4" />}
         title="Schedules"
@@ -363,7 +364,11 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
             const lastRun = summarizeLastRun(taskRuns);
             const state = scheduledTaskStateLabel(task);
             return (
-              <div key={task.id} className="rounded-lg border border-border bg-surface p-3">
+              <div
+                key={task.id}
+                data-scheduled-task-id={task.id}
+                className="rounded-lg border border-border bg-surface p-3"
+              >
                 <div className="flex min-w-0 items-start justify-between gap-3">
                   <div className="min-w-0">
                     <div className="flex min-w-0 items-center gap-2">
@@ -604,7 +609,7 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
         confirmLabel="Delete task"
         onConfirm={() => (confirmDelete ? taskAction(confirmDelete, "delete") : false)}
       />
-    </div>
+    </ContentPage>
   );
 }
 
