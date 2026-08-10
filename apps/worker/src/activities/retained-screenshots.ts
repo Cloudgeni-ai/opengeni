@@ -75,6 +75,21 @@ export class RetainedScreenshotUnavailableError extends Error {
   }
 }
 
+/** Read an intentional image directly at the tool execution boundary. */
+export function typedScreenshotFromToolOutput(input: {
+  callId: string;
+  output: unknown;
+}): TypedScreenshotToolOutput | null {
+  const image = imageBytesFromSdkToolOutput(input.output);
+  if (!image) return null;
+  return {
+    callId: input.callId,
+    toolOutputId: input.callId,
+    bytes: image.bytes,
+    mediaType: image.mediaType,
+  };
+}
+
 /** Read the SDK's trusted typed image before event/history serialization. */
 export function typedScreenshotFromSdkEvent(event: unknown): TypedScreenshotToolOutput | null {
   if (!event || typeof event !== "object") return null;
@@ -178,7 +193,7 @@ function sdkImageSourceContainsInlineImage(source: unknown): boolean {
   );
 }
 
-function toolOutputContainsInlineImage(output: unknown): boolean {
+export function toolOutputContainsInlineImage(output: unknown): boolean {
   if (typeof output === "string") return output.startsWith("data:image/");
   if (Array.isArray(output)) {
     return output.some((entry) => {

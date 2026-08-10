@@ -1325,6 +1325,39 @@ describe("runtime event normalization", () => {
     );
   });
 
+  test("view_image crosses the retention hook before returning to SDK history", async () => {
+    const observed: unknown[] = [];
+    const [filesystemCapability] = buildAgentCapabilities(testSettings(), [], {
+      structuredToolTransport: false,
+      supportsImageInput: true,
+      onRetainableSessionImageOutput: async (input) => {
+        observed.push(input);
+      },
+    });
+    const bound = (filesystemCapability as any).bind({
+      createEditor: () => ({}),
+      viewImage: async () => ({
+        type: "image",
+        image: { data: Uint8Array.from([1, 2, 3]), mediaType: "image/png" },
+      }),
+    });
+    const viewImage = bound.tools().find((tool: { name?: string }) => tool.name === "view_image");
+    const output = await viewImage.invoke(undefined, '{"path":"/tmp/image.png"}', {
+      toolCall: { callId: "call-view" },
+    });
+    expect(observed).toEqual([
+      {
+        toolName: "view_image",
+        toolCallId: "call-view",
+        output,
+      },
+    ]);
+    expect(output).toEqual({
+      type: "image",
+      image: { url: "data:image/png;base64,AQID" },
+    });
+  });
+
   test("text-only models do not receive the filesystem view_image tool", () => {
     const toolNames = (supportsImageInput: boolean) => {
       const [filesystemCapability] = buildAgentCapabilities(testSettings(), [], {

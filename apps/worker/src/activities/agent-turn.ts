@@ -139,6 +139,7 @@ import {
   type SandboxFileDownloadFailure,
   type OpenGeniRuntime,
   type ComputerToolMode,
+  type RetainableSessionImageOutputHook,
   type ModelResponseUsage,
   type ModelCallUsageInput,
   type ModelCallUsageNormalization,
@@ -352,7 +353,9 @@ import {
   materializeRetainedScreenshotRunState,
   sdkEventContainsInlineImage,
   retainComputerScreenshot,
+  toolOutputContainsInlineImage,
   typedScreenshotFromSdkEvent,
+  typedScreenshotFromToolOutput,
   unavailableRetainedSessionImage,
 } from "./retained-screenshots";
 import {
@@ -3638,6 +3641,57 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // intentional computer_screenshot or view_image result must never be lost
     // when the event/history sanitizer removes its inline bytes.
     const retainedSessionImageCallIds = new Set<string>();
+    const retainSessionImageAtToolBoundary: RetainableSessionImageOutputHook = async ({
+      toolCallId,
+      output,
+    }) => {
+      const activeTurnId = turnId;
+      if (!activeTurnId) {
+        throw new Error("Session image tool completed before turn initialization");
+      }
+      const typedScreenshot = typedScreenshotFromToolOutput({ callId: toolCallId, output });
+      retainedSessionImageCallIds.add(toolCallId);
+      if (!typedScreenshot) {
+        if (toolOutputContainsInlineImage(output)) {
+          retainedScreenshotReceiptsByCallId.set(
+            toolCallId,
+            unavailableRetainedSessionImage({
+              sessionId: input.sessionId,
+              turnId: activeTurnId,
+              attemptId: input.attemptId,
+              toolCallId,
+              toolOutputId: toolCallId,
+              reason: "unsupported",
+            }),
+          );
+        }
+        return;
+      }
+      retainedScreenshotReceiptsByCallId.set(
+        toolCallId,
+        unavailableRetainedSessionImage({
+          sessionId: input.sessionId,
+          turnId: activeTurnId,
+          attemptId: input.attemptId,
+          toolCallId,
+          toolOutputId: toolCallId,
+          reason: "pending",
+        }),
+      );
+      retainedScreenshotReceiptsByCallId.set(
+        toolCallId,
+        await retainComputerScreenshot({
+          db,
+          objectStorage,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: activeTurnId,
+          attemptId: input.attemptId,
+          output: typedScreenshot,
+        }),
+      );
+    };
     const materializeScreenshotHistory = async (history: Array<Record<string, unknown>>) => {
       collectRetainedScreenshotReceipts(history, retainedScreenshotReceiptsByCallId);
       if (!modelCanReceiveRetainedSessionImages) return history;
@@ -6550,6 +6604,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           didComputerUse = true;
           await maybeStartOnTurnRecording(resolvedSandbox, activeSandboxBackend);
         },
+        onRetainableSessionImageOutput: retainSessionImageAtToolBoundary,
         ...(packRuntime.skills.length > 0 ? { packSkills: packRuntime.skills } : {}),
         ...(session.skills.length > 0 ? { sessionSkills: session.skills } : {}),
         ...(skillLibraryRuntime.skillLibrarySkills.length > 0
@@ -7555,8 +7610,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             }
             const completedToolCall = completedToolCallFromSdkEvent(durableSdkEvent);
             if (completedToolCall) {
-              const typedScreenshot = typedScreenshotFromSdkEvent(durableSdkEvent);
+              retainedScreenshotMetadata =
+                retainedScreenshotReceiptsByCallId.get(completedToolCall.callId) ?? null;
+              const typedScreenshot = retainedScreenshotMetadata
+                ? null
+                : typedScreenshotFromSdkEvent(durableSdkEvent);
               if (
+                !retainedScreenshotMetadata &&
                 retainedSessionImageCallIds.has(completedToolCall.callId) &&
                 sdkEventContainsInlineImage(durableSdkEvent) &&
                 !typedScreenshot
@@ -7575,6 +7635,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 );
               }
               if (
+                !retainedScreenshotMetadata &&
                 typedScreenshot &&
                 typedScreenshot.callId === completedToolCall.callId &&
                 retainedSessionImageCallIds.has(completedToolCall.callId)
