@@ -574,7 +574,7 @@ describe("worker activities integration", () => {
     }
   });
 
-  test("session_create links the spawned worker to the manager via the caller's session claim", async () => {
+  test("session_create links the worker and inherits the calling turn's model", async () => {
     // A manager session calls session_create through its OWN first-party MCP
     // token. That token carries the manager's session id as a worker-signed
     // claim, so the spawned worker records parent_session_id = manager — no
@@ -596,6 +596,10 @@ describe("worker activities integration", () => {
       natsUrl: services.natsUrl,
       productAccessMode: "configured",
       delegationSecret,
+      // Deliberately differs from the manager. An omitted child model must not
+      // fall back to this deployment default (which could be a credits model
+      // while the manager is using a Codex subscription).
+      openaiModel: "gpt-5.6-sol",
     });
     const app = createApp({
       settings: apiSettings,
@@ -672,6 +676,8 @@ describe("worker activities integration", () => {
       const worker = allSessions.find((candidate) => candidate.id !== manager.id);
       expect(worker).toBeDefined();
       expect(worker?.parentSessionId).toBe(manager.id);
+      expect(worker?.model).toBe("scripted-model");
+      expect(worker?.metadata.reasoningEffort).toBe("medium");
     } finally {
       server.stop(true);
     }
