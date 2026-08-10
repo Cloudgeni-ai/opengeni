@@ -1,20 +1,33 @@
-# Google Drive connection and sync preview
+# Google Drive connection and scheduled knowledge sync
 
 OpenGeni can connect a Google account once, choose multiple Shared Drives or
-folder boundaries, and configure recurring incremental sync from the Capabilities
-page. This first slice is intentionally a connector preview:
+folder boundaries, and explicitly enable scheduled synchronization from the
+Capabilities page. Saving a selection alone is inert; enabling synchronization
+materializes a scoped knowledge source and a shared Schedule action:
 
 - OAuth and refresh tokens are server-side only and encrypted in the existing
   connection vault.
 - OpenGeni requests
   `https://www.googleapis.com/auth/drive.readonly` so it can resolve Shared
   Drive names and later read documents for ingestion.
-- Selecting folders or Shared Drives stores their boundaries, future knowledge
-  scope, sync cadence, and read policy on the connection.
-- The saved schedule and policy do not yet create a knowledge source, download
-  files, run a backfill, or update workspace memory. A reusable server-side
-  inventory/export planner now defines the first execution boundary, but no API
-  or worker dispatches it yet.
+- Selecting folders or Shared Drives freezes their exact source boundary,
+  organization/workspace/personal destination, initiating subject, owning
+  connection identity, source configuration generation, and read policy.
+- The separate **Enable synchronization** decision creates one provider-neutral
+  `knowledge_source_sync` action per enabled boundary and starts an idempotent
+  initial backfill. The action never creates an agent session, invokes a model,
+  or records an agent-run charge.
+- Shared **Schedules** becomes canonical for cadence and the user's per-source
+  pause state after creation. A later connector save does not overwrite either.
+- Source inventory, downloads/exports, canonical blobs, Documents, immutable
+  source-object/document-version provenance, and document indexing run in a
+  dedicated checkpointed Temporal workflow.
+- The connector's read policy controls interactive connector actions only.
+  Background sync is authorized solely by **Enable synchronization** and does
+  not pause for per-run approval.
+- Deleting a sync Schedule first disables that exact source selection and
+  tombstones its scoped source. Later saves keep it disabled until the same
+  initiating subject explicitly enables synchronization again.
 
 Google currently classifies `drive.readonly` as a restricted scope.
 Keep the OAuth app in Testing with explicit test users for local development.
@@ -124,10 +137,35 @@ any visible subfolder; selecting a parent includes every nested folder. Multiple
 locations can be connected in one setup. A Shared Drive or shared folder can be
 added by pasting its full `https://drive.google.com/.../folders/...` URL or ID.
 
-The intended first successful run recursively imports all existing supported
-documents inside the selected boundary. Subsequent scheduled runs use a durable
-cursor to process only new, changed, moved, or deleted documents since the last
-successful run; they do not re-ingest every unchanged document each hour.
+The first successful run recursively inventories all existing supported
+documents inside an enabled boundary. Scheduled inventory currently remains a
+bounded repair scan: stable provider revisions avoid downloading unchanged
+objects, while a provider-specific change cursor is reserved for the separate
+Google Changes API follow-on. OpenGeni does not overload the scoped-knowledge
+`sync_cursor` column with execution checkpoint state.
+
+Each repair scan has its own durable scan generation. Every object observed
+across checkpointed pages is stamped into that generation; only a provider
+response that explicitly declares the scan complete may tombstone active
+objects absent from the complete generation. Partial, failed, paused, or
+reconnect-required scans never infer deletion, and a failed run clears its
+execution checkpoint before a later repair starts a new generation.
+
+`manual`, `hourly`, and `daily` map to an on-demand Schedule, a one-hour
+interval, and a daily 00:00 UTC calendar respectively. The Schedules UI exposes
+pause/resume, run-now, cadence editing, deletion, source/scope identity,
+reconnect state, and per-run imported/unchanged/skipped/failed counts.
+Schedule deletion is stronger than pause: it durably clears the connector's
+sync-enable decision before removing the Temporal schedule and database row.
+An explicit connector re-enable creates a new Schedule against the restored
+source lifecycle generation.
+
+Canonical blob storage is content-addressed, but Document identity is not.
+Each provider source object/version receives its own immutable Document identity
+even when another object has identical bytes. Advancing an object's version
+revokes agent access to the previous Document, removes its indexed chunks, and
+invalidates delayed index or ACL completions before the replacement can become
+eligible.
 
 ## Bounded inventory and export planning
 
@@ -142,7 +180,7 @@ the first backfill slice:
   identities. Folder names, locations, and deep links are metadata rather than
   authority.
 - Inventory is paginated and breadth-first, with a versioned serializable
-  checkpoint bound to the normalized Google permission, external tenant,
+  execution checkpoint bound to the normalized Google permission, external tenant,
   source drive/boundary, and destination authority identities. Legacy,
   unversioned, or incompatible checkpoints fail closed before buffered items or
   provider access. Explicit cumulative item, known-byte, Drive-request/cost,
@@ -163,21 +201,60 @@ the first backfill slice:
   or advance its checkpoint. The caller receives a typed stop reason and may
   retry the same page.
 
-This planner does not fetch bytes, persist provider/source/object/version rows,
-create Documents or chunks, run embeddings, dispatch a schedule, or expose a
-public API/UI. Those remain later inventory/backfill slices. Durable change
-cursors and event reconciliation are a separate incremental-sync boundary;
-Drive ACL intersection, revocation, and citation reauthorization are a separate
-authorization boundary.
+The worker uses a provider-neutral driver port for inventory, content transfer,
+and opaque citation locators. It fetches bytes within the planner's limits,
+stores content by SHA-256, converges repeated objects and versions, and creates
+Documents in the frozen destination collection/default collection. Imported
+Documents are deliberately `agentAccess=false`: each immutable version creates
+a durable index obligation before indexing, and a later generation-fenced ACL
+evidence operation is the only seam that may make the Document agent-readable.
+Google ACL evidence collection and citation-time reauthorization are not
+implemented by this slice, so Drive imports remain fail-closed for agent
+retrieval until that follow-on lands.
 
-The **Only me**, **This workspace**, and **Company** options record the intended
-future knowledge scope. **Hourly**, **Daily**, and **On demand** record the
-intended cadence, while **Allow**, **Ask**, and **Block** record the connector
-read policy. The common MCP runtime can now enforce persisted connector-action
-policies with durable approval and secret-free audit, but this Google Drive setup
-slice does not yet publish its selections into that backend policy table.
-They remain configuration only in this slice. Durable scheduler dispatch, source
-rows, content fetching and indexing, cursor processing, ACL projection,
+Provider revision is observation metadata, not the immutable OpenGeni version
+identity. A revision or metadata/ACL change is recorded even when the bytes,
+Document, and file are unchanged, so the next repair does not repeatedly
+download the same provider observation. Automatic Temporal retries also repair
+both persistence seams: a current immutable version without an index obligation
+gets one, and a pending obligation is re-indexed or settled before the item is
+accepted as unchanged.
+
+Durable wake receipts retain `scheduled`, `manual`, `initial`, `retry`,
+`repair`, and future `provider_event` provenance even when overlapping fires
+coalesce. Source configuration and lifecycle generations fence wake admission,
+checkpointing, indexing obligations, ACL activation, and settlement. A stable
+per-source workflow ID plus a Postgres lease and one-item execution buffer
+enforce overlap and replay idempotency across worker restarts. Terminal runs
+emit separate knowledge-sync usage events plus low-cardinality run/item/byte
+metrics; they do not emit `agent_run.created`.
+
+A successful source run advances the live source sync generation, and lease
+settlement advances scheduler state to that exact output generation. Index and
+ACL completions may settle against that live-or-newer scheduler generation only
+while every source lifecycle/configuration, object/version, ACL, obligation, and
+Document authority fence still matches. A retry that finds the deterministic
+source run already complete settles that durable result without invoking the
+provider again.
+
+Connection pause is layered independently from the user's per-source Schedule
+pause. Pausing or disconnecting a Drive connection suspends effective Temporal
+delivery without rewriting the source's Schedule status; resume removes only
+the connection-owned pause reason. Pause, disconnect, token revocation, app
+removal, re-consent/reconnect requirements, and permission loss also advance a
+deny ACL generation, invalidate outstanding index obligations, revoke Document
+agent access, and delete materialized chunks. Resume or reconnect never restores
+the old retrieval eligibility: a newly observed immutable version, successful
+index obligation, and fresh generation-fenced ACL evidence are required. Durable
+Google Changes API event delivery and live Drive ACL/citation reauthorization
+remain separate follow-ons.
+
+The **Only me**, **This workspace**, and **Company** options are immutable
+knowledge authority, not presentation labels. **Hourly**, **Daily**, and **On
+demand** seed the newly created shared Schedule; later edits happen there.
+**Allow**, **Ask**, and **Block** remain
+the connector read-policy configuration used by the common connector-action
+boundary. Google Changes API eventing, provider ACL projection,
 policy-UI wiring, and memory updates are not activated by the inventory planner.
 
 Disconnecting revokes the OpenGeni connection locally. The confirmation dialog

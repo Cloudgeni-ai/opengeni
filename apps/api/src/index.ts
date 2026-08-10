@@ -168,6 +168,14 @@ export async function createTemporalWorkflowClient(
     },
     syncScheduledTask: async ({ task }) => {
       const schedule = temporal.schedule.getHandle(task.temporalScheduleId);
+      if (task.schedule.type === "manual") {
+        try {
+          await schedule.delete();
+        } catch (error) {
+          if (!(error instanceof ScheduleNotFoundError)) throw error;
+        }
+        return;
+      }
       const options = temporalScheduleOptions(task, settings.temporalTaskQueue);
       try {
         await schedule.update(() => temporalScheduleUpdateOptions(options));
@@ -193,6 +201,7 @@ export async function createTemporalWorkflowClient(
       agentRunUsageIdempotencyKey,
       triggerWorkflowId,
       initiator,
+      triggerType = "manual",
     }) => {
       // Deterministic workflowId (derived from the trigger token by the
       // caller) + REJECT_DUPLICATE makes a retried manual trigger idempotent:
@@ -209,7 +218,7 @@ export async function createTemporalWorkflowClient(
               accountId: task.accountId,
               workspaceId: task.workspaceId,
               taskId: task.id,
-              triggerType: "manual",
+              triggerType,
               agentRunUsageIdempotencyKey,
               initiator,
             },
@@ -488,6 +497,9 @@ export function shouldCreateScheduleAfterUpdateError(error: unknown): boolean {
 }
 
 export function temporalScheduleSpec(schedule: ScheduledTaskScheduleSpec): ScheduleSpec {
+  if (schedule.type === "manual") {
+    throw new Error("manual scheduled tasks do not have a Temporal Schedule spec");
+  }
   if (schedule.type === "interval") {
     return {
       intervals: [temporalIntervalSpec(schedule)],
@@ -574,7 +586,7 @@ function temporalScheduleOptions(task: ScheduledTask, taskQueue: string): Schedu
       pauseOnFailure: false,
     },
     state: {
-      paused: task.status === "paused",
+      paused: scheduledTaskEffectivelyPaused(task),
       ...(task.schedule.type === "once" ? { remainingActions: 1 } : {}),
     },
     memo: {
@@ -584,6 +596,15 @@ function temporalScheduleOptions(task: ScheduledTask, taskQueue: string): Schedu
       name: task.name,
     },
   };
+}
+
+function scheduledTaskEffectivelyPaused(task: ScheduledTask): boolean {
+  if (task.status === "paused") return true;
+  if (task.action.kind !== "knowledge_source_sync") return false;
+  const control = task.metadata.knowledgeSourceSync;
+  if (!control || typeof control !== "object") return false;
+  const record = control as Record<string, unknown>;
+  return record.sourceEnabled === false || record.connectionPaused === true;
 }
 
 function temporalScheduleUpdateOptions(options: ScheduleOptions): ScheduleUpdateOptions {

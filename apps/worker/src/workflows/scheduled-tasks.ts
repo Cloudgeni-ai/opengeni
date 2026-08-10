@@ -1,6 +1,18 @@
-import { patched, workflowInfo } from "@temporalio/workflow";
+import {
+  getExternalWorkflowHandle,
+  ParentClosePolicy,
+  patched,
+  startChild,
+  workflowInfo,
+  WorkflowIdReusePolicy,
+} from "@temporalio/workflow";
 import type { TurnInitiator } from "@opengeni/contracts";
 import { scheduledTaskActivity } from "./activities";
+import {
+  knowledgeSourceSyncWake,
+  knowledgeSourceSyncWorkflow,
+  knowledgeSourceSyncWorkflowId,
+} from "./knowledge-source-sync";
 
 type ScheduledTaskFireWorkflowBase = {
   accountId: string;
@@ -16,7 +28,7 @@ export type ScheduledTaskFireWorkflowInput = ScheduledTaskFireWorkflowBase &
         initiator?: never;
       }
     | {
-        triggerType: "manual";
+        triggerType: "manual" | "initial" | "provider_event" | "retry" | "repair";
         agentRunUsageIdempotencyKey: string;
         initiator: TurnInitiator;
       }
@@ -30,7 +42,7 @@ export async function scheduledTaskFireWorkflow(
   // the exact charging identity.
   if (
     patched("scheduled-task-manual-initiator-v1") &&
-    input.triggerType === "manual" &&
+    input.triggerType !== "scheduled" &&
     (!input.agentRunUsageIdempotencyKey || !input.initiator)
   ) {
     return;
@@ -40,14 +52,38 @@ export async function scheduledTaskFireWorkflow(
     taskId: input.taskId,
     producerKey: workflowInfo().workflowId,
   };
-  await scheduledTaskActivity.dispatchScheduledTaskRun(
-    input.triggerType === "manual"
+  const result = await scheduledTaskActivity.dispatchScheduledTaskRun(
+    input.triggerType !== "scheduled"
       ? {
           ...base,
-          triggerType: "manual",
+          triggerType: input.triggerType,
           agentRunUsageIdempotencyKey: input.agentRunUsageIdempotencyKey,
           initiator: input.initiator,
         }
       : { ...base, triggerType: "scheduled" },
   );
+  if (result.action !== "knowledge_source_sync") return;
+
+  const workflowId = knowledgeSourceSyncWorkflowId(result.sourceId);
+  try {
+    await startChild(knowledgeSourceSyncWorkflow, {
+      workflowId,
+      workflowIdReusePolicy: WorkflowIdReusePolicy.ALLOW_DUPLICATE,
+      parentClosePolicy: ParentClosePolicy.ABANDON,
+      args: [result],
+    });
+  } catch (error) {
+    if (!alreadyRunningWorkflow(error)) throw error;
+    await getExternalWorkflowHandle(workflowId).signal(knowledgeSourceSyncWake, result);
+  }
+}
+
+function alreadyRunningWorkflow(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current && typeof current === "object"; depth += 1) {
+    const record = current as { name?: unknown; cause?: unknown };
+    if (record.name === "WorkflowExecutionAlreadyStartedError") return true;
+    current = record.cause;
+  }
+  return false;
 }

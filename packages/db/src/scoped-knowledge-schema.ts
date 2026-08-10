@@ -288,7 +288,7 @@ export const knowledgeDocumentVersions = pgTable(
       table.objectId,
       table.versionGeneration,
     ),
-    objectExternalVersion: uniqueIndex("knowledge_document_versions_object_external_version_uq").on(
+    objectExternalVersion: index("knowledge_document_versions_object_external_version_idx").on(
       table.objectId,
       table.externalVersionId,
     ),

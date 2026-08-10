@@ -1076,7 +1076,10 @@ function SessionChatPane(props: {
   );
 
   return (
-    <section className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
+    <section
+      data-workspace-scroll-owner="self-managed"
+      className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden"
+    >
       {terminal ? (
         <div className="mx-auto w-full max-w-3xl px-4 pt-6 sm:px-6">
           <TerminalSessionBanner session={props.session} onNewSession={props.onNewSession} />

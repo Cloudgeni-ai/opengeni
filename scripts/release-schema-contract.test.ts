@@ -214,14 +214,19 @@ describe("release schema contract", () => {
         (migrations.has("0194_editable_artifact_durable_exports.sql") ? 1 : 0) +
         (migrations.has("0195_editable_artifact_import_authorization.sql") ? 1 : 0) +
         (migrations.has("0196_rig_provider_images.sql") ? 1 : 0) +
+        (migrations.has("0197_knowledge_source_sync_schedules.sql") ? 1 : 0) +
         (migrations.has("0199_workspace_learning_policy.sql") ? 1 : 0) +
         (migrations.has("0200_durable_learning_router.sql") ? 1 : 0) +
         (migrations.has("0201_company_profile_authority.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "7fa58c7b6bbcea0595468a92c4a286cf56004847d7ebac801fce70ca696d76c2",
+      "862fabff790fb6b692aceca7abc8c719fcf2c6754b9cf9004d5af245a6780f1f",
     );
     expect(contract.latestMigration).toBe("0201_company_profile_authority.sql");
+    expect(migrations.get("0197_knowledge_source_sync_schedules.sql")).toMatchObject({
+      sha256: "edd425be4e4db07f4fcab1e520ece71dc1a692072ce28256ec2b86248442f3c8",
+      deploymentMode: "maintenance",
+    });
     expect(migrations.get("0065_enrollment_credential_generation.sql")).toMatchObject({
       sha256: "2e25fa2dfb8a95a7a9ba1ef5aa9bd219755af998b3317bcdf4d7acc4f67264fe",
       deploymentMode: "rolling",

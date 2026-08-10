@@ -26,6 +26,7 @@ import {
 } from "@/components/rigs/rig-definition-fields";
 import { RigStatusChip } from "@/components/rigs/rig-status-chip";
 import { Button } from "@/components/ui/button";
+import { ContentPage } from "@/components/ui/content-layout";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -182,11 +183,7 @@ export function RigsRoute({ workspaceId }: { workspaceId: string }) {
 }
 
 function PageShell({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col px-4 py-5 sm:px-6 lg:px-8">
-      {children}
-    </div>
-  );
+  return <ContentPage width="standard">{children}</ContentPage>;
 }
 
 export function PermissionDenied() {
