@@ -7,6 +7,7 @@ import {
   sdkEventContainsInlineImage,
   ScreenshotValidationError,
   typedScreenshotFromSdkEvent,
+  typedScreenshotFromToolOutput,
   unavailableRetainedSessionImage,
   validateComputerScreenshot,
   validateRetainableSessionImage,
@@ -30,6 +31,23 @@ const WEBP = Uint8Array.from([
 ]);
 
 describe("retained computer screenshots", () => {
+  test("extracts an image before it enters SDK event history", () => {
+    expect(
+      typedScreenshotFromToolOutput({
+        callId: "call-boundary",
+        output: {
+          type: "image",
+          image: { url: `data:image/png;base64,${Buffer.from(PNG).toString("base64")}` },
+        },
+      }),
+    ).toEqual({
+      callId: "call-boundary",
+      toolOutputId: "call-boundary",
+      bytes: PNG,
+      mediaType: "image/png",
+    });
+  });
+
   test("extracts the SDK typed image and validates exact PNG facts", () => {
     const output = typedScreenshotFromSdkEvent({
       type: "run_item_stream_event",

@@ -903,9 +903,12 @@ wrong one is the classic mistake.
    graph fail closed with the exact offending path. Historical inline image and
    screenshot items remain backward-compatible model history. New
    `computer_screenshot` and `view_image` typed PNG/JPEG/WebP bytes are validated
-   and retained before persistence; every new history copy receives the
-   deterministic bounded artifact receipt (or an explicit unavailable fact),
-   never the provider object key or re-encoded base64 source.
+   and retained inside the tool invocation, before its result can enter live SDK
+   history. The later SDK event only projects the established receipt, so
+   event/state ordering cannot expose inline bytes to reconciliation. Every new
+   history copy receives the deterministic bounded artifact receipt (or an
+   explicit unavailable fact), never the provider object key or re-encoded
+   base64 source.
    New generated images follow the same no-inline-byte rule but are permanent
    workspace files: native hosted base64 is retained before serialization and
    adapter tools return the same compact `generated_image` receipt. A later

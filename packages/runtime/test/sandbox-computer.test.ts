@@ -10,6 +10,7 @@ import {
   ComputerUseCapability,
   computerUse,
   computerFunctionTools,
+  withRetainableSessionImageOutputHook,
   ComputerReadOnlyError,
   ComputerUnavailableError,
   ComputerActionError,
@@ -1379,6 +1380,35 @@ describe("computerFunctionTools image delivery on the codex backend", () => {
   const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
   const PNG_B64 = Buffer.from(PNG).toString("base64");
   const PNG_DATA_URL = `data:image/png;base64,${PNG_B64}`;
+
+  test("retains a screenshot before returning its unchanged result to the SDK", async () => {
+    const { computer } = makeFakeComputer({ screenshotB64: PNG_B64 });
+    const calls: unknown[] = [];
+    const wrapped = withRetainableSessionImageOutputHook(
+      computerFunctionTools(computer as never, false, undefined, true),
+      async (input) => {
+        calls.push(input);
+      },
+    );
+    const screenshot = toolsByName(wrapped).computer_screenshot as {
+      invoke: (context: never, input: string, details: unknown) => Promise<unknown>;
+    };
+    const output = await screenshot.invoke({} as never, "{}", {
+      toolCall: { callId: "call_image" },
+    });
+    expect(calls).toEqual([
+      {
+        toolName: "computer_screenshot",
+        toolCallId: "call_image",
+        output,
+      },
+    ]);
+    expect((output as { type: string }).type).toBe("image");
+
+    await expect(invokeTool(screenshot, {})).rejects.toThrow(
+      "computer_screenshot completed without a tool-call identity",
+    );
+  });
 
   test("imageFunctionResults=false (default): computer_screenshot returns the text data-URL string", async () => {
     const { computer } = makeFakeComputer({ screenshotB64: PNG_B64 });
