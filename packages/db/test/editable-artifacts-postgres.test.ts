@@ -23,6 +23,7 @@ import {
   PostgresEditableArtifactLiveReadStore,
   PostgresEditableArtifactLiveTicketStore,
   PostgresEditableArtifactStore,
+  listEditableArtifactIdsCreatedBySubject,
   type PersistedEditableArtifact,
   type PersistedEditableArtifactCausalFrontier,
   type PersistedEditableArtifactKernelState,
@@ -103,6 +104,47 @@ afterAll(async () => {
 }, 180_000);
 
 describe("Postgres editable artifact authority", () => {
+  test("discovers active artifacts by exact creator without crossing tenant scope", async () => {
+    if (!available || !client || !shared) return;
+    const scope = { accountId, workspaceId };
+    const sourceSessionId = crypto.randomUUID();
+    const matchingId = nextId();
+    const otherId = nextId();
+    for (const [artifactId, marker, createdBySubjectId] of [
+      [matchingId, "1", `agent:${sourceSessionId}`],
+      [otherId, "2", `agent:${crypto.randomUUID()}`],
+    ] as const) {
+      const created = await store.createArtifact({
+        ...creationFixture({
+          scope,
+          artifactId,
+          receiptId: nextId(),
+          authorityKey: JSON.stringify(["human", "user:alice"]),
+          idempotencyKey: `creator-list:${artifactId}`,
+          requestHash: hash(marker),
+          modality: "spreadsheet",
+          title: `Creator list ${marker}`,
+          stateHash: hash(marker === "1" ? "3" : "4"),
+          authorizationRevision: 1,
+          createdBySubjectId,
+        }),
+        authorizationActor: humanAuthorizationActor("user:alice"),
+      });
+      expect(created.kind).toBe("result");
+    }
+
+    expect(
+      await listEditableArtifactIdsCreatedBySubject(client.db, scope, `agent:${sourceSessionId}`),
+    ).toEqual([matchingId]);
+    expect(
+      await listEditableArtifactIdsCreatedBySubject(
+        client.db,
+        { accountId: otherAccountId, workspaceId: otherWorkspaceId },
+        `agent:${sourceSessionId}`,
+      ),
+    ).toEqual([]);
+  });
+
   test("prepares one exact replay-safe Office source upload", async () => {
     if (!available || !client) return;
     const fileId = crypto.randomUUID();

@@ -585,6 +585,41 @@ export class EditableArtifactPersistenceError extends Error {
   }
 }
 
+/**
+ * Discover durable artifacts created by one exact principal. This is only a
+ * tenant-scoped candidate query: callers must still authorize every returned
+ * artifact through the application boundary before exposing metadata.
+ */
+export async function listEditableArtifactIdsCreatedBySubject(
+  db: Database,
+  scopeInput: PersistedEditableArtifactScope,
+  subjectIdInput: string,
+  limitInput = 64,
+): Promise<readonly string[]> {
+  const scope = validateScope(scopeInput);
+  const subjectId = validateIdentity(subjectIdInput, "creator subject id");
+  const limit = validateInteger(limitInput, "editable artifact list limit", 1, 64);
+  return await withRlsContext(
+    db,
+    scope,
+    async (tx) => {
+      const rows = await rawRows<{ id: string }>(
+        tx,
+        sql`select id
+          from editable_artifacts
+          where account_id = ${scope.accountId}::uuid
+            and workspace_id = ${scope.workspaceId}::uuid
+            and created_by_subject_id = ${subjectId}
+            and lifecycle_state = 'active'
+          order by created_at asc, id asc
+          limit ${limit}`,
+      );
+      return Object.freeze(rows.map((row) => validateStableId(row.id, "artifact id")));
+    },
+    { isolationLevel: "repeatable read", accessMode: "read only" },
+  );
+}
+
 export const EDITABLE_ARTIFACT_INTENT_MAX_BYTES = 5 * 1024 * 1024;
 export const EDITABLE_ARTIFACT_KERNEL_TAIL_MAX_TRANSACTIONS = 100_000;
 export const EDITABLE_ARTIFACT_KERNEL_TAIL_MAX_BYTES = 64 * 1024 * 1024;

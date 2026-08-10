@@ -21,7 +21,14 @@ import {
   type UserMessageItem,
 } from "@opengeni/react/session";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { CheckIcon, Loader2Icon, MenuIcon, MessagesSquareIcon, XIcon } from "lucide-react";
+import {
+  CheckIcon,
+  Loader2Icon,
+  MenuIcon,
+  MessagesSquareIcon,
+  PanelsTopLeftIcon,
+  XIcon,
+} from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -45,7 +52,10 @@ import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Notice } from "@/components/ui/notice";
 import type { WorkspaceTab } from "@opengeni/react";
+import { projectEditableArtifactPublications } from "@opengeni/sdk/editable-artifact-publication";
+import type { EditableArtifactResource } from "@opengeni/sdk/artifacts";
 import { useAppContext } from "@/context";
+import type { SessionEditableArtifactSummary } from "@/components/session/editable-artifacts-workspace";
 import {
   normalizeProviderDomain,
   oauthConnectionOwnership,
@@ -83,6 +93,14 @@ const LazySessionInspector = lazy(() =>
   import("@/components/session/inspector").then(({ SessionInspector }) => ({
     default: SessionInspector,
   })),
+);
+
+const LazySessionEditableArtifactsWorkspace = lazy(() =>
+  import("@/components/session/editable-artifacts-workspace").then(
+    ({ SessionEditableArtifactsWorkspace }) => ({
+      default: SessionEditableArtifactsWorkspace,
+    }),
+  ),
 );
 
 const LazyCodexRealtimeControl = lazy(() =>
@@ -592,25 +610,57 @@ function SessionDock(props: {
   onOpenNavigation: () => void;
 }) {
   // The workbench (Changes | Files | Terminal | Desktop + machine chip) lives in
-  // the package now; the app injects Debug around it. Agents remain in the one
-  // compact composer-adjacent surface.
-  const trailingTabs: WorkspaceTab[] = props.session
-    ? [
-        {
-          id: "debug",
-          label: "Debug",
-          content: (
-            <Suspense fallback={<LoadingPanel label="Opening debug inspector" />}>
-              <LazySessionInspector
-                session={props.session}
-                events={props.events}
-                connectionState={props.connectionState}
-              />
-            </Suspense>
-          ),
-        },
-      ]
-    : [];
+  // the package now; the app injects durable artifacts and Debug around it.
+  // Heavy editor/runtime code stays lazy until the user opens the tab.
+  const editableArtifacts = useMemo(
+    () => projectEditableArtifactPublications(props.events, props.workspaceId, props.sessionId),
+    [props.events, props.sessionId, props.workspaceId],
+  );
+  const artifactSummaries = useSessionEditableArtifactSummaries({
+    workspaceId: props.workspaceId,
+    sessionId: props.sessionId,
+    eventPublications: editableArtifacts,
+  });
+  const trailingTabs: WorkspaceTab[] = [];
+  if (artifactSummaries.length > 0) {
+    trailingTabs.push({
+      id: "artifacts",
+      label: (
+        <span className="inline-flex items-center gap-1.5">
+          <PanelsTopLeftIcon className="size-3.5" aria-hidden />
+          <span>Artifacts</span>
+        </span>
+      ),
+      badge: (
+        <span className="rounded-og-xs bg-og-accent-soft px-1 text-og-xs text-og-fg-muted">
+          {artifactSummaries.length}
+        </span>
+      ),
+      content: (
+        <Suspense fallback={<LoadingPanel label="Opening artifact" />}>
+          <LazySessionEditableArtifactsWorkspace
+            workspaceId={props.workspaceId}
+            artifacts={artifactSummaries}
+          />
+        </Suspense>
+      ),
+    });
+  }
+  if (props.session) {
+    trailingTabs.push({
+      id: "debug",
+      label: "Debug",
+      content: (
+        <Suspense fallback={<LoadingPanel label="Opening debug inspector" />}>
+          <LazySessionInspector
+            session={props.session}
+            events={props.events}
+            connectionState={props.connectionState}
+          />
+        </Suspense>
+      ),
+    });
+  }
 
   return (
     <SessionWorkspace
@@ -635,6 +685,73 @@ function SessionDock(props: {
       }
     />
   );
+}
+
+function useSessionEditableArtifactSummaries(input: {
+  workspaceId: string;
+  sessionId: string;
+  eventPublications: ReturnType<typeof projectEditableArtifactPublications>;
+}): readonly SessionEditableArtifactSummary[] {
+  const context = useAppContext();
+  const fallback = useMemo<readonly SessionEditableArtifactSummary[]>(
+    () =>
+      input.eventPublications.map(({ receipt }) => ({
+        id: receipt.artifact.id,
+        modality: receipt.artifact.modality,
+        title: receipt.artifact.title,
+      })),
+    [input.eventPublications],
+  );
+  const publicationSequence = input.eventPublications.at(-1)?.sequence ?? 0;
+  const authorityKey = `${input.workspaceId}:${input.sessionId}:${context.accessKeyVersion}`;
+  const refreshKey = `${authorityKey}:${publicationSequence}`;
+  const [loaded, setLoaded] = useState<{
+    key: string;
+    artifacts: readonly EditableArtifactResource[];
+  } | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let current = true;
+    void Promise.all([
+      import("@/lib/editable-artifact-client"),
+      import("@/lib/editable-artifact-browser"),
+    ])
+      .then(async ([{ editableArtifactClient }, { createConsoleEditableArtifactReplicaId }]) => {
+        const result = await editableArtifactClient.listSessionEditableArtifacts(
+          input.workspaceId,
+          input.sessionId,
+          {
+            replicaId: createConsoleEditableArtifactReplicaId(),
+            signal: controller.signal,
+          },
+        );
+        if (current) setLoaded({ key: authorityKey, artifacts: result.artifacts });
+      })
+      .catch(() => {
+        // A validated publication receipt remains a useful degraded fallback.
+        // Discovery will retry after auth changes or the next publication.
+      });
+    return () => {
+      current = false;
+      controller.abort();
+    };
+  }, [authorityKey, input.sessionId, input.workspaceId, refreshKey]);
+
+  const durable = loaded?.key === authorityKey ? loaded.artifacts : [];
+  return mergeArtifactSummaries(durable, fallback);
+}
+
+function mergeArtifactSummaries(
+  durable: readonly SessionEditableArtifactSummary[],
+  fallback: readonly SessionEditableArtifactSummary[],
+): readonly SessionEditableArtifactSummary[] {
+  const merged = new Map<string, SessionEditableArtifactSummary>();
+  for (const artifact of durable) merged.set(artifact.id, artifact);
+  for (const artifact of fallback) {
+    if (!merged.has(artifact.id)) merged.set(artifact.id, artifact);
+  }
+  return [...merged.values()];
 }
 
 function SessionChatPane(props: {

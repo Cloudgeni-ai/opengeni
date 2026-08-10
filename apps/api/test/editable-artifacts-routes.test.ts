@@ -35,6 +35,7 @@ type RecordedApplication = {
   createCalls: Array<Parameters<EditableArtifactApplicationPort["createArtifact"]>[0]>;
   importCalls: Array<Parameters<EditableArtifactApplicationPort["importArtifact"]>[0]>;
   readCalls: Array<Parameters<EditableArtifactApplicationPort["readArtifact"]>[0]>;
+  listCalls: Array<readonly [{ accountId: string; workspaceId: string }, string, number]>;
   sourceCalls: Array<readonly [string, string]>;
   sourceValue: { value: FileAsset | null };
   sourceError: { value: Error | null };
@@ -53,6 +54,7 @@ function routeFixture(
   const createCalls: RecordedApplication["createCalls"] = [];
   const importCalls: RecordedApplication["importCalls"] = [];
   const readCalls: RecordedApplication["readCalls"] = [];
+  const listCalls: RecordedApplication["listCalls"] = [];
   const sourceCalls: RecordedApplication["sourceCalls"] = [];
   const sourceValue = { value: readyOfficeFile() as FileAsset | null };
   const sourceError = { value: null as Error | null };
@@ -102,6 +104,10 @@ function routeFixture(
       if (sourceError.value) throw sourceError.value;
       return sourceValue.value;
     },
+    editableArtifactSessionArtifactIds: async (scope, sourceSessionId, limit) => {
+      listCalls.push([scope, sourceSessionId, limit]);
+      return [ARTIFACT_ID];
+    },
     ...(options.uncomposed ? {} : { editableArtifacts: application }),
   });
   return {
@@ -110,6 +116,7 @@ function routeFixture(
     createCalls,
     importCalls,
     readCalls,
+    listCalls,
     sourceCalls,
     sourceValue,
     sourceError,
@@ -338,6 +345,63 @@ describe("editable artifact create/open routes", () => {
       actor: { kind: "human", replicaId: REPLICA_ID },
     });
   });
+
+  test("discovers session artifacts then authorizes each exact resource", async () => {
+    const fixture = routeFixture();
+    const response = await fixture.app.request(
+      `http://api.test/v1/workspaces/${WORKSPACE_ID}/editable-artifacts?sourceSessionId=${SESSION_ID}&replicaId=${REPLICA_ID}`,
+      { headers: { authorization: await bearer() } },
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(await response.json()).toEqual({
+      artifacts: [
+        {
+          id: ARTIFACT_ID,
+          modality: "spreadsheet",
+          title: "Forecast",
+          lifecycle: "active",
+          headSequence: 0,
+          stateHash: `sha256:${"0".repeat(64)}`,
+          createdAt: "2026-08-08T12:00:00.000Z",
+          updatedAt: "2026-08-08T12:00:00.000Z",
+        },
+      ],
+    });
+    expect(fixture.listCalls).toEqual([
+      [{ accountId: ACCOUNT_ID, workspaceId: WORKSPACE_ID }, SESSION_ID, 64],
+    ]);
+    expect(fixture.readCalls[0]).toMatchObject({
+      artifactId: ARTIFACT_ID,
+      actor: { kind: "human", replicaId: REPLICA_ID },
+    });
+  });
+
+  test("rejects incomplete session discovery queries before touching storage", async () => {
+    const fixture = routeFixture();
+    const response = await fixture.app.request(
+      `http://api.test/v1/workspaces/${WORKSPACE_ID}/editable-artifacts?sourceSessionId=${SESSION_ID}`,
+      { headers: { authorization: await bearer() } },
+    );
+    expect(response.status).toBe(422);
+    expect(fixture.listCalls).toEqual([]);
+    expect(fixture.readCalls).toEqual([]);
+  });
+
+  test.each(["forbidden", "not_found"] as const)(
+    "does not expose %s discovery candidates",
+    async (code) => {
+      const fixture = routeFixture();
+      fixture.failWith.value = new EditableArtifactApplicationError(code);
+      const response = await fixture.app.request(
+        `http://api.test/v1/workspaces/${WORKSPACE_ID}/editable-artifacts?sourceSessionId=${SESSION_ID}&replicaId=${REPLICA_ID}`,
+        { headers: { authorization: await bearer() } },
+      );
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ artifacts: [] });
+      expect(fixture.readCalls).toHaveLength(1);
+    },
+  );
 
   test.each([
     [" padded", 422],

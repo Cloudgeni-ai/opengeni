@@ -11,11 +11,13 @@ export type {
 export type {
   CreateEditableArtifactMaterializationRequest,
   CreateEditableArtifactResourceRequest,
+  EditableArtifactListResource,
   EditableArtifactMaterializationFormat,
   EditableArtifactMaterializationJobResource,
   EditableArtifactMaterializationResultResource,
   EditableArtifactPinnedVersionResource,
   EditableArtifactResource,
+  ListSessionEditableArtifactResourcesOptions,
   PinEditableArtifactVersionRequest,
   ReadEditableArtifactMaterializationOptions,
   ReadEditableArtifactResourceOptions,
