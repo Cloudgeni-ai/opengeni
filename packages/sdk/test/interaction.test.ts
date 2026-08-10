@@ -153,6 +153,7 @@ function computerSession(overrides: Partial<ComputerSession> = {}): ComputerSess
       semanticActions: true,
       pointerInput: true,
       keyboardInput: true,
+      clipboard: true,
       backgroundActions: true,
       parallelApps: true,
     },
@@ -809,6 +810,33 @@ describe("BrowserSession SDK", () => {
 });
 
 describe("ComputerSession SDK", () => {
+  test("reads the exact native ComputerSession clipboard as a scoped resource", async () => {
+    const clipboard = {
+      computerSessionId: COMPUTER_SESSION_ID,
+      controllerGeneration: "controller-2",
+      text: "native clipboard",
+      truncated: false,
+      observedAt: "2026-08-10T10:00:01.000Z",
+    };
+    const calls: string[] = [];
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async (input) => {
+        calls.push(String(input));
+        return json(clipboard);
+      },
+    });
+
+    expect(
+      await client.interaction.computers
+        .session(WORKSPACE_ID, COMPUTER_SESSION_ID)
+        .clipboard.read(),
+    ).toEqual(clipboard);
+    expect(calls).toEqual([
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/computer-sessions/${COMPUTER_SESSION_ID}/clipboard`,
+    ]);
+  });
+
   test("discovers an associated workspace computer and routes causal native actions", async () => {
     const session = computerSession();
     const calls: Array<{ url: string; method: string; body: unknown }> = [];

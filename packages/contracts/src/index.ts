@@ -840,6 +840,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "computer_open",
   "computer_targets",
   "computer_observe",
+  "computer_clipboard",
   "computer_act",
   "computer_lifecycle",
   "variable_set_list",
@@ -930,6 +931,7 @@ export const FIRST_PARTY_IN_PROCESS_TOOL_NAMES = [
   "computer_open",
   "computer_targets",
   "computer_observe",
+  "computer_clipboard",
   "computer_act",
   "computer_lifecycle",
 ] as const satisfies readonly FirstPartyMcpToolName[];

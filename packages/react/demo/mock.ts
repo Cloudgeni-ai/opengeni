@@ -50,6 +50,7 @@ import type {
   ComposerDraft,
   ComputerActionReceipt,
   ComputerActionRequest,
+  ComputerClipboard,
   ComputerObservation,
   ComputerSession,
   ComputerSessionAttachment,
@@ -2438,6 +2439,20 @@ export class MockOpenGeniClient implements SessionClientLike {
     return session;
   }
 
+  async readComputerClipboard(
+    _workspaceId: string,
+    computerSessionId: string,
+  ): Promise<ComputerClipboard> {
+    const session = await this.getComputerSession(WORKSPACE_ID, computerSessionId);
+    return {
+      computerSessionId,
+      controllerGeneration: requireDemoComputerController(session).controllerGeneration,
+      text: "Demo computer clipboard",
+      truncated: false,
+      observedAt: new Date().toISOString(),
+    };
+  }
+
   async createComputerSession(
     _workspaceId: string,
     request: CreateComputerSessionRequest,
@@ -3191,6 +3206,7 @@ function fabricateComputerSession(
       semanticActions: true,
       pointerInput: true,
       keyboardInput: true,
+      clipboard: true,
       backgroundActions: true,
       parallelApps: true,
     },

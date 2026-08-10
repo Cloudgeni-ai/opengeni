@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type {
   ComputerAction,
+  ComputerClipboard,
   ComputerSessionCapabilities,
   InteractionRect,
   InteractionSemanticNodeValue,
@@ -57,6 +58,8 @@ export type NativeComputerFrame = {
   data: Uint8Array;
 };
 
+export type NativeComputerClipboard = Pick<ComputerClipboard, "text" | "truncated">;
+
 export type NativeComputerHandshake = {
   protocolVersion: typeof COMPUTER_NATIVE_PROTOCOL_VERSION;
   helperVersion: string;
@@ -107,6 +110,7 @@ export interface ComputerNativeTransport {
   targets(): Promise<NativeComputerTarget[]>;
   observe(targetId: string): Promise<NativeComputerObservation>;
   capture(targetId: string): Promise<NativeComputerFrame>;
+  clipboard(): Promise<NativeComputerClipboard>;
   validate(command: NativeComputerActionCommand): Promise<void>;
   dispatch(command: NativeComputerActionCommand): Promise<NativeComputerObservation>;
   close(): Promise<void>;
@@ -210,6 +214,10 @@ export class ComputerNativeClient implements ComputerNativeTransport {
       parseFrame,
       this.captureTimeoutMs,
     );
+  }
+
+  async clipboard(): Promise<NativeComputerClipboard> {
+    return await this.request("clipboard", {}, parseClipboard, this.requestTimeoutMs);
   }
 
   async validate(command: NativeComputerActionCommand): Promise<void> {
@@ -471,6 +479,7 @@ function parseCapabilities(value: unknown): ComputerSessionCapabilities {
     "semanticActions",
     "pointerInput",
     "keyboardInput",
+    "clipboard",
     "backgroundActions",
     "parallelApps",
   ] as const;
@@ -492,9 +501,24 @@ function emptyCapabilities(): ComputerSessionCapabilities {
     semanticActions: false,
     pointerInput: false,
     keyboardInput: false,
+    clipboard: false,
     backgroundActions: false,
     parallelApps: false,
   };
+}
+
+function parseClipboard(value: unknown): NativeComputerClipboard {
+  const input = record(value, "native clipboard");
+  if (input.text !== null && typeof input.text !== "string") {
+    throw new Error("native clipboard text is invalid");
+  }
+  if (typeof input.truncated !== "boolean" || (input.text === null && input.truncated)) {
+    throw new Error("native clipboard truncation state is invalid");
+  }
+  if (typeof input.text === "string" && Buffer.byteLength(input.text, "utf8") > 1024 * 1024) {
+    throw new Error("native clipboard text exceeds its byte envelope");
+  }
+  return { text: input.text, truncated: input.truncated };
 }
 
 function parseTargets(value: unknown): NativeComputerTarget[] {

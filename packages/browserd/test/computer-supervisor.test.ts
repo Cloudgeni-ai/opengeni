@@ -119,6 +119,7 @@ class FixtureComputerDriver implements ComputerSupervisorDriver {
     semanticActions: true,
     pointerInput: true,
     keyboardInput: true,
+    clipboard: true,
     backgroundActions: true,
     parallelApps: true,
   };
@@ -148,6 +149,16 @@ class FixtureComputerDriver implements ComputerSupervisorDriver {
 
   async capture(): Promise<ComputerImageFrame> {
     throw new Error("unused");
+  }
+
+  async clipboard() {
+    return {
+      computerSessionId: this.sessionId,
+      controllerGeneration: this.generation,
+      text: "fixture clipboard",
+      truncated: false,
+      observedAt: "2026-08-11T12:00:00.000Z",
+    };
   }
 
   async subscribeFrames(): Promise<ComputerFrameSubscription> {

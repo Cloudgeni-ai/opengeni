@@ -1123,7 +1123,7 @@ const routeLabelPatterns: Array<{
   },
   {
     pattern:
-      /^\/v1\/workspaces\/[^/]+\/browser-sessions\/[^/]+\/(actions|attachments|end|heartbeat|resume|revisions|suspend|targets)$/,
+      /^\/v1\/workspaces\/[^/]+\/browser-sessions\/[^/]+\/(actions|attachments|clipboard|end|heartbeat|resume|revisions|suspend|targets)$/,
     label: (match) => `/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/${match[1]}`,
   },
   {
@@ -1146,7 +1146,7 @@ const routeLabelPatterns: Array<{
   },
   {
     pattern:
-      /^\/v1\/workspaces\/[^/]+\/computer-sessions\/[^/]+\/(actions|attachments|end|heartbeat|targets)$/,
+      /^\/v1\/workspaces\/[^/]+\/computer-sessions\/[^/]+\/(actions|attachments|clipboard|end|heartbeat|targets)$/,
     label: (match) =>
       `/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/${match[1]}`,
   },

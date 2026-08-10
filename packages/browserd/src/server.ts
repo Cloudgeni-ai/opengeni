@@ -583,6 +583,10 @@ export class BrowserControlServer {
       if (request.method === "GET") return success(await supervisor.listTargets(reference));
       throw new ProtocolError("invalid_action", "method not allowed", 405);
     }
+    if (segments.length === 4 && segments[3] === "clipboard") {
+      if (request.method === "GET") return success(await supervisor.clipboard(reference));
+      throw new ProtocolError("invalid_action", "method not allowed", 405);
+    }
     if (segments.length === 4 && segments[3] === "actions") {
       if (request.method !== "POST") {
         throw new ProtocolError("invalid_action", "method not allowed", 405);

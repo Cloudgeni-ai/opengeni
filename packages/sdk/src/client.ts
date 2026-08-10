@@ -52,6 +52,7 @@ import {
   type BrowserRevisionListResponse,
   type ComputerActionReceipt,
   type ComputerActionRequest,
+  type ComputerClipboard,
   type ComputerObservation,
   type ComputerSession,
   type ComputerSessionAttachment,
@@ -3048,6 +3049,20 @@ export class OpenGeniClient {
     return await this.requestJson<ComputerSession>(
       "GET",
       `/v1/workspaces/${workspaceId}/computer-sessions/${encodeURIComponent(computerSessionId)}`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  async readComputerClipboard(
+    workspaceId: string,
+    computerSessionId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<ComputerClipboard> {
+    return await this.requestJson<ComputerClipboard>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/computer-sessions/${encodeURIComponent(computerSessionId)}/clipboard`,
       undefined,
       {},
       options,

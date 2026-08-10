@@ -211,6 +211,89 @@ describe("OpenGeni Codemode interaction facade", () => {
     });
   });
 
+  test("keeps native Computer clipboard mutations on the causal action path", async () => {
+    const clipboard = {
+      computerSessionId,
+      controllerGeneration: "controller-1",
+      text: "native text",
+      truncated: false,
+      observedAt: "2026-08-10T10:00:00.000Z",
+    };
+    const fake = fakeClient((path) => {
+      if (path === "interaction.computer.clipboard") return result(clipboard);
+      if (path === "interaction.computer.targets") {
+        return result({
+          computerSessionId,
+          controllerGeneration: "controller-1",
+          targets: [
+            { id: "window-1", kind: "window", focused: true },
+            { id: "screen-1", kind: "screen", focused: true },
+          ],
+        });
+      }
+      if (path === "interaction.computer.act") {
+        return result({ operationId: "operation-3", state: "completed" });
+      }
+      throw new Error(`unexpected path: ${path}`);
+    });
+    const computer = createOpenGeniCodemode(fake.client).computers.use(computerSessionId);
+
+    expect(await computer.clipboard.read()).toEqual(clipboard);
+    await computer.clipboard.write("draft");
+    await computer.clipboard.copy({ targetId: "window-1" });
+    await computer.clipboard.paste();
+
+    expect(fake.calls).toEqual([
+      {
+        path: "interaction.computer.clipboard",
+        args: { computerSessionId },
+        options: {},
+      },
+      {
+        path: "interaction.computer.targets",
+        args: { computerSessionId },
+        options: {},
+      },
+      {
+        path: "interaction.computer.act",
+        args: {
+          computerSessionId,
+          targetId: "screen-1",
+          action: { type: "clipboard", operation: "write", text: "draft" },
+        },
+        options: {},
+      },
+      {
+        path: "interaction.computer.targets",
+        args: { computerSessionId },
+        options: {},
+      },
+      {
+        path: "interaction.computer.act",
+        args: {
+          computerSessionId,
+          targetId: "window-1",
+          action: { type: "clipboard", operation: "copy" },
+        },
+        options: {},
+      },
+      {
+        path: "interaction.computer.targets",
+        args: { computerSessionId },
+        options: {},
+      },
+      {
+        path: "interaction.computer.act",
+        args: {
+          computerSessionId,
+          targetId: "screen-1",
+          action: { type: "clipboard", operation: "paste" },
+        },
+        options: {},
+      },
+    ]);
+  });
+
   test("keeps identity creation on the caller-owned Codemode operation id", async () => {
     const fake = fakeClient((_path, args) =>
       result({

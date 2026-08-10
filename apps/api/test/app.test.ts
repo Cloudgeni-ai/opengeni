@@ -494,12 +494,18 @@ describe("API helpers", () => {
     ).toBe(
       "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/downloads/:downloadId/save",
     );
+    expect(routeLabel(`/v1/workspaces/${workspace}/browser-sessions/browser-1/clipboard`)).toBe(
+      "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/clipboard",
+    );
     expect(
       routeLabel(
         `/v1/workspaces/${workspace}/computer-sessions/computer-1/targets/window-1/observation`,
       ),
     ).toBe(
       "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/targets/:targetId/observation",
+    );
+    expect(routeLabel(`/v1/workspaces/${workspace}/computer-sessions/computer-1/clipboard`)).toBe(
+      "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/clipboard",
     );
     expect(routeLabel(`/v1/workspaces/${workspace}/network-routes/route-1`)).toBe(
       "/v1/workspaces/:workspaceId/network-routes/:networkRouteId",

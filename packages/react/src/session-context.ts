@@ -236,6 +236,7 @@ const COMPUTER_INTERACTION_METHODS = [
   "resolveInteractionIntervention",
   "listComputerSessions",
   "getComputerSession",
+  "readComputerClipboard",
   "createComputerSession",
   "listComputerTargets",
   "observeComputerTarget",

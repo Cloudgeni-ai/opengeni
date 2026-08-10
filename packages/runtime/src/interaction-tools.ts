@@ -19,6 +19,7 @@ import {
   BrowserTargetListResponse,
   ComputerAction,
   ComputerActionReceipt,
+  ComputerClipboard,
   ComputerObservation,
   ComputerSession,
   ComputerSessionMutationResponse,
@@ -84,6 +85,7 @@ const TOOL_PERMISSION = {
   computer_open: "sessions:control",
   computer_targets: "sessions:read",
   computer_observe: "sessions:read",
+  computer_clipboard: "sessions:read",
   computer_act: "sessions:control",
   computer_lifecycle: "sessions:control",
 } as const satisfies Record<InteractionAttemptToolName, Permission>;
@@ -331,6 +333,7 @@ const ComputerObserveInput = z
     targetId: z.string().min(1).max(512),
   })
   .strict();
+const ComputerClipboardInput = z.object({ computerSessionId: z.string().uuid() }).strict();
 const ComputerActInput = z
   .object({
     computerSessionId: z.string().uuid(),
@@ -866,11 +869,25 @@ export function createInteractionAttemptToolDefinitions(
   });
 
   add({
+    name: "computer_clipboard",
+    codemodePath: ["interaction", "computer", "clipboard"],
+    title: "Read computer clipboard",
+    description:
+      "Read the bounded native OS clipboard for one exact ComputerSession graphical seat. This may be shared by ComputerSessions on the same physical login seat and is never the BrowserSession private clipboard. Use computer_act clipboard actions to write, clear, copy, or paste.",
+    input: ComputerClipboardInput,
+    output: ComputerClipboard,
+    readOnly: true,
+    idempotent: true,
+    execute: async (value) =>
+      await input.transport.readComputerClipboard(input.workspaceId, value.computerSessionId),
+  });
+
+  add({
     name: "computer_act",
     codemodePath: ["interaction", "computer", "act"],
     title: "Act in app or window",
     description:
-      "Perform one semantic, keyboard, pointer, focus, or launch action in an exact ComputerSession target. Omit fences to use a fresh observation automatically. Returns the durable causal receipt.",
+      "Perform one semantic, keyboard, clipboard, pointer, focus, or launch action in an exact ComputerSession target. Omit fences to use a fresh observation automatically. Returns the durable causal receipt.",
     input: ComputerActInput,
     output: ComputerActionReceipt,
     readOnly: false,

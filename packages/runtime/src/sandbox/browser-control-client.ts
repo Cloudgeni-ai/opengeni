@@ -23,6 +23,7 @@ import {
   BrowserWorkspaceFileStageResponse,
   ComputerActionCommand,
   ComputerActionReceipt,
+  ComputerClipboard,
   ComputerObservation,
   ComputerSessionCapabilities,
   ComputerTarget,
@@ -46,6 +47,7 @@ import {
   type BrowserWorkspaceFileStageResponse as BrowserWorkspaceFileStageResponseValue,
   type ComputerActionCommand as ComputerActionCommandValue,
   type ComputerActionReceipt as ComputerActionReceiptValue,
+  type ComputerClipboard as ComputerClipboardValue,
   type ComputerObservation as ComputerObservationValue,
   type ComputerSessionCapabilities as ComputerSessionCapabilitiesValue,
   type ComputerTarget as ComputerTargetValue,
@@ -1206,6 +1208,16 @@ export class ComputerControlSessionClient {
       await this.parent.requestForSession({
         method: "GET",
         path: this.targetPath(targetId, "observation"),
+        token: this.viewToken,
+      }),
+    );
+  }
+
+  async readClipboard(): Promise<ComputerClipboardValue> {
+    return ComputerClipboard.parse(
+      await this.parent.requestForSession({
+        method: "GET",
+        path: this.path("clipboard"),
         token: this.viewToken,
       }),
     );

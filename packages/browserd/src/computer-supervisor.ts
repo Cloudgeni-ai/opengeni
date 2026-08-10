@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import type {
   ComputerActionCommand,
   ComputerActionReceipt,
+  ComputerClipboard,
   ComputerObservation,
   ComputerSessionCapabilities,
   ComputerTarget,
@@ -53,6 +54,7 @@ export type ComputerSupervisorDriver = ComputerInteractionDriver & {
   readonly capabilities: ComputerSessionCapabilities;
   listTargets(): Promise<ComputerTarget[]>;
   capture(targetId: string): Promise<ComputerImageFrame>;
+  clipboard(): Promise<ComputerClipboard>;
   subscribeFrames(
     targetId: string,
     options?: ComputerFrameStreamOptions,
@@ -237,6 +239,10 @@ export class ComputerSupervisor {
     targetId: string,
   ): Promise<ComputerImageFrame> {
     return await this.requireActive(reference).driver.capture(targetId);
+  }
+
+  async clipboard(reference: ComputerSessionReference): Promise<ComputerClipboard> {
+    return await this.requireActive(reference).driver.clipboard();
   }
 
   async subscribeFrames(

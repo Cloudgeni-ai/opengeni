@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
 import {
+  ComputerClipboard,
   ComputerObservation,
   ComputerTarget,
   type ComputerActionCommand,
+  type ComputerClipboard as ComputerClipboardValue,
   type ComputerObservation as ComputerObservationValue,
   type ComputerSessionCapabilities,
   type ComputerTarget as ComputerTargetValue,
@@ -129,6 +131,20 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
         data: frame.data,
         capturedAt: this.now().toISOString(),
       };
+    } catch (error) {
+      throw predispatchError(error);
+    }
+  }
+
+  async clipboard(): Promise<ComputerClipboardValue> {
+    this.assertOpen();
+    try {
+      return ComputerClipboard.parse({
+        computerSessionId: this.computerSessionId,
+        controllerGeneration: this.controllerGeneration,
+        ...(await this.client.clipboard()),
+        observedAt: this.now().toISOString(),
+      });
     } catch (error) {
       throw predispatchError(error);
     }

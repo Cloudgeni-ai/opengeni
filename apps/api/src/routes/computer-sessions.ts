@@ -322,6 +322,26 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
     },
   );
 
+  app.get(
+    "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/clipboard",
+    async (context) => {
+      const { workspaceId, grant, computerSessionId } = await routePreamble(
+        context,
+        "sessions:read",
+      );
+      const result = await withActiveComputerController(
+        context,
+        grant,
+        workspaceId,
+        computerSessionId,
+        "session.read",
+        "computer.read",
+        async ({ sessionClient }) => await sessionClient.readClipboard(),
+      );
+      return context.json(result);
+    },
+  );
+
   app.post(
     "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/actions",
     async (context) => {

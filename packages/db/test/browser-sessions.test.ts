@@ -215,6 +215,7 @@ describe("durable BrowserSession lifecycle", () => {
         semanticActions: true,
         pointerInput: true,
         keyboardInput: true,
+        clipboard: true,
         backgroundActions: true,
         parallelApps: true,
       },

@@ -46,6 +46,13 @@ describe("NativeComputerDriver", () => {
         expectedObservationId: "observation-1",
       });
       expect(transport.dispatched).toEqual(transport.validated);
+      expect(await driver.clipboard()).toEqual({
+        computerSessionId,
+        controllerGeneration,
+        text: "fixture clipboard",
+        truncated: false,
+        observedAt: "2026-08-10T12:00:00.000Z",
+      });
 
       const frames = await driver.subscribeFrames("window-1", {
         format: "png",
@@ -136,6 +143,10 @@ class FixtureNativeTransport implements ComputerNativeTransport {
     };
   }
 
+  async clipboard() {
+    return { text: "fixture clipboard", truncated: false };
+  }
+
   async validate(nativeCommand: NativeComputerActionCommand): Promise<void> {
     if (this.validateError) throw this.validateError;
     this.validated = nativeCommand;
@@ -161,6 +172,7 @@ function capabilities(): ComputerSessionCapabilities {
     semanticActions: true,
     pointerInput: true,
     keyboardInput: true,
+    clipboard: true,
     backgroundActions: true,
     parallelApps: true,
   };

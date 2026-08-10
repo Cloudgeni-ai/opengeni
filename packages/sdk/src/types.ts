@@ -2396,6 +2396,7 @@ export type FirstPartyMcpToolName =
   | "computer_open"
   | "computer_targets"
   | "computer_observe"
+  | "computer_clipboard"
   | "computer_act"
   | "computer_lifecycle"
   | "variable_set_list"

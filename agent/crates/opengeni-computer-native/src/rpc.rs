@@ -60,6 +60,7 @@ enum NativeOperation {
     Targets,
     Observe { target_id: String },
     Capture { target_id: String },
+    Clipboard,
     Validate { command: NativeActionCommand },
     Dispatch { command: NativeActionCommand },
 }
@@ -261,6 +262,10 @@ async fn handle_request(
         NativeOperation::Capture { target_id } => {
             adapter.capture(&target_id).await.and_then(frame_payload)
         }
+        NativeOperation::Clipboard => match adapter.clipboard().await {
+            Ok(clipboard) => serialize_result(clipboard).map(payload),
+            Err(error) => Err(error),
+        },
         NativeOperation::Validate { command } => adapter
             .validate(&command)
             .await
@@ -412,8 +417,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        NativeAdapterResult, NativeCapabilities, NativeCapturedFrame, NativeObservation,
-        NativeTarget,
+        NativeAdapterResult, NativeCapabilities, NativeCapturedFrame, NativeClipboard,
+        NativeObservation, NativeTarget,
     };
 
     struct MockAdapter;
@@ -430,6 +435,7 @@ mod tests {
                 semantic_actions: true,
                 pointer_input: false,
                 keyboard_input: false,
+                clipboard: true,
                 background_actions: true,
                 parallel_apps: true,
             }
@@ -454,6 +460,13 @@ mod tests {
                 mime_type: "image/png".to_string(),
                 sha256: hex::encode(Sha256::digest(&bytes)),
                 bytes,
+            })
+        }
+
+        async fn clipboard(&self) -> NativeAdapterResult<NativeClipboard> {
+            Ok(NativeClipboard {
+                text: Some("hello".to_string()),
+                truncated: false,
             })
         }
 
@@ -492,6 +505,34 @@ mod tests {
         assert_eq!(response["requestId"], "r_test");
         assert_eq!(response["status"], "ok");
         assert_eq!(response["result"]["platform"], std::env::consts::OS);
+        client_write.shutdown().await.expect("close request stream");
+        task.await.expect("server task").expect("server result");
+    }
+
+    #[tokio::test]
+    async fn serves_a_correlated_bounded_native_clipboard_read() {
+        let (client, server) = duplex(16 * 1024);
+        let (mut client_read, mut client_write) = split(client);
+        let (server_read, server_write) = split(server);
+        let task = tokio::spawn(serve(Arc::new(MockAdapter), server_read, server_write));
+        let request = serde_json::to_vec(&json!({
+            "protocolVersion": NATIVE_RPC_PROTOCOL_VERSION,
+            "requestId": "r_clipboard",
+            "method": "clipboard",
+        }))
+        .expect("serialize request");
+        write_frame(&mut client_write, &request, MAX_REQUEST_BYTES)
+            .await
+            .expect("write request");
+        let response = read_frame(&mut client_read, MAX_RESPONSE_BYTES)
+            .await
+            .expect("read response")
+            .expect("response frame");
+        let response: Value = serde_json::from_slice(&response).expect("decode response");
+        assert_eq!(response["requestId"], "r_clipboard");
+        assert_eq!(response["status"], "ok");
+        assert_eq!(response["result"]["text"], "hello");
+        assert_eq!(response["result"]["truncated"], false);
         client_write.shutdown().await.expect("close request stream");
         task.await.expect("server task").expect("server result");
     }

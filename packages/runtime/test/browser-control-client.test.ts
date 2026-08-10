@@ -405,6 +405,13 @@ describe("BrowserControlClient", () => {
     const target = computerTarget(computerSessionId, controllerGeneration);
     const observation = computerObservation(target);
     const receipt = computerReceipt(operationId, observation);
+    const clipboard = {
+      computerSessionId,
+      controllerGeneration,
+      text: "fixture clipboard",
+      truncated: false,
+      observedAt: "2026-08-10T12:00:00.000Z",
+    };
     const requests: Array<{ path: string; authorization: string | null }> = [];
     const server = Bun.serve({
       port: 0,
@@ -438,6 +445,9 @@ describe("BrowserControlClient", () => {
         }
         if (url.pathname.endsWith("/observation") && request.method === "GET") {
           return success(observation);
+        }
+        if (url.pathname.endsWith("/clipboard") && request.method === "GET") {
+          return success(clipboard);
         }
         if (url.pathname.endsWith("/actions") && request.method === "POST") {
           return success(receipt);
@@ -489,6 +499,7 @@ describe("BrowserControlClient", () => {
       const session = client.computerSessionClient({ reference, controlToken, viewToken });
       expect(await session.listTargets()).toEqual([target]);
       expect(await session.observe(target.id)).toEqual(observation);
+      expect(await session.readClipboard()).toEqual(clipboard);
       expect(
         await session.action({
           protocolVersion: 1,
@@ -514,6 +525,10 @@ describe("BrowserControlClient", () => {
           { path: "POST /v1/computer-sessions", authorization: `Bearer ${adminToken}` },
           {
             path: `GET /v1/computer-sessions/${computerSessionId}/targets`,
+            authorization: `Bearer ${viewToken}`,
+          },
+          {
+            path: `GET /v1/computer-sessions/${computerSessionId}/clipboard`,
             authorization: `Bearer ${viewToken}`,
           },
           {
@@ -874,6 +889,7 @@ function computerCapabilities() {
     semanticActions: true,
     pointerInput: true,
     keyboardInput: true,
+    clipboard: true,
     backgroundActions: true,
     parallelApps: true,
   } as const;

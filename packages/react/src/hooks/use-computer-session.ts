@@ -1,6 +1,7 @@
 import type {
   ComputerAction,
   ComputerActionReceipt,
+  ComputerClipboard,
   ComputerFrame,
   ComputerObservation,
   ComputerSession,
@@ -28,6 +29,7 @@ export type UseComputerSessionResult = {
   mutating: boolean;
   error: Error | null;
   refresh: () => Promise<void>;
+  readClipboard: () => Promise<ComputerClipboard>;
   /** Changes only this viewer's target cursor; it never takes ownership or
    * foregrounds an application. */
   selectTarget: (targetId: string) => Promise<ComputerTarget>;
@@ -364,6 +366,11 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
     [dispatchAction],
   );
 
+  const readClipboard = useCallback(async (): Promise<ComputerClipboard> => {
+    if (!computerSessionId) throw new Error("No ComputerSession is selected.");
+    return await client.readComputerClipboard(workspaceId, computerSessionId);
+  }, [client, computerSessionId, workspaceId]);
+
   return {
     session: visible.session,
     targets: visible.targets,
@@ -374,6 +381,7 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
     mutating: visible.mutating,
     error: visible.error,
     refresh,
+    readClipboard,
     selectTarget,
     act,
     actFromFrame,

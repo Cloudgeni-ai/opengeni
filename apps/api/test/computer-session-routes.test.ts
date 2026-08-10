@@ -12,6 +12,7 @@ describe("ComputerSession route discipline", () => {
       '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId"',
       '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/targets"',
       '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/targets/:targetId/observation"',
+      '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/clipboard"',
       '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/actions"',
       '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/operations/:operationId"',
       '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/attachments"',

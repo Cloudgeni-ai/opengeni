@@ -2,7 +2,8 @@ use async_trait::async_trait;
 use serde::Serialize;
 
 use crate::{
-    NativeActionCommand, NativeCapabilities, NativeCapturedFrame, NativeObservation, NativeTarget,
+    NativeActionCommand, NativeCapabilities, NativeCapturedFrame, NativeClipboard,
+    NativeObservation, NativeTarget,
 };
 
 /// Stable native-adapter failure classes mapped by computerd into the public
@@ -124,6 +125,9 @@ pub trait ComputerAdapter: Send + Sync {
 
     /// Captures one exact target and establishes a new pointer frame fence.
     async fn capture(&self, target_id: &str) -> NativeAdapterResult<NativeCapturedFrame>;
+
+    /// Reads the graphical seat's bounded native text clipboard.
+    async fn clipboard(&self) -> NativeAdapterResult<NativeClipboard>;
 
     /// Validates all observation/frame fences without performing a mutation.
     async fn validate(&self, command: &NativeActionCommand) -> NativeAdapterResult<()>;

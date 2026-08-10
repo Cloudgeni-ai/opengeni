@@ -43,6 +43,7 @@ describe("interaction attempt tools", () => {
       "browser_debug",
       "computer_targets",
       "computer_observe",
+      "computer_clipboard",
     ]);
     const environment = createAttemptToolEnvironment({
       scope: {
@@ -56,7 +57,7 @@ describe("interaction attempt tools", () => {
       generation: 1,
       definitions,
     });
-    expect(environment.catalog.entries).toHaveLength(6);
+    expect(environment.catalog.entries).toHaveLength(7);
     expect(environment.catalog.entries[0]).toMatchObject({
       identity: { serverId: "interaction", toolName: "interaction_discover" },
       modelName: "interaction__interaction_discover",
@@ -244,6 +245,35 @@ describe("interaction attempt tools", () => {
       },
     });
     expect(result.isError).not.toBe(true);
+  });
+
+  test("reads only the exact ComputerSession native clipboard", async () => {
+    const clipboard = {
+      computerSessionId,
+      controllerGeneration: "controller-1",
+      text: "native clipboard",
+      truncated: false,
+      observedAt: now,
+    };
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        readComputerClipboard: async () => clipboard,
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_clipboard"],
+      permissions: ["sessions:read"],
+    });
+    const result = await definitions[0]!.execute(
+      { computerSessionId },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+
+    expect(definitions[0]).toMatchObject({
+      codemodePath: ["interaction", "computer", "clipboard"],
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    });
+    expect(result.structuredContent).toEqual(clipboard);
   });
 
   test("routes browser auth discovery through the canonical typed transport", async () => {

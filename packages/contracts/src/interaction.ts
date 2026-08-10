@@ -2427,11 +2427,42 @@ export const ComputerSessionCapabilities = z
     semanticActions: z.boolean(),
     pointerInput: z.boolean(),
     keyboardInput: z.boolean(),
+    clipboard: z.boolean(),
     backgroundActions: z.boolean(),
     parallelApps: z.boolean(),
   })
   .strict();
 export type ComputerSessionCapabilities = z.infer<typeof ComputerSessionCapabilities>;
+
+/** A fresh bounded read of the native clipboard for the ComputerSession's
+ * graphical seat. Physical ComputerSessions on the same login seat intentionally
+ * observe the same OS clipboard; BrowserSession private clipboards never do. */
+export const ComputerClipboard = z
+  .object({
+    computerSessionId: z.string().uuid(),
+    controllerGeneration: opaqueGeneration,
+    text: z
+      .string()
+      .max(INTERACTION_MAX_CLIPBOARD_BYTES)
+      .refine(
+        (value) => new TextEncoder().encode(value).byteLength <= INTERACTION_MAX_CLIPBOARD_BYTES,
+        { message: "computer clipboard text exceeds its UTF-8 byte envelope" },
+      )
+      .nullable(),
+    truncated: z.boolean(),
+    observedAt: z.string().datetime({ offset: true }),
+  })
+  .strict()
+  .superRefine((clipboard, context) => {
+    if (clipboard.text === null && clipboard.truncated) {
+      context.addIssue({
+        code: "custom",
+        path: ["truncated"],
+        message: "an unavailable computer clipboard value cannot be truncated",
+      });
+    }
+  });
+export type ComputerClipboard = z.infer<typeof ComputerClipboard>;
 
 export const ComputerSession = z
   .object({
@@ -2593,6 +2624,29 @@ export const ComputerAction = z.discriminatedUnion("type", [
       value: z.string().max(1_000_000),
     })
     .strict(),
+  z
+    .object({
+      type: z.literal("clipboard"),
+      operation: z.enum(["write", "clear", "copy", "paste"]),
+      text: z
+        .string()
+        .max(INTERACTION_MAX_CLIPBOARD_BYTES)
+        .refine(
+          (value) => new TextEncoder().encode(value).byteLength <= INTERACTION_MAX_CLIPBOARD_BYTES,
+          { message: "computer clipboard text exceeds its UTF-8 byte envelope" },
+        )
+        .optional(),
+    })
+    .strict()
+    .superRefine((action, context) => {
+      if ((action.operation === "write") !== (action.text !== undefined)) {
+        context.addIssue({
+          code: "custom",
+          path: ["text"],
+          message: "computer clipboard text is required exactly for write",
+        });
+      }
+    }),
   z.object({ type: z.literal("focus"), targetId: boundedOpaqueId }).strict(),
   z
     .object({

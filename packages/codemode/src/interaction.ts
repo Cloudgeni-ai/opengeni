@@ -23,6 +23,7 @@ import type {
   BrowserTargetListResponse,
   ComputerAction,
   ComputerActionReceipt,
+  ComputerClipboard,
   ComputerLocator,
   ComputerObservation,
   ComputerSession,
@@ -64,6 +65,7 @@ const PATH = {
   computerOpen: ["interaction", "computer", "open"],
   computerTargets: ["interaction", "computer", "targets"],
   computerObserve: ["interaction", "computer", "observe"],
+  computerClipboard: ["interaction", "computer", "clipboard"],
   computerAct: ["interaction", "computer", "act"],
   computerLifecycle: ["interaction", "computer", "lifecycle"],
 } as const;
@@ -875,6 +877,7 @@ export class CodemodeComputerCollection {
 export class CodemodeComputer {
   readonly targets: CodemodeComputerTargetCollection;
   readonly apps: CodemodeComputerTargetCollection;
+  readonly clipboard: CodemodeComputerClipboard;
 
   constructor(
     private readonly client: CodemodeClientProvider,
@@ -882,6 +885,7 @@ export class CodemodeComputer {
   ) {
     this.targets = new CodemodeComputerTargetCollection(client, id);
     this.apps = this.targets;
+    this.clipboard = new CodemodeComputerClipboard(client, id, this.targets);
   }
 
   async refresh(callOptions: CodemodeCallOptions = {}): Promise<ComputerSession> {
@@ -929,6 +933,61 @@ export class CodemodeComputer {
   }
 }
 
+export class CodemodeComputerClipboard {
+  constructor(
+    private readonly client: CodemodeClientProvider,
+    readonly computerSessionId: string,
+    private readonly targets: CodemodeComputerTargetCollection,
+  ) {}
+
+  async read(callOptions: CodemodeCallOptions = {}): Promise<ComputerClipboard> {
+    return await callStructured(
+      this.client,
+      PATH.computerClipboard,
+      { computerSessionId: this.computerSessionId },
+      callOptions,
+    );
+  }
+
+  async write(
+    text: string,
+    options: { targetId?: string | undefined } = {},
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<ComputerActionReceipt> {
+    return await this.mutate({ type: "clipboard", operation: "write", text }, options, callOptions);
+  }
+
+  async clear(
+    options: { targetId?: string | undefined } = {},
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<ComputerActionReceipt> {
+    return await this.mutate({ type: "clipboard", operation: "clear" }, options, callOptions);
+  }
+
+  async copy(
+    options: { targetId?: string | undefined } = {},
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<ComputerActionReceipt> {
+    return await this.mutate({ type: "clipboard", operation: "copy" }, options, callOptions);
+  }
+
+  async paste(
+    options: { targetId?: string | undefined } = {},
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<ComputerActionReceipt> {
+    return await this.mutate({ type: "clipboard", operation: "paste" }, options, callOptions);
+  }
+
+  private async mutate(
+    action: Extract<ComputerAction, { type: "clipboard" }>,
+    options: { targetId?: string | undefined },
+    callOptions: CodemodeCallOptions,
+  ): Promise<ComputerActionReceipt> {
+    const targetId = await this.targets.resolveSeatId(options.targetId, callOptions);
+    return await this.targets.use(targetId).act(action, {}, callOptions);
+  }
+}
+
 export class CodemodeComputerTargetCollection {
   constructor(
     private readonly client: CodemodeClientProvider,
@@ -966,6 +1025,17 @@ export class CodemodeComputerTargetCollection {
     if (listed.targets.length === 0)
       throw new Error("Computer has no app, window, or screen targets");
     throw new Error("Computer target is ambiguous; select an exact app or window");
+  }
+
+  async resolveSeatId(
+    targetId: string | undefined,
+    callOptions: CodemodeCallOptions,
+  ): Promise<string> {
+    if (targetId) return await this.resolveId(targetId, callOptions);
+    const listed = await this.list(callOptions);
+    const screens = listed.targets.filter((target) => target.kind === "screen");
+    if (screens.length === 1) return screens[0]!.id;
+    return await this.resolveId(undefined, callOptions);
   }
 }
 

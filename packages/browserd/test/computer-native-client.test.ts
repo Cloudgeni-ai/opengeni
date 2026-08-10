@@ -17,6 +17,7 @@ describe("ComputerNativeClient", () => {
       const [targets, capabilities] = await Promise.all([client.targets(), client.capabilities()]);
       expect(targets[0]).toMatchObject({ id: "window-1", targetGeneration: "target-generation-1" });
       expect(capabilities.parallelApps).toBe(true);
+      expect(await client.clipboard()).toEqual({ text: "fixture clipboard", truncated: false });
       const frame = await client.capture("window-1");
       expect(new TextDecoder().decode(frame.data)).toBe("fixture-png");
       expect(frame).toMatchObject({ frameId: "frame-1", width: 10, height: 20 });

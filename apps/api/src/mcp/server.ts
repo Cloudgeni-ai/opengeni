@@ -282,6 +282,7 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   computer_open: { sessionRequired: true, allOf: ["sessions:control"] },
   computer_targets: { sessionRequired: true, allOf: ["sessions:read"] },
   computer_observe: { sessionRequired: true, allOf: ["sessions:read"] },
+  computer_clipboard: { sessionRequired: true, allOf: ["sessions:read"] },
   computer_act: { sessionRequired: true, allOf: ["sessions:control"] },
   computer_lifecycle: { sessionRequired: true, allOf: ["sessions:control"] },
   variable_set_list: { allOf: ["variable-sets:list", "secrets:list"] },

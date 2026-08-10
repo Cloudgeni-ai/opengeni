@@ -62,6 +62,7 @@ function computerSession(
       semanticActions: true,
       pointerInput: true,
       keyboardInput: true,
+      clipboard: true,
       backgroundActions: true,
       parallelApps: true,
     },

@@ -138,6 +138,7 @@ function browserActionMode(action: BrowserActionRequest["action"]): string {
 function computerActionMode(type: ComputerActionRequest["action"]["type"]): string {
   if (type === "pointer") return "coordinate";
   if (type === "keyboard") return "keyboard";
+  if (type === "clipboard") return "clipboard";
   if (type === "launch") return "lifecycle";
   return "semantic";
 }

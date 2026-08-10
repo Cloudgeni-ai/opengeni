@@ -16,6 +16,7 @@ import {
   ComputerActionCommand,
   ComputerActionRequest,
   ComputerActionReceipt,
+  ComputerClipboard,
   ComputerSessionAttachment,
   ComputerSessionAttachmentRequest,
   ComputerTargetListResponse,
@@ -350,6 +351,49 @@ describe("interaction contracts", () => {
         error: null,
       }).success,
     ).toBe(false);
+  });
+
+  test("keeps native computer clipboard reads bounded and mutations causal", () => {
+    expect(
+      ComputerClipboard.parse({
+        computerSessionId,
+        controllerGeneration: "controller-2",
+        text: "native clipboard",
+        truncated: false,
+        observedAt: "2026-08-10T12:00:00.000Z",
+      }),
+    ).toMatchObject({ text: "native clipboard", truncated: false });
+    expect(
+      ComputerClipboard.safeParse({
+        computerSessionId,
+        controllerGeneration: "controller-2",
+        text: null,
+        truncated: true,
+        observedAt: "2026-08-10T12:00:00.000Z",
+      }).success,
+    ).toBe(false);
+
+    const base = {
+      operationId,
+      targetId: "screen-1",
+      expectedTargetGeneration: "target-4",
+      expectedObservationId: null,
+      expectedFrameId: null,
+    };
+    expect(
+      ComputerActionRequest.parse({
+        ...base,
+        action: { type: "clipboard", operation: "write", text: "hello" },
+      }).action,
+    ).toEqual({ type: "clipboard", operation: "write", text: "hello" });
+    for (const action of [
+      { type: "clipboard", operation: "write" },
+      { type: "clipboard", operation: "clear", text: "unexpected" },
+      { type: "clipboard", operation: "copy", text: "unexpected" },
+      { type: "clipboard", operation: "paste", text: "unexpected" },
+    ]) {
+      expect(ComputerActionRequest.safeParse({ ...base, action }).success).toBe(false);
+    }
   });
 
   test("validates generation-fenced human pointer actions", () => {

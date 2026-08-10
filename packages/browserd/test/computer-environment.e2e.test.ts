@@ -5,12 +5,15 @@ import { join } from "node:path";
 import type {
   BrowserActionCommand,
   BrowserObservation,
+  ComputerAction,
   ComputerActionCommand,
   ComputerObservation,
+  ComputerTarget,
   InteractionSemanticNodeValue,
 } from "@opengeni/contracts";
 import {
   BrowserSupervisor,
+  ComputerNativeClient,
   ComputerSupervisor,
   LinuxVirtualComputerEnvironmentAllocator,
   type ComputerEnvironmentAllocator,
@@ -83,6 +86,78 @@ test.skipIf(!enabled)(
         receipt.observation && hasValue(receipt.observation, "typed through the native adapter"),
       ).toBe(true);
 
+      const updatedInput = findNode(receipt.observation!, "Fixture input");
+      const focused = await supervisor.action(
+        semanticCommand(receipt.observation!, updatedInput.ref, "focus"),
+      );
+      expect(focused.state).toBe("completed");
+      const screen = (await supervisor.listTargets(first)).find(
+        (target) => target.kind === "screen",
+      );
+      if (!screen) throw new Error("isolated Linux screen target is missing");
+      expect(
+        (
+          await supervisor.action(
+            screenCommand(first, screen, {
+              type: "keyboard",
+              action: "press",
+              value: "Control+a",
+            }),
+          )
+        ).state,
+      ).toBe("completed");
+      expect(
+        (
+          await supervisor.action(
+            screenCommand(first, screen, { type: "clipboard", operation: "copy" }),
+          )
+        ).state,
+      ).toBe("completed");
+      await waitForClipboardText(supervisor, first, "typed through the native adapter");
+
+      const clipboardWrite = await supervisor.action(
+        screenCommand(first, screen, {
+          type: "clipboard",
+          operation: "write",
+          text: "pasted through the native clipboard Ω",
+        }),
+      );
+      expect(clipboardWrite.state).toBe("completed");
+      expect(await supervisor.clipboard(first)).toMatchObject({
+        text: "pasted through the native clipboard Ω",
+        truncated: false,
+      });
+      expect(await supervisor.clipboard(second)).toMatchObject({ text: null, truncated: false });
+      expect(
+        (
+          await supervisor.action(
+            screenCommand(first, screen, {
+              type: "keyboard",
+              action: "press",
+              value: "Control+a",
+            }),
+          )
+        ).state,
+      ).toBe("completed");
+      expect(
+        (
+          await supervisor.action(
+            screenCommand(first, screen, { type: "clipboard", operation: "paste" }),
+          )
+        ).state,
+      ).toBe("completed");
+      await waitForValue(
+        supervisor,
+        first,
+        firstTarget.id,
+        "pasted through the native clipboard Ω",
+      );
+      const clipboardClear = await supervisor.action(
+        screenCommand(first, screen, { type: "clipboard", operation: "clear" }),
+      );
+      expect(clipboardClear.state).toBe("completed");
+      expect(await supervisor.clipboard(first)).toMatchObject({ text: null, truncated: false });
+
       const frame = await supervisor.capture(
         { computerSessionId: firstId, controllerGeneration: "controller-a" },
         firstTarget.id,
@@ -110,6 +185,58 @@ test.skipIf(!enabled)(
     } finally {
       await supervisor.close();
       await rm(rootDirectory, { recursive: true, force: true });
+    }
+  },
+  30_000,
+);
+
+test.skipIf(!enabled)(
+  "shares one live Linux seat clipboard across independent native helpers",
+  async () => {
+    const allocator = new LinuxVirtualComputerEnvironmentAllocator();
+    const sessionDirectory = await mkdtemp("/tmp/og-shared-seat-");
+    let lease: ComputerEnvironmentLease | null = null;
+    let first: ComputerNativeClient | null = null;
+    let second: ComputerNativeClient | null = null;
+    try {
+      lease = await allocator.allocate({
+        computerSessionId: "77777777-7777-4777-8777-777777777777",
+        controllerGeneration: "shared-seat-controller",
+        sessionDirectory,
+        baseEnvironment: process.env,
+      });
+      const options = {
+        binaryPath: process.env.OPENGENI_COMPUTER_NATIVE_BINARY!,
+        env: { ...process.env, ...lease.environment },
+      };
+      first = await ComputerNativeClient.open(options);
+      second = await ComputerNativeClient.open(options);
+      const firstScreen = (await first.targets()).find((target) => target.kind === "screen");
+      const secondScreen = (await second.targets()).find((target) => target.kind === "screen");
+      if (!firstScreen || !secondScreen) throw new Error("shared Linux screen target is missing");
+      await first.dispatch({
+        targetId: firstScreen.id,
+        expectedTargetGeneration: firstScreen.targetGeneration,
+        expectedObservationId: null,
+        expectedFrameId: null,
+        action: { type: "clipboard", operation: "write", text: "shared seat clipboard Ω" },
+      });
+      expect(await second.clipboard()).toEqual({
+        text: "shared seat clipboard Ω",
+        truncated: false,
+      });
+      await second.dispatch({
+        targetId: secondScreen.id,
+        expectedTargetGeneration: secondScreen.targetGeneration,
+        expectedObservationId: null,
+        expectedFrameId: null,
+        action: { type: "clipboard", operation: "clear" },
+      });
+      expect(await first.clipboard()).toEqual({ text: null, truncated: false });
+    } finally {
+      await Promise.allSettled([first?.close(), second?.close()]);
+      await lease?.close();
+      await rm(sessionDirectory, { recursive: true, force: true });
     }
   },
   30_000,
@@ -433,6 +560,72 @@ function setValueCommand(
       value,
     },
   };
+}
+
+function semanticCommand(
+  observation: ComputerObservation,
+  ref: string,
+  action: "focus",
+): ComputerActionCommand {
+  return {
+    protocolVersion: 1,
+    operationId: randomUUID(),
+    computerSessionId: observation.computerSessionId,
+    controllerGeneration: observation.target.controllerGeneration,
+    targetId: observation.target.id,
+    expectedTargetGeneration: observation.target.targetGeneration,
+    expectedObservationId: observation.observationId,
+    expectedFrameId: null,
+    actor: { kind: "agent", subjectId: "agent:linux-e2e" },
+    action: { type: "semantic", locator: { kind: "ref", ref }, action },
+  };
+}
+
+function screenCommand(
+  reference: { computerSessionId: string; controllerGeneration: string },
+  target: ComputerTarget,
+  action: ComputerAction,
+): ComputerActionCommand {
+  return {
+    protocolVersion: 1,
+    operationId: randomUUID(),
+    computerSessionId: reference.computerSessionId,
+    controllerGeneration: reference.controllerGeneration,
+    targetId: target.id,
+    expectedTargetGeneration: target.targetGeneration,
+    expectedObservationId: null,
+    expectedFrameId: null,
+    actor: { kind: "agent", subjectId: "agent:linux-e2e" },
+    action,
+  };
+}
+
+async function waitForClipboardText(
+  supervisor: ComputerSupervisor,
+  reference: { computerSessionId: string; controllerGeneration: string },
+  text: string,
+): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  do {
+    if ((await supervisor.clipboard(reference)).text === text) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  } while (Date.now() < deadline);
+  throw new Error(`native clipboard never contained ${text}`);
+}
+
+async function waitForValue(
+  supervisor: ComputerSupervisor,
+  reference: { computerSessionId: string; controllerGeneration: string },
+  targetId: string,
+  value: string,
+): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  do {
+    const observation = await supervisor.observe(reference, targetId);
+    if (hasValue(observation, value)) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  } while (Date.now() < deadline);
+  throw new Error(`native target never contained ${value}`);
 }
 
 function gtkFixture(title: string): string {

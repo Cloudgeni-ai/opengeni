@@ -937,8 +937,17 @@ export type ComputerSessionCapabilities = {
   semanticActions: boolean;
   pointerInput: boolean;
   keyboardInput: boolean;
+  clipboard: boolean;
   backgroundActions: boolean;
   parallelApps: boolean;
+};
+
+export type ComputerClipboard = {
+  computerSessionId: string;
+  controllerGeneration: string;
+  text: string | null;
+  truncated: boolean;
+  observedAt: string;
 };
 
 export type ComputerSession = {
@@ -1030,6 +1039,11 @@ export type ComputerAction =
       button?: "left" | "right" | "middle" | undefined;
     }
   | { type: "keyboard"; action: "type" | "press"; value: string }
+  | {
+      type: "clipboard";
+      operation: "write" | "clear" | "copy" | "paste";
+      text?: string | undefined;
+    }
   | { type: "focus"; targetId: string }
   | { type: "launch"; applicationId: string };
 
@@ -1368,6 +1382,11 @@ export interface InteractionTransport {
     computerSessionId: string,
     options?: OpenGeniRequestOptions,
   ): Promise<ComputerSession>;
+  readComputerClipboard(
+    workspaceId: string,
+    computerSessionId: string,
+    options?: OpenGeniRequestOptions,
+  ): Promise<ComputerClipboard>;
   createComputerSession(
     workspaceId: string,
     request: CreateComputerSessionRequest,
@@ -2168,6 +2187,7 @@ export class ComputerSessionResource {
   readonly targets: ComputerTargetCollection;
   /** Native application/window targets are also the public app collection. */
   readonly apps: ComputerTargetCollection;
+  readonly clipboard: ComputerClipboardResource;
 
   constructor(
     private readonly transport: BrowserInteractionTransport,
@@ -2176,6 +2196,7 @@ export class ComputerSessionResource {
   ) {
     this.targets = new ComputerTargetCollection(transport, workspaceId, id);
     this.apps = this.targets;
+    this.clipboard = new ComputerClipboardResource(transport, workspaceId, id);
   }
 
   async get(options: OpenGeniRequestOptions = {}): Promise<ComputerSession> {
@@ -2224,6 +2245,26 @@ export class ComputerSessionResource {
     options: OpenGeniRequestOptions = {},
   ): Promise<ComputerSessionMutationResponse> {
     return await this.transport.endComputerSession(this.workspaceId, this.id, request, options);
+  }
+}
+
+export class ComputerClipboardResource {
+  constructor(
+    private readonly transport: BrowserInteractionTransport,
+    readonly workspaceId: string,
+    readonly computerSessionId: string,
+  ) {}
+
+  async read(options: OpenGeniRequestOptions = {}): Promise<ComputerClipboard> {
+    const clipboard = await this.transport.readComputerClipboard(
+      this.workspaceId,
+      this.computerSessionId,
+      options,
+    );
+    if (clipboard.computerSessionId !== this.computerSessionId) {
+      throw new Error("Computer clipboard belongs to another ComputerSession");
+    }
+    return clipboard;
   }
 }
 

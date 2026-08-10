@@ -22,10 +22,22 @@ pub struct NativeCapabilities {
     pub pointer_input: bool,
     /// Keyboard input is available.
     pub keyboard_input: bool,
+    /// The graphical seat's native text clipboard is available.
+    pub clipboard: bool,
     /// Semantic actions can operate without foregrounding the target.
     pub background_actions: bool,
     /// Independent applications can receive semantic actions concurrently.
     pub parallel_apps: bool,
+}
+
+/// One bounded read of the graphical seat's native text clipboard.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeClipboard {
+    /// UTF-8 text, or `None` when the clipboard is empty/non-text.
+    pub text: Option<String>,
+    /// Whether an oversized ambient value was truncated to the public envelope.
+    pub truncated: bool,
 }
 
 /// Rectangle in logical screen coordinates.
@@ -326,6 +338,20 @@ pub enum NativeKeyboardAction {
     Press,
 }
 
+/// Native clipboard operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeClipboardAction {
+    /// Replace the seat clipboard with supplied text.
+    Write,
+    /// Clear the seat clipboard.
+    Clear,
+    /// Send the platform-standard copy command to the target.
+    Copy,
+    /// Send the platform-standard paste command to the target.
+    Paste,
+}
+
 /// Native action union.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -366,6 +392,13 @@ pub enum NativeAction {
         action: NativeKeyboardAction,
         /// Text or key/chord.
         value: String,
+    },
+    /// Read/write support is seat-scoped; copy/paste additionally target focus.
+    Clipboard {
+        /// Clipboard operation.
+        operation: NativeClipboardAction,
+        /// Required exactly for `write`.
+        text: Option<String>,
     },
     /// Focus another app/window target.
     Focus {

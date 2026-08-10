@@ -18,14 +18,16 @@ use sha2::{Digest as _, Sha256};
 use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
+use crate::clipboard::NativeClipboardController;
 use crate::tree::semantic_roots_equivalent;
 use crate::{
     ComputerAdapter, NativeAction, NativeActionCommand, NativeActionValue, NativeAdapterError,
     NativeAdapterErrorCode, NativeAdapterResult, NativeCapabilities, NativeCapturedFrame,
-    NativeKeyboardAction, NativeLocator, NativeNodeMetadata, NativeNodeValue, NativeObservation,
-    NativePointerAction, NativePointerButton, NativeRect, NativeRedactedValue,
-    NativeRedactionReason, NativeSemanticAction, NativeSemanticPlatform, NativeTarget,
-    NativeTargetKind, RawSemanticNode, SemanticSnapshotIndex,
+    NativeClipboard, NativeClipboardAction, NativeKeyboardAction, NativeLocator,
+    NativeNodeMetadata, NativeNodeValue, NativeObservation, NativePointerAction,
+    NativePointerButton, NativeRect, NativeRedactedValue, NativeRedactionReason,
+    NativeSemanticAction, NativeSemanticPlatform, NativeTarget, NativeTargetKind, RawSemanticNode,
+    SemanticSnapshotIndex,
 };
 
 const MAX_WINDOW_FRAME_FENCES: usize = 512;
@@ -84,6 +86,7 @@ pub(crate) struct AxComputerAdapter {
     latest: RwLock<BTreeMap<String, StoredObservation>>,
     latest_screen_frames: RwLock<BTreeMap<String, ScreenFrameFence>>,
     latest_window_frames: RwLock<BTreeMap<String, WindowFrameFence>>,
+    clipboard: Option<NativeClipboardController>,
     /// macOS exposes one foreground Aqua input seat per login session. AX-only
     /// mutations stay parallel on their per-process workers, but anything that
     /// focuses/launches an app or emits CGEvent input must hold this queue.
@@ -114,6 +117,7 @@ impl AxComputerAdapter {
             latest: RwLock::new(BTreeMap::new()),
             latest_screen_frames: RwLock::new(BTreeMap::new()),
             latest_window_frames: RwLock::new(BTreeMap::new()),
+            clipboard: NativeClipboardController::open().ok(),
             input_seat: Mutex::new(()),
         })
     }
@@ -513,6 +517,14 @@ impl AxComputerAdapter {
                 validate_optional_end(*end_x, *end_y, frame.width, frame.height)?;
             }
             NativeAction::Keyboard { .. } | NativeAction::Launch { .. } => {}
+            NativeAction::Clipboard { operation, text } => {
+                validate_clipboard_payload(*operation, text.as_deref())?;
+                if self.clipboard.is_none() {
+                    return Err(NativeAdapterError::unsupported(
+                        "native text clipboard is unavailable on this macOS login seat",
+                    ));
+                }
+            }
             NativeAction::Semantic { .. } | NativeAction::Focus { .. } => {
                 return Err(NativeAdapterError::unsupported(
                     "semantic/focus actions cannot target the macOS screen",
@@ -776,7 +788,7 @@ impl AxComputerAdapter {
                 true,
             ));
         }
-        let input = keyboard_input(&command.action)?;
+        let input = keyboard_or_clipboard_input(&command.action)?;
         self.invalidate_frames().await;
         let native = record.native.clone();
         tokio::task::spawn_blocking(move || focus_and_inject_target(&native, &[input]))
@@ -795,6 +807,41 @@ impl AxComputerAdapter {
                 ))
             })
     }
+
+    async fn dispatch_clipboard_storage(
+        &self,
+        command: &NativeActionCommand,
+    ) -> Option<NativeAdapterResult<NativeObservation>> {
+        let NativeAction::Clipboard { operation, text } = &command.action else {
+            return None;
+        };
+        if !matches!(
+            operation,
+            NativeClipboardAction::Write | NativeClipboardAction::Clear
+        ) {
+            return None;
+        }
+        Some(
+            async {
+                self.validate(command).await?;
+                self.clipboard
+                    .as_ref()
+                    .ok_or_else(|| {
+                        NativeAdapterError::unsupported(
+                            "native text clipboard is unavailable on this macOS login seat",
+                        )
+                    })?
+                    .mutate(*operation, text.clone())
+                    .await?;
+                self.observe(&command.target_id).await.map_err(|error| {
+                    NativeAdapterError::outcome_unknown(format!(
+                        "native clipboard changed but target state could not be observed: {error}"
+                    ))
+                })
+            }
+            .await,
+        )
+    }
 }
 
 #[async_trait]
@@ -806,6 +853,7 @@ impl ComputerAdapter for AxComputerAdapter {
             accessibility: accessibility_trusted(),
             input_monitoring: input_monitoring_granted(),
             screen_capture: screen_capture_granted(),
+            clipboard: self.clipboard.is_some(),
         })
     }
 
@@ -848,6 +896,19 @@ impl ComputerAdapter for AxComputerAdapter {
         }
     }
 
+    async fn clipboard(&self) -> NativeAdapterResult<NativeClipboard> {
+        Self::ensure_unlocked()?;
+        self.clipboard
+            .as_ref()
+            .ok_or_else(|| {
+                NativeAdapterError::unsupported(
+                    "native text clipboard is unavailable on this macOS login seat",
+                )
+            })?
+            .read()
+            .await
+    }
+
     async fn validate(&self, command: &NativeActionCommand) -> NativeAdapterResult<()> {
         Self::ensure_unlocked()?;
         if let Some(screen) = Self::load_screen(&command.target_id)? {
@@ -861,7 +922,15 @@ impl ComputerAdapter for AxComputerAdapter {
             NativeAction::Semantic { .. } | NativeAction::Focus { .. } => {
                 self.validate_observed_action(command).await
             }
-            NativeAction::Keyboard { .. } => {
+            NativeAction::Keyboard { .. } | NativeAction::Clipboard { .. } => {
+                if let NativeAction::Clipboard { operation, text } = &command.action {
+                    validate_clipboard_payload(*operation, text.as_deref())?;
+                    if self.clipboard.is_none() {
+                        return Err(NativeAdapterError::unsupported(
+                            "native text clipboard is unavailable on this macOS login seat",
+                        ));
+                    }
+                }
                 let record = Self::load_target(&command.target_id).await?;
                 if record.target.target_generation != command.expected_target_generation {
                     return Err(NativeAdapterError::definite(
@@ -883,6 +952,9 @@ impl ComputerAdapter for AxComputerAdapter {
         command: &NativeActionCommand,
     ) -> NativeAdapterResult<NativeObservation> {
         Self::ensure_unlocked()?;
+        if let Some(result) = self.dispatch_clipboard_storage(command).await {
+            return result;
+        }
         if let Some(screen) = Self::load_screen(&command.target_id)? {
             // Screen pointer/keyboard input and activating application launch
             // all contend for the same physical Aqua seat.
@@ -909,8 +981,9 @@ impl ComputerAdapter for AxComputerAdapter {
                     )
                     .map_err(map_ffi_mutation)?;
                 }
-                NativeAction::Keyboard { .. } => {
-                    inject_batch(&[keyboard_input(&command.action)?]).map_err(map_ffi_mutation)?;
+                NativeAction::Keyboard { .. } | NativeAction::Clipboard { .. } => {
+                    inject_batch(&[keyboard_or_clipboard_input(&command.action)?])
+                        .map_err(map_ffi_mutation)?;
                 }
                 NativeAction::Launch { application_id } => {
                     let application_id = application_id.clone();
@@ -929,7 +1002,9 @@ impl ComputerAdapter for AxComputerAdapter {
         }
         match &command.action {
             NativeAction::Pointer { .. } => self.dispatch_window_pointer(command).await,
-            NativeAction::Keyboard { .. } => self.dispatch_keyboard_target(command).await,
+            NativeAction::Keyboard { .. } | NativeAction::Clipboard { .. } => {
+                self.dispatch_keyboard_target(command).await
+            }
             NativeAction::Semantic { .. } | NativeAction::Focus { .. } => {
                 self.dispatch_semantic(command).await
             }
@@ -947,6 +1022,7 @@ struct MacCapabilityGrants {
     accessibility: bool,
     input_monitoring: bool,
     screen_capture: bool,
+    clipboard: bool,
 }
 
 fn capabilities_for_grants(grants: MacCapabilityGrants) -> NativeCapabilities {
@@ -962,6 +1038,7 @@ fn capabilities_for_grants(grants: MacCapabilityGrants) -> NativeCapabilities {
         semantic_actions: semantic,
         pointer_input: input,
         keyboard_input: input,
+        clipboard: grants.unlocked && grants.clipboard,
         background_actions: semantic,
         parallel_apps: semantic,
     }
@@ -1168,22 +1245,56 @@ fn pointer_inputs(action: &NativeAction) -> NativeAdapterResult<Vec<InputEvent>>
     })
 }
 
-fn keyboard_input(action: &NativeAction) -> NativeAdapterResult<InputEvent> {
-    let NativeAction::Keyboard { action, value } = action else {
-        return Err(invalid("expected keyboard action"));
-    };
-    Ok(match action {
-        NativeKeyboardAction::Type => InputEvent::Key {
-            text: Some(value.clone()),
-            named: None,
-            action: KeyAction::Press,
-        },
-        NativeKeyboardAction::Press => InputEvent::Key {
-            text: None,
-            named: Some(value.clone()),
-            action: KeyAction::Press,
-        },
-    })
+fn keyboard_or_clipboard_input(action: &NativeAction) -> NativeAdapterResult<InputEvent> {
+    match action {
+        NativeAction::Keyboard { action, value } => Ok(match action {
+            NativeKeyboardAction::Type => InputEvent::Key {
+                text: Some(value.clone()),
+                named: None,
+                action: KeyAction::Press,
+            },
+            NativeKeyboardAction::Press => InputEvent::Key {
+                text: None,
+                named: Some(value.clone()),
+                action: KeyAction::Press,
+            },
+        }),
+        NativeAction::Clipboard { operation, text } => {
+            validate_clipboard_payload(*operation, text.as_deref())?;
+            let named = match operation {
+                NativeClipboardAction::Copy => "Command+c",
+                NativeClipboardAction::Paste => "Command+v",
+                NativeClipboardAction::Write | NativeClipboardAction::Clear => {
+                    return Err(NativeAdapterError::unsupported(
+                        "clipboard storage mutations are not macOS key input",
+                    ));
+                }
+            };
+            Ok(InputEvent::Key {
+                text: None,
+                named: Some(named.to_string()),
+                action: KeyAction::Press,
+            })
+        }
+        _ => Err(invalid("expected keyboard or clipboard-transfer action")),
+    }
+}
+
+fn validate_clipboard_payload(
+    operation: NativeClipboardAction,
+    text: Option<&str>,
+) -> NativeAdapterResult<()> {
+    if (operation == NativeClipboardAction::Write) != text.is_some() {
+        return Err(invalid(
+            "native clipboard text is required exactly for write",
+        ));
+    }
+    if text.is_some_and(|value| value.len() > 1024 * 1024) {
+        return Err(invalid(
+            "native clipboard text exceeds its UTF-8 byte envelope",
+        ));
+    }
+    Ok(())
 }
 
 fn encode_png(rgba: &[u8], width: u32, height: u32) -> NativeAdapterResult<Vec<u8>> {
@@ -1349,9 +1460,15 @@ mod capability_tests {
             accessibility: true,
             input_monitoring: true,
             screen_capture: true,
+            clipboard: true,
         };
         let complete = capabilities_for_grants(complete_grants);
-        assert!(complete.semantic_actions && complete.pointer_input && complete.window_capture);
+        assert!(
+            complete.semantic_actions
+                && complete.pointer_input
+                && complete.window_capture
+                && complete.clipboard
+        );
 
         let accessibility_revoked = capabilities_for_grants(MacCapabilityGrants {
             accessibility: false,
@@ -1382,6 +1499,11 @@ mod capability_tests {
             ..complete_grants
         });
         assert!(!locked.app_discovery && !locked.app_launch);
-        assert!(!locked.semantic_actions && !locked.pointer_input && !locked.window_capture);
+        assert!(
+            !locked.semantic_actions
+                && !locked.pointer_input
+                && !locked.window_capture
+                && !locked.clipboard
+        );
     }
 }

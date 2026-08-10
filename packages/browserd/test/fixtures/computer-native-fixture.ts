@@ -85,6 +85,7 @@ function result(method: string): unknown {
   }
   if (method === "capabilities") return capabilities();
   if (method === "targets") return [target()];
+  if (method === "clipboard") return { text: "fixture clipboard", truncated: false };
   if (method === "validate") return null;
   if (method === "observe" || method === "dispatch") {
     return {
@@ -110,6 +111,7 @@ function capabilities() {
     semanticActions: true,
     pointerInput: true,
     keyboardInput: true,
+    clipboard: true,
     backgroundActions: true,
     parallelApps: true,
   };

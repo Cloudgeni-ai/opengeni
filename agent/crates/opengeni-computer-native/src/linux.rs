@@ -26,14 +26,16 @@ use sha2::{Digest as _, Sha256};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use crate::clipboard::NativeClipboardController;
 use crate::tree::semantic_roots_equivalent;
 use crate::{
     ComputerAdapter, NativeAction, NativeActionCommand, NativeActionValue, NativeAdapterError,
     NativeAdapterErrorCode, NativeAdapterResult, NativeCapabilities, NativeCapturedFrame,
-    NativeKeyboardAction, NativeLocator, NativeNodeMetadata, NativeNodeValue, NativeObservation,
-    NativePointerAction, NativePointerButton, NativeRect, NativeRedactedValue,
-    NativeRedactionReason, NativeSemanticAction, NativeSemanticPlatform, NativeTarget,
-    NativeTargetKind, RawSemanticNode, SemanticSnapshotIndex,
+    NativeClipboard, NativeClipboardAction, NativeKeyboardAction, NativeLocator,
+    NativeNodeMetadata, NativeNodeValue, NativeObservation, NativePointerAction,
+    NativePointerButton, NativeRect, NativeRedactedValue, NativeRedactionReason,
+    NativeSemanticAction, NativeSemanticPlatform, NativeTarget, NativeTargetKind, RawSemanticNode,
+    SemanticSnapshotIndex,
 };
 
 const CACHE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -87,6 +89,7 @@ pub(crate) struct AtspiComputerAdapter {
     frame_sequence: AtomicU64,
     latest: RwLock<BTreeMap<String, StoredObservation>>,
     desktop: Option<LinuxDesktop>,
+    clipboard: Option<NativeClipboardController>,
     latest_screen_frame: RwLock<Option<String>>,
     latest_window_frames: RwLock<BTreeMap<String, WindowFrameFence>>,
 }
@@ -114,6 +117,7 @@ impl AtspiComputerAdapter {
             frame_sequence: AtomicU64::new(0),
             latest: RwLock::new(BTreeMap::new()),
             desktop: LinuxDesktop::open_default().ok(),
+            clipboard: NativeClipboardController::open().ok(),
             latest_screen_frame: RwLock::new(None),
             latest_window_frames: RwLock::new(BTreeMap::new()),
         })
@@ -937,6 +941,14 @@ impl AtspiComputerAdapter {
                 }
             }
             NativeAction::Keyboard { .. } => {}
+            NativeAction::Clipboard { operation, text } => {
+                validate_clipboard_payload(*operation, text.as_deref())?;
+                if self.clipboard.is_none() {
+                    return Err(NativeAdapterError::unsupported(
+                        "native text clipboard is unavailable on this Linux graphical seat",
+                    ));
+                }
+            }
             NativeAction::Semantic { .. }
             | NativeAction::Focus { .. }
             | NativeAction::Launch { .. } => {
@@ -1190,6 +1202,41 @@ impl AtspiComputerAdapter {
             ))
         })
     }
+
+    async fn dispatch_clipboard_storage(
+        &self,
+        command: &NativeActionCommand,
+    ) -> Option<NativeAdapterResult<NativeObservation>> {
+        let NativeAction::Clipboard { operation, text } = &command.action else {
+            return None;
+        };
+        if !matches!(
+            operation,
+            NativeClipboardAction::Write | NativeClipboardAction::Clear
+        ) {
+            return None;
+        }
+        Some(
+            async {
+                self.validate(command).await?;
+                self.clipboard
+                    .as_ref()
+                    .ok_or_else(|| {
+                        NativeAdapterError::unsupported(
+                            "native text clipboard is unavailable on this Linux graphical seat",
+                        )
+                    })?
+                    .mutate(*operation, text.clone())
+                    .await?;
+                self.observe(&command.target_id).await.map_err(|error| {
+                    NativeAdapterError::outcome_unknown(format!(
+                        "native clipboard changed but target state could not be observed: {error}"
+                    ))
+                })
+            }
+            .await,
+        )
+    }
 }
 
 #[async_trait]
@@ -1208,6 +1255,7 @@ impl ComputerAdapter for AtspiComputerAdapter {
             semantic_actions: true,
             pointer_input: desktop,
             keyboard_input: desktop,
+            clipboard: self.clipboard.is_some(),
             background_actions: true,
             parallel_apps: true,
         }
@@ -1269,6 +1317,18 @@ impl ComputerAdapter for AtspiComputerAdapter {
         self.capture_window_target(record).await
     }
 
+    async fn clipboard(&self) -> NativeAdapterResult<NativeClipboard> {
+        self.clipboard
+            .as_ref()
+            .ok_or_else(|| {
+                NativeAdapterError::unsupported(
+                    "native text clipboard is unavailable on this Linux graphical seat",
+                )
+            })?
+            .read()
+            .await
+    }
+
     async fn validate(&self, command: &NativeActionCommand) -> NativeAdapterResult<()> {
         if let Some(screen) = self.screen_target() {
             if screen.id == command.target_id {
@@ -1313,6 +1373,22 @@ impl ComputerAdapter for AtspiComputerAdapter {
                     "Linux pixel input must target the exact X11 screen",
                 ));
             }
+            NativeAction::Clipboard { operation, text } => {
+                validate_clipboard_payload(*operation, text.as_deref())?;
+                if matches!(
+                    operation,
+                    NativeClipboardAction::Copy | NativeClipboardAction::Paste
+                ) {
+                    return Err(NativeAdapterError::unsupported(
+                        "Linux clipboard copy/paste must target the exact X11 screen",
+                    ));
+                }
+                if self.clipboard.is_none() {
+                    return Err(NativeAdapterError::unsupported(
+                        "native text clipboard is unavailable on this Linux graphical seat",
+                    ));
+                }
+            }
             NativeAction::Focus { target_id } => {
                 if target_id != &command.target_id {
                     return Err(NativeAdapterError::definite(
@@ -1335,6 +1411,9 @@ impl ComputerAdapter for AtspiComputerAdapter {
         &self,
         command: &NativeActionCommand,
     ) -> NativeAdapterResult<NativeObservation> {
+        if let Some(result) = self.dispatch_clipboard_storage(command).await {
+            return result;
+        }
         if let Some(screen) = self.screen_target() {
             if screen.id == command.target_id {
                 self.validate_screen(command, &screen).await?;
@@ -1402,6 +1481,7 @@ impl ComputerAdapter for AtspiComputerAdapter {
                 }
                 NativeAction::Pointer { .. }
                 | NativeAction::Keyboard { .. }
+                | NativeAction::Clipboard { .. }
                 | NativeAction::Launch { .. } => {
                     return Err(NativeAdapterError::unsupported(
                         "native action is unavailable in the AT-SPI adapter",
@@ -1762,12 +1842,48 @@ fn pixel_inputs(
                 action: v1::KeyAction::Press as i32,
             }),
         )]),
+        NativeAction::Clipboard { operation, text } => {
+            validate_clipboard_payload(*operation, text.as_deref())?;
+            let key = match operation {
+                NativeClipboardAction::Copy => "Control+c",
+                NativeClipboardAction::Paste => "Control+v",
+                NativeClipboardAction::Write | NativeClipboardAction::Clear => {
+                    return Err(NativeAdapterError::unsupported(
+                        "clipboard storage mutations are not X11 key input",
+                    ));
+                }
+            };
+            Ok(vec![desktop_input(v1::desktop_input::Event::Key(
+                v1::KeyEvent {
+                    key: key.to_string(),
+                    is_text: false,
+                    action: v1::KeyAction::Press as i32,
+                },
+            ))])
+        }
         NativeAction::Semantic { .. }
         | NativeAction::Focus { .. }
         | NativeAction::Launch { .. } => Err(NativeAdapterError::unsupported(
             "action is not an X11 screen input",
         )),
     }
+}
+
+fn validate_clipboard_payload(
+    operation: NativeClipboardAction,
+    text: Option<&str>,
+) -> NativeAdapterResult<()> {
+    if (operation == NativeClipboardAction::Write) != text.is_some() {
+        return Err(invalid_action(
+            "native clipboard text is required exactly for write",
+        ));
+    }
+    if text.is_some_and(|value| value.len() > 1024 * 1024) {
+        return Err(invalid_action(
+            "native clipboard text exceeds its UTF-8 byte envelope",
+        ));
+    }
+    Ok(())
 }
 
 fn pointer_input(
