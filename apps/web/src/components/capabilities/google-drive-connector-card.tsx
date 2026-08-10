@@ -384,7 +384,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
 
   return (
     <>
-      <section className="mt-5 rounded-lg border border-border bg-surface/35 p-4">
+      <section className="mt-12 rounded-lg border border-border bg-surface/35 p-4">
         <div className="flex items-center gap-3">
           <div className="flex min-w-0 flex-1 gap-3">
             <div className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-border bg-bg">
