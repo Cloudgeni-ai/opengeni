@@ -32,6 +32,7 @@ e2e(
       browserSessionId,
       controllerGeneration,
       runner,
+      downloadDirectory: join(directory, "downloads"),
     });
     let releaseBarrier!: () => void;
     const barrier = new Promise<void>((resolve) => {

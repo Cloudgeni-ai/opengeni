@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { resolve as resolvePath } from "node:path";
 import {
   BrowserActionCommand,
   BrowserDiagnosticBatch,
@@ -24,6 +25,7 @@ import {
   type BrowserInteractionDriver,
 } from "@opengeni/interaction";
 import {
+  namespaceCdpAccessibilityFrame,
   normalizeCdpAccessibilityTree,
   type CdpAccessibilityEntry,
   type CdpAccessibilitySnapshot,
@@ -51,6 +53,9 @@ const GRACEFUL_BROWSER_CLOSE_TIMEOUT_MS = 30_000;
 const NETWORK_IDLE_MS = 500;
 const PROTECTED_AUTH_AUTO_ADVANCE_TIMEOUT_MS = 3_000;
 const PROTECTED_AUTH_DIAGNOSTIC_QUIET_MS = 5_000;
+const MAX_FRAME_TREES = 512;
+const ACCESSIBILITY_FRAME_CONCURRENCY = 16;
+const ACCESSIBILITY_SNAPSHOT_ATTEMPTS = 3;
 const USER_AGENT_METADATA_EXPRESSION = `(async () => {
   const data = navigator.userAgentData;
   if (!data || typeof data.getHighEntropyValues !== "function") return null;
@@ -105,6 +110,11 @@ type MainFrame = {
   id: string;
   loaderId: string;
   url: string;
+};
+
+type PageFrameTree = {
+  frame: MainFrame;
+  childFrames: PageFrameTree[];
 };
 
 type Diagnostics = {
@@ -174,6 +184,7 @@ export type AgentBrowserDriverOptions = {
   now?: () => Date;
   createId?: () => string;
   resolveWorkspaceFiles?: (workspaceFileIds: readonly string[]) => Promise<readonly string[]>;
+  downloadDirectory?: string;
   connect?: (endpoint: string) => Promise<BrowserCdpConnection>;
   engine?: "chromium" | "chrome";
   emulation?: BrowserSessionEmulation;
@@ -233,6 +244,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly resolveWorkspaceFiles:
     | ((workspaceFileIds: readonly string[]) => Promise<readonly string[]>)
     | undefined;
+  private readonly downloadDirectory: string | null;
   private readonly connect: (endpoint: string) => Promise<BrowserCdpConnection>;
   private readonly states = new Map<string, TargetState>();
   private readonly firstSeenAt = new Map<string, string>();
@@ -254,6 +266,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     this.engine = options.engine ?? "chromium";
     this.emulation = hasBrowserEmulation(options.emulation) ? options.emulation : null;
     this.resolveWorkspaceFiles = options.resolveWorkspaceFiles;
+    this.downloadDirectory = options.downloadDirectory
+      ? resolvePath(options.downloadDirectory)
+      : null;
     this.connect = options.connect ?? (async (endpoint) => await CdpConnection.connect(endpoint));
   }
 
@@ -727,6 +742,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }>("Browser.getVersion");
       this.browserProduct = typeof version.product === "string" ? version.product : "";
       this.userAgent = typeof version.userAgent === "string" ? version.userAgent : "";
+      if (this.downloadDirectory) {
+        await connection.send("Browser.setDownloadBehavior", {
+          behavior: "allow",
+          downloadPath: this.downloadDirectory,
+          eventsEnabled: true,
+        });
+      }
       if (this.emulation?.geolocation) {
         await connection.send("Browser.grantPermissions", {
           permissions: ["geolocation"],
@@ -990,54 +1012,87 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   private async applyEmulation(connection: BrowserCdpConnection, sessionId: string): Promise<void> {
     if (!this.emulation) return;
-    const updates: Array<Promise<unknown>> = [];
     if (this.emulation.locale) {
       if (!this.userAgent) {
         throw new Error("browser did not expose a user agent for locale emulation");
       }
       const userAgentMetadata = await this.normalUserAgentMetadata(connection, sessionId);
-      updates.push(
-        connection.send(
-          "Emulation.setLocaleOverride",
-          { locale: this.emulation.locale },
-          { sessionId },
-        ),
-      );
-      updates.push(
-        connection.send(
-          "Emulation.setUserAgentOverride",
-          {
-            userAgent: this.userAgent,
-            acceptLanguage: this.emulation.locale,
-            userAgentMetadata,
-          },
-          { sessionId },
-        ),
+      await this.applyInheritedStringOverride({
+        connection,
+        sessionId,
+        method: "Emulation.setLocaleOverride",
+        params: { locale: this.emulation.locale },
+        expression: "Intl.DateTimeFormat().resolvedOptions().locale",
+        expected: this.emulation.locale,
+        normalize: normalizeLocale,
+      });
+      await connection.send(
+        "Emulation.setUserAgentOverride",
+        {
+          userAgent: this.userAgent,
+          acceptLanguage: this.emulation.locale,
+          userAgentMetadata,
+        },
+        { sessionId },
       );
     }
     if (this.emulation.timezone) {
-      updates.push(
-        connection.send(
-          "Emulation.setTimezoneOverride",
-          { timezoneId: this.emulation.timezone },
-          { sessionId },
-        ),
-      );
+      await this.applyInheritedStringOverride({
+        connection,
+        sessionId,
+        method: "Emulation.setTimezoneOverride",
+        params: { timezoneId: this.emulation.timezone },
+        expression: "Intl.DateTimeFormat().resolvedOptions().timeZone",
+        expected: this.emulation.timezone,
+        normalize: (value) => value,
+      });
     }
     if (this.emulation.geolocation) {
-      updates.push(
-        connection.send(
-          "Emulation.setGeolocationOverride",
-          {
-            latitude: this.emulation.geolocation.latitude,
-            longitude: this.emulation.geolocation.longitude,
-            accuracy: this.emulation.geolocation.accuracyMeters,
-          },
-          { sessionId },
-        ),
+      await connection.send(
+        "Emulation.setGeolocationOverride",
+        {
+          latitude: this.emulation.geolocation.latitude,
+          longitude: this.emulation.geolocation.longitude,
+          accuracy: this.emulation.geolocation.accuracyMeters,
+        },
+        { sessionId },
       );
     }
-    await Promise.all(updates);
+  }
+
+  private async applyInheritedStringOverride(options: {
+    connection: BrowserCdpConnection;
+    sessionId: string;
+    method: "Emulation.setLocaleOverride" | "Emulation.setTimezoneOverride";
+    params: Readonly<Record<string, unknown>>;
+    expression: string;
+    expected: string;
+    normalize: (value: string) => string;
+  }): Promise<void> {
+    try {
+      await options.connection.send(options.method, options.params, {
+        sessionId: options.sessionId,
+      });
+      return;
+    } catch (error) {
+      if (!(error instanceof CdpProtocolError) || error.method !== options.method) throw error;
+      const current = await options.connection.send<{
+        result?: unknown;
+        exceptionDetails?: unknown;
+      }>(
+        "Runtime.evaluate",
+        { expression: options.expression, returnByValue: true },
+        { sessionId: options.sessionId },
+      );
+      const value = isRecord(current.result) ? current.result.value : null;
+      if (
+        current.exceptionDetails ||
+        typeof value !== "string" ||
+        options.normalize(value) !== options.normalize(options.expected)
+      ) {
+        throw error;
+      }
+    }
   }
 
   private async normalUserAgentMetadata(
@@ -1204,22 +1259,71 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   private async refreshAccessibility(state: TargetState): Promise<CdpAccessibilitySnapshot> {
+    for (let attempt = 0; attempt < ACCESSIBILITY_SNAPSHOT_ATTEMPTS; attempt += 1) {
+      const before = flattenFrameTree(await this.frameTree(state.sessionId));
+      const nodes = await this.collectAccessibilityFrames(state.sessionId, before);
+      const after = flattenFrameTree(await this.frameTree(state.sessionId));
+      if (frameTreeFingerprint(before) !== frameTreeFingerprint(after)) {
+        continue;
+      }
+      const accessibility = normalizeCdpAccessibilityTree({
+        nodes,
+        controllerGeneration: this.controllerGeneration,
+        targetId: state.targetId,
+        documentGeneration: state.documentGeneration,
+      });
+      state.accessibility = accessibility;
+      return accessibility;
+    }
+    throw new Error("browser frame tree did not settle for a bounded accessibility observation");
+  }
+
+  private async collectAccessibilityFrames(
+    sessionId: string,
+    frames: readonly MainFrame[],
+  ): Promise<CdpAxNode[]> {
+    const nodes: CdpAxNode[] = [];
+    for (let offset = 0; offset < frames.length; offset += ACCESSIBILITY_FRAME_CONCURRENCY) {
+      const batch = frames.slice(offset, offset + ACCESSIBILITY_FRAME_CONCURRENCY);
+      const results = await Promise.allSettled(
+        batch.map(async (frame) => ({
+          frame,
+          nodes: await this.accessibilityFrame(sessionId, frame),
+        })),
+      );
+      const hasFailure = results.some((result) => result.status === "rejected");
+      const current = hasFailure
+        ? new Map(
+            flattenFrameTree(await this.frameTree(sessionId)).map((frame) => [frame.id, frame]),
+          )
+        : null;
+      for (const [index, result] of results.entries()) {
+        if (result.status === "fulfilled") {
+          nodes.push(...result.value.nodes);
+          continue;
+        }
+        const currentFrame = current?.get(batch[index]!.id);
+        if (currentFrame) nodes.push(...(await this.accessibilityFrame(sessionId, currentFrame)));
+      }
+    }
+    return nodes;
+  }
+
+  private async accessibilityFrame(sessionId: string, frame: MainFrame): Promise<CdpAxNode[]> {
     const connection = await this.ensureConnection();
     const response = await connection.send<{ nodes?: unknown }>(
       "Accessibility.getFullAXTree",
-      {},
-      { sessionId: state.sessionId },
+      { frameId: frame.id },
+      { sessionId },
     );
-    if (!Array.isArray(response.nodes))
+    if (!Array.isArray(response.nodes)) {
       throw new Error("CDP returned an invalid accessibility tree");
-    const accessibility = normalizeCdpAccessibilityTree({
-      nodes: response.nodes as CdpAxNode[],
-      controllerGeneration: this.controllerGeneration,
-      targetId: state.targetId,
-      documentGeneration: state.documentGeneration,
-    });
-    state.accessibility = accessibility;
-    return accessibility;
+    }
+    return namespaceCdpAccessibilityFrame(
+      frame.id,
+      response.nodes as CdpAxNode[],
+      `${frame.id}\0${frame.loaderId}`,
+    );
   }
 
   private async refreshFrame(state: TargetState): Promise<void> {
@@ -1239,6 +1343,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   private async mainFrame(sessionId: string): Promise<MainFrame> {
+    return (await this.frameTree(sessionId)).frame;
+  }
+
+  private async frameTree(sessionId: string): Promise<PageFrameTree> {
     const connection = await this.ensureConnection();
     const response = await connection.send<{ frameTree?: unknown }>(
       "Page.getFrameTree",
@@ -1248,15 +1356,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     if (!isRecord(response.frameTree) || !isRecord(response.frameTree.frame)) {
       throw new Error("CDP returned an invalid frame tree");
     }
-    const frame = response.frameTree.frame;
-    if (
-      typeof frame.id !== "string" ||
-      typeof frame.loaderId !== "string" ||
-      typeof frame.url !== "string"
-    ) {
-      throw new Error("CDP returned an invalid main frame");
-    }
-    return { id: frame.id, loaderId: frame.loaderId, url: frame.url };
+    return parseFrameTree(response.frameTree);
   }
 
   private async layoutMetrics(state: TargetState): Promise<{
@@ -1914,10 +2014,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       y: ys.reduce((sum, value) => sum + value, 0) / ys.length,
     };
     if (requireHit) {
-      const hit = await this.callOnNode(state, backendDOMNodeId, HIT_TEST_FUNCTION, [
-        { value: point.x },
-        { value: point.y },
-      ]);
+      const hit = await this.callOnNode(state, backendDOMNodeId, HIT_TEST_FUNCTION, []);
       if (hit !== true) {
         throw new InteractionDefiniteDriverError(
           "invalid_action",
@@ -2675,15 +2772,21 @@ const KEY_DEFINITIONS: Record<
   space: { key: " ", code: "Space", keyCode: 32, text: " " },
 };
 
-const HIT_TEST_FUNCTION = `function(x, y) {
-  const hit = document.elementFromPoint(x, y);
-  return Boolean(hit && (this === hit || this.contains?.(hit)));
+const HIT_TEST_FUNCTION = `function() {
+  const element = this instanceof Element ? this : this.parentElement;
+  if (!(element instanceof Element) || !element.isConnected) return false;
+  const rect = element.getBoundingClientRect();
+  const root = element.getRootNode();
+  const hitTest = root && typeof root.elementFromPoint === "function" ? root : document;
+  const hit = hitTest.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+  return Boolean(hit && (element === hit || element.contains?.(hit)));
 }`;
 
 const VISIBLE_FUNCTION = `function() {
-  if (!(this instanceof Element) || !this.isConnected) return false;
-  const style = getComputedStyle(this);
-  const rect = this.getBoundingClientRect();
+  const element = this instanceof Element ? this : this.parentElement;
+  if (!(element instanceof Element) || !element.isConnected) return false;
+  const style = getComputedStyle(element);
+  const rect = element.getBoundingClientRect();
   return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
 }`;
 
@@ -2984,6 +3087,55 @@ function userAgentMetadataString(value: unknown): string {
     throw new Error("browser returned invalid User-Agent metadata");
   }
   return value;
+}
+
+function normalizeLocale(value: string): string {
+  return value.replaceAll("_", "-").toLocaleLowerCase();
+}
+
+function parseFrameTree(
+  value: Record<string, unknown>,
+  state: { count: number } = { count: 0 },
+): PageFrameTree {
+  state.count += 1;
+  if (state.count > MAX_FRAME_TREES) {
+    throw new Error("CDP frame tree exceeds its bounded envelope");
+  }
+  if (!isRecord(value.frame)) throw new Error("CDP returned an invalid frame tree");
+  const frame = value.frame;
+  if (
+    typeof frame.id !== "string" ||
+    typeof frame.loaderId !== "string" ||
+    typeof frame.url !== "string"
+  ) {
+    throw new Error("CDP returned an invalid frame");
+  }
+  const rawChildren = value.childFrames;
+  if (rawChildren !== undefined && !Array.isArray(rawChildren)) {
+    throw new Error("CDP returned invalid child frames");
+  }
+  return {
+    frame: { id: frame.id, loaderId: frame.loaderId, url: frame.url },
+    childFrames: (rawChildren ?? []).map((child) => {
+      if (!isRecord(child)) throw new Error("CDP returned an invalid child frame");
+      return parseFrameTree(child, state);
+    }),
+  };
+}
+
+function flattenFrameTree(root: PageFrameTree): MainFrame[] {
+  const frames: MainFrame[] = [];
+  const pending = [root];
+  while (pending.length > 0) {
+    const current = pending.shift()!;
+    frames.push(current.frame);
+    pending.unshift(...current.childFrames);
+  }
+  return frames;
+}
+
+function frameTreeFingerprint(frames: readonly MainFrame[]): string {
+  return frames.map((frame) => `${frame.id}\0${frame.loaderId}`).join("\n");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

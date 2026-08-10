@@ -1005,6 +1005,7 @@ async function createBrowserDriver(
     browserSessionId: context.browserSessionId,
     controllerGeneration: context.controllerGeneration,
     runner,
+    downloadDirectory: context.downloadDirectory,
     ...(route
       ? {
           emulation: {
