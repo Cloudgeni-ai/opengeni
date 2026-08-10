@@ -5,8 +5,10 @@ import {
   RecursiveTextChunker,
   canViewDocument,
   chunkText,
+  decodeDocumentIndexCheckpoint,
   deterministicEmbedding,
   documentOpenAIEmbeddingConfig,
+  encodeDocumentIndexCheckpoint,
   heuristicCuration,
   parseCurationOutcome,
   parseDocumentBytes,
@@ -15,6 +17,34 @@ import {
 } from "../src";
 
 describe("documents", () => {
+  test("round-trips document index checkpoints only within their frozen authority scope", () => {
+    const scope = {
+      accountId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      initiatingSubjectId: "user:owner",
+    };
+    const checkpoint = encodeDocumentIndexCheckpoint({ ...scope, sequence: 42n });
+    expect(decodeDocumentIndexCheckpoint(checkpoint, scope)).toBe(42n);
+    expect(() =>
+      decodeDocumentIndexCheckpoint(checkpoint, {
+        ...scope,
+        workspaceId: "33333333-3333-4333-8333-333333333333",
+      }),
+    ).toThrow("different workspace or subject");
+    expect(() =>
+      decodeDocumentIndexCheckpoint(checkpoint, {
+        ...scope,
+        initiatingSubjectId: "user:other",
+      }),
+    ).toThrow("different workspace or subject");
+    expect(() => decodeDocumentIndexCheckpoint("not-a-checkpoint", scope)).toThrow(
+      "invalid document index checkpoint",
+    );
+    expect(() => encodeDocumentIndexCheckpoint({ ...scope, sequence: -1n })).toThrow(
+      "checkpoint sequence is invalid",
+    );
+  });
+
   test("requires canonical bounded subjects for legacy personal authority", () => {
     const workspaceId = "11111111-1111-4111-8111-111111111111";
     const document = {
