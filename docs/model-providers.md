@@ -198,6 +198,13 @@ New session, Send, Steer, scheduled-task, child-session, and workspace-policy
 admission store canonical product IDs. Alias strings are retained only as
 secret-safe requested-input evidence for an explicit per-turn switch.
 
+An agent-spawned child that omits `model`, `reasoningEffort`, or `latencyMode`
+inherits those fields from the exact worker-signed calling turn. Explicit child
+values still win. The fallback for legacy session-bound grants is the parent
+session, never the deployment default; consequently a Codex-subscription
+manager cannot silently spawn an OpenGeni-credit worker merely by omitting
+`model`.
+
 Configuration fails loud when:
 
 - two providers declare the same canonical product ID;
