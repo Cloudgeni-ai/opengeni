@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import type { Settings } from "@opengeni/config";
+import { configuredGoogleDriveSyncLimits, type Settings } from "@opengeni/config";
 import type { AccessGrant, ScheduledTask, ScheduledTaskScheduleSpec } from "@opengeni/contracts";
 import {
   bindConnectorDocumentDestination,
@@ -913,13 +913,7 @@ async function materializeGoogleDriveKnowledgeSchedules(
         kind: input.connection.kind,
       },
       limits: {
-        maxItems: 500,
-        maxBytes: 500_000_000,
-        maxFileBytes: 100_000_000,
-        maxProviderRequests: 1_000,
-        maxElapsedSeconds: 300,
-        maxConcurrency: 4,
-        maxFailureDetails: 25,
+        ...configuredGoogleDriveSyncLimits(deps.settings),
       },
     };
     const schedule = googleDriveSchedule(selectedSource.syncCadence);

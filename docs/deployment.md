@@ -414,6 +414,19 @@ secret-managed CI system. The open-source repository intentionally provides the
 reusable product, chart, Terraform roots, and conformance commands; it does not
 ship Cloudgeni-specific operational release gates or live-account scripts.
 
+For a Google Drive release, run the source-only, provider-free readiness check
+from the exact candidate revision before any live acceptance:
+
+```bash
+bun run deployment:google-drive-readiness
+```
+
+It emits one secret-safe JSON receipt and does not contact Google. The complete
+configuration table, Helm overlay, dashboard/alert contract, and explicit
+non-production versus production approval stages are canonical in
+[`google-drive.md`](google-drive.md#release-readiness-contract). A passing static
+receipt is not deployment or live-provider proof.
+
 For private in-cluster MinIO behind a local port-forward, keep the presigned URL host intact with curl's connect mapping:
 
 ```bash
@@ -608,8 +621,12 @@ review state, reviewed head, and submission time:
   single-maintainer PR whose author, exact-head reviewer, and merge actor are
   that same human; it is never a substitute for approving a bot-authored
   Version PR;
-- any base/head update invalidates the prior verdict, and a review submitted
-  after merge is not release evidence.
+- a candidate-head update invalidates a head-bound verdict. For the structured
+  admin-PASS form, changing the explicitly selected `reviewedBaseSha` also
+  requires replacement evidence on the same candidate head. Ordinary protected
+  `main` movement is not itself a candidate update and must not trigger a source
+  merge/rebase; and
+- a review submitted after merge is not release evidence.
 
 Candidate or operator admission must fail closed when those provider identities
 do not match; do not weaken the provenance check or recreate approval from a
@@ -628,23 +645,33 @@ body continue to bind the exact base/head verdict.
 For a single-maintainer source PR, generate the exact structured review body
 before merging. Submit the result as a native `COMMENTED` pull-request review;
 the formatter can also print the canonical SHA-256 needed by an external
-operator to bind the same artifact:
+operator to bind the same artifact. Use the exact provider-retained PR base SHA
+from the pull-request detail (`pull.base.sha`) as `--base`; this is the
+reviewed-base identity that the release verifier reconstructs, not the latest
+SHA currently at the tip of protected `main`:
 
 ```bash
 bun scripts/release-review.ts \
-  --base <exact-current-main-sha> \
+  --base <exact-provider-retained-pull.base.sha> \
   --head <exact-reviewed-pr-head-sha> \
   --reviewer <trusted-maintainer-login>
 
 bun scripts/release-review.ts \
-  --base <exact-current-main-sha> \
+  --base <exact-provider-retained-pull.base.sha> \
   --head <exact-reviewed-pr-head-sha> \
   --reviewer <trusted-maintainer-login> \
   --digest
 ```
 
-Regenerate the body and verdict after every head or base movement. Do not edit a
-submitted review after merge to manufacture evidence retroactively.
+Regenerate the body and verdict when the candidate head or its provider-retained
+`pull.base.sha` (the verifier's exact accepted reviewed-base identity) changes.
+An ordinary protected-`main` advance does not itself change that base-bound
+review artifact. Separately, let the merge authority refresh latest-current-main
+mergeability and material-compatibility evidence on the same candidate head;
+that evidence is not `reviewedBaseSha` and does not require replacing the review
+or mutating the candidate. Do not merge or rebase `main` into the source branch solely to refresh
+evidence, and do not edit a submitted review after merge to manufacture
+evidence retroactively.
 
 GitHub check lookup is ref-sensitive: a checked head can become undiscoverable
 after its source branch is deleted or rewritten even though the check itself
@@ -1545,7 +1572,7 @@ helm upgrade --install opengeni deploy/helm/opengeni \
   --set secret.existingSecret=opengeni-runtime
 ```
 
-`ServiceMonitor` and `PrometheusRule` templates render only when `monitoring.coreos.com/v1` CRDs are installed. The canonical rules cover stuck turns (`opengeni_turn_oldest_inflight_age_seconds > 900`), traffic-gated sandbox create failure ratio, warming timeouts, orphan sandbox growth, overdue finite-lifetime rotation, checkpoint deletion failures, terminal-owner retained-process backlog, expired drains, stale/absent inventory projections, scraped target availability, turn-worker memory-guard target/drain/failure signals, and node-relative memory/I/O PSI, swap activity, kubelet runtime errors, and NotReady state. Node alerts are joined to `kube_pod_info` so they retain only nodes hosting the current OpenGeni Helm release; deployments without node-exporter or kube-state-metrics produce no false series. `observability.prometheusRule.inventoryFreshnessSeconds` defaults to 300 seconds and must cover at least three configured sandbox-reaper periods; Helm rejects an unsafe pairing. Read-only inventory refresh remains active when sandbox ownership mutation is disabled, so an ownership fence does not silently age every inventory projection out. `observability.prometheusRule.rules` appends environment-specific rules; it never replaces the canonical safety catalog. The chart-managed OpenTelemetry Collector remains optional and is for traces/logs forwarding, not scraped metrics.
+`ServiceMonitor` and `PrometheusRule` templates render only when `monitoring.coreos.com/v1` CRDs are installed. The canonical rules cover stuck turns (`opengeni_turn_oldest_inflight_age_seconds > 900`), traffic-gated sandbox create failure ratio, warming timeouts, orphan sandbox growth, overdue finite-lifetime rotation, checkpoint deletion failures, terminal-owner retained-process backlog, expired drains, stale/absent inventory projections, scraped target availability, Google Drive sync failure ratio/reconnect/explicit-limit signals, turn-worker memory-guard target/drain/failure signals, and node-relative memory/I/O PSI, swap activity, kubelet runtime errors, and NotReady state. Google Drive rules are scoped to the exact namespace, Helm release, configured environment, and provider. Node alerts are joined to `kube_pod_info` so they retain only nodes hosting the current OpenGeni Helm release; deployments without node-exporter or kube-state-metrics produce no false series. `observability.prometheusRule.inventoryFreshnessSeconds` defaults to 300 seconds and must cover at least three configured sandbox-reaper periods; Helm rejects an unsafe pairing. Read-only inventory refresh remains active when sandbox ownership mutation is disabled, so an ownership fence does not silently age every inventory projection out. `observability.prometheusRule.rules` appends environment-specific rules; it never replaces the canonical safety catalog. The chart-managed OpenTelemetry Collector remains optional and is for traces/logs forwarding, not scraped metrics.
 
 Minimum production dashboards should cover:
 

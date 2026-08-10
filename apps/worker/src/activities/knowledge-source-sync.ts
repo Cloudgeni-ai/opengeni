@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { heartbeat } from "@temporalio/activity";
+import { googleDriveProviderRetryOptions } from "@opengeni/config";
 import { KnowledgeSourceSyncRunSummary } from "@opengeni/contracts";
 import {
   GoogleDriveConnectionMetadata,
@@ -52,6 +53,10 @@ import {
 } from "@opengeni/db";
 import { readResponseJsonBounded } from "@opengeni/network";
 import { createDocumentActivities } from "./documents";
+import {
+  fetchGoogleDriveProvider,
+  GoogleDriveProviderTransportError,
+} from "./google-drive-provider";
 import type {
   ControlActivityServices,
   RunKnowledgeSourceSyncBatchInput,
@@ -130,6 +135,10 @@ export function createKnowledgeSourceSyncActivities(
         reconnectRequired: false,
         failures: [],
       };
+      observability.info("Knowledge source sync started", {
+        provider: "google_drive",
+        outcome: "started",
+      });
       try {
         summary.phase = "inventory";
         const resolved = await getKnowledgeSourceForSyncAuthority(db, {
@@ -322,6 +331,8 @@ export function createKnowledgeSourceSyncActivities(
           initiatingSubjectId: action.initiatingSubjectId,
           authorization: token.headers.Authorization ?? token.headers.authorization,
           limits: action.limits,
+          retry: googleDriveProviderRetryOptions(settings),
+          observability,
         });
         const inventory = await driver.inventory(lease.state.executionCheckpoint);
         summary.providerRequests = inventory.providerRequests;
@@ -911,6 +922,7 @@ export function createKnowledgeSourceSyncActivities(
           labels: { provider: "google_drive" },
           amount: summary.bytes,
         });
+        recordSyncTelemetry(observability, summary, "succeeded");
         return {
           action: "complete",
           bufferedWake: settled.bufferedWake,
@@ -998,6 +1010,7 @@ export function createKnowledgeSourceSyncActivities(
           labels: { provider: "google_drive" },
           amount: summary.bytes,
         });
+        recordSyncTelemetry(observability, summary, "failed", failure);
         return {
           action: "failed",
           bufferedWake: settled.bufferedWake,
@@ -1115,6 +1128,8 @@ function googleDriveSyncDriver(input: {
   workspaceId: string;
   initiatingSubjectId: string;
   authorization: string | undefined;
+  retry: ReturnType<typeof googleDriveProviderRetryOptions>;
+  observability: ControlActivityServices["observability"];
   limits: {
     maxItems: number;
     maxBytes: number;
@@ -1145,7 +1160,8 @@ function googleDriveSyncDriver(input: {
           pageSize: Math.min(input.limits.maxItems, 100),
         },
         checkpoint: executionCheckpoint as never,
-        listChildren: async (request) => await listDriveChildren(request, input.authorization),
+        listChildren: async (request) =>
+          await listDriveChildren(request, input.authorization, input.retry, input.observability),
       });
       return {
         status: inventory.status,
@@ -1157,7 +1173,7 @@ function googleDriveSyncDriver(input: {
       };
     },
     fetchContent: async (entry, maxBytes) =>
-      await fetchDriveBytes(entry, input.authorization, maxBytes),
+      await fetchDriveBytes(entry, input.authorization, maxBytes, input.retry, input.observability),
     citationLocator: (entry) => ({
       version: 1,
       providerKey: "google-drive",
@@ -1177,9 +1193,70 @@ function selectedDriveSource(
   return sources.find((source) => source.id === externalSourceId) ?? null;
 }
 
+function recordSyncTelemetry(
+  observability: ControlActivityServices["observability"],
+  summary: KnowledgeSourceSyncRunSummary,
+  outcome: "succeeded" | "failed",
+  failure?: SyncFailure,
+): void {
+  observability.observeHistogram({
+    name: "opengeni_knowledge_source_sync_duration_seconds",
+    help: "Knowledge-source synchronization duration by provider and terminal outcome.",
+    labels: { provider: "google_drive", outcome },
+    value: Math.max(0, summary.elapsedMs) / 1_000,
+  });
+  if (summary.providerRequests > 0) {
+    observability.incrementCounter({
+      name: "opengeni_knowledge_source_sync_provider_requests_total",
+      help: "Logical provider requests consumed by knowledge-source synchronization.",
+      labels: { provider: "google_drive", outcome },
+      amount: summary.providerRequests,
+    });
+  }
+  if (summary.limitReached) {
+    observability.incrementCounter({
+      name: "opengeni_knowledge_source_sync_limit_hits_total",
+      help: "Knowledge-source synchronization runs stopped by an explicit resource budget.",
+      labels: { provider: "google_drive", limit: summary.limitReached },
+    });
+  }
+  if (summary.reconnectRequired) {
+    observability.incrementCounter({
+      name: "opengeni_knowledge_source_sync_reconnect_required_total",
+      help: "Knowledge-source synchronization failures requiring connector reconnection.",
+      labels: { provider: "google_drive" },
+    });
+  }
+  if (failure) {
+    observability.incrementCounter({
+      name: "opengeni_knowledge_source_sync_failures_total",
+      help: "Knowledge-source synchronization terminal failures by bounded reason.",
+      labels: {
+        provider: "google_drive",
+        reason: failure.code,
+        retryable: failure.retryable ? "true" : "false",
+      },
+    });
+    observability.warn("Knowledge source sync failed", {
+      provider: "google_drive",
+      outcome: failure.retryable ? "retryable_failed" : "failed",
+      reason: failure.code,
+      durationMs: summary.elapsedMs,
+    });
+    return;
+  }
+  observability.info("Knowledge source sync completed", {
+    provider: "google_drive",
+    outcome: "succeeded",
+    durationMs: summary.elapsedMs,
+  });
+}
+
 async function listDriveChildren(
   input: { folderId: string; driveId: string | null; pageToken: string | null; pageSize: number },
   authorization: string | undefined,
+  retry: ReturnType<typeof googleDriveProviderRetryOptions>,
+  observability: ControlActivityServices["observability"],
 ): Promise<GoogleDriveInventoryPage> {
   if (!authorization) throw new SyncFailure("connection_reconnect_required", true, true);
   const url = new URL(`${DRIVE_API_BASE}/files`);
@@ -1199,11 +1276,22 @@ async function listDriveChildren(
     url.searchParams.set("corpora", "drive");
     url.searchParams.set("driveId", input.driveId);
   }
-  const response = await fetch(url, {
-    headers: { authorization, accept: "application/json" },
-    redirect: "error",
-    signal: AbortSignal.timeout(15_000),
-  });
+  let response: Response;
+  try {
+    response = await fetchGoogleDriveProvider({
+      fetchImpl: fetch,
+      url,
+      init: { headers: { authorization, accept: "application/json" } },
+      operation: "list",
+      policy: retry,
+      observability,
+    });
+  } catch (error) {
+    if (error instanceof GoogleDriveProviderTransportError) {
+      throw new SyncFailure("provider_unavailable", true);
+    }
+    throw error;
+  }
   if (!response.ok) {
     if (response.status === 401 || response.status === 403) {
       throw new SyncFailure("connection_reconnect_required", true, true);
@@ -1250,6 +1338,8 @@ async function fetchDriveBytes(
   entry: GoogleDriveInventoryEntry,
   authorization: string | undefined,
   maxBytes: number,
+  retry: ReturnType<typeof googleDriveProviderRetryOptions>,
+  observability: ControlActivityServices["observability"],
 ): Promise<Uint8Array> {
   if (!authorization) throw new SyncFailure("connection_reconnect_required", true, true);
   const url =
@@ -1262,11 +1352,22 @@ async function fetchDriveBytes(
     url.searchParams.set("alt", "media");
     url.searchParams.set("supportsAllDrives", "true");
   }
-  const response = await fetch(url, {
-    headers: { authorization },
-    redirect: "error",
-    signal: AbortSignal.timeout(30_000),
-  });
+  let response: Response;
+  try {
+    response = await fetchGoogleDriveProvider({
+      fetchImpl: fetch,
+      url,
+      init: { headers: { authorization } },
+      operation: entry.transfer.action === "export" ? "export" : "download",
+      policy: retry,
+      observability,
+    });
+  } catch (error) {
+    if (error instanceof GoogleDriveProviderTransportError) {
+      throw new SyncFailure("provider_unavailable", true);
+    }
+    throw error;
+  }
   if (!response.ok) {
     if (response.status === 401 || response.status === 403) {
       throw new SyncFailure("connection_reconnect_required", true, true);

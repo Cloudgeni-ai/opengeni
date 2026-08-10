@@ -27,12 +27,13 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Connected machines | `docs/connected-machines.md` | `README.md`, `AGENTS.md`, client docs and skills should link. |
 | Deployment | `docs/deployment.md` | `README.md`, `AGENTS.md`, Helm/Terraform notes should link. |
 | Release/publishing | `CONTRIBUTING.md` § Release / Publishing, plus workflow files as executable truth | `README.md`, package READMEs, architecture release notes should link. |
+| Pull-request delivery across moving `main` | `AGENTS.md` § Pull-request delivery across moving `main`; executable admission truth in `.github/workflows/source-admission.yml` and `scripts/check-source-admission.mjs` | `.agents/skills/opengeni/SKILL.md`, `CONTRIBUTING.md`, the PR template, and `docs/deployment.md` must preserve the same immutable-candidate distinction. |
 | Client/SDK integration | `packages/sdk/README.md` | `README.md`, `packages/react/README.md`, and customer integration skills should link. |
 | Composer voice input | `docs/transcription.md` | Architecture, SDK/React docs, and host-app guides should link instead of restating provider selection or microphone lifecycle rules. |
 | Workbench embedding & production acceptance | `docs/embedding-workbench.md`, `docs/workbench-acceptance.md` | Host-app guides should link instead of weakening or restating the live evidence contract. |
 | Credential taxonomy | `docs/credentials.md` | `docs/embedding.md`, `docs/capabilities.md`, route comments should link instead of re-listing token types. |
 | GitHub App workspace binding | `docs/github-app.md` | `README.md`, `docs/architecture.md`, API/MCP/UI copy should summarize without weakening the authority matrix. |
-| Google Drive source preview | `docs/google-drive.md` | Capabilities UI and connector code should link instead of restating OAuth scope and no-ingestion boundaries. |
+| Google Drive connection, scheduled sync, and release readiness | `docs/google-drive.md` | Capabilities UI, connector code, Helm overlays, and operator notes should link instead of restating OAuth scope, sync limits, or live-acceptance boundaries. |
 | OpenGeni Slack bot connection | `docs/slack-bot.md` | Capabilities/scheduled-task UI and architecture should link instead of restating manifest or routing rules. |
 | Social connectors (X / Reddit) | `docs/social-connectors.md` | `docs/architecture.md`, pack/capability UI copy, and marketing-pack docs should link instead of restating OAuth endpoints, scopes, or token-handling rules. |
 | Rigs (versioned sandbox machine definitions) | `docs/rigs.md` | `docs/architecture.md`, `docs/packs.md`, `docs/variable-sets.md`, `docs/capabilities.md` should link instead of restating verification/promotion rules. |

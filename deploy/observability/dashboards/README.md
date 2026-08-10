@@ -1,6 +1,6 @@
 # OpenGeni Grafana dashboards
 
-Dashboards-as-code for the OpenGeni control plane. Four boards, each answering a
+Dashboards-as-code for the OpenGeni control plane. Five boards, each answering a
 different "manage and fix problems as soon as they arise" question:
 
 | File | Board | Answers |
@@ -9,8 +9,9 @@ different "manage and fix problems as soon as they arise" question:
 | `connected-machines.json` | **OpenGeni · Connected Machines** | Are Connected Machine control ops healthy — op outcomes, healed faults (the leading indicator), op latency, the fault taxonomy, and the payload wall? |
 | `worker-fleet.json` | **OpenGeni · Worker Fleet** | Is the fleet keeping up — turns inflight/queued, worker memory vs. limit, HPA replicas, sandbox leases, and whether compaction is firing against context pressure? |
 | `sandbox-health.json` | **OpenGeni · Sandbox Health** | Are provider operations, creates, lease recovery, checkpoint GC, deadline rotation, draining, and retained-process reconciliation healthy? |
+| `google-drive-sync.json` | **OpenGeni · Google Drive Sync** | Are scheduled Drive syncs succeeding within their duration, provider-retry, reconnect, and explicit resource budgets? |
 
-All four are theme-agnostic, tagged `opengeni` + `observability`, and carry a
+All five are theme-agnostic, tagged `opengeni` + `observability`, and carry a
 `$datasource` template variable — pick your Prometheus datasource on import; no UID
 is hardcoded.
 
@@ -82,7 +83,15 @@ App series used here (non-exhaustive): `opengeni_stream_ttft_seconds`,
 `opengeni_turn_worker_memory_guard_available_bytes`,
 `opengeni_turn_worker_memory_guard_process_rss_ratio`,
 `opengeni_turn_worker_memory_guard_breach_seconds`,
-`opengeni_turn_worker_memory_guard_drains_total`, and the prom-client defaults
+`opengeni_turn_worker_memory_guard_drains_total`,
+`opengeni_knowledge_source_sync_runs_total`,
+`opengeni_knowledge_source_sync_duration_seconds`,
+`opengeni_knowledge_source_sync_provider_requests_total`,
+`opengeni_knowledge_source_sync_limit_hits_total`,
+`opengeni_knowledge_source_sync_reconnect_required_total`,
+`opengeni_knowledge_source_sync_failures_total`,
+`opengeni_google_drive_provider_requests_total`,
+`opengeni_google_drive_provider_retries_total`, and the prom-client defaults
 (`opengeni_process_resident_memory_bytes`).
 
 Some Worker Fleet panels and recording rules also read **cluster-infra** series:

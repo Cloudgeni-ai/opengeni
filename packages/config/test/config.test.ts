@@ -4,6 +4,7 @@ import { describe, expect, test } from "bun:test";
 import { McpServerConnectionRef as ContractMcpServerConnectionRef } from "@opengeni/contracts";
 import {
   collectGitIdentityEnvironment,
+  configuredGoogleDriveSyncLimits,
   configuredEntitlements,
   collectSandboxEnvironment,
   effectiveModalIdleTimeoutSeconds,
@@ -12,6 +13,7 @@ import {
   configuredAllowedReasoningEfforts,
   environmentsEncryptionKeyBytes,
   getSettings,
+  googleDriveProviderRetryOptions,
   parseStaticEntitlementsJson,
   parseStaticUsageLimitsJson,
   parseMcpServers,
@@ -142,6 +144,21 @@ describe("Google Drive integration settings", () => {
     expect(settings.webBaseUrl).toBe("http://127.0.0.1:3000");
     expect(settings.googleDriveClientId).toBe("client.apps.googleusercontent.com");
     expect(settings.googleDriveClientSecret).toBe("client-secret");
+    expect(configuredGoogleDriveSyncLimits(settings)).toMatchObject({
+      maxItems: 500,
+      maxBytes: 500_000_000,
+      maxFileBytes: 100_000_000,
+      maxProviderRequests: 1_000,
+      maxElapsedSeconds: 300,
+      maxFailureDetails: 25,
+    });
+    expect(googleDriveProviderRetryOptions(settings)).toEqual({
+      requestTimeoutMs: 30_000,
+      attempts: 3,
+      initialDelayMs: 250,
+      maxDelayMs: 5_000,
+      budgetMs: 15_000,
+    });
   });
 
   test("requires the Google OAuth client id and secret together", () => {
@@ -155,6 +172,76 @@ describe("Google Drive integration settings", () => {
     ).toThrow(
       "OPENGENI_GOOGLE_DRIVE_CLIENT_ID and OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET must be configured together",
     );
+  });
+
+  test("requires the integrations gate when Google Drive credentials are present", () => {
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_ENVIRONMENT: "local",
+          OPENGENI_PUBLIC_BASE_URL: "http://127.0.0.1:8000",
+          OPENGENI_INTEGRATIONS_STATE_SECRET: "state-secret",
+          OPENGENI_GOOGLE_DRIVE_CLIENT_ID: "client.apps.googleusercontent.com",
+          OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET: "client-secret",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow(
+      "OPENGENI_INTEGRATIONS_ENABLED=true is required when the Google Drive integration is configured",
+    );
+  });
+
+  test("parses bounded sync and provider retry budgets", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_GOOGLE_DRIVE_SYNC_MAX_ITEMS: "750",
+        OPENGENI_GOOGLE_DRIVE_SYNC_MAX_BYTES: "900000000",
+        OPENGENI_GOOGLE_DRIVE_SYNC_MAX_FILE_BYTES: "120000000",
+        OPENGENI_GOOGLE_DRIVE_SYNC_MAX_PROVIDER_REQUESTS: "1200",
+        OPENGENI_GOOGLE_DRIVE_SYNC_MAX_ELAPSED_SECONDS: "420",
+        OPENGENI_GOOGLE_DRIVE_SYNC_MAX_FAILURE_DETAILS: "40",
+        OPENGENI_GOOGLE_DRIVE_PROVIDER_REQUEST_TIMEOUT_MS: "20000",
+        OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_ATTEMPTS: "4",
+        OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_INITIAL_DELAY_MS: "500",
+        OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_MAX_DELAY_MS: "4000",
+        OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_BUDGET_MS: "12000",
+      },
+      () => getSettings(),
+    );
+    expect(configuredGoogleDriveSyncLimits(settings)).toMatchObject({
+      maxItems: 750,
+      maxBytes: 900_000_000,
+      maxFileBytes: 120_000_000,
+      maxProviderRequests: 1_200,
+      maxElapsedSeconds: 420,
+      maxFailureDetails: 40,
+    });
+    expect(googleDriveProviderRetryOptions(settings)).toEqual({
+      requestTimeoutMs: 20_000,
+      attempts: 4,
+      initialDelayMs: 500,
+      maxDelayMs: 4_000,
+      budgetMs: 12_000,
+    });
+  });
+
+  test("rejects contradictory Google Drive budgets", () => {
+    for (const env of [
+      {
+        OPENGENI_GOOGLE_DRIVE_SYNC_MAX_BYTES: "100",
+        OPENGENI_GOOGLE_DRIVE_SYNC_MAX_FILE_BYTES: "101",
+      },
+      {
+        OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_INITIAL_DELAY_MS: "5001",
+        OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_MAX_DELAY_MS: "5000",
+      },
+      {
+        OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_INITIAL_DELAY_MS: "1000",
+        OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_BUDGET_MS: "999",
+      },
+    ]) {
+      expect(() => withEnv(env, () => getSettings())).toThrow();
+    }
   });
 });
 

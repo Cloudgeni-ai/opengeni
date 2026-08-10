@@ -75,6 +75,7 @@
     "deployment:temporal-values": "bun scripts/deployment-temporal-values.ts",
     "deployment:conformance": "bun scripts/deployment-conformance.ts",
     "deployment:connected-machine-load": "bun scripts/operator/connected-machine-load-profile.ts",
+    "deployment:google-drive-readiness": "bun scripts/google-drive-release-readiness.ts",
     "operator:sandbox-reaper-hold": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; bun scripts/operator/sandbox-reaper-hold.ts",
     "acceptance:workbench-live": "bun scripts/workbench-live-acceptance.ts",
     "check:generated-fonts": "bun scripts/generate-noto-jp-loader.ts --check",

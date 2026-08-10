@@ -33,6 +33,96 @@ Google currently classifies `drive.readonly` as a restricted scope.
 Keep the OAuth app in Testing with explicit test users for local development.
 Production use requires Google's applicable verification and security review.
 
+## Release-readiness contract
+
+The repository can prove configuration and operational readiness without
+contacting Google. From the exact source revision intended for release, load the
+same environment or Secret projection that the API and control worker will use,
+then run:
+
+```bash
+bun run deployment:google-drive-readiness
+```
+
+The command prints one bounded
+`opengeni.google-drive-release-readiness.v1` JSON document and performs **zero
+provider calls**. Exit `0` means the static contract is ready, exit `2` means a
+required release setting is absent or disabled, and exit `3` means the runtime
+configuration itself is invalid. The output reports only check states, the
+derived callback URL, numeric budgets, and pending approval gates; it never
+prints OAuth credentials, state/encryption secrets, tokens, provider bodies, or
+headers.
+
+Static readiness requires:
+
+- the integrations gate enabled;
+- both Google OAuth client settings present in the runtime Secret;
+- the OAuth state secret and credential-encryption key present;
+- a public API base URL from which the exact callback URI is derived; and
+- structured logs and Prometheus metrics enabled.
+
+This receipt is **not** proof of Google verification, OAuth consent, token
+refresh, source browsing, file download/export, scheduled execution, deployment,
+or production acceptance. Each of those remains an explicit later approval and
+evidence boundary. The non-secret Helm overlay is
+`deploy/helm/opengeni/values.google-drive-readiness.example.yaml`; the four
+secret values named there must be supplied through the referenced runtime Secret
+or an ExternalSecret and never committed.
+
+### Bounded sync and provider retry settings
+
+| Setting | Default | Purpose |
+| --- | ---: | --- |
+| `OPENGENI_GOOGLE_DRIVE_SYNC_MAX_ITEMS` | `500` | Maximum inventory items in one source invocation. |
+| `OPENGENI_GOOGLE_DRIVE_SYNC_MAX_BYTES` | `500000000` | Maximum known/fetched bytes in one invocation. |
+| `OPENGENI_GOOGLE_DRIVE_SYNC_MAX_FILE_BYTES` | `100000000` | Maximum bytes accepted for one file or export. Must not exceed the total byte limit. |
+| `OPENGENI_GOOGLE_DRIVE_SYNC_MAX_PROVIDER_REQUESTS` | `1000` | Maximum logical Drive inventory requests in one invocation. |
+| `OPENGENI_GOOGLE_DRIVE_SYNC_MAX_ELAPSED_SECONDS` | `300` | Maximum planner elapsed time in one invocation. |
+| `OPENGENI_GOOGLE_DRIVE_SYNC_MAX_FAILURE_DETAILS` | `25` | Maximum bounded per-item failure details retained in the summary. |
+| `OPENGENI_GOOGLE_DRIVE_PROVIDER_REQUEST_TIMEOUT_MS` | `30000` | Timeout for one list/download/export HTTP attempt. |
+| `OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_ATTEMPTS` | `3` | Total in-activity attempts, including the first attempt. |
+| `OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_INITIAL_DELAY_MS` | `250` | Initial exponential retry delay. |
+| `OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_MAX_DELAY_MS` | `5000` | Maximum delay before one retry. |
+| `OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_BUDGET_MS` | `15000` | Maximum elapsed-plus-delay budget for local retries. |
+
+The local retry helper absorbs only transport failures, HTTP `429`, and HTTP
+`5xx`. It never retries permanent `4xx` responses. It honors a bounded
+`Retry-After` value, caps exponential delay, cancels retryable response bodies,
+and returns control to the durable Temporal retry after the local attempts or
+budget are exhausted. URLs, authorization headers, response bodies, credentials,
+and provider diagnostics never enter metric labels or structured logs.
+
+### Observability and staged acceptance
+
+The **OpenGeni · Google Drive Sync** dashboard shows exact-release run outcomes,
+15-minute failure ratio, p95 duration, provider attempts/retries, explicit limit
+hits, reconnect requirements, and bounded terminal reasons. The chart alerts
+when an exact release has at least five runs and more than 20% fail, when a
+source requires reconnect, or when a run reaches an explicit limit. All queries
+are fenced to one namespace, environment, release, and the `google_drive`
+provider where applicable.
+
+Use the following staged evidence order; never infer a later stage from an
+earlier one:
+
+1. **Source/static:** typecheck, unit tests, Helm/render checks, dashboard checks,
+   and the readiness command with synthetic non-secret values.
+2. **Merged dependencies:** confirm the exact release source includes every
+   required connector, scheduling, document, and observability dependency.
+3. **Non-production provider acceptance:** only after explicit human approval,
+   use a dedicated Google test project/test user and record OAuth callback,
+   reconnect, bounded list/download/export, and scheduled-run evidence.
+4. **Deployment/production acceptance:** requires a separate explicit human
+   approval, reviewed secret delivery, Google verification/security-review
+   evidence where applicable, rollout/rollback ownership, and live dashboard and
+   alert receipts.
+
+Failure response is deliberately conservative: reconnect through the owning
+human's normal connection lifecycle for credential failures; inspect the
+low-cardinality reason and limit labels before changing budgets; and do not copy
+tokens, Google response bodies, or raw provider errors into tickets, logs, or
+release evidence.
+
 ## Launch OAuth scope decision
 
 The current connector configures a continuously readable folder, My Drive, or
@@ -226,7 +316,8 @@ coalesce. Source configuration and lifecycle generations fence wake admission,
 checkpointing, indexing obligations, ACL activation, and settlement. A stable
 per-source workflow ID plus a Postgres lease and one-item execution buffer
 enforce overlap and replay idempotency across worker restarts. Terminal runs
-emit separate knowledge-sync usage events plus low-cardinality run/item/byte
+emit separate knowledge-sync usage events plus low-cardinality run/item/byte,
+duration, provider-request, retry, limit, reconnect, and terminal-reason
 metrics; they do not emit `agent_run.created`.
 
 A successful source run advances the live source sync generation, and lease

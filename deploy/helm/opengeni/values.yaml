@@ -91,6 +91,9 @@ config:
   OPENGENI_OBJECT_STORAGE_FORCE_PATH_STYLE: "true"
   OPENGENI_SANDBOX_BACKEND: modal
   OPENGENI_SANDBOX_PREPARATION_PROFILES: none
+  # Google Drive is disabled unless the integration gate and OAuth credentials
+  # are explicitly supplied. See values.google-drive-readiness.example.yaml for
+  # the complete bounded sync/retry posture and release checklist.
 
 secret:
   create: false
@@ -102,6 +105,11 @@ secret:
   # Provide Better Auth, Resend, Stripe, GitHub App, model-provider, database,
   # NATS, Temporal, sandbox, and object-storage secrets through this secret or
   # an ExternalSecret. Never commit real secrets in values.
+  # Google Drive release readiness requires these keys in the runtime secret:
+  #   OPENGENI_INTEGRATIONS_STATE_SECRET
+  #   OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY
+  #   OPENGENI_GOOGLE_DRIVE_CLIENT_ID
+  #   OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET
   # For Temporal Cloud, configure OPENGENI_TEMPORAL_HOST and
   # OPENGENI_TEMPORAL_NAMESPACE, then place OPENGENI_TEMPORAL_API_KEY in this
   # secret; the API key automatically enables TLS.
