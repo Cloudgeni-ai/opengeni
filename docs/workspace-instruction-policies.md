@@ -170,19 +170,26 @@ session/turn/attempt/generation and is the only runtime insert path.
 
 ## Runtime composition and precedence
 
-For an exact attempt, the worker combines the policy snapshot with the existing
-preference-registry descriptor snapshot. Automatic model context follows this
-order after the non-bypassable platform CORE:
+For an exact attempt, the worker combines the account company-profile snapshot,
+policy snapshot, and existing preference-registry descriptor snapshot.
+Automatic model context follows this order after the non-bypassable platform
+CORE:
 
-1. organization preference descriptors;
-2. workspace charter;
-3. workspace global policy;
-4. workspace preference descriptors;
-5. immutable initiating-user preference descriptors;
-6. matching session role policy;
-7. session and exact-turn instructions;
-8. selected skills and repository/tool substrate;
-9. bounded retrieved memory/knowledge.
+1. organization company profile, when active;
+2. organization preference descriptors;
+3. workspace charter;
+4. workspace global policy;
+5. workspace preference descriptors;
+6. immutable initiating-user preference descriptors;
+7. matching session role policy;
+8. session and exact-turn instructions;
+9. selected skills and repository/tool substrate;
+10. bounded retrieved memory/knowledge.
+
+The company profile is the separate account-scoped authority documented in
+[`company-profile.md`](company-profile.md). It does not turn company facts into
+preferences or widen workspace policy authority. When absent, the prior
+policy/preference order and legacy behavior remain byte-for-byte unchanged.
 
 Preference entries are sanitized descriptors only. Full content remains behind
 the exact attempt's authorized retrieval handle. Documents, imports, Slack
