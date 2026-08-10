@@ -34,7 +34,10 @@ let admin: postgres.Sql;
 let client: DbClient;
 let db: Database;
 
-async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string }> {
+async function freshWorkspace(): Promise<{
+  accountId: string;
+  workspaceId: string;
+}> {
   const [account] = await admin<{ id: string }[]>`
     insert into managed_accounts (name) values ('connected-machine-removal') returning id`;
   const [workspace] = await admin<{ id: string }[]>`
@@ -171,7 +174,10 @@ describe("connected machine removal lifecycle", () => {
       select action, target_id from audit_events
       where workspace_id = ${workspaceId} and target_id = ${enrollment.id}
       order by occurred_at desc limit 1`;
-    expect(audit).toEqual({ action: "connected_machine.removed", target_id: enrollment.id });
+    expect(audit).toEqual({
+      action: "connected_machine.removed",
+      target_id: enrollment.id,
+    });
   }, 60_000);
 
   test("removes only the selected duplicate enrollment", async () => {
@@ -370,6 +376,45 @@ describe("connected machine removal lifecycle", () => {
       }),
     ).rejects.toBeInstanceOf(MachineRemovalIdempotencyError);
 
+    const activeTurnId = crypto.randomUUID();
+    await admin`
+      update sessions
+      set active_turn_id = ${activeTurnId}, status = 'running'
+      where id = ${session.id}`;
+    const activeTurnBlocked = await removeEnrollment(db, {
+      accountId,
+      workspaceId,
+      enrollmentId: routedEnrollment.id,
+      operationKey: "route-active-turn-blocked",
+      moveSessionsToDefaultSandbox: true,
+    });
+    expect(activeTurnBlocked).toMatchObject({
+      outcome: "blocked",
+      removed: false,
+      code: "active_commands",
+      dependentSessions: [
+        { id: session.id, title: null },
+        { id: secondSession.id, title: "Second routed session" },
+      ],
+    });
+    const [blockedSession] = await admin<
+      {
+        active_sandbox_id: string | null;
+        active_epoch: number;
+      }[]
+    >`
+      select active_sandbox_id, active_epoch
+      from sessions where id = ${session.id}`;
+    expect(blockedSession).toEqual({
+      active_sandbox_id: routedMachine.id,
+      active_epoch: routed.pointer!.activeEpoch,
+    });
+    expect((await getEnrollment(db, workspaceId, routedEnrollment.id))?.status).toBe("active");
+    await admin`
+      update sessions
+      set active_turn_id = null, status = 'idle'
+      where id = ${session.id}`;
+
     const [beforeMove] = await admin<
       {
         id: string;
@@ -444,7 +489,10 @@ describe("connected machine removal lifecycle", () => {
       enrollmentId: leasedEnrollment.id,
       operationKey: "lease-blocked",
     });
-    expect(leaseBlocked).toMatchObject({ outcome: "blocked", code: "active_lease" });
+    expect(leaseBlocked).toMatchObject({
+      outcome: "blocked",
+      code: "active_lease",
+    });
     await admin`
       update sandbox_leases set liveness = 'cold', refcount = 0
       where workspace_id = ${workspaceId} and sandbox_group_id = ${leasedMachine.id}`;
