@@ -49,6 +49,7 @@ const TERMINAL_SELECTOR = "[data-opengeni-terminal]";
 const INTERACTIVE_TERMINAL_SELECTOR =
   '[data-opengeni-terminal][data-opengeni-terminal-status="open"]' +
   '[data-opengeni-terminal-interactive="true"]';
+const SESSION_CHROME_STEERING_TEST_ID = "session-chrome-steering";
 const CAPTURE_API_P95_MS = maximumMillisecondBudget("performance.capture-api-response", "p95");
 const CAPTURE_USABLE_WORKBENCH_P95_MS = maximumMillisecondBudget(
   "performance.capture-usable-workbench",
@@ -1475,6 +1476,20 @@ function isRunningControlCommandMarkerEvent(event: SessionEvent, marker: string)
   return state === "running";
 }
 
+/**
+ * The production session route renders control state in SessionChrome. Match
+ * both its stable test id and the exact authoritative stopping projection so
+ * the optimistic "Changing direction" state cannot satisfy this proof.
+ */
+export function liveStoppingStateLocator(
+  page: Pick<Page, "getByTestId">,
+  control: "steer" | "pause",
+): Locator {
+  return page.getByTestId(SESSION_CHROME_STEERING_TEST_ID).filter({
+    hasText: control === "steer" ? "Stopping previous work" : "Stopping current work",
+  });
+}
+
 async function proveLiveSteerCancellation(input: {
   client: OpenGeniClient;
   page: Page;
@@ -1555,8 +1570,8 @@ async function proveLiveSteerCancellation(input: {
   const composer = page.getByLabel("Message the agent");
   await composer.waitFor({ timeout: 20_000 });
   await composer.fill(`Reply exactly REPLACED_${marker}. Do not run a tool.`);
-  const stoppingVisible = page
-    .getByTestId("stopping-previous-attempt")
+  const stoppingState = liveStoppingStateLocator(page, "steer");
+  const stoppingVisible = stoppingState
     .waitFor({ state: "visible", timeout: 1_000 })
     .then(() => true)
     .catch(() => false);
@@ -1640,7 +1655,7 @@ async function proveLiveSteerCancellation(input: {
       `Steer spent ${cancellationTimeline.physicalQuiescenceMs}ms behind the physical fence without rendering its stopping state`,
     );
   }
-  await page.getByTestId("stopping-previous-attempt").waitFor({ state: "hidden", timeout: 5_000 });
+  await stoppingState.waitFor({ state: "hidden", timeout: 5_000 });
 
   const settled = await waitForSettled(client, workspaceId, sessionId, sessionTimeoutMs);
   if (settled.status !== "idle") {
@@ -1758,12 +1773,12 @@ async function proveLivePauseCancellation(input: {
   const predecessorTurnId = ready.turnId;
   const predecessorAttemptId = ready.turnAttemptId;
 
-  const stoppingState = page
-    .getByTestId("stopping-previous-attempt")
+  const stoppingState = liveStoppingStateLocator(page, "pause");
+  const stoppingObservation = stoppingState
     .waitFor({ state: "visible", timeout: 1_000 })
     .then(async () => ({
       visible: true,
-      text: (await page.getByTestId("stopping-previous-attempt").textContent()) ?? "",
+      text: (await stoppingState.textContent()) ?? "",
     }))
     .catch(() => ({ visible: false, text: "" }));
   const pauseResponsePromise = page.waitForResponse(
@@ -1831,22 +1846,19 @@ async function proveLivePauseCancellation(input: {
       `Pause physical cancellation took ${controlCancellationMs}ms; budget is ${CONTROL_CANCELLATION_WORST_MS}ms`,
     );
   }
-  const renderedStoppingState = await stoppingState;
-  if (controlCancellationMs > 100 && !renderedStoppingState.visible) {
+  const observedStoppingState = await stoppingObservation;
+  if (controlCancellationMs > 100 && !observedStoppingState.visible) {
     throw new Error(
       `Pause spent ${controlCancellationMs}ms behind the physical fence without rendering its stopping state`,
     );
   }
   if (
-    renderedStoppingState.visible &&
-    (!renderedStoppingState.text.includes("Stopping current attempt") ||
-      !renderedStoppingState.text.includes("until you resume"))
+    observedStoppingState.visible &&
+    !observedStoppingState.text.includes("Stopping current work")
   ) {
-    throw new Error(
-      "Pause rendered misleading Steer queue copy while physical cancellation settled",
-    );
+    throw new Error("Pause rendered misleading control-state copy while cancellation settled");
   }
-  await page.getByTestId("stopping-previous-attempt").waitFor({ state: "hidden", timeout: 5_000 });
+  await stoppingState.waitFor({ state: "hidden", timeout: 5_000 });
   await page.getByText("Paused here", { exact: true }).waitFor({ timeout: 5_000 });
 
   audit.fences.set(predecessorAttemptId, {
