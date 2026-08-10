@@ -141,6 +141,13 @@ tests; negotiated frame and mutation limits are enforced before work is queued.
 
 ## Browser and computer interaction (`@opengeni/sdk/interaction`)
 
+An interaction **resource** is a workspace-scoped, durable object with a stable
+id and lifecycle, such as a `BrowserSession`, `ComputerSession`, browser
+identity, network route, auth run, or pending human intervention. This use of
+"resource" is unrelated to the file/repository `resources` attached to a chat
+message. A **facade** is only the typed, resource-oriented SDK organization
+shown below; it owns no state or authority of its own.
+
 `OpenGeniClient.interaction` is the framework-free resource facade over the same
 public BrowserSession, ComputerSession, identity, auth, network-route, and human
 intervention APIs used by OpenGeni itself. It adds no second state or execution
