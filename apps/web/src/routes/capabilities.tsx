@@ -85,6 +85,7 @@ import {
 } from "@/lib/capabilities";
 import { listViewState } from "@/lib/load-state";
 import {
+  GOOGLE_DRIVE_APP_DESCRIPTION,
   googleDriveAccountState,
   localConnectedGoogleDrivePreview,
   preferredGoogleDriveConnection,
@@ -1266,7 +1267,7 @@ export function CapabilitiesRoute({
             <ManagedAppTile
               icon={<AppLogo app="googleDrive" />}
               name="Google Drive"
-              description="Search, sync, and create files in Drive."
+              description={GOOGLE_DRIVE_APP_DESCRIPTION}
               status={googleDriveStatusLabel(googleDriveState.state)}
               onOpen={() => setManagedApp("google-drive")}
             />

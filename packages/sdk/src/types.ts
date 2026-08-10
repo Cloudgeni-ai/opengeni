@@ -692,7 +692,7 @@ export type GoogleDriveSelectedSource = {
 
 export type GoogleDriveConnectionMetadata = {
   credentialRole: "google_drive_metadata";
-  credentialLabel: "Google Drive metadata browser";
+  credentialLabel: "Google Drive read-only source sync" | "Google Drive metadata browser";
   googlePermissionId: string;
   googleEmail: string;
   googleDisplayName: string | null;
