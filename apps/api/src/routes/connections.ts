@@ -355,6 +355,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         accountId: grant.accountId,
         workspaceId,
         subjectId: grant.subjectId,
+        grant,
         connectionId: c.req.param("connectionId"),
         payload: await c.req.json(),
         canManageOrganizationDestination:

@@ -4,10 +4,24 @@ import { z } from "zod";
 export const ScopedKnowledgeScopeKind = z.enum(["organization", "workspace", "personal"]);
 export type ScopedKnowledgeScopeKind = z.infer<typeof ScopedKnowledgeScopeKind>;
 
-export type ScopedKnowledgeScope =
-  | { kind: "organization"; workspaceId: null; subjectId: null }
-  | { kind: "workspace"; workspaceId: string; subjectId: null }
-  | { kind: "personal"; workspaceId: string | null; subjectId: string };
+export const ScopedKnowledgeScope = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("organization"),
+    workspaceId: z.null(),
+    subjectId: z.null(),
+  }),
+  z.object({
+    kind: z.literal("workspace"),
+    workspaceId: z.string().uuid(),
+    subjectId: z.null(),
+  }),
+  z.object({
+    kind: z.literal("personal"),
+    workspaceId: z.string().uuid().nullable(),
+    subjectId: z.string().min(1).max(1024),
+  }),
+]);
+export type ScopedKnowledgeScope = z.infer<typeof ScopedKnowledgeScope>;
 
 export const ScopedKnowledgeActorKind = z.enum(["human", "service"]);
 export type ScopedKnowledgeActorKind = z.infer<typeof ScopedKnowledgeActorKind>;

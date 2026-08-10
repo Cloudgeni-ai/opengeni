@@ -2,6 +2,7 @@ import type { Settings } from "@opengeni/config";
 import type {
   AccessGrant,
   McpPersonalConnectionDelegation,
+  KnowledgeSourceSyncAction,
   ScheduledTask,
   ScheduledTaskAgentConfig,
   Session,
@@ -14,6 +15,8 @@ import { OPENGENI_SLACK_BOT_SESSION_METADATA_KEY } from "@opengeni/contracts";
 import {
   createScheduledTask,
   deleteScheduledTask,
+  getConnectionMetadata,
+  getKnowledgeSourceForSyncAuthority,
   getNestedAgentDepthDeploymentPolicy,
   getRig,
   getScheduledTask,
@@ -94,24 +97,39 @@ export async function createValidatedScheduledTask(input: {
   sessionAuthorization?: SessionAuthorizationPort | null | undefined;
   authorizationSurface?: SessionAuthorizationSurface | undefined;
 }): Promise<ScheduledTask> {
-  const agentConfig = await validateScheduledTaskAgentConfig({
-    ...input,
-    workspaceId: input.grant.workspaceId,
-  });
+  // API parsing fills this default, but pack installers and older internal
+  // callers can still invoke the shared validator with the pre-action shape.
+  const action = input.payload.action ?? ({ kind: "agent_turn" } as const);
+  const knowledgeAction = action.kind === "knowledge_source_sync" ? action : null;
+  if (knowledgeAction) {
+    await validateKnowledgeSourceSyncAction({
+      db: input.db,
+      grant: input.grant,
+      action: knowledgeAction,
+    });
+  }
+  const agentConfig = knowledgeAction
+    ? input.payload.agentConfig
+    : await validateScheduledTaskAgentConfig({
+        ...input,
+        workspaceId: input.grant.workspaceId,
+      });
   const id = crypto.randomUUID();
   validateScheduledTaskSchedule(input.payload.schedule);
-  const target = await validateScheduledTaskTarget({
-    db: input.db,
-    sessionAuthorization: input.sessionAuthorization,
-    authorizationSurface: input.authorizationSurface,
-    grant: input.grant,
-    targetSessionId: input.payload.targetSessionId,
-    runMode: input.payload.runMode,
-    variableSetId: input.payload.variableSetId,
-    rigId: input.payload.rigId,
-    agentConfig,
-  });
-  if (input.payload.variableSetId) {
+  const target = knowledgeAction
+    ? null
+    : await validateScheduledTaskTarget({
+        db: input.db,
+        sessionAuthorization: input.sessionAuthorization,
+        authorizationSurface: input.authorizationSurface,
+        grant: input.grant,
+        targetSessionId: input.payload.targetSessionId,
+        runMode: input.payload.runMode,
+        variableSetId: input.payload.variableSetId,
+        rigId: input.payload.rigId,
+        agentConfig,
+      });
+  if (!knowledgeAction && input.payload.variableSetId) {
     await validateVariableSetAttachment(
       { settings: input.settings, db: input.db },
       input.grant,
@@ -124,21 +142,22 @@ export async function createValidatedScheduledTask(input: {
   // (at dispatch), so validate only that the id names a rig in the workspace —
   // NOT that it has an active version now (that is a fire-time concern). RLS
   // makes a cross-workspace id indistinguishable from missing → both 422.
-  if (input.payload.rigId) {
+  if (!knowledgeAction && input.payload.rigId) {
     await requireScheduledTaskRig(input.db, input.grant.workspaceId, input.payload.rigId);
   }
-  const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(
-    input.db,
-    input.grant.workspaceId,
-    input.settings,
-  );
-  const personalConnectionDelegations = await freezePersonalConnectionDelegations({
-    db: input.db,
-    workspaceId: input.grant.workspaceId,
-    settings: runtimeSettings,
-    tools: [...agentConfig.tools, { kind: "mcp", id: "opengeni" }],
-    source: personalConnectionDelegationSourceForGrant(input.grant),
-  });
+  const personalConnectionDelegations = knowledgeAction
+    ? []
+    : await freezePersonalConnectionDelegations({
+        db: input.db,
+        workspaceId: input.grant.workspaceId,
+        settings: await settingsWithEnabledCapabilityMcpServers(
+          input.db,
+          input.grant.workspaceId,
+          input.settings,
+        ),
+        tools: [...agentConfig.tools, { kind: "mcp", id: "opengeni" }],
+        source: personalConnectionDelegationSourceForGrant(input.grant),
+      });
   const creationInitiator = creationInitiatorForGrant(input.grant);
   return await createScheduledTask(input.db, {
     id,
@@ -150,6 +169,7 @@ export async function createValidatedScheduledTask(input: {
     temporalScheduleId: scheduledTaskTemporalScheduleId(id),
     runMode: input.payload.runMode,
     overlapPolicy: input.payload.overlapPolicy,
+    action,
     agentConfig,
     ...(creationInitiator.initiator ? { createdBy: creationInitiator.initiator } : {}),
     ...(creationInitiator.context ? { createdByContext: creationInitiator.context } : {}),
@@ -301,6 +321,50 @@ export async function validatedScheduledTaskUpdate(input: {
   authorizationSurface?: SessionAuthorizationSurface | undefined;
 }): Promise<UpdateScheduledTaskInput> {
   const update: UpdateScheduledTaskInput = {};
+  const existingKnowledge = input.existing.action.kind === "knowledge_source_sync";
+  if (input.payload.action && input.payload.action.kind !== input.existing.action.kind) {
+    throw new HTTPException(409, {
+      message: "scheduled task action kind is immutable; create a new schedule",
+    });
+  }
+  if (existingKnowledge) {
+    if (
+      input.payload.agentConfig !== undefined ||
+      input.payload.runMode !== undefined ||
+      input.payload.targetSessionId !== undefined ||
+      input.payload.variableSetId !== undefined ||
+      input.payload.rigId !== undefined
+    ) {
+      throw new HTTPException(422, {
+        message: "knowledge source schedules do not accept agent/session configuration",
+      });
+    }
+    if (input.payload.overlapPolicy === "allow_concurrent") {
+      throw new HTTPException(422, {
+        message: "knowledge source schedules require skip or buffer_one overlap",
+      });
+    }
+    if (input.payload.action?.kind === "knowledge_source_sync") {
+      await validateKnowledgeSourceSyncAction({
+        db: input.db,
+        grant: input.grant,
+        action: input.payload.action,
+      });
+      update.action = input.payload.action;
+    }
+    if (input.payload.name !== undefined)
+      update.name = trimmedScheduledTaskName(input.payload.name);
+    if (input.payload.status !== undefined) update.status = input.payload.status;
+    if (input.payload.schedule !== undefined) {
+      validateScheduledTaskSchedule(input.payload.schedule);
+      update.schedule = input.payload.schedule;
+    }
+    if (input.payload.overlapPolicy !== undefined) {
+      update.overlapPolicy = input.payload.overlapPolicy;
+    }
+    if (input.payload.metadata !== undefined) update.metadata = input.payload.metadata;
+    return update;
+  }
   const existingTarget = input.existing.targetSessionId;
   const nextRunMode = input.payload.runMode ?? input.existing.runMode;
   const nextTargetSessionId =
@@ -517,6 +581,7 @@ export async function restoreScheduledTask(
     schedule: task.schedule,
     runMode: task.runMode,
     overlapPolicy: task.overlapPolicy,
+    action: task.action,
     agentConfig: task.agentConfig,
     personalConnectionDelegations: previous.personalConnectionDelegations,
     ...(task.runMode === "existing_session"
@@ -526,6 +591,62 @@ export async function restoreScheduledTask(
     rigId: task.rigId,
     metadata: task.metadata,
   });
+}
+
+async function validateKnowledgeSourceSyncAction(input: {
+  db: Database;
+  grant: AccessGrant;
+  action: KnowledgeSourceSyncAction;
+}): Promise<void> {
+  if (input.action.initiatingSubjectId !== input.grant.subjectId) {
+    throw new HTTPException(403, {
+      message: "knowledge source sync must preserve the exact initiating subject",
+    });
+  }
+  if (input.action.connection.ownerSubjectId !== input.grant.subjectId) {
+    throw new HTTPException(403, {
+      message: "knowledge source connection must belong to the initiating subject",
+    });
+  }
+  const resolved = await getKnowledgeSourceForSyncAuthority(input.db, {
+    accountId: input.grant.accountId,
+    workspaceId: input.grant.workspaceId,
+    sourceId: input.action.sourceId,
+    initiatingSubjectId: input.grant.subjectId,
+  });
+  if (!resolved || resolved.source.lifecycleState !== "active") {
+    throw new HTTPException(404, { message: "knowledge source not found" });
+  }
+  if (
+    resolved.source.syncGeneration !== input.action.sourceGeneration ||
+    resolved.source.lifecycleGeneration !== input.action.sourceLifecycleGeneration ||
+    JSON.stringify(resolved.source.scope) !== JSON.stringify(input.action.destination)
+  ) {
+    throw new HTTPException(409, {
+      message: "knowledge source authority or generation changed",
+    });
+  }
+  const connection = await getConnectionMetadata(
+    input.db,
+    input.grant.workspaceId,
+    input.action.connection.connectionId,
+    input.grant.subjectId,
+  );
+  if (
+    !connection ||
+    connection.accountId !== input.grant.accountId ||
+    connection.workspaceId !== input.grant.workspaceId ||
+    connection.subjectId !== input.action.connection.ownerSubjectId ||
+    connection.version !== input.action.connection.connectionVersion ||
+    connection.providerDomain.toLowerCase() !==
+      input.action.connection.providerDomain.toLowerCase() ||
+    connection.kind !== input.action.connection.kind ||
+    connection.status !== "active"
+  ) {
+    throw new HTTPException(409, {
+      message: "knowledge source connection authority changed or requires reconnect",
+    });
+  }
 }
 
 export class ScheduledTaskSyncError extends Error {

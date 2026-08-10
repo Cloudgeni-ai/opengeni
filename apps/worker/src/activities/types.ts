@@ -295,7 +295,10 @@ export type DispatchScheduledTaskRunInput = {
       initiator?: never;
     }
   | {
-      triggerType: Extract<ScheduledTaskTriggerType, "manual">;
+      triggerType: Extract<
+        ScheduledTaskTriggerType,
+        "manual" | "initial" | "provider_event" | "retry" | "repair"
+      >;
       agentRunUsageIdempotencyKey: string;
       /** Exact identity used by the API-side charge for this same trigger. */
       initiator: TurnInitiator;
@@ -310,7 +313,8 @@ export type DispatchScheduledTaskRunResult =
         | "insufficient_credits"
         | "monthly_model_cost_limit"
         | "monthly_agent_run_limit"
-        | "malformed_manual_trigger";
+        | "malformed_manual_trigger"
+        | "knowledge_source_paused";
     }
   | {
       action: "start" | "signal";
@@ -320,6 +324,38 @@ export type DispatchScheduledTaskRunResult =
       triggerEventId: string;
       workflowId: string;
       workflowWakeRevision: number | null;
+    }
+  | {
+      action: "knowledge_source_sync";
+      accountId: string;
+      workspaceId: string;
+      taskId: string;
+      scheduledTaskRunId: string;
+      sourceId: string;
+      overlapPolicy: "skip" | "buffer_one";
+    };
+
+export type RunKnowledgeSourceSyncBatchInput = {
+  accountId: string;
+  workspaceId: string;
+  taskId: string;
+  scheduledTaskRunId: string;
+  sourceId: string;
+  overlapPolicy: "skip" | "buffer_one";
+};
+
+export type RunKnowledgeSourceSyncBatchResult =
+  | { action: "continue" }
+  | {
+      action: "complete";
+      bufferedWake: boolean;
+      bufferedScheduledTaskRunId?: string | null;
+    }
+  | { action: "skipped" | "buffered" }
+  | {
+      action: "failed";
+      bufferedWake: boolean;
+      bufferedScheduledTaskRunId?: string | null;
     };
 
 type DocumentIndexIdentity = {

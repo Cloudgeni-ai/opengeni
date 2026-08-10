@@ -17,11 +17,13 @@ import {
   enqueueSessionWorkflowWakeIfRunnable,
   getBillingBalance,
   getScheduledTask,
+  ensureKnowledgeSourceSyncState,
   getScheduledTaskPersonalConnectionDelegations,
   getRig,
   getVariableSet,
   isCodexBilledTurn,
   markScheduledTaskRunFailedIfQueued,
+  recordKnowledgeSourceSyncWake,
   recordUsageEvent,
   requireScheduledTaskTargetInTransaction,
   requireSession,
@@ -30,6 +32,7 @@ import {
   SessionSpawnDeniedDbError,
   sumUsageQuantity,
   updateScheduledTask,
+  updateScheduledTaskRun,
   upsertSessionGoal,
 } from "@opengeni/db";
 import { appendAndPublishEvents, publishDurableSessionEvents } from "@opengeni/events";
@@ -55,7 +58,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       // Histories created before the manual-initiator workflow patch already
       // contain this activity command. Reject their incomplete wire input here
       // so replay consumes the recorded command and the retry loop settles.
-      if (input.triggerType === "manual" && !input.initiator) {
+      if (input.triggerType !== "scheduled" && !input.initiator) {
         return { action: "blocked", reason: "malformed_manual_trigger" };
       }
       const task = await getScheduledTask(db, input.workspaceId, input.taskId);
@@ -64,6 +67,64 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       // unbounded retry loop for work that no longer exists.
       if (!task) {
         return { action: "deleted" };
+      }
+      if (task.action.kind === "knowledge_source_sync") {
+        if (knowledgeSourceSyncEffectivelyPaused(task)) {
+          return { action: "blocked", reason: "knowledge_source_paused" };
+        }
+        const run = await createScheduledTaskRun(db, {
+          workspaceId: task.workspaceId,
+          taskId: task.id,
+          triggerType: input.triggerType,
+          producerKey:
+            input.producerKey ??
+            input.agentRunUsageIdempotencyKey ??
+            `knowledge-source-sync:${crypto.randomUUID()}`,
+          scheduledAt: null,
+        });
+        await ensureKnowledgeSourceSyncState(db, task);
+        await recordKnowledgeSourceSyncWake(db, {
+          accountId: task.accountId,
+          workspaceId: task.workspaceId,
+          sourceId: task.action.sourceId,
+          scheduledTaskId: task.id,
+          scheduledTaskRunId: run.id,
+          cause: input.triggerType,
+          producerKey:
+            input.producerKey ??
+            input.agentRunUsageIdempotencyKey ??
+            `knowledge-source-sync:${run.id}`,
+          sourceConfigGeneration: task.action.sourceConfigGeneration,
+          sourceLifecycleGeneration: task.action.sourceLifecycleGeneration,
+        });
+        await recordUsageEvent(db, {
+          accountId: task.accountId,
+          workspaceId: task.workspaceId,
+          eventType: "knowledge_source_sync.fired",
+          quantity: 1,
+          unit: "run",
+          sourceResourceType: "scheduled_task_run",
+          sourceResourceId: run.id,
+          initiator: input.initiator ?? { kind: "service", subjectId: "scheduler" },
+          initiatorContext: { scheduledTaskId: task.id, scheduledTaskRunId: run.id },
+          origin: "scheduled_task",
+          idempotencyKey: `usage:knowledge_source_sync.fired:${run.id}`,
+        });
+        if (run.status === "queued") {
+          await updateScheduledTaskRun(db, task.workspaceId, run.id, {
+            status: "dispatched",
+            actionKind: "knowledge_source_sync",
+          });
+        }
+        return {
+          action: "knowledge_source_sync",
+          accountId: task.accountId,
+          workspaceId: task.workspaceId,
+          taskId: task.id,
+          scheduledTaskRunId: run.id,
+          sourceId: task.action.sourceId,
+          overlapPolicy: task.overlapPolicy as "skip" | "buffer_one",
+        };
       }
       const taskPersonalConnectionDelegations = await getScheduledTaskPersonalConnectionDelegations(
         db,
@@ -533,6 +594,17 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       return result;
     },
   };
+}
+
+function knowledgeSourceSyncEffectivelyPaused(task: {
+  status: "active" | "paused";
+  metadata: Record<string, unknown>;
+}): boolean {
+  if (task.status === "paused") return true;
+  const value = task.metadata.knowledgeSourceSync;
+  if (!value || typeof value !== "object") return false;
+  const control = value as Record<string, unknown>;
+  return control.sourceEnabled === false || control.connectionPaused === true;
 }
 
 async function scheduledRunAdmissionDenial(

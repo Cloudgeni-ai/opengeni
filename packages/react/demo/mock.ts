@@ -2296,6 +2296,7 @@ function scheduledTask(
     temporalScheduleId: `sched-${name.toLowerCase().replace(/[^a-z]+/g, "-")}`,
     runMode: "new_session_per_run",
     overlapPolicy: "skip",
+    action: { kind: "agent_turn" },
     agentConfig: { prompt, resources: [], tools: [], metadata: {} },
     targetSessionId: null,
     reusableSessionId: null,
