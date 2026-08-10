@@ -34,14 +34,9 @@ describe("live Seedance video generation", () => {
       const requestedIdempotencyHex = process.env.OPENGENI_LIVE_VIDEO_IDEMPOTENCY_HEX;
       const idempotencyHex = /^[0-9a-f]{48}$/u.test(requestedIdempotencyHex ?? "")
         ? requestedIdempotencyHex!
-        : createHash("sha256")
-            .update(`live-seedance:${randomUUID()}`)
-            .digest("hex")
-            .slice(0, 48);
+        : createHash("sha256").update(`live-seedance:${randomUUID()}`).digest("hex").slice(0, 48);
       const idempotencyKey = `ogvid_${idempotencyHex}`;
-      let started: Awaited<
-        ReturnType<typeof startGatewayVideoGeneration>
-      > | null = null;
+      let started: Awaited<ReturnType<typeof startGatewayVideoGeneration>> | null = null;
       for (let attempt = 0; attempt < 3; attempt += 1) {
         try {
           started = await startGatewayVideoGeneration({
@@ -52,11 +47,7 @@ describe("live Seedance video generation", () => {
           });
           break;
         } catch (error) {
-          if (
-            !(error instanceof GatewayVideoApiError) ||
-            !error.retryable ||
-            attempt === 2
-          ) {
+          if (!(error instanceof GatewayVideoApiError) || !error.retryable || attempt === 2) {
             throw error;
           }
           await Bun.sleep(3_000);

@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
+  cancelUnacceptedVideoGenerationsForToolCallsInTransaction,
   markVideoGenerationAcceptedInTransaction,
   markVideoGenerationTerminalUpdateInTransaction,
 } from "./video-generation";
@@ -8920,8 +8921,10 @@ export async function loadWorkspaceVercelAiGatewayCredentialLease(
     let decoded: unknown;
     try {
       decoded = JSON.parse(decryptEnvironmentValue(key, row.credentialEncrypted));
-    } catch (error) {
-      throw new Error("workspace AI Gateway credential could not be decrypted", { cause: error });
+    } catch {
+      // JSON parser errors can quote decrypted plaintext. Never attach them to
+      // a worker error that may be serialized into Temporal history or logs.
+      throw new Error("workspace AI Gateway credential could not be decrypted");
     }
     const apiKey =
       decoded && typeof decoded === "object" && !Array.isArray(decoded)
@@ -24337,6 +24340,22 @@ export async function recordPendingSessionToolCallResult(
             operation,
             toolCallId: input.callId,
           });
+        } else {
+          // Admission and its accepted tool result are one causal boundary. If
+          // reference preparation (or any other pre-submit work) failed, settle
+          // the still-unaccepted operation in this same result transaction so
+          // quota and managed credits cannot remain reserved.
+          await cancelUnacceptedVideoGenerationsForToolCallsInTransaction(
+            tx as unknown as Database,
+            {
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: input.turnId,
+              toolCallIds: [input.callId],
+              reason: "Video generation failed before it was accepted.",
+              now: new Date(),
+            },
+          );
         }
         return {
           accepted: true,

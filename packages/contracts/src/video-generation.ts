@@ -20,6 +20,9 @@ export type VideoGenerationSourceMode = z.infer<typeof VideoGenerationSourceMode
 export const VideoGenerationResolution = z.enum(["480p", "720p"]);
 export type VideoGenerationResolution = z.infer<typeof VideoGenerationResolution>;
 
+export const VideoGenerationFundingSource = z.enum(["opengeni_credits", "workspace_gateway"]);
+export type VideoGenerationFundingSource = z.infer<typeof VideoGenerationFundingSource>;
+
 export const VideoGenerationAspectRatio = z.enum([
   "16:9",
   "4:3",
@@ -144,6 +147,7 @@ export const VideoGenerationPolicy = z
   .object({
     schemaVersion: z.literal(VIDEO_GENERATION_SCHEMA_VERSION),
     revision: z.number().int().nonnegative().safe(),
+    fundingSource: VideoGenerationFundingSource,
     enabledModelIds: z.array(z.string().min(1).max(256)).max(16),
     defaultModelId: z.string().min(1).max(256).nullable(),
   })
@@ -170,27 +174,68 @@ export type VideoGenerationPolicy = z.infer<typeof VideoGenerationPolicy>;
 export const UpdateVideoGenerationPolicyRequest = z
   .object({
     expectedRevision: z.number().int().nonnegative().safe(),
+    fundingSource: VideoGenerationFundingSource,
     enabledModelIds: z.array(z.string().min(1).max(256)).max(16),
     defaultModelId: z.string().min(1).max(256).nullable(),
   })
   .strict();
 export type UpdateVideoGenerationPolicyRequest = z.infer<typeof UpdateVideoGenerationPolicyRequest>;
 
+export const VideoGenerationFundingOption = z
+  .object({
+    source: VideoGenerationFundingSource,
+    label: z.string().min(1).max(128),
+    description: z.string().min(1).max(256),
+    available: z.boolean(),
+    unavailableReason: z.string().min(1).max(256).nullable(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.available !== (value.unavailableReason === null)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["unavailableReason"],
+        message: "available funding options cannot have an unavailable reason",
+      });
+    }
+  });
+export type VideoGenerationFundingOption = z.infer<typeof VideoGenerationFundingOption>;
+
 export const WorkspaceVideoGenerationSettings = z
   .object({
     schemaVersion: z.literal(VIDEO_GENERATION_SCHEMA_VERSION),
     policy: VideoGenerationPolicy,
-    providerConfigured: z.boolean(),
+    fundingOptions: z.array(VideoGenerationFundingOption).length(2),
     availableModels: z.array(VideoGenerationModelCapability).max(16),
     capabilities: VideoGenerationCapabilities.nullable(),
   })
   .strict()
   .superRefine((value, ctx) => {
-    if (!value.providerConfigured && value.capabilities !== null) {
+    if (
+      new Set(value.fundingOptions.map((option) => option.source)).size !== 2 ||
+      !value.fundingOptions.some((option) => option.source === "opengeni_credits") ||
+      !value.fundingOptions.some((option) => option.source === "workspace_gateway")
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["fundingOptions"],
+        message: "both funding sources must be described exactly once",
+      });
+    }
+    const selected = value.fundingOptions.find(
+      (option) => option.source === value.policy.fundingSource,
+    );
+    if (!selected) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["fundingOptions"],
+        message: "the selected funding source must be described",
+      });
+    } else if (!selected.available && value.capabilities !== null) {
       ctx.addIssue({
         code: "custom",
         path: ["capabilities"],
-        message: "unconfigured workspaces cannot expose executable capabilities",
+        message: "unavailable funding cannot expose executable capabilities",
       });
     }
   });

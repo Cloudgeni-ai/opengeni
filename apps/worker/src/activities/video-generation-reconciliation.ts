@@ -32,6 +32,7 @@ import {
   downloadGeneratedVideoToVerifiedTemp,
   retainVerifiedGeneratedVideo,
 } from "./video-output-retention";
+import { decryptVideoGenerationApiKey } from "./video-generation-credential";
 import type {
   TurnActivityServices,
   VideoGenerationReconcileResult,
@@ -68,7 +69,10 @@ export async function reconcileVideoGenerationOperation(
   }
   const key = environmentsEncryptionKeyBytes(service.settings);
   if (!key) throw new Error("Video generation recovery encryption key is unavailable");
-  const apiKey = decryptApiKey(operation, key);
+  if (!operation.credentialEncrypted) {
+    throw new Error("Video provider credential lease was erased too early");
+  }
+  const apiKey = decryptVideoGenerationApiKey(key, operation.credentialEncrypted);
 
   if (operation.status === "accepted") {
     const canonical = decryptCanonicalRequest(operation, key);
@@ -508,17 +512,6 @@ function decryptProviderBody(
     throw new Error("Frozen provider request is malformed");
   }
   return body;
-}
-
-function decryptApiKey(operation: VideoGenerationOperationWithReferences, key: Uint8Array): string {
-  if (!operation.credentialEncrypted)
-    throw new Error("Video provider credential lease was erased too early");
-  const value = record(JSON.parse(decryptEnvironmentValue(key, operation.credentialEncrypted)));
-  const apiKey = value?.apiKey;
-  if (typeof apiKey !== "string" || !apiKey.trim()) {
-    throw new Error("Video provider credential lease is malformed");
-  }
-  return apiKey;
 }
 
 function parseReferenceRole(value: string): GatewayVideoReferenceGrant["role"] {

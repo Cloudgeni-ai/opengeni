@@ -19,7 +19,11 @@ import {
   type Database,
   type VideoGenerationReference,
 } from "@opengeni/db";
-import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
+import {
+  calculateVideoGenerationCreditCostMicros,
+  environmentsEncryptionKeyBytes,
+  type Settings,
+} from "@opengeni/config";
 import type { ObjectStorage } from "@opengeni/storage";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -28,9 +32,11 @@ import {
   videoReferenceStagingKey,
   type SandboxCommandRunner,
 } from "./video-reference-staging";
+import { encryptVideoGenerationApiKey } from "./video-generation-credential";
 
-export type WorkspaceGatewayVideoCredentialLease = Readonly<{
-  connectionId: string;
+export type VideoGenerationCredentialLease = Readonly<{
+  fundingSource: "opengeni_credits" | "workspace_gateway";
+  connectionId: string | null;
   version: number;
   credentialEncrypted: string;
   apiKey: string;
@@ -44,11 +50,34 @@ export type AcceptedVideoGeneration = Readonly<{
 
 export function videoCapabilitiesForTurn(input: {
   policy: VideoGenerationPolicy;
-  credential: WorkspaceGatewayVideoCredentialLease;
+  credential: VideoGenerationCredentialLease;
 }): VideoGenerationCapabilities {
+  if (input.policy.fundingSource !== input.credential.fundingSource) {
+    throw new Error("Video generation funding changed before capability resolution");
+  }
   return videoGenerationCapabilitiesForPolicy({
     policy: input.policy,
     credentialVersion: input.credential.version,
+  });
+}
+
+export function managedVideoGenerationCredentialLease(
+  settings: Settings,
+): VideoGenerationCredentialLease | null {
+  if (!settings.vercelAiGatewayApiKey) return null;
+  const encryptionKey = environmentsEncryptionKeyBytes(settings);
+  if (!encryptionKey) {
+    throw new Error("Managed video generation requires OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY");
+  }
+  return Object.freeze({
+    fundingSource: "opengeni_credits",
+    connectionId: null,
+    version: 1,
+    credentialEncrypted: encryptVideoGenerationApiKey(
+      encryptionKey,
+      settings.vercelAiGatewayApiKey,
+    ),
+    apiKey: settings.vercelAiGatewayApiKey,
   });
 }
 
@@ -64,7 +93,7 @@ export async function admitVideoGenerationRequest(input: {
   toolCallId: string;
   toolInput: GenerateVideoToolInput;
   policy: VideoGenerationPolicy;
-  credential: WorkspaceGatewayVideoCredentialLease;
+  credential: VideoGenerationCredentialLease;
   runCommand?: SandboxCommandRunner;
   signal?: AbortSignal;
 }): Promise<AcceptedVideoGeneration> {
@@ -97,6 +126,12 @@ export async function admitVideoGenerationRequest(input: {
     })),
   });
   const requestDigest = videoGenerationRequestDigest(canonical);
+  const shouldDebitManagedCredits =
+    input.credential.fundingSource === "opengeni_credits" &&
+    (input.settings.billingMode === "stripe" || input.settings.usageLimitsMode === "managed");
+  const pricedCostMicros = shouldDebitManagedCredits
+    ? calculateVideoGenerationCreditCostMicros(input.settings, canonical)
+    : 0;
   const admissionKey = videoGenerationAdmissionKey(input);
   const candidateOperationId = randomUUID();
   const expectedArtifactId = randomUUID();
@@ -135,6 +170,8 @@ export async function admitVideoGenerationRequest(input: {
     sourceMode: canonical.sourceMode,
     capabilityRevision: capabilities.capabilityRevision,
     policyRevision: input.policy.revision,
+    fundingSource: input.credential.fundingSource,
+    pricedCostMicros,
     connectionId: input.credential.connectionId,
     credentialVersion: input.credential.version,
     credentialEncrypted: input.credential.credentialEncrypted,

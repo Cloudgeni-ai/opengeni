@@ -513,6 +513,8 @@ export type {
   VideoArtifactPlaybackSource,
   VideoGenerationAspectRatio,
   VideoGenerationCapabilities,
+  VideoGenerationFundingOption,
+  VideoGenerationFundingSource,
   VideoGenerationModelCapability,
   VideoGenerationOperationSummary,
   VideoGenerationPolicy,

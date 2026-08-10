@@ -28,18 +28,24 @@ export function registerVideoGenerationRoutes(app: Hono, deps: ApiRouteDeps): vo
       getWorkspaceVideoGenerationPolicy(deps.db, workspaceId),
       getWorkspaceVercelAiGatewayConnectionMetadata(deps.db, workspaceId),
     ]);
+    const fundingOptions = videoGenerationFundingOptions({
+      managedConfigured: managedVideoGenerationConfigured(deps),
+      workspaceGatewayConfigured: connection !== null,
+    });
+    const selectedFunding = fundingOptions.find((option) => option.source === policy.fundingSource);
     const capabilities =
-      connection && policy.defaultModelId && policy.enabledModelIds.length > 0
+      selectedFunding?.available && policy.defaultModelId && policy.enabledModelIds.length > 0
         ? videoGenerationCapabilitiesForPolicy({
             policy,
-            credentialVersion: connection.version,
+            credentialVersion:
+              policy.fundingSource === "workspace_gateway" ? (connection?.version ?? 0) : 1,
           })
         : null;
     return c.json(
       WorkspaceVideoGenerationSettings.parse({
         schemaVersion: 1,
         policy,
-        providerConfigured: connection !== null,
+        fundingOptions,
         availableModels: VIDEO_GENERATION_MODEL_CATALOG,
         capabilities,
       }),
@@ -50,6 +56,19 @@ export function registerVideoGenerationRoutes(app: Hono, deps: ApiRouteDeps): vo
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
     const payload = UpdateVideoGenerationPolicyRequest.parse(await c.req.json());
+    const connection = await getWorkspaceVercelAiGatewayConnectionMetadata(deps.db, workspaceId);
+    const fundingOptions = videoGenerationFundingOptions({
+      managedConfigured: managedVideoGenerationConfigured(deps),
+      workspaceGatewayConfigured: connection !== null,
+    });
+    const selectedFunding = fundingOptions.find(
+      (option) => option.source === payload.fundingSource,
+    );
+    if (payload.enabledModelIds.length > 0 && !selectedFunding?.available) {
+      throw new HTTPException(422, {
+        message: selectedFunding?.unavailableReason ?? "Video generation funding is unavailable",
+      });
+    }
     try {
       const policy = await updateWorkspaceVideoGenerationPolicy(deps.db, {
         accountId: grant.accountId,
@@ -80,4 +99,34 @@ export function registerVideoGenerationRoutes(app: Hono, deps: ApiRouteDeps): vo
     if (!summary) throw new HTTPException(404, { message: "video generation operation not found" });
     return c.json(VideoGenerationOperationSummary.parse(summary));
   });
+}
+
+function managedVideoGenerationConfigured(deps: ApiRouteDeps): boolean {
+  return Boolean(deps.settings.vercelAiGatewayApiKey && deps.settings.environmentsEncryptionKey);
+}
+
+function videoGenerationFundingOptions(input: {
+  managedConfigured: boolean;
+  workspaceGatewayConfigured: boolean;
+}) {
+  return [
+    {
+      source: "opengeni_credits" as const,
+      label: "OpenGeni",
+      description: "Uses OpenGeni credits through the managed Gateway route.",
+      available: input.managedConfigured,
+      unavailableReason: input.managedConfigured
+        ? null
+        : "OpenGeni-managed video generation is not configured.",
+    },
+    {
+      source: "workspace_gateway" as const,
+      label: "Your Gateway",
+      description: "Uses your workspace Vercel AI Gateway key.",
+      available: input.workspaceGatewayConfigured,
+      unavailableReason: input.workspaceGatewayConfigured
+        ? null
+        : "Connect a workspace Vercel AI Gateway key first.",
+    },
+  ];
 }

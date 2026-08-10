@@ -103,6 +103,7 @@ describe("video generation contracts", () => {
       VideoGenerationPolicy.safeParse({
         schemaVersion: 1,
         revision: 1,
+        fundingSource: "workspace_gateway",
         enabledModelIds: [],
         defaultModelId: SEEDANCE_2_5_MODEL_ID,
       }).success,

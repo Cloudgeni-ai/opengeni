@@ -3777,20 +3777,32 @@ export type VideoGenerationCapabilities = {
 export type VideoGenerationPolicy = {
   schemaVersion: 1;
   revision: number;
+  fundingSource: VideoGenerationFundingSource;
   enabledModelIds: string[];
   defaultModelId: string | null;
 };
 
 export type UpdateVideoGenerationPolicyRequest = {
   expectedRevision: number;
+  fundingSource: VideoGenerationFundingSource;
   enabledModelIds: string[];
   defaultModelId: string | null;
+};
+
+export type VideoGenerationFundingSource = "opengeni_credits" | "workspace_gateway";
+
+export type VideoGenerationFundingOption = {
+  source: VideoGenerationFundingSource;
+  label: string;
+  description: string;
+  available: boolean;
+  unavailableReason: string | null;
 };
 
 export type WorkspaceVideoGenerationSettings = {
   schemaVersion: 1;
   policy: VideoGenerationPolicy;
-  providerConfigured: boolean;
+  fundingOptions: VideoGenerationFundingOption[];
   availableModels: VideoGenerationModelCapability[];
   capabilities: VideoGenerationCapabilities | null;
 };

@@ -7,6 +7,7 @@ import {
   retainedGeneratedVideoReferenceFromFile,
   type GeneratedVideoFacts,
   type MediaGenerationResult,
+  type VideoGenerationFundingSource,
   type VideoGenerationPolicy as VideoGenerationPolicyValue,
 } from "@opengeni/contracts";
 import { and, eq, inArray, sql } from "drizzle-orm";
@@ -45,6 +46,13 @@ export class VideoGenerationCapacityError extends Error {
   }
 }
 
+export class VideoGenerationCreditError extends Error {
+  constructor(message = "insufficient OpenGeni credits") {
+    super(message);
+    this.name = "VideoGenerationCreditError";
+  }
+}
+
 export async function getWorkspaceVideoGenerationPolicy(
   db: Database,
   workspaceId: string,
@@ -66,6 +74,7 @@ export async function updateWorkspaceVideoGenerationPolicy(
     workspaceId: string;
     subjectId: string;
     expectedRevision: number;
+    fundingSource: VideoGenerationFundingSource;
     enabledModelIds: string[];
     defaultModelId: string | null;
   },
@@ -73,6 +82,7 @@ export async function updateWorkspaceVideoGenerationPolicy(
   const requested = VideoGenerationPolicy.parse({
     schemaVersion: 1,
     revision: input.expectedRevision + 1,
+    fundingSource: input.fundingSource,
     enabledModelIds: input.enabledModelIds,
     defaultModelId: input.defaultModelId,
   });
@@ -109,6 +119,7 @@ export async function updateWorkspaceVideoGenerationPolicy(
           workspaceId: input.workspaceId,
           accountId: input.accountId,
           revision: currentRevision + 1,
+          fundingSource: requested.fundingSource,
           enabledModelIds: [...requested.enabledModelIds],
           defaultModelId: requested.defaultModelId,
           updatedBySubjectId: input.subjectId.slice(0, 1_024),
@@ -143,7 +154,9 @@ export type AdmitVideoGenerationOperationInput = {
   sourceMode: string;
   capabilityRevision: string;
   policyRevision: number;
-  connectionId: string;
+  fundingSource: VideoGenerationFundingSource;
+  pricedCostMicros: number;
+  connectionId: string | null;
   credentialVersion: number;
   credentialEncrypted: string;
   providerIdempotencyKey: string;
@@ -201,6 +214,7 @@ export async function admitVideoGenerationOperation(
         if (
           !policy ||
           policy.revision !== input.policyRevision ||
+          policy.fundingSource !== input.fundingSource ||
           !policy.enabledModelIds.includes(input.modelId)
         ) {
           throw new VideoGenerationConflictError("Video generation capability changed");
@@ -251,6 +265,9 @@ export async function admitVideoGenerationOperation(
             modelId: input.modelId,
             sourceMode: input.sourceMode,
             capabilityRevision: input.capabilityRevision,
+            fundingSource: input.fundingSource,
+            pricedCostMicros: input.pricedCostMicros,
+            creditState: input.pricedCostMicros > 0 ? "debited" : "not_applicable",
             connectionId: input.connectionId,
             credentialVersion: input.credentialVersion,
             credentialEncrypted: input.credentialEncrypted,
@@ -265,6 +282,12 @@ export async function admitVideoGenerationOperation(
           })
           .returning();
         if (!operation) throw new Error("Video generation operation was not admitted");
+        if (input.pricedCostMicros > 0) {
+          if (input.fundingSource !== "opengeni_credits" || input.connectionId !== null) {
+            throw new Error("Only OpenGeni-funded video operations may debit credits");
+          }
+          await debitVideoGenerationCredits(tx, operation);
+        }
         if (input.references.length > 0) {
           await tx.insert(schema.videoGenerationReferences).values(
             input.references.map((reference) => ({
@@ -389,13 +412,21 @@ export async function markVideoGenerationAcceptedInTransaction(
         .for("share")
         .limit(1)
     : [];
+  const workspaceGatewayAuthorized =
+    operation.fundingSource === "workspace_gateway" &&
+    connection?.status === "active" &&
+    connection.version === operation.credentialVersion &&
+    connection.metadata.credentialRole === "vercel_ai_gateway";
+  const managedAuthorized =
+    operation.fundingSource === "opengeni_credits" &&
+    operation.connectionId === null &&
+    (operation.creditState === "debited" ||
+      (operation.creditState === "not_applicable" && operation.pricedCostMicros === 0));
   if (
     !policy ||
+    policy.fundingSource !== operation.fundingSource ||
     !policy.enabledModelIds.includes(operation.modelId) ||
-    !connection ||
-    connection.status !== "active" ||
-    connection.version !== operation.credentialVersion ||
-    connection.metadata.credentialRole !== "vercel_ai_gateway"
+    (!workspaceGatewayAuthorized && !managedAuthorized)
   ) {
     throw new VideoGenerationConflictError("Video generation authorization changed");
   }
@@ -433,10 +464,12 @@ export async function cancelVideoGenerationBeforeSubmit(
     }
     const now = new Date();
     await releaseReservedQuota(tx, operation, false);
+    const creditState = await refundVideoGenerationCredits(tx, operation, now);
     const [updated] = await tx
       .update(schema.videoGenerationOperations)
       .set({
         status: "cancelled_before_submit",
+        creditState,
         quotaState: "released",
         terminalAt: now,
         terminalUpdateState:
@@ -490,10 +523,12 @@ export async function cancelUnacceptedVideoGenerationsForToolCallsInTransaction(
   const cancelled: string[] = [];
   for (const operation of operations) {
     await releaseReservedQuota(tx, operation, false);
+    const creditState = await refundVideoGenerationCredits(tx, operation, input.now);
     const [updated] = await tx
       .update(schema.videoGenerationOperations)
       .set({
         status: "cancelled_before_submit",
+        creditState,
         quotaState: "released",
         terminalAt: input.now,
         terminalUpdateState: "suppressed",
@@ -757,10 +792,12 @@ export async function settleVideoGenerationFailure(
     if (!inArrayValue(operation.status, allowed)) throw invalidTransition(operation, input.status);
     await releaseReservedQuota(tx, operation, false);
     const now = new Date();
+    const creditState = await refundVideoGenerationCredits(tx, operation, now);
     const [updated] = await tx
       .update(schema.videoGenerationOperations)
       .set({
         status: input.status,
+        creditState,
         quotaState: "released",
         terminalAt: now,
         nextReconcileAt: null,
@@ -1226,6 +1263,118 @@ async function releaseReservedQuota(
     .where(eq(schema.workspaceVideoGenerationQuotas.workspaceId, operation.workspaceId));
 }
 
+async function debitVideoGenerationCredits(
+  tx: Database,
+  operation: VideoGenerationOperation,
+): Promise<void> {
+  if (operation.pricedCostMicros <= 0 || operation.fundingSource !== "opengeni_credits") {
+    throw new Error("Managed video credit debit has an invalid funding binding");
+  }
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${operation.accountId}))`);
+  const [balanceRow] = await tx
+    .select({
+      balanceMicros: sql<number>`coalesce(sum(${schema.creditLedgerEntries.amountMicros}), 0)`,
+    })
+    .from(schema.creditLedgerEntries)
+    .where(eq(schema.creditLedgerEntries.accountId, operation.accountId));
+  const balanceMicros = Number(balanceRow?.balanceMicros ?? 0);
+  if (!Number.isSafeInteger(balanceMicros) || balanceMicros < operation.pricedCostMicros) {
+    throw new VideoGenerationCreditError();
+  }
+  const now = new Date();
+  const inserted = await tx
+    .insert(schema.creditLedgerEntries)
+    .values({
+      accountId: operation.accountId,
+      workspaceId: operation.workspaceId,
+      type: "video_generation_debit",
+      amountMicros: -operation.pricedCostMicros,
+      sourceType: "video_generation_operation",
+      sourceId: operation.id,
+      idempotencyKey: `credit:video_generation_debit:${operation.id}`,
+      metadata: {
+        modelId: operation.modelId,
+        sourceMode: operation.sourceMode,
+        pricedCostMicros: operation.pricedCostMicros,
+      },
+      occurredAt: now,
+    })
+    .onConflictDoNothing({ target: schema.creditLedgerEntries.idempotencyKey })
+    .returning({ id: schema.creditLedgerEntries.id });
+  if (inserted.length !== 1) {
+    throw new VideoGenerationConflictError("Video generation credit debit already exists");
+  }
+  await tx
+    .insert(schema.usageEvents)
+    .values({
+      accountId: operation.accountId,
+      workspaceId: operation.workspaceId,
+      eventType: "video_generation.cost",
+      quantity: operation.pricedCostMicros,
+      unit: "usd_micros",
+      sourceResourceType: "video_generation_operation",
+      sourceResourceId: operation.id,
+      sessionId: operation.sessionId,
+      turnId: operation.turnId,
+      turnAttemptId: operation.attemptId,
+      idempotencyKey: `usage:video_generation.cost:${operation.id}`,
+      occurredAt: now,
+    })
+    .onConflictDoNothing({ target: schema.usageEvents.idempotencyKey });
+}
+
+async function refundVideoGenerationCredits(
+  tx: Database,
+  operation: VideoGenerationOperation,
+  now: Date,
+): Promise<VideoGenerationOperation["creditState"]> {
+  if (operation.creditState !== "debited") return operation.creditState;
+  if (operation.fundingSource !== "opengeni_credits" || operation.pricedCostMicros <= 0) {
+    throw new Error("Video generation credit refund has an invalid funding binding");
+  }
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${operation.accountId}))`);
+  const inserted = await tx
+    .insert(schema.creditLedgerEntries)
+    .values({
+      accountId: operation.accountId,
+      workspaceId: operation.workspaceId,
+      type: "video_generation_refund",
+      amountMicros: operation.pricedCostMicros,
+      sourceType: "video_generation_operation",
+      sourceId: operation.id,
+      idempotencyKey: `credit:video_generation_refund:${operation.id}`,
+      metadata: {
+        modelId: operation.modelId,
+        sourceMode: operation.sourceMode,
+        pricedCostMicros: operation.pricedCostMicros,
+      },
+      occurredAt: now,
+    })
+    .onConflictDoNothing({ target: schema.creditLedgerEntries.idempotencyKey })
+    .returning({ id: schema.creditLedgerEntries.id });
+  if (inserted.length !== 1) {
+    throw new VideoGenerationConflictError("Video generation credit refund already exists");
+  }
+  await tx
+    .insert(schema.usageEvents)
+    .values({
+      accountId: operation.accountId,
+      workspaceId: operation.workspaceId,
+      eventType: "video_generation.refund",
+      quantity: operation.pricedCostMicros,
+      unit: "usd_micros",
+      sourceResourceType: "video_generation_operation",
+      sourceResourceId: operation.id,
+      sessionId: operation.sessionId,
+      turnId: operation.turnId,
+      turnAttemptId: operation.attemptId,
+      idempotencyKey: `usage:video_generation.refund:${operation.id}`,
+      occurredAt: now,
+    })
+    .onConflictDoNothing({ target: schema.usageEvents.idempotencyKey });
+  return "refunded";
+}
+
 function policyFromRow(
   row: typeof schema.workspaceVideoGenerationPolicies.$inferSelect | undefined,
 ): VideoGenerationPolicyValue {
@@ -1234,10 +1383,17 @@ function policyFromRow(
       ? {
           schemaVersion: 1,
           revision: row.revision,
+          fundingSource: row.fundingSource,
           enabledModelIds: row.enabledModelIds,
           defaultModelId: row.defaultModelId,
         }
-      : { schemaVersion: 1, revision: 0, enabledModelIds: [], defaultModelId: null },
+      : {
+          schemaVersion: 1,
+          revision: 0,
+          fundingSource: "workspace_gateway",
+          enabledModelIds: [],
+          defaultModelId: null,
+        },
   );
 }
 
@@ -1257,7 +1413,9 @@ function assertAdmissionMatches(
     operation.requestDigest !== input.requestDigest ||
     operation.toolCallId !== input.toolCallId ||
     operation.sessionId !== input.sessionId ||
-    operation.turnId !== input.turnId
+    operation.turnId !== input.turnId ||
+    operation.fundingSource !== input.fundingSource ||
+    operation.pricedCostMicros !== input.pricedCostMicros
   ) {
     throw new VideoGenerationConflictError(
       "Video generation admission key was reused with different arguments",

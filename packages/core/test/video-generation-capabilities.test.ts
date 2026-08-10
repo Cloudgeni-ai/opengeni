@@ -17,6 +17,7 @@ describe("video generation capability catalog", () => {
       policy: {
         schemaVersion: 1,
         revision: 2,
+        fundingSource: "workspace_gateway",
         enabledModelIds: [SEEDANCE_2_5_MODEL_ID],
         defaultModelId: SEEDANCE_2_5_MODEL_ID,
       },

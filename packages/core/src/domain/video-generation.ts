@@ -4,6 +4,7 @@ import {
   VideoGenerationResolution,
   VideoGenerationSourceMode,
   type GenerateVideoToolInput as GenerateVideoToolInputType,
+  type VideoGenerationFundingSource,
   type VideoGenerationModelCapability,
 } from "@opengeni/contracts";
 import { createHash } from "node:crypto";
@@ -180,12 +181,14 @@ export function videoGenerationProviderIdempotencyKey(input: {
 
 export function videoGenerationCapabilityRevision(input: {
   policyRevision: number;
+  fundingSource: VideoGenerationFundingSource;
   credentialVersion: number;
   modelIds: readonly string[];
 }): string {
   return sha256(
     "opengeni:video-generation-capability:v1\0",
     String(input.policyRevision),
+    input.fundingSource,
     String(input.credentialVersion),
     JSON.stringify([...input.modelIds].sort()),
     VIDEO_GENERATION_ADAPTER_VERSION,

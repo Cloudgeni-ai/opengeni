@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { getSettings } from "../src";
+import { calculateVideoGenerationCreditCostMicros, getSettings } from "../src";
 
 describe("video generation settings", () => {
   test("has bounded production-safe defaults", () => {
@@ -11,6 +11,15 @@ describe("video generation settings", () => {
     expect(settings.videoGenerationWorkspaceQuotaBytes).toBe(20 * 1024 * 1024 * 1024);
     expect(settings.videoGenerationTempDirectory).toBe("/tmp/opengeni-video");
     expect(settings.videoGenerationFfprobePath).toBe("ffprobe");
+    expect(settings.videoGenerationCredit480pMicrosPerSecond).toBe(155_000);
+    expect(settings.videoGenerationCredit720pMicrosPerSecond).toBe(350_000);
+    expect(
+      calculateVideoGenerationCreditCostMicros(settings, {
+        modelId: "bytedance/seedance-2.5",
+        resolution: "480p",
+        durationSeconds: 4,
+      }),
+    ).toBe(620_000);
   });
 
   test("rejects unsafe operational bounds", () => {

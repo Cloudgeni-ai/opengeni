@@ -33,12 +33,8 @@ describe("Vercel AI Gateway video adapter", () => {
     });
     expect(result).toEqual({ providerJobId: "job_1" });
     expect(request!.url).toEndWith("/v4/ai/video-model/start");
-    expect(request!.headers.get("ai-video-model-specification-version")).toBe(
-      "4",
-    );
-    expect(request!.headers.get("idempotency-key")).toBe(
-      `ogvid_${"a".repeat(48)}`,
-    );
+    expect(request!.headers.get("ai-video-model-specification-version")).toBe("4");
+    expect(request!.headers.get("idempotency-key")).toBe(`ogvid_${"a".repeat(48)}`);
     expect(await request!.json()).toEqual({
       prompt: baseRequest.prompt,
       n: 1,

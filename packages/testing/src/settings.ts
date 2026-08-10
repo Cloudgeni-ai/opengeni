@@ -96,6 +96,8 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     videoGenerationWorkspaceQuotaBytes: 20 * 1024 * 1024 * 1024,
     videoGenerationTempDirectory: "/tmp/opengeni-video",
     videoGenerationFfprobePath: "ffprobe",
+    videoGenerationCredit480pMicrosPerSecond: 155_000,
+    videoGenerationCredit720pMicrosPerSecond: 350_000,
     openaiAllowedModels: "scripted-model,gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna",
     voiceInputMaxDurationSeconds: 60,
     voiceInputMaxSizeBytes: 25 * 1024 * 1024,

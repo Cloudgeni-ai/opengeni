@@ -247,7 +247,11 @@ import {
 } from "@opengeni/core";
 import { maybeCompactContext, settleFailedContextCompactionLandmark } from "./context-compaction";
 import { TurnAttemptFencedError } from "./turn-attempt-fenced";
-import { admitVideoGenerationRequest } from "./video-generation-admission";
+import {
+  admitVideoGenerationRequest,
+  managedVideoGenerationCredentialLease,
+  type VideoGenerationCredentialLease,
+} from "./video-generation-admission";
 import {
   assertGitCredentialRenewalTransportUnchanged,
   gitCredentialAuthorityForTurn,
@@ -6491,9 +6495,24 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         };
       })();
       const videoGenerationPolicy = await getWorkspaceVideoGenerationPolicy(db, input.workspaceId);
-      const videoGenerationCredential = objectStorage
-        ? await loadWorkspaceVercelAiGatewayCredentialLease(db, modelRunSettings, input.workspaceId)
-        : null;
+      let videoGenerationCredential: VideoGenerationCredentialLease | null = null;
+      if (objectStorage) {
+        if (videoGenerationPolicy.fundingSource === "opengeni_credits") {
+          videoGenerationCredential = managedVideoGenerationCredentialLease(modelRunSettings);
+        } else {
+          const workspaceCredential = await loadWorkspaceVercelAiGatewayCredentialLease(
+            db,
+            modelRunSettings,
+            input.workspaceId,
+          );
+          if (workspaceCredential) {
+            videoGenerationCredential = {
+              fundingSource: "workspace_gateway",
+              ...workspaceCredential,
+            };
+          }
+        }
+      }
       const videoGenerationOption: Pick<BuildAgentOptions, "videoGeneration"> = (() => {
         if (
           !objectStorage ||

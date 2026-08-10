@@ -73,19 +73,11 @@ export async function startGatewayVideoGenerationWithBody(input: {
     ...(input.signal ? { signal: input.signal } : {}),
     ...(input.fetch ? { fetch: input.fetch } : {}),
   });
-  const parsed = await readGatewayJson(
-    response,
-    "AI Gateway video start",
-    input.signal,
-  );
+  const parsed = await readGatewayJson(response, "AI Gateway video start", input.signal);
   const operation = record(parsed.operation);
   const providerJobId = stringValue(operation?.gatewayJobId);
   if (!providerJobId || providerJobId.length > 1_024) {
-    throw new GatewayVideoApiError(
-      null,
-      true,
-      "AI Gateway video start response is malformed",
-    );
+    throw new GatewayVideoApiError(null, true, "AI Gateway video start response is malformed");
   }
   return Object.freeze({ providerJobId });
 }
@@ -110,11 +102,7 @@ export async function getGatewayVideoGenerationStatus(input: {
     ...(input.signal ? { signal: input.signal } : {}),
     ...(input.fetch ? { fetch: input.fetch } : {}),
   });
-  const parsed = await readGatewayJson(
-    response,
-    "AI Gateway video status",
-    input.signal,
-  );
+  const parsed = await readGatewayJson(response, "AI Gateway video status", input.signal);
   const status = stringValue(parsed.status);
   if (status === "pending" || status === "queued" || status === "running") {
     return Object.freeze({ status: "pending" });
@@ -125,31 +113,14 @@ export async function getGatewayVideoGenerationStatus(input: {
       publicReason: publicProviderReason(parsed.error, status === "cancelled"),
     });
   }
-  if (
-    status !== "completed" ||
-    !Array.isArray(parsed.videos) ||
-    parsed.videos.length !== 1
-  ) {
-    throw new GatewayVideoApiError(
-      null,
-      true,
-      "AI Gateway video status response is malformed",
-    );
+  if (status !== "completed" || !Array.isArray(parsed.videos) || parsed.videos.length !== 1) {
+    throw new GatewayVideoApiError(null, true, "AI Gateway video status response is malformed");
   }
   const video = record(parsed.videos[0]);
   const outputUrl = video?.type === "url" ? stringValue(video.url) : null;
   const mediaType = stringValue(video?.mediaType);
-  if (
-    !outputUrl ||
-    !mediaType ||
-    outputUrl.length > 8_192 ||
-    mediaType.length > 128
-  ) {
-    throw new GatewayVideoApiError(
-      null,
-      false,
-      "AI Gateway returned an unsupported video result",
-    );
+  if (!outputUrl || !mediaType || outputUrl.length > 8_192 || mediaType.length > 128) {
+    throw new GatewayVideoApiError(null, false, "AI Gateway returned an unsupported video result");
   }
   return Object.freeze({ status: "completed", outputUrl, mediaType });
 }
@@ -182,16 +153,14 @@ export function buildGatewayVideoStartBody(
     fps: 24,
     generateAudio: request.generateAudio,
     providerOptions: {},
-    ...(request.sourceMode === "first_frame" ||
-    request.sourceMode === "first_and_last_frames"
+    ...(request.sourceMode === "first_frame" || request.sourceMode === "first_and_last_frames"
       ? {
           frameImages: files.map(({ role, file }) => ({
             frameType: role,
             image: file,
           })),
         }
-      : request.sourceMode === "image_reference" ||
-          request.sourceMode === "video_reference"
+      : request.sourceMode === "image_reference" || request.sourceMode === "video_reference"
         ? { inputReferences: files.map(({ file }) => file) }
         : {}),
   };
@@ -208,9 +177,7 @@ async function gatewayFetch(input: {
   fetch?: FetchLike;
 }): Promise<Response> {
   const timeout = AbortSignal.timeout(60_000);
-  const signal = input.signal
-    ? AbortSignal.any([input.signal, timeout])
-    : timeout;
+  const signal = input.signal ? AbortSignal.any([input.signal, timeout]) : timeout;
   let response: Response;
   try {
     response = await (input.fetch ?? globalThis.fetch)(input.url, {
@@ -226,9 +193,7 @@ async function gatewayFetch(input: {
         "ai-video-model-specification-version": VIDEO_SPECIFICATION_VERSION,
         "ai-model-id": input.modelId,
         "user-agent": "opengeni/video-generation",
-        ...(input.idempotencyKey
-          ? { "idempotency-key": input.idempotencyKey }
-          : {}),
+        ...(input.idempotencyKey ? { "idempotency-key": input.idempotencyKey } : {}),
       },
       body: JSON.stringify(input.body),
     });
@@ -237,9 +202,7 @@ async function gatewayFetch(input: {
     throw new GatewayVideoApiError(
       null,
       true,
-      error instanceof Error
-        ? error.message
-        : "AI Gateway video request failed",
+      error instanceof Error ? error.message : "AI Gateway video request failed",
     );
   }
   if (response.ok) return response;
@@ -270,14 +233,9 @@ async function readGatewayJson(
   label: string,
   signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
-  const text = await readResponseTextBounded(
-    response,
-    RESPONSE_MAX_BYTES,
-    label,
-    {
-      ...(signal ? { signal } : {}),
-    },
-  );
+  const text = await readResponseTextBounded(response, RESPONSE_MAX_BYTES, label, {
+    ...(signal ? { signal } : {}),
+  });
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -285,18 +243,12 @@ async function readGatewayJson(
     throw new GatewayVideoApiError(null, true, `${label} response is not JSON`);
   }
   const value = record(parsed);
-  if (!value)
-    throw new GatewayVideoApiError(
-      null,
-      true,
-      `${label} response is malformed`,
-    );
+  if (!value) throw new GatewayVideoApiError(null, true, `${label} response is malformed`);
   return value;
 }
 
 function requireSecret(value: string): void {
-  if (!value.trim())
-    throw new Error("AI Gateway video generation credential is empty");
+  if (!value.trim()) throw new Error("AI Gateway video generation credential is empty");
 }
 
 function requireIdempotencyKey(value: string): void {
@@ -328,8 +280,7 @@ function boundedError(value: string): string {
   try {
     const parsed = record(JSON.parse(value));
     const error = record(parsed?.error);
-    message =
-      stringValue(error?.message) ?? stringValue(parsed?.message) ?? value;
+    message = stringValue(error?.message) ?? stringValue(parsed?.message) ?? value;
   } catch {
     // Preserve the already-bounded non-JSON diagnostic.
   }

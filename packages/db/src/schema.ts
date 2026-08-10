@@ -2379,6 +2379,7 @@ export const workspaceVideoGenerationPolicies = pgTable(
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
     revision: bigint("revision", { mode: "number" }).notNull().default(0),
+    fundingSource: text("funding_source").notNull().default("workspace_gateway"),
     enabledModelIds: jsonb("enabled_model_ids").$type<string[]>().notNull().default([]),
     defaultModelId: text("default_model_id"),
     updatedBySubjectId: text("updated_by_subject_id"),
@@ -2400,6 +2401,10 @@ export const workspaceVideoGenerationPolicies = pgTable(
       sql`jsonb_typeof(${table.enabledModelIds}) = 'array'
         and jsonb_array_length(${table.enabledModelIds}) <= 16
         and (${table.defaultModelId} is null or ${table.enabledModelIds} ? ${table.defaultModelId})`,
+    ),
+    fundingSourceValid: check(
+      "workspace_video_generation_policies_funding_source_chk",
+      sql`${table.fundingSource} in ('opengeni_credits', 'workspace_gateway')`,
     ),
   }),
 );
@@ -2456,6 +2461,9 @@ export const videoGenerationOperations = pgTable(
     modelId: text("model_id").notNull(),
     sourceMode: text("source_mode").notNull(),
     capabilityRevision: text("capability_revision").notNull(),
+    fundingSource: text("funding_source").notNull().default("workspace_gateway"),
+    pricedCostMicros: bigint("priced_cost_micros", { mode: "number" }).notNull().default(0),
+    creditState: text("credit_state").notNull().default("not_applicable"),
     connectionId: uuid("connection_id"),
     credentialVersion: integer("credential_version").notNull(),
     credentialEncrypted: text("credential_encrypted"),
@@ -2543,6 +2551,27 @@ export const videoGenerationOperations = pgTable(
         and (${table.providerRequestEncrypted} is null or ${table.status} = 'submission_uncertain')
         and (${table.status} not in ('provider_started','retaining','completed','retention_failed') or ${table.providerJobId} is not null)
         and (${table.providerJobId} is null or ${table.status} in ('provider_started','retaining','completed','provider_failed','retention_failed'))`,
+    ),
+    fundingStateValid: check(
+      "video_generation_operations_funding_state_chk",
+      sql`(${table.fundingSource} = 'workspace_gateway'
+          and ${table.connectionId} is not null
+          and ${table.pricedCostMicros} = 0
+          and ${table.creditState} = 'not_applicable')
+        or (${table.fundingSource} = 'opengeni_credits'
+          and ${table.connectionId} is null
+          and ((${table.pricedCostMicros} = 0 and ${table.creditState} = 'not_applicable')
+            or (${table.pricedCostMicros} > 0
+              and ((${table.status} in ('provider_failed','cancelled_before_submit','outcome_unknown','retention_failed')
+                    and ${table.creditState} = 'refunded')
+                or (${table.status} not in ('provider_failed','cancelled_before_submit','outcome_unknown','retention_failed')
+                    and ${table.creditState} = 'debited')))))`,
+    ),
+    fundingValuesValid: check(
+      "video_generation_operations_funding_values_chk",
+      sql`${table.fundingSource} in ('opengeni_credits','workspace_gateway')
+        and ${table.pricedCostMicros} between 0 and 1000000000
+        and ${table.creditState} in ('not_applicable','debited','refunded')`,
     ),
   }),
 );

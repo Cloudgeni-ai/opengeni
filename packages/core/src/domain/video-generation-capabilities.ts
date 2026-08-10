@@ -32,6 +32,7 @@ export function defaultVideoGenerationPolicy(): VideoGenerationPolicyType {
   return VideoGenerationPolicy.parse({
     schemaVersion: 1,
     revision: 0,
+    fundingSource: "workspace_gateway",
     enabledModelIds: [],
     defaultModelId: null,
   });
@@ -51,6 +52,7 @@ export function videoGenerationCapabilitiesForPolicy(input: {
     schemaVersion: 1,
     capabilityRevision: videoGenerationCapabilityRevision({
       policyRevision: policy.revision,
+      fundingSource: policy.fundingSource,
       credentialVersion: input.credentialVersion,
       modelIds: models.map((model) => model.modelId),
     }),

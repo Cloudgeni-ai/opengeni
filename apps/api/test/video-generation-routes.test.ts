@@ -84,8 +84,16 @@ describe("video generation workspace routes", () => {
       expect(initial.status).toBe(200);
       expect(await initial.json()).toMatchObject({
         schemaVersion: 1,
-        providerConfigured: false,
-        policy: { revision: 0, enabledModelIds: [], defaultModelId: null },
+        policy: {
+          revision: 0,
+          fundingSource: "workspace_gateway",
+          enabledModelIds: [],
+          defaultModelId: null,
+        },
+        fundingOptions: [
+          { source: "opengeni_credits", available: false },
+          { source: "workspace_gateway", available: false },
+        ],
         availableModels: [{ modelId: MODEL_ID }],
         capabilities: null,
       });
@@ -106,6 +114,7 @@ describe("video generation workspace routes", () => {
         headers: { authorization: readAuthorization, "content-type": "application/json" },
         body: JSON.stringify({
           expectedRevision: 0,
+          fundingSource: "workspace_gateway",
           enabledModelIds: [MODEL_ID],
           defaultModelId: MODEL_ID,
         }),
@@ -117,6 +126,7 @@ describe("video generation workspace routes", () => {
         headers: { authorization: adminAuthorization, "content-type": "application/json" },
         body: JSON.stringify({
           expectedRevision: 0,
+          fundingSource: "workspace_gateway",
           enabledModelIds: [MODEL_ID],
           defaultModelId: MODEL_ID,
         }),
@@ -125,6 +135,7 @@ describe("video generation workspace routes", () => {
       expect(await enabled.json()).toEqual({
         schemaVersion: 1,
         revision: 1,
+        fundingSource: "workspace_gateway",
         enabledModelIds: [MODEL_ID],
         defaultModelId: MODEL_ID,
       });
@@ -134,8 +145,16 @@ describe("video generation workspace routes", () => {
       });
       expect(configured.status).toBe(200);
       expect(await configured.json()).toMatchObject({
-        providerConfigured: true,
-        policy: { revision: 1, enabledModelIds: [MODEL_ID], defaultModelId: MODEL_ID },
+        fundingOptions: [
+          { source: "opengeni_credits", available: false },
+          { source: "workspace_gateway", available: true },
+        ],
+        policy: {
+          revision: 1,
+          fundingSource: "workspace_gateway",
+          enabledModelIds: [MODEL_ID],
+          defaultModelId: MODEL_ID,
+        },
         capabilities: {
           schemaVersion: 1,
           defaultModelId: MODEL_ID,
@@ -148,6 +167,7 @@ describe("video generation workspace routes", () => {
         headers: { authorization: adminAuthorization, "content-type": "application/json" },
         body: JSON.stringify({
           expectedRevision: 0,
+          fundingSource: "workspace_gateway",
           enabledModelIds: [],
           defaultModelId: null,
         }),
@@ -159,11 +179,64 @@ describe("video generation workspace routes", () => {
         headers: { authorization: adminAuthorization, "content-type": "application/json" },
         body: JSON.stringify({
           expectedRevision: 1,
+          fundingSource: "workspace_gateway",
           enabledModelIds: ["unknown/video-model"],
           defaultModelId: "unknown/video-model",
         }),
       });
       expect(unknown.status).toBe(422);
+    } finally {
+      await deleteWorkspace(client.db, workspace.workspaceId);
+    }
+  });
+
+  test("enables the same Seedance capability through OpenGeni credits without a workspace key", async () => {
+    const workspace = await workspaceFixture();
+    const managedApp = new Hono();
+    registerVideoGenerationRoutes(managedApp, {
+      db: client.db,
+      settings: testSettings({
+        delegationSecret: SECRET,
+        vercelAiGatewayApiKey: "managed-gateway-key",
+        environmentsEncryptionKey: Buffer.alloc(32, 7).toString("base64"),
+      }),
+    } as ApiRouteDeps);
+    try {
+      const authorization = await bearer(workspace, ["workspace:read", "workspace:admin"]);
+      const initial = await managedApp.request(settingsUrl(workspace.workspaceId), {
+        headers: { authorization },
+      });
+      expect(await initial.json()).toMatchObject({
+        fundingOptions: [
+          { source: "opengeni_credits", available: true },
+          { source: "workspace_gateway", available: false },
+        ],
+        capabilities: null,
+      });
+
+      const enabled = await managedApp.request(`${settingsUrl(workspace.workspaceId)}/policy`, {
+        method: "PUT",
+        headers: { authorization, "content-type": "application/json" },
+        body: JSON.stringify({
+          expectedRevision: 0,
+          fundingSource: "opengeni_credits",
+          enabledModelIds: [MODEL_ID],
+          defaultModelId: MODEL_ID,
+        }),
+      });
+      expect(enabled.status).toBe(200);
+      expect(await enabled.json()).toMatchObject({
+        revision: 1,
+        fundingSource: "opengeni_credits",
+      });
+
+      const configured = await managedApp.request(settingsUrl(workspace.workspaceId), {
+        headers: { authorization },
+      });
+      expect(await configured.json()).toMatchObject({
+        policy: { fundingSource: "opengeni_credits", enabledModelIds: [MODEL_ID] },
+        capabilities: { defaultModelId: MODEL_ID, models: [{ modelId: MODEL_ID }] },
+      });
     } finally {
       await deleteWorkspace(client.db, workspace.workspaceId);
     }

@@ -9,12 +9,14 @@ import {
   ReasoningEffort,
   SandboxBackend,
   SessionMcpApprovalPolicy,
+  SEEDANCE_2_5_MODEL_ID,
   StaticUsageLimits,
   TurnExecutionPolicyV1,
   UsageLimitsMode,
   type TurnExecutionLatencyModeSourceV1,
   type TurnExecutionModelSourceV1,
   type TurnExecutionReasoningSourceV1,
+  type VideoGenerationResolution,
 } from "@opengeni/contracts";
 import { CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS } from "@opengeni/codex";
 import {
@@ -414,6 +416,20 @@ const SettingsSchema = z.object({
     .default(20 * 1024 * 1024 * 1024),
   videoGenerationTempDirectory: z.string().trim().min(1).max(1_024).default("/tmp/opengeni-video"),
   videoGenerationFfprobePath: z.string().trim().min(1).max(1_024).default("ffprobe"),
+  // OpenGeni's customer price, not a claim about the provider's delayed cost report.
+  // The durable operation freezes the exact resulting price before provider submit.
+  videoGenerationCredit480pMicrosPerSecond: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(10_000_000)
+    .default(155_000),
+  videoGenerationCredit720pMicrosPerSecond: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(10_000_000)
+    .default(350_000),
   // Native composer voice input (browser MediaRecorder → API transcription).
   // Provider credentials stay server-side; ClientConfig only projects availability
   // and hard ceilings. Selection happens once before audio is sent — never retry
@@ -1900,6 +1916,12 @@ export function getSettings(): Settings {
     videoGenerationWorkspaceQuotaBytes: optional("OPENGENI_VIDEO_GENERATION_WORKSPACE_QUOTA_BYTES"),
     videoGenerationTempDirectory: optional("OPENGENI_VIDEO_GENERATION_TEMP_DIRECTORY"),
     videoGenerationFfprobePath: optional("OPENGENI_VIDEO_GENERATION_FFPROBE_PATH"),
+    videoGenerationCredit480pMicrosPerSecond: optional(
+      "OPENGENI_VIDEO_GENERATION_CREDIT_480P_MICROS_PER_SECOND",
+    ),
+    videoGenerationCredit720pMicrosPerSecond: optional(
+      "OPENGENI_VIDEO_GENERATION_CREDIT_720P_MICROS_PER_SECOND",
+    ),
     voiceInputMaxDurationSeconds: optional("OPENGENI_VOICE_INPUT_MAX_DURATION_SECONDS"),
     voiceInputMaxSizeBytes: optional("OPENGENI_VOICE_INPUT_MAX_SIZE_BYTES"),
     voiceInputResumableEnabled: optional("OPENGENI_VOICE_INPUT_RESUMABLE_ENABLED"),
@@ -3667,6 +3689,36 @@ export function calculateGatewayReportedCostBreakdown(
     providerCostMicros: Number(providerMicros),
     creditCostMicros: Number(creditMicros),
   };
+}
+
+/**
+ * Exact OpenGeni product price frozen before a managed video request starts.
+ * Gateway reporting is delayed for asynchronous video, so this deliberately
+ * does not masquerade as provider-reported cost.
+ */
+export function calculateVideoGenerationCreditCostMicros(
+  settings: Settings,
+  input: {
+    modelId: string;
+    resolution: VideoGenerationResolution;
+    durationSeconds: number;
+  },
+): number {
+  if (input.modelId !== SEEDANCE_2_5_MODEL_ID) {
+    throw new Error(`Missing video generation credit pricing for ${input.modelId}`);
+  }
+  if (!Number.isSafeInteger(input.durationSeconds) || input.durationSeconds < 1) {
+    throw new Error("Video generation duration is invalid for credit pricing");
+  }
+  const rate =
+    input.resolution === "480p"
+      ? settings.videoGenerationCredit480pMicrosPerSecond
+      : settings.videoGenerationCredit720pMicrosPerSecond;
+  const cost = rate * input.durationSeconds;
+  if (!Number.isSafeInteger(cost) || cost <= 0 || cost > 1_000_000_000) {
+    throw new Error("Video generation credit price exceeds the supported range");
+  }
+  return cost;
 }
 
 export function configuredAllowedReasoningEfforts(

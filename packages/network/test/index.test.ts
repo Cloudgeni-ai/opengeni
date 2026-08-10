@@ -341,7 +341,7 @@ describe("DNS-pinned outbound transport", () => {
           "HTTP/1.1 200 OK\r\n" +
             "Content-Type: video/mp4\r\n" +
             "Content-Length: 4\r\n" +
-            'X-Tos-Expiration: expiry-date=\"Sat, 06 Feb 2027 16:00:00 GMT\", rule-id=\"180day\u81ea\u52a8\u6e05\u7406\"\r\n' +
+            'X-Tos-Expiration: expiry-date="Sat, 06 Feb 2027 16:00:00 GMT", rule-id="180day\u81ea\u52a8\u6e05\u7406"\r\n' +
             "Connection: close\r\n\r\n" +
             "test",
           "utf8",

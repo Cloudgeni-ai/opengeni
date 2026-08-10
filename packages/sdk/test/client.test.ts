@@ -1198,6 +1198,7 @@ describe("OpenGeniClient", () => {
     const policy = {
       schemaVersion: 1 as const,
       revision: 2,
+      fundingSource: "opengeni_credits" as const,
       enabledModelIds: ["bytedance/seedance-2.5"],
       defaultModelId: "bytedance/seedance-2.5",
     };
@@ -1214,7 +1215,22 @@ describe("OpenGeniClient", () => {
     const settings = {
       schemaVersion: 1 as const,
       policy,
-      providerConfigured: true,
+      fundingOptions: [
+        {
+          source: "opengeni_credits" as const,
+          label: "OpenGeni",
+          description: "Uses OpenGeni credits.",
+          available: true,
+          unavailableReason: null,
+        },
+        {
+          source: "workspace_gateway" as const,
+          label: "Your Gateway",
+          description: "Uses your workspace Gateway key.",
+          available: false,
+          unavailableReason: "Connect a Gateway key.",
+        },
+      ],
       availableModels: [model],
       capabilities: {
         schemaVersion: 1 as const,
@@ -1258,6 +1274,7 @@ describe("OpenGeniClient", () => {
     expect(
       await client.updateVideoGenerationPolicy(WORKSPACE_ID, {
         expectedRevision: 1,
+        fundingSource: "opengeni_credits",
         enabledModelIds: [model.modelId],
         defaultModelId: model.modelId,
       }),
@@ -1269,6 +1286,7 @@ describe("OpenGeniClient", () => {
     expect(requests.map((request) => request.method)).toEqual(["GET", "PUT", "GET", "POST"]);
     expect(JSON.parse(requests[1]!.body!)).toEqual({
       expectedRevision: 1,
+      fundingSource: "opengeni_credits",
       enabledModelIds: [model.modelId],
       defaultModelId: model.modelId,
     });

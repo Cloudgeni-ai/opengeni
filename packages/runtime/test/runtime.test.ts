@@ -114,7 +114,12 @@ import { TurnSandboxCommandCancelledError } from "../src/sandbox/turn-tool-cance
 import { CompactionNeededError } from "../src/context-compaction";
 import { readSkillLibraryArtifact, verifySkillLibraryArtifact } from "../src/skill-library";
 import { MCP_MAX_CONCURRENT_SERVER_OPERATIONS } from "../src/mcp-network";
-import { ScriptedModel, functionCall, startTestMcpServer, testSettings } from "@opengeni/testing";
+import {
+  ScriptedModel,
+  functionCall as scriptedFunctionCall,
+  startTestMcpServer,
+  testSettings,
+} from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
 import {
   boundModelToolOutputItem,
@@ -479,7 +484,7 @@ describe("structured human-input runtime boundary", () => {
     const model = new ScriptedModel([
       {
         output: [
-          functionCall(
+          scriptedFunctionCall(
             HUMAN_INPUT_TOOL_NAME,
             { questions: JSON.stringify(validQuestions), allowSkip: false },
             "human-call-invalid",
@@ -488,7 +493,7 @@ describe("structured human-input runtime boundary", () => {
       },
       {
         output: [
-          functionCall(
+          scriptedFunctionCall(
             HUMAN_INPUT_TOOL_NAME,
             { questions: validQuestions, allowSkip: false },
             "human-call-valid",
