@@ -6,10 +6,7 @@ import { createRoot } from "react-dom/client";
 
 import type { PersonalSlackAccountState } from "@/lib/personal-slack";
 import type { ConnectionMetadata } from "@/types";
-import {
-  PersonalSlackAccountCard,
-  personalSlackAccountStatusLabel,
-} from "./personal-slack-account-card";
+import { PersonalSlackAccountCard } from "./personal-slack-account-card";
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -103,8 +100,7 @@ describe("PersonalSlackAccountCard", () => {
         );
       });
 
-      expect(personalSlackAccountStatusLabel(state, true)).toBe("Not connected");
-      expect(container.textContent).toContain("Connect my Slack account");
+      expect(container.textContent).toContain("Connect");
       expect(container.textContent).not.toContain("Not connected");
       expect(container.textContent).not.toContain("Connect only when");
     } finally {
@@ -209,7 +205,7 @@ describe("PersonalSlackAccountCard", () => {
     });
     try {
       expect(disconnected.container.textContent).toContain("Disconnected");
-      expect(disconnected.container.textContent).toContain("Reconnect my Slack account");
+      expect(disconnected.container.textContent).toContain("Reconnect");
       expect(disconnected.container.textContent).not.toContain("DisconnectDisconnect");
     } finally {
       await disconnected.unmount();

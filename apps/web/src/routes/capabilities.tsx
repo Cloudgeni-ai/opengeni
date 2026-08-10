@@ -42,10 +42,7 @@ import {
 import { CapabilityLogo } from "@/components/capabilities/capability-logo";
 import { CapabilityTile } from "@/components/capabilities/capability-tile";
 import { PacksSection } from "@/components/capabilities/packs-section";
-import {
-  PersonalSlackAccountCard,
-  personalSlackAccountStatusLabel,
-} from "@/components/capabilities/personal-slack-account-card";
+import { PersonalSlackAccountCard } from "@/components/capabilities/personal-slack-account-card";
 import { SlackReactionSummonCard } from "@/components/capabilities/slack-reaction-summon-card";
 import { LoadErrorState, PageHeader } from "@/components/common";
 import { Button } from "@/components/ui/button";
@@ -1474,12 +1471,6 @@ export function CapabilitiesRoute({
                     </div>
                   </div>
                   <div className="flex shrink-0 flex-wrap items-center justify-end gap-3">
-                    <span className="text-xs text-fg-muted">
-                      {personalSlackAccountStatusLabel(
-                        visiblePersonalSlackStatus,
-                        personalSlackAvailable,
-                      )}
-                    </span>
                     <PersonalSlackAccountCard
                       available={personalSlackAvailable}
                       canManage={canManagePersonalSlack}

@@ -82,7 +82,7 @@ export function PersonalSlackAccountCard({
             onClick={onConnect}
           >
             {busy ? <Loader2Icon className="animate-spin" /> : <UserRoundIcon />}
-            Connect my Slack account
+            Connect
           </Button>
         ) : accountState.state === "reconnect_required" || accountState.state === "disconnected" ? (
           <Button
@@ -92,7 +92,7 @@ export function PersonalSlackAccountCard({
             onClick={onReconnect}
           >
             {busy ? <Loader2Icon className="animate-spin" /> : <RefreshCwIcon />}
-            Reconnect my Slack account
+            Reconnect
           </Button>
         ) : null}
         {canDisconnect ? (
@@ -139,13 +139,6 @@ export function PersonalSlackAccountCard({
       ) : null}
     </section>
   );
-}
-
-export function personalSlackAccountStatusLabel(
-  state: PersonalSlackAccountState,
-  available: boolean,
-): string {
-  return personalSlackStateView(state, available).label;
 }
 
 function personalSlackStateView(
