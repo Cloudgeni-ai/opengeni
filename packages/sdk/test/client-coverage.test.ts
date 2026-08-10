@@ -1192,6 +1192,38 @@ describe("OpenGeniClient capabilities", () => {
       `GET /v1/workspaces/${WORKSPACE_ID}/capabilities/discovery/mcp-registry?query=github&limit=10`,
     ]);
   });
+
+  test("previews, installs, impact-checks, and uninstalls immutable Skills", async () => {
+    const { client, requests } = makeClient(() => jsonResponse({}));
+    const sourceUrl = "https://skills.sh/acme/skills/release-operator";
+    const capabilityId = "skill:release-operator-deadbeef1234";
+    await client.previewSkillImport(WORKSPACE_ID, { url: sourceUrl });
+    await client.installSkill(WORKSPACE_ID, {
+      url: sourceUrl,
+      expectedSourceCommit: "a".repeat(40),
+      expectedContentSha256: "b".repeat(64),
+    });
+    await client.previewSkillUninstall(WORKSPACE_ID, capabilityId);
+    await client.uninstallSkill(WORKSPACE_ID, capabilityId, {
+      expectedInstallationVersion: 3,
+    });
+
+    expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
+      [
+        `POST /v1/workspaces/${WORKSPACE_ID}/skills/preview`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/skills/install`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/skills/skill%3Arelease-operator-deadbeef1234/uninstall-preview`,
+        `DELETE /v1/workspaces/${WORKSPACE_ID}/skills/skill%3Arelease-operator-deadbeef1234`,
+      ],
+    );
+    expect(JSON.parse(requests[0]!.body!)).toEqual({ url: sourceUrl });
+    expect(JSON.parse(requests[1]!.body!)).toEqual({
+      url: sourceUrl,
+      expectedSourceCommit: "a".repeat(40),
+      expectedContentSha256: "b".repeat(64),
+    });
+    expect(JSON.parse(requests[3]!.body!)).toEqual({ expectedInstallationVersion: 3 });
+  });
 });
 
 describe("OpenGeniClient github", () => {

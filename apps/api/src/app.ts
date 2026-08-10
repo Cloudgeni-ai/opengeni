@@ -65,6 +65,7 @@ import { registerBillingRoutes } from "./routes/billing";
 import { registerGitHubRoutes } from "./routes/github";
 import { registerInstallRoutes } from "./routes/install";
 import { registerPackRoutes } from "./routes/packs";
+import { registerSkillRoutes } from "./routes/skills";
 import { registerRigRoutes } from "./routes/rigs";
 import { registerScheduledTaskRoutes } from "./routes/scheduled-tasks";
 import { registerSessionRoutes } from "./routes/sessions";
@@ -587,6 +588,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerEnvironmentRoutes(app, routeDeps);
   registerRigRoutes(app, routeDeps);
   registerPackRoutes(app, routeDeps);
+  registerSkillRoutes(app, routeDeps);
   registerSessionRoutes(app, routeDeps);
   registerScheduledTaskRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
@@ -1167,6 +1169,22 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/capabilities\/[^/]+\/disable$/,
     label: "/v1/workspaces/:workspaceId/capabilities/:id/disable",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/skills\/preview$/,
+    label: "/v1/workspaces/:workspaceId/skills/preview",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/skills\/install$/,
+    label: "/v1/workspaces/:workspaceId/skills/install",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/skills\/[^/]+\/uninstall-preview$/,
+    label: "/v1/workspaces/:workspaceId/skills/:id/uninstall-preview",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/skills\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/skills/:id",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/environments$/,

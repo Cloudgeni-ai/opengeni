@@ -54,6 +54,19 @@ export type SkillLibrarySkill = Readonly<{
   files: readonly SkillLibraryFile[];
 }>;
 
+export const PORTABLE_SKILL_MAX_FILES = 128;
+export const PORTABLE_SKILL_MAX_FILE_BYTES = 256 * 1024;
+export const PORTABLE_SKILL_MAX_TOTAL_BYTES = 1024 * 1024;
+const portableSkillName = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
+
+export type PortableSkillArtifact = Readonly<{
+  name: string;
+  description: string;
+  files: readonly SkillLibraryFile[];
+  contentSha256: string;
+  totalBytes: number;
+}>;
+
 const skillLibraryEntries: readonly SkillLibraryEntry[] = Object.freeze([
   Object.freeze({
     id: "checkov",
@@ -343,6 +356,109 @@ export function readSkillLibraryArtifact(root: string): SkillLibraryArtifact {
     ),
     contentSha256,
   });
+}
+
+/**
+ * Validate and fingerprint a portable, text-only Skill artifact before it is
+ * persisted or exposed to the runtime. Remote imports and curated entries use
+ * the same canonical path and whole-artifact digest rules.
+ */
+export function buildPortableSkillArtifact(
+  inputFiles: readonly SkillLibraryFile[],
+): PortableSkillArtifact {
+  if (inputFiles.length === 0 || inputFiles.length > PORTABLE_SKILL_MAX_FILES) {
+    throw new Error(`Skill artifact must contain 1-${PORTABLE_SKILL_MAX_FILES} files`);
+  }
+  const paths = new Set<string>();
+  let totalBytes = 0;
+  const materialized = inputFiles
+    .map((file) => {
+      const path = normalizeSkillLibraryRelativePath(file.path);
+      if (paths.has(path)) {
+        throw new Error(`Skill artifact contains duplicate file path: ${path}`);
+      }
+      paths.add(path);
+      const bytes = new TextEncoder().encode(file.content);
+      if (bytes.byteLength > PORTABLE_SKILL_MAX_FILE_BYTES) {
+        throw new Error(
+          `Skill artifact file exceeds ${PORTABLE_SKILL_MAX_FILE_BYTES} bytes: ${path}`,
+        );
+      }
+      totalBytes += bytes.byteLength;
+      if (totalBytes > PORTABLE_SKILL_MAX_TOTAL_BYTES) {
+        throw new Error(`Skill artifact exceeds ${PORTABLE_SKILL_MAX_TOTAL_BYTES} bytes`);
+      }
+      return Object.freeze({ path, content: file.content, bytes });
+    })
+    .sort((left, right) => compareCanonicalPath(left.path, right.path));
+  const skillMarkdown = materialized.find((file) => file.path === "SKILL.md")?.content;
+  if (skillMarkdown === undefined) {
+    throw new Error("Skill artifact is missing a top-level SKILL.md");
+  }
+  const metadata = parsePortableSkillFrontmatter(skillMarkdown);
+  if (!metadata.name || !portableSkillName.test(metadata.name)) {
+    throw new Error("Skill artifact SKILL.md must declare a safe name");
+  }
+  if (
+    !metadata.description ||
+    metadata.description.length > 2_048 ||
+    /[\r\n]/u.test(metadata.description)
+  ) {
+    throw new Error("Skill artifact SKILL.md must declare a single-line description");
+  }
+  return Object.freeze({
+    name: metadata.name,
+    description: metadata.description,
+    files: Object.freeze(materialized.map(({ path, content }) => Object.freeze({ path, content }))),
+    contentSha256: skillLibraryArtifactSha256(materialized),
+    totalBytes,
+  });
+}
+
+export function parsePortableSkillFrontmatter(markdown: string): {
+  name: string | null;
+  description: string | null;
+} {
+  const lines = markdown.split(/\r?\n/u);
+  if (lines[0]?.trim() !== "---") return { name: null, description: null };
+  const end = lines.findIndex((line, index) => index > 0 && line.trim() === "---");
+  if (end === -1) return { name: null, description: null };
+  let name: string | null = null;
+  let description: string | null = null;
+  for (let index = 1; index < end; index += 1) {
+    const line = lines[index]!;
+    const separator = line.indexOf(":");
+    if (separator < 1) continue;
+    const key = line.slice(0, separator).trim();
+    const raw = line.slice(separator + 1).trim();
+    if (key === "name") {
+      name = unquotePortableFrontmatterValue(raw);
+      continue;
+    }
+    if (key !== "description") continue;
+    if (raw !== ">" && raw !== ">-" && raw !== "|" && raw !== "|-") {
+      description = unquotePortableFrontmatterValue(raw);
+      continue;
+    }
+    const block: string[] = [];
+    while (index + 1 < end && /^\s+\S/u.test(lines[index + 1]!)) {
+      index += 1;
+      block.push(lines[index]!.trim());
+    }
+    description = block.join(" ").trim() || null;
+  }
+  return { name: name?.trim() || null, description: description?.trim() || null };
+}
+
+function unquotePortableFrontmatterValue(value: string): string {
+  if (value.length >= 2) {
+    const first = value[0];
+    const last = value[value.length - 1];
+    if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+      return value.slice(1, -1);
+    }
+  }
+  return value;
 }
 
 /** Verify a reviewed artifact against its immutable catalog digest. */

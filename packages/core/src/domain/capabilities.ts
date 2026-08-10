@@ -125,9 +125,10 @@ export async function buildCapabilityCatalog(input: {
     ...(codexApps ? [codexApps] : []),
   ])
     .map((item) => {
+      const runtimeItem = applyPortableSkillRuntime(item);
       const projected = applyCapabilityEnablement(
-        item,
-        capabilityInstallationById.get(item.id),
+        runtimeItem,
+        capabilityInstallationById.get(runtimeItem.id),
         activePackIds,
       );
       return applyCapabilityLifecycle(projected);
@@ -136,6 +137,26 @@ export async function buildCapabilityCatalog(input: {
   return {
     items,
     installations: capabilityInstallations,
+  };
+}
+
+function applyPortableSkillRuntime(item: CapabilityCatalogItem): CapabilityCatalogItem {
+  if (
+    item.kind !== "skill" ||
+    item.metadata.platformVersion !== 2 ||
+    typeof item.metadata.pluginVersionId !== "string" ||
+    typeof item.metadata.facetId !== "string" ||
+    typeof item.metadata.sourceCommit !== "string" ||
+    typeof item.metadata.contentSha256 !== "string"
+  ) {
+    return item;
+  }
+  return {
+    ...item,
+    runtime: {
+      available: true,
+      notes: "Installed from an immutable workspace Skill artifact.",
+    },
   };
 }
 

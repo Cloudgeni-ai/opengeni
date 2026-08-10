@@ -4106,6 +4106,34 @@ export type CapabilityCatalogAuthKind = "oauth2" | "api_key" | "none" | "unknown
 
 export type CapabilityCatalogTier = "verified" | "community";
 
+export type CapabilityLifecycleStatus =
+  | "available"
+  | "installed"
+  | "connected"
+  | "ready"
+  | "needs_attention"
+  | "unavailable"
+  | "managed";
+
+export type CapabilityReadiness = "ready" | "setup_required" | "attention" | "unavailable";
+
+export type CapabilityAction =
+  | "install"
+  | "connect"
+  | "configure"
+  | "update"
+  | "repair"
+  | "disconnect"
+  | "uninstall"
+  | "inspect";
+
+export type CapabilityLifecycle = {
+  status: CapabilityLifecycleStatus;
+  readiness: CapabilityReadiness;
+  detail: string | null;
+  managedBy: "deployment" | "platform" | "workspace" | null;
+};
+
 export type CapabilityRuntime = {
   available: boolean;
   mcpServerId?: string | undefined;
@@ -4152,7 +4180,11 @@ export type CapabilityCatalogItem = {
   staleAt: string | null;
   tools: ToolRef[];
   runtime: CapabilityRuntime;
+  lifecycle: CapabilityLifecycle;
+  actions: CapabilityAction[];
+  /** @deprecated Use lifecycle and actions. */
   enabled: boolean;
+  /** @deprecated Use lifecycle.detail. */
   enabledReason: string | null;
   /** The connection backing this enabled installation, or null when none is involved. */
   connectionRef: {
@@ -4223,6 +4255,80 @@ export type DiscoverMcpCapabilitiesResponse = {
   items: CapabilityCatalogItem[];
   source: "official_mcp_registry";
   sourceUrl: string;
+};
+
+export type SkillImportSource = "github" | "skills_sh";
+
+export type PreviewSkillImportRequest = {
+  url: string;
+};
+
+export type SkillImportFileSummary = {
+  path: string;
+  byteSize: number;
+  contentSha256: string;
+};
+
+export type SkillImportPreview = {
+  source: SkillImportSource;
+  sourceUrl: string;
+  repositoryUrl: string;
+  owner: string;
+  repository: string;
+  sourcePath: string;
+  sourceCommit: string;
+  name: string;
+  description: string;
+  contentSha256: string;
+  totalBytes: number;
+  files: SkillImportFileSummary[];
+  warnings: string[];
+};
+
+export type InstallSkillRequest = {
+  url: string;
+  expectedSourceCommit: string;
+  expectedContentSha256: string;
+};
+
+export type InstalledSkill = {
+  capabilityId: string;
+  pluginId: string;
+  pluginVersionId: string;
+  facetId: string;
+  pluginInstallationId: string;
+  facetInstallationId: string;
+  source: SkillImportSource;
+  sourceUrl: string;
+  sourceCommit: string;
+  contentSha256: string;
+  name: string;
+  status: "installed";
+};
+
+export type CapabilityComponentOwner = {
+  kind: "direct" | "plugin" | "pack" | "migration";
+  id: string;
+  removable: boolean;
+};
+
+export type SkillUninstallPreview = {
+  capabilityId: string;
+  installed: boolean;
+  installationVersion: number | null;
+  directOwner: CapabilityComponentOwner | null;
+  remainingOwners: CapabilityComponentOwner[];
+  removesRuntimeSkill: boolean;
+};
+
+export type UninstallSkillRequest = {
+  expectedInstallationVersion: number;
+};
+
+export type UninstallSkillResult = {
+  capabilityId: string;
+  status: "not_installed" | "uninstalled" | "retained_by_other_owners";
+  remainingOwners: CapabilityComponentOwner[];
 };
 
 // --- GitHub ---------------------------------------------------------------------

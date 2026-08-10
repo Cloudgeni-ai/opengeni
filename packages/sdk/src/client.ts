@@ -54,6 +54,8 @@ import type {
   CreateApiKeyRequest,
   CreateApiKeyResponse,
   CreateCapabilityCatalogItemRequest,
+  InstallSkillRequest,
+  InstalledSkill,
   CreateCheckoutRequest,
   CreateCheckoutResponse,
   OpenGeniSlackBotInstallRequest,
@@ -120,6 +122,7 @@ import type {
   RetainedArtifactMetadata,
   RegisterCapabilityPackRequest,
   ResourceRef,
+  PreviewSkillImportRequest,
   ScheduledTask,
   ScheduledTaskRun,
   Session,
@@ -235,6 +238,10 @@ import type {
   OAuthStartResponse,
   SocialConnection,
   SocialOAuthStartRequest,
+  SkillImportPreview,
+  SkillUninstallPreview,
+  UninstallSkillRequest,
+  UninstallSkillResult,
 } from "./types";
 import { parseRetainedGeneratedImageReference } from "./retained-artifacts";
 import type {
@@ -3604,6 +3611,50 @@ export class OpenGeniClient {
         ...(options.query !== undefined ? { query: options.query } : {}),
         ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
       },
+    );
+  }
+
+  /** Resolve one public skills.sh or GitHub Skill folder to an immutable review preview. */
+  async previewSkillImport(
+    workspaceId: string,
+    request: PreviewSkillImportRequest,
+  ): Promise<SkillImportPreview> {
+    return await this.requestJson<SkillImportPreview>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/skills/preview`,
+      request,
+    );
+  }
+
+  /** Install only the exact commit and full-content digest accepted during preview. */
+  async installSkill(workspaceId: string, request: InstallSkillRequest): Promise<InstalledSkill> {
+    return await this.requestJson<InstalledSkill>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/skills/install`,
+      request,
+    );
+  }
+
+  async previewSkillUninstall(
+    workspaceId: string,
+    capabilityId: string,
+  ): Promise<SkillUninstallPreview> {
+    return await this.requestJson<SkillUninstallPreview>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/skills/${encodeURIComponent(capabilityId)}/uninstall-preview`,
+    );
+  }
+
+  /** Remove the direct owner under an optimistic installation-version fence. */
+  async uninstallSkill(
+    workspaceId: string,
+    capabilityId: string,
+    request: UninstallSkillRequest,
+  ): Promise<UninstallSkillResult> {
+    return await this.requestJson<UninstallSkillResult>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/skills/${encodeURIComponent(capabilityId)}`,
+      request,
     );
   }
 

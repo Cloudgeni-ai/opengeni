@@ -248,10 +248,16 @@ process.env.OPENAI_AGENTS_DONT_LOG_MODEL_DATA = "1";
 process.env.OPENAI_AGENTS_DONT_LOG_TOOL_DATA = "1";
 
 export {
+  buildPortableSkillArtifact,
   getSkillLibraryEntry,
   isSkillLibraryEntryId,
   listSkillLibraryEntries,
   loadSkillLibrarySkill,
+  PORTABLE_SKILL_MAX_FILE_BYTES,
+  PORTABLE_SKILL_MAX_FILES,
+  PORTABLE_SKILL_MAX_TOTAL_BYTES,
+  parsePortableSkillFrontmatter,
+  type PortableSkillArtifact,
   type SkillLibraryEntry,
   type SkillLibraryFile,
   type SkillLibrarySkill,
@@ -1889,7 +1895,7 @@ export type ToolspaceTokenWriterSession = SandboxSessionLike;
 export type EffectiveSkillSelection = Readonly<{
   id: string;
   name: string;
-  source: "bundled" | "library" | "pack" | "session";
+  source: "bundled" | "imported" | "library" | "pack" | "session";
   version: string | null;
   contentSha256: string | null;
   reason: string;

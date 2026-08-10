@@ -2,11 +2,13 @@ import { CapabilityPack } from "@opengeni/contracts";
 import {
   getWorkspace,
   getWorkspacePack,
+  listInstalledPortableSkills,
   listCapabilityInstallations,
   listPackInstallations,
   type Database,
 } from "@opengeni/db";
 import {
+  buildPortableSkillArtifact,
   isSkillLibraryEntryId,
   loadSkillLibrarySkill,
   type EffectiveSkillSelection,
@@ -143,6 +145,32 @@ export async function resolveWorkspaceSkillLibraryRuntime(
       version: loaded.entry.version,
       contentSha256: loaded.entry.contentSha256,
       reason: "enabled workspace capability installation",
+    });
+  }
+  const importedSkills = await listInstalledPortableSkills(db, workspaceId);
+  for (const imported of importedSkills) {
+    const artifact = buildPortableSkillArtifact(imported.files);
+    if (
+      artifact.name !== imported.name ||
+      artifact.description !== imported.description ||
+      artifact.contentSha256 !== imported.contentSha256
+    ) {
+      throw new Error(
+        `Imported Skill artifact verification failed for ${imported.capabilityId}; reinstall it from the pinned source`,
+      );
+    }
+    skillLibrarySkills.push({
+      name: artifact.name,
+      description: artifact.description,
+      files: artifact.files.map((file) => ({ path: file.path, content: file.content })),
+    });
+    skillLibrarySelections.push({
+      id: imported.capabilityId,
+      name: artifact.name,
+      source: "imported",
+      version: imported.sourceCommit,
+      contentSha256: artifact.contentSha256,
+      reason: `installed from ${imported.sourceUrl}`,
     });
   }
   return { skillLibrarySkills, skillLibrarySelections };

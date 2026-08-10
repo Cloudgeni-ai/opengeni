@@ -105,6 +105,34 @@ Self-hosted/Connected Machine deployments may omit the curated artifact from the
 
 Skill-library selection is currently workspace-scoped through the capability installation. Existing session rows do not contain a per-session library pin, so resumed and newly created sessions use the workspace's active exact-pinned library installations plus their Pack/session/repository sources. This deliberately removes the former seven deployment-default domain Skills rather than silently retaining methodology a workspace never selected. A future per-session pin migration can preserve historical library context for long-lived sessions if product requirements call for that stronger continuation guarantee; it must use the same immutable id/version/hash records and must not broaden authorization.
 
+### Remote Skill imports
+
+Workspace administrators can preview and install a Skill from a public
+`skills.sh` URL or a GitHub repository/deep-folder URL. Preview resolves the
+repository to an immutable commit, walks only the selected tree, rejects
+symlinks, submodules, traversal, invalid UTF-8, duplicate paths, missing
+frontmatter, and bounded-size violations, then returns file digests without
+returning file contents. Install repeats source resolution and requires both
+the previewed commit and whole-artifact SHA-256 to match; source drift is a
+`409` and never installs unreviewed bytes.
+
+The normalized v2 persistence model stores the immutable Plugin version, Skill
+facet, exact text files, workspace installation, and component owners under
+FORCE RLS. Runtime materialization revalidates the stored artifact and digest
+before adding it to the same lazy `.agents/` Skill index as curated, Pack,
+session, repository, and native artifact Skills. Uninstall is previewed and
+optimistic-concurrency fenced: removing the direct owner retains the Skill when
+a Plugin or Pack still owns it, and only the final owner removes it from later
+turns. The compatibility catalog/install rows are dual-written during the
+rolling migration; they are a projection, not the artifact authority.
+
+The owning endpoints are:
+
+- `POST /v1/workspaces/:workspaceId/skills/preview`
+- `POST /v1/workspaces/:workspaceId/skills/install`
+- `GET /v1/workspaces/:workspaceId/skills/:capabilityId/uninstall-preview`
+- `DELETE /v1/workspaces/:workspaceId/skills/:capabilityId`
+
 Configured MCP endpoint URLs are visible in the catalog. Do not put tokens or other secrets in `OPENGENI_MCP_SERVERS` URLs.
 
 ## API

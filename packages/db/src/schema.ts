@@ -6375,6 +6375,435 @@ export const capabilityInstallations = pgTable(
   }),
 );
 
+// --- Capabilities platform v2 ------------------------------------------------
+// Expand-only normalized state. The v1 catalog/installations remain intact
+// while adapters shadow-read and migrate exact owners into this model.
+
+export const capabilityPlugins = pgTable(
+  "capability_plugins",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    pluginKey: text("plugin_key").notNull(),
+    accountId: uuid("account_id").references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id").references(() => workspaces.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    description: text("description"),
+    category: text("category").notNull(),
+    tags: jsonb("tags").$type<string[]>().notNull().default([]),
+    provenance: text("provenance").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    globalKey: uniqueIndex("capability_plugins_global_key_idx")
+      .on(table.pluginKey)
+      .where(sql`${table.workspaceId} is null`),
+    workspaceKey: uniqueIndex("capability_plugins_workspace_key_idx").on(
+      table.workspaceId,
+      table.pluginKey,
+    ),
+    scope: index("capability_plugins_scope_idx").on(table.workspaceId, table.category),
+  }),
+);
+
+export const capabilityPluginVersions = pgTable(
+  "capability_plugin_versions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    pluginId: uuid("plugin_id")
+      .notNull()
+      .references(() => capabilityPlugins.id, { onDelete: "cascade" }),
+    version: text("version").notNull(),
+    manifestDigest: text("manifest_digest").notNull(),
+    manifest: jsonb("manifest").$type<Record<string, unknown>>().notNull().default({}),
+    status: text("status").notNull().default("published"),
+    importBatchId: uuid("import_batch_id").references(() => importBatches.id, {
+      onDelete: "set null",
+    }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pluginVersion: uniqueIndex("capability_plugin_versions_plugin_version_idx").on(
+      table.pluginId,
+      table.version,
+    ),
+    pluginDigest: uniqueIndex("capability_plugin_versions_plugin_digest_idx").on(
+      table.pluginId,
+      table.manifestDigest,
+    ),
+    pluginIdentity: uniqueIndex("capability_plugin_versions_plugin_identity_idx").on(
+      table.pluginId,
+      table.id,
+    ),
+  }),
+);
+
+export const capabilityFacets = pgTable(
+  "capability_facets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    pluginVersionId: uuid("plugin_version_id")
+      .notNull()
+      .references(() => capabilityPluginVersions.id, { onDelete: "cascade" }),
+    facetKey: text("facet_key").notNull(),
+    kind: text("kind").notNull(),
+    activationMode: text("activation_mode").notNull(),
+    required: boolean("required").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    versionKey: uniqueIndex("capability_facets_version_key_idx").on(
+      table.pluginVersionId,
+      table.facetKey,
+    ),
+    versionKind: index("capability_facets_version_kind_idx").on(table.pluginVersionId, table.kind),
+  }),
+);
+
+export const capabilityIntegrationFacets = pgTable("capability_integration_facets", {
+  facetId: uuid("facet_id")
+    .primaryKey()
+    .references(() => capabilityFacets.id, { onDelete: "cascade" }),
+  providerDomain: text("provider_domain").notNull(),
+  connectionKinds: jsonb("connection_kinds").$type<string[]>().notNull().default([]),
+  ownership: text("ownership").notNull(),
+  requiredScopes: jsonb("required_scopes").$type<string[]>().notNull().default([]),
+  resourceSelection: text("resource_selection").notNull().default("none"),
+});
+
+export const capabilityMcpFacets = pgTable(
+  "capability_mcp_facets",
+  {
+    facetId: uuid("facet_id")
+      .primaryKey()
+      .references(() => capabilityFacets.id, { onDelete: "cascade" }),
+    serverId: text("server_id").notNull(),
+    endpointUrl: text("endpoint_url").notNull(),
+    transport: text("transport").notNull(),
+    authKind: text("auth_kind").notNull(),
+    integrationFacetId: uuid("integration_facet_id").references(
+      () => capabilityIntegrationFacets.facetId,
+      { onDelete: "restrict" },
+    ),
+    allowedTools: jsonb("allowed_tools").$type<string[]>().notNull().default([]),
+  },
+  (table) => ({
+    server: index("capability_mcp_facets_server_idx").on(table.serverId),
+  }),
+);
+
+export const capabilityApiFacets = pgTable("capability_api_facets", {
+  facetId: uuid("facet_id")
+    .primaryKey()
+    .references(() => capabilityFacets.id, { onDelete: "cascade" }),
+  protocol: text("protocol").notNull(),
+  baseUrl: text("base_url").notNull(),
+  specSourceUrl: text("spec_source_url"),
+  authScheme: jsonb("auth_scheme").$type<Record<string, unknown>>().notNull().default({}),
+  integrationFacetId: uuid("integration_facet_id").references(
+    () => capabilityIntegrationFacets.facetId,
+    { onDelete: "restrict" },
+  ),
+});
+
+export const capabilitySkillFacets = pgTable(
+  "capability_skill_facets",
+  {
+    facetId: uuid("facet_id")
+      .primaryKey()
+      .references(() => capabilityFacets.id, { onDelete: "cascade" }),
+    capabilityId: text("capability_id").notNull(),
+    name: text("name").notNull(),
+    description: text("description").notNull(),
+    sourceUrl: text("source_url").notNull(),
+    sourceCommit: text("source_commit").notNull(),
+    sourcePath: text("source_path").notNull(),
+    contentSha256: text("content_sha256").notNull(),
+    fileCount: integer("file_count").notNull(),
+    totalBytes: integer("total_bytes").notNull(),
+    license: text("license"),
+  },
+  (table) => ({
+    content: index("capability_skill_facets_content_idx").on(table.contentSha256),
+  }),
+);
+
+export const capabilitySkillFiles = pgTable(
+  "capability_skill_files",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    skillFacetId: uuid("skill_facet_id")
+      .notNull()
+      .references(() => capabilitySkillFacets.facetId, { onDelete: "cascade" }),
+    path: text("path").notNull(),
+    content: text("content").notNull(),
+    byteSize: integer("byte_size").notNull(),
+    contentSha256: text("content_sha256").notNull(),
+  },
+  (table) => ({
+    skillPath: uniqueIndex("capability_skill_files_skill_path_idx").on(
+      table.skillFacetId,
+      table.path,
+    ),
+  }),
+);
+
+export const capabilityPluginInstallations = pgTable(
+  "capability_plugin_installations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    pluginId: uuid("plugin_id")
+      .notNull()
+      .references(() => capabilityPlugins.id, { onDelete: "restrict" }),
+    pluginVersionId: uuid("plugin_version_id").notNull(),
+    status: text("status").notNull().default("active"),
+    version: integer("version").notNull().default(1),
+    installedBySubjectId: text("installed_by_subject_id").notNull(),
+    installedAt: timestamp("installed_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pluginVersion: foreignKey({
+      columns: [table.pluginId, table.pluginVersionId],
+      foreignColumns: [capabilityPluginVersions.pluginId, capabilityPluginVersions.id],
+      name: "capability_plugin_installations_plugin_version_fk",
+    }).onDelete("restrict"),
+    workspacePlugin: uniqueIndex("capability_plugin_installations_workspace_plugin_idx").on(
+      table.workspaceId,
+      table.pluginId,
+    ),
+    workspaceStatus: index("capability_plugin_installations_workspace_status_idx").on(
+      table.workspaceId,
+      table.status,
+    ),
+  }),
+);
+
+export const capabilityFacetInstallations = pgTable(
+  "capability_facet_installations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    pluginInstallationId: uuid("plugin_installation_id")
+      .notNull()
+      .references(() => capabilityPluginInstallations.id, { onDelete: "cascade" }),
+    facetId: uuid("facet_id")
+      .notNull()
+      .references(() => capabilityFacets.id, { onDelete: "restrict" }),
+    connectionId: uuid("connection_id").references(() => connections.id, {
+      onDelete: "restrict",
+    }),
+    status: text("status").notNull().default("active"),
+    config: jsonb("config").$type<Record<string, unknown>>().notNull().default({}),
+    version: integer("version").notNull().default(1),
+    attentionCode: text("attention_code"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    installationFacet: uniqueIndex("capability_facet_installations_installation_facet_idx").on(
+      table.pluginInstallationId,
+      table.facetId,
+    ),
+    workspaceStatus: index("capability_facet_installations_workspace_status_idx").on(
+      table.workspaceId,
+      table.status,
+    ),
+  }),
+);
+
+export const capabilityComponentOwners = pgTable(
+  "capability_component_owners",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    facetInstallationId: uuid("facet_installation_id")
+      .notNull()
+      .references(() => capabilityFacetInstallations.id, { onDelete: "cascade" }),
+    ownerKind: text("owner_kind").notNull(),
+    ownerId: text("owner_id").notNull(),
+    removable: boolean("removable").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    uniqueOwner: uniqueIndex("capability_component_owners_unique_idx").on(
+      table.facetInstallationId,
+      table.ownerKind,
+      table.ownerId,
+    ),
+    workspaceOwner: index("capability_component_owners_workspace_owner_idx").on(
+      table.workspaceId,
+      table.ownerKind,
+      table.ownerId,
+    ),
+  }),
+);
+
+export const integrationSpecRevisions = pgTable(
+  "integration_spec_revisions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    apiFacetId: uuid("api_facet_id")
+      .notNull()
+      .references(() => capabilityApiFacets.facetId, { onDelete: "cascade" }),
+    revision: integer("revision").notNull(),
+    protocol: text("protocol").notNull(),
+    sourceUrl: text("source_url"),
+    specDigest: text("spec_digest").notNull(),
+    spec: jsonb("spec").$type<Record<string, unknown>>().notNull(),
+    status: text("status").notNull().default("active"),
+    fetchedAt: timestamp("fetched_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    facetRevision: uniqueIndex("integration_spec_revisions_facet_revision_idx").on(
+      table.apiFacetId,
+      table.revision,
+    ),
+    facetDigest: uniqueIndex("integration_spec_revisions_facet_digest_idx").on(
+      table.apiFacetId,
+      table.specDigest,
+    ),
+  }),
+);
+
+export const integrationTools = pgTable(
+  "integration_tools",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    facetId: uuid("facet_id")
+      .notNull()
+      .references(() => capabilityFacets.id, { onDelete: "cascade" }),
+    toolKey: text("tool_key").notNull(),
+    name: text("name").notNull(),
+    description: text("description"),
+    inputSchema: jsonb("input_schema").$type<Record<string, unknown>>().notNull().default({}),
+    outputSchema: jsonb("output_schema").$type<Record<string, unknown>>(),
+    effect: text("effect").notNull().default("read"),
+    active: boolean("active").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    facetTool: uniqueIndex("integration_tools_facet_tool_idx").on(table.facetId, table.toolKey),
+  }),
+);
+
+export const integrationFeatureFacets = pgTable(
+  "integration_feature_facets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    integrationFacetId: uuid("integration_facet_id")
+      .notNull()
+      .references(() => capabilityIntegrationFacets.facetId, { onDelete: "cascade" }),
+    featureKey: text("feature_key").notNull(),
+    kind: text("kind").notNull(),
+    configSchema: jsonb("config_schema").$type<Record<string, unknown>>().notNull().default({}),
+    capabilities: jsonb("capabilities").$type<Record<string, unknown>>().notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    integrationFeature: uniqueIndex("integration_feature_facets_integration_feature_idx").on(
+      table.integrationFacetId,
+      table.featureKey,
+    ),
+    integrationKind: index("integration_feature_facets_integration_kind_idx").on(
+      table.integrationFacetId,
+      table.kind,
+    ),
+  }),
+);
+
+export const integrationFeatureBindings = pgTable(
+  "integration_feature_bindings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    featureFacetId: uuid("feature_facet_id")
+      .notNull()
+      .references(() => integrationFeatureFacets.id, { onDelete: "restrict" }),
+    connectionId: uuid("connection_id").references(() => connections.id, {
+      onDelete: "restrict",
+    }),
+    status: text("status").notNull().default("active"),
+    config: jsonb("config").$type<Record<string, unknown>>().notNull().default({}),
+    cursor: jsonb("cursor").$type<Record<string, unknown>>().notNull().default({}),
+    version: integer("version").notNull().default(1),
+    lastSuccessAt: timestamp("last_success_at", { withTimezone: true }),
+    lastErrorCode: text("last_error_code"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceFeature: uniqueIndex("integration_feature_bindings_workspace_feature_idx").on(
+      table.workspaceId,
+      table.featureFacetId,
+    ),
+    workspaceStatus: index("integration_feature_bindings_workspace_status_idx").on(
+      table.workspaceId,
+      table.status,
+    ),
+  }),
+);
+
+export const capabilityOperations = pgTable(
+  "capability_operations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    idempotencyKey: text("idempotency_key").notNull(),
+    requestDigest: text("request_digest").notNull(),
+    kind: text("kind").notNull(),
+    targetKind: text("target_kind").notNull(),
+    targetId: text("target_id").notNull(),
+    status: text("status").notNull().default("pending"),
+    phase: text("phase").notNull().default("admitted"),
+    version: integer("version").notNull().default(1),
+    result: jsonb("result").$type<Record<string, unknown>>(),
+    errorCode: text("error_code"),
+    createdBySubjectId: text("created_by_subject_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+  },
+  (table) => ({
+    workspaceIdempotency: uniqueIndex("capability_operations_workspace_idempotency_idx").on(
+      table.workspaceId,
+      table.idempotencyKey,
+    ),
+    workspaceStatus: index("capability_operations_workspace_status_idx").on(
+      table.workspaceId,
+      table.status,
+      table.updatedAt,
+    ),
+  }),
+);
+
 export const socialConnections = pgTable(
   "social_connections",
   {

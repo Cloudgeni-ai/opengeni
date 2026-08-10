@@ -112,7 +112,12 @@ import {
 import { Manifest } from "@openai/agents/sandbox";
 import { TurnSandboxCommandCancelledError } from "../src/sandbox/turn-tool-cancellation";
 import { CompactionNeededError } from "../src/context-compaction";
-import { readSkillLibraryArtifact, verifySkillLibraryArtifact } from "../src/skill-library";
+import {
+  buildPortableSkillArtifact,
+  PORTABLE_SKILL_MAX_FILE_BYTES,
+  readSkillLibraryArtifact,
+  verifySkillLibraryArtifact,
+} from "../src/skill-library";
 import { MCP_MAX_CONCURRENT_SERVER_OPERATIONS } from "../src/mcp-network";
 import { ScriptedModel, startTestMcpServer, testSettings } from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
@@ -6996,6 +7001,51 @@ describe("curated skill-library artifact integrity", () => {
       symlinkSync("SKILL.md", join(root, "linked.md"));
       expect(() => readSkillLibraryArtifact(root)).toThrow(/symbolic link/);
     });
+  });
+});
+
+describe("portable skill artifact validation", () => {
+  test("normalizes, sorts, and fingerprints the complete artifact", () => {
+    const artifact = buildPortableSkillArtifact([
+      { path: "references/runbook.md", content: "Runbook.\n" },
+      {
+        path: "SKILL.md",
+        content:
+          "---\nname: incident-response\ndescription: >-\n  Triage incidents and\n  preserve evidence.\n---\n# Incident response\n",
+      },
+    ]);
+    expect(artifact).toMatchObject({
+      name: "incident-response",
+      description: "Triage incidents and preserve evidence.",
+      totalBytes: expect.any(Number),
+      contentSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+    });
+    expect(artifact.files.map((file) => file.path)).toEqual(["SKILL.md", "references/runbook.md"]);
+  });
+
+  test("rejects path traversal, duplicate files, missing metadata, and size overflow", () => {
+    const validMarkdown = "---\nname: safe\ndescription: Safe guidance.\n---\n";
+    expect(() =>
+      buildPortableSkillArtifact([
+        { path: "SKILL.md", content: validMarkdown },
+        { path: "../escape.md", content: "x" },
+      ]),
+    ).toThrow("unsafe path");
+    expect(() =>
+      buildPortableSkillArtifact([
+        { path: "SKILL.md", content: validMarkdown },
+        { path: "SKILL.md", content: validMarkdown },
+      ]),
+    ).toThrow("duplicate file path");
+    expect(() =>
+      buildPortableSkillArtifact([{ path: "SKILL.md", content: "# Missing\n" }]),
+    ).toThrow("must declare a safe name");
+    expect(() =>
+      buildPortableSkillArtifact([
+        { path: "SKILL.md", content: validMarkdown },
+        { path: "large.txt", content: "x".repeat(PORTABLE_SKILL_MAX_FILE_BYTES + 1) },
+      ]),
+    ).toThrow("file exceeds");
   });
 });
 

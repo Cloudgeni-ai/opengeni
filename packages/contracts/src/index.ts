@@ -6692,12 +6692,7 @@ export const CapabilityLifecycleStatus = z.enum([
 ]);
 export type CapabilityLifecycleStatus = z.infer<typeof CapabilityLifecycleStatus>;
 
-export const CapabilityReadiness = z.enum([
-  "ready",
-  "setup_required",
-  "attention",
-  "unavailable",
-]);
+export const CapabilityReadiness = z.enum(["ready", "setup_required", "attention", "unavailable"]);
 export type CapabilityReadiness = z.infer<typeof CapabilityReadiness>;
 
 export const CapabilityAction = z.enum([
@@ -6894,6 +6889,90 @@ export const DiscoverMcpCapabilitiesResponse = z.object({
   sourceUrl: z.string().url(),
 });
 export type DiscoverMcpCapabilitiesResponse = z.infer<typeof DiscoverMcpCapabilitiesResponse>;
+
+export const SkillImportSource = z.enum(["github", "skills_sh"]);
+export type SkillImportSource = z.infer<typeof SkillImportSource>;
+
+export const PreviewSkillImportRequest = z.object({
+  url: z.string().url().max(2048),
+});
+export type PreviewSkillImportRequest = z.infer<typeof PreviewSkillImportRequest>;
+
+export const SkillImportFileSummary = z.object({
+  path: z.string().min(1).max(1024),
+  byteSize: z.number().int().nonnegative().max(262144),
+  contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+});
+export type SkillImportFileSummary = z.infer<typeof SkillImportFileSummary>;
+
+export const SkillImportPreview = z.object({
+  source: SkillImportSource,
+  sourceUrl: z.string().url(),
+  repositoryUrl: z.string().url(),
+  owner: z.string().min(1).max(100),
+  repository: z.string().min(1).max(100),
+  sourcePath: z.string().min(1).max(1024),
+  sourceCommit: z.string().regex(/^[0-9a-f]{40,64}$/),
+  name: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/),
+  description: z.string().min(1).max(2048),
+  contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+  totalBytes: z.number().int().positive().max(1048576),
+  files: z.array(SkillImportFileSummary).min(1).max(128),
+  warnings: z.array(z.string().min(1).max(500)).max(32).default([]),
+});
+export type SkillImportPreview = z.infer<typeof SkillImportPreview>;
+
+export const InstallSkillRequest = z.object({
+  url: z.string().url().max(2048),
+  expectedSourceCommit: z.string().regex(/^[0-9a-f]{40,64}$/),
+  expectedContentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+});
+export type InstallSkillRequest = z.infer<typeof InstallSkillRequest>;
+
+export const InstalledSkill = z.object({
+  capabilityId: z.string().min(1),
+  pluginId: z.string().uuid(),
+  pluginVersionId: z.string().uuid(),
+  facetId: z.string().uuid(),
+  pluginInstallationId: z.string().uuid(),
+  facetInstallationId: z.string().uuid(),
+  source: SkillImportSource,
+  sourceUrl: z.string().url(),
+  sourceCommit: z.string().regex(/^[0-9a-f]{40,64}$/),
+  contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+  name: z.string(),
+  status: z.literal("installed"),
+});
+export type InstalledSkill = z.infer<typeof InstalledSkill>;
+
+export const CapabilityComponentOwner = z.object({
+  kind: z.enum(["direct", "plugin", "pack", "migration"]),
+  id: z.string().min(1).max(512),
+  removable: z.boolean(),
+});
+export type CapabilityComponentOwner = z.infer<typeof CapabilityComponentOwner>;
+
+export const SkillUninstallPreview = z.object({
+  capabilityId: z.string().min(1),
+  installed: z.boolean(),
+  installationVersion: z.number().int().positive().nullable(),
+  directOwner: CapabilityComponentOwner.nullable(),
+  remainingOwners: z.array(CapabilityComponentOwner),
+  removesRuntimeSkill: z.boolean(),
+});
+export type SkillUninstallPreview = z.infer<typeof SkillUninstallPreview>;
+
+export const UninstallSkillRequest = z.object({
+  expectedInstallationVersion: z.number().int().positive(),
+});
+export type UninstallSkillRequest = z.infer<typeof UninstallSkillRequest>;
+
+export const UninstallSkillResult = z.object({
+  capabilityId: z.string().min(1),
+  status: z.enum(["not_installed", "uninstalled", "retained_by_other_owners"]),
+  remainingOwners: z.array(CapabilityComponentOwner),
+});
+export type UninstallSkillResult = z.infer<typeof UninstallSkillResult>;
 
 export const Session = z.object({
   id: z.string().uuid(),

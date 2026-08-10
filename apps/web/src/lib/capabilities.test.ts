@@ -85,6 +85,13 @@ function item(overrides: Partial<CapabilityCatalogItem> = {}): CapabilityCatalog
     staleAt: null,
     tools: [],
     runtime: { available: true, notes: null },
+    lifecycle: {
+      status: "available",
+      readiness: "setup_required",
+      detail: null,
+      managedBy: null,
+    },
+    actions: [],
     enabled: false,
     enabledReason: null,
     connectionRef: null,

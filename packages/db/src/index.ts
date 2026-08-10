@@ -3882,6 +3882,90 @@ export type EnableCapabilityInstallationInput = {
   metadata?: Record<string, unknown>;
 };
 
+export type InstallPortableSkillInput = {
+  accountId: string;
+  workspaceId: string;
+  subjectId: string;
+  capabilityId: string;
+  pluginKey: string;
+  source: "github" | "skills_sh";
+  sourceUrl: string;
+  repositoryUrl: string;
+  sourceCommit: string;
+  sourcePath: string;
+  name: string;
+  description: string;
+  contentSha256: string;
+  totalBytes: number;
+  license?: string | null;
+  files: Array<{
+    path: string;
+    content: string;
+    byteSize: number;
+    contentSha256: string;
+  }>;
+};
+
+export type InstalledPortableSkill = {
+  capabilityId: string;
+  pluginId: string;
+  pluginVersionId: string;
+  facetId: string;
+  pluginInstallationId: string;
+  facetInstallationId: string;
+  source: "github" | "skills_sh";
+  sourceUrl: string;
+  sourceCommit: string;
+  contentSha256: string;
+  name: string;
+};
+
+export type PortableSkillRuntime = {
+  capabilityId: string;
+  name: string;
+  description: string;
+  sourceUrl: string;
+  sourceCommit: string;
+  sourcePath: string;
+  contentSha256: string;
+  files: Array<{ path: string; content: string }>;
+};
+
+export type PortableSkillOwner = {
+  kind: "direct" | "plugin" | "pack" | "migration";
+  id: string;
+  removable: boolean;
+};
+
+export type PortableSkillUninstallPreview = {
+  capabilityId: string;
+  installed: boolean;
+  installationVersion: number | null;
+  directOwner: PortableSkillOwner | null;
+  remainingOwners: PortableSkillOwner[];
+  removesRuntimeSkill: boolean;
+};
+
+export type UninstallPortableSkillResult = {
+  capabilityId: string;
+  status: "not_installed" | "uninstalled" | "retained_by_other_owners";
+  remainingOwners: PortableSkillOwner[];
+};
+
+export class PortableSkillInstallationVersionConflictError extends Error {
+  readonly name = "PortableSkillInstallationVersionConflictError";
+
+  constructor(
+    readonly capabilityId: string,
+    readonly expectedVersion: number,
+    readonly actualVersion: number,
+  ) {
+    super(
+      `Portable Skill installation ${capabilityId} changed: expected version ${expectedVersion}, current version ${actualVersion}`,
+    );
+  }
+}
+
 export type EnabledMcpCapabilityServer = {
   capabilityId: string;
   id: string;
@@ -5882,6 +5966,637 @@ export async function getCapabilityCatalogItem(
       .limit(1);
     const exposure = catalogExposureState(row, installation ?? null);
     return exposure === "blocked" ? null : mapCapabilityCatalogItem(row, exposure);
+  });
+}
+
+/**
+ * Install one immutable, already-validated portable Skill through the v2
+ * Plugin/facet ownership model and dual-write the v1 compatibility projection.
+ * Repeating the same exact source is idempotent; changing a commit's content
+ * fails instead of silently rewriting immutable history.
+ */
+export async function installPortableSkill(
+  db: Database,
+  input: InstallPortableSkillInput,
+): Promise<InstalledPortableSkill> {
+  return await withRlsContext(
+    db,
+    {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+    },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const now = new Date();
+        let [plugin] = await tx
+          .select()
+          .from(schema.capabilityPlugins)
+          .where(
+            and(
+              eq(schema.capabilityPlugins.workspaceId, input.workspaceId),
+              eq(schema.capabilityPlugins.pluginKey, input.pluginKey),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!plugin) {
+          [plugin] = await tx
+            .insert(schema.capabilityPlugins)
+            .values({
+              pluginKey: input.pluginKey,
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              name: input.name,
+              description: input.description,
+              category: "skills",
+              tags: ["skill", "imported", input.source],
+              provenance: "workspace",
+            })
+            .returning();
+        } else if (plugin.accountId !== input.accountId) {
+          throw new Error("Portable Skill plugin tenant mismatch");
+        } else if (plugin.name !== input.name || plugin.description !== input.description) {
+          [plugin] = await tx
+            .update(schema.capabilityPlugins)
+            .set({
+              name: input.name,
+              description: input.description,
+              updatedAt: now,
+            })
+            .where(eq(schema.capabilityPlugins.id, plugin.id))
+            .returning();
+        }
+        if (!plugin) throw new Error("Failed to create portable Skill plugin");
+
+        const manifest = {
+          schemaVersion: 1,
+          kind: "skill",
+          source: input.source,
+          sourceUrl: input.sourceUrl,
+          repositoryUrl: input.repositoryUrl,
+          sourceCommit: input.sourceCommit,
+          sourcePath: input.sourcePath,
+          contentSha256: input.contentSha256,
+          fileCount: input.files.length,
+          totalBytes: input.totalBytes,
+        };
+        const manifestDigest = createHash("sha256").update(stableJson(manifest)).digest("hex");
+        const [versionByName] = await tx
+          .select()
+          .from(schema.capabilityPluginVersions)
+          .where(
+            and(
+              eq(schema.capabilityPluginVersions.pluginId, plugin.id),
+              eq(schema.capabilityPluginVersions.version, input.sourceCommit),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (versionByName && versionByName.manifestDigest !== manifestDigest) {
+          throw new Error(
+            `Portable Skill source commit ${input.sourceCommit} conflicts with immutable stored content`,
+          );
+        }
+        let pluginVersion = versionByName;
+        if (!pluginVersion) {
+          [pluginVersion] = await tx
+            .insert(schema.capabilityPluginVersions)
+            .values({
+              pluginId: plugin.id,
+              version: input.sourceCommit,
+              manifestDigest,
+              manifest,
+              status: "published",
+            })
+            .returning();
+        }
+        if (!pluginVersion) throw new Error("Failed to create portable Skill plugin version");
+
+        let [facet] = await tx
+          .select()
+          .from(schema.capabilityFacets)
+          .where(
+            and(
+              eq(schema.capabilityFacets.pluginVersionId, pluginVersion.id),
+              eq(schema.capabilityFacets.facetKey, "skill"),
+            ),
+          )
+          .limit(1);
+        if (!facet) {
+          [facet] = await tx
+            .insert(schema.capabilityFacets)
+            .values({
+              pluginVersionId: pluginVersion.id,
+              facetKey: "skill",
+              kind: "skill",
+              activationMode: "workspace_managed",
+              required: true,
+            })
+            .returning();
+        }
+        if (!facet) throw new Error("Failed to create portable Skill facet");
+
+        const [existingSkill] = await tx
+          .select()
+          .from(schema.capabilitySkillFacets)
+          .where(eq(schema.capabilitySkillFacets.facetId, facet.id))
+          .limit(1);
+        if (
+          existingSkill &&
+          (existingSkill.contentSha256 !== input.contentSha256 ||
+            existingSkill.capabilityId !== input.capabilityId)
+        ) {
+          throw new Error("Portable Skill facet conflicts with immutable stored content");
+        }
+        if (!existingSkill) {
+          await tx.insert(schema.capabilitySkillFacets).values({
+            facetId: facet.id,
+            capabilityId: input.capabilityId,
+            name: input.name,
+            description: input.description,
+            sourceUrl: input.sourceUrl,
+            sourceCommit: input.sourceCommit,
+            sourcePath: input.sourcePath,
+            contentSha256: input.contentSha256,
+            fileCount: input.files.length,
+            totalBytes: input.totalBytes,
+            license: input.license ?? null,
+          });
+          await tx.insert(schema.capabilitySkillFiles).values(
+            input.files.map((file) => ({
+              skillFacetId: facet.id,
+              path: file.path,
+              content: file.content,
+              byteSize: file.byteSize,
+              contentSha256: file.contentSha256,
+            })),
+          );
+        }
+
+        let [pluginInstallation] = await tx
+          .select()
+          .from(schema.capabilityPluginInstallations)
+          .where(
+            and(
+              eq(schema.capabilityPluginInstallations.workspaceId, input.workspaceId),
+              eq(schema.capabilityPluginInstallations.pluginId, plugin.id),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!pluginInstallation) {
+          [pluginInstallation] = await tx
+            .insert(schema.capabilityPluginInstallations)
+            .values({
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              pluginId: plugin.id,
+              pluginVersionId: pluginVersion.id,
+              status: "active",
+              installedBySubjectId: input.subjectId,
+            })
+            .returning();
+        } else if (
+          pluginInstallation.pluginVersionId !== pluginVersion.id ||
+          pluginInstallation.status !== "active"
+        ) {
+          await tx
+            .delete(schema.capabilityFacetInstallations)
+            .where(
+              eq(schema.capabilityFacetInstallations.pluginInstallationId, pluginInstallation.id),
+            );
+          [pluginInstallation] = await tx
+            .update(schema.capabilityPluginInstallations)
+            .set({
+              pluginVersionId: pluginVersion.id,
+              status: "active",
+              version: pluginInstallation.version + 1,
+              installedBySubjectId: input.subjectId,
+              installedAt: now,
+              updatedAt: now,
+            })
+            .where(eq(schema.capabilityPluginInstallations.id, pluginInstallation.id))
+            .returning();
+        }
+        if (!pluginInstallation) {
+          throw new Error("Failed to create portable Skill plugin installation");
+        }
+
+        let [facetInstallation] = await tx
+          .select()
+          .from(schema.capabilityFacetInstallations)
+          .where(
+            and(
+              eq(schema.capabilityFacetInstallations.pluginInstallationId, pluginInstallation.id),
+              eq(schema.capabilityFacetInstallations.facetId, facet.id),
+            ),
+          )
+          .limit(1);
+        if (!facetInstallation) {
+          [facetInstallation] = await tx
+            .insert(schema.capabilityFacetInstallations)
+            .values({
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              pluginInstallationId: pluginInstallation.id,
+              facetId: facet.id,
+              status: "active",
+            })
+            .returning();
+        }
+        if (!facetInstallation) throw new Error("Failed to create portable Skill installation");
+
+        await tx
+          .insert(schema.capabilityComponentOwners)
+          .values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            facetInstallationId: facetInstallation.id,
+            ownerKind: "direct",
+            ownerId: input.capabilityId,
+            removable: true,
+          })
+          .onConflictDoNothing();
+
+        const compatibilityMetadata = {
+          platformVersion: 2,
+          source: input.source,
+          sourceUrl: input.sourceUrl,
+          repositoryUrl: input.repositoryUrl,
+          sourceCommit: input.sourceCommit,
+          sourcePath: input.sourcePath,
+          contentSha256: input.contentSha256,
+          pluginId: plugin.id,
+          pluginVersionId: pluginVersion.id,
+          facetId: facet.id,
+          provenance: "workspace_import",
+        };
+        await tx
+          .insert(schema.capabilityCatalogItems)
+          .values({
+            id: input.capabilityId,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            kind: "skill",
+            source: "manual",
+            name: input.name,
+            description: input.description,
+            category: "skills",
+            tags: ["skill", "imported", input.source],
+            homepageUrl: input.repositoryUrl,
+            installUrl: input.sourceUrl,
+            provenance: "workspace_import",
+            tier: "community",
+            metadata: compatibilityMetadata,
+            updatedAt: now,
+          })
+          .onConflictDoUpdate({
+            target: [schema.capabilityCatalogItems.workspaceId, schema.capabilityCatalogItems.id],
+            set: {
+              name: input.name,
+              description: input.description,
+              tags: ["skill", "imported", input.source],
+              homepageUrl: input.repositoryUrl,
+              installUrl: input.sourceUrl,
+              provenance: "workspace_import",
+              tier: "community",
+              metadata: compatibilityMetadata,
+              updatedAt: now,
+            },
+          });
+        const compatibilityInstallationMetadata = {
+          ...compatibilityMetadata,
+          pluginInstallationId: pluginInstallation.id,
+          facetInstallationId: facetInstallation.id,
+        };
+        await tx
+          .insert(schema.capabilityInstallations)
+          .values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            capabilityId: input.capabilityId,
+            kind: "skill",
+            status: "active",
+            config: { sourceCommit: input.sourceCommit },
+            metadata: compatibilityInstallationMetadata,
+            enabledAt: now,
+            updatedAt: now,
+          })
+          .onConflictDoUpdate({
+            target: [
+              schema.capabilityInstallations.workspaceId,
+              schema.capabilityInstallations.capabilityId,
+            ],
+            set: {
+              status: "active",
+              config: { sourceCommit: input.sourceCommit },
+              metadata: compatibilityInstallationMetadata,
+              enabledAt: now,
+              updatedAt: now,
+            },
+          });
+
+        return {
+          capabilityId: input.capabilityId,
+          pluginId: plugin.id,
+          pluginVersionId: pluginVersion.id,
+          facetId: facet.id,
+          pluginInstallationId: pluginInstallation.id,
+          facetInstallationId: facetInstallation.id,
+          source: input.source,
+          sourceUrl: input.sourceUrl,
+          sourceCommit: input.sourceCommit,
+          contentSha256: input.contentSha256,
+          name: input.name,
+        };
+      }),
+  );
+}
+
+/** Return exact text artifacts for active v2 Skill installations. */
+export async function listInstalledPortableSkills(
+  db: Database,
+  workspaceId: string,
+): Promise<PortableSkillRuntime[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({
+        capabilityId: schema.capabilitySkillFacets.capabilityId,
+        facetId: schema.capabilitySkillFacets.facetId,
+        name: schema.capabilitySkillFacets.name,
+        description: schema.capabilitySkillFacets.description,
+        sourceUrl: schema.capabilitySkillFacets.sourceUrl,
+        sourceCommit: schema.capabilitySkillFacets.sourceCommit,
+        sourcePath: schema.capabilitySkillFacets.sourcePath,
+        contentSha256: schema.capabilitySkillFacets.contentSha256,
+        path: schema.capabilitySkillFiles.path,
+        content: schema.capabilitySkillFiles.content,
+      })
+      .from(schema.capabilityPluginInstallations)
+      .innerJoin(
+        schema.capabilityFacetInstallations,
+        eq(
+          schema.capabilityFacetInstallations.pluginInstallationId,
+          schema.capabilityPluginInstallations.id,
+        ),
+      )
+      .innerJoin(
+        schema.capabilitySkillFacets,
+        eq(schema.capabilitySkillFacets.facetId, schema.capabilityFacetInstallations.facetId),
+      )
+      .innerJoin(
+        schema.capabilitySkillFiles,
+        eq(schema.capabilitySkillFiles.skillFacetId, schema.capabilitySkillFacets.facetId),
+      )
+      .where(
+        and(
+          eq(schema.capabilityPluginInstallations.workspaceId, workspaceId),
+          eq(schema.capabilityPluginInstallations.status, "active"),
+          eq(schema.capabilityFacetInstallations.status, "active"),
+          sql`exists (
+            select 1
+            from ${schema.capabilityComponentOwners} owner
+            where owner.facet_installation_id = ${schema.capabilityFacetInstallations.id}
+          )`,
+        ),
+      )
+      .orderBy(asc(schema.capabilitySkillFacets.name), asc(schema.capabilitySkillFiles.path));
+    const skills = new Map<string, PortableSkillRuntime>();
+    for (const row of rows) {
+      const existing = skills.get(row.facetId);
+      if (existing) {
+        existing.files.push({ path: row.path, content: row.content });
+        continue;
+      }
+      skills.set(row.facetId, {
+        capabilityId: row.capabilityId,
+        name: row.name,
+        description: row.description,
+        sourceUrl: row.sourceUrl,
+        sourceCommit: row.sourceCommit,
+        sourcePath: row.sourcePath,
+        contentSha256: row.contentSha256,
+        files: [{ path: row.path, content: row.content }],
+      });
+    }
+    return [...skills.values()];
+  });
+}
+
+export async function getPortableSkillUninstallPreview(
+  db: Database,
+  workspaceId: string,
+  capabilityId: string,
+): Promise<PortableSkillUninstallPreview> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const context = await portableSkillOwnerContext(scopedDb, workspaceId, capabilityId);
+    if (!context) {
+      return {
+        capabilityId,
+        installed: false,
+        installationVersion: null,
+        directOwner: null,
+        remainingOwners: [],
+        removesRuntimeSkill: false,
+      };
+    }
+    const owners = await portableSkillOwners(scopedDb, context.facetInstallationId);
+    const directOwner = owners.find(
+      (owner) => owner.kind === "direct" && owner.id === capabilityId,
+    );
+    const remainingOwners = owners.filter(
+      (owner) => !(owner.kind === "direct" && owner.id === capabilityId),
+    );
+    return {
+      capabilityId,
+      installed: true,
+      installationVersion: context.installationVersion,
+      directOwner: directOwner ?? null,
+      remainingOwners,
+      removesRuntimeSkill: remainingOwners.length === 0,
+    };
+  });
+}
+
+export async function uninstallPortableSkill(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    capabilityId: string;
+    expectedInstallationVersion: number;
+  },
+): Promise<UninstallPortableSkillResult> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const context = await portableSkillOwnerContext(
+          tx as unknown as Database,
+          input.workspaceId,
+          input.capabilityId,
+          true,
+        );
+        if (!context) {
+          return {
+            capabilityId: input.capabilityId,
+            status: "not_installed",
+            remainingOwners: [],
+          };
+        }
+        if (context.installationVersion !== input.expectedInstallationVersion) {
+          throw new PortableSkillInstallationVersionConflictError(
+            input.capabilityId,
+            input.expectedInstallationVersion,
+            context.installationVersion,
+          );
+        }
+        await tx
+          .delete(schema.capabilityComponentOwners)
+          .where(
+            and(
+              eq(schema.capabilityComponentOwners.facetInstallationId, context.facetInstallationId),
+              eq(schema.capabilityComponentOwners.ownerKind, "direct"),
+              eq(schema.capabilityComponentOwners.ownerId, input.capabilityId),
+            ),
+          );
+        const remainingOwners = await portableSkillOwners(
+          tx as unknown as Database,
+          context.facetInstallationId,
+        );
+        if (remainingOwners.length > 0) {
+          await tx
+            .update(schema.capabilityPluginInstallations)
+            .set({
+              version: context.installationVersion + 1,
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.capabilityPluginInstallations.id, context.pluginInstallationId));
+          return {
+            capabilityId: input.capabilityId,
+            status: "retained_by_other_owners",
+            remainingOwners,
+          };
+        }
+
+        const now = new Date();
+        await tx
+          .delete(schema.capabilityFacetInstallations)
+          .where(eq(schema.capabilityFacetInstallations.id, context.facetInstallationId));
+        const siblingFacets = await tx
+          .select({ id: schema.capabilityFacetInstallations.id })
+          .from(schema.capabilityFacetInstallations)
+          .where(
+            eq(
+              schema.capabilityFacetInstallations.pluginInstallationId,
+              context.pluginInstallationId,
+            ),
+          )
+          .limit(1);
+        await tx
+          .update(schema.capabilityPluginInstallations)
+          .set({
+            status: siblingFacets.length === 0 ? "disabled" : "active",
+            version: context.installationVersion + 1,
+            updatedAt: now,
+          })
+          .where(eq(schema.capabilityPluginInstallations.id, context.pluginInstallationId));
+        await tx
+          .update(schema.capabilityInstallations)
+          .set({ status: "disabled", updatedAt: now })
+          .where(
+            and(
+              eq(schema.capabilityInstallations.workspaceId, input.workspaceId),
+              eq(schema.capabilityInstallations.capabilityId, input.capabilityId),
+            ),
+          );
+        return {
+          capabilityId: input.capabilityId,
+          status: "uninstalled",
+          remainingOwners: [],
+        };
+      }),
+  );
+}
+
+async function portableSkillOwnerContext(
+  db: Database,
+  workspaceId: string,
+  capabilityId: string,
+  lock = false,
+): Promise<{
+  pluginInstallationId: string;
+  facetInstallationId: string;
+  installationVersion: number;
+} | null> {
+  let query = db
+    .select({
+      pluginInstallationId: schema.capabilityPluginInstallations.id,
+      facetInstallationId: schema.capabilityFacetInstallations.id,
+      installationVersion: schema.capabilityPluginInstallations.version,
+    })
+    .from(schema.capabilityComponentOwners)
+    .innerJoin(
+      schema.capabilityFacetInstallations,
+      eq(
+        schema.capabilityFacetInstallations.id,
+        schema.capabilityComponentOwners.facetInstallationId,
+      ),
+    )
+    .innerJoin(
+      schema.capabilityPluginInstallations,
+      eq(
+        schema.capabilityPluginInstallations.id,
+        schema.capabilityFacetInstallations.pluginInstallationId,
+      ),
+    )
+    .innerJoin(
+      schema.capabilitySkillFacets,
+      eq(schema.capabilitySkillFacets.facetId, schema.capabilityFacetInstallations.facetId),
+    )
+    .where(
+      and(
+        eq(schema.capabilityComponentOwners.workspaceId, workspaceId),
+        eq(schema.capabilityComponentOwners.ownerKind, "direct"),
+        eq(schema.capabilityComponentOwners.ownerId, capabilityId),
+      ),
+    )
+    .limit(2);
+  if (lock) query = query.for("update") as typeof query;
+  const rows = await query;
+  if (rows.length > 1) {
+    throw new Error(`Portable Skill ${capabilityId} has duplicate direct owners`);
+  }
+  return rows[0] ?? null;
+}
+
+async function portableSkillOwners(
+  db: Database,
+  facetInstallationId: string,
+): Promise<PortableSkillOwner[]> {
+  const rows = await db
+    .select({
+      kind: schema.capabilityComponentOwners.ownerKind,
+      id: schema.capabilityComponentOwners.ownerId,
+      removable: schema.capabilityComponentOwners.removable,
+    })
+    .from(schema.capabilityComponentOwners)
+    .where(eq(schema.capabilityComponentOwners.facetInstallationId, facetInstallationId))
+    .orderBy(
+      asc(schema.capabilityComponentOwners.ownerKind),
+      asc(schema.capabilityComponentOwners.ownerId),
+    );
+  return rows.map((row) => {
+    if (
+      row.kind !== "direct" &&
+      row.kind !== "plugin" &&
+      row.kind !== "pack" &&
+      row.kind !== "migration"
+    ) {
+      throw new Error(`Unknown portable Skill owner kind: ${row.kind}`);
+    }
+    return { kind: row.kind, id: row.id, removable: row.removable };
   });
 }
 
