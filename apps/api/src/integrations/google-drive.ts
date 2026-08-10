@@ -8,6 +8,10 @@ import {
 import {
   GOOGLE_DRIVE_CREDENTIAL_LABEL,
   GOOGLE_DRIVE_CREDENTIAL_ROLE,
+  GOOGLE_DRIVE_FILE_SCOPE,
+  GOOGLE_DRIVE_PUBLICATION_CREATE_ACTION,
+  GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
+  GOOGLE_DRIVE_PUBLICATION_TOOL_NAME,
   GOOGLE_DRIVE_PROVIDER_DOMAIN,
   GOOGLE_DRIVE_READONLY_SCOPE,
   GoogleDriveBrowseItem,
@@ -15,12 +19,14 @@ import {
   GoogleDriveConnectionLifecycle,
   GoogleDriveConnectionMetadata,
   GoogleDriveOAuthStartResponse,
+  GoogleDriveOutputDestination,
   SaveGoogleDriveSourceRequest,
   googleDriveOAuthScopeDecision,
   googleDriveScopesAllowCapability,
   type GoogleDriveDisconnectRequest,
   type GoogleDriveLifecycleActionRequest,
   type GoogleDriveOAuthStartRequest,
+  type SaveGoogleDriveOutputDestinationRequest,
 } from "@opengeni/contracts/google-drive";
 import {
   captureScheduledTaskRestoreState,
@@ -43,6 +49,7 @@ import {
   decryptEnvironmentValue,
   disconnectConnectionIdempotently,
   encryptEnvironmentValue,
+  ensureConnectorActionPolicyDefault,
   getConnectionMetadata,
   getKnowledgeSourceByExternalIdentityForSyncAuthority,
   getKnowledgeSourceForSyncAuthority,
@@ -88,6 +95,7 @@ type GoogleDriveOAuthState = {
   subjectId: string;
   returnPath: string;
   encryptedPkceVerifier: string;
+  capability: "source_read" | "publish";
   connectionId?: string;
   connectionVersion?: number;
   nonce: string;
@@ -140,13 +148,17 @@ export async function startGoogleDriveOAuth(
     subjectId: input.subjectId,
     returnPath: GOOGLE_DRIVE_RETURN_PATH(input.workspaceId),
     encryptedPkceVerifier: encryptEnvironmentValue(key, verifier),
+    capability: input.payload.capability,
     ...(existing ? { connectionId: existing.id, connectionVersion: existing.version } : {}),
   });
   const authorizationUrl = new URL(GOOGLE_AUTHORIZATION_URL);
   authorizationUrl.searchParams.set("client_id", google.clientId);
   authorizationUrl.searchParams.set("redirect_uri", redirectUri);
   authorizationUrl.searchParams.set("response_type", "code");
-  authorizationUrl.searchParams.set("scope", GOOGLE_DRIVE_READONLY_SCOPE);
+  authorizationUrl.searchParams.set(
+    "scope",
+    input.payload.capability === "publish" ? GOOGLE_DRIVE_FILE_SCOPE : GOOGLE_DRIVE_READONLY_SCOPE,
+  );
   authorizationUrl.searchParams.set("access_type", "offline");
   authorizationUrl.searchParams.set("include_granted_scopes", "true");
   authorizationUrl.searchParams.set("prompt", "consent select_account");
@@ -211,10 +223,9 @@ export async function completeGoogleDriveOAuthCallback(
       fetchImpl,
     );
     const scopeDecision = googleDriveOAuthScopeDecision(token.scopes);
-    if (
-      scopeDecision.accessMode !== "readonly" ||
-      !scopeDecision.capabilities.includes("recursive_source_sync")
-    ) {
+    const requiredCapability =
+      state.capability === "publish" ? "publish_file" : "recursive_source_sync";
+    if (!scopeDecision.accessMode || !scopeDecision.capabilities.includes(requiredCapability)) {
       throw new GoogleDriveCallbackError("scope_not_granted");
     }
     const identity = await verifyGoogleDriveIdentity(token.accessToken, fetchImpl);
@@ -276,6 +287,9 @@ export async function completeGoogleDriveOAuthCallback(
       verifiedAt: new Date().toISOString(),
       accessMode: scopeDecision.accessMode,
       lifecycle: googleDriveLifecycle("active"),
+      ...(previousMetadata?.outputDestination
+        ? { outputDestination: previousMetadata.outputDestination }
+        : {}),
       ...(previousMetadata?.documentDestination
         ? { documentDestination: previousMetadata.documentDestination }
         : {}),
@@ -775,6 +789,102 @@ export async function saveGoogleDriveSource(
     ),
   });
   return updated;
+}
+
+export async function saveGoogleDriveOutputDestination(
+  deps: ApiRouteDeps,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    connectionId: string;
+    payload: SaveGoogleDriveOutputDestinationRequest;
+  },
+) {
+  const existing = await getConnectionMetadata(
+    deps.db,
+    input.workspaceId,
+    input.connectionId,
+    input.subjectId,
+  );
+  if (!existing) {
+    throw new HTTPException(404, { message: "Google Drive connection not found" });
+  }
+  if (existing.version !== input.payload.expectedVersion) {
+    throw new HTTPException(409, { message: "Google Drive connection changed" });
+  }
+  const metadata = await requireGoogleDrivePublishingConnection(deps, existing, input.subjectId);
+  const destination = await verifyGoogleDriveOutputDestination(deps, {
+    workspaceId: input.workspaceId,
+    subjectId: input.subjectId,
+    connectionId: input.connectionId,
+    destination: input.payload.destination,
+  });
+  await ensureConnectorActionPolicyDefault(deps.db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    subjectId: input.subjectId,
+    connectionId: input.connectionId,
+    serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
+    toolName: GOOGLE_DRIVE_PUBLICATION_TOOL_NAME,
+    actionName: GOOGLE_DRIVE_PUBLICATION_CREATE_ACTION,
+    policy: "ask",
+  });
+  const updated = await updateConnection(deps.db, {
+    workspaceId: input.workspaceId,
+    connectionId: input.connectionId,
+    visibleToSubjectId: input.subjectId,
+    expectedVersion: input.payload.expectedVersion,
+    metadata: GoogleDriveConnectionMetadata.parse({ ...metadata, outputDestination: destination }),
+    updatedBySubjectId: input.subjectId,
+  });
+  if (!updated) {
+    throw new HTTPException(409, { message: "Google Drive connection changed" });
+  }
+  return updated;
+}
+
+async function verifyGoogleDriveOutputDestination(
+  deps: ApiRouteDeps,
+  input: {
+    workspaceId: string;
+    subjectId: string;
+    connectionId: string;
+    destination: SaveGoogleDriveOutputDestinationRequest["destination"];
+  },
+) {
+  const folderId = validDriveId(input.destination.folderId, "destination.folderId");
+  const url = new URL(`${GOOGLE_DRIVE_API_BASE}/files/${encodeURIComponent(folderId)}`);
+  url.searchParams.set("supportsAllDrives", "true");
+  url.searchParams.set("fields", "id,name,mimeType,driveId,trashed,capabilities(canAddChildren)");
+  const record = objectRecord(
+    await googleDriveApiRequest(deps, {
+      workspaceId: input.workspaceId,
+      subjectId: input.subjectId,
+      connectionId: input.connectionId,
+      url,
+      label: "Google Drive output folder",
+      capability: "publish_file",
+    }),
+  );
+  const driveId = optionalString(record.driveId);
+  const capabilities = objectRecord(record.capabilities);
+  if (
+    requiredString(record.id, "Google Drive folder id") !== folderId ||
+    requiredString(record.mimeType, "Google Drive folder MIME type") !==
+      GOOGLE_DRIVE_FOLDER_MIME_TYPE ||
+    record.trashed === true ||
+    capabilities.canAddChildren !== true
+  ) {
+    throw new HTTPException(422, { message: "Google Drive output folder is not writable" });
+  }
+  return GoogleDriveOutputDestination.parse({
+    folderId,
+    folderName: requiredString(record.name, "Google Drive folder name"),
+    driveId: driveId ?? null,
+    location: driveId ? "shared_drive" : "my_drive",
+    selectedAt: new Date().toISOString(),
+  });
 }
 
 async function materializeGoogleDriveKnowledgeSchedules(
@@ -1355,6 +1465,30 @@ async function requireGoogleDriveSourceConnection(
   return metadata;
 }
 
+async function requireGoogleDrivePublishingConnection(
+  deps: ApiRouteDeps,
+  connection: GoogleDriveConnectionRecord,
+  subjectId: string,
+) {
+  const metadata = requireGoogleDriveConnection(connection, subjectId);
+  const lifecycle = effectiveGoogleDriveLifecycle(connection, metadata);
+  if (connection.status === "revoked") {
+    throw new HTTPException(409, { message: "Google Drive is disconnected" });
+  }
+  if (lifecycle.state === "paused") {
+    throw new HTTPException(409, { message: "Google Drive is paused" });
+  }
+  if (connection.status !== "active" || lifecycle.state !== "active") {
+    throw new HTTPException(401, { message: "Google Drive needs to be reconnected" });
+  }
+  if (!googleDriveScopesAllowCapability(connection.grantedScopes, "publish_file")) {
+    throw new HTTPException(401, {
+      message: "Google Drive publishing needs separate write consent",
+    });
+  }
+  return metadata;
+}
+
 function readGoogleDriveOAuthState(
   raw: string | undefined,
   settings: Settings,
@@ -1383,11 +1517,15 @@ function readGoogleDriveOAuthState(
   }
   const connectionId = optionalString(payload.connectionId) ?? undefined;
   const connectionVersion = numberValue(payload.connectionVersion);
+  const capability = payload.capability ?? "source_read";
   if (
     (connectionVersion !== undefined && !Number.isInteger(connectionVersion)) ||
     Boolean(connectionId) !== Boolean(connectionVersion)
   ) {
     throw new HTTPException(400, { message: "invalid Google Drive reconnect state" });
+  }
+  if (capability !== "source_read" && capability !== "publish") {
+    throw new HTTPException(400, { message: "invalid Google Drive OAuth capability" });
   }
   return {
     accountId,
@@ -1398,6 +1536,7 @@ function readGoogleDriveOAuthState(
       payload.encryptedPkceVerifier,
       "state.encryptedPkceVerifier",
     ),
+    capability,
     ...(connectionId ? { connectionId, connectionVersion: connectionVersion! } : {}),
     nonce: requiredString(payload.nonce, "state.nonce"),
     iat,
@@ -1604,6 +1743,7 @@ async function googleDriveApiRequest(
     connectionId: string;
     url: URL;
     label: string;
+    capability?: "recursive_source_sync" | "publish_file";
   },
 ): Promise<unknown> {
   const current = await getConnectionMetadata(
@@ -1615,7 +1755,11 @@ async function googleDriveApiRequest(
   if (!current) {
     throw new HTTPException(404, { message: "Google Drive connection not found" });
   }
-  await requireGoogleDriveSourceConnection(deps, current, input.subjectId);
+  if (input.capability === "publish_file") {
+    await requireGoogleDrivePublishingConnection(deps, current, input.subjectId);
+  } else {
+    await requireGoogleDriveSourceConnection(deps, current, input.subjectId);
+  }
   const resolver = buildConnectionTokenResolver(deps.db, deps.settings, undefined, {
     ...(deps.googleDriveFetch ? { refreshTransport: { fetchImpl: deps.googleDriveFetch } } : {}),
     transitionPermanentRefreshFailure: async (failure) =>
@@ -1699,8 +1843,8 @@ async function googleDriveApiRequest(
     throw new HTTPException(response.status === 403 ? 403 : 502, {
       message:
         response.status === 403
-          ? "Google Drive denied metadata access; re-consent may be required"
-          : "Google Drive metadata request failed",
+          ? "Google Drive denied the requested access; re-consent may be required"
+          : "Google Drive request failed",
     });
   }
   return await readResponseJsonBounded<unknown>(response, GOOGLE_RESPONSE_MAX_BYTES, input.label);

@@ -21,6 +21,7 @@ import {
   GoogleDriveLifecycleActionRequest,
   GoogleDriveOAuthStartRequest,
   GoogleDriveOAuthStartResponse,
+  SaveGoogleDriveOutputDestinationRequest,
 } from "@opengeni/contracts/google-drive";
 import {
   hasPermission,
@@ -56,6 +57,7 @@ import {
   browseGoogleDrive,
   completeGoogleDriveOAuthCallback,
   disconnectGoogleDrive,
+  saveGoogleDriveOutputDestination,
   saveGoogleDriveSource,
   startGoogleDriveOAuth,
   transitionGoogleDriveLifecycle,
@@ -366,6 +368,32 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           authorization.authenticatedSubjectId === grant.subjectId,
       });
       return c.json(ConnectionResponse.parse({ connection }));
+    },
+  );
+
+  app.post(
+    "/v1/workspaces/:workspaceId/connections/google-drive/:connectionId/output-destination",
+    async (c) => {
+      assertIntegrationsEnabled();
+      const workspaceId = c.req.param("workspaceId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+      const parsed = SaveGoogleDriveOutputDestinationRequest.safeParse(await c.req.json());
+      if (!parsed.success) {
+        throw new HTTPException(400, {
+          message: "invalid Google Drive output destination request",
+        });
+      }
+      return c.json(
+        ConnectionResponse.parse({
+          connection: await saveGoogleDriveOutputDestination(deps, {
+            accountId: grant.accountId,
+            workspaceId,
+            subjectId: grant.subjectId,
+            connectionId: c.req.param("connectionId"),
+            payload: parsed.data,
+          }),
+        }),
+      );
     },
   );
 

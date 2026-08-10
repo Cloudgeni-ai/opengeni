@@ -117,23 +117,58 @@ export type PreparedEditableArtifactPublication = z.infer<
   typeof PreparedEditableArtifactPublicationSchema
 >;
 
+const PublishEditableArtifactBaseShape = {
+  path: z
+    .string()
+    .min(1)
+    .max(4_096)
+    .refine((value) => value.trim() === value && isWellFormedEditableArtifactText(value)),
+  title: z
+    .string()
+    .min(1)
+    .refine(
+      (value) =>
+        value.trim() === value &&
+        isWellFormedEditableArtifactText(value) &&
+        new TextEncoder().encode(value).byteLength <= 512,
+    ),
+  modality: z.enum(["document", "spreadsheet", "presentation"]),
+} as const;
+
+/** Model-visible intent. Exact provider authority is injected by the host. */
+export const PublishEditableArtifactModelToolInput = z
+  .object({
+    ...PublishEditableArtifactBaseShape,
+    googleDrive: z
+      .object({
+        idempotencyKey: z.string().trim().min(1).max(200),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+export type PublishEditableArtifactModelToolInput = z.infer<
+  typeof PublishEditableArtifactModelToolInput
+>;
+
 export const PublishEditableArtifactToolInput = z
   .object({
-    path: z
-      .string()
-      .min(1)
-      .max(4_096)
-      .refine((value) => value.trim() === value && isWellFormedEditableArtifactText(value)),
-    title: z
-      .string()
-      .min(1)
-      .refine(
-        (value) =>
-          value.trim() === value &&
-          isWellFormedEditableArtifactText(value) &&
-          new TextEncoder().encode(value).byteLength <= 512,
-      ),
-    modality: z.enum(["document", "spreadsheet", "presentation"]),
+    ...PublishEditableArtifactBaseShape,
+    googleDrive: z
+      .object({
+        connectionId: z.string().uuid(),
+        destination: z
+          .object({
+            folderId: z.string().min(1).max(256),
+            folderName: z.string().min(1).max(1024),
+            driveId: z.string().min(1).max(256).nullable(),
+            location: z.enum(["my_drive", "shared_drive"]),
+          })
+          .strict(),
+        idempotencyKey: z.string().trim().min(1).max(200),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 export type PublishEditableArtifactToolInput = z.infer<typeof PublishEditableArtifactToolInput>;

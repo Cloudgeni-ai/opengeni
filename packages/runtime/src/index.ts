@@ -39,7 +39,9 @@ import {
   type ToolRef,
 } from "@opengeni/contracts";
 import {
+  PublishEditableArtifactModelToolInput,
   PublishEditableArtifactToolInput,
+  type PublishEditableArtifactModelToolInput as PublishEditableArtifactModelToolInputType,
   type PublishEditableArtifactReceipt,
 } from "@opengeni/contracts/editable-artifact-publication";
 import {
@@ -1286,6 +1288,11 @@ export type ConnectorActionPolicyHooks = {
   complete: (input: { requestId: string; outcome: "completed" | "uncertain" }) => Promise<void>;
 };
 
+type EditableArtifactGoogleDriveTarget = Pick<
+  NonNullable<PublishEditableArtifactToolInput["googleDrive"]>,
+  "connectionId" | "destination"
+>;
+
 export type BuildAgentOptions = {
   model?: Model;
   /** Attach the built-in structured human-input tool. Default: enabled. */
@@ -1335,6 +1342,11 @@ export type BuildAgentOptions = {
       };
   /** Host-owned durable promotion of one final, verified Office artifact. */
   editableArtifactPublication?: {
+    googleDriveTarget?: EditableArtifactGoogleDriveTarget;
+    prepareApproval?: (
+      input: PublishEditableArtifactToolInput,
+      context: { toolCallId: string },
+    ) => Promise<"allow" | "ask" | "block">;
     execute: (
       input: PublishEditableArtifactToolInput,
       context: { toolCallId: string },
@@ -1816,6 +1828,23 @@ const agentActiveSandboxBackend = new WeakMap<object, Settings["sandboxBackend"]
 const agentRigSetup = new WeakMap<object, RigSetupDescriptor>();
 const agentRigCredentialHooks = new WeakMap<object, SandboxLifecycleHook[]>();
 
+function resolveEditableArtifactPublicationInput(
+  input: PublishEditableArtifactModelToolInputType,
+  googleDriveTarget: EditableArtifactGoogleDriveTarget | undefined,
+): PublishEditableArtifactToolInput {
+  if (!input.googleDrive) return PublishEditableArtifactToolInput.parse(input);
+  if (!googleDriveTarget) {
+    throw new Error("Google Drive publication has no configured output destination");
+  }
+  return PublishEditableArtifactToolInput.parse({
+    ...input,
+    googleDrive: {
+      ...googleDriveTarget,
+      idempotencyKey: input.googleDrive.idempotencyKey,
+    },
+  });
+}
+
 /**
  * The tool output emitted for an MCP tool call that FAILED with a THROWN error
  * — a JSON-RPC protocol error (e.g. -32602 invalid params), an auth 401/403, a
@@ -1942,10 +1971,28 @@ export function buildOpenGeniAgent(
   const editableArtifactPublicationTool = options.editableArtifactPublication
     ? agentTool({
         name: "publish_editable_artifact",
-        description:
-          "Promote one final, validated Office file into the durable collaborative editor. Call exactly once only after exporting, re-importing, and visually verifying the final .docx, .xlsx, or .pptx. Do not call for scratch files, previews, read-only work, or before validation. A successful receipt is authoritative; never repeat it.",
-        parameters: PublishEditableArtifactToolInput,
+        description: `Promote one final, validated Office file into the durable collaborative editor. Call exactly once only after exporting, re-importing, and visually verifying the final .docx, .xlsx, or .pptx. Do not call for scratch files, previews, read-only work, or before validation. A successful receipt is authoritative; never repeat it.${
+          options.editableArtifactPublication.googleDriveTarget
+            ? " When the user explicitly requests Google Drive publication, include googleDrive with one stable idempotencyKey; the host supplies the configured private connection and exact output folder."
+            : " Google Drive publication is not configured for this turn."
+        }`,
+        parameters: PublishEditableArtifactModelToolInput,
         errorFunction: null,
+        needsApproval: async (_runContext, input, callId) => {
+          if (!input.googleDrive) return false;
+          if (!callId) {
+            throw new Error("Google Drive publication has no durable approval identity");
+          }
+          const adapter = options.editableArtifactPublication;
+          if (!adapter?.prepareApproval) {
+            throw new Error("Google Drive publication approval policy is unavailable");
+          }
+          const resolved = resolveEditableArtifactPublicationInput(
+            input,
+            adapter.googleDriveTarget,
+          );
+          return (await adapter.prepareApproval(resolved, { toolCallId: callId })) === "ask";
+        },
         execute: async (input, _context, details) => {
           const toolCallId = details?.toolCall?.callId;
           if (!toolCallId) {
@@ -1955,7 +2002,10 @@ export function buildOpenGeniAgent(
           if (!adapter) {
             throw new Error("Editable-artifact publication adapter changed during execution");
           }
-          return await adapter.execute(input, { toolCallId });
+          return await adapter.execute(
+            resolveEditableArtifactPublicationInput(input, adapter.googleDriveTarget),
+            { toolCallId },
+          );
         },
       })
     : null;

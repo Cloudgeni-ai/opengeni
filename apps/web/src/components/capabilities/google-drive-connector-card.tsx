@@ -19,6 +19,8 @@ import { Select } from "@/components/ui/select";
 import { useAppContext } from "@/context";
 import {
   googleDriveAccountState,
+  googleDriveCanPublish,
+  googleDriveCanReadSources,
   googleDriveConnectionMetadata,
   googleDriveDisconnectAttempt,
   localConnectedGoogleDrivePreview,
@@ -68,6 +70,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [browseOpen, setBrowseOpen] = useState(false);
+  const [publishingOpen, setPublishingOpen] = useState(false);
   const [browseBusy, setBrowseBusy] = useState(false);
   const [disconnectOpen, setDisconnectOpen] = useState(false);
   const [pendingDisconnect, setPendingDisconnect] = useState<GoogleDriveDisconnectAttempt | null>(
@@ -81,6 +84,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
   const [authorityKind, setAuthorityKind] =
     useState<ConnectorDocumentDestinationAuthority>("workspace");
   const [folderIdDraft, setFolderIdDraft] = useState("");
+  const [outputFolderDraft, setOutputFolderDraft] = useState("");
   const [syncCadence, setSyncCadence] = useState<GoogleDriveSyncCadence>("hourly");
   const [syncEnabled, setSyncEnabled] = useState(false);
   const [readPolicy, setReadPolicy] = useState<GoogleDriveReadPolicy>("allow");
@@ -103,6 +107,8 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
   const savedSources = configuredGoogleDriveSources(metadata);
   const savedDefaults = savedSources[0];
   const folderItems = items.filter((item) => item.kind === "folder");
+  const canBrowseSources = googleDriveCanReadSources(metadata);
+  const canPublish = googleDriveCanPublish(connection);
 
   const refreshConnections = useCallback(async () => {
     if (!canRead) {
@@ -132,7 +138,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
     if (!status) return;
     if (status === "connected") {
       toast.success("Google Drive connected", {
-        description: "Choose a Shared Drive or folder boundary and configure incremental sync.",
+        description: "Configure imports or choose an explicit publishing folder.",
       });
       void refreshConnections();
     } else {
@@ -146,7 +152,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
     window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
   }, [refreshConnections]);
 
-  async function connect(reconnect = false) {
+  async function connect(capability: "source_read" | "publish" = "source_read", reconnect = false) {
     if (!canWrite) return;
     setBusy(true);
     try {
@@ -154,7 +160,12 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
         `/v1/workspaces/${workspaceId}/connections/google-drive/install`,
         {
           method: "POST",
-          body: JSON.stringify(reconnect && connection ? { connectionId: connection.id } : {}),
+          body: JSON.stringify({
+            capability,
+            ...(connection && (reconnect || connection.status === "active")
+              ? { connectionId: connection.id }
+              : {}),
+          }),
         },
       );
       window.location.assign(start.authorizationUrl);
@@ -378,6 +389,35 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
     }
   }
 
+  function openPublishing() {
+    setOutputFolderDraft(metadata?.outputDestination?.folderId ?? "");
+    setPublishingOpen(true);
+  }
+
+  async function saveOutputDestination() {
+    if (!connection || !canWrite || !outputFolderDraft.trim()) return;
+    setBusy(true);
+    try {
+      const updated = await client.saveGoogleDriveOutputDestination(workspaceId, connection.id, {
+        expectedVersion: connection.version,
+        destination: { folderId: outputFolderDraft.trim() },
+      });
+      setConnections((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+      setPublishingOpen(false);
+      toast.success("Google Drive publishing folder saved", {
+        description:
+          "Publishing actions default to Ask and still require an explicit artifact publication request.",
+      });
+    } catch (error) {
+      toast.error("Google Drive publishing folder could not be saved", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+      await refreshConnections();
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (!canRead) {
     return null;
   }
@@ -399,7 +439,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
             <div className="min-w-0">
               <div className="text-sm font-medium">Google Drive</div>
               <p className="mt-0.5 text-xs leading-5 text-fg-muted">
-                Connect folders and Shared Drives for recurring knowledge import.
+                Import knowledge or publish editable artifacts with separate Drive permissions.
               </p>
             </div>
           </div>
@@ -412,15 +452,49 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
             ) : connection && accountState.state !== "disconnected" ? (
               <>
                 {accountState.state === "connected" ? (
-                  <Button
-                    type="button"
-                    size="sm"
-                    disabled={busy || !canWrite || readOnly}
-                    onClick={openBrowser}
-                  >
-                    <FolderOpenIcon className="size-3.5" />
-                    {savedSources.length > 0 ? "Manage folders" : "Connect folders"}
-                  </Button>
+                  <>
+                    {canBrowseSources ? (
+                      <Button
+                        type="button"
+                        size="sm"
+                        disabled={busy || !canWrite || readOnly}
+                        onClick={openBrowser}
+                      >
+                        <FolderOpenIcon className="size-3.5" />
+                        {savedSources.length > 0 ? "Manage imports" : "Connect imports"}
+                      </Button>
+                    ) : (
+                      <Button
+                        type="button"
+                        size="sm"
+                        disabled={busy || !canWrite || readOnly}
+                        onClick={() => void connect("source_read", true)}
+                      >
+                        Enable imports
+                      </Button>
+                    )}
+                    {canPublish ? (
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="sm"
+                        disabled={busy || !canWrite || readOnly}
+                        onClick={openPublishing}
+                      >
+                        {metadata?.outputDestination ? "Manage publishing" : "Choose output folder"}
+                      </Button>
+                    ) : (
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="sm"
+                        disabled={busy || !canWrite || readOnly}
+                        onClick={() => void connect("publish", true)}
+                      >
+                        Enable publishing
+                      </Button>
+                    )}
+                  </>
                 ) : null}
                 {accountState.state === "paused" ? (
                   <Button
@@ -437,7 +511,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
                     type="button"
                     size="sm"
                     disabled={busy || !canWrite || readOnly}
-                    onClick={() => void connect(true)}
+                    onClick={() => void connect("source_read", true)}
                   >
                     {accountState.state === "reconsent_required"
                       ? "Re-consent"
@@ -461,7 +535,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
                 type="button"
                 size="sm"
                 disabled={busy || !canWrite || readOnly}
-                onClick={() => void connect()}
+                onClick={() => void connect("source_read")}
               >
                 {busy ? <Loader2Icon className="size-3.5 animate-spin" /> : null}
                 Connect
@@ -471,7 +545,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
         </div>
 
         {connection && metadata ? (
-          <div className="mt-3 grid gap-2 border-t border-border/70 pt-3 text-xs sm:grid-cols-3">
+          <div className="mt-3 grid gap-2 border-t border-border/70 pt-3 text-xs sm:grid-cols-4">
             <div>
               <span className="text-fg-subtle">Account</span>
               <div className="mt-0.5 truncate text-fg">
@@ -498,6 +572,20 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
                   : "Not configured"}
               </div>
             </div>
+            <div>
+              <span className="text-fg-subtle">Publishing destination</span>
+              <div className="mt-0.5 truncate text-fg">
+                {metadata.outputDestination
+                  ? `${metadata.outputDestination.folderName} · ${
+                      metadata.outputDestination.location === "shared_drive"
+                        ? "Shared Drive"
+                        : "My Drive"
+                    }`
+                  : canPublish
+                    ? "Not selected"
+                    : "Permission not enabled"}
+              </div>
+            </div>
           </div>
         ) : null}
 
@@ -517,6 +605,51 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
         cancelAutoFocus
         onConfirm={disconnect}
       />
+
+      <Dialog open={publishingOpen} onOpenChange={setPublishingOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Choose Google Drive publishing folder</DialogTitle>
+            <DialogDescription>
+              Paste one explicit folder or Shared Drive folder link. This destination is separate
+              from imported knowledge locations and changes only when you save again here.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-3">
+            <label className="grid gap-1.5 text-xs text-fg-muted">
+              Output folder link or ID
+              <Input
+                value={outputFolderDraft}
+                onChange={(event) => setOutputFolderDraft(event.target.value)}
+                placeholder="https://drive.google.com/drive/folders/..."
+              />
+            </label>
+            {metadata?.outputDestination ? (
+              <Notice tone="info" title="Current destination">
+                {metadata.outputDestination.folderName} ({metadata.outputDestination.folderId})
+              </Notice>
+            ) : null}
+            <p className="text-xs leading-5 text-fg-subtle">
+              OpenGeni verifies that the exact folder is writable. The first saved destination
+              installs an Ask default for Drive publication without overwriting an existing Allow,
+              Ask, or Block policy.
+            </p>
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="secondary" onClick={() => setPublishingOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              disabled={busy || !canWrite || !outputFolderDraft.trim()}
+              onClick={() => void saveOutputDestination()}
+            >
+              {busy ? <Loader2Icon className="size-3.5 animate-spin" /> : null}
+              Save output folder
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={browseOpen} onOpenChange={setBrowseOpen}>
         <DialogContent className="max-h-[90vh] max-w-xl grid-rows-[auto_minmax(0,1fr)_auto_auto] overflow-hidden">
@@ -867,7 +1000,7 @@ function scopeLabel(scope: ConnectorDocumentDestinationAuthority): string {
 
 function googleDriveFailureMessage(reason: string | null): string {
   if (reason === "provider_denied") return "Google access was not approved.";
-  if (reason === "scope_not_granted") return "Google Drive read access was not approved.";
+  if (reason === "scope_not_granted") return "The requested Google Drive access was not approved.";
   if (reason === "refresh_token_missing")
     return "Google did not return offline access. Reconnect and approve the consent prompt.";
   if (reason === "account_mismatch")

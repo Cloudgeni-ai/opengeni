@@ -18947,6 +18947,122 @@ export async function upsertConnectorActionPolicy(
   );
 }
 
+/**
+ * Install a risk-appropriate connector default without overwriting an explicit
+ * user choice that already exists for the same immutable connector action.
+ */
+export async function ensureConnectorActionPolicyDefault(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    connectionId: string;
+    serverId: string;
+    toolName: string;
+    actionName: string;
+    policy: ConnectorActionPolicyDecision;
+  },
+): Promise<{
+  policy: typeof schema.connectorActionPolicies.$inferSelect;
+  changed: boolean;
+}> {
+  const scope = {
+    connectionId: boundedConnectorActionText(
+      input.connectionId,
+      "connector connection id",
+      CONNECTOR_ACTION_CONNECTION_ID_MAX,
+    ),
+    serverId: boundedConnectorActionText(
+      input.serverId,
+      "connector server id",
+      CONNECTOR_ACTION_SERVER_ID_MAX,
+    ),
+    toolName: boundedConnectorActionText(
+      input.toolName,
+      "connector tool name",
+      CONNECTOR_ACTION_NAME_MAX,
+    ),
+    actionName: boundedConnectorActionText(
+      input.actionName,
+      "connector action name",
+      CONNECTOR_ACTION_NAME_MAX,
+    ),
+  };
+  const subjectId = boundedConnectorActionText(input.subjectId, "policy actor", 1024);
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        await assertWorkspaceAccountPairInScope(tx, input.accountId, input.workspaceId);
+        const [inserted] = await tx
+          .insert(schema.connectorActionPolicies)
+          .values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            ...scope,
+            policy: input.policy,
+            createdBySubjectId: subjectId,
+            updatedBySubjectId: subjectId,
+          })
+          .onConflictDoNothing({
+            target: [
+              schema.connectorActionPolicies.workspaceId,
+              schema.connectorActionPolicies.connectionId,
+              schema.connectorActionPolicies.serverId,
+              schema.connectorActionPolicies.toolName,
+              schema.connectorActionPolicies.actionName,
+            ],
+          })
+          .returning();
+        if (!inserted) {
+          const [existing] = await tx
+            .select()
+            .from(schema.connectorActionPolicies)
+            .where(
+              and(
+                eq(schema.connectorActionPolicies.workspaceId, input.workspaceId),
+                eq(schema.connectorActionPolicies.connectionId, scope.connectionId),
+                eq(schema.connectorActionPolicies.serverId, scope.serverId),
+                eq(schema.connectorActionPolicies.toolName, scope.toolName),
+                eq(schema.connectorActionPolicies.actionName, scope.actionName),
+              ),
+            )
+            .limit(1);
+          if (!existing) throw new Error("Failed to reconcile connector action policy default");
+          return { policy: existing, changed: false };
+        }
+        await tx.insert(schema.auditEvents).values(
+          withLosslessContentWriteVersion(
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              subjectId,
+              action: "connector.action.policy_changed",
+              targetType: "connector_action_policy",
+              targetId: inserted.id,
+              metadata: {
+                connectionId: inserted.connectionId,
+                serverId: inserted.serverId,
+                toolName: inserted.toolName,
+                actionName: inserted.actionName,
+                policy: inserted.policy,
+                version: inserted.version,
+                previousPolicy: null,
+                previousVersion: null,
+                source: "connector_default",
+              },
+            },
+            "metadata",
+            "metadataCodecVersion",
+          ),
+        );
+        return { policy: inserted, changed: true };
+      }),
+  );
+}
+
 export async function prepareConnectorActionApproval(
   db: Database,
   identity: ConnectorActionAttemptIdentity,

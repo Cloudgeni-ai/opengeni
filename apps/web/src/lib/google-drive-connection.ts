@@ -5,6 +5,8 @@ import type {
 } from "@/types";
 
 const GOOGLE_DRIVE_PROVIDER_DOMAIN = "googleapis.com";
+const GOOGLE_DRIVE_FULL_SCOPE = "https://www.googleapis.com/auth/drive";
+const GOOGLE_DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file";
 
 export function localConnectedGoogleDrivePreview(
   search: string,
@@ -109,7 +111,9 @@ export function googleDriveConnectionMetadata(
     value.credentialRole !== "google_drive_metadata" ||
     typeof value.googlePermissionId !== "string" ||
     typeof value.googleEmail !== "string" ||
-    (value.accessMode !== "metadata_readonly" && value.accessMode !== "readonly")
+    (value.accessMode !== "file_only" &&
+      value.accessMode !== "metadata_readonly" &&
+      value.accessMode !== "readonly")
   ) {
     return null;
   }
@@ -173,7 +177,7 @@ export function googleDriveAccountState(
   if (lifecycle?.state === "token_revoked") {
     return { state: "token_revoked", connection, recoverable: true };
   }
-  if (lifecycle?.state === "reconsent_required" || metadata.accessMode !== "readonly") {
+  if (lifecycle?.state === "reconsent_required" || metadata.accessMode === "metadata_readonly") {
     return { state: "reconsent_required", connection, recoverable: true };
   }
   if (lifecycle?.state === "paused" && connection.status === "active") {
@@ -187,6 +191,18 @@ export function googleDriveAccountState(
     return { state: "reconnect_required", connection, recoverable: true };
   }
   return { state: "connected", connection, recoverable: true };
+}
+
+export function googleDriveCanReadSources(
+  metadata: GoogleDriveConnectionMetadata | null | undefined,
+): boolean {
+  return metadata?.accessMode === "readonly";
+}
+
+export function googleDriveCanPublish(connection: ConnectionMetadata | null): boolean {
+  if (!connection) return false;
+  const scopes = new Set(connection.grantedScopes);
+  return scopes.has(GOOGLE_DRIVE_FULL_SCOPE) || scopes.has(GOOGLE_DRIVE_FILE_SCOPE);
 }
 
 function normalizedProviderDomain(value: string): string {

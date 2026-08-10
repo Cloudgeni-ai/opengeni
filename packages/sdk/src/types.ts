@@ -697,8 +697,9 @@ export type GoogleDriveConnectionMetadata = {
   googleEmail: string;
   googleDisplayName: string | null;
   verifiedAt: string;
-  accessMode: "metadata_readonly" | "readonly";
+  accessMode: "file_only" | "metadata_readonly" | "readonly";
   lifecycle?: GoogleDriveConnectionLifecycle | undefined;
+  outputDestination?: GoogleDriveOutputDestination | undefined;
   documentDestination?: ConnectorDocumentDestination | undefined;
   selectedSources?: GoogleDriveSelectedSource[] | undefined;
   /** @deprecated Read selectedSources; retained while existing connections migrate. */
@@ -706,8 +707,17 @@ export type GoogleDriveConnectionMetadata = {
   [key: string]: unknown;
 };
 
+export type GoogleDriveOutputDestination = {
+  folderId: string;
+  folderName: string;
+  driveId: string | null;
+  location: "my_drive" | "shared_drive";
+  selectedAt: string;
+};
+
 export type GoogleDriveOAuthStartRequest = {
   connectionId?: string | undefined;
+  capability?: "source_read" | "publish" | undefined;
 };
 
 export type GoogleDriveOAuthStartResponse = {
@@ -723,6 +733,13 @@ export type GoogleDriveLifecycleActionRequest = {
 export type GoogleDriveDisconnectRequest = {
   expectedVersion: number;
   idempotencyKey: string;
+};
+
+export type SaveGoogleDriveOutputDestinationRequest = {
+  expectedVersion: number;
+  destination: {
+    folderId: string;
+  };
 };
 
 export type GoogleDriveBrowseItem = {

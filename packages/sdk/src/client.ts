@@ -93,6 +93,7 @@ import type {
   GitHubRepositoriesResponse,
   GoogleDriveDisconnectRequest,
   GoogleDriveLifecycleActionRequest,
+  SaveGoogleDriveOutputDestinationRequest,
   KnowledgeMemory,
   KnowledgeMemorySearchRequest,
   ListApiKeysResponse,
@@ -3723,6 +3724,19 @@ export class OpenGeniClient {
     const response = await this.requestJson<ConnectionResponse>(
       "PATCH",
       `/v1/workspaces/${workspaceId}/connections/google-drive/${connectionId}/lifecycle`,
+      request,
+    );
+    return response.connection;
+  }
+
+  async saveGoogleDriveOutputDestination(
+    workspaceId: string,
+    connectionId: string,
+    request: SaveGoogleDriveOutputDestinationRequest,
+  ): Promise<ConnectionMetadata> {
+    const response = await this.requestJson<ConnectionResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/connections/google-drive/${connectionId}/output-destination`,
       request,
     );
     return response.connection;

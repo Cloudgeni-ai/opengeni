@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   PreparedEditableArtifactPublicationSchema,
+  PublishEditableArtifactModelToolInput,
   PublishEditableArtifactReceiptSchema,
   PublishEditableArtifactToolInput,
 } from "../src/editable-artifact-publication";
@@ -10,15 +11,48 @@ const artifactId = "a".repeat(32);
 describe("editable artifact publication contracts", () => {
   test("accepts one closed tool request and durable receipt", () => {
     expect(
-      PublishEditableArtifactToolInput.parse({
+      PublishEditableArtifactModelToolInput.parse({
         path: "/workspace/final.docx",
         title: "Final report",
         modality: "document",
+        googleDrive: { idempotencyKey: "publish-final-report" },
       }),
     ).toEqual({
       path: "/workspace/final.docx",
       title: "Final report",
       modality: "document",
+      googleDrive: { idempotencyKey: "publish-final-report" },
+    });
+    expect(
+      PublishEditableArtifactToolInput.parse({
+        path: "/workspace/final.docx",
+        title: "Final report",
+        modality: "document",
+        googleDrive: {
+          connectionId: "33333333-3333-4333-8333-333333333333",
+          destination: {
+            folderId: "folder-1",
+            folderName: "Product",
+            driveId: null,
+            location: "my_drive",
+          },
+          idempotencyKey: "publish-final-report",
+        },
+      }),
+    ).toEqual({
+      path: "/workspace/final.docx",
+      title: "Final report",
+      modality: "document",
+      googleDrive: {
+        connectionId: "33333333-3333-4333-8333-333333333333",
+        destination: {
+          folderId: "folder-1",
+          folderName: "Product",
+          driveId: null,
+          location: "my_drive",
+        },
+        idempotencyKey: "publish-final-report",
+      },
     });
     expect(
       PublishEditableArtifactReceiptSchema.parse({
@@ -33,6 +67,19 @@ describe("editable artifact publication contracts", () => {
           sha256: "b".repeat(64),
         },
         editorPath: `/workspaces/22222222-2222-4222-8222-222222222222/artifacts/editable/${artifactId}`,
+        googleDrive: {
+          connectionId: "33333333-3333-4333-8333-333333333333",
+          providerFileId: "drive-file-1",
+          webViewLink: "https://docs.google.com/document/d/drive-file-1/edit",
+          mimeType: "application/vnd.google-apps.document",
+          destination: {
+            folderId: "folder-1",
+            folderName: "Product",
+            driveId: null,
+            location: "my_drive",
+          },
+          replayed: false,
+        },
       }).artifact.id,
     ).toBe(artifactId);
     expect(

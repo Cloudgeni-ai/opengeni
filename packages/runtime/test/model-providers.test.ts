@@ -1534,6 +1534,15 @@ describe("multi-provider gating in buildOpenGeniAgent", () => {
       artifactRuntimeAvailable: true,
       sandboxEnvironment: environment,
       editableArtifactPublication: {
+        googleDriveTarget: {
+          connectionId: "33333333-3333-4333-8333-333333333333",
+          destination: {
+            folderId: "folder-1",
+            folderName: "Product",
+            driveId: null,
+            location: "my_drive",
+          },
+        },
         execute: async (input, context) => {
           calls.push({ input, context });
           return receipt;
@@ -1563,6 +1572,25 @@ describe("multi-provider gating in buildOpenGeniAgent", () => {
         },
       ),
     ).toEqual(receipt);
+    expect(
+      await tool.invoke(
+        new RunContext(),
+        JSON.stringify({
+          path: "/workspace/board-report.docx",
+          title: "Board report",
+          modality: "document",
+          googleDrive: { idempotencyKey: "board-report-v1" },
+        }),
+        {
+          toolCall: {
+            type: "function_call",
+            callId: "call-publish-drive-1",
+            name: "publish_editable_artifact",
+            arguments: "{}",
+          },
+        },
+      ),
+    ).toEqual(receipt);
     expect(calls).toEqual([
       {
         input: {
@@ -1571,6 +1599,24 @@ describe("multi-provider gating in buildOpenGeniAgent", () => {
           modality: "document",
         },
         context: { toolCallId: "call-publish-1" },
+      },
+      {
+        input: {
+          path: "/workspace/board-report.docx",
+          title: "Board report",
+          modality: "document",
+          googleDrive: {
+            connectionId: "33333333-3333-4333-8333-333333333333",
+            destination: {
+              folderId: "folder-1",
+              folderName: "Product",
+              driveId: null,
+              location: "my_drive",
+            },
+            idempotencyKey: "board-report-v1",
+          },
+        },
+        context: { toolCallId: "call-publish-drive-1" },
       },
     ]);
   });

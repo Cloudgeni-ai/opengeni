@@ -1,4 +1,4 @@
-# Google Drive connection and scheduled knowledge sync
+# Google Drive connection, scheduled knowledge sync, and artifact publishing
 
 OpenGeni can connect a Google account once, choose multiple Shared Drives or
 folder boundaries, and explicitly enable scheduled synchronization from the
@@ -33,6 +33,42 @@ Google currently classifies `drive.readonly` as a restricted scope.
 Keep the OAuth app in Testing with explicit test users for local development.
 Production use requires Google's applicable verification and security review.
 
+Editable documents, spreadsheets, and presentations can also be published to
+Google Drive through the existing `publish_editable_artifact` tool. Publishing
+is a separate, outbound capability:
+
+- the user explicitly starts incremental OAuth consent for
+  `https://www.googleapis.com/auth/drive.file`; it is never inferred from an
+  inbound source selection;
+- the user separately saves one exact output folder or Shared Drive folder;
+  the API normalizes a pasted Drive URL/ID, verifies `canAddChildren` at save
+  time, and persists the canonical folder name and Drive identity;
+- saving the first output destination installs the connector-action
+  default `Ask` for the exact connection/tool/create scope only when no policy
+  already exists; an existing `Allow`, `Ask`, or `Block` decision is preserved;
+- each model-visible tool request supplies only an explicit Drive-publication
+  intent and stable idempotency key. The host snapshots and injects the exact
+  subject-owned connection and configured destination before approval, so
+  private connection UUIDs never enter prompts. Inbound `selectedSources` are
+  never treated as an outbound destination;
+- the worker first promotes the editable artifact through the existing durable
+  source-file authority, then admits the provider write through the connector
+  action ledger immediately before credential resolution and Drive access;
+- a `Block` or unmanaged policy performs no Google credential resolution or
+  provider request;
+- the exact destination is re-read from Google immediately before upload and
+  must still be writable with the same folder name and Shared Drive identity;
+- DOCX, XLSX, and PPTX source bytes are uploaded as Google Docs, Sheets, and
+  Slides respectively. The durable receipt records the provider file ID, link,
+  native MIME type, exact destination, and whether the result was reconciled;
+- a deterministic, hashed operation marker is stored in Drive
+  `appProperties`. Retries list and reconcile that marker before create, so an
+  acknowledged or ambiguous prior create is not blindly duplicated.
+
+Publishing does not deploy code, alter production configuration, or authorize
+arbitrary writes elsewhere in Drive. `drive.file` remains limited to files
+created by or explicitly opened/shared with the app.
+
 ## Launch OAuth scope decision
 
 The current connector configures a continuously readable folder, My Drive, or
@@ -55,18 +91,21 @@ Shared Drive boundary. That product mode requires
   not be represented as a recursively synchronized folder.
 
 OAuth start continues to use Google's incremental-authorization flag. A future
-Drive publishing feature may request `drive.file` as a separate write capability
-without replacing the read-only source grant. The callback and every active
+Picker source mode may request `drive.file` without replacing the read-only
+source grant. Outbound publication already requests `drive.file` as a separate
+write capability. The callback and every active
 source-browser admission evaluate the exact returned/stored scope set through
 one deterministic capability decision. Unknown, partial, write-only, or malformed
-grants fail before Google identity lookup, credential persistence, or
-source-provider reads.
+source grants fail before Google identity lookup, credential persistence, or
+source-provider reads; a valid publishing-only grant remains usable for
+publication but cannot browse or configure recursive imports.
 
 ## Local setup
 
 1. In Google Cloud, enable the Google Drive API.
 2. Configure the OAuth consent screen, add
-   `https://www.googleapis.com/auth/drive.readonly`, and add your
+   `https://www.googleapis.com/auth/drive.readonly` and
+   `https://www.googleapis.com/auth/drive.file`, and add your
    Google account as a test user.
 3. Create an OAuth client of type **Web application**.
 4. Add this exact authorized redirect URI:
@@ -102,7 +141,9 @@ to the exact ports printed by the dev stack.
 The Capabilities card projects one explicit, durable state for the current
 subject-owned Google Drive connection:
 
-- **Connected** permits source browsing and configuration.
+- **Connected** permits only the capabilities proven by the stored grant:
+  `drive.readonly` enables source browsing/configuration and `drive.file`
+  enables explicit output-folder configuration and publishing.
 - **Paused** is a local reversible stop. OpenGeni does not browse or use saved
   Drive locations until the same connection is resumed.
 - **Token revoked** means Google rejected the refresh grant. Reconnect with the

@@ -39,6 +39,28 @@ export const PublishEditableArtifactReceiptSchema = z
       .regex(
         /^\/workspaces\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/artifacts\/editable\/[0-9a-f]{32}$/u,
       ),
+    googleDrive: z
+      .object({
+        connectionId: z.string().uuid(),
+        providerFileId: z.string().min(1).max(256),
+        webViewLink: z.string().url(),
+        mimeType: z.enum([
+          "application/vnd.google-apps.document",
+          "application/vnd.google-apps.spreadsheet",
+          "application/vnd.google-apps.presentation",
+        ]),
+        destination: z
+          .object({
+            folderId: z.string().min(1).max(256),
+            folderName: editableArtifactReceiptText,
+            driveId: z.string().min(1).max(256).nullable(),
+            location: z.enum(["my_drive", "shared_drive"]),
+          })
+          .strict(),
+        replayed: z.boolean(),
+      })
+      .strict()
+      .optional(),
   })
   .strict()
   .superRefine((value, context) => {

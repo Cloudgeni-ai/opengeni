@@ -28,6 +28,7 @@ import {
   getWorkspaceModelPolicy,
   getWorkspaceGrant,
   getWorkspace,
+  listConnectionsMetadata,
   listCodexAccountStatuses,
   fetchCodexUsageForAccount,
   getSessionCodexState,
@@ -89,6 +90,11 @@ import {
   type SessionAttemptQuiescenceCommit,
   type SessionTurnRecordingSettlement,
 } from "@opengeni/db";
+import {
+  GOOGLE_DRIVE_PROVIDER_DOMAIN,
+  GoogleDriveConnectionMetadata,
+  googleDriveScopesAllowCapability,
+} from "@opengeni/contracts/google-drive";
 import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
 import { sandboxLeaseTelemetryKey, sandboxOperationMetricObserver } from "@opengeni/observability";
 import {
@@ -379,6 +385,10 @@ import { executeGatewayImageGeneration } from "./gateway-image-generation";
 import { executeCodexImageGeneration } from "./codex-image-generation";
 import { imageProviderBindingHash } from "./image-generation-operation";
 import { executeEditableArtifactPublication } from "./editable-artifact-publication";
+import {
+  executeGoogleDriveEditableArtifactPublication,
+  googleDrivePublicationConnectorCall,
+} from "./google-drive-publication";
 import { captureWorkspaceRevision, openFreshWorkspaceCaptureSession } from "./workspace-capture";
 import type { ChannelASession } from "@opengeni/runtime/sandbox";
 import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
@@ -6406,7 +6416,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const editableArtifactPublicationOption: Pick<
         BuildAgentOptions,
         "editableArtifactPublication"
-      > = (() => {
+      > = await (async () => {
         if (
           !objectStorage ||
           !sandboxArtifactRuntime.available ||
@@ -6423,8 +6433,61 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           activeSandboxBackend === "selfhosted"
             ? objectStorage
             : objectStorageForSandboxDownloads(modelRunSettings, objectStorage);
+        const candidates = (
+          await listConnectionsMetadata(db, input.workspaceId, turn.initiator.subjectId)
+        )
+          .filter(
+            (connection) =>
+              connection.subjectId === turn.initiator.subjectId &&
+              connection.providerDomain === GOOGLE_DRIVE_PROVIDER_DOMAIN &&
+              connection.kind === "oauth2" &&
+              connection.status === "active" &&
+              googleDriveScopesAllowCapability(connection.grantedScopes, "publish_file"),
+          )
+          .flatMap((connection) => {
+            const parsed = GoogleDriveConnectionMetadata.safeParse(connection.metadata);
+            if (
+              !parsed.success ||
+              !parsed.data.outputDestination ||
+              parsed.data.lifecycle?.state === "paused" ||
+              (parsed.data.lifecycle && parsed.data.lifecycle.state !== "active")
+            ) {
+              return [];
+            }
+            return [{ connection, destination: parsed.data.outputDestination }];
+          })
+          .sort(
+            (left, right) =>
+              Date.parse(right.connection.updatedAt) - Date.parse(left.connection.updatedAt) ||
+              Date.parse(right.connection.createdAt) - Date.parse(left.connection.createdAt) ||
+              right.connection.id.localeCompare(left.connection.id),
+          );
+        const selected = candidates[0];
+        const googleDrivePublicationTarget = selected
+          ? {
+              connectionId: selected.connection.id,
+              destination: {
+                folderId: selected.destination.folderId,
+                folderName: selected.destination.folderName,
+                driveId: selected.destination.driveId,
+                location: selected.destination.location,
+              },
+            }
+          : undefined;
         return {
           editableArtifactPublication: {
+            ...(googleDrivePublicationTarget
+              ? { googleDriveTarget: googleDrivePublicationTarget }
+              : {}),
+            prepareApproval: async (request, { toolCallId }) => {
+              if (!request.googleDrive) return "allow";
+              const preparation = await prepareConnectorActionApproval(
+                db,
+                connectorActionIdentity,
+                googleDrivePublicationConnectorCall(request, toolCallId),
+              );
+              return preparation.managed ? preparation.decision : "block";
+            },
             execute: async (request, { toolCallId }) => {
               const sessionForPublication =
                 resolvedSandbox?.established.session ?? sdkOwnedSandboxSession;
@@ -6435,7 +6498,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 );
               }
               const runAs = sandboxRunAs(modelRunSettings);
-              return await executeEditableArtifactPublication({
+              const artifact = await executeEditableArtifactPublication({
                 db,
                 objectStorage,
                 sandboxObjectStorage,
@@ -6459,6 +6522,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   ),
                 ...(runtimeCancellationSignal ? { signal: runtimeCancellationSignal } : {}),
               });
+              if (!request.googleDrive) return artifact;
+              const googleDrive = await executeGoogleDriveEditableArtifactPublication({
+                db,
+                objectStorage,
+                settings: modelRunSettings,
+                identity: connectorActionIdentity,
+                subjectId: turn.initiator.subjectId,
+                toolCallId,
+                request,
+                artifact,
+                ...(runtimeCancellationSignal ? { signal: runtimeCancellationSignal } : {}),
+              });
+              return { ...artifact, googleDrive };
             },
           },
         };
