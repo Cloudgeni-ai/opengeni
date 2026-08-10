@@ -9,22 +9,23 @@ import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { useAppContext } from "@/context";
 import type { ConnectionMetadata } from "@/types";
+
+const OPENGENI_REACTION_EMOJI = "genie" as const;
 
 export function SlackReactionSummonCard({
   workspaceId,
   connection,
   canManage,
   installBusy,
-  onReinstall,
+  onUpdatePermissions,
 }: {
   workspaceId: string;
   connection: ConnectionMetadata;
   canManage: boolean;
   installBusy: boolean;
-  onReinstall: () => void;
+  onUpdatePermissions: () => void;
 }) {
   const context = useAppContext();
   const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId);
@@ -91,7 +92,7 @@ export function SlackReactionSummonCard({
 
   async function save() {
     if (draft.enabled && !installReady) {
-      toast.error("Reinstall the Slack bot before enabling reaction summon");
+      toast.error("Update Slack permissions before enabling the emoji shortcut");
       return;
     }
     if (
@@ -104,10 +105,14 @@ export function SlackReactionSummonCard({
     }
     setSaving(true);
     try {
+      const next = { ...draft, emoji: OPENGENI_REACTION_EMOJI };
       const updated = await context.updateWorkspaceSettings(workspaceId, {
-        slackReactionSummon: draft,
+        slackReactionSummon: next,
       });
-      if (updated) toast.success("Slack reaction summon settings saved");
+      if (updated) {
+        setDraft(next);
+        toast.success("Slack emoji shortcut saved");
+      }
     } finally {
       setSaving(false);
     }
@@ -133,7 +138,7 @@ export function SlackReactionSummonCard({
         <div>
           <p className="text-xs font-semibold text-fg">Emoji shortcut</p>
           <p className="mt-1 max-w-2xl text-2xs leading-5 text-fg-muted">
-            React with an emoji to ask OpenGeni about a message.
+            React with 🧞 to ask OpenGeni about a message.
           </p>
         </div>
         <label className="flex items-center gap-2 text-xs font-medium text-fg">
@@ -152,32 +157,19 @@ export function SlackReactionSummonCard({
           <div className="flex items-start gap-2">
             <AlertTriangleIcon className="mt-0.5 size-4 shrink-0 text-warning" />
             <p className="text-2xs leading-5 text-fg-muted">
-              <strong className="text-fg">Reinstall required.</strong> Slack has not granted access
-              to emoji reactions yet.
+              Slack needs permission to read the 🧞 reaction before this shortcut can be enabled.
             </p>
           </div>
           {canManage ? (
-            <Button type="button" size="sm" disabled={installBusy} onClick={onReinstall}>
+            <Button type="button" size="sm" disabled={installBusy} onClick={onUpdatePermissions}>
               {installBusy ? <Loader2Icon className="animate-spin" /> : null}
-              Reinstall Slack bot
+              Update Slack permissions
             </Button>
           ) : null}
         </div>
       ) : null}
 
-      <div className="mt-3 grid gap-3 sm:grid-cols-2">
-        <label className="text-2xs font-medium text-fg-muted">
-          Emoji
-          <Input
-            className="mt-1"
-            value={draft.emoji}
-            disabled={!canManage || saving}
-            maxLength={64}
-            placeholder="genie"
-            onChange={(event) => setDraft({ ...draft, emoji: event.target.value.trim() })}
-          />
-        </label>
-
+      <div className="mt-3">
         <label className="text-2xs font-medium text-fg-muted">
           Where it works
           <select
@@ -243,7 +235,7 @@ export function SlackReactionSummonCard({
         <div className="mt-3 flex justify-end">
           <Button type="button" size="sm" disabled={saving} onClick={() => void save()}>
             {saving ? <Loader2Icon className="animate-spin" /> : null}
-            Save reaction settings
+            Save
           </Button>
         </div>
       ) : (

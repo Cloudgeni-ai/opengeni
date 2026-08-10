@@ -166,7 +166,7 @@ export function localConnectedSlackPreview(
       id: "00000000-0000-4000-8000-000000000003",
       subjectId: null,
       kind: "app_install",
-      grantedScopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES],
+      grantedScopes: [...OPENGENI_SLACK_BOT_REQUESTED_SCOPES],
       verifiedInstallAt: now,
       verifiedInstallVersion: 1,
       metadata: {
@@ -246,7 +246,7 @@ export function SlackBotInstallControls({
             onClick={() => onInstall(false)}
           >
             {busy ? <Loader2Icon className="animate-spin" /> : null}
-            Reinstall
+            Reconnect
           </Button>
           {canInstall ? (
             <Button type="button" variant="ghost" disabled={busy} onClick={() => onInstall(true)}>
@@ -328,8 +328,6 @@ export function CapabilitiesRoute({
   const [slackBotBusy, setSlackBotBusy] = useState(false);
   const [slackDestinationBusy, setSlackDestinationBusy] = useState(false);
   const [slackDestinationAuthority, setSlackDestinationAuthority] =
-    useState<ConnectorDocumentDestinationAuthority>("workspace");
-  const [savedSlackDestinationAuthority, setSavedSlackDestinationAuthority] =
     useState<ConnectorDocumentDestinationAuthority>("workspace");
 
   const [filter, setFilter] = useState<CapabilityFilter>(
@@ -421,7 +419,6 @@ export function CapabilitiesRoute({
   useEffect(() => {
     const authority = slackBotDocumentDestinationAuthority(slackBotConnection?.metadata);
     setSlackDestinationAuthority(authority);
-    setSavedSlackDestinationAuthority(authority);
   }, [slackBotConnection?.id, slackBotConnection?.metadata]);
   // The item the sheet renders, always from the live catalog. Registry items
   // aren't in `items` until persisted, so they fall back to their snapshot; a
@@ -640,7 +637,6 @@ export function CapabilitiesRoute({
           },
         },
       });
-      setSavedSlackDestinationAuthority(slackDestinationAuthority);
       toast.success("Slack knowledge destination saved");
     } catch (error) {
       toast.error("Couldn't save the Slack knowledge destination", {
@@ -1362,10 +1358,12 @@ export function CapabilitiesRoute({
                       <div className="mt-3 border-t border-border/70 pt-3">
                         <div className="flex flex-wrap items-end justify-between gap-3">
                           <div>
-                            <p className="text-xs font-semibold text-fg">Knowledge from Slack</p>
+                            <p className="text-xs font-semibold text-fg">
+                              Save imported Slack messages
+                            </p>
                             <p className="mt-1 text-2xs leading-4 text-fg-muted">
-                              Save imported Slack content to{" "}
-                              {slackBotDestinationLabel(savedSlackDestinationAuthority)}.
+                              Messages are saved only when explicitly imported. Slack is not synced
+                              automatically.
                             </p>
                           </div>
                           <div className="flex flex-wrap items-end gap-2">
@@ -1381,7 +1379,6 @@ export function CapabilitiesRoute({
                                   )
                                 }
                               >
-                                <option value="personal">My knowledge</option>
                                 <option
                                   value="workspace"
                                   disabled={!canManageSlackWorkspaceDestination}
@@ -1424,7 +1421,7 @@ export function CapabilitiesRoute({
                           connection={visibleSlackBotConnection}
                           canManage={canManageSlackReaction}
                           installBusy={slackBotBusy}
-                          onReinstall={() => void installSlackBot(false)}
+                          onUpdatePermissions={() => void installSlackBot(false)}
                         />
                       </div>
 
@@ -1445,14 +1442,6 @@ export function CapabilitiesRoute({
                               ? ` · ${slackBotConnections.length} Slack installations`
                               : ""}
                           </p>
-                          <SlackBotInstallControls
-                            canInstall={canInstallSlackBot}
-                            hasConnection
-                            busy={slackBotBusy}
-                            onInstall={(createNewConnection) =>
-                              void installSlackBot(createNewConnection)
-                            }
-                          />
                           {visibleSlackBotConnection.status === "active" ? (
                             <Button
                               type="button"
@@ -1982,17 +1971,7 @@ export function slackBotDocumentDestinationAuthority(
     return "workspace";
   }
   const authorityKind = (destination as Record<string, unknown>).authorityKind;
-  return authorityKind === "organization" ||
-    authorityKind === "workspace" ||
-    authorityKind === "personal"
+  return authorityKind === "organization" || authorityKind === "workspace"
     ? authorityKind
     : "workspace";
-}
-
-export function slackBotDestinationLabel(
-  authorityKind: ConnectorDocumentDestinationAuthority,
-): string {
-  if (authorityKind === "organization") return "organization knowledge";
-  if (authorityKind === "personal") return "your personal knowledge";
-  return "workspace knowledge";
 }
