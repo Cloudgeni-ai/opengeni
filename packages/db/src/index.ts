@@ -21418,6 +21418,8 @@ export type SessionDiscoverySummary = {
   title: string | null;
   titleOriginalChars: number | null;
   parentSessionId: string | null;
+  rootSessionId: string;
+  nestedAgentDepth: number;
   status: SessionStatus;
   effectiveControl: SessionDiscoveryControl;
   goal: {
@@ -21520,6 +21522,9 @@ export async function listSessionDiscoverySummaries(
     includeLastMessage?: boolean;
     orderBy?: SessionDiscoveryOrderBy;
     updatedAfter?: string;
+    parentSessionId?: string | null;
+    search?: string;
+    subjectId?: string;
     authorizationScope?: SessionAuthorizationListScope;
   },
 ): Promise<{
@@ -21617,8 +21622,35 @@ export async function listSessionDiscoverySummaries(
           )
       : undefined;
     const snapshotFilters: SQL[] = [eq(schema.sessions.workspaceId, workspaceId)];
+    if (options.subjectId) {
+      snapshotFilters.push(sql`not exists (
+        select 1
+        from ${schema.slackInteractions} private_slack_interaction
+        where private_slack_interaction.workspace_id = ${schema.sessions.workspaceId}
+          and private_slack_interaction.session_reservation_id = ${schema.sessions.rootSessionId}
+          and private_slack_interaction.visibility = 'private'
+          and private_slack_interaction.owning_subject_id <> ${options.subjectId}
+      )`);
+    }
     if (options.authorizationScope) {
       snapshotFilters.push(sessionAuthorizationScopeFilter(options.authorizationScope));
+    }
+    if (Object.prototype.hasOwnProperty.call(options, "parentSessionId")) {
+      snapshotFilters.push(
+        options.parentSessionId === null
+          ? isNull(schema.sessions.parentSessionId)
+          : eq(schema.sessions.parentSessionId, options.parentSessionId!),
+      );
+    }
+    const search = options.search?.trim();
+    if (search) {
+      const pattern = `%${search
+        .replaceAll("\\", "\\\\")
+        .replaceAll("%", "\\%")
+        .replaceAll("_", "\\_")}%`;
+      snapshotFilters.push(
+        or(ilike(schema.sessions.title, pattern), ilike(schema.sessions.initialMessage, pattern))!,
+      );
     }
     snapshotFilters.push(
       orderBy === "updatedAt"
@@ -21638,6 +21670,8 @@ export async function listSessionDiscoverySummaries(
         >`left(${schema.sessions.title}, ${SESSION_DISCOVERY_CONTROL_TITLE_MAX_CHARS})`,
         titleOriginalChars: sql<number | null>`char_length(${schema.sessions.title})::integer`,
         parentSessionId: schema.sessions.parentSessionId,
+        rootSessionId: schema.sessions.rootSessionId,
+        nestedAgentDepth: schema.sessions.nestedAgentDepth,
         status: schema.sessions.status,
         createdAt: schema.sessions.createdAt,
         updatedAt: schema.sessions.updatedAt,
@@ -21765,6 +21799,8 @@ export async function listSessionDiscoverySummaries(
         title: row.title,
         titleOriginalChars: row.titleOriginalChars === null ? null : Number(row.titleOriginalChars),
         parentSessionId: relatedAccess === "root" ? row.parentSessionId : null,
+        rootSessionId: relatedAccess === "root" ? row.rootSessionId : row.id,
+        nestedAgentDepth: row.nestedAgentDepth,
         status: row.status as SessionStatus,
         effectiveControl: projectSessionDiscoveryControlForRelatedAccess(
           control,
@@ -21820,6 +21856,108 @@ export async function listSessionDiscoverySummaries(
       updatedThrough: orderBy === "updatedAt" ? snapshotRevision : null,
       updatedAfter,
     };
+  });
+}
+
+export type SessionDiscoveryAncestor = {
+  id: string;
+  title: string | null;
+  titleOriginalChars: number | null;
+};
+
+/**
+ * Return bounded root-to-parent paths for a bounded discovery result page.
+ * Authorization is re-applied to every ancestor so exact-session grants never
+ * acquire parent metadata merely by searching for their target.
+ */
+export async function listSessionDiscoveryAncestorPaths(
+  db: Database,
+  workspaceId: string,
+  sessionIds: string[],
+  authorizationScope?: SessionAuthorizationListScope,
+): Promise<Map<string, SessionDiscoveryAncestor[]>> {
+  const targetIds = [...new Set(sessionIds)].slice(0, 100);
+  if (targetIds.length === 0) return new Map();
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await rawRows<{
+      targetId: string;
+      id: string;
+      title: string | null;
+      titleOriginalChars: number | string | null;
+      depth: number | string;
+      cycle: boolean;
+    }>(
+      scopedDb,
+      sql`
+      with recursive lineage as (
+        select
+          target.id as target_id,
+          target.id,
+          target.parent_session_id,
+          target.title,
+          0::integer as depth,
+          array[target.id]::uuid[] as path,
+          false as cycle
+        from ${schema.sessions} target
+        where target.workspace_id = ${workspaceId}
+          and ${inArray(sql`target.id`, targetIds)}
+
+        union all
+
+        select
+          child.target_id,
+          parent.id,
+          parent.parent_session_id,
+          parent.title,
+          child.depth + 1,
+          child.path || parent.id,
+          parent.id = any(child.path)
+        from lineage child
+        join ${schema.sessions} parent
+          on parent.workspace_id = ${workspaceId}
+         and parent.id = child.parent_session_id
+        where not child.cycle
+          and child.depth < 64
+      )
+      select
+        target_id as "targetId",
+        id,
+        left(title, ${SESSION_DISCOVERY_CONTROL_TITLE_MAX_CHARS}) as title,
+        char_length(title)::integer as "titleOriginalChars",
+        depth,
+        cycle
+      from lineage
+      where depth > 0
+      order by target_id, depth desc
+    `,
+    );
+    const candidateIds = [...new Set(rows.filter((row) => !row.cycle).map((row) => row.id))];
+    let allowed = new Set(candidateIds);
+    if (authorizationScope && authorizationScope.kind !== "all" && candidateIds.length > 0) {
+      const allowedRows = await scopedDb
+        .select({ id: schema.sessions.id })
+        .from(schema.sessions)
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, workspaceId),
+            inArray(schema.sessions.id, candidateIds),
+            sessionAuthorizationScopeFilter(authorizationScope),
+          ),
+        );
+      allowed = new Set(allowedRows.map((row) => row.id));
+    }
+    const result = new Map<string, SessionDiscoveryAncestor[]>();
+    for (const row of rows) {
+      if (row.cycle || !allowed.has(row.id)) continue;
+      const path = result.get(row.targetId) ?? [];
+      path.push({
+        id: row.id,
+        title: row.title,
+        titleOriginalChars: row.titleOriginalChars === null ? null : Number(row.titleOriginalChars),
+      });
+      result.set(row.targetId, path);
+    }
+    return result;
   });
 }
 

@@ -43,6 +43,7 @@ import {
   listOutstandingSessionSystemUpdates,
   listSessionEvents,
   listSessionDiscoverySummaries,
+  listSessionDiscoveryAncestorPaths,
   listSessionSystemUpdatesForTurn,
   listUsageEvents,
   listWorkspaceControlEvents,
@@ -732,6 +733,46 @@ describe("clean session control plane", () => {
     expect(new Set([...pageOne.sessions, ...pageTwo.sessions].map((entry) => entry.id))).toEqual(
       new Set([first.id, second.id, third.id]),
     );
+
+    const roots = await listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
+      limit: 10,
+      parentSessionId: null,
+      subjectId: grant.subjectId,
+    });
+    expect(roots.total).toBe(2);
+    expect(new Set(roots.sessions.map((entry) => entry.id))).toEqual(
+      new Set([first.id, second.id]),
+    );
+
+    const children = await listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
+      limit: 10,
+      parentSessionId: second.id,
+      subjectId: grant.subjectId,
+    });
+    expect(children.total).toBe(1);
+    expect(children.sessions[0]).toMatchObject({
+      id: third.id,
+      parentSessionId: second.id,
+    });
+
+    const search = await listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
+      limit: 10,
+      search: "third",
+      subjectId: grant.subjectId,
+    });
+    expect(search.total).toBe(1);
+    expect(search.sessions[0]?.id).toBe(third.id);
+    const paths = await listSessionDiscoveryAncestorPaths(client.db, grant.workspaceId!, [
+      third.id,
+    ]);
+    expect(paths.get(third.id)?.map((entry) => entry.id)).toEqual([second.id]);
+    const exactOnlyPaths = await listSessionDiscoveryAncestorPaths(
+      client.db,
+      grant.workspaceId!,
+      [third.id],
+      { kind: "scoped", rootSessionIds: [], sessionIds: [third.id] },
+    );
+    expect(exactOnlyPaths.get(third.id)).toBeUndefined();
   });
 
   test("session discovery preserves exact keysets and hands concurrent changes to the next scan", async () => {
