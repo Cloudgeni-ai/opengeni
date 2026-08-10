@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OpenGeni Chromium AX Fixture</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 32px;
+        color: #15171c;
+        background: #f5f6f8;
+        font: 16px/1.4 system-ui, sans-serif;
+      }
+      main { display: grid; gap: 18px; max-width: 720px; }
+      input, button { font: inherit; padding: 10px 12px; }
+      canvas { width: 420px; height: 130px; border: 1px solid #c8cad0; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>OpenGeni Chromium native accessibility fixture</h1>
+      <label for="chromium-input">Chromium input</label>
+      <input id="chromium-input" aria-label="Chromium input" />
+      <button id="chromium-apply" type="button">Apply Chromium</button>
+      <output id="chromium-status" aria-live="polite">Chromium idle</output>
+      <canvas id="chromium-canvas" width="420" height="130" aria-label="Visual-only Chromium canvas"></canvas>
+    </main>
+    <script>
+      const input = document.querySelector('#chromium-input');
+      const status = document.querySelector('#chromium-status');
+      document.querySelector('#chromium-apply').addEventListener('click', () => {
+        status.textContent = `Chromium applied: ${input.value}`;
+      });
+      const context = document.querySelector('#chromium-canvas').getContext('2d');
+      context.fillStyle = '#ed1f8f';
+      context.fillRect(18, 18, 190, 84);
+      context.fillStyle = '#0dc7df';
+      context.beginPath();
+      context.arc(300, 65, 45, 0, Math.PI * 2);
+      context.fill();
+    </script>
+  </body>
+</html>

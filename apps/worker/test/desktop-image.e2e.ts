@@ -6,7 +6,7 @@
 //    opengeni-desktop-up, then assert (exactly like the spike that PASSED):
 //      (a) noVNC /vnc.html      -> HTTP 200
 //      (b) websockify WS upgrade -> 101 + the RFB banner bytes
-//      (c) a REAL browser binary -> an ELF (NOT the Jammy snap-stub), launches
+//      (c) a REAL browser binary -> an ELF engine, launches
 //      (d) the stack comes up    -> OPENGENI_DESKTOP_UP printed; :5900 + :6080 listen
 //    Container + image are torn down in finally.
 //
@@ -149,19 +149,15 @@ describe("P4.1 desktop image — LOCAL build + stack-up assertions", () => {
       expect(socks.out).toContain("VNC_OK");
       expect(socks.out).toContain("WS_OK");
 
-      // 4) (c) a REAL browser is installed, NOT the Jammy snap-stub. The Jammy
-      //    `chromium-browser` stub is a tiny shell script (a few hundred bytes) that
-      //    demands the chromium SNAP and does NOTHING in a snapd-less container.
-      //    google-chrome ships a launcher wrapper PLUS a real ELF `chrome` binary;
+      // 4) (c) a REAL browser is installed, not a distro transition stub.
+      //    Google Chrome/Chromium ships a launcher wrapper PLUS a real ELF engine;
       //    the proof of "real browser" is (i) a genuine ELF binary present in the
       //    install dir, and (ii) `--version` actually launches and prints a version.
       //
-      //    NOTE: /usr/local/bin/opengeni-browser is now a CONTAINER-SAFE WRAPPER SCRIPT
-      //    (it adds --no-sandbox etc. so Chrome launches as root from the human exo/menu
-      //    path), so we resolve the REAL engine via OPENGENI_BROWSER_BIN (the binary the
-      //    wrapper execs), not via readlink of the wrapper itself.
+      //    NOTE: /usr/local/bin/opengeni-browser is a container-safe wrapper. The
+      //    image records its architecture-specific real engine in one immutable file.
       const browser = await sh(
-        'BIN="${OPENGENI_BROWSER_BIN:-/usr/bin/google-chrome-stable}"; ' +
+        "BIN=$(head -n 1 /etc/opengeni/browser-engine); " +
           'BIN=$(readlink -f "$BIN"); DIR=$(dirname "$BIN"); ' +
           'echo "resolved=$BIN"; ' +
           // find a real ELF binary in the install tree (chrome's actual engine).
@@ -195,7 +191,27 @@ describe("P4.1 desktop image — LOCAL build + stack-up assertions", () => {
       // and the wrapper actually LAUNCHES enough to report a version (the snap-stub cannot).
       const ver = await sh("/usr/local/bin/opengeni-browser --version 2>&1 | head -1", 30_000);
       expect(ver.code).toBe(0);
-      expect(ver.out.toLowerCase()).toMatch(/chrome|firefox/);
+      expect(ver.out.toLowerCase()).toMatch(/chrome|chromium/);
+
+      // The same image must also provide the browser-native control plane. This
+      // crosses the compiled daemon, file-only admin secret, pinned native
+      // driver, real engine launch, CDP attachment, and semantic observation.
+      const browserd = await sh(
+        [
+          "umask 077",
+          "mkdir -p /run/opengeni",
+          "printf '%s\\n' admin.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa > /run/opengeni/browserd-token",
+          "OPENGENI_BROWSERD_ADMIN_TOKEN_FILE=/run/opengeni/browserd-token opengeni-browserd-up",
+          "admin=$(tr -d '\\r\\n' </run/opengeni/browserd-token)",
+          'response=$(curl -fsS -H "Authorization: Bearer ${admin}" -H \'Content-Type: application/json\' --data \'{"browserSessionId":"11111111-1111-4111-8111-111111111111","controllerGeneration":"desktop-image-canary","tokenGeneration":1,"controlToken":"control.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","viewToken":"view.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","headed":false,"initialUrl":"data:text/html,<title>Desktop browserd canary</title><button>Ready</button>"}\' http://127.0.0.1:7682/v1/browser-sessions)',
+          "printf '%s' \"$response\" | jq -e '.ok == true and .data.observation.target.title == \"Desktop browserd canary\"' >/dev/null",
+          "opengeni-browserd-down >/dev/null",
+          "echo BROWSERD_OK",
+        ].join("; "),
+        120_000,
+      );
+      expect(browserd.code).toBe(0);
+      expect(browserd.out).toContain("BROWSERD_OK");
 
       // host-side from-outside-the-box assertions on the published port:
       // (a) noVNC /vnc.html -> 200

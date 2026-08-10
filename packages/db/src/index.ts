@@ -9,6 +9,7 @@ import type {
   AccessGrant,
   AccessPrincipalKind,
   ApiKey,
+  AttemptToolResult,
   BillingBalance,
   CapabilityCatalogItem,
   CapabilityInstallation,
@@ -115,6 +116,10 @@ import type {
   ModalCheckpointProviderBinding,
   SandboxProviderContinuityRecovery,
 } from "@opengeni/contracts";
+import {
+  completeCodemodeOperationInTransaction,
+  failCodemodeOperationInTransaction,
+} from "./codemode-operations";
 import {
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   McpPersonalConnectionDelegations,
@@ -4076,7 +4081,7 @@ export async function createFileUpload(
   );
 }
 
-export type PrepareEditableArtifactSourceFileInput = {
+export type PrepareGeneratedWorkspaceFileInput = {
   accountId: string;
   workspaceId: string;
   fileId: string;
@@ -4092,13 +4097,13 @@ export type PrepareEditableArtifactSourceFileInput = {
 };
 
 /**
- * Prepare one deterministic upload intent for an agent-published Office source.
+ * Prepare one deterministic upload intent for a generated workspace file.
  * Retries return the same pending/ready file only when every immutable byte and
  * storage fact matches; identity reuse with different content fails closed.
  */
-export async function prepareEditableArtifactSourceFile(
+export async function prepareGeneratedWorkspaceFile(
   db: Database,
-  input: PrepareEditableArtifactSourceFileInput,
+  input: PrepareGeneratedWorkspaceFileInput,
 ): Promise<{ file: FileAsset; uploadId: string; created: boolean }> {
   if (!Number.isSafeInteger(input.sizeBytes) || input.sizeBytes < 1) {
     throw new TypeError("Editable artifact source size is invalid");
@@ -4112,7 +4117,7 @@ export async function prepareEditableArtifactSourceFile(
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
         await tx.execute(
-          sql`select pg_advisory_xact_lock(hashtextextended(${`editable-artifact-source:${input.workspaceId}:${input.fileId}`}, 0))`,
+          sql`select pg_advisory_xact_lock(hashtextextended(${`generated-workspace-file:${input.workspaceId}:${input.fileId}`}, 0))`,
         );
         const [existing] = await tx
           .select({ file: schema.files, upload: schema.fileUploads })
@@ -4131,7 +4136,7 @@ export async function prepareEditableArtifactSourceFile(
           .for("update")
           .limit(1);
         if (existing) {
-          assertEditableArtifactSourceFileMatches(existing.file, existing.upload, input);
+          assertGeneratedWorkspaceFileMatches(existing.file, existing.upload, input);
           return { file: mapFile(existing.file), uploadId: existing.upload.id, created: false };
         }
 
@@ -4151,7 +4156,7 @@ export async function prepareEditableArtifactSourceFile(
             objectKey: input.objectKey,
           })
           .returning();
-        if (!file) throw new Error("Failed to prepare editable artifact source file");
+        if (!file) throw new Error("Failed to prepare generated workspace file");
         const [upload] = await tx
           .insert(schema.fileUploads)
           .values({
@@ -4163,16 +4168,16 @@ export async function prepareEditableArtifactSourceFile(
             expiresAt: input.expiresAt,
           })
           .returning();
-        if (!upload) throw new Error("Failed to prepare editable artifact source upload");
+        if (!upload) throw new Error("Failed to prepare generated workspace file upload");
         return { file: mapFile(file), uploadId: upload.id, created: true };
       }),
   );
 }
 
-function assertEditableArtifactSourceFileMatches(
+function assertGeneratedWorkspaceFileMatches(
   file: typeof schema.files.$inferSelect,
   upload: typeof schema.fileUploads.$inferSelect,
-  input: PrepareEditableArtifactSourceFileInput,
+  input: PrepareGeneratedWorkspaceFileInput,
 ): void {
   const statusMatches =
     (file.status === "pending_upload" && upload.status === "pending") ||
@@ -4194,7 +4199,7 @@ function assertEditableArtifactSourceFileMatches(
     file.bucket !== input.bucket ||
     file.objectKey !== input.objectKey
   ) {
-    throw new Error(`Editable artifact source identity conflict: ${input.fileId}`);
+    throw new Error(`Generated workspace file identity conflict: ${input.fileId}`);
   }
 }
 
@@ -19374,7 +19379,7 @@ async function frozenSessionCreatorForInsert(
   // A first-party worker bearer is minted per request with the exact current
   // turn/attempt. Freeze the creator under the same ownership locks as the
   // session insert so a superseded attempt cannot create a child attributed to
-  // its former initiating subject. Session-scoped Toolspace credentials remain
+  // its former initiating subject. Session-scoped Codemode credentials remain
   // deliberately renewable and are a separate, non-orchestration surface.
   await assertAgentCommandAuthorityInTransaction(tx, {
     workspaceId: input.workspaceId,
@@ -22703,122 +22708,6 @@ export async function listSessionEvents(
   });
 }
 
-export type ToolspaceCallReservation =
-  | { reserved: true; count: number; turn: SessionTurnForExecution }
-  | {
-      reserved: false;
-      reason: TurnAttemptFenceRejectReason | "budget_exhausted";
-    };
-
-export type ToolspaceTurnAttemptClaims = {
-  sessionId: string;
-  turnId: string;
-  attemptId: string;
-  executionGeneration: number;
-};
-
-/**
- * Admit one exact Toolspace bearer before any session credential is decrypted or
- * any upstream schema is enumerated. This intentionally reuses the canonical
- * activity write fence so Pause/Steer, attempt replacement, generation changes,
- * and terminal settlement revoke a copied token at the same linearization point
- * as other attempt-owned writes.
- */
-export async function admitToolspaceTurnAttempt(
-  db: Database,
-  workspaceId: string,
-  claims: ToolspaceTurnAttemptClaims,
-): Promise<boolean> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    return await scopedDb.transaction(async (tx) => {
-      const fence = await lockTurnAttemptWriteFenceTx(tx, {
-        workspaceId,
-        sessionId: claims.sessionId,
-        turnId: claims.turnId,
-        attemptId: claims.attemptId,
-        executionGeneration: claims.executionGeneration,
-      });
-      return fence.allowed && fence.turn.status === "running";
-    });
-  });
-}
-
-/**
- * Atomically reserve one toolspace call against a turn's per-turn budget.
- *
- * A single conditional UPDATE increments `toolspace_call_count` only while it is
- * below `limit` and returns the post-increment value. Concurrent reservations
- * for the same turn serialize on the row lock, so exactly `limit` of N
- * simultaneous callers observe `reserved: true` — closing the read-then-append
- * TOCTOU the event-count approach had. The returned attempt id is captured by
- * that same UPDATE, so callers cannot accidentally execute under a successor
- * attempt. `reserved: false` means the turn is not executable, at/over budget,
- * or no longer exists.
- */
-export async function reserveToolspaceCallForAttempt(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sessionId: string;
-    turnId: string;
-    executionGeneration: number;
-    attemptId: string;
-    limit: number;
-  },
-): Promise<ToolspaceCallReservation> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        const fence = await lockTurnAttemptWriteFenceTx(tx as unknown as Database, {
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: input.turnId,
-          executionGeneration: input.executionGeneration,
-          attemptId: input.attemptId,
-        });
-        if (!fence.allowed) {
-          return { reserved: false, reason: fence.reason };
-        }
-        if (fence.turn.status !== "running") {
-          return { reserved: false, reason: "turn_terminal" };
-        }
-        if (Number(fence.turn.toolspaceCallCount) >= input.limit) {
-          return { reserved: false, reason: "budget_exhausted" };
-        }
-        const [row] = await tx
-          .update(schema.sessionTurns)
-          .set({
-            toolspaceCallCount: sql`${schema.sessionTurns.toolspaceCallCount} + 1`,
-          })
-          .where(
-            and(
-              eq(schema.sessionTurns.workspaceId, input.workspaceId),
-              eq(schema.sessionTurns.sessionId, input.sessionId),
-              eq(schema.sessionTurns.id, input.turnId),
-              eq(schema.sessionTurns.executionGeneration, input.executionGeneration),
-              eq(schema.sessionTurns.activeAttemptId, input.attemptId),
-              sql`${schema.sessionTurns.toolspaceCallCount} < ${input.limit}`,
-            ),
-          )
-          .returning({ count: schema.sessionTurns.toolspaceCallCount });
-        if (!row) {
-          throw new Error("Toolspace call reservation lost its locked turn");
-        }
-        return {
-          reserved: true,
-          count: Number(row.count),
-          turn: mapSessionTurnForExecution({
-            ...fence.turn,
-            toolspaceCallCount: Number(row.count),
-          }),
-        };
-      }),
-  );
-}
-
 function normalizeEventSequence(value: number | undefined, fallback: number): number {
   if (value === undefined || !Number.isFinite(value)) {
     return fallback;
@@ -24186,47 +24075,6 @@ export async function registerPendingSessionToolCall(
           }
         }
         return { accepted: true, registered: inserted.length === 1 };
-      }),
-  );
-}
-
-/**
- * Clear one completed Toolspace receipt after its attempt-fenced output event is
- * durable. If control already replaced the attempt, its settlement transaction
- * owns the receipt and will retain an explicit outcome-unknown or the durable
- * output event instead.
- */
-export async function clearPendingSessionToolspaceCall(
-  db: Database,
-  input: Omit<PendingSessionToolCallInput, "callType" | "callItem">,
-): Promise<{ accepted: boolean; cleared: boolean }> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        const fence = await lockTurnAttemptWriteFenceTx(tx as unknown as Database, {
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: input.turnId,
-          executionGeneration: input.executionGeneration,
-          attemptId: input.attemptId,
-        });
-        if (!fence.allowed) return { accepted: false, cleared: false };
-        const deleted = await tx
-          .delete(schema.sessionPendingToolCalls)
-          .where(
-            and(
-              eq(schema.sessionPendingToolCalls.workspaceId, input.workspaceId),
-              eq(schema.sessionPendingToolCalls.sessionId, input.sessionId),
-              eq(schema.sessionPendingToolCalls.turnId, input.turnId),
-              eq(schema.sessionPendingToolCalls.attemptId, input.attemptId),
-              eq(schema.sessionPendingToolCalls.callId, input.callId),
-              eq(schema.sessionPendingToolCalls.callType, "toolspace_call"),
-            ),
-          )
-          .returning({ id: schema.sessionPendingToolCalls.id });
-        return { accepted: true, cleared: deleted.length === 1 };
       }),
   );
 }
@@ -26235,7 +26083,7 @@ export async function listOpenPtySessions(
 // ============================================================================
 
 export type SandboxLeaseLiveness = "cold" | "warming" | "warm" | "draining";
-export type LeaseHolderKind = "turn" | "viewer" | "direct" | "process";
+export type LeaseHolderKind = "turn" | "viewer" | "direct" | "process" | "interaction";
 
 export type SandboxProviderExistence =
   | "not_created"
@@ -27285,7 +27133,7 @@ async function acquireLeaseOnce(
         // between holder deletion and provider teardown. A live turn remains
         // viewable: the reaper intentionally drains only boxes with no turn
         // holder, and this same lock makes the distinction race-free.
-        if (kind === "viewer" && Number(row.turn_holders) === 0) {
+        if ((kind === "viewer" || kind === "interaction") && Number(row.turn_holders) === 0) {
           const workspaceRows = await tx.execute<{
             sandbox_viewer_force_drain_reason: SandboxViewerForceDrainReason | null;
           }>(sql`
@@ -30974,8 +30822,6 @@ export interface ReapDrainable {
   leaseEpoch: number;
 }
 
-let loggedLegacyReapFunctionFallback = false;
-
 export async function reapStaleLeaseHolders(
   db: Database,
   input: {
@@ -30985,12 +30831,17 @@ export async function reapStaleLeaseHolders(
      *  10s turn heartbeat, so only a DEAD worker's holder ever crosses it). 0/absent
      *  = legacy never-reap. */
     turnHolderTtlMs?: number;
+    /** Delete placement-controller holders after their BrowserSession or
+     *  ComputerSession heartbeat dies. Active controllers refresh both the
+     *  resource and holder in one API heartbeat; zero disables only for tests. */
+    interactionHolderTtlMs?: number;
     idleGraceMs: number; // drain-grace horizon (matches releaseLeaseHolder)
   },
 ): Promise<{
   reapedViewers: number;
   reapedDirect: number;
   reapedTurns: number;
+  reapedInteractions: number;
   warmingReset: number;
   drained: ReapDrainable[];
 }> {
@@ -31032,6 +30883,133 @@ export async function reapStaleLeaseHolders(
         const reapedDirect = reaped.filter(
           (row: { lease_id: string; kind: string }) => row.kind === "direct",
         ).length;
+        const staleInteractionRows =
+          input.interactionHolderTtlMs && input.interactionHolderTtlMs > 0
+            ? await rawRows<{ id: string; workspace_id: string }>(
+                tx,
+                sql`
+                select holder.id, holder.workspace_id
+                from sandbox_lease_holders holder
+                where holder.workspace_id = ${input.workspaceId}
+                  and holder.kind = 'interaction'
+                  and (
+                    holder.last_heartbeat_at < now()
+                      - (${String(input.interactionHolderTtlMs)} || ' milliseconds')::interval
+                    or not (
+                      exists (
+                        select 1 from browser_sessions browser
+                        join sandbox_leases lease on lease.id = holder.lease_id
+                        where holder.holder_id = ('browser-session:' || browser.id::text)
+                          and browser.account_id = holder.account_id
+                          and browser.workspace_id = holder.workspace_id
+                          and browser.sandbox_group_id = lease.sandbox_group_id
+                          and browser.lifecycle in (
+                            'starting', 'active', 'suspending', 'restoring', 'ending'
+                          )
+                      )
+                      or exists (
+                        select 1 from computer_sessions computer
+                        join sandbox_leases lease on lease.id = holder.lease_id
+                        where holder.holder_id = ('computer-session:' || computer.id::text)
+                          and computer.account_id = holder.account_id
+                          and computer.workspace_id = holder.workspace_id
+                          and computer.sandbox_group_id = lease.sandbox_group_id
+                          and computer.lifecycle in (
+                            'starting', 'active', 'suspending', 'restoring', 'ending'
+                          )
+                      )
+                    )
+                  )
+                for update of holder skip locked
+              `,
+              )
+            : [];
+        const staleInteractionIds = staleInteractionRows.map(
+          (row: { id: string; workspace_id: string }) => row.id,
+        );
+        let reapedInteractions = 0;
+        if (staleInteractionIds.length > 0) {
+          const changedBrowsers = await rawRows<{ workspace_id: string }>(
+            tx,
+            sql`
+            update browser_sessions browser set
+              lifecycle = 'lost',
+              controller_id = null,
+              controller_generation = null,
+              placement_instance_id = null,
+              controller_heartbeat_at = null,
+              failure_code = 'controller_heartbeat_expired',
+              updated_at = now()
+            from sandbox_lease_holders holder
+            where holder.id in ${sql`(${sql.join(
+              staleInteractionIds.map((id) => sql`${id}`),
+              sql`, `,
+            )})`}
+              and holder.holder_id = ('browser-session:' || browser.id::text)
+              and holder.account_id = browser.account_id
+              and holder.workspace_id = browser.workspace_id
+              and browser.lifecycle in (
+                'starting', 'active', 'suspending', 'restoring', 'ending'
+              )
+            returning browser.workspace_id
+          `,
+          );
+          const changedComputers = await rawRows<{ workspace_id: string }>(
+            tx,
+            sql`
+            update computer_sessions computer set
+              lifecycle = 'lost',
+              controller_id = null,
+              controller_generation = null,
+              placement_instance_id = null,
+              controller_heartbeat_at = null,
+              failure_code = 'controller_heartbeat_expired',
+              updated_at = now()
+            from sandbox_lease_holders holder
+            where holder.id in ${sql`(${sql.join(
+              staleInteractionIds.map((id) => sql`${id}`),
+              sql`, `,
+            )})`}
+              and holder.holder_id = ('computer-session:' || computer.id::text)
+              and holder.account_id = computer.account_id
+              and holder.workspace_id = computer.workspace_id
+              and computer.lifecycle in (
+                'starting', 'active', 'suspending', 'restoring', 'ending'
+              )
+            returning computer.workspace_id
+          `,
+          );
+          const changedWorkspaceIds = [
+            ...new Set(
+              [...changedBrowsers, ...changedComputers].map(
+                (row: { workspace_id: string }) => row.workspace_id,
+              ),
+            ),
+          ];
+          if (changedWorkspaceIds.length > 0) {
+            await tx.execute(sql`
+              update workspace_interaction_revisions set
+                revision = revision + 1,
+                updated_at = now()
+              where workspace_id in ${sql`(${sql.join(
+                changedWorkspaceIds.map((id) => sql`${id}`),
+                sql`, `,
+              )})`}
+            `);
+          }
+          const deleted = await rawRows<{ id: string }>(
+            tx,
+            sql`
+            delete from sandbox_lease_holders
+            where id in ${sql`(${sql.join(
+              staleInteractionIds.map((id) => sql`${id}`),
+              sql`, `,
+            )})`}
+            returning id
+          `,
+          );
+          reapedInteractions = deleted.length;
+        }
         // (a2) Reap DEAD-WORKER turn holders. A live holder is touched every 10s
         // from registration (the resumeBoxForTurn holder-liveness loop covers the
         // warmup; the turn heartbeat covers the run — legit multi-day turns
@@ -31208,6 +31186,7 @@ export async function reapStaleLeaseHolders(
           reapedViewers,
           reapedDirect,
           reapedTurns: reapedTurnRows.length,
+          reapedInteractions,
           warmingReset: warmingReset + warmingDrain.length,
           drained: drainable.map((r) => ({
             workspaceId: input.workspaceId,
@@ -31235,67 +31214,31 @@ export async function reapStaleLeaseHoldersGlobal(
     /** Reap DEAD-WORKER turn holders staler than this (the lease TTL; see
      *  reapStaleLeaseHolders). 0/absent = never (legacy). */
     turnHolderTtlMs?: number;
+    interactionHolderTtlMs?: number;
     idleGraceMs: number;
   },
 ): Promise<ReapDrainable[]> {
-  let rows: Array<{
-    workspace_id: string;
-    sandbox_group_id: string;
-    instance_id: string | null;
-    lease_epoch: number | string;
-  }>;
-  const runCurrentReaper = async () =>
-    await db.transaction(async (txRaw) => {
-      const tx = txRaw as unknown as Database;
-      await tx.execute(sql`select set_config('opengeni.sandbox_recovery_protocol_v2', '1', true)`);
-      return await rawRows<{
-        workspace_id: string;
-        sandbox_group_id: string;
-        instance_id: string | null;
-        lease_epoch: number | string;
-      }>(
-        tx,
-        sql`
+  const rows = await db.transaction(async (txRaw) => {
+    const tx = txRaw as unknown as Database;
+    await tx.execute(sql`select set_config('opengeni.sandbox_recovery_protocol_v2', '1', true)`);
+    return await rawRows<{
+      workspace_id: string;
+      sandbox_group_id: string;
+      instance_id: string | null;
+      lease_epoch: number | string;
+    }>(
+      tx,
+      sql`
         select workspace_id, sandbox_group_id, instance_id, lease_epoch
-        from opengeni_private.reap_sandbox_leases(${input.viewerHolderTtlMs}, ${input.turnHolderTtlMs ?? 0}, ${input.idleGraceMs})
+        from opengeni_private.reap_sandbox_leases(
+          ${input.viewerHolderTtlMs},
+          ${input.turnHolderTtlMs ?? 0},
+          ${input.interactionHolderTtlMs ?? input.viewerHolderTtlMs},
+          ${input.idleGraceMs}
+        )
       `,
-      );
-    });
-  const runLegacyReaper = async () =>
-    await db.transaction(async (txRaw) => {
-      const tx = txRaw as unknown as Database;
-      await tx.execute(sql`select set_config('opengeni.sandbox_recovery_protocol_v2', '1', true)`);
-      return await rawRows<{
-        workspace_id: string;
-        sandbox_group_id: string;
-        instance_id: string | null;
-        lease_epoch: number | string;
-      }>(
-        tx,
-        sql`
-        select workspace_id, sandbox_group_id, instance_id, lease_epoch
-        from opengeni_private.reap_sandbox_leases(${input.viewerHolderTtlMs}, ${input.idleGraceMs})
-      `,
-      );
-    });
-  try {
-    rows = await runCurrentReaper();
-  } catch (error) {
-    // Deploy normally runs migrations before rollout, but a newly-started worker
-    // may briefly hit a DB that only has the legacy 2-arg SECURITY DEFINER
-    // function. Fall back for that sweep only: viewer/warming/drain reaping stays
-    // active, dead-turn-holder reaping is skipped until migration 0044 lands.
-    if ((error as { code?: unknown })?.code !== "42883") {
-      throw error;
-    }
-    if (!loggedLegacyReapFunctionFallback) {
-      loggedLegacyReapFunctionFallback = true;
-      console.warn(
-        "sandbox lease global reaper: 3-arg reap_sandbox_leases missing; falling back to legacy 2-arg sweep",
-      );
-    }
-    rows = await runLegacyReaper();
-  }
+    );
+  });
   return rows.map((r) => ({
     workspaceId: r.workspace_id,
     sandboxGroupId: r.sandbox_group_id,
@@ -39618,7 +39561,7 @@ export async function forceDrainOverLimitViewerOnlyBoxes(
     `);
 
     // Canonical holder-mutation order is lease -> holder. Lock the exact
-    // viewer-only candidates before deleting their holder rows so this path
+    // passive-only candidates before deleting their holder rows so this path
     // cannot deadlock with the global reaper or race a concurrent acquire.
     await scopedDb.execute(sql`
       select id from sandbox_leases
@@ -39628,18 +39571,63 @@ export async function forceDrainOverLimitViewerOnlyBoxes(
       for update
     `);
 
-    // Force-drain VIEWER-ONLY warm boxes: CAS warm->draining guarded
+    // Force-drain passive-only warm boxes: CAS warm->draining guarded
     // turn_holders = 0 (a paying turn is NEVER killed). Stamp the grace deadline
     // so the reaper terminates at refcount 0 past the grace, exactly as a normal
     // refcount->0 drain would.
-    // Drop the viewer holders of every warm VIEWER-ONLY lease (turn_holders=0 — a
-    // paying turn is never killed) so refcount → 0 (otherwise the viewer holder
-    // pins refcount > 0 and the reaper never terminates at refcount=0, and the
-    // holder heartbeat would re-arm the lease). Scoped to the warm viewer-only
-    // leases via a subselect so a turn-held box's holders are untouched.
+    // An interaction cannot keep a placement controller alive after the
+    // workspace cost boundary has force-drained it. Make BrowserSession and
+    // ComputerSession loss visible before removing their holders; later
+    // recovery is explicit admission, never a silent resurrection.
+    const lostBrowsers = await scopedDb.execute<{ id: string }>(sql`
+      update browser_sessions browser set
+        lifecycle = 'lost',
+        controller_id = null,
+        controller_generation = null,
+        placement_instance_id = null,
+        controller_heartbeat_at = null,
+        failure_code = 'workspace_force_drained',
+        updated_at = now()
+      where browser.workspace_id = ${input.workspaceId}
+        and browser.lifecycle in ('starting', 'active', 'suspending', 'restoring', 'ending')
+        and browser.sandbox_group_id in (
+          select sandbox_group_id from sandbox_leases
+          where workspace_id = ${input.workspaceId}
+            and liveness = 'warm' and turn_holders = 0
+        )
+      returning browser.id
+    `);
+    const lostComputers = await scopedDb.execute<{ id: string }>(sql`
+      update computer_sessions computer set
+        lifecycle = 'lost',
+        controller_id = null,
+        controller_generation = null,
+        placement_instance_id = null,
+        controller_heartbeat_at = null,
+        failure_code = 'workspace_force_drained',
+        updated_at = now()
+      where computer.workspace_id = ${input.workspaceId}
+        and computer.lifecycle in ('starting', 'active', 'suspending', 'restoring', 'ending')
+        and computer.sandbox_group_id in (
+          select sandbox_group_id from sandbox_leases
+          where workspace_id = ${input.workspaceId}
+            and liveness = 'warm' and turn_holders = 0
+        )
+      returning computer.id
+    `);
+    if (lostBrowsers.length > 0 || lostComputers.length > 0) {
+      await scopedDb.execute(sql`
+        update workspace_interaction_revisions set
+          revision = revision + 1,
+          updated_at = now()
+        where workspace_id = ${input.workspaceId}
+      `);
+    }
+    // Drop viewer and interaction holders of every passive-only lease. Scoped
+    // through the locked warm rows so a turn-held box remains untouched.
     await scopedDb.execute(sql`
       delete from sandbox_lease_holders h
-      where h.kind = 'viewer'
+      where h.kind in ('viewer', 'interaction')
         and h.lease_id in (
           select id from sandbox_leases
           where workspace_id = ${input.workspaceId}
@@ -49363,6 +49351,37 @@ export async function appendSessionEventsForTurnAttempt(
   inputs: AppendEventInput[],
 ): Promise<{ events: SessionEvent[]; accepted: boolean }> {
   if (inputs.length === 0) return { events: [], accepted: true };
+  const result = await mutateAndAppendSessionEventsForTurnAttempt(
+    db,
+    workspaceId,
+    sessionId,
+    turnId,
+    executionGeneration,
+    attemptId,
+    inputs,
+    async () => true,
+  );
+  return { events: result.events, accepted: result.accepted };
+}
+
+/**
+ * Commit one exact-attempt mutation and its timeline projection together. The
+ * mutation runs first so Codemode's operation-row lock order remains stable;
+ * returning false leaves both the mutation and projection absent.
+ */
+export async function mutateAndAppendSessionEventsForTurnAttempt(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  turnId: string,
+  executionGeneration: number,
+  attemptId: string,
+  inputs: AppendEventInput[],
+  mutate: (tx: Database) => Promise<boolean>,
+): Promise<{ events: SessionEvent[]; accepted: boolean; mutationApplied: boolean }> {
+  if (inputs.length === 0) {
+    throw new Error("Atomic attempt mutation requires a timeline projection event");
+  }
   const eventTypes = [...new Set(inputs.map((input) => input.type))].sort();
   return await runIdempotentPersistenceTransaction(
     {
@@ -49372,6 +49391,10 @@ export async function appendSessionEventsForTurnAttempt(
     },
     async () =>
       await withWorkspaceRls(db, workspaceId, async (tx) => {
+        const mutationApplied = await mutate(tx as unknown as Database);
+        if (!mutationApplied) {
+          return { events: [], accepted: false, mutationApplied: false };
+        }
         const fence = await lockTurnAttemptWriteFenceTx(tx, {
           workspaceId,
           sessionId,
@@ -49515,9 +49538,111 @@ export async function appendSessionEventsForTurnAttempt(
           .where(
             and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
           );
-        return { events: inserted.map(mapEvent), accepted: fence.allowed };
+        return {
+          events: inserted.map(mapEvent),
+          accepted: fence.allowed,
+          mutationApplied: true,
+        };
       }),
   );
+}
+
+export type SettleCodemodeOperationWithOutputInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+  operationId: string;
+  claimId: string;
+  producerId: string;
+  settlement:
+    | { state: "completed"; result: AttemptToolResult }
+    | {
+        state: "failed" | "outcome_unknown";
+        errorCode: string;
+        errorMessage: string;
+      };
+};
+
+/**
+ * The Codemode terminal journal row and its visible tool-call output are one
+ * PostgreSQL commit. A worker crash can lose only live NATS fanout, which the
+ * ordinary durable event replay repairs; it cannot leave a completed call
+ * permanently spinning in the timeline.
+ */
+export async function settleCodemodeOperationWithOutput(
+  db: Database,
+  input: SettleCodemodeOperationWithOutputInput,
+): Promise<{ committed: boolean; events: SessionEvent[]; accepted: boolean }> {
+  const settlement = input.settlement;
+  const failed = settlement.state !== "completed";
+  const output: AttemptToolResult =
+    settlement.state === "completed"
+      ? settlement.result
+      : {
+          content: [
+            {
+              type: "text",
+              text: settlement.errorMessage.slice(0, 4_096),
+            },
+          ],
+          isError: true,
+          _meta: {
+            codemodeState: settlement.state,
+            errorCode: settlement.errorCode.slice(0, 128),
+          },
+        };
+  const result = await mutateAndAppendSessionEventsForTurnAttempt(
+    db,
+    input.workspaceId,
+    input.sessionId,
+    input.turnId,
+    input.executionGeneration,
+    input.attemptId,
+    [
+      {
+        type: "agent.toolCall.output",
+        turnId: input.turnId,
+        turnGeneration: input.executionGeneration,
+        turnAttemptId: input.attemptId,
+        producerId: input.producerId,
+        payload: {
+          id: input.operationId,
+          output,
+          ...(failed ? { error: true } : {}),
+          origin: "codemode",
+          subjectId: input.producerId,
+        },
+      },
+    ],
+    async (tx) =>
+      settlement.state === "completed"
+        ? await completeCodemodeOperationInTransaction(tx, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            attemptId: input.attemptId,
+            operationId: input.operationId,
+            claimId: input.claimId,
+            result: settlement.result,
+          })
+        : await failCodemodeOperationInTransaction(tx, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            attemptId: input.attemptId,
+            operationId: input.operationId,
+            claimId: input.claimId,
+            state: settlement.state,
+            errorCode: settlement.errorCode,
+            errorMessage: settlement.errorMessage,
+          }),
+  );
+  return {
+    committed: result.mutationApplied,
+    events: result.events,
+    accepted: result.accepted,
+  };
 }
 
 export async function appendSessionEventToSandboxGroup(
@@ -50991,3 +51116,10 @@ export * from "./workspace-artifacts";
 export * from "./transcription-recordings";
 export * from "./editable-artifacts";
 export * from "./editable-artifact-materialization";
+export * from "./attempt-tool-catalogs";
+export * from "./codemode-operations";
+export * from "./browser-sessions";
+export * from "./computer-sessions";
+export * from "./browser-identities";
+export * from "./browser-auth";
+export * from "./attached-browser-devices";

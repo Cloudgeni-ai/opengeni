@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { access } from "node:fs/promises";
 import {
+  BROWSER_CONTROL_PORT,
   CAPABILITY_DESCRIPTORS,
   DESKTOP_STREAM_PORT,
   SandboxBackend,
@@ -401,6 +402,24 @@ describe("createSandboxClient — 6080 desktop-port merge", () => {
       ) as { options?: { exposedPorts?: number[] } };
       expect(client.options?.exposedPorts ?? []).not.toContain(DESKTOP_STREAM_PORT);
     }
+  });
+});
+
+describe("createSandboxClient — browser controller port merge", () => {
+  for (const backend of ["modal", "runloop", "e2b"] as const) {
+    test(`pre-declares 7682 for ${backend}`, () => {
+      const client = createSandboxClient(
+        testSettings({ sandboxBackend: backend, ...CREDS[backend] }),
+      ) as { options?: { exposedPorts?: number[] } };
+      expect(client.options?.exposedPorts).toContain(BROWSER_CONTROL_PORT);
+    });
+  }
+
+  test("leaves the on-demand Blaxel port list absent", () => {
+    const client = createSandboxClient(
+      testSettings({ sandboxBackend: "blaxel", blaxelApiKey: "k" }),
+    ) as { options?: { exposedPorts?: number[] } };
+    expect(client.options?.exposedPorts).toBeUndefined();
   });
 });
 

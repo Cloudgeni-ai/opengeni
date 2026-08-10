@@ -2197,7 +2197,7 @@ export const KNOWN_PERMISSIONS = [
   "secrets:read",
   "secrets:write",
   "mcp_servers:attach",
-  "toolspace:call",
+  "codemode:call",
   "goals:manage",
   "enrollments:read",
   "enrollments:manage",
@@ -2232,7 +2232,6 @@ export type FirstPartyMcpToolName =
   | "run_on"
   | "sandbox_provision"
   | "connected_machine_remove"
-  | "connected_machine_remove"
   | "rig_list"
   | "rig_get"
   | "rig_propose_change"
@@ -2247,6 +2246,20 @@ export type FirstPartyMcpToolName =
   | "session_resume"
   | "session_steer"
   | "set_other_session_title"
+  | "interaction_discover"
+  | "browser_open"
+  | "browser_tabs"
+  | "browser_observe"
+  | "browser_act"
+  | "browser_debug"
+  | "browser_identity"
+  | "browser_publish"
+  | "browser_lifecycle"
+  | "computer_open"
+  | "computer_targets"
+  | "computer_observe"
+  | "computer_act"
+  | "computer_lifecycle"
   | "variable_set_list"
   | "environment_list"
   | "variable_set_get_variable"
@@ -2286,7 +2299,15 @@ export type FirstPartyMcpToolName =
   | "artifacts_get_source"
   | "artifacts_create"
   | "artifacts_publish"
-  | "artifacts_rollback";
+  | "artifacts_rollback"
+  | "editable_artifact_list"
+  | "editable_artifact_create"
+  | "editable_artifact_import"
+  | "editable_artifact_get"
+  | "editable_artifact_inspect"
+  | "editable_artifact_apply"
+  | "editable_artifact_export"
+  | "editable_artifact_export_status";
 
 export type ProductAccessMode = "local" | "configured" | "managed";
 

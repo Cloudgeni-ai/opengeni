@@ -354,6 +354,7 @@ try {
   const runtimeLocalDependencies = await Promise.all(
     [
       "packages/agent-proto",
+      "packages/codemode",
       "packages/codex",
       "packages/config",
       "packages/contracts",

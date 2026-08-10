@@ -472,7 +472,7 @@ export class InMemoryEditableArtifactStore
     });
   }
 
-  async readSnapshotCompactionBasis(
+  async readCurrentKernelState(
     scope: EditableArtifactScope,
     artifactId: EditableArtifactId,
     expectedAuthorizationRevision: number,

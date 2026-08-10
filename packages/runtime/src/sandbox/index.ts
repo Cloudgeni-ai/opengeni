@@ -21,6 +21,7 @@
 import type { Settings } from "@opengeni/config";
 import { collectSandboxEnvironment, parseExposedPorts } from "@opengeni/config";
 import {
+  BROWSER_CONTROL_PORT,
   DESKTOP_STREAM_PORT,
   OPENGENI_SANDBOX_PROVIDER_INSTANCE_ID_FIELD,
   TERMINAL_STREAM_PORT,
@@ -233,6 +234,42 @@ export {
   type EnsureTerminalServerResult,
 } from "./terminal-server";
 
+export {
+  BROWSER_CONTROL_PORT,
+  BROWSER_CONTROL_SERVER_TIMEOUT_MS,
+  BrowserControlServerError,
+  BrowserControlServerUnsupportedError,
+  buildBrowserControlServerScript,
+  ensureBrowserControlServer,
+  tearDownBrowserControlServer,
+  type EnsureBrowserControlServerOptions,
+  type EnsureBrowserControlServerResult,
+} from "./browser-control-server";
+
+export {
+  BROWSER_CONTROL_ADMIN_TOKEN_FILE,
+  BrowserControlClient,
+  BrowserControlProtocolError,
+  BrowserControlRequestError,
+  BrowserControlSessionClient,
+  BrowserControlTransportError,
+  BrowserControlUnsupportedError,
+  provisionBrowserControlClient,
+  type BrowserControlPlacementSession,
+  type BrowserStateDownloadGrant,
+  type BrowserStateUploadGrant,
+  type BrowserViewGrant,
+  type CapturePlacementBrowserStateInput,
+  type CreatePlacementBrowserSessionInput,
+  type PlacementBrowserSession,
+  type PlacementBrowserSessionReference,
+  type PlacementBrowserTransport,
+  type PlacementBrowserStateCaptureReceipt,
+  type ProvisionBrowserControlClientInput,
+  type ProvisionBrowserControlClientResult,
+  type RestorePlacementBrowserStateInput,
+} from "./browser-control-client";
+
 // Host-owned rotating run credentials. Material lives outside the persisted
 // workspace/manifest and is activated atomically per session generation.
 export {
@@ -254,17 +291,17 @@ export {
   type MaterializeRunCredentialsOptions,
 } from "./run-credentials";
 
-// Session-specific Toolspace token routing. The manifest retains one stable
+// Session-specific Codemode token routing. The manifest retains one stable
 // legacy pointer for warm-box env parity; every session command selects its own
 // hashed token file off-manifest.
 export {
-  ToolspaceTokenPathError,
-  toolspaceTokenFileForSession,
-  toolspaceTokenFileFromEnvironment,
-  withToolspaceTokenEnvironment,
-  withToolspaceTokenSession,
-  withToolspaceTokenClient,
-} from "./toolspace-token";
+  CodemodeTokenPathError,
+  codemodeTokenFileForSession,
+  codemodeTokenFileFromEnvironment,
+  withCodemodeTokenEnvironment,
+  withCodemodeTokenSession,
+  withCodemodeTokenClient,
+} from "./codemode-token";
 
 // The Channel-B pixel DATA PLANE (P4.2). Resolves the provider's scoped tunnel
 // for port 6080 (client → provider-tunnel direct), assembles the WS URL, and
@@ -542,6 +579,15 @@ export function createSandboxClientForBackend(
     !exposedPorts.includes(TERMINAL_STREAM_PORT)
   ) {
     exposedPorts.push(TERMINAL_STREAM_PORT);
+  }
+  // The browser controller is a placement service baked into both canonical
+  // images. Providers that require port declaration must receive its fixed
+  // port when the box is created; on-demand providers resolve it lazily.
+  if (
+    !registration.descriptor.portExposure.supportsOnDemandPorts &&
+    !exposedPorts.includes(BROWSER_CONTROL_PORT)
+  ) {
+    exposedPorts.push(BROWSER_CONTROL_PORT);
   }
 
   const raw = withProviderExactResumeContract(
@@ -1437,7 +1483,10 @@ export function withoutSandboxProviderIdentity(
     return providerIndependentEnvelope;
   }
   const { providerState: _providerState, ...providerIndependentState } = sessionState;
-  return { ...providerIndependentEnvelope, sessionState: providerIndependentState };
+  return {
+    ...providerIndependentEnvelope,
+    sessionState: providerIndependentState,
+  };
 }
 
 function readInstanceId(backend: SandboxBackend | string, session: unknown): string {

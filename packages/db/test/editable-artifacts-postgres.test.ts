@@ -15,7 +15,7 @@ import {
   completeFileUpload,
   createSession,
   nestedPostgresSqlState,
-  prepareEditableArtifactSourceFile,
+  prepareGeneratedWorkspaceFile,
 } from "../src/index";
 import { provisionRoles } from "../src/provision-roles";
 import {
@@ -23,6 +23,8 @@ import {
   PostgresEditableArtifactLiveReadStore,
   PostgresEditableArtifactLiveTicketStore,
   PostgresEditableArtifactStore,
+  listEditableArtifactIdsForSession,
+  touchEditableArtifactSessionLink,
   type PersistedEditableArtifact,
   type PersistedEditableArtifactCausalFrontier,
   type PersistedEditableArtifactKernelState,
@@ -71,6 +73,12 @@ beforeAll(async () => {
   otherAccountId = otherAccount!.id;
   otherWorkspaceId = otherWorkspace!.id;
   await shared.admin`
+    insert into workspace_inference_controls (account_id, workspace_id)
+    values
+      (${accountId}, ${workspaceId}),
+      (${otherAccountId}, ${otherWorkspaceId})
+    on conflict (workspace_id) do nothing`;
+  await shared.admin`
     insert into workspace_memberships (
       account_id, workspace_id, subject_id, permissions
     ) values
@@ -103,6 +111,51 @@ afterAll(async () => {
 }, 180_000);
 
 describe("Postgres editable artifact authority", () => {
+  test("tracks artifacts used by one exact session without crossing tenant scope", async () => {
+    if (!available || !client) return;
+    const scope = { accountId, workspaceId };
+    const session = await createSession(client.db, {
+      accountId,
+      workspaceId,
+      initialMessage: "artifact collaboration",
+      resources: [],
+      metadata: {},
+      model: "gpt-5.6-sol",
+      sandboxBackend: "none",
+    });
+    const artifactId = nextId();
+    const created = await store.createArtifact({
+      ...creationFixture({
+        scope,
+        artifactId,
+        receiptId: nextId(),
+        authorityKey: JSON.stringify(["human", "user:alice"]),
+        idempotencyKey: `session-link:${artifactId}`,
+        requestHash: hash("1"),
+        modality: "spreadsheet",
+        title: "Session link",
+        stateHash: hash("2"),
+        authorizationRevision: 1,
+        createdBySubjectId: "user:alice",
+      }),
+      authorizationActor: humanAuthorizationActor("user:alice"),
+    });
+    expect(created.kind).toBe("result");
+
+    await touchEditableArtifactSessionLink(client.db, scope, session.id, artifactId);
+    await touchEditableArtifactSessionLink(client.db, scope, session.id, artifactId);
+    expect(await listEditableArtifactIdsForSession(client.db, scope, session.id)).toEqual([
+      artifactId,
+    ]);
+    expect(
+      await listEditableArtifactIdsForSession(
+        client.db,
+        { accountId: otherAccountId, workspaceId: otherWorkspaceId },
+        session.id,
+      ),
+    ).toEqual([]);
+  });
+
   test("prepares one exact replay-safe Office source upload", async () => {
     if (!available || !client) return;
     const fileId = crypto.randomUUID();
@@ -121,20 +174,20 @@ describe("Postgres editable artifact authority", () => {
       objectKey: `workspaces/${workspaceId}/files/${fileId}/editable-artifact-source/final.xlsx`,
       expiresAt: new Date(Date.now() + 60_000),
     };
-    const prepared = await prepareEditableArtifactSourceFile(client.db, input);
+    const prepared = await prepareGeneratedWorkspaceFile(client.db, input);
     expect(prepared).toMatchObject({ created: true, uploadId, file: { status: "pending_upload" } });
-    expect(await prepareEditableArtifactSourceFile(client.db, input)).toMatchObject({
+    expect(await prepareGeneratedWorkspaceFile(client.db, input)).toMatchObject({
       created: false,
       uploadId,
       file: { id: fileId, sha256: "a".repeat(64), status: "pending_upload" },
     });
     expect((await completeFileUpload(client.db, workspaceId, uploadId)).status).toBe("ready");
-    expect(await prepareEditableArtifactSourceFile(client.db, input)).toMatchObject({
+    expect(await prepareGeneratedWorkspaceFile(client.db, input)).toMatchObject({
       created: false,
       file: { status: "ready" },
     });
     await expect(
-      prepareEditableArtifactSourceFile(client.db, { ...input, sha256: "b".repeat(64) }),
+      prepareGeneratedWorkspaceFile(client.db, { ...input, sha256: "b".repeat(64) }),
     ).rejects.toThrow("identity conflict");
   });
 
@@ -1986,12 +2039,12 @@ describe("Postgres editable artifact authority", () => {
       replicaId: "6666666666666666",
       stateHash: hash("4"),
     });
-    const compactionBasis = await store.readSnapshotCompactionBasis(scope, artifactId, 1);
+    const compactionBasis = await store.readCurrentKernelState(scope, artifactId, 1);
     expect(compactionBasis.kind).toBe("basis");
     if (compactionBasis.kind !== "basis") throw new Error("compaction basis unavailable");
     expect(compactionBasis.state.tailTransactionCount).toBe(1);
     expect(compactionBasis.state.tailByteSize).toBeGreaterThan(0);
-    expect(await store.readSnapshotCompactionBasis(scope, artifactId, 2)).toEqual({
+    expect(await store.readCurrentKernelState(scope, artifactId, 2)).toEqual({
       kind: "authorization_stale",
     });
     const snapshotId = nextId();

@@ -13,6 +13,7 @@ use std::process::Command;
 use opengeni_agent_platform::service::{self, ServiceBackend, ServiceScope, ServiceSpec};
 use tracing::info;
 
+use crate::browser_bridge;
 use crate::cli::{ServiceAction, ServiceArgs, ServiceInstallArgs, ServiceScopeArgs, StartArgs};
 
 /// Idempotently installs, enables, and starts the ordinary background service.
@@ -101,7 +102,15 @@ fn install(args: &ServiceInstallArgs) -> Result<(), String> {
         ServiceBackend::Launchd => install_launchd(&spec, args.restart),
         ServiceBackend::WindowsScm => install_windows(&spec, args.restart),
         ServiceBackend::Unsupported => Err(service::unsupported_backend().to_string()),
+    }?;
+    if install_scope == ServiceScope::User {
+        let manifests = browser_bridge::install_native_host_manifests(&spec.binary_path, &home()?)
+            .map_err(|error| error.to_string())?;
+        for manifest in manifests {
+            info!(path = %manifest.display(), "installed Chrome Native Messaging host");
+        }
     }
+    Ok(())
 }
 
 /// Linux: write the user (or system) unit, reload systemd, enable+start it, and —
@@ -330,7 +339,12 @@ fn uninstall(install_scope: ServiceScope) -> Result<(), String> {
             Ok(())
         }
         ServiceBackend::Unsupported => Err(service::unsupported_backend().to_string()),
+    }?;
+    if install_scope == ServiceScope::User {
+        browser_bridge::remove_native_host_manifests(&home()?)
+            .map_err(|error| error.to_string())?;
     }
+    Ok(())
 }
 
 fn lifecycle(action: &str, install_scope: ServiceScope) -> Result<(), String> {

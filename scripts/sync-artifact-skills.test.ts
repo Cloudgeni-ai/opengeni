@@ -15,16 +15,19 @@ describe("bundled editable-artifact skills", () => {
     await expect(checkArtifactSkillBundle()).resolves.toBeUndefined();
   });
 
-  test("use only the verified, portable runtime bootstrap", async () => {
+  test("teach the canonical durable artifact surface and only explicit file boundaries", async () => {
     for (const name of ARTIFACT_SKILL_NAMES) {
       const root = join(repoRoot, ".agents", "skills", name);
       const skill = await readFile(join(root, "SKILL.md"), "utf8");
       const api = await readFile(join(root, "references", "api.md"), "utf8");
       expect(skill).toStartWith("---\nname:");
       expect(skill).toContain("description:");
-      expect(skill).toContain("opengeni-artifact-runtime locate --json");
-      expect(api).toContain("process.env.OPENGENI_ARTIFACT_TOOL_ENTRY");
-      expect(api).toContain("pathToFileURL(artifactEntry).href");
+      expect(skill).toContain("editable_artifact_list");
+      expect(skill).toContain("editable_artifact_apply");
+      expect(skill).toContain("Artifacts dock");
+      expect(api).toContain('from "@opengeni/codemode"');
+      expect(api).toContain("$OPENGENI_ARTIFACT_TOOL_ENTRY");
+      expect(`${skill}\n${api}`).not.toContain("publish_editable_artifact");
       expect(api).not.toMatch(/from ["']@opengeni\/artifact-tool/u);
       expect(api).not.toContain("@opengeni/artifact-tool@latest");
     }

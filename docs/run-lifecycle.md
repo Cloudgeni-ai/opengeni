@@ -425,7 +425,7 @@ without mutating the SDK object, while undefined array entries and every other
 non-JSON graph fail with the exact offending path. The lossless database codec
 stays strict rather than silently changing arbitrary input.
 
-Before a personal MCP is attached, the worker/Toolspace boundary revalidates the
+Before a personal MCP is attached, the worker/Codemode boundary revalidates the
 delegation's exact workspace membership, connection id, provider domain, kind,
 owner subject, and active status. A missing, revoked, transferred, or otherwise
 invalid row is never replaced with another subject's connection. Only that MCP
@@ -547,7 +547,7 @@ admission independently of the two-minute heartbeat timeout.
 
 The dying `runAgentTurn` activity owns physical proof. It cancels the exact
 turn's tool/sandbox controller, waits for all controller-owned operations to
-quiesce, stops and drains attempt-owned Git, Toolspace, and generic
+quiesce, stops and drains attempt-owned Git, Codemode, and generic
 run-credential renewal/materialization writes, and immediately writes
 `session_turn_attempts.quiesced_at` before
 attempt-qualified credential deletion, cache, recording, provider, lease, or
@@ -777,8 +777,9 @@ envelope, closes the exact attempt as recoverable, and leaves the same logical
 turn in `recovering`. It never creates a human queue row or synthetic user
 message. Any in-flight side-effecting tool call is durably closed with an
 explicit `interrupted / outcome unknown` result before the next attempt can
-run; this includes Toolspace calls, whose pending receipt is written before the
-remote request. A late result is retained only as rejected evidence. The workflow then
+run; this includes Codemode calls, whose operation is journaled before dispatch
+and whose execution-start marker prevents replay after the side-effect boundary.
+A late result is retained only as rejected evidence. The workflow then
 creates a fresh attempt for that same turn on a healthy worker and reconstructs
 model input from durable model history and tool-call lineage. At most the
 single in-flight model step is lost, the same bound as a crash. This is an

@@ -9,9 +9,12 @@
 // container-responsive composers additionally import responsive.css.
 
 export type {
+  EmbeddedBrowserInteractionClientLike,
+  EmbeddedComputerInteractionClientLike,
   EmbeddedFileAttachmentClientLike,
   EmbeddedGoalClientLike,
   EmbeddedHumanInputSessionClientLike,
+  EmbeddedInteractionClientLike,
   EmbeddedSessionEventClientLike,
   EmbeddedSessionLineageClientLike,
   EmbeddedSessionMcpApprovalPolicyClientLike,
@@ -24,6 +27,7 @@ export type { OpenGeniProviderProps } from "./provider";
 export { useOpenGeni, useOpenGeniClient } from "./session-context";
 export { useVideoArtifactPlaybackLoader } from "./hooks/use-video-artifact-playback";
 export type { ClientOverride, OpenGeniContextValue } from "./session-context";
+export * from "./interaction";
 export { usePageLiveActivity } from "./hooks/internal";
 
 // Hooks
@@ -505,6 +509,10 @@ export { SandboxFiles } from "./components/sandbox-files";
 export type { SandboxFilesProps } from "./components/sandbox-files";
 export { DesktopViewer } from "./components/desktop-viewer";
 export type { DesktopViewerProps } from "./components/desktop-viewer";
+export { BrowserViewer } from "./components/browser-viewer";
+export type { BrowserViewerNotification, BrowserViewerProps } from "./components/browser-viewer";
+export { ComputerViewer } from "./components/computer-viewer";
+export type { ComputerViewerNotification, ComputerViewerProps } from "./components/computer-viewer";
 export { WorkspaceDock } from "./components/workspace-dock";
 export type { WorkspaceDockProps, WorkspaceTab } from "./components/workspace-dock";
 
@@ -517,6 +525,7 @@ export {
   WORKBENCH_TAB_CHANGES,
   WORKBENCH_TAB_FILES,
   WORKBENCH_TAB_TERMINAL,
+  WORKBENCH_TAB_BROWSER,
   WORKBENCH_TAB_DESKTOP,
   WORKBENCH_SURFACES,
 } from "./components/sandbox-workspace";

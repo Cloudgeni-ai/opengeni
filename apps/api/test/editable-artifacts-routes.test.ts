@@ -1,14 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import {
-  signDelegatedAccessToken,
-  type AccessGrant,
-  type FileAsset,
-  type Permission,
-} from "@opengeni/contracts";
+import { signDelegatedAccessToken, type AccessGrant, type Permission } from "@opengeni/contracts";
 import { testSettings } from "@opengeni/testing";
 import {
   EditableArtifactCompatibilityError,
+  EditableArtifactOfficeImportError,
+  editableArtifactCausalFrontier,
+  editableArtifactContentHash,
+  editableArtifactStateHash,
   type EditableArtifactApplicationPort,
+  type EditableArtifactOfficeImportPort,
 } from "@opengeni/core";
 import { Hono } from "hono";
 
@@ -35,9 +35,9 @@ type RecordedApplication = {
   createCalls: Array<Parameters<EditableArtifactApplicationPort["createArtifact"]>[0]>;
   importCalls: Array<Parameters<EditableArtifactApplicationPort["importArtifact"]>[0]>;
   readCalls: Array<Parameters<EditableArtifactApplicationPort["readArtifact"]>[0]>;
-  sourceCalls: Array<readonly [string, string]>;
-  sourceValue: { value: FileAsset | null };
-  sourceError: { value: Error | null };
+  listCalls: Array<readonly [{ accountId: string; workspaceId: string }, string, number]>;
+  officeImportCalls: Array<Parameters<EditableArtifactOfficeImportPort["prepare"]>[0]>;
+  officeImportError: { value: Error | null };
   failWith: { value: Error | null };
 };
 
@@ -53,9 +53,9 @@ function routeFixture(
   const createCalls: RecordedApplication["createCalls"] = [];
   const importCalls: RecordedApplication["importCalls"] = [];
   const readCalls: RecordedApplication["readCalls"] = [];
-  const sourceCalls: RecordedApplication["sourceCalls"] = [];
-  const sourceValue = { value: readyOfficeFile() as FileAsset | null };
-  const sourceError = { value: null as Error | null };
+  const listCalls: RecordedApplication["listCalls"] = [];
+  const officeImportCalls: RecordedApplication["officeImportCalls"] = [];
+  const officeImportError = { value: null as Error | null };
   const failWith = { value: null as Error | null };
   const application = {
     createArtifact: async (input) => {
@@ -97,10 +97,16 @@ function routeFixture(
     }),
     db: {} as never,
     managedAuth: null,
-    editableArtifactImportSource: async (workspaceId, fileId) => {
-      sourceCalls.push([workspaceId, fileId]);
-      if (sourceError.value) throw sourceError.value;
-      return sourceValue.value;
+    editableArtifactOfficeImports: {
+      prepare: async (input) => {
+        officeImportCalls.push(input);
+        if (officeImportError.value) throw officeImportError.value;
+        return preparedOfficeImport(input.modality);
+      },
+    },
+    editableArtifactSessionArtifactIds: async (scope, sourceSessionId, limit) => {
+      listCalls.push([scope, sourceSessionId, limit]);
+      return [ARTIFACT_ID];
     },
     ...(options.uncomposed ? {} : { editableArtifacts: application }),
   });
@@ -110,28 +116,51 @@ function routeFixture(
     createCalls,
     importCalls,
     readCalls,
-    sourceCalls,
-    sourceValue,
-    sourceError,
+    listCalls,
+    officeImportCalls,
+    officeImportError,
     failWith,
   };
 }
 
-function readyOfficeFile(): FileAsset {
-  return {
-    id: FILE_ID,
-    workspaceId: WORKSPACE_ID,
-    status: "ready",
-    filename: "forecast.xlsx",
-    safeFilename: "forecast.xlsx",
-    contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    sizeBytes: 4_096,
-    sha256: "a".repeat(64),
-    bucket: "test",
-    objectKey: `workspaces/${WORKSPACE_ID}/files/${FILE_ID}/original/forecast.xlsx`,
-    createdAt: "2026-08-08T12:00:00.000Z",
-    updatedAt: "2026-08-08T12:00:00.000Z",
+function preparedOfficeImport(modality: "document" | "spreadsheet" | "presentation") {
+  const mimeType =
+    modality === "spreadsheet"
+      ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      : modality === "document"
+        ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        : "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+  const common = {
+    blobReference: `editable-artifacts/snapshots/sha256/${"b".repeat(64)}`,
+    byteSize: 8_192,
+    contentHash: editableArtifactContentHash(`sha256:${"b".repeat(64)}`),
+    mimeType: "application/vnd.opengeni.editable-artifact-snapshot" as const,
+    coveredHeadSequence: 0 as const,
+    stateHash: editableArtifactStateHash(`sha256:${"c".repeat(64)}`),
+    modelSchemaVersion: 1,
+    kernelVersion: "artifact-kernel-1",
   };
+  return {
+    originalImport: {
+      fileId: FILE_ID,
+      blobReference: `workspaces/${WORKSPACE_ID}/files/${FILE_ID}/original/source`,
+      byteSize: 4_096,
+      contentHash: editableArtifactContentHash(`sha256:${"a".repeat(64)}`),
+      mimeType,
+    },
+    snapshot:
+      modality === "spreadsheet"
+        ? {
+            ...common,
+            modality: "spreadsheet" as const,
+            coveredCausalFrontier: editableArtifactCausalFrontier([
+              { replicaId: REPLICA_ID as never, counter: 4 },
+            ]),
+            operationProtocolVersion: 1,
+            crdtStateVersion: 1,
+          }
+        : { ...common, modality, nativeRevision: 0 },
+  } as const;
 }
 
 function artifactResult(modality: "document" | "spreadsheet" | "presentation" = "spreadsheet") {
@@ -229,27 +258,12 @@ async function createArtifact(
 }
 
 function importBody(extra: Record<string, unknown> = {}): string {
-  const contentHash = `sha256:${"b".repeat(64)}`;
   return JSON.stringify({
     replicaId: REPLICA_ID,
     idempotencyKey: "import-1",
     modality: "spreadsheet",
     title: "Imported forecast",
     sourceFileId: FILE_ID,
-    snapshot: {
-      modality: "spreadsheet",
-      blobReference: `editable-artifacts/snapshots/sha256/${"b".repeat(64)}`,
-      byteSize: 8_192,
-      contentHash,
-      mimeType: "application/vnd.opengeni.editable-artifact-snapshot",
-      coveredHeadSequence: 0,
-      coveredCausalFrontier: [{ replicaId: REPLICA_ID, counter: 4 }],
-      stateHash: `sha256:${"c".repeat(64)}`,
-      modelSchemaVersion: 1,
-      kernelVersion: "artifact-kernel-1",
-      operationProtocolVersion: 1,
-      crdtStateVersion: 1,
-    },
     ...extra,
   });
 }
@@ -339,6 +353,63 @@ describe("editable artifact create/open routes", () => {
     });
   });
 
+  test("discovers session artifacts then authorizes each exact resource", async () => {
+    const fixture = routeFixture();
+    const response = await fixture.app.request(
+      `http://api.test/v1/workspaces/${WORKSPACE_ID}/editable-artifacts?sourceSessionId=${SESSION_ID}&replicaId=${REPLICA_ID}`,
+      { headers: { authorization: await bearer() } },
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(await response.json()).toEqual({
+      artifacts: [
+        {
+          id: ARTIFACT_ID,
+          modality: "spreadsheet",
+          title: "Forecast",
+          lifecycle: "active",
+          headSequence: 0,
+          stateHash: `sha256:${"0".repeat(64)}`,
+          createdAt: "2026-08-08T12:00:00.000Z",
+          updatedAt: "2026-08-08T12:00:00.000Z",
+        },
+      ],
+    });
+    expect(fixture.listCalls).toEqual([
+      [{ accountId: ACCOUNT_ID, workspaceId: WORKSPACE_ID }, SESSION_ID, 64],
+    ]);
+    expect(fixture.readCalls[0]).toMatchObject({
+      artifactId: ARTIFACT_ID,
+      actor: { kind: "human", replicaId: REPLICA_ID },
+    });
+  });
+
+  test("rejects incomplete session discovery queries before touching storage", async () => {
+    const fixture = routeFixture();
+    const response = await fixture.app.request(
+      `http://api.test/v1/workspaces/${WORKSPACE_ID}/editable-artifacts?sourceSessionId=${SESSION_ID}`,
+      { headers: { authorization: await bearer() } },
+    );
+    expect(response.status).toBe(422);
+    expect(fixture.listCalls).toEqual([]);
+    expect(fixture.readCalls).toEqual([]);
+  });
+
+  test.each(["forbidden", "not_found"] as const)(
+    "does not expose %s discovery candidates",
+    async (code) => {
+      const fixture = routeFixture();
+      fixture.failWith.value = new EditableArtifactApplicationError(code);
+      const response = await fixture.app.request(
+        `http://api.test/v1/workspaces/${WORKSPACE_ID}/editable-artifacts?sourceSessionId=${SESSION_ID}&replicaId=${REPLICA_ID}`,
+        { headers: { authorization: await bearer() } },
+      );
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ artifacts: [] });
+      expect(fixture.readCalls).toHaveLength(1);
+    },
+  );
+
   test.each([
     [" padded", 422],
     ["padded ", 422],
@@ -372,7 +443,7 @@ describe("editable artifact create/open routes", () => {
 });
 
 describe("editable artifact Office import route", () => {
-  test("binds a ready retained Office file to a verified imported snapshot", async () => {
+  test("derives the verified import server-side from one ready workspace file", async () => {
     const fixture = routeFixture();
     const response = await importArtifact(
       fixture,
@@ -386,7 +457,12 @@ describe("editable artifact Office import route", () => {
     );
 
     expect(response.status).toBe(201);
-    expect(fixture.sourceCalls).toEqual([[WORKSPACE_ID, FILE_ID]]);
+    expect(fixture.officeImportCalls).toHaveLength(1);
+    expect(fixture.officeImportCalls[0]).toMatchObject({
+      scope: { accountId: ACCOUNT_ID, workspaceId: WORKSPACE_ID },
+      fileId: FILE_ID,
+      modality: "spreadsheet",
+    });
     expect(fixture.importCalls).toHaveLength(1);
     expect(fixture.importCalls[0]).toMatchObject({
       scope: { accountId: ACCOUNT_ID, workspaceId: WORKSPACE_ID },
@@ -412,50 +488,60 @@ describe("editable artifact Office import route", () => {
     expect(await response.json()).toMatchObject({ id: ARTIFACT_ID, modality: "spreadsheet" });
   });
 
-  test("requires both artifact publication and retained-file read authority", async () => {
+  test("requires both artifact edit and retained-file read authority", async () => {
     const fixture = routeFixture();
     const response = await importArtifact(
       fixture,
       await bearer({ permissions: ["artifacts:publish"] }),
     );
     expect(response.status).toBe(403);
-    expect(fixture.sourceCalls).toHaveLength(0);
+    expect(fixture.officeImportCalls).toHaveLength(0);
     expect(fixture.importCalls).toHaveLength(0);
   });
 
-  test("rejects unavailable sources and noncanonical snapshot object references", async () => {
+  test("maps typed source failures and rejects the removed client snapshot shape", async () => {
     const missing = routeFixture();
-    missing.sourceValue.value = null;
+    missing.officeImportError.value = new EditableArtifactOfficeImportError("invalid_source");
     expect((await importArtifact(missing, await bearer())).status).toBe(422);
     expect(missing.importCalls).toHaveLength(0);
 
-    const wrongReference = routeFixture();
+    const changed = routeFixture();
+    changed.officeImportError.value = new EditableArtifactOfficeImportError("source_changed");
+    expect((await importArtifact(changed, await bearer())).status).toBe(409);
+    expect(changed.importCalls).toHaveLength(0);
+
+    const legacyShape = routeFixture();
     const body = JSON.parse(importBody()) as Record<string, unknown>;
-    body.snapshot = { ...(body.snapshot as object), blobReference: "private/arbitrary" };
-    expect(
-      (await importArtifact(wrongReference, await bearer(), JSON.stringify(body))).status,
-    ).toBe(422);
-    expect(wrongReference.importCalls).toHaveLength(0);
+    body.snapshot = { blobReference: "private/arbitrary" };
+    expect((await importArtifact(legacyShape, await bearer(), JSON.stringify(body))).status).toBe(
+      422,
+    );
+    expect(legacyShape.officeImportCalls).toHaveLength(0);
+    expect(legacyShape.importCalls).toHaveLength(0);
   });
 
-  test("does not misclassify a source-store failure as an invalid user file", async () => {
+  test("does not misclassify an importer infrastructure failure as invalid input", async () => {
     const fixture = routeFixture();
-    fixture.sourceError.value = new Error("database unavailable");
+    fixture.officeImportError.value = new Error("database unavailable");
     const response = await importArtifact(fixture, await bearer());
     expect(response.status).toBe(500);
-    expect(fixture.sourceCalls).toEqual([[WORKSPACE_ID, FILE_ID]]);
+    expect(fixture.officeImportCalls).toHaveLength(1);
     expect(fixture.importCalls).toHaveLength(0);
   });
 
-  test("rejects cross-modality metadata before reading the retained file", async () => {
+  test("passes the requested modality to the trusted importer", async () => {
     const fixture = routeFixture();
     const response = await importArtifact(
       fixture,
       await bearer(),
       importBody({ modality: "document" }),
     );
-    expect(response.status).toBe(422);
-    expect(fixture.sourceCalls).toHaveLength(0);
+    expect(response.status).toBe(201);
+    expect(fixture.officeImportCalls[0]).toMatchObject({ modality: "document" });
+    expect(fixture.importCalls[0]).toMatchObject({
+      modality: "document",
+      snapshot: { modality: "document" },
+    });
   });
 });
 

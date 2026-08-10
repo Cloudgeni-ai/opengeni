@@ -17,6 +17,10 @@ import { BinaryReader, BinaryWriter } from "@bufbuild/protobuf/wire";
 
 /** `StreamKind.STREAM_KIND_DESKTOP` (agent-proto enum value). */
 export const STREAM_KIND_DESKTOP = 2;
+/** `StreamKind.STREAM_KIND_BROWSER` (agent-proto enum value). */
+export const STREAM_KIND_BROWSER = 3;
+/** `StreamKind.STREAM_KIND_COMPUTER` (agent-proto enum value). */
+export const STREAM_KIND_COMPUTER = 4;
 /** `StreamRole.STREAM_ROLE_CLIENT` (agent-proto enum value). */
 export const STREAM_ROLE_CLIENT = 2;
 

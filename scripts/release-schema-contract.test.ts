@@ -219,12 +219,19 @@ describe("release schema contract", () => {
         (migrations.has("0201_company_profile_authority.sql") ? 1 : 0) +
         (migrations.has("0202_document_index_checkpoints.sql") ? 1 : 0) +
         (migrations.has("0203_durable_video_generation.sql") ? 1 : 0) +
-        (migrations.has("0204_video_generation_funding.sql") ? 1 : 0),
+        (migrations.has("0204_video_generation_funding.sql") ? 1 : 0) +
+        (migrations.has("0205_attempt_tool_catalogs.sql") ? 1 : 0) +
+        (migrations.has("0206_browser_sessions.sql") ? 1 : 0) +
+        (migrations.has("0207_browser_identities.sql") ? 1 : 0) +
+        (migrations.has("0208_attached_browser_devices.sql") ? 1 : 0) +
+        (migrations.has("0209_computer_sessions.sql") ? 1 : 0) +
+        (migrations.has("0210_browser_auth_network_interventions.sql") ? 1 : 0) +
+        (migrations.has("0211_editable_artifact_session_links.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "52eb1881de30a377c50a99da1dd8c403b488f6dd966c5a93f5192bd1a503d126",
+      "23af6abd163eef3cb5cb22ca0e4195946083505fd3f6c84e7a8f9b7c735b121c",
     );
-    expect(contract.latestMigration).toBe("0204_video_generation_funding.sql");
+    expect(contract.latestMigration).toBe("0211_editable_artifact_session_links.sql");
     expect(migrations.get("0197_knowledge_source_sync_schedules.sql")).toMatchObject({
       sha256: "edd425be4e4db07f4fcab1e520ece71dc1a692072ce28256ec2b86248442f3c8",
       deploymentMode: "maintenance",
@@ -247,6 +254,42 @@ describe("release schema contract", () => {
     });
     expect(migrations.get("0202_document_index_checkpoints.sql")).toMatchObject({
       sha256: "93b24b48e587fca5288af6042947f4592a3767bc6882fc8d5f52c973214e94ea",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0203_durable_video_generation.sql")).toMatchObject({
+      sha256: "a48d600cd51a4ed6ed2a68d443959b8754364ab7d60709b1d5cd23f2a5013d3a",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0204_video_generation_funding.sql")).toMatchObject({
+      sha256: "bdb70908f6e61ecc1d69228e2c05183c70527bf1bebac74bdab3294243ed9c3b",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0205_attempt_tool_catalogs.sql")).toMatchObject({
+      sha256: "65e121d067dc3df2cd23a4e78e9ad094a0450a0be648720af0ff50f2002418d5",
+      deploymentMode: "maintenance",
+    });
+    expect(migrations.get("0206_browser_sessions.sql")).toMatchObject({
+      sha256: "bb21e1ec77eb9a92435abfd6bbaa969355ec61179b5ea4837ca363fc1f667c2f",
+      deploymentMode: "maintenance",
+    });
+    expect(migrations.get("0207_browser_identities.sql")).toMatchObject({
+      sha256: "03790bd77a2b6e237c22d3dabc6f5a579feaf18931d5ce71da084d0958729e5e",
+      deploymentMode: "maintenance",
+    });
+    expect(migrations.get("0208_attached_browser_devices.sql")).toMatchObject({
+      sha256: "5389ae763a5f8fa0b55f93f626dd4370154702695ab2c80da0a627c435b5792d",
+      deploymentMode: "maintenance",
+    });
+    expect(migrations.get("0209_computer_sessions.sql")).toMatchObject({
+      sha256: "b6be91fdc83b54677e7a326245f0ac2fee93b032c26bc26b011eb3879745fcb0",
+      deploymentMode: "maintenance",
+    });
+    expect(migrations.get("0210_browser_auth_network_interventions.sql")).toMatchObject({
+      sha256: "44fd93e8cf8b08ab7d5088a3b075a557a770474a5ac5c7d14ef1ebffe1c0e771",
+      deploymentMode: "maintenance",
+    });
+    expect(migrations.get("0211_editable_artifact_session_links.sql")).toMatchObject({
+      sha256: "0d24c5387951f232e72d3af5fe116fd268c0d30d59e0ac55959ba87a2309c966",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0183_model_call_provider_cost_estimates.sql")).toMatchObject({

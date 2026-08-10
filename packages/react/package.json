@@ -66,6 +66,10 @@
       "types": "./src/artifacts-presentation.ts",
       "default": "./src/artifacts-presentation.ts"
     },
+    "./interaction": {
+      "types": "./src/interaction.ts",
+      "default": "./src/interaction.ts"
+    },
     "./styles.css": {
       "types": "./styles/index.d.ts",
       "style": "./styles/index.css",

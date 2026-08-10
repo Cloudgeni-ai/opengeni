@@ -1,7 +1,7 @@
 {
   "name": "@opengeni/ogtool",
   "version": "0.1.0",
-  "description": "Dependency-free CLI for calling the OpenGeni Toolspace MCP surface from a sandbox or custom rig.",
+  "description": "Codemode CLI and typed client entrypoint for an OpenGeni execution attempt.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -9,10 +9,9 @@
     "directory": "packages/ogtool"
   },
   "bin": {
-    "ogtool": "./bin/ogtool.cjs"
+    "ogtool": "./dist/bin/ogtool.cjs"
   },
   "files": [
-    "bin",
     "dist",
     "src"
   ],
@@ -34,8 +33,11 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "bun test",
-    "build": "bun ../../scripts/build-typescript-package.ts",
+    "build": "bun build.ts",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
+  },
+  "dependencies": {
+    "@opengeni/codemode": "workspace:*"
   },
   "devDependencies": {
     "tsup": "^8.5.0",

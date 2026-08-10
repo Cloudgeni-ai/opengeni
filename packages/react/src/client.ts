@@ -98,6 +98,40 @@ export type SessionClientLike = Pick<
   | "attachViewer"
   | "heartbeatViewer"
   | "detachViewer"
+  // Browser/Computer interaction resources
+  | "listAttachedBrowsers"
+  | "getAttachedBrowser"
+  | "listBrowserIdentities"
+  | "getBrowserIdentity"
+  | "createBrowserIdentity"
+  | "listBrowserRevisions"
+  | "listBrowserSessions"
+  | "getBrowserSession"
+  | "createBrowserSession"
+  | "listBrowserTargets"
+  | "openBrowserTarget"
+  | "selectBrowserTarget"
+  | "closeBrowserTarget"
+  | "observeBrowserTarget"
+  | "actInBrowser"
+  | "getBrowserActionReceipt"
+  | "listBrowserDiagnostics"
+  | "attachBrowserSession"
+  | "heartbeatBrowserSession"
+  | "publishBrowserRevision"
+  | "suspendBrowserSession"
+  | "resumeBrowserSession"
+  | "endBrowserSession"
+  | "listComputerSessions"
+  | "getComputerSession"
+  | "createComputerSession"
+  | "listComputerTargets"
+  | "observeComputerTarget"
+  | "actInComputer"
+  | "getComputerActionReceipt"
+  | "attachComputerSession"
+  | "heartbeatComputerSession"
+  | "endComputerSession"
   // Channel-A structured services (terminal-as-events feed via fs/git/terminal)
   | "fsList"
   | "fsListBatch"
@@ -188,3 +222,50 @@ export type EmbeddedRealtimeSessionClientLike = Pick<
   | "syncSessionRealtimeLedger"
   | "endSessionRealtime"
 >;
+
+/** Exact public SDK surface required by BrowserSession hooks and components. */
+export type EmbeddedBrowserInteractionClientLike = Pick<
+  OpenGeniClient,
+  | "listAttachedBrowsers"
+  | "getAttachedBrowser"
+  | "listBrowserIdentities"
+  | "getBrowserIdentity"
+  | "createBrowserIdentity"
+  | "listBrowserRevisions"
+  | "listBrowserSessions"
+  | "getBrowserSession"
+  | "createBrowserSession"
+  | "listBrowserTargets"
+  | "openBrowserTarget"
+  | "selectBrowserTarget"
+  | "closeBrowserTarget"
+  | "observeBrowserTarget"
+  | "actInBrowser"
+  | "getBrowserActionReceipt"
+  | "listBrowserDiagnostics"
+  | "attachBrowserSession"
+  | "heartbeatBrowserSession"
+  | "publishBrowserRevision"
+  | "suspendBrowserSession"
+  | "resumeBrowserSession"
+  | "endBrowserSession"
+>;
+
+/** Exact public SDK surface required by ComputerSession hooks and components. */
+export type EmbeddedComputerInteractionClientLike = Pick<
+  OpenGeniClient,
+  | "listComputerSessions"
+  | "getComputerSession"
+  | "createComputerSession"
+  | "listComputerTargets"
+  | "observeComputerTarget"
+  | "actInComputer"
+  | "getComputerActionReceipt"
+  | "attachComputerSession"
+  | "heartbeatComputerSession"
+  | "endComputerSession"
+>;
+
+/** Complete public Browser + Computer interaction surface. */
+export type EmbeddedInteractionClientLike = EmbeddedBrowserInteractionClientLike &
+  EmbeddedComputerInteractionClientLike;

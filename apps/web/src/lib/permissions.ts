@@ -12,7 +12,7 @@ const permissionGroupAssignments: Record<Permission, string> = {
   "stream:control": "Sessions",
   "stream:acknowledge": "Sessions",
   "terminal:attach": "Sessions",
-  "toolspace:call": "Sessions",
+  "codemode:call": "Sessions",
   "files:upload": "Files & documents",
   "files:read": "Files & documents",
   "files:write": "Files & documents",
@@ -131,7 +131,7 @@ export function buildSessionMcpPermissionGroups(): PermissionGroup[] {
     "billing:manage",
     "workspace:create",
   ]);
-  const notFirstPartyMcp = new Set<string>(["toolspace:call"]);
+  const notFirstPartyMcp = new Set<string>(["codemode:call"]);
   return buildApiKeyPermissionGroups()
     .map((group) => ({
       label: group.label,

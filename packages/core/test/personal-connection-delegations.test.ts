@@ -206,7 +206,7 @@ describe("personal MCP connection delegation", () => {
     await resolver({
       ...request,
       subjectId: "worker:first-party-mcp",
-      toolName: "toolspace_issue_create",
+      toolName: "codemode_issue_create",
     });
 
     expect(received).toHaveLength(2);
