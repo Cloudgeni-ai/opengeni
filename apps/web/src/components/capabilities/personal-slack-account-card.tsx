@@ -115,7 +115,7 @@ export function PersonalSlackAccountCard({
         </p>
       ) : null}
 
-      {connection ? (
+      {connection && !embedded ? (
         <details className="group mt-3 border-t border-border/70 pt-3">
           <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 text-2xs text-fg-subtle transition-colors hover:text-fg-muted">
             <ShieldCheckIcon className="size-3" />

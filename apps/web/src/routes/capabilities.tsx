@@ -1480,8 +1480,8 @@ export function CapabilitiesRoute({
                 )}
               </section>
 
-              <details className="group mt-3 rounded-xl border border-border bg-surface px-4 py-3">
-                <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+              <section className="mt-3 rounded-xl border border-border bg-surface px-4 py-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
                   <div className="flex min-w-0 items-start gap-3">
                     <span className="grid size-8 shrink-0 place-items-center rounded-lg border border-border bg-bg">
                       <AppLogo app="slack" className="size-4" />
@@ -1493,30 +1493,27 @@ export function CapabilitiesRoute({
                       </p>
                     </div>
                   </div>
-                  <div className="flex shrink-0 items-center gap-2 text-xs text-fg-muted">
-                    <span>
+                  <div className="flex shrink-0 flex-wrap items-center justify-end gap-3">
+                    <span className="text-xs text-fg-muted">
                       {personalSlackAccountStatusLabel(
                         visiblePersonalSlackStatus,
                         personalSlackAvailable,
                       )}
                     </span>
-                    <ChevronDownIcon className="size-4 text-fg-subtle transition-transform group-open:rotate-180" />
+                    <PersonalSlackAccountCard
+                      available={personalSlackAvailable}
+                      canManage={canManagePersonalSlack}
+                      busy={personalSlackBusy}
+                      accountState={visiblePersonalSlackStatus}
+                      embedded
+                      readOnly={slackPreview !== null}
+                      onConnect={() => void startPersonalSlackOAuth()}
+                      onReconnect={() => void startPersonalSlackOAuth()}
+                      onDisconnect={() => setPersonalSlackDisconnectOpen(true)}
+                    />
                   </div>
-                </summary>
-                <div className="mt-3 border-t border-border/70 pt-3">
-                  <PersonalSlackAccountCard
-                    available={personalSlackAvailable}
-                    canManage={canManagePersonalSlack}
-                    busy={personalSlackBusy}
-                    accountState={visiblePersonalSlackStatus}
-                    embedded
-                    readOnly={slackPreview !== null}
-                    onConnect={() => void startPersonalSlackOAuth()}
-                    onReconnect={() => void startPersonalSlackOAuth()}
-                    onDisconnect={() => setPersonalSlackDisconnectOpen(true)}
-                  />
                 </div>
-              </details>
+              </section>
             </section>
           </SheetContent>
         </Sheet>

@@ -113,6 +113,40 @@ describe("PersonalSlackAccountCard", () => {
     }
   });
 
+  test("keeps a connected embedded control to the single disconnect action", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(
+          <PersonalSlackAccountCard
+            available
+            canManage
+            busy={false}
+            accountState={{
+              state: "connected",
+              connection: connection(),
+              accessTokenRefreshDue: false,
+            }}
+            embedded
+            onConnect={() => {}}
+            onReconnect={() => {}}
+            onDisconnect={() => {}}
+          />,
+        );
+      });
+
+      const buttons = [...container.querySelectorAll<HTMLButtonElement>("button")];
+      expect(buttons.map((button) => button.textContent?.trim())).toEqual(["Disconnect"]);
+      expect(container.querySelector("details")).toBeNull();
+      expect(container.textContent).not.toContain("Connection details");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("renders a subject-owned status without exposing its private row id", async () => {
     const rendered = await renderCard({
       state: "connected",
