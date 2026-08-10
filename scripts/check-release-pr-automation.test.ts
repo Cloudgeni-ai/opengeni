@@ -2968,12 +2968,12 @@ describe("workflow contracts", () => {
         browser_lane_matrix: "${{ steps.plan.outputs.browser_lane_matrix }}",
       }),
     );
-    expect(plan.steps.find((step: any) => step.id === "plan").run).toContain(
-      'bun scripts/ci/impact.ts --base "$BASE_SHA" --head "$HEAD_SHA"',
-    );
-    expect(plan.steps.find((step: any) => step.id === "plan").run).toContain(
-      "bun scripts/ci/impact.ts --full --output impact-plan.json",
-    );
+    const planScript = plan.steps.find((step: any) => step.id === "plan").run;
+    expect(planScript).toContain('bun scripts/ci/impact.ts --base "$BASE_SHA" --head "$HEAD_SHA"');
+    expect(planScript).toContain("bun scripts/ci/impact.ts --full --output impact-plan.json");
+    expect(planScript).toContain("unit_maximum=4");
+    expect(planScript).toContain("if jq -e '.mode == \"full\"' impact-plan.json");
+    expect(planScript).toContain("unit_maximum=6");
 
     const source = ci.jobs["source-contracts"];
     expect(source.needs).toEqual(["automation-admission", "plan"]);
