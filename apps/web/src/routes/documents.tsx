@@ -2,8 +2,8 @@
 // optional collections for organization, reindex, and semantic search — all
 // through the SDK client.
 import {
+  ArrowLeftIcon,
   BotOffIcon,
-  CheckIcon,
   FileSearchIcon,
   FilesIcon,
   FolderInputIcon,
@@ -13,12 +13,13 @@ import {
   RefreshCwIcon,
   SparklesIcon,
 } from "lucide-react";
+import { Link } from "@tanstack/react-router";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { LoadErrorState, PageHeader } from "@/components/common";
 import { Button } from "@/components/ui/button";
-import { ContentPage, FormField, FormGrid } from "@/components/ui/content-layout";
+import { ContentPage, FormField } from "@/components/ui/content-layout";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { Notice } from "@/components/ui/notice";
@@ -27,26 +28,12 @@ import { StatusDot, type StatusTone } from "@/components/ui/status-dot";
 import { useAppContext } from "@/context";
 import { usePageLiveActivity } from "@opengeni/react";
 import { listViewState } from "@/lib/load-state";
-import { cn } from "@/lib/utils";
 import type {
   DocumentAuthorityKind,
   DocumentBase,
-  DocumentSearchMode,
   DocumentSearchResult,
   IndexedDocument,
-  KnowledgeSourceKind,
 } from "@/types";
-
-const sourceKindOptions: KnowledgeSourceKind[] = [
-  "manual_upload",
-  "meeting_transcript",
-  "repository",
-  "email",
-  "chat",
-  "document",
-  "web",
-  "other",
-];
 
 export const DEFAULT_DOCUMENT_AUTHORITY_KIND: DocumentAuthorityKind = "workspace";
 
@@ -77,7 +64,13 @@ export function resolveDocumentCollectionSelection(
   return bases.find(isDefaultDocumentCollection)?.id ?? bases[0]?.id ?? null;
 }
 
-export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
+export function DocumentsRoute({
+  workspaceId,
+  returnToBrain = false,
+}: {
+  workspaceId: string;
+  returnToBrain?: boolean;
+}) {
   const context = useAppContext();
   const client = context.client;
   const pageLive = usePageLiveActivity();
@@ -92,23 +85,10 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
   const [results, setResults] = useState<DocumentSearchResult[]>([]);
   const [name, setName] = useState("");
   const [query, setQuery] = useState("");
-  const [searchMode, setSearchMode] = useState<DocumentSearchMode>("hybrid");
-  const [searchSourceKind, setSearchSourceKind] = useState<KnowledgeSourceKind | "">("");
-  const [searchAclTags, setSearchAclTags] = useState("");
-  const [uploadSourceKind, setUploadSourceKind] = useState<KnowledgeSourceKind>("manual_upload");
-  const [uploadSourceUri, setUploadSourceUri] = useState("");
-  const [uploadSourceTitle, setUploadSourceTitle] = useState("");
-  const [uploadSourceAuthor, setUploadSourceAuthor] = useState("");
-  const [uploadAclTags, setUploadAclTags] = useState("");
-  const [uploadAuthorityKind, setUploadAuthorityKind] = useState<DocumentAuthorityKind>(
-    DEFAULT_DOCUMENT_AUTHORITY_KIND,
-  );
-  const [uploadAgentAccess, setUploadAgentAccess] = useState(true);
   const [dropText, setDropText] = useState("");
   const [dropAuthorityKind, setDropAuthorityKind] = useState<DocumentAuthorityKind>(
     DEFAULT_DOCUMENT_AUTHORITY_KIND,
   );
-  const [dropAgentAccess, setDropAgentAccess] = useState(true);
   const [dropping, setDropping] = useState(false);
   const [creatingBase, setCreatingBase] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -243,7 +223,6 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
     if (!selectedBaseId || !files || files.length === 0) return;
     setUploading(true);
     try {
-      const aclTags = splitTags(uploadAclTags);
       for (const file of Array.from(files)) {
         const asset = await client.uploadFile(workspaceId, {
           filename: file.name || "file",
@@ -252,13 +231,8 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
         });
         const indexed = await client.addDocument(workspaceId, selectedBaseId, {
           fileId: asset.id,
-          sourceKind: uploadSourceKind,
-          authorityKind: uploadAuthorityKind,
-          agentAccess: uploadAgentAccess,
-          ...(uploadSourceUri.trim() ? { sourceUri: uploadSourceUri.trim() } : {}),
-          ...(uploadSourceTitle.trim() ? { sourceTitle: uploadSourceTitle.trim() } : {}),
-          ...(uploadSourceAuthor.trim() ? { sourceAuthor: uploadSourceAuthor.trim() } : {}),
-          ...(aclTags.length > 0 ? { aclTags } : {}),
+          authorityKind: dropAuthorityKind,
+          agentAccess: true,
         });
         setDocuments((current) => [indexed, ...current.filter((item) => item.id !== indexed.id)]);
       }
@@ -294,7 +268,7 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
       const document = await client.createKnowledgeDrop(workspaceId, {
         text,
         authorityKind: dropAuthorityKind,
-        agentAccess: dropAgentAccess,
+        agentAccess: true,
       });
       setDropText("");
       toast.success("Dropped into knowledge", {
@@ -324,7 +298,7 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
         last = await client.createKnowledgeDrop(workspaceId, {
           fileId: asset.id,
           authorityKind: dropAuthorityKind,
-          agentAccess: dropAgentAccess,
+          agentAccess: true,
         });
       }
       toast.success(
@@ -373,9 +347,7 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
       const response = await client.searchDocuments(workspaceId, selectedBaseId, {
         query: query.trim(),
         limit: 8,
-        mode: searchMode,
-        ...(searchSourceKind ? { sourceKinds: [searchSourceKind] } : {}),
-        ...(splitTags(searchAclTags).length > 0 ? { aclTags: splitTags(searchAclTags) } : {}),
+        mode: "hybrid",
       });
       setResults(response.results);
       setSearched(query.trim());
@@ -443,44 +415,19 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
         <PageHeader
           icon={<FileSearchIcon className="size-4" />}
           title="Documents"
-          description="Upload immediately for agent search. Collections are optional organization."
-          actions={
-            <details className="w-full min-w-0 lg:w-auto">
-              <summary className="flex h-8 cursor-pointer list-none items-center justify-center gap-1.5 rounded-md border border-border bg-surface px-3 text-xs font-medium text-fg-muted hover:bg-surface-2 pointer-coarse:min-h-10">
-                <PlusIcon className="size-3.5" />
-                New collection
-                <span className="font-normal text-fg-subtle">optional</span>
-              </summary>
-              <div className="mt-2 grid min-w-0 gap-2 rounded-lg border border-border bg-surface p-2 sm:min-w-80 sm:grid-cols-[minmax(10rem,1fr)_auto]">
-                <Input
-                  ref={nameInputRef}
-                  aria-label="New document collection name"
-                  value={name}
-                  onChange={(event) => setName(event.target.value)}
-                  placeholder="Collection name"
-                  className="h-8 min-w-0 text-xs pointer-coarse:min-h-10"
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") void handleCreateBase();
-                  }}
-                />
-                <Button
-                  type="button"
-                  size="sm"
-                  onClick={() => void handleCreateBase()}
-                  disabled={creatingBase || !name.trim()}
-                  className="h-8 shrink-0 pointer-coarse:min-h-10"
-                >
-                  {creatingBase ? (
-                    <Loader2Icon className="size-3.5 animate-spin" />
-                  ) : (
-                    <PlusIcon className="size-3.5" />
-                  )}
-                  Create
-                </Button>
-              </div>
-            </details>
-          }
+          description="Add information agents can find when it is relevant."
         />
+        {returnToBrain ? (
+          <Link
+            to="/workspaces/$workspaceId/state"
+            params={{ workspaceId }}
+            search={{}}
+            className="mt-6 inline-flex items-center gap-1 text-xs font-medium text-brand hover:underline"
+          >
+            <ArrowLeftIcon className="size-3" />
+            Back to Agent Brain
+          </Link>
+        ) : null}
 
         <div
           role="region"
@@ -494,24 +441,21 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
         >
           <div className="flex items-center gap-2 text-sm font-medium">
             <SparklesIcon className="size-4 text-brand" />
-            Drop anything
-            <span className="text-2xs font-normal text-fg-subtle">
-              Drops start in Default; enabled curation may name, summarize, and organize them.
-            </span>
+            Add knowledge
           </div>
           <div className="mt-2 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
             <textarea
               aria-label="Knowledge drop text"
               value={dropText}
               onChange={(event) => setDropText(event.target.value)}
-              placeholder="Paste notes, a transcript, an email — or drag files here."
+              placeholder="Paste text here, drag in files, or choose files below."
               rows={2}
               disabled={!fileUploadsEnabled || dropping}
               className="min-h-16 w-full resize-y rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2.5 py-2 text-xs leading-5 text-[color:var(--color-fg)]"
             />
             <div className="flex flex-col gap-2">
               <label className="grid gap-1 text-2xs font-medium text-fg-subtle">
-                Authority
+                Save for
                 <select
                   value={dropAuthorityKind}
                   onChange={(event) =>
@@ -527,15 +471,6 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
                     </option>
                   ))}
                 </select>
-              </label>
-              <label className="flex items-center gap-2 text-xs text-fg-muted">
-                <input
-                  type="checkbox"
-                  checked={dropAgentAccess}
-                  onChange={(event) => setDropAgentAccess(event.target.checked)}
-                  disabled={dropping}
-                />
-                Subject-aware agents can read it
               </label>
               <div className="flex gap-2">
                 <input
@@ -555,7 +490,7 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
                   className="h-8"
                 >
                   <FilesIcon className="size-3.5" />
-                  Files
+                  Choose files
                 </Button>
                 <Button
                   type="button"
@@ -569,7 +504,7 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
                   ) : (
                     <SparklesIcon className="size-3.5" />
                   )}
-                  Drop
+                  Add
                 </Button>
               </div>
             </div>
@@ -581,197 +516,110 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
           ) : null}
         </div>
 
-        <div className="mt-5 grid min-h-0 min-w-0 flex-1 gap-4 lg:grid-cols-[15rem_minmax(0,1fr)] xl:grid-cols-[15rem_minmax(0,1fr)_20rem]">
-          <aside
-            aria-labelledby="document-bases-heading"
-            className="min-w-0 border-b border-border pb-4 lg:border-b-0 lg:border-r lg:pr-4"
-          >
-            <div className="mb-2 flex items-center justify-between gap-2">
-              <h2
-                id="document-bases-heading"
-                className="text-xs font-medium uppercase text-fg-subtle"
-              >
-                Collections <span className="normal-case font-normal">(optional)</span>
-              </h2>
-              <div className="text-2xs text-fg-subtle">{bases.length}</div>
-            </div>
-            <div className="grid auto-cols-[minmax(10rem,80%)] grid-flow-col gap-1 overflow-x-auto overscroll-x-contain pb-1 lg:block lg:space-y-1 lg:overflow-visible lg:pb-0">
-              {basesView === "loading" ? (
-                <div className="flex items-center gap-2 rounded-lg border border-border p-3 text-xs text-fg-muted">
-                  <Loader2Icon className="size-3.5 animate-spin" />
-                  Loading collections
-                </div>
-              ) : basesView === "error" ? (
-                <LoadErrorState
-                  title="Couldn't load document collections"
-                  error={basesError}
-                  onRetry={() => void refreshBases()}
-                />
-              ) : basesView === "empty" ? (
-                <div className="rounded-lg border border-dashed border-border p-3 text-xs leading-5 text-fg-muted">
-                  Default is being prepared. Refresh if this message persists.
-                </div>
-              ) : (
-                bases.map((base) => (
-                  <button
-                    key={base.id}
+        <details className="mt-4 rounded-lg border border-border bg-surface">
+          <summary className="cursor-pointer list-none px-4 py-3 text-sm font-medium text-fg [&::-webkit-details-marker]:hidden">
+            Collections (optional)
+          </summary>
+          <div className="grid gap-4 border-t border-border p-4">
+            <p className="text-xs text-fg-muted">
+              Add directly to a collection when you do not want OpenGeni to organize it
+              automatically.
+            </p>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <FormField label="Collection">
+                <Select
+                  value={selectedBaseId ?? ""}
+                  onChange={(event) => setSelectedBaseId(event.target.value || null)}
+                  disabled={basesView !== "ready"}
+                >
+                  {bases.map((base) => (
+                    <option key={base.id} value={base.id}>
+                      {base.name}
+                    </option>
+                  ))}
+                </Select>
+              </FormField>
+              <FormField label="Create collection">
+                <div className="flex gap-2">
+                  <Input
+                    ref={nameInputRef}
+                    aria-label="New document collection name"
+                    value={name}
+                    onChange={(event) => setName(event.target.value)}
+                    placeholder="Collection name"
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") void handleCreateBase();
+                    }}
+                  />
+                  <Button
                     type="button"
-                    onClick={() => setSelectedBaseId(base.id)}
-                    className={cn(
-                      "flex w-full items-center justify-between gap-2 rounded-lg border px-3 py-2 text-left text-xs pointer-coarse:min-h-10",
-                      selectedBaseId === base.id
-                        ? "border-brand/40 bg-brand/10 text-fg"
-                        : "border-border bg-bg/25 text-fg-muted hover:bg-surface-2",
-                    )}
+                    variant="secondary"
+                    onClick={() => void handleCreateBase()}
+                    disabled={creatingBase || !name.trim()}
                   >
-                    <span className="flex min-w-0 items-center gap-1.5">
-                      <span className="min-w-0 break-words" title={base.name}>
-                        {base.name}
-                      </span>
-                      {isDefaultDocumentCollection(base) ? (
-                        <span className="shrink-0 rounded border border-border px-1 text-[10px] font-normal text-fg-subtle">
-                          automatic
-                        </span>
-                      ) : null}
-                    </span>
-                    {selectedBaseId === base.id ? (
-                      <CheckIcon className="size-3.5 shrink-0" />
-                    ) : null}
-                  </button>
-                ))
-              )}
+                    {creatingBase ? (
+                      <Loader2Icon className="size-3.5 animate-spin" />
+                    ) : (
+                      <PlusIcon className="size-3.5" />
+                    )}
+                    Create
+                  </Button>
+                </div>
+              </FormField>
             </div>
-          </aside>
+            <div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                aria-label="Upload documents to selected collection"
+                className="hidden"
+                onChange={(event) => void handleFiles(event.target.files)}
+              />
+              <Button
+                type="button"
+                disabled={uploading || !fileUploadsEnabled || !selectedBaseId}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                {uploading ? (
+                  <Loader2Icon className="size-3.5 animate-spin" />
+                ) : (
+                  <FilesIcon className="size-3.5" />
+                )}
+                Add files to collection
+              </Button>
+            </div>
+          </div>
+        </details>
 
+        <div className="mt-5 grid min-h-0 min-w-0 flex-1 gap-5 xl:grid-cols-[minmax(0,1fr)_20rem]">
           <div className="min-w-0">
             {selectedBase ? (
               <>
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <div className="min-w-0">
-                    <div className="truncate text-base font-medium">{selectedBase.name}</div>
-                    <div className="text-xs text-fg-subtle">
-                      {documents.length} files · {failedDocuments.length} failed
+                    <div className="truncate text-base font-medium">Your documents</div>
+                  </div>
+                  {failedDocuments.length > 0 ? (
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="sm"
+                        disabled={retryingAll}
+                        onClick={() => void handleRetryFailedDocuments()}
+                        className="h-8 pointer-coarse:min-h-10"
+                      >
+                        {retryingAll ? (
+                          <Loader2Icon className="size-3.5 animate-spin" />
+                        ) : (
+                          <RefreshCwIcon className="size-3.5" />
+                        )}
+                        Retry failed
+                      </Button>
                     </div>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    <input
-                      ref={fileInputRef}
-                      type="file"
-                      multiple
-                      aria-label="Upload documents to selected collection"
-                      className="hidden"
-                      onChange={(event) => void handleFiles(event.target.files)}
-                    />
-                    <Button
-                      type="button"
-                      size="sm"
-                      disabled={uploading || !fileUploadsEnabled}
-                      onClick={() => fileInputRef.current?.click()}
-                      className="h-8 pointer-coarse:min-h-10"
-                    >
-                      {uploading ? (
-                        <Loader2Icon className="size-3.5 animate-spin" />
-                      ) : (
-                        <FilesIcon className="size-3.5" />
-                      )}
-                      Upload
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="secondary"
-                      size="sm"
-                      disabled={retryingAll || failedDocuments.length === 0}
-                      onClick={() => void handleRetryFailedDocuments()}
-                      className="h-8 pointer-coarse:min-h-10"
-                    >
-                      {retryingAll ? (
-                        <Loader2Icon className="size-3.5 animate-spin" />
-                      ) : (
-                        <RefreshCwIcon className="size-3.5" />
-                      )}
-                      Retry failed
-                    </Button>
-                  </div>
+                  ) : null}
                 </div>
-
-                <FormGrid
-                  columns="three"
-                  className="mt-4 rounded-lg border border-border bg-surface/25 p-3 xl:grid-cols-5"
-                >
-                  <FormField label="Source">
-                    <Select
-                      value={uploadSourceKind}
-                      onChange={(event) =>
-                        setUploadSourceKind(event.target.value as KnowledgeSourceKind)
-                      }
-                      className="h-8 text-xs pointer-coarse:min-h-10"
-                    >
-                      {sourceKindOptions.map((kind) => (
-                        <option key={kind} value={kind}>
-                          {formatToken(kind)}
-                        </option>
-                      ))}
-                    </Select>
-                  </FormField>
-                  <FormField label="URI">
-                    <Input
-                      value={uploadSourceUri}
-                      onChange={(event) => setUploadSourceUri(event.target.value)}
-                      className="h-8 text-xs pointer-coarse:min-h-10"
-                      placeholder="https://..."
-                    />
-                  </FormField>
-                  <FormField label="Title">
-                    <Input
-                      value={uploadSourceTitle}
-                      onChange={(event) => setUploadSourceTitle(event.target.value)}
-                      className="h-8 text-xs pointer-coarse:min-h-10"
-                      placeholder="Source title"
-                    />
-                  </FormField>
-                  <FormField label="Author">
-                    <Input
-                      value={uploadSourceAuthor}
-                      onChange={(event) => setUploadSourceAuthor(event.target.value)}
-                      className="h-8 text-xs pointer-coarse:min-h-10"
-                      placeholder="Owner"
-                    />
-                  </FormField>
-                  <FormField label="ACL tags">
-                    <Input
-                      value={uploadAclTags}
-                      onChange={(event) => setUploadAclTags(event.target.value)}
-                      className="h-8 text-xs pointer-coarse:min-h-10"
-                      placeholder="team, confidential"
-                    />
-                  </FormField>
-                  <FormField label="Authority">
-                    <Select
-                      aria-label="Upload authority"
-                      value={uploadAuthorityKind}
-                      onChange={(event) =>
-                        setUploadAuthorityKind(event.target.value as DocumentAuthorityKind)
-                      }
-                      className="h-8 text-xs pointer-coarse:min-h-10"
-                    >
-                      {DOCUMENT_AUTHORITY_OPTIONS.map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </Select>
-                  </FormField>
-                  <FormField label="Agent access">
-                    <Select
-                      value={uploadAgentAccess ? "on" : "off"}
-                      onChange={(event) => setUploadAgentAccess(event.target.value === "on")}
-                      className="h-8 text-xs pointer-coarse:min-h-10"
-                    >
-                      <option value="on">Subject-aware agents can read</option>
-                      <option value="off">Agents blocked</option>
-                    </Select>
-                  </FormField>
-                </FormGrid>
 
                 <div className="mt-4 space-y-2">
                   {pollFailed ? (
@@ -814,25 +662,8 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
                       title="No documents yet"
                       description={
                         fileUploadsEnabled
-                          ? "Upload files to index them for agent search."
+                          ? "Add files or text above to make them available to agents."
                           : "File uploads are turned off for this deployment."
-                      }
-                      action={
-                        fileUploadsEnabled ? (
-                          <Button
-                            type="button"
-                            size="sm"
-                            disabled={uploading}
-                            onClick={() => fileInputRef.current?.click()}
-                          >
-                            {uploading ? (
-                              <Loader2Icon className="size-3.5 animate-spin" />
-                            ) : (
-                              <FilesIcon className="size-3.5" />
-                            )}
-                            Upload files
-                          </Button>
-                        ) : undefined
                       }
                     />
                   ) : (
@@ -884,14 +715,6 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
                                 className="rounded border border-[color:var(--color-border)] px-1"
                               >
                                 {topic}
-                              </span>
-                            ))}
-                            {document.aclTags.slice(0, 3).map((tag) => (
-                              <span
-                                key={tag}
-                                className="rounded border border-[color:var(--color-border)] px-1"
-                              >
-                                {tag}
                               </span>
                             ))}
                           </div>
@@ -978,7 +801,7 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
 
           <aside
             aria-labelledby="document-search-heading"
-            className="min-w-0 border-t border-border pt-4 lg:col-span-2 xl:col-span-1 xl:border-l xl:border-t-0 xl:pl-4 xl:pt-0"
+            className="min-w-0 border-t border-border pt-4 xl:border-l xl:border-t-0 xl:pl-5 xl:pt-0"
           >
             <h2
               id="document-search-heading"
@@ -999,44 +822,6 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
                   if (event.key === "Enter") void handleSearch();
                 }}
               />
-              <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-2">
-                <Select
-                  aria-label="Search mode"
-                  value={searchMode}
-                  onChange={(event) => setSearchMode(event.target.value as DocumentSearchMode)}
-                  className="h-8 text-xs pointer-coarse:min-h-10"
-                  disabled={!selectedBaseId}
-                >
-                  <option value="hybrid">Hybrid</option>
-                  <option value="vector">Vector</option>
-                  <option value="keyword">Keyword</option>
-                </Select>
-                <Select
-                  aria-label="Source kind"
-                  value={searchSourceKind}
-                  onChange={(event) =>
-                    setSearchSourceKind(event.target.value as KnowledgeSourceKind | "")
-                  }
-                  className="h-8 text-xs pointer-coarse:min-h-10"
-                  disabled={!selectedBaseId}
-                >
-                  <option value="">All sources</option>
-                  {sourceKindOptions.map((kind) => (
-                    <option key={kind} value={kind}>
-                      {formatToken(kind)}
-                    </option>
-                  ))}
-                </Select>
-              </div>
-              <FormField label="ACL tags">
-                <Input
-                  value={searchAclTags}
-                  onChange={(event) => setSearchAclTags(event.target.value)}
-                  placeholder="team, confidential"
-                  className="h-8 text-xs pointer-coarse:min-h-10"
-                  disabled={!selectedBaseId}
-                />
-              </FormField>
               <Button
                 type="button"
                 size="sm"
@@ -1114,17 +899,6 @@ function documentStatusTone(status: IndexedDocument["status"]): StatusTone {
   if (status === "failed") return "failed";
   if (status === "indexing") return "running";
   return "waiting";
-}
-
-function splitTags(value: string): string[] {
-  return [
-    ...new Set(
-      value
-        .split(",")
-        .map((tag) => tag.trim())
-        .filter(Boolean),
-    ),
-  ];
 }
 
 function formatToken(value: string): string {

@@ -192,27 +192,31 @@ describe("Documents Default collection UX", () => {
       await settleRoute();
 
       expect(listDocuments).toHaveBeenCalledWith("workspace-a", defaultBase.id);
-      expect(container.textContent).toContain("Upload immediately for agent search");
+      expect(container.textContent).toContain(
+        "Add information agents can find when it is relevant",
+      );
+      expect(container.textContent).toContain("Add knowledge");
       expect(container.textContent).toContain("Collections (optional)");
-      expect(container.textContent).toContain("New collectionoptional");
+      expect(container.textContent).not.toContain("Advanced access");
+      expect(container.textContent).not.toContain("ACL tags");
+      expect(container.textContent).not.toContain("Search filters");
       expect(container.textContent).not.toContain("Create your first base");
       const upload = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
-        (button) => button.textContent?.trim() === "Upload files",
+        (button) => button.textContent?.trim() === "Choose files",
       );
       expect(upload).not.toBeUndefined();
       expect(upload?.disabled).toBe(false);
-      const authoritySelects = [
-        container.querySelector<HTMLSelectElement>('[aria-label="Drop authority"]'),
-        container.querySelector<HTMLSelectElement>('[aria-label="Upload authority"]'),
-      ];
-      for (const select of authoritySelects) {
-        expect(select?.value).toBe("workspace");
-        expect([...select!.options].map((option) => [option.value, option.textContent])).toEqual([
-          ["organization", "Company"],
-          ["workspace", "Current workspace"],
-          ["personal", "Only me"],
-        ]);
-      }
+      const authoritySelect = container.querySelector<HTMLSelectElement>(
+        '[aria-label="Drop authority"]',
+      );
+      expect(authoritySelect?.value).toBe("workspace");
+      expect(
+        [...authoritySelect!.options].map((option) => [option.value, option.textContent]),
+      ).toEqual([
+        ["organization", "Company"],
+        ["workspace", "Current workspace"],
+        ["personal", "Only me"],
+      ]);
     } finally {
       await act(async () => root.unmount());
       container.remove();
@@ -231,12 +235,12 @@ describe("Documents Default collection UX", () => {
       });
       await settleRoute();
 
-      const uploadAuthority = container.querySelector<HTMLSelectElement>(
-        '[aria-label="Upload authority"]',
+      const dropAuthority = container.querySelector<HTMLSelectElement>(
+        '[aria-label="Drop authority"]',
       )!;
       await act(async () => {
-        uploadAuthority.value = "organization";
-        uploadAuthority.dispatchEvent(new Event("change", { bubbles: true }));
+        dropAuthority.value = "organization";
+        dropAuthority.dispatchEvent(new Event("change", { bubbles: true }));
       });
 
       const ordinaryUpload = container.querySelector<HTMLInputElement>(
@@ -256,12 +260,10 @@ describe("Documents Default collection UX", () => {
         expect.objectContaining({
           fileId: "44444444-4444-4444-8444-444444444444",
           authorityKind: "organization",
+          agentAccess: true,
         }),
       );
 
-      const dropAuthority = container.querySelector<HTMLSelectElement>(
-        '[aria-label="Drop authority"]',
-      )!;
       const dropText = container.querySelector<HTMLTextAreaElement>(
         '[aria-label="Knowledge drop text"]',
       )!;
@@ -271,7 +273,7 @@ describe("Documents Default collection UX", () => {
         setControlledTextarea(dropText, "Personal note");
       });
       const dropButton = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
-        (button) => button.textContent?.trim() === "Drop",
+        (button) => button.textContent?.trim() === "Add",
       )!;
       await act(async () => {
         dropButton.click();
@@ -281,7 +283,11 @@ describe("Documents Default collection UX", () => {
 
       expect(createKnowledgeDrop).toHaveBeenCalledWith(
         "workspace-a",
-        expect.objectContaining({ text: "Personal note", authorityKind: "personal" }),
+        expect.objectContaining({
+          text: "Personal note",
+          authorityKind: "personal",
+          agentAccess: true,
+        }),
       );
 
       const droppedFile = new File(["personal file"], "personal.txt", { type: "text/plain" });
@@ -298,6 +304,7 @@ describe("Documents Default collection UX", () => {
         expect.objectContaining({
           fileId: "44444444-4444-4444-8444-444444444444",
           authorityKind: "personal",
+          agentAccess: true,
         }),
       ]);
     } finally {
