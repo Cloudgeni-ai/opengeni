@@ -299,8 +299,7 @@ const SettingsSchema = z.object({
   // holder of stream:control gets 403 until this flips. Keeps stream:control a
   // declared-but-inert permission so later hardening is a flag flip.
   streamControlEnabled: EnvBoolean.default(false),
-  toolspaceEnabled: EnvBoolean.default(false),
-  toolspaceMaxCallsPerTurn: z.coerce.number().int().positive().default(200),
+  codemodeMaxCallsPerTurn: z.coerce.number().int().positive().default(200),
   // Optional release-coherent bootstrap hint for custom rigs/connected machines
   // that do not carry the stock-image ogtool binary. Exact stable versions only:
   // the agent must never guess a tag or silently install `latest`.
@@ -866,6 +865,10 @@ const SettingsSchema = z.object({
   // snapshotted before the box dies (sandbox-file-persistence).
   sandboxLeaseReaperPeriodMs: z.coerce.number().int().positive().default(30_000),
   sandboxViewerHolderTtlMs: z.coerce.number().int().positive().default(90_000),
+  // A BrowserSession controller refreshes its durable resource and exact
+  // interaction lease holder together. This longer crash horizon tolerates API
+  // replacement while still releasing a placement whose controller died.
+  sandboxInteractionHolderTtlMs: z.coerce.number().int().positive().default(180_000),
   // The DRAIN grace: how long a refcount-0 (draining) lease stays WARM before the
   // reaper resume-by-ids the box and terminates it. This is the cost-vs-snappiness
   // dial — when the user navigates away the box keeps refcount 0, but it survives
@@ -1863,8 +1866,7 @@ export function getSettings(): Settings {
     delegationSecret: optional("OPENGENI_DELEGATION_SECRET"),
     streamTokenSecret: optional("OPENGENI_STREAM_TOKEN_SECRET"),
     streamControlEnabled: optional("OPENGENI_STREAM_CONTROL_ENABLED"),
-    toolspaceEnabled: optional("OPENGENI_TOOLSPACE_ENABLED"),
-    toolspaceMaxCallsPerTurn: optional("OPENGENI_TOOLSPACE_MAX_CALLS_PER_TURN"),
+    codemodeMaxCallsPerTurn: optional("OPENGENI_CODEMODE_MAX_CALLS_PER_TURN"),
     ogtoolPackageSpec: optional("OPENGENI_OGTOOL_PACKAGE_SPEC"),
     environmentsEncryptionKey: optional("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY"),
     integrationsEnabled: optional("OPENGENI_INTEGRATIONS_ENABLED"),
@@ -2057,6 +2059,7 @@ export function getSettings(): Settings {
     sandboxSelfhostedControlTimeoutMs: optional("OPENGENI_SANDBOX_SELFHOSTED_CONTROL_TIMEOUT_MS"),
     sandboxLeaseReaperPeriodMs: optional("OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS"),
     sandboxViewerHolderTtlMs: optional("OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS"),
+    sandboxInteractionHolderTtlMs: optional("OPENGENI_SANDBOX_INTERACTION_HOLDER_TTL_MS"),
     sandboxIdleGraceMs: optional("OPENGENI_SANDBOX_IDLE_GRACE_MS"),
     sandboxSnapshotIntervalMs: optional("OPENGENI_SANDBOX_SNAPSHOT_INTERVAL_MS"),
     sandboxSnapshotTimeoutMs: optional("OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS"),
@@ -3932,16 +3935,13 @@ export function stableSandboxEnvironmentForRun(
     environment.OPENGENI_GIT_CLI_WRAPPER_DIR ??= `${home}/.opengeni/bin`;
     environment.PATH = prependPathEntry(environment.PATH, environment.OPENGENI_GIT_CLI_WRAPPER_DIR);
   }
-  if (settings.toolspaceEnabled && settings.sandboxBackend !== "selfhosted") {
-    environment.OPENGENI_TOOLSPACE_TOKEN_FILE ??= `${environment.HOME ?? descriptor.workspaceRoot}/.opengeni/toolspace-token`;
+  if (settings.sandboxBackend !== "selfhosted" && resolveFirstPartyDelegationSecret(settings)) {
+    environment.OPENGENI_CODEMODE_TOKEN_FILE ??= `${environment.HOME ?? descriptor.workspaceRoot}/.opengeni/codemode-token`;
     if (settings.ogtoolPackageSpec) {
       environment.OPENGENI_OGTOOL_PACKAGE_SPEC ??= settings.ogtoolPackageSpec;
     }
     if (options.workspaceId) {
-      environment.OPENGENI_TOOLSPACE_URL ??= firstPartyMcpWorkspaceUrl(
-        settings,
-        options.workspaceId,
-      );
+      environment.OPENGENI_CODEMODE_URL ??= codemodeWorkspaceUrl(settings, options.workspaceId);
     }
   }
   return environment;
@@ -4499,6 +4499,15 @@ export function firstPartyMcpWorkspaceUrl(settings: Settings, workspaceId: strin
   return url.toString();
 }
 
+export function codemodeWorkspaceUrl(settings: Settings, workspaceId: string): string {
+  const url = new URL(firstPartyMcpWorkspaceUrl(settings, workspaceId));
+  if (!url.pathname.endsWith("/mcp")) {
+    throw new Error("First-party MCP URL cannot be projected to the Codemode endpoint");
+  }
+  url.pathname = `${url.pathname.slice(0, -4)}/codemode`;
+  return url.toString();
+}
+
 function firstPartyMcpServerUrl(settings: Settings): string {
   return firstPartyMcpBaseUrl(settings);
 }
@@ -4513,9 +4522,6 @@ function firstPartyFilesMcpServerUrl(mcpUrl: string): string {
 
 function validateSettings(settings: Settings): void {
   temporalConnectionOptions(settings);
-  if (settings.toolspaceEnabled && !settings.delegationSecret) {
-    throw new Error("OPENGENI_DELEGATION_SECRET is required when OPENGENI_TOOLSPACE_ENABLED=true");
-  }
   if (settings.productAccessMode === "managed") {
     if (!settings.publicBaseUrl) {
       throw new Error(
@@ -4836,6 +4842,7 @@ function validateSettings(settings: Settings): void {
   {
     const reaperPeriod = settings.sandboxLeaseReaperPeriodMs;
     const viewerTtl = settings.sandboxViewerHolderTtlMs;
+    const interactionTtl = settings.sandboxInteractionHolderTtlMs;
     const idleGraceMs = settings.sandboxIdleGraceMs;
     const providerLifetimeMs = settings.modalTimeoutSeconds * 1000;
     const rotationLeadMs = settings.sandboxRotationLeadMs;
@@ -4852,6 +4859,13 @@ function validateSettings(settings: Settings): void {
         `OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS (${reaperPeriod}) must be strictly less than ` +
           `OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS (${viewerTtl}): the reaper must run more often ` +
           `than the TTL it polices, or stale viewer holders outlive a full reaper period.`,
+      );
+    }
+    if (!(reaperPeriod < interactionTtl)) {
+      throw new Error(
+        `OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS (${reaperPeriod}) must be strictly less than ` +
+          `OPENGENI_SANDBOX_INTERACTION_HOLDER_TTL_MS (${interactionTtl}): the reaper must run ` +
+          `more often than the controller-heartbeat horizon.`,
       );
     }
     if (!(idleTimeoutMs <= providerLifetimeMs)) {
@@ -4883,6 +4897,13 @@ function validateSettings(settings: Settings): void {
         `OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS (${viewerTtl}) must be strictly less than the effective box ` +
           `idle timeout (${idleTimeoutMs}): a viewer holder must be reapable before the box idles out from ` +
           `under it (the provider idle-timeout is the backstop).`,
+      );
+    }
+    if (!(interactionTtl < idleTimeoutMs)) {
+      throw new Error(
+        `OPENGENI_SANDBOX_INTERACTION_HOLDER_TTL_MS (${interactionTtl}) must be strictly less than ` +
+          `the effective box idle timeout (${idleTimeoutMs}): a dead browser controller must be ` +
+          `reapable before the provider reclaims its placement.`,
       );
     }
     if (!(reaperPeriod + idleGraceMs < idleTimeoutMs)) {

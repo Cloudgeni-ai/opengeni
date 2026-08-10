@@ -179,7 +179,7 @@ event.
 capability and Codex overlays, and before `runtime.prepareTools`. The worker-only
 DB accessor decrypts headers for that run path, combines them with the exact
 attempt's approval-policy snapshot, and carries the connection ref into the
-runtime settings. Normal model MCP and Toolspace/Code Mode use that same
+runtime settings. Normal model MCP and Codemode/Code Mode use that same
 attempt-fenced configuration and request-time resolver, including forced refresh
 after a 401. Normal session reads return only safe metadata and the non-secret
 connection pointer.
@@ -189,7 +189,7 @@ hooks to the runtime. The runtime wraps converted MCP function tools and every
 sandbox clone, evaluates approval before interruption, rechecks durable
 admission immediately before invocation, and commits completion or uncertainty
 afterward. This wrapper does not change tool selection, connector visibility,
-Toolspace exclusion rules, or Slack interaction progress delivery.
+the shared Codemode catalog/executor, or Slack interaction progress delivery.
 
 ## Dedicated-read invariant
 

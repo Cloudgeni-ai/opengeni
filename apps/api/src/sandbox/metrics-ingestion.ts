@@ -32,8 +32,10 @@
 
 import {
   clearEnrollmentWentOffline,
+  disconnectAttachedBrowserDevices,
   getEnrollment,
   ingestMachineMetricsSample,
+  reconcileAttachedBrowserInventory,
   sessionsWithActiveOpOnEnrollment,
   setEnrollmentDisplayState,
   setEnrollmentOpStreamState,
@@ -43,13 +45,20 @@ import {
   type Database,
   type MachineMetricsSample,
 } from "@opengeni/db";
+import {
+  AttachedBrowserInventorySnapshot as AttachedBrowserInventoryContract,
+  type AttachedBrowserInventorySnapshot as AttachedBrowserInventoryContractValue,
+} from "@opengeni/contracts";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
 import {
   AgentEvent,
+  Arch,
   GoingOfflineReason,
   Hello,
+  Os,
   goingOfflineReasonToJSON,
+  type AttachedBrowserInventorySnapshot as WireAttachedBrowserInventorySnapshot,
   type MetricsSample,
 } from "@opengeni/agent-proto";
 
@@ -122,6 +131,90 @@ export function wireSampleToDbSample(wire: MetricsSample): MachineMetricsSample 
         ? new Date(Number(wire.sampledAtMs))
         : new Date(),
   };
+}
+
+/** Validate and project one wire inventory before it reaches durable browser
+ *  discovery. Unknown enum values and unsafe uint64 counters reject the whole
+ *  authoritative snapshot instead of partially disconnecting good endpoints. */
+export function wireAttachedBrowserInventoryToContract(
+  wire: WireAttachedBrowserInventorySnapshot,
+): AttachedBrowserInventoryContractValue {
+  return AttachedBrowserInventoryContract.parse({
+    bridgeGeneration: wire.bridgeGeneration,
+    revision: safeWireInteger(wire.revision, "browser inventory revision"),
+    devices: wire.devices.map((device) => ({
+      id: device.id,
+      name: device.name,
+      profileLabel: device.profileLabel.trim() || null,
+      browserName: device.browserName,
+      browserVersion: device.browserVersion,
+      extensionVersion: device.extensionVersion,
+      platform: wireBrowserPlatform(device.platform),
+      architecture: wireBrowserArchitecture(device.arch),
+      connectionGeneration: device.connectionGeneration,
+      inventoryRevision: safeWireInteger(
+        device.inventoryRevision,
+        "attached browser inventory revision",
+      ),
+      tabCount: safeWireInteger(device.tabCount, "attached browser tab count"),
+      capabilities: device.capabilities,
+    })),
+  });
+}
+
+function safeWireInteger(value: string | number, label: string): number {
+  let parsed: bigint;
+  try {
+    parsed = BigInt(value);
+  } catch {
+    throw new Error(`${label} is not an integer`);
+  }
+  if (parsed < 0n || parsed > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error(`${label} is outside the safe integer range`);
+  }
+  return Number(parsed);
+}
+
+function wireBrowserPlatform(platform: Os): "linux" | "macos" | "windows" {
+  switch (platform) {
+    case Os.OS_LINUX:
+      return "linux";
+    case Os.OS_MACOS:
+      return "macos";
+    case Os.OS_WINDOWS:
+      return "windows";
+    default:
+      throw new Error("attached browser platform is unspecified or unsupported");
+  }
+}
+
+function wireBrowserArchitecture(architecture: Arch): "x64" | "arm64" {
+  switch (architecture) {
+    case Arch.ARCH_X86_64:
+      return "x64";
+    case Arch.ARCH_AARCH64:
+      return "arm64";
+    default:
+      throw new Error("attached browser architecture is unspecified or unsupported");
+  }
+}
+
+async function ingestAttachedBrowserInventory(
+  db: Database,
+  input: {
+    workspaceId: string;
+    agentId: string;
+    inventory: WireAttachedBrowserInventorySnapshot;
+  },
+): Promise<void> {
+  const enrollment = await getEnrollment(db, input.workspaceId, input.agentId);
+  if (!enrollment) return;
+  await reconcileAttachedBrowserInventory(db, {
+    accountId: enrollment.accountId,
+    workspaceId: input.workspaceId,
+    enrollmentId: input.agentId,
+    snapshot: wireAttachedBrowserInventoryToContract(input.inventory),
+  });
 }
 
 /**
@@ -253,6 +346,18 @@ export async function handleAgentEventPayload(
           enrollmentId: ids.agentId,
           reason,
         });
+        try {
+          await disconnectAttachedBrowserDevices(db, {
+            accountId: enrollment.accountId,
+            workspaceId: ids.workspaceId,
+            enrollmentId: ids.agentId,
+          });
+        } catch (error) {
+          observability?.warn?.("Failed to disconnect attached browsers with their machine", {
+            subject,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
         // Fan out the link-plane events to the sessions with an active op on this
         // machine: machine.link.lost (its control link is going away) for every
         // clean going-offline, PLUS machine.runner.restarted when the reason is a
@@ -294,10 +399,23 @@ export async function handleAgentEventPayload(
   if (event.event?.$case !== "heartbeat") {
     return; // an unknown event kind → not a metrics point.
   }
-  const metrics = event.event.heartbeat.metrics;
-  if (!metrics) {
-    return; // a heartbeat without a sample → liveness already touched elsewhere.
+  const heartbeat = event.event.heartbeat;
+  if (heartbeat.attachedBrowserInventory) {
+    try {
+      await ingestAttachedBrowserInventory(db, {
+        workspaceId: ids.workspaceId,
+        agentId: ids.agentId,
+        inventory: heartbeat.attachedBrowserInventory,
+      });
+    } catch (error) {
+      observability?.warn?.("Failed to ingest an attached-browser inventory", {
+        subject,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
+  const metrics = heartbeat.metrics;
+  if (!metrics) return;
   try {
     await ingestHeartbeat(db, {
       workspaceId: ids.workspaceId,

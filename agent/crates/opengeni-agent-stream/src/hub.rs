@@ -25,7 +25,7 @@
 //! tokens and only splice a producer↔consumer pair when the keys match and both
 //! tokens pass (see the crate-level relay-dial protocol doc).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -37,6 +37,7 @@ use opengeni_agent_proto::v1::{self, DesktopEnsureRequest, PtyOpenResponse, Stre
 use tokio::sync::{mpsc, oneshot};
 
 use crate::backoff::ChannelBackoff;
+use crate::browser_pump;
 use crate::channel::{ChannelConfig, RelayChannel};
 use crate::framebuffer_pump::{self, InputPolicy};
 use crate::pty_pump::{self, PtyCommand, PtyControlTx};
@@ -58,6 +59,8 @@ const PUMP_READY_TIMEOUT: Duration = Duration::from_secs(5);
 pub const PTY_STREAM_PORT: u32 = 7681;
 /// The logical port a desktop (framebuffer) stream maps to (the noVNC port).
 pub const DESKTOP_STREAM_PORT: u32 = 6080;
+const BROWSER_STREAM_PORT_START: u32 = 20_000;
+const BROWSER_STREAM_PORT_END: u32 = 65_535;
 
 /// Static configuration for the relay hub: the agent identity, the relay URL, and
 /// the agent's relay token + consent policy.
@@ -88,6 +91,9 @@ pub struct RelayHub {
     /// `pty_write`/`pty_resize`/`pty_close` ops reach. Entries are removed when the
     /// pump ends.
     ptys: Arc<Mutex<HashMap<String, PtyControlTx>>>,
+    /// Allocated logical relay ports for browser frame subscriptions. They are
+    /// routing handles, not listening TCP ports.
+    browser_ports: Arc<Mutex<HashSet<u32>>>,
 }
 
 impl std::fmt::Debug for RelayHub {
@@ -107,6 +113,7 @@ impl RelayHub {
         Self {
             config: Arc::new(config),
             ptys: Arc::new(Mutex::new(HashMap::new())),
+            browser_ports: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -201,6 +208,121 @@ impl StreamRegistry for RelayHub {
         spawn_desktop_pump(desktop, channel, config, policy, ready_tx);
         await_pump_ready(ready_rx, "desktop").await?;
 
+        Ok(descriptor)
+    }
+
+    async fn register_browser_frames(
+        &self,
+        browserd_port: u16,
+        req: &v1::BrowserFramesOpenRequest,
+    ) -> PlatformResult<StreamChannel> {
+        let port = allocate_browser_port(&self.browser_ports)?;
+        let descriptor = self.descriptor(v1::StreamKind::Browser, port);
+        let config = self.channel_config(descriptor.clone());
+        let mut channel = match RelayChannel::register(config).await {
+            Ok(channel) => channel,
+            Err(error) => {
+                release_browser_port(&self.browser_ports, port);
+                return Err(stream_to_platform(error));
+            }
+        };
+        let socket = match browser_pump::connect(browserd_port, req).await {
+            Ok(socket) => socket,
+            Err(error) => {
+                channel
+                    .close(
+                        v1::StreamCloseReason::Normal,
+                        "browser frame source unavailable",
+                    )
+                    .await;
+                release_browser_port(&self.browser_ports, port);
+                return Err(stream_to_platform(error));
+            }
+        };
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let browser_ports = self.browser_ports.clone();
+        tokio::spawn(async move {
+            match browser_pump::run(socket, &mut channel, Some(ready_tx)).await {
+                Ok(()) => {
+                    channel
+                        .close(v1::StreamCloseReason::Normal, "browser frame stream closed")
+                        .await;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "browser frame pump ended");
+                    channel
+                        .close(
+                            v1::StreamCloseReason::ProcessExit,
+                            "browser frame stream failed",
+                        )
+                        .await;
+                }
+            }
+            release_browser_port(&browser_ports, port);
+        });
+        if let Err(error) = await_pump_ready(ready_rx, "browser").await {
+            release_browser_port(&self.browser_ports, port);
+            return Err(error);
+        }
+        Ok(descriptor)
+    }
+
+    async fn register_computer_frames(
+        &self,
+        browserd_port: u16,
+        req: &v1::ComputerFramesOpenRequest,
+    ) -> PlatformResult<StreamChannel> {
+        let port = allocate_browser_port(&self.browser_ports)?;
+        let descriptor = self.descriptor(v1::StreamKind::Computer, port);
+        let config = self.channel_config(descriptor.clone());
+        let mut channel = match RelayChannel::register(config).await {
+            Ok(channel) => channel,
+            Err(error) => {
+                release_browser_port(&self.browser_ports, port);
+                return Err(stream_to_platform(error));
+            }
+        };
+        let socket = match browser_pump::connect_computer(browserd_port, req).await {
+            Ok(socket) => socket,
+            Err(error) => {
+                channel
+                    .close(
+                        v1::StreamCloseReason::Normal,
+                        "computer frame source unavailable",
+                    )
+                    .await;
+                release_browser_port(&self.browser_ports, port);
+                return Err(stream_to_platform(error));
+            }
+        };
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let browser_ports = self.browser_ports.clone();
+        tokio::spawn(async move {
+            match browser_pump::run(socket, &mut channel, Some(ready_tx)).await {
+                Ok(()) => {
+                    channel
+                        .close(
+                            v1::StreamCloseReason::Normal,
+                            "computer frame stream closed",
+                        )
+                        .await;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "computer frame pump ended");
+                    channel
+                        .close(
+                            v1::StreamCloseReason::ProcessExit,
+                            "computer frame stream failed",
+                        )
+                        .await;
+                }
+            }
+            release_browser_port(&browser_ports, port);
+        });
+        if let Err(error) = await_pump_ready(ready_rx, "computer").await {
+            release_browser_port(&self.browser_ports, port);
+            return Err(error);
+        }
         Ok(descriptor)
     }
 
@@ -358,6 +480,31 @@ fn new_channel_id() -> String {
 }
 
 static CHANNEL_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static BROWSER_PORT_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn allocate_browser_port(ports: &Arc<Mutex<HashSet<u32>>>) -> PlatformResult<u32> {
+    let mut ports = ports
+        .lock()
+        .map_err(|_| PlatformError::os("browser relay allocation state is unavailable"))?;
+    let range = u64::from(BROWSER_STREAM_PORT_END - BROWSER_STREAM_PORT_START + 1);
+    for _ in 0..range {
+        let offset =
+            BROWSER_PORT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % range;
+        let port = BROWSER_STREAM_PORT_START + u32::try_from(offset).unwrap_or(0);
+        if ports.insert(port) {
+            return Ok(port);
+        }
+    }
+    Err(PlatformError::os(
+        "browser relay channel allocation bound was reached",
+    ))
+}
+
+fn release_browser_port(ports: &Arc<Mutex<HashSet<u32>>>, port: u32) {
+    if let Ok(mut ports) = ports.lock() {
+        ports.remove(&port);
+    }
+}
 
 /// Maps a stream error to a platform error so the dispatch path surfaces a typed
 /// `AgentError`. A relay open failure is a `STREAM`-class condition.

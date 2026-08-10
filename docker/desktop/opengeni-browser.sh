@@ -32,9 +32,8 @@
 #                             /workspace and survives a HOME with odd perms.
 #   --no-first-run / --no-default-browser-check : skip first-run UI nags in a kiosk box.
 #
-# OPENGENI_BROWSER_BIN lets the image point this at google-chrome-stable (amd64) or
-# firefox-esr (arm64) without forking the script. Firefox ignores the Chrome flags
-# it doesn't know, but it DOES need --no-remote/profile handling, so we branch.
+# OPENGENI_BROWSER_BIN lets the image point this at Google Chrome (amd64) or
+# Chromium (arm64) without forking the script.
 set -euo pipefail
 
 # OPENGENI_BROWSER_BIN MUST point at the REAL engine binary by ABSOLUTE PATH, never
@@ -43,14 +42,19 @@ set -euo pipefail
 # Layer 5). The real Google Chrome deb installs its launcher at the fixed absolute path
 # /opt/google/chrome/google-chrome; we exec THAT so the wrapper can never re-enter
 # itself (no symlink loop). Default reflects that real path.
-BIN="${OPENGENI_BROWSER_BIN:-/opt/google/chrome/google-chrome}"
+BIN="${OPENGENI_BROWSER_BIN:-}"
+# The image records its architecture-specific real engine during build. An explicit
+# runtime override still wins, which is useful for connected-machine deployments.
+if [ -z "$BIN" ] && [ -r /etc/opengeni/browser-engine ]; then
+  BIN="$(head -n 1 /etc/opengeni/browser-engine)"
+fi
 # Resolve robustly across arch: if the configured binary isn't executable (e.g. an
-# arm64 image that ships firefox-esr instead of chrome), fall back to whichever real
+# arm64 image that ships Chromium instead of Chrome), fall back to whichever real
 # browser IS present so the wrapper never dead-ends on a missing path. EVERY candidate
 # here is a REAL engine binary by absolute path — NOT a /usr/bin name that now aliases
 # back to this wrapper (that would recurse) — so the fallback is always loop-free.
 if [ ! -x "$BIN" ]; then
-  for cand in /opt/google/chrome/google-chrome /opt/google/chrome/chrome /usr/lib/firefox-esr/firefox-esr /usr/lib/firefox/firefox; do
+  for cand in /opt/google/chrome/google-chrome /opt/google/chrome/chrome /usr/lib/chromium/chromium; do
     if [ -x "$cand" ]; then BIN="$cand"; break; fi
   done
 fi
@@ -65,19 +69,17 @@ mkdir -p "$PROFILE_DIR" 2>/dev/null || true
 export NO_AT_BRIDGE=1
 export GTK_A11Y=none
 
-case "$BIN" in
-  *firefox*)
-    exec "$BIN" --no-remote --profile "$PROFILE_DIR" "$@"
-    ;;
-  *)
-    exec "$BIN" \
-      --no-sandbox \
-      --test-type \
-      --disable-dev-shm-usage \
-      --disable-gpu \
-      --no-first-run \
-      --no-default-browser-check \
-      --user-data-dir="$PROFILE_DIR" \
-      "$@"
-    ;;
-esac
+if [ ! -x "$BIN" ]; then
+  echo "OpenGeni browser engine is unavailable" >&2
+  exit 127
+fi
+
+exec "$BIN" \
+  --no-sandbox \
+  --test-type \
+  --disable-dev-shm-usage \
+  --disable-gpu \
+  --no-first-run \
+  --no-default-browser-check \
+  --user-data-dir="$PROFILE_DIR" \
+  "$@"

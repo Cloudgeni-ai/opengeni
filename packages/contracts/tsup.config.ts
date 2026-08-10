@@ -15,8 +15,6 @@ export default defineConfig({
     "src/editable-artifact-causal-frontier.ts",
     "src/editable-artifact-codec-registry.ts",
     "src/editable-artifact-versions.ts",
-    "src/editable-artifact-publication.ts",
-    "src/editable-artifact-publication-receipt.ts",
     "src/spreadsheet-artifact-commands.ts",
     "src/spreadsheet-artifact-query.ts",
     "src/document-artifact-commands.ts",

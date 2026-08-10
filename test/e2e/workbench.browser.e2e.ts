@@ -715,7 +715,7 @@ describe("workbench browser acceptance", () => {
     await page.goto(dockUrl(baseUrl, "warm-live", "dark", "changes"), {
       waitUntil: "networkidle",
     });
-    const tabs = page.getByRole("tab");
+    const tabs = page.getByRole("tablist").getByRole("tab");
     expect(await tabs.nth(0).evaluate((tab) => tab === document.activeElement)).toBe(true);
     await tabs.nth(0).focus();
     await page.keyboard.press("ArrowRight");
@@ -728,7 +728,7 @@ describe("workbench browser acceptance", () => {
     );
 
     await page.keyboard.press("End");
-    expect(await tabs.nth(3).getAttribute("aria-selected")).toBe("true");
+    expect(await tabs.last().getAttribute("aria-selected")).toBe("true");
     await page.keyboard.press("ArrowRight");
     expect(await tabs.nth(0).getAttribute("aria-selected")).toBe("true");
 

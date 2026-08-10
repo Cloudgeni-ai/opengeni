@@ -64,8 +64,8 @@ import {
   ChannelAUnsupportedError,
   ChannelAUnavailableError,
   ChannelAValidationError,
-  toolspaceTokenFileFromEnvironment,
-  withToolspaceTokenSession,
+  codemodeTokenFileFromEnvironment,
+  withCodemodeTokenSession,
   withRunCredentialsSession,
   type ChannelASession,
   type EstablishedSandboxSession,
@@ -98,7 +98,19 @@ export type ChannelAOperation =
   | "terminal.pty.open"
   | "terminal.pty.write"
   | "terminal.pty.resize"
-  | "terminal.pty.close";
+  | "terminal.pty.close"
+  | "browser.create"
+  | "browser.resume"
+  | "browser.suspend"
+  | "browser.end"
+  | "browser.read"
+  | "browser.control"
+  | "browser.attach"
+  | "computer.create"
+  | "computer.end"
+  | "computer.read"
+  | "computer.control"
+  | "computer.attach";
 
 export type ChannelAContext = {
   accountId: string;
@@ -138,6 +150,10 @@ export type ChannelAHandle = {
   /** Connected Machine homes deliberately have no cloud lease. Durable PTYs
    * require a real home-provider lease and reject this null case. */
   lease: LeaseSnapshot | null;
+  /** Exact placement-home session established under this request's lease or
+   * Connected Machine fence. Unlike routingSession, this never follows a later
+   * active-sandbox pointer and is safe for placement-bound controllers. */
+  homeSession: ChannelASession;
   routingSession: RoutingSandboxSession;
   requestId: string;
 };
@@ -481,7 +497,7 @@ async function withChannelAOperation<T>(
   const leaseTtlMs = settings.sandboxLeaseTtlMs;
 
   // The STABLE run-environment used by both a cloud home and a machine home.
-  // It also carries the per-session Toolspace pointer selected below.
+  // It also carries the per-session Codemode pointer selected below.
   const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(
     db,
     settings,
@@ -507,6 +523,7 @@ async function withChannelAOperation<T>(
   const runEstablished = async (
     routed: EstablishedSandboxSession,
     lease: LeaseSnapshot | null,
+    homeSession: ChannelASession,
   ): Promise<T> => {
     const emit = async (events: { type: string; payload: unknown }[]): Promise<void> => {
       await appendAndPublishEvents(
@@ -519,10 +536,10 @@ async function withChannelAOperation<T>(
     };
     const routingSession = routed.session as RoutingSandboxSession;
     const credentialSession = withRunCredentialsSession(routingSession as object, session.id);
-    const scopedSession = environment.OPENGENI_TOOLSPACE_TOKEN_FILE
-      ? withToolspaceTokenSession(
+    const scopedSession = environment.OPENGENI_CODEMODE_TOKEN_FILE
+      ? withCodemodeTokenSession(
           credentialSession,
-          toolspaceTokenFileFromEnvironment(environment, session.id),
+          codemodeTokenFileFromEnvironment(environment, session.id),
         )
       : credentialSession;
     const service = new SandboxChannelAService({
@@ -530,7 +547,7 @@ async function withChannelAOperation<T>(
       leaseEpoch: lease?.leaseEpoch ?? session.activeEpoch,
       emit,
     });
-    const result = await fn({ service, lease, routingSession, requestId });
+    const result = await fn({ service, lease, homeSession, routingSession, requestId });
     // The direct request has accepted the result in memory. Finalize every
     // Connected Machine backend the routing proxy reached so a mid-request
     // route transition cannot leave completed output retained until TTL.
@@ -607,7 +624,7 @@ async function withChannelAOperation<T>(
         },
         established,
       );
-      return await runEstablished(routed, null);
+      return await runEstablished(routed, null, established.session as ChannelASession);
     } catch (error) {
       observeChannelAOperationFailure(services, {
         workspaceId,
@@ -832,7 +849,8 @@ async function withChannelAOperation<T>(
         },
         established!,
       );
-      const run = async () => await runEstablished(routed, leaseSnapshot);
+      const run = async () =>
+        await runEstablished(routed, leaseSnapshot, established!.session as ChannelASession);
       return readOnly && session.sandboxBackend === "modal"
         ? await withSandboxProviderReadLock(
             db,

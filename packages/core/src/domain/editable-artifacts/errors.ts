@@ -77,10 +77,7 @@ export class EditableArtifactCausalChainError extends EditableArtifactDomainErro
 
 export class EditableArtifactStaleBaseError extends EditableArtifactDomainError {
   constructor() {
-    super(
-      "stale_base",
-      "Serialized editable artifact changed after this transaction observed its base",
-    );
+    super("stale_base", "Editable artifact changed after this transaction observed its base");
   }
 }
 

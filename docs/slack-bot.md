@@ -55,7 +55,7 @@ Enforcement is fail-closed across the full lifecycle:
 
 - Connection list/get/update/delete and OAuth reconnect require the exact subject.
 - Tool catalog discovery exposes only the current subject's personal connection readiness, never another subject's UUID or metadata.
-- Runtime and Toolspace token resolution use the immutable human initiator captured for the turn.
+- Runtime and Codemode token resolution use the immutable human initiator captured for the turn.
 - A service or scheduled-task initiator can use a personal connection only through its immutable frozen personal-delegation snapshot; it never infers one from the creator or current user.
 - Two different OpenGeni users in the same workspace resolve different Slack rows even when both use `slack.com` and `oauth2`.
 

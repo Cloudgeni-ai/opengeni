@@ -18,7 +18,11 @@ import type { ManagedAuth } from "./managed-auth-type";
 import type { ApiSandboxClient, ResumeBoxByIdInput, ResumedSandboxSession } from "./sandbox-types";
 import type { TranscriptionSegmenter, TranscriptionService } from "./transcription";
 import type { EditableArtifactApplicationPort } from "./editable-artifact-live";
-import type { EditableArtifactDurableExportService } from "./editable-artifacts";
+import type {
+  EditableArtifactAgentApplication,
+  EditableArtifactDurableExportService,
+  EditableArtifactOfficeImportPort,
+} from "./editable-artifacts";
 
 export type SessionWorkflowClient = {
   signalUserMessage: (input: {
@@ -95,6 +99,10 @@ export type AppDependencies = {
   editableArtifacts?: EditableArtifactApplicationPort;
   /** Durable immutable version/materialization API paired with editableArtifacts. */
   editableArtifactExports?: EditableArtifactDurableExportService;
+  /** Canonical agent-facing artifact use cases shared by MCP and Codemode. */
+  editableArtifactAgent?: EditableArtifactAgentApplication;
+  /** Trusted Office-file to canonical sequence-zero import boundary. */
+  editableArtifactOfficeImports?: EditableArtifactOfficeImportPort;
   bus: EventBus;
   workflowClient: SessionWorkflowClient;
   /** Optional provider override for deterministic API/object-storage tests. */
@@ -112,7 +120,7 @@ export type AppDependencies = {
   githubAppApi?: GitHubAppApiPort;
   /**
    * Optional host-owned connection credential seam. API-side consumers use
-   * the MCP leg for Toolspace/Code Mode; worker consumers bind the same port
+   * the MCP leg for Codemode/Code Mode; worker consumers bind the same port
    * for model MCP, Git, and sandbox-secret resolution.
    */
   connectionCredentials?: ConnectionCredentialsPort | null;

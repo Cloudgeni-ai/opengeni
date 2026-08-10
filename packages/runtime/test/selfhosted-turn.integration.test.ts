@@ -47,12 +47,12 @@ const liveSessions: Array<{ close?: () => Promise<void> }> = [];
 async function runPinnedToVmTurn(
   model: ScriptedModel,
   opts: {
-    toolspaceTokenSeed?: string;
+    codemodeTokenSeed?: string;
     responder?: MockAgentResponder;
     activeSandboxBackend?: "selfhosted";
-    onToolspaceTokenSessionReady?: Parameters<
+    onCodemodeTokenSessionReady?: Parameters<
       typeof runAgentStream
-    >[3]["onToolspaceTokenSessionReady"];
+    >[3]["onCodemodeTokenSessionReady"];
   } = {},
 ): Promise<string> {
   const settings = testSettings({
@@ -102,18 +102,18 @@ async function runPinnedToVmTurn(
   const agent = buildOpenGeniAgent(settings, [], {
     model,
     sandboxEnvironment: ENV,
-    ...(opts.toolspaceTokenSeed
+    ...(opts.codemodeTokenSeed
       ? {
-          toolspaceTokenSeed: opts.toolspaceTokenSeed,
-          toolspaceTokenSessionId: "session-selfhosted",
+          codemodeTokenSeed: opts.codemodeTokenSeed,
+          codemodeTokenSessionId: "session-selfhosted",
         }
       : {}),
     ...(opts.activeSandboxBackend ? { activeSandboxBackend: opts.activeSandboxBackend } : {}),
   });
   const result = await runAgentStream(agent, "run echo on the vm", settings, {
     ownedSandbox: { client: client as never, session: proxy as never },
-    ...(opts.onToolspaceTokenSessionReady
-      ? { onToolspaceTokenSessionReady: opts.onToolspaceTokenSessionReady }
+    ...(opts.onCodemodeTokenSessionReady
+      ? { onCodemodeTokenSessionReady: opts.onCodemodeTokenSessionReady }
       : {}),
   });
   for await (const _ of result.toStream()) {
@@ -158,13 +158,13 @@ describe("selfhosted agent-turn contract — full run loop over a pinned selfhos
     expect(typeof s).toBe("string");
   });
 
-  test("an offline machine cannot block a text-only model turn, even if a Toolspace seed is supplied accidentally", async () => {
+  test("an offline machine cannot block a text-only model turn, even if a Codemode seed is supplied accidentally", async () => {
     let renewalSessionWasPublished = false;
     await runPinnedToVmTurn(new ScriptedModel([{ output: [assistantMessage("ok")] }]), {
-      toolspaceTokenSeed: "ogd_selfhosted_seed",
+      codemodeTokenSeed: "ogd_selfhosted_seed",
       responder: new MockAgentResponder({ online: false }),
       activeSandboxBackend: "selfhosted",
-      onToolspaceTokenSessionReady: () => {
+      onCodemodeTokenSessionReady: () => {
         renewalSessionWasPublished = true;
       },
     });
@@ -205,8 +205,8 @@ describe("selfhosted agent-turn contract — full run loop over a pinned selfhos
       controlRpc: responder,
       relay: RELAY,
       environment: {
-        OPENGENI_TOOLSPACE_URL: "https://app.opengeni.example/v1/workspaces/ws/mcp",
-        OPENGENI_TOOLSPACE_TOKEN_FILE: "/workspace/.opengeni/toolspace-token",
+        OPENGENI_CODEMODE_URL: "https://app.opengeni.example/v1/workspaces/ws/mcp",
+        OPENGENI_CODEMODE_TOKEN_FILE: "/workspace/.opengeni/codemode-token",
         OPENGENI_OGTOOL_PACKAGE_SPEC: "@opengeni/ogtool@0.1.0",
         HOME: "/workspace",
         GIT_AUTHOR_NAME: "OpenGeni Bot",

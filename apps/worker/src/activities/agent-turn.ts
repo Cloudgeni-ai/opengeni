@@ -18,6 +18,7 @@ import {
   getHumanInputResumeForEvent,
   getSessionHumanInputRequest,
   installOrReadTurnExecutionPolicyForAttempt,
+  persistAttemptToolCatalog,
   workspaceCodexSubscriptionActive,
   acquireCodexCredentialLease,
   armCodexCapacityWait,
@@ -128,8 +129,8 @@ import {
   clearRunCredentialsForAttempt,
   withRunCredentialsSession,
   refreshGitCredentialBindingTokenFiles,
-  refreshToolspaceTokenFile,
-  toolspaceTokenFileFromEnvironment,
+  refreshCodemodeTokenFile,
+  codemodeTokenFileFromEnvironment,
   sandboxFileDownloadFailureNote,
   SUMMARY_BUFFER_TOKENS,
   isMcpRequestTimeoutError,
@@ -156,7 +157,8 @@ import {
   type LazyToolTransport,
   type NormalizedRunCredentialMaterial,
   type RunCredentialCommandSession,
-  type ToolspaceTokenWriterSession,
+  type CodemodeTokenWriterSession,
+  createFirstPartyInteractionAttemptToolDefinitions,
   deleteRecordingArtifacts,
   stopRecording as stopRecordingOnBox,
 } from "@opengeni/runtime";
@@ -182,7 +184,6 @@ import {
   type ModelProviderApi,
   type RegistryProviderKind,
   type Settings,
-  resolveFirstPartyDelegationSecret,
 } from "@opengeni/config";
 import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import {
@@ -211,6 +212,7 @@ import {
   publishCodexFleetShadowDecisionV1,
 } from "./codex-fleet-shadow";
 import type { CodexAccountStatus } from "@opengeni/db";
+import { CodemodeAttemptDispatcher } from "./codemode-dispatcher";
 import { buildCodexTokenResolver } from "./codex-auth";
 import {
   refreshCodexUsageAndRepairCapacityWaiters,
@@ -257,7 +259,7 @@ import {
   gitCredentialAuthorityForTurn,
   gitHubTokenMintSelections,
   loadWorkspaceEnvironmentForRunWithCredentials,
-  mintSandboxToolspaceToken,
+  mintSandboxCodemodeToken,
   mintRunGitCredentials,
   mintRunGitCredentialBinding,
   sandboxEnvironmentForRun,
@@ -274,10 +276,10 @@ import {
   type RunCredentialRenewalController,
 } from "./run-credential-renewal";
 import {
-  TOOLSPACE_TOKEN_EXPIRY_LEAD_MS,
-  startToolspaceTokenRenewalLoop,
-  type ToolspaceTokenRenewalController,
-} from "./toolspace-token-renewal";
+  CODEMODE_TOKEN_EXPIRY_LEAD_MS,
+  startCodemodeTokenRenewalLoop,
+  type CodemodeTokenRenewalController,
+} from "./codemode-token-renewal";
 import {
   bindRunCredentialResolver,
   runCredentialAuthNeededPayloads,
@@ -389,7 +391,6 @@ import { executeGatewayImageGeneration } from "./gateway-image-generation";
 import { executeCodexImageGeneration } from "./codex-image-generation";
 import { imageProviderBindingHash } from "./image-generation-operation";
 import { resolveImageGenerationReferences } from "./image-generation-references";
-import { executeEditableArtifactPublication } from "./editable-artifact-publication";
 import { captureWorkspaceRevision, openFreshWorkspaceCaptureSession } from "./workspace-capture";
 import { SandboxChannelAService, type ChannelASession } from "@opengeni/runtime/sandbox";
 import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
@@ -857,7 +858,7 @@ export async function drainAttemptOwnedSandboxWriters(input: {
   toolCancellationFence: Pick<TurnToolCancellationFence, "cancel" | "waitForQuiescence"> | null;
   cancellationReason?: unknown;
   gitCredentialRenewals: readonly Pick<GitCredentialRenewalController, "stop">[];
-  toolspaceTokenRenewal: Pick<ToolspaceTokenRenewalController, "stop"> | null;
+  codemodeTokenRenewal: Pick<CodemodeTokenRenewalController, "stop"> | null;
   runCredentialRenewal: Pick<RunCredentialRenewalController, "stop"> | null;
 }): Promise<void> {
   if (input.toolCancellationFence) {
@@ -867,7 +868,7 @@ export async function drainAttemptOwnedSandboxWriters(input: {
     await input.toolCancellationFence.waitForQuiescence();
   }
   await Promise.all(input.gitCredentialRenewals.map(async (renewal) => await renewal.stop()));
-  await input.toolspaceTokenRenewal?.stop();
+  await input.codemodeTokenRenewal?.stop();
   await input.runCredentialRenewal?.stop();
 }
 
@@ -2047,9 +2048,11 @@ export type SandboxArtifactRuntimeAdmission = Readonly<{
 }>;
 
 /**
- * Admit native artifact skills only for the deployment's exact base sandbox
- * image contract. A pack/rig image override is an independent filesystem and
- * therefore fails closed even when the deployment base image is capable.
+ * Admit the optional native standalone-file runtime only for the deployment's
+ * exact base sandbox image contract. A pack/rig image override is an
+ * independent filesystem and therefore fails closed even when the deployment
+ * base image is capable. Collaborative artifact skills are admitted separately
+ * from the frozen canonical tool catalog.
  *
  * This keeps lazy provisioning intact: CI/release proves the image closure,
  * while a before-agent-start doctor verifies the actual box before any model
@@ -3054,11 +3057,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     let runCredentialRenewal: RunCredentialRenewalController | null = null;
     let runCredentialRenewalClosed = false;
     let runCredentialSession: RunCredentialCommandSession | null = null;
-    // The delegated Toolspace bearer has a one-hour TTL. Renewal is attempt-
+    // The delegated Codemode bearer has a one-hour TTL. Renewal is attempt-
     // owned and attaches only after the initial token file reached a real
     // sandbox session; finalization drains an in-flight replacement.
-    let toolspaceTokenRenewal: ToolspaceTokenRenewalController | null = null;
-    let toolspaceTokenRenewalClosed = false;
+    let codemodeTokenRenewal: CodemodeTokenRenewalController | null = null;
+    let codemodeTokenRenewalClosed = false;
     // MID-SESSION snapshot single-flight guard: the heartbeat tick fires every
     // 10s but a Modal filesystem snapshot can take longer — never overlap two
     // captures on one box. The in-flight capture's promise is held so the
@@ -3112,6 +3115,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       await current?.flush().catch(() => undefined);
     };
     let preparedTools: Awaited<ReturnType<OpenGeniRuntime["prepareTools"]>> | null = null;
+    let codemodeDispatcher: CodemodeAttemptDispatcher | null = null;
     const toolCancellationFenceRef: {
       current: TurnToolCancellationFence | null;
     } = {
@@ -3464,7 +3468,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // Legacy ownership mode lets the Agents SDK create the sandbox inside
     // run(). Keep that exact session once the runtime exposes it so an image
     // generated later in the same model/tool loop can be copied immediately.
-    let sdkOwnedSandboxSession: ToolspaceTokenWriterSession | null = null;
+    let sdkOwnedSandboxSession: CodemodeTokenWriterSession | null = null;
     const prepareGeneratedImageDownload = async (receipt: GeneratedImageReceipt) => {
       if (!objectStorage) {
         throw new Error("Generated image sandbox materialization requires object storage");
@@ -3488,7 +3492,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       };
     };
     const writeGeneratedImageDownload = async (
-      sessionForDownload: ToolspaceTokenWriterSession,
+      sessionForDownload: CodemodeTokenWriterSession,
       download: SandboxFileDownload,
     ): Promise<void> => {
       const runAs = sandboxRunAs(modelRunSettings);
@@ -3549,7 +3553,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           "generatedImageMaterialization",
           async () =>
             await writeGeneratedImageDownload(
-              sessionForDownload as ToolspaceTokenWriterSession,
+              sessionForDownload as CodemodeTokenWriterSession,
               download,
             ),
         );
@@ -3577,7 +3581,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       try {
         const { download } = await prepareGeneratedImageDownload(receipt);
         await writeGeneratedImageDownload(
-          sessionForDownload as ToolspaceTokenWriterSession,
+          sessionForDownload as CodemodeTokenWriterSession,
           download,
         );
         return true;
@@ -5624,8 +5628,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               turn,
             })
           : undefined;
-      const toolspaceAuthority = {
+      const codemodeAuthority = {
         sessionId: input.sessionId,
+        turnId: turn.id,
+        attemptId: input.attemptId,
+        executionGeneration: turn.executionGeneration,
       };
       const sandboxArtifactRuntime = sandboxArtifactRuntimeAdmission(
         settings,
@@ -5638,8 +5645,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         gitTokens: sandboxGitTokens,
         gitTokenExpiresAt: sandboxGitTokenExpiresAt,
         gitCredentialBindings: sandboxGitCredentialBindings,
-        toolspaceToken: sandboxToolspaceToken,
-        toolspaceTokenExpiresAt: sandboxToolspaceTokenExpiresAt,
+        codemodeToken: sandboxCodemodeToken,
+        codemodeTokenExpiresAt: sandboxCodemodeTokenExpiresAt,
       } = await waitForTurnOperation(
         sandboxEnvironmentForRun(
           runSettings,
@@ -5649,14 +5656,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           sandboxWorkspaceEnvironmentValues,
           {
             skipGitHubToken: activeSandboxBackend === "selfhosted",
-            skipToolspace: activeSandboxBackend === "selfhosted",
+            skipCodemode: activeSandboxBackend === "selfhosted",
             deferGitHubToken:
               activeSandboxBackend !== "selfhosted" && establishPolicy === "on-demand",
             scope: connectionScope,
             ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
             gitCredentials: connectionCredentials?.gitCredentials,
             authorizeGitHubTokenMint,
-            toolspaceAuthority,
+            codemodeAuthority,
           },
         ),
         cancellationSignal,
@@ -5669,8 +5676,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ? { ...baseSandboxEnvironment, ...sandboxArtifactRuntime.environment }
         : baseSandboxEnvironment;
 
-      const sandboxToolspaceTokenFile = sandboxToolspaceToken
-        ? toolspaceTokenFileFromEnvironment(sandboxEnvironment, input.sessionId)
+      const sandboxCodemodeTokenFile = sandboxCodemodeToken
+        ? codemodeTokenFileFromEnvironment(sandboxEnvironment, input.sessionId)
         : undefined;
 
       const initialGitCredentials: MintedRunGitCredentials | undefined =
@@ -5783,22 +5790,22 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         gitCredentialRenewals = controllers;
       };
 
-      const attachToolspaceTokenRenewal = async (
-        tokenSession: ToolspaceTokenWriterSession,
-        initialExpiresAt = sandboxToolspaceTokenExpiresAt,
+      const attachCodemodeTokenRenewal = async (
+        tokenSession: CodemodeTokenWriterSession,
+        initialExpiresAt = sandboxCodemodeTokenExpiresAt,
         initialSandbox?: ResumedTurnSandbox,
       ): Promise<void> => {
-        if (!sandboxToolspaceToken || !initialExpiresAt) return;
-        const previous = toolspaceTokenRenewal;
-        toolspaceTokenRenewal = null;
+        if (!sandboxCodemodeToken || !initialExpiresAt) return;
+        const previous = codemodeTokenRenewal;
+        codemodeTokenRenewal = null;
         await previous?.stop();
-        if (toolspaceTokenRenewalClosed) return;
+        if (codemodeTokenRenewalClosed) return;
 
         const mint = async () => {
-          const material = await mintSandboxToolspaceToken(
+          const material = await mintSandboxCodemodeToken(
             runSettings,
             connectionScope,
-            toolspaceAuthority,
+            codemodeAuthority,
           );
           if (material) {
           }
@@ -5808,18 +5815,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const runAs = sandboxRunAs(runSettings);
           const targetSandbox = resolvedSandbox ?? initialSandbox;
           if (!targetSandbox) {
-            throw new Error("Toolspace token renewal has no exact sandbox lease target");
+            throw new Error("Codemode token renewal has no exact sandbox lease target");
           }
           await runWorkspaceMutationForSandbox(
             targetSandbox,
-            "toolspaceTokenRenewal",
+            "codemodeTokenRenewal",
             async () =>
-              await refreshToolspaceTokenFile(tokenSession, material.token, {
+              await refreshCodemodeTokenFile(tokenSession, material.token, {
                 ...(runAs ? { runAs } : {}),
-                ...(sandboxToolspaceTokenFile
+                ...(sandboxCodemodeTokenFile
                   ? {
-                      tokenFile: sandboxToolspaceTokenFile,
-                      legacyTokenFile: sandboxEnvironment.OPENGENI_TOOLSPACE_TOKEN_FILE!,
+                      tokenFile: sandboxCodemodeTokenFile,
+                      legacyTokenFile: sandboxEnvironment.OPENGENI_CODEMODE_TOKEN_FILE!,
                     }
                   : {}),
                 ...(toolCancellationFenceRef.current
@@ -5833,32 +5840,32 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           );
         };
         let renewalExpiresAt = initialExpiresAt;
-        if (renewalExpiresAt.getTime() <= Date.now() + TOOLSPACE_TOKEN_EXPIRY_LEAD_MS) {
+        if (renewalExpiresAt.getTime() <= Date.now() + CODEMODE_TOKEN_EXPIRY_LEAD_MS) {
           const fresh = await mint();
           if (!fresh) {
-            throw new Error("Toolspace token mint became unavailable during sandbox setup");
+            throw new Error("Codemode token mint became unavailable during sandbox setup");
           }
           await write(fresh);
           renewalExpiresAt = fresh.expiresAt;
         }
-        const controller = startToolspaceTokenRenewalLoop({
+        const controller = startCodemodeTokenRenewalLoop({
           initialExpiresAt: renewalExpiresAt,
           mint,
           write,
           onSuccess: () => {
             observability.incrementCounter({
-              name: "opengeni_toolspace_token_renewals_total",
-              help: "Sandbox Toolspace token renewal attempts by outcome.",
+              name: "opengeni_codemode_token_renewals_total",
+              help: "Sandbox Codemode token renewal attempts by outcome.",
               labels: { outcome: "completed" },
             });
           },
           onFailure: ({ retryDelayMs, errorClass }) => {
             observability.incrementCounter({
-              name: "opengeni_toolspace_token_renewals_total",
-              help: "Sandbox Toolspace token renewal attempts by outcome.",
+              name: "opengeni_codemode_token_renewals_total",
+              help: "Sandbox Codemode token renewal attempts by outcome.",
               labels: { outcome: "error" },
             });
-            observability.warn("Sandbox Toolspace token renewal failed; retry scheduled", {
+            observability.warn("Sandbox Codemode token renewal failed; retry scheduled", {
               sessionId: input.sessionId,
               turnId,
               errorClass,
@@ -5866,11 +5873,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             });
           },
         });
-        if (toolspaceTokenRenewalClosed) {
+        if (codemodeTokenRenewalClosed) {
           await controller.stop();
           return;
         }
-        toolspaceTokenRenewal = controller;
+        codemodeTokenRenewal = controller;
       };
 
       const attachRunCredentialRenewal = async (
@@ -6360,6 +6367,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           ...(credentialSubjectId ? { credentialSubjectId } : {}),
           ...(codexAppsAuth ? { codexAppsAuth } : {}),
           resolveCredential,
+          onAttemptToolCatalog: async (catalog) => {
+            await persistAttemptToolCatalog(db, catalog);
+          },
           onAuthNeeded: async (payload) => {
             if (!shouldPublishToolAuthNeededForTurn(payload, trigger, turn)) {
               return;
@@ -6372,10 +6382,44 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             ? { firstPartyPermissions: session.firstPartyMcpPermissions }
             : {}),
           firstPartyTools: session.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+          attemptToolDefinitions: createFirstPartyInteractionAttemptToolDefinitions({
+            settings: runSettings,
+            scope: {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: turn.id,
+              attemptId: input.attemptId,
+              executionGeneration,
+            },
+            ...(session.firstPartyMcpPermissions?.length
+              ? { permissions: session.firstPartyMcpPermissions }
+              : {}),
+            selectedTools: session.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
+            subjectId: "worker:first-party-mcp",
+            subjectLabel: "OpenGeni worker",
+          }),
         }),
         cancellationSignal,
         async (latePreparedTools) => await latePreparedTools.close().catch(() => undefined),
       );
+      if (turnId && preparedTools.attemptToolEnvironment) {
+        codemodeDispatcher = new CodemodeAttemptDispatcher(
+          db,
+          bus,
+          preparedTools.attemptToolEnvironment,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId,
+            attemptId: input.attemptId,
+            executionGeneration,
+          },
+          cancellationSignal,
+        );
+        codemodeDispatcher.start();
+      }
       // Genesis turn = the first user turn (no assistant history reconciled
       // yet). Durable Postgres state (countSessionHistoryItems includes
       // superseded rows after compaction), NOT a workflow counter (turnsThisRun
@@ -6612,66 +6656,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           },
         };
       })();
-      const editableArtifactPublicationOption: Pick<
-        BuildAgentOptions,
-        "editableArtifactPublication"
-      > = (() => {
-        if (
-          !objectStorage ||
-          !sandboxArtifactRuntime.available ||
-          !resolveFirstPartyDelegationSecret(modelRunSettings) ||
-          (session.firstPartyMcpPermissions !== null &&
-            !session.firstPartyMcpPermissions.includes("artifacts:publish") &&
-            !session.firstPartyMcpPermissions.includes("workspace:admin"))
-        ) {
-          return {};
-        }
-        const runtimeEntrypoint = sandboxEnvironment.OPENGENI_ARTIFACT_TOOL_ENTRY;
-        if (!runtimeEntrypoint) return {};
-        const sandboxObjectStorage =
-          activeSandboxBackend === "selfhosted"
-            ? objectStorage
-            : objectStorageForSandboxDownloads(modelRunSettings, objectStorage);
-        return {
-          editableArtifactPublication: {
-            execute: async (request, { toolCallId }) => {
-              const sessionForPublication =
-                resolvedSandbox?.established.session ?? sdkOwnedSandboxSession;
-              const fence = toolCancellationFenceRef.current;
-              if (!sessionForPublication || !fence) {
-                throw new Error(
-                  "Editable artifact publication requires the active sandbox session",
-                );
-              }
-              const runAs = sandboxRunAs(modelRunSettings);
-              return await executeEditableArtifactPublication({
-                db,
-                objectStorage,
-                sandboxObjectStorage,
-                settings: modelRunSettings,
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                turnId: turn.id,
-                attemptId: input.attemptId,
-                executionGeneration,
-                toolCallId,
-                request,
-                runtimeEntrypoint,
-                runCommand: async (command) =>
-                  await fence.runSandboxCommandStructured(
-                    sessionForPublication as import("@opengeni/runtime").TurnSandboxCommandSession,
-                    {
-                      ...command,
-                      ...(runAs ? { runAs } : {}),
-                    },
-                  ),
-                ...(runtimeCancellationSignal ? { signal: runtimeCancellationSignal } : {}),
-              });
-            },
-          },
-        };
-      })();
       const serviceTier = serviceTierForLatencyMode(
         turnExecutionPolicy.providerId,
         turnExecutionPolicy.latencyMode,
@@ -6713,6 +6697,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           titleIsSet: Boolean(session.title?.trim()),
         },
         sandboxEnvironment,
+        ...(preparedTools.attemptToolCatalog
+          ? { attemptToolCatalog: preparedTools.attemptToolCatalog }
+          : {}),
         ...(sandboxArtifactRuntime.available ? { artifactRuntimeAvailable: true } : {}),
         ...(cancellationSignal ? { turnCancellationSignal: cancellationSignal } : {}),
         onToolCancellationFence: (fence) => {
@@ -6733,13 +6720,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ...(activeSandboxBackend !== "selfhosted" && !sandboxGitTokens && sandboxGitToken
           ? { gitTokenSeed: sandboxGitToken }
           : {}),
-        // Toolspace delivery is managed-sandbox-only. Connected Machines own any
+        // Codemode delivery is managed-sandbox-only. Connected Machines own any
         // manually configured API credentials and must never be contacted during
         // turn admission merely to seed OpenGeni tooling.
-        ...(sandboxToolspaceToken
+        ...(sandboxCodemodeToken
           ? {
-              toolspaceTokenSeed: sandboxToolspaceToken,
-              toolspaceTokenSessionId: input.sessionId,
+              codemodeTokenSeed: sandboxCodemodeToken,
+              codemodeTokenSessionId: input.sessionId,
             }
           : {}),
         ...(activeSandboxBackend ? { activeSandboxBackend } : {}),
@@ -6768,7 +6755,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         hostedWebSearch,
         ...imageGenerationOption,
         ...videoGenerationOption,
-        ...editableArtifactPublicationOption,
         lazyToolTransport,
         supportsImageInput,
         inputFileMediaTypes: modelInputPolicy.inputFileMediaTypes,
@@ -6902,8 +6888,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     authorizeGitHubTokenMint,
                   });
             const lazyGitTokens = lazyGitCredentials?.gitTokens;
-            const lazyToolspaceToken = sandboxToolspaceToken
-              ? await mintSandboxToolspaceToken(runSettings, connectionScope, toolspaceAuthority)
+            const lazyCodemodeToken = sandboxCodemodeToken
+              ? await mintSandboxCodemodeToken(runSettings, connectionScope, codemodeAuthority)
               : undefined;
             const provisioned = await resumeBoxForTurn(
               {
@@ -6962,9 +6948,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                           gitCredentialBindingsOverride: lazyGitCredentials.bindings,
                         }
                       : {}),
-                    ...(lazyToolspaceToken
+                    ...(lazyCodemodeToken
                       ? {
-                          toolspaceTokenSeedOverride: lazyToolspaceToken.token,
+                          codemodeTokenSeedOverride: lazyCodemodeToken.token,
                         }
                       : {}),
                     ...(toolCancellationFenceRef.current
@@ -6977,9 +6963,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   },
                 ),
             );
-            await attachToolspaceTokenRenewal(
-              provisioned.established.session as ToolspaceTokenWriterSession,
-              lazyToolspaceToken?.expiresAt,
+            await attachCodemodeTokenRenewal(
+              provisioned.established.session as CodemodeTokenWriterSession,
+              lazyCodemodeToken?.expiresAt,
               provisioned,
             );
             await attachGitCredentialRenewal(
@@ -7373,7 +7359,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             "fileMaterialization",
             async () =>
               await materializeSandboxFileDownloads(
-                setupBoxSession as ToolspaceTokenWriterSession,
+                setupBoxSession as CodemodeTokenWriterSession,
                 downloadsToMaterialize,
                 {
                   onRuntimeEvent: async (event) => {
@@ -7660,14 +7646,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   },
                 }
               : {}),
-            ...(sandboxToolspaceToken && sandboxToolspaceTokenExpiresAt && !lazyOwnedSandbox
+            ...(sandboxCodemodeToken && sandboxCodemodeTokenExpiresAt && !lazyOwnedSandbox
               ? {
-                  onToolspaceTokenSessionReady: async (
-                    tokenSession: ToolspaceTokenWriterSession,
-                  ) => {
+                  onCodemodeTokenSessionReady: async (tokenSession: CodemodeTokenWriterSession) => {
                     const renewalSession =
-                      (setupBoxSession as ToolspaceTokenWriterSession | null) ?? tokenSession;
-                    await attachToolspaceTokenRenewal(renewalSession);
+                      (setupBoxSession as CodemodeTokenWriterSession | null) ?? tokenSession;
+                    await attachCodemodeTokenRenewal(renewalSession);
                   },
                 }
               : {}),
@@ -7690,7 +7674,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               : {}),
             ...(modelRunSettings.sandboxBackend !== "none"
               ? {
-                  onSandboxSessionReady: async (sandboxSession: ToolspaceTokenWriterSession) => {
+                  onSandboxSessionReady: async (sandboxSession: CodemodeTokenWriterSession) => {
                     sdkOwnedSandboxSession = sandboxSession;
                     for (const receipt of generatedImageReceiptsByArtifactId.values()) {
                       await materializeGeneratedImageInOwnedSdkSession(receipt, sandboxSession);
@@ -9536,10 +9520,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         gitCredentialRenewalClosed = true;
         const gitRenewalsToStop = gitCredentialRenewals;
         gitCredentialRenewals = [];
-        toolspaceTokenRenewalClosed = true;
-        const toolspaceRenewalToStop =
-          toolspaceTokenRenewal as ToolspaceTokenRenewalController | null;
-        toolspaceTokenRenewal = null;
+        codemodeTokenRenewalClosed = true;
+        const codemodeRenewalToStop = codemodeTokenRenewal as CodemodeTokenRenewalController | null;
+        codemodeTokenRenewal = null;
         runCredentialRenewalClosed = true;
         const runRenewalToStop = runCredentialRenewal as RunCredentialRenewalController | null;
         runCredentialRenewal = null;
@@ -9591,7 +9574,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           toolCancellationFence,
           cancellationReason: cancellationSignal?.reason ?? new Error("TURN_ATTEMPT_FINALIZED"),
           gitCredentialRenewals: gitRenewalsToStop,
-          toolspaceTokenRenewal: toolspaceRenewalToStop,
+          codemodeTokenRenewal: codemodeRenewalToStop,
           runCredentialRenewal: runRenewalToStop,
         });
         attemptWritersDrained = true;
@@ -9836,6 +9819,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             observability,
             ...(finalizerSignal ? { signal: finalizerSignal } : {}),
           });
+        }
+        if (codemodeDispatcher) {
+          await waitForTurnFinalizerStep(
+            codemodeDispatcher.close().catch(() => undefined),
+            finalizerSignal,
+          );
+          codemodeDispatcher = null;
         }
         if (preparedTools) {
           await waitForTurnFinalizerStep(

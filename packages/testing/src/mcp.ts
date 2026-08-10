@@ -54,6 +54,8 @@ export function startTestMcpServer(
     toolDescriptionBytes?: number;
     /** Inflate one successful call result to exercise runtime result-size limits. */
     toolResultBytes?: number;
+    /** Advertise the optional MCP output/effect metadata used by catalog tests. */
+    richToolMetadata?: boolean;
   } = {},
 ): TestMcpServer {
   const calls: TestMcpToolCall[] = [];
@@ -153,6 +155,7 @@ export function startTestMcpServer(
         options.beforeToolCall,
         options.toolDescriptionBytes,
         options.toolResultBytes,
+        options.richToolMetadata,
       );
       await mcp.connect(transport);
       return await transport.handleRequest(request);
@@ -214,6 +217,7 @@ function buildServer(
   beforeToolCall?: (call: TestMcpToolCall) => void | Promise<void>,
   toolDescriptionBytes?: number,
   toolResultBytes?: number,
+  richToolMetadata?: boolean,
 ): McpServer {
   const server = new McpServer({
     name: "test-document-search",
@@ -243,6 +247,34 @@ function buildServer(
       };
     },
   );
+  if (richToolMetadata) {
+    server.registerTool(
+      "summarize_document",
+      {
+        title: "Summarize document",
+        description: "Return one structured document summary.",
+        inputSchema: { id: z.string() },
+        outputSchema: { summary: z.string(), sourceId: z.string() },
+        annotations: {
+          title: "Document summary",
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
+      },
+      async ({ id }) => {
+        const call = { tool: "summarize_document", args: { id } };
+        calls.push(call);
+        await beforeToolCall?.(call);
+        const structuredContent = { summary: `summary for ${id}`, sourceId: id };
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(structuredContent) }],
+          structuredContent,
+        };
+      },
+    );
+  }
   server.registerTool(
     "fetch_document",
     {

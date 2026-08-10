@@ -11,11 +11,13 @@ export type {
 export type {
   CreateEditableArtifactMaterializationRequest,
   CreateEditableArtifactResourceRequest,
+  EditableArtifactListResource,
   EditableArtifactMaterializationFormat,
   EditableArtifactMaterializationJobResource,
   EditableArtifactMaterializationResultResource,
   EditableArtifactPinnedVersionResource,
   EditableArtifactResource,
+  ListSessionEditableArtifactResourcesOptions,
   PinEditableArtifactVersionRequest,
   ReadEditableArtifactMaterializationOptions,
   ReadEditableArtifactResourceOptions,
@@ -97,6 +99,8 @@ export type {
 export { createGatewayRealtimeTransportStarter } from "./gateway-realtime-transport";
 export { projectSessionRealtimeLifecycle } from "./codex-realtime-lifecycle";
 export type { SessionRealtimeLifecycleProjection } from "./codex-realtime-lifecycle";
+// Provider-neutral Browser/Computer resource client + bounded frame protocol.
+export * from "./interaction";
 // Desktop (noVNC) transport contract — pure, zero-dep (the RFB import lives in
 // @opengeni/react). URL assembler + connection state machine + rotation fence.
 export { desktopSocketUrl, nextDesktopState, applyUrlRotation } from "./desktop";

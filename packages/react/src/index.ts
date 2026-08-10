@@ -9,9 +9,12 @@
 // container-responsive composers additionally import responsive.css.
 
 export type {
+  EmbeddedBrowserInteractionClientLike,
+  EmbeddedComputerInteractionClientLike,
   EmbeddedFileAttachmentClientLike,
   EmbeddedGoalClientLike,
   EmbeddedHumanInputSessionClientLike,
+  EmbeddedInteractionClientLike,
   EmbeddedSessionEventClientLike,
   EmbeddedSessionLineageClientLike,
   EmbeddedSessionMcpApprovalPolicyClientLike,
@@ -517,6 +520,7 @@ export {
   WORKBENCH_TAB_CHANGES,
   WORKBENCH_TAB_FILES,
   WORKBENCH_TAB_TERMINAL,
+  WORKBENCH_TAB_BROWSER,
   WORKBENCH_TAB_DESKTOP,
   WORKBENCH_SURFACES,
 } from "./components/sandbox-workspace";

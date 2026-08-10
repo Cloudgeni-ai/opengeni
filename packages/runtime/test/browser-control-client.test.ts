@@ -1,0 +1,800 @@
+import { afterEach, describe, expect, test } from "bun:test";
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import {
+  BROWSER_CONTROL_PROTOCOL_VERSION,
+  BROWSER_PROFILE_ARTIFACT_FORMAT,
+  BROWSER_STATE_ARTIFACT_CONTENT_TYPE,
+  type BrowserObservation,
+  type BrowserTarget,
+  type ComputerActionReceipt,
+  type ComputerObservation,
+  type ComputerTarget,
+} from "@opengeni/contracts";
+import {
+  BrowserControlClient,
+  BrowserControlProtocolError,
+  BrowserControlRequestError,
+  provisionBrowserControlClient,
+  type BrowserControlPlacementSession,
+} from "../src/sandbox/browser-control-client";
+
+const adminToken = `admin.${"a".repeat(48)}`;
+const controlToken = `control.${"c".repeat(48)}`;
+const viewToken = `view.${"v".repeat(48)}`;
+const roots: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(
+    roots.splice(0).map(async (root) => await rm(root, { recursive: true, force: true })),
+  );
+});
+
+describe("BrowserControlClient", () => {
+  test("drives the typed placement protocol without putting credentials in commands", async () => {
+    const browserSessionId = randomUUID();
+    const workspaceId = randomUUID();
+    const stateOperationId = randomUUID();
+    const controllerGeneration = "controller-1";
+    const linkedComputerSessionId = randomUUID();
+    const restoreKey = Buffer.alloc(32, 9);
+    const restoreAad = Buffer.from("restore-authority", "utf8");
+    let createRequest: Record<string, unknown> | null = null;
+    const target = browserTarget(browserSessionId, controllerGeneration);
+    const observation = browserObservation(target);
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        if (
+          request.headers.get("authorization") !== `Bearer ${adminToken}` &&
+          request.headers.get("authorization") !== `Bearer ${controlToken}` &&
+          request.headers.get("authorization") !== `Bearer ${viewToken}`
+        ) {
+          return failure(401, "permission_denied", "no authority");
+        }
+        const url = new URL(request.url);
+        if (url.pathname === "/v1/origins" && request.method === "PUT") {
+          const body = (await request.json()) as { origins: string[] };
+          return success({ origins: body.origins });
+        }
+        if (url.pathname === "/v1/browser-sessions" && request.method === "POST") {
+          createRequest = (await request.json()) as Record<string, unknown>;
+          return success({ browserSessionId, controllerGeneration, observation }, 201);
+        }
+        if (url.pathname.endsWith("/state-captures") && request.method === "POST") {
+          const body = (await request.json()) as {
+            operationId: string;
+            objectKey: string;
+          };
+          return success({
+            operationId: body.operationId,
+            browserSessionId,
+            controllerGeneration,
+            objectKey: body.objectKey,
+            format: BROWSER_PROFILE_ARTIFACT_FORMAT,
+            artifactDigest: "a".repeat(64),
+            contentDigest: "b".repeat(64),
+            sizeBytes: 1_024,
+            fileCount: 4,
+            profileBytes: 512,
+            manifest: {
+              schemaVersion: 1,
+              browserSessionId,
+              controllerGeneration,
+              capturedAt: "2026-08-10T12:00:00.000Z",
+              engine: "chromium",
+              engineVersion: "140.0.0.0",
+              driverId: "opengeni.cdp.v1",
+              driverSchemaVersion: 1,
+              profileCrypto: "chromium_basic",
+              platform: "linux",
+              architecture: "x64",
+              tabs: [{ url: "https://example.test/", selected: true }],
+            },
+          });
+        }
+        if (url.pathname.endsWith("/targets") && request.method === "GET") {
+          return success([target]);
+        }
+        if (url.pathname === "/v1/failure") {
+          return failure(409, "controller_stale", "controller moved");
+        }
+        if (url.pathname === "/v1/malformed") {
+          return Response.json({ nope: true });
+        }
+        return failure(404, "resource_not_found", "missing");
+      },
+    });
+    const placement = await localPlacement();
+    try {
+      const client = new BrowserControlClient(placement.session, {
+        adminToken,
+        port: server.port,
+      });
+      expect(await client.addAllowedOrigins(["https://app.opengeni.test/"])).toEqual([
+        "https://app.opengeni.test",
+      ]);
+      const created = await client.createSession({
+        browserSessionId,
+        controllerGeneration,
+        tokenGeneration: 1,
+        controlToken,
+        viewToken,
+        headed: true,
+        linkedComputer: {
+          computerSessionId: linkedComputerSessionId,
+          controllerGeneration: "computer-controller-1",
+        },
+        initialUrl: "https://example.test/",
+        restore: {
+          objectKey: `workspaces/${workspaceId}/browser-state/revisions/${stateOperationId}/chromium-profile.ogbs`,
+          format: BROWSER_PROFILE_ARTIFACT_FORMAT,
+          artifactDigest: "a".repeat(64),
+          contentDigest: "b".repeat(64),
+          manifestDigest: "c".repeat(64),
+          sizeBytes: 1_024,
+          dataKey: restoreKey,
+          aad: restoreAad,
+          materialization: {
+            portability: "portable",
+            reason: null,
+            platform: "linux",
+            architecture: "x64",
+            engine: "chromium",
+            engineVersion: "140.0.0.0",
+            driverId: "opengeni.cdp.v1",
+            driverSchemaVersion: 1,
+            profileCrypto: "chromium_basic",
+            providerId: null,
+            placement: null,
+          },
+          download: {
+            url: "https://state.example.test/object?signature=read-private",
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          },
+        },
+      });
+      expect(created).toEqual({
+        browserSessionId,
+        controllerGeneration,
+        observation,
+      });
+      expect(createRequest).toMatchObject({
+        linkedComputer: {
+          computerSessionId: linkedComputerSessionId,
+          controllerGeneration: "computer-controller-1",
+        },
+        restore: {
+          dataKeyBase64: restoreKey.toString("base64"),
+          aadBase64: restoreAad.toString("base64"),
+          manifestDigest: "c".repeat(64),
+        },
+      });
+      const stateKey = Buffer.alloc(32, 7);
+      const stateAad = Buffer.from("state-aad", "utf8");
+      const stateReceipt = await client.captureState({
+        browserSessionId,
+        controllerGeneration,
+        operationId: stateOperationId,
+        afterCapture: "restart",
+        objectKey: `workspaces/${workspaceId}/browser-state/${stateOperationId}.ogbs`,
+        dataKey: stateKey,
+        aad: stateAad,
+        upload: {
+          url: "https://state.example.test/object?signature=private",
+          requiredHeaders: {
+            "content-type": BROWSER_STATE_ARTIFACT_CONTENT_TYPE,
+          },
+          expiresAt: "2026-08-10T12:05:00.000Z",
+        },
+      });
+      expect(stateReceipt).toMatchObject({
+        operationId: stateOperationId,
+        browserSessionId,
+        controllerGeneration,
+        artifactDigest: "a".repeat(64),
+      });
+      expect(
+        await client
+          .sessionClient({
+            reference: { browserSessionId, controllerGeneration },
+            controlToken,
+            viewToken,
+          })
+          .listTargets(),
+      ).toEqual([target]);
+      expect(
+        await client.frameStreamUrl({ browserSessionId, controllerGeneration }, target.id),
+      ).toBe(
+        `ws://127.0.0.1:${server.port}/v1/browser-sessions/${browserSessionId}/targets/${target.id}/frames?provider=fixture`,
+      );
+      await expect(
+        client.requestForSession({
+          method: "GET",
+          path: "/v1/failure",
+          token: controlToken,
+        }),
+      ).rejects.toMatchObject<Partial<BrowserControlRequestError>>({
+        name: "BrowserControlRequestError",
+        status: 409,
+        error: {
+          code: "controller_stale",
+          message: "controller moved",
+          retryable: false,
+        },
+      });
+      await expect(
+        client.requestForSession({
+          method: "GET",
+          path: "/v1/malformed",
+          token: controlToken,
+        }),
+      ).rejects.toBeInstanceOf(BrowserControlProtocolError);
+
+      expect(placement.commands.every((command) => !command.includes(adminToken))).toBe(true);
+      expect(placement.commands.every((command) => !command.includes(controlToken))).toBe(true);
+      expect(placement.commands.every((command) => !command.includes(viewToken))).toBe(true);
+      expect(
+        placement.commands.every((command) => !command.includes(restoreKey.toString("base64"))),
+      ).toBe(true);
+      expect(
+        placement.commands.every((command) => !command.includes(restoreAad.toString("base64"))),
+      ).toBe(true);
+      expect(placement.writes.some((entry) => entry.content.includes(adminToken))).toBe(true);
+      expect(placement.finalizations).toBe(6);
+      for (const path of placement.writes.map((entry) => dirname(entry.path))) {
+        if (!path.includes("opengeni-browser-control-client")) continue;
+        await expect(stat(path)).rejects.toThrow();
+      }
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("drives ComputerSessions through the same placement controller", async () => {
+    const computerSessionId = randomUUID();
+    const operationId = randomUUID();
+    const controllerGeneration = "computer-controller-1";
+    const target = computerTarget(computerSessionId, controllerGeneration);
+    const observation = computerObservation(target);
+    const receipt = computerReceipt(operationId, observation);
+    const requests: Array<{ path: string; authorization: string | null }> = [];
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const url = new URL(request.url);
+        requests.push({
+          path: `${request.method} ${url.pathname}`,
+          authorization: request.headers.get("authorization"),
+        });
+        if (url.pathname === "/v1/computer-sessions" && request.method === "POST") {
+          return success(
+            {
+              computerSessionId,
+              controllerGeneration,
+              platform: "linux",
+              adapter: "opengeni.linux.atspi-x11.v1",
+              seatId: "seat-1",
+              displayId: ":101",
+              capabilities: computerCapabilities(),
+              targets: [target],
+            },
+            201,
+          );
+        }
+        if (url.pathname.endsWith("/view-grants") && request.method === "POST") {
+          const body = (await request.json()) as { grantId: string; expiresAt: string };
+          return success(body, 201);
+        }
+        if (url.pathname.endsWith("/targets") && request.method === "GET") {
+          return success([target]);
+        }
+        if (url.pathname.endsWith("/observation") && request.method === "GET") {
+          return success(observation);
+        }
+        if (url.pathname.endsWith("/actions") && request.method === "POST") {
+          return success(receipt);
+        }
+        if (url.pathname.endsWith(`/operations/${operationId}`) && request.method === "GET") {
+          return success(receipt);
+        }
+        if (url.pathname.endsWith("/heartbeat") && request.method === "POST") {
+          return success({ alive: true });
+        }
+        if (url.pathname.endsWith("/end") && request.method === "POST") {
+          return success({ ended: true });
+        }
+        return failure(404, "resource_not_found", "missing");
+      },
+    });
+    const placement = await localPlacement();
+    try {
+      const client = new BrowserControlClient(placement.session, {
+        adminToken,
+        port: server.port,
+      });
+      const reference = { computerSessionId, controllerGeneration };
+      expect(
+        await client.createComputerSession({
+          ...reference,
+          tokenGeneration: 1,
+          controlToken,
+          viewToken,
+        }),
+      ).toEqual({
+        ...reference,
+        platform: "linux",
+        adapter: "opengeni.linux.atspi-x11.v1",
+        seatId: "seat-1",
+        displayId: ":101",
+        capabilities: computerCapabilities(),
+        targets: [target],
+      });
+      const expiresAt = new Date(Date.now() + 60_000).toISOString();
+      const grantId = randomUUID();
+      expect(
+        await client.createComputerViewGrant(reference, {
+          grantId,
+          token: viewToken,
+          expiresAt,
+        }),
+      ).toEqual({ grantId, expiresAt });
+      const session = client.computerSessionClient({ reference, controlToken, viewToken });
+      expect(await session.listTargets()).toEqual([target]);
+      expect(await session.observe(target.id)).toEqual(observation);
+      expect(
+        await session.action({
+          protocolVersion: 1,
+          operationId,
+          ...reference,
+          targetId: target.id,
+          expectedTargetGeneration: target.targetGeneration,
+          expectedObservationId: null,
+          expectedFrameId: null,
+          actor: { kind: "human", subjectId: "user-1" },
+          action: { type: "keyboard", action: "type", value: "hello" },
+        }),
+      ).toEqual(receipt);
+      expect(await session.receipt(operationId)).toEqual(receipt);
+      await session.heartbeat();
+      expect(await client.computerFrameStreamUrl(reference, target.id)).toBe(
+        `ws://127.0.0.1:${server.port}/v1/computer-sessions/${computerSessionId}/targets/${target.id}/frames?provider=fixture`,
+      );
+      await client.endComputerSession(reference, { removeState: true });
+
+      expect(requests).toEqual(
+        expect.arrayContaining([
+          { path: "POST /v1/computer-sessions", authorization: `Bearer ${adminToken}` },
+          {
+            path: `GET /v1/computer-sessions/${computerSessionId}/targets`,
+            authorization: `Bearer ${viewToken}`,
+          },
+          {
+            path: `POST /v1/computer-sessions/${computerSessionId}/actions`,
+            authorization: `Bearer ${controlToken}`,
+          },
+        ]),
+      );
+      expect(placement.commands.every((command) => !command.includes(adminToken))).toBe(true);
+      expect(placement.commands.every((command) => !command.includes(controlToken))).toBe(true);
+      expect(placement.commands.every((command) => !command.includes(viewToken))).toBe(true);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("atomically installs the placement credential before controller startup", async () => {
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        if (request.headers.get("authorization") !== `Bearer ${adminToken}`) {
+          return failure(401, "permission_denied", "no authority");
+        }
+        const body = (await request.json()) as { origins: string[] };
+        return success({ origins: body.origins });
+      },
+    });
+    const placement = await localPlacement({ fakeControllerStartup: true });
+    const root = join(placement.root, "authority");
+    const tokenFile = join(root, "admin-token");
+    try {
+      const provisioned = await provisionBrowserControlClient(placement.session, {
+        adminToken,
+        adminTokenFile: tokenFile,
+        allowedOrigins: ["https://app.opengeni.test"],
+        port: server.port,
+      });
+      expect(provisioned.server.port).toBe(server.port);
+      expect((await readFile(tokenFile, "utf8")).trim()).toBe(adminToken);
+      expect((await stat(tokenFile)).mode & 0o777).toBe(0o600);
+      expect(placement.commands.some((command) => command.includes("opengeni-browserd-up"))).toBe(
+        true,
+      );
+      expect(placement.commands.every((command) => !command.includes(adminToken))).toBe(true);
+      expect(placement.finalizations).toBe(2);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("uses the standard exec and writeStdin surface when writeFile is unavailable", async () => {
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        if (request.headers.get("authorization") !== `Bearer ${adminToken}`) {
+          return failure(401, "permission_denied", "no authority");
+        }
+        const body = (await request.json()) as { origins: string[] };
+        return success({ origins: body.origins });
+      },
+    });
+    const placement = await localPlacement({
+      confinePrivateReads: true,
+      fakeControllerStartup: true,
+      streamWrites: true,
+    });
+    const tokenFile = join(placement.root, "streamed-authority", "admin-token");
+    try {
+      await provisionBrowserControlClient(placement.session, {
+        adminToken,
+        adminTokenFile: tokenFile,
+        allowedOrigins: ["https://app.opengeni.test"],
+        port: server.port,
+      });
+
+      expect(placement.session.writeFile).toBeUndefined();
+      expect((await readFile(tokenFile, "utf8")).trim()).toBe(adminToken);
+      expect((await stat(tokenFile)).mode & 0o777).toBe(0o600);
+      expect(placement.stdinWrites.length).toBeGreaterThanOrEqual(2);
+      expect(
+        placement.stdinWrites.some((value) =>
+          Buffer.from(value, "base64").toString("utf8").includes(adminToken),
+        ),
+      ).toBe(true);
+      expect(placement.commands.every((command) => !command.includes(adminToken))).toBe(true);
+      expect(
+        placement.commands.some((command) => command.includes("OPENGENI_BROWSER_PRIVATE_CHUNK_")),
+      ).toBe(true);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("uses agent-supervised sidecar and typed browser relay on connected machines", async () => {
+    const ensured: unknown[] = [];
+    const opened: unknown[] = [];
+    const openedComputers: unknown[] = [];
+    const session: BrowserControlPlacementSession = {
+      async exec() {
+        throw new Error("native provisioning must not shell out");
+      },
+      async writeFile() {
+        throw new Error("native provisioning must not install credentials through files");
+      },
+      async ensureBrowserControl(request) {
+        ensured.push(request);
+        return { port: 31_337, sidecarGeneration: "sidecar-1" };
+      },
+      async openBrowserFrames(request) {
+        opened.push(request);
+        return {
+          channel: {
+            channelId: "browser-channel-1",
+            workspaceId: "11111111-1111-1111-1111-111111111111",
+            agentId: "agent-1",
+            kind: 3,
+            port: 20_001,
+          },
+          endpoint: {
+            host: "relay.example.test",
+            port: 443,
+            tls: true,
+            path: "/stream",
+            query: "ws=1&agent=agent-1&port=20001&channel=browser-channel-1",
+          },
+        };
+      },
+      async openComputerFrames(request) {
+        openedComputers.push(request);
+        return {
+          channel: {
+            channelId: "computer-channel-1",
+            workspaceId: "11111111-1111-1111-1111-111111111111",
+            agentId: "agent-1",
+            kind: 3,
+            port: 20_002,
+          },
+          endpoint: {
+            host: "relay.example.test",
+            port: 443,
+            tls: true,
+            path: "/stream",
+            query: "ws=1&agent=agent-1&port=20002&channel=computer-channel-1",
+          },
+        };
+      },
+    };
+    const nativeAuthority = {
+      scopeId: "workspace:attached:device-1",
+      scopeGeneration: "connection-1",
+    };
+    const provisioned = await provisionBrowserControlClient(session, {
+      adminToken,
+      nativeAuthority,
+      allowedOrigins: ["https://app.opengeni.test"],
+    });
+    expect(provisioned.server).toEqual({ port: 31_337, marker: "agent:sidecar-1" });
+    expect(ensured).toEqual([
+      {
+        ...nativeAuthority,
+        adminToken,
+        allowedOrigins: ["https://app.opengeni.test"],
+      },
+    ]);
+    const expiresAt = new Date(Date.now() + 60_000).toISOString();
+    const relay = await provisioned.client.openRelayedFrameStream({
+      reference: { browserSessionId: randomUUID(), controllerGeneration: "controller-1" },
+      targetId: "target-1",
+      viewToken,
+      expiresAt,
+      stream: { quality: 55, everyNthFrame: 2 },
+    });
+    expect(relay?.channel).toMatchObject({ channelId: "browser-channel-1", kind: 3 });
+    expect(opened).toHaveLength(1);
+    expect(opened[0]).toMatchObject({
+      ...nativeAuthority,
+      targetId: "target-1",
+      viewToken,
+      format: "jpeg",
+      quality: 55,
+      maxWidth: 1_440,
+      maxHeight: 900,
+      everyNthFrame: 2,
+    });
+
+    const computerSessionId = randomUUID();
+    const computerRelay = await provisioned.client.openRelayedComputerFrameStream({
+      reference: { computerSessionId, controllerGeneration: "controller-2" },
+      targetId: "window-1",
+      viewToken,
+      expiresAt,
+      stream: { format: "png", maxWidth: 1_200 },
+    });
+    expect(computerRelay?.channel).toMatchObject({
+      channelId: "computer-channel-1",
+      kind: 3,
+    });
+    expect(openedComputers).toEqual([
+      expect.objectContaining({
+        ...nativeAuthority,
+        computerSessionId,
+        controllerGeneration: "controller-2",
+        targetId: "window-1",
+        viewToken,
+        format: "png",
+        quality: 70,
+        maxWidth: 1_200,
+        maxHeight: 900,
+        everyNthFrame: 1,
+      }),
+    ]);
+  });
+});
+
+async function localPlacement(
+  options: {
+    confinePrivateReads?: boolean;
+    fakeControllerStartup?: boolean;
+    streamWrites?: boolean;
+  } = {},
+): Promise<{
+  root: string;
+  session: BrowserControlPlacementSession;
+  commands: string[];
+  writes: Array<{ path: string; content: string }>;
+  stdinWrites: string[];
+  finalizations: number;
+}> {
+  const root = `/tmp/og-browser-client-test-${randomUUID()}`;
+  roots.push(root);
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  const fixture = {
+    root,
+    commands: [] as string[],
+    writes: [] as Array<{ path: string; content: string }>,
+    stdinWrites: [] as string[],
+    finalizations: 0,
+    session: {} as BrowserControlPlacementSession,
+  };
+  let nextStreamId = 1;
+  const streams = new Map<number, ReturnType<typeof Bun.spawn<"pipe", "pipe", "pipe">>>();
+  fixture.session = {
+    async exec({ cmd }) {
+      fixture.commands.push(cmd);
+      if (options.fakeControllerStartup && cmd.includes("opengeni-browserd-up")) {
+        return {
+          output: "OPENGENI_BROWSERD_UP port=fixture",
+          stdout: "OPENGENI_BROWSERD_UP port=fixture",
+          stderr: "",
+          exitCode: 0,
+        };
+      }
+      const child = Bun.spawn(["bash", "-lc", cmd], {
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      if (options.streamWrites && cmd.includes("dd bs=1 count=")) {
+        const sessionId = nextStreamId++;
+        streams.set(sessionId, child);
+        return { output: "", stdout: "", stderr: "", sessionId };
+      }
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+        child.exited,
+      ]);
+      return { output: `${stdout}${stderr}`, stdout, stderr, exitCode };
+    },
+    ...(options.streamWrites
+      ? {
+          async writeStdin({ sessionId, chars = "" }) {
+            const child = streams.get(sessionId);
+            if (!child) return `write_stdin failed: session not found: ${sessionId}`;
+            fixture.stdinWrites.push(chars);
+            child.stdin.write(chars);
+            await child.stdin.flush();
+            const [stdout, stderr] = await Promise.all([
+              new Response(child.stdout).text(),
+              new Response(child.stderr).text(),
+              child.exited,
+            ]);
+            streams.delete(sessionId);
+            return `${stdout}${stderr}`;
+          },
+        }
+      : {
+          async writeFile({ path, content, createParents }) {
+            if (createParents) await mkdir(dirname(path), { recursive: true });
+            const value = typeof content === "string" ? content : new TextDecoder().decode(content);
+            fixture.writes.push({ path, content: value });
+            await writeFile(path, content);
+            return typeof content === "string" ? Buffer.byteLength(content) : content.byteLength;
+          },
+        }),
+    async readFile({ path, maxBytes }) {
+      if (options.confinePrivateReads && path.includes("opengeni-browser-control-client")) {
+        throw new Error("fixture confines native reads to its workspace");
+      }
+      const value = await readFile(path);
+      return maxBytes === undefined ? value : value.subarray(0, maxBytes);
+    },
+    async resolveExposedPort(port) {
+      return { host: "127.0.0.1", port, path: "/", query: "provider=fixture" };
+    },
+    async finalizeOpStreamOps() {
+      fixture.finalizations += 1;
+    },
+  };
+  return fixture;
+}
+
+function browserTarget(browserSessionId: string, controllerGeneration: string): BrowserTarget {
+  return {
+    id: "target-1",
+    browserSessionId,
+    controllerGeneration,
+    targetGeneration: "target-1",
+    documentGeneration: "document-1",
+    kind: "page",
+    title: "Fixture",
+    url: "https://example.test/",
+    selected: true,
+    attached: true,
+    createdAt: "2026-08-09T12:00:00.000Z",
+  };
+}
+
+function browserObservation(target: BrowserTarget): BrowserObservation {
+  return {
+    protocolVersion: 1,
+    observationId: "observation-1",
+    browserSessionId: target.browserSessionId,
+    target,
+    frameId: "frame-1",
+    semantic: { kind: "snapshot", roots: [], nodeCount: 0 },
+    screenshot: null,
+    focusedRef: null,
+    changedRegions: [],
+    diagnostics: {
+      consoleErrorCount: 0,
+      failedRequestCount: 0,
+      downloadCount: 0,
+      pageErrorCount: 0,
+    },
+    dialog: null,
+    observedAt: "2026-08-09T12:00:00.000Z",
+  };
+}
+
+function computerCapabilities() {
+  return {
+    semanticObservation: true,
+    appDiscovery: true,
+    appLaunch: true,
+    windowCapture: true,
+    screenCapture: true,
+    semanticActions: true,
+    pointerInput: true,
+    keyboardInput: true,
+    backgroundActions: true,
+    parallelApps: true,
+  } as const;
+}
+
+function computerTarget(computerSessionId: string, controllerGeneration: string): ComputerTarget {
+  return {
+    id: "window-1",
+    computerSessionId,
+    controllerGeneration,
+    targetGeneration: "target-generation-1",
+    kind: "window",
+    applicationId: "org.opengeni.Fixture",
+    processId: 42,
+    title: "Fixture",
+    bounds: { x: 10, y: 20, width: 640, height: 480 },
+    focused: true,
+  };
+}
+
+function computerObservation(target: ComputerTarget): ComputerObservation {
+  return {
+    protocolVersion: 1,
+    observationId: "computer-observation-1",
+    computerSessionId: target.computerSessionId,
+    target,
+    frameId: "computer-frame-1",
+    semantic: { kind: "snapshot", roots: [], nodeCount: 0 },
+    screenshot: null,
+    focusedRef: null,
+    changedRegions: [],
+    observedAt: "2026-08-10T12:00:00.000Z",
+  };
+}
+
+function computerReceipt(
+  operationId: string,
+  observation: ComputerObservation,
+): ComputerActionReceipt {
+  return {
+    protocolVersion: 1,
+    operationId,
+    computerSessionId: observation.computerSessionId,
+    controllerGeneration: observation.target.controllerGeneration,
+    targetId: observation.target.id,
+    state: "completed",
+    dispatchedAt: "2026-08-10T12:00:00.000Z",
+    settledAt: "2026-08-10T12:00:01.000Z",
+    observation,
+    error: null,
+  };
+}
+
+function success(data: unknown, status = 200): Response {
+  return Response.json(
+    { protocolVersion: BROWSER_CONTROL_PROTOCOL_VERSION, ok: true, data },
+    { status },
+  );
+}
+
+function failure(status: number, code: string, message: string): Response {
+  return Response.json(
+    {
+      protocolVersion: BROWSER_CONTROL_PROTOCOL_VERSION,
+      ok: false,
+      error: { code, message, retryable: false },
+    },
+    { status },
+  );
+}

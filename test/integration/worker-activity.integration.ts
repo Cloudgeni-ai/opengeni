@@ -1916,7 +1916,7 @@ describe("worker activities integration", () => {
     }
   });
 
-  test("runs repository clone hook for Modal repository-backed sessions before SDK sandbox use", async () => {
+  test("seeds Codemode authority and clones Modal repositories before SDK sandbox use", async () => {
     const grant = await testGrant(dbClient.db);
     const session = await createOwnedSession(dbClient.db, grant, {
       initialMessage: "read repo",
@@ -1970,14 +1970,20 @@ describe("worker activities integration", () => {
     });
 
     expect(result.status).toBe("failed");
-    expect(sandboxExecCalls).toHaveLength(1);
+    expect(sandboxExecCalls).toHaveLength(2);
     expect(String(sandboxExecCalls[0]?.cmd)).toContain(
+      "OPENGENI_CODEMODE_TOKEN_FILE='/workspace/.opengeni/codemode-tokens/",
+    );
+    expect(String(sandboxExecCalls[0]?.cmd)).toContain(
+      'printf \'%s\' "$OPENGENI_CODEMODE_TOKEN_SEED" > "$token_file.tmp.$$"',
+    );
+    expect(String(sandboxExecCalls[1]?.cmd)).toContain(
       "clone_repository '/workspace/repos/github.com/Futhark-AS/aifilesearch.git'",
     );
-    expect(String(sandboxExecCalls[0]?.cmd)).toContain(
+    expect(String(sandboxExecCalls[1]?.cmd)).toContain(
       'git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"',
     );
-    expect(String(sandboxExecCalls[0]?.cmd)).toContain("x-access-token");
+    expect(String(sandboxExecCalls[1]?.cmd)).toContain("x-access-token");
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
     expect(events.some((event) => event.type === "sandbox.operation.started")).toBe(true);
     expect(events.some((event) => event.type === "sandbox.operation.completed")).toBe(true);

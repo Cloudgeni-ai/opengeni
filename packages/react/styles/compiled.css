@@ -565,6 +565,9 @@
 :where(.og-root).top-8,:where(.og-root) .top-8 {
     top: calc(var(--spacing) * 8);
   }
+:where(.og-root).top-10,:where(.og-root) .top-10 {
+    top: calc(var(--spacing) * 10);
+  }
 :where(.og-root).-right-3,:where(.og-root) .-right-3 {
     right: calc(var(--spacing) * -3);
   }
@@ -675,6 +678,9 @@
   }
 :where(.og-root).m-0,:where(.og-root) .m-0 {
     margin: calc(var(--spacing) * 0);
+  }
+:where(.og-root).m-auto,:where(.og-root) .m-auto {
+    margin: auto;
   }
 :where(.og-root).-mx-1,:where(.og-root) .-mx-1 {
     margin-inline: calc(var(--spacing) * -1);
@@ -869,6 +875,10 @@
     width: calc(var(--spacing) * 4);
     height: calc(var(--spacing) * 4);
   }
+:where(.og-root).size-4\.5,:where(.og-root) .size-4\.5 {
+    width: calc(var(--spacing) * 4.5);
+    height: calc(var(--spacing) * 4.5);
+  }
 :where(.og-root).size-5,:where(.og-root) .size-5 {
     width: calc(var(--spacing) * 5);
     height: calc(var(--spacing) * 5);
@@ -904,6 +914,10 @@
 :where(.og-root).size-full,:where(.og-root) .size-full {
     width: 100%;
     height: 100%;
+  }
+:where(.og-root).size-px,:where(.og-root) .size-px {
+    width: 1px;
+    height: 1px;
   }
 :where(.og-root).h-1,:where(.og-root) .h-1 {
     height: calc(var(--spacing) * 1);
@@ -1136,6 +1150,15 @@
 :where(.og-root).max-w-44,:where(.og-root) .max-w-44 {
     max-width: calc(var(--spacing) * 44);
   }
+:where(.og-root).max-w-48,:where(.og-root) .max-w-48 {
+    max-width: calc(var(--spacing) * 48);
+  }
+:where(.og-root).max-w-52,:where(.og-root) .max-w-52 {
+    max-width: calc(var(--spacing) * 52);
+  }
+:where(.og-root).max-w-56,:where(.og-root) .max-w-56 {
+    max-width: calc(var(--spacing) * 56);
+  }
 :where(.og-root).max-w-64,:where(.og-root) .max-w-64 {
     max-width: calc(var(--spacing) * 64);
   }
@@ -1189,6 +1212,9 @@
   }
 :where(.og-root).min-w-16,:where(.og-root) .min-w-16 {
     min-width: calc(var(--spacing) * 16);
+  }
+:where(.og-root).min-w-24,:where(.og-root) .min-w-24 {
+    min-width: calc(var(--spacing) * 24);
   }
 :where(.og-root).min-w-\[8rem\],:where(.og-root) .min-w-\[8rem\] {
     min-width: 8rem;
@@ -1416,6 +1442,13 @@
 :where(.og-root).gap-px,:where(.og-root) .gap-px {
     gap: 1px;
   }
+:where(.og-root).space-y-0\.5,:where(.og-root) .space-y-0\.5 {
+    :where(& > :not(:last-child)) {
+      --tw-space-y-reverse: 0;
+      margin-block-start: calc(calc(var(--spacing) * 0.5) * var(--tw-space-y-reverse));
+      margin-block-end: calc(calc(var(--spacing) * 0.5) * calc(1 - var(--tw-space-y-reverse)));
+    }
+  }
 :where(.og-root).space-y-1,:where(.og-root) .space-y-1 {
     :where(& > :not(:last-child)) {
       --tw-space-y-reverse: 0;
@@ -1566,6 +1599,10 @@
 :where(.og-root).rounded-xl,:where(.og-root) .rounded-xl {
     border-radius: var(--og-radius-xl);
   }
+:where(.og-root).rounded-t-og-sm,:where(.og-root) .rounded-t-og-sm {
+    border-top-left-radius: var(--og-radius-sm);
+    border-top-right-radius: var(--og-radius-sm);
+  }
 :where(.og-root).rounded-l-og-md,:where(.og-root) .rounded-l-og-md {
     border-top-left-radius: var(--og-radius-md);
     border-bottom-left-radius: var(--og-radius-md);
@@ -1604,6 +1641,10 @@
 :where(.og-root).border-b,:where(.og-root) .border-b {
     border-bottom-style: var(--tw-border-style);
     border-bottom-width: 1px;
+  }
+:where(.og-root).border-b-0,:where(.og-root) .border-b-0 {
+    border-bottom-style: var(--tw-border-style);
+    border-bottom-width: 0px;
   }
 :where(.og-root).border-l,:where(.og-root) .border-l {
     border-left-style: var(--tw-border-style);
@@ -1852,6 +1893,12 @@
       background-color: color-mix(in oklab, var(--color-black) 60%, transparent);
     }
   }
+:where(.og-root).bg-black\/65,:where(.og-root) .bg-black\/65 {
+    background-color: color-mix(in srgb, #000 65%, transparent);
+    @supports (color: color-mix(in lab, red, red)) {
+      background-color: color-mix(in oklab, var(--color-black) 65%, transparent);
+    }
+  }
 :where(.og-root).bg-black\/90,:where(.og-root) .bg-black\/90 {
     background-color: color-mix(in srgb, #000 90%, transparent);
     @supports (color: color-mix(in lab, red, red)) {
@@ -2006,12 +2053,6 @@
     background-color: var(--og-color-status-running);
     @supports (color: color-mix(in lab, red, red)) {
       background-color: color-mix(in oklab, var(--og-color-status-running) 10%, transparent);
-    }
-  }
-:where(.og-root).bg-og-status-running\/20,:where(.og-root) .bg-og-status-running\/20 {
-    background-color: var(--og-color-status-running);
-    @supports (color: color-mix(in lab, red, red)) {
-      background-color: color-mix(in oklab, var(--og-color-status-running) 20%, transparent);
     }
   }
 :where(.og-root).bg-og-status-waiting,:where(.og-root) .bg-og-status-waiting {
@@ -2523,6 +2564,10 @@
     --tw-tracking: 0.08em;
     letter-spacing: 0.08em;
   }
+:where(.og-root).tracking-\[0\.12em\],:where(.og-root) .tracking-\[0\.12em\] {
+    --tw-tracking: 0.12em;
+    letter-spacing: 0.12em;
+  }
 :where(.og-root).tracking-\[0\.25em\],:where(.og-root) .tracking-\[0\.25em\] {
     --tw-tracking: 0.25em;
     letter-spacing: 0.25em;
@@ -2658,6 +2703,12 @@
     color: color-mix(in srgb, #fff 70%, transparent);
     @supports (color: color-mix(in lab, red, red)) {
       color: color-mix(in oklab, var(--color-white) 70%, transparent);
+    }
+  }
+:where(.og-root).text-white\/80,:where(.og-root) .text-white\/80 {
+    color: color-mix(in srgb, #fff 80%, transparent);
+    @supports (color: color-mix(in lab, red, red)) {
+      color: color-mix(in oklab, var(--color-white) 80%, transparent);
     }
   }
 :where(.og-root).capitalize,:where(.og-root) .capitalize {
@@ -3349,6 +3400,14 @@
       }
     }
   }
+:where(.og-root).focus-within\:border-og-accent\/60,:where(.og-root) .focus-within\:border-og-accent\/60 {
+    &:focus-within {
+      border-color: var(--og-color-accent);
+      @supports (color: color-mix(in lab, red, red)) {
+        border-color: color-mix(in oklab, var(--og-color-accent) 60%, transparent);
+      }
+    }
+  }
 :where(.og-root).focus-within\:opacity-100,:where(.og-root) .focus-within\:opacity-100 {
     &:focus-within {
       opacity: 100%;
@@ -3744,6 +3803,11 @@
       color: var(--color-fg);
     }
   }
+:where(.og-root).focus\:opacity-100,:where(.og-root) .focus\:opacity-100 {
+    &:focus {
+      opacity: 100%;
+    }
+  }
 :where(.og-root).focus\:ring-1,:where(.og-root) .focus\:ring-1 {
     &:focus {
       --tw-ring-shadow: var(--tw-ring-inset,) 0 0 0 calc(1px + var(--tw-ring-offset-width)) var(--tw-ring-color, currentcolor);
@@ -3932,6 +3996,11 @@
 :where(.og-root).disabled\:text-og-fg-subtle,:where(.og-root) .disabled\:text-og-fg-subtle {
     &:disabled {
       color: var(--og-color-fg-subtle);
+    }
+  }
+:where(.og-root).disabled\:opacity-30,:where(.og-root) .disabled\:opacity-30 {
+    &:disabled {
+      opacity: 30%;
     }
   }
 :where(.og-root).disabled\:opacity-35,:where(.og-root) .disabled\:opacity-35 {

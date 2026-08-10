@@ -116,6 +116,9 @@ export class MockAgentResponder implements ControlRpc {
     if (!op) {
       return errorResponse(req.requestId, ErrorCode.ERROR_CODE_PROTOCOL, "empty op", false);
     }
+    const subjectParts = subject.split(".");
+    const workspaceId = subjectParts[1] ?? "";
+    const agentId = subjectParts[2] ?? "";
     switch (op.$case) {
       case "ping":
         return ok(req.requestId, {
@@ -197,8 +200,8 @@ export class MockAgentResponder implements ControlRpc {
           desktopEnsure: {
             channel: {
               channelId: "mock-desktop",
-              workspaceId: "",
-              agentId: "",
+              workspaceId,
+              agentId,
               kind: 1,
               port: 6080,
             },
@@ -214,7 +217,40 @@ export class MockAgentResponder implements ControlRpc {
           $case: "ptyOpen",
           ptyOpen: {
             ptyId: "mock-pty",
-            channel: { channelId: "mock-pty", workspaceId: "", agentId: "", kind: 1, port: 7681 },
+            channel: { channelId: "mock-pty", workspaceId, agentId, kind: 1, port: 7681 },
+          },
+        });
+      }
+      case "browserControlEnsure":
+        return ok(req.requestId, {
+          $case: "browserControlEnsure",
+          browserControlEnsure: { port: 17_321, sidecarGeneration: "mock-sidecar-1" },
+        });
+      case "browserFramesOpen": {
+        return ok(req.requestId, {
+          $case: "browserFramesOpen",
+          browserFramesOpen: {
+            channel: {
+              channelId: `mock-browser-${op.browserFramesOpen.targetId}`,
+              workspaceId,
+              agentId,
+              kind: 3,
+              port: 20_000,
+            },
+          },
+        });
+      }
+      case "computerFramesOpen": {
+        return ok(req.requestId, {
+          $case: "computerFramesOpen",
+          computerFramesOpen: {
+            channel: {
+              channelId: `mock-computer-${op.computerFramesOpen.targetId}`,
+              workspaceId,
+              agentId,
+              kind: 4,
+              port: 20_001,
+            },
           },
         });
       }

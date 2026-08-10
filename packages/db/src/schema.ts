@@ -1,4 +1,6 @@
 import type {
+  AttemptToolCatalog,
+  AttemptToolResult,
   DraftTimelineAnnotation,
   FirstPartyMcpToolName,
   McpPersonalConnectionDelegation,
@@ -3234,7 +3236,7 @@ export const sessionTurns = pgTable(
     // turn has no human preference authority.
     initiatingHumanSubjectId: text("initiating_human_subject_id"),
     // Immutable exact personal MCP authority for this logical turn. Recovery,
-    // approval, retries, and Toolspace reuse this row; no runtime may infer
+    // approval, retries, and Codemode reuse this row; no runtime may infer
     // broader authority from the session creator or mutable session state.
     personalConnectionDelegations: jsonb("personal_connection_delegations")
       .$type<McpPersonalConnectionDelegation[]>()
@@ -3242,10 +3244,10 @@ export const sessionTurns = pgTable(
       .default([]),
     cancelledBy: text("cancelled_by"),
     cancelReason: text("cancel_reason"),
-    // Atomic per-turn toolspace call budget counter (migration 0043). Incremented
+    // Atomic per-turn codemode call budget counter (migration 0043). Incremented
     // by a single conditional UPDATE at tools/call time; the row lock serializes
-    // concurrent reservations so exactly `toolspaceMaxCallsPerTurn` succeed.
-    toolspaceCallCount: integer("toolspace_call_count").notNull().default(0),
+    // concurrent reservations so exactly `codemodeMaxCallsPerTurn` succeed.
+    codemodeCallCount: integer("codemode_call_count").notNull().default(0),
     startedAt: timestamp("started_at", { withTimezone: true }),
     finishedAt: timestamp("finished_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -3431,6 +3433,243 @@ export const sessionTurnAttempts = pgTable(
       "session_turn_attempts_closed_check",
       sql`(${table.state} = 'closed' and ${table.outcome} is not null and ${table.closedAt} is not null)
         or (${table.state} <> 'closed' and ${table.outcome} is null and ${table.closedAt} is null)`,
+    ),
+  }),
+);
+
+// Immutable executable tool universe admitted to one exact attempt. Model MCP
+// and sandbox Codemode use the same digest and opaque identities from this row.
+export const sessionAttemptToolCatalogs = pgTable(
+  "session_attempt_tool_catalogs",
+  {
+    attemptId: uuid("attempt_id").primaryKey(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    turnId: uuid("turn_id").notNull(),
+    executionGeneration: integer("execution_generation").notNull(),
+    catalogVersion: integer("catalog_version").notNull(),
+    generation: integer("generation").notNull(),
+    digest: text("digest").notNull(),
+    catalog: jsonb("catalog").$type<AttemptToolCatalog>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    attemptOwner: foreignKey({
+      name: "session_attempt_tool_catalogs_attempt_owner_fk",
+      columns: [table.accountId, table.workspaceId, table.sessionId, table.turnId, table.attemptId],
+      foreignColumns: [
+        sessionTurnAttempts.accountId,
+        sessionTurnAttempts.workspaceId,
+        sessionTurnAttempts.sessionId,
+        sessionTurnAttempts.turnId,
+        sessionTurnAttempts.id,
+      ],
+    }).onDelete("cascade"),
+    sessionTurn: index("session_attempt_tool_catalogs_session_turn_idx").on(
+      table.workspaceId,
+      table.sessionId,
+      table.turnId,
+    ),
+    exactAuthorityDigest: uniqueIndex(
+      "session_attempt_tool_catalogs_exact_authority_digest_uidx",
+    ).on(
+      table.accountId,
+      table.workspaceId,
+      table.sessionId,
+      table.turnId,
+      table.attemptId,
+      table.executionGeneration,
+      table.digest,
+    ),
+    versionValid: check(
+      "session_attempt_tool_catalogs_version_check",
+      sql`${table.catalogVersion} = 1 and ${table.generation} > 0 and ${table.executionGeneration} > 0`,
+    ),
+    digestValid: check(
+      "session_attempt_tool_catalogs_digest_check",
+      sql`${table.digest} ~ '^[0-9a-f]{64}$'`,
+    ),
+    catalogSize: check(
+      "session_attempt_tool_catalogs_size_check",
+      sql`octet_length(${table.catalog}::text) between 2 and 16777216`,
+    ),
+    catalogIdentity: check(
+      "session_attempt_tool_catalogs_catalog_identity_check",
+      sql`jsonb_typeof(${table.catalog}) = 'object'
+        and ${table.catalog} ?& array[
+          'version', 'accountId', 'workspaceId', 'sessionId', 'turnId',
+          'attemptId', 'executionGeneration', 'generation', 'createdAt',
+          'digest', 'entries'
+        ]::text[]
+        and ${table.catalog}->>'accountId' = ${table.accountId}::text
+        and ${table.catalog}->>'workspaceId' = ${table.workspaceId}::text
+        and ${table.catalog}->>'sessionId' = ${table.sessionId}::text
+        and ${table.catalog}->>'turnId' = ${table.turnId}::text
+        and ${table.catalog}->>'attemptId' = ${table.attemptId}::text
+        and (${table.catalog}->>'executionGeneration')::integer = ${table.executionGeneration}
+        and (${table.catalog}->>'version')::integer = ${table.catalogVersion}
+        and (${table.catalog}->>'generation')::integer = ${table.generation}
+        and ${table.catalog}->>'digest' = ${table.digest}
+        and jsonb_typeof(${table.catalog}->'entries') = 'array'
+        and jsonb_array_length(${table.catalog}->'entries') <= 4096`,
+    ),
+  }),
+);
+
+// Durable idempotency and outcome journal for calls made programmatically from
+// an attempt's sandbox. The active worker executes these through the exact same
+// in-memory AttemptToolEnvironment as model MCP calls.
+export const sessionAttemptCodemodeCalls = pgTable(
+  "session_attempt_codemode_calls",
+  {
+    operationId: uuid("operation_id").primaryKey(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    turnId: uuid("turn_id").notNull(),
+    attemptId: uuid("attempt_id").notNull(),
+    executionGeneration: integer("execution_generation").notNull(),
+    catalogDigest: text("catalog_digest").notNull(),
+    requestDigest: text("request_digest").notNull(),
+    serverId: text("server_id").notNull(),
+    toolName: text("tool_name").notNull(),
+    arguments: jsonb("arguments").$type<Record<string, unknown>>().notNull(),
+    callerSubjectId: text("caller_subject_id").notNull(),
+    state: text("state", {
+      enum: ["queued", "running", "completed", "failed", "outcome_unknown", "cancelled"],
+    })
+      .notNull()
+      .default("queued"),
+    claimId: uuid("claim_id"),
+    result: jsonb("result").$type<AttemptToolResult>(),
+    errorCode: text("error_code"),
+    errorMessage: text("error_message"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }),
+    executionStartedAt: timestamp("execution_started_at", { withTimezone: true }),
+    claimExpiresAt: timestamp("claim_expires_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    catalog: foreignKey({
+      name: "session_attempt_codemode_calls_catalog_fk",
+      columns: [
+        table.accountId,
+        table.workspaceId,
+        table.sessionId,
+        table.turnId,
+        table.attemptId,
+        table.executionGeneration,
+        table.catalogDigest,
+      ],
+      foreignColumns: [
+        sessionAttemptToolCatalogs.accountId,
+        sessionAttemptToolCatalogs.workspaceId,
+        sessionAttemptToolCatalogs.sessionId,
+        sessionAttemptToolCatalogs.turnId,
+        sessionAttemptToolCatalogs.attemptId,
+        sessionAttemptToolCatalogs.executionGeneration,
+        sessionAttemptToolCatalogs.digest,
+      ],
+    }).onDelete("cascade"),
+    sessionTurn: index("session_attempt_codemode_calls_session_turn_idx").on(
+      table.workspaceId,
+      table.sessionId,
+      table.turnId,
+      table.createdAt,
+    ),
+    activeAttempt: index("session_attempt_codemode_calls_active_attempt_idx")
+      .on(table.workspaceId, table.attemptId, table.state)
+      .where(sql`${table.state} in ('queued', 'running')`),
+    generationsValid: check(
+      "session_attempt_codemode_calls_generation_check",
+      sql`${table.executionGeneration} > 0`,
+    ),
+    digestsValid: check(
+      "session_attempt_codemode_calls_digests_check",
+      sql`${table.catalogDigest} ~ '^[0-9a-f]{64}$' and ${table.requestDigest} ~ '^[0-9a-f]{64}$'`,
+    ),
+    identityValid: check(
+      "session_attempt_codemode_calls_identity_check",
+      sql`octet_length(${table.serverId}) between 1 and 256
+        and octet_length(${table.toolName}) between 1 and 512
+        and octet_length(${table.callerSubjectId}) between 1 and 1024`,
+    ),
+    argumentsSize: check(
+      "session_attempt_codemode_calls_arguments_size_check",
+      sql`jsonb_typeof(${table.arguments}) = 'object'
+        and octet_length(${table.arguments}::text) between 2 and 4194304`,
+    ),
+    resultSize: check(
+      "session_attempt_codemode_calls_result_size_check",
+      sql`${table.result} is null or (
+        jsonb_typeof(${table.result}) = 'object'
+        and octet_length(${table.result}::text) between 2 and 16777216
+      )`,
+    ),
+    lifecycleValid: check(
+      "session_attempt_codemode_calls_lifecycle_check",
+      sql`(
+        ${table.state} = 'queued'
+        and ${table.claimId} is null
+        and ${table.claimedAt} is null
+        and ${table.executionStartedAt} is null
+        and ${table.claimExpiresAt} is null
+        and ${table.completedAt} is null
+        and ${table.result} is null
+        and ${table.errorCode} is null
+        and ${table.errorMessage} is null
+      ) or (
+        ${table.state} = 'running'
+        and ${table.claimId} is not null
+        and ${table.claimedAt} is not null
+        and ${table.claimExpiresAt} is not null
+        and ${table.completedAt} is null
+        and ${table.result} is null
+        and ${table.errorCode} is null
+        and ${table.errorMessage} is null
+      ) or (
+        ${table.state} = 'completed'
+        and ${table.claimId} is not null
+        and ${table.claimedAt} is not null
+        and ${table.executionStartedAt} is not null
+        and ${table.claimExpiresAt} is not null
+        and ${table.completedAt} is not null
+        and ${table.result} is not null
+        and ${table.errorCode} is null
+        and ${table.errorMessage} is null
+      ) or (
+        ${table.state} = 'failed'
+        and ${table.claimId} is not null
+        and ${table.claimedAt} is not null
+        and ${table.claimExpiresAt} is not null
+        and ${table.completedAt} is not null
+        and ${table.result} is null
+        and ${table.errorCode} is not null
+        and ${table.errorMessage} is not null
+      ) or (
+        ${table.state} = 'outcome_unknown'
+        and ${table.claimId} is not null
+        and ${table.claimedAt} is not null
+        and ${table.executionStartedAt} is not null
+        and ${table.claimExpiresAt} is not null
+        and ${table.completedAt} is not null
+        and ${table.result} is null
+        and ${table.errorCode} is not null
+        and ${table.errorMessage} is not null
+      ) or (
+        ${table.state} = 'cancelled'
+        and ${table.claimId} is null
+        and ${table.claimedAt} is null
+        and ${table.executionStartedAt} is null
+        and ${table.claimExpiresAt} is null
+        and ${table.completedAt} is not null
+        and ${table.result} is null
+        and ${table.errorCode} is not null
+        and ${table.errorMessage} is not null
+      )`,
     ),
   }),
 );
@@ -4894,7 +5133,9 @@ export const sandboxLeaseHolders = pgTable(
     leaseId: uuid("lease_id")
       .notNull()
       .references(() => sandboxLeases.id, { onDelete: "cascade" }),
-    kind: text("kind", { enum: ["turn", "viewer", "direct", "process"] }).notNull(),
+    kind: text("kind", {
+      enum: ["turn", "viewer", "direct", "process", "interaction"],
+    }).notNull(),
     holderId: text("holder_id").notNull(),
     // The attributing session within the (possibly shared) group.
     subjectId: uuid("subject_id"),
@@ -6957,3 +7198,4 @@ export * from "./memory-governance-schema";
 export * from "./scoped-knowledge-schema";
 export * from "./knowledge-source-sync-schema";
 export * from "./transcription-recordings-schema";
+export * from "./interaction-schema";

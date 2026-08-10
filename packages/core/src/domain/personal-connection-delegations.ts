@@ -241,7 +241,7 @@ function personalAuthorityUnavailable(
 
 /**
  * Resolves subject-owned MCP credentials only through the exact authority
- * frozen on the causal turn. A direct human subject, worker Toolspace caller,
+ * frozen on the causal turn. A direct human subject, worker Codemode caller,
  * retry, or recovery can identify the caller, but none may widen or replace
  * the persisted connection UUID.
  */

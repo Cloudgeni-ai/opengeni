@@ -110,19 +110,18 @@ describe("lazy provisioning synthetic manifest", () => {
     );
   });
 
-  test("lazy setup seeds the provisioning-time Toolspace bearer instead of the turn-start bearer", async () => {
+  test("lazy setup seeds the provisioning-time Codemode bearer instead of the turn-start bearer", async () => {
     const settings = testSettings({
       sandboxBackend: "modal",
       webSearchEnabled: false,
-      toolspaceEnabled: true,
-      delegationSecret: "toolspace-secret",
+      delegationSecret: "codemode-secret",
     });
     const environment = { HOME: "/workspace" };
     const agent = buildOpenGeniAgent(settings, [], {
       model: new ScriptedModel([]),
       sandboxEnvironment: environment,
-      toolspaceTokenSeed: "ogd_turn_start",
-      toolspaceTokenSessionId: "session-lazy",
+      codemodeTokenSeed: "ogd_turn_start",
+      codemodeTokenSessionId: "session-lazy",
     });
     const commands: string[] = [];
     const backend = {
@@ -136,11 +135,11 @@ describe("lazy provisioning synthetic manifest", () => {
     await runOwnedSandboxSetup(agent, backend as never, backend as never, {
       settings,
       environment,
-      toolspaceTokenSeedOverride: "ogd_provisioning_time",
+      codemodeTokenSeedOverride: "ogd_provisioning_time",
     });
 
     const seedCommand = commands.find((command) =>
-      command.includes("OPENGENI_TOOLSPACE_TOKEN_SEED"),
+      command.includes("OPENGENI_CODEMODE_TOKEN_SEED"),
     );
     expect(seedCommand).toContain("ogd_provisioning_time");
     expect(seedCommand).not.toContain("ogd_turn_start");
