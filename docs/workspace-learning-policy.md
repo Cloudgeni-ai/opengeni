@@ -25,7 +25,7 @@ Migration `0199_workspace_learning_policy.sql` adds four FORCE-RLS tables:
 
 Revision creation does not activate a policy. Activation and rollback require an exact authenticated human actor, expected current revision, expected activation version, and operation fingerprint. A rollback target must have been active previously. Direct head/event writes are not a supported or authorized activation path.
 
-Workspaces without an active revision snapshot deterministically as `off`, with no revision and no source overrides. This default applies only to the future governed derived-learning path; it does not disable existing Memory injection, `memory_search`, `memory_save`, or `memory_correct` behavior.
+Workspaces without an active revision snapshot deterministically as `off`, with no revision and no source overrides. This default applies only to a governed derived-learning evaluator/controller; it does not disable existing Memory injection, `memory_search`, `memory_save`, or `memory_correct` behavior.
 
 ## Effective resolution and the durable-learning router interface
 
@@ -35,9 +35,9 @@ Workspaces without an active revision snapshot deterministically as `off`, with 
 2. It matches one exact `{kind,id}` override.
 3. It returns the override mode when present; otherwise it returns the workspace mode with `inherited: true`.
 4. Its receipt retains the snapshot id/hash, policy revision identity, activation version, and source reference.
-5. `workspaceLearningPolicyRouterContext(effectiveMode)` projects the exact immutable `{mode,snapshotId,revisionId}` object consumed by the canonical router. A snapshot with no active revision uses the explicit stable `workspace-learning-policy:default-off:v1` revision sentinel, preserving the deterministic `off` policy instead of misrepresenting it as a missing snapshot.
+5. `workspaceLearningPolicyRouterContext(effectiveMode)` projects the exact immutable `{mode,snapshotId,revisionId}` handoff for a separately authorized evaluator/controller before it invokes the canonical confirmed-write router. A snapshot with no active revision uses the explicit stable `workspace-learning-policy:default-off:v1` revision sentinel, preserving the deterministic `off` policy instead of misrepresenting it as a missing snapshot.
 
-The canonical durable-learning router may consume this result, but this policy domain does not implement routing. Destination ownership remains:
+The canonical durable-learning router is implemented separately and does not automatically resolve or enforce this policy. A future evaluator/controller must consume this result, decide whether it may form a confirmed proposal or activation request, and then invoke the router. Destination ownership remains:
 
 - Documents/RAG: evidence and retrieval only.
 - Memory: facts, decisions, observations, and history.
@@ -46,9 +46,8 @@ The canonical durable-learning router may consume this result, but this policy d
 
 ## Explicit non-goals
 
-This slice does not implement:
+This policy slice does not implement:
 
-- the canonical durable-learning write router;
 - derived-change evaluation or automatic activation control;
 - destination Memory, Preference Registry, charter, or policy mutation;
 - explicit session command/tool integration;
@@ -57,3 +56,5 @@ This slice does not implement:
 - Slack notification delivery.
 
 Canonical code: `packages/contracts/src/workspace-learning-policy.ts`, `packages/db/src/workspace-learning-policy.ts`, `packages/db/src/workspace-learning-policy-schema.ts`, and migration `0199_workspace_learning_policy.sql`.
+
+Canonical confirmed-write routing: [`durable-learning-router.md`](durable-learning-router.md).

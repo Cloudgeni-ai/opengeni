@@ -681,6 +681,27 @@ BEGIN
     END IF;
     IF to_regprocedure(
       format(
+        '%I.durable_learning_begin_attempt(uuid,uuid,uuid,uuid,uuid,uuid,integer,text,text,text,text,jsonb,jsonb)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.durable_learning_begin_attempt(uuid, uuid, uuid, uuid, uuid, uuid, integer, text, text, text, text, jsonb, jsonb) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format('%I.durable_learning_complete_attempt(uuid,text,jsonb)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.durable_learning_complete_attempt(uuid, text, jsonb) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
         '%I.scoped_knowledge_apply_lifecycle(uuid,text,uuid,text,bigint,text,text,text,text,text,text)',
         ${literal(schema)}
       )

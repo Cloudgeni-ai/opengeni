@@ -297,6 +297,7 @@ export * from "./workspace-instruction-policies";
 export * from "./company-profile";
 export * from "./workspace-learning-policy";
 export * from "./preference-registry";
+export * from "./durable-learning";
 export * from "./memory-governance";
 export * from "./scoped-knowledge";
 export * from "./knowledge-source-sync";

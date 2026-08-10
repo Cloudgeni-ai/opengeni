@@ -6616,6 +6616,7 @@ export * from "./workspace-instruction-policies-schema";
 export * from "./company-profile-schema";
 export * from "./workspace-learning-policy-schema";
 export * from "./preference-registry-schema";
+export * from "./durable-learning-schema";
 export * from "./memory-governance-schema";
 export * from "./scoped-knowledge-schema";
 export * from "./knowledge-source-sync-schema";

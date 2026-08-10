@@ -11130,4 +11130,5 @@ export * from "./company-profile";
 export * from "./workspace-learning-policy";
 export * from "./workspace-state";
 export * from "./preference-registry";
+export * from "./durable-learning";
 export * from "./scoped-knowledge";

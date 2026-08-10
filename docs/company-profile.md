@@ -39,8 +39,9 @@ route.
 Explicit agent-directed and autonomous company-level learning does not use the
 admin route. The canonical durable-learning router is the sole caller of the
 authority-native `writeCompanyProfileLearning` / `rollbackCompanyProfileLearning`
-seam. This authority does not implement the router, its ledger, natural-language
-commands, or learning-policy resolution.
+seam. This authority does not itself implement the router or ledger, and the
+router does not add natural-language commands or learning-policy resolution.
+See [`durable-learning-router.md`](durable-learning-router.md).
 
 ## Bounded structured content
 
@@ -160,7 +161,8 @@ default profile.
 
 ## Deliberate non-goals
 
-This authority does not implement natural-language remember commands, learning-policy
-resolution, durable-learning routing/ledger storage, Documents ingestion or search,
-Memory, Preference Registry, workspace charter/policy activation, or generic
-company knowledge retrieval.
+This authority does not implement natural-language remember commands,
+learning-policy resolution, Documents ingestion or search, Memory, Preference
+Registry, workspace charter/policy activation, or generic company knowledge
+retrieval. Durable-learning routing and ledger storage are separate canonical
+components documented in [`durable-learning-router.md`](durable-learning-router.md).

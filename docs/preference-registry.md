@@ -122,11 +122,14 @@ only inactive proposals with a required provenance source ID and
 `untrusted_proposal` trust. Neither ingestion nor a connector/service identity
 can activate a preference or change its scope. The currently implemented human
 route requires a separately authorized direct human to activate the exact
-immutable revision and produce audit evidence. The only authorized future
-automatic seam is the separate governed-learning controller: it must activate
-an exact immutable proposal through this canonical lifecycle under a versioned
-automatic policy. Connectors, ingestion, workers, source text, and arbitrary
-services still cannot activate directly.
+immutable revision and produce audit evidence. The canonical confirmed-write
+router may create or correct a structured preference only after exact-attempt
+and initiating-human authorization, while still delegating to this lifecycle.
+The only authorized future automatic decision seam is the separate
+governed-learning controller: under a versioned automatic policy, it must invoke
+that router for an exact immutable request rather than activating registry rows
+directly. Connectors, ingestion, workers, source text, and arbitrary services
+still cannot activate directly.
 
 This registry does not ingest source content and does not define connector or
 source/fact schemas. Those systems can call proposal creation later, but cannot
