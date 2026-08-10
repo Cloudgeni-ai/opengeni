@@ -58,6 +58,7 @@ import { registerConnectionRoutes } from "./routes/connections";
 import { registerDocumentRoutes } from "./routes/documents";
 import { registerEnrollmentRoutes } from "./routes/enrollments";
 import { registerMachineRoutes } from "./routes/machines";
+import { registerMemorySlackPublicationRoutes } from "./routes/memory-slack-publications";
 import { registerEnvironmentRoutes } from "./routes/environments";
 import { registerFileRoutes } from "./routes/files";
 import { registerApiKeyRoutes } from "./routes/api-keys";
@@ -574,6 +575,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerInsightsRoutes(app, routeDeps);
   registerWorkspaceInstructionPolicyRoutes(app, routeDeps);
   registerWorkspaceStateRoutes(app, routeDeps);
+  registerMemorySlackPublicationRoutes(app, routeDeps);
   registerWorkspaceArtifactRoutes(app, routeDeps);
   registerPreferenceRegistryRoutes(app, routeDeps);
   registerSocialRoutes(app, routeDeps);

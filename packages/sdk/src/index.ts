@@ -185,6 +185,22 @@ export type {
   WorkspaceStateResponse,
   WorkspaceStateSourceKindCounts,
 } from "./workspace-state";
+export type {
+  MemorySlackImportance,
+  MemorySlackPublication,
+  MemorySlackPublicationActionRequest,
+  MemorySlackPublicationConfiguration,
+  MemorySlackPublicationConfigurationResponse,
+  MemorySlackPublicationDistribution,
+  MemorySlackPublicationHistoryResponse,
+  MemorySlackPublicationReceipt,
+  MemorySlackPublicationReceiptKind,
+  MemorySlackPublicationState,
+  MemorySlackRequestedMode,
+  SlackPublicationChannel,
+  SlackPublicationChannelListResponse,
+  UpdateMemorySlackPublicationConfigurationRequest,
+} from "./memory-slack-delivery";
 export { normalizePreferenceRegistryStableKey } from "./preference-registry";
 export type {
   ActivatePreferenceRegistryRevisionRequest,

@@ -1127,6 +1127,303 @@ export const slackBotPostOperations = pgTable(
   }),
 );
 
+export const memorySlackPublicationConfigurations = pgTable(
+  "memory_slack_publication_configurations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    revision: integer("revision").notNull(),
+    enabled: boolean("enabled").notNull(),
+    connectionId: uuid("connection_id"),
+    slackTeamId: text("slack_team_id"),
+    slackChannelId: text("slack_channel_id"),
+    slackChannelName: text("slack_channel_name"),
+    autoImportances: text("auto_importances").array().notNull().default(["major"]),
+    reviewImportances: text("review_importances").array().notNull().default(["normal"]),
+    createdBySubjectId: text("created_by_subject_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceRevision: uniqueIndex(
+      "memory_slack_publication_configurations_workspace_revision_uq",
+    ).on(table.workspaceId, table.revision),
+    workspaceCreated: index("memory_slack_publication_configurations_workspace_created_idx").on(
+      table.workspaceId,
+      table.revision,
+    ),
+    revisionValid: check(
+      "memory_slack_publication_configurations_revision_check",
+      sql`${table.revision} > 0`,
+    ),
+    destinationValid: check(
+      "memory_slack_publication_configurations_destination_check",
+      sql`not ${table.enabled} or (
+        ${table.connectionId} is not null
+        and octet_length(${table.slackTeamId}) between 1 and 64
+        and octet_length(${table.slackChannelId}) between 1 and 64
+      )`,
+    ),
+    channelNameValid: check(
+      "memory_slack_publication_configurations_channel_name_check",
+      sql`${table.slackChannelName} is null
+        or octet_length(${table.slackChannelName}) between 1 and 256`,
+    ),
+    policyValid: check(
+      "memory_slack_publication_configurations_policy_check",
+      sql`${table.autoImportances} <@ array['major', 'normal', 'minor']::text[]
+        and ${table.reviewImportances} <@ array['major', 'normal', 'minor']::text[]
+        and cardinality(${table.autoImportances}) <= 3
+        and cardinality(${table.reviewImportances}) <= 3
+        and not (${table.autoImportances} && ${table.reviewImportances})`,
+    ),
+    actorValid: check(
+      "memory_slack_publication_configurations_actor_check",
+      sql`octet_length(${table.createdBySubjectId}) between 1 and 1024`,
+    ),
+  }),
+);
+
+export const memorySlackPublications = pgTable(
+  "memory_slack_publications",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    configurationId: uuid("configuration_id")
+      .notNull()
+      .references(() => memorySlackPublicationConfigurations.id, { onDelete: "restrict" }),
+    configurationRevision: integer("configuration_revision").notNull(),
+    connectionId: uuid("connection_id").notNull(),
+    slackTeamId: text("slack_team_id").notNull(),
+    slackChannelId: text("slack_channel_id").notNull(),
+    sourceType: text("source_type").$type<"workspace_memory" | "durable_learning">().notNull(),
+    sourceId: text("source_id").notNull(),
+    sourceVersion: text("source_version"),
+    sourceIdempotencyKey: text("source_idempotency_key").notNull(),
+    projection: jsonb("projection").$type<Record<string, unknown>>().notNull(),
+    projectionSha256: text("projection_sha256").notNull(),
+    importance: text("importance").$type<"major" | "normal" | "minor">().notNull(),
+    deliveryMode: text("delivery_mode").$type<"auto" | "review">().notNull(),
+    state: text("state")
+      .$type<
+        | "review_pending"
+        | "queued"
+        | "delivering"
+        | "retry_wait"
+        | "delivered"
+        | "rejected"
+        | "failed"
+        | "cancelled"
+      >()
+      .notNull(),
+    operationId: uuid("operation_id").notNull(),
+    initiatorKind: text("initiator_kind").$type<"human" | "agent" | "service">().notNull(),
+    initiatorSubjectId: text("initiator_subject_id").notNull(),
+    initiatingHumanSubjectId: text("initiating_human_subject_id"),
+    sessionId: uuid("session_id"),
+    turnId: uuid("turn_id"),
+    attemptId: uuid("attempt_id"),
+    claimHolderId: uuid("claim_holder_id"),
+    claimExpiresAt: timestamp("claim_expires_at", { withTimezone: true }),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    retryAt: timestamp("retry_at", { withTimezone: true }),
+    lastErrorCode: text("last_error_code"),
+    slackMessageTimestamp: text("slack_message_timestamp"),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+    terminalAt: timestamp("terminal_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    source: uniqueIndex("memory_slack_publications_source_uq").on(
+      table.workspaceId,
+      table.sourceIdempotencyKey,
+    ),
+    operation: uniqueIndex("memory_slack_publications_operation_uq").on(
+      table.workspaceId,
+      table.operationId,
+    ),
+    claim: index("memory_slack_publications_claim_idx").on(
+      table.state,
+      table.retryAt,
+      table.createdAt,
+      table.id,
+    ),
+    workspaceHistory: index("memory_slack_publications_workspace_history_idx").on(
+      table.workspaceId,
+      table.createdAt,
+      table.id,
+    ),
+    sourceTypeValid: check(
+      "memory_slack_publications_source_type_check",
+      sql`${table.sourceType} in ('workspace_memory', 'durable_learning')`,
+    ),
+    sourceValid: check(
+      "memory_slack_publications_source_check",
+      sql`octet_length(${table.sourceId}) between 1 and 1024
+        and (${table.sourceVersion} is null or octet_length(${table.sourceVersion}) between 1 and 512)
+        and octet_length(${table.sourceIdempotencyKey}) between 1 and 256`,
+    ),
+    projectionValid: check(
+      "memory_slack_publications_projection_check",
+      sql`jsonb_typeof(${table.projection}) = 'object'
+        and octet_length(${table.projection}::text) between 2 and 8192
+        and ${table.projectionSha256} ~ '^[0-9a-f]{64}$'`,
+    ),
+    distributionValid: check(
+      "memory_slack_publications_distribution_check",
+      sql`${table.importance} in ('major', 'normal', 'minor')
+        and ${table.deliveryMode} in ('auto', 'review')`,
+    ),
+    stateValid: check(
+      "memory_slack_publications_state_check",
+      sql`${table.state} in (
+        'review_pending', 'queued', 'delivering', 'retry_wait',
+        'delivered', 'rejected', 'failed', 'cancelled'
+      )`,
+    ),
+    destinationValid: check(
+      "memory_slack_publications_destination_check",
+      sql`${table.configurationRevision} > 0
+        and octet_length(${table.slackTeamId}) between 1 and 64
+        and octet_length(${table.slackChannelId}) between 1 and 64`,
+    ),
+    initiatorValid: check(
+      "memory_slack_publications_initiator_check",
+      sql`${table.initiatorKind} in ('human', 'agent', 'service')
+        and octet_length(${table.initiatorSubjectId}) between 1 and 1024
+        and (${table.initiatingHumanSubjectId} is null
+          or octet_length(${table.initiatingHumanSubjectId}) between 1 and 1024)`,
+    ),
+    claimValid: check(
+      "memory_slack_publications_claim_check",
+      sql`(${table.state} = 'delivering'
+          and ${table.claimHolderId} is not null
+          and ${table.claimExpiresAt} is not null
+          and ${table.retryAt} is null)
+        or (${table.state} = 'retry_wait'
+          and ${table.claimHolderId} is null
+          and ${table.claimExpiresAt} is null
+          and ${table.retryAt} is not null)
+        or (${table.state} not in ('delivering', 'retry_wait')
+          and ${table.claimHolderId} is null
+          and ${table.claimExpiresAt} is null
+          and ${table.retryAt} is null)`,
+    ),
+    attemptValid: check("memory_slack_publications_attempt_check", sql`${table.attemptCount} >= 0`),
+    errorValid: check(
+      "memory_slack_publications_error_check",
+      sql`${table.lastErrorCode} is null or octet_length(${table.lastErrorCode}) between 1 and 128`,
+    ),
+  }),
+);
+
+export const memorySlackPublicationReceipts = pgTable(
+  "memory_slack_publication_receipts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    publicationId: uuid("publication_id")
+      .notNull()
+      .references(() => memorySlackPublications.id, { onDelete: "cascade" }),
+    sequence: integer("sequence").notNull(),
+    kind: text("kind")
+      .$type<
+        | "enqueued"
+        | "review_approved"
+        | "review_rejected"
+        | "delivery_claimed"
+        | "retry_scheduled"
+        | "delivered"
+        | "failed"
+        | "cancelled"
+        | "manual_retry"
+      >()
+      .notNull(),
+    state: text("state")
+      .$type<
+        | "review_pending"
+        | "queued"
+        | "delivering"
+        | "retry_wait"
+        | "delivered"
+        | "rejected"
+        | "failed"
+        | "cancelled"
+      >()
+      .notNull(),
+    attemptNumber: integer("attempt_number").notNull(),
+    actorKind: text("actor_kind").$type<"human" | "agent" | "service">().notNull(),
+    actorSubjectId: text("actor_subject_id").notNull(),
+    operationId: uuid("operation_id").notNull(),
+    errorCode: text("error_code"),
+    retryAt: timestamp("retry_at", { withTimezone: true }),
+    slackChannelId: text("slack_channel_id"),
+    slackMessageTimestamp: text("slack_message_timestamp"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    sequenceUnique: uniqueIndex("memory_slack_publication_receipts_sequence_uq").on(
+      table.publicationId,
+      table.sequence,
+    ),
+    workspaceHistory: index("memory_slack_publication_receipts_workspace_history_idx").on(
+      table.workspaceId,
+      table.publicationId,
+      table.sequence,
+    ),
+    kindValid: check(
+      "memory_slack_publication_receipts_kind_check",
+      sql`${table.kind} in (
+        'enqueued', 'review_approved', 'review_rejected', 'delivery_claimed',
+        'retry_scheduled', 'delivered', 'failed', 'cancelled', 'manual_retry'
+      )`,
+    ),
+    stateValid: check(
+      "memory_slack_publication_receipts_state_check",
+      sql`${table.state} in (
+        'review_pending', 'queued', 'delivering', 'retry_wait',
+        'delivered', 'rejected', 'failed', 'cancelled'
+      )`,
+    ),
+    attemptValid: check(
+      "memory_slack_publication_receipts_attempt_check",
+      sql`${table.sequence} > 0 and ${table.attemptNumber} >= 0`,
+    ),
+    actorValid: check(
+      "memory_slack_publication_receipts_actor_check",
+      sql`${table.actorKind} in ('human', 'agent', 'service')
+        and octet_length(${table.actorSubjectId}) between 1 and 1024`,
+    ),
+    errorValid: check(
+      "memory_slack_publication_receipts_error_check",
+      sql`${table.errorCode} is null or octet_length(${table.errorCode}) between 1 and 128`,
+    ),
+    providerValid: check(
+      "memory_slack_publication_receipts_provider_check",
+      sql`((${table.slackChannelId} is null) = (${table.slackMessageTimestamp} is null))
+        and (${table.slackChannelId} is null
+          or octet_length(${table.slackChannelId}) between 1 and 64)
+        and (${table.slackMessageTimestamp} is null
+          or octet_length(${table.slackMessageTimestamp}) between 1 and 64)`,
+    ),
+  }),
+);
+
 // Durable provider-operation identity for OpenGeni Slack bot deletions. Slack
 // has no client-supplied idempotency key for chat.delete, so an expired
 // provider_started claim becomes outcome_unknown and must be reconciled before

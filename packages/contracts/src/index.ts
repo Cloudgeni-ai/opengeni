@@ -7,6 +7,7 @@ import {
 } from "./event-preview";
 import { WorkspaceInstructionPolicyRoleKeyInput } from "./workspace-instruction-policies";
 import { ClientResumableVoiceInputConfig } from "./transcription-recordings";
+import { MemorySlackPublicationDistribution } from "./memory-slack-delivery";
 
 export * from "./slack-bot-scopes";
 export * from "./connector-destinations";
@@ -14,6 +15,7 @@ export * from "./image-generation";
 export * from "./editable-artifacts";
 export * from "./editable-artifact-committed-transaction";
 export * from "./editable-artifact-serialized-commit";
+export * from "./memory-slack-delivery";
 
 export {
   CreateWorkspaceArtifactRequest,
@@ -3672,6 +3674,7 @@ export const CreateKnowledgeMemoryRequest = z.object({
   createdBySessionId: z.string().uuid().optional(),
   pinned: z.boolean().optional(),
   replacesId: z.string().min(1).optional(),
+  slackPublication: MemorySlackPublicationDistribution.optional(),
 });
 export type CreateKnowledgeMemoryRequest = z.infer<typeof CreateKnowledgeMemoryRequest>;
 

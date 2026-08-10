@@ -15,6 +15,7 @@ import {
   stableJson,
   compactSessionEventResult,
   sessionEventLatestClassToSemanticClass,
+  MemorySlackPublicationDistribution,
   SessionMcpCredentialUpdateInput,
   ToolAuthNeededPayload,
   VariableSetVariableName,
@@ -34,7 +35,6 @@ import {
   WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES,
 } from "@opengeni/contracts";
 import {
-  correctWorkspaceMemory,
   countVariableSets,
   beginRigChangeVerificationAttempt,
   createVariableSet,
@@ -71,7 +71,6 @@ import {
   MEMORY_SEARCH_TOOL_DESCRIPTION,
   requireScheduledTask,
   requireSession,
-  saveWorkspaceMemory,
   searchWorkspaceMemories,
   serializeEffectiveSessionControl,
   setSessionGoalStatusWithEvent,
@@ -111,9 +110,11 @@ import {
   hasPermission,
   authorizedSocialConnectionsForGrant,
   buildCapabilityCatalog,
+  correctWorkspaceMemoryWithSlackPublication,
   requireLiveAgentAttemptAuthorization,
   requireSessionAuthorization,
   requireSessionAuthorizationListScope,
+  saveWorkspaceMemoryWithSlackPublication,
   searchCapabilityCatalogItems,
   type ResolvedSessionAuthorization,
 } from "@opengeni/core";
@@ -2088,6 +2089,28 @@ function registerMemoryTools(
   sessionId: string,
   json: JsonResult,
 ): void {
+  const publicationActor = async () => {
+    const actor = await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
+    return {
+      actor: {
+        kind: actor.initiator.kind === "subject" ? ("human" as const) : ("service" as const),
+        subjectId: actor.initiator.subjectId,
+        initiatingHumanSubjectId:
+          actor.initiator.kind === "subject" ? actor.initiator.subjectId : null,
+        sessionId,
+        turnId: actor.turnId,
+        attemptId: actor.attemptId,
+      },
+      ownerLabel: actor.initiator.label ?? grant.subjectLabel ?? null,
+    };
+  };
+  const publicationInputSchema = z4.object({
+    importance: z4.enum(["major", "normal", "minor"]),
+    audience: z4.literal("workspace"),
+    slackMode: z4.enum(["auto", "review", "never"]),
+    shareSummary: z4.string().trim().min(1).max(4_096),
+  });
+
   server.registerTool(
     "memory_search",
     {
@@ -2122,10 +2145,12 @@ function registerMemoryTools(
         kind: MemoryKindSchema,
         confidence: z4.number().min(0).max(1).optional(),
         replaces_id: z4.string().min(1).optional(),
+        slack_publication: publicationInputSchema.optional(),
       },
     },
-    async ({ text, kind, confidence, replaces_id }) => {
-      const result = await saveWorkspaceMemory(
+    async ({ text, kind, confidence, replaces_id, slack_publication }) => {
+      const principal = slack_publication ? await publicationActor() : null;
+      const result = await saveWorkspaceMemoryWithSlackPublication(
         deps.db,
         {
           accountId: grant.accountId,
@@ -2137,6 +2162,13 @@ function registerMemoryTools(
           ...(replaces_id ? { replacesId: replaces_id } : {}),
           origin: "agent",
         },
+        slack_publication
+          ? {
+              distribution: MemorySlackPublicationDistribution.parse(slack_publication),
+              actor: principal!.actor,
+              ownerLabel: principal!.ownerLabel,
+            }
+          : null,
         deps.getDocumentServices().embedder,
       );
       await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [
@@ -2188,6 +2220,19 @@ function registerMemoryTools(
             dedupeReason: result.dedupeReason,
             updatedInPlace: result.updated,
             embedded: result.embedded,
+            slackPublicationDecision: result.slackPublication.decision?.eligible
+              ? "eligible"
+              : (result.slackPublication.decision?.reason ?? "not_requested"),
+            slackPublicationId:
+              result.slackPublication.enqueue?.kind === "enqueued" ||
+              result.slackPublication.enqueue?.kind === "replayed"
+                ? result.slackPublication.enqueue.publication.id
+                : null,
+            slackPublicationState:
+              result.slackPublication.enqueue?.kind === "enqueued" ||
+              result.slackPublication.enqueue?.kind === "replayed"
+                ? result.slackPublication.enqueue.publication.state
+                : null,
           },
         }),
       );
@@ -2202,10 +2247,12 @@ function registerMemoryTools(
         id: z4.string().min(1),
         reason: z4.string().min(1).optional(),
         replacement_text: z4.string().min(1).optional(),
+        slack_publication: publicationInputSchema.optional(),
       },
     },
-    async ({ id, reason, replacement_text }) => {
-      const result = await correctWorkspaceMemory(
+    async ({ id, reason, replacement_text, slack_publication }) => {
+      const principal = slack_publication ? await publicationActor() : null;
+      const result = await correctWorkspaceMemoryWithSlackPublication(
         deps.db,
         {
           accountId: grant.accountId,
@@ -2215,6 +2262,13 @@ function registerMemoryTools(
           ...(reason ? { reason } : {}),
           ...(replacement_text ? { replacementText: replacement_text } : {}),
         },
+        slack_publication
+          ? {
+              distribution: MemorySlackPublicationDistribution.parse(slack_publication),
+              actor: principal!.actor,
+              ownerLabel: principal!.ownerLabel,
+            }
+          : null,
         deps.getDocumentServices().embedder,
       );
       await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [
@@ -2257,7 +2311,22 @@ function registerMemoryTools(
             : undefined,
           timestamp: (result.replacement ?? result.memory).updatedAt,
           idempotency: { status: "not_supported" },
-          facts: { correctionAction: result.action },
+          facts: {
+            correctionAction: result.action,
+            slackPublicationDecision: result.slackPublication.decision?.eligible
+              ? "eligible"
+              : (result.slackPublication.decision?.reason ?? "not_requested"),
+            slackPublicationId:
+              result.slackPublication.enqueue?.kind === "enqueued" ||
+              result.slackPublication.enqueue?.kind === "replayed"
+                ? result.slackPublication.enqueue.publication.id
+                : null,
+            slackPublicationState:
+              result.slackPublication.enqueue?.kind === "enqueued" ||
+              result.slackPublication.enqueue?.kind === "replayed"
+                ? result.slackPublication.enqueue.publication.state
+                : null,
+          },
         }),
       );
     },

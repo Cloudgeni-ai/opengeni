@@ -293,6 +293,7 @@ export * from "./new-session-drafts";
 export * from "./workspace-instruction-policies";
 export * from "./preference-registry";
 export * from "./memory-governance";
+export * from "./memory-slack-delivery";
 export * from "./scoped-knowledge";
 export * from "./generated-images";
 export { interruptedToolCallResult } from "./session-tool-call-settlement";

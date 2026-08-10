@@ -33,6 +33,7 @@ import { CapabilityLogo } from "@/components/capabilities/capability-logo";
 import { CapabilityTile } from "@/components/capabilities/capability-tile";
 import { PacksSection } from "@/components/capabilities/packs-section";
 import { PersonalSlackAccountCard } from "@/components/capabilities/personal-slack-account-card";
+import { MemorySlackPublicationCard } from "@/components/capabilities/memory-slack-publication-card";
 import { SlackReactionSummonCard } from "@/components/capabilities/slack-reaction-summon-card";
 import { LoadErrorState, PageHeader } from "@/components/common";
 import { Button } from "@/components/ui/button";
@@ -1302,6 +1303,12 @@ export function CapabilitiesRoute({
                     canManage={canManageSlackReaction}
                     installBusy={slackBotBusy}
                     onReinstall={() => void installSlackBot(false)}
+                  />
+
+                  <MemorySlackPublicationCard
+                    workspaceId={workspaceId}
+                    connections={slackBotConnections}
+                    canManage={canManageSlackReaction}
                   />
 
                   <details className="group mt-3 border-t border-border/70 pt-3">

@@ -65,6 +65,8 @@ export * from "./domain/scheduled-tasks";
 export * from "./domain/sessions";
 export * from "./domain/insights";
 export * from "./domain/memory-slack-publication";
+export * from "./domain/memory-slack-delivery";
+export * from "./domain/durable-learning-slack-publication";
 export * from "./domain/slack-bot";
 export * from "./domain/workspace-members";
 export * from "./application/new-session-drafts";

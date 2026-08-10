@@ -259,6 +259,15 @@ import type {
   WorkspaceStateResponse,
 } from "./workspace-state";
 import type {
+  MemorySlackPublication,
+  MemorySlackPublicationActionRequest,
+  MemorySlackPublicationConfiguration,
+  MemorySlackPublicationConfigurationResponse,
+  MemorySlackPublicationHistoryResponse,
+  SlackPublicationChannelListResponse,
+  UpdateMemorySlackPublicationConfigurationRequest,
+} from "./memory-slack-delivery";
+import type {
   ActivatePreferenceRegistryRevisionRequest,
   ChangePreferenceRegistryScopeRequest,
   CorrectPreferenceRegistryRequest,
@@ -3569,6 +3578,60 @@ export class OpenGeniClient {
     return await this.requestJson<SlackReactionChannelListResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/integrations/slack/reaction-channels?${query}`,
+    );
+  }
+
+  async getMemorySlackPublicationConfiguration(
+    workspaceId: string,
+  ): Promise<MemorySlackPublicationConfigurationResponse> {
+    return await this.requestJson<MemorySlackPublicationConfigurationResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/memory-slack-publications/configuration`,
+    );
+  }
+
+  async updateMemorySlackPublicationConfiguration(
+    workspaceId: string,
+    request: UpdateMemorySlackPublicationConfigurationRequest,
+  ): Promise<MemorySlackPublicationConfiguration> {
+    return await this.requestJson<MemorySlackPublicationConfiguration>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/memory-slack-publications/configuration`,
+      request,
+    );
+  }
+
+  async listMemorySlackPublicationChannels(
+    workspaceId: string,
+    connectionId: string,
+    cursor?: string,
+  ): Promise<SlackPublicationChannelListResponse> {
+    const query = new URLSearchParams({ connectionId });
+    if (cursor) query.set("cursor", cursor);
+    return await this.requestJson<SlackPublicationChannelListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/memory-slack-publications/channels?${query}`,
+    );
+  }
+
+  async listMemorySlackPublications(
+    workspaceId: string,
+  ): Promise<MemorySlackPublicationHistoryResponse> {
+    return await this.requestJson<MemorySlackPublicationHistoryResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/memory-slack-publications`,
+    );
+  }
+
+  async actOnMemorySlackPublication(
+    workspaceId: string,
+    publicationId: string,
+    request: MemorySlackPublicationActionRequest,
+  ): Promise<MemorySlackPublication> {
+    return await this.requestJson<MemorySlackPublication>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/memory-slack-publications/${encodeURIComponent(publicationId)}/action`,
+      request,
     );
   }
 

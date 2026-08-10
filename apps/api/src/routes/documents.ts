@@ -21,7 +21,6 @@ import {
   getKnowledgeMemory,
   listKnowledgeMemories,
   updateKnowledgeMemory,
-  saveWorkspaceMemory,
   searchWorkspaceMemories,
 } from "@opengeni/db";
 import {
@@ -40,7 +39,11 @@ import {
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { requireAccessGrant, requireAccessGrantAuthorization } from "@opengeni/core";
+import {
+  requireAccessGrant,
+  requireAccessGrantAuthorization,
+  saveWorkspaceMemoryWithSlackPublication,
+} from "@opengeni/core";
 import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { buildDocumentsMcpServer } from "../mcp/documents";
@@ -561,12 +564,17 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(400, { message: "invalid knowledge memory request" });
     }
     const payload = parsedBody.data;
+    if (payload.status !== "active" && payload.slackPublication) {
+      throw new HTTPException(400, {
+        message: "Slack publication is available only for active Workspace Memory writes",
+      });
+    }
     // status `active` (the default) is a memory write → route through the single
     // gate (sanitize + embed + dedup). Explicit proposed/approved/rejected keeps
     // the legacy curated create.
     if (payload.status === "active") {
       try {
-        const result = await saveWorkspaceMemory(
+        const result = await saveWorkspaceMemoryWithSlackPublication(
           db,
           {
             accountId: grant.accountId,
@@ -579,6 +587,17 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
             metadata: payload.metadata,
             origin: "human",
           },
+          payload.slackPublication
+            ? {
+                distribution: payload.slackPublication,
+                actor: {
+                  kind: "human",
+                  subjectId: grant.subjectId,
+                  initiatingHumanSubjectId: grant.subjectId,
+                },
+                ownerLabel: grant.subjectLabel ?? null,
+              }
+            : null,
           getDocumentServices().embedder,
         );
         return c.json(KnowledgeMemory.parse(result.memory), 201);
