@@ -46,7 +46,8 @@ Then open the smallest source files that answer the question:
 - Event bus/SSE: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`.
 - Worker/orchestration: `apps/worker/src/workflows/`, `apps/worker/src/activities/`.
 - Runtime/sandbox/tools: `packages/runtime/src/index.ts` is the public agent-loop facade;
-  `packages/runtime/src/model-provider.ts` owns provider clients, request policy, and model routing;
+  `packages/runtime/src/model-provider.ts` is the package-private model-provider facade over
+  cohesive client, error, request-policy, routing, and transport leaves beside it;
   `packages/runtime/src/model-input.ts` owns final model-wire shaping and context guards;
   `packages/runtime/src/run-events.ts` owns SDK stream/usage/interruption normalization.
 - Files/object storage: `apps/api/src/routes/files.ts`, `packages/storage/src/index.ts`.
