@@ -34,6 +34,7 @@ import { apiBaseUrl } from "@/api";
 import { PageHeader } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { ContentPage } from "@/components/ui/content-layout";
 import { Notice } from "@/components/ui/notice";
 import { deviceVerificationUri, installOneLiner } from "@/lib/deployment";
 import {
@@ -197,7 +198,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
     machines.error instanceof OpenGeniApiError && machines.error.status === 404;
 
   return (
-    <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col px-4 py-5 sm:px-6 lg:px-8">
+    <ContentPage width="standard">
       <PageHeader
         icon={<LaptopIcon className="size-4" />}
         title="Machines"
@@ -307,7 +308,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
           </div>
         ) : null}
       </ConfirmDialog>
-    </div>
+    </ContentPage>
   );
 }
 
