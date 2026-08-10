@@ -21,6 +21,7 @@ import {
   controlCancellationTimelineMs,
   fixturePrompt,
   isExpectedBrowserCancellation,
+  liveStoppingStateLocator,
   maskKnownPublicEvidenceValues,
   openWorkspaceIfCollapsed,
   parseCookieHeader,
@@ -69,6 +70,31 @@ describe("workbench live acceptance preflight", () => {
       classifyControlCommandMarkerEvent(event(marker, "sandbox.command.output.delta"), marker),
     ).toBeNull();
     expect(classifyControlCommandMarkerEvent(event("different"), marker)).toBeNull();
+  });
+
+  test("matches authoritative SessionChrome stopping copy, not optimistic Steer copy", () => {
+    const filters: unknown[] = [];
+    const steering = {
+      filter: (options: unknown) => {
+        filters.push(options);
+        return steering;
+      },
+    };
+    const testIds: string[] = [];
+    const page = {
+      getByTestId: (testId: string) => {
+        testIds.push(testId);
+        return steering;
+      },
+    } as never;
+
+    expect(liveStoppingStateLocator(page, "steer")).toBe(steering as never);
+    expect(liveStoppingStateLocator(page, "pause")).toBe(steering as never);
+    expect(testIds).toEqual(["session-chrome-steering", "session-chrome-steering"]);
+    expect(filters).toEqual([
+      { hasText: "Stopping previous work" },
+      { hasText: "Stopping current work" },
+    ]);
   });
 
   test("observes split binary terminal output without depending on xterm DOM rows", async () => {
