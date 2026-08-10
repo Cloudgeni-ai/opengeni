@@ -365,9 +365,11 @@ export function RootRouteComponent() {
     select: (state) => Object.keys(state.location.search).length > 0,
   });
   // Public surfaces render ahead of auth/config gates. `/reset-password` is
-  // always public; the SessionChrome DEV harness is public and needs no session.
-  const isPublicAuthRoute =
-    pathname === "/reset-password" || (import.meta.env.DEV && pathname === "/dev/composer-chrome");
+  // always public; DEV visual harnesses are public and need no session.
+  const isPublicDevHarness =
+    import.meta.env.DEV &&
+    (pathname === "/dev/composer-chrome" || pathname === "/dev/agent-topology");
+  const isPublicAuthRoute = pathname === "/reset-password" || isPublicDevHarness;
   // The @opengeni/sdk client behind every console API call and hook. Auth
   // headers are read per request; a new identity per key version makes the
   // hooks re-fetch and the event streams reconnect with the new credentials.
@@ -388,6 +390,7 @@ export function RootRouteComponent() {
   }, []);
 
   useEffect(() => {
+    if (isPublicDevHarness) return;
     let cancelled = false;
     void fetchClientConfig()
       .then((config) => {
@@ -415,7 +418,7 @@ export function RootRouteComponent() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [isPublicDevHarness]);
 
   useEffect(() => {
     if (!clientConfig) {
