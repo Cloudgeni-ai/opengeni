@@ -232,7 +232,11 @@ export function capabilityConnectPlan(item: CapabilityCatalogItem): CapabilityCo
   }
   const requiredHeaders = stringArray((item.metadata as Record<string, unknown>).requiredHeaders);
   if (requiredHeaders.length > 0) {
-    return { mode: "api_key", providerDomain, fields: requiredHeaders.map(headerField) };
+    return {
+      mode: "api_key",
+      providerDomain,
+      fields: requiredHeaders.map(headerField),
+    };
   }
   // Imported / credential-gated MCPs carry authKind "api_key" (or authModel
   // "credential_ref") but usually NO explicit requiredHeaders in metadata. They
@@ -243,6 +247,16 @@ export function capabilityConnectPlan(item: CapabilityCatalogItem): CapabilityCo
     return { mode: "api_key", providerDomain, fields: [GENERIC_API_KEY_FIELD] };
   }
   return { mode: "enable" };
+}
+
+const OFFICIAL_GMAIL_MCP_URL = "https://gmailmcp.googleapis.com/mcp/v1";
+
+export function capabilityRequiresPersonalConnection(item: CapabilityCatalogItem): boolean {
+  return (
+    item.metadata.connectionOwnership === "personal_only" ||
+    item.mcpUrl?.replace(/\/+$/, "") === OFFICIAL_GMAIL_MCP_URL ||
+    item.endpointUrl?.replace(/\/+$/, "") === OFFICIAL_GMAIL_MCP_URL
+  );
 }
 
 /** Short auth hint for a tile ("OAuth" / "API key"), or null when none applies. */
@@ -399,8 +413,16 @@ export function connectionHealth(
  * surviving row to reuse, or null when it was deleted (repair mints a fresh one).
  */
 export type ReconnectPlan =
-  | { kind: "oauth"; connectionId: string | null; ownership: ConnectionOwnership }
-  | { kind: "api_key"; connectionId: string | null; ownership: ConnectionOwnership };
+  | {
+      kind: "oauth";
+      connectionId: string | null;
+      ownership: ConnectionOwnership;
+    }
+  | {
+      kind: "api_key";
+      connectionId: string | null;
+      ownership: ConnectionOwnership;
+    };
 
 export function capabilityReconnectPlan(
   item: CapabilityCatalogItem,
@@ -553,7 +575,12 @@ export function oauthConnectionRef(
     } {
   return ownership === "personal"
     ? subjectOAuthConnectionRef(providerDomain)
-    : { connectionId, providerDomain, kind: "oauth2", subjectScope: "workspace" };
+    : {
+        connectionId,
+        providerDomain,
+        kind: "oauth2",
+        subjectScope: "workspace",
+      };
 }
 
 export function apiKeyConnectionRef(
@@ -570,7 +597,12 @@ export function apiKeyConnectionRef(
     } {
   return ownership === "personal"
     ? { providerDomain, kind: "api_key", subjectScope: "subject" }
-    : { connectionId, providerDomain, kind: "api_key", subjectScope: "workspace" };
+    : {
+        connectionId,
+        providerDomain,
+        kind: "api_key",
+        subjectScope: "workspace",
+      };
 }
 
 export function oauthConnectionOwnership(value: string | null): ConnectionOwnership | null {

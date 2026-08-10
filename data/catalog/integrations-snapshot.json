@@ -5330,6 +5330,7 @@
         "unlabel_message",
         "unlabel_thread"
       ],
+      "connectionOwnership": "personal_only",
       "credentialFacts": [
         {
           "id": "google_oauth_client",

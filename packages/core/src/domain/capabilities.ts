@@ -70,6 +70,7 @@ const mcpRegistryMaxPages = 3;
 const mcpCapabilityProbeTimeoutMs = 15000;
 const maxMcpCredentialHeaders = 16;
 const maxMcpCredentialHeaderValueLength = 4096;
+const officialGmailMcpUrl = "https://gmailmcp.googleapis.com/mcp/v1";
 // RFC 9110 field-name token characters.
 const mcpCredentialHeaderName = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
 
@@ -435,11 +436,15 @@ function normalizedMcpCredentialHeaders(
   const seen = new Set<string>();
   for (const [name, value] of entries) {
     if (!mcpCredentialHeaderName.test(name)) {
-      throw new HTTPException(422, { message: `invalid credential header name: ${name}` });
+      throw new HTTPException(422, {
+        message: `invalid credential header name: ${name}`,
+      });
     }
     const lower = name.toLowerCase();
     if (seen.has(lower)) {
-      throw new HTTPException(422, { message: `duplicate credential header name: ${name}` });
+      throw new HTTPException(422, {
+        message: `duplicate credential header name: ${name}`,
+      });
     }
     seen.add(lower);
     if (value.length === 0 || value.length > maxMcpCredentialHeaderValueLength) {
@@ -465,6 +470,15 @@ async function validateMcpCapabilityConnectionRef(
   ref: McpServerConnectionRef,
 ): Promise<McpServerConnectionRef> {
   const subjectScope = ref.subjectScope ?? "workspace";
+  const personalOnly =
+    item.metadata.connectionOwnership === "personal_only" ||
+    item.endpointUrl?.replace(/\/+$/, "") === officialGmailMcpUrl;
+  if (personalOnly && subjectScope !== "subject") {
+    throw new HTTPException(422, {
+      message:
+        "this capability requires a personal connection; each workspace member must connect their own account",
+    });
+  }
   const normalized: McpServerConnectionRef = {
     providerDomain: ref.providerDomain.trim(),
     subjectScope,
@@ -474,11 +488,17 @@ async function validateMcpCapabilityConnectionRef(
     ...(ref.scopes ? { scopes: uniqueStrings(ref.scopes) } : {}),
     ...(ref.resource ? { resource: ref.resource } : {}),
     ...(ref.selectedResources
-      ? { selectedResources: ref.selectedResources.map((resource) => ({ ...resource })) }
+      ? {
+          selectedResources: ref.selectedResources.map((resource) => ({
+            ...resource,
+          })),
+        }
       : {}),
   };
   if (!normalized.providerDomain) {
-    throw new HTTPException(422, { message: "connectionRef.providerDomain is required" });
+    throw new HTTPException(422, {
+      message: "connectionRef.providerDomain is required",
+    });
   }
   if (!item.endpointUrl || !item.runtime.mcpServerId) {
     throw new HTTPException(422, {
@@ -739,7 +759,9 @@ export async function disableCapability(input: {
       });
     }
   } else if (!(await getCapabilityInstallation(input.db, input.workspaceId, item.id))) {
-    throw new HTTPException(409, { message: "capability is not currently enabled" });
+    throw new HTTPException(409, {
+      message: "capability is not currently enabled",
+    });
   }
   return await disableCapabilityInstallation(input.db, input.workspaceId, item.id);
 }
@@ -936,7 +958,9 @@ async function fetchMcpRegistryPage(
   try {
     const response = await fetchImpl(url, { signal: controller.signal });
     if (!response.ok) {
-      throw new HTTPException(502, { message: `MCP registry returned ${response.status}` });
+      throw new HTTPException(502, {
+        message: `MCP registry returned ${response.status}`,
+      });
     }
     return (await response.json()) as McpRegistryPage;
   } catch (error) {
@@ -944,7 +968,9 @@ async function fetchMcpRegistryPage(
       throw error;
     }
     if (error instanceof Error && error.name === "AbortError") {
-      throw new HTTPException(504, { message: "MCP registry request timed out" });
+      throw new HTTPException(504, {
+        message: "MCP registry request timed out",
+      });
     }
     throw new HTTPException(502, {
       message: `MCP registry request failed: ${error instanceof Error ? error.message : String(error)}`,

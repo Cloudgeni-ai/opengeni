@@ -83,6 +83,7 @@ export type CatalogIntegrationRow = {
   scopesHint: string[];
   allowedTools?: string[];
   requireApproval?: boolean | string[];
+  connectionOwnership?: "personal_only";
   credentialFacts: Array<Record<string, unknown>>;
   tier: CatalogTier;
   provenance: string;
@@ -105,7 +106,11 @@ export type CatalogIntegrationRow = {
 export type NormalizedCatalogSnapshot = {
   generatedAt: string | null;
   rows: CatalogIntegrationRow[];
-  skipped: Array<{ domain: string | null; mcpUrl: string | null; reason: string }>;
+  skipped: Array<{
+    domain: string | null;
+    mcpUrl: string | null;
+    reason: string;
+  }>;
   quarantined: Array<{ row: CatalogIntegrationRow; reason: string }>;
   cleaning: {
     inputRows: number;
@@ -135,6 +140,7 @@ const officialCatalogContractsByMcpUrl = new Map<
         | "description"
         | "allowedTools"
         | "requireApproval"
+        | "connectionOwnership"
         | "logoSourceUrl"
         | "homepageUrl"
         | "installUrl"
@@ -186,6 +192,9 @@ const officialCatalogContractsByMcpUrl = new Map<
         "unlabel_message",
         "unlabel_thread",
       ],
+      // A consumer Gmail account is never a workspace credential. Each member
+      // authorizes their own mailbox and receives only their own delegation.
+      connectionOwnership: "personal_only",
       // Google has not published a reusable Gmail MCP logo asset. Keep the
       // catalog's self-hosted monogram instead of hotlinking a brand asset.
       logoSourceUrl: null,
@@ -263,7 +272,13 @@ const officialCatalogContractsByMcpUrl = new Map<
 ]);
 
 export type LogoStorageResult =
-  | { ok: true; path: string; sourceUrl: string; contentType: string; sizeBytes: number }
+  | {
+      ok: true;
+      path: string;
+      sourceUrl: string;
+      contentType: string;
+      sizeBytes: number;
+    }
   | { ok: false; sourceUrl: string | null; reason: string };
 
 export type ImportCatalogResult = {
@@ -275,10 +290,17 @@ export type ImportCatalogResult = {
   staleCount: number;
   quarantined: NormalizedCatalogSnapshot["quarantined"];
   skipped: NormalizedCatalogSnapshot["skipped"];
-  logoFailures: Array<{ domain: string; mcpUrl: string; reason: string; sourceUrl: string | null }>;
+  logoFailures: Array<{
+    domain: string;
+    mcpUrl: string;
+    reason: string;
+    sourceUrl: string | null;
+  }>;
 };
 
-export type LogoStorage = Pick<ObjectStorage, "putObject"> & { bucket?: string };
+export type LogoStorage = Pick<ObjectStorage, "putObject"> & {
+  bucket?: string;
+};
 export type LogoFetch = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
 export async function readSnapshotFile(path: string): Promise<unknown> {
@@ -352,7 +374,11 @@ export function normalizeCatalogSnapshot(
     const mcpUrl = canonicalMcpUrl(rawMcpUrl);
     const transport = normalizeTransport(candidate.transport ?? candidate.transports);
     if (!transport) {
-      skipped.push({ domain, mcpUrl: null, reason: "transport_not_streamable_http" });
+      skipped.push({
+        domain,
+        mcpUrl: null,
+        reason: "transport_not_streamable_http",
+      });
       continue;
     }
     const key = `${domain}\n${mcpUrl}`;
@@ -405,6 +431,9 @@ export function normalizeCatalogSnapshot(
       ...(official?.allowedTools ? { allowedTools: official.allowedTools } : {}),
       ...(official?.requireApproval !== undefined
         ? { requireApproval: official.requireApproval }
+        : {}),
+      ...(official?.connectionOwnership
+        ? { connectionOwnership: official.connectionOwnership }
         : {}),
       credentialFacts: recordArray(candidate.credentialFacts),
       tier: official?.tier ?? (provenance === "detected" ? "verified" : "community"),
@@ -460,7 +489,11 @@ export function normalizeCatalogSnapshot(
       // Credential prose is not a machine-actionable runtime contract. Keep
       // the row out of the registry rather than exposing a server that cannot
       // be connected safely.
-      skipped.push({ domain, mcpUrl: null, reason: "api_key_metadata_unactionable" });
+      skipped.push({
+        domain,
+        mcpUrl: null,
+        reason: "api_key_metadata_unactionable",
+      });
       continue;
     }
     // Only accepted rows claim their normalized surface key. A missing or
@@ -480,7 +513,11 @@ export function normalizeCatalogSnapshot(
     const winner = bestCatalogRow(existing, row);
     const loser = winner === existing ? row : existing;
     candidatesByDomainName.set(domainNameKey, winner);
-    skipped.push({ domain: loser.domain, mcpUrl: null, reason: "duplicate_domain_name" });
+    skipped.push({
+      domain: loser.domain,
+      mcpUrl: null,
+      reason: "duplicate_domain_name",
+    });
   }
 
   const candidatesByEndpoint = new Map<string, CatalogIntegrationRow>();
@@ -495,7 +532,11 @@ export function normalizeCatalogSnapshot(
     const winner = bestCatalogRow(existing, row);
     const loser = winner === existing ? row : existing;
     candidatesByEndpoint.set(endpointKey, winner);
-    skipped.push({ domain: loser.domain, mcpUrl: null, reason: "duplicate_endpoint" });
+    skipped.push({
+      domain: loser.domain,
+      mcpUrl: null,
+      reason: "duplicate_endpoint",
+    });
   }
 
   const rows = [...candidatesByEndpoint.values()].sort(
@@ -651,6 +692,7 @@ export function catalogRowToDbInput(
       originalLogoUrl: row.logoSourceUrl,
       ...(row.allowedTools ? { allowedTools: row.allowedTools } : {}),
       ...(row.requireApproval !== undefined ? { requireApproval: row.requireApproval } : {}),
+      ...(row.connectionOwnership ? { connectionOwnership: row.connectionOwnership } : {}),
       ...(row.documentationUrl ? { documentationUrl: row.documentationUrl } : {}),
       ...(row.registryName
         ? {
@@ -707,7 +749,11 @@ export async function storeLogoForRow(
   }
   const contentType = normalizedContentType(response.headers.get("content-type"));
   if (!contentType?.startsWith("image/")) {
-    return { ok: false, sourceUrl, reason: `invalid_content_type:${contentType ?? "missing"}` };
+    return {
+      ok: false,
+      sourceUrl,
+      reason: `invalid_content_type:${contentType ?? "missing"}`,
+    };
   }
   const contentLength = response.headers.get("content-length");
   if (contentLength && Number(contentLength) > MAX_LOGO_BYTES) {
@@ -719,8 +765,19 @@ export async function storeLogoForRow(
   }
   const digest = createHash("sha256").update(bytes).digest("hex");
   const key = `catalog-assets/integrations-sh/logos/${safePathSegment(row.domain)}/${digest.slice(0, 24)}.${extensionForContentType(contentType)}`;
-  await input.storage.putObject({ key, contentType, body: bytes, sha256: digest });
-  return { ok: true, path: key, sourceUrl, contentType, sizeBytes: bytes.byteLength };
+  await input.storage.putObject({
+    key,
+    contentType,
+    body: bytes,
+    sha256: digest,
+  });
+  return {
+    ok: true,
+    path: key,
+    sourceUrl,
+    contentType,
+    sizeBytes: bytes.byteLength,
+  };
 }
 
 export function catalogCapabilityId(domain: string, mcpUrl: string): string {
@@ -1202,7 +1259,13 @@ function parseArgs(argv: string[]): {
   if (!snapshotPath) {
     throw new Error("missing --snapshot <path>");
   }
-  return { snapshotPath, dryRun, skipLogos, ifChanged, ...(snapshotRef ? { snapshotRef } : {}) };
+  return {
+    snapshotPath,
+    dryRun,
+    skipLogos,
+    ifChanged,
+    ...(snapshotRef ? { snapshotRef } : {}),
+  };
 }
 
 function printUsage(): void {

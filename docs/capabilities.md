@@ -207,6 +207,16 @@ is omitted from Google's authorization, token, and refresh requests. The MCP
 resource remains stored in the encrypted bundle and bound to the runtime
 connection.
 
+Gmail is personal-only. Enabling the capability makes Gmail available in the
+workspace catalog, but it does not share a mailbox: each member must authorize
+their own Google account. Personal connection rows and identifiers are hidden
+from other members, and a turn can execute Gmail only through the initiating
+member's frozen personal delegation. OpenGeni rejects workspace-owned Gmail
+OAuth and capability bindings at the API boundary. Gmail content that a user
+asks the agent to quote, summarize, or otherwise add to a session follows that
+session's visibility; connection privacy does not turn a shared session into a
+private one.
+
 The catalog also pins the exact ten tools in Google's reviewed Developer
 Preview surface. A newly added remote tool is unavailable until the catalog
 contract is reviewed and updated. Draft creation and label/unlabel tools require
@@ -247,9 +257,9 @@ Before importing/enabling the capability in a deployment:
    ```
 
 5. Run the normal reviewed catalog import, open **Capabilities**, search for
-   **Gmail**, and choose **Connect only for me** for a personal mailbox. A
-   workspace-owned connection is appropriate only for an intentionally shared
-   mailbox because every authorized workspace user may otherwise execute it.
+   **Gmail**, and select **Connect only for me**. The ownership choice is fixed:
+   every member connects their own mailbox, and other workspace members cannot
+   see or use it.
 
 The fixed tool allowlist and approval defaults are defense in depth for the
 provider's Developer Preview behavior. See Google's [configuration

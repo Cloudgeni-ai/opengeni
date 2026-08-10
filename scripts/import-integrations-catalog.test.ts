@@ -33,10 +33,19 @@ describe("integrations.sh catalog import normalization", () => {
   });
 
   test("normalizes skipLogos and invalidates on output or semantic changes", async () => {
-    const base = { snapshotPath: fixtureUrl.pathname, snapshotRef: "reviewed-catalog" };
+    const base = {
+      snapshotPath: fixtureUrl.pathname,
+      snapshotRef: "reviewed-catalog",
+    };
     const omitted = await catalogImportFingerprint(base);
-    const explicitFalse = await catalogImportFingerprint({ ...base, skipLogos: false });
-    const skipLogos = await catalogImportFingerprint({ ...base, skipLogos: true });
+    const explicitFalse = await catalogImportFingerprint({
+      ...base,
+      skipLogos: false,
+    });
+    const skipLogos = await catalogImportFingerprint({
+      ...base,
+      skipLogos: true,
+    });
     const nextSemanticVersion = await catalogImportFingerprint({
       ...base,
       semanticVersion: CATALOG_IMPORT_SEMANTIC_VERSION + 1,
@@ -59,7 +68,10 @@ describe("integrations.sh catalog import normalization", () => {
 
     const first = await resolveIfChangedCatalogImport({ ...base, skipLogos: false }, findCompleted);
     expect(first.completedBatch).toBeNull();
-    completed.set(first.snapshotRef, { id: "completed-batch", importedCount: 6 });
+    completed.set(first.snapshotRef, {
+      id: "completed-batch",
+      importedCount: 6,
+    });
 
     const unchanged = await resolveIfChangedCatalogImport(base, findCompleted);
     const changedLogos = await resolveIfChangedCatalogImport(
@@ -135,7 +147,11 @@ describe("integrations.sh catalog import normalization", () => {
         row({
           domain: "broken.example",
           mcpUrl: "https://broken.example/mcp",
-          probe: { status: "unverified", reason: "http_status", httpStatus: 503 },
+          probe: {
+            status: "unverified",
+            reason: "http_status",
+            httpStatus: 503,
+          },
         }),
       ],
     });
@@ -258,9 +274,15 @@ describe("integrations.sh catalog import normalization", () => {
         "unlabel_message",
         "unlabel_thread",
       ],
+      connectionOwnership: "personal_only",
       logoSourceUrl: null,
       installUrl: "https://developers.google.com/workspace/gmail/api/guides/configure-mcp-server",
     });
+    expect(
+      catalogRowToDbInput(normalized.rows[0]!, {
+        importBatchId: "00000000-0000-4000-8000-000000000121",
+      }).metadata,
+    ).toMatchObject({ connectionOwnership: "personal_only" });
   });
 
   test("pins Mobbin to its reviewed official Registry and OAuth contract", () => {
@@ -385,7 +407,10 @@ describe("integrations.sh catalog import normalization", () => {
     const normalized = normalizeCatalogSnapshot({
       generatedAt: "2026-07-03T00:00:00.000Z",
       importRows: [
-        row({ domain: "missing.example", mcpUrl: "https://missing.example/mcp" }),
+        row({
+          domain: "missing.example",
+          mcpUrl: "https://missing.example/mcp",
+        }),
         row({
           domain: "key.example",
           mcpUrl: "https://key.example/mcp",
@@ -418,7 +443,11 @@ describe("integrations.sh catalog import normalization", () => {
           domain: "key.example",
           mcpUrl: "https://key.example/mcp",
           authKind: "api_key",
-          authContract: { headerName: "Authorization", scheme: "Bearer", ignored: "value" },
+          authContract: {
+            headerName: "Authorization",
+            scheme: "Bearer",
+            ignored: "value",
+          },
           probe: { status: "real", reason: "auth_challenge", httpStatus: 401 },
         }),
       ],
@@ -445,10 +474,20 @@ describe("integrations.sh catalog import normalization", () => {
       importRows: [
         row({ domain: "valid.example", mcpUrl: "https://valid.example/mcp" }),
         row({ domain: "valid.example", mcpUrl: "https://valid.example/mcp" }),
-        row({ domain: "templated.example", mcpUrl: "https://example.com/{APP_ID}/mcp" }),
-        row({ domain: "redacted.example", mcpUrl: "https://example.com/mcp?key=REDACTED" }),
+        row({
+          domain: "templated.example",
+          mcpUrl: "https://example.com/{APP_ID}/mcp",
+        }),
+        row({
+          domain: "redacted.example",
+          mcpUrl: "https://example.com/mcp?key=REDACTED",
+        }),
         row({ domain: "stdio.example", mcpUrl: "stdio://server" }),
-        row({ domain: "sse.example", mcpUrl: "https://sse.example/mcp", transport: "sse" }),
+        row({
+          domain: "sse.example",
+          mcpUrl: "https://sse.example/mcp",
+          transport: "sse",
+        }),
         row({
           domain: "snake-game-mcp.onrender.com",
           mcpUrl: "https://snake-game-mcp.onrender.com/mcp",
@@ -456,7 +495,9 @@ describe("integrations.sh catalog import normalization", () => {
       ],
     };
 
-    const normalized = normalizeCatalogSnapshot(snapshot, { allowUnprobedCandidates: true });
+    const normalized = normalizeCatalogSnapshot(snapshot, {
+      allowUnprobedCandidates: true,
+    });
 
     expect(normalized.rows.map((candidate) => candidate.domain)).toEqual(["valid.example"]);
     expect(normalized.skipped.map((skip) => skip.reason).sort()).toEqual(
@@ -545,14 +586,21 @@ describe("integrations.sh catalog import normalization", () => {
 
     expect(normalized.rows).toEqual([]);
     expect(normalized.skipped).toEqual([
-      { domain: "query.example", mcpUrl: null, reason: "credential_query_parameter" },
+      {
+        domain: "query.example",
+        mcpUrl: null,
+        reason: "credential_query_parameter",
+      },
     ]);
   });
 
   test("never retains a rejected URL when another validation reason wins", () => {
     const normalized = normalizeCatalogSnapshot({
       importRows: [
-        row({ domain: "", mcpUrl: "https://example.com/mcp?token=fixture-value" }),
+        row({
+          domain: "",
+          mcpUrl: "https://example.com/mcp?token=fixture-value",
+        }),
         row({
           domain: "snake-game-mcp.onrender.com",
           mcpUrl: "https://example.com/mcp?token=fixture-value",
@@ -571,8 +619,16 @@ describe("integrations.sh catalog import normalization", () => {
 
     expect(normalized.skipped).toEqual([
       { domain: null, mcpUrl: null, reason: "missing_domain" },
-      { domain: "snake-game-mcp.onrender.com", mcpUrl: null, reason: "dead_demo_domain" },
-      { domain: "transport.example", mcpUrl: null, reason: "transport_not_streamable_http" },
+      {
+        domain: "snake-game-mcp.onrender.com",
+        mcpUrl: null,
+        reason: "dead_demo_domain",
+      },
+      {
+        domain: "transport.example",
+        mcpUrl: null,
+        reason: "transport_not_streamable_http",
+      },
       { domain: "userinfo.example", mcpUrl: null, reason: "non_http_url" },
     ]);
   });
@@ -825,7 +881,9 @@ describe("integrations.sh logo storage", () => {
       {
         storage,
         fetchImpl: async () =>
-          new Response("not an image", { headers: { "content-type": "text/plain" } }),
+          new Response("not an image", {
+            headers: { "content-type": "text/plain" },
+          }),
       },
     );
     expect(nonImage).toEqual({
@@ -840,7 +898,10 @@ describe("integrations.sh logo storage", () => {
         storage,
         fetchImpl: async () =>
           new Response(new Uint8Array([]), {
-            headers: { "content-type": "image/png", "content-length": String(512 * 1024 + 1) },
+            headers: {
+              "content-type": "image/png",
+              "content-length": String(512 * 1024 + 1),
+            },
           }),
       },
     );
@@ -857,7 +918,9 @@ describe("integrations.sh logo storage", () => {
       {
         storage: null,
         fetchImpl: async () =>
-          new Response(new Uint8Array([1]), { headers: { "content-type": "image/png" } }),
+          new Response(new Uint8Array([1]), {
+            headers: { "content-type": "image/png" },
+          }),
       },
     );
     expect(noStorage).toEqual({
@@ -902,7 +965,11 @@ describe("integrations.sh MCP endpoint probe", () => {
         ),
     });
 
-    expect(outcome).toMatchObject({ status: "real", reason: "mcp_json_rpc", httpStatus: 200 });
+    expect(outcome).toMatchObject({
+      status: "real",
+      reason: "mcp_json_rpc",
+      httpStatus: 200,
+    });
   });
 
   test("classifies auth-gated MCP endpoints with WWW-Authenticate as real", async () => {
@@ -917,7 +984,11 @@ describe("integrations.sh MCP endpoint probe", () => {
         }),
     });
 
-    expect(outcome).toMatchObject({ status: "real", reason: "auth_challenge", httpStatus: 401 });
+    expect(outcome).toMatchObject({
+      status: "real",
+      reason: "auth_challenge",
+      httpStatus: 401,
+    });
   });
 
   test("classifies 404s, HTML, generic JSON, and DNS failures as junk", async () => {
@@ -940,10 +1011,16 @@ describe("integrations.sh MCP endpoint probe", () => {
     await expect(
       probeMcpEndpoint("https://api.example/mcp", {
         fetchImpl: async () =>
-          new Response(JSON.stringify({ kind: "gmail#profile", emailAddress: "me@example.com" }), {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          }),
+          new Response(
+            JSON.stringify({
+              kind: "gmail#profile",
+              emailAddress: "me@example.com",
+            }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            },
+          ),
       }),
     ).resolves.toMatchObject({ status: "junk", reason: "non_mcp_json" });
 
@@ -962,7 +1039,10 @@ describe("integrations.sh MCP endpoint probe", () => {
         generatedAt: "2026-07-03T00:00:00.000Z",
         importRows: [
           row({ domain: "real.example", mcpUrl: "https://real.example/mcp" }),
-          row({ domain: "gmail.googleapis.com", mcpUrl: "https://gmail.googleapis.com/mcp" }),
+          row({
+            domain: "gmail.googleapis.com",
+            mcpUrl: "https://gmail.googleapis.com/mcp",
+          }),
           row({ domain: "maybe.example", mcpUrl: "https://maybe.example/mcp" }),
         ],
       },
@@ -974,7 +1054,11 @@ describe("integrations.sh MCP endpoint probe", () => {
         const url = String(input);
         if (url.includes("real.example")) {
           return new Response(
-            JSON.stringify({ jsonrpc: "2.0", id: 1, result: { capabilities: {} } }),
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: 1,
+              result: { capabilities: {} },
+            }),
             {
               status: 200,
               headers: { "content-type": "application/json" },
@@ -1008,7 +1092,10 @@ describe("integrations.sh MCP endpoint probe", () => {
 });
 
 function row(
-  overrides: Partial<CatalogIntegrationRow> & { domain: string; mcpUrl: string },
+  overrides: Partial<CatalogIntegrationRow> & {
+    domain: string;
+    mcpUrl: string;
+  },
 ): CatalogIntegrationRow {
   return {
     domain: overrides.domain,

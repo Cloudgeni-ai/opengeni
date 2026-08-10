@@ -81,6 +81,7 @@ function encryptedFixture(): string {
 async function createMcpCapability(
   workspace: { accountId: string; workspaceId: string },
   id: string,
+  overrides: { endpointUrl?: string; metadata?: Record<string, unknown> } = {},
 ): Promise<void> {
   await upsertCapabilityCatalogItem(db, {
     ...workspace,
@@ -91,9 +92,9 @@ async function createMcpCapability(
     description: "Subject-isolation fixture",
     category: "integrations",
     tags: ["fixture"],
-    endpointUrl: "https://mcp.slack.com/mcp",
+    endpointUrl: overrides.endpointUrl ?? "https://mcp.slack.com/mcp",
     authModel: "credential_ref",
-    metadata: { mcpServerId: `${id}-runtime` },
+    metadata: { mcpServerId: `${id}-runtime`, ...overrides.metadata },
   });
 }
 
@@ -247,6 +248,97 @@ describe("subject-owned capability connection references", () => {
     const projected = JSON.stringify({ installation, servers, catalog });
     expect(projected).not.toContain(alice.id);
     expect(projected).not.toContain(bob.id);
+  });
+
+  test("keeps Gmail personal even when a workspace-owned mailbox row exists", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const capabilityId = `mcp:gmail-personal-${crypto.randomUUID()}`;
+    await createMcpCapability(workspace, capabilityId, {
+      endpointUrl: "https://gmailmcp.googleapis.com/mcp/v1",
+      metadata: { connectionOwnership: "personal_only" },
+    });
+    const alice = await createConnection(db, {
+      ...workspace,
+      subjectId: "subject-alice",
+      providerDomain: "gmailmcp.googleapis.com",
+      kind: "oauth2",
+      credentialEncrypted: encryptedFixture(),
+    });
+    const sharedConnection = await createConnection(db, {
+      ...workspace,
+      subjectId: null,
+      providerDomain: "gmailmcp.googleapis.com",
+      kind: "oauth2",
+      credentialEncrypted: encryptedFixture(),
+    });
+
+    await expect(
+      enableCapability({
+        db,
+        grant: grant(workspace, "subject-alice"),
+        ...workspace,
+        settings,
+        capabilityId,
+        payload: {
+          config: {},
+          metadata: {},
+          headers: {},
+          connectionRef: {
+            connectionId: sharedConnection.id,
+            providerDomain: "gmailmcp.googleapis.com",
+            kind: "oauth2",
+            subjectScope: "workspace",
+          },
+        },
+      }),
+    ).rejects.toThrow("requires a personal connection");
+
+    await expect(
+      enableCapability({
+        db,
+        grant: grant(workspace, "subject-bob"),
+        ...workspace,
+        settings,
+        capabilityId,
+        payload: {
+          config: {},
+          metadata: {},
+          headers: {},
+          connectionRef: {
+            providerDomain: "gmailmcp.googleapis.com",
+            kind: "oauth2",
+            subjectScope: "subject",
+          },
+        },
+      }),
+    ).rejects.toThrow("visible active connection");
+
+    await enableCapability({
+      db,
+      grant: grant(workspace, "subject-alice"),
+      ...workspace,
+      settings,
+      capabilityId,
+      payload: {
+        config: {},
+        metadata: {},
+        headers: {},
+        connectionRef: {
+          providerDomain: "gmailmcp.googleapis.com",
+          kind: "oauth2",
+          subjectScope: "subject",
+        },
+      },
+    });
+    const installation = await getCapabilityInstallation(db, workspace.workspaceId, capabilityId);
+    expect(installation?.config.connectionRef).toEqual({
+      providerDomain: "gmailmcp.googleapis.com",
+      kind: "oauth2",
+      subjectScope: "subject",
+    });
+    expect(JSON.stringify(installation)).not.toContain(alice.id);
+    expect(JSON.stringify(installation)).not.toContain(sharedConnection.id);
   });
 
   test("rejects cross-subject and workspace misuse while preserving shared app-install refs", async () => {

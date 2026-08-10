@@ -304,6 +304,7 @@ async function startMcpOAuthWithinDeadline(
 ): Promise<OAuthStartResponse> {
   const { db, settings } = deps;
   const mcpUrl = canonicalMcpResource(context.payload.mcpUrl ?? context.payload.resource);
+  const officialGmailResource = mcpUrl === OFFICIAL_GMAIL_MCP_URL;
   const officialSlackResource = mcpUrl === OFFICIAL_SLACK_MCP_URL;
   const providerDomain = officialSlackResource
     ? "slack.com"
@@ -311,6 +312,7 @@ async function startMcpOAuthWithinDeadline(
   const hostedSlackMcp = officialSlackResource || providerDomain === "slack.com";
   assertHostedSlackMcpOAuthStart(settings, context.payload, mcpUrl, hostedSlackMcp);
   const requestedOwnership: ConnectionOwnership = context.payload.ownership ?? "workspace";
+  assertOfficialGmailPersonalOwnership(mcpUrl, requestedOwnership);
   const returnPath = safeReturnPath(context.payload.returnPath ?? "/integrations");
   const baseUrl = integrationBaseUrl(settings.publicBaseUrl, context.requestUrl);
   const redirectUri = `${baseUrl}/v1/integrations/oauth/callback`;
@@ -338,7 +340,6 @@ async function startMcpOAuthWithinDeadline(
   if (hostedSlackMcp && !isLocalTestEnvironment(settings.environment)) {
     assertSlackAuthorizationServer(discovery.as);
   }
-  const officialGmailResource = mcpUrl === OFFICIAL_GMAIL_MCP_URL;
   const googleAuthorizationServer = hasGoogleAuthorizationServerIdentity(discovery.as);
   if (officialGmailResource || googleAuthorizationServer) {
     if (!officialGmailResource || providerDomain !== "gmailmcp.googleapis.com") {
@@ -418,6 +419,18 @@ async function startMcpOAuthWithinDeadline(
   });
 }
 
+export function assertOfficialGmailPersonalOwnership(
+  mcpUrl: string,
+  ownership: ConnectionOwnership,
+): void {
+  if (mcpUrl === OFFICIAL_GMAIL_MCP_URL && ownership !== "personal") {
+    throw new HTTPException(422, {
+      message:
+        "Gmail connections are personal only; each workspace member must connect their own mailbox",
+    });
+  }
+}
+
 export async function completeMcpOAuthCallback(
   deps: OAuthClientDeps,
   input: {
@@ -463,6 +476,9 @@ async function completeMcpOAuthCallbackWithinDeadline(
   }
   try {
     state = readOAuthState(input.state, settings);
+    // Fence state minted by an older deployment too: a rolling update must not
+    // let a still-valid workspace-owned Gmail callback persist shared authority.
+    assertOfficialGmailPersonalOwnership(state.mcpUrl, state.ownership);
     if (!input.code) {
       return {
         redirectTo: callbackReturnPath(state.returnPath, "error", {
@@ -1567,7 +1583,11 @@ function oauthCallbackFailureReason(stage: OAuthCallbackStage, error: unknown): 
 function isDatabaseStatementTimeout(error: unknown): boolean {
   let current = error;
   for (let depth = 0; depth < 4 && current && typeof current === "object"; depth += 1) {
-    const candidate = current as { code?: unknown; message?: unknown; cause?: unknown };
+    const candidate = current as {
+      code?: unknown;
+      message?: unknown;
+      cause?: unknown;
+    };
     if (
       candidate.code === "57014" ||
       (typeof candidate.message === "string" &&

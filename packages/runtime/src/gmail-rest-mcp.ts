@@ -541,8 +541,19 @@ export class GmailRestMcpServer implements MCPServer {
         headers: { ...headers, ...headersRecord(init.headers) },
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
+    const sendBounded = async (headers: Record<string, string>) => {
+      try {
+        return await send(headers);
+      } catch (error) {
+        throw new GmailRestProviderError(
+          replaySafe
+            ? `Gmail request failed: ${safeProviderTransportMessage(error)}`
+            : "Gmail mutation request failed after submission; outcome is uncertain",
+        );
+      }
+    };
     const first = await resolve(false);
-    let response = await send(first.headers);
+    let response = await sendBounded(first.headers);
     if (response.status === 401) {
       await response.body?.cancel().catch(() => undefined);
       if (!replaySafe) {
@@ -551,7 +562,7 @@ export class GmailRestMcpServer implements MCPServer {
         );
       }
       const refreshed = await resolve(true);
-      response = await send(refreshed.headers);
+      response = await sendBounded(refreshed.headers);
     }
     const payload = await readResponseJsonBounded<unknown>(
       response,
@@ -610,8 +621,11 @@ function extractContent(root: GmailPart | undefined): {
     mimeType: string;
     size: number;
   }> = [];
-  const visit = (part: GmailPart | undefined) => {
-    if (!part) return;
+  const pending = root ? [root] : [];
+  let visited = 0;
+  while (pending.length > 0 && visited < 2_048) {
+    const part = pending.pop()!;
+    visited += 1;
     const filename = part.filename?.trim() ?? "";
     if (filename || part.body?.attachmentId) {
       attachments.push({
@@ -625,9 +639,10 @@ function extractContent(root: GmailPart | undefined): {
       if (part.mimeType === "text/plain") plain = appendBounded(plain, decoded, MAX_BODY_CHARS);
       if (part.mimeType === "text/html") html = appendBounded(html, decoded, MAX_BODY_CHARS);
     }
-    for (const child of part.parts ?? []) visit(child);
-  };
-  visit(root);
+    for (let index = (part.parts?.length ?? 0) - 1; index >= 0; index -= 1) {
+      pending.push(part.parts![index]!);
+    }
+  }
   return {
     plaintextBody: plain || null,
     htmlBody: html || null,
@@ -654,9 +669,11 @@ function buildDraftMime(args: Record<string, unknown>, reply: GmailMessage | nul
   ];
   const replyMessageId = replyHeaders["message-id"];
   if (replyMessageId) {
-    headers.push(`In-Reply-To: ${replyMessageId}`);
+    headers.push(`In-Reply-To: ${safeHeaderValue(replyMessageId)}`);
     headers.push(
-      `References: ${[replyHeaders.references, replyMessageId].filter(Boolean).join(" ")}`,
+      `References: ${safeHeaderValue(
+        [replyHeaders.references, replyMessageId].filter(Boolean).join(" "),
+      )}`,
     );
   }
   const bodyEntity = mimeBody(body, htmlBody);
@@ -722,9 +739,7 @@ function parseAttachments(value: unknown): Array<{
     return {
       content,
       filename: optionalString(record.filename, `attachments[${index}].filename`, 255) ?? "",
-      mimeType:
-        optionalString(record.mimeType, `attachments[${index}].mimeType`, 255) ??
-        "application/octet-stream",
+      mimeType: attachmentMimeType(record.mimeType, index),
       inline: record.inline === true,
     };
   });
@@ -835,6 +850,19 @@ function encodeHeader(value: string): string {
     : value.replace(/[\r\n]+/gu, " ");
 }
 
+function safeHeaderValue(value: string): string {
+  return value.replace(/[\r\n]+/gu, " ").slice(0, 998);
+}
+
+function attachmentMimeType(value: unknown, index: number): string {
+  const mimeType =
+    optionalString(value, `attachments[${index}].mimeType`, 255) ?? "application/octet-stream";
+  if (!/^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/u.test(mimeType)) {
+    throw new GmailRestInputError(`attachments[${index}].mimeType is invalid`);
+  }
+  return mimeType;
+}
+
 function escapeQuoted(value: string): string {
   return value.replace(/[\r\n]/gu, " ").replace(/["\\]/gu, "\\$&");
 }
@@ -873,6 +901,11 @@ function safeErrorMessage(error: unknown): string {
   )
     return error.message;
   return "Gmail REST tool failed";
+}
+
+function safeProviderTransportMessage(error: unknown): string {
+  if (error instanceof DOMException && error.name === "TimeoutError") return "request timed out";
+  return "provider transport failed";
 }
 
 function canonicalUrl(value: string): string | null {

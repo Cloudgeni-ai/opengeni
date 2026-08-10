@@ -159,6 +159,46 @@ describe("Gmail REST MCP adapter", () => {
     expect(JSON.parse(result.content[0]!.text)).toEqual({ id: "draft-1" });
   });
 
+  test("rejects attachment MIME header injection before a provider request", async () => {
+    let requests = 0;
+    const gmail = server({
+      fetchImpl: async () => {
+        requests += 1;
+        return Response.json({ id: "draft-1" });
+      },
+    });
+    const result = (await gmail.callTool("create_draft", {
+      to: ["user@example.com"],
+      attachments: [
+        {
+          content: Buffer.from("fixture").toString("base64"),
+          filename: "safe.txt",
+          mimeType: "text/plain\r\nBcc: attacker@example.com",
+        },
+      ],
+    })) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain("mimeType is invalid");
+    expect(requests).toBe(0);
+  });
+
+  test("reports an uncertain outcome without replaying a failed draft transport", async () => {
+    let requests = 0;
+    const gmail = server({
+      fetchImpl: async () => {
+        requests += 1;
+        throw new TypeError("fixture transport failure");
+      },
+    });
+    const result = (await gmail.callTool("create_draft", {
+      to: ["user@example.com"],
+      body: "Draft only",
+    })) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain("outcome is uncertain");
+    expect(requests).toBe(1);
+  });
+
   test("retains the hosted MCP URL as the OAuth resource identity", () => {
     expect(OFFICIAL_GMAIL_MCP_URL).toBe("https://gmailmcp.googleapis.com/mcp/v1");
   });
