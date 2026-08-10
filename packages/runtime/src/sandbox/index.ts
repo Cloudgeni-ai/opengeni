@@ -1045,6 +1045,11 @@ export class SandboxExecReadinessError extends Error {
   }
 }
 
+/** Modal may return a sandbox handle before its command router accepts exec.
+ * Allow cold filesystem-snapshot restores to absorb provider tail latency
+ * without publishing the lease warm before command execution is possible. */
+export const MODAL_EXEC_READINESS_TIMEOUT_MS = 60_000;
+
 function sandboxExecProbeExitCode(result: unknown): number | null {
   if (typeof result === "string") {
     const match = result.match(/Process exited with code (-?\d+)/);
@@ -1075,7 +1080,7 @@ function sandboxExecProbeStillRunning(result: unknown): boolean {
  * bounded probe before atomically publishing the lease warm/ready. */
 export async function verifySandboxExecReadiness(
   established: EstablishedSandboxSession,
-  timeoutMs = 15_000,
+  timeoutMs = MODAL_EXEC_READINESS_TIMEOUT_MS,
 ): Promise<void> {
   if (established.backendId !== "modal") return;
   const session = established.session as {

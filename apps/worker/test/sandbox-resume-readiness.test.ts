@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { type EstablishedSandboxSession, SandboxExecReadinessError } from "@opengeni/runtime";
+import {
+  type EstablishedSandboxSession,
+  MODAL_EXEC_READINESS_TIMEOUT_MS,
+  SandboxExecReadinessError,
+} from "@opengeni/runtime";
 import {
   SandboxWarmingTimeoutError,
   isRetryableDegradedRestore,
@@ -22,6 +26,10 @@ function established(
 }
 
 describe("sandbox exec readiness", () => {
+  test("allows Modal cold restores up to the shared 60 second readiness budget", () => {
+    expect(MODAL_EXEC_READINESS_TIMEOUT_MS).toBe(60_000);
+  });
+
   test("probes Modal before the lease is published warm", async () => {
     const commands: string[] = [];
     await waitForSandboxExecReadiness(
