@@ -87,6 +87,8 @@ const {
   DOCUMENT_AUTHORITY_OPTIONS,
   DocumentsRoute,
   documentAuthorityLabel,
+  documentTypeLabel,
+  localPopulatedDocumentsPreview,
 } = await import("./documents");
 
 beforeAll(() => {
@@ -159,6 +161,31 @@ function fireFileDrop(target: HTMLElement, files: File[]): void {
 }
 
 describe("Documents scope-first UX", () => {
+  test("provides a development-only populated preview across file types and scopes", () => {
+    expect(
+      localPopulatedDocumentsPreview("?previewDocuments=populated", "workspace-a", false),
+    ).toBeNull();
+    const preview = localPopulatedDocumentsPreview(
+      "?previewDocuments=populated",
+      "workspace-a",
+      true,
+    );
+    expect(preview?.documents.map((document) => document.authorityKind)).toEqual([
+      "organization",
+      "workspace",
+      "organization",
+      "workspace",
+      "personal",
+    ]);
+    expect(preview?.documents.map(documentTypeLabel)).toEqual([
+      "PDF",
+      "Word document",
+      "Image",
+      "Spreadsheet",
+      "Text",
+    ]);
+  });
+
   test("uses the fixed authority labels, mappings, and workspace-safe default", () => {
     expect(DOCUMENT_AUTHORITY_OPTIONS).toEqual([
       { value: "organization", label: "Company" },

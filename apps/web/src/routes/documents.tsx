@@ -3,7 +3,11 @@
 // it belongs to, and search everything they are authorized to access.
 import {
   ArrowLeftIcon,
+  FileIcon,
+  FileImageIcon,
   FileSearchIcon,
+  FileSpreadsheetIcon,
+  FileTextIcon,
   FilesIcon,
   Loader2Icon,
   PlusIcon,
@@ -47,6 +51,99 @@ export function documentAuthorityLabel(kind: DocumentAuthorityKind): string {
   return DOCUMENT_AUTHORITY_OPTIONS.find((option) => option.value === kind)?.label ?? kind;
 }
 
+export function localPopulatedDocumentsPreview(
+  search: string,
+  workspaceId: string,
+  enabled = import.meta.env.DEV,
+): { base: DocumentBase; documents: IndexedDocument[] } | null {
+  if (!enabled || new URLSearchParams(search).get("previewDocuments") !== "populated") {
+    return null;
+  }
+
+  const timestamp = "2026-08-10T10:00:00.000Z";
+  const base: DocumentBase = {
+    id: "preview-documents",
+    workspaceId,
+    name: "Documents",
+    description: null,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+  const examples = [
+    {
+      title: "Company strategy 2026.pdf",
+      parser: "pdf",
+      summary: "Company direction, annual priorities, and the goals every agent should understand.",
+      authorityKind: "organization" as const,
+      topics: ["strategy", "company goals"],
+    },
+    {
+      title: "Product launch plan.docx",
+      parser: "docx",
+      summary: "Launch milestones, owners, messaging, and the rollout plan for the next release.",
+      authorityKind: "workspace" as const,
+      topics: ["product", "launch"],
+    },
+    {
+      title: "Brand guidelines.png",
+      parser: "image",
+      summary: "Visual reference covering the approved logo, colors, typography, and spacing.",
+      authorityKind: "organization" as const,
+      topics: ["brand", "design"],
+    },
+    {
+      title: "Lead pipeline.xlsx",
+      parser: "xlsx",
+      summary: "Current sales prospects, stages, owners, and expected contract values.",
+      authorityKind: "workspace" as const,
+      topics: ["sales", "pipeline"],
+    },
+    {
+      title: "Research notes.txt",
+      parser: "text",
+      summary: "Private notes and early observations for an upcoming market analysis.",
+      authorityKind: "personal" as const,
+      topics: ["research"],
+    },
+  ];
+
+  return {
+    base,
+    documents: examples.map((example, index) => ({
+      id: `preview-document-${index + 1}`,
+      workspaceId,
+      baseId: base.id,
+      fileId: `preview-file-${index + 1}`,
+      status: "ready",
+      title: example.title,
+      parser: example.parser,
+      chunkCount: index === 2 ? 1 : 6 - index,
+      error: null,
+      sourceKind: "manual_upload",
+      sourceUri: null,
+      sourceExternalId: null,
+      sourceTitle: null,
+      sourceAuthor: "Preview user",
+      sourceCreatedAt: timestamp,
+      sourceUpdatedAt: timestamp,
+      sourceVersion: "1",
+      aclTags: [],
+      authorityKind: example.authorityKind,
+      authorityWorkspaceId: example.authorityKind === "workspace" ? workspaceId : null,
+      authoritySubjectId: example.authorityKind === "personal" ? "preview-user" : null,
+      visibility: example.authorityKind === "personal" ? "private" : "workspace",
+      createdBy: "preview-user",
+      agentAccess: true,
+      summary: example.summary,
+      topics: example.topics,
+      curationStatus: "auto_filed",
+      curation: null,
+      createdAt: timestamp,
+      updatedAt: new Date(Date.parse(timestamp) - index * 60_000).toISOString(),
+    })),
+  };
+}
+
 export function DocumentsRoute({
   workspaceId,
   returnToBrain = false,
@@ -82,6 +179,8 @@ export function DocumentsRoute({
   // rows carry a visible notice instead of silently freezing.
   const [pollFailed, setPollFailed] = useState(false);
   const failedDocuments = documents.filter((document) => document.status === "failed");
+  const populatedPreview = localPopulatedDocumentsPreview(window.location.search, workspaceId);
+  const visibleDocuments = populatedPreview?.documents ?? documents;
   // Honest list states: an initial fetch renders as loading and a failed load
   // as an error with retry instead of exposing the internal storage model.
   const basesView = listViewState({
@@ -94,6 +193,8 @@ export function DocumentsRoute({
     error: documentsError,
     count: documents.length,
   });
+  const visibleBasesView = populatedPreview ? "ready" : basesView;
+  const visibleDocumentsView = populatedPreview ? "ready" : documentsView;
 
   const refreshBases = useCallback(async () => {
     setBasesLoading(true);
@@ -427,7 +528,7 @@ export function DocumentsRoute({
 
         <div className="mt-5 grid min-h-0 min-w-0 flex-1 gap-5 xl:grid-cols-[minmax(0,1fr)_20rem]">
           <div className="min-w-0">
-            {basesView === "ready" ? (
+            {visibleBasesView === "ready" ? (
               <>
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <div className="min-w-0">
@@ -474,18 +575,18 @@ export function DocumentsRoute({
                       Couldn't reach the server to refresh indexing progress. It will keep retrying.
                     </Notice>
                   ) : null}
-                  {documentsView === "loading" ? (
+                  {visibleDocumentsView === "loading" ? (
                     <div className="flex items-center justify-center gap-2 rounded-lg border border-border p-6 text-xs text-fg-muted">
                       <Loader2Icon className="size-3.5 animate-spin" />
                       Loading documents
                     </div>
-                  ) : documentsView === "error" ? (
+                  ) : visibleDocumentsView === "error" ? (
                     <LoadErrorState
                       title="Couldn't load documents"
                       error={documentsError}
                       onRetry={() => void refreshDocuments(bases)}
                     />
-                  ) : documentsView === "empty" ? (
+                  ) : visibleDocumentsView === "empty" ? (
                     <EmptyState
                       icon={<FilesIcon className="size-4" />}
                       title="No documents yet"
@@ -496,44 +597,47 @@ export function DocumentsRoute({
                       }
                     />
                   ) : (
-                    documents.map((document) => (
+                    visibleDocuments.map((document) => (
                       <div
                         key={document.id}
                         className="flex items-start justify-between gap-3 rounded-lg border border-border bg-surface/35 px-3 py-2.5"
                       >
-                        <div className="min-w-0">
-                          <div className="break-words text-sm font-medium" title={document.title}>
-                            {document.title}
-                          </div>
-                          {document.summary ? (
-                            <p className="mt-1 line-clamp-2 max-w-3xl text-xs leading-5 text-fg-muted">
-                              {document.summary}
-                            </p>
-                          ) : null}
-                          <div className="mt-1 flex flex-wrap gap-1 text-[11px] text-[color:var(--color-fg-subtle)]">
-                            <span>{formatToken(document.sourceKind)}</span>
-                            {document.sourceTitle ? <span>· {document.sourceTitle}</span> : null}
-                            <span className="inline-flex items-center gap-1 rounded border border-[color:var(--color-border)] px-1">
-                              {documentAuthorityLabel(document.authorityKind)}
-                            </span>
-                            {document.status !== "ready" ? <span>{document.status}</span> : null}
-                            {document.agentAccess === false ? (
-                              <span className="text-danger">Agents cannot access this</span>
-                            ) : null}
-                            {document.topics.slice(0, 2).map((topic) => (
-                              <span
-                                key={topic}
-                                className="rounded border border-[color:var(--color-border)] px-1"
-                              >
-                                {topic}
-                              </span>
-                            ))}
-                          </div>
-                          {document.status === "failed" && document.error ? (
-                            <div className="mt-2 line-clamp-2 max-w-3xl text-xs leading-5 text-danger">
-                              {document.error}
+                        <div className="flex min-w-0 gap-3">
+                          <DocumentTypeIcon document={document} />
+                          <div className="min-w-0">
+                            <div className="break-words text-sm font-medium" title={document.title}>
+                              {document.title}
                             </div>
-                          ) : null}
+                            {document.summary ? (
+                              <p className="mt-1 line-clamp-2 max-w-3xl text-xs leading-5 text-fg-muted">
+                                {document.summary}
+                              </p>
+                            ) : null}
+                            <div className="mt-1 flex flex-wrap gap-1 text-[11px] text-[color:var(--color-fg-subtle)]">
+                              <span>{documentTypeLabel(document)}</span>
+                              {document.sourceTitle ? <span>· {document.sourceTitle}</span> : null}
+                              <span className="inline-flex items-center gap-1 rounded border border-[color:var(--color-border)] px-1">
+                                {documentAuthorityLabel(document.authorityKind)}
+                              </span>
+                              {document.status !== "ready" ? <span>{document.status}</span> : null}
+                              {document.agentAccess === false ? (
+                                <span className="text-danger">Agents cannot access this</span>
+                              ) : null}
+                              {document.topics.slice(0, 2).map((topic) => (
+                                <span
+                                  key={topic}
+                                  className="rounded border border-[color:var(--color-border)] px-1"
+                                >
+                                  {topic}
+                                </span>
+                              ))}
+                            </div>
+                            {document.status === "failed" && document.error ? (
+                              <div className="mt-2 line-clamp-2 max-w-3xl text-xs leading-5 text-danger">
+                                {document.error}
+                              </div>
+                            ) : null}
+                          </div>
                         </div>
                         <div className="flex shrink-0 items-center gap-2 pt-0.5">
                           <StatusDot
@@ -564,7 +668,7 @@ export function DocumentsRoute({
                   )}
                 </div>
               </>
-            ) : basesView === "empty" ? (
+            ) : visibleBasesView === "empty" ? (
               <EmptyState
                 icon={<FileSearchIcon className="size-4" />}
                 title="Preparing document storage"
@@ -661,6 +765,49 @@ export function DocumentsRoute({
         </div>
       </section>
     </ContentPage>
+  );
+}
+
+type DocumentType = "pdf" | "word" | "image" | "spreadsheet" | "text" | "file";
+
+export function documentType(document: Pick<IndexedDocument, "parser" | "title">): DocumentType {
+  const value = `${document.parser} ${document.title}`.toLowerCase();
+  if (/\.(png|jpe?g|gif|webp|svg|heic|tiff?)\b/.test(value) || value.includes("image")) {
+    return "image";
+  }
+  if (/\.(xlsx?|csv|tsv)\b/.test(value) || /spreadsheet|excel/.test(value)) {
+    return "spreadsheet";
+  }
+  if (/\.(docx?|odt|rtf)\b/.test(value) || /word|docx/.test(value)) return "word";
+  if (/\.pdf\b/.test(value) || value.includes("pdf")) return "pdf";
+  if (/\.(txt|md|markdown)\b/.test(value) || /plain.?text|markdown/.test(value)) return "text";
+  return "file";
+}
+
+export function documentTypeLabel(document: Pick<IndexedDocument, "parser" | "title">): string {
+  const kind = documentType(document);
+  if (kind === "pdf") return "PDF";
+  if (kind === "word") return "Word document";
+  if (kind === "image") return "Image";
+  if (kind === "spreadsheet") return "Spreadsheet";
+  if (kind === "text") return "Text";
+  return formatToken(document.parser || "file");
+}
+
+function DocumentTypeIcon({ document }: { document: IndexedDocument }) {
+  const kind = documentType(document);
+  const Icon =
+    kind === "image"
+      ? FileImageIcon
+      : kind === "spreadsheet"
+        ? FileSpreadsheetIcon
+        : kind === "pdf" || kind === "word" || kind === "text"
+          ? FileTextIcon
+          : FileIcon;
+  return (
+    <span className="grid size-9 shrink-0 place-items-center rounded-lg border border-border bg-bg text-fg-muted">
+      <Icon className="size-4" aria-hidden="true" />
+    </span>
   );
 }
 
