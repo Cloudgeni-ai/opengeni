@@ -6797,6 +6797,38 @@ export const OpenGeniSlackBotInstallStart = z.object({
 });
 export type OpenGeniSlackBotInstallStart = z.infer<typeof OpenGeniSlackBotInstallStart>;
 
+export const SlackInstallationBindingState = z.enum(["active", "quarantined"]);
+export type SlackInstallationBindingState = z.infer<typeof SlackInstallationBindingState>;
+
+export const SlackInstallationBinding = z.object({
+  id: z.string().uuid(),
+  accountId: z.string().uuid(),
+  accountName: z.string().min(1),
+  workspaceId: z.string().uuid(),
+  workspaceName: z.string().min(1),
+  connectionId: z.string().uuid(),
+  connectionStatus: ConnectionStatus,
+  connectionVersion: z.number().int().positive(),
+  slackTeamId: z.string().min(1).max(64),
+  slackTeamName: z.string().min(1).max(256),
+  botId: z.string().min(1).max(64),
+  botUserId: z.string().min(1).max(64),
+  botDisplayName: z.literal("OpenGeni"),
+  state: SlackInstallationBindingState,
+  quarantineReason: z.string().min(1).nullable(),
+  version: z.number().int().positive(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type SlackInstallationBinding = z.infer<typeof SlackInstallationBinding>;
+
+export const ListSlackInstallationBindingsResponse = z.object({
+  bindings: z.array(SlackInstallationBinding),
+});
+export type ListSlackInstallationBindingsResponse = z.infer<
+  typeof ListSlackInstallationBindingsResponse
+>;
+
 export const UpdateConnectionRequest = z.object({
   providerDomain: z.string().min(1).optional(),
   subjectId: z.string().min(1).nullable().optional(),

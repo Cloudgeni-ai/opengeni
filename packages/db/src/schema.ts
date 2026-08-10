@@ -765,6 +765,72 @@ export const connections = pgTable(
   }),
 );
 
+// One durable routing authority per installed Slack team. The active partial
+// unique index is the database fence that prevents a team from being routed to
+// two OpenGeni workspaces. Legacy ambiguous rows are retained as quarantined
+// evidence instead of deleting credentials or guessing a winner.
+export const slackInstallationBindings = pgTable(
+  "slack_installation_bindings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => connections.id, { onDelete: "cascade" }),
+    slackTeamId: text("slack_team_id").notNull(),
+    slackTeamName: text("slack_team_name").notNull(),
+    botId: text("bot_id").notNull(),
+    botUserId: text("bot_user_id").notNull(),
+    botDisplayName: text("bot_display_name").notNull(),
+    state: text("state").$type<"active" | "quarantined">().notNull(),
+    quarantineReason: text("quarantine_reason"),
+    version: integer("version").notNull().default(1),
+    createdBySubjectId: text("created_by_subject_id"),
+    updatedBySubjectId: text("updated_by_subject_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    connection: uniqueIndex("slack_installation_bindings_connection_uq").on(table.connectionId),
+    activeTeam: uniqueIndex("slack_installation_bindings_active_team_uq")
+      .on(table.slackTeamId)
+      .where(sql`${table.state} = 'active'`),
+    workspaceState: index("slack_installation_bindings_workspace_state_idx").on(
+      table.workspaceId,
+      table.state,
+      table.updatedAt,
+    ),
+    workspaceAccount: foreignKey({
+      name: "slack_installation_bindings_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    stateValid: check(
+      "slack_installation_bindings_state_check",
+      sql`${table.state} in ('active', 'quarantined')`,
+    ),
+    quarantineConsistent: check(
+      "slack_installation_bindings_quarantine_check",
+      sql`(${table.state} = 'active' and ${table.quarantineReason} is null)
+        or (${table.state} = 'quarantined' and length(btrim(${table.quarantineReason})) > 0)`,
+    ),
+    identityBounded: check(
+      "slack_installation_bindings_identity_check",
+      sql`octet_length(${table.slackTeamId}) between 1 and 64
+        and octet_length(${table.slackTeamName}) between 1 and 256
+        and octet_length(${table.botId}) between 1 and 64
+        and octet_length(${table.botUserId}) between 1 and 64
+        and ${table.botDisplayName} = 'OpenGeni'`,
+    ),
+    versionPositive: check("slack_installation_bindings_version_check", sql`${table.version} > 0`),
+  }),
+);
+
 export const connectionDisconnectOperations = pgTable(
   "connection_disconnect_operations",
   {

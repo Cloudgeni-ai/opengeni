@@ -204,28 +204,31 @@ describe("Slack interaction migration and durable database boundary", () => {
     }
   });
 
-  test("collapses one Slack principal deterministically and fails closed on tenant ambiguity", async () => {
+  test("routes one Slack team and rejects duplicate or cross-tenant installations", async () => {
     if (!available) return;
     const first = await workspace("resolver-a");
     const original = await botConnection(first, "T_RESOLVER", {
       botId: "B_RESOLVER",
       botUserId: "U_RESOLVER_BOT",
     });
-    const duplicate = await botConnection(first, "T_RESOLVER", {
-      botId: "B_RESOLVER",
-      botUserId: "U_RESOLVER_BOT",
-    });
-    expect((await resolveSlackInstallationRoute(db, "T_RESOLVER"))?.connectionId).toBe(
-      duplicate.id,
-    );
-    expect(duplicate.id).not.toBe(original.id);
+    await expect(
+      botConnection(first, "T_RESOLVER", {
+        botId: "B_RESOLVER",
+        botUserId: "U_RESOLVER_BOT",
+      }),
+    ).rejects.toThrow("OPENGENI_SLACK_BINDING_CONFLICT");
+    expect((await resolveSlackInstallationRoute(db, "T_RESOLVER"))?.connectionId).toBe(original.id);
 
     const second = await workspace("resolver-b");
-    await botConnection(second, "T_RESOLVER", {
-      botId: "B_OTHER",
-      botUserId: "U_OTHER_BOT",
-    });
-    expect(await resolveSlackInstallationRoute(db, "T_RESOLVER")).toBeNull();
+    await expect(
+      botConnection(second, "T_RESOLVER", {
+        botId: "B_OTHER",
+        botUserId: "U_OTHER_BOT",
+      }),
+    ).rejects.toThrow("OPENGENI_SLACK_BINDING_CONFLICT");
+    expect((await resolveSlackInstallationRoute(db, "T_RESOLVER"))?.workspaceId).toBe(
+      first.workspaceId,
+    );
   });
 
   test("deduplicates reaction event and remove-readd identities, reclaims expired leases, and scopes settlement", async () => {

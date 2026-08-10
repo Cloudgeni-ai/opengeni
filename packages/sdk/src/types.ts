@@ -645,6 +645,33 @@ export type OpenGeniSlackBotInstallStart = {
   expiresAt: string;
 };
 
+export type SlackInstallationBindingState = "active" | "quarantined";
+
+export type SlackInstallationBinding = {
+  id: string;
+  accountId: string;
+  accountName: string;
+  workspaceId: string;
+  workspaceName: string;
+  connectionId: string;
+  connectionStatus: ConnectionStatus;
+  connectionVersion: number;
+  slackTeamId: string;
+  slackTeamName: string;
+  botId: string;
+  botUserId: string;
+  botDisplayName: "OpenGeni";
+  state: SlackInstallationBindingState;
+  quarantineReason: string | null;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ListSlackInstallationBindingsResponse = {
+  bindings: SlackInstallationBinding[];
+};
+
 export type GoogleDriveTargetScope = "user" | "workspace" | "organization";
 export type ConnectorDocumentDestinationAuthority = "organization" | "workspace" | "personal";
 export type ConnectorDocumentDestinationSelection = {
