@@ -229,7 +229,7 @@ export function MemorySlackPublicationCard({
       </div>
 
       {error ? (
-        <div className="mt-3 flex items-start gap-2 rounded-md border border-danger/30 bg-danger/5 p-3 text-2xs text-danger">
+        <div className="mt-3 flex items-start gap-2 rounded-md border border-border bg-bg p-3 text-2xs text-danger">
           <AlertTriangleIcon className="mt-0.5 size-4 shrink-0" /> {error}
         </div>
       ) : null}
