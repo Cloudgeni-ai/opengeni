@@ -45,6 +45,11 @@ import {
   type BrowserScreenshotOptions,
   type NormalizedBrowserFrameStreamOptions,
 } from "./media";
+import type {
+  BrowserDownloadBeginEvent,
+  BrowserDownloadProgressEvent,
+  BrowserDownloadProgressResult,
+} from "./downloads";
 import type { AgentBrowserJsonCommand } from "./runner";
 
 const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
@@ -188,6 +193,11 @@ export type AgentBrowserDriverOptions = {
     workspaceFileIds: readonly string[],
   ) => Promise<readonly string[]>;
   downloadDirectory?: string;
+  downloadEvents?: {
+    begin(event: BrowserDownloadBeginEvent): Promise<unknown>;
+    progress(event: BrowserDownloadProgressEvent): Promise<BrowserDownloadProgressResult>;
+    reject(guid: string, failureCode: string): Promise<void>;
+  };
   connect?: (endpoint: string) => Promise<BrowserCdpConnection>;
   engine?: "chromium" | "chrome";
   emulation?: BrowserSessionEmulation;
@@ -248,6 +258,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     | ((operationId: string, workspaceFileIds: readonly string[]) => Promise<readonly string[]>)
     | undefined;
   private readonly downloadDirectory: string | null;
+  private readonly downloadEvents: AgentBrowserDriverOptions["downloadEvents"];
   private readonly connect: (endpoint: string) => Promise<BrowserCdpConnection>;
   private readonly states = new Map<string, TargetState>();
   private readonly firstSeenAt = new Map<string, string>();
@@ -272,6 +283,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     this.downloadDirectory = options.downloadDirectory
       ? resolvePath(options.downloadDirectory)
       : null;
+    this.downloadEvents = options.downloadEvents;
     this.connect = options.connect ?? (async (endpoint) => await CdpConnection.connect(endpoint));
   }
 
@@ -747,7 +759,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       this.userAgent = typeof version.userAgent === "string" ? version.userAgent : "";
       if (this.downloadDirectory) {
         await connection.send("Browser.setDownloadBehavior", {
-          behavior: "allow",
+          behavior: "allowAndName",
           downloadPath: this.downloadDirectory,
           eventsEnabled: true,
         });
@@ -767,6 +779,20 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           const state = [...this.states.values()].find(
             (candidate) => candidate.frame.id === frameId,
           );
+          if (this.downloadEvents) {
+            const guid = typeof event.params.guid === "string" ? event.params.guid : "";
+            const suggestedFilename =
+              typeof event.params.suggestedFilename === "string"
+                ? event.params.suggestedFilename
+                : "download";
+            void this.downloadEvents
+              .begin({
+                guid,
+                targetId: state?.targetId ?? null,
+                suggestedFilename,
+              })
+              .catch(() => undefined);
+          }
           if (state && !this.protectedAuthQuiet(state)) {
             state.diagnostics.downloadCount += 1;
             this.appendDiagnostic(state, {
@@ -779,6 +805,34 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               filename: boundedTextField(event.params.suggestedFilename, 4_096),
             });
           }
+        }),
+        connection.on("Browser.downloadProgress", (event) => {
+          if (!this.downloadEvents) return;
+          const guid = typeof event.params.guid === "string" ? event.params.guid : "";
+          const state = event.params.state;
+          if (state !== "inProgress" && state !== "completed" && state !== "canceled") return;
+          const receivedBytes = event.params.receivedBytes;
+          const totalBytes = event.params.totalBytes;
+          if (typeof receivedBytes !== "number" || !Number.isSafeInteger(receivedBytes)) return;
+          if (
+            totalBytes !== undefined &&
+            (typeof totalBytes !== "number" || !Number.isSafeInteger(totalBytes))
+          ) {
+            return;
+          }
+          void this.downloadEvents
+            .progress({
+              guid,
+              state,
+              receivedBytes,
+              totalBytes: typeof totalBytes === "number" ? totalBytes : null,
+            })
+            .then(async ({ cancelReason }) => {
+              if (!cancelReason) return;
+              await connection.send("Browser.cancelDownload", { guid }).catch(() => undefined);
+              await this.downloadEvents?.reject(guid, cancelReason);
+            })
+            .catch(() => undefined);
         }),
       );
       this.connection = connection;

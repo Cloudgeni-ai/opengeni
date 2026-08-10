@@ -15,6 +15,8 @@ import {
   BrowserActionCommand,
   BrowserActionRequest,
   BrowserDiagnosticKind,
+  BrowserDownload,
+  BrowserDownloadListResponse,
   BrowserOpenTargetRequest,
   BrowserProtectedAuthFillCommand,
   BrowserSessionAttachment,
@@ -539,6 +541,47 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
           }),
       );
       return context.json(result);
+    },
+  );
+
+  app.get(
+    "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/downloads",
+    async (context) => {
+      const { workspaceId, grant, browserSessionId } = await browserRoutePreamble(
+        context,
+        "sessions:read",
+      );
+      const result = await withActiveBrowserController(
+        context,
+        grant,
+        workspaceId,
+        browserSessionId,
+        "session.read",
+        "browser.read",
+        async ({ sessionClient }) => await sessionClient.listDownloads(),
+      );
+      return context.json(BrowserDownloadListResponse.parse(result));
+    },
+  );
+
+  app.get(
+    "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/downloads/:downloadId",
+    async (context) => {
+      const { workspaceId, grant, browserSessionId } = await browserRoutePreamble(
+        context,
+        "sessions:read",
+      );
+      const downloadId = requireUuidParam(context, "downloadId");
+      const result = await withActiveBrowserController(
+        context,
+        grant,
+        workspaceId,
+        browserSessionId,
+        "session.read",
+        "browser.read",
+        async ({ sessionClient }) => await sessionClient.download(downloadId),
+      );
+      return context.json(BrowserDownload.parse(result));
     },
   );
 

@@ -29,6 +29,8 @@ import {
   type BrowserActionRequest,
   type BrowserDiagnosticBatch,
   type BrowserDiagnosticsOptions,
+  type BrowserDownload,
+  type BrowserDownloadListResponse,
   type BrowserIdentity,
   type BrowserIdentityListOptions,
   type BrowserIdentityListResponse,
@@ -2729,6 +2731,35 @@ export class OpenGeniClient {
     return await this.requestJson<BrowserSession>(
       "GET",
       `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  async listBrowserDownloads(
+    workspaceId: string,
+    browserSessionId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserDownloadListResponse> {
+    return await this.requestJson<BrowserDownloadListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/downloads`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  async getBrowserDownload(
+    workspaceId: string,
+    browserSessionId: string,
+    downloadId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserDownload> {
+    return await this.requestJson<BrowserDownload>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/downloads/${encodeURIComponent(downloadId)}`,
       undefined,
       {},
       options,

@@ -9,6 +9,8 @@ import {
   BrowserActionCommand,
   BrowserActionReceipt,
   BrowserDiagnosticBatch,
+  BrowserDownload,
+  BrowserDownloadListResponse,
   BrowserObservation,
   BrowserProtectedAuthFillCommand,
   BrowserProtectedAuthFillReceipt,
@@ -26,6 +28,8 @@ import {
   type BrowserActionCommand as BrowserActionCommandValue,
   type BrowserActionReceipt as BrowserActionReceiptValue,
   type BrowserDiagnosticBatch as BrowserDiagnosticBatchValue,
+  type BrowserDownload as BrowserDownloadValue,
+  type BrowserDownloadListResponse as BrowserDownloadListResponseValue,
   type BrowserDiagnosticKind,
   type BrowserObservation as BrowserObservationValue,
   type BrowserProtectedAuthFillCommand as BrowserProtectedAuthFillCommandValue,
@@ -916,6 +920,42 @@ export class BrowserControlSessionClient {
       throw new BrowserControlProtocolError("browser controller returned malformed targets");
     }
     return data.map((target) => BrowserTarget.parse(target));
+  }
+
+  async listDownloads(): Promise<BrowserDownloadListResponseValue> {
+    const data = await this.parent.requestForSession({
+      method: "GET",
+      path: this.path("downloads"),
+      token: this.viewToken,
+    });
+    const response = BrowserDownloadListResponse.parse(data);
+    if (
+      response.browserSessionId !== this.reference.browserSessionId ||
+      response.controllerGeneration !== this.reference.controllerGeneration
+    ) {
+      throw new BrowserControlProtocolError(
+        "browser controller returned downloads for another session binding",
+      );
+    }
+    return response;
+  }
+
+  async download(downloadId: string): Promise<BrowserDownloadValue> {
+    const id = requireUuid(downloadId, "download id");
+    const data = await this.parent.requestForSession({
+      method: "GET",
+      path: this.path(`downloads/${id}`),
+      token: this.viewToken,
+    });
+    const download = BrowserDownload.parse(data);
+    if (
+      download.id !== id ||
+      download.browserSessionId !== this.reference.browserSessionId ||
+      download.controllerGeneration !== this.reference.controllerGeneration
+    ) {
+      throw new BrowserControlProtocolError("browser controller returned another download binding");
+    }
+    return download;
   }
 
   async openTarget(url?: string): Promise<BrowserObservationValue> {

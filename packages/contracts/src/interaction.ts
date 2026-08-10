@@ -1269,6 +1269,154 @@ export const BrowserTarget = z
   .strict();
 export type BrowserTarget = z.infer<typeof BrowserTarget>;
 
+export const BrowserDownloadStatus = z.enum([
+  "in_progress",
+  "completed",
+  "cancelled",
+  "failed",
+  "unavailable",
+]);
+export type BrowserDownloadStatus = z.infer<typeof BrowserDownloadStatus>;
+
+/** One browser-produced file. Its bytes remain private to the exact controller
+ * until an explicit save publishes and materializes them. No placement path or
+ * source URL crosses this contract. */
+export const BrowserDownload = z
+  .object({
+    id: z.string().uuid(),
+    browserSessionId: z.string().uuid(),
+    controllerGeneration: opaqueGeneration,
+    targetId: boundedOpaqueId.nullable(),
+    filename: z
+      .string()
+      .min(1)
+      .max(4_096)
+      .regex(/^[^\u0000-\u001f\u007f]+$/u),
+    status: BrowserDownloadStatus,
+    receivedBytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    totalBytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable(),
+    sha256: sha256Hex.nullable(),
+    version: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    startedAt: z.string().datetime({ offset: true }),
+    settledAt: z.string().datetime({ offset: true }).nullable(),
+    failureCode: boundedOpaqueId.nullable(),
+  })
+  .strict()
+  .superRefine((download, context) => {
+    const terminal = download.status !== "in_progress";
+    if (terminal !== (download.settledAt !== null)) {
+      context.addIssue({
+        code: "custom",
+        path: ["settledAt"],
+        message: "download settlement must match its terminal status",
+      });
+    }
+    if (
+      (download.status === "failed" || download.status === "unavailable") !==
+      (download.failureCode !== null)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["failureCode"],
+        message: "failed or unavailable downloads require one failure code",
+      });
+    }
+    if (download.status === "completed") {
+      if (download.sha256 === null || download.totalBytes !== download.receivedBytes) {
+        context.addIssue({
+          code: "custom",
+          path: ["sha256"],
+          message: "completed downloads require exact bytes and SHA-256",
+        });
+      }
+    } else if (download.sha256 !== null) {
+      context.addIssue({
+        code: "custom",
+        path: ["sha256"],
+        message: "only completed downloads carry a SHA-256",
+      });
+    }
+  });
+export type BrowserDownload = z.infer<typeof BrowserDownload>;
+
+export const BrowserDownloadListResponse = z
+  .object({
+    browserSessionId: z.string().uuid(),
+    controllerGeneration: opaqueGeneration,
+    downloads: z.array(BrowserDownload).max(10_000),
+  })
+  .strict();
+export type BrowserDownloadListResponse = z.infer<typeof BrowserDownloadListResponse>;
+
+const workspaceRelativeFilePath = z
+  .string()
+  .min(1)
+  .max(4_096)
+  .refine((value) => {
+    if (value !== value.trim() || value.startsWith("/") || /^[A-Za-z]:[\\/]/u.test(value)) {
+      return false;
+    }
+    if (value.includes("\\") || value.includes("\0")) return false;
+    const segments = value.split("/");
+    return segments.every(
+      (segment) =>
+        segment.length > 0 &&
+        segment !== "." &&
+        segment !== ".." &&
+        !/[<>:"|?*\u0000-\u001f\u007f]/u.test(segment) &&
+        !/[ .]$/u.test(segment) &&
+        !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(segment),
+    );
+  }, "destinationPath must be a portable workspace-relative file path");
+
+export const BrowserDownloadSaveRequest = z
+  .object({
+    operationId: z.string().uuid(),
+    destinationPath: workspaceRelativeFilePath,
+    overwrite: z.boolean().default(false),
+  })
+  .strict();
+export type BrowserDownloadSaveRequest = z.infer<typeof BrowserDownloadSaveRequest>;
+
+export const BrowserDownloadSaveResponse = z
+  .object({
+    download: BrowserDownload,
+    destinationPath: workspaceRelativeFilePath,
+    fileId: z.string().uuid(),
+    operationId: z.string().uuid(),
+    replayed: z.boolean(),
+  })
+  .strict();
+export type BrowserDownloadSaveResponse = z.infer<typeof BrowserDownloadSaveResponse>;
+
+/** Controller-private, narrow object authority for publishing one exact
+ * completed download. Signed URLs and headers never appear in public SDK or
+ * durable controller receipts. */
+export const BrowserDownloadExportRequest = z
+  .object({
+    operationId: z.string().uuid(),
+    downloadId: z.string().uuid(),
+    upload: z
+      .object({
+        url: boundedHttpUrl,
+        requiredHeaders: z.record(z.string().min(1).max(256), z.string().max(8_192)),
+        expiresAt: z.string().datetime({ offset: true }),
+      })
+      .strict(),
+  })
+  .strict();
+export type BrowserDownloadExportRequest = z.infer<typeof BrowserDownloadExportRequest>;
+
+export const BrowserDownloadExportReceipt = z
+  .object({
+    operationId: z.string().uuid(),
+    downloadId: z.string().uuid(),
+    sizeBytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    sha256: sha256Hex,
+  })
+  .strict();
+export type BrowserDownloadExportReceipt = z.infer<typeof BrowserDownloadExportReceipt>;
+
 export const InteractionRect = z
   .object({
     x: z.number().finite(),

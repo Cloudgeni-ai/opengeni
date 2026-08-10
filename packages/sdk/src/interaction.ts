@@ -557,6 +557,37 @@ export type BrowserTarget = {
   createdAt: string;
 };
 
+export type BrowserDownloadStatus =
+  | "in_progress"
+  | "completed"
+  | "cancelled"
+  | "failed"
+  | "unavailable";
+
+/** One browser-produced file. Its bytes remain private to the exact browser
+ * controller until an explicit save publishes them into the workspace. */
+export type BrowserDownload = {
+  id: string;
+  browserSessionId: string;
+  controllerGeneration: string;
+  targetId: string | null;
+  filename: string;
+  status: BrowserDownloadStatus;
+  receivedBytes: number;
+  totalBytes: number | null;
+  sha256: string | null;
+  version: number;
+  startedAt: string;
+  settledAt: string | null;
+  failureCode: string | null;
+};
+
+export type BrowserDownloadListResponse = {
+  browserSessionId: string;
+  controllerGeneration: string;
+  downloads: BrowserDownload[];
+};
+
 export type InteractionRect = {
   x: number;
   y: number;
@@ -1167,6 +1198,17 @@ export interface InteractionTransport {
     browserSessionId: string,
     options?: OpenGeniRequestOptions,
   ): Promise<BrowserSession>;
+  listBrowserDownloads(
+    workspaceId: string,
+    browserSessionId: string,
+    options?: OpenGeniRequestOptions,
+  ): Promise<BrowserDownloadListResponse>;
+  getBrowserDownload(
+    workspaceId: string,
+    browserSessionId: string,
+    downloadId: string,
+    options?: OpenGeniRequestOptions,
+  ): Promise<BrowserDownload>;
   createBrowserSession(
     workspaceId: string,
     request: CreateBrowserSessionRequest,
@@ -1768,6 +1810,7 @@ export class BrowserSessionCollection {
 
 export class BrowserSessionResource {
   readonly auth: BrowserAuthRunCollection;
+  readonly downloads: BrowserDownloadCollection;
   readonly tabs: BrowserTargetCollection;
   /** Alias for hosts that prefer the protocol term. */
   readonly targets: BrowserTargetCollection;
@@ -1778,6 +1821,7 @@ export class BrowserSessionResource {
     readonly id: string,
   ) {
     this.auth = new BrowserAuthRunCollection(transport, workspaceId, id);
+    this.downloads = new BrowserDownloadCollection(transport, workspaceId, id);
     this.tabs = new BrowserTargetCollection(transport, workspaceId, id);
     this.targets = this.tabs;
   }
@@ -1867,6 +1911,53 @@ export class BrowserSessionResource {
     options: OpenGeniRequestOptions = {},
   ): Promise<BrowserSessionMutationResponse> {
     return await this.transport.endBrowserSession(this.workspaceId, this.id, request, options);
+  }
+}
+
+export class BrowserDownloadCollection {
+  constructor(
+    private readonly transport: BrowserInteractionTransport,
+    readonly workspaceId: string,
+    readonly browserSessionId: string,
+  ) {}
+
+  async list(options: OpenGeniRequestOptions = {}): Promise<BrowserDownloadListResponse> {
+    return await this.transport.listBrowserDownloads(
+      this.workspaceId,
+      this.browserSessionId,
+      options,
+    );
+  }
+
+  download(downloadId: string): BrowserDownloadResource {
+    return new BrowserDownloadResource(
+      this.transport,
+      this.workspaceId,
+      this.browserSessionId,
+      downloadId,
+    );
+  }
+}
+
+export class BrowserDownloadResource {
+  constructor(
+    private readonly transport: BrowserInteractionTransport,
+    readonly workspaceId: string,
+    readonly browserSessionId: string,
+    readonly id: string,
+  ) {}
+
+  async get(options: OpenGeniRequestOptions = {}): Promise<BrowserDownload> {
+    const download = await this.transport.getBrowserDownload(
+      this.workspaceId,
+      this.browserSessionId,
+      this.id,
+      options,
+    );
+    if (download.browserSessionId !== this.browserSessionId) {
+      throw new Error("BrowserDownload belongs to another BrowserSession");
+    }
+    return download;
   }
 }
 

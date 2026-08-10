@@ -3,6 +3,7 @@ import {
   BROWSER_CONTROL_PORT,
   BROWSER_PROFILE_ARTIFACT_FORMAT,
   BrowserActionCommand,
+  BrowserDownloadListResponse,
   BrowserRevisionMaterialization,
   type BrowserActionCommand as BrowserActionCommandValue,
   BrowserProtectedAuthFillCommand,
@@ -385,6 +386,28 @@ export class BrowserControlServer {
         );
       }
       return success(await this.supervisor.protectedAuthFill(command));
+    }
+    if (segments.length === 4 && segments[3] === "downloads") {
+      if (request.method !== "GET") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      return success(
+        BrowserDownloadListResponse.parse({
+          ...reference,
+          downloads: await this.supervisor.listDownloads(reference),
+        }),
+      );
+    }
+    if (segments.length === 5 && segments[3] === "downloads") {
+      if (request.method !== "GET") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      const download = await this.supervisor.getDownload(
+        reference,
+        requireUuid(segments[4], "download id"),
+      );
+      if (!download) throw new ProtocolError("resource_not_found", "download not found", 404);
+      return success(download);
     }
     if (segments.length === 5 && segments[3] === "operations") {
       if (request.method !== "GET") {

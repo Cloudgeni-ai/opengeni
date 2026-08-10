@@ -7,6 +7,7 @@ import type {
   BrowserActionReceipt,
   BrowserDiagnosticBatch,
   BrowserDiagnosticKind,
+  BrowserDownload,
   BrowserObservation,
   BrowserProtectedAuthFillCommand,
   BrowserProtectedAuthObservation,
@@ -31,6 +32,7 @@ import {
 } from "@opengeni/interaction";
 import { createAttachedChromeTransport } from "./attached-cdp";
 import { AgentBrowserDriver, type BrowserRuntimeSnapshot } from "./cdp-driver";
+import { BrowserDownloadStore, type CompletedBrowserDownloadFile } from "./downloads";
 import type { ResolvedAgentBrowserBinary } from "./binary";
 import {
   type BrowserFrameStreamOptions,
@@ -184,6 +186,11 @@ export type BrowserSupervisorDriverContext = BrowserSessionReference & {
     operationId: string,
     workspaceFileIds: readonly string[],
   ) => Promise<readonly string[]>;
+  downloadEvents?: {
+    begin: BrowserDownloadStore["begin"];
+    progress: BrowserDownloadStore["progress"];
+    reject: BrowserDownloadStore["reject"];
+  };
 };
 
 export type BrowserSupervisorOptions = {
@@ -206,6 +213,7 @@ type Runtime = {
   controller: BrowserInteractionController;
   protectedAuthController: BrowserProtectedAuthController;
   workspaceFileStager: BrowserWorkspaceFileStager;
+  downloadStore: BrowserDownloadStore | null;
   lifecycle: "active" | "capturing" | "captured" | "ending";
 };
 
@@ -435,6 +443,45 @@ export class BrowserSupervisor {
     return await this.requireActive(reference).driver.debug(targetId, options);
   }
 
+  async listDownloads(reference: BrowserSessionReference): Promise<BrowserDownload[]> {
+    const store = this.requireActive(reference).downloadStore;
+    if (!store) {
+      throw new InteractionControllerError(
+        "unsupported",
+        "browser placement does not expose managed downloads",
+      );
+    }
+    return await store.list();
+  }
+
+  async getDownload(
+    reference: BrowserSessionReference,
+    downloadId: string,
+  ): Promise<BrowserDownload | null> {
+    const store = this.requireActive(reference).downloadStore;
+    if (!store) {
+      throw new InteractionControllerError(
+        "unsupported",
+        "browser placement does not expose managed downloads",
+      );
+    }
+    return await store.get(downloadId);
+  }
+
+  async completedDownloadFile(
+    reference: BrowserSessionReference,
+    downloadId: string,
+  ): Promise<CompletedBrowserDownloadFile> {
+    const store = this.requireActive(reference).downloadStore;
+    if (!store) {
+      throw new InteractionControllerError(
+        "unsupported",
+        "browser placement cannot publish device-local downloads",
+      );
+    }
+    return await store.completedFile(downloadId);
+  }
+
   captureState(inputValue: BrowserStateCaptureInput): Promise<BrowserStateCaptureReceipt> {
     this.assertOpen();
     const input = validateCaptureInput(inputValue);
@@ -561,18 +608,42 @@ export class BrowserSupervisor {
       protectedAuthJournal.close();
       throw error;
     }
+    let downloadStore: BrowserDownloadStore | null = null;
+    if (options.transport.kind === "managed") {
+      try {
+        downloadStore = await BrowserDownloadStore.open({
+          rootDirectory: downloadDirectory,
+          browserSessionId: options.browserSessionId,
+          controllerGeneration: options.controllerGeneration,
+        });
+      } catch (error) {
+        journal.close();
+        protectedAuthJournal.close();
+        stateJournal.close();
+        throw error;
+      }
+    }
     const driverContext: BrowserSupervisorDriverContext = {
       browserSessionId: options.browserSessionId,
       controllerGeneration: options.controllerGeneration,
       sessionDirectory,
       socketDirectory,
       profileDirectory,
-      downloadDirectory,
+      downloadDirectory: downloadStore?.filesDirectory ?? downloadDirectory,
       screenshotDirectory,
       headed: options.headed,
       transport: options.transport,
       resolveWorkspaceFiles: async (operationId, workspaceFileIds) =>
         await workspaceFileStager.resolve(operationId, workspaceFileIds),
+      ...(downloadStore
+        ? {
+            downloadEvents: {
+              begin: downloadStore.begin.bind(downloadStore),
+              progress: downloadStore.progress.bind(downloadStore),
+              reject: downloadStore.reject.bind(downloadStore),
+            },
+          }
+        : {}),
       ...(options.browserExecutablePath
         ? { browserExecutablePath: options.browserExecutablePath }
         : {}),
@@ -596,6 +667,7 @@ export class BrowserSupervisor {
         controller: null as unknown as BrowserInteractionController,
         protectedAuthController: null as unknown as BrowserProtectedAuthController,
         workspaceFileStager,
+        downloadStore,
       };
       runtime.controller = this.createController(runtime, driver, initialJournal);
       runtime.protectedAuthController = this.createProtectedAuthController(
@@ -643,6 +715,11 @@ export class BrowserSupervisor {
       }
       try {
         stateJournal.close();
+      } catch (cleanupError) {
+        failures.push(cleanupError);
+      }
+      try {
+        await downloadStore?.close();
       } catch (cleanupError) {
         failures.push(cleanupError);
       }
@@ -702,6 +779,7 @@ export class BrowserSupervisor {
         runtime.controller.waitForIdle(),
         runtime.protectedAuthController.waitForIdle(),
       ]);
+      await runtime.downloadStore?.interruptInProgress("browser_restarted");
       snapshot = await runtime.driver.runtimeSnapshot();
       await runtime.driver.close();
       driverClosed = true;
@@ -913,7 +991,13 @@ export class BrowserSupervisor {
     let actionJournalClosed = false;
     let protectedAuthJournalClosed = false;
     let stateJournalClosed = false;
+    let downloadStoreClosed = runtime.downloadStore === null;
     if (!driverAlreadyClosed) {
+      try {
+        await runtime.downloadStore?.interruptInProgress("browser_ended");
+      } catch (error) {
+        failures.push(error);
+      }
       try {
         await runtime.driver.close();
         driverClosed = true;
@@ -939,6 +1023,12 @@ export class BrowserSupervisor {
     } catch (error) {
       failures.push(error);
     }
+    try {
+      await runtime.downloadStore?.close();
+      downloadStoreClosed = true;
+    } catch (error) {
+      failures.push(error);
+    }
     if (driverClosed) {
       try {
         await rm(join(this.socketRootDirectory, shortDigest(runtime.options.browserSessionId)), {
@@ -954,7 +1044,8 @@ export class BrowserSupervisor {
       driverClosed &&
       actionJournalClosed &&
       protectedAuthJournalClosed &&
-      stateJournalClosed
+      stateJournalClosed &&
+      downloadStoreClosed
     ) {
       try {
         await rm(runtime.sessionDirectory, { recursive: true, force: true });
@@ -1045,6 +1136,7 @@ async function createBrowserDriver(
     controllerGeneration: context.controllerGeneration,
     runner,
     downloadDirectory: context.downloadDirectory,
+    ...(context.downloadEvents ? { downloadEvents: context.downloadEvents } : {}),
     resolveWorkspaceFiles: context.resolveWorkspaceFiles,
     ...(route
       ? {

@@ -11,6 +11,7 @@ export * from "./computer-media";
 export * from "./computer-native-client";
 export * from "./computer-protocol";
 export * from "./computer-supervisor";
+export * from "./downloads";
 export * from "./journal";
 export * from "./media";
 export * from "./protocol";

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type {
   BrowserActionCommand,
@@ -346,6 +346,60 @@ describe("BrowserControlServer", () => {
     } finally {
       fileServer.stop(true);
     }
+  });
+
+  test("projects exact managed downloads through view authority without leaking placement paths", async () => {
+    let browserContext: BrowserSupervisorDriverContext | null = null;
+    await withServer(
+      async ({ server, reference }) => {
+        const created = await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+        expect(created.status).toBe(201);
+        const download = await browserContext!.downloadEvents!.begin({
+          guid: "server-download-guid",
+          targetId: null,
+          suggestedFilename: "fixture.pdf",
+        });
+        await writeFile(join(browserContext!.downloadDirectory, "server-download-guid"), "pdf");
+        await browserContext!.downloadEvents!.progress({
+          guid: "server-download-guid",
+          state: "completed",
+          receivedBytes: 3,
+          totalBytes: 3,
+        });
+
+        const path = `/v1/browser-sessions/${reference.browserSessionId}/downloads`;
+        expect((await request(server, path)).status).toBe(401);
+        const listed = await request(server, path, { token: viewToken });
+        expect(listed.status).toBe(200);
+        const listedText = await listed.text();
+        expect(listedText).not.toContain(browserContext!.downloadDirectory);
+        expect(JSON.parse(listedText).data.downloads).toEqual([
+          expect.objectContaining({
+            id: download.id,
+            filename: "fixture.pdf",
+            status: "completed",
+            receivedBytes: 3,
+          }),
+        ]);
+
+        const fetched = await request(server, `${path}/${download.id}`, { token: viewToken });
+        expect(fetched.status).toBe(200);
+        expect((await json(fetched)).data).toMatchObject({
+          id: download.id,
+          browserSessionId: reference.browserSessionId,
+          status: "completed",
+        });
+      },
+      {
+        onBrowserContext: (context) => {
+          browserContext = context;
+        },
+      },
+    );
   });
 
   test("enrolls exact browser origins monotonically through admin authority", async () => {

@@ -26,6 +26,7 @@ const NETWORK_ROUTE_ID = "00000000-0000-4000-8000-000000000019";
 const SITE_AUTH_CONNECTION_ID = "00000000-0000-4000-8000-000000000020";
 const AUTH_RUN_ID = "00000000-0000-4000-8000-000000000021";
 const INTERVENTION_ID = "00000000-0000-4000-8000-000000000022";
+const BROWSER_DOWNLOAD_ID = "00000000-0000-4000-8000-000000000023";
 
 function attachedBrowser(): AttachedBrowserDevice {
   return {
@@ -171,6 +172,48 @@ function computerSession(overrides: Partial<ComputerSession> = {}): ComputerSess
 }
 
 describe("BrowserSession SDK", () => {
+  test("lists browser-produced files as resources without exposing controller paths", async () => {
+    const download = {
+      id: BROWSER_DOWNLOAD_ID,
+      browserSessionId: BROWSER_SESSION_ID,
+      controllerGeneration: "controller-1",
+      targetId: "target-1",
+      filename: "report.pdf",
+      status: "completed" as const,
+      receivedBytes: 42,
+      totalBytes: 42,
+      sha256: "a".repeat(64),
+      version: 2,
+      startedAt: "2026-08-10T10:00:00.000Z",
+      settledAt: "2026-08-10T10:00:01.000Z",
+      failureCode: null,
+    };
+    const calls: string[] = [];
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async (input) => {
+        const url = String(input);
+        calls.push(url);
+        return url.endsWith(`/${BROWSER_DOWNLOAD_ID}`)
+          ? json(download)
+          : json({
+              browserSessionId: BROWSER_SESSION_ID,
+              controllerGeneration: "controller-1",
+              downloads: [download],
+            });
+      },
+    });
+
+    const browser = client.interaction.browsers.session(WORKSPACE_ID, BROWSER_SESSION_ID);
+    expect((await browser.downloads.list()).downloads).toEqual([download]);
+    expect(await browser.downloads.download(BROWSER_DOWNLOAD_ID).get()).toEqual(download);
+    expect(JSON.stringify(download)).not.toContain("/tmp/");
+    expect(calls).toEqual([
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/browser-sessions/${BROWSER_SESSION_ID}/downloads`,
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/browser-sessions/${BROWSER_SESSION_ID}/downloads/${BROWSER_DOWNLOAD_ID}`,
+    ]);
+  });
+
   test("discovers live attached browser endpoints independently from saved identities", async () => {
     const device = attachedBrowser();
     const calls: string[] = [];
