@@ -2142,6 +2142,7 @@ describe("knowledge-source schedule dispatch", () => {
       googlePermissionId: "permission-cursor",
       sourceId: "cursor-folder",
       driveId: null,
+      boundaryId: "cursor-folder",
       pageToken: "start-page-2",
       cursorGeneration: 1,
       lastFullReconciliationAt: "2026-08-10T00:00:00.000Z",

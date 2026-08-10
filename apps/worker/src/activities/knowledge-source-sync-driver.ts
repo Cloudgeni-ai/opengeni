@@ -8,6 +8,7 @@ export type KnowledgeSourceSyncDriverInventory<Entry, StopReason extends string>
   cursorInvalidated: boolean;
   providerRequests: number;
   elapsedMs: number;
+  hardLimitReached: boolean;
 };
 
 /** Provider port for deterministic knowledge ingestion. Implementations own

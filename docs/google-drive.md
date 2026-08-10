@@ -165,22 +165,37 @@ added by pasting its full `https://drive.google.com/.../folders/...` URL or ID.
 
 The first successful run captures a Google Drive Changes start page token before
 recursively inventorying all existing supported documents inside an enabled
-boundary. After that complete inventory settles, normal scheduled runs drain the
-Changes feed page by page and durably advance the provider cursor only with the
+boundary. For My Drive, OpenGeni resolves Google's `root` alias to the actual
+root folder ID before using parent ancestry to classify later changes; an
+unresolved or non-folder root fails closed instead of advancing the cursor.
+After that complete inventory settles, normal scheduled runs drain the Changes
+feed page by page and durably advance the provider cursor only with the
 successful source lease settlement. Shared Drive token, change, metadata, and
 inventory requests carry the exact drive identity plus Google's all-drives
 support parameters. OpenGeni does not overload the scoped-knowledge
 `sync_cursor` column with provider cursor or execution checkpoint state.
 
+Changes checkpoints persist cumulative examined-change, provider-request, and
+elapsed-time budgets across every continuation. Every returned change counts,
+including removal-only pages, and ancestry metadata requests share the same
+provider-request budget. Page requests use only the remaining item allowance;
+hard item, request, or total-time exhaustion fails as `resource_limit` rather
+than creating another continuation. Bounded invocation-time pauses may resume,
+but retain their consumed totals. Repeated page tokens and oversized provider
+pages fail as invalid provider payloads. A delta that requires a full repair
+carries the same consumed budget into the full inventory checkpoint.
+
 Changes that cannot be represented safely as a bounded object update trigger a
 full repair instead of guessing. This includes known removals, trashing,
-reparenting or moves outside the configured boundary, and folder topology
-changes. A rejected or invalid Changes cursor similarly captures a fresh start
-token and completes a full repair before adopting that token; it never skips
-directly to the new cursor. Google documents start page tokens as non-expiring,
-so renewal is driven by explicit invalidation rather than a guessed TTL. A
-bounded daily full reconciliation remains an independent safety repair for
-missed provider history even when no invalid-cursor response is observed.
+reparenting or moves outside the configured boundary, unresolved ancestry, and
+folder topology changes. A later move/removal in the same drained window also
+removes any earlier pending import for that object before repair. A rejected or
+invalid Changes cursor similarly captures a fresh start token and completes a
+full repair before adopting that token; it never skips directly to the new
+cursor. Google documents start page tokens as non-expiring, so renewal is
+driven by explicit invalidation rather than a guessed TTL. A bounded daily full
+reconciliation remains an independent safety repair for missed provider history
+even when no invalid-cursor response is observed.
 
 Each repair scan has its own durable scan generation. Every object observed
 across checkpointed pages is stamped into that generation; only a provider
