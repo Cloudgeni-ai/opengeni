@@ -74,4 +74,41 @@ describe("Vercel AI Gateway image adapter", () => {
     );
     expect(calls).toBe(1);
   });
+
+  test("sends ordered validated image references through the v3 files contract", async () => {
+    let requestBody: unknown;
+    await generateGatewayImage({
+      apiKey: "gateway-secret",
+      modelId: "openai/gpt-image-2",
+      prompt: "Use reference one for the subject and two for the visual style",
+      references: [
+        {
+          mediaType: "image/png",
+          bytes: Uint8Array.from([1, 2, 3]),
+          sizeBytes: 3,
+          sha256: "a".repeat(64),
+        },
+        {
+          mediaType: "image/webp",
+          bytes: Uint8Array.from([4, 5, 6]),
+          sizeBytes: 3,
+          sha256: "b".repeat(64),
+        },
+      ],
+      toolCallId: "call-image-edit-1",
+      fetch: async (_url, init) => {
+        requestBody = JSON.parse(String(init?.body));
+        return Response.json({ images: ["aW1hZ2U="] });
+      },
+    });
+
+    expect(requestBody).toEqual({
+      prompt: "Use reference one for the subject and two for the visual style",
+      n: 1,
+      files: [
+        { type: "file", mediaType: "image/png", data: "AQID" },
+        { type: "file", mediaType: "image/webp", data: "BAUG" },
+      ],
+    });
+  });
 });

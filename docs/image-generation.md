@@ -37,9 +37,18 @@ Selection is deterministic for the accepted turn:
 
 The ordinary text model and image model are intentionally independent. The
 tool is omitted unless permanent object storage and one verified route above
-are available. Generation currently accepts one bounded text prompt and
-returns one image. Editing, masks, and reference-image inputs are not silently
-emulated.
+are available. Adapter-backed generation accepts one bounded text prompt and
+up to four ordered PNG, JPEG, or WebP references. A reference may be an exact
+`/workspace` path, a workspace File ID, or a generated-image artifact ID. The
+worker resolves workspace ownership, range-reads bounded bytes, validates the
+actual image signature and durable hash, then sends those images in order.
+Arbitrary URLs are never accepted. The prompt states what each ordered image
+contributes. Masks and provider-specific edit controls are not emulated.
+
+Codex subscriptions use `/images/generations` without references and the
+Codex-compatible `/images/edits` request when references are present. Gateway
+uses the pinned v3 image model `files` input. The no-reference request and
+durable operation digest remain byte-for-byte compatible with earlier turns.
 
 The selected text provider does not change the generated-image artifact or UI
 contract. Current route availability is:
