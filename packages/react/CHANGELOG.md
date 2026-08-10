@@ -1,5 +1,14 @@
 # @opengeni/react
 
+## 0.50.1
+
+### Patch Changes
+
+- 98b94e8: Project physical cancellation immediately from atomic Steer and Pause receipts, then reconcile it against durable queue truth.
+- Updated dependencies [98b94e8]
+- Updated dependencies [2cd6dce]
+  - @opengeni/sdk@0.50.1
+
 ## 0.50.0
 
 ### Minor Changes
