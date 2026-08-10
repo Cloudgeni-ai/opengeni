@@ -36,6 +36,8 @@ describe("BrowserControlClient", () => {
     const browserSessionId = randomUUID();
     const workspaceId = randomUUID();
     const stateOperationId = randomUUID();
+    const workspaceFileOperationId = randomUUID();
+    const workspaceFileId = randomUUID();
     const protectedAuthOperationId = randomUUID();
     const controllerGeneration = "controller-1";
     const linkedComputerSessionId = randomUUID();
@@ -111,6 +113,17 @@ describe("BrowserControlClient", () => {
             settledAt: "2026-08-10T12:00:01.000Z",
             observation: { target, status: "submitted" },
             error: null,
+          });
+        }
+        if (url.pathname.endsWith("/workspace-files") && request.method === "POST") {
+          const body = (await request.json()) as {
+            operationId: string;
+            files: Array<{ fileId: string }>;
+          };
+          return success({
+            operationId: body.operationId,
+            fileIds: body.files.map((file) => file.fileId),
+            replayed: false,
           });
         }
         if (
@@ -263,6 +276,27 @@ describe("BrowserControlClient", () => {
         viewToken,
       });
       expect(await browserSession.listTargets()).toEqual([target]);
+      expect(
+        await browserSession.stageWorkspaceFiles({
+          operationId: workspaceFileOperationId,
+          files: [
+            {
+              fileId: workspaceFileId,
+              safeFilename: "fixture.txt",
+              sizeBytes: 12,
+              sha256: "d".repeat(64),
+              download: {
+                url: "https://files.example.test/object?signature=private",
+                expiresAt: new Date(Date.now() + 60_000).toISOString(),
+              },
+            },
+          ],
+        }),
+      ).toEqual({
+        operationId: workspaceFileOperationId,
+        fileIds: [workspaceFileId],
+        replayed: false,
+      });
       const protectedAuthCommand = {
         protocolVersion: 1 as const,
         operationId: protectedAuthOperationId,
@@ -337,7 +371,7 @@ describe("BrowserControlClient", () => {
       ).toBe(true);
       expect(placement.writes.some((entry) => entry.content.includes(adminToken))).toBe(true);
       expect(placement.writes.some((entry) => entry.content.includes("route-password"))).toBe(true);
-      expect(placement.finalizations).toBe(8);
+      expect(placement.finalizations).toBe(9);
       for (const path of placement.writes.map((entry) => dirname(entry.path))) {
         if (!path.includes("opengeni-browser-control-client")) continue;
         await expect(stat(path)).rejects.toThrow();

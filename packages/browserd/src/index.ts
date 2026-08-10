@@ -22,3 +22,4 @@ export * from "./state-download";
 export * from "./state-journal";
 export * from "./state-upload";
 export * from "./supervisor";
+export * from "./workspace-files";

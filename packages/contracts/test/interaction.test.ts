@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { randomUUID } from "node:crypto";
 import {
   AuthRun,
   BrowserActionCommand,
@@ -10,6 +11,7 @@ import {
   BrowserRevision,
   BrowserRevisionMaterialization,
   BrowserSessionAttachment,
+  BrowserWorkspaceFileStageRequest,
   ComputerActionCommand,
   ComputerActionRequest,
   ComputerActionReceipt,
@@ -373,6 +375,58 @@ describe("interaction contracts", () => {
       BrowserActionRequest.safeParse({
         ...base,
         action: { type: "pointer", action: "click", x: 1, y: 2, deltaY: 40 },
+      }).success,
+    ).toBe(false);
+  });
+
+  test("bounds browser workspace-file staging and aggregate upload batches", () => {
+    const fileId = randomUUID();
+    const authority = {
+      fileId,
+      safeFilename: "report.txt",
+      sizeBytes: 12,
+      sha256: "a".repeat(64),
+      download: {
+        url: "https://objects.example.test/file?signature=private",
+        expiresAt: "2026-08-10T12:05:00.000Z",
+      },
+    };
+    expect(
+      BrowserWorkspaceFileStageRequest.safeParse({
+        operationId,
+        files: [authority, authority],
+      }).success,
+    ).toBe(false);
+    expect(
+      BrowserWorkspaceFileStageRequest.safeParse({
+        operationId,
+        files: [{ ...authority, safeFilename: "../secret" }],
+      }).success,
+    ).toBe(false);
+
+    const fileIds = Array.from({ length: 101 }, () => randomUUID());
+    expect(
+      BrowserActionRequest.safeParse({
+        operationId,
+        targetId: "target-1",
+        expectedTargetGeneration: "target-4",
+        expectedDocumentGeneration: "document-9",
+        expectedFrameId: "frame-12",
+        action: {
+          type: "batch",
+          actions: [
+            {
+              type: "upload",
+              locator: { kind: "css", selector: "#one" },
+              workspaceFileIds: fileIds.slice(0, 100),
+            },
+            {
+              type: "upload",
+              locator: { kind: "css", selector: "#two" },
+              workspaceFileIds: fileIds.slice(100),
+            },
+          ],
+        },
       }).success,
     ).toBe(false);
   });

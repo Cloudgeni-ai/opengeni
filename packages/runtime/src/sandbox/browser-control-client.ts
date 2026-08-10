@@ -14,6 +14,8 @@ import {
   BrowserProtectedAuthFillReceipt,
   BrowserRevisionMaterialization,
   BrowserTarget,
+  BrowserWorkspaceFileStageRequest,
+  BrowserWorkspaceFileStageResponse,
   ComputerActionCommand,
   ComputerActionReceipt,
   ComputerObservation,
@@ -30,6 +32,8 @@ import {
   type BrowserProtectedAuthFillReceipt as BrowserProtectedAuthFillReceiptValue,
   type BrowserRevisionMaterialization as BrowserRevisionMaterializationValue,
   type BrowserTarget as BrowserTargetValue,
+  type BrowserWorkspaceFileStageRequest as BrowserWorkspaceFileStageRequestValue,
+  type BrowserWorkspaceFileStageResponse as BrowserWorkspaceFileStageResponseValue,
   type ComputerActionCommand as ComputerActionCommandValue,
   type ComputerActionReceipt as ComputerActionReceiptValue,
   type ComputerObservation as ComputerObservationValue,
@@ -972,6 +976,23 @@ export class BrowserControlSessionClient {
         path: this.path("actions"),
         token: this.controlToken,
         body: parsed,
+      }),
+    );
+  }
+
+  /** API-broker-only file authority path. Signed read URLs are materialized by
+   * browserd and never become part of the public action or durable receipt. */
+  async stageWorkspaceFiles(
+    request: BrowserWorkspaceFileStageRequestValue,
+  ): Promise<BrowserWorkspaceFileStageResponseValue> {
+    const parsed = BrowserWorkspaceFileStageRequest.parse(request);
+    return BrowserWorkspaceFileStageResponse.parse(
+      await this.parent.requestForSession({
+        method: "POST",
+        path: this.path(`operations/${parsed.operationId}/workspace-files`),
+        token: this.controlToken,
+        body: parsed,
+        timeoutMs: BROWSER_STATE_TRANSFER_TIMEOUT_MS,
       }),
     );
   }

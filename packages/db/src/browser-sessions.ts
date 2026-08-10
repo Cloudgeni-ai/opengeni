@@ -50,7 +50,7 @@ export const MANAGED_BROWSER_SESSION_CAPABILITIES = BrowserSessionCapabilities.p
   humanInput: true,
   tabs: true,
   downloads: false,
-  uploads: false,
+  uploads: true,
   clipboard: false,
   diagnostics: true,
   rawCdp: false,

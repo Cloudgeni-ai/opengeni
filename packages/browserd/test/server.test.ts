@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type {
   BrowserActionCommand,
@@ -254,6 +254,98 @@ describe("BrowserControlServer", () => {
         ).status,
       ).toBe(401);
     });
+  });
+
+  test("stages workspace files through control authority without exposing signed URLs", async () => {
+    const bytes = Buffer.from("private workspace bytes", "utf8");
+    const fileServer = Bun.serve({ port: 0, fetch: () => new Response(bytes) });
+    let browserContext: BrowserSupervisorDriverContext | null = null;
+    try {
+      await withServer(
+        async ({ server, reference }) => {
+          const created = await request(server, "/v1/browser-sessions", {
+            method: "POST",
+            token: adminToken,
+            body: createBody(reference),
+          });
+          expect(created.status).toBe(201);
+          const observation = (await json(created)).data.observation as BrowserObservation;
+          const operationId = randomUUID();
+          const fileId = randomUUID();
+          const authority = {
+            operationId,
+            files: [
+              {
+                fileId,
+                safeFilename: "fixture.txt",
+                sizeBytes: bytes.byteLength,
+                sha256: createHash("sha256").update(bytes).digest("hex"),
+                download: {
+                  url: `${fileServer.url}/file?signature=private`,
+                  expiresAt: new Date(Date.now() + 60_000).toISOString(),
+                },
+              },
+            ],
+          };
+          const path = `/v1/browser-sessions/${reference.browserSessionId}/operations/${operationId}/workspace-files`;
+          expect(
+            (
+              await request(server, path, {
+                method: "POST",
+                token: viewToken,
+                body: authority,
+              })
+            ).status,
+          ).toBe(401);
+          const staged = await request(server, path, {
+            method: "POST",
+            token: controlToken,
+            body: authority,
+          });
+          expect(staged.status).toBe(200);
+          const response = await staged.text();
+          expect(response).not.toContain("signature");
+          expect(JSON.parse(response).data).toMatchObject({
+            operationId,
+            fileIds: [fileId],
+            replayed: false,
+          });
+          const resolved = await browserContext!.resolveWorkspaceFiles(operationId, [fileId]);
+          expect(await readFile(resolved[0]!)).toEqual(bytes);
+          const stale = await request(
+            server,
+            `/v1/browser-sessions/${reference.browserSessionId}/actions`,
+            {
+              method: "POST",
+              token: controlToken,
+              body: {
+                ...command(observation),
+                operationId,
+                expectedTargetGeneration: "stale",
+                action: {
+                  type: "upload",
+                  locator: { kind: "css", selector: "#file" },
+                  workspaceFileIds: [fileId],
+                },
+              },
+            },
+          );
+          expect((await json(stale)).data).toMatchObject({
+            state: "failed",
+            dispatchedAt: null,
+            error: { code: "target_stale" },
+          });
+          expect(await browserContext!.resolveWorkspaceFiles(operationId, [fileId])).toEqual([]);
+        },
+        {
+          onBrowserContext: (context) => {
+            browserContext = context;
+          },
+        },
+      );
+    } finally {
+      fileServer.stop(true);
+    }
   });
 
   test("enrolls exact browser origins monotonically through admin authority", async () => {

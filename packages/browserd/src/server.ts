@@ -7,6 +7,7 @@ import {
   type BrowserActionCommand as BrowserActionCommandValue,
   BrowserProtectedAuthFillCommand,
   type BrowserProtectedAuthFillCommand as BrowserProtectedAuthFillCommandValue,
+  BrowserWorkspaceFileStageRequest,
   ComputerActionCommand,
   type ComputerActionCommand as ComputerActionCommandValue,
   NetworkRouteConsistency,
@@ -344,6 +345,32 @@ export class BrowserControlServer {
         );
       }
       return success(await this.supervisor.action(command));
+    }
+    if (
+      segments.length === 6 &&
+      segments[3] === "operations" &&
+      segments[5] === "workspace-files"
+    ) {
+      if (request.method !== "POST") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      const operationId = requireUuid(segments[4], "operation id");
+      const staged = BrowserWorkspaceFileStageRequest.safeParse(await readJson(request));
+      if (!staged.success) {
+        throw new ProtocolError(
+          "invalid_action",
+          "workspace-file staging authority is invalid",
+          400,
+        );
+      }
+      if (staged.data.operationId !== operationId) {
+        throw new ProtocolError(
+          "operation_conflict",
+          "workspace-file staging authority targets another operation",
+          409,
+        );
+      }
+      return success(await this.supervisor.stageWorkspaceFiles(reference, staged.data));
     }
     if (segments.length === 4 && segments[3] === "protected-auth-fills") {
       if (request.method !== "POST") {
@@ -1357,7 +1384,8 @@ function routeNeedsControl(segments: readonly string[], request: Request): boole
   if (
     segments[3] === "actions" ||
     segments[3] === "protected-auth-fills" ||
-    segments[3] === "protected-auth-operations"
+    segments[3] === "protected-auth-operations" ||
+    (segments[3] === "operations" && request.method === "POST")
   ) {
     return true;
   }

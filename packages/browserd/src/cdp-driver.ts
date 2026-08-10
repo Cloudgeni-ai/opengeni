@@ -183,7 +183,10 @@ export type AgentBrowserDriverOptions = {
   runner: BrowserCommandRunner;
   now?: () => Date;
   createId?: () => string;
-  resolveWorkspaceFiles?: (workspaceFileIds: readonly string[]) => Promise<readonly string[]>;
+  resolveWorkspaceFiles?: (
+    operationId: string,
+    workspaceFileIds: readonly string[],
+  ) => Promise<readonly string[]>;
   downloadDirectory?: string;
   connect?: (endpoint: string) => Promise<BrowserCdpConnection>;
   engine?: "chromium" | "chrome";
@@ -242,7 +245,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly emulation: BrowserSessionEmulation | null;
   private userAgentMetadataPromise: Promise<BrowserUserAgentMetadata> | null = null;
   private readonly resolveWorkspaceFiles:
-    | ((workspaceFileIds: readonly string[]) => Promise<readonly string[]>)
+    | ((operationId: string, workspaceFileIds: readonly string[]) => Promise<readonly string[]>)
     | undefined;
   private readonly downloadDirectory: string | null;
   private readonly connect: (endpoint: string) => Promise<BrowserCdpConnection>;
@@ -574,7 +577,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       let completedActions = 0;
       for (const action of actions) {
         try {
-          await this.dispatchAction(state, action);
+          await this.dispatchAction(state, action, command.operationId);
           completedActions += 1;
           if (state.dialog) {
             if (completedActions < actions.length) {
@@ -1682,7 +1685,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
   }
 
-  private async dispatchAction(state: TargetState, action: BrowserAction): Promise<void> {
+  private async dispatchAction(
+    state: TargetState,
+    action: BrowserAction,
+    operationId: string,
+  ): Promise<void> {
     switch (action.type) {
       case "navigate":
         await this.navigate(state, action.url);
@@ -1812,7 +1819,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             "this browser placement cannot resolve workspace files for upload",
           );
         }
-        const paths = await this.resolveWorkspaceFiles(action.workspaceFileIds);
+        const paths = await this.resolveWorkspaceFiles(operationId, action.workspaceFileIds);
         if (paths.length !== action.workspaceFileIds.length) {
           throw new InteractionDefiniteDriverError(
             "resource_not_found",

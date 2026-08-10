@@ -35,6 +35,7 @@ import {
   PublishBrowserRevisionResponse,
   type AccessGrant,
   type BrowserProtectedAuthFillReceipt as BrowserProtectedAuthFillReceiptValue,
+  type BrowserActionRequest as BrowserActionRequestValue,
   type BrowserSession as BrowserSessionValue,
   type CreateBrowserSessionRequest as CreateBrowserSessionRequestValue,
   type InteractionPlacement,
@@ -76,6 +77,7 @@ import {
   getAttachedBrowserDevice,
   getBrowserRevisionArtifactAuthority,
   getEnrollment,
+  getFiles,
   getAuthRun,
   getProtectedAuthFillPreparation,
   getSiteAuthConnection,
@@ -163,6 +165,7 @@ import {
 import { withChannelA, type ChannelAOperation } from "../sandbox/channel-a";
 
 const BROWSER_DRIVER_ID = "opengeni.cdp.v1";
+const BROWSER_WORKSPACE_FILE_AUTHORITY_TTL_SECONDS = 20 * 60;
 
 type BrowserPlacement = {
   placement: InteractionPlacement;
@@ -568,6 +571,10 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         "sessions:control",
       );
       const request = await parseJsonBody(context, BrowserActionRequest);
+      const workspaceFileIds = browserUploadFileIds(request.action);
+      if (workspaceFileIds.length > 0) {
+        await requireAccessGrant(context, deps, workspaceId, "files:read");
+      }
       const startedAtMs = performance.now();
       const result = await withActiveBrowserController(
         context,
@@ -576,21 +583,70 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         browserSessionId,
         "session.control",
         "browser.control",
-        async ({ sessionClient, binding }) =>
-          await sessionClient.action(
-            BrowserActionCommand.parse({
-              protocolVersion: BROWSER_CONTROL_PROTOCOL_VERSION,
-              operationId: request.operationId,
-              browserSessionId,
-              controllerGeneration: binding.controllerGeneration,
-              targetId: request.targetId,
-              expectedTargetGeneration: request.expectedTargetGeneration,
-              expectedDocumentGeneration: request.expectedDocumentGeneration,
-              expectedFrameId: request.expectedFrameId,
-              actor: interactionActorForGrant(grant),
-              action: request.action,
-            }),
-          ),
+        async ({ sessionClient, binding }) => {
+          const command = BrowserActionCommand.parse({
+            protocolVersion: BROWSER_CONTROL_PROTOCOL_VERSION,
+            operationId: request.operationId,
+            browserSessionId,
+            controllerGeneration: binding.controllerGeneration,
+            targetId: request.targetId,
+            expectedTargetGeneration: request.expectedTargetGeneration,
+            expectedDocumentGeneration: request.expectedDocumentGeneration,
+            expectedFrameId: request.expectedFrameId,
+            actor: interactionActorForGrant(grant),
+            action: request.action,
+          });
+          if (workspaceFileIds.length > 0) {
+            let alreadyAdmitted = false;
+            try {
+              await sessionClient.receipt(request.operationId);
+              alreadyAdmitted = true;
+            } catch (error) {
+              if (!(error instanceof BrowserControlRequestError && error.status === 404)) {
+                throw error;
+              }
+            }
+            if (!alreadyAdmitted) {
+              if (!deps.objectStorage) {
+                throw new HTTPException(503, {
+                  message: "object storage is not configured",
+                });
+              }
+              const files = await getFiles(deps.db, workspaceId, workspaceFileIds);
+              const byId = new Map(files.map((file) => [file.id, file]));
+              const ordered = workspaceFileIds.map((fileId) => byId.get(fileId));
+              if (ordered.some((file) => !file)) {
+                throw new HTTPException(404, { message: "workspace file not found" });
+              }
+              if (ordered.some((file) => file!.status !== "ready")) {
+                throw new HTTPException(409, { message: "workspace file is not ready" });
+              }
+              const authorities = await Promise.all(
+                ordered.map(async (file) => {
+                  const signed = await deps.objectStorage!.createGetUrl({
+                    key: file!.objectKey,
+                    expiresInSeconds: BROWSER_WORKSPACE_FILE_AUTHORITY_TTL_SECONDS,
+                  });
+                  return {
+                    fileId: file!.id,
+                    safeFilename: browserUploadFilename(file!.safeFilename),
+                    sizeBytes: file!.sizeBytes,
+                    sha256: browserUploadSha256(file!.sha256),
+                    download: {
+                      url: signed.url,
+                      expiresAt: signed.expiresAt.toISOString(),
+                    },
+                  };
+                }),
+              );
+              await sessionClient.stageWorkspaceFiles({
+                operationId: request.operationId,
+                files: authorities,
+              });
+            }
+          }
+          return await sessionClient.action(command);
+        },
       );
       observeBrowserActionResult(deps.observability, startedAtMs, request, result);
       return context.json(result);
@@ -3186,6 +3242,28 @@ function assertAuthRunBrowser(actual: string, expected: string): void {
   if (actual !== expected) {
     throw new InteractionResourceConflictError("Auth run belongs to another browser session");
   }
+}
+
+function browserUploadFileIds(action: BrowserActionRequestValue["action"]): string[] {
+  const actions = action.type === "batch" ? action.actions : [action];
+  return [
+    ...new Set(actions.flatMap((entry) => (entry.type === "upload" ? entry.workspaceFileIds : []))),
+  ];
+}
+
+function browserUploadFilename(value: string): string {
+  const normalized = value
+    .trim()
+    .replace(/[/\\]/gu, "_")
+    .replace(/[^A-Za-z0-9._ -]+/gu, "_")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .slice(0, 240);
+  return normalized && normalized !== "." && normalized !== ".." ? normalized : "file";
+}
+
+function browserUploadSha256(value: string | null): string | null {
+  return value && /^[0-9a-f]{64}$/u.test(value) ? value : null;
 }
 
 function interactionFailure(error: unknown) {

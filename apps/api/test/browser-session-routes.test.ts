@@ -92,6 +92,26 @@ describe("BrowserSession route discipline", () => {
     expect(route).not.toContain("BrowserActionCommand.parse");
   });
 
+  test("stages upload bytes privately before the canonical browser action", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const start = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/actions"',
+    );
+    const end = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs"',
+      start,
+    );
+    const route = source.slice(start, end);
+    expect(route).toContain('requireAccessGrant(context, deps, workspaceId, "files:read")');
+    expect(route.indexOf("getFiles(deps.db")).toBeLessThan(
+      route.indexOf("sessionClient.stageWorkspaceFiles"),
+    );
+    expect(route.indexOf("sessionClient.stageWorkspaceFiles")).toBeLessThan(
+      route.indexOf("sessionClient.action(command)"),
+    );
+    expect(route).toContain("sessionClient.receipt(request.operationId)");
+  });
+
   test("resolves linked browsers through the exact active ComputerSession placement", async () => {
     const source = await readFile(routeUrl, "utf8");
     const createStart = source.indexOf('app.post("/v1/workspaces/:workspaceId/browser-sessions"');

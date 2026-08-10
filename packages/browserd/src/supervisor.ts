@@ -12,6 +12,8 @@ import type {
   BrowserProtectedAuthObservation,
   BrowserRevisionMaterialization,
   BrowserTarget,
+  BrowserWorkspaceFileStageRequest,
+  BrowserWorkspaceFileStageResponse,
 } from "@opengeni/contracts";
 import {
   BROWSER_PROFILE_ARTIFACT_FORMAT,
@@ -39,6 +41,7 @@ import {
 import { AgentBrowserJsonRunner, browserProfileCryptoPolicy } from "./runner";
 import { SqliteBrowserOperationJournal } from "./journal";
 import { SqliteBrowserProtectedAuthJournal } from "./protected-auth-journal";
+import { BrowserWorkspaceFileStager } from "./workspace-files";
 import {
   captureEncryptedBrowserProfile,
   restoreEncryptedBrowserProfile,
@@ -177,6 +180,10 @@ export type BrowserSupervisorDriverContext = BrowserSessionReference & {
   browserExecutablePath?: string;
   launchEnvironment?: NodeJS.ProcessEnv;
   networkRoute?: BrowserSupervisorNetworkRoute;
+  resolveWorkspaceFiles: (
+    operationId: string,
+    workspaceFileIds: readonly string[],
+  ) => Promise<readonly string[]>;
 };
 
 export type BrowserSupervisorOptions = {
@@ -198,6 +205,7 @@ type Runtime = {
   driver: BrowserSupervisorDriver;
   controller: BrowserInteractionController;
   protectedAuthController: BrowserProtectedAuthController;
+  workspaceFileStager: BrowserWorkspaceFileStager;
   lifecycle: "active" | "capturing" | "captured" | "ending";
 };
 
@@ -361,11 +369,27 @@ export class BrowserSupervisor {
     return await this.requireActive(reference).controller.observe(targetId);
   }
 
-  action(command: BrowserActionCommand): Promise<BrowserActionReceipt> {
-    return this.requireActive({
+  async action(command: BrowserActionCommand): Promise<BrowserActionReceipt> {
+    const runtime = this.requireActive({
       browserSessionId: command.browserSessionId,
       controllerGeneration: command.controllerGeneration,
-    }).controller.run(command);
+    });
+    const receipt = await runtime.controller.run(command);
+    if (
+      browserActionUsesWorkspaceFiles(command.action) &&
+      receipt.state === "failed" &&
+      receipt.dispatchedAt === null
+    ) {
+      await runtime.workspaceFileStager.discard(command.operationId).catch(() => undefined);
+    }
+    return receipt;
+  }
+
+  async stageWorkspaceFiles(
+    reference: BrowserSessionReference,
+    request: BrowserWorkspaceFileStageRequest,
+  ): Promise<BrowserWorkspaceFileStageResponse> {
+    return await this.requireActive(reference).workspaceFileStager.stage(request);
   }
 
   protectedAuthFill(command: BrowserProtectedAuthFillCommand) {
@@ -481,11 +505,13 @@ export class BrowserSupervisor {
     const socketDirectory = join(this.socketRootDirectory, shortDigest(options.browserSessionId));
     const profileDirectory = join(sessionDirectory, "profile");
     const downloadDirectory = join(sessionDirectory, "downloads");
+    const uploadDirectory = join(sessionDirectory, "uploads");
     const screenshotDirectory = join(sessionDirectory, "screenshots");
     for (const directory of [
       sessionDirectory,
       socketDirectory,
       downloadDirectory,
+      uploadDirectory,
       screenshotDirectory,
     ]) {
       await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -504,6 +530,9 @@ export class BrowserSupervisor {
       await mkdir(profileDirectory, { recursive: true, mode: 0o700 });
       await chmod(profileDirectory, 0o700);
     }
+    const workspaceFileStager = await BrowserWorkspaceFileStager.open({
+      rootDirectory: uploadDirectory,
+    });
     const journal = await SqliteBrowserOperationJournal.open({
       path: join(sessionDirectory, "operations.sqlite"),
       browserSessionId: options.browserSessionId,
@@ -542,6 +571,8 @@ export class BrowserSupervisor {
       screenshotDirectory,
       headed: options.headed,
       transport: options.transport,
+      resolveWorkspaceFiles: async (operationId, workspaceFileIds) =>
+        await workspaceFileStager.resolve(operationId, workspaceFileIds),
       ...(options.browserExecutablePath
         ? { browserExecutablePath: options.browserExecutablePath }
         : {}),
@@ -564,6 +595,7 @@ export class BrowserSupervisor {
         lifecycle: "active" as const,
         controller: null as unknown as BrowserInteractionController,
         protectedAuthController: null as unknown as BrowserProtectedAuthController,
+        workspaceFileStager,
       };
       runtime.controller = this.createController(runtime, driver, initialJournal);
       runtime.protectedAuthController = this.createProtectedAuthController(
@@ -950,6 +982,13 @@ function aggregateFailure(
   return new AggregateError(errors, message, { cause });
 }
 
+function browserActionUsesWorkspaceFiles(action: BrowserActionCommand["action"]): boolean {
+  return (
+    action.type === "upload" ||
+    (action.type === "batch" && action.actions.some((entry) => entry.type === "upload"))
+  );
+}
+
 async function createBrowserDriver(
   context: BrowserSupervisorDriverContext,
   binary?: ResolvedAgentBrowserBinary,
@@ -1006,6 +1045,7 @@ async function createBrowserDriver(
     controllerGeneration: context.controllerGeneration,
     runner,
     downloadDirectory: context.downloadDirectory,
+    resolveWorkspaceFiles: context.resolveWorkspaceFiles,
     ...(route
       ? {
           emulation: {

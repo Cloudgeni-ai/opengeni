@@ -16,6 +16,7 @@ export const INTERACTION_MAX_SEMANTIC_NODES = 10_000;
 export const INTERACTION_MAX_CHANGED_NODES = 2_000;
 export const INTERACTION_MAX_DIAGNOSTIC_ENTRIES = 1_000;
 export const INTERACTION_MAX_ACTIONS_PER_BATCH = 32;
+export const INTERACTION_MAX_WORKSPACE_FILES_PER_COMMAND = 100;
 
 /**
  * Latest-wins workspace invalidation for Browser/Computer resources. This is
@@ -1611,7 +1612,19 @@ export const BrowserActionBatch = z
     type: z.literal("batch"),
     actions: z.array(BrowserAction).min(1).max(INTERACTION_MAX_ACTIONS_PER_BATCH),
   })
-  .strict();
+  .strict()
+  .superRefine((batch, context) => {
+    const fileIds = new Set(
+      batch.actions.flatMap((action) => (action.type === "upload" ? action.workspaceFileIds : [])),
+    );
+    if (fileIds.size > INTERACTION_MAX_WORKSPACE_FILES_PER_COMMAND) {
+      context.addIssue({
+        code: "custom",
+        path: ["actions"],
+        message: "browser action references too many workspace files",
+      });
+    }
+  });
 export type BrowserActionBatch = z.infer<typeof BrowserActionBatch>;
 
 export const InteractionError = z
@@ -1660,6 +1673,62 @@ export const BrowserActionCommand = z
   })
   .strict();
 export type BrowserActionCommand = z.infer<typeof BrowserActionCommand>;
+
+/** Controller-private authority used to materialize immutable workspace files
+ * beside a BrowserSession before an upload action dispatches. Signed URLs and
+ * placement paths never appear in the public BrowserAction or its receipt. */
+export const BrowserWorkspaceFileAuthority = z
+  .object({
+    fileId: z.string().uuid(),
+    safeFilename: z
+      .string()
+      .min(1)
+      .max(240)
+      .regex(/^[A-Za-z0-9._ -]+$/u)
+      .refine((value) => value !== "." && value !== "..", {
+        message: "safe filename must be one path segment",
+      }),
+    sizeBytes: z.number().int().nonnegative().max(5_000_000_000),
+    sha256: sha256Hex.nullable(),
+    download: z
+      .object({
+        url: boundedHttpUrl,
+        expiresAt: z.string().datetime({ offset: true }),
+      })
+      .strict(),
+  })
+  .strict();
+export type BrowserWorkspaceFileAuthority = z.infer<typeof BrowserWorkspaceFileAuthority>;
+
+export const BrowserWorkspaceFileStageRequest = z
+  .object({
+    operationId: z.string().uuid(),
+    files: z.array(BrowserWorkspaceFileAuthority).min(1).max(100),
+  })
+  .strict()
+  .superRefine((request, context) => {
+    const seen = new Set<string>();
+    for (const [index, file] of request.files.entries()) {
+      if (seen.has(file.fileId)) {
+        context.addIssue({
+          code: "custom",
+          path: ["files", index, "fileId"],
+          message: "workspace file authority is duplicated",
+        });
+      }
+      seen.add(file.fileId);
+    }
+  });
+export type BrowserWorkspaceFileStageRequest = z.infer<typeof BrowserWorkspaceFileStageRequest>;
+
+export const BrowserWorkspaceFileStageResponse = z
+  .object({
+    operationId: z.string().uuid(),
+    fileIds: z.array(z.string().uuid()).min(1).max(100),
+    replayed: z.boolean(),
+  })
+  .strict();
+export type BrowserWorkspaceFileStageResponse = z.infer<typeof BrowserWorkspaceFileStageResponse>;
 
 export const InteractionOperationState = z.enum([
   "prepared",

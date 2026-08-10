@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { randomUUID } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type {
   BrowserAction,
@@ -9,7 +9,7 @@ import type {
   InteractionSemanticNodeValue,
 } from "@opengeni/contracts";
 import { InteractionDefiniteDriverError } from "@opengeni/interaction";
-import { AgentBrowserDriver, AgentBrowserJsonRunner } from "../src";
+import { AgentBrowserDriver, AgentBrowserJsonRunner, BrowserWorkspaceFileStager } from "../src";
 import { startBrowserConformanceFixture } from "./fixtures/browser-conformance-fixture";
 
 const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
@@ -18,9 +18,28 @@ e2e(
   "passes the deterministic browser-native conformance fixture",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-conformance-");
-    const uploadPath = join(directory, "fixture-upload.txt");
+    const uploadBytes = Buffer.from("deterministic upload\n", "utf8");
     const uploadFileId = randomUUID();
-    await writeFile(uploadPath, "deterministic upload\n", { mode: 0o600 });
+    const uploadOperationId = randomUUID();
+    const uploadServer = Bun.serve({ port: 0, fetch: () => new Response(uploadBytes) });
+    const fileStager = await BrowserWorkspaceFileStager.open({
+      rootDirectory: join(directory, "uploads"),
+    });
+    await fileStager.stage({
+      operationId: uploadOperationId,
+      files: [
+        {
+          fileId: uploadFileId,
+          safeFilename: "fixture-upload.txt",
+          sizeBytes: uploadBytes.byteLength,
+          sha256: createHash("sha256").update(uploadBytes).digest("hex"),
+          download: {
+            url: `${uploadServer.url}/fixture-upload.txt?signature=private`,
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          },
+        },
+      ],
+    });
     const fixture = startBrowserConformanceFixture();
     const runner = await AgentBrowserJsonRunner.create({
       namespace: `conformance_${randomUUID().slice(0, 8)}`,
@@ -36,8 +55,7 @@ e2e(
       controllerGeneration: `controller-${randomUUID()}`,
       runner,
       downloadDirectory: join(directory, "downloads"),
-      resolveWorkspaceFiles: async (ids) =>
-        ids.length === 1 && ids[0] === uploadFileId ? [uploadPath] : [],
+      resolveWorkspaceFiles: async (operationId, ids) => await fileStager.resolve(operationId, ids),
       emulation: {
         locale: "nb-NO",
         timezone: "Europe/Oslo",
@@ -105,11 +123,16 @@ e2e(
         "locator_not_found",
       );
 
-      page = await act(driver, page, {
-        type: "upload",
-        locator: { kind: "label", text: "Fixture file" },
-        workspaceFileIds: [uploadFileId],
-      });
+      page = await act(
+        driver,
+        page,
+        {
+          type: "upload",
+          locator: { kind: "label", text: "Fixture file" },
+          workspaceFileIds: [uploadFileId],
+        },
+        uploadOperationId,
+      );
       expect(names(page)).toContain("Uploaded fixture-upload.txt");
 
       page = await act(driver, page, clickRole("button", "Read fixture location"));
@@ -152,6 +175,7 @@ e2e(
       expect(names(page)).toContain("Redirect complete");
     } finally {
       await driver.close().catch(() => undefined);
+      uploadServer.stop(true);
       fixture.close();
       await rm(directory, { recursive: true, force: true });
     }
@@ -159,10 +183,14 @@ e2e(
   90_000,
 );
 
-function command(observation: BrowserObservation, action: BrowserAction): BrowserActionCommand {
+function command(
+  observation: BrowserObservation,
+  action: BrowserAction,
+  operationId: BrowserActionCommand["operationId"] = randomUUID(),
+): BrowserActionCommand {
   return {
     protocolVersion: 1,
-    operationId: randomUUID(),
+    operationId,
     browserSessionId: observation.browserSessionId,
     controllerGeneration: observation.target.controllerGeneration,
     targetId: observation.target.id,
@@ -178,8 +206,9 @@ async function act(
   driver: AgentBrowserDriver,
   observation: BrowserObservation,
   action: BrowserAction,
+  operationId?: BrowserActionCommand["operationId"],
 ): Promise<BrowserObservation> {
-  return await driver.dispatch(command(observation, action));
+  return await driver.dispatch(command(observation, action, operationId));
 }
 
 function clickRole(role: string, name: string): BrowserAction {
