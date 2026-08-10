@@ -36,6 +36,9 @@ import {
   type Database,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
+import { rigProviderImagesFromVerification } from "./provider-images";
+
+export * from "./provider-images";
 
 export const MAX_RIGS_PER_WORKSPACE = 50;
 export const MAX_CHECKS_PER_RIG = 100;
@@ -352,6 +355,13 @@ export async function promoteSetupAppendChange(
   if (typeof payload.command !== "string" || !payload.command.trim()) {
     throw new HTTPException(422, { message: "setup_append change is missing command" });
   }
+  const nextDefinition = {
+    image: base.image,
+    setupScript: appendRigSetupCommand(base.setupScript, payload.command),
+    checks: base.checks,
+    credentialHooks: base.credentialHooks,
+    defaultVariableSetIds: base.defaultVariableSetIds,
+  };
   const { version, change: updated } = await promoteChangeWithActiveCas(
     deps,
     grant.workspaceId,
@@ -359,16 +369,13 @@ export async function promoteSetupAppendChange(
     change.id,
     {
       expectedActiveVersionId: change.baseVersionId,
-      image: base.image,
-      setupScript: appendRigSetupCommand(base.setupScript, payload.command),
-      checks: base.checks,
-      credentialHooks: base.credentialHooks,
-      defaultVariableSetIds: base.defaultVariableSetIds,
+      ...nextDefinition,
       changelog:
         typeof payload.note === "string" && payload.note.trim()
           ? payload.note
           : "Verified setup append",
       createdBy: change.proposedBy ?? rigActorForGrant(grant),
+      providerImages: rigProviderImagesFromVerification(change.verification, nextDefinition),
     },
   );
   await recordRigAuditEvent(deps.db, {
@@ -418,6 +425,18 @@ export async function promoteVerifiedDefinitionEditChangeForApi(
     defaultVariableSetIds?: unknown;
     changelog?: unknown;
   };
+  const nextDefinition = {
+    image: payload.image === undefined ? base.image : (payload.image as string | null),
+    setupScript:
+      payload.setupScript === undefined ? base.setupScript : (payload.setupScript as string | null),
+    checks: Array.isArray(payload.checks) ? (payload.checks as RigVersion["checks"]) : base.checks,
+    credentialHooks: Array.isArray(payload.credentialHooks)
+      ? (payload.credentialHooks as string[])
+      : base.credentialHooks,
+    defaultVariableSetIds: Array.isArray(payload.defaultVariableSetIds)
+      ? (payload.defaultVariableSetIds as string[])
+      : base.defaultVariableSetIds,
+  };
   const { version, change: updated } = await promoteChangeWithActiveCas(
     deps,
     grant.workspaceId,
@@ -425,25 +444,13 @@ export async function promoteVerifiedDefinitionEditChangeForApi(
     change.id,
     {
       expectedActiveVersionId: change.baseVersionId,
-      image: payload.image === undefined ? base.image : (payload.image as string | null),
-      setupScript:
-        payload.setupScript === undefined
-          ? base.setupScript
-          : (payload.setupScript as string | null),
-      checks: Array.isArray(payload.checks)
-        ? (payload.checks as RigVersion["checks"])
-        : base.checks,
-      credentialHooks: Array.isArray(payload.credentialHooks)
-        ? (payload.credentialHooks as string[])
-        : base.credentialHooks,
-      defaultVariableSetIds: Array.isArray(payload.defaultVariableSetIds)
-        ? (payload.defaultVariableSetIds as string[])
-        : base.defaultVariableSetIds,
+      ...nextDefinition,
       changelog:
         typeof payload.changelog === "string" && payload.changelog.trim()
           ? payload.changelog
           : "Verified definition edit",
       createdBy: rigActorForGrant(grant),
+      providerImages: rigProviderImagesFromVerification(change.verification, nextDefinition),
     },
   );
   await recordRigAuditEvent(deps.db, {

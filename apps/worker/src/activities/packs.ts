@@ -12,7 +12,13 @@ import {
   type EffectiveSkillSelection,
   type PackSkill,
 } from "@opengeni/runtime";
-export { settingsWithPackSandboxImage, settingsWithRigImage } from "./sandbox-images";
+export {
+  resolveRigProviderImageSelection,
+  rigProviderImageSourceImage,
+  settingsWithPackSandboxImage,
+  settingsWithRigImage,
+  settingsWithRigProviderImage,
+} from "./sandbox-images";
 
 /**
  * The pack-scoped runtime for a workspace: the sandbox image its sessions run

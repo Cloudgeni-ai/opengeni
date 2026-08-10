@@ -212,12 +212,13 @@ describe("release schema contract", () => {
         (migrations.has("0192_editable_artifact_live_tickets.sql") ? 1 : 0) +
         (migrations.has("0193_editable_artifact_authorization.sql") ? 1 : 0) +
         (migrations.has("0194_editable_artifact_durable_exports.sql") ? 1 : 0) +
-        (migrations.has("0195_editable_artifact_import_authorization.sql") ? 1 : 0),
+        (migrations.has("0195_editable_artifact_import_authorization.sql") ? 1 : 0) +
+        (migrations.has("0196_rig_provider_images.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "db8bb1eeb946617f64a6e4187647b12cf519c72508eda13d0169b3a231b9d041",
+      "8b6af65542e7f94eda48c83448456ceb9d54a57083bb3cb866b886415838ca9f",
     );
-    expect(contract.latestMigration).toBe("0195_editable_artifact_import_authorization.sql");
+    expect(contract.latestMigration).toBe("0196_rig_provider_images.sql");
     expect(migrations.get("0065_enrollment_credential_generation.sql")).toMatchObject({
       sha256: "2e25fa2dfb8a95a7a9ba1ef5aa9bd219755af998b3317bcdf4d7acc4f67264fe",
       deploymentMode: "rolling",
@@ -280,6 +281,10 @@ describe("release schema contract", () => {
     });
     expect(migrations.get("0195_editable_artifact_import_authorization.sql")).toMatchObject({
       sha256: "c34cef47b396a9bdc518180d2012c2d6c1fc96313449a76ff2c50403acc32c7f",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0196_rig_provider_images.sql")).toMatchObject({
+      sha256: "0d47354968aeec0ba9d329351593fd8f3b5469a3157e74f837dbdb16b64bc07f",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0180_retained_screenshot_lifecycle_fences.sql")).toMatchObject({

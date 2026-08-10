@@ -233,6 +233,7 @@ import {
   assertSessionAllowsProductModel,
   defaultSessionMcpServerIds,
   directPersonalConnectionSubjectId,
+  rigProviderImageContentHash,
   resolveCodexAppsCredentialIdForRun,
   withFrozenPersonalConnectionDelegations,
   resolveSessionToolPolicy,
@@ -273,10 +274,12 @@ import {
 import { withFirstPartyTools } from "./goals";
 import {
   mergeRigDefaultVariableSetEnvironment,
+  rigProviderImageSourceImage,
   resolveWorkspacePackRuntime,
   resolveWorkspaceSkillLibraryRuntime,
   settingsWithPackSandboxImage,
   settingsWithRigImage,
+  settingsWithRigProviderImage,
 } from "./packs";
 import { deliverFailedChildTurnToParent } from "./parent-wake";
 import {
@@ -4757,19 +4760,26 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const structuredWorkspacePolicyActive =
         hasActiveWorkspaceInstructionPolicy(instructionPolicySnapshot);
       const workspaceMemory = await resolveWorkspaceMemoryBlock(db, input.workspaceId);
+      const logicalSandboxSettings = settingsWithRigImage(
+        settingsWithPackSandboxImage(
+          capabilitySettings,
+          packRuntime.sandboxImage,
+          packRuntime.sandboxProviderImages,
+        ),
+        rigVersion?.image ?? null,
+      );
+      const providerImageSettings = await settingsWithRigProviderImage(
+        logicalSandboxSettings,
+        rigVersion,
+        turn.sandboxBackend,
+      );
       const baseRunSettings = {
         // IMAGE PRECEDENCE (M3): rig > pack > deployment. settingsWithRigImage runs
         // OUTERMOST so a rig-pinned image overrides both the pack image and the
         // deployment default; a rig with no image (or a rig-less turn) is a
-        // pass-through, leaving the pack/deployment chain exactly as today.
-        ...settingsWithRigImage(
-          settingsWithPackSandboxImage(
-            capabilitySettings,
-            packRuntime.sandboxImage,
-            packRuntime.sandboxProviderImages,
-          ),
-          rigVersion?.image ?? null,
-        ),
+        // pass-through. A matching verified provider-native ID is then applied
+        // only to fresh creation without changing the logical lease image.
+        ...providerImageSettings,
         openaiModel: turn.model,
         openaiReasoningEffort: turn.reasoningEffort,
         sandboxBackend: turn.sandboxBackend,
@@ -5999,6 +6009,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               {
                 db,
                 settings: runSettings,
+                logicalFallbackSettings: logicalSandboxSettings,
                 cancellationSignal: sandboxResumeSignal,
                 sandboxMetrics: runtimeMetricsHooksForObservability(observability),
                 onSandboxLost: publishSandboxLost,
@@ -6574,6 +6585,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                       rigName,
                       script: rigVersion.setupScript,
                       timeoutMs: runSettings.rigSetupTimeoutMs,
+                      contentHash: rigProviderImageContentHash({
+                        backend: turn.sandboxBackend,
+                        sourceImage: rigProviderImageSourceImage(
+                          logicalSandboxSettings,
+                          turn.sandboxBackend,
+                        ),
+                        definition: rigVersion,
+                      }),
                     },
                   }
                 : {}),
@@ -6619,6 +6638,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               {
                 db,
                 settings: runSettings,
+                logicalFallbackSettings: logicalSandboxSettings,
                 cancellationSignal: sandboxResumeSignal,
                 sandboxMetrics: runtimeMetricsHooksForObservability(observability),
                 onSandboxLost: publishSandboxLost,

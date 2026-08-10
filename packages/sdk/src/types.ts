@@ -3377,6 +3377,34 @@ export type RigCheck = {
   command: string;
 };
 
+export type RigProviderImageBuildStatus = "building" | "ready" | "failed" | "unsupported";
+
+export type RigProviderImage = {
+  backend: SandboxBackend;
+  provider: string;
+  status: RigProviderImageBuildStatus;
+  contentHash: string;
+  setupHash: string;
+  sourceImage: string | null;
+  buildRequestId: string;
+  imageId: string | null;
+  imageDigest: string | null;
+  artifactId: string | null;
+  providerBindingKeyHash: string | null;
+  provenance: {
+    kind: "rig_verification";
+    targetKind: "change" | "version";
+    targetId: string;
+  };
+  startedAt: string;
+  finishedAt: string | null;
+  error: {
+    code: string;
+    message: string;
+    retryable: boolean;
+  } | null;
+};
+
 export type RigVersion = {
   id: string;
   rigId: string;
@@ -3387,6 +3415,7 @@ export type RigVersion = {
   credentialHooks: string[];
   defaultVariableSetIds: string[];
   changelog: string | null;
+  providerImages: Partial<Record<SandboxBackend, RigProviderImage>>;
   createdBy: string | null;
   active: boolean;
   createdAt: string;

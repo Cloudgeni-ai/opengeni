@@ -22,7 +22,11 @@ import { modalProvider } from "./modal";
 import { noneProvider } from "./none";
 import { runloopProvider } from "./runloop";
 import { selfhostedProvider } from "./selfhosted";
-import type { ProviderRegistration, ProviderWorkspaceCapturePolicy } from "./types";
+import type {
+  ProviderImmutableImageBuildResult,
+  ProviderRegistration,
+  ProviderWorkspaceCapturePolicy,
+} from "./types";
 import { vercelProvider } from "./vercel";
 
 export const PROVIDER_REGISTRY: Record<SandboxBackend, ProviderRegistration> = {
@@ -158,6 +162,27 @@ export function prepareProviderForTeardownAfterCapture(backend: string, session:
   PROVIDER_REGISTRY[backend as SandboxBackend]?.prepareForTeardownAfterCapture?.(session);
 }
 
+export function providerSupportsImmutableImageBuild(backend: SandboxBackend): boolean {
+  return typeof PROVIDER_REGISTRY[backend].buildImmutableImage === "function";
+}
+
+export async function buildImmutableProviderImage(input: {
+  backend: SandboxBackend;
+  settings: Settings;
+  session: unknown;
+  requestId: string;
+  timeoutMs: number;
+}): Promise<ProviderImmutableImageBuildResult | null> {
+  const build = PROVIDER_REGISTRY[input.backend].buildImmutableImage;
+  if (!build) return null;
+  return await build({
+    settings: input.settings,
+    session: input.session,
+    requestId: input.requestId,
+    timeoutMs: input.timeoutMs,
+  });
+}
+
 // Boot-validate the registry once at module load: the descriptor-table self-
 // test PLUS the descriptor.backendId === SDK client.backendId assertion (the
 // deferred-from-P0.1 invariant). The SDK client constructors are pure option-
@@ -170,6 +195,8 @@ export type {
   ProviderRegistration,
   ProviderConstructionContext,
   ProviderExactResumeMode,
+  ProviderImmutableImageBuildInput,
+  ProviderImmutableImageBuildResult,
   ProviderWorkspaceCapturePolicy,
   ProviderWorkspaceCaptureTakeover,
 } from "./types";

@@ -16,6 +16,7 @@ import {
   createSandboxClient,
   negotiateCapabilities,
   prepareProviderForTeardownAfterCapture,
+  providerSupportsImmutableImageBuild,
   providerWorkspaceCapturePolicy,
   sandboxBackendForSdkBackendId,
   sdkBackendIdForSandboxBackend,
@@ -58,6 +59,14 @@ describe("provider registry — descriptor invariants + backendId assertion", ()
       expect(reg.descriptor.backend).toBe(backend);
       // backendId == enum key for all but local (SDK reports "unix_local").
       expect(reg.descriptor.backendId).toBe(backend === "local" ? "unix_local" : backend);
+    }
+  });
+
+  test("immutable provider image builds are explicit and unsupported by default", () => {
+    expect(providerSupportsImmutableImageBuild("modal")).toBe(true);
+    for (const backend of SandboxBackend.options) {
+      if (backend === "modal") continue;
+      expect(providerSupportsImmutableImageBuild(backend)).toBe(false);
     }
   });
 

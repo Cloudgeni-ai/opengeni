@@ -93,6 +93,8 @@ import type {
   WorkspaceMember,
   WorkspaceRegisteredPack,
   Rig,
+  RigProviderImage,
+  RigProviderImages,
   RigVersion,
   RigVerificationHealth,
   RigChange,
@@ -143,6 +145,7 @@ import {
   type LatencyMode,
   resolveWorkspaceMemoryEnabled,
   RigChange as RigChangeContract,
+  RigProviderImage as RigProviderImageContract,
   SessionGoal as SessionGoalContract,
   SessionSystemUpdatePayload,
   sessionSystemUpdateBatchHistoryItem,
@@ -11574,6 +11577,7 @@ function mapRigVersion(row: typeof schema.rigVersions.$inferSelect): RigVersion 
     credentialHooks: row.credentialHooks,
     defaultVariableSetIds: row.defaultVariableSetIds,
     changelog: row.changelog,
+    providerImages: row.providerImages,
     createdBy: row.createdBy,
     active: row.active,
     createdAt: row.createdAt.toISOString(),
@@ -11822,6 +11826,7 @@ export async function createRig(
           credentialHooks: content.credentialHooks ?? [],
           defaultVariableSetIds: content.defaultVariableSetIds ?? [],
           changelog: content.changelog ?? null,
+          providerImages: {},
           createdBy: content.createdBy ?? input.createdBy ?? null,
           active: true,
         })
@@ -12120,6 +12125,7 @@ export async function createRigVersion(
         credentialHooks: input.credentialHooks ?? [],
         defaultVariableSetIds: input.defaultVariableSetIds ?? [],
         changelog: input.changelog ?? null,
+        providerImages: {},
         createdBy: input.createdBy ?? null,
         active: options.activate ?? false,
       })
@@ -12142,6 +12148,7 @@ export async function createRigVersionForChangePromotion(
   changeId: string,
   input: RigVersionContentInput & {
     expectedActiveVersionId: string;
+    providerImages?: RigProviderImages;
   },
 ): Promise<{ version: RigVersion; change: RigChange }> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
@@ -12206,6 +12213,11 @@ export async function createRigVersionForChangePromotion(
         and(eq(schema.rigVersions.workspaceId, workspaceId), eq(schema.rigVersions.rigId, rigId)),
       );
     const nextVersion = Number(max) + 1;
+    const providerImages = await retainRigProviderImageArtifacts(
+      scopedDb,
+      workspaceId,
+      input.providerImages ?? {},
+    );
     await scopedDb
       .update(schema.rigVersions)
       .set({ active: false })
@@ -12229,6 +12241,7 @@ export async function createRigVersionForChangePromotion(
         credentialHooks: input.credentialHooks ?? [],
         defaultVariableSetIds: input.defaultVariableSetIds ?? [],
         changelog: input.changelog ?? null,
+        providerImages,
         createdBy: input.createdBy ?? null,
         active: true,
       })
@@ -12393,6 +12406,208 @@ export async function getRigVersionById(
       )
       .limit(1);
     return row ? mapRigVersion(row) : null;
+  });
+}
+
+export type RigProviderImageBuildClaim =
+  | { status: "claimed"; image: RigProviderImage }
+  | { status: "ready" | "in_progress" | "unsupported" | "conflict"; image: RigProviderImage };
+
+async function retainRigProviderImageArtifacts(
+  db: Database,
+  workspaceId: string,
+  images: RigProviderImages,
+): Promise<RigProviderImages> {
+  const retained: RigProviderImages = {};
+  for (const [backend, image] of Object.entries(images) as Array<
+    [SandboxBackend, RigProviderImage]
+  >) {
+    if (image.status !== "ready" || backend !== "modal") {
+      retained[backend] = image;
+      continue;
+    }
+    if (!image.artifactId || !image.imageId || !image.providerBindingKeyHash) continue;
+    const [artifact] = await db
+      .select({
+        id: schema.sandboxCheckpointArtifacts.id,
+        providerBindingKey: schema.sandboxCheckpointArtifacts.providerBindingKey,
+      })
+      .from(schema.sandboxCheckpointArtifacts)
+      .where(
+        and(
+          eq(schema.sandboxCheckpointArtifacts.id, image.artifactId),
+          eq(schema.sandboxCheckpointArtifacts.workspaceId, workspaceId),
+          eq(schema.sandboxCheckpointArtifacts.providerBackend, "modal"),
+          eq(schema.sandboxCheckpointArtifacts.objectKind, "modal_filesystem_snapshot"),
+          eq(schema.sandboxCheckpointArtifacts.objectId, image.imageId),
+          inArray(schema.sandboxCheckpointArtifacts.state, ["candidate", "current"]),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    const bindingHash = artifact
+      ? `sha256:${createHash("sha256").update(artifact.providerBindingKey, "utf8").digest("hex")}`
+      : null;
+    if (!artifact || bindingHash !== image.providerBindingKeyHash) continue;
+    // Checkpoint states `current` and `previous` are reserved for exact lease
+    // references by the ledger's deferred integrity trigger. Rig ownership is
+    // the transactionally published providerImages.artifactId reference, so a
+    // rig-owned artifact remains a candidate and the global GC function skips
+    // it while that ready reference exists.
+    retained[backend] = image;
+  }
+  return retained;
+}
+
+/**
+ * Claim the one provider-image build slot for an existing immutable rig
+ * version. A finalized ready image is never overwritten in place: if the
+ * effective base/content identity changed, callers must mint/verify a new rig
+ * version and runtime setup remains the truthful fallback for this one.
+ */
+export async function claimRigVersionProviderImageBuild(
+  db: Database,
+  input: {
+    workspaceId: string;
+    versionId: string;
+    image: RigProviderImage;
+    staleAfterMs: number;
+    /** Retry a same-content unsupported record only after runtime support exists. */
+    retryUnsupported?: boolean;
+  },
+): Promise<RigProviderImageBuildClaim> {
+  const candidate = RigProviderImageContract.parse(input.image);
+  if (candidate.status !== "building") {
+    throw new Error("Rig provider image build claims require status=building");
+  }
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.rigVersions)
+      .where(
+        and(
+          eq(schema.rigVersions.workspaceId, input.workspaceId),
+          eq(schema.rigVersions.id, input.versionId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!row) throw new Error(`Rig version not found: ${input.versionId}`);
+
+    const existing = row.providerImages[candidate.backend];
+    if (existing) {
+      const sameContent =
+        existing.contentHash === candidate.contentHash &&
+        existing.setupHash === candidate.setupHash &&
+        existing.sourceImage === candidate.sourceImage;
+      if (existing.status === "ready") {
+        if (!sameContent) return { status: "conflict", image: existing };
+        const retained = await retainRigProviderImageArtifacts(scopedDb, input.workspaceId, {
+          [existing.backend]: existing,
+        });
+        if (retained[existing.backend]) {
+          return { status: "ready", image: existing };
+        }
+      }
+      if (existing.status === "unsupported" && sameContent && !input.retryUnsupported) {
+        return { status: "unsupported", image: existing };
+      }
+      if (!sameContent) {
+        return { status: "conflict", image: existing };
+      }
+      if (existing.status === "building") {
+        const startedAtMs = Date.parse(existing.startedAt);
+        if (
+          Number.isFinite(startedAtMs) &&
+          Date.now() - startedAtMs < Math.max(1, input.staleAfterMs)
+        ) {
+          return { status: "in_progress", image: existing };
+        }
+      }
+    }
+
+    // Failed or stale retries retain the original provider idempotency key so
+    // an ambiguous first snapshot converges on the same immutable Image.
+    const claimed = RigProviderImageContract.parse({
+      ...candidate,
+      ...(existing?.buildRequestId ? { buildRequestId: existing.buildRequestId } : {}),
+    });
+    const providerImages: RigProviderImages = {
+      ...row.providerImages,
+      [claimed.backend]: claimed,
+    };
+    await scopedDb
+      .update(schema.rigVersions)
+      .set({ providerImages })
+      .where(
+        and(
+          eq(schema.rigVersions.workspaceId, input.workspaceId),
+          eq(schema.rigVersions.id, input.versionId),
+        ),
+      );
+    return { status: "claimed", image: claimed };
+  });
+}
+
+/** Finalize only the exact claimed build request; late callbacks are fenced. */
+export async function finalizeRigVersionProviderImageBuild(
+  db: Database,
+  input: {
+    workspaceId: string;
+    versionId: string;
+    image: RigProviderImage;
+  },
+): Promise<boolean> {
+  const finalized = RigProviderImageContract.parse(input.image);
+  if (finalized.status === "building") {
+    throw new Error("Rig provider image finalization requires a terminal status");
+  }
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.rigVersions)
+      .where(
+        and(
+          eq(schema.rigVersions.workspaceId, input.workspaceId),
+          eq(schema.rigVersions.id, input.versionId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!row) throw new Error(`Rig version not found: ${input.versionId}`);
+    const current = row.providerImages[finalized.backend];
+    if (
+      current?.status !== "building" ||
+      current.buildRequestId !== finalized.buildRequestId ||
+      current.contentHash !== finalized.contentHash ||
+      current.setupHash !== finalized.setupHash
+    ) {
+      return (
+        current?.status === finalized.status &&
+        current.buildRequestId === finalized.buildRequestId &&
+        current.contentHash === finalized.contentHash
+      );
+    }
+    if (finalized.status === "ready") {
+      const retained = await retainRigProviderImageArtifacts(scopedDb, input.workspaceId, {
+        [finalized.backend]: finalized,
+      });
+      if (!retained[finalized.backend]) return false;
+    }
+    const providerImages: RigProviderImages = {
+      ...row.providerImages,
+      [finalized.backend]: finalized,
+    };
+    await scopedDb
+      .update(schema.rigVersions)
+      .set({ providerImages })
+      .where(
+        and(
+          eq(schema.rigVersions.workspaceId, input.workspaceId),
+          eq(schema.rigVersions.id, input.versionId),
+        ),
+      );
+    return true;
   });
 }
 
@@ -34391,6 +34606,26 @@ export async function markSandboxCheckpointArtifactDeletePending(
             select 1 from sandbox_leases lease
             where lease.current_checkpoint_artifact_id = artifact.id
                or lease.previous_checkpoint_artifact_id = artifact.id
+          )
+          and not exists (
+            select 1
+            from rig_versions version
+            cross join lateral jsonb_each(version.provider_images) provider_image
+            where version.workspace_id = ${input.workspaceId}
+              and provider_image.value ->> 'artifactId' = artifact.id::text
+              and provider_image.value ->> 'status' = 'ready'
+          )
+          and not exists (
+            select 1
+            from rig_changes change
+            join rig_versions base
+              on base.id = change.base_version_id
+             and base.workspace_id = change.workspace_id
+             and base.active = true
+            where change.workspace_id = ${input.workspaceId}
+              and change.status in ('verifying', 'proposed')
+              and change.verification #>> '{providerImage,artifactId}' = artifact.id::text
+              and change.verification #>> '{providerImage,status}' = 'ready'
           )
         returning artifact.id
       `);
