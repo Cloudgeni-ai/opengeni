@@ -4,9 +4,9 @@ import { readFile } from "node:fs/promises";
 import postgres from "postgres";
 import { migrate } from "../src/migrate";
 
-const migrationUrl = new URL("../drizzle/0203_video_generation_funding.sql", import.meta.url);
+const migrationUrl = new URL("../drizzle/0204_video_generation_funding.sql", import.meta.url);
 
-describe("migration 0203 video generation funding", () => {
+describe("migration 0204 video generation funding", () => {
   test("is rolling and adds an explicit frozen funding state", async () => {
     const source = await readFile(migrationUrl, "utf8");
     expect(source.split(/\r?\n/, 1)[0]).toBe("-- deployment-mode: rolling");
@@ -14,7 +14,7 @@ describe("migration 0203 video generation funding", () => {
     expect(source).toContain("NOT VALID");
     expect(source).not.toMatch(/ACCESS\s+EXCLUSIVE/iu);
 
-    const blank = await acquireBlankTestDatabase("migration-0203-video-funding");
+    const blank = await acquireBlankTestDatabase("migration-0204-video-funding");
     if (!blank) return;
     const sql = postgres(blank.databaseUrl, { max: 1, onnotice: () => undefined });
     try {

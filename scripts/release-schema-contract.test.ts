@@ -217,12 +217,14 @@ describe("release schema contract", () => {
         (migrations.has("0197_knowledge_source_sync_schedules.sql") ? 1 : 0) +
         (migrations.has("0199_workspace_learning_policy.sql") ? 1 : 0) +
         (migrations.has("0201_company_profile_authority.sql") ? 1 : 0) +
-        (migrations.has("0202_document_index_checkpoints.sql") ? 1 : 0),
+        (migrations.has("0202_document_index_checkpoints.sql") ? 1 : 0) +
+        (migrations.has("0203_durable_video_generation.sql") ? 1 : 0) +
+        (migrations.has("0204_video_generation_funding.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "c9b19caabb946d91e6e2ec4b34bb48323a61efbfc76628fe338a277f5dcbe343",
+      "52eb1881de30a377c50a99da1dd8c403b488f6dd966c5a93f5192bd1a503d126",
     );
-    expect(contract.latestMigration).toBe("0202_document_index_checkpoints.sql");
+    expect(contract.latestMigration).toBe("0204_video_generation_funding.sql");
     expect(migrations.get("0197_knowledge_source_sync_schedules.sql")).toMatchObject({
       sha256: "edd425be4e4db07f4fcab1e520ece71dc1a692072ce28256ec2b86248442f3c8",
       deploymentMode: "maintenance",

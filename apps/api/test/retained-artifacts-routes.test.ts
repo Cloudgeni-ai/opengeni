@@ -380,6 +380,7 @@ async function createGeneratedVideoArtifact(
     workspaceId: workspace.workspaceId,
     subjectId: workspace.subjectId,
     expectedRevision: 0,
+    fundingSource: "workspace_gateway",
     enabledModelIds: ["bytedance/seedance-2.5"],
     defaultModelId: "bytedance/seedance-2.5",
   });
@@ -403,6 +404,8 @@ async function createGeneratedVideoArtifact(
     sourceMode: "text",
     capabilityRevision: "a".repeat(64),
     policyRevision: policy.revision,
+    fundingSource: "workspace_gateway",
+    pricedCostMicros: 0,
     connectionId: connection.id,
     credentialVersion: connection.version,
     credentialEncrypted: "encrypted-credential-lease",

@@ -4,9 +4,9 @@ import { readFile } from "node:fs/promises";
 import postgres from "postgres";
 import { migrate } from "../src/migrate";
 
-const migrationUrl = new URL("../drizzle/0202_durable_video_generation.sql", import.meta.url);
+const migrationUrl = new URL("../drizzle/0203_durable_video_generation.sql", import.meta.url);
 
-describe("migration 0202 durable video generation", () => {
+describe("migration 0203 durable video generation", () => {
   test("is rolling, tenant isolated, and installs the recovery claim", async () => {
     const source = await readFile(migrationUrl, "utf8");
     expect(source.split(/\r?\n/, 1)[0]).toBe("-- deployment-mode: rolling");
@@ -17,7 +17,7 @@ describe("migration 0202 durable video generation", () => {
     expect(source).toContain("FORCE ROW LEVEL SECURITY");
     expect(source).not.toMatch(/ACCESS\s+EXCLUSIVE/iu);
 
-    const blank = await acquireBlankTestDatabase("migration-0202-video-generation");
+    const blank = await acquireBlankTestDatabase("migration-0203-video-generation");
     if (!blank) return;
     const sql = postgres(blank.databaseUrl, { max: 1, onnotice: () => undefined });
     try {

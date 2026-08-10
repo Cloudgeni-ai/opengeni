@@ -209,11 +209,11 @@ export const FORCE_RLS_TABLES = [
   "workspace_model_policies",
   "workspace_packs",
   "workspace_screenshot_quotas",
-  "workspace_video_generation_policies",
-  "workspace_video_generation_quotas",
   "workspace_session_activity_revisions",
   "workspace_variable_set_variables",
   "workspace_variable_sets",
+  "workspace_video_generation_policies",
+  "workspace_video_generation_quotas",
 ] as const;
 
 /**
@@ -354,11 +354,11 @@ export const RUNTIME_FULL_DML_TABLES = [
   "workspace_model_policies",
   "workspace_packs",
   "workspace_screenshot_quotas",
-  "workspace_video_generation_policies",
-  "workspace_video_generation_quotas",
   "workspace_session_activity_revisions",
   "workspace_variable_set_variables",
   "workspace_variable_sets",
+  "workspace_video_generation_policies",
+  "workspace_video_generation_quotas",
   "workspaces",
 ] as const;
 
