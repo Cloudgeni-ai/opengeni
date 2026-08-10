@@ -9,7 +9,18 @@ const packageJson = JSON.parse(readFileSync(join(runtimeRoot, "package.json"), "
   exports?: Record<string, unknown>;
 };
 
-const implementationModules = ["model-input", "model-provider", "run-events"] as const;
+const implementationModules = [
+  "model-input",
+  "model-provider",
+  "model-provider-client",
+  "model-provider-errors",
+  "model-provider-request-policy",
+  "model-provider-routing",
+  "model-provider-transport",
+  "run-events",
+] as const;
+
+type ImplementationModule = (typeof implementationModules)[number];
 
 function importSpecifiersOf(source: string): string[] {
   const specifiers: string[] = [];
@@ -39,6 +50,45 @@ describe("runtime implementation module boundaries", () => {
 
     for (const moduleName of implementationModules) {
       expect(publicSubpaths).not.toContain(`./${moduleName}`);
+    }
+  });
+
+  test("package-private implementation modules stay acyclic", () => {
+    const implementationSet = new Set<string>(implementationModules);
+    const dependencies = new Map<ImplementationModule, ImplementationModule[]>();
+
+    for (const moduleName of implementationModules) {
+      const source = readFileSync(join(runtimeRoot, "src", `${moduleName}.ts`), "utf8");
+      const localDependencies = importSpecifiersOf(source)
+        .filter((specifier) => specifier.startsWith("./"))
+        .map((specifier) => specifier.slice(2).replace(/\.ts$/, ""))
+        .filter((specifier): specifier is ImplementationModule => implementationSet.has(specifier));
+      dependencies.set(moduleName, localDependencies);
+    }
+
+    const visited = new Set<ImplementationModule>();
+    const visiting = new Set<ImplementationModule>();
+    const path: ImplementationModule[] = [];
+
+    function visit(moduleName: ImplementationModule): void {
+      if (visited.has(moduleName)) return;
+      if (visiting.has(moduleName)) {
+        const cycleStart = path.indexOf(moduleName);
+        const cycle = [...path.slice(cycleStart), moduleName].join(" -> ");
+        throw new Error(`Runtime implementation dependency cycle: ${cycle}`);
+      }
+      visiting.add(moduleName);
+      path.push(moduleName);
+      for (const dependency of dependencies.get(moduleName) ?? []) {
+        visit(dependency);
+      }
+      path.pop();
+      visiting.delete(moduleName);
+      visited.add(moduleName);
+    }
+
+    for (const moduleName of implementationModules) {
+      visit(moduleName);
     }
   });
 
