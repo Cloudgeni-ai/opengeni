@@ -147,6 +147,19 @@
     .og-realtime-model-trigger {
     display: none;
   }
+
+  [data-og-responsive-basis="container"]
+    .og-composer-footer:has([data-transcription-capturing])
+    .og-composer-controls
+    > :not([data-transcription-capturing]) {
+    display: none;
+  }
+
+  [data-og-responsive-basis="container"]
+    .og-composer-footer:has([data-transcription-capturing])
+    .og-composer-actions {
+    display: none;
+  }
 }
 
 @container og-composer (max-width: 24.999rem) {
@@ -193,4 +206,3 @@
   );
   max-width: calc(100vw - 1rem);
 }
-
