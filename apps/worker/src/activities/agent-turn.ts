@@ -72,6 +72,7 @@ import {
   getEnrollment,
   abandonRecordingForTurnAttempt,
   commitSessionAttemptQuiescence,
+  getOrCreateCompanyProfileSnapshot,
   getOrCreatePreferenceRegistrySnapshot,
   getOrCreateWorkspaceInstructionPolicySnapshot,
   PreferenceRegistryInitiatorError,
@@ -4741,19 +4742,22 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         attemptId: input.attemptId,
         executionGeneration: turn.executionGeneration,
       };
-      const [workspace, instructionPolicySnapshot, preferenceSnapshot] = await Promise.all([
-        getWorkspace(db, input.workspaceId),
-        getOrCreateWorkspaceInstructionPolicySnapshot(db, governanceClaims),
-        getOrCreatePreferenceRegistrySnapshot(db, governanceClaims).catch((error) => {
-          if (error instanceof PreferenceRegistryInitiatorError) return null;
-          throw error;
-        }),
-      ]);
+      const [workspace, companyProfileSnapshot, instructionPolicySnapshot, preferenceSnapshot] =
+        await Promise.all([
+          getWorkspace(db, input.workspaceId),
+          getOrCreateCompanyProfileSnapshot(db, governanceClaims),
+          getOrCreateWorkspaceInstructionPolicySnapshot(db, governanceClaims),
+          getOrCreatePreferenceRegistrySnapshot(db, governanceClaims).catch((error) => {
+            if (error instanceof PreferenceRegistryInitiatorError) return null;
+            throw error;
+          }),
+        ]);
       if (!workspace) throw new Error(`Workspace not found: ${input.workspaceId}`);
       const workspaceAgentInstructions = workspace.agentInstructions;
       const agentHumanInputEnabled = resolveWorkspaceAgentHumanInputEnabled(workspace.settings);
       assertWorkspaceHumanInputAllowed(agentHumanInputEnabled, "resume", humanInputResume !== null);
       const workspaceGovernance = renderWorkspaceGovernanceContext({
+        companyProfile: companyProfileSnapshot,
         instructionPolicy: instructionPolicySnapshot,
         preferences: preferenceSnapshot,
       });

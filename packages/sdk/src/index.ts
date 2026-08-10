@@ -140,6 +140,28 @@ export {
   normalizeWorkspaceInstructionPolicyRoleKey,
   WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
 } from "./workspace-instruction-policies";
+export {
+  COMPANY_PROFILE_ENTRY_MAX_CHARS,
+  COMPANY_PROFILE_ENTRY_MAX_COUNT,
+  COMPANY_PROFILE_SCALAR_MAX_CHARS,
+  normalizeCompanyProfileStableKey,
+} from "./company-profile";
+export type {
+  ActivateCompanyProfileRevisionRequest,
+  CompanyProfileActivationEvent,
+  CompanyProfileContent,
+  CompanyProfileDiffRequest,
+  CompanyProfileDiffResponse,
+  CompanyProfileEntry,
+  CompanyProfileHead,
+  CompanyProfileListOptions,
+  CompanyProfileListResponse,
+  CompanyProfileMutationResponse,
+  CompanyProfileRevision,
+  CompanyProfileRevisionIdentity,
+  RollbackCompanyProfileRequest,
+  UpdateCompanyProfileRequest,
+} from "./company-profile";
 export type {
   ActivateWorkspaceInstructionPolicyRequest,
   CreateWorkspaceInstructionPolicyDraftRequest,

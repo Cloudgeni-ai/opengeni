@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type {
+  ResolvedCompanyProfileSnapshot,
   PreferenceRegistryDescriptor,
   PreferenceRegistrySnapshot,
   ResolvedWorkspaceInstructionPolicySnapshot,
@@ -13,12 +14,43 @@ import {
 } from "../src";
 
 const hashes = {
+  company: "0".repeat(64),
   charter: "a".repeat(64),
   global: "b".repeat(64),
   role: "c".repeat(64),
   snapshot: "d".repeat(64),
   preferences: "e".repeat(64),
 };
+
+function companyProfileSnapshot(): ResolvedCompanyProfileSnapshot {
+  return {
+    id: crypto.randomUUID(),
+    accountId: crypto.randomUUID(),
+    workspaceId: crypto.randomUUID(),
+    sessionId: crypto.randomUUID(),
+    turnId: crypto.randomUUID(),
+    attemptId: crypto.randomUUID(),
+    executionGeneration: 1,
+    profile: {
+      id: crypto.randomUUID(),
+      revision: 3,
+      contentHash: hashes.company,
+      activationVersion: 2,
+      activatedAt: "2026-08-09T16:00:00.000Z",
+      provenance: { source: "human", sourceIdHash: null },
+      profile: {
+        identity: "COMPANY_IDENTITY_SENTINEL",
+        mission: "COMPANY_MISSION_SENTINEL",
+        products: [{ key: "opengeni", content: "COMPANY_PRODUCT_SENTINEL" }],
+        customers: [],
+        goals: [{ key: "reliability", content: "COMPANY_GOAL_SENTINEL" }],
+        constraints: [],
+      },
+    },
+    snapshotHash: hashes.company,
+    createdAt: "2026-08-09T16:01:00.000Z",
+  };
+}
 
 function policyEntry(
   overrides: Partial<ResolvedWorkspaceInstructionPolicySnapshotEntry> &
@@ -108,6 +140,7 @@ function preferenceSnapshot(
 describe("exact-attempt workspace governance prompt", () => {
   test("orders fixed authorities before session/task state and bounded memory", () => {
     const governance = renderWorkspaceGovernanceContext({
+      companyProfile: companyProfileSnapshot(),
       instructionPolicy: policySnapshot([
         policyEntry({ kind: "charter", scope: "global", content: "CHARTER_SENTINEL" }),
         policyEntry({ kind: "policy", scope: "global", content: "GLOBAL_POLICY_SENTINEL" }),
@@ -135,6 +168,7 @@ describe("exact-attempt workspace governance prompt", () => {
     });
     const instructions = agent.instructions;
     const ordered = [
+      "COMPANY_IDENTITY_SENTINEL",
       "ORG_PREF_SENTINEL descriptor sentinel",
       "CHARTER_SENTINEL",
       "GLOBAL_POLICY_SENTINEL",

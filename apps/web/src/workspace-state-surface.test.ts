@@ -84,6 +84,32 @@ describe("Agent Brain authority surface", () => {
     expect(loader).toContain("listWorkspaceInstructionPolicyOnboardingProposals");
     expect(loader).toContain("listPreferenceRegistry");
     expect(loader).toContain("getPreferenceRegistry");
+    expect(loader).toContain("listCompanyProfile");
+    expect(route).toContain("CompanyProfileInventory");
+    for (const required of [
+      "Organization company profile",
+      "Concise mandatory context shared across the organization",
+      "Edit organization company profile",
+      "Save and activate new revision",
+      "Editing and rollback require direct organization account-admin authority",
+      "Current revision",
+      "Activation version",
+      "History",
+      "Activate",
+      "Rollback",
+    ]) {
+      expect(route).toContain(required);
+    }
+    for (const operation of [
+      "updateCompanyProfile",
+      "activateCompanyProfileRevision",
+      "rollbackCompanyProfile",
+    ]) {
+      expect(route).toContain(operation);
+    }
+    expect(route.indexOf("<CompanyProfileInventory")).toBeLessThan(
+      route.indexOf('id="brain-diagnostics"'),
+    );
     expect(route).toContain("createWorkspaceInstructionPolicyOnboardingProposal");
     for (const required of [
       "dedicated organization/workspace/personal registry",

@@ -1,5 +1,10 @@
 import {
+  COMPANY_PROFILE_ENTRY_MAX_CHARS,
+  COMPANY_PROFILE_SCALAR_MAX_CHARS,
   OpenGeniApiError,
+  normalizeCompanyProfileStableKey,
+  type CompanyProfileContent,
+  type CompanyProfileEntry,
   WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
   normalizeWorkspaceInstructionPolicyRoleKey,
   type WorkspaceInstructionPolicyKind,
@@ -23,16 +28,17 @@ import {
   SettingsIcon,
   UsersIcon,
 } from "lucide-react";
-import { type FormEvent, type ReactNode, useState } from "react";
+import { type FormEvent, type ReactNode, useEffect, useState } from "react";
 
 import { EmptyState, LoadErrorState, PageHeader } from "@/components/common";
 import { ContentPage } from "@/components/ui/content-layout";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
-import { hasWorkspacePermission } from "@/lib/permissions";
+import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 
 import { BrainOverview } from "./agent-brain-overview";
 import {
+  useCompanyProfileInventory,
   useWorkspaceInstructionPolicyOnboardingProposals,
   useWorkspaceStateInventory,
 } from "./workspace-state-loader";
@@ -203,6 +209,323 @@ function PreferenceInventory({ state }: { state: WorkspaceStateResponse }) {
           The descriptor inventory reached its safety bound; the hash must not be treated as
           complete.
         </p>
+      ) : null}
+    </StateCard>
+  );
+}
+
+function profileEntriesText(entries: readonly CompanyProfileEntry[]): string {
+  return entries.map((entry) => `${entry.key}: ${entry.content}`).join("\n");
+}
+
+function parseProfileEntries(value: string): CompanyProfileEntry[] {
+  return value
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const separator = line.indexOf(":");
+      if (separator < 1) throw new Error("Each list line must use `stable-key: content`.");
+      const key = normalizeCompanyProfileStableKey(line.slice(0, separator));
+      const content = line.slice(separator + 1).trim();
+      if (!key || !content) throw new Error("Each list line needs a stable key and content.");
+      if (content.length > COMPANY_PROFILE_ENTRY_MAX_CHARS) {
+        throw new Error(
+          `Company-profile list entries must be at most ${COMPANY_PROFILE_ENTRY_MAX_CHARS} characters.`,
+        );
+      }
+      return { key, content };
+    });
+}
+
+function emptyCompanyProfile(): CompanyProfileContent {
+  return {
+    identity: null,
+    mission: null,
+    products: [],
+    customers: [],
+    goals: [],
+    constraints: [],
+  };
+}
+
+export function CompanyProfileInventory({ workspaceId }: { workspaceId: string }) {
+  const context = useAppContext();
+  const { client } = context;
+  const inventory = useCompanyProfileInventory(client, workspaceId);
+  const workspaceGrant = context.accessContext.workspaceGrants.find(
+    (grant) => grant.workspaceId === workspaceId,
+  );
+  const canManage = Boolean(
+    workspaceGrant?.accountId &&
+    hasAccountPermission(context.accessContext, workspaceGrant.accountId, "account:admin"),
+  );
+  const currentRevision = inventory.response?.current
+    ? (inventory.response.revisions.find(
+        (revision) => revision.id === inventory.response?.current?.revisionId,
+      ) ?? null)
+    : null;
+  const [identity, setIdentity] = useState("");
+  const [mission, setMission] = useState("");
+  const [products, setProducts] = useState("");
+  const [customers, setCustomers] = useState("");
+  const [goals, setGoals] = useState("");
+  const [constraints, setConstraints] = useState("");
+  const [reason, setReason] = useState("Update organization company profile");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const profile = currentRevision?.profile ?? emptyCompanyProfile();
+    setIdentity(profile.identity ?? "");
+    setMission(profile.mission ?? "");
+    setProducts(profileEntriesText(profile.products));
+    setCustomers(profileEntriesText(profile.customers));
+    setGoals(profileEntriesText(profile.goals));
+    setConstraints(profileEntriesText(profile.constraints));
+  }, [currentRevision]);
+
+  const save = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    if (!canManage || submitting || !inventory.response) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      await client.updateCompanyProfile(workspaceId, {
+        operationId: crypto.randomUUID(),
+        profile: {
+          identity: identity.trim() || null,
+          mission: mission.trim() || null,
+          products: parseProfileEntries(products),
+          customers: parseProfileEntries(customers),
+          goals: parseProfileEntries(goals),
+          constraints: parseProfileEntries(constraints),
+        },
+        expectedCurrentRevisionId: inventory.response.current?.revisionId ?? null,
+        expectedActivationVersion: inventory.response.current?.activationVersion ?? 0,
+        reason,
+      });
+      await inventory.reload();
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : String(saveError));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const activate = async (revisionId: string): Promise<void> => {
+    if (!canManage || !inventory.response || submitting) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      await client.activateCompanyProfileRevision(workspaceId, revisionId, {
+        operationId: crypto.randomUUID(),
+        expectedCurrentRevisionId: inventory.response.current?.revisionId ?? null,
+        expectedActivationVersion: inventory.response.current?.activationVersion ?? 0,
+        reason: "Activate reviewed company-profile proposal",
+      });
+      await inventory.reload();
+    } catch (activationError) {
+      setError(
+        activationError instanceof Error ? activationError.message : String(activationError),
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const rollback = async (revisionId: string): Promise<void> => {
+    const current = inventory.response?.current;
+    if (!canManage || !current || submitting) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      await client.rollbackCompanyProfile(workspaceId, {
+        operationId: crypto.randomUUID(),
+        targetRevisionId: revisionId,
+        expectedCurrentRevisionId: current.revisionId,
+        expectedActivationVersion: current.activationVersion,
+        reason: "Restore a previously active company profile",
+      });
+      await inventory.reload();
+    } catch (rollbackError) {
+      setError(rollbackError instanceof Error ? rollbackError.message : String(rollbackError));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <StateCard
+      title="Organization company profile"
+      description="Concise mandatory context shared across the organization. Longer material stays in Documents; this is not Memory, Preference Registry, or workspace policy."
+    >
+      {inventory.loading && !inventory.response ? <Skeleton className="h-40 w-full" /> : null}
+      {inventory.error && !inventory.response ? (
+        <LoadErrorState
+          title="Couldn't load the company profile"
+          error={inventory.error}
+          onRetry={() => void inventory.reload()}
+        />
+      ) : null}
+      {inventory.response ? (
+        <div className="grid gap-4">
+          <div className="grid gap-3 sm:grid-cols-3">
+            <Metric
+              label="Current revision"
+              value={
+                inventory.response.current ? `r${inventory.response.current.revision}` : "None"
+              }
+            />
+            <Metric
+              label="Activation version"
+              value={inventory.response.current?.activationVersion ?? 0}
+            />
+            <Metric label="History" value={inventory.response.revisions.length} />
+          </div>
+          {currentRevision ? (
+            <div className="grid gap-3 rounded-md border border-border bg-surface-2/30 p-3 text-xs leading-5 text-fg-muted">
+              {currentRevision.profile.identity ? (
+                <div>
+                  <strong className="text-fg">Identity:</strong> {currentRevision.profile.identity}
+                </div>
+              ) : null}
+              {currentRevision.profile.mission ? (
+                <div>
+                  <strong className="text-fg">Mission:</strong> {currentRevision.profile.mission}
+                </div>
+              ) : null}
+              {(["products", "customers", "goals", "constraints"] as const).map((field) =>
+                currentRevision.profile[field].length > 0 ? (
+                  <div key={field}>
+                    <strong className="text-fg">{humanize(field)}:</strong>{" "}
+                    {currentRevision.profile[field].map((entry) => entry.content).join(" · ")}
+                  </div>
+                ) : null,
+              )}
+            </div>
+          ) : (
+            <EmptyState>No organization company profile is active.</EmptyState>
+          )}
+
+          {canManage ? (
+            <form
+              aria-label="Edit organization company profile"
+              className="grid gap-3 rounded-md border border-border p-3"
+              onSubmit={(event) => void save(event)}
+            >
+              <div className="grid gap-3 md:grid-cols-2">
+                <label className="grid gap-1 text-xs font-medium text-fg-muted">
+                  Identity
+                  <textarea
+                    className="min-h-20 rounded-md border border-border bg-surface px-3 py-2 text-sm text-fg"
+                    maxLength={COMPANY_PROFILE_SCALAR_MAX_CHARS}
+                    value={identity}
+                    onChange={(event) => setIdentity(event.target.value)}
+                  />
+                </label>
+                <label className="grid gap-1 text-xs font-medium text-fg-muted">
+                  Mission
+                  <textarea
+                    className="min-h-20 rounded-md border border-border bg-surface px-3 py-2 text-sm text-fg"
+                    maxLength={COMPANY_PROFILE_SCALAR_MAX_CHARS}
+                    value={mission}
+                    onChange={(event) => setMission(event.target.value)}
+                  />
+                </label>
+              </div>
+              <div className="grid gap-3 md:grid-cols-2">
+                {(
+                  [
+                    ["Products", products, setProducts],
+                    ["Customers", customers, setCustomers],
+                    ["Goals", goals, setGoals],
+                    ["Critical constraints", constraints, setConstraints],
+                  ] as const
+                ).map(([label, value, setter]) => (
+                  <label key={label} className="grid gap-1 text-xs font-medium text-fg-muted">
+                    {label}
+                    <textarea
+                      className="min-h-24 rounded-md border border-border bg-surface px-3 py-2 font-mono text-xs text-fg"
+                      placeholder="stable-key: concise content"
+                      value={value}
+                      onChange={(event) => setter(event.target.value)}
+                    />
+                  </label>
+                ))}
+              </div>
+              <label className="grid gap-1 text-xs font-medium text-fg-muted">
+                Audit reason
+                <input
+                  className="rounded-md border border-border bg-surface px-3 py-2 text-sm text-fg"
+                  value={reason}
+                  maxLength={4096}
+                  required
+                  onChange={(event) => setReason(event.target.value)}
+                />
+              </label>
+              {error ? <p className="text-xs text-status-danger">{error}</p> : null}
+              <button
+                className="w-fit rounded-md bg-brand px-3 py-2 text-xs font-semibold text-white disabled:opacity-50"
+                type="submit"
+                disabled={submitting}
+              >
+                Save and activate new revision
+              </button>
+            </form>
+          ) : (
+            <p className="text-xs text-fg-muted">
+              Editing and rollback require direct organization account-admin authority.
+            </p>
+          )}
+
+          <div className="divide-y divide-border rounded-md border border-border">
+            {inventory.response.revisions.map((revision) => {
+              const active = revision.id === inventory.response?.current?.revisionId;
+              const previouslyActive = inventory.response?.activationEvents.some(
+                (activationEvent) => activationEvent.newRevision?.id === revision.id,
+              );
+              return (
+                <div
+                  key={revision.id}
+                  className="flex flex-col gap-2 p-3 text-xs sm:flex-row sm:items-center sm:justify-between"
+                >
+                  <div>
+                    <span className="font-medium text-fg">r{revision.revision}</span> ·{" "}
+                    {humanize(revision.intent)} · {humanize(revision.provenance.source)} ·{" "}
+                    {formatDate(revision.createdAt)}
+                  </div>
+                  {canManage && !active ? (
+                    <div className="flex gap-2">
+                      {revision.intent === "proposal" ? (
+                        <button
+                          className="text-brand hover:underline"
+                          type="button"
+                          disabled={submitting}
+                          onClick={() => void activate(revision.id)}
+                        >
+                          Activate
+                        </button>
+                      ) : null}
+                      {previouslyActive ? (
+                        <button
+                          className="text-brand hover:underline"
+                          type="button"
+                          disabled={submitting}
+                          onClick={() => void rollback(revision.id)}
+                        >
+                          Rollback
+                        </button>
+                      ) : null}
+                    </div>
+                  ) : active ? (
+                    <span className="font-medium text-status-success">Active</span>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        </div>
       ) : null}
     </StateCard>
   );
@@ -967,6 +1290,7 @@ export function WorkspaceStateRoute({ workspaceId }: { workspaceId: string }) {
             workspaceId={workspaceId}
             onOpenDiagnostics={() => setDiagnosticsOpen(true)}
           />
+          <CompanyProfileInventory workspaceId={workspaceId} />
           <details
             id="brain-diagnostics"
             className="group scroll-mt-4 rounded-lg border border-border bg-surface"

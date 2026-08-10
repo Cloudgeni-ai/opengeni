@@ -260,6 +260,7 @@ export {
 export type { RuntimeMetricsHooks } from "./metrics";
 export {
   appendWorkspaceGovernance,
+  CompanyProfilePromptLimitError,
   hasActiveWorkspaceInstructionPolicy,
   renderWorkspaceGovernanceContext,
   WorkspaceGovernancePromptLimitError,

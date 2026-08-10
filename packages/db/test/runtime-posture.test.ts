@@ -92,14 +92,14 @@ function safePosture(): RuntimeDatabasePosture {
 describe("runtime database posture evaluator", () => {
   test("freezes the unique, sorted current-ledger table privilege classes", () => {
     const contracts = [
-      [FORCE_RLS_TABLES, 148],
+      [FORCE_RLS_TABLES, 152],
       [NON_RLS_RUNTIME_TABLES, 11],
-      [RUNTIME_FULL_DML_TABLES, 109],
-      [RUNTIME_READ_ONLY_TABLES, 7],
-      [RUNTIME_READ_INSERT_TABLES, 35],
+      [RUNTIME_FULL_DML_TABLES, 110],
+      [RUNTIME_READ_ONLY_TABLES, 8],
+      [RUNTIME_READ_INSERT_TABLES, 37],
       [RUNTIME_READ_INSERT_UPDATE_TABLES, 1],
       [PROTECTED_NO_DIRECT_DML_TABLES, 7],
-      [RUNTIME_DML_TABLES, 152],
+      [RUNTIME_DML_TABLES, 156],
     ] as const;
     for (const [tables, length] of contracts) {
       expect(tables).toHaveLength(length);
@@ -108,8 +108,8 @@ describe("runtime database posture evaluator", () => {
     }
 
     expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(159);
-    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(159);
+    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(163);
+    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(163);
     expect(
       FORCE_RLS_TABLES.every(
         (table) =>

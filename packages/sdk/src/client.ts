@@ -254,6 +254,17 @@ import type {
   WorkspaceInstructionPolicyRevision,
 } from "./workspace-instruction-policies";
 import type {
+  ActivateCompanyProfileRevisionRequest,
+  CompanyProfileDiffRequest,
+  CompanyProfileDiffResponse,
+  CompanyProfileListOptions,
+  CompanyProfileListResponse,
+  CompanyProfileMutationResponse,
+  CompanyProfileRevision,
+  RollbackCompanyProfileRequest,
+  UpdateCompanyProfileRequest,
+} from "./company-profile";
+import type {
   WorkspaceStateExportResponse,
   WorkspaceStateGetOptions,
   WorkspaceStateResponse,
@@ -2337,6 +2348,77 @@ export class OpenGeniClient {
     return await this.requestJson<WorkspaceInstructionPolicyActivationResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/instruction-policies/rollback`,
+      request,
+    );
+  }
+
+  /** Read the current organization profile plus immutable revision and activation history. */
+  async listCompanyProfile(
+    workspaceId: string,
+    options: CompanyProfileListOptions = {},
+  ): Promise<CompanyProfileListResponse> {
+    const params = new URLSearchParams();
+    if (options.afterRevision !== undefined)
+      params.set("afterRevision", String(options.afterRevision));
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
+    const query = params.toString();
+    return await this.requestJson<CompanyProfileListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/company-profile${query ? `?${query}` : ""}`,
+    );
+  }
+
+  async getCompanyProfileRevision(
+    workspaceId: string,
+    revisionId: string,
+  ): Promise<CompanyProfileRevision> {
+    return await this.requestJson<CompanyProfileRevision>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/company-profile/revisions/${encodeURIComponent(revisionId)}`,
+    );
+  }
+
+  async updateCompanyProfile(
+    workspaceId: string,
+    request: UpdateCompanyProfileRequest,
+  ): Promise<CompanyProfileMutationResponse> {
+    return await this.requestJson<CompanyProfileMutationResponse>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/company-profile`,
+      request,
+    );
+  }
+
+  async diffCompanyProfileRevisions(
+    workspaceId: string,
+    request: CompanyProfileDiffRequest,
+  ): Promise<CompanyProfileDiffResponse> {
+    const params = new URLSearchParams(request);
+    return await this.requestJson<CompanyProfileDiffResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/company-profile/diff?${params}`,
+    );
+  }
+
+  async activateCompanyProfileRevision(
+    workspaceId: string,
+    revisionId: string,
+    request: ActivateCompanyProfileRevisionRequest,
+  ): Promise<CompanyProfileMutationResponse> {
+    return await this.requestJson<CompanyProfileMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/company-profile/revisions/${encodeURIComponent(revisionId)}/activate`,
+      request,
+    );
+  }
+
+  async rollbackCompanyProfile(
+    workspaceId: string,
+    request: RollbackCompanyProfileRequest,
+  ): Promise<CompanyProfileMutationResponse> {
+    return await this.requestJson<CompanyProfileMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/company-profile/rollback`,
       request,
     );
   }

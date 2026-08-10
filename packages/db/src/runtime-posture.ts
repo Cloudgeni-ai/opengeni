@@ -60,6 +60,10 @@ export const FORCE_RLS_TABLES = [
   "codex_reset_redemption_attempts",
   "codex_rotation_settings",
   "codex_subscription_credentials",
+  "company_profile_activation_events",
+  "company_profile_heads",
+  "company_profile_revisions",
+  "company_profile_snapshots",
   "composer_drafts",
   "connection_disconnect_operations",
   "connections",
@@ -240,6 +244,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "codex_reset_redemption_attempts",
   "codex_rotation_settings",
   "codex_subscription_credentials",
+  "company_profile_heads",
   "composer_drafts",
   "connection_disconnect_operations",
   "connections",
@@ -336,6 +341,7 @@ export const RUNTIME_FULL_DML_TABLES = [
 
 /** Configuration and lifecycle-owned audit rows are read-only at runtime. */
 export const RUNTIME_READ_ONLY_TABLES = [
+  "company_profile_snapshots",
   "knowledge_lifecycle_events",
   "knowledge_memory_lifecycle_events",
   "knowledge_memory_relationships",
@@ -347,6 +353,8 @@ export const RUNTIME_READ_ONLY_TABLES = [
 
 /** Append-only evidence/revision tables are insertable and queryable, never mutable. */
 export const RUNTIME_READ_INSERT_TABLES = [
+  "company_profile_activation_events",
+  "company_profile_revisions",
   "editable_artifact_blob_refs",
   "editable_artifact_idempotency_receipts",
   "editable_artifact_live_outbox",

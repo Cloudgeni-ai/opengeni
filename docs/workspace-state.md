@@ -56,6 +56,11 @@ changes remain proposals only: if represented as instruction policy, they must
 be inactive, provenance-linked drafts until an authorized policy operation
 explicitly activates them.
 
+The same Agent Brain console also presents the account-scoped organization
+company profile and its immutable history through the canonical company-profile
+API. Workspace State does not own or duplicate that profile; see
+[`company-profile.md`](company-profile.md).
+
 ## HTTP and authorization
 
 `GET /v1/workspaces/:workspaceId/workspace-state` requires `workspace:read` and
