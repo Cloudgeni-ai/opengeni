@@ -4838,9 +4838,6 @@ export type MachineMetricsSeriesResponse = {
 export type RemoveEnrollmentRequest = {
   expectedUpdatedAt?: string;
   idempotencyKey?: string;
-  /** Explicit confirmation to repoint dependent sessions to their default
-   * managed sandbox before revoking the connected machine. */
-  moveSessionsToDefaultSandbox?: boolean;
 };
 
 /** Typed removal/revocation outcome. Blocked outcomes preserve the exact
@@ -4855,6 +4852,7 @@ export type RemoveEnrollmentResponse = {
   code:
     | "active_route"
     | "active_commands"
+    | "machine_home"
     | "active_lease"
     | "recovery_pending"
     | "not_selfhosted"

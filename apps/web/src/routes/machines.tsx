@@ -30,8 +30,8 @@ import { toast } from "sonner";
 
 import {
   OpenGeniApiError,
-  type RemoveEnrollmentRequest,
   type RemoveEnrollmentResponse,
+  type SwapActiveSandboxResponse,
 } from "@opengeni/sdk";
 
 import { apiBaseUrl } from "@/api";
@@ -65,11 +65,13 @@ async function copyToClipboard(text: string, successMessage: string) {
 }
 
 export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
+  const { client } = useAppContext();
   const machines = useMachines({ pollIntervalMs: 5000 });
   const pageLive = usePageLiveActivity();
   const [enrollOpen, setEnrollOpen] = useState(false);
   const [removeTarget, setRemoveTarget] = useState<MachineView | null>(null);
   const [removeBlocked, setRemoveBlocked] = useState<RemoveEnrollmentResponse | null>(null);
+  const [removeMoveError, setRemoveMoveError] = useState<Error | null>(null);
 
   // The machine whose telemetry detail is open (by sandboxId), and its history.
   const [detailId, setDetailId] = useState<string | null>(null);
@@ -229,6 +231,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
                   onRemove: (machine: MachineView) => {
                     machines.clearMutationError();
                     setRemoveBlocked(null);
+                    setRemoveMoveError(null);
                     setRemoveTarget(machine);
                   },
                 }
@@ -278,6 +281,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
           if (!open) {
             setRemoveTarget(null);
             setRemoveBlocked(null);
+            setRemoveMoveError(null);
             machines.clearMutationError();
           }
         }}
@@ -291,10 +295,20 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
         onConfirm={async () => {
           const target = removeTarget;
           if (!target?.enrollmentId) return false;
-          const result = await machines.remove(
-            target.enrollmentId,
-            machineRemovalRequest(removeBlocked),
-          );
+          const sessionsToMove =
+            removeBlocked?.code === "active_route" ? removeBlocked.dependentSessions : [];
+          if (sessionsToMove.length > 0) {
+            try {
+              setRemoveMoveError(null);
+              await moveDependentSessionsToDefault(client, workspaceId, sessionsToMove);
+            } catch (error) {
+              setRemoveMoveError(
+                error instanceof Error ? error : new Error("A session could not be moved."),
+              );
+              return false;
+            }
+          }
+          const result = await machines.remove(target.enrollmentId);
           if (!result) {
             return false;
           }
@@ -308,13 +322,15 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
               : `${target.name} removed`,
             {
               description:
-                result.dependentSessions.length > 0
-                  ? `${result.dependentSessions.length} ${result.dependentSessions.length === 1 ? "session now uses its" : "sessions now use their"} default managed sandbox.`
+                sessionsToMove.length > 0
+                  ? `${sessionsToMove.length} ${sessionsToMove.length === 1 ? "session now uses its" : "sessions now use their"} verified default managed sandbox.`
                   : "It will disappear from the active machine list.",
             },
           );
           setRemoveTarget(null);
           setDetailId(null);
+          setRemoveBlocked(null);
+          setRemoveMoveError(null);
           return true;
         }}
       >
@@ -331,6 +347,11 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
                   : "Never connected"}
               </p>
             </div>
+            {removeMoveError ? (
+              <Notice tone="failed" title="Couldn't move every session">
+                {removeMoveError.message}
+              </Notice>
+            ) : null}
             {removeBlocked ? (
               <MachineRemovalBlockNotice workspaceId={workspaceId} result={removeBlocked} />
             ) : machines.mutationError ? (
@@ -345,10 +366,31 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
   );
 }
 
-export function machineRemovalRequest(
-  blocked: RemoveEnrollmentResponse | null,
-): RemoveEnrollmentRequest {
-  return blocked?.code === "active_route" ? { moveSessionsToDefaultSandbox: true } : {};
+type DefaultSandboxClient = {
+  swapActiveSandbox: (
+    workspaceId: string,
+    sessionId: string,
+    request: { target: string },
+  ) => Promise<SwapActiveSandboxResponse>;
+};
+
+export async function moveDependentSessionsToDefault(
+  client: DefaultSandboxClient,
+  workspaceId: string,
+  sessions: Array<{ id: string; title: string | null }>,
+): Promise<void> {
+  for (const session of sessions) {
+    const result = await client.swapActiveSandbox(workspaceId, session.id, {
+      target: "default",
+    });
+    if (!result.swapped) {
+      const sessionName = session.title?.trim() || session.id;
+      throw new Error(
+        result.reason?.trim() ||
+          `Session ${sessionName} could not reach a verified default managed sandbox${result.code ? ` (${result.code})` : ""}.`,
+      );
+    }
+  }
 }
 
 export function MachineRemovalBlockNotice({

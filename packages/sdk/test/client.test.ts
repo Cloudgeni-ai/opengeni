@@ -132,7 +132,6 @@ describe("OpenGeniClient", () => {
     const result = await client.removeEnrollment(WORKSPACE_ID, enrollmentId, {
       expectedUpdatedAt: "2026-08-04T09:00:00.000Z",
       idempotencyKey: "remove-sdk-contract-1",
-      moveSessionsToDefaultSandbox: true,
     });
 
     expect(result).toEqual(response);
@@ -143,7 +142,6 @@ describe("OpenGeniClient", () => {
     expect(JSON.parse(requests[0]!.body!)).toEqual({
       expectedUpdatedAt: "2026-08-04T09:00:00.000Z",
       idempotencyKey: "remove-sdk-contract-1",
-      moveSessionsToDefaultSandbox: true,
     });
   });
 

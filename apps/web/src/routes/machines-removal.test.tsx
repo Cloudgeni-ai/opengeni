@@ -4,7 +4,7 @@ import type { RemoveEnrollmentResponse } from "@opengeni/sdk";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 
-import { MachineRemovalBlockNotice, machineRemovalRequest } from "./machines";
+import { MachineRemovalBlockNotice, moveDependentSessionsToDefault } from "./machines";
 
 const blocked: RemoveEnrollmentResponse = {
   revoked: false,
@@ -63,9 +63,70 @@ describe("connected machine removal conflict", () => {
     container.remove();
   });
 
-  test("requires the explicit move flag only after an active-route blocker", () => {
-    expect(machineRemovalRequest(null)).toEqual({});
-    expect(machineRemovalRequest(blocked)).toEqual({ moveSessionsToDefaultSandbox: true });
-    expect(machineRemovalRequest({ ...blocked, code: "active_lease" })).toEqual({});
+  test("moves every dependency through the canonical default-sandbox endpoint", async () => {
+    const calls: Array<{ workspaceId: string; sessionId: string; target: string }> = [];
+    await moveDependentSessionsToDefault(
+      {
+        swapActiveSandbox: async (workspaceId, sessionId, request) => {
+          calls.push({ workspaceId, sessionId, target: request.target });
+          return { swapped: true, activeSandboxId: null, activeEpoch: calls.length };
+        },
+      },
+      "workspace-a",
+      blocked.dependentSessions,
+    );
+    expect(calls).toEqual([
+      {
+        workspaceId: "workspace-a",
+        sessionId: "22222222-2222-4222-8222-222222222222",
+        target: "default",
+      },
+      {
+        workspaceId: "workspace-a",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        target: "default",
+      },
+    ]);
+  });
+
+  test("stops before removal when a default sandbox is not verified ready", async () => {
+    await expect(
+      moveDependentSessionsToDefault(
+        {
+          swapActiveSandbox: async () => ({
+            swapped: false,
+            activeSandboxId: "44444444-4444-4444-8444-444444444444",
+            activeEpoch: 7,
+            code: "recovery_in_progress",
+            reason: "The managed sandbox is still restoring.",
+          }),
+        },
+        "workspace-a",
+        blocked.dependentSessions,
+      ),
+    ).rejects.toThrow("The managed sandbox is still restoring.");
+  });
+
+  test("renders a machine-home blocker without offering a false managed-home action", async () => {
+    const machineHome = {
+      ...blocked,
+      code: "machine_home" as const,
+      message: "Machine is the durable home sandbox for Capacity planning.",
+      action: "Keep the machine enrolled until a managed-home migration exists.",
+    };
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<MachineRemovalBlockNotice workspaceId="workspace-a" result={machineHome} />);
+    });
+
+    expect(container.textContent).toContain("Not safe yet");
+    expect(container.textContent).toContain("durable home sandbox");
+    expect(container.textContent).toContain("managed-home migration");
+
+    await act(async () => root.unmount());
+    container.remove();
   });
 });
