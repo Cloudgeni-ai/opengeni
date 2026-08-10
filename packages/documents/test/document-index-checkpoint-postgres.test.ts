@@ -52,7 +52,7 @@ async function createReadyDocument(
     returning id`;
   const subjectId = input.kind === "personal" ? (input.subjectId ?? "user:alice") : null;
   const [document] = await shared!.admin<
-    Array<{ id: string; index_sequence: bigint; indexed_at: Date }>
+    Array<{ id: string; index_sequence: bigint | string; indexed_at: Date }>
   >`
     insert into documents (
       account_id, workspace_id, base_id, file_id, status, title, parser, chunk_count,
@@ -71,7 +71,7 @@ async function createReadyDocument(
     ) returning id, index_sequence, indexed_at`;
   return {
     documentId: document!.id,
-    indexSequence: document!.index_sequence,
+    indexSequence: BigInt(document!.index_sequence),
     indexedAt: document!.indexed_at,
   };
 }
