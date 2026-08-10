@@ -1,5 +1,24 @@
 # @opengeni/runtime
 
+## 0.18.40
+
+### Patch Changes
+
+- cccc2b3: Split the package-private model-provider implementation into acyclic client,
+  error, request-policy, routing, and transport modules while preserving the
+  existing public runtime surface and provider behavior.
+- 96965c2: Retain explicit image-tool outputs before they enter live agent history, preventing inline image bytes from reaching durable session history during SDK event/state ordering skew.
+- a8e44ae: Extract provider client construction, request policy, and model routing into a package-private runtime module while preserving the existing public entrypoint and exports.
+- eade67f: Allow Modal cold filesystem-snapshot restores up to 60 seconds to become command-ready before failing lease warm-up.
+- Updated dependencies [b46f4de]
+- Updated dependencies [d55a093]
+- Updated dependencies [ad9123b]
+- Updated dependencies [31666e2]
+- Updated dependencies [bd5514e]
+- Updated dependencies [5fcad0a]
+  - @opengeni/contracts@0.43.0
+  - @opengeni/config@0.12.11
+
 ## 0.18.39
 
 ### Patch Changes
