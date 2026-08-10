@@ -45,6 +45,21 @@ describe("interaction resource routes", () => {
     expect(create).toContain("originatingToolOperationId");
   });
 
+  test("resolves an agent-owned intervention through its exact approval boundary", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const start = source.indexOf(
+      '"/v1/workspaces/:workspaceId/interaction-interventions/:interventionId/resolve"',
+    );
+    const route = source.slice(start, source.indexOf("\n  );", start));
+    expect(route).toContain("getInteractionInterventionApprovalTarget");
+    expect(route).toContain(
+      'authorizeSession(deps, grant, approvalTarget.sessionId, "session.approval.write")',
+    );
+    expect(route).toContain("acceptSessionApprovalDecision");
+    expect(route).toContain("interactionIntervention:");
+    expect(route).toContain("signalApprovalDecision");
+  });
+
   test("maps absence separately from conflict/state and hides unknown failures", () => {
     expect(
       interactionResourceRouteError(new InteractionResourceNotFoundError("missing")).status,

@@ -32,6 +32,7 @@ import {
 import {
   CLEARED_RUN_STATE_BLOB,
   EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS,
+  INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
   MODEL_ATTACHMENT_REFS_FIELD,
   sessionSystemUpdateBatchHistoryItem,
   type ToolAuthNeededPayload,
@@ -96,6 +97,7 @@ import {
   mcpTransportErrorWithRetryMetadata,
   serializeApprovals,
   serializeHumanInputRequests,
+  serializeInteractionInterventionRequests,
   refreshCodemodeTokenFile,
   withStructuredViewImageFunctionResults,
   sandboxCommandExitCode,
@@ -379,6 +381,39 @@ describe("structured human-input runtime boundary", () => {
           ],
           allowSkip: true,
           expiresInSeconds: 60,
+        },
+      },
+    ]);
+  });
+
+  test("partitions typed interaction waits while preserving their exact SDK approval", () => {
+    const interaction = {
+      name: INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
+      rawItem: {
+        callId: "interaction-human-call-1",
+        name: INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
+        arguments: JSON.stringify({
+          operation: "wait",
+          interventionId: "00000000-0000-4000-8000-000000000001",
+        }),
+      },
+    };
+    expect(serializeApprovals([interaction])).toEqual([]);
+    expect(serializeInteractionInterventionRequests([interruption, interaction])).toEqual([
+      {
+        toolCallId: "interaction-human-call-1",
+        input: {
+          operation: "wait",
+          interventionId: "00000000-0000-4000-8000-000000000001",
+        },
+        approval: {
+          id: "interaction-human-call-1",
+          name: INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
+          arguments: JSON.stringify({
+            operation: "wait",
+            interventionId: "00000000-0000-4000-8000-000000000001",
+          }),
+          raw: interaction,
         },
       },
     ]);
@@ -1592,6 +1627,45 @@ describe("runtime event normalization", () => {
         docs__search_documents: false,
         docs__fetch_document: false,
       });
+    });
+
+    test("the canonical interaction wait always interrupts, including sandbox clones", async () => {
+      const interactionServer: MCPServer = {
+        name: "interaction",
+        cacheToolsList: false,
+        async connect() {},
+        async close() {},
+        async listTools() {
+          return [
+            {
+              name: INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
+              description: "Wait for exact human interaction",
+              inputSchema: {
+                type: "object" as const,
+                properties: {},
+                required: [],
+                additionalProperties: true,
+              },
+            },
+          ];
+        },
+        async callTool() {
+          return [];
+        },
+        async invalidateToolsCache() {},
+      };
+      for (const backend of ["none", "modal"] as const) {
+        const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: backend }), [], {
+          mcpServers: [interactionServer],
+        });
+        expect(await approvalMapForAgent(agent)).toEqual({
+          [INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME]: true,
+        });
+        const clone = (agent as unknown as { clone: (config: unknown) => ApprovalAgent }).clone({});
+        expect(await approvalMapForAgent(clone)).toEqual({
+          [INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME]: true,
+        });
+      }
     });
 
     test("requireApproval survives the sandbox clone() tool-resolution path", async () => {

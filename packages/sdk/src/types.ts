@@ -2387,6 +2387,8 @@ export type FirstPartyMcpToolName =
   | "browser_observe"
   | "browser_act"
   | "browser_debug"
+  | "browser_auth"
+  | "interaction_request_human"
   | "browser_identity"
   | "browser_publish"
   | "browser_lifecycle"

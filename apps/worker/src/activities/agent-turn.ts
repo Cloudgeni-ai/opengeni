@@ -16,6 +16,7 @@ import {
   getSessionRootId,
   getSessionGoal,
   getHumanInputResumeForEvent,
+  getInteractionInterventionResumeForEvent,
   getSessionHumanInputRequest,
   installOrReadTurnExecutionPolicyForAttempt,
   persistAttemptToolCatalog,
@@ -700,6 +701,55 @@ export function stableHumanInputRequestId(
 ): string {
   const hex = createHash("sha256")
     .update("opengeni-human-input-v1\0")
+    .update(sessionId)
+    .update("\0")
+    .update(turnId)
+    .update("\0")
+    .update(toolCallId)
+    .digest("hex")
+    .slice(0, 32)
+    .split("");
+  hex[12] = "5";
+  hex[16] = ["8", "9", "a", "b"][Number.parseInt(hex[16] ?? "0", 16) % 4] ?? "8";
+  const value = hex.join("");
+  return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20)}`;
+}
+
+export function stableInteractionInterventionId(
+  sessionId: string,
+  turnId: string,
+  toolCallId: string,
+): string {
+  return stableInteractionInterventionUuid(
+    "opengeni-interaction-intervention-v1",
+    sessionId,
+    turnId,
+    toolCallId,
+  );
+}
+
+export function stableInteractionInterventionOperationId(
+  sessionId: string,
+  turnId: string,
+  toolCallId: string,
+): string {
+  return stableInteractionInterventionUuid(
+    "opengeni-interaction-intervention-operation-v1",
+    sessionId,
+    turnId,
+    toolCallId,
+  );
+}
+
+function stableInteractionInterventionUuid(
+  namespace: string,
+  sessionId: string,
+  turnId: string,
+  toolCallId: string,
+): string {
+  const hex = createHash("sha256")
+    .update(namespace)
+    .update("\0")
     .update(sessionId)
     .update("\0")
     .update(turnId)
@@ -3976,6 +4026,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         input.sessionId,
         trigger,
       );
+      const interactionInterventionResume = await getInteractionInterventionResumeForEvent(
+        db,
+        input.workspaceId,
+        input.sessionId,
+        trigger,
+      );
       triggerType = trigger.type;
       redispatchesAtDispatch = Number(
         (turn.metadata as { workerDeathRedispatches?: number } | null)?.workerDeathRedispatches ??
@@ -6460,6 +6516,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             selectedTools: session.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
             subjectId: "worker:first-party-mcp",
             subjectLabel: "OpenGeni worker",
+            ...(interactionInterventionResume
+              ? { interventionResume: interactionInterventionResume }
+              : {}),
           }),
         }),
         cancellationSignal,
@@ -8185,6 +8244,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const approvals = runtime.serializeApprovals(stream.interruptions);
           const humanInputInterruptions =
             runtime.serializeHumanInputRequests?.(stream.interruptions) ?? [];
+          const interactionInterventionInterruptions =
+            runtime.serializeInteractionInterventionRequests?.(stream.interruptions) ?? [];
           const latestWorkspace = await getWorkspace(db, input.workspaceId);
           if (!latestWorkspace) throw new Error(`Workspace not found: ${input.workspaceId}`);
           assertWorkspaceHumanInputAllowed(
@@ -8236,6 +8297,26 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 },
               },
             }));
+          const interactionInterventionRequests = interactionInterventionInterruptions.map(
+            (interruption) => ({
+              id: stableInteractionInterventionId(
+                input.sessionId,
+                activeTurnId,
+                interruption.toolCallId,
+              ),
+              operationId: stableInteractionInterventionOperationId(
+                input.sessionId,
+                activeTurnId,
+                interruption.toolCallId,
+              ),
+              toolCallId: interruption.toolCallId,
+              input: interruption.input,
+            }),
+          );
+          const pendingApprovals = [
+            ...approvals,
+            ...interactionInterventionInterruptions.map((interruption) => interruption.approval),
+          ];
           if (
             !(await settle!({
               events: [
@@ -8258,10 +8339,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               activeTurnId,
               runState: {
                 serializedRunState: compactMediaRunState(stream.state.toString()),
-                pendingApprovals: approvals,
+                pendingApprovals,
                 humanInputRequests: humanInputRequests.map(
                   ({ isNew: _isNew, ...request }) => request,
                 ),
+                interactionInterventionRequests,
               },
             }))
           ) {

@@ -79,6 +79,63 @@ describe("session-state interrupt settlement", () => {
     ]);
   });
 
+  test("expires an interaction wait through its exact approval and publishes the decision", async () => {
+    publishedEvents.length = 0;
+    const expireCalls: unknown[] = [];
+    const activities = createSessionStateActivities(
+      async () =>
+        ({
+          db: fakeDb,
+          bus: { publish: async () => undefined },
+          settings: {},
+          observability: {},
+          wakeSessionWorkflow: null,
+        }) as any,
+      {
+        expireSessionInteractionIntervention: mock(async (_db, input) => {
+          expireCalls.push(input);
+          return {
+            action: "expired" as const,
+            events: [
+              {
+                type: "user.approvalDecision",
+                payload: { approvalId: "interaction-call-1", decision: "reject" },
+              },
+            ],
+          };
+        }),
+        publishDurableSessionEvents: mock(
+          async (_bus, _workspaceId, _sessionId, events: typeof publishedEvents) => {
+            publishedEvents.push(...events);
+          },
+        ),
+      },
+    );
+
+    expect(
+      await activities.expireSessionInteractionIntervention({
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+        interventionId: "intervention-1",
+      }),
+    ).toEqual({ action: "expired" });
+    expect(expireCalls).toEqual([
+      {
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+        interventionId: "intervention-1",
+      },
+    ]);
+    expect(publishedEvents).toEqual([
+      {
+        type: "user.approvalDecision",
+        payload: { approvalId: "interaction-call-1", decision: "reject" },
+      },
+    ]);
+  });
+
   test("publishes the already-atomic durable pause recovery batch", async () => {
     publishedEvents.length = 0;
     controlApplications.length = 0;

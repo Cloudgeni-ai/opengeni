@@ -256,6 +256,7 @@ CREATE TABLE "interaction_interventions" (
   "originating_turn_id" uuid,
   "originating_attempt_id" uuid,
   "originating_tool_operation_id" uuid,
+  "originating_tool_call_id" text,
   "response_actor_subject_id" text,
   "version" bigint NOT NULL DEFAULT 1,
   "operation_id" uuid NOT NULL,
@@ -293,6 +294,10 @@ CREATE TABLE "interaction_interventions" (
     AND "reason" = btrim("reason")
     AND ("originating_attempt_id" IS NULL OR "originating_turn_id" IS NOT NULL)
     AND ("originating_tool_operation_id" IS NULL OR "originating_attempt_id" IS NOT NULL)
+    AND ("originating_tool_call_id" IS NULL OR (
+      "originating_attempt_id" IS NOT NULL
+      AND octet_length("originating_tool_call_id") BETWEEN 1 AND 1024
+    ))
     AND ("response_actor_subject_id" IS NULL OR octet_length("response_actor_subject_id") BETWEEN 1 AND 1024)
     AND "version" > 0
   ),
@@ -314,6 +319,10 @@ CREATE TABLE "interaction_interventions" (
 CREATE INDEX "interaction_interventions_open_resource_idx"
   ON "interaction_interventions"
   ("workspace_id", "resource_kind", "resource_id", "status", "created_at");
+CREATE UNIQUE INDEX "interaction_interventions_originating_tool_call_uq"
+  ON "interaction_interventions"
+  ("workspace_id", "originating_session_id", "originating_turn_id", "originating_tool_call_id")
+  WHERE "originating_tool_call_id" IS NOT NULL;
 CREATE UNIQUE INDEX "interaction_interventions_open_target_kind_uq"
   ON "interaction_interventions"
   ("workspace_id", "resource_kind", "resource_id", "target_id", "kind")

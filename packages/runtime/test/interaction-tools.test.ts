@@ -10,6 +10,7 @@ import type {
   ComputerActionReceipt,
   ComputerObservation,
   ComputerTarget,
+  InteractionIntervention,
 } from "@opengeni/contracts";
 import type { InteractionTransport } from "@opengeni/sdk";
 import {
@@ -206,6 +207,61 @@ describe("interaction attempt tools", () => {
     expect(result.isError).not.toBe(true);
   });
 
+  test("routes browser auth discovery through the canonical typed transport", async () => {
+    let includeArchived: boolean | undefined;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        listSiteAuthConnections: async (_workspaceId, options) => {
+          includeArchived = options?.includeArchived;
+          return { revision: 7, connections: [] };
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_auth"],
+      permissions: ["sessions:control"],
+    });
+    const result = await definitions[0]!.execute(
+      { operation: "list_connections", includeArchived: true },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+
+    expect(includeArchived).toBe(true);
+    expect(result.structuredContent).toEqual({
+      operation: "list_connections",
+      result: { revision: 7, connections: [] },
+    });
+  });
+
+  test("resumes the exact human interaction with a fresh target observation", async () => {
+    const target = browserTarget();
+    const observation = browserObservation(target);
+    const intervention = completedBrowserIntervention(target);
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({ observeBrowserTarget: async () => observation }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["interaction_request_human"],
+      permissions: ["sessions:control"],
+      interventionResume: { toolCallId: "interaction-human-call", intervention },
+    });
+    expect(definitions[0]).toMatchObject({
+      modelName: "interaction__interaction_request_human",
+      codemodePath: ["interaction", "requestHuman"],
+      approval: "human",
+    });
+    const result = await definitions[0]!.execute(
+      { operation: "wait", interventionId: intervention.id },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+
+    expect(result.structuredContent).toEqual({
+      intervention,
+      observation,
+      observationErrorCode: null,
+    });
+  });
+
   test("uses the pointer action's exact frame instead of silently changing its authority", async () => {
     const target = computerTarget();
     const observation = computerObservation(target);
@@ -289,6 +345,35 @@ function browserObservation(target: BrowserTarget): BrowserObservation {
     },
     dialog: null,
     observedAt: now,
+  };
+}
+
+function completedBrowserIntervention(target: BrowserTarget): InteractionIntervention {
+  return {
+    id: randomUUID(),
+    accountId,
+    workspaceId,
+    resourceKind: "browser_session",
+    resourceId: browserSessionId,
+    targetId: target.id,
+    controllerGeneration: target.controllerGeneration,
+    targetGeneration: target.targetGeneration,
+    documentGeneration: target.documentGeneration,
+    kind: "mfa",
+    reason: "Complete MFA in this exact tab.",
+    status: "completed",
+    authRunId: null,
+    originatingSessionId: sessionId,
+    originatingTurnId: turnId,
+    originatingAttemptId: attemptId,
+    originatingToolOperationId: randomUUID(),
+    responseActorSubjectId: "user:test",
+    version: 2,
+    operationId: randomUUID(),
+    expiresAt: "2026-08-10T12:15:00.000Z",
+    createdAt: now,
+    updatedAt: now,
+    settledAt: now,
   };
 }
 

@@ -124,6 +124,81 @@ describe("OpenGeni Codemode interaction facade", () => {
     ]);
   });
 
+  test("keeps auth and human handoff on the same typed atomic paths", async () => {
+    const authRunId = "55555555-5555-4555-8555-555555555555";
+    const fake = fakeClient((path) => {
+      if (path === "interaction.browser.auth") {
+        return result({ operation: "start", result: { run: { id: authRunId } } });
+      }
+      if (path === "interaction.browser.observe") {
+        return result({
+          target: {
+            controllerGeneration: "controller-1",
+            targetGeneration: "target-1",
+            documentGeneration: "document-1",
+          },
+        });
+      }
+      if (path === "interaction.requestHuman") {
+        return result({ intervention: { id: "intervention-1" }, observation: null });
+      }
+      throw new Error(`unexpected path: ${path}`);
+    });
+    const browser = createOpenGeniCodemode(fake.client).browsers.use(browserSessionId);
+    const run = await browser.auth.start(
+      {
+        siteAuthConnectionId: "66666666-6666-4666-8666-666666666666",
+        targetId: "tab-1",
+        expectedTargetGeneration: "target-1",
+        expectedDocumentGeneration: "document-1",
+      },
+      { operationId: "77777777-7777-4777-8777-777777777777" },
+    );
+    await browser.tabs.use("tab-1").requestHuman("Complete MFA.", {
+      kind: "mfa",
+      authRunId: run.id,
+      expiresInSeconds: 300,
+    });
+
+    expect(run.id).toBe(authRunId);
+    expect(fake.calls).toEqual([
+      {
+        path: "interaction.browser.auth",
+        args: {
+          operation: "start",
+          browserSessionId,
+          siteAuthConnectionId: "66666666-6666-4666-8666-666666666666",
+          targetId: "tab-1",
+          expectedTargetGeneration: "target-1",
+          expectedDocumentGeneration: "document-1",
+        },
+        options: { operationId: "77777777-7777-4777-8777-777777777777" },
+      },
+      {
+        path: "interaction.browser.observe",
+        args: { browserSessionId, targetId: "tab-1" },
+        options: {},
+      },
+      {
+        path: "interaction.requestHuman",
+        args: {
+          operation: "request",
+          resourceKind: "browser_session",
+          resourceId: browserSessionId,
+          targetId: "tab-1",
+          expectedControllerGeneration: "controller-1",
+          expectedTargetGeneration: "target-1",
+          expectedDocumentGeneration: "document-1",
+          kind: "mfa",
+          reason: "Complete MFA.",
+          authRunId,
+          expiresInSeconds: 300,
+        },
+        options: {},
+      },
+    ]);
+  });
+
   test("turns a typed atomic failure into a useful facade error", async () => {
     const fake = fakeClient(() => ({
       isError: true,

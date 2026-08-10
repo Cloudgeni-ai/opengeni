@@ -16,6 +16,7 @@ import {
 } from "@opengeni/codemode";
 import {
   approvalIdentifier,
+  INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
   CAPABILITY_DESCRIPTORS,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
@@ -228,11 +229,13 @@ import {
   modelResponseUsageFromResponse,
   serializeApprovals,
   serializeHumanInputRequests,
+  serializeInteractionInterventionRequests,
 } from "./run-events";
 import type {
   ModelResponseUsage,
   NormalizedRuntimeEvent,
   SerializedHumanInputInterruption,
+  SerializedInteractionInterventionInterruption,
 } from "./run-events";
 
 // The Agents SDK's debug namespaces can otherwise serialize complete model
@@ -349,6 +352,7 @@ export {
   normalizeToolOutputForEvent,
   serializeApprovals,
   serializeHumanInputRequests,
+  serializeInteractionInterventionRequests,
 } from "./run-events";
 export type {
   ModelResponseServiceTierEvent,
@@ -357,6 +361,7 @@ export type {
   NormalizedRuntimeEvent,
   NormalizeSdkEventOptions,
   SerializedHumanInputInterruption,
+  SerializedInteractionInterventionInterruption,
 } from "./run-events";
 
 // Inject the SDK's V4A `applyDiff` into the selfhosted session's apply_patch editor
@@ -635,6 +640,9 @@ export type OpenGeniRuntime = {
   ) => Promise<Awaited<ReturnType<typeof runAgentStream>>>;
   serializeApprovals: (interruptions: unknown[]) => unknown[];
   serializeHumanInputRequests?: (interruptions: unknown[]) => SerializedHumanInputInterruption[];
+  serializeInteractionInterventionRequests?: (
+    interruptions: unknown[],
+  ) => SerializedInteractionInterventionInterruption[];
 };
 
 export type ProductionRuntimeOverrides = {
@@ -671,6 +679,7 @@ export function createProductionAgentRuntime(
       }),
     serializeApprovals,
     serializeHumanInputRequests,
+    serializeInteractionInterventionRequests,
   };
 }
 
@@ -2170,6 +2179,7 @@ export function buildOpenGeniAgent(
       options.connectorActionPolicy,
       options.resolvedMcpConnectionIds,
     );
+    installInteractionInterventionPolicy(agent as unknown as ApprovalCapableAgent);
     return agent;
   }
 
@@ -2290,6 +2300,7 @@ export function buildOpenGeniAgent(
     options.connectorActionPolicy,
     options.resolvedMcpConnectionIds,
   );
+  installInteractionInterventionPolicy(agent as unknown as ApprovalCapableAgent);
   return agent;
 }
 
@@ -2508,6 +2519,32 @@ function installMcpApprovalPolicy(
     agent.clone = (config: unknown) => {
       const cloned = originalClone(config);
       installMcpApprovalPolicy(cloned, policies, connectorActionPolicy);
+      return cloned;
+    };
+  }
+}
+
+/**
+ * Turn the canonical interaction-request tool into a typed SDK interruption.
+ * Its MCP/Codemode catalog entry and execution stay unchanged; this projection
+ * only makes Runner freeze before the first execution so the worker can persist
+ * the exact Browser/Computer intervention beside the saved RunState.
+ */
+function installInteractionInterventionPolicy(agent: ApprovalCapableAgent): void {
+  const listMcpTools = agent.getMcpTools.bind(agent);
+  agent.getMcpTools = async (resolutionContext: unknown) => {
+    const tools = await listMcpTools(resolutionContext);
+    return tools.map((tool) =>
+      tool.type === "function" && tool.name === INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME
+        ? { ...tool, needsApproval: async () => true }
+        : tool,
+    );
+  };
+  const originalClone = agent.clone?.bind(agent);
+  if (originalClone) {
+    agent.clone = (config: unknown) => {
+      const cloned = originalClone(config);
+      installInteractionInterventionPolicy(cloned);
       return cloned;
     };
   }

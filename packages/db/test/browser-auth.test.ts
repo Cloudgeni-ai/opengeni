@@ -2,7 +2,10 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
   activateBrowserSession,
+  acceptSessionApprovalDecision,
+  applySessionTurnSettlement,
   bootstrapWorkspace,
+  claimSessionWorkForAttempt,
   createDb,
   createInteractionIntervention,
   createNetworkRoute,
@@ -11,22 +14,28 @@ import {
   completeProtectedAuthFill,
   dispatchBrowserSessionOperation,
   dispatchProtectedAuthFill,
+  expireSessionInteractionIntervention,
   getAuthRun,
   getInteractionIntervention,
+  getInteractionInterventionResumeForEvent,
   getProtectedAuthFillPreparation,
   InteractionResourceConflictError,
   InteractionResourceNotFoundError,
+  InteractionResourceStateError,
   listInteractionInterventions,
   listNetworkRoutes,
   listSiteAuthConnections,
+  peekSessionWork,
   prepareProtectedAuthFill,
   prepareBrowserSessionCreate,
   reportAuthRun,
   resolveInteractionIntervention,
   startAuthRun,
+  submitHumanPromptInTransaction,
   updateNetworkRoute,
   updateSiteAuthConnection,
   verifyAuthRun,
+  withWorkspaceSubjectRls,
 } from "../src";
 
 let available = true;
@@ -130,6 +139,37 @@ async function activeBrowser(scope: Awaited<ReturnType<typeof fixture>>) {
     engineVersion: "151.0.0",
   });
   return { browserSessionId: prepared.session.id, controllerGeneration };
+}
+
+async function claimTurn(scope: Awaited<ReturnType<typeof fixture>>) {
+  await withWorkspaceSubjectRls(client.db, scope.workspaceId, scope.actorSubjectId, (db) =>
+    db.transaction((tx) =>
+      submitHumanPromptInTransaction(tx as typeof db, {
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        sessionId: scope.sessionId,
+        subjectId: scope.actorSubjectId,
+        actor: { type: "human", subjectId: scope.actorSubjectId },
+        operationKey: crypto.randomUUID(),
+        delivery: "send",
+        text: "Open the protected page",
+        resources: [],
+        reasoningEffortFallback: "low",
+        source: "user",
+      }),
+    ),
+  );
+  const attemptId = crypto.randomUUID();
+  const claim = await claimSessionWorkForAttempt(client.db, scope.workspaceId, {
+    sessionId: scope.sessionId,
+    workflowId: `session-${scope.sessionId}`,
+    workflowRunId: crypto.randomUUID(),
+    dispatchId: crypto.randomUUID(),
+    attemptId,
+    trigger: { kind: "next" },
+  });
+  if (claim.action !== "claimed") throw new Error(`Could not claim test turn: ${claim.reason}`);
+  return { attemptId, turn: claim.turn };
 }
 
 function humanSiteAuth(operationId = crypto.randomUUID()) {
@@ -463,6 +503,219 @@ describe("browser auth and network resources", () => {
       interventionId: null,
       version: 3,
     });
+  });
+
+  test("keeps model-owned expiry attached to the exact approval across re-freeze", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const browser = await activeBrowser(scope);
+    const claimed = await claimTurn(scope);
+    const toolCallId = "interaction-human-call";
+    const ordinaryApprovalId = "ordinary-approval-call";
+    const interventionId = crypto.randomUUID();
+    const operationId = crypto.randomUUID();
+    const request = {
+      operation: "request" as const,
+      resourceKind: "browser_session" as const,
+      resourceId: browser.browserSessionId,
+      targetId: "target-human-wait",
+      expectedControllerGeneration: browser.controllerGeneration,
+      expectedTargetGeneration: "target-generation-human-wait",
+      expectedDocumentGeneration: "document-generation-human-wait",
+      kind: "mfa" as const,
+      reason: "Complete MFA in this exact tab.",
+      expiresInSeconds: 30,
+    };
+    const initial = await applySessionTurnSettlement(client.db, scope.workspaceId, {
+      sessionId: scope.sessionId,
+      turnId: claimed.turn.id,
+      triggerEventId: claimed.turn.triggerEventId,
+      attemptId: claimed.attemptId,
+      turnStatus: "requires_action",
+      sessionStatus: "requires_action",
+      activeTurnId: claimed.turn.id,
+      runState: {
+        serializedRunState: JSON.stringify({ version: 1, interrupted: true }),
+        pendingApprovals: [{ id: ordinaryApprovalId }, { id: toolCallId }],
+        interactionInterventionRequests: [
+          { id: interventionId, operationId, toolCallId, input: request },
+        ],
+      },
+      events: [
+        {
+          type: "session.requiresAction",
+          payload: { approvals: [{ id: ordinaryApprovalId }] },
+        },
+        { type: "session.status.changed", payload: { status: "requires_action" } },
+      ],
+    });
+    expect(initial.action).toBe("settled");
+
+    const ordinary = await acceptSessionApprovalDecision(client.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      sessionId: scope.sessionId,
+      subjectId: scope.actorSubjectId,
+      payload: { approvalId: ordinaryApprovalId, decision: "approve" },
+    });
+    expect(ordinary.action).toBe("accepted");
+    if (ordinary.action !== "accepted") throw new Error("ordinary approval was not accepted");
+    const resumedAttemptId = crypto.randomUUID();
+    const resumed = await claimSessionWorkForAttempt(client.db, scope.workspaceId, {
+      sessionId: scope.sessionId,
+      workflowId: `session-${scope.sessionId}`,
+      workflowRunId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      attemptId: resumedAttemptId,
+      trigger: { kind: "approval", triggerEventId: ordinary.event.id },
+    });
+    if (resumed.action !== "claimed") {
+      throw new Error(`Could not resume test turn: ${resumed.reason}`);
+    }
+    const refrozen = await applySessionTurnSettlement(client.db, scope.workspaceId, {
+      sessionId: scope.sessionId,
+      turnId: resumed.turn.id,
+      triggerEventId: resumed.turn.triggerEventId,
+      attemptId: resumedAttemptId,
+      turnStatus: "requires_action",
+      sessionStatus: "requires_action",
+      activeTurnId: resumed.turn.id,
+      runState: {
+        serializedRunState: JSON.stringify({ version: 1, interrupted: true, resumed: true }),
+        pendingApprovals: [{ id: toolCallId }],
+        interactionInterventionRequests: [
+          { id: interventionId, operationId, toolCallId, input: request },
+        ],
+      },
+      events: [{ type: "session.status.changed", payload: { status: "requires_action" } }],
+    });
+    expect(refrozen.action).toBe("settled");
+
+    await shared!.admin`
+      update interaction_interventions
+      set expires_at = now() - interval '1 second'
+      where workspace_id = ${scope.workspaceId} and id = ${interventionId}`;
+    // Passive reads must not settle the intervention without also resuming the
+    // exact model approval.
+    expect(
+      await getInteractionIntervention(client.db, {
+        ...scope,
+        interventionId,
+      }),
+    ).toMatchObject({ status: "open" });
+    const wait = await peekSessionWork(client.db, scope.workspaceId, scope.sessionId);
+    expect(wait).toMatchObject({
+      kind: "approval-wait",
+      interactionInterventionId: interventionId,
+    });
+
+    await expect(
+      acceptSessionApprovalDecision(client.db, {
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        sessionId: scope.sessionId,
+        subjectId: scope.actorSubjectId,
+        payload: { approvalId: toolCallId, decision: "approve" },
+        clientEventId: crypto.randomUUID(),
+        interactionIntervention: {
+          interventionId,
+          operationId: crypto.randomUUID(),
+          expectedVersion: 1,
+          outcome: "completed",
+        },
+      }),
+    ).rejects.toBeInstanceOf(InteractionResourceStateError);
+    expect(
+      await getInteractionIntervention(client.db, {
+        ...scope,
+        interventionId,
+      }),
+    ).toMatchObject({ status: "open", version: 1 });
+
+    const expired = await expireSessionInteractionIntervention(client.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      sessionId: scope.sessionId,
+      interventionId,
+    });
+    expect(expired.action).toBe("expired");
+    expect(expired.events).toEqual([
+      expect.objectContaining({
+        type: "user.approvalDecision",
+        payload: { approvalId: toolCallId, decision: "reject" },
+      }),
+    ]);
+    expect(
+      await getInteractionIntervention(client.db, {
+        ...scope,
+        interventionId,
+      }),
+    ).toMatchObject({ status: "expired", version: 2 });
+    expect(
+      await getInteractionInterventionResumeForEvent(
+        client.db,
+        scope.workspaceId,
+        scope.sessionId,
+        expired.events[0]!,
+      ),
+    ).toBeNull();
+    expect(await peekSessionWork(client.db, scope.workspaceId, scope.sessionId)).toMatchObject({
+      kind: "approval-pending",
+      triggerEventId: expired.events[0]!.id,
+    });
+    expect(
+      await expireSessionInteractionIntervention(client.db, {
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        sessionId: scope.sessionId,
+        interventionId,
+      }),
+    ).toEqual({ action: "stale", events: [] });
+  });
+
+  test("cancels leftover intervention resources with their terminal agent turn", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const browser = await activeBrowser(scope);
+    const claimed = await claimTurn(scope);
+    const created = await createInteractionIntervention(client.db, {
+      ...scope,
+      operationId: crypto.randomUUID(),
+      resourceKind: "browser_session",
+      resourceId: browser.browserSessionId,
+      targetId: "target-terminal",
+      expectedControllerGeneration: browser.controllerGeneration,
+      expectedTargetGeneration: "target-generation-terminal",
+      expectedDocumentGeneration: "document-generation-terminal",
+      kind: "confirmation",
+      reason: "Confirm this action in the exact tab.",
+      expiresInSeconds: 900,
+      originatingSessionId: scope.sessionId,
+      originatingTurnId: claimed.turn.id,
+      originatingAttemptId: claimed.attemptId,
+      originatingToolOperationId: crypto.randomUUID(),
+    });
+    const settled = await applySessionTurnSettlement(client.db, scope.workspaceId, {
+      sessionId: scope.sessionId,
+      turnId: claimed.turn.id,
+      triggerEventId: claimed.turn.triggerEventId,
+      attemptId: claimed.attemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [
+        { type: "turn.completed", payload: {} },
+        { type: "session.status.changed", payload: { status: "idle" } },
+      ],
+    });
+
+    expect(settled.action).toBe("settled");
+    expect(
+      await getInteractionIntervention(client.db, {
+        ...scope,
+        interventionId: created.intervention.id,
+      }),
+    ).toMatchObject({ status: "cancelled", version: 2 });
   });
 
   test("fences protected credential fill and verifies only the observed exact target", async () => {

@@ -951,9 +951,8 @@ export const StartAuthRunRequest = z
   .strict();
 export type StartAuthRunRequest = z.infer<typeof StartAuthRunRequest>;
 
-export const ReportAuthRunRequest = z
+export const ReportAuthRunPayload = z
   .object({
-    operationId: z.string().uuid(),
     expectedVersion: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
     methodId: boundedOpaqueId.optional(),
     authorityId: boundedOpaqueId.optional(),
@@ -1001,6 +1000,11 @@ export const ReportAuthRunRequest = z
       });
     }
   });
+export type ReportAuthRunPayload = z.infer<typeof ReportAuthRunPayload>;
+
+export const ReportAuthRunRequest = ReportAuthRunPayload.safeExtend({
+  operationId: z.string().uuid(),
+});
 export type ReportAuthRunRequest = z.infer<typeof ReportAuthRunRequest>;
 
 export const ProtectedAuthField = z
@@ -1139,6 +1143,38 @@ export const InteractionInterventionMutationResponse = z
 export type InteractionInterventionMutationResponse = z.infer<
   typeof InteractionInterventionMutationResponse
 >;
+
+/** Canonical model/Codemode input for one typed browser/computer human wait. */
+export const INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME = "interaction__interaction_request_human";
+
+export const RequestHumanInteractionToolInput = z.discriminatedUnion("operation", [
+  z.object({ operation: z.literal("wait"), interventionId: z.string().uuid() }).strict(),
+  z
+    .object({
+      operation: z.literal("request"),
+      resourceKind: z.enum(["browser_session", "computer_session"]),
+      resourceId: z.string().uuid(),
+      targetId: boundedOpaqueId,
+      expectedControllerGeneration: opaqueGeneration,
+      expectedTargetGeneration: opaqueGeneration,
+      expectedDocumentGeneration: opaqueGeneration.nullable(),
+      kind: z.enum(["manual_login", "mfa", "external_action", "confirmation", "other"]),
+      reason: z.string().trim().min(1).max(2_048),
+      authRunId: z.string().uuid().optional(),
+      expiresInSeconds: z.number().int().min(30).max(86_400).default(900),
+    })
+    .strict(),
+]);
+export type RequestHumanInteractionToolInput = z.infer<typeof RequestHumanInteractionToolInput>;
+
+export const RequestHumanInteractionToolOutput = z
+  .object({
+    intervention: InteractionIntervention,
+    observation: z.lazy(() => z.union([BrowserObservation, ComputerObservation])).nullable(),
+    observationErrorCode: z.string().min(1).max(128).nullable(),
+  })
+  .strict();
+export type RequestHumanInteractionToolOutput = z.infer<typeof RequestHumanInteractionToolOutput>;
 
 export const BrowserIdentityListResponse = z
   .object({

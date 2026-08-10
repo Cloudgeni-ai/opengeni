@@ -22,6 +22,7 @@ import {
 import {
   BrowserSessionNotFoundError,
   ComputerSessionNotFoundError,
+  acceptSessionApprovalDecision,
   InteractionResourceConflictError,
   InteractionResourceNotFoundError,
   InteractionResourceStateError,
@@ -32,6 +33,7 @@ import {
   getBrowserSessionControlRecord,
   getComputerSessionControlRecord,
   getInteractionIntervention,
+  getInteractionInterventionApprovalTarget,
   getNetworkRoute,
   getSiteAuthConnection,
   listAuthRuns,
@@ -48,7 +50,9 @@ import {
   requireAccessGrant,
   requireSessionAuthorization,
   type ApiRouteDeps,
+  workflowIdForSession,
 } from "@opengeni/core";
+import { publishDurableSessionEvents } from "@opengeni/events";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 
@@ -323,17 +327,77 @@ export function registerInteractionResourceRoutes(app: Hono, deps: ApiRouteDeps)
       const interventionId = uuidParam(context, "interventionId");
       const request = await parseJsonBody(context, ResolveInteractionInterventionRequest);
       try {
-        return context.json(
-          InteractionInterventionMutationResponse.parse(
-            await resolveInteractionIntervention(deps.db, {
-              accountId: grant.accountId,
-              workspaceId,
-              actorSubjectId: grant.subjectId,
-              interventionId,
-              ...request,
-            }),
-          ),
+        const approvalTarget = await getInteractionInterventionApprovalTarget(deps.db, {
+          accountId: grant.accountId,
+          workspaceId,
+          interventionId,
+        });
+        if (approvalTarget) {
+          await authorizeSession(deps, grant, approvalTarget.sessionId, "session.approval.write");
+        }
+        if (!approvalTarget) {
+          return context.json(
+            InteractionInterventionMutationResponse.parse(
+              await resolveInteractionIntervention(deps.db, {
+                accountId: grant.accountId,
+                workspaceId,
+                actorSubjectId: grant.subjectId,
+                interventionId,
+                ...request,
+              }),
+            ),
+          );
+        }
+        const decision = request.outcome === "completed" ? "approve" : "reject";
+        const accepted = await acceptSessionApprovalDecision(deps.db, {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId: approvalTarget.sessionId,
+          subjectId: grant.subjectId,
+          payload: {
+            approvalId: approvalTarget.toolCallId,
+            decision,
+            ...(decision === "reject"
+              ? { message: "Human interaction was dismissed or expired." }
+              : {}),
+          },
+          clientEventId: request.operationId,
+          interactionIntervention: {
+            interventionId,
+            operationId: request.operationId,
+            expectedVersion: request.expectedVersion,
+            outcome: request.outcome,
+          },
+        });
+        if (accepted.action === "conflict") {
+          throw new InteractionResourceConflictError(
+            "Another response already advanced this waiting agent turn",
+          );
+        }
+        await publishDurableSessionEvents(
+          deps.bus,
+          workspaceId,
+          approvalTarget.sessionId,
+          accepted.events,
         );
+        await deps.workflowClient.signalApprovalDecision({
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId: approvalTarget.sessionId,
+          eventId: accepted.event.id,
+          workflowId: workflowIdForSession(approvalTarget.sessionId),
+          workflowWakeRevision: accepted.workflowWakeRevision,
+        });
+        const response = InteractionInterventionMutationResponse.parse({
+          intervention: await getInteractionIntervention(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            interventionId,
+          }),
+          operationId: request.operationId,
+          replayed: accepted.events.length === 0,
+        });
+        return context.json(response);
       } catch (error) {
         throw interactionResourceRouteError(error);
       }

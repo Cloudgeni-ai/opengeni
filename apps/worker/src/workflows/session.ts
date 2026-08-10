@@ -475,7 +475,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       const seenWakeups = wakeups;
       const seenInterruptionWakeups = interruptionWakeups;
       const timeoutMs =
-        peek.humanInputRequestId && peek.expiresAt
+        (peek.humanInputRequestId || peek.interactionInterventionId) && peek.expiresAt
           ? humanInputDeadlineWaitMs(peek.expiresAt)
           : undefined;
       const wakeCondition = () =>
@@ -497,6 +497,16 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         // If the workflow timer fired first, the DB settler truthfully leaves
         // the request pending. Bound that skew with one interruptible timer
         // instead of spinning peek + activity at zero delay.
+        if (expiry.action === "stale") {
+          await condition(wakeCondition, HUMAN_INPUT_EXPIRY_STALE_RETRY_MS);
+        }
+      } else if (!woke && peek.interactionInterventionId) {
+        const expiry = await activity.expireSessionInteractionIntervention({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          interventionId: peek.interactionInterventionId,
+        });
         if (expiry.action === "stale") {
           await condition(wakeCondition, HUMAN_INPUT_EXPIRY_STALE_RETRY_MS);
         }

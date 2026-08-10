@@ -1,5 +1,8 @@
 import {
   AttachedBrowserDevice,
+  AuthRun,
+  AuthRunListResponse,
+  AuthRunMutationResponse,
   BrowserAction,
   BrowserActionBatch,
   BrowserActionReceipt,
@@ -20,8 +23,18 @@ import {
   ComputerSessionMutationResponse,
   ComputerTarget,
   ComputerTargetListResponse,
+  InteractionIntervention,
   InteractionPlacement,
+  ProtectedAuthFillRequest,
+  ProtectedAuthFillResponse,
   PublishBrowserRevisionResponse,
+  ReportAuthRunPayload,
+  RequestHumanInteractionToolInput,
+  RequestHumanInteractionToolOutput,
+  SiteAuthConnection,
+  SiteAuthConnectionListResponse,
+  StartAuthRunRequest,
+  VerifyAuthRunRequest,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   FIRST_PARTY_IN_PROCESS_TOOL_NAMES,
@@ -61,6 +74,8 @@ const TOOL_PERMISSION = {
   browser_observe: "sessions:read",
   browser_act: "sessions:control",
   browser_debug: "sessions:read",
+  browser_auth: "sessions:control",
+  interaction_request_human: "sessions:control",
   browser_identity: "sessions:control",
   browser_publish: "sessions:control",
   browser_lifecycle: "sessions:control",
@@ -177,6 +192,73 @@ const BrowserDebugInput = z
     limit: z.number().int().min(1).max(1_000).optional(),
   })
   .strict();
+
+const BrowserAuthInput = z.discriminatedUnion("operation", [
+  z
+    .object({
+      operation: z.literal("list_connections"),
+      includeArchived: z.boolean().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      operation: z.literal("get_connection"),
+      siteAuthConnectionId: z.string().uuid(),
+    })
+    .strict(),
+  z
+    .object({
+      operation: z.literal("list_runs"),
+      browserSessionId: z.string().uuid().optional(),
+      siteAuthConnectionId: z.string().uuid().optional(),
+      includeSettled: z.boolean().optional(),
+    })
+    .strict(),
+  z.object({ operation: z.literal("get_run"), authRunId: z.string().uuid() }).strict(),
+  z
+    .object({ operation: z.literal("start"), browserSessionId: z.string().uuid() })
+    .extend(StartAuthRunRequest.omit({ operationId: true }).shape)
+    .strict(),
+  ReportAuthRunPayload.safeExtend({
+    operation: z.literal("report"),
+    browserSessionId: z.string().uuid(),
+    authRunId: z.string().uuid(),
+  }),
+  z
+    .object({
+      operation: z.literal("protected_fill"),
+      browserSessionId: z.string().uuid(),
+      authRunId: z.string().uuid(),
+    })
+    .extend(ProtectedAuthFillRequest.omit({ operationId: true }).shape)
+    .strict(),
+  z
+    .object({
+      operation: z.literal("verify"),
+      browserSessionId: z.string().uuid(),
+      authRunId: z.string().uuid(),
+    })
+    .extend(VerifyAuthRunRequest.omit({ operationId: true }).shape)
+    .strict(),
+]);
+
+const BrowserAuthOutput = z.discriminatedUnion("operation", [
+  z
+    .object({ operation: z.literal("list_connections"), result: SiteAuthConnectionListResponse })
+    .strict(),
+  z.object({ operation: z.literal("get_connection"), result: SiteAuthConnection }).strict(),
+  z.object({ operation: z.literal("list_runs"), result: AuthRunListResponse }).strict(),
+  z.object({ operation: z.literal("get_run"), result: AuthRun }).strict(),
+  z.object({ operation: z.literal("start"), result: AuthRunMutationResponse }).strict(),
+  z.object({ operation: z.literal("report"), result: AuthRunMutationResponse }).strict(),
+  z.object({ operation: z.literal("protected_fill"), result: ProtectedAuthFillResponse }).strict(),
+  z.object({ operation: z.literal("verify"), result: AuthRunMutationResponse }).strict(),
+]);
+
+export type InteractionInterventionResume = {
+  toolCallId: string;
+  intervention: z.infer<typeof InteractionIntervention>;
+};
 const BrowserPublishInput = z
   .object({
     browserSessionId: z.string().uuid(),
@@ -263,6 +345,7 @@ export type CreateInteractionAttemptToolsInput = {
   sessionId: string;
   selectedTools?: readonly FirstPartyMcpToolName[];
   permissions?: readonly Permission[];
+  interventionResume?: InteractionInterventionResume | null;
 };
 
 export function createInteractionAttemptToolDefinitions(
@@ -280,6 +363,7 @@ export function createInteractionAttemptToolDefinitions(
     output: TOutput;
     readOnly: boolean;
     idempotent: boolean;
+    approval?: "none" | "human" | "policy";
     execute: (
       value: z.output<TInput>,
       context: AttemptToolExecutionContext,
@@ -307,7 +391,7 @@ export function createInteractionAttemptToolDefinitions(
         openWorldHint: true,
       },
       source: "interaction",
-      approval: "none",
+      approval: options.approval ?? "none",
       execute: async (raw, context) =>
         await safeInteractionExecution(
           options.input,
@@ -473,6 +557,147 @@ export function createInteractionAttemptToolDefinitions(
           ...(value.limit !== undefined ? { limit: value.limit } : {}),
         },
       ),
+  });
+
+  add({
+    name: "browser_auth",
+    codemodePath: ["interaction", "browser", "auth"],
+    title: "Authenticate browser session",
+    description:
+      "List configured site-auth connections and durable auth runs, or start, advance, protected-fill, and verify one exact BrowserSession authentication run. Protected secret values never enter tool arguments or results. If protected fill returns needs_human, call interaction_request_human with the returned intervention id.",
+    input: BrowserAuthInput,
+    output: BrowserAuthOutput,
+    readOnly: false,
+    idempotent: true,
+    execute: async (value, context) => {
+      if (value.operation === "list_connections") {
+        return {
+          operation: value.operation,
+          result: await input.transport.listSiteAuthConnections(input.workspaceId, {
+            includeArchived: value.includeArchived ?? false,
+          }),
+        };
+      }
+      if (value.operation === "get_connection") {
+        return {
+          operation: value.operation,
+          result: await input.transport.getSiteAuthConnection(
+            input.workspaceId,
+            value.siteAuthConnectionId,
+          ),
+        };
+      }
+      if (value.operation === "list_runs") {
+        return {
+          operation: value.operation,
+          result: await input.transport.listAuthRuns(input.workspaceId, {
+            ...(value.browserSessionId ? { browserSessionId: value.browserSessionId } : {}),
+            ...(value.siteAuthConnectionId
+              ? { siteAuthConnectionId: value.siteAuthConnectionId }
+              : {}),
+            includeSettled: value.includeSettled ?? false,
+          }),
+        };
+      }
+      if (value.operation === "get_run") {
+        return {
+          operation: value.operation,
+          result: await input.transport.getAuthRun(input.workspaceId, value.authRunId),
+        };
+      }
+      if (value.operation === "start") {
+        const { operation: _operation, browserSessionId, ...request } = value;
+        return {
+          operation: value.operation,
+          result: await input.transport.startBrowserAuthRun(input.workspaceId, browserSessionId, {
+            operationId: context.operationId,
+            ...request,
+          }),
+        };
+      }
+      if (value.operation === "report") {
+        const { operation: _operation, browserSessionId, authRunId, ...request } = value;
+        return {
+          operation: value.operation,
+          result: await input.transport.reportBrowserAuthRun(
+            input.workspaceId,
+            browserSessionId,
+            authRunId,
+            { operationId: context.operationId, ...request },
+          ),
+        };
+      }
+      if (value.operation === "protected_fill") {
+        const { operation: _operation, browserSessionId, authRunId, ...request } = value;
+        return {
+          operation: value.operation,
+          result: await input.transport.protectedBrowserAuthFill(
+            input.workspaceId,
+            browserSessionId,
+            authRunId,
+            { operationId: context.operationId, ...request },
+          ),
+        };
+      }
+      const { operation: _operation, browserSessionId, authRunId, ...request } = value;
+      return {
+        operation: value.operation,
+        result: await input.transport.verifyBrowserAuthRun(
+          input.workspaceId,
+          browserSessionId,
+          authRunId,
+          { operationId: context.operationId, ...request },
+        ),
+      };
+    },
+  });
+
+  add({
+    name: "interaction_request_human",
+    codemodePath: ["interaction", "requestHuman"],
+    title: "Request human interaction",
+    description:
+      "Pause the current agent turn for a person to act in one exact browser tab or computer target. Use operation=wait for an intervention already returned by browser_auth; otherwise provide the exact observed resource generations and a concise reason. The same tool call resumes with the settled intervention and a fresh observation.",
+    input: RequestHumanInteractionToolInput,
+    output: RequestHumanInteractionToolOutput,
+    readOnly: false,
+    idempotent: true,
+    approval: "human",
+    execute: async (value) => {
+      const resumed = input.interventionResume;
+      if (!resumed) {
+        throw new Error("Interaction intervention resumed without a durable response");
+      }
+      assertInterventionResumeMatches(value, resumed.intervention);
+      try {
+        const observation =
+          resumed.intervention.resourceKind === "browser_session"
+            ? await input.transport.observeBrowserTarget(
+                input.workspaceId,
+                resumed.intervention.resourceId,
+                resumed.intervention.targetId,
+              )
+            : await input.transport.observeComputerTarget(
+                input.workspaceId,
+                resumed.intervention.resourceId,
+                resumed.intervention.targetId,
+              );
+        return {
+          intervention: resumed.intervention,
+          observation,
+          observationErrorCode: null,
+        };
+      } catch (error) {
+        return {
+          intervention: resumed.intervention,
+          observation: null,
+          observationErrorCode:
+            error instanceof OpenGeniApiError
+              ? (error.code ?? `http_${error.status}`)
+              : "observation_unavailable",
+        };
+      }
+    },
   });
 
   add({
@@ -730,6 +955,7 @@ export function createFirstPartyInteractionAttemptToolDefinitions(
     sessionId: input.scope.sessionId,
     selectedTools,
     permissions,
+    ...(input.interventionResume ? { interventionResume: input.interventionResume } : {}),
   });
 }
 
@@ -831,6 +1057,31 @@ function newestRelevant<
       )
       .sort((left, right) => Date.parse(right.lastUsedAt) - Date.parse(left.lastUsedAt))[0] ?? null
   );
+}
+
+function assertInterventionResumeMatches(
+  request: z.output<typeof RequestHumanInteractionToolInput>,
+  intervention: z.infer<typeof InteractionIntervention>,
+): void {
+  if (request.operation === "wait") {
+    if (request.interventionId !== intervention.id) {
+      throw new Error("Interaction response does not belong to the resumed intervention");
+    }
+    return;
+  }
+  if (
+    request.resourceKind !== intervention.resourceKind ||
+    request.resourceId !== intervention.resourceId ||
+    request.targetId !== intervention.targetId ||
+    request.expectedControllerGeneration !== intervention.controllerGeneration ||
+    request.expectedTargetGeneration !== intervention.targetGeneration ||
+    request.expectedDocumentGeneration !== intervention.documentGeneration ||
+    request.kind !== intervention.kind ||
+    request.reason !== intervention.reason ||
+    (request.authRunId ?? null) !== intervention.authRunId
+  ) {
+    throw new Error("Interaction response does not match the resumed tool request");
+  }
 }
 
 async function safeInteractionExecution<TInput extends z.ZodType, TOutput extends z.ZodType>(

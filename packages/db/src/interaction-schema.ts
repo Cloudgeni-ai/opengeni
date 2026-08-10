@@ -1088,6 +1088,7 @@ export const interactionInterventions = pgTable(
     originatingTurnId: uuid("originating_turn_id"),
     originatingAttemptId: uuid("originating_attempt_id"),
     originatingToolOperationId: uuid("originating_tool_operation_id"),
+    originatingToolCallId: text("originating_tool_call_id"),
     responseActorSubjectId: text("response_actor_subject_id"),
     version: bigint("version", { mode: "number" }).notNull().default(1),
     operationId: uuid("operation_id").notNull(),
@@ -1105,6 +1106,14 @@ export const interactionInterventions = pgTable(
       table.workspaceId,
       table.operationId,
     ),
+    originatingToolCall: uniqueIndex("interaction_interventions_originating_tool_call_uq")
+      .on(
+        table.workspaceId,
+        table.originatingSessionId,
+        table.originatingTurnId,
+        table.originatingToolCallId,
+      )
+      .where(sql`${table.originatingToolCallId} is not null`),
     openResource: index("interaction_interventions_open_resource_idx").on(
       table.workspaceId,
       table.resourceKind,
@@ -1128,6 +1137,10 @@ export const interactionInterventions = pgTable(
         and ${table.reason} = btrim(${table.reason})
         and (${table.originatingAttemptId} is null or ${table.originatingTurnId} is not null)
         and (${table.originatingToolOperationId} is null or ${table.originatingAttemptId} is not null)
+        and (${table.originatingToolCallId} is null or (
+          ${table.originatingAttemptId} is not null
+          and octet_length(${table.originatingToolCallId}) between 1 and 1024
+        ))
         and (${table.responseActorSubjectId} is null or octet_length(${table.responseActorSubjectId}) between 1 and 1024)
         and ${table.version} > 0`,
     ),

@@ -83,6 +83,7 @@ describe("migration 0210 browser auth, routes, and interventions", () => {
         where schemaname = current_schema()
           and indexname in (
             'auth_runs_active_browser_target_uq',
+            'interaction_interventions_originating_tool_call_uq',
             'interaction_interventions_open_target_kind_uq',
             'interaction_interventions_open_auth_run_uq'
           )
@@ -91,6 +92,7 @@ describe("migration 0210 browser auth, routes, and interventions", () => {
         "auth_runs_active_browser_target_uq",
         "interaction_interventions_open_auth_run_uq",
         "interaction_interventions_open_target_kind_uq",
+        "interaction_interventions_originating_tool_call_uq",
       ]);
     } finally {
       await sql.end();

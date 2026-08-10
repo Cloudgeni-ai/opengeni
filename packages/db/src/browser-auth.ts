@@ -17,6 +17,7 @@ import {
   ProtectedAuthFillRequest,
   ProtectedAuthFillResponse,
   ReportAuthRunRequest,
+  RequestHumanInteractionToolInput,
   SiteAuthAuthority,
   ResolveInteractionInterventionRequest,
   SiteAuthConnection,
@@ -44,6 +45,8 @@ import {
   type ProtectedAuthFillResponse as ProtectedAuthFillResponseValue,
   type ReportAuthRunRequest as ReportAuthRunRequestValue,
   type ResolveInteractionInterventionRequest as ResolveInteractionInterventionRequestValue,
+  type RequestHumanInteractionToolInput as RequestHumanInteractionToolInputValue,
+  type SessionEvent,
   type SiteAuthAuthority as SiteAuthAuthorityValue,
   type SiteAuthConnection as SiteAuthConnectionValue,
   type SiteAuthConnectionListResponse as SiteAuthConnectionListResponseValue,
@@ -2364,6 +2367,10 @@ async function expireInterventionsInScope(
       and(
         eq(schema.interactionInterventions.workspaceId, input.workspaceId),
         eq(schema.interactionInterventions.status, "open"),
+        // Model-owned interventions are also pending approvals. Only the
+        // owning session workflow may expire those rows, because it must append
+        // the exact rejection that resumes the frozen RunState atomically.
+        sql`${schema.interactionInterventions.originatingToolCallId} is null`,
         sql`${schema.interactionInterventions.expiresAt} <= now()`,
       ),
     )
@@ -2431,6 +2438,226 @@ export async function getInteractionIntervention(
     if (!row) throw new InteractionResourceNotFoundError("Interaction intervention not found");
     return interventionFromRow(row);
   });
+}
+
+export type AttemptInteractionInterventionRequest = {
+  id: string;
+  operationId: string;
+  accountId: string;
+  workspaceId: string;
+  originatingSessionId: string;
+  originatingTurnId: string;
+  originatingAttemptId: string;
+  toolCallId: string;
+  input: RequestHumanInteractionToolInputValue;
+};
+
+/**
+ * Persist one interaction interruption inside the same transaction as its
+ * frozen Agent RunState. This is deliberately transaction-local: callers must
+ * already hold the session/turn/attempt settlement locks and RLS context.
+ */
+export async function persistAttemptInteractionInterventionInTransaction(
+  db: Database,
+  raw: AttemptInteractionInterventionRequest,
+): Promise<InteractionInterventionValue> {
+  const input = RequestHumanInteractionToolInput.parse(raw.input);
+  if (Buffer.byteLength(raw.toolCallId) < 1 || Buffer.byteLength(raw.toolCallId) > 1_024) {
+    throw new InteractionResourceStateError("Interaction tool call id is invalid");
+  }
+  if (input.operation === "wait") {
+    const [current] = await db
+      .select()
+      .from(schema.interactionInterventions)
+      .where(
+        and(
+          eq(schema.interactionInterventions.workspaceId, raw.workspaceId),
+          eq(schema.interactionInterventions.id, input.interventionId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!current) throw new InteractionResourceNotFoundError("Interaction intervention not found");
+    if (current.status !== "open" || current.expiresAt.getTime() <= Date.now()) {
+      throw new InteractionResourceStateError("Interaction intervention is no longer open");
+    }
+    if (
+      current.originatingSessionId !== raw.originatingSessionId ||
+      current.originatingTurnId !== raw.originatingTurnId
+    ) {
+      throw new InteractionResourceConflictError(
+        "Interaction intervention belongs to another agent operation",
+      );
+    }
+    if (
+      current.originatingToolCallId !== null &&
+      current.originatingToolCallId !== raw.toolCallId
+    ) {
+      throw new InteractionResourceConflictError(
+        "Interaction intervention already has another waiting tool call",
+      );
+    }
+    const row =
+      current.originatingToolCallId === raw.toolCallId
+        ? current
+        : (
+            await db
+              .update(schema.interactionInterventions)
+              .set({ originatingToolCallId: raw.toolCallId, updatedAt: sql`now()` })
+              .where(
+                and(
+                  eq(schema.interactionInterventions.workspaceId, raw.workspaceId),
+                  eq(schema.interactionInterventions.id, current.id),
+                  eq(schema.interactionInterventions.version, current.version),
+                  eq(schema.interactionInterventions.status, "open"),
+                  sql`${schema.interactionInterventions.originatingToolCallId} is null`,
+                ),
+              )
+              .returning()
+          )[0];
+    if (!row) throw new InteractionResourceConflictError("Intervention wait lost its fence");
+    return interventionFromRow(row);
+  }
+
+  await assertActiveInteractionResource(db, {
+    workspaceId: raw.workspaceId,
+    resourceKind: input.resourceKind,
+    resourceId: input.resourceId,
+    expectedControllerGeneration: input.expectedControllerGeneration,
+  });
+  let authRun: AuthRunRow | null = null;
+  if (input.authRunId) {
+    if (input.resourceKind !== "browser_session") {
+      throw new InteractionResourceStateError("Only browser interventions can belong to auth runs");
+    }
+    authRun = await loadAuthRunRow(db, raw.workspaceId, input.authRunId);
+    if (!authRun) throw new InteractionResourceNotFoundError("Auth run not found");
+    if (
+      authRun.browserSessionId !== input.resourceId ||
+      authRun.targetId !== input.targetId ||
+      authRun.controllerGeneration !== input.expectedControllerGeneration ||
+      authRun.targetGeneration !== input.expectedTargetGeneration ||
+      authRun.documentGeneration !== input.expectedDocumentGeneration ||
+      authRun.settledAt
+    ) {
+      throw new InteractionResourceConflictError(
+        "Interaction intervention does not match the active auth run",
+      );
+    }
+  }
+  const [existing] = await db
+    .select()
+    .from(schema.interactionInterventions)
+    .where(
+      and(
+        eq(schema.interactionInterventions.workspaceId, raw.workspaceId),
+        eq(schema.interactionInterventions.id, raw.id),
+      ),
+    )
+    .for("update")
+    .limit(1);
+  if (existing) {
+    if (
+      existing.operationId !== raw.operationId ||
+      existing.originatingSessionId !== raw.originatingSessionId ||
+      existing.originatingTurnId !== raw.originatingTurnId ||
+      existing.originatingToolCallId !== raw.toolCallId ||
+      existing.resourceKind !== input.resourceKind ||
+      existing.resourceId !== input.resourceId ||
+      existing.targetId !== input.targetId ||
+      existing.controllerGeneration !== input.expectedControllerGeneration ||
+      existing.targetGeneration !== input.expectedTargetGeneration ||
+      existing.documentGeneration !== input.expectedDocumentGeneration ||
+      existing.kind !== input.kind ||
+      existing.reason !== input.reason ||
+      existing.authRunId !== (input.authRunId ?? null) ||
+      existing.status !== "open"
+    ) {
+      throw new InteractionResourceConflictError("Interaction interruption replay changed");
+    }
+    return interventionFromRow(existing);
+  }
+  const [row] = await db
+    .insert(schema.interactionInterventions)
+    .values({
+      id: raw.id,
+      accountId: raw.accountId,
+      workspaceId: raw.workspaceId,
+      resourceKind: input.resourceKind,
+      resourceId: input.resourceId,
+      targetId: input.targetId,
+      controllerGeneration: input.expectedControllerGeneration,
+      targetGeneration: input.expectedTargetGeneration,
+      documentGeneration: input.expectedDocumentGeneration,
+      kind: input.kind,
+      reason: input.reason,
+      authRunId: input.authRunId ?? null,
+      originatingSessionId: raw.originatingSessionId,
+      originatingTurnId: raw.originatingTurnId,
+      originatingAttemptId: raw.originatingAttemptId,
+      originatingToolOperationId: raw.operationId,
+      originatingToolCallId: raw.toolCallId,
+      operationId: raw.operationId,
+      expiresAt: sql`now() + (${input.expiresInSeconds} * interval '1 second')`,
+    })
+    .returning();
+  if (!row) throw new Error("Interaction interruption insert returned no row");
+  if (authRun) {
+    const linked = await db
+      .update(schema.authRuns)
+      .set({ interventionId: row.id, version: authRun.version + 1, updatedAt: sql`now()` })
+      .where(
+        and(
+          eq(schema.authRuns.workspaceId, raw.workspaceId),
+          eq(schema.authRuns.id, authRun.id),
+          eq(schema.authRuns.version, authRun.version),
+          sql`${schema.authRuns.settledAt} is null`,
+        ),
+      )
+      .returning({ id: schema.authRuns.id });
+    if (linked.length !== 1) {
+      throw new InteractionResourceConflictError("Auth run changed before intervention link");
+    }
+  }
+  await advanceWorkspaceInteractionRevision(db, raw.accountId, raw.workspaceId);
+  return interventionFromRow(row);
+}
+
+export async function getInteractionInterventionApprovalTarget(
+  db: Database,
+  input: { accountId: string; workspaceId: string; interventionId: string },
+): Promise<{ sessionId: string; toolCallId: string } | null> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const row = await loadInterventionRow(scopedDb, input.workspaceId, input.interventionId);
+    return row?.originatingToolCallId
+      ? { sessionId: row.originatingSessionId, toolCallId: row.originatingToolCallId }
+      : null;
+  });
+}
+
+export async function getInteractionInterventionResumeForEvent(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  event: Pick<SessionEvent, "type" | "payload">,
+): Promise<{ toolCallId: string; intervention: InteractionInterventionValue } | null> {
+  if (event.type !== "user.approvalDecision") return null;
+  const payload = event.payload as { approvalId?: unknown; decision?: unknown };
+  if (typeof payload.approvalId !== "string" || payload.decision !== "approve") return null;
+  const [row] = await db
+    .select()
+    .from(schema.interactionInterventions)
+    .where(
+      and(
+        eq(schema.interactionInterventions.workspaceId, workspaceId),
+        eq(schema.interactionInterventions.originatingSessionId, sessionId),
+        eq(schema.interactionInterventions.originatingToolCallId, payload.approvalId),
+      ),
+    )
+    .orderBy(asc(schema.interactionInterventions.createdAt))
+    .limit(1);
+  if (!row || row.status !== "completed") return null;
+  return { toolCallId: payload.approvalId, intervention: interventionFromRow(row) };
 }
 
 export async function createInteractionIntervention(
@@ -2591,7 +2818,7 @@ export async function createInteractionIntervention(
   }
 }
 
-export async function resolveInteractionIntervention(
+export async function resolveInteractionInterventionInTransaction(
   db: Database,
   input: InteractionMutationScope & {
     interventionId: string;
@@ -2609,92 +2836,152 @@ export async function resolveInteractionIntervention(
     request: digestRequest,
     actorSubjectId: input.actorSubjectId,
   });
-  return await withRlsContext(db, input, async (scopedDb) => {
-    await assertWorkspaceAccount(scopedDb, input.accountId, input.workspaceId);
-    await lockOperation(scopedDb, request.operationId);
-    const existing = await loadOperation(scopedDb, input.workspaceId, request.operationId);
-    if (existing) {
-      assertOperation(existing, {
-        resourceKind: "intervention",
-        resourceId: input.interventionId,
-        kind: "resolve",
-        requestDigest: digest,
-        actorSubjectId: input.actorSubjectId,
-      });
-      const response = InteractionInterventionMutationResponse.parse(existing.result);
-      return { ...response, replayed: true };
-    }
-    const [current] = await scopedDb
-      .select()
-      .from(schema.interactionInterventions)
-      .where(
-        and(
-          eq(schema.interactionInterventions.workspaceId, input.workspaceId),
-          eq(schema.interactionInterventions.id, input.interventionId),
-        ),
-      )
-      .for("update")
-      .limit(1);
-    if (!current) {
-      throw new InteractionResourceNotFoundError("Interaction intervention not found");
-    }
-    if (current.version !== request.expectedVersion) {
-      throw new InteractionResourceConflictError(
-        "Interaction intervention changed before this response",
-      );
-    }
-    if (current.status !== "open") {
-      throw new InteractionResourceStateError("Interaction intervention is already settled");
-    }
-    const expired = current.expiresAt.getTime() <= Date.now();
-    const status = expired ? "expired" : request.outcome;
-    const [row] = await scopedDb
-      .update(schema.interactionInterventions)
-      .set({
-        status,
-        responseActorSubjectId: expired ? null : input.actorSubjectId,
-        version: current.version + 1,
-        updatedAt: sql`now()`,
-        settledAt: sql`now()`,
-      })
-      .where(
-        and(
-          eq(schema.interactionInterventions.workspaceId, input.workspaceId),
-          eq(schema.interactionInterventions.id, input.interventionId),
-          eq(schema.interactionInterventions.version, request.expectedVersion),
-          eq(schema.interactionInterventions.status, "open"),
-        ),
-      )
-      .returning();
-    if (!row) {
-      throw new InteractionResourceConflictError("Intervention response lost its fence");
-    }
-    await settleLinkedAuthRun(scopedDb, {
-      workspaceId: input.workspaceId,
-      authRunId: row.authRunId,
-      interventionId: row.id,
-      outcome: status,
-    });
-    const response = InteractionInterventionMutationResponse.parse({
-      intervention: interventionFromRow(row),
-      operationId: request.operationId,
-      replayed: false,
-    });
-    await insertCompletedOperation(scopedDb, {
-      operationId: request.operationId,
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
+  const scopedDb = db;
+  await assertWorkspaceAccount(scopedDb, input.accountId, input.workspaceId);
+  await lockOperation(scopedDb, request.operationId);
+  const existing = await loadOperation(scopedDb, input.workspaceId, request.operationId);
+  if (existing) {
+    assertOperation(existing, {
       resourceKind: "intervention",
       resourceId: input.interventionId,
       kind: "resolve",
       requestDigest: digest,
-      resultVersion: row.version,
-      result: response,
       actorSubjectId: input.actorSubjectId,
     });
-    await advanceWorkspaceInteractionRevision(scopedDb, input.accountId, input.workspaceId);
-    return response;
+    const response = InteractionInterventionMutationResponse.parse(existing.result);
+    return { ...response, replayed: true };
+  }
+  const [current] = await scopedDb
+    .select()
+    .from(schema.interactionInterventions)
+    .where(
+      and(
+        eq(schema.interactionInterventions.workspaceId, input.workspaceId),
+        eq(schema.interactionInterventions.id, input.interventionId),
+      ),
+    )
+    .for("update")
+    .limit(1);
+  if (!current) {
+    throw new InteractionResourceNotFoundError("Interaction intervention not found");
+  }
+  if (current.version !== request.expectedVersion) {
+    throw new InteractionResourceConflictError(
+      "Interaction intervention changed before this response",
+    );
+  }
+  if (current.status !== "open") {
+    throw new InteractionResourceStateError("Interaction intervention is already settled");
+  }
+  const expired = current.expiresAt.getTime() <= Date.now();
+  const status = expired ? "expired" : request.outcome;
+  const [row] = await scopedDb
+    .update(schema.interactionInterventions)
+    .set({
+      status,
+      responseActorSubjectId: expired ? null : input.actorSubjectId,
+      version: current.version + 1,
+      updatedAt: sql`now()`,
+      settledAt: sql`now()`,
+    })
+    .where(
+      and(
+        eq(schema.interactionInterventions.workspaceId, input.workspaceId),
+        eq(schema.interactionInterventions.id, input.interventionId),
+        eq(schema.interactionInterventions.version, request.expectedVersion),
+        eq(schema.interactionInterventions.status, "open"),
+      ),
+    )
+    .returning();
+  if (!row) {
+    throw new InteractionResourceConflictError("Intervention response lost its fence");
+  }
+  await settleLinkedAuthRun(scopedDb, {
+    workspaceId: input.workspaceId,
+    authRunId: row.authRunId,
+    interventionId: row.id,
+    outcome: status,
   });
+  const response = InteractionInterventionMutationResponse.parse({
+    intervention: interventionFromRow(row),
+    operationId: request.operationId,
+    replayed: false,
+  });
+  await insertCompletedOperation(scopedDb, {
+    operationId: request.operationId,
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    resourceKind: "intervention",
+    resourceId: input.interventionId,
+    kind: "resolve",
+    requestDigest: digest,
+    resultVersion: row.version,
+    result: response,
+    actorSubjectId: input.actorSubjectId,
+  });
+  await advanceWorkspaceInteractionRevision(scopedDb, input.accountId, input.workspaceId);
+  return response;
+}
+
+export async function resolveInteractionIntervention(
+  db: Database,
+  input: InteractionMutationScope & {
+    interventionId: string;
+  } & ResolveInteractionInterventionRequestValue,
+): Promise<InteractionInterventionMutationResponseValue> {
+  return await withRlsContext(
+    db,
+    input,
+    async (scopedDb) => await resolveInteractionInterventionInTransaction(scopedDb, input),
+  );
+}
+
+/**
+ * Cancel every still-open intervention created by a logical agent turn when
+ * that turn becomes terminal. The caller already owns the turn-settlement
+ * transaction, so no resource can outlive the terminal session truth.
+ */
+export async function cancelTurnInteractionInterventionsInTransaction(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+  },
+): Promise<number> {
+  const cancelled = await db
+    .update(schema.interactionInterventions)
+    .set({
+      status: "cancelled",
+      version: sql`${schema.interactionInterventions.version} + 1`,
+      updatedAt: sql`now()`,
+      settledAt: sql`now()`,
+    })
+    .where(
+      and(
+        eq(schema.interactionInterventions.workspaceId, input.workspaceId),
+        eq(schema.interactionInterventions.originatingSessionId, input.sessionId),
+        eq(schema.interactionInterventions.originatingTurnId, input.turnId),
+        eq(schema.interactionInterventions.status, "open"),
+      ),
+    )
+    .returning({
+      id: schema.interactionInterventions.id,
+      authRunId: schema.interactionInterventions.authRunId,
+    });
+  for (const intervention of cancelled) {
+    await settleLinkedAuthRun(db, {
+      workspaceId: input.workspaceId,
+      authRunId: intervention.authRunId,
+      interventionId: intervention.id,
+      outcome: "cancelled",
+    });
+  }
+  if (cancelled.length > 0) {
+    await advanceWorkspaceInteractionRevision(db, input.accountId, input.workspaceId);
+  }
+  return cancelled.length;
 }
 
 export async function cancelOpenInteractionInterventions(
