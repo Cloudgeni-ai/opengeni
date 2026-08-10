@@ -13,7 +13,6 @@ import {
   localConnectedSlackPreview,
   slackBotDocumentDestinationAuthority,
   SlackBotInstallControls,
-  WorkspaceSlackBotRequestedScopes,
 } from "./capabilities";
 
 beforeAll(() => {
@@ -106,21 +105,6 @@ describe("OpenGeni Slack bot install controls", () => {
         documentDestination: { authorityKind: "organization" },
       }),
     ).toBe("organization");
-  });
-
-  test("renders every requested workspace-bot scope including read-only reactions", async () => {
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
-    try {
-      await act(async () => root.render(<WorkspaceSlackBotRequestedScopes />));
-      expect(container.textContent).toBe(OPENGENI_SLACK_BOT_REQUESTED_SCOPES.join(", "));
-      expect(container.textContent).toContain("reactions:read");
-      expect(container.textContent).not.toContain("reactions:write");
-    } finally {
-      await act(async () => root.unmount());
-      container.remove();
-    }
   });
 
   test("uses the authoritative workspace permission grant", () => {

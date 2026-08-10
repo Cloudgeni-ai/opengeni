@@ -216,14 +216,6 @@ export function canManageSlackReactionSummon(
   return grant?.permissions.includes("workspace:admin") === true;
 }
 
-export function WorkspaceSlackBotRequestedScopes() {
-  return (
-    <p className="mt-2 max-w-3xl break-words font-mono text-2xs leading-relaxed text-fg-subtle">
-      {OPENGENI_SLACK_BOT_REQUESTED_SCOPES.join(", ")}
-    </p>
-  );
-}
-
 export function SlackBotInstallControls({
   canInstall,
   hasConnection,
@@ -1459,24 +1451,12 @@ export function CapabilitiesRoute({
                     </details>
                   </>
                 ) : (
-                  <>
-                    <SlackBotInstallControls
-                      canInstall={canInstallSlackBot}
-                      hasConnection={false}
-                      busy={slackBotBusy}
-                      onInstall={(createNewConnection) => void installSlackBot(createNewConnection)}
-                    />
-                    <details className="group mt-3">
-                      <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 text-2xs text-fg-subtle transition-colors hover:text-fg-muted">
-                        <ChevronDownIcon className="size-3 shrink-0 transition-transform group-open:rotate-180" />
-                        <span>Permissions</span>
-                      </summary>
-                      <p className="mt-2 text-2xs leading-5 text-fg-muted">
-                        Slack shows these permissions before you approve the installation.
-                      </p>
-                      <WorkspaceSlackBotRequestedScopes />
-                    </details>
-                  </>
+                  <SlackBotInstallControls
+                    canInstall={canInstallSlackBot}
+                    hasConnection={false}
+                    busy={slackBotBusy}
+                    onInstall={(createNewConnection) => void installSlackBot(createNewConnection)}
+                  />
                 )}
               </section>
 
