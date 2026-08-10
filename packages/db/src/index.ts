@@ -1864,7 +1864,12 @@ export type TemporalScheduleCleanupClaim = {
 export type DeleteWorkspaceIfQuiescentResult =
   | { status: "deleted"; temporalScheduleCleanups: TemporalScheduleCleanupClaim[] }
   | {
-      status: "not_found" | "only_workspace" | "active_sessions" | "live_sandboxes";
+      status:
+        | "not_found"
+        | "only_workspace"
+        | "active_sessions"
+        | "active_video_generations"
+        | "live_sandboxes";
     };
 
 /**
@@ -1939,6 +1944,30 @@ export async function deleteWorkspaceIfQuiescent(
             .for("update", { noWait: true });
           if (liveAttempts.length > 0) {
             return { status: "active_sessions" as const };
+          }
+
+          // A paid asynchronous video operation owns provider recovery outside
+          // the originating turn. Cascading its row would lose the only stable
+          // job/idempotency identity and could strand an already-paid result.
+          const activeVideoGenerations = await tx
+            .select({ id: schema.videoGenerationOperations.id })
+            .from(schema.videoGenerationOperations)
+            .where(
+              and(
+                eq(schema.videoGenerationOperations.workspaceId, input.workspaceId),
+                inArray(schema.videoGenerationOperations.status, [
+                  "preparing",
+                  "prepared",
+                  "accepted",
+                  "submission_uncertain",
+                  "provider_started",
+                  "retaining",
+                ]),
+              ),
+            )
+            .for("update", { noWait: true });
+          if (activeVideoGenerations.length > 0) {
+            return { status: "active_video_generations" as const };
           }
 
           const leases = await tx

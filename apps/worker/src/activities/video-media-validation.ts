@@ -10,7 +10,6 @@ const RANGE_BYTES = 1024 * 1024;
 const PROBE_STDOUT_MAX_BYTES = 64 * 1024;
 const PROBE_STDERR_MAX_BYTES = 16 * 1024;
 const PROBE_TIMEOUT_MS = 20_000;
-const BMFF_SCAN_BYTES = 4 * 1024 * 1024;
 
 export type VerifiedTempFile = Readonly<{
   directory: string;
@@ -141,7 +140,6 @@ export async function validateGeneratedVideo(input: {
   expectedDurationSeconds?: number;
 }): Promise<GeneratedVideoFacts> {
   const facts = await probeBrowserCompatibleMp4(input.path, input.ffprobePath);
-  await assertFastStartMp4(input.path);
   if (
     input.expectedDurationSeconds !== undefined &&
     Math.abs(facts.durationSeconds - input.expectedDurationSeconds) > 3
@@ -223,46 +221,6 @@ async function probeBrowserCompatibleMp4(
     videoCodec: "h264",
     audioCodec: audio.length === 1 ? "aac" : null,
   };
-}
-
-async function assertFastStartMp4(path: string): Promise<void> {
-  const handle = await open(path, "r");
-  try {
-    const file = await handle.stat();
-    const length = Math.min(file.size, BMFF_SCAN_BYTES);
-    const bytes = Buffer.allocUnsafe(length);
-    const read = await handle.read(bytes, 0, length, 0);
-    let offset = 0;
-    let sawFtyp = false;
-    let moovOffset = -1;
-    let mdatOffset = -1;
-    while (offset + 8 <= read.bytesRead) {
-      const size32 = bytes.readUInt32BE(offset);
-      const type = bytes.toString("ascii", offset + 4, offset + 8);
-      let size = size32;
-      let headerBytes = 8;
-      if (size32 === 1) {
-        if (offset + 16 > read.bytesRead) break;
-        const large = bytes.readBigUInt64BE(offset + 8);
-        if (large > BigInt(Number.MAX_SAFE_INTEGER)) break;
-        size = Number(large);
-        headerBytes = 16;
-      } else if (size32 === 0) {
-        size = file.size - offset;
-      }
-      if (size < headerBytes) throw new Error("Generated MP4 contains an invalid box");
-      if (type === "ftyp" && offset === 0) sawFtyp = true;
-      if (type === "moov" && moovOffset < 0) moovOffset = offset;
-      if (type === "mdat" && mdatOffset < 0) mdatOffset = offset;
-      if (moovOffset >= 0 && mdatOffset >= 0) break;
-      offset += size;
-    }
-    if (!sawFtyp || moovOffset < 0 || (mdatOffset >= 0 && moovOffset > mdatOffset)) {
-      throw new Error("Generated MP4 is not seekable before full download");
-    }
-  } finally {
-    await handle.close();
-  }
 }
 
 async function spawnBounded(

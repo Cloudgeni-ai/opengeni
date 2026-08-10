@@ -42,7 +42,7 @@ afterAll(async () => {
 });
 
 describe("video media validation", () => {
-  test("accepts a browser-compatible fast-start H.264 MP4", async () => {
+  test("accepts a browser-compatible H.264 MP4", async () => {
     const path = join(root, `valid-${randomUUID()}.mp4`);
     await writeFile(path, Buffer.from(FAST_START_MP4_BASE64, "base64"));
     expect(
@@ -58,7 +58,7 @@ describe("video media validation", () => {
     });
   });
 
-  test("rejects an MP4 whose metadata requires downloading past media bytes", async () => {
+  test("accepts provider MP4 metadata at the end for native Range playback", async () => {
     const bytes = Buffer.from(FAST_START_MP4_BASE64, "base64");
     const boxes = topLevelBoxes(bytes);
     const reordered = Buffer.concat([
@@ -69,9 +69,10 @@ describe("video media validation", () => {
     ]);
     const path = join(root, `slow-start-${randomUUID()}.mp4`);
     await writeFile(path, reordered);
-    await expect(validateGeneratedVideo({ path, ffprobePath: probe })).rejects.toThrow(
-      "not seekable before full download",
-    );
+    await expect(validateGeneratedVideo({ path, ffprobePath: probe })).resolves.toMatchObject({
+      videoCodec: "h264",
+      durationSeconds: 4,
+    });
   });
 
   test("copies a version-fenced staged object in bounded ranges and verifies its digest", async () => {

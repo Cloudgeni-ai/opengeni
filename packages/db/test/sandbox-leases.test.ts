@@ -385,6 +385,25 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     });
     await admin`update sessions set status = 'idle' where id = ${recoveringSessionId}`;
 
+    const videoOperationId = crypto.randomUUID();
+    await admin`
+      insert into video_generation_operations (
+        id, account_id, workspace_id, tool_call_id, admission_key, request_digest,
+        prompt_digest, model_id, source_mode, capability_revision, credential_version,
+        provider_idempotency_key, expected_artifact_id, expected_file_id, reserved_bytes,
+        status, recovery_deadline_at
+      ) values (
+        ${videoOperationId}, ${accountId}, ${workspaceId}, 'workspace-delete-video',
+        ${"a".repeat(64)}, ${"b".repeat(64)}, ${"c".repeat(64)},
+        'bytedance/seedance-2.5', 'text', ${"d".repeat(64)}, 1,
+        'workspace-delete-idempotency', ${crypto.randomUUID()}, ${crypto.randomUUID()},
+        536870912, 'prepared', now() + interval '1 hour'
+      )`;
+    expect(await deleteWorkspaceIfQuiescent(db, { accountId, workspaceId })).toEqual({
+      status: "active_video_generations",
+    });
+    await admin`delete from video_generation_operations where id = ${videoOperationId}`;
+
     // Aggregate counters are projections. A raw ownership receipt must still
     // fence deletion even if those counters are corrupt/stale at zero.
     const rawHolderId = crypto.randomUUID();

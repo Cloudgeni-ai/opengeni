@@ -33,8 +33,12 @@ describe("Vercel AI Gateway video adapter", () => {
     });
     expect(result).toEqual({ providerJobId: "job_1" });
     expect(request!.url).toEndWith("/v4/ai/video-model/start");
-    expect(request!.headers.get("ai-video-model-specification-version")).toBe("4");
-    expect(request!.headers.get("idempotency-key")).toBe(`ogvid_${"a".repeat(48)}`);
+    expect(request!.headers.get("ai-video-model-specification-version")).toBe(
+      "4",
+    );
+    expect(request!.headers.get("idempotency-key")).toBe(
+      `ogvid_${"a".repeat(48)}`,
+    );
     expect(await request!.json()).toEqual({
       prompt: baseRequest.prompt,
       n: 1,
@@ -68,18 +72,34 @@ describe("Vercel AI Gateway video adapter", () => {
         ],
       },
       [
-        { role: "first_frame", url: "https://objects.test/first", mediaType: "image/png" },
-        { role: "last_frame", url: "https://objects.test/last", mediaType: "image/png" },
+        {
+          role: "first_frame",
+          url: "https://objects.test/first",
+          mediaType: "image/png",
+        },
+        {
+          role: "last_frame",
+          url: "https://objects.test/last",
+          mediaType: "image/png",
+        },
       ],
     );
     expect(firstLast.frameImages).toEqual([
       {
         frameType: "first_frame",
-        image: { type: "url", url: "https://objects.test/first", mediaType: "image/png" },
+        image: {
+          type: "url",
+          url: "https://objects.test/first",
+          mediaType: "image/png",
+        },
       },
       {
         frameType: "last_frame",
-        image: { type: "url", url: "https://objects.test/last", mediaType: "image/png" },
+        image: {
+          type: "url",
+          url: "https://objects.test/last",
+          mediaType: "image/png",
+        },
       },
     ]);
     expect(JSON.stringify(firstLast)).not.toContain("base64");
@@ -90,7 +110,13 @@ describe("Vercel AI Gateway video adapter", () => {
       { status: "pending" },
       {
         status: "completed",
-        videos: [{ type: "url", url: "https://output.test/video.mp4", mediaType: "video/mp4" }],
+        videos: [
+          {
+            type: "url",
+            url: "https://output.test/video.mp4",
+            mediaType: "video/mp4",
+          },
+        ],
       },
       { status: "error", error: { message: "Rejected safely" } },
     ];
@@ -103,5 +129,25 @@ describe("Vercel AI Gateway video adapter", () => {
       });
       expect(status.status).toBe(expected);
     }
+  });
+
+  test("retries status visibility lag without making start 404 retryable", async () => {
+    await expect(
+      getGatewayVideoGenerationStatus({
+        apiKey: "test-key",
+        modelId: baseRequest.modelId,
+        providerJobId: "job_1",
+        fetch: async () => new Response("Async job not found", { status: 404 }),
+      }),
+    ).rejects.toMatchObject({ status: 404, retryable: true });
+    await expect(
+      startGatewayVideoGeneration({
+        apiKey: "test-key",
+        request: baseRequest,
+        idempotencyKey: `ogvid_${"b".repeat(48)}`,
+        referenceGrants: [],
+        fetch: async () => new Response("Not found", { status: 404 }),
+      }),
+    ).rejects.toMatchObject({ status: 404, retryable: false });
   });
 });
