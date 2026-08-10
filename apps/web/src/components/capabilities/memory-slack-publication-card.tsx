@@ -292,7 +292,7 @@ export function MemorySlackPublicationCard({
       </div>
 
       <div className="mt-3 overflow-x-auto rounded-md border border-border bg-bg">
-        <table className="w-full min-w-[34rem] text-left text-2xs">
+        <table className="w-full text-left text-2xs">
           <thead className="border-b border-border text-fg-subtle">
             <tr>
               <th className="p-2 font-medium">Importance</th>

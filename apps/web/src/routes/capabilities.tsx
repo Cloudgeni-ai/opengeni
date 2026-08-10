@@ -33,7 +33,6 @@ import { CapabilityLogo } from "@/components/capabilities/capability-logo";
 import { CapabilityTile } from "@/components/capabilities/capability-tile";
 import { PacksSection } from "@/components/capabilities/packs-section";
 import { PersonalSlackAccountCard } from "@/components/capabilities/personal-slack-account-card";
-import { MemorySlackPublicationCard } from "@/components/capabilities/memory-slack-publication-card";
 import { SlackReactionSummonCard } from "@/components/capabilities/slack-reaction-summon-card";
 import { LoadErrorState, PageHeader } from "@/components/common";
 import { Button } from "@/components/ui/button";
@@ -88,6 +87,10 @@ import { request } from "@/api";
 const GoogleDriveConnectorCard = lazy(async () => {
   const module = await import("@/components/capabilities/google-drive-connector-card");
   return { default: module.GoogleDriveConnectorCard };
+});
+const MemorySlackPublicationCard = lazy(async () => {
+  const module = await import("@/components/capabilities/memory-slack-publication-card");
+  return { default: module.MemorySlackPublicationCard };
 });
 import type {
   AccessContext,
@@ -1305,11 +1308,13 @@ export function CapabilitiesRoute({
                     onReinstall={() => void installSlackBot(false)}
                   />
 
-                  <MemorySlackPublicationCard
-                    workspaceId={workspaceId}
-                    connections={slackBotConnections}
-                    canManage={canManageSlackReaction}
-                  />
+                  <Suspense fallback={null}>
+                    <MemorySlackPublicationCard
+                      workspaceId={workspaceId}
+                      connections={slackBotConnections}
+                      canManage={canManageSlackReaction}
+                    />
+                  </Suspense>
 
                   <details className="group mt-3 border-t border-border/70 pt-3">
                     <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 text-2xs text-fg-subtle transition-colors hover:text-fg-muted">
