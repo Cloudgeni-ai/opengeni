@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
 
-const cli = join(import.meta.dir, "..", "dist", "bin", "ogtool.cjs");
+const cliSource = join(import.meta.dir, "..", "src", "cli.ts");
 const packageVersion = (
   (await Bun.file(join(import.meta.dir, "..", "package.json")).json()) as { version: string }
 ).version;
@@ -18,7 +18,7 @@ async function run(
   args: string[],
   environment: Record<string, string | undefined> = {},
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  const child = Bun.spawn(["node", cli, ...args], {
+  const child = Bun.spawn([process.execPath, cliSource, ...args], {
     env: {
       ...process.env,
       OPENGENI_CODEMODE_URL: undefined,
