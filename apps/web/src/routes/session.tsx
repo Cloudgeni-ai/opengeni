@@ -29,6 +29,10 @@ import { isApiErrorStatus } from "@/api";
 import { ConsoleComposer } from "@/components/Composer";
 import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
+import {
+  FollowUpRepositoryMenuBody,
+  FollowUpRepositoryPicker,
+} from "@/components/follow-up-repository-picker";
 import { MarkdownText } from "@/components/markdown";
 import { ModelPicker, SessionToolPicker, type SessionToolSelection } from "@/components/pickers";
 import {
@@ -75,6 +79,7 @@ import {
   sessionPolicyPickerIds,
   toolsForPolicySelection,
 } from "@/lib/session-tools";
+import { useFollowUpRepositories } from "@/lib/use-follow-up-repositories";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import type { ComposerDraft, LineageNode, SessionRealtimeModel } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
@@ -769,6 +774,7 @@ function SessionChatPane(props: {
   // Workspace-scoped: the provider (mounted on the workspace route) supplies
   // the workspaceId, so the hook needs no positional argument.
   const attachments = useFileAttachments();
+  const repositories = useFollowUpRepositories(props.session);
   const { effortForSession, latencyMode } = context;
   const selectableSessionMcpServers = context.toolMcpServers;
   const selectableToolIds = useMemo(
@@ -1015,24 +1021,27 @@ function SessionChatPane(props: {
     events: props.events,
     sendExtras: () => {
       return {
-        resources: attachments.readyResources,
+        resources: [...attachments.readyResources, ...repositories.pendingResources],
         model,
         reasoningEffort,
         latencyMode,
       };
     },
-    sendBlocked: () => attachments.hasUnresolved,
+    sendBlocked: () => attachments.hasUnresolved || repositories.error !== null,
     effectiveControl: props.queue.effectiveControl ?? props.session.effectiveControl,
     onDraftApplied: applyComposerSettings,
     // Clear only files included in the accepted wire input. A file added while
     // sendMessage is in flight belongs to the next message and must survive.
-    onSent: (_text, input) =>
+    onSent: (_text, input) => {
       attachments.removeReadyFiles(
         (input.resources ?? []).flatMap((resource) =>
           resource.kind === "file" ? [resource.fileId] : [],
         ),
-      ),
+      );
+      repositories.commitSent(input.resources ?? []);
+    },
   });
+  const repositoryPickerProps = repositories.pickerProps(terminal || composer.sending);
 
   // Slash-command palette context: the operator controls (/goal, /clear,
   // /compact, /help) act on THIS session. Permissions come from the workspace
@@ -1278,6 +1287,11 @@ function SessionChatPane(props: {
                   composer.sending || terminal || durableToolsSaving || !durableToolsHydrated
                 }
                 onToolSelectionChange={(next) => void saveDurableToolPolicy(next)}
+                repositories={{
+                  selectedCount: repositories.selectionCount,
+                  disabled: terminal || composer.sending,
+                  panel: <FollowUpRepositoryMenuBody {...repositoryPickerProps} />,
+                }}
               />
             }
             actions={
@@ -1350,6 +1364,10 @@ function SessionChatPane(props: {
                   }
                   saving={durableToolsSaving}
                   onChange={(next) => void saveDurableToolPolicy(next)}
+                />
+                <FollowUpRepositoryPicker
+                  {...repositoryPickerProps}
+                  triggerClassName="max-sm:hidden"
                 />
                 {durableToolsError ? (
                   <span className="sr-only" role="alert">

@@ -1596,12 +1596,12 @@ export function isComposerDraftEvent(event: Pick<SessionEvent, "type">): boolean
 }
 
 /**
- * Default text for a file-only message (attachment(s) present, no typed draft).
- * Kept non-empty so the wire contract (`text: z.string().min(1)`) and the
- * worker's non-whitespace guard accept it; the attached files still ride in
- * `resources`. Exported for tests.
+ * Default text for a resource-only message (attachments present, no typed
+ * draft). Kept non-empty so the wire contract (`text: z.string().min(1)`) and
+ * the worker's non-whitespace guard accept it. The export name is retained for
+ * compatibility now that repositories can ride beside files in `resources`.
  */
-export const FILE_ONLY_MESSAGE_TEXT = "(see attached files)";
+export const FILE_ONLY_MESSAGE_TEXT = "(see attached context)";
 
 /** Resolve possibly-deferred extras to a concrete bag (function evaluated now). */
 export function resolveSendExtras(

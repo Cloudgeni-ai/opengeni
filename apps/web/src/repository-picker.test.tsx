@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import { createElement } from "react";
 
+import { FollowUpRepositoryMenuBody } from "@/components/follow-up-repository-picker";
 import { repositoryBindingPresentation } from "@/components/repository-picker";
+import { registerDom, renderComponent } from "../../../packages/react/test/render-hook";
+import type { GitHubRepository } from "@/types";
+
+registerDom();
 
 describe("repository picker GitHub binding status", () => {
   test("projects configured-but-unbound as actionable and never healthy", () => {
@@ -63,5 +69,74 @@ describe("repository picker GitHub binding status", () => {
       canRefresh: false,
     });
     expect(presentation.emptyDescription).toContain("not configured");
+  });
+});
+
+describe("additive repository picker", () => {
+  test("renders already-mounted repositories as locked", async () => {
+    const repository: GitHubRepository = {
+      id: 456,
+      installationId: 123,
+      fullName: "example/app",
+      name: "app",
+      private: false,
+      htmlUrl: "https://github.com/example/app",
+      cloneUrl: "https://github.com/example/app.git",
+      defaultBranch: "main",
+      accountLogin: "example",
+      accountType: "Organization",
+    };
+    const rendered = await renderComponent(
+      createElement(FollowUpRepositoryMenuBody, {
+        setupMode: "platform",
+        configured: true,
+        status: "bound",
+        installUrl: null,
+        linkUrl: null,
+        installations: [],
+        repositories: [repository],
+        groups: [
+          {
+            installationId: repository.installationId,
+            label: repository.accountLogin,
+            detail: repository.accountType ?? "GitHub account",
+            repositories: [repository],
+          },
+        ],
+        selectedRepoIds: new Set([repository.id]),
+        selectedRepoRefs: { [repository.id]: "main" },
+        selectedInstallationId: repository.installationId,
+        manualRepos: [],
+        manualOpen: false,
+        githubAppOpen: false,
+        org: "",
+        pending: false,
+        repoBusy: false,
+        githubAppBusy: false,
+        lockedRepoIds: new Set([repository.id]),
+        onRefresh: async () => {},
+        onToggleRepo: () => {},
+        onRefChange: () => {},
+        onManualOpenChange: () => {},
+        onManualAdd: () => {},
+        onManualUpdate: () => {},
+        onManualRemove: () => {},
+        onGitHubAppOpenChange: () => {},
+        onOrgChange: () => {},
+        onStartGitHubApp: () => {},
+        onDisconnectInstallation: async () => {},
+      }),
+    );
+
+    const mounted = rendered.container.querySelector<HTMLButtonElement>(
+      'button[aria-label="example/app mounted"]',
+    );
+    expect(mounted?.disabled).toBe(true);
+    expect(rendered.container.textContent).toContain("Mounted");
+    expect(
+      rendered.container.querySelector<HTMLInputElement>('input[aria-label="example/app ref"]')
+        ?.disabled,
+    ).toBe(true);
+    await rendered.unmount();
   });
 });
