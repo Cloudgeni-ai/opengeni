@@ -1,3 +1,12 @@
+FROM python:3.12-slim AS checkov-runtime
+
+ARG CHECKOV_VERSION=3.2.526
+
+RUN set -eux; \
+    python -m venv /opt/checkov; \
+    /opt/checkov/bin/pip install --no-cache-dir "checkov==${CHECKOV_VERSION}"; \
+    /opt/checkov/bin/checkov --version
+
 FROM node:22.22.0-bookworm-slim AS node-runtime
 
 FROM oven/bun:1.3.14 AS artifact-runtime-builder
@@ -55,7 +64,6 @@ RUN set -eux; \
 FROM python:3.12-slim
 
 ARG TERRAFORM_VERSION=1.13.3
-ARG CHECKOV_VERSION=3.2.526
 ARG TTYD_VERSION=1.7.7
 ARG TARGETARCH
 
@@ -96,21 +104,6 @@ RUN set -eux; \
 COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
 RUN test "$(node --version)" = "v22.22.0"
 
-# Exact native document/spreadsheet/presentation runtime. The builder turns the
-# release-matrix input into a self-contained Node facade, vendors only its
-# target-native renderer closure, pins every byte in installation.json, and
-# runs real DOCX/XLSX/PPTX plus PNG/WebP smoke probes before this copy.
-COPY --from=artifact-runtime-builder /opt/opengeni/artifact-runtime /opt/opengeni/artifact-runtime
-RUN set -eux; \
-    if [ -f /opt/opengeni/artifact-runtime/installation.json ]; then \
-      ln -s /opt/opengeni/artifact-runtime/opengeni-artifact-runtime.mjs /usr/local/bin/opengeni-artifact-runtime; \
-      OPENGENI_ARTIFACT_RUNTIME_MANIFEST=/opt/opengeni/artifact-runtime/installation.json \
-        OPENGENI_ARTIFACT_TOOL_ENTRY=/opt/opengeni/artifact-runtime/skill-facade-entry.mjs \
-        opengeni-artifact-runtime doctor --json; \
-    else \
-      test -f /opt/opengeni/artifact-runtime/.unavailable; \
-    fi
-
 RUN set -eux; \
     arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
     case "${arch}" in amd64) terraform_arch="amd64" ;; arm64|aarch64) terraform_arch="arm64" ;; *) echo "unsupported architecture=${arch}" >&2; exit 1 ;; esac; \
@@ -118,10 +111,6 @@ RUN set -eux; \
     unzip /tmp/terraform.zip -d /usr/local/bin; \
     rm /tmp/terraform.zip; \
     terraform version
-
-RUN set -eux; \
-    pip install --no-cache-dir "checkov==${CHECKOV_VERSION}"; \
-    checkov --version
 
 RUN set -eux; \
     curl -fsSL https://aka.ms/InstallAzureCLIDeb | bash; \
@@ -156,6 +145,30 @@ RUN set -eux; \
     curl -fsSL "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}/ttyd.${tarch}" -o /usr/local/bin/ttyd; \
     chmod 0755 /usr/local/bin/ttyd; \
     ttyd --version
+
+# Checkov's large target-native Python closure is independent of the serial
+# final-image toolchain. Build it in parallel, then retain the existing final
+# executable path and version probe on the identical Python base image.
+COPY --from=checkov-runtime /opt/checkov /opt/checkov
+RUN set -eux; \
+    ln -s /opt/checkov/bin/checkov /usr/local/bin/checkov; \
+    checkov --version
+
+# Exact native document/spreadsheet/presentation runtime. Keep this exact-source
+# copy after the source-invariant toolchain so remote BuildKit caches can reuse
+# Terraform, Checkov, Azure CLI, GitHub CLI, and ttyd across source revisions.
+# The builder still pins every byte and runs real DOCX/XLSX/PPTX plus PNG/WebP
+# smoke probes before this copy, and the final image still doctors that runtime.
+COPY --from=artifact-runtime-builder /opt/opengeni/artifact-runtime /opt/opengeni/artifact-runtime
+RUN set -eux; \
+    if [ -f /opt/opengeni/artifact-runtime/installation.json ]; then \
+      ln -s /opt/opengeni/artifact-runtime/opengeni-artifact-runtime.mjs /usr/local/bin/opengeni-artifact-runtime; \
+      OPENGENI_ARTIFACT_RUNTIME_MANIFEST=/opt/opengeni/artifact-runtime/installation.json \
+        OPENGENI_ARTIFACT_TOOL_ENTRY=/opt/opengeni/artifact-runtime/skill-facade-entry.mjs \
+        opengeni-artifact-runtime doctor --json; \
+    else \
+      test -f /opt/opengeni/artifact-runtime/.unavailable; \
+    fi
 
 ENV HOME=/workspace
 ENV OPENGENI_TERMINAL_STREAM_PORT=7681

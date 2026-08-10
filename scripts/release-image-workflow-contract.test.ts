@@ -16,6 +16,60 @@ async function action(name: string): Promise<string> {
   return readFile(resolve(root, ".github/actions", name, "action.yml"), "utf8");
 }
 
+const sandboxArtifactRuntimeCopy =
+  "COPY --from=artifact-runtime-builder /opt/opengeni/artifact-runtime /opt/opengeni/artifact-runtime";
+const sandboxCheckovCopy = "COPY --from=checkov-runtime /opt/checkov /opt/checkov";
+
+function keepsStableSandboxToolchainBeforeArtifactRuntime(dockerfile: string): boolean {
+  const runtimeCopy = dockerfile.indexOf(sandboxArtifactRuntimeCopy);
+  const runtimeDoctor = dockerfile.indexOf("opengeni-artifact-runtime doctor --json");
+  const stableToolchain = [
+    "releases.hashicorp.com/terraform/${TERRAFORM_VERSION}",
+    'pip install --no-cache-dir "checkov==${CHECKOV_VERSION}"',
+    "https://aka.ms/InstallAzureCLIDeb",
+    "https://cli.github.com/packages/githubcli-archive-keyring.gpg",
+    "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}",
+  ];
+
+  return (
+    runtimeCopy >= 0 &&
+    runtimeDoctor > runtimeCopy &&
+    stableToolchain.every((marker) => {
+      const tool = dockerfile.indexOf(marker);
+      return tool >= 0 && tool < runtimeCopy;
+    })
+  );
+}
+
+function buildsSandboxCheckovOffTheSerialToolchain(dockerfile: string): boolean {
+  const checkovStage = dockerfile.indexOf("FROM python:3.12-slim AS checkov-runtime");
+  const finalStage = dockerfile.indexOf("\nFROM python:3.12-slim\n", checkovStage + 1);
+  const checkovInstall = dockerfile.indexOf(
+    'pip install --no-cache-dir "checkov==${CHECKOV_VERSION}"',
+    checkovStage,
+  );
+  const ttydInstall = dockerfile.indexOf(
+    "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}",
+    finalStage,
+  );
+  const checkovCopy = dockerfile.indexOf(sandboxCheckovCopy, finalStage);
+  const checkovVerification = dockerfile.indexOf(
+    "ln -s /opt/checkov/bin/checkov /usr/local/bin/checkov",
+    checkovCopy,
+  );
+  const runtimeCopy = dockerfile.indexOf(sandboxArtifactRuntimeCopy, finalStage);
+
+  return (
+    checkovStage >= 0 &&
+    checkovInstall > checkovStage &&
+    finalStage > checkovInstall &&
+    ttydInstall > finalStage &&
+    checkovCopy > ttydInstall &&
+    checkovVerification > checkovCopy &&
+    runtimeCopy > checkovVerification
+  );
+}
+
 function ghApiCommands(source: string): string[] {
   const commands: string[] = [];
   let command = "";
@@ -43,6 +97,55 @@ describe("release image workflow contract", () => {
 
     expect(patchCopy).toBeGreaterThan(-1);
     expect(frozenInstall).toBeGreaterThan(patchCopy);
+  });
+
+  test("keeps stable sandbox tools cacheable across exact runtime revisions", async () => {
+    const dockerfile = await readFile(resolve(root, "docker/sandbox.Dockerfile"), "utf8");
+
+    expect(keepsStableSandboxToolchainBeforeArtifactRuntime(dockerfile)).toBe(true);
+
+    const runtimeBlockStart = dockerfile.indexOf("# Exact native document");
+    const runtimeBlockEnd = dockerfile.indexOf("ENV HOME=/workspace", runtimeBlockStart);
+    const runtimeBlock = dockerfile.slice(runtimeBlockStart, runtimeBlockEnd);
+    const withoutRuntimeBlock =
+      dockerfile.slice(0, runtimeBlockStart) + dockerfile.slice(runtimeBlockEnd);
+    const terraformLayer = withoutRuntimeBlock.indexOf(
+      'RUN set -eux; \\\n    arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \\\n    case "${arch}" in amd64) terraform_arch=',
+    );
+    const previousOrdering =
+      withoutRuntimeBlock.slice(0, terraformLayer) +
+      runtimeBlock +
+      withoutRuntimeBlock.slice(terraformLayer);
+
+    expect(runtimeBlockStart).toBeGreaterThan(-1);
+    expect(runtimeBlockEnd).toBeGreaterThan(runtimeBlockStart);
+    expect(terraformLayer).toBeGreaterThan(-1);
+    expect(keepsStableSandboxToolchainBeforeArtifactRuntime(previousOrdering)).toBe(false);
+  });
+
+  test("builds Checkov outside the serial sandbox toolchain", async () => {
+    const dockerfile = await readFile(resolve(root, "docker/sandbox.Dockerfile"), "utf8");
+
+    expect(buildsSandboxCheckovOffTheSerialToolchain(dockerfile)).toBe(true);
+
+    const checkovFinalizationStart = dockerfile.indexOf(sandboxCheckovCopy);
+    const checkovFinalizationEnd = dockerfile.indexOf(
+      "# Exact native document",
+      checkovFinalizationStart,
+    );
+    const serialCheckov = dockerfile
+      .replace(
+        "FROM python:3.12-slim AS checkov-runtime",
+        "FROM python:3.12-slim AS unused-checkov",
+      )
+      .replace(
+        dockerfile.slice(checkovFinalizationStart, checkovFinalizationEnd),
+        'RUN set -eux; \\\n    pip install --no-cache-dir "checkov==${CHECKOV_VERSION}"; \\\n    checkov --version\n\n',
+      );
+
+    expect(checkovFinalizationStart).toBeGreaterThan(-1);
+    expect(checkovFinalizationEnd).toBeGreaterThan(checkovFinalizationStart);
+    expect(buildsSandboxCheckovOffTheSerialToolchain(serialCheckov)).toBe(false);
   });
 
   test("dedicated artifact sidecars run self-contained production bundles", async () => {
