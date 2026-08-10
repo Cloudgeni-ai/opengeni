@@ -186,6 +186,12 @@ No path infers personal authority from the session creator, current user,
 service initiator, latest connection, latest queue head, or an unrelated newer
 turn.
 
+That same exact calling-turn boundary supplies an agent-spawned child's omitted
+model, reasoning effort, and latency mode. Explicit child values may override
+them. A Codex-subscription manager therefore keeps its external billing path for
+workers by default instead of falling back to the deployment's OpenGeni-credit
+model.
+
 The prompt queue is not worker backlog. In particular, human prompts preserved
 behind paused session/workspace gates are intentionally ineligible and do not
 schedule an activity. Fleet pressure comes from Temporal's dedicated

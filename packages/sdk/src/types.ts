@@ -2905,7 +2905,7 @@ export type WorkspaceSettings = {
 
 export type WorkspaceSlackReactionSummonSettings = {
   enabled: boolean;
-  emoji: string;
+  emoji: "genie";
   channelPolicy: { mode: "bot_member" } | { mode: "allowlist"; channelIds: string[] };
 };
 

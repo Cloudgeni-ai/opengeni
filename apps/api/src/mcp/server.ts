@@ -3009,9 +3009,21 @@ function registerWorkspaceOrchestrationTools(
           // Bind the spawned session to a rig (freezes its active version);
           // declared so MCP validation doesn't strip it before the domain reads it.
           rigId: z4.string().uuid().optional(),
-          model: z4.string().min(1).optional(),
-          reasoningEffort: z4.string().optional(),
-          latencyMode: z4.enum(["standard", "priority", "fast"]).optional(),
+          model: z4
+            .string()
+            .min(1)
+            .optional()
+            .describe(
+              "Model for the worker. Omit to inherit the exact calling turn's model, including its Codex subscription billing path.",
+            ),
+          reasoningEffort: z4
+            .string()
+            .optional()
+            .describe("Omit to inherit the exact calling turn's reasoning effort."),
+          latencyMode: z4
+            .enum(["standard", "priority", "fast"])
+            .optional()
+            .describe("Omit to inherit the exact calling turn's latency mode."),
           sandboxBackend: z4.string().optional(),
           // Create-time machine targeting: an enrolled sandbox id (from
           // sandboxes_list) to run the spawned session on. Seeds the active-sandbox

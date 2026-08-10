@@ -48,6 +48,7 @@ import {
   submissionFromSessionDraft,
 } from "./lib/session-create";
 import {
+  buildAdditionalRepositoryResources,
   buildTools,
   buildResources,
   effortOptionsFor,
@@ -1718,6 +1719,65 @@ describe("GitHub repository resources", () => {
       githubInstallationId: 123,
       githubRepositoryId: 456,
     });
+  });
+
+  test("builds only repositories pending on an existing session", () => {
+    const mounted = gitHubRepositoryResource(githubRepository(), "main");
+    const additionalRepo = githubRepository({
+      id: 789,
+      fullName: "example/worker",
+      name: "worker",
+      cloneUrl: "https://github.com/example/worker.git",
+      htmlUrl: "https://github.com/example/worker",
+    });
+
+    expect(
+      buildAdditionalRepositoryResources({
+        mountedResources: [mounted],
+        manualRepos: [],
+        repositories: [additionalRepo],
+        selectedRepoIds: new Set([additionalRepo.id]),
+        selectedRepoRefs: { [additionalRepo.id]: "feature/context" },
+      }),
+    ).toEqual([gitHubRepositoryResource(additionalRepo, "feature/context")]);
+  });
+
+  test("rejects a follow-up repository that conflicts with a mounted path", () => {
+    const mounted = buildResources(
+      [{ id: 1, url: "https://git.example.com/acme/app.git", ref: "main" }],
+      [],
+      new Set(),
+      {},
+    )[0] as Extract<ResourceRef, { kind: "repository" }>;
+    expect(() =>
+      buildAdditionalRepositoryResources({
+        mountedResources: [mounted],
+        manualRepos: [{ id: 1, url: mounted.uri, ref: "develop" }],
+        repositories: [],
+        selectedRepoIds: new Set(),
+        selectedRepoRefs: {},
+      }),
+    ).toThrow("resource mount path is already attached");
+  });
+
+  test("rejects a follow-up repository that conflicts with a mounted file", () => {
+    const repository = githubRepository();
+    const pendingRepository = gitHubRepositoryResource(repository, "main");
+    const mountedFile: ResourceRef = {
+      kind: "file",
+      fileId: "934d5479-1848-49e3-b6fa-f1d015b5508e",
+      mountPath: pendingRepository.mountPath,
+    };
+
+    expect(() =>
+      buildAdditionalRepositoryResources({
+        mountedResources: [mountedFile],
+        manualRepos: [],
+        repositories: [repository],
+        selectedRepoIds: new Set([repository.id]),
+        selectedRepoRefs: { [repository.id]: "main" },
+      }),
+    ).toThrow("resource mount path is already attached");
   });
 
   test("hydrates private repositories by identity, drops revoked entries, and keeps manual refs", () => {

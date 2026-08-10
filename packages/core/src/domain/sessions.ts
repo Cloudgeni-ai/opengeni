@@ -866,10 +866,10 @@ export function workflowIdForSession(sessionId: string): string {
  * it cannot be resolved to a provider at run time, so we fail the request at
  * the API edge with 422 rather than enqueuing a turn the worker can't honor.
  *
- * `model` is the explicit, caller-supplied value (null/undefined when omitted).
- * An omitted model defaults to `settings.openaiModel` downstream — which is
- * always first in `configuredAllowedModels` — so only an explicit value is
- * checked. Centralized here so every model-carrying choke point
+ * `model` is the effective value selected by the caller's boundary. Top-level
+ * omission defaults to `settings.openaiModel`; child-session omission inherits
+ * the worker-signed calling turn before reaching this helper. Centralized here
+ * so every model-carrying choke point
  * (create-session, user-message/turn-accept, queued-turn update, and
  * scheduled-task agentConfig — a scheduled task is a session the worker runs
  * later) and the MCP surfaces that share them validate identically and cannot
@@ -1228,6 +1228,19 @@ export async function createSessionForRequestWithOutcome(
       message: `parent session not found in workspace: ${parentSessionId}`,
     });
   }
+  const creationInitiator = creationInitiatorForGrant(grant);
+  const parentCallingTurn =
+    parentSession && creationInitiator.actor
+      ? await getSessionTurn(db, workspaceId, creationInitiator.actor.turnId)
+      : null;
+  if (
+    creationInitiator.actor &&
+    (!parentCallingTurn || parentCallingTurn.sessionId !== parentSession?.id)
+  ) {
+    throw new HTTPException(403, {
+      message: "caller attempt does not belong to the parent session",
+    });
+  }
   const capabilityRuntimeSettings = await settingsWithEnabledCapabilityMcpServers(
     db,
     workspaceId,
@@ -1356,25 +1369,56 @@ export async function createSessionForRequestWithOutcome(
       frozenRigVersionId = rig.activeVersion.id;
     }
   }
-  const model = canonicalConfiguredModel(settings, payload.model ?? settings.openaiModel);
+  // A spawned worker is causally part of the exact turn that created it. Omitted
+  // execution policy fields therefore inherit that calling turn rather than the
+  // deployment defaults. This is especially important for Codex subscription
+  // managers: falling back to the deployment model would silently move a child
+  // onto the OpenGeni-credits billing path. Legacy session-bound grants without
+  // exact attempt claims fall back to the parent session's persisted defaults.
+  const inheritedModel = parentCallingTurn?.model ?? parentSession?.model ?? settings.openaiModel;
+  const model = canonicalConfiguredModel(settings, payload.model ?? inheritedModel);
   if (model === null || model === undefined) {
     throw new Error("effective session model unexpectedly resolved to null");
   }
-  // Session creation persists the EFFECTIVE model — an omitted payload.model
-  // stamps the deployment default onto the session — so the policy must vet
-  // that effective value, not just explicit ones (a restricted workspace's
-  // default-model session would otherwise be born blocked).
+  // Session creation persists the EFFECTIVE model — the explicit selection,
+  // inherited calling-turn model, or deployment default — so the policy must
+  // vet that effective value, not just explicit ones (a restricted workspace's
+  // inherited/default-model session would otherwise be born blocked).
   await assertWorkspaceModelPolicyAllows(db, settings, workspaceId, model);
-  const reasoningEffort = payload.reasoningEffort ?? settings.openaiReasoningEffort;
-  const latencyMode = payload.latencyMode ?? "standard";
+  const inheritedReasoningEffort =
+    parentCallingTurn?.reasoningEffort ??
+    (parentSession
+      ? reasoningEffortForSession(parentSession.metadata, settings.openaiReasoningEffort)
+      : settings.openaiReasoningEffort);
+  const inheritedLatencyMode =
+    parentCallingTurn?.latencyMode ??
+    (parentSession ? latencyModeForSession(parentSession.metadata, "standard") : "standard");
+  const reasoningEffort = payload.reasoningEffort ?? inheritedReasoningEffort;
+  const latencyMode = payload.latencyMode ?? inheritedLatencyMode;
+  const inheritedFromParent = parentSession !== null;
   const turnExecutionPolicy = resolveTurnExecutionPolicyV1(settings, {
     modelId: model,
     requestedModelId: payload.model ?? null,
-    modelSource: payload.model === undefined ? "deployment" : "explicit",
+    modelSource:
+      payload.model === undefined
+        ? inheritedFromParent
+          ? "continuation"
+          : "deployment"
+        : "explicit",
     reasoningEffort,
-    reasoningSource: payload.reasoningEffort === undefined ? "deployment" : "explicit",
+    reasoningSource:
+      payload.reasoningEffort === undefined
+        ? inheritedFromParent
+          ? "continuation"
+          : "deployment"
+        : "explicit",
     latencyMode,
-    latencyModeSource: payload.latencyMode === undefined ? "deployment" : "explicit",
+    latencyModeSource:
+      payload.latencyMode === undefined
+        ? inheritedFromParent
+          ? "continuation"
+          : "deployment"
+        : "explicit",
   });
   // Parent linkage was resolved above, before context validation. A child with
   // no explicit permission override inherits the creating session's effective
@@ -1679,7 +1723,6 @@ export async function createSessionForRequestWithOutcome(
       model,
     });
   }
-  const creationInitiator = creationInitiatorForGrant(grant);
   let createOutcome: CreateSessionOutcome;
   try {
     createOutcome = await createAndStartSessionWithOutcome({

@@ -359,7 +359,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     await page.route(basesPattern, delayedBases);
     await page.goto(surfaceUrl(webBaseUrl, workspaceId, "documents", fixtures));
     await basesRequest;
-    await page.getByText("Loading collections", { exact: true }).waitFor();
+    await page.getByText("Loading documents", { exact: true }).waitFor();
     releaseBases();
     await page.getByText("No documents yet", { exact: true }).waitFor();
     await page.unroute(basesPattern, delayedBases);
@@ -786,16 +786,14 @@ async function openSurface(
     await page.getByText(longVariableSetName, { exact: true }).waitFor();
     await ensureVariableSetExpanded(page);
   } else if (surface === "documents") {
-    await page.getByText(longBaseName, { exact: true }).waitFor();
     await page.getByText("No documents yet", { exact: true }).waitFor();
-    const bases = page.getByRole("complementary", {
-      name: "Collections (optional)",
-      exact: true,
-    });
     const search = page.getByRole("complementary", { name: "Search", exact: true });
-    await bases.waitFor();
     await search.waitFor();
-    await search.getByRole("textbox", { name: "ACL tags", exact: true }).waitFor();
+    await search.getByRole("textbox", { name: "Search indexed documents", exact: true }).waitFor();
+    expect(await page.getByRole("complementary", { name: "Collections (optional)" }).count()).toBe(
+      0,
+    );
+    expect(await search.getByRole("textbox", { name: "ACL tags", exact: true }).count()).toBe(0);
     expect(await page.getByRole("heading", { name: "Working set" }).count()).toBe(0);
   } else {
     await page
@@ -963,8 +961,8 @@ async function expectOwnedTouchTargets(page: Page, surface: Surface): Promise<vo
         ]
       : surface === "documents"
         ? [
-            page.locator("summary").getByText("New collectionoptional", { exact: true }),
-            page.getByRole("button", { name: longBaseName, exact: true }),
+            page.getByRole("button", { name: "Choose files", exact: true }),
+            page.getByRole("combobox", { name: "Drop authority", exact: true }),
           ]
         : [page.getByRole("button", { name: "Add memory", exact: true })];
   for (const target of targets) {
