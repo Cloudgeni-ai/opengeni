@@ -9,7 +9,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { Hono } from "hono";
-import { registerDocumentRoutes } from "../src/routes/documents";
+import { documentHttpException, registerDocumentRoutes } from "../src/routes/documents";
 
 const SECRET = "durable-learning-memory-route-test-secret";
 
@@ -18,6 +18,8 @@ let client: DbClient;
 let app: Hono;
 let workspaceId: string;
 let authorization: string;
+let secondWorkspaceId: string;
+let secondAuthorization: string;
 
 beforeAll(async () => {
   const acquired = await acquireSharedTestDatabase("durable-learning-memory-routes");
@@ -40,6 +42,25 @@ beforeAll(async () => {
     accountId: grant.accountId,
     workspaceId,
     subjectId: grant.subjectId,
+    permissions: ["documents:manage"],
+    principalKind: "human_session",
+    exp: Math.floor(Date.now() / 1_000) + 3_600,
+  })}`;
+  const secondAccess = await bootstrapWorkspace(client.db, {
+    accountExternalSource: "durable-learning-memory-routes",
+    accountExternalId: `second-account-${suffix}`,
+    accountName: "Durable learning memory routes second tenant",
+    workspaceExternalSource: "durable-learning-memory-routes",
+    workspaceExternalId: `second-workspace-${suffix}`,
+    workspaceName: "Durable learning memory routes second tenant",
+    subjectId: `human:second:${suffix}`,
+  });
+  const secondGrant = secondAccess.workspaceGrants[0]!;
+  secondWorkspaceId = secondGrant.workspaceId;
+  secondAuthorization = `Bearer ${await signDelegatedAccessToken(SECRET, {
+    accountId: secondGrant.accountId,
+    workspaceId: secondWorkspaceId,
+    subjectId: secondGrant.subjectId,
     permissions: ["documents:manage"],
     principalKind: "human_session",
     exp: Math.floor(Date.now() / 1_000) + 3_600,
@@ -75,12 +96,16 @@ describe("durable-learning workspace Memory routes", () => {
     const create = (
       body: { text: string; kind: "decision" | "semantic"; metadata: { source: string } },
       idempotencyKey?: string,
+      target: { workspaceId: string; authorization: string } = {
+        workspaceId,
+        authorization,
+      },
     ) =>
-      app.request(`http://x/v1/workspaces/${workspaceId}/knowledge/memories`, {
+      app.request(`http://x/v1/workspaces/${target.workspaceId}/knowledge/memories`, {
         method: "POST",
         body: JSON.stringify(body),
         headers: {
-          authorization,
+          authorization: target.authorization,
           "content-type": "application/json",
           ...(idempotencyKey ? { "idempotency-key": idempotencyKey } : {}),
         },
@@ -137,5 +162,24 @@ describe("durable-learning workspace Memory routes", () => {
         .status,
     ).toBe(409);
     expect((await create(keyedPayload, "x".repeat(201))).status).toBe(400);
+
+    const secondTenantResponse = await create(keyedPayload, idempotencyKey, {
+      workspaceId: secondWorkspaceId,
+      authorization: secondAuthorization,
+    });
+    expect(secondTenantResponse.status).toBe(201);
+    expect(((await secondTenantResponse.json()) as { id: string }).id).not.toBe(keyedFirst.id);
+  });
+
+  test("does not project raw database diagnostics through REST", () => {
+    const projected = documentHttpException(
+      new Error(
+        'Failed query: insert into durable_learning_attempts (...) params: ["tenant-secret"]',
+      ),
+    );
+    expect(projected.status).toBe(500);
+    expect(projected.message).toBe("internal server error");
+    expect(projected.message).not.toContain("insert into");
+    expect(projected.message).not.toContain("tenant-secret");
   });
 });

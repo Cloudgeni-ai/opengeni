@@ -683,7 +683,7 @@ function dropFilename(preferred: string | undefined): string {
   return /\.[A-Za-z0-9]{1,8}$/.test(stem) ? stem : `${stem}.txt`;
 }
 
-function documentHttpException(error: unknown): HTTPException {
+export function documentHttpException(error: unknown): HTTPException {
   if (error instanceof HTTPException) return error;
   if (
     error instanceof DurableLearningAttemptConflictError ||
@@ -717,7 +717,7 @@ function documentHttpException(error: unknown): HTTPException {
   ) {
     return new HTTPException(400, { message });
   }
-  return new HTTPException(500, { message });
+  return new HTTPException(500, { message: "internal server error" });
 }
 
 const DURABLE_LEARNING_REST_IDEMPOTENCY_KEY_MAX_CHARS = 200;

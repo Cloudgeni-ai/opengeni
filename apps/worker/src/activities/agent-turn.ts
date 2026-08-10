@@ -72,6 +72,7 @@ import {
   getEnrollment,
   abandonRecordingForTurnAttempt,
   commitSessionAttemptQuiescence,
+  getOrCreateCompanyProfileSnapshot,
   getOrCreatePreferenceRegistrySnapshot,
   getOrCreateWorkspaceInstructionPolicySnapshot,
   PreferenceRegistryInitiatorError,
@@ -138,6 +139,7 @@ import {
   type SandboxFileDownloadFailure,
   type OpenGeniRuntime,
   type ComputerToolMode,
+  type RetainableSessionImageOutputHook,
   type ModelResponseUsage,
   type ModelCallUsageInput,
   type ModelCallUsageNormalization,
@@ -351,7 +353,9 @@ import {
   materializeRetainedScreenshotRunState,
   sdkEventContainsInlineImage,
   retainComputerScreenshot,
+  toolOutputContainsInlineImage,
   typedScreenshotFromSdkEvent,
+  typedScreenshotFromToolOutput,
   unavailableRetainedSessionImage,
 } from "./retained-screenshots";
 import {
@@ -401,6 +405,7 @@ import {
   type TurnExecutionPolicyV1,
 } from "@opengeni/contracts";
 import { createHash, randomUUID } from "node:crypto";
+import { createModelCheckpointMemoryCollector } from "../model-checkpoint-memory-collector";
 
 // Retryable provider connectivity/5xx failures start quickly and back off to
 // this ceiling. Explicit rate limits retain the minute-granular fallback.
@@ -2651,6 +2656,7 @@ export async function finalizeDurableTurnOpStreams(
 }
 
 export function createRunAgentTurnActivity(services: () => Promise<ActivityServices>) {
+  const modelCheckpointMemoryCollector = createModelCheckpointMemoryCollector();
   return async function runAgentTurn(input: RunAgentTurnInput): Promise<RunAgentTurnResult> {
     const {
       settings,
@@ -3635,6 +3641,57 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // intentional computer_screenshot or view_image result must never be lost
     // when the event/history sanitizer removes its inline bytes.
     const retainedSessionImageCallIds = new Set<string>();
+    const retainSessionImageAtToolBoundary: RetainableSessionImageOutputHook = async ({
+      toolCallId,
+      output,
+    }) => {
+      const activeTurnId = turnId;
+      if (!activeTurnId) {
+        throw new Error("Session image tool completed before turn initialization");
+      }
+      const typedScreenshot = typedScreenshotFromToolOutput({ callId: toolCallId, output });
+      retainedSessionImageCallIds.add(toolCallId);
+      if (!typedScreenshot) {
+        if (toolOutputContainsInlineImage(output)) {
+          retainedScreenshotReceiptsByCallId.set(
+            toolCallId,
+            unavailableRetainedSessionImage({
+              sessionId: input.sessionId,
+              turnId: activeTurnId,
+              attemptId: input.attemptId,
+              toolCallId,
+              toolOutputId: toolCallId,
+              reason: "unsupported",
+            }),
+          );
+        }
+        return;
+      }
+      retainedScreenshotReceiptsByCallId.set(
+        toolCallId,
+        unavailableRetainedSessionImage({
+          sessionId: input.sessionId,
+          turnId: activeTurnId,
+          attemptId: input.attemptId,
+          toolCallId,
+          toolOutputId: toolCallId,
+          reason: "pending",
+        }),
+      );
+      retainedScreenshotReceiptsByCallId.set(
+        toolCallId,
+        await retainComputerScreenshot({
+          db,
+          objectStorage,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: activeTurnId,
+          attemptId: input.attemptId,
+          output: typedScreenshot,
+        }),
+      );
+    };
     const materializeScreenshotHistory = async (history: Array<Record<string, unknown>>) => {
       collectRetainedScreenshotReceipts(history, retainedScreenshotReceiptsByCallId);
       if (!modelCanReceiveRetainedSessionImages) return history;
@@ -4741,19 +4798,22 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         attemptId: input.attemptId,
         executionGeneration: turn.executionGeneration,
       };
-      const [workspace, instructionPolicySnapshot, preferenceSnapshot] = await Promise.all([
-        getWorkspace(db, input.workspaceId),
-        getOrCreateWorkspaceInstructionPolicySnapshot(db, governanceClaims),
-        getOrCreatePreferenceRegistrySnapshot(db, governanceClaims).catch((error) => {
-          if (error instanceof PreferenceRegistryInitiatorError) return null;
-          throw error;
-        }),
-      ]);
+      const [workspace, companyProfileSnapshot, instructionPolicySnapshot, preferenceSnapshot] =
+        await Promise.all([
+          getWorkspace(db, input.workspaceId),
+          getOrCreateCompanyProfileSnapshot(db, governanceClaims),
+          getOrCreateWorkspaceInstructionPolicySnapshot(db, governanceClaims),
+          getOrCreatePreferenceRegistrySnapshot(db, governanceClaims).catch((error) => {
+            if (error instanceof PreferenceRegistryInitiatorError) return null;
+            throw error;
+          }),
+        ]);
       if (!workspace) throw new Error(`Workspace not found: ${input.workspaceId}`);
       const workspaceAgentInstructions = workspace.agentInstructions;
       const agentHumanInputEnabled = resolveWorkspaceAgentHumanInputEnabled(workspace.settings);
       assertWorkspaceHumanInputAllowed(agentHumanInputEnabled, "resume", humanInputResume !== null);
       const workspaceGovernance = renderWorkspaceGovernanceContext({
+        companyProfile: companyProfileSnapshot,
         instructionPolicy: instructionPolicySnapshot,
         preferences: preferenceSnapshot,
       });
@@ -6544,6 +6604,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           didComputerUse = true;
           await maybeStartOnTurnRecording(resolvedSandbox, activeSandboxBackend);
         },
+        onRetainableSessionImageOutput: retainSessionImageAtToolBoundary,
         ...(packRuntime.skills.length > 0 ? { packSkills: packRuntime.skills } : {}),
         ...(session.skills.length > 0 ? { sessionSkills: session.skills } : {}),
         ...(skillLibraryRuntime.skillLibrarySkills.length > 0
@@ -7494,6 +7555,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               currentToolBatchCallIds = new Set<string>();
               currentToolBatchCompletedCallIds = new Set<string>();
               await reconcileConversationTruth();
+              modelCheckpointMemoryCollector.schedule(observability);
               try {
                 await ensureRunAllowed(
                   settings,
@@ -7548,8 +7610,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             }
             const completedToolCall = completedToolCallFromSdkEvent(durableSdkEvent);
             if (completedToolCall) {
-              const typedScreenshot = typedScreenshotFromSdkEvent(durableSdkEvent);
+              retainedScreenshotMetadata =
+                retainedScreenshotReceiptsByCallId.get(completedToolCall.callId) ?? null;
+              const typedScreenshot = retainedScreenshotMetadata
+                ? null
+                : typedScreenshotFromSdkEvent(durableSdkEvent);
               if (
+                !retainedScreenshotMetadata &&
                 retainedSessionImageCallIds.has(completedToolCall.callId) &&
                 sdkEventContainsInlineImage(durableSdkEvent) &&
                 !typedScreenshot
@@ -7568,6 +7635,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 );
               }
               if (
+                !retainedScreenshotMetadata &&
                 typedScreenshot &&
                 typedScreenshot.callId === completedToolCall.callId &&
                 retainedSessionImageCallIds.has(completedToolCall.callId)

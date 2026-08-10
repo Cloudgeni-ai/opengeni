@@ -5,7 +5,7 @@
 -- Documents/RAG state. Attempts and terminal receipts are append-only; the
 -- selected canonical authority retains its own lifecycle history.
 CREATE TABLE "durable_learning_attempts" (
-  "id" uuid PRIMARY KEY,
+  "id" uuid NOT NULL,
   "account_id" uuid NOT NULL REFERENCES "managed_accounts"("id") ON DELETE CASCADE,
   "workspace_id" uuid NOT NULL REFERENCES "workspaces"("id") ON DELETE CASCADE,
   "contract_version" text NOT NULL,
@@ -20,8 +20,10 @@ CREATE TABLE "durable_learning_attempts" (
   -- intentionally not an FK: session deletion must not rewrite immutable audit.
   "session_id" uuid,
   "created_at" timestamptz NOT NULL DEFAULT now(),
-  CONSTRAINT "durable_learning_attempts_tenant_attempt_uq"
-    UNIQUE ("account_id", "workspace_id", "id"),
+  CONSTRAINT "durable_learning_attempts_pk"
+    PRIMARY KEY ("account_id", "workspace_id", "id"),
+  CONSTRAINT "durable_learning_attempts_input_identity_uq"
+    UNIQUE ("account_id", "workspace_id", "id", "input_hash"),
   CONSTRAINT "durable_learning_attempts_workspace_fk"
     FOREIGN KEY ("workspace_id", "account_id")
     REFERENCES "workspaces"("id", "account_id") ON DELETE CASCADE,
@@ -71,8 +73,10 @@ CREATE TABLE "durable_learning_receipts" (
   CONSTRAINT "durable_learning_receipts_attempt_uq"
     UNIQUE ("account_id", "workspace_id", "attempt_id"),
   CONSTRAINT "durable_learning_receipts_attempt_fk"
-    FOREIGN KEY ("account_id", "workspace_id", "attempt_id")
-    REFERENCES "durable_learning_attempts"("account_id", "workspace_id", "id")
+    FOREIGN KEY ("account_id", "workspace_id", "attempt_id", "input_hash")
+    REFERENCES "durable_learning_attempts"(
+      "account_id", "workspace_id", "id", "input_hash"
+    )
     ON DELETE CASCADE,
   CONSTRAINT "durable_learning_receipts_contract_chk" CHECK (
     "input_hash" ~ '^[0-9a-f]{64}$'
@@ -125,8 +129,10 @@ CREATE TABLE "durable_learning_authority_results" (
   CONSTRAINT "durable_learning_authority_results_pk"
     PRIMARY KEY ("account_id", "workspace_id", "attempt_id"),
   CONSTRAINT "durable_learning_authority_results_attempt_fk"
-    FOREIGN KEY ("account_id", "workspace_id", "attempt_id")
-    REFERENCES "durable_learning_attempts"("account_id", "workspace_id", "id")
+    FOREIGN KEY ("account_id", "workspace_id", "attempt_id", "input_hash")
+    REFERENCES "durable_learning_attempts"(
+      "account_id", "workspace_id", "id", "input_hash"
+    )
     ON DELETE CASCADE,
   CONSTRAINT "durable_learning_authority_results_contract_chk" CHECK (
     "input_hash" ~ '^[0-9a-f]{64}$'

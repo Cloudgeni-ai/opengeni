@@ -792,7 +792,14 @@ Resource-based turn workers use that exact graceful path only as emergency
 memory protection. Temporal's cgroup-aware slot tuner closes new admission at
 `OPENGENI_TURN_WORKER_TARGET_MEMORY_USAGE`; reaching that target is ordinary
 backpressure and does not restart a worker. An admitted long-running turn can
-still retain native or external memory afterward, so the worker samples the
+still retain native or external memory afterward. After each terminal model
+response is durably reconciled into exact conversation truth, the worker
+schedules one process-wide forced GC on a later task when JavaScript heap or
+external memory has reached 512 MiB. Concurrent response checkpoints coalesce,
+and collection runs at most once per 30 seconds. This does not trim history,
+recycle the worker, or restart an activity: active turns and all exact context
+they still own remain strongly reachable while completed request serialization
+and stream buffers can be reclaimed. The worker also samples the
 most pressured finite process cgroup or ancestor, falling back to whole-host
 `MemAvailable` only without a finite cgroup. Process RSS pressure receives a
 bounded asynchronous GC opportunity first. Only if the authoritative scope
@@ -896,9 +903,12 @@ wrong one is the classic mistake.
    graph fail closed with the exact offending path. Historical inline image and
    screenshot items remain backward-compatible model history. New
    `computer_screenshot` and `view_image` typed PNG/JPEG/WebP bytes are validated
-   and retained before persistence; every new history copy receives the
-   deterministic bounded artifact receipt (or an explicit unavailable fact),
-   never the provider object key or re-encoded base64 source.
+   and retained inside the tool invocation, before its result can enter live SDK
+   history. The later SDK event only projects the established receipt, so
+   event/state ordering cannot expose inline bytes to reconciliation. Every new
+   history copy receives the deterministic bounded artifact receipt (or an
+   explicit unavailable fact), never the provider object key or re-encoded
+   base64 source.
    New generated images follow the same no-inline-byte rule but are permanent
    workspace files: native hosted base64 is retained before serialization and
    adapter tools return the same compact `generated_image` receipt. A later

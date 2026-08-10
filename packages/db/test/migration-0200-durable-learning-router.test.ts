@@ -41,11 +41,12 @@ describe("migration 0200 durable-learning router", () => {
 
   test("binds receipts and optional sessions to the exact tenant attempt", async () => {
     const source = await readFile(migrationUrl, "utf8");
-    expect(source).toContain('UNIQUE ("account_id", "workspace_id", "id")');
-    expect(source).toContain('FOREIGN KEY ("account_id", "workspace_id", "attempt_id")');
+    expect(source).toContain('PRIMARY KEY ("account_id", "workspace_id", "id")');
+    expect(source).toContain('UNIQUE ("account_id", "workspace_id", "id", "input_hash")');
     expect(source).toContain(
-      'REFERENCES "durable_learning_attempts"("account_id", "workspace_id", "id")',
+      'FOREIGN KEY ("account_id", "workspace_id", "attempt_id", "input_hash")',
     );
+    expect(source).toContain('"account_id", "workspace_id", "id", "input_hash"');
     expect(source).toContain("durable_learning_validate_attempt_session");
     expect(source).toContain(
       "durable learning attempt session is outside its exact account/workspace",

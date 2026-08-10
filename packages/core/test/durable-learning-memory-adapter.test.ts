@@ -251,4 +251,51 @@ describe("Workspace Memory durable-learning adapter", () => {
     expect(noOpAfterArchive.router.idempotency).toBe("replayed");
     expect(noOpAfterArchive.memory).toEqual(noOp.memory);
   });
+
+  test("keeps one caller attempt UUID independent across tenant-scoped Memory adapters", async () => {
+    if (!client) return;
+    const sharedAttemptId = randomUUID();
+    const suffix = randomUUID();
+    const [leftAccess, rightAccess] = await Promise.all([
+      bootstrapWorkspace(client.db, {
+        accountExternalSource: "durable-learning-tenant-attempt",
+        accountExternalId: `left-account-${suffix}`,
+        accountName: "Durable learning tenant attempt left",
+        workspaceExternalSource: "durable-learning-tenant-attempt",
+        workspaceExternalId: `left-workspace-${suffix}`,
+        workspaceName: "Durable learning tenant attempt left",
+        subjectId: `human:left:${suffix}`,
+      }),
+      bootstrapWorkspace(client.db, {
+        accountExternalSource: "durable-learning-tenant-attempt",
+        accountExternalId: `right-account-${suffix}`,
+        accountName: "Durable learning tenant attempt right",
+        workspaceExternalSource: "durable-learning-tenant-attempt",
+        workspaceExternalId: `right-workspace-${suffix}`,
+        workspaceName: "Durable learning tenant attempt right",
+        subjectId: `human:right:${suffix}`,
+      }),
+    ]);
+    const left = leftAccess.workspaceGrants[0]!;
+    const right = rightAccess.workspaceGrants[0]!;
+    const route = (grant: typeof left) =>
+      routeLegacyWorkspaceMemoryWrite({
+        db: client!.db,
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: null,
+        actor: { kind: "human", subjectId: grant.subjectId },
+        initiatingHumanSubjectId: grant.subjectId,
+        attemptId: sharedAttemptId,
+        text: "The same caller UUID remains tenant scoped.",
+        kind: "semantic",
+      });
+
+    const [leftCreated, rightCreated] = await Promise.all([route(left), route(right)]);
+    expect(leftCreated.router.idempotency).toBe("created");
+    expect(rightCreated.router.idempotency).toBe("created");
+    expect(leftCreated.memory?.memory.id).not.toBe(rightCreated.memory?.memory.id);
+    expect((await route(left)).router.idempotency).toBe("replayed");
+    expect((await route(right)).router.idempotency).toBe("replayed");
+  });
 });

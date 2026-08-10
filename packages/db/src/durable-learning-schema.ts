@@ -16,7 +16,7 @@ import {
 export const durableLearningAttempts = pgTable(
   "durable_learning_attempts",
   {
-    id: uuid("id").primaryKey(),
+    id: uuid("id").notNull(),
     accountId: uuid("account_id").notNull(),
     workspaceId: uuid("workspace_id").notNull(),
     contractVersion: text("contract_version").notNull(),
@@ -31,10 +31,15 @@ export const durableLearningAttempts = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    tenantAttempt: uniqueIndex("durable_learning_attempts_tenant_attempt_uq").on(
+    pk: primaryKey({
+      name: "durable_learning_attempts_pk",
+      columns: [table.accountId, table.workspaceId, table.id],
+    }),
+    inputIdentity: uniqueIndex("durable_learning_attempts_input_identity_uq").on(
       table.accountId,
       table.workspaceId,
       table.id,
+      table.inputHash,
     ),
     workspaceTimeline: index("durable_learning_attempts_workspace_time_idx").on(
       table.workspaceId,

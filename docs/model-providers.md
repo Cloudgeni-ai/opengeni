@@ -447,6 +447,11 @@ credential-bearing URL.
 
 ## Runtime routing and billing
 
+`packages/runtime/src/model-provider.ts` is the canonical runtime implementation
+for provider clients, object-stage request policy, provider-bound model
+construction, and model-name routing. The package root re-exports that surface
+for compatibility.
+
 `MultiProviderModelProvider` is installed as the process default so both
 in-process and sandboxed agent paths resolve the same product model. A resolved
 provider-bound model is constructed with the normalized

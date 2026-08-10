@@ -214,6 +214,90 @@ describe("durable learning Postgres ledger", () => {
     ).toBeNull();
   });
 
+  test("tenant-scopes attempt UUIDs and binds terminal hashes to the parent attempt", async () => {
+    if (!client) return;
+    const left = await workspace("tenant-attempt-left");
+    const right = await workspace("tenant-attempt-right");
+    const ledger = createDurableLearningAttemptLedger(client.db);
+    const sharedAttemptId = randomUUID();
+    const leftAttempt = learningAttempt({
+      accountId: left.accountId,
+      workspaceId: left.workspaceId,
+      subjectId: left.subjectId,
+      attemptId: sharedAttemptId,
+    });
+    const rightAttempt = learningAttempt({
+      accountId: right.accountId,
+      workspaceId: right.workspaceId,
+      subjectId: right.subjectId,
+      attemptId: sharedAttemptId,
+    });
+
+    expect((await ledger.reserveAttempt(leftAttempt)).attempt).toEqual(leftAttempt);
+    expect((await ledger.reserveAttempt(rightAttempt)).attempt).toEqual(rightAttempt);
+
+    const mismatchedHash = "d".repeat(64);
+    const mismatchedReceipt: DurableLearningReceipt = {
+      ...receipt(leftAttempt),
+      inputHash: mismatchedHash,
+    };
+    let receiptFailure: unknown;
+    try {
+      await withWorkspaceRls(client.db, left.workspaceId, async (scopedDb) =>
+        scopedDb.insert(schema.durableLearningReceipts).values({
+          accountId: left.accountId,
+          workspaceId: left.workspaceId,
+          attemptId: leftAttempt.id,
+          inputHash: mismatchedHash,
+          outcome: mismatchedReceipt.outcome,
+          destination: mismatchedReceipt.decision.destination,
+          resourceId: mismatchedReceipt.resource?.id ?? null,
+          receipt: mismatchedReceipt,
+          createdAt: new Date(mismatchedReceipt.createdAt),
+        }),
+      );
+    } catch (error) {
+      receiptFailure = error;
+    }
+    expect(errorChainMessage(receiptFailure)).toContain("durable_learning_receipts_attempt_fk");
+
+    let authorityFailure: unknown;
+    try {
+      await withWorkspaceRls(client.db, left.workspaceId, async (scopedDb) =>
+        scopedDb.insert(schema.durableLearningAuthorityResults).values({
+          accountId: left.accountId,
+          workspaceId: left.workspaceId,
+          attemptId: leftAttempt.id,
+          inputHash: mismatchedHash,
+          effectKind: "memory_write",
+          result: { attemptId: leftAttempt.id, inputHash: mismatchedHash },
+        }),
+      );
+    } catch (error) {
+      authorityFailure = error;
+    }
+    expect(errorChainMessage(authorityFailure)).toContain(
+      "durable_learning_authority_results_attempt_fk",
+    );
+
+    const [leftRows, rightRows] = await Promise.all([
+      withWorkspaceRls(client.db, left.workspaceId, async (scopedDb) =>
+        scopedDb
+          .select({ inputHash: schema.durableLearningAttempts.inputHash })
+          .from(schema.durableLearningAttempts)
+          .where(eq(schema.durableLearningAttempts.id, sharedAttemptId)),
+      ),
+      withWorkspaceRls(client.db, right.workspaceId, async (scopedDb) =>
+        scopedDb
+          .select({ inputHash: schema.durableLearningAttempts.inputHash })
+          .from(schema.durableLearningAttempts)
+          .where(eq(schema.durableLearningAttempts.id, sharedAttemptId)),
+      ),
+    ]);
+    expect(leftRows).toEqual([{ inputHash: leftAttempt.inputHash }]);
+    expect(rightRows).toEqual([{ inputHash: rightAttempt.inputHash }]);
+  });
+
   test("denies direct mutation of append-only attempts to the runtime role", async () => {
     if (!client) return;
     const grant = await workspace("immutable");

@@ -99,6 +99,15 @@ read-only too: it loads the authority's immutable result snapshot and verifies
 that its resource identity, version, and status still match the receipt rather
 than calling a mutating adapter to reconstruct current state.
 
+PostgreSQL scopes an attempt UUID by account and workspace rather than treating
+the caller-selected UUID as a deployment-global key. The attempt also exposes
+one unique `(account_id, workspace_id, id, input_hash)` parent identity. Both
+the terminal receipt and immutable authority-result tables foreign-key that
+complete identity, so even a direct runtime-role insert cannot attach terminal
+evidence for a different immutable input. Reusing the same UUID in another
+tenant creates an independent attempt and cannot expose a hidden tenant's row
+or a provider-specific uniqueness diagnostic.
+
 The router records the immutable attempt before invoking the selected adapter.
 A separate renewable execution claim excludes concurrent invocation for the
 same pending attempt; it is coordination state, not learning authority or audit

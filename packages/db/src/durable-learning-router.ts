@@ -138,6 +138,8 @@ function receiptFromRow(row: ReceiptRow): DurableLearningReceiptType {
 
 async function attemptAndReceipt(
   db: Database,
+  accountId: string,
+  workspaceId: string,
   attemptId: string,
 ): Promise<{
   attempt: DurableLearningAttemptType;
@@ -155,9 +157,16 @@ async function attemptAndReceipt(
         eq(schema.durableLearningReceipts.accountId, schema.durableLearningAttempts.accountId),
         eq(schema.durableLearningReceipts.workspaceId, schema.durableLearningAttempts.workspaceId),
         eq(schema.durableLearningReceipts.attemptId, schema.durableLearningAttempts.id),
+        eq(schema.durableLearningReceipts.inputHash, schema.durableLearningAttempts.inputHash),
       ),
     )
-    .where(eq(schema.durableLearningAttempts.id, attemptId))
+    .where(
+      and(
+        eq(schema.durableLearningAttempts.accountId, accountId),
+        eq(schema.durableLearningAttempts.workspaceId, workspaceId),
+        eq(schema.durableLearningAttempts.id, attemptId),
+      ),
+    )
     .limit(1);
   if (!row) return null;
   return {
@@ -180,7 +189,12 @@ export function createDurableLearningAttemptLedger(db: Database) {
           await tx.execute(
             sql`select pg_advisory_xact_lock(hashtextextended(${`durable-learning:${parsed.accountId}:${parsed.workspaceId}:${parsed.id}`}, 0::bigint))`,
           );
-          const existing = await attemptAndReceipt(tx, parsed.id);
+          const existing = await attemptAndReceipt(
+            tx,
+            parsed.accountId,
+            parsed.workspaceId,
+            parsed.id,
+          );
           if (existing) {
             if (existing.attempt.inputHash !== parsed.inputHash) {
               throw new DurableLearningLedgerConflictError(
@@ -280,7 +294,12 @@ export function createDurableLearningAttemptLedger(db: Database) {
           await tx.execute(
             sql`select pg_advisory_xact_lock(hashtextextended(${`durable-learning:${parsedAttempt.accountId}:${parsedAttempt.workspaceId}:${parsedAttempt.id}`}, 0::bigint))`,
           );
-          const existing = await attemptAndReceipt(tx, parsedAttempt.id);
+          const existing = await attemptAndReceipt(
+            tx,
+            parsedAttempt.accountId,
+            parsedAttempt.workspaceId,
+            parsedAttempt.id,
+          );
           if (!existing || existing.attempt.inputHash !== parsedAttempt.inputHash) {
             throw new DurableLearningLedgerConflictError(
               "Durable-learning receipt lost its immutable attempt",
@@ -343,7 +362,7 @@ export function createDurableLearningAttemptLedger(db: Database) {
 
     async getCompletedAttempt(accountId: string, workspaceId: string, attemptId: string) {
       return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-        const resolved = await attemptAndReceipt(scopedDb, attemptId);
+        const resolved = await attemptAndReceipt(scopedDb, accountId, workspaceId, attemptId);
         if (
           !resolved ||
           resolved.receipt === null ||
