@@ -249,7 +249,7 @@ export function SlackBotInstallControls({
   }
 
   return (
-    <div className="mt-4">
+    <div className="shrink-0">
       <button
         type="button"
         aria-busy={busy}
@@ -1297,8 +1297,8 @@ export function CapabilitiesRoute({
                 className="mt-3 rounded-xl border border-border bg-surface p-4"
                 aria-labelledby="workspace-slack-bot-heading"
               >
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div className="flex min-w-0 items-start gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="flex min-w-0 flex-1 items-start gap-3">
                     <span className="grid size-9 shrink-0 place-items-center rounded-lg border border-border bg-bg">
                       <AppLogo app="slack" className="size-5" />
                     </span>
@@ -1314,6 +1314,14 @@ export function CapabilitiesRoute({
                       </p>
                     </div>
                   </div>
+                  {!visibleSlackBotConnection || !visibleSlackBotMetadata ? (
+                    <SlackBotInstallControls
+                      canInstall={canInstallSlackBot}
+                      hasConnection={false}
+                      busy={slackBotBusy}
+                      onInstall={(createNewConnection) => void installSlackBot(createNewConnection)}
+                    />
+                  ) : null}
                 </div>
 
                 {visibleSlackBotConnection && visibleSlackBotMetadata ? (
@@ -1447,14 +1455,7 @@ export function CapabilitiesRoute({
                       </details>
                     </details>
                   </>
-                ) : (
-                  <SlackBotInstallControls
-                    canInstall={canInstallSlackBot}
-                    hasConnection={false}
-                    busy={slackBotBusy}
-                    onInstall={(createNewConnection) => void installSlackBot(createNewConnection)}
-                  />
-                )}
+                ) : null}
               </section>
 
               <section className="mt-3 rounded-xl border border-border bg-surface px-4 py-3">
