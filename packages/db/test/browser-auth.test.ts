@@ -4,6 +4,7 @@ import {
   activateBrowserSession,
   acceptSessionApprovalDecision,
   applySessionTurnSettlement,
+  bindBrowserSessionNetworkRouteAuthority,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createDb,
@@ -15,6 +16,7 @@ import {
   dispatchBrowserSessionOperation,
   dispatchProtectedAuthFill,
   expireSessionInteractionIntervention,
+  findBrowserSessionControlRecordByOperation,
   getAuthRun,
   getInteractionIntervention,
   getInteractionInterventionResumeForEvent,
@@ -113,7 +115,10 @@ async function activeBrowser(scope: Awaited<ReturnType<typeof fixture>>) {
     associatedSessionId: scope.sessionId,
     name: `Auth browser ${operationId.slice(0, 8)}`,
     initialUrl: "https://example.com/login",
-    placement: { kind: "sandbox_group" as const, sandboxGroupId: scope.sandboxGroupId },
+    placement: {
+      kind: "sandbox_group" as const,
+      sandboxGroupId: scope.sandboxGroupId,
+    },
     driverId: "opengeni.cdp.v1",
     engine: "chromium" as const,
     headless: true,
@@ -202,7 +207,11 @@ function humanSiteAuth(operationId = crypto.randomUUID()) {
     preferredIdentityId: null,
     preferredPlacement: null,
     preferredNetworkRouteId: null,
-    healthPolicy: { mode: "on_use" as const, intervalSeconds: null, automaticRepair: false },
+    healthPolicy: {
+      mode: "on_use" as const,
+      intervalSeconds: null,
+      automaticRepair: false,
+    },
   };
 }
 
@@ -211,8 +220,14 @@ describe("browser auth and network resources", () => {
     if (!available) return;
     const scope = await fixture();
     const request = directRoute();
-    const created = await createNetworkRoute(client.db, { ...scope, ...request });
-    expect(created).toMatchObject({ replayed: false, operationId: request.operationId });
+    const created = await createNetworkRoute(client.db, {
+      ...scope,
+      ...request,
+    });
+    expect(created).toMatchObject({
+      replayed: false,
+      operationId: request.operationId,
+    });
     expect(await createNetworkRoute(client.db, { ...scope, ...request })).toMatchObject({
       route: { id: created.route.id },
       replayed: true,
@@ -232,7 +247,10 @@ describe("browser auth and network resources", () => {
       expectedVersion: 1,
       name: "Direct preferred",
     });
-    expect(updated.route).toMatchObject({ name: "Direct preferred", version: 2 });
+    expect(updated.route).toMatchObject({
+      name: "Direct preferred",
+      version: 2,
+    });
     await expect(
       updateNetworkRoute(client.db, {
         ...scope,
@@ -243,6 +261,70 @@ describe("browser auth and network resources", () => {
       }),
     ).rejects.toBeInstanceOf(InteractionResourceConflictError);
     expect((await listNetworkRoutes(client.db, scope)).routes).toHaveLength(1);
+
+    const browserOperationId = crypto.randomUUID();
+    const prepared = await prepareBrowserSessionCreate(client.db, {
+      ...scope,
+      operationId: browserOperationId,
+      associatedSessionId: scope.sessionId,
+      name: "Routed browser",
+      initialUrl: "https://example.com",
+      placement: {
+        kind: "sandbox_group",
+        sandboxGroupId: scope.sandboxGroupId,
+      },
+      driverId: "opengeni.cdp.v1",
+      engine: "chromium",
+      headless: true,
+      identityId: null,
+      baseRevisionId: null,
+      networkRouteId: created.route.id,
+    });
+    const beforeBinding = await findBrowserSessionControlRecordByOperation(client.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      operationId: browserOperationId,
+    });
+    expect(beforeBinding?.networkRouteAuthority).toMatchObject({
+      routeId: created.route.id,
+      routeVersion: 2,
+      credentialVersion: null,
+      authorityDigest: null,
+      configuration: { kind: "direct" },
+    });
+    const bound = await bindBrowserSessionNetworkRouteAuthority(client.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      browserSessionId: prepared.session.id,
+      operationId: browserOperationId,
+      routeVersion: 2,
+      credentialVersion: null,
+      authorityDigest: `route.${"a".repeat(43)}`,
+    });
+    expect(bound).toMatchObject({
+      routeVersion: 2,
+      authorityDigest: `route.${"a".repeat(43)}`,
+    });
+    const changedForFutureSessions = await updateNetworkRoute(client.db, {
+      ...scope,
+      routeId: created.route.id,
+      operationId: crypto.randomUUID(),
+      expectedVersion: 2,
+      name: "Future route configuration",
+    });
+    expect(changedForFutureSessions.route.version).toBe(3);
+    expect(
+      (
+        await findBrowserSessionControlRecordByOperation(client.db, {
+          accountId: scope.accountId,
+          workspaceId: scope.workspaceId,
+          operationId: browserOperationId,
+        })
+      )?.networkRouteAuthority,
+    ).toMatchObject({
+      routeVersion: 2,
+      authorityDigest: `route.${"a".repeat(43)}`,
+    });
   });
 
   test("freezes visible connection authority without persisting credential values", async () => {
@@ -271,7 +353,11 @@ describe("browser auth and network resources", () => {
       },
       fields: [
         { id: "email", purpose: "identifier" as const, credentialKey: "email" },
-        { id: "password", purpose: "password" as const, credentialKey: "password" },
+        {
+          id: "password",
+          purpose: "password" as const,
+          credentialKey: "password",
+        },
       ],
     };
     const created = await createSiteAuthConnection(client.db, {
@@ -318,7 +404,10 @@ describe("browser auth and network resources", () => {
   test("runs exact-target auth and resumes it through one durable intervention", async () => {
     if (!available) return;
     const scope = await fixture();
-    const auth = await createSiteAuthConnection(client.db, { ...scope, ...humanSiteAuth() });
+    const auth = await createSiteAuthConnection(client.db, {
+      ...scope,
+      ...humanSiteAuth(),
+    });
     const browser = await activeBrowser(scope);
     const startOperationId = crypto.randomUUID();
     const started = await startAuthRun(client.db, {
@@ -377,7 +466,10 @@ describe("browser auth and network resources", () => {
       expiresInSeconds: 900,
       originatingSessionId: scope.sessionId,
     });
-    expect(intervention.intervention).toMatchObject({ status: "open", version: 1 });
+    expect(intervention.intervention).toMatchObject({
+      status: "open",
+      version: 1,
+    });
     expect(
       await createInteractionIntervention(client.db, {
         ...scope,
@@ -404,7 +496,10 @@ describe("browser auth and network resources", () => {
       expectedVersion: 1,
       outcome: "completed",
     });
-    expect(resolved.intervention).toMatchObject({ status: "completed", version: 2 });
+    expect(resolved.intervention).toMatchObject({
+      status: "completed",
+      version: 2,
+    });
     expect(await getAuthRun(client.db, { ...scope, authRunId: started.run.id })).toMatchObject({
       state: "working",
       interventionId: null,
@@ -421,7 +516,10 @@ describe("browser auth and network resources", () => {
   test("atomically turns a human protected fill into one replay-safe intervention", async () => {
     if (!available) return;
     const scope = await fixture();
-    const auth = await createSiteAuthConnection(client.db, { ...scope, ...humanSiteAuth() });
+    const auth = await createSiteAuthConnection(client.db, {
+      ...scope,
+      ...humanSiteAuth(),
+    });
     const browser = await activeBrowser(scope);
     const started = await startAuthRun(client.db, {
       ...scope,
@@ -443,8 +541,14 @@ describe("browser auth and network resources", () => {
       expectedFrameId: "frame-human",
       authorityId: "human",
       fields: [
-        { fieldId: "email", locator: { kind: "css" as const, selector: "#email" } },
-        { fieldId: "password", locator: { kind: "css" as const, selector: "#password" } },
+        {
+          fieldId: "email",
+          locator: { kind: "css" as const, selector: "#email" },
+        },
+        {
+          fieldId: "password",
+          locator: { kind: "css" as const, selector: "#password" },
+        },
       ],
       submit: { type: "none" as const },
     };
@@ -489,7 +593,10 @@ describe("browser auth and network resources", () => {
       }),
     ).toMatchObject({
       replayed: true,
-      response: { replayed: true, run: { interventionId: waiting.run.interventionId } },
+      response: {
+        replayed: true,
+        run: { interventionId: waiting.run.interventionId },
+      },
     });
     await resolveInteractionIntervention(client.db, {
       ...scope,
@@ -546,7 +653,10 @@ describe("browser auth and network resources", () => {
           type: "session.requiresAction",
           payload: { approvals: [{ id: ordinaryApprovalId }] },
         },
-        { type: "session.status.changed", payload: { status: "requires_action" } },
+        {
+          type: "session.status.changed",
+          payload: { status: "requires_action" },
+        },
       ],
     });
     expect(initial.action).toBe("settled");
@@ -581,13 +691,22 @@ describe("browser auth and network resources", () => {
       sessionStatus: "requires_action",
       activeTurnId: resumed.turn.id,
       runState: {
-        serializedRunState: JSON.stringify({ version: 1, interrupted: true, resumed: true }),
+        serializedRunState: JSON.stringify({
+          version: 1,
+          interrupted: true,
+          resumed: true,
+        }),
         pendingApprovals: [{ id: toolCallId }],
         interactionInterventionRequests: [
           { id: interventionId, operationId, toolCallId, input: request },
         ],
       },
-      events: [{ type: "session.status.changed", payload: { status: "requires_action" } }],
+      events: [
+        {
+          type: "session.status.changed",
+          payload: { status: "requires_action" },
+        },
+      ],
     });
     expect(refrozen.action).toBe("settled");
 
@@ -774,10 +893,19 @@ describe("browser auth and network resources", () => {
       expectedFrameId: "frame-1",
       authorityId: "saved",
       fields: [
-        { fieldId: "email", locator: { kind: "css" as const, selector: "#email" } },
-        { fieldId: "password", locator: { kind: "css" as const, selector: "#password" } },
+        {
+          fieldId: "email",
+          locator: { kind: "css" as const, selector: "#email" },
+        },
+        {
+          fieldId: "password",
+          locator: { kind: "css" as const, selector: "#password" },
+        },
       ],
-      submit: { type: "click" as const, locator: { kind: "css" as const, selector: "#login" } },
+      submit: {
+        type: "click" as const,
+        locator: { kind: "css" as const, selector: "#login" },
+      },
     };
     expect(
       await getProtectedAuthFillPreparation(client.db, {
@@ -822,7 +950,11 @@ describe("browser auth and network resources", () => {
     expect(completed).toMatchObject({
       status: "submitted",
       replayed: false,
-      run: { state: "working", version: 2, documentGeneration: "document-generation-2" },
+      run: {
+        state: "working",
+        version: 2,
+        documentGeneration: "document-generation-2",
+      },
     });
     expect(
       await prepareProtectedAuthFill(client.db, {

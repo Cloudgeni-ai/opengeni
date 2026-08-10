@@ -5,6 +5,7 @@ import {
   activateBrowserSession,
   activateComputerSession,
   ATTACHED_BROWSER_SESSION_CAPABILITIES,
+  bindBrowserSessionNetworkRouteAuthority,
   bootstrapWorkspace,
   BrowserSessionNotFoundError,
   BrowserSessionOperationConflictError,
@@ -15,6 +16,7 @@ import {
   commitWarmingToWarm,
   completeBrowserSessionEnd,
   createDb,
+  createNetworkRoute,
   createSession,
   dispatchBrowserSessionOperation,
   dispatchComputerSessionOperation,
@@ -560,10 +562,59 @@ describe("durable BrowserSession lifecycle", () => {
     ).toMatchObject({ state: "failed", replayed: true });
   });
 
-  test("suspends onto one private checkpoint and resumes under a fresh controller fence", async () => {
+  test("resumes routed private state under fresh controller and route authority fences", async () => {
     if (!available) return;
     const scope = await fixture();
-    const active = await activeBrowser(scope);
+    const route = await createNetworkRoute(client.db, {
+      ...scope,
+      actorSubjectId: scope.subjectId,
+      operationId: crypto.randomUUID(),
+      name: `Resume route ${crypto.randomUUID()}`,
+      configuration: { kind: "direct" },
+      consistency: {
+        dns: "placement",
+        expectedPublicIp: null,
+        expectedRegion: null,
+        locale: null,
+        timezone: null,
+        geolocation: null,
+        webRtc: "default",
+        stability: "session",
+      },
+    });
+    const createOperationId = crypto.randomUUID();
+    const prepared = await prepareBrowserSessionCreate(client.db, {
+      ...createInput(scope, createOperationId),
+      networkRouteId: route.route.id,
+    });
+    const initialRouteDigest = `route.${"a".repeat(43)}`;
+    await bindBrowserSessionNetworkRouteAuthority(client.db, {
+      ...scope,
+      browserSessionId: prepared.session.id,
+      operationId: createOperationId,
+      routeVersion: route.route.version,
+      credentialVersion: null,
+      authorityDigest: initialRouteDigest,
+    });
+    const controllerGeneration = crypto.randomUUID();
+    await dispatchBrowserSessionOperation(client.db, {
+      ...scope,
+      operationId: createOperationId,
+      browserSessionId: prepared.session.id,
+      controllerGeneration,
+    });
+    const activated = await activateBrowserSession(client.db, {
+      ...scope,
+      operationId: createOperationId,
+      browserSessionId: prepared.session.id,
+      controller: {
+        controllerId: "browserd:test",
+        controllerGeneration,
+        placementInstanceId: "placement:test",
+      },
+      engineVersion: "151.0.7922.108",
+    });
+    const active = { ...activated, controllerGeneration };
     const suspendOperationId = crypto.randomUUID();
     const suspending = await prepareBrowserSessionSuspend(client.db, {
       ...scope,
@@ -623,6 +674,28 @@ describe("durable BrowserSession lifecycle", () => {
       actorSubjectId: scope.subjectId,
     });
     expect(restoring.session.lifecycle).toBe("restoring");
+    expect(
+      (
+        await getBrowserSessionControlRecord(client.db, {
+          ...scope,
+          browserSessionId: active.session.id,
+          operationId: resumeOperationId,
+        })
+      ).networkRouteAuthority,
+    ).toMatchObject({
+      routeId: route.route.id,
+      routeVersion: route.route.version,
+      authorityDigest: null,
+    });
+    const resumedRouteDigest = `route.${"b".repeat(43)}`;
+    await bindBrowserSessionNetworkRouteAuthority(client.db, {
+      ...scope,
+      browserSessionId: active.session.id,
+      operationId: resumeOperationId,
+      routeVersion: route.route.version,
+      credentialVersion: null,
+      authorityDigest: resumedRouteDigest,
+    });
     const resumedGeneration = crypto.randomUUID();
     const resumedController = {
       controllerId: "browserd:test",
@@ -636,6 +709,16 @@ describe("durable BrowserSession lifecycle", () => {
       controllerGeneration: resumedGeneration,
       controller: resumedController,
     });
+    await expect(
+      bindBrowserSessionNetworkRouteAuthority(client.db, {
+        ...scope,
+        browserSessionId: active.session.id,
+        operationId: resumeOperationId,
+        routeVersion: route.route.version,
+        credentialVersion: null,
+        authorityDigest: `route.${"c".repeat(43)}`,
+      }),
+    ).rejects.toBeInstanceOf(BrowserSessionOperationConflictError);
     const resumed = await activateBrowserSession(client.db, {
       ...scope,
       operationId: resumeOperationId,
@@ -648,6 +731,14 @@ describe("durable BrowserSession lifecycle", () => {
       controller: resumedController,
     });
     expect(resumedGeneration).not.toBe(active.controllerGeneration);
+    expect(
+      (
+        await getBrowserSessionControlRecord(client.db, {
+          ...scope,
+          browserSessionId: active.session.id,
+        })
+      ).networkRouteAuthority,
+    ).toMatchObject({ authorityDigest: resumedRouteDigest });
     expect(
       await getBrowserPrivateCheckpointAuthority(client.db, {
         ...scope,

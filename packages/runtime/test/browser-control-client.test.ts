@@ -159,6 +159,23 @@ describe("BrowserControlClient", () => {
           computerSessionId: linkedComputerSessionId,
           controllerGeneration: "computer-controller-1",
         },
+        networkRoute: {
+          routeId: randomUUID(),
+          routeVersion: 3,
+          authorityDigest: `ogr.${"r".repeat(43)}`,
+          kind: "proxy",
+          consistency: {
+            dns: "proxy",
+            expectedPublicIp: null,
+            expectedRegion: "NO",
+            locale: "nb-NO",
+            timezone: "Europe/Oslo",
+            geolocation: { latitude: 59.9139, longitude: 10.7522, accuracyMeters: 25 },
+            webRtc: "disable_non_proxied_udp",
+            stability: "session",
+          },
+          proxyUrl: "http://route-user:route-password@proxy.test:8443/",
+        },
         initialUrl: "https://example.test/",
         restore: {
           objectKey: `workspaces/${workspaceId}/browser-state/revisions/${stateOperationId}/chromium-profile.ogbs`,
@@ -202,6 +219,18 @@ describe("BrowserControlClient", () => {
           dataKeyBase64: restoreKey.toString("base64"),
           aadBase64: restoreAad.toString("base64"),
           manifestDigest: "c".repeat(64),
+        },
+        networkRoute: {
+          routeVersion: 3,
+          authorityDigest: `ogr.${"r".repeat(43)}`,
+          kind: "proxy",
+          proxyUrl: "http://route-user:route-password@proxy.test:8443/",
+          consistency: {
+            dns: "proxy",
+            expectedRegion: "NO",
+            locale: "nb-NO",
+            timezone: "Europe/Oslo",
+          },
         },
       });
       const stateKey = Buffer.alloc(32, 7);
@@ -299,6 +328,7 @@ describe("BrowserControlClient", () => {
       expect(
         placement.commands.every((command) => !command.includes("placement-private-password")),
       ).toBe(true);
+      expect(placement.commands.every((command) => !command.includes("route-password"))).toBe(true);
       expect(
         placement.commands.every((command) => !command.includes(restoreKey.toString("base64"))),
       ).toBe(true);
@@ -306,6 +336,7 @@ describe("BrowserControlClient", () => {
         placement.commands.every((command) => !command.includes(restoreAad.toString("base64"))),
       ).toBe(true);
       expect(placement.writes.some((entry) => entry.content.includes(adminToken))).toBe(true);
+      expect(placement.writes.some((entry) => entry.content.includes("route-password"))).toBe(true);
       expect(placement.finalizations).toBe(8);
       for (const path of placement.writes.map((entry) => dirname(entry.path))) {
         if (!path.includes("opengeni-browser-control-client")) continue;

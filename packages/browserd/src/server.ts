@@ -9,6 +9,7 @@ import {
   type BrowserProtectedAuthFillCommand as BrowserProtectedAuthFillCommandValue,
   ComputerActionCommand,
   type ComputerActionCommand as ComputerActionCommandValue,
+  NetworkRouteConsistency,
   type InteractionError,
 } from "@opengeni/contracts";
 import { InteractionControllerError } from "@opengeni/interaction";
@@ -580,6 +581,7 @@ export class BrowserControlServer {
           ...(body.initialUrl ? { initialUrl: body.initialUrl } : {}),
           ...(body.restore ? { restore: body.restore } : {}),
           ...(body.transport ? { transport: body.transport } : {}),
+          ...(body.networkRoute ? { networkRoute: body.networkRoute } : {}),
           ...(body.linkedComputer
             ? {
                 linkedComputer: body.linkedComputer,
@@ -942,13 +944,19 @@ export class BrowserControlServer {
         ? { format: parseImageFormat(url.searchParams.get("format")) }
         : {}),
       ...(url.searchParams.has("quality")
-        ? { quality: parseInteger(url.searchParams.get("quality"), "quality", 1, 100) }
+        ? {
+            quality: parseInteger(url.searchParams.get("quality"), "quality", 1, 100),
+          }
         : {}),
       ...(url.searchParams.has("maxWidth")
-        ? { maxWidth: parseInteger(url.searchParams.get("maxWidth"), "maxWidth", 1, 4_096) }
+        ? {
+            maxWidth: parseInteger(url.searchParams.get("maxWidth"), "maxWidth", 1, 4_096),
+          }
         : {}),
       ...(url.searchParams.has("maxHeight")
-        ? { maxHeight: parseInteger(url.searchParams.get("maxHeight"), "maxHeight", 1, 4_096) }
+        ? {
+            maxHeight: parseInteger(url.searchParams.get("maxHeight"), "maxHeight", 1, 4_096),
+          }
         : {}),
       ...(url.searchParams.has("everyNthFrame")
         ? {
@@ -979,7 +987,9 @@ export class BrowserControlServer {
         expiryTimer: null,
         closed: false,
       },
-      headers: { "sec-websocket-protocol": COMPUTER_CONTROL_WEBSOCKET_PROTOCOL },
+      headers: {
+        "sec-websocket-protocol": COMPUTER_CONTROL_WEBSOCKET_PROTOCOL,
+      },
     });
     if (!upgraded) {
       throw new ProtocolError("resource_unavailable", "frame stream upgrade failed", 503, true);
@@ -1421,6 +1431,7 @@ function parseCreateSession(value: Record<string, unknown>): {
   headed: boolean;
   initialUrl?: string;
   transport?: NonNullable<BrowserSupervisorSessionOptions["transport"]>;
+  networkRoute?: NonNullable<BrowserSupervisorSessionOptions["networkRoute"]>;
   linkedComputer?: { computerSessionId: string; controllerGeneration: string };
   restore?: BrowserStateRestoreInput & { dataKey: Buffer; aad: Buffer };
 } {
@@ -1433,6 +1444,7 @@ function parseCreateSession(value: Record<string, unknown>): {
     "headed",
     "initialUrl",
     "transport",
+    "networkRoute",
     "linkedComputer",
     "restore",
   ]);
@@ -1452,10 +1464,61 @@ function parseCreateSession(value: Record<string, unknown>): {
       ? {}
       : { initialUrl: requireString(value.initialUrl, "initialUrl", 16_384) }),
     ...(value.transport === undefined ? {} : { transport: parseBrowserTransport(value.transport) }),
+    ...(value.networkRoute === undefined
+      ? {}
+      : { networkRoute: parseBrowserNetworkRoute(value.networkRoute) }),
     ...(value.linkedComputer === undefined
       ? {}
       : { linkedComputer: parseLinkedComputer(value.linkedComputer) }),
     ...(value.restore === undefined ? {} : { restore: parseStateRestore(value.restore) }),
+  };
+}
+
+function parseBrowserNetworkRoute(
+  value: unknown,
+): NonNullable<BrowserSupervisorSessionOptions["networkRoute"]> {
+  if (!isRecord(value)) {
+    throw new ProtocolError("invalid_action", "browser network route is invalid", 400);
+  }
+  assertOnlyKeys(value, [
+    "routeId",
+    "routeVersion",
+    "authorityDigest",
+    "kind",
+    "consistency",
+    "proxyUrl",
+  ]);
+  if (value.kind !== "direct" && value.kind !== "proxy" && value.kind !== "tunnel") {
+    throw new ProtocolError("invalid_action", "browser network route kind is unsupported", 400);
+  }
+  const consistency = NetworkRouteConsistency.safeParse(value.consistency);
+  if (!consistency.success) {
+    throw new ProtocolError("invalid_action", "browser network route consistency is invalid", 400);
+  }
+  const authorityDigest = requireString(
+    value.authorityDigest,
+    "browser network route authority digest",
+    256,
+  );
+  if (!/^[A-Za-z0-9._~-]{16,256}$/u.test(authorityDigest)) {
+    throw new ProtocolError("invalid_action", "browser network route authority is invalid", 400);
+  }
+  return {
+    routeId: requireUuid(value.routeId, "browser network route id"),
+    routeVersion: requireInteger(
+      value.routeVersion,
+      "browser network route version",
+      1,
+      MAX_TOKEN_GENERATION,
+    ),
+    authorityDigest,
+    kind: value.kind,
+    consistency: consistency.data,
+    ...(value.proxyUrl === undefined
+      ? {}
+      : {
+          proxyUrl: requireString(value.proxyUrl, "browser proxy authority", 16_384),
+        }),
   };
 }
 

@@ -57,6 +57,61 @@ describe("managed browser profile cryptography", () => {
   });
 
   test.skipIf(process.platform === "win32")(
+    "keeps proxy authority in the isolated daemon environment and out of argv",
+    async () => {
+      const root = await mkdtemp("/tmp/og-runner-route-");
+      const binaryPath = join(root, "fixture-agent-browser");
+      await writeFile(
+        binaryPath,
+        `#!/usr/bin/env bun\nconsole.log(JSON.stringify({ success: true, data: { argv: process.argv.slice(2), proxy: process.env.AGENT_BROWSER_PROXY, proxyUsername: process.env.AGENT_BROWSER_PROXY_USERNAME, proxyPassword: process.env.AGENT_BROWSER_PROXY_PASSWORD, args: process.env.AGENT_BROWSER_ARGS, timezone: process.env.TZ }, error: null }));\n`,
+        { mode: 0o700 },
+      );
+      const proxyUrl = "http://route-user:route-password@proxy.test:8443/";
+      const runner = await AgentBrowserJsonRunner.create({
+        namespace: "og",
+        sessionName: "route",
+        socketDirectory: join(root, "socket"),
+        profileDirectory: join(root, "profile"),
+        downloadDirectory: join(root, "downloads"),
+        screenshotDirectory: join(root, "screenshots"),
+        headed: false,
+        proxyUrl,
+        launchArguments: [
+          "--lang=en-US",
+          "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+        ],
+        timezone: "Europe/Oslo",
+        binary: {
+          path: binaryPath,
+          name: "agent-browser-darwin-arm64",
+          version: "0.33.2",
+          sha256: "fixture",
+        },
+      });
+      try {
+        const result = await runner.run<{
+          argv: string[];
+          proxy: string;
+          proxyUsername: string;
+          proxyPassword: string;
+          args: string;
+          timezone: string;
+        }>(["open", "about:blank"]);
+        expect(result.proxy).toBe("http://proxy.test:8443");
+        expect(result.proxyUsername).toBe("route-user");
+        expect(result.proxyPassword).toBe("route-password");
+        expect(result.argv.join(" ")).not.toContain("route-password");
+        expect(result.argv.join(" ")).toContain("http://proxy.test:8443");
+        expect(result.args).toContain("--lang=en-US");
+        expect(result.args).toContain("--force-webrtc-ip-handling-policy");
+        expect(result.timezone).toBe("Europe/Oslo");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
     "times out even when a daemon inherits the command pipes",
     async () => {
       const root = await mkdtemp("/tmp/og-runner-timeout-");

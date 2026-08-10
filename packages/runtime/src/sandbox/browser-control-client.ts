@@ -20,6 +20,7 @@ import {
   ComputerSessionCapabilities,
   ComputerTarget,
   InteractionError,
+  NetworkRouteConsistency,
   type BrowserActionCommand as BrowserActionCommandValue,
   type BrowserActionReceipt as BrowserActionReceiptValue,
   type BrowserDiagnosticBatch as BrowserDiagnosticBatchValue,
@@ -35,6 +36,7 @@ import {
   type ComputerSessionCapabilities as ComputerSessionCapabilitiesValue,
   type ComputerTarget as ComputerTargetValue,
   type InteractionError as InteractionErrorValue,
+  type NetworkRouteConsistency as NetworkRouteConsistencyValue,
 } from "@opengeni/contracts";
 import type {
   BrowserControlEnsureRequest,
@@ -141,6 +143,19 @@ export type CreatePlacementBrowserSessionInput = PlacementBrowserSessionReferenc
   restore?: RestorePlacementBrowserStateInput;
   transport?: PlacementBrowserTransport;
   linkedComputer?: PlacementComputerSessionReference;
+  networkRoute?: PlacementBrowserNetworkRoute;
+};
+
+export type PlacementBrowserNetworkRoute = {
+  routeId: string;
+  routeVersion: number;
+  authorityDigest: string;
+  kind: "direct" | "proxy" | "tunnel";
+  consistency: NetworkRouteConsistencyValue;
+  /** Present for an initial authenticated-proxy launch; omitted only when
+   * replaying an already-live controller after the referenced credential was
+   * rotated. Never persisted or returned by the controller. */
+  proxyUrl?: string;
 };
 
 export type PlacementBrowserTransport =
@@ -400,6 +415,9 @@ export class BrowserControlClient {
           ...(input.transport ? { transport: placementBrowserTransport(input.transport) } : {}),
           ...(input.linkedComputer
             ? { linkedComputer: parseComputerReference(input.linkedComputer) }
+            : {}),
+          ...(input.networkRoute
+            ? { networkRoute: placementBrowserNetworkRoute(input.networkRoute) }
             : {}),
           ...(restore ? { restore: restore.wire } : {}),
         },
@@ -673,7 +691,10 @@ export class BrowserControlClient {
       maxHeight?: number | undefined;
       everyNthFrame?: number | undefined;
     };
-  }): Promise<{ channel: StreamChannel; endpoint: ExposedPortEndpoint } | null> {
+  }): Promise<{
+    channel: StreamChannel;
+    endpoint: ExposedPortEndpoint;
+  } | null> {
     if (!this.session.openBrowserFrames) return null;
     if (!this.nativeAuthority) {
       throw new BrowserControlProtocolError(
@@ -721,7 +742,10 @@ export class BrowserControlClient {
       maxHeight?: number | undefined;
       everyNthFrame?: number | undefined;
     };
-  }): Promise<{ channel: StreamChannel; endpoint: ExposedPortEndpoint } | null> {
+  }): Promise<{
+    channel: StreamChannel;
+    endpoint: ExposedPortEndpoint;
+  } | null> {
     if (!this.session.openComputerFrames) return null;
     if (!this.nativeAuthority) {
       throw new BrowserControlProtocolError(
@@ -1217,6 +1241,53 @@ function placementBrowserTransport(input: PlacementBrowserTransport): PlacementB
     browserName: requireBoundedText(input.browserName, 1, 100, "attached browser name"),
     browserVersion: requireBoundedText(input.browserVersion, 1, 256, "attached browser version"),
   };
+}
+
+function placementBrowserNetworkRoute(
+  input: PlacementBrowserNetworkRoute,
+): PlacementBrowserNetworkRoute {
+  const kind = input.kind;
+  if (kind !== "direct" && kind !== "proxy" && kind !== "tunnel") {
+    throw new BrowserControlProtocolError("browser network route kind is invalid");
+  }
+  if (!/^[A-Za-z0-9._~-]{16,256}$/u.test(input.authorityDigest)) {
+    throw new BrowserControlProtocolError("browser network route authority is invalid");
+  }
+  const proxyUrl = input.proxyUrl === undefined ? undefined : boundedProxyUrl(input.proxyUrl);
+  if (kind !== "proxy" && proxyUrl !== undefined) {
+    throw new BrowserControlProtocolError("non-proxy browser route contains proxy authority");
+  }
+  return {
+    routeId: requireUuid(input.routeId, "network route id"),
+    routeVersion: positiveSafeInteger(input.routeVersion, "network route version"),
+    authorityDigest: input.authorityDigest,
+    kind,
+    consistency: NetworkRouteConsistency.parse(input.consistency),
+    ...(proxyUrl === undefined ? {} : { proxyUrl }),
+  };
+}
+
+function boundedProxyUrl(value: string): string {
+  if (Buffer.byteLength(value) > 16_384) {
+    throw new BrowserControlProtocolError("browser proxy authority is too large");
+  }
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new BrowserControlProtocolError("browser proxy authority is invalid");
+  }
+  if (
+    !["http:", "https:", "socks5:"].includes(url.protocol) ||
+    !url.hostname ||
+    (!url.port && url.protocol !== "http:" && url.protocol !== "https:") ||
+    (url.pathname !== "" && url.pathname !== "/") ||
+    url.search ||
+    url.hash
+  ) {
+    throw new BrowserControlProtocolError("browser proxy authority is invalid");
+  }
+  return url.toString();
 }
 
 function parseStateCaptureReceipt(value: unknown): PlacementBrowserStateCaptureReceipt {

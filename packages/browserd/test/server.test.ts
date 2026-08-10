@@ -33,6 +33,28 @@ const grantedViewToken = `grant.${"g".repeat(48)}`;
 const allowedOrigin = "https://app.opengeni.test";
 
 describe("BrowserControlServer", () => {
+  test("delivers the exact private network route only to the browser supervisor", async () => {
+    let browserContext: BrowserSupervisorDriverContext | null = null;
+    await withServer(
+      async ({ server, reference }) => {
+        const route = proxyRoute();
+        const created = await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference, { networkRoute: route }),
+        });
+        expect(created.status).toBe(201);
+        expect(browserContext?.networkRoute).toEqual(route);
+        expect(await created.text()).not.toContain("proxy-password");
+      },
+      {
+        onBrowserContext: (context) => {
+          browserContext = context;
+        },
+      },
+    );
+  });
+
   test("resolves a linked ComputerSession into the browser launch environment", async () => {
     const computerSessionId = randomUUID();
     let browserContext: BrowserSupervisorDriverContext | null = null;
@@ -715,6 +737,7 @@ function createBody(
     viewToken: string;
     headed: boolean;
     linkedComputer: { computerSessionId: string; controllerGeneration: string };
+    networkRoute: ReturnType<typeof proxyRoute>;
   }> = {},
 ) {
   return {
@@ -724,6 +747,26 @@ function createBody(
     viewToken,
     headed: false,
     ...overrides,
+  };
+}
+
+function proxyRoute() {
+  return {
+    routeId: "22222222-2222-4222-8222-222222222222",
+    routeVersion: 1,
+    authorityDigest: `ogr.${"a".repeat(43)}`,
+    kind: "proxy" as const,
+    consistency: {
+      dns: "proxy" as const,
+      expectedPublicIp: null,
+      expectedRegion: null,
+      locale: "en-US",
+      timezone: "Europe/Oslo",
+      geolocation: { latitude: 59.9139, longitude: 10.7522, accuracyMeters: 25 },
+      webRtc: "disable_non_proxied_udp" as const,
+      stability: "session" as const,
+    },
+    proxyUrl: "http://proxy-user:proxy-password@proxy.test:8443/",
   };
 }
 

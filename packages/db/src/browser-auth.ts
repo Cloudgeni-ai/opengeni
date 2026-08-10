@@ -504,7 +504,9 @@ export async function createNetworkRoute(
 
 export async function updateNetworkRoute(
   db: Database,
-  input: InteractionMutationScope & { routeId: string } & UpdateNetworkRouteRequestValue,
+  input: InteractionMutationScope & {
+    routeId: string;
+  } & UpdateNetworkRouteRequestValue,
 ): Promise<NetworkRouteMutationResponseValue> {
   const request = UpdateNetworkRouteRequest.parse({
     operationId: input.operationId,
@@ -643,7 +645,11 @@ export async function listSiteAuthConnections(
 
 export async function getSiteAuthConnection(
   db: Database,
-  input: { accountId: string; workspaceId: string; siteAuthConnectionId: string },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    siteAuthConnectionId: string;
+  },
 ): Promise<SiteAuthConnectionValue> {
   return await withRlsContext(
     db,
@@ -1127,7 +1133,10 @@ function protectedAuthPreparationFromOperation(
     operationState: operation.state,
     response:
       operation.state === "completed" && operation.result
-        ? { ...ProtectedAuthFillResponse.parse(operation.result), replayed: true }
+        ? {
+            ...ProtectedAuthFillResponse.parse(operation.result),
+            replayed: true,
+          }
         : null,
     replayed: operation.state === "completed",
   };
@@ -1135,7 +1144,9 @@ function protectedAuthPreparationFromOperation(
 
 export async function getProtectedAuthFillPreparation(
   db: Database,
-  input: InteractionMutationScope & { authRunId: string } & ProtectedAuthFillRequestValue,
+  input: InteractionMutationScope & {
+    authRunId: string;
+  } & ProtectedAuthFillRequestValue,
 ): Promise<ProtectedAuthFillPreparation | null> {
   const request = parseProtectedAuthFillRequest(input);
   const digest = protectedAuthFillDigest(input.authRunId, request, input.actorSubjectId);
@@ -1909,7 +1920,9 @@ export async function completeProtectedAuthFill(
             inArray(schema.interactionResourceOperations.state, ["prepared", "dispatched"]),
           ),
         )
-        .returning({ operationId: schema.interactionResourceOperations.operationId });
+        .returning({
+          operationId: schema.interactionResourceOperations.operationId,
+        });
       if (!completed) {
         throw new InteractionResourceConflictError(
           "Protected-fill settlement lost its operation fence",
@@ -1976,7 +1989,9 @@ export async function markProtectedAuthFillOutcomeUnknown(
           inArray(schema.interactionResourceOperations.state, ["prepared", "dispatched"]),
         ),
       )
-      .returning({ operationId: schema.interactionResourceOperations.operationId });
+      .returning({
+        operationId: schema.interactionResourceOperations.operationId,
+      });
     if (!marked) {
       throw new InteractionResourceConflictError(
         "Protected-fill unknown outcome lost its operation fence",
@@ -2503,7 +2518,10 @@ export async function persistAttemptInteractionInterventionInTransaction(
         : (
             await db
               .update(schema.interactionInterventions)
-              .set({ originatingToolCallId: raw.toolCallId, updatedAt: sql`now()` })
+              .set({
+                originatingToolCallId: raw.toolCallId,
+                updatedAt: sql`now()`,
+              })
               .where(
                 and(
                   eq(schema.interactionInterventions.workspaceId, raw.workspaceId),
@@ -2605,7 +2623,11 @@ export async function persistAttemptInteractionInterventionInTransaction(
   if (authRun) {
     const linked = await db
       .update(schema.authRuns)
-      .set({ interventionId: row.id, version: authRun.version + 1, updatedAt: sql`now()` })
+      .set({
+        interventionId: row.id,
+        version: authRun.version + 1,
+        updatedAt: sql`now()`,
+      })
       .where(
         and(
           eq(schema.authRuns.workspaceId, raw.workspaceId),
@@ -2630,7 +2652,10 @@ export async function getInteractionInterventionApprovalTarget(
   return await withRlsContext(db, input, async (scopedDb) => {
     const row = await loadInterventionRow(scopedDb, input.workspaceId, input.interventionId);
     return row?.originatingToolCallId
-      ? { sessionId: row.originatingSessionId, toolCallId: row.originatingToolCallId }
+      ? {
+          sessionId: row.originatingSessionId,
+          toolCallId: row.originatingToolCallId,
+        }
       : null;
   });
 }
@@ -2640,7 +2665,10 @@ export async function getInteractionInterventionResumeForEvent(
   workspaceId: string,
   sessionId: string,
   event: Pick<SessionEvent, "type" | "payload">,
-): Promise<{ toolCallId: string; intervention: InteractionInterventionValue } | null> {
+): Promise<{
+  toolCallId: string;
+  intervention: InteractionInterventionValue;
+} | null> {
   if (event.type !== "user.approvalDecision") return null;
   const payload = event.payload as { approvalId?: unknown; decision?: unknown };
   if (typeof payload.approvalId !== "string" || payload.decision !== "approve") return null;
@@ -2657,7 +2685,10 @@ export async function getInteractionInterventionResumeForEvent(
     .orderBy(asc(schema.interactionInterventions.createdAt))
     .limit(1);
   if (!row || row.status !== "completed") return null;
-  return { toolCallId: payload.approvalId, intervention: interventionFromRow(row) };
+  return {
+    toolCallId: payload.approvalId,
+    intervention: interventionFromRow(row),
+  };
 }
 
 export async function createInteractionIntervention(

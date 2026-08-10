@@ -56,6 +56,11 @@ export type AgentBrowserRunnerOptions = {
   browserExecutablePath?: string;
   workingDirectory?: string;
   environment?: Readonly<Record<string, string | undefined>>;
+  /** Private launch authority. It is injected into the daemon environment,
+   * never into argv, logs, or durable browser metadata. */
+  proxyUrl?: string;
+  launchArguments?: readonly string[];
+  timezone?: string;
   binary?: ResolvedAgentBrowserBinary;
 };
 
@@ -73,13 +78,16 @@ export function browserProfileCryptoPolicy(platform: NodeJS.Platform): BrowserPr
 export class AgentBrowserJsonRunner {
   readonly binary: ResolvedAgentBrowserBinary;
   private readonly environment: NodeJS.ProcessEnv;
+  private readonly globalArguments: readonly string[];
   private readonly workingDirectory: string;
   private readonly daemonPidFile: string;
 
   private constructor(binary: ResolvedAgentBrowserBinary, options: AgentBrowserRunnerOptions) {
     this.binary = binary;
     this.workingDirectory = resolve(options.workingDirectory ?? process.cwd());
-    this.environment = isolatedEnvironment(options);
+    const proxy = options.proxyUrl ? privateProxyAuthority(options.proxyUrl) : null;
+    this.environment = isolatedEnvironment(options, proxy);
+    this.globalArguments = proxy ? ["--proxy", proxy.server] : [];
     this.daemonPidFile = join(
       resolve(options.socketDirectory),
       "namespaces",
@@ -115,7 +123,7 @@ export class AgentBrowserJsonRunner {
     if (options.signal?.aborted) {
       throw new AgentBrowserCommandError("aborted", "agent-browser command was aborted");
     }
-    const child = spawn(this.binary.path, ["--json", ...args], {
+    const child = spawn(this.binary.path, ["--json", ...this.globalArguments, ...args], {
       cwd: this.workingDirectory,
       env: this.environment,
       stdio: ["ignore", "pipe", "pipe"],
@@ -359,7 +367,10 @@ async function waitForProcessStop(pid: number, timeoutMs: number): Promise<boole
 }
 
 async function boundedProcessOutput(command: string, args: readonly string[]): Promise<string> {
-  const child = spawn(command, args, { stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
+  const child = spawn(command, args, {
+    stdio: ["ignore", "pipe", "ignore"],
+    windowsHide: true,
+  });
   const chunks: Buffer[] = [];
   let bytes = 0;
   let overflow = false;
@@ -381,7 +392,10 @@ async function boundedProcessOutput(command: string, args: readonly string[]): P
   return Buffer.concat(chunks).toString("utf8");
 }
 
-function isolatedEnvironment(options: AgentBrowserRunnerOptions): NodeJS.ProcessEnv {
+function isolatedEnvironment(
+  options: AgentBrowserRunnerOptions,
+  proxy: PrivateProxyAuthority | null,
+): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = {};
   for (const key of PASSTHROUGH_ENVIRONMENT_KEYS) {
     if (process.env[key] !== undefined) environment[key] = process.env[key];
@@ -399,16 +413,85 @@ function isolatedEnvironment(options: AgentBrowserRunnerOptions): NodeJS.Process
     AGENT_BROWSER_SCREENSHOT_DIR: resolve(options.screenshotDirectory),
     AGENT_BROWSER_IDLE_TIMEOUT_MS: "0",
     AGENT_BROWSER_HEADED: options.headed ? "1" : "0",
-    AGENT_BROWSER_ARGS: browserLaunchArguments(process.platform),
+    AGENT_BROWSER_ARGS: browserLaunchArguments(process.platform, options.launchArguments),
     NO_COLOR: "1",
   });
+  if (proxy) {
+    environment.AGENT_BROWSER_PROXY = proxy.server;
+    if (proxy.username !== null && proxy.password !== null) {
+      environment.AGENT_BROWSER_PROXY_USERNAME = proxy.username;
+      environment.AGENT_BROWSER_PROXY_PASSWORD = proxy.password;
+    }
+  }
+  if (options.timezone) environment.TZ = supportedTimezone(options.timezone);
   if (options.browserExecutablePath) {
     environment.AGENT_BROWSER_EXECUTABLE_PATH = resolve(options.browserExecutablePath);
   }
   return environment;
 }
 
-export function browserLaunchArguments(platform: NodeJS.Platform): string {
+type PrivateProxyAuthority = {
+  server: string;
+  username: string | null;
+  password: string | null;
+};
+
+function privateProxyAuthority(value: string): PrivateProxyAuthority {
+  if (Buffer.byteLength(value) > 16_384) throw new Error("proxy authority exceeds its envelope");
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("proxy authority URL is invalid");
+  }
+  if (
+    !["http:", "https:", "socks5:"].includes(url.protocol) ||
+    !url.hostname ||
+    (!url.port && url.protocol !== "http:" && url.protocol !== "https:") ||
+    (url.pathname !== "" && url.pathname !== "/") ||
+    url.search ||
+    url.hash
+  ) {
+    throw new Error("proxy authority URL is invalid");
+  }
+  const hasUsername = url.username.length > 0;
+  const hasPassword = url.password.length > 0;
+  if (hasUsername !== hasPassword) {
+    throw new Error("proxy authority credentials are incomplete");
+  }
+  const username = hasUsername ? decodeUrlCredential(url.username) : null;
+  const password = hasPassword ? decodeUrlCredential(url.password) : null;
+  if (username?.includes("\0") || password?.includes("\0")) {
+    throw new Error("proxy authority credentials are invalid");
+  }
+  const server = `${url.protocol}//${url.host}`;
+  return { server, username, password };
+}
+
+function decodeUrlCredential(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    throw new Error("proxy authority credentials are invalid");
+  }
+}
+
+function supportedTimezone(value: string): string {
+  if (Buffer.byteLength(value) > 128 || /[,\r\n\0]/u.test(value)) {
+    throw new Error("browser timezone is invalid");
+  }
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value }).format();
+  } catch {
+    throw new Error("browser timezone is unsupported");
+  }
+  return value;
+}
+
+export function browserLaunchArguments(
+  platform: NodeJS.Platform,
+  additional: readonly string[] = [],
+): string {
   const policy = browserProfileCryptoPolicy(platform);
   const profileCryptoArgument =
     policy === "chromium_basic"
@@ -416,7 +499,16 @@ export function browserLaunchArguments(platform: NodeJS.Platform): string {
       : policy === "chromium_mock_keychain"
         ? "--use-mock-keychain"
         : null;
-  return ["--restore-last-session", profileCryptoArgument]
+  const validatedAdditional = additional.map((argument) => {
+    if (!argument.startsWith("--") || argument.length > 512 || /[,\r\n\0]/u.test(argument)) {
+      throw new Error("browser launch argument is invalid");
+    }
+    return argument;
+  });
+  if (validatedAdditional.length > 32) {
+    throw new Error("too many browser launch arguments");
+  }
+  return ["--restore-last-session", profileCryptoArgument, ...validatedAdditional]
     .filter((value): value is string => value !== null)
     .join(",");
 }

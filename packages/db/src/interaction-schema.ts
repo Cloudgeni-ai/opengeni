@@ -446,6 +446,13 @@ export const browserSessions = pgTable(
     baseRevisionId: uuid("base_revision_id"),
     linkedComputerSessionId: uuid("linked_computer_session_id"),
     networkRouteId: uuid("network_route_id"),
+    networkRouteVersion: bigint("network_route_version", { mode: "number" }),
+    networkRouteConfiguration: jsonb("network_route_configuration"),
+    networkRouteConsistency: jsonb("network_route_consistency"),
+    networkRouteCredentialVersion: bigint("network_route_credential_version", {
+      mode: "number",
+    }),
+    networkRouteAuthorityDigest: text("network_route_authority_digest"),
     privateCheckpointArtifactId: uuid("private_checkpoint_artifact_id"),
     capabilities: jsonb("capabilities").$type<BrowserSessionCapabilities>().notNull(),
     createOperationId: uuid("create_operation_id").notNull(),
@@ -478,6 +485,11 @@ export const browserSessions = pgTable(
       table.sandboxGroupId,
       table.lifecycle,
     ),
+    networkRoute: index("browser_sessions_workspace_network_route_idx").on(
+      table.workspaceId,
+      table.networkRouteId,
+      table.lifecycle,
+    ),
     valuesValid: check(
       "browser_sessions_values_check",
       sql`octet_length(${table.name}) between 1 and 200
@@ -485,6 +497,27 @@ export const browserSessions = pgTable(
         and octet_length(${table.createdBySubjectId}) between 1 and 1024
         and ${table.tokenGeneration} > 0
         and octet_length(${table.capabilities}::text) between 2 and 65536
+        and (
+          (${table.networkRouteId} is null
+            and ${table.networkRouteVersion} is null
+            and ${table.networkRouteConfiguration} is null
+            and ${table.networkRouteConsistency} is null
+            and ${table.networkRouteCredentialVersion} is null
+            and ${table.networkRouteAuthorityDigest} is null)
+          or
+          (${table.networkRouteId} is not null
+            and ${table.networkRouteVersion} > 0
+            and jsonb_typeof(${table.networkRouteConfiguration}) = 'object'
+            and octet_length(${table.networkRouteConfiguration}::text) between 2 and 65536
+            and jsonb_typeof(${table.networkRouteConsistency}) = 'object'
+            and octet_length(${table.networkRouteConsistency}::text) between 2 and 65536
+            and (${table.networkRouteCredentialVersion} is null or ${table.networkRouteCredentialVersion} > 0)
+            and (${table.networkRouteAuthorityDigest} is not null or ${table.networkRouteCredentialVersion} is null)
+            and (${table.networkRouteAuthorityDigest} is null or (
+              octet_length(${table.networkRouteAuthorityDigest}) between 16 and 256
+              and ${table.networkRouteAuthorityDigest} ~ '^[A-Za-z0-9._~-]+$'
+            )))
+        )
         and (${table.engineVersion} is null or octet_length(${table.engineVersion}) between 1 and 256)
         and (${table.failureCode} is null or octet_length(${table.failureCode}) between 1 and 512)`,
     ),

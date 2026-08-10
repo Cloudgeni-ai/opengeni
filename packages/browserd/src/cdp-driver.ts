@@ -51,6 +51,20 @@ const GRACEFUL_BROWSER_CLOSE_TIMEOUT_MS = 30_000;
 const NETWORK_IDLE_MS = 500;
 const PROTECTED_AUTH_AUTO_ADVANCE_TIMEOUT_MS = 3_000;
 const PROTECTED_AUTH_DIAGNOSTIC_QUIET_MS = 5_000;
+const USER_AGENT_METADATA_EXPRESSION = `(async () => {
+  const data = navigator.userAgentData;
+  if (!data || typeof data.getHighEntropyValues !== "function") return null;
+  const high = await data.getHighEntropyValues([
+    "architecture", "bitness", "formFactors", "fullVersionList", "model",
+    "platformVersion", "wow64"
+  ]);
+  return {
+    brands: data.brands,
+    mobile: data.mobile,
+    platform: data.platform,
+    ...high,
+  };
+})()`;
 
 class DialogOpenedSignal extends Error {}
 
@@ -162,6 +176,30 @@ export type AgentBrowserDriverOptions = {
   resolveWorkspaceFiles?: (workspaceFileIds: readonly string[]) => Promise<readonly string[]>;
   connect?: (endpoint: string) => Promise<BrowserCdpConnection>;
   engine?: "chromium" | "chrome";
+  emulation?: BrowserSessionEmulation;
+};
+
+export type BrowserSessionEmulation = {
+  locale: string | null;
+  timezone: string | null;
+  geolocation: {
+    latitude: number;
+    longitude: number;
+    accuracyMeters: number;
+  } | null;
+};
+
+type BrowserUserAgentMetadata = {
+  brands?: Array<{ brand: string; version: string }>;
+  fullVersionList?: Array<{ brand: string; version: string }>;
+  platform: string;
+  platformVersion: string;
+  architecture: string;
+  model: string;
+  mobile: boolean;
+  bitness?: string;
+  wow64?: boolean;
+  formFactors?: string[];
 };
 
 export type BrowserRuntimeSnapshot = {
@@ -169,6 +207,14 @@ export type BrowserRuntimeSnapshot = {
   engineVersion: string | null;
   tabs: Array<{ url: string; selected: boolean }>;
 };
+
+function hasBrowserEmulation(
+  value: BrowserSessionEmulation | undefined,
+): value is BrowserSessionEmulation {
+  return Boolean(
+    value && (value.locale !== null || value.timezone !== null || value.geolocation !== null),
+  );
+}
 
 /**
  * Target-scoped browser authority. agent-browser owns the pinned Chrome/profile
@@ -182,6 +228,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly now: () => Date;
   private readonly createId: () => string;
   private readonly engine: "chromium" | "chrome";
+  private readonly emulation: BrowserSessionEmulation | null;
+  private userAgentMetadataPromise: Promise<BrowserUserAgentMetadata> | null = null;
   private readonly resolveWorkspaceFiles:
     | ((workspaceFileIds: readonly string[]) => Promise<readonly string[]>)
     | undefined;
@@ -204,15 +252,20 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     this.now = options.now ?? (() => new Date());
     this.createId = options.createId ?? randomUUID;
     this.engine = options.engine ?? "chromium";
+    this.emulation = hasBrowserEmulation(options.emulation) ? options.emulation : null;
     this.resolveWorkspaceFiles = options.resolveWorkspaceFiles;
     this.connect = options.connect ?? (async (endpoint) => await CdpConnection.connect(endpoint));
   }
 
   async start(url?: string): Promise<BrowserObservationValue> {
-    const launched = await this.runner.run<{ url?: unknown; targetId?: unknown }>(
-      url === undefined ? ["open"] : ["open", url],
-      { timeoutMs: BROWSER_START_TIMEOUT_MS },
-    );
+    const deferNavigation = this.emulation !== null && url !== undefined && url !== "about:blank";
+    const launchUrl = this.emulation !== null ? "about:blank" : url;
+    const launched = await this.runner.run<{
+      url?: unknown;
+      targetId?: unknown;
+    }>(launchUrl === undefined ? ["open"] : ["open", launchUrl], {
+      timeoutMs: BROWSER_START_TIMEOUT_MS,
+    });
     this.started = true;
     const connection = await this.ensureConnection();
     const targets = await this.targetInfos(connection);
@@ -229,6 +282,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       targetId: target.targetId,
     });
     this.selectedTargetId = target.targetId;
+    if (deferNavigation) {
+      await this.navigate(await this.ensureTargetState(target), url);
+    }
     return await this.observe(target.targetId);
   }
 
@@ -243,12 +299,19 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   async openTarget(url = "about:blank"): Promise<BrowserObservationValue> {
     const connection = await this.ensureConnection();
-    const result = await connection.send<{ targetId?: unknown }>("Target.createTarget", { url });
+    const deferNavigation = this.emulation !== null && url !== "about:blank";
+    const result = await connection.send<{ targetId?: unknown }>("Target.createTarget", {
+      url: deferNavigation ? "about:blank" : url,
+    });
     if (typeof result.targetId !== "string") throw new Error("CDP did not return a target id");
     await connection.send("Target.activateTarget", {
       targetId: result.targetId,
     });
     this.selectedTargetId = result.targetId;
+    if (deferNavigation) {
+      const info = await this.requireTargetInfo(connection, result.targetId);
+      await this.navigate(await this.ensureTargetState(info), url);
+    }
     return await this.observe(result.targetId);
   }
 
@@ -280,7 +343,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     let terminationError: unknown = null;
     if (this.started) {
       try {
-        await this.runner.run(["close"], { timeoutMs: GRACEFUL_BROWSER_CLOSE_TIMEOUT_MS });
+        await this.runner.run(["close"], {
+          timeoutMs: GRACEFUL_BROWSER_CLOSE_TIMEOUT_MS,
+        });
       } catch (error) {
         closeError = error;
       }
@@ -599,7 +664,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         for (const field of resolvedFields) {
           await this.focusNode(state, field.backendDOMNodeId);
           await this.selectAllAndDelete(state);
-          await this.sendActionTarget(state, "Input.insertText", { text: field.value });
+          await this.sendActionTarget(state, "Input.insertText", {
+            text: field.value,
+          });
         }
 
         if (command.submit.type === "click") {
@@ -660,6 +727,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }>("Browser.getVersion");
       this.browserProduct = typeof version.product === "string" ? version.product : "";
       this.userAgent = typeof version.userAgent === "string" ? version.userAgent : "";
+      if (this.emulation?.geolocation) {
+        await connection.send("Browser.grantPermissions", {
+          permissions: ["geolocation"],
+        });
+      }
       await connection.send("Target.setDiscoverTargets", { discover: true });
       this.browserUnsubscribe.push(
         connection.on("Target.targetDestroyed", (event) => {
@@ -740,6 +812,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       connection.send("Network.enable", {}, { sessionId }),
       connection.send("Log.enable", {}, { sessionId }),
     ]);
+    await this.applyEmulation(connection, sessionId);
     const frame = await this.mainFrame(sessionId);
     const state: TargetState = {
       targetId: info.targetId,
@@ -913,6 +986,190 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     );
     this.states.set(info.targetId, state);
     return state;
+  }
+
+  private async applyEmulation(connection: BrowserCdpConnection, sessionId: string): Promise<void> {
+    if (!this.emulation) return;
+    const updates: Array<Promise<unknown>> = [];
+    if (this.emulation.locale) {
+      if (!this.userAgent) {
+        throw new Error("browser did not expose a user agent for locale emulation");
+      }
+      const userAgentMetadata = await this.normalUserAgentMetadata(connection, sessionId);
+      updates.push(
+        connection.send(
+          "Emulation.setLocaleOverride",
+          { locale: this.emulation.locale },
+          { sessionId },
+        ),
+      );
+      updates.push(
+        connection.send(
+          "Emulation.setUserAgentOverride",
+          {
+            userAgent: this.userAgent,
+            acceptLanguage: this.emulation.locale,
+            userAgentMetadata,
+          },
+          { sessionId },
+        ),
+      );
+    }
+    if (this.emulation.timezone) {
+      updates.push(
+        connection.send(
+          "Emulation.setTimezoneOverride",
+          { timezoneId: this.emulation.timezone },
+          { sessionId },
+        ),
+      );
+    }
+    if (this.emulation.geolocation) {
+      updates.push(
+        connection.send(
+          "Emulation.setGeolocationOverride",
+          {
+            latitude: this.emulation.geolocation.latitude,
+            longitude: this.emulation.geolocation.longitude,
+            accuracy: this.emulation.geolocation.accuracyMeters,
+          },
+          { sessionId },
+        ),
+      );
+    }
+    await Promise.all(updates);
+  }
+
+  private async normalUserAgentMetadata(
+    connection: BrowserCdpConnection,
+    sessionId: string,
+  ): Promise<BrowserUserAgentMetadata> {
+    if (!this.userAgentMetadataPromise) {
+      this.userAgentMetadataPromise = this.loadNormalUserAgentMetadata(connection, sessionId);
+    }
+    try {
+      return await this.userAgentMetadataPromise;
+    } catch (error) {
+      this.userAgentMetadataPromise = null;
+      throw error;
+    }
+  }
+
+  private async loadNormalUserAgentMetadata(
+    connection: BrowserCdpConnection,
+    sessionId: string,
+  ): Promise<BrowserUserAgentMetadata> {
+    const evaluated = await connection.send<{
+      result?: unknown;
+      exceptionDetails?: unknown;
+    }>(
+      "Runtime.evaluate",
+      {
+        expression: USER_AGENT_METADATA_EXPRESSION,
+        awaitPromise: true,
+        returnByValue: true,
+      },
+      { sessionId },
+    );
+    if (
+      !evaluated.exceptionDetails &&
+      isRecord(evaluated.result) &&
+      evaluated.result.value !== null &&
+      evaluated.result.value !== undefined
+    ) {
+      return parseUserAgentMetadata(evaluated.result.value);
+    }
+    return await this.loadUserAgentMetadataFromHiddenTarget(connection);
+  }
+
+  private async loadUserAgentMetadataFromHiddenTarget(
+    connection: BrowserCdpConnection,
+  ): Promise<BrowserUserAgentMetadata> {
+    const created = await connection.send<{ targetId?: unknown }>("Target.createTarget", {
+      url: "about:blank",
+      hidden: true,
+    });
+    if (typeof created.targetId !== "string") {
+      throw new Error("browser could not create a hidden metadata target");
+    }
+    let metadata: BrowserUserAgentMetadata | null = null;
+    let metadataError: unknown = null;
+    try {
+      const attached = await connection.send<{ sessionId?: unknown }>("Target.attachToTarget", {
+        targetId: created.targetId,
+        flatten: true,
+      });
+      if (typeof attached.sessionId !== "string") {
+        throw new Error("browser could not attach its hidden metadata target");
+      }
+      await Promise.all([
+        connection.send("Page.enable", {}, { sessionId: attached.sessionId }),
+        connection.send("Runtime.enable", {}, { sessionId: attached.sessionId }),
+      ]);
+      await this.navigateForUserAgentMetadata(connection, attached.sessionId, "chrome://version/");
+      const evaluated = await connection.send<{
+        result?: unknown;
+        exceptionDetails?: unknown;
+      }>(
+        "Runtime.evaluate",
+        {
+          expression: USER_AGENT_METADATA_EXPRESSION,
+          awaitPromise: true,
+          returnByValue: true,
+        },
+        { sessionId: attached.sessionId },
+      );
+      if (evaluated.exceptionDetails || !isRecord(evaluated.result)) {
+        throw new Error("browser could not preserve User-Agent metadata for locale emulation");
+      }
+      metadata = parseUserAgentMetadata(evaluated.result.value);
+    } catch (error) {
+      metadataError = error;
+    }
+    let closeError: unknown = null;
+    try {
+      const closed = await connection.send<{ success?: unknown }>("Target.closeTarget", {
+        targetId: created.targetId,
+      });
+      if (closed.success !== true) {
+        throw new Error("browser could not close its hidden metadata target");
+      }
+    } catch (error) {
+      closeError = error;
+    }
+    if (metadataError && closeError) {
+      throw new AggregateError(
+        [metadataError, closeError],
+        "browser metadata discovery and cleanup both failed",
+      );
+    }
+    if (metadataError) throw metadataError;
+    if (closeError) throw closeError;
+    if (!metadata) throw new Error("browser returned no User-Agent metadata");
+    return metadata;
+  }
+
+  private async navigateForUserAgentMetadata(
+    connection: BrowserCdpConnection,
+    sessionId: string,
+    url: string,
+  ): Promise<void> {
+    const loaded = connection.waitForEvent("Page.loadEventFired", {
+      sessionId,
+      timeoutMs: 5_000,
+    });
+    let navigation: { errorText?: unknown };
+    try {
+      navigation = await connection.send("Page.navigate", { url }, { sessionId });
+    } catch (error) {
+      await loaded.catch(() => undefined);
+      throw error;
+    }
+    if (typeof navigation.errorText === "string" && navigation.errorText) {
+      await loaded.catch(() => undefined);
+      throw new Error(`browser metadata navigation failed: ${navigation.errorText}`);
+    }
+    await loaded;
   }
 
   private async observeUnlocked(
@@ -2671,6 +2928,62 @@ function sameFrameOptions(
 
 function transportError(value: unknown): Error {
   return value instanceof Error ? value : new CdpTransportError("browser media stream failed");
+}
+
+function parseUserAgentMetadata(value: unknown): BrowserUserAgentMetadata {
+  if (!isRecord(value) || typeof value.mobile !== "boolean") {
+    throw new Error("browser returned invalid User-Agent metadata");
+  }
+  const metadata: BrowserUserAgentMetadata = {
+    platform: userAgentMetadataString(value.platform),
+    platformVersion: userAgentMetadataString(value.platformVersion),
+    architecture: userAgentMetadataString(value.architecture),
+    model: userAgentMetadataString(value.model),
+    mobile: value.mobile,
+  };
+  const brands = userAgentBrandList(value.brands);
+  const fullVersionList = userAgentBrandList(value.fullVersionList);
+  const bitness = optionalUserAgentMetadataString(value.bitness);
+  const formFactors = userAgentStringList(value.formFactors);
+  if (brands) metadata.brands = brands;
+  if (fullVersionList) metadata.fullVersionList = fullVersionList;
+  if (bitness !== undefined) metadata.bitness = bitness;
+  if (typeof value.wow64 === "boolean") metadata.wow64 = value.wow64;
+  if (formFactors) metadata.formFactors = formFactors;
+  return metadata;
+}
+
+function userAgentBrandList(value: unknown): Array<{ brand: string; version: string }> | null {
+  if (value === undefined) return null;
+  if (!Array.isArray(value) || value.length > 32) {
+    throw new Error("browser returned invalid User-Agent brands");
+  }
+  return value.map((entry) => {
+    if (!isRecord(entry)) throw new Error("browser returned invalid User-Agent brand");
+    return {
+      brand: userAgentMetadataString(entry.brand),
+      version: userAgentMetadataString(entry.version),
+    };
+  });
+}
+
+function userAgentStringList(value: unknown): string[] | null {
+  if (value === undefined) return null;
+  if (!Array.isArray(value) || value.length > 32) {
+    throw new Error("browser returned invalid User-Agent form factors");
+  }
+  return value.map(userAgentMetadataString);
+}
+
+function optionalUserAgentMetadataString(value: unknown): string | undefined {
+  return value === undefined ? undefined : userAgentMetadataString(value);
+}
+
+function userAgentMetadataString(value: unknown): string {
+  if (typeof value !== "string" || Buffer.byteLength(value) > 512 || /[\r\n\0]/u.test(value)) {
+    throw new Error("browser returned invalid User-Agent metadata");
+  }
+  return value;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -38,6 +38,7 @@ import {
   type BrowserSession as BrowserSessionValue,
   type CreateBrowserSessionRequest as CreateBrowserSessionRequestValue,
   type InteractionPlacement,
+  type InteractionCredentialAuthorityRef,
   type BrowserRevisionMaterialization as BrowserRevisionMaterializationValue,
   type Session,
   type SessionAuthorizationOperation,
@@ -47,6 +48,7 @@ import {
   acquireLease,
   activateBrowserSession,
   ATTACHED_BROWSER_SESSION_CAPABILITIES,
+  bindBrowserSessionNetworkRouteAuthority,
   AttachedBrowserDeviceNotFoundError,
   BrowserIdentityConflictError,
   BrowserIdentityNotFoundError,
@@ -126,6 +128,7 @@ import {
   type BrowserControlClient,
   type BrowserControlPlacementSession,
   type PlacementBrowserStateCaptureReceipt,
+  type PlacementBrowserNetworkRoute,
   type PlacementBrowserTransport,
   type RestorePlacementBrowserStateInput,
 } from "@opengeni/runtime/sandbox";
@@ -134,6 +137,7 @@ import { HTTPException } from "hono/http-exception";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import {
   deriveBrowserControllerAdminToken,
+  deriveBrowserNetworkRouteAuthorityDigest,
   deriveBrowserSessionControllerTokens,
   deriveBrowserViewGrantToken,
 } from "../browser-controller-authority";
@@ -305,6 +309,14 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
           );
 
           try {
+            const networkRoute = await resolveBrowserNetworkRouteLaunch({
+              deps,
+              grant,
+              workspaceId,
+              browserSessionId: prepared.session.id,
+              operationId: request.operationId,
+              rootSecret: authority,
+            });
             const interactionHeld = await ensureInteractionHolder(
               deps,
               grant,
@@ -359,6 +371,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
                 headed: !prepared.session.headless,
                 transport: placement.transport,
                 ...(linkedComputer ? { linkedComputer } : {}),
+                ...(networkRoute ? { networkRoute } : {}),
                 ...(request.initialUrl ? { initialUrl: request.initialUrl } : {}),
                 ...(restore ? { restore } : {}),
               });
@@ -1037,7 +1050,11 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
             browserSessionId,
             controllerGeneration: binding.controllerGeneration,
           };
-          await client.createViewGrant(reference, { grantId, token, expiresAt });
+          await client.createViewGrant(reference, {
+            grantId,
+            token,
+            expiresAt,
+          });
           const relayed = await client.openRelayedFrameStream({
             reference,
             targetId: request.targetId,
@@ -1496,7 +1513,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
             browserSessionId,
           });
         }
-        browserAuthorityRoot(deps);
+        const authority = browserAuthorityRoot(deps);
         const prepared = await prepareBrowserSessionResume(deps.db, {
           accountId: grant.accountId,
           workspaceId,
@@ -1554,6 +1571,14 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
           "browser.resume",
           context.req.raw.signal,
           async (placement) => {
+            const networkRoute = await resolveBrowserNetworkRouteLaunch({
+              deps,
+              grant,
+              workspaceId,
+              browserSessionId,
+              operationId: request.operationId,
+              rootSecret: authority,
+            });
             const interactionHeld = await ensureInteractionHolder(
               deps,
               grant,
@@ -1578,14 +1603,14 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
               placement,
             );
             const adminToken = deriveBrowserControllerAdminToken({
-              rootSecret: browserAuthorityRoot(deps),
+              rootSecret: authority,
               accountId: grant.accountId,
               workspaceId,
               placement: placement.placement,
               placementInstanceId: placement.placementInstanceId,
             });
             const tokens = deriveBrowserSessionControllerTokens({
-              rootSecret: browserAuthorityRoot(deps),
+              rootSecret: authority,
               accountId: grant.accountId,
               workspaceId,
               browserSessionId,
@@ -1608,6 +1633,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
                 headed: !prepared.session.headless,
                 transport: placement.transport,
                 ...(linkedComputer ? { linkedComputer } : {}),
+                ...(networkRoute ? { networkRoute } : {}),
                 restore: restore!,
               });
             } catch (error) {
@@ -2125,6 +2151,7 @@ function browserCreateInput(
     headless: attached ? false : request.headless,
     identityId: request.identityId ?? null,
     baseRevisionId: request.baseRevisionId ?? null,
+    networkRouteId: request.networkRouteId ?? null,
     linkedComputerSessionId: request.linkedComputerSessionId ?? null,
     resolveDefaultRevision:
       !attached && request.identityId !== undefined && request.baseRevisionId === undefined,
@@ -2144,6 +2171,11 @@ function assertCreateReplay(
   if ((request.identityId ?? null) !== session.identityId) {
     throw new BrowserSessionOperationConflictError(
       "BrowserSession create operation is bound to another identity",
+    );
+  }
+  if ((request.networkRouteId ?? null) !== session.networkRouteId) {
+    throw new BrowserSessionOperationConflictError(
+      "BrowserSession create operation is bound to another network route",
     );
   }
   if (request.baseRevisionId !== undefined && request.baseRevisionId !== session.baseRevisionId) {
@@ -2473,7 +2505,7 @@ async function ensureDispatchedGeneration(
     });
   }
   if (record.operation?.state !== "dispatched") {
-    throw new BrowserSessionStateError("BrowserSession create operation is not dispatchable");
+    throw new BrowserSessionStateError("BrowserSession operation is not dispatchable");
   }
   if (
     !record.session.controller ||
@@ -2855,7 +2887,15 @@ async function loadBoundBrowserCredential(
   workspaceId: string,
   authority: Extract<SiteAuthAuthority, { kind: "connection_fields" }>,
 ) {
-  const reference = authority.credential;
+  return await loadExactInteractionCredential(deps, grant, workspaceId, authority.credential);
+}
+
+async function loadExactInteractionCredential(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  workspaceId: string,
+  reference: InteractionCredentialAuthorityRef,
+) {
   const credential = await loadConnectionCredentialForBroker(deps.db, deps.settings, {
     workspaceId,
     connectionId: reference.connectionId,
@@ -2875,6 +2915,173 @@ async function loadBoundBrowserCredential(
     throw new BrowserAuthCredentialError("Configured browser credential is unavailable");
   }
   return credential;
+}
+
+async function resolveBrowserNetworkRouteLaunch(input: {
+  deps: ApiRouteDeps;
+  grant: AccessGrant;
+  workspaceId: string;
+  browserSessionId: string;
+  operationId: string;
+  rootSecret: string;
+}): Promise<PlacementBrowserNetworkRoute | null> {
+  const record = await getBrowserSessionControlRecord(input.deps.db, {
+    accountId: input.grant.accountId,
+    workspaceId: input.workspaceId,
+    browserSessionId: input.browserSessionId,
+    operationId: input.operationId,
+  });
+  const route = record.networkRouteAuthority;
+  if (!route) return null;
+  if (route.configuration.kind === "managed") {
+    throw new BrowserSessionStateError(
+      "Managed network routes require an external browser provider driver",
+    );
+  }
+  const kind = route.configuration.kind;
+  let proxyCredential: { username: string; password: string } | null = null;
+  let credentialVersion: number | null = null;
+  let proxyUrl: string | undefined;
+  const dispatched = record.operation?.state === "dispatched";
+  if (kind === "proxy") {
+    const reference = route.configuration.credential;
+    if (reference) {
+      try {
+        const credential = await loadExactInteractionCredential(
+          input.deps,
+          input.grant,
+          input.workspaceId,
+          reference,
+        );
+        credentialVersion = credential.version;
+        proxyCredential = proxyCredentialFromBundle(credential.credential);
+      } catch (error) {
+        if (route.authorityDigest && dispatched) {
+          return secretlessNetworkRouteReplay(route, kind);
+        }
+        throw error;
+      }
+      if (dispatched && route.credentialVersion !== credentialVersion) {
+        return secretlessNetworkRouteReplay(route, kind);
+      }
+    }
+    proxyUrl = browserProxyUrl(route.configuration, proxyCredential);
+  }
+  if (dispatched) {
+    if (!route.authorityDigest) {
+      throw new BrowserSessionStateError("BrowserSession route authority is not bound");
+    }
+    return {
+      routeId: route.routeId,
+      routeVersion: route.routeVersion,
+      authorityDigest: route.authorityDigest,
+      kind,
+      consistency: route.consistency,
+      ...(proxyUrl === undefined ? {} : { proxyUrl }),
+    };
+  }
+  const authorityDigest = deriveBrowserNetworkRouteAuthorityDigest({
+    rootSecret: input.rootSecret,
+    accountId: input.grant.accountId,
+    workspaceId: input.workspaceId,
+    browserSessionId: input.browserSessionId,
+    routeId: route.routeId,
+    routeVersion: route.routeVersion,
+    credentialVersion,
+    configuration: route.configuration,
+    consistency: route.consistency,
+    proxyCredential,
+  });
+  const bound = await bindBrowserSessionNetworkRouteAuthority(input.deps.db, {
+    accountId: input.grant.accountId,
+    workspaceId: input.workspaceId,
+    browserSessionId: input.browserSessionId,
+    operationId: input.operationId,
+    routeVersion: route.routeVersion,
+    credentialVersion,
+    authorityDigest,
+  });
+  if (bound.authorityDigest !== authorityDigest) {
+    throw new BrowserSessionOperationConflictError("BrowserSession route launch authority changed");
+  }
+  return {
+    routeId: route.routeId,
+    routeVersion: route.routeVersion,
+    authorityDigest,
+    kind,
+    consistency: route.consistency,
+    ...(proxyUrl === undefined ? {} : { proxyUrl }),
+  };
+}
+
+function secretlessNetworkRouteReplay(
+  route: NonNullable<BrowserSessionControlRecord["networkRouteAuthority"]>,
+  kind: "direct" | "proxy" | "tunnel",
+): PlacementBrowserNetworkRoute {
+  if (!route.authorityDigest) {
+    throw new BrowserSessionStateError("BrowserSession route authority is not bound");
+  }
+  return {
+    routeId: route.routeId,
+    routeVersion: route.routeVersion,
+    authorityDigest: route.authorityDigest,
+    kind,
+    consistency: route.consistency,
+  };
+}
+
+function proxyCredentialFromBundle(credential: Readonly<Record<string, unknown>>): {
+  username: string;
+  password: string;
+} {
+  const username = credential.username;
+  const password = credential.password;
+  if (
+    typeof username !== "string" ||
+    Buffer.byteLength(username) < 1 ||
+    Buffer.byteLength(username) > 4_096 ||
+    username.includes("\0") ||
+    typeof password !== "string" ||
+    Buffer.byteLength(password) < 1 ||
+    Buffer.byteLength(password) > 16_384 ||
+    password.includes("\0")
+  ) {
+    throw new BrowserAuthCredentialError(
+      "Proxy credential must contain bounded username and password fields",
+    );
+  }
+  return { username, password };
+}
+
+function browserProxyUrl(
+  configuration: Extract<
+    NonNullable<BrowserSessionControlRecord["networkRouteAuthority"]>["configuration"],
+    { kind: "proxy" }
+  >,
+  credential: { username: string; password: string } | null,
+): string {
+  const rawHost = configuration.host;
+  if (
+    /[\s/@?#]/u.test(rawHost) ||
+    ((rawHost.includes("[") || rawHost.includes("]")) && !/^\[[^\]]+\]$/u.test(rawHost))
+  ) {
+    throw new BrowserSessionStateError("Network route proxy host is invalid");
+  }
+  const host = rawHost.includes(":") ? `[${rawHost.replace(/^\[|\]$/gu, "")}]` : rawHost;
+  let url: URL;
+  try {
+    url = new URL(`${configuration.protocol}://${host}:${configuration.port}`);
+  } catch {
+    throw new BrowserSessionStateError("Network route proxy host is invalid");
+  }
+  if (!url.hostname || url.pathname !== "/") {
+    throw new BrowserSessionStateError("Network route proxy host is invalid");
+  }
+  if (credential) {
+    url.username = credential.username;
+    url.password = credential.password;
+  }
+  return url.toString();
 }
 
 async function settleProtectedAuthReceipt(input: {

@@ -193,6 +193,94 @@ describe("BrowserSupervisor", () => {
           upload: uploadAuthority(),
         }),
       ).rejects.toMatchObject({ code: "unsupported" });
+      await expect(
+        supervisor.createSession({
+          ...session,
+          headed: false,
+          networkRoute: {
+            ...withoutProxyAuthority(proxyRoute()),
+            kind: "direct",
+            consistency: {
+              ...proxyRoute().consistency,
+              dns: "placement",
+              webRtc: "proxy_only",
+            },
+          },
+        }),
+      ).rejects.toMatchObject({ code: "unsupported" });
+    });
+  });
+
+  test("binds one exact proxy authority and permits only a secretless replay", async () => {
+    await withSupervisor(async ({ supervisor, contexts }) => {
+      const session = reference(1);
+      const route = proxyRoute("http://user:password@proxy.test:8443/");
+      await supervisor.createSession({ ...session, headed: false, networkRoute: route });
+      expect(contexts.get(session.browserSessionId)?.networkRoute).toEqual(route);
+
+      await expect(
+        supervisor.createSession({
+          ...session,
+          headed: false,
+          networkRoute: withoutProxyAuthority(route),
+        }),
+      ).resolves.toMatchObject(session);
+      await expect(
+        supervisor.createSession({
+          ...session,
+          headed: false,
+          networkRoute: { ...route, authorityDigest: `ogr.${"z".repeat(43)}` },
+        }),
+      ).rejects.toMatchObject({ code: "operation_conflict" });
+      await expect(
+        supervisor.createSession({
+          ...session,
+          headed: false,
+          networkRoute: { ...route, proxyUrl: "http://user:other@proxy.test:8443/" },
+        }),
+      ).rejects.toMatchObject({ code: "operation_conflict" });
+    });
+
+    await withSupervisor(async ({ supervisor }) => {
+      const session = reference(2);
+      await expect(
+        supervisor.createSession({
+          ...session,
+          headed: false,
+          networkRoute: withoutProxyAuthority(proxyRoute()),
+        }),
+      ).rejects.toMatchObject({ code: "resource_unavailable", retryable: true });
+    });
+  });
+
+  test("rejects route guarantees that its browser transport cannot provide", async () => {
+    await withSupervisor(async ({ supervisor }) => {
+      const session = reference(1);
+      const transport = {
+        kind: "attached_chrome" as const,
+        deviceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        connectionGeneration: "chrome-generation-1",
+        browserName: "Chrome",
+        browserVersion: "151.0.0.0",
+      };
+      await expect(
+        supervisor.createSession({
+          ...session,
+          headed: true,
+          transport,
+          networkRoute: proxyRoute(),
+        }),
+      ).rejects.toMatchObject({ code: "unsupported" });
+      await expect(
+        supervisor.createSession({
+          ...session,
+          headed: false,
+          networkRoute: {
+            ...proxyRoute(),
+            consistency: { ...proxyRoute().consistency, dns: "placement" },
+          },
+        }),
+      ).rejects.toMatchObject({ code: "unsupported" });
     });
   });
 
@@ -652,6 +740,31 @@ function reference(sequence: number) {
     browserSessionId: `11111111-1111-4111-8111-${sequence.toString().padStart(12, "0")}`,
     controllerGeneration: `controller-${sequence}`,
   };
+}
+
+function proxyRoute(proxyUrl = "http://user:password@proxy.test:8443/") {
+  return {
+    routeId: "22222222-2222-4222-8222-222222222222",
+    routeVersion: 1,
+    authorityDigest: `ogr.${"a".repeat(43)}`,
+    kind: "proxy" as const,
+    consistency: {
+      dns: "proxy" as const,
+      expectedPublicIp: null,
+      expectedRegion: null,
+      locale: "en-US",
+      timezone: "Europe/Oslo",
+      geolocation: { latitude: 59.9139, longitude: 10.7522, accuracyMeters: 50 },
+      webRtc: "disable_non_proxied_udp" as const,
+      stability: "session" as const,
+    },
+    proxyUrl,
+  };
+}
+
+function withoutProxyAuthority(route: ReturnType<typeof proxyRoute>) {
+  const { proxyUrl: _proxyUrl, ...authority } = route;
+  return authority;
 }
 
 function command(

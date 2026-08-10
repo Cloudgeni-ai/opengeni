@@ -28,7 +28,10 @@ describe("migration 0210 browser auth, routes, and interventions", () => {
 
     const blank = await acquireBlankTestDatabase("migration-0210");
     if (!blank) return;
-    const sql = postgres(blank.databaseUrl, { max: 1, onnotice: () => undefined });
+    const sql = postgres(blank.databaseUrl, {
+      max: 1,
+      onnotice: () => undefined,
+    });
     try {
       await migrate(blank.databaseUrl);
       const tables = await sql<Array<{ name: string; rlsEnabled: boolean; rlsForced: boolean }>>`
@@ -57,6 +60,25 @@ describe("migration 0210 browser auth, routes, and interventions", () => {
           )`;
       expect(forbiddenColumns).toHaveLength(0);
 
+      const browserRouteColumns = await sql<Array<{ name: string }>>`
+        select column_name as name
+        from information_schema.columns
+        where table_schema = current_schema()
+          and table_name = 'browser_sessions'
+          and column_name in (
+            'network_route_version', 'network_route_configuration',
+            'network_route_consistency', 'network_route_credential_version',
+            'network_route_authority_digest'
+          )
+        order by column_name`;
+      expect(browserRouteColumns.map((column) => column.name)).toEqual([
+        "network_route_authority_digest",
+        "network_route_configuration",
+        "network_route_consistency",
+        "network_route_credential_version",
+        "network_route_version",
+      ]);
+
       const constraints = await sql<Array<{ name: string; definition: string }>>`
         select conname as name, pg_get_constraintdef(oid) as definition
         from pg_constraint
@@ -83,6 +105,7 @@ describe("migration 0210 browser auth, routes, and interventions", () => {
         where schemaname = current_schema()
           and indexname in (
             'auth_runs_active_browser_target_uq',
+            'browser_sessions_workspace_network_route_idx',
             'interaction_interventions_originating_tool_call_uq',
             'interaction_interventions_open_target_kind_uq',
             'interaction_interventions_open_auth_run_uq'
@@ -90,6 +113,7 @@ describe("migration 0210 browser auth, routes, and interventions", () => {
         order by indexname`;
       expect(indexes.map((index) => index.name)).toEqual([
         "auth_runs_active_browser_target_uq",
+        "browser_sessions_workspace_network_route_idx",
         "interaction_interventions_open_auth_run_uq",
         "interaction_interventions_open_target_kind_uq",
         "interaction_interventions_originating_tool_call_uq",

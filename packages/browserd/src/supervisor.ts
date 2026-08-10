@@ -16,6 +16,8 @@ import type {
 import {
   BROWSER_PROFILE_ARTIFACT_FORMAT,
   BrowserRevisionMaterialization as BrowserRevisionMaterializationSchema,
+  NetworkRouteConsistency,
+  type NetworkRouteConsistency as NetworkRouteConsistencyValue,
 } from "@opengeni/contracts";
 import {
   BrowserInteractionController,
@@ -88,6 +90,16 @@ export type BrowserSupervisorSessionOptions = BrowserSessionReference & {
   transport?: BrowserSupervisorTransport;
   linkedComputer?: { computerSessionId: string; controllerGeneration: string };
   launchEnvironment?: NodeJS.ProcessEnv;
+  networkRoute?: BrowserSupervisorNetworkRoute;
+};
+
+export type BrowserSupervisorNetworkRoute = {
+  routeId: string;
+  routeVersion: number;
+  authorityDigest: string;
+  kind: "direct" | "proxy" | "tunnel";
+  consistency: NetworkRouteConsistencyValue;
+  proxyUrl?: string;
 };
 
 export type BrowserSupervisorTransport =
@@ -164,6 +176,7 @@ export type BrowserSupervisorDriverContext = BrowserSessionReference & {
   transport: BrowserSupervisorTransport;
   browserExecutablePath?: string;
   launchEnvironment?: NodeJS.ProcessEnv;
+  networkRoute?: BrowserSupervisorNetworkRoute;
 };
 
 export type BrowserSupervisorOptions = {
@@ -190,10 +203,12 @@ type Runtime = {
 
 type BrowserRuntimeOptions = Omit<
   BrowserSupervisorSessionOptions,
-  "restore" | "transport" | "launchEnvironment"
+  "restore" | "transport" | "launchEnvironment" | "networkRoute"
 > & {
   transport: BrowserSupervisorTransport;
   restoreAuthorityDigest: string | null;
+  networkRouteAuthorityDigest: string | null;
+  networkRouteMaterialDigest: string | null;
 };
 
 type ValidatedBrowserStateRestoreInput = Omit<BrowserStateRestoreInput, "dataKey" | "aad"> & {
@@ -455,6 +470,13 @@ export class BrowserSupervisor {
   }
 
   private async buildRuntime(options: ValidatedBrowserSupervisorSessionOptions): Promise<Runtime> {
+    if (options.networkRoute?.kind === "proxy" && !options.networkRoute.proxyUrl) {
+      throw new InteractionControllerError(
+        "resource_unavailable",
+        "proxy authority is unavailable for a new browser launch",
+        true,
+      );
+    }
     const sessionDirectory = join(this.rootDirectory, "sessions", options.browserSessionId);
     const socketDirectory = join(this.socketRootDirectory, shortDigest(options.browserSessionId));
     const profileDirectory = join(sessionDirectory, "profile");
@@ -524,6 +546,7 @@ export class BrowserSupervisor {
         ? { browserExecutablePath: options.browserExecutablePath }
         : {}),
       ...(options.launchEnvironment ? { launchEnvironment: options.launchEnvironment } : {}),
+      ...(options.networkRoute ? { networkRoute: options.networkRoute } : {}),
     };
     let driver: BrowserSupervisorDriver | null = null;
     try {
@@ -812,7 +835,12 @@ export class BrowserSupervisor {
       canonicalJson(runtime.options.transport) !== canonicalJson(requested.transport) ||
       canonicalJson(runtime.options.linkedComputer ?? null) !==
         canonicalJson(requested.linkedComputer ?? null) ||
-      runtime.options.restoreAuthorityDigest !== restoreAuthorityDigest(requested.restore)
+      runtime.options.restoreAuthorityDigest !== restoreAuthorityDigest(requested.restore) ||
+      runtime.options.networkRouteAuthorityDigest !==
+        (requested.networkRoute?.authorityDigest ?? null) ||
+      (requested.networkRoute?.proxyUrl !== undefined &&
+        runtime.options.networkRouteMaterialDigest !==
+          networkRouteMaterialDigest(requested.networkRoute))
     ) {
       throw new InteractionControllerError(
         "operation_conflict",
@@ -944,6 +972,14 @@ async function createBrowserDriver(
       engine: "chrome",
     });
   }
+  const route = context.networkRoute;
+  const launchArguments: string[] = [];
+  if (route?.consistency.locale) {
+    launchArguments.push(`--lang=${route.consistency.locale}`);
+  }
+  if (route?.consistency.webRtc !== "default") {
+    launchArguments.push("--force-webrtc-ip-handling-policy=disable_non_proxied_udp");
+  }
   const runner = await AgentBrowserJsonRunner.create({
     namespace: "og",
     // A close followed immediately by another daemon using the same socket
@@ -956,6 +992,9 @@ async function createBrowserDriver(
     downloadDirectory: context.downloadDirectory,
     screenshotDirectory: context.screenshotDirectory,
     headed: context.headed,
+    ...(route?.kind === "proxy" && route.proxyUrl ? { proxyUrl: route.proxyUrl } : {}),
+    ...(launchArguments.length > 0 ? { launchArguments } : {}),
+    ...(route?.consistency.timezone ? { timezone: route.consistency.timezone } : {}),
     ...(context.browserExecutablePath
       ? { browserExecutablePath: context.browserExecutablePath }
       : {}),
@@ -966,6 +1005,15 @@ async function createBrowserDriver(
     browserSessionId: context.browserSessionId,
     controllerGeneration: context.controllerGeneration,
     runner,
+    ...(route
+      ? {
+          emulation: {
+            locale: route.consistency.locale,
+            timezone: route.consistency.timezone,
+            geolocation: route.consistency.geolocation,
+          },
+        }
+      : {}),
   });
 }
 
@@ -987,6 +1035,9 @@ function validateSessionOptions(
     throw new Error("initialUrl exceeds its byte envelope");
   }
   const transport = validateBrowserTransport(options.transport ?? { kind: "managed" });
+  const networkRoute = options.networkRoute
+    ? validateBrowserNetworkRoute(options.networkRoute, transport)
+    : undefined;
   if (options.linkedComputer) {
     if (transport.kind !== "managed" || !options.headed) {
       throw new InteractionControllerError(
@@ -1018,10 +1069,11 @@ function validateSessionOptions(
       throw new Error("attached Chrome cannot select another browser executable");
     }
   }
-  const { restore, transport: _transport, ...session } = options;
+  const { restore, transport: _transport, networkRoute: _networkRoute, ...session } = options;
   return {
     ...session,
     transport,
+    ...(networkRoute ? { networkRoute } : {}),
     ...(restore ? { restore: validateRestoreInput(restore) } : {}),
   };
 }
@@ -1043,6 +1095,109 @@ function validateBrowserTransport(input: BrowserSupervisorTransport): BrowserSup
     browserVersion,
     ...(input.authorityFile ? { authorityFile: resolve(input.authorityFile) } : {}),
   };
+}
+
+function validateBrowserNetworkRoute(
+  input: BrowserSupervisorNetworkRoute,
+  transport: BrowserSupervisorTransport,
+): BrowserSupervisorNetworkRoute {
+  if (!isUuid(input.routeId)) throw new Error("network route id must be a UUID");
+  if (!Number.isSafeInteger(input.routeVersion) || input.routeVersion < 1) {
+    throw new Error("network route version is invalid");
+  }
+  if (!/^[A-Za-z0-9._~-]{16,256}$/u.test(input.authorityDigest)) {
+    throw new Error("network route authority digest is invalid");
+  }
+  if (input.kind !== "direct" && input.kind !== "proxy" && input.kind !== "tunnel") {
+    throw new Error("network route kind is unsupported");
+  }
+  const consistency = NetworkRouteConsistency.parse(input.consistency);
+  if (consistency.locale) validateLocale(consistency.locale);
+  if (consistency.timezone) validateTimezone(consistency.timezone);
+  const expectedDns = input.kind === "proxy" ? "proxy" : "placement";
+  if (consistency.dns !== expectedDns) {
+    throw new InteractionControllerError(
+      "unsupported",
+      `network route ${input.kind} cannot provide ${consistency.dns} DNS`,
+    );
+  }
+  if (consistency.webRtc === "proxy_only" && input.kind !== "proxy") {
+    throw new InteractionControllerError(
+      "unsupported",
+      "WebRTC proxy-only routing requires a proxy network route",
+    );
+  }
+  if (transport.kind === "attached_chrome" && input.kind === "proxy") {
+    throw new InteractionControllerError(
+      "unsupported",
+      "attached Chrome cannot change its process-scoped proxy route",
+    );
+  }
+  if (
+    transport.kind === "attached_chrome" &&
+    (consistency.locale !== null ||
+      consistency.timezone !== null ||
+      consistency.geolocation !== null ||
+      consistency.webRtc !== "default")
+  ) {
+    throw new InteractionControllerError(
+      "unsupported",
+      "attached Chrome cannot change process-scoped route emulation",
+    );
+  }
+  if (input.kind !== "proxy" && input.proxyUrl !== undefined) {
+    throw new Error("non-proxy network route contains proxy authority");
+  }
+  const proxyUrl = input.proxyUrl === undefined ? undefined : validateProxyUrl(input.proxyUrl);
+  return {
+    routeId: input.routeId,
+    routeVersion: input.routeVersion,
+    authorityDigest: input.authorityDigest,
+    kind: input.kind,
+    consistency,
+    ...(proxyUrl === undefined ? {} : { proxyUrl }),
+  };
+}
+
+function validateLocale(value: string): void {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(value)) {
+    throw new Error("network route locale is invalid");
+  }
+  try {
+    if (Intl.getCanonicalLocales(value).length !== 1) throw new Error();
+  } catch {
+    throw new Error("network route locale is unsupported");
+  }
+}
+
+function validateTimezone(value: string): void {
+  if (/[,\r\n\0]/u.test(value)) throw new Error("network route timezone is invalid");
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value }).format();
+  } catch {
+    throw new Error("network route timezone is unsupported");
+  }
+}
+
+function validateProxyUrl(value: string): string {
+  if (Buffer.byteLength(value) > 16_384) throw new Error("proxy authority exceeds its envelope");
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("proxy authority URL is invalid");
+  }
+  if (
+    !["http:", "https:", "socks5:"].includes(url.protocol) ||
+    !url.hostname ||
+    (!url.port && url.protocol !== "http:" && url.protocol !== "https:") ||
+    (url.pathname !== "" && url.pathname !== "/") ||
+    url.search ||
+    url.hash
+  ) {
+    throw new Error("proxy authority URL is invalid");
+  }
+  return url.toString();
 }
 
 function validateRestoreInput(input: BrowserStateRestoreInput): ValidatedBrowserStateRestoreInput {
@@ -1106,11 +1261,29 @@ function validateRestoreInput(input: BrowserStateRestoreInput): ValidatedBrowser
 }
 
 function runtimeOptions(options: ValidatedBrowserSupervisorSessionOptions): BrowserRuntimeOptions {
-  const { restore, launchEnvironment: _launchEnvironment, ...runtime } = options;
+  const { restore, launchEnvironment: _launchEnvironment, networkRoute, ...runtime } = options;
   return {
     ...runtime,
     restoreAuthorityDigest: restoreAuthorityDigest(restore),
+    networkRouteAuthorityDigest: networkRoute?.authorityDigest ?? null,
+    networkRouteMaterialDigest: networkRoute ? networkRouteMaterialDigest(networkRoute) : null,
   };
+}
+
+function networkRouteMaterialDigest(route: BrowserSupervisorNetworkRoute): string {
+  return createHash("sha256")
+    .update(
+      canonicalJson({
+        routeId: route.routeId,
+        routeVersion: route.routeVersion,
+        authorityDigest: route.authorityDigest,
+        kind: route.kind,
+        consistency: route.consistency,
+        proxyUrl: route.proxyUrl ?? null,
+      }),
+      "utf8",
+    )
+    .digest("hex");
 }
 
 function restoreAuthorityDigest(

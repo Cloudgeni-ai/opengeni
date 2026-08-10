@@ -167,11 +167,15 @@ describe("BrowserSession route discipline", () => {
       resume.indexOf("prepareBrowserPrivateCheckpointRestore"),
     );
     expect(resume.indexOf("prepareBrowserPrivateCheckpointRestore")).toBeLessThan(
+      resume.indexOf("resolveBrowserNetworkRouteLaunch"),
+    );
+    expect(resume.indexOf("resolveBrowserNetworkRouteLaunch")).toBeLessThan(
       resume.indexOf("ensureDispatchedGeneration"),
     );
     expect(resume.indexOf("ensureDispatchedGeneration")).toBeLessThan(
       resume.indexOf("client.createSession"),
     );
+    expect(resume).toContain("...(networkRoute ? { networkRoute } : {})");
   });
 
   test("preserves exact human, service, and agent-attempt action provenance", () => {
