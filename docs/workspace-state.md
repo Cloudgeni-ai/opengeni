@@ -13,9 +13,9 @@ The overview links to focused workspace-instruction and preference views rather
 than opening the diagnostic inventory. Both focused views are prompt-first: the
 user describes the desired behavior in plain language and continues in a real
 OpenGeni session that asks essential follow-ups and proposes the structured
-result before saving. This flow depends on OPE-183/OPE-184's canonical durable
-learning write tools; it must never substitute ordinary Memory for preference
-or instruction authority.
+result before saving. This flow depends on the canonical durable learning write
+tools; it must never substitute ordinary Memory for preference or instruction
+authority.
 
 Direct workspace-instruction and preference editors remain available under a
 collapsed **Write manually** disclosure. Manual workspace saves create and
