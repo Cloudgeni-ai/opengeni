@@ -1,5 +1,14 @@
 # @opengeni/sdk
 
+## 0.50.1
+
+### Patch Changes
+
+- 98b94e8: Project physical cancellation immediately from atomic Steer and Pause receipts, then reconcile it against durable queue truth.
+- 2cd6dce: Build and reuse version-bound immutable provider images after clean rig verification, with content-hash invalidation and runtime-setup fallback for missing or unsupported providers.
+- Updated dependencies [2cd6dce]
+  - @opengeni/contracts@0.42.1
+
 ## 0.50.0
 
 ### Minor Changes

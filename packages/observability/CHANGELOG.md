@@ -1,5 +1,12 @@
 # @opengeni/observability
 
+## 0.5.16
+
+### Patch Changes
+
+- Updated dependencies [2cd6dce]
+  - @opengeni/contracts@0.42.1
+
 ## 0.5.15
 
 ### Patch Changes
