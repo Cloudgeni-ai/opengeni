@@ -12,7 +12,7 @@ Canonical implementation:
 - persistence and exact-attempt snapshots:
   `packages/db/src/company-profile.ts`,
   `packages/db/src/company-profile-schema.ts`, and migration
-  `0197_company_profile_authority.sql`;
+  `0201_company_profile_authority.sql`;
 - HTTP/SDK administration: `apps/api/src/routes/company-profile.ts` and
   `packages/sdk/src/company-profile.ts`;
 - the only prompt composer: `packages/runtime/src/workspace-governance.ts`,
@@ -134,7 +134,7 @@ preference full content are not.
 
 When no company profile exists, its section is absent. Existing legacy
 workspace persona and structured policy/preference composition remain
-byte-for-byte unchanged; migration `0197` performs no backfill and creates no
+byte-for-byte unchanged; migration `0201` performs no backfill and creates no
 default profile.
 
 ## Deliberate non-goals

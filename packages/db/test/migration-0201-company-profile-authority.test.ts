@@ -23,14 +23,14 @@ import {
 
 const migrationPath = join(
   dirname(fileURLToPath(import.meta.url)),
-  "../drizzle/0197_company_profile_authority.sql",
+  "../drizzle/0201_company_profile_authority.sql",
 );
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("migration-0197-company-profile");
+  shared = await acquireSharedTestDatabase("migration-0201-company-profile");
   if (!shared) return;
   client = createDb(shared.appUrl, { max: 4 });
 }, 180_000);
@@ -81,7 +81,7 @@ async function seedAttempt(input: {
   return { ...input, turnId, attemptId, executionGeneration: 1 };
 }
 
-describe("migration 0197 company-profile authority", () => {
+describe("migration 0201 company-profile authority", () => {
   test("declares one bounded rolling authority without a second knowledge store", async () => {
     const migration = await readFile(migrationPath, "utf8");
     expect(migration.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: rolling");
