@@ -388,9 +388,10 @@ import {
 import { executeGatewayImageGeneration } from "./gateway-image-generation";
 import { executeCodexImageGeneration } from "./codex-image-generation";
 import { imageProviderBindingHash } from "./image-generation-operation";
+import { resolveImageGenerationReferences } from "./image-generation-references";
 import { executeEditableArtifactPublication } from "./editable-artifact-publication";
 import { captureWorkspaceRevision, openFreshWorkspaceCaptureSession } from "./workspace-capture";
-import type { ChannelASession } from "@opengeni/runtime/sandbox";
+import { SandboxChannelAService, type ChannelASession } from "@opengeni/runtime/sandbox";
 import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
 import {
   desktopCapableBackend,
@@ -6413,6 +6414,37 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             }
           : {};
       const hostedWebSearch = hostedWebSearchForTurn(resolvedModel, runSettings.webSearchEnabled);
+      const resolveImageReferences = async (
+        references: Parameters<typeof resolveImageGenerationReferences>[0]["references"],
+      ) =>
+        await resolveImageGenerationReferences({
+          db,
+          objectStorage: objectStorage!,
+          workspaceId: input.workspaceId,
+          references,
+          readSandboxFile: async (path, maxBytes) => {
+            const imageReferenceSession = (setupBoxSession ??
+              sdkOwnedSandboxSession) as ChannelASession | null;
+            if (!imageReferenceSession) {
+              throw new Error("Sandbox image reference is unavailable");
+            }
+            const relativePath = path.slice("/workspace/".length);
+            const referenceRunAs = sandboxRunAs(modelRunSettings);
+            const channel = new SandboxChannelAService({
+              session: imageReferenceSession,
+              workspaceRoot: "/workspace",
+              leaseEpoch: resolvedSandbox?.leaseEpoch ?? 0,
+              ...(referenceRunAs ? { runAs: referenceRunAs } : {}),
+            });
+            const read = await channel.fsRead({
+              path: relativePath,
+              encoding: "base64",
+              maxBytes,
+            });
+            if (read.truncated) throw new Error("Sandbox image reference exceeds the byte limit");
+            return Uint8Array.from(Buffer.from(read.content, "base64"));
+          },
+        });
       const imageGenerationOption: Pick<BuildAgentOptions, "imageGeneration"> = (() => {
         // Never expose a paid image operation unless its permanent artifact can
         // be committed. Failing after provider execution would leave an
@@ -6439,7 +6471,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           return {
             imageGeneration: {
               kind: "provider_adapter",
-              execute: async ({ prompt }, { toolCallId }) => {
+              execute: async ({ prompt, references }, { toolCallId }) => {
+                const resolvedReferences = await resolveImageReferences(references);
                 const receipt = await executeCodexImageGeneration({
                   db,
                   objectStorage,
@@ -6450,6 +6483,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   attemptId: input.attemptId,
                   toolCallId,
                   prompt,
+                  references: resolvedReferences,
                   credentialId: codexImageCredentialId,
                   codexContext: codexImageContext,
                   ...(runtimeCancellationSignal ? { abortSignal: runtimeCancellationSignal } : {}),
@@ -6472,7 +6506,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         return {
           imageGeneration: {
             kind: "provider_adapter",
-            execute: async ({ prompt }, { toolCallId }) => {
+            execute: async ({ prompt, references }, { toolCallId }) => {
+              const resolvedReferences = await resolveImageReferences(references);
               const receipt = await executeGatewayImageGeneration({
                 db,
                 objectStorage,
@@ -6484,6 +6519,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 apiKey: gatewayApiKey,
                 modelId: capabilitySettings.imageGenerationModel,
                 prompt,
+                references: resolvedReferences,
                 toolCallId,
                 ...(runtimeCancellationSignal ? { abortSignal: runtimeCancellationSignal } : {}),
               });

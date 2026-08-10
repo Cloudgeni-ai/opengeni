@@ -1336,7 +1336,10 @@ export type BuildAgentOptions = {
     | { kind: "native_hosted" }
     | {
         kind: "provider_adapter";
-        execute: (input: { prompt: string }, context: { toolCallId: string }) => Promise<unknown>;
+        execute: (
+          input: GenerateImageToolInput,
+          context: { toolCallId: string },
+        ) => Promise<unknown>;
       };
   /** Host-owned durable asynchronous video-generation boundary for this turn. */
   videoGeneration?: {
@@ -1939,7 +1942,7 @@ export function buildOpenGeniAgent(
       ? agentTool({
           name: "generate_image",
           description:
-            "Generate exactly one image from the requested visual description. Use this when the user asks to create an image. The result is a permanent image artifact and its exact sandbox path. Do not call it repeatedly unless the user requested multiple distinct images.",
+            "Generate or edit exactly one image. Optionally provide up to four ordered references using exact /workspace paths, workspace File IDs, or generated-image artifact IDs; describe each reference's role by position in the prompt. The result is a permanent image artifact and its exact sandbox path. Do not call repeatedly unless the user requested multiple distinct images.",
           parameters: GenerateImageToolInput,
           errorFunction: null,
           execute: async (input, _context, details) => {

@@ -1590,7 +1590,7 @@ describe("multi-provider gating in buildOpenGeniAgent", () => {
       native.tools.some((tool) => tool.type === "function" && tool.name === "generate_image"),
     ).toBe(false);
 
-    const calls: Array<{ prompt: string; toolCallId: string }> = [];
+    const calls: Array<{ prompt: string; references: unknown[]; toolCallId: string }> = [];
     const adapter = buildOpenGeniAgent(settings, [], {
       imageGeneration: {
         kind: "provider_adapter",
@@ -1626,7 +1626,9 @@ describe("multi-provider gating in buildOpenGeniAgent", () => {
         },
       },
     );
-    expect(calls).toEqual([{ prompt: "a blue sphere", toolCallId: "call-image-1" }]);
+    expect(calls).toEqual([
+      { prompt: "a blue sphere", references: [], toolCallId: "call-image-1" },
+    ]);
     expect(output).toEqual({ type: "generated_image", artifact: { artifactId: "artifact-1" } });
   });
 

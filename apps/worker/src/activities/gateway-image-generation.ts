@@ -6,6 +6,7 @@ import {
   executeImageGenerationOperation,
   imageProviderBindingHash,
 } from "./image-generation-operation";
+import type { ResolvedImageGenerationReference } from "./image-generation-references";
 
 const GATEWAY_IMAGE_PROVIDER_ID = "vercel-ai-gateway";
 const GATEWAY_IMAGE_URL = "https://ai-gateway.vercel.sh/v3/ai/image-model";
@@ -36,6 +37,7 @@ export async function executeGatewayImageGeneration(input: {
   apiKey: string;
   modelId: string;
   prompt: string;
+  references?: readonly ResolvedImageGenerationReference[];
   toolCallId: string;
   abortSignal?: AbortSignal;
 }): Promise<GeneratedImageReceipt> {
@@ -44,11 +46,13 @@ export async function executeGatewayImageGeneration(input: {
     ...input,
     providerId: GATEWAY_IMAGE_PROVIDER_ID,
     providerBindingHash,
+    ...(input.references ? { referenceDigests: input.references } : {}),
     generate: async () =>
       await generateGatewayImage({
         apiKey: input.apiKey,
         modelId: input.modelId,
         prompt: input.prompt,
+        ...(input.references ? { references: input.references } : {}),
         toolCallId: input.toolCallId,
         ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
       }),
@@ -65,6 +69,7 @@ export async function generateGatewayImage(input: {
   apiKey: string;
   modelId: string;
   prompt: string;
+  references?: readonly ResolvedImageGenerationReference[];
   toolCallId: string;
   abortSignal?: AbortSignal;
   fetch?: FetchLike;
@@ -84,7 +89,19 @@ export async function generateGatewayImage(input: {
       "ai-model-id": input.modelId,
       "user-agent": "opengeni/image-generation",
     },
-    body: JSON.stringify({ prompt: input.prompt, n: 1 }),
+    body: JSON.stringify({
+      prompt: input.prompt,
+      n: 1,
+      ...(input.references?.length
+        ? {
+            files: input.references.map((reference) => ({
+              type: "file",
+              mediaType: reference.mediaType,
+              data: Buffer.from(reference.bytes).toString("base64"),
+            })),
+          }
+        : {}),
+    }),
     ...(input.abortSignal ? { signal: input.abortSignal } : {}),
   });
   if (!response.ok) {
