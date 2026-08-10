@@ -119,6 +119,7 @@ const INTERACTION_MODES = new Set([
   "coordinate",
   "keyboard",
   "clipboard",
+  "permission",
   "lifecycle",
   "media",
   "auth",
@@ -879,10 +880,7 @@ export function interactionInterventionMetricObserver(
   return (observation) => {
     if (observation.replayed) return;
     const kind = boundedMetricEnum(INTERACTION_INTERVENTION_KINDS, observation.kind);
-    const outcome = boundedMetricEnum(
-      INTERACTION_INTERVENTION_OUTCOMES,
-      observation.outcome,
-    );
+    const outcome = boundedMetricEnum(INTERACTION_INTERVENTION_OUTCOMES, observation.outcome);
     try {
       observability.incrementCounter({
         name: "opengeni_interaction_interventions_total",

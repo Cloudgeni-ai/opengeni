@@ -158,6 +158,13 @@ describe("observability", () => {
       durationMs: 250,
     });
     observe({
+      resource: "browser",
+      operation: "act",
+      mode: "permission",
+      outcome: "completed",
+      durationMs: 5,
+    });
+    observe({
       resource: "browser-session-private-id",
       operation: "click:https://private.example/secret",
       mode: "locator:#private-input",
@@ -168,6 +175,9 @@ describe("observability", () => {
     const metrics = await obs.prometheusMetrics();
     expect(metrics).toMatch(
       /opengeni_interaction_operations_total\{[^}]*mode="semantic"[^}]*operation="act"[^}]*outcome="completed"[^}]*resource="browser"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_interaction_operations_total\{[^}]*mode="permission"[^}]*operation="act"[^}]*outcome="completed"[^}]*resource="browser"[^}]*\} 1\b/,
     );
     expect(metrics).toMatch(
       /opengeni_interaction_operations_total\{[^}]*mode="unknown"[^}]*operation="unknown"[^}]*outcome="unknown"[^}]*resource="unknown"[^}]*\} 1\b/,
