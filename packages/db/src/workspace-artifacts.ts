@@ -323,7 +323,11 @@ async function assertAttemptAuthority(
       FOR UPDATE OF session
     ), locked_turn AS MATERIALIZED (
       SELECT turn.id, turn.account_id, turn.workspace_id, turn.session_id,
-        turn.active_attempt_id, turn.execution_generation, turn.initiator_subject_id
+        turn.active_attempt_id, turn.execution_generation,
+        coalesce(
+          turn.initiating_human_subject_id,
+          case when turn.initiator_kind = 'subject' then turn.initiator_subject_id end
+        ) as initiating_human_subject_id
       FROM session_turns turn
       JOIN locked_session session
         ON session.id = turn.session_id
@@ -333,8 +337,10 @@ async function assertAttemptAuthority(
         AND turn.active_attempt_id = ${input.sourceAttemptId}::uuid
         AND turn.execution_generation = ${input.sourceExecutionGeneration}
         AND turn.status IN ('running', 'requires_action', 'recovering', 'waiting_capacity')
-        AND turn.initiator_kind = 'subject'
-        AND length(btrim(turn.initiator_subject_id)) BETWEEN 1 AND 1024
+        AND length(btrim(coalesce(
+          turn.initiating_human_subject_id,
+          case when turn.initiator_kind = 'subject' then turn.initiator_subject_id end
+        ))) BETWEEN 1 AND 1024
       FOR UPDATE OF turn
     ), locked_attempt AS MATERIALIZED (
       SELECT attempt.id, attempt.account_id, attempt.workspace_id,
@@ -363,7 +369,7 @@ async function assertAttemptAuthority(
   `)) as unknown as Array<{ id: string }>;
   if (!rows[0]) {
     throw new WorkspaceArtifactOperationError(
-      "Artifact mutation requires the exact active attempt and execution generation",
+      "Artifact mutation requires the exact active attempt, execution generation, and immutable human authority",
     );
   }
 }
