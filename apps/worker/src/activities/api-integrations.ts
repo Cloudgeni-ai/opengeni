@@ -88,6 +88,7 @@ function integrationCredentialResolver(
         toolName: request.operationKey,
         connectionRef,
         destinationUrl: request.destinationUrl,
+        credentialTarget: "http_api",
         forceRefresh: request.forceRefresh === true,
       });
       if (result.status === "auth_needed") {
@@ -97,11 +98,13 @@ function integrationCredentialResolver(
       const destination = new URL(request.destinationUrl);
       return {
         audience: { origin: destination.origin, pathPrefix: "/" },
-        placements: Object.entries(result.headers).map(([name, value]) => ({
-          carrier: "header" as const,
-          name,
-          value,
-        })),
+        placements:
+          result.placements ??
+          Object.entries(result.headers).map(([name, value]) => ({
+            carrier: "header" as const,
+            name,
+            value,
+          })),
         ...(result.expiresAt ? { expiresAt: result.expiresAt.toISOString() } : {}),
         ...(connectionRef.scopes ? { scope: [...connectionRef.scopes] } : {}),
       };

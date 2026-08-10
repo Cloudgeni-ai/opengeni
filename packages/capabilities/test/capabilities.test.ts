@@ -51,9 +51,7 @@ describe("OpenAPI compiler and local MCP invocation", () => {
         delete: {
           operationId: "widgets.delete",
           summary: "Delete a widget",
-          parameters: [
-            { name: "id", in: "path", required: true, schema: { type: "string" } },
-          ],
+          parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
           responses: { "204": { description: "Deleted" } },
         },
       },
@@ -125,9 +123,7 @@ describe("OpenAPI compiler and local MCP invocation", () => {
             credentialResolutions.push(request.forceRefresh === true);
             return {
               audience: { origin: "https://api.example.com", pathPrefix: "/v1/" },
-              placements: [
-                { carrier: "header", name: "Authorization", value: "expired-token" },
-              ],
+              placements: [{ carrier: "header", name: "Authorization", value: "expired-token" }],
             };
           },
         },
@@ -203,6 +199,43 @@ describe("OpenAPI compiler and local MCP invocation", () => {
       }),
     ).toThrow(IntegrationInvocationError);
     expect(url.toString()).toBe("https://api.example.com/v1/widgets");
+  });
+
+  test("applies cookie/query placements atomically and rejects unsafe destinations", () => {
+    const url = new URL("https://api.example.com/v1/widgets");
+    const headers = new Headers({ "X-Existing": "retained" });
+    applyCredentialPlacements(url, headers, {
+      audience: { origin: "https://api.example.com", pathPrefix: "/v1/" },
+      placements: [
+        { carrier: "header", name: "X-Client", prefix: "Key ", value: "client-secret" },
+        { carrier: "query", name: "api_key", value: "query-secret" },
+        { carrier: "cookie", name: "session_key", value: "cookie-secret" },
+      ],
+    });
+    expect(url.toString()).toBe("https://api.example.com/v1/widgets?api_key=query-secret");
+    expect(headers.get("x-client")).toBe("Key client-secret");
+    expect(headers.get("cookie")).toBe("session_key=cookie-secret");
+
+    for (const placements of [
+      [
+        { carrier: "query" as const, name: "api_key", value: "one" },
+        { carrier: "query" as const, name: "api_key", value: "two" },
+      ],
+      [{ carrier: "header" as const, name: "Host", value: "attacker.example" }],
+      [{ carrier: "query" as const, name: "api_key", value: "secret\r\nleak" }],
+      [{ carrier: "cookie" as const, name: "session_key", value: "secret; injected=yes" }],
+    ]) {
+      const rejectedUrl = new URL("https://api.example.com/v1/widgets");
+      const rejectedHeaders = new Headers({ "X-Existing": "retained" });
+      expect(() =>
+        applyCredentialPlacements(rejectedUrl, rejectedHeaders, {
+          audience: { origin: "https://api.example.com", pathPrefix: "/v1/" },
+          placements,
+        }),
+      ).toThrow(IntegrationInvocationError);
+      expect(rejectedUrl.toString()).toBe("https://api.example.com/v1/widgets");
+      expect([...rejectedHeaders.entries()]).toEqual([["x-existing", "retained"]]);
+    }
   });
 });
 

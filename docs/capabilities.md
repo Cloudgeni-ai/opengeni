@@ -88,6 +88,13 @@ share the normalized component ledger, so uninstall preview identifies whether
 the runtime adapter will actually disappear. Mutation uses the Plugin
 installation version as an optimistic-concurrency fence.
 
+API-key Connections may store bounded, validated header, query, and cookie
+placements. The broker resolves those placements only for the exact provider
+destination and local HTTP API adapter; query/cookie material fails closed for
+remote MCP transport. Duplicate destinations, forbidden transport headers,
+cookie injection, control characters, and oversized values are rejected before
+the request URL or headers are mutated.
+
 The normalized v2 rows store the protocol-compiled revision, tools, integration
 and API facets, facet installations, and owners under FORCE RLS. Compatibility
 catalog/install rows are dual-written while existing clients migrate, but they

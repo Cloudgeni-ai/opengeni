@@ -12,6 +12,7 @@ lifecycle stay in OpenGeni's core/database layers.
 Security defaults:
 
 - credentials are resolved for one exact destination and verified before use;
+- header, query, and cookie placements are bounded and validated atomically;
 - redirects are never followed on credential-bearing requests;
 - response bodies, schemas, operation counts, and deadlines are bounded;
 - mutating operations are marked approval-required by default;

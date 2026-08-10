@@ -154,8 +154,7 @@ export function registerApiIntegrationRoutes(
           authScheme: resolved.authScheme,
           ...(payload.connectionId ? { connectionId: payload.connectionId } : {}),
           requiredScopes: resolved.requiredScopes,
-          ownership:
-            resolved.preview.connectionOwnership === "personal" ? "subject" : "workspace",
+          ownership: resolved.preview.connectionOwnership === "personal" ? "subject" : "workspace",
           ...(payload.allowedTools ? { allowedTools: payload.allowedTools } : {}),
           revision: resolved.revision,
         }),
@@ -164,22 +163,19 @@ export function registerApiIntegrationRoutes(
     );
   });
 
-  app.get(
-    "/v1/workspaces/:workspaceId/integrations/:capabilityId/uninstall-preview",
-    async (c) => {
-      const workspaceId = c.req.param("workspaceId");
-      await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-      return c.json(
-        ApiIntegrationUninstallPreview.parse(
-          await getApiIntegrationUninstallPreview(
-            deps.db,
-            workspaceId,
-            decodeURIComponent(c.req.param("capabilityId")),
-          ),
+  app.get("/v1/workspaces/:workspaceId/integrations/:capabilityId/uninstall-preview", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    return c.json(
+      ApiIntegrationUninstallPreview.parse(
+        await getApiIntegrationUninstallPreview(
+          deps.db,
+          workspaceId,
+          decodeURIComponent(c.req.param("capabilityId")),
         ),
-      );
-    },
-  );
+      ),
+    );
+  });
 
   app.delete("/v1/workspaces/:workspaceId/integrations/:capabilityId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -302,23 +298,24 @@ function previewCredentialResolver(
           connectionId: connection.id,
           providerDomain: connection.providerDomain,
           kind: connection.kind,
-          ...(connection.grantedScopes.length > 0
-            ? { scopes: [...connection.grantedScopes] }
-            : {}),
+          ...(connection.grantedScopes.length > 0 ? { scopes: [...connection.grantedScopes] } : {}),
           subjectScope: connection.subjectId ? "subject" : "workspace",
         },
         destinationUrl: request.destinationUrl,
+        credentialTarget: "http_api",
         forceRefresh: request.forceRefresh === true,
       });
       if (result.status === "auth_needed") return null;
       const destination = new URL(request.destinationUrl);
       return {
         audience: { origin: destination.origin, pathPrefix: "/" },
-        placements: Object.entries(result.headers).map(([name, value]) => ({
-          carrier: "header" as const,
-          name,
-          value,
-        })),
+        placements:
+          result.placements ??
+          Object.entries(result.headers).map(([name, value]) => ({
+            carrier: "header" as const,
+            name,
+            value,
+          })),
         ...(result.expiresAt ? { expiresAt: result.expiresAt.toISOString() } : {}),
       };
     },

@@ -864,6 +864,7 @@ describe("buildHostConnectionTokenResolver", () => {
       serverId: "github",
       toolName: "create_pull_request",
       destinationUrl: "https://github.com/mcp",
+      credentialTarget: "mcp",
       connectionRef: {
         provider: "github",
         providerDomain: "github.com",
@@ -885,6 +886,101 @@ describe("buildHostConnectionTokenResolver", () => {
     });
     headers.Authorization = "Bearer mutated-after-return";
     expect(result).toMatchObject({ headers: { Authorization: "Bearer host-token" } });
+  });
+
+  test("accepts consistent query/cookie placements only for a local HTTP API target", async () => {
+    const resolver = buildHostConnectionTokenResolver(
+      async (request) => ({
+        status: "ok",
+        accountId: request.accountId,
+        workspaceId: request.workspaceId,
+        sessionId: request.sessionId,
+        headers: { "X-Client": "client-secret" },
+        placements: [
+          { carrier: "header", name: "X-Client", value: "client-secret" },
+          { carrier: "query", name: "api_key", value: "query-secret" },
+          { carrier: "cookie", name: "session_key", value: "cookie-secret" },
+        ],
+        connectionId: "host-api-connection",
+        providerDomain: request.connectionRef.providerDomain,
+      }),
+      context,
+    );
+
+    const result = await resolver({
+      workspaceId: "ws_1",
+      serverId: "inventory-api",
+      destinationUrl: "https://api.example.com/v1/items",
+      credentialTarget: "http_api",
+      connectionRef: { providerDomain: "api.example.com", kind: "api_key" },
+    });
+    expect(result).toEqual({
+      status: "ok",
+      headers: { "X-Client": "client-secret" },
+      placements: [
+        { carrier: "header", name: "X-Client", value: "client-secret" },
+        { carrier: "query", name: "api_key", value: "query-secret" },
+        { carrier: "cookie", name: "session_key", value: "cookie-secret" },
+      ],
+      connectionId: "host-api-connection",
+    });
+
+    await expect(
+      resolver({
+        workspaceId: "ws_1",
+        serverId: "inventory-mcp",
+        destinationUrl: "https://api.example.com/mcp",
+        connectionRef: { providerDomain: "api.example.com", kind: "api_key" },
+      }),
+    ).rejects.toBeInstanceOf(HostMcpCredentialBindingError);
+  });
+
+  test("rejects inconsistent or unsafe host placement echoes", async () => {
+    const mismatched = buildHostConnectionTokenResolver(
+      async (request) => ({
+        status: "ok",
+        accountId: request.accountId,
+        workspaceId: request.workspaceId,
+        sessionId: request.sessionId,
+        headers: { Authorization: "Bearer one" },
+        placements: [{ carrier: "header", name: "Authorization", value: "Bearer two" }],
+        connectionId: "host-api-connection",
+        providerDomain: request.connectionRef.providerDomain,
+      }),
+      context,
+    );
+    await expect(
+      mismatched({
+        workspaceId: "ws_1",
+        serverId: "inventory-api",
+        destinationUrl: "https://api.example.com/v1/items",
+        credentialTarget: "http_api",
+        connectionRef: { providerDomain: "api.example.com", kind: "api_key" },
+      }),
+    ).rejects.toBeInstanceOf(HostMcpCredentialBindingError);
+
+    const injected = buildHostConnectionTokenResolver(
+      async (request) => ({
+        status: "ok",
+        accountId: request.accountId,
+        workspaceId: request.workspaceId,
+        sessionId: request.sessionId,
+        headers: {},
+        placements: [{ carrier: "query", name: "api_key", value: "secret\r\nleak" }],
+        connectionId: "host-api-connection",
+        providerDomain: request.connectionRef.providerDomain,
+      }),
+      context,
+    );
+    await expect(
+      injected({
+        workspaceId: "ws_1",
+        serverId: "inventory-api",
+        destinationUrl: "https://api.example.com/v1/items",
+        credentialTarget: "http_api",
+        connectionRef: { providerDomain: "api.example.com", kind: "api_key" },
+      }),
+    ).rejects.toThrow("invalid placement");
   });
 
   test("rejects a mismatched host scope before returning credential material", async () => {
@@ -1077,6 +1173,86 @@ describe("buildConnectionTokenResolver", () => {
       kind: "api_key",
     });
     expect(counts.loadInputs[0]).not.toHaveProperty("subjectId");
+  });
+
+  test("materializes bounded query/cookie API-key placements but never sends them to MCP", async () => {
+    const credential = brokerCredential({
+      credential: {
+        placements: [
+          { carrier: "header", name: "X-Client", value: "client-secret" },
+          { carrier: "query", name: "api_key", value: "query-secret" },
+          { carrier: "cookie", name: "session_key", value: "cookie-secret" },
+        ],
+      },
+    });
+    const { deps, counts } = resolverDeps({ loadCredential: async () => credential });
+    const resolver = buildConnectionTokenResolver({} as Database, settings, deps);
+    const apiResult = await resolver({
+      workspaceId: "ws_1",
+      serverId: "inventory-api",
+      destinationUrl: "https://api.example.com/v1/items",
+      credentialTarget: "http_api",
+      connectionRef: { providerDomain: "api.example.com", kind: "api_key" },
+    });
+    expect(apiResult).toEqual({
+      status: "ok",
+      headers: { "X-Client": "client-secret" },
+      placements: [
+        { carrier: "header", name: "X-Client", value: "client-secret" },
+        { carrier: "query", name: "api_key", value: "query-secret" },
+        { carrier: "cookie", name: "session_key", value: "cookie-secret" },
+      ],
+      connectionId: "conn_1",
+      connectionVersion: 1,
+      expiresAt: null,
+    });
+    expect(counts.recordUsed).toBe(1);
+
+    const mcpResult = await resolver({
+      workspaceId: "ws_1",
+      serverId: "inventory-mcp",
+      destinationUrl: "https://api.example.com/mcp",
+      connectionRef: { providerDomain: "api.example.com", kind: "api_key" },
+    });
+    expect(mcpResult).toEqual({
+      status: "auth_needed",
+      reason: "unsupported_auth",
+      providerDomain: "api.example.com",
+      connectionId: "conn_1",
+    });
+    expect(counts.recordUsed).toBe(1);
+  });
+
+  test("rejects duplicate, forbidden, and injected stored placements without exposing secrets", async () => {
+    for (const placements of [
+      [
+        { carrier: "query", name: "api_key", value: "first-secret" },
+        { carrier: "query", name: "api_key", value: "second-secret" },
+      ],
+      [{ carrier: "header", name: "Host", value: "forbidden-secret" }],
+      [{ carrier: "cookie", name: "session_key", value: "secret; injected=yes" }],
+      [{ carrier: "query", name: "api_key", value: "secret\r\nleak" }],
+    ]) {
+      const { deps, counts } = resolverDeps({
+        loadCredential: async () => brokerCredential({ credential: { placements } }),
+      });
+      const resolver = buildConnectionTokenResolver({} as Database, settings, deps);
+      const result = await resolver({
+        workspaceId: "ws_1",
+        serverId: "inventory-api",
+        destinationUrl: "https://api.example.com/v1/items",
+        credentialTarget: "http_api",
+        connectionRef: { providerDomain: "api.example.com", kind: "api_key" },
+      });
+      expect(result).toEqual({
+        status: "auth_needed",
+        reason: "refresh_failed",
+        providerDomain: "api.example.com",
+        connectionId: "conn_1",
+      });
+      expect(JSON.stringify(result)).not.toContain("secret");
+      expect(counts.recordUsed).toBe(0);
+    }
   });
 
   test("subject refs require a concrete owner and reject a faulty cross-subject loader", async () => {

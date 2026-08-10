@@ -1,7 +1,4 @@
-import type {
-  IntegrationCredentialPlacement,
-  ResolvedIntegrationCredential,
-} from "./types";
+import type { IntegrationCredentialPlacement, ResolvedIntegrationCredential } from "./types";
 import { IntegrationInvocationError } from "./types";
 
 const forbiddenCredentialHeaders = new Set([
@@ -15,6 +12,12 @@ const forbiddenCredentialHeaders = new Set([
   "transfer-encoding",
   "upgrade",
 ]);
+const MAX_CREDENTIAL_PLACEMENTS = 32;
+const MAX_CREDENTIAL_NAME_LENGTH = 256;
+const MAX_CREDENTIAL_VALUE_LENGTH = 16_384;
+const headerNamePattern = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
+const queryNamePattern = /^[A-Za-z0-9._~-]+$/;
+const cookieNamePattern = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 
 function normalizeAudiencePath(path: string | undefined): string {
   if (!path?.trim()) return "/";
@@ -70,16 +73,28 @@ function placementValue(placement: IntegrationCredentialPlacement): string {
   return `${placement.prefix ?? ""}${placement.value}`;
 }
 
-export function applyCredentialPlacements(
-  destination: URL,
-  headers: Headers,
-  credential: ResolvedIntegrationCredential,
-): void {
-  assertCredentialAudience(credential, destination);
-  const cookies: string[] = [];
-  for (const placement of credential.placements) {
-    const name = placement.name.trim();
-    if (!name || /[\r\n]/.test(name) || /[\r\n]/.test(placement.value)) {
+function validateCredentialPlacements(placements: readonly IntegrationCredentialPlacement[]): void {
+  if (placements.length === 0 || placements.length > MAX_CREDENTIAL_PLACEMENTS) {
+    throw new IntegrationInvocationError(
+      "credential_placement_invalid",
+      "Connection credential placement count is invalid",
+      "not_started",
+      false,
+    );
+  }
+  const seen = new Set<string>();
+  for (const placement of placements) {
+    const name = placement.name;
+    const value = placementValue(placement);
+    const normalizedName = placement.carrier === "header" ? name.toLowerCase() : name;
+    if (
+      name.length === 0 ||
+      name.length > MAX_CREDENTIAL_NAME_LENGTH ||
+      placement.value.length === 0 ||
+      value.length > MAX_CREDENTIAL_VALUE_LENGTH ||
+      /[\r\n\0]/.test(name) ||
+      /[\r\n\0]/.test(value)
+    ) {
       throw new IntegrationInvocationError(
         "credential_placement_invalid",
         "Connection credential placement is invalid",
@@ -87,10 +102,12 @@ export function applyCredentialPlacements(
         false,
       );
     }
-    const value = placementValue(placement);
     if (placement.carrier === "header") {
-      const normalized = name.toLowerCase();
-      if (forbiddenCredentialHeaders.has(normalized) || normalized.startsWith("sec-")) {
+      if (
+        !headerNamePattern.test(name) ||
+        forbiddenCredentialHeaders.has(normalizedName) ||
+        normalizedName.startsWith("sec-")
+      ) {
         throw new IntegrationInvocationError(
           "credential_header_forbidden",
           "Connection credential targets a forbidden request header",
@@ -98,18 +115,52 @@ export function applyCredentialPlacements(
           false,
         );
       }
-      headers.set(name, value);
     } else if (placement.carrier === "query") {
-      destination.searchParams.set(name, value);
-    } else {
-      if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name) || /[;\r\n]/.test(value)) {
+      if (!queryNamePattern.test(name)) {
         throw new IntegrationInvocationError(
-          "credential_cookie_invalid",
-          "Connection credential cookie placement is invalid",
+          "credential_placement_invalid",
+          "Connection credential query placement is invalid",
           "not_started",
           false,
         );
       }
+    } else if (!cookieNamePattern.test(name) || /;/.test(value)) {
+      throw new IntegrationInvocationError(
+        "credential_cookie_invalid",
+        "Connection credential cookie placement is invalid",
+        "not_started",
+        false,
+      );
+    }
+    const key = `${placement.carrier}\0${normalizedName}`;
+    if (seen.has(key)) {
+      throw new IntegrationInvocationError(
+        "credential_placement_invalid",
+        "Connection credential placements contain a duplicate destination",
+        "not_started",
+        false,
+      );
+    }
+    seen.add(key);
+  }
+}
+
+export function applyCredentialPlacements(
+  destination: URL,
+  headers: Headers,
+  credential: ResolvedIntegrationCredential,
+): void {
+  assertCredentialAudience(credential, destination);
+  validateCredentialPlacements(credential.placements);
+  const cookies: string[] = [];
+  for (const placement of credential.placements) {
+    const name = placement.name;
+    const value = placementValue(placement);
+    if (placement.carrier === "header") {
+      headers.set(name, value);
+    } else if (placement.carrier === "query") {
+      destination.searchParams.set(name, value);
+    } else {
       cookies.push(`${name}=${value}`);
     }
   }

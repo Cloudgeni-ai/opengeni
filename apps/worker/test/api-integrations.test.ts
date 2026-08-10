@@ -69,8 +69,16 @@ const authority = {
 
 describe("installed API Integration worker adapters", () => {
   test("uses the exact attempt resolver, local MCP registry, and provider transport", async () => {
-    const resolved: Array<{ destinationUrl: string; forceRefresh: boolean }> = [];
-    const requests: Array<{ url: string; authorization: string | null }> = [];
+    const resolved: Array<{
+      destinationUrl: string;
+      credentialTarget: string | undefined;
+      forceRefresh: boolean;
+    }> = [];
+    const requests: Array<{
+      url: string;
+      authorization: string | null;
+      cookie: string | null;
+    }> = [];
     const item = integration();
     const settings = testSettings({
       mcpServers: [
@@ -92,18 +100,25 @@ describe("installed API Integration worker adapters", () => {
       resolveCredential: async (request): Promise<ResolveConnectionCredentialResult> => {
         resolved.push({
           destinationUrl: request.destinationUrl,
+          credentialTarget: request.credentialTarget,
           forceRefresh: request.forceRefresh === true,
         });
         return {
           status: "ok",
           connectionId: item.connectionRef!.connectionId!,
           headers: { Authorization: "Bearer exact-attempt" },
+          placements: [
+            { carrier: "header", name: "Authorization", value: "Bearer exact-attempt" },
+            { carrier: "query", name: "api_key", value: "query-secret" },
+            { carrier: "cookie", name: "session_key", value: "cookie-secret" },
+          ],
         };
       },
       fetchImpl: async (request, init) => {
         requests.push({
           url: String(request),
           authorization: new Headers(init?.headers).get("authorization"),
+          cookie: new Headers(init?.headers).get("cookie"),
         });
         return new Response(JSON.stringify({ items: ["one"] }), {
           status: 200,
@@ -111,11 +126,9 @@ describe("installed API Integration worker adapters", () => {
         });
       },
     });
-    const prepared = await prepareAgentTools(
-      settings,
-      [{ kind: "mcp", id: item.serverId }],
-      { localMcpServers },
-    );
+    const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: item.serverId }], {
+      localMcpServers,
+    });
     try {
       expect(prepared.resolvedMcpConnectionIds.get(item.serverId)).toBe(
         item.connectionRef!.connectionId,
@@ -126,12 +139,17 @@ describe("installed API Integration worker adapters", () => {
       const result = await prepared.mcpServers[0]!.callTool("inventory_api__list_items", {});
       expect(result).toMatchObject({ isError: false });
       expect(resolved).toEqual([
-        { destinationUrl: "https://127.0.0.1/v1/items", forceRefresh: false },
+        {
+          destinationUrl: "https://127.0.0.1/v1/items",
+          credentialTarget: "http_api",
+          forceRefresh: false,
+        },
       ]);
       expect(requests).toEqual([
         {
-          url: "https://127.0.0.1/v1/items",
+          url: "https://127.0.0.1/v1/items?api_key=query-secret",
           authorization: "Bearer exact-attempt",
+          cookie: "session_key=cookie-secret",
         },
       ]);
     } finally {

@@ -2862,6 +2862,13 @@ export type McpCredentialsRequest = {
   surface: "model" | "toolspace";
   /** Canonical MCP destination that will receive the resolved headers. */
   destinationUrl: string;
+  /**
+   * Credential transport requested by the caller. Omitted means the existing
+   * header-only MCP transport. The additive `http_api` target allows embedding
+   * hosts to return query/cookie API-key placements for local API integrations
+   * without making those placements eligible for a remote MCP request.
+   */
+  credentialTarget?: "mcp" | "http_api";
   serverId: string;
   toolName?: string;
   connectionRef: McpServerConnectionRef;
@@ -2874,6 +2881,13 @@ export type McpCredentialAuthNeededReason =
   | "unsupported_auth"
   | "resource_scope_unavailable";
 
+export type ConnectionCredentialPlacement = {
+  carrier: "header" | "query" | "cookie";
+  name: string;
+  value: string;
+  prefix?: string;
+};
+
 export type McpCredentialResolution =
   | {
       status: "ok";
@@ -2882,6 +2896,12 @@ export type McpCredentialResolution =
       workspaceId: string;
       sessionId: string;
       headers: Record<string, string>;
+      /**
+       * Optional normalized HTTP credential placements. When present, header
+       * placements must exactly match `headers`. Query/cookie placements are
+       * accepted only for a request whose credentialTarget is `http_api`.
+       */
+      placements?: ConnectionCredentialPlacement[];
       connectionId: string;
       providerDomain: string;
       provider?: string;
@@ -7128,9 +7148,7 @@ export const ApiIntegrationInstallationSummary = z
     contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
   })
   .strict();
-export type ApiIntegrationInstallationSummary = z.infer<
-  typeof ApiIntegrationInstallationSummary
->;
+export type ApiIntegrationInstallationSummary = z.infer<typeof ApiIntegrationInstallationSummary>;
 
 export const ListApiIntegrationsResponse = z
   .object({ integrations: z.array(ApiIntegrationInstallationSummary) })
@@ -7147,9 +7165,7 @@ export const ApiIntegrationUninstallPreview = z
     removesRuntimeIntegration: z.boolean(),
   })
   .strict();
-export type ApiIntegrationUninstallPreview = z.infer<
-  typeof ApiIntegrationUninstallPreview
->;
+export type ApiIntegrationUninstallPreview = z.infer<typeof ApiIntegrationUninstallPreview>;
 
 export const UninstallApiIntegrationRequest = z
   .object({ expectedInstallationVersion: z.number().int().positive() })
