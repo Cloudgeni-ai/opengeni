@@ -215,20 +215,26 @@ and label lists do not.
 
 Before importing/enabling the capability in a deployment:
 
-1. In a Google Cloud project, enable both the Gmail API and Gmail MCP API,
-   configure the OAuth consent screen, and create a **Web application** OAuth
-   client.
-2. Register
+1. Join the [Google Workspace Developer Preview
+   Program](https://developers.google.com/workspace/preview) with the Google
+   Workspace account that will authorize Gmail. Include the deployment's exact
+   Google Cloud project in the application and wait for Google to confirm that
+   both the account and project are registered. Enabling the APIs and granting
+   OAuth scopes alone is not sufficient for the hosted MCP preview.
+2. In that registered Google Cloud project, enable both the Gmail API and Gmail
+   MCP API, configure the OAuth consent screen, and create a **Web application**
+   OAuth client.
+3. Register
    `${OPENGENI_PUBLIC_BASE_URL}/v1/integrations/oauth/callback` as an authorized
    redirect URI.
-3. Set `OPENGENI_INTEGRATIONS_ENABLED=true`, configure the normal integration
+4. Set `OPENGENI_INTEGRATIONS_ENABLED=true`, configure the normal integration
    state/encryption secrets, and add the deployment-owned client:
 
    ```dotenv
    OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON='{"https://accounts.google.com":{"clientId":"...","clientSecret":"...","tokenEndpointAuthMethod":"client_secret_post"}}'
    ```
 
-4. Run the normal reviewed catalog import, open **Capabilities**, search for
+5. Run the normal reviewed catalog import, open **Capabilities**, search for
    **Gmail**, and choose **Connect only for me** for a personal mailbox. A
    workspace-owned connection is appropriate only for an intentionally shared
    mailbox because every authorized workspace user may otherwise execute it.
