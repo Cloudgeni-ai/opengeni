@@ -10,6 +10,8 @@ import {
   BrowserDiagnosticBatch as ContractBrowserDiagnosticBatch,
   BrowserDownload as ContractBrowserDownload,
   BrowserDownloadListResponse as ContractBrowserDownloadListResponse,
+  BrowserDownloadSaveRequest as ContractBrowserDownloadSaveRequest,
+  BrowserDownloadSaveResponse as ContractBrowserDownloadSaveResponse,
   BrowserIdentity as ContractBrowserIdentity,
   BrowserIdentityListResponse as ContractBrowserIdentityListResponse,
   BrowserIdentityMutationResponse as ContractBrowserIdentityMutationResponse,
@@ -56,6 +58,8 @@ import {
   type BrowserDiagnosticBatch,
   type BrowserDownload,
   type BrowserDownloadListResponse,
+  type BrowserDownloadSaveRequest,
+  type BrowserDownloadSaveResponse,
   type BrowserIdentity,
   type BrowserIdentityListResponse,
   type BrowserIdentityMutationResponse,
@@ -162,6 +166,7 @@ describe("SDK interaction / contracts parity", () => {
       exact<BrowserDiagnosticBatch, z.infer<typeof ContractBrowserDiagnosticBatch>>(true),
       exact<BrowserDownload, z.infer<typeof ContractBrowserDownload>>(true),
       exact<BrowserDownloadListResponse, z.infer<typeof ContractBrowserDownloadListResponse>>(true),
+      exact<BrowserDownloadSaveResponse, z.infer<typeof ContractBrowserDownloadSaveResponse>>(true),
       exact<BrowserIdentity, z.infer<typeof ContractBrowserIdentity>>(true),
       exact<BrowserIdentityListResponse, z.infer<typeof ContractBrowserIdentityListResponse>>(true),
       exact<
@@ -216,6 +221,7 @@ describe("SDK interaction / contracts parity", () => {
         z.input<typeof ContractBrowserSessionAttachmentRequest>
       >(true),
       exact<BrowserActionRequest, z.input<typeof ContractBrowserActionRequest>>(true),
+      exact<BrowserDownloadSaveRequest, z.input<typeof ContractBrowserDownloadSaveRequest>>(true),
     ];
     expect(checks.every(Boolean)).toBe(true);
   });

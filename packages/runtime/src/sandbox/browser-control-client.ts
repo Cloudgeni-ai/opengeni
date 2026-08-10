@@ -10,6 +10,8 @@ import {
   BrowserActionReceipt,
   BrowserDiagnosticBatch,
   BrowserDownload,
+  BrowserDownloadExportReceipt,
+  BrowserDownloadExportRequest,
   BrowserDownloadListResponse,
   BrowserObservation,
   BrowserProtectedAuthFillCommand,
@@ -29,6 +31,8 @@ import {
   type BrowserActionReceipt as BrowserActionReceiptValue,
   type BrowserDiagnosticBatch as BrowserDiagnosticBatchValue,
   type BrowserDownload as BrowserDownloadValue,
+  type BrowserDownloadExportReceipt as BrowserDownloadExportReceiptValue,
+  type BrowserDownloadExportRequest as BrowserDownloadExportRequestValue,
   type BrowserDownloadListResponse as BrowserDownloadListResponseValue,
   type BrowserDiagnosticKind,
   type BrowserObservation as BrowserObservationValue,
@@ -94,6 +98,12 @@ export type BrowserControlPlacementSession = {
     content: string | Uint8Array;
     createParents?: boolean;
   }) => Promise<unknown>;
+  writePlacementPrivate?: (args: {
+    path: string;
+    content: string | Uint8Array;
+    createParents?: boolean;
+  }) => Promise<unknown>;
+  deletePlacementPrivate?: (path: string) => Promise<void>;
   writeStdin?: (args: {
     sessionId: number;
     chars?: string;
@@ -958,6 +968,29 @@ export class BrowserControlSessionClient {
     return download;
   }
 
+  async exportDownload(
+    downloadId: string,
+    requestInput: BrowserDownloadExportRequestValue,
+  ): Promise<BrowserDownloadExportReceiptValue> {
+    const id = requireUuid(downloadId, "download id");
+    const request = BrowserDownloadExportRequest.parse(requestInput);
+    if (request.downloadId !== id) {
+      throw new BrowserControlProtocolError("download export targets another resource");
+    }
+    const receipt = BrowserDownloadExportReceipt.parse(
+      await this.parent.requestForSession({
+        method: "POST",
+        path: this.path(`downloads/${id}/exports`),
+        token: this.controlToken,
+        body: request,
+      }),
+    );
+    if (receipt.operationId !== request.operationId || receipt.downloadId !== id) {
+      throw new BrowserControlProtocolError("browser controller returned another export receipt");
+    }
+    return receipt;
+  }
+
   async openTarget(url?: string): Promise<BrowserObservationValue> {
     return BrowserObservation.parse(
       await this.parent.requestForSession({
@@ -1575,6 +1608,7 @@ function sha256(value: unknown, label: string): string {
 
 function requirePlacementRequestSurface(session: BrowserControlPlacementSession): void {
   const hasPrivateWrite =
+    typeof session.writePlacementPrivate === "function" ||
     typeof session.writeFile === "function" ||
     (typeof session.exec === "function" && typeof session.writeStdin === "function");
   if (
@@ -1596,6 +1630,10 @@ async function writePrivateFile(
   },
   timeoutMs = 60_000,
 ): Promise<void> {
+  if (session.writePlacementPrivate) {
+    await session.writePlacementPrivate(input);
+    return;
+  }
   if (session.writeFile) {
     await session.writeFile(input);
     return;

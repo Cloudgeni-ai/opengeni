@@ -19,6 +19,9 @@ describe("BrowserSession route discipline", () => {
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/select"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/observation"',
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/downloads"',
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/downloads/:downloadId"',
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/downloads/:downloadId/save"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/actions"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId"',
@@ -110,6 +113,35 @@ describe("BrowserSession route discipline", () => {
       route.indexOf("sessionClient.action(command)"),
     );
     expect(route).toContain("sessionClient.receipt(request.operationId)");
+  });
+
+  test("publishes one exact private download before one fenced workspace import", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const start = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/downloads/:downloadId/save"',
+    );
+    const end = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/observation"',
+      start,
+    );
+    const route = source.slice(start, end);
+    expect(route.indexOf("findBrowserDownloadSave")).toBeLessThan(
+      route.indexOf("if (!objectStorage)"),
+    );
+    expect(route.indexOf("sessionClient.exportDownload")).toBeLessThan(
+      route.indexOf("finalizeBrowserDownloadFile"),
+    );
+    expect(route.indexOf("finalizeBrowserDownloadFile")).toBeLessThan(
+      route.indexOf("dispatchBrowserDownloadSave"),
+    );
+    expect(route.indexOf("dispatchBrowserDownloadSave")).toBeLessThan(
+      route.indexOf("service.importWorkspaceFile"),
+    );
+    expect(route.indexOf("service.importWorkspaceFile")).toBeLessThan(
+      route.indexOf("completeBrowserDownloadSave"),
+    );
+    expect(route).toContain('operation: "browser.download.save"');
+    expect(route).toContain("mayReplaceExisting: save.overwrite && dispatched.dispatchedNow");
   });
 
   test("resolves linked browsers through the exact active ComputerSession placement", async () => {

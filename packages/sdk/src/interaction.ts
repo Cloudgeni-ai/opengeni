@@ -588,6 +588,20 @@ export type BrowserDownloadListResponse = {
   downloads: BrowserDownload[];
 };
 
+export type BrowserDownloadSaveRequest = {
+  operationId: string;
+  destinationPath: string;
+  overwrite?: boolean | undefined;
+};
+
+export type BrowserDownloadSaveResponse = {
+  download: BrowserDownload;
+  destinationPath: string;
+  fileId: string;
+  operationId: string;
+  replayed: boolean;
+};
+
 export type InteractionRect = {
   x: number;
   y: number;
@@ -1209,6 +1223,13 @@ export interface InteractionTransport {
     downloadId: string,
     options?: OpenGeniRequestOptions,
   ): Promise<BrowserDownload>;
+  saveBrowserDownload(
+    workspaceId: string,
+    browserSessionId: string,
+    downloadId: string,
+    request: BrowserDownloadSaveRequest,
+    options?: OpenGeniRequestOptions,
+  ): Promise<BrowserDownloadSaveResponse>;
   createBrowserSession(
     workspaceId: string,
     request: CreateBrowserSessionRequest,
@@ -1381,6 +1402,11 @@ export type InteractionInterventionListOptions = OpenGeniRequestOptions & {
 
 export type AttachedBrowserDeviceListOptions = OpenGeniRequestOptions & {
   includeDisconnected?: boolean | undefined;
+};
+
+export type BrowserDownloadSaveOptions = OpenGeniRequestOptions & {
+  operationId?: string | undefined;
+  overwrite?: boolean | undefined;
 };
 
 export type CurrentOrOpenBrowserOptions = {
@@ -1958,6 +1984,30 @@ export class BrowserDownloadResource {
       throw new Error("BrowserDownload belongs to another BrowserSession");
     }
     return download;
+  }
+
+  /** Publish this exact private browser download into the source session's
+   * workspace. Pass an operationId when the caller needs retry identity across
+   * process boundaries; otherwise one is generated for this call. */
+  async saveToWorkspace(
+    destinationPath: string,
+    options: BrowserDownloadSaveOptions = {},
+  ): Promise<BrowserDownloadSaveResponse> {
+    const { operationId = crypto.randomUUID(), overwrite = false, ...requestOptions } = options;
+    const response = await this.transport.saveBrowserDownload(
+      this.workspaceId,
+      this.browserSessionId,
+      this.id,
+      { operationId, destinationPath, overwrite },
+      requestOptions,
+    );
+    if (
+      response.download.id !== this.id ||
+      response.download.browserSessionId !== this.browserSessionId
+    ) {
+      throw new Error("BrowserDownload save returned another resource");
+    }
+    return response;
   }
 }
 

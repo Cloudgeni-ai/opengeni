@@ -15,9 +15,12 @@ import type {
   BrowserTarget,
   BrowserWorkspaceFileStageRequest,
   BrowserWorkspaceFileStageResponse,
+  BrowserDownloadExportRequest as BrowserDownloadExportRequestValue,
+  BrowserDownloadExportReceipt as BrowserDownloadExportReceiptValue,
 } from "@opengeni/contracts";
 import {
   BROWSER_PROFILE_ARTIFACT_FORMAT,
+  BrowserDownloadExportRequest,
   BrowserRevisionMaterialization as BrowserRevisionMaterializationSchema,
   NetworkRouteConsistency,
   type NetworkRouteConsistency as NetworkRouteConsistencyValue,
@@ -33,6 +36,7 @@ import {
 import { createAttachedChromeTransport } from "./attached-cdp";
 import { AgentBrowserDriver, type BrowserRuntimeSnapshot } from "./cdp-driver";
 import { BrowserDownloadStore, type CompletedBrowserDownloadFile } from "./downloads";
+import { uploadBrowserDownload } from "./download-upload";
 import type { ResolvedAgentBrowserBinary } from "./binary";
 import {
   type BrowserFrameStreamOptions,
@@ -40,7 +44,11 @@ import {
   type BrowserImageFrame,
   type BrowserScreenshotOptions,
 } from "./media";
-import { AgentBrowserJsonRunner, browserProfileCryptoPolicy } from "./runner";
+import {
+  AgentBrowserJsonRunner,
+  assertAgentBrowserSocketPath,
+  browserProfileCryptoPolicy,
+} from "./runner";
 import { SqliteBrowserOperationJournal } from "./journal";
 import { SqliteBrowserProtectedAuthJournal } from "./protected-auth-journal";
 import { BrowserWorkspaceFileStager } from "./workspace-files";
@@ -200,6 +208,7 @@ export type BrowserSupervisorOptions = {
   agentBrowserBinary?: ResolvedAgentBrowserBinary;
   createDriver?: (context: BrowserSupervisorDriverContext) => Promise<BrowserSupervisorDriver>;
   uploadArtifact?: (artifactPath: string, authority: BrowserStateUploadAuthority) => Promise<void>;
+  uploadDownload?: typeof uploadBrowserDownload;
 };
 
 type Runtime = {
@@ -252,6 +261,7 @@ export class BrowserSupervisor {
     artifactPath: string,
     authority: BrowserStateUploadAuthority,
   ) => Promise<void>;
+  private readonly uploadDownload: typeof uploadBrowserDownload;
   private readonly sessions = new Map<string, Runtime>();
   private readonly creating = new Map<string, Promise<Runtime>>();
   private readonly ending = new Map<string, Promise<void>>();
@@ -263,6 +273,13 @@ export class BrowserSupervisor {
     this.socketRootDirectory = resolve(
       options.socketRootDirectory ?? defaultSocketRoot(this.rootDirectory),
     );
+    if (!options.createDriver) {
+      assertAgentBrowserSocketPath({
+        socketDirectory: join(this.socketRootDirectory, "0".repeat(16)),
+        namespace: "og",
+        sessionName: `b${"0".repeat(16)}`,
+      });
+    }
     this.maxSessions = boundedPositiveInteger(
       options.maxSessions ?? DEFAULT_MAX_SESSIONS,
       "maxSessions",
@@ -271,6 +288,7 @@ export class BrowserSupervisor {
       options.createDriver ??
       (async (context) => await createBrowserDriver(context, options.agentBrowserBinary));
     this.uploadArtifact = options.uploadArtifact ?? uploadBrowserStateArtifact;
+    this.uploadDownload = options.uploadDownload ?? uploadBrowserDownload;
   }
 
   static async open(options: BrowserSupervisorOptions): Promise<BrowserSupervisor> {
@@ -480,6 +498,21 @@ export class BrowserSupervisor {
       );
     }
     return await store.completedFile(downloadId);
+  }
+
+  async exportDownload(
+    reference: BrowserSessionReference,
+    requestInput: BrowserDownloadExportRequestValue,
+  ): Promise<BrowserDownloadExportReceiptValue> {
+    const request = BrowserDownloadExportRequest.parse(requestInput);
+    const store = this.requireActive(reference).downloadStore;
+    if (!store) {
+      throw new InteractionControllerError(
+        "unsupported",
+        "browser placement cannot publish device-local downloads",
+      );
+    }
+    return await store.export(request, this.uploadDownload);
   }
 
   captureState(inputValue: BrowserStateCaptureInput): Promise<BrowserStateCaptureReceipt> {

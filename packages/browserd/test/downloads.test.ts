@@ -194,6 +194,64 @@ describe("BrowserDownloadStore", () => {
     ).rejects.toThrow("already bound");
     await store.close();
   });
+
+  test("publishes exact bytes idempotently without persisting signed authority", async () => {
+    const rootDirectory = await newRoot();
+    const store = await BrowserDownloadStore.open({
+      rootDirectory,
+      browserSessionId,
+      controllerGeneration,
+      createId: () => firstDownloadId,
+      now: () => new Date("2026-08-10T12:00:00.000Z"),
+    });
+    await store.begin({ guid: "exported", targetId: null, suggestedFilename: "report.bin" });
+    await writeFile(join(store.filesDirectory, "exported"), "export me");
+    await store.progress({
+      guid: "exported",
+      state: "completed",
+      receivedBytes: 9,
+      totalBytes: 9,
+    });
+    const operationId = "44444444-4444-4444-8444-444444444444";
+    const uploads: string[] = [];
+    const authority = (signature: string) => ({
+      operationId,
+      downloadId: firstDownloadId,
+      upload: {
+        url: `https://storage.test/object?signature=${signature}`,
+        requiredHeaders: { "content-type": "application/octet-stream" },
+        expiresAt: "2026-08-10T12:15:00.000Z",
+      },
+    });
+    const upload = async (
+      path: string,
+      grant: { url: string; requiredHeaders: Record<string, string>; expiresAt: string },
+      expected: { sizeBytes: number; sha256: string },
+    ) => {
+      uploads.push(grant.url);
+      expect(await readFile(path, "utf8")).toBe("export me");
+      expect(expected).toEqual({
+        sizeBytes: 9,
+        sha256: "cab2b47a987c2db44dda774d9a594af4e5cadad9ba7ec27d2d8571b9c97d0350",
+      });
+    };
+
+    expect(await store.export(authority("private-one"), upload)).toMatchObject({
+      operationId,
+      downloadId: firstDownloadId,
+      replayed: false,
+    });
+    expect(await store.export(authority("private-two"), upload)).toMatchObject({
+      operationId,
+      downloadId: firstDownloadId,
+      replayed: true,
+    });
+    expect(uploads).toEqual(["https://storage.test/object?signature=private-one"]);
+    await store.close();
+    const databaseBytes = await readFile(join(rootDirectory, "downloads.sqlite"));
+    expect(databaseBytes.includes(Buffer.from("private-one"))).toBe(false);
+    expect(databaseBytes.includes(Buffer.from("storage.test"))).toBe(false);
+  });
 });
 
 async function fixture(

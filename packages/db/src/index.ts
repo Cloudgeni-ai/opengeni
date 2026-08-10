@@ -52884,5 +52884,6 @@ export * from "./browser-sessions";
 export * from "./computer-sessions";
 export * from "./browser-identities";
 export * from "./browser-auth";
+export * from "./browser-downloads";
 export * from "./attached-browser-devices";
 export * from "./interaction-revisions";

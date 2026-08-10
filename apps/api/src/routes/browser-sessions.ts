@@ -16,6 +16,8 @@ import {
   BrowserActionRequest,
   BrowserDiagnosticKind,
   BrowserDownload,
+  BrowserDownloadSaveRequest,
+  BrowserDownloadSaveResponse,
   BrowserDownloadListResponse,
   BrowserOpenTargetRequest,
   BrowserProtectedAuthFillCommand,
@@ -38,7 +40,9 @@ import {
   type AccessGrant,
   type BrowserProtectedAuthFillReceipt as BrowserProtectedAuthFillReceiptValue,
   type BrowserActionRequest as BrowserActionRequestValue,
+  type BrowserDownload as BrowserDownloadValue,
   type BrowserSession as BrowserSessionValue,
+  type FileAsset,
   type CreateBrowserSessionRequest as CreateBrowserSessionRequestValue,
   type InteractionPlacement,
   type InteractionCredentialAuthorityRef,
@@ -61,10 +65,13 @@ import {
   BrowserSessionOperationConflictError,
   BrowserSessionStateError,
   completeBrowserSessionEnd,
+  completeBrowserDownloadSave,
+  completeFileUpload,
   completeProtectedAuthFill,
   commitBrowserSessionSuspension,
   commitBrowserRevisionPublication,
   dispatchBrowserRevisionPublication,
+  dispatchBrowserDownloadSave,
   dispatchBrowserSessionOperation,
   dispatchProtectedAuthFill,
   failBrowserSessionOperation,
@@ -73,6 +80,7 @@ import {
   failBrowserSessionSuspension,
   failBrowserRevisionPublication,
   findBrowserSessionControlRecordByOperation,
+  findBrowserDownloadSave,
   getBrowserSessionControlRecord,
   getComputerSessionControlRecord,
   getBrowserPrivateCheckpointAuthority,
@@ -80,6 +88,7 @@ import {
   getBrowserRevisionArtifactAuthority,
   getEnrollment,
   getFiles,
+  getFileUpload,
   getAuthRun,
   getProtectedAuthFillPreparation,
   getSiteAuthConnection,
@@ -91,6 +100,7 @@ import {
   listBrowserSessions,
   listAttachedBrowserDevices,
   prepareBrowserSessionCreate,
+  prepareBrowserDownloadSave,
   prepareBrowserSessionEnd,
   prepareBrowserSessionResume,
   prepareBrowserSessionSuspend,
@@ -103,6 +113,7 @@ import {
   startAuthRun,
   touchBrowserSessionController,
   verifyAuthRun,
+  settleBrowserDownloadSaveFailure,
   type BrowserSessionControlRecord,
   type BrowserPrivateCheckpointAuthority,
   type BrowserRevisionArtifactAuthority,
@@ -111,6 +122,8 @@ import {
 import {
   requireAccessGrant,
   requireSessionAuthorization,
+  recordWorkspaceUsage,
+  requireLimit,
   relayConfigFromSettings,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
@@ -165,6 +178,7 @@ import {
   observeLifecycleResult,
 } from "../interaction-metrics";
 import { withChannelA, type ChannelAOperation } from "../sandbox/channel-a";
+import { sanitizeFilename } from "./files";
 
 const BROWSER_DRIVER_ID = "opengeni.cdp.v1";
 const BROWSER_WORKSPACE_FILE_AUTHORITY_TTL_SECONDS = 20 * 60;
@@ -582,6 +596,226 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         async ({ sessionClient }) => await sessionClient.download(downloadId),
       );
       return context.json(BrowserDownload.parse(result));
+    },
+  );
+
+  app.post(
+    "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/downloads/:downloadId/save",
+    async (context) => {
+      const workspaceId = context.req.param("workspaceId") ?? "";
+      const grant = await requireAccessGrant(context, deps, workspaceId, "sessions:control");
+      await requireAccessGrant(context, deps, workspaceId, "files:upload");
+      const browserSessionId = requireUuidParam(context, "browserSessionId");
+      const downloadId = requireUuidParam(context, "downloadId");
+      const request = await parseJsonBody(context, BrowserDownloadSaveRequest);
+      const objectStorage = deps.objectStorage;
+      const identity = {
+        accountId: grant.accountId,
+        workspaceId,
+        actorSubjectId: grant.subjectId,
+        browserSessionId,
+        downloadId,
+        request,
+      };
+
+      try {
+        let save = await findBrowserDownloadSave(deps.db, identity);
+        if (save?.response) {
+          return context.json(BrowserDownloadSaveResponse.parse(save.response), 200);
+        }
+        if (!objectStorage) {
+          throw new HTTPException(503, { message: "object storage is not configured" });
+        }
+        if (save && isTerminalOperation(save.state)) {
+          throw new InteractionResourceStateError(
+            `Browser download save is ${save.state.replace("_", " ")}`,
+          );
+        }
+
+        if (!save) {
+          const source = await withActiveBrowserController(
+            context,
+            grant,
+            workspaceId,
+            browserSessionId,
+            "session.control",
+            "browser.read",
+            async ({ sessionClient, record, binding }) => {
+              const download = await sessionClient.download(downloadId);
+              if (
+                download.status !== "completed" ||
+                !download.sha256 ||
+                download.controllerGeneration !== binding.controllerGeneration
+              ) {
+                throw new InteractionResourceStateError("Browser download is not ready to save");
+              }
+              return { download, sourceSessionId: record.sourceSessionId };
+            },
+          );
+          if (source.download.receivedBytes > objectStorage.maxSinglePutSizeBytes) {
+            throw new HTTPException(413, {
+              message: `browser download exceeds single PUT limit of ${objectStorage.maxSinglePutSizeBytes} bytes`,
+            });
+          }
+          const fileId = randomUUID();
+          const safeFilename = sanitizeFilename(source.download.filename);
+          save = await prepareBrowserDownloadSave(deps.db, {
+            ...identity,
+            sourceSessionId: source.sourceSessionId,
+            download: source.download,
+            fileId,
+            safeFilename,
+            contentType: "application/octet-stream",
+            bucket: objectStorage.bucket,
+            objectKey: `workspaces/${workspaceId}/files/${fileId}/original/${safeFilename}`,
+            uploadExpiresAt: new Date(
+              Date.now() + BROWSER_WORKSPACE_FILE_AUTHORITY_TTL_SECONDS * 1_000,
+            ),
+          });
+        }
+
+        if (save.download.receivedBytes > objectStorage.maxSinglePutSizeBytes) {
+          throw new HTTPException(413, {
+            message: `browser download exceeds single PUT limit of ${objectStorage.maxSinglePutSizeBytes} bytes`,
+          });
+        }
+        await requireLimit(deps, {
+          accountId: grant.accountId,
+          workspaceId,
+          action: "file:upload",
+          quantity: save.download.receivedBytes,
+        });
+
+        let upload = await getFileUpload(deps.db, workspaceId, save.uploadId);
+        if (!upload || upload.file.id !== save.fileId || upload.file.objectKey !== save.objectKey) {
+          throw new InteractionResourceStateError("Browser download file authority is unavailable");
+        }
+        if (upload.status === "pending") {
+          if (save.state !== "prepared") {
+            throw new InteractionResourceStateError(
+              "Browser download save was dispatched before its bytes were published",
+            );
+          }
+          const put = await objectStorage.createPutUrl({
+            key: save.objectKey,
+            contentType: save.contentType,
+            sha256: save.download.sha256,
+            expiresInSeconds: BROWSER_WORKSPACE_FILE_AUTHORITY_TTL_SECONDS,
+          });
+          save = await prepareBrowserDownloadSave(deps.db, {
+            ...identity,
+            sourceSessionId: save.sourceSessionId,
+            download: save.download,
+            fileId: save.fileId,
+            safeFilename: save.safeFilename,
+            contentType: save.contentType,
+            bucket: upload.file.bucket,
+            objectKey: save.objectKey,
+            uploadExpiresAt: put.expiresAt,
+          });
+          const preparedSave = save;
+          const receipt = await withActiveBrowserController(
+            context,
+            grant,
+            workspaceId,
+            browserSessionId,
+            "session.control",
+            "browser.control",
+            async ({ sessionClient, record, binding }) => {
+              if (
+                record.sourceSessionId !== preparedSave.sourceSessionId ||
+                binding.controllerGeneration !== preparedSave.controllerGeneration
+              ) {
+                throw new InteractionResourceStateError(
+                  "Browser download belongs to a stale controller",
+                );
+              }
+              const current = await sessionClient.download(downloadId);
+              assertBrowserDownloadSaveSource(current, preparedSave.download);
+              return await sessionClient.exportDownload(downloadId, {
+                operationId: request.operationId,
+                downloadId,
+                upload: {
+                  url: put.url,
+                  requiredHeaders: put.requiredHeaders,
+                  expiresAt: put.expiresAt.toISOString(),
+                },
+              });
+            },
+          );
+          if (
+            receipt.sizeBytes !== save.download.receivedBytes ||
+            receipt.sha256 !== save.download.sha256
+          ) {
+            throw new BrowserControlProtocolError(
+              "browser controller returned another download export",
+            );
+          }
+          upload = await finalizeBrowserDownloadFile(deps, grant, workspaceId, save.uploadId);
+        } else if (upload.status === "completed" && upload.file.status === "ready") {
+          await recordBrowserDownloadFileUsage(deps, grant, workspaceId, upload.file);
+        } else {
+          throw new InteractionResourceStateError(
+            `Browser download file upload is ${upload.status.replace("_", " ")}`,
+          );
+        }
+
+        if (upload.file.status !== "ready") {
+          throw new InteractionResourceStateError("Browser download file is not ready");
+        }
+        const get = await objectStorage.createGetUrl({
+          key: upload.file.objectKey,
+          expiresInSeconds: BROWSER_WORKSPACE_FILE_AUTHORITY_TTL_SECONDS,
+        });
+        const sourceSession = await requireSourceSession(deps, workspaceId, save.sourceSessionId);
+        await authorizeSourceSession(deps, grant, save.sourceSessionId, "session.control");
+        const dispatched = await dispatchBrowserDownloadSave(deps.db, identity);
+        const imported = await withChannelA(
+          channelServices,
+          {
+            accountId: grant.accountId,
+            workspaceId,
+            session: sourceSession,
+            subjectId: grant.subjectId,
+            waitSignal: context.req.raw.signal,
+            operation: "browser.download.save",
+          },
+          async ({ service }) =>
+            await service.importWorkspaceFile({
+              operationId: request.operationId,
+              destinationPath: save.destinationPath,
+              overwrite: save.overwrite,
+              mayReplaceExisting: save.overwrite && dispatched.dispatchedNow,
+              sizeBytes: save.download.receivedBytes,
+              sha256: save.download.sha256!,
+              source: {
+                url: get.url,
+                expiresAt: get.expiresAt.toISOString(),
+              },
+            }),
+        );
+        if (
+          imported.destinationPath !== save.destinationPath ||
+          imported.sizeBytes !== save.download.receivedBytes ||
+          imported.sha256 !== save.download.sha256
+        ) {
+          await settleBrowserDownloadSaveFailure(deps.db, {
+            ...identity,
+            state: "outcome_unknown",
+            errorCode: "workspace_import_receipt_mismatch",
+          });
+          throw new InteractionResourceStateError(
+            "Browser download workspace import outcome is unknown",
+          );
+        }
+        const response = await completeBrowserDownloadSave(deps.db, identity);
+        return context.json(
+          BrowserDownloadSaveResponse.parse(response),
+          response.replayed ? 200 : 201,
+        );
+      } catch (error) {
+        throw browserRouteError(error);
+      }
     },
   );
 
@@ -3336,6 +3570,89 @@ function interactionFailure(error: unknown) {
     message: error instanceof Error ? error.message : "browser controller failed",
     retryable: false,
   };
+}
+
+function assertBrowserDownloadSaveSource(
+  current: BrowserDownloadValue,
+  expected: BrowserDownloadValue,
+): void {
+  if (
+    current.id !== expected.id ||
+    current.browserSessionId !== expected.browserSessionId ||
+    current.controllerGeneration !== expected.controllerGeneration ||
+    current.status !== "completed" ||
+    current.version !== expected.version ||
+    current.filename !== expected.filename ||
+    current.receivedBytes !== expected.receivedBytes ||
+    current.totalBytes !== expected.totalBytes ||
+    current.sha256 !== expected.sha256
+  ) {
+    throw new InteractionResourceStateError("Browser download changed before it was saved");
+  }
+}
+
+async function finalizeBrowserDownloadFile(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  workspaceId: string,
+  uploadId: string,
+): Promise<NonNullable<Awaited<ReturnType<typeof getFileUpload>>>> {
+  const objectStorage = deps.objectStorage;
+  if (!objectStorage) throw new HTTPException(503, { message: "object storage is not configured" });
+  let upload = await getFileUpload(deps.db, workspaceId, uploadId);
+  if (!upload) throw new InteractionResourceStateError("Browser download file upload is absent");
+  if (upload.status === "completed" && upload.file.status === "ready") {
+    await recordBrowserDownloadFileUsage(deps, grant, workspaceId, upload.file);
+    return upload;
+  }
+  if (upload.status !== "pending") {
+    throw new InteractionResourceStateError(
+      `Browser download file upload is ${upload.status.replace("_", " ")}`,
+    );
+  }
+  if (upload.expiresAt.getTime() <= Date.now()) {
+    throw new InteractionResourceStateError("Browser download file upload authority expired");
+  }
+  const head = await objectStorage.headFile(upload.file).catch(() => {
+    throw new HTTPException(503, { message: "browser download object is not available" });
+  });
+  if (
+    Number(head.ContentLength ?? -1) !== upload.file.sizeBytes ||
+    (head.ContentType !== undefined && head.ContentType !== upload.file.contentType) ||
+    (upload.file.sha256 !== null && head.Metadata?.sha256 !== upload.file.sha256)
+  ) {
+    throw new HTTPException(502, { message: "browser download object failed verification" });
+  }
+  let file: FileAsset;
+  try {
+    file = await completeFileUpload(deps.db, workspaceId, upload.id);
+  } catch (error) {
+    const current = await getFileUpload(deps.db, workspaceId, upload.id);
+    if (current?.status !== "completed" || current.file.status !== "ready") throw error;
+    upload = current;
+    file = current.file;
+  }
+  await recordBrowserDownloadFileUsage(deps, grant, workspaceId, file);
+  return { ...upload, status: "completed", file };
+}
+
+async function recordBrowserDownloadFileUsage(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  workspaceId: string,
+  file: FileAsset,
+): Promise<void> {
+  await recordWorkspaceUsage(deps, {
+    accountId: grant.accountId,
+    workspaceId,
+    subjectId: grant.subjectId,
+    eventType: "file.uploaded",
+    quantity: file.sizeBytes,
+    unit: "byte",
+    sourceResourceType: "file",
+    sourceResourceId: file.id,
+    idempotencyKey: `file.uploaded:${workspaceId}:${file.id}`,
+  });
 }
 
 function browserRouteError(error: unknown): HTTPException {

@@ -3,6 +3,7 @@ import {
   BROWSER_CONTROL_PORT,
   BROWSER_PROFILE_ARTIFACT_FORMAT,
   BrowserActionCommand,
+  BrowserDownloadExportRequest,
   BrowserDownloadListResponse,
   BrowserRevisionMaterialization,
   type BrowserActionCommand as BrowserActionCommandValue,
@@ -117,6 +118,7 @@ export type BrowserControlServerOptions = {
   allowedOrigins?: readonly string[];
   browserExecutablePath?: string;
   closeSupervisorOnStop?: boolean;
+  onUnexpectedError?: (error: unknown, context: { method: string; pathname: string }) => void;
 };
 
 export class BrowserControlServer {
@@ -129,6 +131,9 @@ export class BrowserControlServer {
   private readonly allowedOrigins: Set<string>;
   private readonly browserExecutablePath: string | undefined;
   private readonly closeSupervisorOnStop: boolean;
+  private readonly onUnexpectedError:
+    | ((error: unknown, context: { method: string; pathname: string }) => void)
+    | undefined;
   private readonly authorities = new Map<string, SessionAuthority>();
   private readonly computerAuthorities = new Map<string, ComputerSessionAuthority>();
   private readonly lifecycleTails = new Map<string, Promise<void>>();
@@ -147,6 +152,7 @@ export class BrowserControlServer {
     }
     this.browserExecutablePath = options.browserExecutablePath;
     this.closeSupervisorOnStop = options.closeSupervisorOnStop ?? true;
+    this.onUnexpectedError = options.onUnexpectedError;
     const requestedHostname = options.hostname ?? "127.0.0.1";
     this.server = Bun.serve<InteractionSocketData>({
       hostname: requestedHostname,
@@ -250,6 +256,16 @@ export class BrowserControlServer {
       const response = await this.route(request, server);
       return response ? this.withCors(response, normalizedOrigin) : undefined;
     } catch (error) {
+      if (!(error instanceof ProtocolError) && !(error instanceof InteractionControllerError)) {
+        try {
+          this.onUnexpectedError?.(error, {
+            method: request.method,
+            pathname: new URL(request.url).pathname,
+          });
+        } catch {
+          // Diagnostics must never alter the controller response contract.
+        }
+      }
       return this.withCors(protocolResponse(error), normalizedOrigin);
     }
   }
@@ -408,6 +424,24 @@ export class BrowserControlServer {
       );
       if (!download) throw new ProtocolError("resource_not_found", "download not found", 404);
       return success(download);
+    }
+    if (segments.length === 6 && segments[3] === "downloads" && segments[5] === "exports") {
+      if (request.method !== "POST") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      const downloadId = requireUuid(segments[4], "download id");
+      const exported = BrowserDownloadExportRequest.safeParse(await readJson(request));
+      if (!exported.success) {
+        throw new ProtocolError("invalid_action", "download export authority is invalid", 400);
+      }
+      if (exported.data.downloadId !== downloadId) {
+        throw new ProtocolError(
+          "operation_conflict",
+          "download export targets another resource",
+          409,
+        );
+      }
+      return success(await this.supervisor.exportDownload(reference, exported.data));
     }
     if (segments.length === 5 && segments[3] === "operations") {
       if (request.method !== "GET") {
@@ -1408,6 +1442,7 @@ function routeNeedsControl(segments: readonly string[], request: Request): boole
     segments[3] === "actions" ||
     segments[3] === "protected-auth-fills" ||
     segments[3] === "protected-auth-operations" ||
+    (segments[3] === "downloads" && segments[5] === "exports") ||
     (segments[3] === "operations" && request.method === "POST")
   ) {
     return true;

@@ -489,6 +489,13 @@ describe("API helpers", () => {
     );
     expect(
       routeLabel(
+        `/v1/workspaces/${workspace}/browser-sessions/browser-1/downloads/download-1/save`,
+      ),
+    ).toBe(
+      "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/downloads/:downloadId/save",
+    );
+    expect(
+      routeLabel(
         `/v1/workspaces/${workspace}/computer-sessions/computer-1/targets/window-1/observation`,
       ),
     ).toBe(

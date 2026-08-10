@@ -1413,6 +1413,7 @@ export const BrowserDownloadExportReceipt = z
     downloadId: z.string().uuid(),
     sizeBytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
     sha256: sha256Hex,
+    replayed: z.boolean(),
   })
   .strict();
 export type BrowserDownloadExportReceipt = z.infer<typeof BrowserDownloadExportReceipt>;

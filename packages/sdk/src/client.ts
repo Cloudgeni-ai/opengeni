@@ -31,6 +31,8 @@ import {
   type BrowserDiagnosticsOptions,
   type BrowserDownload,
   type BrowserDownloadListResponse,
+  type BrowserDownloadSaveRequest,
+  type BrowserDownloadSaveResponse,
   type BrowserIdentity,
   type BrowserIdentityListOptions,
   type BrowserIdentityListResponse,
@@ -2761,6 +2763,22 @@ export class OpenGeniClient {
       "GET",
       `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/downloads/${encodeURIComponent(downloadId)}`,
       undefined,
+      {},
+      options,
+    );
+  }
+
+  async saveBrowserDownload(
+    workspaceId: string,
+    browserSessionId: string,
+    downloadId: string,
+    request: BrowserDownloadSaveRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserDownloadSaveResponse> {
+    return await this.requestJson<BrowserDownloadSaveResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/downloads/${encodeURIComponent(downloadId)}/save`,
+      request,
       {},
       options,
     );

@@ -7,11 +7,14 @@ import {
 } from "@opengeni/testing";
 import {
   BrowserActionReceipt,
+  BrowserDownloadListResponse,
+  BrowserDownloadSaveResponse,
   BrowserObservation,
   BrowserSessionAttachment,
   BrowserSessionMutationResponse,
   BrowserTargetListResponse,
   signDelegatedAccessToken,
+  type FileAsset,
 } from "@opengeni/contracts";
 import {
   bootstrapWorkspace,
@@ -21,6 +24,7 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import type { AppDependencies, SessionWorkflowClient } from "@opengeni/core";
+import type { ObjectStorage } from "@opengeni/storage";
 import { createApp } from "../../apps/api/src/app";
 
 const image = process.env.OPENGENI_BROWSER_CANARY_IMAGE?.trim() ?? "";
@@ -83,18 +87,26 @@ describe("BrowserSession API Docker canary", () => {
         deleteScheduledTaskSchedule: async () => undefined,
         triggerScheduledTask: async () => undefined,
       } as unknown as SessionWorkflowClient;
+      const storageFixture = createLiveStorageFixture();
       const app = createApp({
         settings,
         db: client.db,
         bus: new MemoryEventBus() as never,
         workflowClient,
         managedAuth: null,
+        objectStorage: storageFixture.storage,
       } satisfies AppDependencies);
       const token = await signDelegatedAccessToken(delegationSecret, {
         accountId: workspace.accountId,
         workspaceId: workspace.workspaceId!,
         subjectId: "browser-live-user",
-        permissions: ["sessions:read", "sessions:control", "stream:view"],
+        permissions: [
+          "sessions:read",
+          "sessions:control",
+          "stream:view",
+          "files:read",
+          "files:upload",
+        ],
         principalKind: "human_session",
         exp: Math.floor(Date.now() / 1_000) + 3_600,
       });
@@ -106,6 +118,7 @@ describe("BrowserSession API Docker canary", () => {
       let containerId: string | null = null;
       let primaryError: unknown;
       let cleanupError: Error | undefined;
+      let containerDiagnostics: string | null = null;
       try {
         const createResponse = await app.request(
           `/v1/workspaces/${workspace.workspaceId}/browser-sessions`,
@@ -164,14 +177,112 @@ describe("BrowserSession API Docker canary", () => {
               expectedFrameId: observation.frameId,
               action: {
                 type: "navigate",
-                url: "data:text/html,%3Ctitle%3EAction%20Completed%3C%2Ftitle%3E",
+                url: storageFixture.fixtureUrl,
               },
             }),
           },
         );
-        expect(BrowserActionReceipt.parse(await actionResponse.json())).toMatchObject({
+        const navigated = BrowserActionReceipt.parse(await actionResponse.json());
+        expect(navigated).toMatchObject({
           state: "completed",
         });
+        if (!navigated.observation) throw new Error("navigation returned no observation");
+
+        const downloadAction = await app.request(
+          `/v1/workspaces/${workspace.workspaceId}/browser-sessions/${browserSessionId}/actions`,
+          {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              operationId: crypto.randomUUID(),
+              targetId: target.id,
+              expectedTargetGeneration: navigated.observation.target.targetGeneration,
+              expectedDocumentGeneration: navigated.observation.target.documentGeneration,
+              expectedFrameId: navigated.observation.frameId,
+              action: {
+                type: "click",
+                locator: { kind: "text", text: "Download fixture" },
+              },
+            }),
+          },
+        );
+        expect(BrowserActionReceipt.parse(await downloadAction.json())).toMatchObject({
+          state: "completed",
+        });
+        const download = await waitForCompletedDownload(
+          app,
+          workspace.workspaceId!,
+          browserSessionId,
+          headers,
+        );
+        expect(download).toMatchObject({
+          filename: "fixture-download.txt",
+          receivedBytes: storageFixture.downloadBytes.byteLength,
+          status: "completed",
+        });
+
+        const saveOperationId = crypto.randomUUID();
+        const savePath = `/v1/workspaces/${workspace.workspaceId}/browser-sessions/${browserSessionId}/downloads/${download.id}/save`;
+        const saveResponse = await app.request(savePath, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            operationId: saveOperationId,
+            destinationPath: "fixture-download.txt",
+            overwrite: false,
+          }),
+        });
+        const saveBody = await saveResponse.json();
+        if (saveResponse.status !== 201) {
+          throw new Error(
+            `BrowserDownload save returned ${saveResponse.status} after ${storageFixture.putCount()} object PUT and ${storageFixture.getCount()} object GET requests: ${JSON.stringify(saveBody)}`,
+          );
+        }
+        const saved = BrowserDownloadSaveResponse.parse(saveBody);
+        expect(saved).toMatchObject({
+          download: { id: download.id },
+          destinationPath: "fixture-download.txt",
+          operationId: saveOperationId,
+          replayed: false,
+        });
+        expect(storageFixture.putCount()).toBe(1);
+        expect(storageFixture.getCount()).toBe(1);
+
+        const readResponse = await app.request(
+          `/v1/workspaces/${workspace.workspaceId}/sessions/${session.id}/fs/read`,
+          {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              path: "fixture-download.txt",
+              encoding: "utf8",
+              maxBytes: 1_024,
+            }),
+          },
+        );
+        expect(readResponse.status).toBe(200);
+        expect(await readResponse.json()).toMatchObject({
+          content: storageFixture.downloadBytes.toString("utf8"),
+          truncated: false,
+        });
+
+        storageFixture.stop();
+        const replayResponse = await app.request(savePath, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            operationId: saveOperationId,
+            destinationPath: "fixture-download.txt",
+            overwrite: false,
+          }),
+        });
+        expect(replayResponse.status).toBe(200);
+        expect(BrowserDownloadSaveResponse.parse(await replayResponse.json())).toMatchObject({
+          operationId: saveOperationId,
+          replayed: true,
+        });
+        expect(storageFixture.putCount()).toBe(1);
+        expect(storageFixture.getCount()).toBe(1);
 
         const attachmentResponse = await app.request(
           `/v1/workspaces/${workspace.workspaceId}/browser-sessions/${browserSessionId}/attachments`,
@@ -208,7 +319,11 @@ describe("BrowserSession API Docker canary", () => {
       } catch (error) {
         primaryError = error;
       } finally {
+        storageFixture.stop();
         if (containerId && /^[a-f0-9]{64}$/u.test(containerId)) {
+          if (primaryError !== undefined) {
+            containerDiagnostics = await readContainerDiagnostics(containerId);
+          }
           const cleanup = Bun.spawn(["docker", "rm", "-f", containerId], {
             stdout: "pipe",
             stderr: "pipe",
@@ -227,9 +342,196 @@ describe("BrowserSession API Docker canary", () => {
           "BrowserSession canary failed and its exact container cleanup also failed",
         );
       }
+      if (primaryError !== undefined && containerDiagnostics) {
+        throw new AggregateError(
+          [primaryError, new Error(containerDiagnostics)],
+          "BrowserSession canary failed; exact placement diagnostics follow",
+        );
+      }
       if (primaryError !== undefined) throw primaryError;
       if (cleanupError) throw cleanupError;
     },
     300_000,
   );
 });
+
+async function readContainerDiagnostics(containerId: string): Promise<string | null> {
+  const logs = Bun.spawn(["docker", "logs", "--tail", "200", containerId], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const controller = Bun.spawn(
+    [
+      "docker",
+      "exec",
+      containerId,
+      "sh",
+      "-c",
+      'if [ -r /tmp/opengeni-browserd/browserd.log ]; then sed -n "1,240p" /tmp/opengeni-browserd/browserd.log; fi',
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  const [stdout, stderr, exitCode, controllerStdout, controllerStderr, controllerExitCode] =
+    await Promise.all([
+      new Response(logs.stdout).text(),
+      new Response(logs.stderr).text(),
+      logs.exited,
+      new Response(controller.stdout).text(),
+      new Response(controller.stderr).text(),
+      controller.exited,
+    ]);
+  if (exitCode !== 0 && controllerExitCode !== 0) return null;
+  const output = [stdout, stderr, controllerStdout, controllerStderr]
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .join("\n");
+  return output ? `BrowserSession placement logs:\n${output}` : null;
+}
+
+function createLiveStorageFixture() {
+  const downloadBytes = Buffer.from("deterministic workspace download\n", "utf8");
+  const objects = new Map<
+    string,
+    { bytes: Uint8Array; contentType: string; sha256: string | null }
+  >();
+  let putCount = 0;
+  let getCount = 0;
+  let stopped = false;
+  const server = Bun.serve({
+    hostname: "0.0.0.0",
+    port: 0,
+    async fetch(request) {
+      const url = new URL(request.url);
+      if (url.pathname === "/fixture") {
+        return new Response(
+          '<!doctype html><title>Download canary</title><a download href="/download">Download fixture</a>',
+          { headers: { "content-type": "text/html; charset=utf-8" } },
+        );
+      }
+      if (url.pathname === "/download") {
+        return new Response(downloadBytes, {
+          headers: {
+            "content-type": "text/plain; charset=utf-8",
+            "content-disposition": 'attachment; filename="fixture-download.txt"',
+          },
+        });
+      }
+      if (!url.pathname.startsWith("/objects/")) return new Response(null, { status: 404 });
+      const key = decodeURIComponent(url.pathname.slice("/objects/".length));
+      if (request.method === "PUT") {
+        putCount += 1;
+        objects.set(key, {
+          bytes: new Uint8Array(await request.arrayBuffer()),
+          contentType: request.headers.get("content-type") ?? "application/octet-stream",
+          sha256: request.headers.get("x-goog-meta-sha256"),
+        });
+        return new Response(null, { status: 200 });
+      }
+      if (request.method === "GET") {
+        getCount += 1;
+        const object = objects.get(key);
+        return object
+          ? new Response(object.bytes, { headers: { "content-type": object.contentType } })
+          : new Response(null, { status: 404 });
+      }
+      return new Response(null, { status: 405 });
+    },
+  });
+  const containerBaseUrl = `http://host.docker.internal:${server.port}`;
+  const objectUrl = (key: string, authority: "get" | "put") =>
+    `${containerBaseUrl}/objects/${encodeURIComponent(key)}?authority=${authority}`;
+  const storage: ObjectStorage = {
+    bucket: "browser-download-live",
+    backend: "gcs",
+    maxSinglePutSizeBytes: 5_000_000_000,
+    async createPutUrl({ key, contentType, sha256, expiresInSeconds = 300 }) {
+      return {
+        url: objectUrl(key, "put"),
+        requiredHeaders: {
+          "content-type": contentType,
+          ...(sha256 ? { "x-goog-meta-sha256": sha256 } : {}),
+        },
+        expiresAt: new Date(Date.now() + expiresInSeconds * 1_000),
+      };
+    },
+    async createGetUrl({ key, expiresInSeconds = 300 }) {
+      return {
+        url: objectUrl(key, "get"),
+        expiresAt: new Date(Date.now() + expiresInSeconds * 1_000),
+      };
+    },
+    async headFile(file) {
+      const object = objects.get(file.objectKey);
+      if (!object) throw new Error("object not found");
+      return {
+        ContentLength: object.bytes.byteLength,
+        ContentType: object.contentType,
+        ...(object.sha256 ? { Metadata: { sha256: object.sha256 } } : {}),
+      };
+    },
+    async fileExists(file) {
+      return objects.has(file.objectKey);
+    },
+    async getFileBytes(file) {
+      const object = requireLiveObject(objects, file);
+      return object.bytes;
+    },
+    async getFileRange(file, range) {
+      const object = objects.get(file.objectKey);
+      return object ? object.bytes.slice(range.start, range.end + 1) : null;
+    },
+    async getObjectBytes(key) {
+      const object = objects.get(key);
+      return object ? { bytes: object.bytes, contentType: object.contentType } : null;
+    },
+    async putObject({ key, contentType, body, sha256 }) {
+      objects.set(key, { bytes: body, contentType, sha256: sha256 ?? null });
+    },
+    async deleteObject(key) {
+      objects.delete(key);
+    },
+  };
+  return {
+    storage,
+    downloadBytes,
+    fixtureUrl: `${containerBaseUrl}/fixture`,
+    putCount: () => putCount,
+    getCount: () => getCount,
+    stop() {
+      if (stopped) return;
+      stopped = true;
+      server.stop(true);
+    },
+  };
+}
+
+function requireLiveObject(
+  objects: Map<string, { bytes: Uint8Array; contentType: string; sha256: string | null }>,
+  file: FileAsset,
+) {
+  const object = objects.get(file.objectKey);
+  if (!object) throw new Error("object not found");
+  return object;
+}
+
+async function waitForCompletedDownload(
+  app: ReturnType<typeof createApp>,
+  workspaceId: string,
+  browserSessionId: string,
+  headers: Record<string, string>,
+) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const response = await app.request(
+      `/v1/workspaces/${workspaceId}/browser-sessions/${browserSessionId}/downloads`,
+      { headers },
+    );
+    if (response.status !== 200) {
+      throw new Error(`BrowserDownload list returned ${response.status}`);
+    }
+    const listed = BrowserDownloadListResponse.parse(await response.json());
+    const completed = listed.downloads.find((download) => download.status === "completed");
+    if (completed) return completed;
+    await Bun.sleep(50);
+  }
+  throw new Error("BrowserDownload did not complete");
+}

@@ -27,6 +27,8 @@ const SITE_AUTH_CONNECTION_ID = "00000000-0000-4000-8000-000000000020";
 const AUTH_RUN_ID = "00000000-0000-4000-8000-000000000021";
 const INTERVENTION_ID = "00000000-0000-4000-8000-000000000022";
 const BROWSER_DOWNLOAD_ID = "00000000-0000-4000-8000-000000000023";
+const BROWSER_DOWNLOAD_SAVE_OPERATION_ID = "00000000-0000-4000-8000-000000000024";
+const BROWSER_DOWNLOAD_FILE_ID = "00000000-0000-4000-8000-000000000025";
 
 function attachedBrowser(): AttachedBrowserDevice {
   return {
@@ -172,7 +174,7 @@ function computerSession(overrides: Partial<ComputerSession> = {}): ComputerSess
 }
 
 describe("BrowserSession SDK", () => {
-  test("lists browser-produced files as resources without exposing controller paths", async () => {
+  test("lists and explicitly saves private browser-produced files as resources", async () => {
     const download = {
       id: BROWSER_DOWNLOAD_ID,
       browserSessionId: BROWSER_SESSION_ID,
@@ -194,23 +196,46 @@ describe("BrowserSession SDK", () => {
       fetch: async (input) => {
         const url = String(input);
         calls.push(url);
-        return url.endsWith(`/${BROWSER_DOWNLOAD_ID}`)
-          ? json(download)
-          : json({
-              browserSessionId: BROWSER_SESSION_ID,
-              controllerGeneration: "controller-1",
-              downloads: [download],
-            });
+        return url.endsWith(`/${BROWSER_DOWNLOAD_ID}/save`)
+          ? json(
+              {
+                download,
+                destinationPath: "downloads/report.pdf",
+                fileId: BROWSER_DOWNLOAD_FILE_ID,
+                operationId: BROWSER_DOWNLOAD_SAVE_OPERATION_ID,
+                replayed: false,
+              },
+              201,
+            )
+          : url.endsWith(`/${BROWSER_DOWNLOAD_ID}`)
+            ? json(download)
+            : json({
+                browserSessionId: BROWSER_SESSION_ID,
+                controllerGeneration: "controller-1",
+                downloads: [download],
+              });
       },
     });
 
     const browser = client.interaction.browsers.session(WORKSPACE_ID, BROWSER_SESSION_ID);
     expect((await browser.downloads.list()).downloads).toEqual([download]);
     expect(await browser.downloads.download(BROWSER_DOWNLOAD_ID).get()).toEqual(download);
+    expect(
+      await browser.downloads
+        .download(BROWSER_DOWNLOAD_ID)
+        .saveToWorkspace("downloads/report.pdf", {
+          operationId: BROWSER_DOWNLOAD_SAVE_OPERATION_ID,
+        }),
+    ).toMatchObject({
+      destinationPath: "downloads/report.pdf",
+      fileId: BROWSER_DOWNLOAD_FILE_ID,
+      operationId: BROWSER_DOWNLOAD_SAVE_OPERATION_ID,
+    });
     expect(JSON.stringify(download)).not.toContain("/tmp/");
     expect(calls).toEqual([
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/browser-sessions/${BROWSER_SESSION_ID}/downloads`,
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/browser-sessions/${BROWSER_SESSION_ID}/downloads/${BROWSER_DOWNLOAD_ID}`,
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/browser-sessions/${BROWSER_SESSION_ID}/downloads/${BROWSER_DOWNLOAD_ID}/save`,
     ]);
   });
 

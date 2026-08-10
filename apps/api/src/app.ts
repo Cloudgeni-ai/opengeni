@@ -1081,6 +1081,19 @@ const routeLabelPatterns: Array<{
     label: "/v1/workspaces/:workspaceId/browser-identities",
   },
   {
+    pattern: /^\/v1\/workspaces\/[^/]+\/browser-sessions\/[^/]+\/downloads\/[^/]+\/save$/,
+    label:
+      "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/downloads/:downloadId/save",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/browser-sessions\/[^/]+\/downloads\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/downloads/:downloadId",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/browser-sessions\/[^/]+\/downloads$/,
+    label: "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/downloads",
+  },
+  {
     pattern:
       /^\/v1\/workspaces\/[^/]+\/browser-sessions\/[^/]+\/auth-runs\/[^/]+\/(protected-fill|report|verify)$/,
     label: (match) =>

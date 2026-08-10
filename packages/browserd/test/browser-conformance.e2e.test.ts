@@ -9,7 +9,13 @@ import type {
   InteractionSemanticNodeValue,
 } from "@opengeni/contracts";
 import { InteractionDefiniteDriverError } from "@opengeni/interaction";
-import { AgentBrowserDriver, AgentBrowserJsonRunner, BrowserWorkspaceFileStager } from "../src";
+import {
+  AgentBrowserDriver,
+  AgentBrowserJsonRunner,
+  BrowserDownloadStore,
+  BrowserWorkspaceFileStager,
+  uploadBrowserDownload,
+} from "../src";
 import { startBrowserConformanceFixture } from "./fixtures/browser-conformance-fixture";
 
 const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
@@ -24,6 +30,13 @@ e2e(
     const uploadServer = Bun.serve({ port: 0, fetch: () => new Response(uploadBytes) });
     const fileStager = await BrowserWorkspaceFileStager.open({
       rootDirectory: join(directory, "uploads"),
+    });
+    const browserSessionId = randomUUID();
+    const controllerGeneration = `controller-${randomUUID()}`;
+    const downloadStore = await BrowserDownloadStore.open({
+      rootDirectory: join(directory, "download-store"),
+      browserSessionId,
+      controllerGeneration,
     });
     await fileStager.stage({
       operationId: uploadOperationId,
@@ -46,15 +59,20 @@ e2e(
       sessionName: "s",
       socketDirectory: join(directory, "s"),
       profileDirectory: join(directory, "profile"),
-      downloadDirectory: join(directory, "downloads"),
+      downloadDirectory: downloadStore.filesDirectory,
       screenshotDirectory: join(directory, "screenshots"),
       headed: false,
     });
     const driver = new AgentBrowserDriver({
-      browserSessionId: randomUUID(),
-      controllerGeneration: `controller-${randomUUID()}`,
+      browserSessionId,
+      controllerGeneration,
       runner,
-      downloadDirectory: join(directory, "downloads"),
+      downloadDirectory: downloadStore.filesDirectory,
+      downloadEvents: {
+        begin: downloadStore.begin.bind(downloadStore),
+        progress: downloadStore.progress.bind(downloadStore),
+        reject: downloadStore.reject.bind(downloadStore),
+      },
       resolveWorkspaceFiles: async (operationId, ids) => await fileStager.resolve(operationId, ids),
       emulation: {
         locale: "nb-NO",
@@ -164,6 +182,54 @@ e2e(
         kind: "download",
         filename: "fixture-download.txt",
       });
+      const completedDownload = await waitForCompletedDownload(downloadStore);
+      const expectedDownloadBytes = Buffer.from("deterministic download\n", "utf8");
+      expect(completedDownload).toMatchObject({
+        browserSessionId,
+        controllerGeneration,
+        filename: "fixture-download.txt",
+        status: "completed",
+        receivedBytes: expectedDownloadBytes.byteLength,
+        sha256: createHash("sha256").update(expectedDownloadBytes).digest("hex"),
+      });
+      let publishedBytes = Buffer.alloc(0);
+      const publicationServer = Bun.serve({
+        port: 0,
+        async fetch(request) {
+          expect(request.method).toBe("PUT");
+          expect(request.headers.get("content-type")).toBe("application/octet-stream");
+          expect(request.headers.get("x-goog-meta-sha256")).toBe(completedDownload.sha256);
+          publishedBytes = Buffer.from(await request.arrayBuffer());
+          return new Response(null, { status: 200 });
+        },
+      });
+      const saveOperationId = randomUUID();
+      try {
+        expect(
+          await downloadStore.export(
+            {
+              operationId: saveOperationId,
+              downloadId: completedDownload.id,
+              upload: {
+                url: `${publicationServer.url}/workspace-object?signature=private`,
+                requiredHeaders: {
+                  "content-type": "application/octet-stream",
+                  "x-goog-meta-sha256": completedDownload.sha256!,
+                },
+                expiresAt: new Date(Date.now() + 60_000).toISOString(),
+              },
+            },
+            uploadBrowserDownload,
+          ),
+        ).toMatchObject({
+          operationId: saveOperationId,
+          downloadId: completedDownload.id,
+          replayed: false,
+        });
+        expect(publishedBytes).toEqual(expectedDownloadBytes);
+      } finally {
+        publicationServer.stop(true);
+      }
 
       page = await act(driver, page, clickRole("button", "Open fixture popup"));
       const popup = await waitForTarget(driver, "Fixture popup");
@@ -175,6 +241,7 @@ e2e(
       expect(names(page)).toContain("Redirect complete");
     } finally {
       await driver.close().catch(() => undefined);
+      await downloadStore.close().catch(() => undefined);
       uploadServer.stop(true);
       fixture.close();
       await rm(directory, { recursive: true, force: true });
@@ -182,6 +249,15 @@ e2e(
   },
   90_000,
 );
+
+async function waitForCompletedDownload(store: BrowserDownloadStore) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const download = (await store.list())[0];
+    if (download?.status === "completed") return download;
+    await Bun.sleep(25);
+  }
+  throw new Error("browser download did not settle");
+}
 
 function command(
   observation: BrowserObservation,

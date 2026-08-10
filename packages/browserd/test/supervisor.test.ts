@@ -13,6 +13,20 @@ import {
 } from "../src";
 
 describe("BrowserSupervisor", () => {
+  test.skipIf(process.platform === "win32")(
+    "rejects a managed socket root before accepting sessions when Unix sockets cannot fit",
+    async () => {
+      await expect(
+        BrowserSupervisor.open({
+          rootDirectory: "/tmp/ogb-supervisor-capacity",
+          socketRootDirectory: `/tmp/${"socket-root-too-long-".repeat(4)}`,
+        }),
+      ).rejects.toThrow(
+        "agent-browser socket directory and identifiers exceed the Unix socket limit",
+      );
+    },
+  );
+
   test("hosts independent sessions and journals each causal action", async () => {
     await withSupervisor(async ({ supervisor, contexts }) => {
       const first = reference(1);

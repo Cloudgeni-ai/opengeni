@@ -55,6 +55,7 @@ export async function runBrowserd(environment: NodeJS.ProcessEnv = process.env):
       ...(config.browserExecutablePath
         ? { browserExecutablePath: config.browserExecutablePath }
         : {}),
+      onUnexpectedError: reportUnexpectedControllerError,
     });
   } catch (error) {
     await Promise.allSettled([
@@ -75,6 +76,34 @@ export async function runBrowserd(environment: NodeJS.ProcessEnv = process.env):
   );
   await waitForShutdownSignal();
   await server.stop();
+}
+
+function reportUnexpectedControllerError(
+  error: unknown,
+  context: { method: string; pathname: string },
+): void {
+  const value =
+    error instanceof Error
+      ? {
+          name: boundedDiagnostic(error.name, 256),
+          message: boundedDiagnostic(error.message, 4_096),
+          stack: boundedDiagnostic(error.stack ?? "", 16_384),
+        }
+      : { name: "UnknownError", message: "non-Error controller failure", stack: "" };
+  process.stderr.write(
+    `${JSON.stringify({
+      service: "opengeni-browserd",
+      event: "unexpected_request_error",
+      method: context.method,
+      pathname: context.pathname,
+      error: value,
+    })}\n`,
+  );
+}
+
+function boundedDiagnostic(value: string, maxBytes: number): string {
+  const bytes = Buffer.from(value);
+  return bytes.byteLength <= maxBytes ? value : bytes.subarray(0, maxBytes).toString("utf8");
 }
 
 type BrowserdConfig = {

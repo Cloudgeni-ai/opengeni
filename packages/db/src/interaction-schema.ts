@@ -1198,11 +1198,17 @@ export const interactionResourceOperations = pgTable(
     accountId: uuid("account_id").notNull(),
     workspaceId: uuid("workspace_id").notNull(),
     resourceKind: text("resource_kind", {
-      enum: ["network_route", "site_auth_connection", "auth_run", "intervention"],
+      enum: [
+        "network_route",
+        "site_auth_connection",
+        "auth_run",
+        "intervention",
+        "browser_download",
+      ],
     }).notNull(),
     resourceId: uuid("resource_id").notNull(),
     kind: text("kind", {
-      enum: ["create", "update", "start", "report", "protected_fill", "verify", "resolve"],
+      enum: ["create", "update", "start", "report", "protected_fill", "verify", "resolve", "save"],
     }).notNull(),
     requestDigest: text("request_digest").notNull(),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),

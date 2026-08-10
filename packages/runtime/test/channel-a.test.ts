@@ -17,12 +17,23 @@ import {
   test,
 } from "bun:test";
 import { testSettings } from "@opengeni/testing";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   SandboxChannelAService,
   ChannelANotFoundError,
+  ChannelAConflictError,
   ChannelAUnavailableError,
   MockAgentResponder,
   SelfhostedSession,
@@ -92,6 +103,51 @@ async function makeBox(): Promise<{ session: LiveLocalSession; root: string }> {
   const session = await client.create({});
   liveSessions.push(session);
   return { session, root: session.state.workspaceRootPath };
+}
+
+function withPlacementPrivateStaging(session: LiveLocalSession): {
+  session: ChannelASession;
+  commands: string[];
+  staged: Array<{ path: string; content: string }>;
+} {
+  const commands: string[] = [];
+  const staged: Array<{ path: string; content: string }> = [];
+  const wrapped = new Proxy(session as ChannelASession, {
+    get(target, property, receiver) {
+      if (property === "writePlacementPrivate") {
+        return async (args: {
+          path: string;
+          content: string | Uint8Array;
+          createParents?: boolean;
+        }) => {
+          if (args.createParents) mkdirSync(dirname(args.path), { recursive: true, mode: 0o700 });
+          const content =
+            typeof args.content === "string"
+              ? args.content
+              : Buffer.from(args.content).toString("utf8");
+          staged.push({ path: args.path, content });
+          await Bun.write(args.path, args.content);
+          chmodSync(args.path, 0o600);
+        };
+      }
+      if (property === "deletePlacementPrivate") {
+        return async (path: string) => rmSync(path, { force: true });
+      }
+      if (property === "exec" || property === "execCommand") {
+        const method = Reflect.get(target, property, target) as
+          | ((args: { cmd: string }) => Promise<unknown>)
+          | undefined;
+        if (!method) return undefined;
+        return async (args: { cmd: string }) => {
+          commands.push(args.cmd);
+          return await method.call(target, args);
+        };
+      }
+      const value = Reflect.get(target, property, receiver) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return { session: wrapped, commands, staged };
 }
 
 afterEach(async () => {
@@ -1049,6 +1105,157 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
     const svc = new SandboxChannelAService({ session });
     await svc.fsMkdir({ path: "once", recursive: false });
     await expect(svc.fsMkdir({ path: "once", recursive: false })).rejects.toThrow();
+  });
+});
+
+describe("Workspace file import (real local box)", () => {
+  test("streams exact bytes once, hides signed authority, and replays from the target hash", async () => {
+    const { session, root } = await makeBox();
+    const placement = withPlacementPrivateStaging(session);
+    mkdirSync(join(root, "downloads"));
+    const bytes = Buffer.from("exact browser download\n\0binary", "utf8");
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    let requests = 0;
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        requests += 1;
+        return new Response(bytes);
+      },
+    });
+    const events: { type: string; payload: unknown }[] = [];
+    const service = new SandboxChannelAService({
+      session: placement.session,
+      workspaceRoot: root,
+      emit: async (batch) => events.push(...batch),
+    });
+    const source = {
+      url: `${server.url}asset?private-token=must-not-leak`,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+    try {
+      const created = await service.importWorkspaceFile({
+        operationId: "00000000-0000-4000-8000-000000000081",
+        destinationPath: "downloads/archive.bin",
+        overwrite: false,
+        mayReplaceExisting: false,
+        sizeBytes: bytes.byteLength,
+        sha256,
+        source,
+      });
+      expect(created).toMatchObject({
+        destinationPath: "downloads/archive.bin",
+        sizeBytes: bytes.byteLength,
+        sha256,
+        replayed: false,
+        revision: 1,
+      });
+      expect(readFileSync(join(root, "downloads/archive.bin"))).toEqual(bytes);
+      expect(requests).toBe(1);
+      expect(placement.staged).toHaveLength(1);
+      expect(placement.staged[0]!.content).toContain("private-token=must-not-leak");
+      expect(placement.commands.join("\n")).not.toContain("private-token=must-not-leak");
+      expect(JSON.stringify(events)).not.toContain("private-token=must-not-leak");
+      expect(existsSync(placement.staged[0]!.path)).toBeFalse();
+
+      const replayed = await service.importWorkspaceFile({
+        operationId: "00000000-0000-4000-8000-000000000081",
+        destinationPath: "downloads/archive.bin",
+        overwrite: false,
+        mayReplaceExisting: false,
+        sizeBytes: bytes.byteLength,
+        sha256,
+        source,
+      });
+      expect(replayed.replayed).toBeTrue();
+      expect(replayed.revision).toBe(1);
+      expect(requests).toBe(1);
+      expect(events.filter((event) => event.type === "fs.changed")).toHaveLength(1);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("requires fresh replacement authority and rejects symlink escape", async () => {
+    const { session, root } = await makeBox();
+    const placement = withPlacementPrivateStaging(session);
+    mkdirSync(join(root, "downloads"));
+    writeFileSync(join(root, "downloads/existing.bin"), "old");
+    const outside = mkdtempSync(join(tmpdir(), "opengeni-import-outside-"));
+    temporaryRoots.push(outside);
+    symlinkSync(outside, join(root, "outside"));
+    const bytes = Buffer.from("new exact bytes");
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const server = Bun.serve({ port: 0, fetch: () => new Response(bytes) });
+    const service = new SandboxChannelAService({
+      session: placement.session,
+      workspaceRoot: root,
+    });
+    const request = {
+      operationId: "00000000-0000-4000-8000-000000000082",
+      destinationPath: "downloads/existing.bin",
+      overwrite: true,
+      mayReplaceExisting: false,
+      sizeBytes: bytes.byteLength,
+      sha256,
+      source: {
+        url: server.url.toString(),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+    };
+    try {
+      await expect(service.importWorkspaceFile(request)).rejects.toBeInstanceOf(
+        ChannelAConflictError,
+      );
+      const replaced = await service.importWorkspaceFile({
+        ...request,
+        mayReplaceExisting: true,
+      });
+      expect(replaced.replayed).toBeFalse();
+      expect(readFileSync(join(root, "downloads/existing.bin"))).toEqual(bytes);
+      await expect(
+        service.importWorkspaceFile({
+          ...request,
+          operationId: "00000000-0000-4000-8000-000000000083",
+          destinationPath: "outside/escape.bin",
+          mayReplaceExisting: true,
+        }),
+      ).rejects.toThrow(/outside workspace/);
+      expect(existsSync(join(outside, "escape.bin"))).toBeFalse();
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("rejects corrupt source bytes without publishing a target", async () => {
+    const { session, root } = await makeBox();
+    const placement = withPlacementPrivateStaging(session);
+    mkdirSync(join(root, "downloads"));
+    const bytes = Buffer.from("corrupt");
+    const server = Bun.serve({ port: 0, fetch: () => new Response(bytes) });
+    const service = new SandboxChannelAService({
+      session: placement.session,
+      workspaceRoot: root,
+    });
+    try {
+      await expect(
+        service.importWorkspaceFile({
+          operationId: "00000000-0000-4000-8000-000000000084",
+          destinationPath: "downloads/corrupt.bin",
+          overwrite: false,
+          mayReplaceExisting: false,
+          sizeBytes: bytes.byteLength,
+          sha256: "0".repeat(64),
+          source: {
+            url: server.url.toString(),
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          },
+        }),
+      ).rejects.toBeInstanceOf(ChannelAUnavailableError);
+      expect(existsSync(join(root, "downloads/corrupt.bin"))).toBeFalse();
+    } finally {
+      server.stop(true);
+    }
   });
 });
 

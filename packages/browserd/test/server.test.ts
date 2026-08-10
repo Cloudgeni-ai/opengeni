@@ -22,6 +22,7 @@ import {
   type BrowserStateUploadAuthority,
   type BrowserSupervisorDriver,
   type BrowserSupervisorDriverContext,
+  type BrowserSupervisorOptions,
 } from "../src";
 
 const adminToken = `admin.${"a".repeat(48)}`;
@@ -350,6 +351,7 @@ describe("BrowserControlServer", () => {
 
   test("projects exact managed downloads through view authority without leaking placement paths", async () => {
     let browserContext: BrowserSupervisorDriverContext | null = null;
+    const uploadAuthorities: string[] = [];
     await withServer(
       async ({ server, reference }) => {
         const created = await request(server, "/v1/browser-sessions", {
@@ -393,10 +395,51 @@ describe("BrowserControlServer", () => {
           browserSessionId: reference.browserSessionId,
           status: "completed",
         });
+
+        const operationId = randomUUID();
+        const exportPath = `${path}/${download.id}/exports`;
+        const exportRequest = {
+          operationId,
+          downloadId: download.id,
+          upload: {
+            url: "https://storage.test/file?signature=private-export",
+            requiredHeaders: { "content-type": "application/octet-stream" },
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          },
+        };
+        expect(
+          (
+            await request(server, exportPath, {
+              method: "POST",
+              token: viewToken,
+              body: exportRequest,
+            })
+          ).status,
+        ).toBe(401);
+        const exported = await request(server, exportPath, {
+          method: "POST",
+          token: controlToken,
+          body: exportRequest,
+        });
+        expect(exported.status).toBe(200);
+        const exportText = await exported.text();
+        expect(exportText).not.toContain("private-export");
+        expect(JSON.parse(exportText).data).toMatchObject({
+          operationId,
+          downloadId: download.id,
+          sizeBytes: 3,
+          replayed: false,
+        });
+        expect(uploadAuthorities).toEqual([exportRequest.upload.url]);
       },
       {
         onBrowserContext: (context) => {
           browserContext = context;
+        },
+        uploadDownload: async (path, authority, expected) => {
+          expect(await readFile(path, "utf8")).toBe("pdf");
+          expect(expected.sizeBytes).toBe(3);
+          uploadAuthorities.push(authority.url);
         },
       },
     );
@@ -666,6 +709,10 @@ describe("BrowserControlServer", () => {
   });
 
   test("rejects malformed bodies without reflecting private driver failures", async () => {
+    const unexpected: Array<{
+      error: unknown;
+      context: { method: string; pathname: string };
+    }> = [];
     await withServer(
       async ({ server, reference }) => {
         const invalidUtf8 = await fetch(`${server.url}/v1/browser-sessions`, {
@@ -684,8 +731,17 @@ describe("BrowserControlServer", () => {
         });
         expect(failed.status).toBe(500);
         expect(JSON.stringify(await json(failed))).not.toContain("private-driver-detail");
+        expect(unexpected).toHaveLength(1);
+        expect(unexpected[0]?.context).toEqual({
+          method: "POST",
+          pathname: "/v1/browser-sessions",
+        });
+        expect(unexpected[0]?.error).toMatchObject({ message: "private-driver-detail" });
       },
-      { failStart: true },
+      {
+        failStart: true,
+        onUnexpectedError: (error, context) => unexpected.push({ error, context }),
+      },
     );
   });
 });
@@ -699,12 +755,14 @@ async function withServer(
     failStart?: boolean;
     allowedOrigins?: readonly string[];
     uploadArtifact?: (path: string, authority: BrowserStateUploadAuthority) => Promise<void>;
+    uploadDownload?: BrowserSupervisorOptions["uploadDownload"];
     linkedComputer?: {
       computerSessionId: string;
       controllerGeneration: string;
       environment: NodeJS.ProcessEnv;
     };
     onBrowserContext?: (context: BrowserSupervisorDriverContext) => void;
+    onUnexpectedError?: (error: unknown, context: { method: string; pathname: string }) => void;
   } = {},
 ): Promise<void> {
   const directory = await mkdtemp("/tmp/ogb-server-");
@@ -716,6 +774,7 @@ async function withServer(
       return fakeDriver(context, options);
     },
     ...(options.uploadArtifact ? { uploadArtifact: options.uploadArtifact } : {}),
+    ...(options.uploadDownload ? { uploadDownload: options.uploadDownload } : {}),
   });
   const computerSupervisor = options.linkedComputer
     ? ({
@@ -737,6 +796,7 @@ async function withServer(
     adminToken,
     port: 0,
     allowedOrigins: options.allowedOrigins ?? [allowedOrigin],
+    ...(options.onUnexpectedError ? { onUnexpectedError: options.onUnexpectedError } : {}),
   });
   try {
     await callback({

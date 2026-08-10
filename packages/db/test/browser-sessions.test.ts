@@ -27,6 +27,7 @@ import {
   getBrowserSessionControlRecord,
   getBrowserPrivateCheckpointAuthority,
   listBrowserSessions,
+  MANAGED_BROWSER_SESSION_CAPABILITIES,
   prepareBrowserSessionCreate,
   prepareBrowserSessionEnd,
   prepareBrowserSessionResume,
@@ -161,6 +162,17 @@ function checkpointArtifact(
 }
 
 describe("durable BrowserSession lifecycle", () => {
+  test("advertises proven managed transfer capabilities without overclaiming attached Chrome", () => {
+    expect(MANAGED_BROWSER_SESSION_CAPABILITIES).toMatchObject({
+      downloads: true,
+      uploads: true,
+    });
+    expect(ATTACHED_BROWSER_SESSION_CAPABILITIES).toMatchObject({
+      downloads: false,
+      uploads: false,
+    });
+  });
+
   test("binds a headed browser to one active same-placement ComputerSession", async () => {
     if (!available) return;
     const scope = await fixture();

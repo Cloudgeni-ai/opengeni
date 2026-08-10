@@ -100,7 +100,7 @@ export class AgentBrowserJsonRunner {
   static async create(options: AgentBrowserRunnerOptions): Promise<AgentBrowserJsonRunner> {
     validateSegment(options.namespace, "namespace");
     validateSegment(options.sessionName, "session name");
-    validateSocketPath(options);
+    assertAgentBrowserSocketPath(options);
     for (const directory of [
       options.socketDirectory,
       options.profileDirectory,
@@ -535,7 +535,9 @@ const PASSTHROUGH_ENVIRONMENT_KEYS = [
   "COMSPEC",
 ] as const;
 
-function validateSocketPath(options: AgentBrowserRunnerOptions): void {
+export function assertAgentBrowserSocketPath(
+  options: Pick<AgentBrowserRunnerOptions, "namespace" | "sessionName" | "socketDirectory">,
+): void {
   if (process.platform === "win32") return;
   const projected = join(
     resolve(options.socketDirectory),
