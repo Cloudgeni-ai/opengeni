@@ -1044,7 +1044,12 @@ export async function postUserMessageTurn(input: {
   expectedDraftRevision?: number | null;
   reasoningEffortFallback?: Settings["openaiReasoningEffort"];
   turnExecutionPolicy: TurnExecutionPolicyV1;
-}): Promise<{ accepted: SessionEvent; turn: SessionTurn; replay: boolean }> {
+}): Promise<{
+  accepted: SessionEvent;
+  turn: SessionTurn;
+  interruptionCount: number;
+  replay: boolean;
+}> {
   const { db, bus, workflowClient, settings, accountId, workspaceId, sessionId } = input;
   const requestedModel = canonicalConfiguredModel(settings, input.model ?? null) ?? null;
   const requestedReasoningEffort = input.reasoningEffort ?? null;
@@ -1158,7 +1163,12 @@ export async function postUserMessageTurn(input: {
       origin: "core",
     });
   }
-  return { accepted, turn, replay: result.replay };
+  return {
+    accepted,
+    turn,
+    interruptionCount: result.interruptionCount,
+    replay: result.replay,
+  };
 }
 
 /**
@@ -1828,7 +1838,12 @@ export async function acceptSessionUserMessageWithOutcome(
     controlEtag?: string | null;
     expectedDraftRevision?: number | null;
   },
-): Promise<{ accepted: SessionEvent; turn: SessionTurn; replay: boolean }> {
+): Promise<{
+  accepted: SessionEvent;
+  turn: SessionTurn;
+  interruptionCount: number;
+  replay: boolean;
+}> {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
   await requireSessionAuthorization(deps, grant, {
     sessionId,
@@ -1906,7 +1921,7 @@ export async function acceptSessionUserMessageWithOutcome(
     source: personalConnectionDelegationSourceForGrant(grant),
   });
   const delegatedServiceInitiator = serviceInitiatorForGrant(grant);
-  const { accepted, turn, replay } = await postUserMessageTurn({
+  const { accepted, turn, interruptionCount, replay } = await postUserMessageTurn({
     db,
     bus,
     workflowClient,
@@ -1963,7 +1978,7 @@ export async function acceptSessionUserMessageWithOutcome(
     origin: turn.source,
     idempotencyKey: `agent_run.created:${workspaceId}:${turn.id}`,
   });
-  return { accepted, turn, replay };
+  return { accepted, turn, interruptionCount, replay };
 }
 
 /** Backward-compatible entity-returning path used by existing REST callers. */
@@ -1973,15 +1988,20 @@ export async function acceptSessionUserMessage(
   workspaceId: Parameters<typeof acceptSessionUserMessageWithOutcome>[2],
   sessionId: Parameters<typeof acceptSessionUserMessageWithOutcome>[3],
   input: Parameters<typeof acceptSessionUserMessageWithOutcome>[4],
-): Promise<{ accepted: SessionEvent; turn: SessionTurn }> {
-  const { accepted, turn } = await acceptSessionUserMessageWithOutcome(
+): Promise<{
+  accepted: SessionEvent;
+  turn: SessionTurn;
+  interruptionCount: number;
+  replay: boolean;
+}> {
+  const { accepted, turn, interruptionCount, replay } = await acceptSessionUserMessageWithOutcome(
     deps,
     grant,
     workspaceId,
     sessionId,
     input,
   );
-  return { accepted, turn };
+  return { accepted, turn, interruptionCount, replay };
 }
 
 /**

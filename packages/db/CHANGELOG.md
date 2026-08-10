@@ -1,5 +1,14 @@
 # @opengeni/db
 
+## 0.29.1
+
+### Patch Changes
+
+- 2cd6dce: Build and reuse version-bound immutable provider images after clean rig verification, with content-hash invalidation and runtime-setup fallback for missing or unsupported providers.
+- Updated dependencies [2cd6dce]
+  - @opengeni/contracts@0.42.1
+  - @opengeni/config@0.12.10
+
 ## 0.29.0
 
 ### Minor Changes

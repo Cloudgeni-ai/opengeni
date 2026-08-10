@@ -229,9 +229,9 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
       });
       setEditingTaskId(null);
       await refresh();
-      toast.success("Knowledge sync schedule updated");
+      toast.success("Sync schedule updated");
     } catch (error) {
-      toast.error("Failed to update knowledge sync schedule", {
+      toast.error("Failed to update sync schedule", {
         description: error instanceof Error ? error.message : String(error),
       });
     } finally {
@@ -281,7 +281,7 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
       <PageHeader
         icon={<CalendarClockIcon className="size-4" />}
         title="Schedules"
-        description="Agent runs and deterministic knowledge-source syncs with per-run history."
+        description="Agent runs and knowledge sync history."
         actions={
           <>
             <Button
@@ -342,7 +342,7 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
           <EmptyState
             icon={<CalendarClockIcon className="size-4" />}
             title="No schedules yet"
-            description="Create an agent schedule or select a connector source to synchronize."
+            description="Schedule an agent run or connector sync."
             action={
               <Button
                 type="button"
@@ -375,14 +375,14 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
                     <div className="mt-1 text-xs text-fg-subtle">
                       {scheduleLabel(task.schedule)} ·{" "}
                       {task.action.kind === "knowledge_source_sync"
-                        ? "knowledge source sync"
+                        ? "knowledge sync"
                         : task.runMode.replaceAll("_", " ")}
                     </div>
                     {task.action.kind === "knowledge_source_sync" ? (
                       <div className="mt-1 text-2xs text-fg-subtle">
                         {task.action.destination.kind} scope · source{" "}
                         {task.action.sourceId.slice(0, 8)} ·{" "}
-                        {task.action.allDescendants ? "all descendants" : "selected object only"}
+                        {task.action.allDescendants ? "with descendants" : "selected only"}
                       </div>
                     ) : (
                       <SchedulePersonalConnectionDisclosure
@@ -598,8 +598,8 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
         title={confirmDelete ? `Delete “${confirmDelete.name}”?` : "Delete scheduled task?"}
         description={
           confirmDelete?.action.kind === "knowledge_source_sync"
-            ? "This deletes the schedule and disables synchronization for this source. Re-enable it explicitly from the connector to create a new schedule."
-            : "This deletes the schedule and stops future runs. Sessions it already created are kept."
+            ? "Deletes this schedule and disables its source. Re-enable it from the connector."
+            : "Deletes future runs; existing sessions are kept."
         }
         confirmLabel="Delete task"
         onConfirm={() => (confirmDelete ? taskAction(confirmDelete, "delete") : false)}
@@ -649,8 +649,7 @@ function KnowledgeSyncTaskEditor(props: {
         </Label>
       </div>
       <Notice>
-        This schedule runs deterministic connector inventory and indexing. It never starts an agent
-        session or incurs an agent-run charge.
+        Runs connector inventory and indexing without an agent session or agent-run charge.
       </Notice>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <Button

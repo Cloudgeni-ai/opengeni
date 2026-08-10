@@ -79,6 +79,26 @@ function queue(overrides: Partial<UseTurnQueueResult> = {}): UseTurnQueueResult 
   };
 }
 
+function pausedEffectiveControl(): NonNullable<UseTurnQueueResult["effectiveControl"]> {
+  return {
+    state: "paused",
+    controlVersion: 4,
+    controlEtag: "control-4",
+    directState: "paused",
+    primaryBlocker: null,
+    additionalBlockerCount: 0,
+    blockers: [],
+    resumeOptions: [],
+    override: null,
+    settlement: {
+      state: "stopping",
+      attemptCount: 1,
+      interruptionPendingCount: 0,
+      quiescencePendingCount: 1,
+    },
+  };
+}
+
 function pendingInput(): UseTurnQueueResult["pendingInputs"][number] {
   return {
     id: "33333333-3333-4333-8333-333333333333",
@@ -330,15 +350,64 @@ describe("SessionChrome", () => {
     expect(steeringPanel?.textContent).not.toContain("agent will continue");
   });
 
-  test("shows stopping even when no Steer is queued", async () => {
+  test("shows an accepted composer Steer receipt before the queue refresh arrives", async () => {
     mounted = await renderComponent(
-      <SessionChrome queue={queue({ queue: [], stoppingPreviousAttempt: true })} />,
+      <SessionChrome
+        queue={queue({ queue: [], stoppingPreviousAttempt: false })}
+        composer={composer({
+          stoppingAttempt: "previous",
+          steering: {
+            phase: "accepted",
+            text: "Use the corrected digest",
+            clientEventId: "client-steer-2",
+            triggerEventId: "event-steer-2",
+            turnId: "11111111-1111-4111-8111-111111111111",
+            stoppingPreviousAttempt: true,
+          },
+        })}
+      />,
+    );
+
+    const steeringChip = mounted.container.querySelector<HTMLButtonElement>(
+      '[data-og-session-chrome-signal="steering"]',
+    );
+    expect(steeringChip?.textContent).toContain("Stopping previous work");
+    expect(steeringChip?.textContent).not.toContain("Changing direction");
+  });
+
+  test("shows a Pause receipt as stopping current work before the queue refresh arrives", async () => {
+    mounted = await renderComponent(
+      <SessionChrome
+        queue={queue({ queue: [], stoppingPreviousAttempt: false })}
+        composer={composer({ stoppingAttempt: "current" })}
+      />,
     );
 
     const stoppingChip = mounted.container.querySelector<HTMLButtonElement>(
       '[data-og-session-chrome-signal="steering"]',
     );
-    expect(stoppingChip?.textContent).toContain("Stopping previous work");
+    expect(stoppingChip?.textContent).toContain("Stopping current work");
+    await act(async () => stoppingChip?.click());
+    expect(
+      mounted.container.querySelector('[data-og-session-chrome-panel="steering"]')?.textContent,
+    ).toContain("current command to stop safely");
+  });
+
+  test("shows stopping even when no Steer is queued", async () => {
+    mounted = await renderComponent(
+      <SessionChrome
+        queue={queue({
+          queue: [],
+          stoppingPreviousAttempt: true,
+          effectiveControl: pausedEffectiveControl(),
+        })}
+      />,
+    );
+
+    const stoppingChip = mounted.container.querySelector<HTMLButtonElement>(
+      '[data-og-session-chrome-signal="steering"]',
+    );
+    expect(stoppingChip?.textContent).toContain("Stopping current work");
     await act(async () => stoppingChip?.click());
     expect(
       mounted.container.querySelector('[data-og-session-chrome-panel="steering"]')?.textContent,

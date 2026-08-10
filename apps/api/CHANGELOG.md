@@ -1,5 +1,24 @@
 # @opengeni/api-router
 
+## 0.24.2
+
+### Patch Changes
+
+- 98b94e8: Project physical cancellation immediately from atomic Steer and Pause receipts, then reconcile it against durable queue truth.
+- Updated dependencies [98b94e8]
+- Updated dependencies [2cd6dce]
+  - @opengeni/core@0.22.2
+  - @opengeni/contracts@0.42.1
+  - @opengeni/db@0.29.1
+  - @opengeni/runtime@0.18.39
+  - @opengeni/artifact-tool@0.1.1
+  - @opengeni/config@0.12.10
+  - @opengeni/documents@0.5.29
+  - @opengeni/events@0.3.100
+  - @opengeni/github@0.4.47
+  - @opengeni/observability@0.5.16
+  - @opengeni/storage@0.2.84
+
 ## 0.24.1
 
 ### Patch Changes

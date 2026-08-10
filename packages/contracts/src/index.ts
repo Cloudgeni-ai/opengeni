@@ -5860,10 +5860,10 @@ export const ProposeRigChangeRequest = z.discriminatedUnion("kind", [
 ]);
 export type ProposeRigChangeRequest = z.infer<typeof ProposeRigChangeRequest>;
 
-export const ScheduledTaskStatus = z.enum(["active", "paused"]);
+export const ScheduledTaskStatus = /* @__PURE__ */ z.enum(["active", "paused"]);
 export type ScheduledTaskStatus = z.infer<typeof ScheduledTaskStatus>;
 
-export const ScheduledTaskRunStatus = z.enum([
+export const ScheduledTaskRunStatus = /* @__PURE__ */ z.enum([
   "queued",
   "dispatched",
   "succeeded",
@@ -5872,17 +5872,21 @@ export const ScheduledTaskRunStatus = z.enum([
 ]);
 export type ScheduledTaskRunStatus = z.infer<typeof ScheduledTaskRunStatus>;
 
-export const ScheduledTaskRunMode = z.enum([
+export const ScheduledTaskRunMode = /* @__PURE__ */ z.enum([
   "new_session_per_run",
   "reusable_session",
   "existing_session",
 ]);
 export type ScheduledTaskRunMode = z.infer<typeof ScheduledTaskRunMode>;
 
-export const ScheduledTaskOverlapPolicy = z.enum(["allow_concurrent", "skip", "buffer_one"]);
+export const ScheduledTaskOverlapPolicy = /* @__PURE__ */ z.enum([
+  "allow_concurrent",
+  "skip",
+  "buffer_one",
+]);
 export type ScheduledTaskOverlapPolicy = z.infer<typeof ScheduledTaskOverlapPolicy>;
 
-export const ScheduledTaskTriggerType = z.enum([
+export const ScheduledTaskTriggerType = /* @__PURE__ */ z.enum([
   "scheduled",
   "manual",
   "initial",
@@ -5892,64 +5896,75 @@ export const ScheduledTaskTriggerType = z.enum([
 ]);
 export type ScheduledTaskTriggerType = z.infer<typeof ScheduledTaskTriggerType>;
 
-export const ScheduledTaskActionKind = z.enum(["agent_turn", "knowledge_source_sync"]);
+export const ScheduledTaskActionKind = /* @__PURE__ */ z.enum([
+  "agent_turn",
+  "knowledge_source_sync",
+]);
 export type ScheduledTaskActionKind = z.infer<typeof ScheduledTaskActionKind>;
 
-export const KnowledgeSourceSyncLimits = z.object({
-  maxItems: z.number().int().positive().max(10_000).default(500),
-  maxBytes: z.number().int().positive().max(5_000_000_000).default(500_000_000),
-  maxFileBytes: z.number().int().positive().max(5_000_000_000).default(100_000_000),
-  maxProviderRequests: z.number().int().positive().max(10_000).default(1_000),
-  maxElapsedSeconds: z.number().int().positive().max(3_600).default(300),
-  maxConcurrency: z.number().int().positive().max(32).default(4),
-  maxFailureDetails: z.number().int().positive().max(100).default(25),
+const KnowledgeSourceSyncPositiveInteger = z.number().int().positive();
+const KnowledgeSourceSyncNonnegativeInteger = z.number().int().nonnegative();
+const KnowledgeSourceSyncZeroInteger = KnowledgeSourceSyncNonnegativeInteger.default(0);
+const KnowledgeSourceSyncUuid = z.string().uuid();
+const KnowledgeSourceSyncSubject = z.string().min(1).max(1024);
+const KnowledgeSourceSyncEnabled = z.boolean().default(true);
+const KnowledgeSourceSyncDisabled = z.boolean().default(false);
+
+export const KnowledgeSourceSyncLimits = /* @__PURE__ */ z.object({
+  maxItems: KnowledgeSourceSyncPositiveInteger.max(10_000).default(500),
+  maxBytes: KnowledgeSourceSyncPositiveInteger.max(5_000_000_000).default(500_000_000),
+  maxFileBytes: KnowledgeSourceSyncPositiveInteger.max(5_000_000_000).default(100_000_000),
+  maxProviderRequests: KnowledgeSourceSyncPositiveInteger.max(10_000).default(1_000),
+  maxElapsedSeconds: KnowledgeSourceSyncPositiveInteger.max(3_600).default(300),
+  maxConcurrency: KnowledgeSourceSyncPositiveInteger.max(32).default(4),
+  maxFailureDetails: KnowledgeSourceSyncPositiveInteger.max(100).default(25),
 });
 export type KnowledgeSourceSyncLimits = z.infer<typeof KnowledgeSourceSyncLimits>;
 
-export const KnowledgeSourceSyncConnectionAuthority = z.object({
-  connectionId: z.string().uuid(),
-  connectionVersion: z.number().int().positive(),
+export const KnowledgeSourceSyncConnectionAuthority = /* @__PURE__ */ z.object({
+  connectionId: KnowledgeSourceSyncUuid,
+  connectionVersion: KnowledgeSourceSyncPositiveInteger,
   providerDomain: z.string().min(1).max(2048),
   kind: z.enum(["oauth2", "api_key", "app_install", "delegated"]),
-  ownerSubjectId: z.string().min(1).max(1024),
+  ownerSubjectId: KnowledgeSourceSyncSubject,
 });
 export type KnowledgeSourceSyncConnectionAuthority = z.infer<
   typeof KnowledgeSourceSyncConnectionAuthority
 >;
 
-export const KnowledgeSourceSyncAction = z
+export const KnowledgeSourceSyncAction = /* @__PURE__ */ z
   .object({
     kind: z.literal("knowledge_source_sync"),
-    sourceId: z.string().uuid(),
-    sourceGeneration: z.number().int().nonnegative(),
-    sourceLifecycleGeneration: z.number().int().positive(),
-    sourceConfigGeneration: z.number().int().positive(),
-    controlWorkspaceId: z.string().uuid(),
+    sourceId: KnowledgeSourceSyncUuid,
+    sourceGeneration: KnowledgeSourceSyncNonnegativeInteger,
+    sourceLifecycleGeneration: KnowledgeSourceSyncPositiveInteger,
+    sourceConfigGeneration: KnowledgeSourceSyncPositiveInteger,
+    controlWorkspaceId: KnowledgeSourceSyncUuid,
     providerCoordinationKey: z.string().trim().min(1).max(1024),
     connection: KnowledgeSourceSyncConnectionAuthority,
     destination: ScopedKnowledgeScope,
-    initiatingSubjectId: z.string().min(1).max(1024),
-    allDescendants: z.boolean().default(true),
+    initiatingSubjectId: KnowledgeSourceSyncSubject,
+    allDescendants: KnowledgeSourceSyncEnabled,
     limits: KnowledgeSourceSyncLimits.prefault({}),
   })
   .strict();
 export type KnowledgeSourceSyncAction = z.infer<typeof KnowledgeSourceSyncAction>;
 
-export const KnowledgeSourceSyncScheduleControl = z
+export const KnowledgeSourceSyncScheduleControl = /* @__PURE__ */ z
   .object({
-    sourceEnabled: z.boolean().default(true),
-    connectionPaused: z.boolean().default(false),
+    sourceEnabled: KnowledgeSourceSyncEnabled,
+    connectionPaused: KnowledgeSourceSyncDisabled,
   })
   .strict();
 export type KnowledgeSourceSyncScheduleControl = z.infer<typeof KnowledgeSourceSyncScheduleControl>;
 
-export const ScheduledTaskAction = z.discriminatedUnion("kind", [
+export const ScheduledTaskAction = /* @__PURE__ */ z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("agent_turn") }).strict(),
   KnowledgeSourceSyncAction,
 ]);
 export type ScheduledTaskAction = z.infer<typeof ScheduledTaskAction>;
 
-export const ScheduledTaskScheduleSpec = z.discriminatedUnion("type", [
+export const ScheduledTaskScheduleSpec = /* @__PURE__ */ z.discriminatedUnion("type", [
   z.object({ type: z.literal("manual") }).strict(),
   z.object({
     type: z.literal("once"),
@@ -5975,7 +5990,7 @@ export const ScheduledTaskScheduleSpec = z.discriminatedUnion("type", [
 ]);
 export type ScheduledTaskScheduleSpec = z.infer<typeof ScheduledTaskScheduleSpec>;
 
-export const ScheduledTaskAgentConfig = z.object({
+export const ScheduledTaskAgentConfig = /* @__PURE__ */ z.object({
   prompt: z.string().min(1),
   resources: z.array(ResourceRef).default([]),
   tools: z.array(ToolRef).default([]),
@@ -5994,7 +6009,7 @@ export const ScheduledTaskAgentConfig = z.object({
 });
 export type ScheduledTaskAgentConfig = z.infer<typeof ScheduledTaskAgentConfig>;
 
-export const ScheduledTask = z.object({
+export const ScheduledTask = /* @__PURE__ */ z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
   workspaceId: z.string().uuid(),
@@ -6027,8 +6042,8 @@ export const ScheduledTask = z.object({
 });
 export type ScheduledTask = z.infer<typeof ScheduledTask>;
 
-export const KnowledgeSourceSyncFailure = z.object({
-  externalObjectId: z.string().min(1).max(1024),
+export const KnowledgeSourceSyncFailure = /* @__PURE__ */ z.object({
+  externalObjectId: KnowledgeSourceSyncSubject,
   code: z.enum([
     "authority_changed",
     "connection_reconnect_required",
@@ -6047,32 +6062,32 @@ export const KnowledgeSourceSyncFailure = z.object({
 });
 export type KnowledgeSourceSyncFailure = z.infer<typeof KnowledgeSourceSyncFailure>;
 
-export const KnowledgeSourceSyncRunSummary = z.object({
+export const KnowledgeSourceSyncRunSummary = /* @__PURE__ */ z.object({
   phase: z
     .enum(["queued", "inventory", "transfer", "index", "checkpoint", "completed", "failed"])
     .default("queued"),
-  scanned: z.number().int().nonnegative().default(0),
-  imported: z.number().int().nonnegative().default(0),
-  unchanged: z.number().int().nonnegative().default(0),
-  skipped: z.number().int().nonnegative().default(0),
-  failed: z.number().int().nonnegative().default(0),
-  bytes: z.number().int().nonnegative().default(0),
-  providerRequests: z.number().int().nonnegative().default(0),
-  elapsedMs: z.number().int().nonnegative().default(0),
-  indexed: z.number().int().nonnegative().default(0),
-  aclPending: z.number().int().nonnegative().default(0),
-  retryable: z.boolean().default(false),
+  scanned: KnowledgeSourceSyncZeroInteger,
+  imported: KnowledgeSourceSyncZeroInteger,
+  unchanged: KnowledgeSourceSyncZeroInteger,
+  skipped: KnowledgeSourceSyncZeroInteger,
+  failed: KnowledgeSourceSyncZeroInteger,
+  bytes: KnowledgeSourceSyncZeroInteger,
+  providerRequests: KnowledgeSourceSyncZeroInteger,
+  elapsedMs: KnowledgeSourceSyncZeroInteger,
+  indexed: KnowledgeSourceSyncZeroInteger,
+  aclPending: KnowledgeSourceSyncZeroInteger,
+  retryable: KnowledgeSourceSyncDisabled,
   limitReached: z
     .enum(["items", "bytes", "file_bytes", "provider_requests", "elapsed_time"])
     .nullable()
     .default(null),
-  checkpointed: z.boolean().default(false),
-  reconnectRequired: z.boolean().default(false),
+  checkpointed: KnowledgeSourceSyncDisabled,
+  reconnectRequired: KnowledgeSourceSyncDisabled,
   failures: z.array(KnowledgeSourceSyncFailure).max(100).default([]),
 });
 export type KnowledgeSourceSyncRunSummary = z.infer<typeof KnowledgeSourceSyncRunSummary>;
 
-export const ScheduledTaskRun = z.object({
+export const ScheduledTaskRun = /* @__PURE__ */ z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
   workspaceId: z.string().uuid(),
@@ -6084,7 +6099,7 @@ export const ScheduledTaskRun = z.object({
   sessionId: z.string().uuid().nullable(),
   triggerEventId: z.string().uuid().nullable(),
   actionKind: ScheduledTaskActionKind.default("agent_turn"),
-  knowledgeSyncRunId: z.string().uuid().nullable().default(null),
+  knowledgeSyncRunId: KnowledgeSourceSyncUuid.nullable().default(null),
   knowledgeSummary: KnowledgeSourceSyncRunSummary.nullable().default(null),
   completedAt: z.string().nullable().default(null),
   error: z.string().nullable(),
@@ -6093,7 +6108,7 @@ export const ScheduledTaskRun = z.object({
 });
 export type ScheduledTaskRun = z.infer<typeof ScheduledTaskRun>;
 
-const CreateAgentScheduledTaskRequest = withVariableSetIdAlias({
+const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias({
   name: z.string().min(1),
   schedule: ScheduledTaskScheduleSpec,
   action: z
@@ -6134,7 +6149,7 @@ const CreateAgentScheduledTaskRequest = withVariableSetIdAlias({
   }
 });
 
-const CreateKnowledgeSourceSyncScheduledTaskRequest = z
+const CreateKnowledgeSourceSyncScheduledTaskRequest = /* @__PURE__ */ z
   .object({
     name: z.string().min(1),
     schedule: ScheduledTaskScheduleSpec,
@@ -6159,13 +6174,13 @@ const CreateKnowledgeSourceSyncScheduledTaskRequest = z
     rigId: null,
   }));
 
-export const CreateScheduledTaskRequest = z.union([
+export const CreateScheduledTaskRequest = /* @__PURE__ */ z.union([
   CreateKnowledgeSourceSyncScheduledTaskRequest,
   CreateAgentScheduledTaskRequest,
 ]);
 export type CreateScheduledTaskRequest = z.infer<typeof CreateScheduledTaskRequest>;
 
-export const UpdateScheduledTaskRequest = withVariableSetIdAlias({
+export const UpdateScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias({
   name: z.string().min(1).optional(),
   schedule: ScheduledTaskScheduleSpec.optional(),
   runMode: ScheduledTaskRunMode.optional(),
@@ -11015,6 +11030,7 @@ export function evaluateWorkspaceModelPolicy(
 
 export * from "./codex-fleet-policy";
 export * from "./workspace-instruction-policies";
+export * from "./workspace-learning-policy";
 export * from "./workspace-state";
 export * from "./preference-registry";
 export * from "./scoped-knowledge";

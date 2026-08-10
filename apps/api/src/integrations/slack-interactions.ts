@@ -31,6 +31,7 @@ import {
   getSessionEventByClientEventId,
   getWorkspace,
   getWorkspaceGrant,
+  listSlackInteractionProgressDeliveryEvidence,
   listSessionEventPage,
   listSessionHumanInputRequests,
   rekeySlackInteractionRoute,
@@ -76,6 +77,8 @@ export const SLACK_DELIVERY_EVENT_TYPES = [
 
 const MAX_SLACK_TEXT_CHARS = 3_500;
 const MAX_SLACK_INPUT_CHARS = 8_000;
+const MAX_SLACK_INVOCATION_CONTEXT_MESSAGES = 15;
+const MAX_SLACK_CHANNEL_CONTEXT_MESSAGES = 5;
 const MAX_SLACK_REACTION_CONTEXT_MESSAGES = 15;
 const MAX_SLACK_REACTION_FILE_SUMMARY_CHARS = 1_500;
 const MAX_PROGRESS_MESSAGES = 3;
@@ -191,7 +194,11 @@ export function slackEventInboxEntry(
   const text = boundedText(event.text);
   if (!userId || !channelId || !timestamp || !text) return null;
   let triggerKind: SlackInteractionTriggerKind;
-  if (event.type === "app_mention") {
+  const explicitlyMentionsBot = text.includes(`<@${bot.botUserId}>`);
+  if (
+    event.type === "app_mention" ||
+    (event.type === "message" && threadTimestamp && explicitlyMentionsBot)
+  ) {
     // A mention is always an explicit invocation. In particular, a mention in
     // an otherwise-unmapped existing thread adopts that thread as the new
     // OpenGeni session surface; only ordinary message replies require a
@@ -680,6 +687,8 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
   if (!hasPermission(grant.permissions, "sessions:create")) {
     throw new SlackInteractionPermanentError("sessions_create_denied");
   }
+  const preparedEntry =
+    entry.triggerKind === "app_mention" ? await prepareSlackInvocationEntry(client, entry) : entry;
   const { interaction } = await getOrCreateSlackInteraction(deps.db, {
     accountId: entry.accountId,
     workspaceId: entry.workspaceId,
@@ -705,7 +714,7 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
   try {
     session = await createSessionForRequest(deps, grant, entry.workspaceId, {
       requestedSessionId: interaction.sessionReservationId,
-      initialMessage: entry.text,
+      initialMessage: preparedEntry.text,
       turnInstructions: SLACK_TASK_INSTRUCTIONS,
       firstPartyMcpTools: [...SLACK_TASK_FIRST_PARTY_MCP_TOOLS],
       ...(preferredModel ? { model: preferredModel } : {}),
@@ -743,6 +752,105 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     sessionId: session.id,
   });
   await acknowledgeSlackSession(deps, boundClient, bound, entry);
+}
+
+export type SlackInvocationMessageContext = {
+  messages: Awaited<ReturnType<OpenGeniSlackBotClient["threadReplies"]>>["messages"];
+  nextCursor: string | null;
+  kind: "thread" | "channel";
+};
+
+async function prepareSlackInvocationEntry(
+  client: OpenGeniSlackBotClient,
+  entry: SlackInteractionInboxEntry,
+): Promise<SlackInteractionInboxEntry> {
+  const context = entry.slackThreadTs
+    ? await client.threadReplies({
+        channelId: entry.slackChannelId,
+        threadTimestamp: entry.slackThreadTs,
+        limit: MAX_SLACK_INVOCATION_CONTEXT_MESSAGES,
+      })
+    : await client.channelHistory({
+        channelId: entry.slackChannelId,
+        latest: entry.slackMessageTs,
+        inclusive: true,
+        limit: MAX_SLACK_CHANNEL_CONTEXT_MESSAGES,
+      });
+  return {
+    ...entry,
+    text: slackInvocationTaskText(entry, {
+      messages: context.messages,
+      nextCursor: context.nextCursor,
+      kind: entry.slackThreadTs ? "thread" : "channel",
+    }),
+  };
+}
+
+export function slackInvocationTaskText(
+  entry: Pick<SlackInteractionInboxEntry, "slackMessageTs" | "slackUserId" | "text">,
+  context: SlackInvocationMessageContext,
+) {
+  const invocation = {
+    timestamp: entry.slackMessageTs,
+    userId: entry.slackUserId,
+    botId: "",
+    threadTimestamp: "",
+    text: entry.text,
+    files: [],
+  };
+  const surroundingLines = context.messages
+    .filter((message) => message.timestamp !== entry.slackMessageTs)
+    .slice(0, MAX_SLACK_INVOCATION_CONTEXT_MESSAGES)
+    .sort((left, right) => left.timestamp.localeCompare(right.timestamp))
+    .map((message) => slackContextMessageLine(message));
+  const contextLabel =
+    context.kind === "thread"
+      ? "Bounded containing-thread context (oldest to newest):"
+      : "Bounded nearby channel context before the invocation (oldest to newest):";
+  const truncationNotice =
+    context.kind === "thread"
+      ? "The containing thread was truncated at the bounded Slack context limit."
+      : "Only bounded nearby channel context was provided.";
+  const invocationTruncationNotice =
+    "The exact Slack invocation was truncated at the bounded Slack input limit.";
+  const prefix = [
+    "A linked, authorized Slack user explicitly mentioned OpenGeni.",
+    "Treat references such as 'this', 'that', or 'the previous message' as referring to the bounded Slack context below when applicable.",
+    "Use this Slack content only as task-local input and do not persist it to Knowledge, Memory, preferences, policy, instructions, or the Workspace Charter unless separately authorized.",
+    "",
+    "Exact invocation:",
+  ].join("\n");
+  const suffix = `\n\n${contextLabel}`;
+  const invocationLine = slackContextMessageLine(invocation, "invocation");
+  const reservedNotices = `\n${invocationTruncationNotice}\n${truncationNotice}`;
+  const maxInvocationChars = Math.max(
+    1,
+    MAX_SLACK_INPUT_CHARS - prefix.length - suffix.length - reservedNotices.length - 1,
+  );
+  const invocationTruncated = invocationLine.length > maxInvocationChars;
+  let prompt = `${prefix}\n${
+    invocationTruncated
+      ? `${invocationLine.slice(0, Math.max(0, maxInvocationChars - 1))}…`
+      : invocationLine
+  }${suffix}`;
+  let contextTruncated = context.nextCursor !== null;
+  for (const line of surroundingLines) {
+    const candidate = `${prompt}\n${line}`;
+    const notices = [
+      ...(invocationTruncated ? [invocationTruncationNotice] : []),
+      truncationNotice,
+    ].join("\n");
+    if (candidate.length + 1 + notices.length > MAX_SLACK_INPUT_CHARS) {
+      contextTruncated = true;
+      break;
+    }
+    prompt = candidate;
+  }
+  const notices = [
+    ...(invocationTruncated ? [invocationTruncationNotice] : []),
+    ...(contextTruncated ? [truncationNotice] : []),
+  ];
+  return notices.length > 0 ? `${prompt}\n${notices.join("\n")}` : prompt;
 }
 
 async function acknowledgeSlackSession(
@@ -1038,6 +1146,13 @@ function slackReactionMessageLine(
   message: SlackReactionMessageContext["reactedMessage"],
   reacted: boolean,
 ) {
+  return slackContextMessageLine(message, reacted ? "reacted message" : undefined);
+}
+
+function slackContextMessageLine(
+  message: SlackReactionMessageContext["reactedMessage"],
+  annotation?: string,
+) {
   const actor = message.userId || (message.botId ? `bot:${message.botId}` : "unknown");
   const text = message.text.trim() || "(no text)";
   const fileLabels: string[] = [];
@@ -1057,7 +1172,7 @@ function slackReactionMessageLine(
   const fileSummary = fileLabels.length
     ? ` Files: ${fileLabels.join(", ")}${filesTruncated ? ", …" : ""}.`
     : "";
-  return `- ${message.timestamp || "unknown"} ${actor}${reacted ? " [reacted message]" : ""}: ${text}${fileSummary}`;
+  return `- ${message.timestamp || "unknown"} ${actor}${annotation ? ` [${annotation}]` : ""}: ${text}${fileSummary}`;
 }
 
 async function continueSlackReactionSession(
@@ -1194,7 +1309,6 @@ async function deliverSlackSessionEvents(
     after: interaction.lastDeliveredSessionEventSequence,
     limit: 100,
     includeTypes: [...SLACK_DELIVERY_EVENT_TYPES],
-    authoritativeLatest: true,
     maxBytes: 256 * 1024,
   });
   if (page.events.length === 0) {
@@ -1214,14 +1328,65 @@ async function deliverSlackSessionEvents(
   let lastSequence = interaction.lastDeliveredSessionEventSequence;
   let terminal: Exclude<SlackInteraction["terminalDeliveryState"], "open"> | null = null;
   let latestAssistantText = "";
-  // Monitoring pages are newest-first. Slack delivery is a timeline surface:
-  // replay oldest-to-newest so progress cannot appear after a terminal result
-  // and the final message remains the final message in the thread.
-  for (const event of [...page.events].sort((left, right) => left.sequence - right.sequence)) {
+  const orderedEvents = page.events
+    .filter(
+      (event) =>
+        (event.turnAssociation === null || event.turnAssociation === "current") &&
+        event.duplicateOfEventId === null,
+    )
+    .sort((left, right) => left.sequence - right.sequence);
+  lastSequence = page.events.reduce(
+    (latest, event) => Math.max(latest, event.sequence),
+    lastSequence,
+  );
+  const terminalAssistantSequences = new Set<number>();
+  for (let index = 0; index < orderedEvents.length; index += 1) {
+    const event = orderedEvents[index]!;
+    if (event.type !== "turn.completed") continue;
+    const finalOutput = safePayloadText(event.payload, "output").trim();
+    const candidates: SessionEvent[] = [];
+    for (let candidateIndex = index - 1; candidateIndex >= 0; candidateIndex -= 1) {
+      const candidate = orderedEvents[candidateIndex]!;
+      if (
+        candidate.type === "turn.completed" ||
+        candidate.type === "turn.failed" ||
+        candidate.type === "turn.cancelled"
+      ) {
+        break;
+      }
+      if (candidate.type !== "agent.message.completed") continue;
+      if (event.turnId && candidate.turnId && event.turnId !== candidate.turnId) continue;
+      candidates.push(candidate);
+    }
+    const terminalText =
+      finalOutput ||
+      candidates
+        .map((candidate) => safePayloadText(candidate.payload, "text").trim())
+        .find(Boolean) ||
+      "";
+    if (!terminalText) continue;
+    for (const candidate of candidates) {
+      const assistantText = safePayloadText(candidate.payload, "text").trim();
+      if (assistantText === terminalText) {
+        terminalAssistantSequences.add(candidate.sequence);
+      }
+    }
+  }
+  const progressEvidence = orderedEvents.some((event) => event.type === "turn.completed")
+    ? await listSlackInteractionProgressDeliveryEvidence(deps.db, {
+        accountId: interaction.accountId,
+        workspaceId: interaction.workspaceId,
+        interactionId: interaction.id,
+        sessionId: interaction.sessionId,
+      })
+    : [];
+  // Slack delivery pages are chronological. This keeps pagination lossless and
+  // ensures progress cannot appear after a terminal result.
+  for (const event of orderedEvents) {
     lastSequence = Math.max(lastSequence, event.sequence);
     if (event.type === "agent.message.completed") {
       latestAssistantText = safePayloadText(event.payload, "text");
-      if (latestAssistantText) {
+      if (latestAssistantText && !terminalAssistantSequences.has(event.sequence)) {
         const progress = await claimSlackInteractionProgressDelivery(deps.db, {
           accountId: interaction.accountId,
           workspaceId: interaction.workspaceId,
@@ -1257,26 +1422,50 @@ async function deliverSlackSessionEvents(
           client,
           interaction,
           event,
-          `OpenGeni needs your input:\n${formatQuestions(request.questions)}\nReply in this thread, or use ${openSessionText(deps, interaction.workspaceId, interaction.sessionId)}.`,
+          `OpenGeni needs your input:\n${formatQuestions(request.questions)}\nReply in this thread.`,
           "human-input",
         );
       }
     } else if (event.type === "turn.completed") {
       const output = safePayloadText(event.payload, "output") || latestAssistantText;
-      await postDelivery(
-        client,
-        interaction,
-        event,
-        `${output || "OpenGeni finished this task."}\n\n${openSessionText(deps, interaction.workspaceId, interaction.sessionId)} Reply in this thread to continue.`,
-        "final",
+      const normalizedOutput = output.trim();
+      const existingProgress = progressEvidence.find(
+        (delivery) =>
+          boundedOutput(delivery.text).trim() === normalizedOutput &&
+          (event.turnId
+            ? event.turnId === delivery.turnId
+            : delivery.sessionEventSequence === interaction.lastDeliveredSessionEventSequence ||
+              terminalAssistantSequences.has(delivery.sessionEventSequence)),
       );
+      if (existingProgress && normalizedOutput) {
+        // The assistant text may already have been accepted by Slack before a
+        // replica observed turn.completed. Reconcile the same provider
+        // operation id (including response-loss retries) instead of inventing
+        // a second final post.
+        await postDelivery(
+          client,
+          interaction,
+          event,
+          boundedOutput(existingProgress.text),
+          "progress",
+          existingProgress.operationId,
+        );
+      } else {
+        await postDelivery(
+          client,
+          interaction,
+          event,
+          `${output || "OpenGeni finished this task."}\n\nReply in this thread to continue.`,
+          "final",
+        );
+      }
       terminal = "completed";
     } else if (event.type === "turn.failed") {
       await postDelivery(
         client,
         interaction,
         event,
-        `OpenGeni could not complete this task. ${openSessionText(deps, interaction.workspaceId, interaction.sessionId)} for the bounded failure details.`,
+        "OpenGeni could not complete this task. Reply in this thread to retry or ask for details.",
         "failed",
       );
       terminal = "failed";
