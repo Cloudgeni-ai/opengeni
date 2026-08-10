@@ -231,6 +231,8 @@ import type {
   WorkspaceRegisteredPack,
   Workspace,
   ListConnectionsResponse,
+  ListSlackInstallationBindingsResponse,
+  SlackInstallationBinding,
   ConnectionResponse,
   OAuthStartRequest,
   OAuthStartResponse,
@@ -3642,6 +3644,15 @@ export class OpenGeniClient {
       `/v1/workspaces/${workspaceId}/connections`,
     );
     return response.connections;
+  }
+
+  /** List the secret-free Slack team -> OpenGeni tenant routing authority. */
+  async listSlackInstallationBindings(workspaceId: string): Promise<SlackInstallationBinding[]> {
+    const response = await this.requestJson<ListSlackInstallationBindingsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/connections/slack-bot/bindings`,
+    );
+    return response.bindings;
   }
 
   async createConnection(

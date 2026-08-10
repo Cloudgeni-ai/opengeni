@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import type { Settings } from "@opengeni/config";
 import {
@@ -23,6 +23,7 @@ import {
   getSlackBotPostOperation,
   markSlackBotDeleteOperationProviderStarted,
   listConnectionsMetadata,
+  listSlackInstallationBindings,
   loadConnectionCredentialForBroker,
   recordSlackBotInstallCallbackFailure,
   releaseSlackBotDeleteOperationClaim,
@@ -78,6 +79,11 @@ beforeAll(async () => {
 afterAll(async () => {
   await client?.close().catch(() => undefined);
   await shared?.release();
+});
+
+afterEach(async () => {
+  if (!shared) return;
+  await shared.admin`delete from managed_accounts where name = 'slack bot acct'`;
 });
 
 async function freshWorkspace(): Promise<{
@@ -943,6 +949,23 @@ describe("OpenGeni Slack bot connection", () => {
       verifiedInstallVersion: 1,
     });
     expect(connection?.verifiedInstallAt).not.toBeNull();
+    expect(
+      await listSlackInstallationBindings(client.db, {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        connectionId: connection!.id,
+        slackTeamId: "T_OPEN_GENI",
+        botId: "B_OPEN_GENI",
+        botUserId: "U_OPEN_GENI",
+        state: "active",
+        version: 1,
+      }),
+    ]);
   });
 
   test("validates and binds a shared bot without exposing its credential", async () => {
@@ -995,9 +1018,38 @@ describe("OpenGeni Slack bot connection", () => {
       credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
       connectionId: body.connection.id,
       slackTeamId: "T_OPEN_GENI",
+      bindingVersion: 1,
       outcome: "succeeded",
     });
     expect(JSON.stringify(audit)).not.toContain(fixtureBotToken());
+
+    const bindingsResponse = await app(slack.fetch).request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/slack-bot/bindings`,
+      {
+        headers: {
+          authorization: await bearer(workspace, "subject-a", ["connections:read"]),
+        },
+      },
+    );
+    expect(bindingsResponse.status).toBe(200);
+    const bindingsBody = (await bindingsResponse.json()) as {
+      bindings: Array<Record<string, unknown>>;
+    };
+    expect(bindingsBody.bindings).toEqual([
+      expect.objectContaining({
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        connectionId: body.connection.id,
+        slackTeamId: "T_OPEN_GENI",
+        slackTeamName: "OpenGeni Test Workspace",
+        botId: "B_OPEN_GENI",
+        botUserId: "U_OPEN_GENI",
+        botDisplayName: "OpenGeni",
+        state: "active",
+        version: 1,
+      }),
+    ]);
+    expect(JSON.stringify(bindingsBody)).not.toContain(fixtureBotToken());
 
     const other = await freshWorkspace();
     const crossTenant = await app(slack.fetch).request(
@@ -1097,14 +1149,66 @@ describe("OpenGeni Slack bot connection", () => {
       fakeSlack({ botId: "B_DIFFERENT", botUserId: "U_DIFFERENT" }).fetch,
     );
     expect(separate.response.status).toBe(302);
-    expect(separate.response.headers.get("location")).toContain("slack=connected");
-    expect(separate.body.connection.id).not.toBe(connected.body.connection.id);
+    expect(separate.response.headers.get("location")).toContain("slack=error");
+    expect(separate.response.headers.get("location")).toContain("reason=http_409");
     const botConnections = (
       await listConnectionsMetadata(client.db, workspace.workspaceId, "subject-a")
     ).filter(
       (candidate) => candidate.metadata.credentialRole === OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
     );
-    expect(botConnections).toHaveLength(2);
+    expect(botConnections).toHaveLength(1);
+  });
+
+  test("rejects cross-workspace team conflicts and keeps the original route", async () => {
+    if (!available) return;
+    const first = await freshWorkspace();
+    const second = await freshWorkspace();
+    const slack = fakeSlack({ teamId: `T_CONFLICT_${crypto.randomUUID().slice(0, 8)}` });
+    const connected = await connectBot(first, slack.fetch);
+    expect(connected.response.headers.get("location")).toContain("slack=connected");
+
+    const conflict = await connectBot(second, slack.fetch);
+    expect(conflict.response.headers.get("location")).toContain("slack=error");
+    expect(conflict.response.headers.get("location")).toContain("reason=http_409");
+    expect(
+      (await listConnectionsMetadata(client.db, second.workspaceId, "subject-a")).filter(
+        (candidate) => candidate.metadata.credentialRole === OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
+      ),
+    ).toHaveLength(0);
+    expect(await listSlackInstallationBindings(client.db, first)).toEqual([
+      expect.objectContaining({ connectionId: connected.body.connection.id, state: "active" }),
+    ]);
+    expect(await listSlackInstallationBindings(client.db, second)).toEqual([]);
+  });
+
+  test("concurrent exact-principal callbacks converge on one connection id", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack({ teamId: `T_CONVERGE_${crypto.randomUUID().slice(0, 8)}` });
+    const first = await startBotInstall(workspace, slack.fetch);
+    const second = await startBotInstall(workspace, slack.fetch);
+    if (!first.state || !second.state) throw new Error("expected concurrent callback states");
+
+    const [firstResult, secondResult] = await Promise.all([
+      completeBotInstall(slack.fetch, first.state),
+      completeBotInstall(slack.fetch, second.state),
+    ]);
+    expect(firstResult.headers.get("location")).toContain("slack=connected");
+    expect(secondResult.headers.get("location")).toContain("slack=connected");
+    const connections = (
+      await listConnectionsMetadata(client.db, workspace.workspaceId, "subject-a")
+    ).filter(
+      (candidate) => candidate.metadata.credentialRole === OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
+    );
+    expect(connections).toHaveLength(1);
+    expect(connections[0]).toMatchObject({ version: 2, verifiedInstallVersion: 2 });
+    expect(await listSlackInstallationBindings(client.db, workspace)).toEqual([
+      expect.objectContaining({
+        connectionId: connections[0]!.id,
+        state: "active",
+        version: 2,
+      }),
+    ]);
   });
 
   test("rejects wrong identity, missing or forbidden scopes, and generic role fabrication", async () => {

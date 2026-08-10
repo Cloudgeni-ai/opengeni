@@ -1358,6 +1358,37 @@ describe("OpenGeniClient connections", () => {
     });
   });
 
+  test("listSlackInstallationBindings returns the secret-free routing authority", async () => {
+    const binding = {
+      id: "binding-1",
+      accountId: "account-1",
+      accountName: "Example account",
+      workspaceId: WORKSPACE_ID,
+      workspaceName: "Example workspace",
+      connectionId: "connection-1",
+      connectionStatus: "active" as const,
+      connectionVersion: 2,
+      slackTeamId: "T_EXAMPLE",
+      slackTeamName: "Example Slack",
+      botId: "B_EXAMPLE",
+      botUserId: "U_EXAMPLE",
+      botDisplayName: "OpenGeni" as const,
+      state: "active" as const,
+      quarantineReason: null,
+      version: 2,
+      createdAt: "2026-06-12T00:00:00.000Z",
+      updatedAt: "2026-06-12T00:01:00.000Z",
+    };
+    const { client, requests } = makeClient(() => jsonResponse({ bindings: [binding] }));
+
+    expect(await client.listSlackInstallationBindings(WORKSPACE_ID)).toEqual([binding]);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.method).toBe("GET");
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/connections/slack-bot/bindings`,
+    );
+  });
+
   test("startConnectionOAuth POSTs to the oauth/start route and returns the authorization URL", async () => {
     const { client, requests } = makeClient(() =>
       jsonResponse({

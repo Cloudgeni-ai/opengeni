@@ -217,12 +217,13 @@ describe("release schema contract", () => {
         (migrations.has("0197_knowledge_source_sync_schedules.sql") ? 1 : 0) +
         (migrations.has("0199_workspace_learning_policy.sql") ? 1 : 0) +
         (migrations.has("0201_company_profile_authority.sql") ? 1 : 0) +
-        (migrations.has("0202_document_index_checkpoints.sql") ? 1 : 0),
+        (migrations.has("0202_document_index_checkpoints.sql") ? 1 : 0) +
+        (migrations.has("0203_slack_installation_bindings.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "c9b19caabb946d91e6e2ec4b34bb48323a61efbfc76628fe338a277f5dcbe343",
+      "4fbbfc1d0c1e3aa08cd1c343eb2b9dad064808b0f9e216e2fb39739b01613246",
     );
-    expect(contract.latestMigration).toBe("0202_document_index_checkpoints.sql");
+    expect(contract.latestMigration).toBe("0203_slack_installation_bindings.sql");
     expect(migrations.get("0197_knowledge_source_sync_schedules.sql")).toMatchObject({
       sha256: "edd425be4e4db07f4fcab1e520ece71dc1a692072ce28256ec2b86248442f3c8",
       deploymentMode: "maintenance",
@@ -245,6 +246,10 @@ describe("release schema contract", () => {
     });
     expect(migrations.get("0202_document_index_checkpoints.sql")).toMatchObject({
       sha256: "93b24b48e587fca5288af6042947f4592a3767bc6882fc8d5f52c973214e94ea",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0203_slack_installation_bindings.sql")).toMatchObject({
+      sha256: "6edc75b6bf6163989c63b2d074c3cee8932f2d3198669a1eed6652957d928d8f",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0183_model_call_provider_cost_estimates.sql")).toMatchObject({
