@@ -35,6 +35,13 @@ describe("pull-request delivery process contract", () => {
     expect(deployment).not.toContain(
       "Regenerate the body and verdict after every head or base movement",
     );
+    expect(deployment.match(/--base <exact-provider-retained-pull\.base\.sha>/g)).toHaveLength(2);
+    expect(deployment).toContain("the verifier's exact accepted reviewed-base identity");
+    expect(deployment).toContain(
+      "refresh latest-current-main\nmergeability and material-compatibility evidence",
+    );
+    expect(deployment).toContain("that evidence is not `reviewedBaseSha`");
+    expect(deployment).not.toContain("--base <exact-current-main-sha>");
   });
 
   test("keeps the agent guidance aligned with executable stale-base admission", async () => {
