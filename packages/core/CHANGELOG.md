@@ -1,5 +1,25 @@
 # @opengeni/core
 
+## 0.22.3
+
+### Patch Changes
+
+- bd5514e: Add explicitly enabled provider-neutral knowledge-source schedules with durable wake provenance, generation-fenced execution checkpoints and index obligations, fail-closed ACL activation seams, no-agent execution, layered pause state, shared schedule administration, and Google Drive source lifecycle integration.
+- Updated dependencies [7954468]
+- Updated dependencies [96965c2]
+- Updated dependencies [a8e44ae]
+- Updated dependencies [eade67f]
+- Updated dependencies [31666e2]
+- Updated dependencies [bd5514e]
+  - @opengeni/db@0.30.0
+  - @opengeni/runtime@0.18.40
+  - @opengeni/contracts@0.43.0
+  - @opengeni/documents@0.5.30
+  - @opengeni/events@0.3.101
+  - @opengeni/config@0.12.11
+  - @opengeni/observability@0.5.17
+  - @opengeni/storage@0.2.85
+
 ## 0.22.2
 
 ### Patch Changes
