@@ -53,6 +53,7 @@
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
+    "@llamaindex/liteparse": "^1.5.3",
     "@opengeni/agent-proto": "workspace:*",
     "@opengeni/codex": "workspace:*",
     "@opengeni/config": "workspace:*",
@@ -69,7 +70,8 @@
     "@temporalio/activity": "^1.17.0",
     "@temporalio/client": "^1.17.0",
     "@temporalio/worker": "^1.17.0",
-    "@temporalio/workflow": "^1.17.0"
+    "@temporalio/workflow": "^1.17.0",
+    "sharp": "^0.34.5"
   },
   "devDependencies": {
     "@openai/agents-core": "0.14.3",
