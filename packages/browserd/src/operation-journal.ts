@@ -128,9 +128,6 @@ export class SqliteInteractionOperationJournal<TReceipt extends JournalReceipt> 
             sequence
           );
       `);
-      if (options.resourceKind === "browser_session") {
-        migrateLegacyBrowserJournal(database);
-      }
       await chmod(path, 0o600);
       return new SqliteInteractionOperationJournal({ ...options, path }, database);
     } catch (error) {
@@ -366,38 +363,6 @@ export class SqliteInteractionOperationJournal<TReceipt extends JournalReceipt> 
 
   private assertOpen(): void {
     if (this.closed) throw new Error(`${this.resourceLabel} operation journal is closed`);
-  }
-}
-
-function migrateLegacyBrowserJournal(database: Database): void {
-  const legacy = database
-    .query<{ name: string }, []>(
-      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'browser_operation_journal'",
-    )
-    .get();
-  if (!legacy) return;
-  database.exec("BEGIN IMMEDIATE");
-  try {
-    database.exec(`
-      INSERT INTO interaction_operation_journal (
-        resource_kind, resource_id, controller_generation, operation_id,
-        command_digest, state, receipt_json, receipt_bytes, updated_at
-      )
-      SELECT
-        'browser_session', browser_session_id, controller_generation, operation_id,
-        command_digest, state, receipt_json, receipt_bytes, updated_at
-      FROM browser_operation_journal
-      ORDER BY sequence ASC;
-      DROP TABLE browser_operation_journal;
-    `);
-    database.exec("COMMIT");
-  } catch (error) {
-    try {
-      database.exec("ROLLBACK");
-    } catch {
-      // Preserve the migration failure; either failure keeps journal startup fail-closed.
-    }
-    throw error;
   }
 }
 
