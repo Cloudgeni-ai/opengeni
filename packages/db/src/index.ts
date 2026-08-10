@@ -37083,6 +37083,7 @@ export type MachineRemovalOutcome = (typeof schema.machineRemovalOperationOutcom
 export type MachineRemovalBlockCode =
   | "active_route"
   | "active_commands"
+  | "machine_home"
   | "active_lease"
   | "recovery_pending"
   | "not_selfhosted";
@@ -37097,6 +37098,7 @@ export type MachineRemovalResult = {
   code: MachineRemovalBlockCode | null;
   message: string;
   action: string;
+  dependentSessions: Array<{ id: string; title: string | null }>;
 };
 
 export class MachineRemovalIdempotencyError extends Error {
@@ -37130,6 +37132,7 @@ function machineRemovalResultFromStored(value: unknown): MachineRemovalResult {
     throw new Error("Invalid stored machine removal result");
   }
   const result = value as Partial<MachineRemovalResult>;
+  const dependentSessions = result.dependentSessions ?? [];
   if (
     typeof result.enrollmentId !== "string" ||
     (result.outcome !== "removed" &&
@@ -37142,15 +37145,24 @@ function machineRemovalResultFromStored(value: unknown): MachineRemovalResult {
     (result.code !== null &&
       result.code !== "active_route" &&
       result.code !== "active_commands" &&
+      result.code !== "machine_home" &&
       result.code !== "active_lease" &&
       result.code !== "recovery_pending" &&
       result.code !== "not_selfhosted") ||
     typeof result.message !== "string" ||
-    typeof result.action !== "string"
+    typeof result.action !== "string" ||
+    !Array.isArray(dependentSessions) ||
+    dependentSessions.some(
+      (session) =>
+        !session ||
+        typeof session !== "object" ||
+        typeof session.id !== "string" ||
+        (session.title !== null && typeof session.title !== "string"),
+    )
   ) {
     throw new Error("Invalid stored machine removal result");
   }
-  return result as MachineRemovalResult;
+  return { ...(result as MachineRemovalResult), dependentSessions };
 }
 
 /**
@@ -37261,11 +37273,13 @@ export async function removeEnrollment(
         .for("share");
       const nonSelfhosted = sandboxes.find((sandbox) => sandbox.kind !== "selfhosted");
       const machine = sandboxes.find((sandbox) => sandbox.kind === "selfhosted") ?? null;
+      const dependentSessions: Array<{ id: string; title: string | null }> = [];
       const baseResult = {
         enrollmentId: enrollment.id,
         machineName: machine?.name ?? null,
         lastSeenAt: enrollment.lastSeenAt?.toISOString() ?? null,
         revokedAt: enrollment.revokedAt?.toISOString() ?? null,
+        dependentSessions,
       };
 
       if (nonSelfhosted) {
@@ -37330,26 +37344,37 @@ export async function removeEnrollment(
       }
 
       if (machine) {
-        const [activePointer] = await scopedDb.execute<{
+        const activePointers = await scopedDb.execute<{
           session_id: string;
           title: string | null;
+          active_turn_id: string | null;
+          sandbox_backend: string;
         }>(sql`
-          select id as session_id, title
+          select id as session_id, title, active_turn_id, sandbox_backend
           from sessions
           where workspace_id = ${input.workspaceId}
             and active_sandbox_id = ${machine.id}
           order by created_at asc, id asc
-          limit 1
           for update
         `);
-        if (activePointer) {
+        dependentSessions.push(
+          ...activePointers.map((pointer: { session_id: string; title: string | null }) => ({
+            id: pointer.session_id,
+            title: pointer.title?.trim() || null,
+          })),
+        );
+
+        const activePointerTurn = activePointers.find(
+          (pointer: { active_turn_id: string | null }) => pointer.active_turn_id !== null,
+        );
+        if (activePointerTurn) {
           const result: MachineRemovalResult = {
             ...baseResult,
             outcome: "blocked",
             removed: false,
-            code: "active_route",
-            message: `Machine is still selected by session ${activePointer.title?.trim() || activePointer.session_id}.`,
-            action: "Move that session back to its managed sandbox, then retry removal.",
+            code: "active_commands",
+            message: `Machine is selected by session ${activePointerTurn.title?.trim() || activePointerTurn.session_id} while it has an active turn.`,
+            action: "Wait for or stop the active turn, then retry removal.",
           };
           await scopedDb.insert(schema.machineRemovalOperations).values({
             accountId: input.accountId,
@@ -37369,7 +37394,46 @@ export async function removeEnrollment(
             targetId: enrollment.id,
             metadata: {
               code: result.code,
-              sessionId: activePointer.session_id,
+              sessionId: activePointerTurn.session_id,
+              turnId: activePointerTurn.active_turn_id,
+              message: result.message,
+            },
+          });
+          return result;
+        }
+
+        const machineHome = activePointers.find(
+          (pointer: { sandbox_backend: string }) => pointer.sandbox_backend === "selfhosted",
+        );
+        if (machineHome) {
+          const result: MachineRemovalResult = {
+            ...baseResult,
+            outcome: "blocked",
+            removed: false,
+            code: "machine_home",
+            message: `Machine is the durable home sandbox for session ${machineHome.title?.trim() || machineHome.session_id}.`,
+            action:
+              "Keep the machine enrolled until that session has a supported managed-home migration or is no longer needed.",
+          };
+          await scopedDb.insert(schema.machineRemovalOperations).values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            enrollmentId: enrollment.id,
+            operationKey,
+            requestFingerprint,
+            outcome: result.outcome,
+            result,
+          });
+          await scopedDb.insert(schema.auditEvents).values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: input.subjectId ?? null,
+            action: "connected_machine.removal_blocked",
+            targetType: "enrollment",
+            targetId: enrollment.id,
+            metadata: {
+              code: result.code,
+              sessionId: machineHome.session_id,
               message: result.message,
             },
           });
@@ -37490,6 +37554,42 @@ export async function removeEnrollment(
             targetType: "enrollment",
             targetId: enrollment.id,
             metadata: { code: result.code, message: result.message },
+          });
+          return result;
+        }
+
+        if (dependentSessions.length > 0) {
+          const count = dependentSessions.length;
+          const result: MachineRemovalResult = {
+            ...baseResult,
+            outcome: "blocked",
+            removed: false,
+            code: "active_route",
+            message: `Machine is still selected by ${count} ${count === 1 ? "session" : "sessions"}.`,
+            action:
+              "Review the affected sessions, then explicitly move them to their default managed sandbox and remove the machine.",
+          };
+          await scopedDb.insert(schema.machineRemovalOperations).values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            enrollmentId: enrollment.id,
+            operationKey,
+            requestFingerprint,
+            outcome: result.outcome,
+            result,
+          });
+          await scopedDb.insert(schema.auditEvents).values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: input.subjectId ?? null,
+            action: "connected_machine.removal_blocked",
+            targetType: "enrollment",
+            targetId: enrollment.id,
+            metadata: {
+              code: result.code,
+              sessionIds: dependentSessions.map((session) => session.id),
+              message: result.message,
+            },
           });
           return result;
         }

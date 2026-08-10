@@ -2407,7 +2407,7 @@ function registerConnectedMachineTools(
     "connected_machine_remove",
     {
       description:
-        "Remove one enrolled self-hosted machine while it is offline. Access is revoked, future heartbeat/reconnect credentials are rejected, session/route/lease/archive history is retained, and a fresh human-approved device-flow enrollment is required to reconnect. Pass the enrollmentId from the Machines surface, never a Modal sandbox id. Blocked outcomes include the exact active dependency and the action needed before retrying.",
+        "Remove one enrolled self-hosted machine while it is offline. Access is revoked, future heartbeat/reconnect credentials are rejected, session/route/lease/archive history is retained, and a fresh human-approved device-flow enrollment is required to reconnect. Pass the enrollmentId from the Machines surface, never a Modal sandbox id. Blocked outcomes include every dependent session and the action needed before retrying. Move each dependent session through the canonical sandbox_swap target=default path before retrying removal; the removal authority never rewrites routes directly.",
       inputSchema: {
         enrollmentId: z4.string().uuid(),
         expectedUpdatedAt: z4.string().datetime({ offset: true }).optional(),

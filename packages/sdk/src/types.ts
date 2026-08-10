@@ -4852,12 +4852,14 @@ export type RemoveEnrollmentResponse = {
   code:
     | "active_route"
     | "active_commands"
+    | "machine_home"
     | "active_lease"
     | "recovery_pending"
     | "not_selfhosted"
     | null;
   message: string;
   action: string;
+  dependentSessions: Array<{ id: string; title: string | null }>;
 };
 
 /** POST /v1/workspaces/:ws/sessions/:sessionId/active-sandbox — swap a session's

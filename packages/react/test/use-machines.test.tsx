@@ -9,6 +9,7 @@ import { actRun, registerDom, renderHook, flush } from "./render-hook";
 import { fakeClient, WORKSPACE_ID } from "./fake-client";
 import { useMachines, type MachinesClientLike } from "../src/hooks/use-machines";
 import type { MachinesResponse, MachineView } from "../src/types/machines";
+import type { SwapActiveSandboxResponse } from "@opengeni/sdk";
 
 registerDom();
 
@@ -84,6 +85,35 @@ describe("useMachines", () => {
     expect(ok).toBe(true);
     expect(swappedTo).toEqual([{ sessionId: "sess-1", target: "sh-1" }]);
     expect(hook.result.current.activeSandboxId).toBe("sh-1");
+    await hook.unmount();
+  });
+
+  test("attach surfaces a resolved swapped:false response as an actionable mutation error", async () => {
+    const machinesClient: MachinesClientLike = {
+      listMachines: async () => response,
+      swapActiveSandbox: async () => ({
+        swapped: false,
+        activeSandboxId: "sh-1",
+        activeEpoch: 3,
+        code: "recovery_in_progress",
+        reason: "The managed sandbox restore is still verifying.",
+      }),
+    };
+    const hook = await renderHook(
+      () => useMachines({ client, workspaceId: WORKSPACE_ID, machinesClient, sessionId: "sess-1" }),
+      undefined,
+    );
+    await flush();
+
+    const ok = await actRun(() => hook.result.current.attach("modal-box"));
+    await flush();
+
+    expect(ok).toBe(false);
+    expect(hook.result.current.mutationError?.message).toBe(
+      "The managed sandbox restore is still verifying.",
+    );
+    expect(hook.result.current.attaching).toBe(false);
+    expect(hook.result.current.attachingSandboxId).toBeNull();
     await hook.unmount();
   });
 
@@ -229,11 +259,11 @@ describe("useMachines", () => {
   test("a late attach settlement from the old session cannot clear the new session spinner", async () => {
     let resolveOld: () => void = () => {};
     let resolveNew: () => void = () => {};
-    const oldSwap = new Promise<void>((resolve) => {
-      resolveOld = resolve;
+    const oldSwap = new Promise<SwapActiveSandboxResponse>((resolve) => {
+      resolveOld = () => resolve({ swapped: true, activeSandboxId: "old-box", activeEpoch: 4 });
     });
-    const newSwap = new Promise<void>((resolve) => {
-      resolveNew = resolve;
+    const newSwap = new Promise<SwapActiveSandboxResponse>((resolve) => {
+      resolveNew = () => resolve({ swapped: true, activeSandboxId: "new-box", activeEpoch: 5 });
     });
     const machinesClient: MachinesClientLike = {
       listMachines: async () => response,
