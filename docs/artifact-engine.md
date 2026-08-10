@@ -322,11 +322,33 @@ advisory-lock winner becomes durable and retries return that winner.
    called once after final export, re-import, and visual verification; its
    closed receipt opens the durable collaborative editor in the stock timeline.
 
+### Current product bridge
+
+- `publish_editable_artifact` turns one verified Office output into a durable
+  editable artifact and returns a closed receipt. The session dock discovers
+  all active artifacts created by that exact session through an authorized
+  server query; recent receipt events are only a degraded fallback.
+- The dock and full-page route open the same public SDK/React editor. Browser
+  edits commit to the canonical artifact head and are visible to every other
+  browser replica. The imported Office file remains immutable source evidence,
+  not a second mutable authority.
+- The agent bridge is currently one-way: an agent can author and publish an
+  artifact, but a later agent turn has no bound tool for opening, inspecting,
+  or editing the artifact's current durable head. Re-reading the sandbox Office
+  file therefore does **not** reveal later browser edits. Completing the product
+  contract requires an agent-facing artifact session/tool that reads the exact
+  current head and submits normal canonical transactions; it must not restore
+  the Office file as mutable truth.
+
+Until that final bridge exists, supported collaboration is browser-to-browser
+and agent-publish-to-browser, not browser-edit-to-agent.
+
 ### Edit
 
-1. Browser/agent validates commands locally and submits a stable replica id,
+1. An SDK client validates commands locally and submits a stable replica id,
    transaction id, request hash, causal base, and typed commands—not trusted
-   canonical operation bytes.
+   canonical operation bytes. The browser client is implemented; the bound
+   agent client described above remains required.
 2. Server derives principal or exact live session/turn/attempt/generation
    authority and reads a consistent detached basis: head sequence, causal
    frontier, state hash, snapshot/tail references, and authorization revision.

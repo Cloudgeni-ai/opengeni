@@ -70,6 +70,28 @@ describe("editable artifact public SDK", () => {
     expect(signals).toEqual([abort.signal, abort.signal]);
   });
 
+  test("lists exact session artifacts through the public client", async () => {
+    const sourceSessionId = "33333333-3333-4333-8333-333333333333";
+    let request: Request | null = null;
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: (async (input, init) => {
+        request = new Request(input, init);
+        return Response.json({ artifacts: [artifact] });
+      }) as typeof fetch,
+    });
+
+    await expect(
+      client.listSessionEditableArtifacts(WORKSPACE_ID, sourceSessionId, {
+        replicaId: REPLICA_ID,
+      }),
+    ).resolves.toEqual({ artifacts: [artifact] });
+    expect(request!.method).toBe("GET");
+    expect(request!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/editable-artifacts?sourceSessionId=${sourceSessionId}&replicaId=${REPLICA_ID}`,
+    );
+  });
+
   test("generates canonical nonzero replica identities", () => {
     const values = new Set(Array.from({ length: 64 }, () => createEditableArtifactReplicaId()));
     expect(values.size).toBe(64);

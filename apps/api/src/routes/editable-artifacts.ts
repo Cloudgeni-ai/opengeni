@@ -26,7 +26,7 @@ import {
   type EditableArtifactModality,
   type ImportEditableArtifactApplicationInput,
 } from "@opengeni/core";
-import { getFile } from "@opengeni/db";
+import { getFile, listEditableArtifactIdsCreatedBySubject } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { z } from "zod";
 
@@ -68,7 +68,14 @@ const VersionName = z
       isWellFormedPersistedText(value),
   );
 const AttemptId = z.string().uuid();
+const SessionId = z.string().uuid();
 const AttemptGeneration = z.number().int().positive().max(2_147_483_647);
+const ListEditableArtifactsQuery = z
+  .object({
+    sourceSessionId: SessionId,
+    replicaId: ReplicaId,
+  })
+  .strict();
 
 const MintEditableArtifactLiveTicketRequest = z
   .object({
@@ -216,6 +223,10 @@ const EditableArtifactResult = z
   })
   .strict();
 
+const EditableArtifactListResult = z
+  .object({ artifacts: z.array(EditableArtifactResult).max(64) })
+  .strict();
+
 const PinnedVersionResult = z
   .object({
     id: ArtifactId,
@@ -340,6 +351,12 @@ export type EditableArtifactRouteDependencies = AccessDeps &
       workspaceId: string,
       fileId: string,
     ) => Promise<FileAsset | null>;
+    /** Test/embedding seam; returned ids are still authorized one by one. */
+    editableArtifactSessionArtifactIds?: (
+      scope: EditableArtifactRouteScope,
+      sourceSessionId: string,
+      limit: number,
+    ) => Promise<readonly string[]>;
   }>;
 
 export type EditableArtifactApplicationErrorCode =
@@ -364,6 +381,50 @@ export function registerEditableArtifactRoutes(
 ): void {
   const collection = "/v1/workspaces/:workspaceId/editable-artifacts";
   const item = `${collection}/:artifactId`;
+
+  app.get(collection, async (context) => {
+    const workspaceId = context.req.param("workspaceId");
+    const grant = await requireAccessGrant(context, deps, workspaceId, "artifacts:read");
+    const query = ListEditableArtifactsQuery.safeParse({
+      sourceSessionId: context.req.query("sourceSessionId"),
+      replicaId: context.req.query("replicaId"),
+    });
+    if (!query.success) {
+      throw new ApiHttpError(422, {
+        code: "validation_failed",
+        message: "Invalid editable artifact list query.",
+      });
+    }
+    const scope = editableArtifactScope({ accountId: grant.accountId, workspaceId });
+    const actor = editableArtifactActorForGrant(grant, query.data.replicaId);
+    const candidateIds = await (deps.editableArtifactSessionArtifactIds
+      ? deps.editableArtifactSessionArtifactIds(scope, query.data.sourceSessionId, 64)
+      : listEditableArtifactIdsCreatedBySubject(
+          deps.db,
+          scope,
+          `agent:${query.data.sourceSessionId}`,
+          64,
+        ));
+    const artifactIds = normalizeArtifactIdList(candidateIds);
+    const application = requireEditableArtifactApplication(deps);
+    const artifacts: z.infer<typeof EditableArtifactResult>[] = [];
+    for (const artifactId of artifactIds) {
+      try {
+        const artifact = await application.readArtifact({
+          scope,
+          actor,
+          artifactId: editableArtifactId(artifactId),
+        });
+        artifacts.push(projectArtifact(artifact, scope));
+      } catch (error) {
+        if (isInvisibleListCandidate(error)) continue;
+        throw editableArtifactHttpError(error);
+      }
+    }
+    const result = EditableArtifactListResult.parse({ artifacts });
+    context.header("cache-control", "private, no-store");
+    return context.json(result, 200);
+  });
 
   app.post(collection, async (context) => {
     const workspaceId = context.req.param("workspaceId");
@@ -857,6 +918,32 @@ function parseArtifactId(value: string): string {
     });
   }
   return parsed.data;
+}
+
+function normalizeArtifactIdList(value: readonly string[]): readonly string[] {
+  if (!Array.isArray(value) || value.length > 64) {
+    throw new Error("Editable artifact list adapter returned too many candidates");
+  }
+  const ids = value.map((candidate) => {
+    const parsed = ArtifactId.safeParse(candidate);
+    if (!parsed.success) {
+      throw new Error("Editable artifact list adapter returned an invalid candidate");
+    }
+    return parsed.data;
+  });
+  if (new Set(ids).size !== ids.length) {
+    throw new Error("Editable artifact list adapter returned duplicate candidates");
+  }
+  return ids;
+}
+
+function isInvisibleListCandidate(error: unknown): boolean {
+  return (
+    (error instanceof EditableArtifactDomainError &&
+      (error.code === "forbidden" || error.code === "not_found")) ||
+    (error instanceof EditableArtifactApplicationError &&
+      (error.code === "forbidden" || error.code === "not_found"))
+  );
 }
 
 function parseReplicaId(value: string): string {

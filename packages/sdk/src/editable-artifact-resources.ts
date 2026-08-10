@@ -13,6 +13,10 @@ export type EditableArtifactResource = Readonly<{
   updatedAt: string;
 }>;
 
+export type EditableArtifactListResource = Readonly<{
+  artifacts: readonly EditableArtifactResource[];
+}>;
+
 export type CreateEditableArtifactResourceRequest = Readonly<{
   /** Stable across transport retries; conflicting reuse is rejected. */
   idempotencyKey: string;
@@ -59,6 +63,11 @@ export type ImportEditableArtifactResourceRequest = Readonly<{
 export type ReadEditableArtifactResourceOptions = OpenGeniRequestOptions &
   Readonly<{
     /** Writer/read replica used to mint artifact-scoped authority. */
+    replicaId: string;
+  }>;
+
+export type ListSessionEditableArtifactResourcesOptions = OpenGeniRequestOptions &
+  Readonly<{
     replicaId: string;
   }>;
 
