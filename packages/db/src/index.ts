@@ -7272,6 +7272,83 @@ export type SlackInteractionProgressClaim =
   | { kind: "limit_reached"; progressCount: number }
   | { kind: "not_owned" };
 
+export type SlackInteractionProgressDeliveryEvidence = {
+  sessionEventSequence: number;
+  operationId: string;
+  text: string;
+  turnId: string | null;
+};
+
+/**
+ * Read the at-most-three durable progress identities for terminal-delivery
+ * reconciliation. A reserved operation may still be provider-started after a
+ * response loss, so callers must retry the same operation id rather than
+ * inventing a second final post.
+ */
+export async function listSlackInteractionProgressDeliveryEvidence(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    interactionId: string;
+    sessionId: string;
+  },
+): Promise<SlackInteractionProgressDeliveryEvidence[]> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({
+        sessionEventSequence: schema.slackInteractionProgressDeliveries.sessionEventSequence,
+        operationId: schema.slackInteractionProgressDeliveries.operationId,
+        payload: schema.sessionEvents.payload,
+        payloadCodecVersion: schema.sessionEvents.payloadCodecVersion,
+        turnId: schema.sessionEvents.turnId,
+      })
+      .from(schema.slackInteractionProgressDeliveries)
+      .innerJoin(
+        schema.sessionEvents,
+        and(
+          eq(
+            schema.sessionEvents.workspaceId,
+            schema.slackInteractionProgressDeliveries.workspaceId,
+          ),
+          eq(schema.sessionEvents.sessionId, input.sessionId),
+          eq(
+            schema.sessionEvents.sequence,
+            schema.slackInteractionProgressDeliveries.sessionEventSequence,
+          ),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.slackInteractionProgressDeliveries.accountId, input.accountId),
+          eq(schema.slackInteractionProgressDeliveries.workspaceId, input.workspaceId),
+          eq(schema.slackInteractionProgressDeliveries.interactionId, input.interactionId),
+          eq(schema.sessionEvents.type, "agent.message.completed"),
+          or(
+            isNull(schema.sessionEvents.turnAssociation),
+            eq(schema.sessionEvents.turnAssociation, "current"),
+          ),
+          isNull(schema.sessionEvents.duplicateOfEventId),
+        ),
+      )
+      .orderBy(desc(schema.slackInteractionProgressDeliveries.sessionEventSequence))
+      .limit(3);
+    return rows.map((row) => {
+      const payload = fromPostgresLosslessJson(row.payload, row.payloadCodecVersion);
+      const text =
+        payload && typeof payload === "object" && !Array.isArray(payload)
+          ? (payload as Record<string, unknown>).text
+          : null;
+      return {
+        sessionEventSequence: row.sessionEventSequence,
+        operationId: row.operationId,
+        text: typeof text === "string" ? text : "",
+        turnId: row.turnId,
+      };
+    });
+  });
+}
+
 /**
  * Reserve one globally bounded progress slot before any Slack provider call.
  * The interaction row lock serializes replicas and expired delivery claim
