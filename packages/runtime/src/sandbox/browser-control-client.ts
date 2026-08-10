@@ -8,6 +8,7 @@ import {
   BROWSER_STATE_ARTIFACT_CONTENT_TYPE,
   BrowserActionCommand,
   BrowserActionReceipt,
+  BrowserClipboard,
   BrowserDiagnosticBatch,
   BrowserDownload,
   BrowserDownloadExportReceipt,
@@ -29,6 +30,7 @@ import {
   NetworkRouteConsistency,
   type BrowserActionCommand as BrowserActionCommandValue,
   type BrowserActionReceipt as BrowserActionReceiptValue,
+  type BrowserClipboard as BrowserClipboardValue,
   type BrowserDiagnosticBatch as BrowserDiagnosticBatchValue,
   type BrowserDownload as BrowserDownloadValue,
   type BrowserDownloadExportReceipt as BrowserDownloadExportReceiptValue,
@@ -1030,6 +1032,16 @@ export class BrowserControlSessionClient {
       await this.parent.requestForSession({
         method: "GET",
         path: this.targetPath(targetId, "observation"),
+        token: this.viewToken,
+      }),
+    );
+  }
+
+  async readClipboard(): Promise<BrowserClipboardValue> {
+    return BrowserClipboard.parse(
+      await this.parent.requestForSession({
+        method: "GET",
+        path: this.path("clipboard"),
         token: this.viewToken,
       }),
     );

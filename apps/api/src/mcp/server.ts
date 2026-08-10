@@ -272,6 +272,7 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   browser_tabs: { sessionRequired: true, allOf: ["sessions:control"] },
   browser_observe: { sessionRequired: true, allOf: ["sessions:read"] },
   browser_act: { sessionRequired: true, allOf: ["sessions:control"] },
+  browser_clipboard: { sessionRequired: true, allOf: ["sessions:read"] },
   browser_debug: { sessionRequired: true, allOf: ["sessions:read"] },
   browser_auth: { sessionRequired: true, allOf: ["sessions:control"] },
   interaction_request_human: { sessionRequired: true, allOf: ["sessions:control"] },

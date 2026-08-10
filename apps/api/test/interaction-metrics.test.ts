@@ -27,7 +27,7 @@ const settings = {
 };
 
 describe("interaction metrics projection", () => {
-  test("classifies semantic, keyboard, coordinate, and stale action outcomes", async () => {
+  test("classifies semantic, keyboard, clipboard, coordinate, and stale action outcomes", async () => {
     const observability = createObservability(settings, { component: "api" });
     const browserReceipt = actionReceipt("browser", "completed") as BrowserActionReceipt;
     const staleComputerReceipt = actionReceipt(
@@ -46,6 +46,12 @@ describe("interaction metrics projection", () => {
       observability,
       performance.now(),
       browserRequest({ type: "press", key: "Enter" }),
+      browserReceipt,
+    );
+    observeBrowserActionResult(
+      observability,
+      performance.now(),
+      browserRequest({ type: "clipboard", operation: "copy" }),
       browserReceipt,
     );
     observeComputerActionResult(
@@ -67,6 +73,9 @@ describe("interaction metrics projection", () => {
     );
     expect(metrics).toMatch(
       /opengeni_interaction_operations_total\{[^}]*mode="keyboard"[^}]*operation="act"[^}]*outcome="completed"[^}]*resource="browser"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_interaction_operations_total\{[^}]*mode="clipboard"[^}]*operation="act"[^}]*outcome="completed"[^}]*resource="browser"[^}]*\} 1\b/,
     );
     expect(metrics).toMatch(
       /opengeni_interaction_operations_total\{[^}]*mode="coordinate"[^}]*operation="act"[^}]*outcome="stale"[^}]*resource="computer"[^}]*\} 1\b/,

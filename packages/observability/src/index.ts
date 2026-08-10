@@ -118,6 +118,7 @@ const INTERACTION_MODES = new Set([
   "semantic",
   "coordinate",
   "keyboard",
+  "clipboard",
   "lifecycle",
   "media",
   "auth",

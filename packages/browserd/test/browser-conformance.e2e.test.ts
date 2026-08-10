@@ -153,6 +153,63 @@ e2e(
       );
       expect(names(page)).toContain("Uploaded fixture-upload.txt");
 
+      expect(driver.readClipboard()).toMatchObject({
+        revision: 0,
+        text: "",
+        source: "empty",
+      });
+      page = await act(driver, page, {
+        type: "clipboard",
+        operation: "write",
+        text: "typed clipboard value",
+      });
+      expect(driver.readClipboard()).toMatchObject({
+        revision: 1,
+        text: "typed clipboard value",
+        source: "write",
+        sourceTargetId: page.target.id,
+      });
+      page = await act(driver, page, {
+        type: "clipboard",
+        operation: "paste",
+        locator: { kind: "label", text: "Clipboard target" },
+      });
+      expect(names(page)).toContain("Clipboard typed clipboard value");
+      page = await act(driver, page, {
+        type: "clipboard",
+        operation: "copy",
+        locator: { kind: "label", text: "Clipboard source" },
+        content: "value",
+      });
+      expect(driver.readClipboard()).toMatchObject({
+        revision: 2,
+        text: "fixture clipboard value",
+        source: "copy",
+      });
+      page = await act(driver, page, clickRole("button", "Select clipboard source"));
+      page = await act(driver, page, { type: "clipboard", operation: "copy" });
+      expect(driver.readClipboard().text).toBe("fixture clipboard value");
+      page = await act(driver, page, clickRole("button", "Select frame clipboard source"));
+      page = await act(driver, page, { type: "clipboard", operation: "copy" });
+      expect(driver.readClipboard().text).toBe("same-frame clipboard value");
+      await expectDefiniteError(
+        driver.dispatch(
+          command(page, {
+            type: "clipboard",
+            operation: "copy",
+            locator: { kind: "label", text: "Protected clipboard" },
+            content: "value",
+          }),
+        ),
+        "permission_denied",
+      );
+      page = await act(driver, page, { type: "clipboard", operation: "clear" });
+      expect(driver.readClipboard()).toMatchObject({
+        revision: 5,
+        text: "",
+        source: "clear",
+      });
+
       page = await act(driver, page, clickRole("button", "Read fixture location"));
       page = await waitForName(driver, page, "59.9139,10.7522");
 

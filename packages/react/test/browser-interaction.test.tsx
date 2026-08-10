@@ -129,7 +129,7 @@ function browserSession(
       tabs: true,
       downloads: true,
       uploads: true,
-      clipboard: false,
+      clipboard: true,
       diagnostics: true,
       rawCdp: false,
       linkedComputer: false,
@@ -1244,6 +1244,89 @@ describe("BrowserViewer", () => {
     expect(canvas?.className).toContain("invisible");
     expect(rendered.container.textContent).toContain("Connecting");
     await rendered.unmount();
+  });
+
+  test("routes human paste through the private browser clipboard and copies back explicitly", async () => {
+    const current = browserSession();
+    const currentTarget = target();
+    const currentObservation = observation(BROWSER_SESSION_ID, currentTarget);
+    const actions: BrowserActionReceipt["operationId"][] = [];
+    const actionValues: unknown[] = [];
+    const copied: string[] = [];
+    const priorClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: async (text: string) => copied.push(text) },
+    });
+    const client = fakeClient({
+      listBrowserSessions: async () => ({ revision: 1, sessions: [current] }),
+      getBrowserSession: async () => current,
+      listBrowserTargets: async () => ({
+        browserSessionId: BROWSER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        targets: [currentTarget],
+      }),
+      observeBrowserTarget: async () => currentObservation,
+      attachBrowserSession: async () => attachment(currentTarget.id),
+      actInBrowser: async (_workspaceId, _browserSessionId, request) => {
+        actions.push(request.operationId);
+        actionValues.push(request.action);
+        return receipt(currentObservation, request.operationId);
+      },
+      readBrowserClipboard: async () => ({
+        browserSessionId: BROWSER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        revision: 1,
+        text: "remote selection",
+        source: "copy",
+        sourceTargetId: currentTarget.id,
+        updatedAt: NOW,
+      }),
+    });
+    const socket = new FakeBrowserSocket("wss://browser.example.test/v1/frames", [
+      "opengeni.browser.v1",
+      "opengeni.auth.test",
+    ]);
+    const rendered = await renderComponent(
+      <BrowserViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        webSocketFactory={() => socket as unknown as BrowserFrameWebSocket}
+      />,
+    );
+    try {
+      await flush(30);
+      await dispatch(socket, "open");
+      await dispatch(socket, "message", {
+        data: frameMessage("target-1", 1).buffer,
+      });
+      await flush(5);
+      const keyboard = rendered.container.querySelector<HTMLTextAreaElement>(
+        "textarea[aria-label='Browser keyboard input']",
+      );
+      expect(keyboard).not.toBeNull();
+      const paste = new ClipboardEvent("paste", { bubbles: true, cancelable: true });
+      Object.defineProperty(paste, "clipboardData", {
+        value: { getData: (kind: string) => (kind === "text/plain" ? "local paste" : "") },
+      });
+      await actRun(() => {
+        keyboard!.dispatchEvent(paste);
+        keyboard!.dispatchEvent(new ClipboardEvent("copy", { bubbles: true, cancelable: true }));
+      });
+      await flush(20);
+
+      expect(actions).toHaveLength(2);
+      expect(actionValues).toEqual([
+        { type: "clipboard", operation: "paste", text: "local paste" },
+        { type: "clipboard", operation: "copy" },
+      ]);
+      expect(copied).toEqual(["remote selection"]);
+    } finally {
+      if (priorClipboard) Object.defineProperty(navigator, "clipboard", priorClipboard);
+      else Reflect.deleteProperty(navigator, "clipboard");
+      await rendered.unmount();
+    }
   });
 
   test("turns a temporary browser into an explicit reusable profile version", async () => {

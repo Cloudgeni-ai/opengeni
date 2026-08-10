@@ -174,6 +174,33 @@ function computerSession(overrides: Partial<ComputerSession> = {}): ComputerSess
 }
 
 describe("BrowserSession SDK", () => {
+  test("reads the exact private browser clipboard as a scoped resource", async () => {
+    const clipboard = {
+      browserSessionId: BROWSER_SESSION_ID,
+      controllerGeneration: "controller-1",
+      revision: 3,
+      text: "private browser text",
+      source: "copy" as const,
+      sourceTargetId: "target-1",
+      updatedAt: "2026-08-10T10:00:01.000Z",
+    };
+    const calls: string[] = [];
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async (input) => {
+        calls.push(String(input));
+        return json(clipboard);
+      },
+    });
+
+    expect(
+      await client.interaction.browsers.session(WORKSPACE_ID, BROWSER_SESSION_ID).clipboard.read(),
+    ).toEqual(clipboard);
+    expect(calls).toEqual([
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/browser-sessions/${BROWSER_SESSION_ID}/clipboard`,
+    ]);
+  });
+
   test("lists and explicitly saves private browser-produced files as resources", async () => {
     const download = {
       id: BROWSER_DOWNLOAD_ID,

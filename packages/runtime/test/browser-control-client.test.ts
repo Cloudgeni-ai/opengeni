@@ -100,6 +100,17 @@ describe("BrowserControlClient", () => {
         if (url.pathname.endsWith("/targets") && request.method === "GET") {
           return success([target]);
         }
+        if (url.pathname.endsWith("/clipboard") && request.method === "GET") {
+          return success({
+            browserSessionId,
+            controllerGeneration,
+            revision: 1,
+            text: "private browser clipboard",
+            source: "copy",
+            sourceTargetId: target.id,
+            updatedAt: "2026-08-10T12:00:00.000Z",
+          });
+        }
         if (url.pathname.endsWith("/protected-auth-fills") && request.method === "POST") {
           const body = (await request.json()) as { operationId: string };
           return success({
@@ -276,6 +287,12 @@ describe("BrowserControlClient", () => {
         viewToken,
       });
       expect(await browserSession.listTargets()).toEqual([target]);
+      expect(await browserSession.readClipboard()).toMatchObject({
+        browserSessionId,
+        revision: 1,
+        text: "private browser clipboard",
+        source: "copy",
+      });
       expect(
         await browserSession.stageWorkspaceFiles({
           operationId: workspaceFileOperationId,
@@ -371,7 +388,7 @@ describe("BrowserControlClient", () => {
       ).toBe(true);
       expect(placement.writes.some((entry) => entry.content.includes(adminToken))).toBe(true);
       expect(placement.writes.some((entry) => entry.content.includes("route-password"))).toBe(true);
-      expect(placement.finalizations).toBe(9);
+      expect(placement.finalizations).toBe(10);
       for (const path of placement.writes.map((entry) => dirname(entry.path))) {
         if (!path.includes("opengeni-browser-control-client")) continue;
         await expect(stat(path)).rejects.toThrow();

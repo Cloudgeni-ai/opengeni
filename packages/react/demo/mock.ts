@@ -21,6 +21,7 @@ import type {
   BillingUsageResponse,
   BrowserActionReceipt,
   BrowserActionRequest,
+  BrowserClipboard,
   BrowserDiagnosticBatch,
   BrowserDiagnosticsOptions,
   BrowserDownload,
@@ -278,6 +279,9 @@ export class MockOpenGeniClient implements SessionClientLike {
   ]);
   private browserDownloads = new Map<string, BrowserDownload[]>([
     [DEMO_BROWSER_SESSION_ID, [fabricateBrowserDownload(DEMO_BROWSER_SESSION_ID)]],
+  ]);
+  private browserClipboards = new Map<string, BrowserClipboard>([
+    [DEMO_BROWSER_SESSION_ID, fabricateBrowserClipboard(DEMO_BROWSER_SESSION_ID)],
   ]);
   private computerRevision = 1;
   private computerSessions = new Map<string, ComputerSession>([
@@ -2007,6 +2011,15 @@ export class MockOpenGeniClient implements SessionClientLike {
     return session;
   }
 
+  async readBrowserClipboard(
+    _workspaceId: string,
+    browserSessionId: string,
+  ): Promise<BrowserClipboard> {
+    const clipboard = this.browserClipboards.get(browserSessionId);
+    if (!clipboard) throw new Error("Browser clipboard not found");
+    return { ...clipboard };
+  }
+
   async listBrowserDownloads(
     _workspaceId: string,
     browserSessionId: string,
@@ -2073,6 +2086,10 @@ export class MockOpenGeniClient implements SessionClientLike {
     this.browserSessions.set(id, session);
     this.browserTargets.set(id, [target]);
     this.browserDownloads.set(id, []);
+    this.browserClipboards.set(
+      id,
+      fabricateBrowserClipboard(id, session.controller?.controllerGeneration),
+    );
     this.browserRevision += 1;
     return {
       session,
@@ -2175,6 +2192,31 @@ export class MockOpenGeniClient implements SessionClientLike {
           url: action.url,
           documentGeneration: `demo-document-${this.browserRevision + 1}`,
         };
+      } else if (action.type === "clipboard") {
+        const currentClipboard =
+          this.browserClipboards.get(browserSessionId) ??
+          fabricateBrowserClipboard(browserSessionId, target.controllerGeneration);
+        if (action.operation === "write" && action.text !== undefined) {
+          this.browserClipboards.set(
+            browserSessionId,
+            updateDemoClipboard(currentClipboard, action.text, "write", target.id),
+          );
+        } else if (action.operation === "clear") {
+          this.browserClipboards.set(
+            browserSessionId,
+            updateDemoClipboard(currentClipboard, "", "clear", target.id),
+          );
+        } else if (action.operation === "copy") {
+          this.browserClipboards.set(
+            browserSessionId,
+            updateDemoClipboard(currentClipboard, "Demo browser selection", "copy", target.id),
+          );
+        } else if (action.operation === "paste" && action.text !== undefined) {
+          this.browserClipboards.set(
+            browserSessionId,
+            updateDemoClipboard(currentClipboard, action.text, "paste", target.id),
+          );
+        }
       }
     }
     this.browserTargets.set(
@@ -2343,6 +2385,10 @@ export class MockOpenGeniClient implements SessionClientLike {
       })),
     );
     this.browserDownloads.set(browserSessionId, []);
+    this.browserClipboards.set(
+      browserSessionId,
+      fabricateBrowserClipboard(browserSessionId, controllerGeneration),
+    );
     this.browserRevision += 1;
     return {
       session,
@@ -2363,6 +2409,7 @@ export class MockOpenGeniClient implements SessionClientLike {
     };
     this.browserSessions.set(browserSessionId, session);
     this.browserDownloads.delete(browserSessionId);
+    this.browserClipboards.delete(browserSessionId);
     this.browserRevision += 1;
     return {
       session,
@@ -3002,6 +3049,37 @@ export class MockOpenGeniClient implements SessionClientLike {
   }
 }
 
+function fabricateBrowserClipboard(
+  browserSessionId: string,
+  controllerGeneration = "demo-controller-1",
+): BrowserClipboard {
+  return {
+    browserSessionId,
+    controllerGeneration,
+    revision: 0,
+    text: "",
+    source: "empty",
+    sourceTargetId: null,
+    updatedAt: null,
+  };
+}
+
+function updateDemoClipboard(
+  clipboard: BrowserClipboard,
+  text: string,
+  source: Exclude<BrowserClipboard["source"], "empty">,
+  sourceTargetId: string,
+): BrowserClipboard {
+  return {
+    ...clipboard,
+    revision: clipboard.revision + 1,
+    text,
+    source,
+    sourceTargetId,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
 function fabricateBrowserSession(
   associationSessionId: string,
   overrides: Partial<BrowserSession> = {},
@@ -3035,7 +3113,7 @@ function fabricateBrowserSession(
       tabs: true,
       downloads: true,
       uploads: true,
-      clipboard: false,
+      clipboard: true,
       diagnostics: true,
       rawCdp: false,
       linkedComputer: true,

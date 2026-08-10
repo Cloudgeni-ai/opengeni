@@ -66,6 +66,97 @@ describe("OpenGeni Codemode interaction facade", () => {
     ]);
   });
 
+  test("exposes private BrowserSession clipboard reads and atomic mutations", async () => {
+    const clipboard = {
+      browserSessionId,
+      controllerGeneration: "controller-1",
+      revision: 2,
+      text: "private browser text",
+      source: "copy" as const,
+      sourceTargetId: "tab-1",
+      updatedAt: "2026-08-10T10:00:00.000Z",
+    };
+    const fake = fakeClient((path) => {
+      if (path === "interaction.browser.clipboard") return result(clipboard);
+      if (path === "interaction.browser.tabs") {
+        return result({
+          browserSessionId,
+          controllerGeneration: "controller-1",
+          targets: [{ id: "tab-1", selected: true }],
+        });
+      }
+      if (path === "interaction.browser.act") {
+        return result({ operationId: "operation-1", state: "completed" });
+      }
+      throw new Error(`unexpected path: ${path}`);
+    });
+    const browser = createOpenGeniCodemode(fake.client).browsers.use(browserSessionId);
+
+    expect(await browser.clipboard.read()).toEqual(clipboard);
+    await browser.clipboard.write("draft");
+    await browser.clipboard.copy({
+      targetId: "tab-1",
+      locator: { kind: "label", text: "Source" },
+      content: "value",
+    });
+    await browser.clipboard.paste({ targetId: "tab-1" });
+
+    expect(fake.calls).toEqual([
+      {
+        path: "interaction.browser.clipboard",
+        args: { browserSessionId },
+        options: {},
+      },
+      {
+        path: "interaction.browser.tabs",
+        args: { operation: "list", browserSessionId },
+        options: {},
+      },
+      {
+        path: "interaction.browser.act",
+        args: {
+          browserSessionId,
+          targetId: "tab-1",
+          action: { type: "clipboard", operation: "write", text: "draft" },
+        },
+        options: {},
+      },
+      {
+        path: "interaction.browser.tabs",
+        args: { operation: "list", browserSessionId },
+        options: {},
+      },
+      {
+        path: "interaction.browser.act",
+        args: {
+          browserSessionId,
+          targetId: "tab-1",
+          action: {
+            type: "clipboard",
+            operation: "copy",
+            locator: { kind: "label", text: "Source" },
+            content: "value",
+          },
+        },
+        options: {},
+      },
+      {
+        path: "interaction.browser.tabs",
+        args: { operation: "list", browserSessionId },
+        options: {},
+      },
+      {
+        path: "interaction.browser.act",
+        args: {
+          browserSessionId,
+          targetId: "tab-1",
+          action: { type: "clipboard", operation: "paste" },
+        },
+        options: {},
+      },
+    ]);
+  });
+
   test("uses the focused Computer target and serializable native locator recipes", async () => {
     const fake = fakeClient((path, _args) => {
       if (path === "interaction.computer.open") {

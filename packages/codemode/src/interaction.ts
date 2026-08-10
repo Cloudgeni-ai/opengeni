@@ -6,6 +6,7 @@ import type {
   AttemptToolResult,
   BrowserAction,
   BrowserActionReceipt,
+  BrowserClipboard,
   BrowserDiagnosticBatch,
   BrowserDiagnosticKind,
   BrowserIdentity,
@@ -51,6 +52,7 @@ const PATH = {
   browserTabs: ["interaction", "browser", "tabs"],
   browserObserve: ["interaction", "browser", "observe"],
   browserAct: ["interaction", "browser", "act"],
+  browserClipboard: ["interaction", "browser", "clipboard"],
   browserDebug: ["interaction", "browser", "debug"],
   browserAuth: ["interaction", "browser", "auth"],
   requestHuman: ["interaction", "requestHuman"],
@@ -224,6 +226,7 @@ export class CodemodeBrowserIdentityCollection {
 export class CodemodeBrowser {
   readonly tabs: CodemodeBrowserTabCollection;
   readonly auth: CodemodeBrowserAuth;
+  readonly clipboard: CodemodeBrowserClipboard;
 
   constructor(
     private readonly client: CodemodeClientProvider,
@@ -231,6 +234,7 @@ export class CodemodeBrowser {
   ) {
     this.tabs = new CodemodeBrowserTabCollection(client, id);
     this.auth = new CodemodeBrowserAuth(client, id);
+    this.clipboard = new CodemodeBrowserClipboard(client, id, this.tabs);
   }
 
   async refresh(callOptions: CodemodeCallOptions = {}): Promise<BrowserSession> {
@@ -320,6 +324,103 @@ export class CodemodeBrowser {
       { browserSessionId: this.id, action },
       callOptions,
     );
+  }
+}
+
+export class CodemodeBrowserClipboard {
+  constructor(
+    private readonly client: CodemodeClientProvider,
+    private readonly browserSessionId: string,
+    private readonly tabs: CodemodeBrowserTabCollection,
+  ) {}
+
+  async read(callOptions: CodemodeCallOptions = {}): Promise<BrowserClipboard> {
+    return await callStructured(
+      this.client,
+      PATH.browserClipboard,
+      { browserSessionId: this.browserSessionId },
+      callOptions,
+    );
+  }
+
+  async write(
+    text: string,
+    options: BrowserActionFences & { targetId?: string | undefined } = {},
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<BrowserActionReceipt> {
+    return await this.act({ type: "clipboard", operation: "write", text }, options, callOptions);
+  }
+
+  async clear(
+    options: BrowserActionFences & { targetId?: string | undefined } = {},
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<BrowserActionReceipt> {
+    return await this.act({ type: "clipboard", operation: "clear" }, options, callOptions);
+  }
+
+  async copy(
+    options: BrowserActionFences & {
+      targetId?: string | undefined;
+      locator?: BrowserLocator | undefined;
+      content?: "selection" | "value" | "text" | undefined;
+    } = {},
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<BrowserActionReceipt> {
+    const {
+      targetId,
+      expectedTargetGeneration,
+      expectedDocumentGeneration,
+      expectedFrameId,
+      ...copy
+    } = options;
+    return await this.act(
+      { type: "clipboard", operation: "copy", ...copy },
+      {
+        targetId,
+        expectedTargetGeneration,
+        expectedDocumentGeneration,
+        expectedFrameId,
+      },
+      callOptions,
+    );
+  }
+
+  async paste(
+    options: BrowserActionFences & {
+      targetId?: string | undefined;
+      locator?: BrowserLocator | undefined;
+      text?: string | undefined;
+    } = {},
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<BrowserActionReceipt> {
+    const {
+      targetId,
+      expectedTargetGeneration,
+      expectedDocumentGeneration,
+      expectedFrameId,
+      ...paste
+    } = options;
+    return await this.act(
+      { type: "clipboard", operation: "paste", ...paste },
+      {
+        targetId,
+        expectedTargetGeneration,
+        expectedDocumentGeneration,
+        expectedFrameId,
+      },
+      callOptions,
+    );
+  }
+
+  private async act(
+    action: BrowserAction,
+    options: BrowserActionFences & { targetId?: string | undefined },
+    callOptions: CodemodeCallOptions,
+  ): Promise<BrowserActionReceipt> {
+    const { targetId, ...fences } = options;
+    return await this.tabs
+      .use(await this.tabs.resolveId(targetId, callOptions))
+      .act(action, fences, callOptions);
   }
 }
 

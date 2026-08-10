@@ -1,6 +1,7 @@
 import type {
   AttachedBrowserDevice,
   BrowserAction,
+  BrowserActionReceipt,
   BrowserDiagnosticBatch,
   BrowserDownload,
   BrowserDownloadSaveResponse,
@@ -30,6 +31,7 @@ import {
 } from "lucide-react";
 import {
   type FormEvent,
+  type ClipboardEvent,
   type KeyboardEvent,
   type MouseEvent,
   type PointerEvent,
@@ -53,6 +55,7 @@ import { useBrowserSession } from "../hooks/use-browser-session";
 import { useBrowserSessions } from "../hooks/use-browser-sessions";
 import { useInteractionInterventions } from "../hooks/use-interaction-interventions";
 import { cn } from "../lib/cn";
+import { copyTextToClipboard } from "../lib/clipboard";
 import { formatBytes } from "../lib/format";
 import type { EmbeddedBrowserInteractionClientOverride } from "../session-context";
 import { InteractionInterventionBanner } from "./interaction-intervention-banner";
@@ -633,11 +636,17 @@ export function BrowserViewer({
             observation={browser.observation}
             mutating={browser.mutating || savingProfile}
             activityLabel={savingProfile ? "Saving browser version…" : undefined}
-            onAction={(action, frame) =>
-              (frame ? browser.actFromFrame(action, frame) : browser.act(action)).then(
-                () => undefined,
-              )
-            }
+            clipboardEnabled={browser.session?.capabilities.clipboard === true}
+            onAction={async (action, frame) => {
+              const receipt = frame
+                ? await browser.actFromFrame(action, frame)
+                : await browser.act(action);
+              if (receipt.state !== "completed") {
+                throw new Error(receipt.error?.message ?? "Browser input did not complete.");
+              }
+              return receipt;
+            }}
+            onReadClipboard={browser.readClipboard}
             onReconnect={frames.reconnect}
             onError={(cause) => notifyError(cause, "Browser input failed.")}
           />
@@ -1248,8 +1257,10 @@ function BrowserViewport(props: {
   connectionError: Error | null;
   observation: ReturnType<typeof useBrowserSession>["observation"];
   mutating: boolean;
+  clipboardEnabled: boolean;
   activityLabel?: string | undefined;
-  onAction: (action: BrowserAction, frame: BrowserFrame | null) => Promise<void>;
+  onAction: (action: BrowserAction, frame: BrowserFrame | null) => Promise<BrowserActionReceipt>;
+  onReadClipboard: () => Promise<{ text: string }>;
   onReconnect: () => void;
   onError: (cause: unknown) => void;
 }) {
@@ -1272,9 +1283,11 @@ function BrowserViewport(props: {
     timer: ReturnType<typeof setTimeout> | null;
   } | null>(null);
   const actionRef = useRef(props.onAction);
+  const readClipboardRef = useRef(props.onReadClipboard);
   const errorRef = useRef(props.onError);
   const actionTailRef = useRef<Promise<void>>(Promise.resolve());
   actionRef.current = props.onAction;
+  readClipboardRef.current = props.onReadClipboard;
   errorRef.current = props.onError;
 
   useEffect(() => {
@@ -1319,12 +1332,22 @@ function BrowserViewport(props: {
     [],
   );
 
-  const enqueue = useCallback((action: BrowserAction, frame: BrowserFrame | null) => {
-    actionTailRef.current = actionTailRef.current
-      .catch(() => undefined)
-      .then(async () => await actionRef.current(action, frame))
-      .catch((cause) => errorRef.current(cause));
-  }, []);
+  const enqueue = useCallback(
+    (
+      action: BrowserAction,
+      frame: BrowserFrame | null,
+      after?: (receipt: BrowserActionReceipt) => Promise<void>,
+    ) => {
+      actionTailRef.current = actionTailRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          const receipt = await actionRef.current(action, frame);
+          await after?.(receipt);
+        })
+        .catch((cause) => errorRef.current(cause));
+    },
+    [],
+  );
 
   const point = useCallback(
     (frame: BrowserFrame, clientX: number, clientY: number) =>
@@ -1429,10 +1452,44 @@ function BrowserViewport(props: {
   };
 
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    const command = event.metaKey || event.ctrlKey;
+    if (
+      props.clipboardEnabled &&
+      command &&
+      !event.altKey &&
+      ["c", "v"].includes(event.key.toLowerCase())
+    ) {
+      return;
+    }
     const key = browserKey(event);
     if (!key) return;
     event.preventDefault();
     enqueue({ type: "press", key }, props.frame);
+  };
+
+  const copy = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    if (!props.clipboardEnabled) return;
+    event.preventDefault();
+    enqueue({ type: "clipboard", operation: "copy" }, props.frame, async () => {
+      const clipboard = await readClipboardRef.current();
+      if (clipboard.text.length === 0) return;
+      if (!(await copyTextToClipboard(clipboard.text))) {
+        throw new Error("Browser text could not be copied to the local clipboard");
+      }
+    });
+  };
+
+  const paste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    if (!props.clipboardEnabled) return;
+    event.preventDefault();
+    enqueue(
+      {
+        type: "clipboard",
+        operation: "paste",
+        text: event.clipboardData.getData("text/plain"),
+      },
+      props.frame,
+    );
   };
 
   const input = (value: string) => {
@@ -1464,6 +1521,8 @@ function BrowserViewport(props: {
         defaultValue=""
         onInput={(event) => input(event.currentTarget.value)}
         onKeyDown={keyDown}
+        onCopy={copy}
+        onPaste={paste}
         className="pointer-events-none absolute left-1/2 top-1/2 size-px resize-none overflow-hidden opacity-0"
         aria-label="Browser keyboard input"
         autoCapitalize="off"

@@ -17,6 +17,7 @@ export const INTERACTION_MAX_CHANGED_NODES = 2_000;
 export const INTERACTION_MAX_DIAGNOSTIC_ENTRIES = 1_000;
 export const INTERACTION_MAX_ACTIONS_PER_BATCH = 32;
 export const INTERACTION_MAX_WORKSPACE_FILES_PER_COMMAND = 100;
+export const INTERACTION_MAX_CLIPBOARD_BYTES = 1024 * 1024;
 
 /**
  * Latest-wins workspace invalidation for Browser/Computer resources. This is
@@ -225,6 +226,48 @@ export const BrowserSession = z
   })
   .strict();
 export type BrowserSession = z.infer<typeof BrowserSession>;
+
+/** Controller-private, BrowserSession-scoped clipboard. This is deliberately
+ * distinct from a ComputerSession/host OS clipboard so concurrent browsers do
+ * not exchange ambient machine state. */
+export const BrowserClipboard = z
+  .object({
+    browserSessionId: z.string().uuid(),
+    controllerGeneration: opaqueGeneration,
+    revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    text: z
+      .string()
+      .max(INTERACTION_MAX_CLIPBOARD_BYTES)
+      .refine(
+        (value) => new TextEncoder().encode(value).byteLength <= INTERACTION_MAX_CLIPBOARD_BYTES,
+        { message: "browser clipboard text exceeds its UTF-8 byte envelope" },
+      ),
+    source: z.enum(["empty", "write", "clear", "copy", "paste"]),
+    sourceTargetId: boundedOpaqueId.nullable(),
+    updatedAt: z.string().datetime({ offset: true }).nullable(),
+  })
+  .strict()
+  .superRefine((clipboard, context) => {
+    if (clipboard.revision === 0) {
+      if (
+        clipboard.text !== "" ||
+        clipboard.source !== "empty" ||
+        clipboard.sourceTargetId !== null ||
+        clipboard.updatedAt !== null
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "initial browser clipboard state must be empty",
+        });
+      }
+    } else if (clipboard.source === "empty" || clipboard.updatedAt === null) {
+      context.addIssue({
+        code: "custom",
+        message: "updated browser clipboard state requires a source and timestamp",
+      });
+    }
+  });
+export type BrowserClipboard = z.infer<typeof BrowserClipboard>;
 
 /** One live Chrome-profile bridge installed on an enrolled machine. This is a
  *  transport endpoint, not saved browser/login state: BrowserIdentity remains
@@ -1743,6 +1786,77 @@ const browserActionVariants = [
       workspaceFileIds: z.array(z.string().uuid()).min(1).max(100),
     })
     .strict(),
+  z
+    .object({
+      type: z.literal("clipboard"),
+      operation: z.enum(["write", "clear", "copy", "paste"]),
+      text: z
+        .string()
+        .max(INTERACTION_MAX_CLIPBOARD_BYTES)
+        .refine(
+          (value) => new TextEncoder().encode(value).byteLength <= INTERACTION_MAX_CLIPBOARD_BYTES,
+          { message: "browser clipboard text exceeds its UTF-8 byte envelope" },
+        )
+        .optional(),
+      locator: BrowserLocator.optional(),
+      content: z.enum(["selection", "value", "text"]).optional(),
+    })
+    .strict()
+    .superRefine((action, context) => {
+      if (action.operation === "write") {
+        if (action.text === undefined) {
+          context.addIssue({
+            code: "custom",
+            path: ["text"],
+            message: "clipboard write requires text",
+          });
+        }
+        if (action.locator !== undefined || action.content !== undefined) {
+          context.addIssue({
+            code: "custom",
+            message: "clipboard write accepts only text",
+          });
+        }
+        return;
+      }
+      if (action.operation === "clear") {
+        if (
+          action.text !== undefined ||
+          action.locator !== undefined ||
+          action.content !== undefined
+        ) {
+          context.addIssue({
+            code: "custom",
+            message: "clipboard clear accepts no payload",
+          });
+        }
+        return;
+      }
+      if (action.operation === "copy") {
+        if (action.text !== undefined) {
+          context.addIssue({
+            code: "custom",
+            path: ["text"],
+            message: "clipboard copy does not accept text",
+          });
+        }
+        if (action.content !== undefined && action.content !== "selection" && !action.locator) {
+          context.addIssue({
+            code: "custom",
+            path: ["locator"],
+            message: "copying element value or text requires a locator",
+          });
+        }
+        return;
+      }
+      if (action.content !== undefined) {
+        context.addIssue({
+          code: "custom",
+          path: ["content"],
+          message: "clipboard paste does not accept content",
+        });
+      }
+    }),
   z
     .object({
       type: z.literal("wait"),

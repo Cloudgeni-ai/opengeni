@@ -6,6 +6,7 @@ import {
   BrowserAction,
   BrowserActionBatch,
   BrowserActionReceipt,
+  BrowserClipboard,
   BrowserDiagnosticBatch,
   BrowserIdentity,
   BrowserIdentityListResponse,
@@ -73,6 +74,7 @@ const TOOL_PERMISSION = {
   browser_tabs: "sessions:control",
   browser_observe: "sessions:read",
   browser_act: "sessions:control",
+  browser_clipboard: "sessions:read",
   browser_debug: "sessions:read",
   browser_auth: "sessions:control",
   interaction_request_human: "sessions:control",
@@ -180,6 +182,7 @@ const BrowserActInput = z
     action: z.union([BrowserAction, BrowserActionBatch]),
   })
   .strict();
+const BrowserClipboardInput = z.object({ browserSessionId: z.string().uuid() }).strict();
 const BrowserDebugInput = z
   .object({
     browserSessionId: z.string().uuid(),
@@ -244,9 +247,17 @@ const BrowserAuthInput = z.discriminatedUnion("operation", [
 
 const BrowserAuthOutput = z.discriminatedUnion("operation", [
   z
-    .object({ operation: z.literal("list_connections"), result: SiteAuthConnectionListResponse })
+    .object({
+      operation: z.literal("list_connections"),
+      result: SiteAuthConnectionListResponse,
+    })
     .strict(),
-  z.object({ operation: z.literal("get_connection"), result: SiteAuthConnection }).strict(),
+  z
+    .object({
+      operation: z.literal("get_connection"),
+      result: SiteAuthConnection,
+    })
+    .strict(),
   z.object({ operation: z.literal("list_runs"), result: AuthRunListResponse }).strict(),
   z.object({ operation: z.literal("get_run"), result: AuthRun }).strict(),
   z.object({ operation: z.literal("start"), result: AuthRunMutationResponse }).strict(),
@@ -534,6 +545,20 @@ export function createInteractionAttemptToolDefinitions(
         action: value.action,
       });
     },
+  });
+
+  add({
+    name: "browser_clipboard",
+    codemodePath: ["interaction", "browser", "clipboard"],
+    title: "Read browser clipboard",
+    description:
+      "Read the bounded private clipboard of one exact BrowserSession. This never reads the connected machine or host OS clipboard. Use browser_act with a clipboard action to write, clear, copy, or paste.",
+    input: BrowserClipboardInput,
+    output: BrowserClipboard,
+    readOnly: true,
+    idempotent: true,
+    execute: async (value) =>
+      await input.transport.readBrowserClipboard(input.workspaceId, value.browserSessionId),
   });
 
   add({

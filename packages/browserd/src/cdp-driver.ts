@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { resolve as resolvePath } from "node:path";
 import {
   BrowserActionCommand,
+  BrowserClipboard,
   BrowserDiagnosticBatch,
   BrowserDiagnosticEntry,
   BrowserDialog,
@@ -9,9 +10,11 @@ import {
   BrowserProtectedAuthFillCommand,
   BrowserTarget,
   INTERACTION_MAX_DIAGNOSTIC_ENTRIES,
+  INTERACTION_MAX_CLIPBOARD_BYTES,
   INTERACTION_PROTOCOL_VERSION,
   type BrowserAction,
   type BrowserActionCommand as BrowserActionCommandValue,
+  type BrowserClipboard as BrowserClipboardValue,
   type BrowserDiagnosticBatch as BrowserDiagnosticBatchValue,
   type BrowserDiagnosticKind,
   type BrowserLocator,
@@ -269,6 +272,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private userAgent = "";
   private browserProduct = "";
   private browserUnsubscribe: Array<() => void> = [];
+  private clipboardRevision = 0;
+  private clipboardText = "";
+  private clipboardSource: BrowserClipboardValue["source"] = "empty";
+  private clipboardSourceTargetId: string | null = null;
+  private clipboardUpdatedAt: string | null = null;
   private started = false;
 
   constructor(options: AgentBrowserDriverOptions) {
@@ -621,6 +629,18 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         info.targetId,
       );
       return await this.observeUnlocked(state, currentInfo);
+    });
+  }
+
+  readClipboard(): BrowserClipboardValue {
+    return BrowserClipboard.parse({
+      browserSessionId: this.browserSessionId,
+      controllerGeneration: this.controllerGeneration,
+      revision: this.clipboardRevision,
+      text: this.clipboardText,
+      source: this.clipboardSource,
+      sourceTargetId: this.clipboardSourceTargetId,
+      updatedAt: this.clipboardUpdatedAt,
     });
   }
 
@@ -1887,9 +1907,119 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         });
         return;
       }
+      case "clipboard":
+        await this.dispatchClipboardAction(state, action);
+        return;
       case "wait":
         await this.waitForCondition(state, action);
         return;
+    }
+  }
+
+  private async dispatchClipboardAction(
+    state: TargetState,
+    action: Extract<BrowserAction, { type: "clipboard" }>,
+  ): Promise<void> {
+    if (action.operation === "clear") {
+      this.setClipboard("", "clear", state.targetId);
+      return;
+    }
+    if (action.operation === "write") {
+      if (action.text === undefined) {
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          "browser clipboard write requires text",
+        );
+      }
+      this.setClipboard(action.text, "write", state.targetId);
+      return;
+    }
+    if (action.operation === "copy") {
+      const text = await this.copyBrowserText(state, action.locator, action.content ?? "selection");
+      this.setClipboard(text, "copy", state.targetId);
+      return;
+    }
+    const text = action.text ?? this.clipboardText;
+    if (action.text !== undefined) this.setClipboard(text, "paste", state.targetId);
+    if (action.locator) {
+      const node = await this.resolveLocator(state, action.locator);
+      await this.focusNode(state, node.backendDOMNodeId);
+    }
+    if (text) {
+      await this.sendActionTarget(state, "Input.insertText", { text });
+    }
+  }
+
+  private async copyBrowserText(
+    state: TargetState,
+    locator: BrowserLocator | undefined,
+    content: "selection" | "value" | "text",
+  ): Promise<string> {
+    let value: unknown;
+    if (locator) {
+      const node = await this.resolveLocator(state, locator);
+      value = await this.callOnNode(state, node.backendDOMNodeId, COPY_BROWSER_TEXT_FUNCTION, [
+        { value: content },
+      ]);
+    } else {
+      value = await this.evaluateAction(
+        state,
+        `(${COPY_ACTIVE_BROWSER_TEXT_FUNCTION})(${json(content)})`,
+      );
+      if (!isRecord(value) || (value.ok !== true && value.error !== "protected")) {
+        const accessibility = await this.refreshAccessibility(state);
+        const focused = accessibility.focusedRef
+          ? accessibility.entriesByRef.get(accessibility.focusedRef)
+          : null;
+        if (focused?.backendDOMNodeId) {
+          value = await this.callOnNode(
+            state,
+            focused.backendDOMNodeId,
+            COPY_BROWSER_TEXT_FUNCTION,
+            [{ value: content }],
+          );
+        }
+      }
+    }
+    if (!isRecord(value) || value.ok !== true || typeof value.text !== "string") {
+      const reason =
+        isRecord(value) && typeof value.error === "string" ? value.error : "unavailable";
+      throw new InteractionDefiniteDriverError(
+        reason === "protected" ? "permission_denied" : "invalid_action",
+        reason === "protected"
+          ? "browser clipboard cannot copy a protected field"
+          : "browser clipboard source is unavailable",
+      );
+    }
+    this.assertClipboardText(value.text);
+    return value.text;
+  }
+
+  private setClipboard(
+    text: string,
+    source: Exclude<BrowserClipboardValue["source"], "empty">,
+    targetId: string,
+  ): void {
+    this.assertClipboardText(text);
+    if (this.clipboardRevision >= Number.MAX_SAFE_INTEGER) {
+      throw new InteractionDefiniteDriverError(
+        "resource_unavailable",
+        "browser clipboard revision capacity is exhausted",
+      );
+    }
+    this.clipboardRevision += 1;
+    this.clipboardText = text;
+    this.clipboardSource = source;
+    this.clipboardSourceTargetId = targetId;
+    this.clipboardUpdatedAt = this.timestamp();
+  }
+
+  private assertClipboardText(text: string): void {
+    if (Buffer.byteLength(text, "utf8") > INTERACTION_MAX_CLIPBOARD_BYTES) {
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        "browser clipboard text exceeds its UTF-8 byte envelope",
+      );
     }
   }
 
@@ -2867,6 +2997,51 @@ const SELECT_OPTIONS_FUNCTION = `function(values) {
 const SCROLL_FUNCTION = `function(deltaX, deltaY) {
   this.scrollBy({ left: deltaX, top: deltaY, behavior: "instant" });
   return true;
+}`;
+
+const COPY_BROWSER_TEXT_FUNCTION = `function(content) {
+  const element = this && this.nodeType === 1 ? this : this?.parentElement;
+  if (!element || element.nodeType !== 1 || !element.isConnected) return { ok: false, error: "unavailable" };
+  const tag = String(element.tagName || "").toLowerCase();
+  if (tag === "input" && String(element.type).toLowerCase() === "password") {
+    return { ok: false, error: "protected" };
+  }
+  if (content === "value") {
+    if (tag === "input" || tag === "textarea" || tag === "select") {
+      return { ok: true, text: String(element.value ?? "") };
+    }
+    return { ok: false, error: "unavailable" };
+  }
+  if (content === "text") {
+    return { ok: true, text: String(element.innerText ?? element.textContent ?? "") };
+  }
+  if (tag === "input" || tag === "textarea") {
+    const start = element.selectionStart;
+    const end = element.selectionEnd;
+    if (typeof start !== "number" || typeof end !== "number") return { ok: false, error: "unavailable" };
+    return { ok: true, text: String(element.value).slice(start, end) };
+  }
+  const selection = element.ownerDocument.defaultView?.getSelection();
+  if (!selection || selection.rangeCount === 0) return { ok: true, text: "" };
+  const range = selection.getRangeAt(0);
+  if (!element.contains(range.commonAncestorContainer) && range.commonAncestorContainer !== element) {
+    return { ok: false, error: "unavailable" };
+  }
+  return { ok: true, text: selection.toString() };
+}`;
+
+const COPY_ACTIVE_BROWSER_TEXT_FUNCTION = `function(content) {
+  let element = document.activeElement || document.body;
+  for (let depth = 0; depth < 16 && ["iframe", "frame"].includes(String(element?.tagName || "").toLowerCase()); depth += 1) {
+    try {
+      const nested = element.contentDocument?.activeElement;
+      if (!nested) return { ok: false, error: "unavailable" };
+      element = nested;
+    } catch {
+      return { ok: false, error: "unavailable" };
+    }
+  }
+  return (${COPY_BROWSER_TEXT_FUNCTION}).call(element, content);
 }`;
 
 const PROTECTED_ELEMENT_METADATA_FUNCTION = `function() {

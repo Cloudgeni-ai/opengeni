@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import type {
   BrowserActionCommand,
   BrowserActionReceipt,
+  BrowserClipboard,
   BrowserDiagnosticBatch,
   BrowserDiagnosticKind,
   BrowserDownload,
@@ -174,6 +175,7 @@ export type BrowserSupervisorDriver = BrowserInteractionDriver & {
       limit?: number;
     },
   ): Promise<BrowserDiagnosticBatch>;
+  readClipboard(): BrowserClipboard;
   runtimeSnapshot(): Promise<BrowserRuntimeSnapshot>;
   protectedFill(command: BrowserProtectedAuthFillCommand): Promise<BrowserProtectedAuthObservation>;
   close(): Promise<void>;
@@ -393,6 +395,10 @@ export class BrowserSupervisor {
 
   async observe(reference: BrowserSessionReference, targetId: string): Promise<BrowserObservation> {
     return await this.requireActive(reference).controller.observe(targetId);
+  }
+
+  readClipboard(reference: BrowserSessionReference): BrowserClipboard {
+    return this.requireActive(reference).driver.readClipboard();
   }
 
   async action(command: BrowserActionCommand): Promise<BrowserActionReceipt> {

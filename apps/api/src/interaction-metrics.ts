@@ -130,6 +130,7 @@ function browserActionMode(action: BrowserActionRequest["action"]): string {
   if (actions.some((candidate) => candidate.type === "type" || candidate.type === "press")) {
     return "keyboard";
   }
+  if (actions.some((candidate) => candidate.type === "clipboard")) return "clipboard";
   return "semantic";
 }
 

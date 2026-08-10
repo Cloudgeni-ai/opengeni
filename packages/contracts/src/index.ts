@@ -830,6 +830,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "browser_tabs",
   "browser_observe",
   "browser_act",
+  "browser_clipboard",
   "browser_debug",
   "browser_auth",
   "interaction_request_human",

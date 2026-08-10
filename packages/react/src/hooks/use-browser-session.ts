@@ -2,6 +2,7 @@ import type {
   BrowserAction,
   BrowserActionBatch,
   BrowserActionReceipt,
+  BrowserClipboard,
   BrowserDiagnosticBatch,
   BrowserDiagnosticsOptions,
   BrowserFrame,
@@ -45,6 +46,7 @@ export type UseBrowserSessionResult = {
     frame: BrowserFrame,
     operationId?: string,
   ) => Promise<BrowserActionReceipt>;
+  readClipboard: () => Promise<BrowserClipboard>;
   diagnostics: (options?: BrowserDiagnosticsOptions) => Promise<BrowserDiagnosticBatch>;
 };
 
@@ -424,6 +426,15 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
     [browserSessionId, client, workspaceId],
   );
 
+  const readClipboard = useCallback(async (): Promise<BrowserClipboard> => {
+    if (!browserSessionId) throw new Error("No BrowserSession is selected.");
+    const clipboard = await client.readBrowserClipboard(workspaceId, browserSessionId);
+    if (clipboard.browserSessionId !== browserSessionId) {
+      throw new Error("Browser clipboard belongs to another BrowserSession.");
+    }
+    return clipboard;
+  }, [browserSessionId, client, workspaceId]);
+
   return {
     session: visible.session,
     targets: visible.targets,
@@ -439,6 +450,7 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
     closeTarget,
     act,
     actFromFrame,
+    readClipboard,
     diagnostics,
   };
 }

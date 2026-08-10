@@ -144,6 +144,16 @@ export type BrowserSession = {
   failureCode: string | null;
 };
 
+export type BrowserClipboard = {
+  browserSessionId: string;
+  controllerGeneration: string;
+  revision: number;
+  text: string;
+  source: "empty" | "write" | "clear" | "copy" | "paste";
+  sourceTargetId: string | null;
+  updatedAt: string | null;
+};
+
 export type InteractionCredentialAuthorityRef = {
   connectionId: string;
   connectionSubjectId: string | null;
@@ -747,6 +757,13 @@ export type BrowserAction =
     }
   | { type: "upload"; locator: BrowserLocator; workspaceFileIds: string[] }
   | {
+      type: "clipboard";
+      operation: "write" | "clear" | "copy" | "paste";
+      text?: string | undefined;
+      locator?: BrowserLocator | undefined;
+      content?: "selection" | "value" | "text" | undefined;
+    }
+  | {
       type: "wait";
       condition: "load" | "network_idle" | "visible" | "hidden";
       locator?: BrowserLocator | undefined;
@@ -1212,6 +1229,11 @@ export interface InteractionTransport {
     browserSessionId: string,
     options?: OpenGeniRequestOptions,
   ): Promise<BrowserSession>;
+  readBrowserClipboard(
+    workspaceId: string,
+    browserSessionId: string,
+    options?: OpenGeniRequestOptions,
+  ): Promise<BrowserClipboard>;
   listBrowserDownloads(
     workspaceId: string,
     browserSessionId: string,
@@ -1836,6 +1858,7 @@ export class BrowserSessionCollection {
 
 export class BrowserSessionResource {
   readonly auth: BrowserAuthRunCollection;
+  readonly clipboard: BrowserClipboardResource;
   readonly downloads: BrowserDownloadCollection;
   readonly tabs: BrowserTargetCollection;
   /** Alias for hosts that prefer the protocol term. */
@@ -1847,6 +1870,7 @@ export class BrowserSessionResource {
     readonly id: string,
   ) {
     this.auth = new BrowserAuthRunCollection(transport, workspaceId, id);
+    this.clipboard = new BrowserClipboardResource(transport, workspaceId, id);
     this.downloads = new BrowserDownloadCollection(transport, workspaceId, id);
     this.tabs = new BrowserTargetCollection(transport, workspaceId, id);
     this.targets = this.tabs;
@@ -1937,6 +1961,26 @@ export class BrowserSessionResource {
     options: OpenGeniRequestOptions = {},
   ): Promise<BrowserSessionMutationResponse> {
     return await this.transport.endBrowserSession(this.workspaceId, this.id, request, options);
+  }
+}
+
+export class BrowserClipboardResource {
+  constructor(
+    private readonly transport: BrowserInteractionTransport,
+    readonly workspaceId: string,
+    readonly browserSessionId: string,
+  ) {}
+
+  async read(options: OpenGeniRequestOptions = {}): Promise<BrowserClipboard> {
+    const clipboard = await this.transport.readBrowserClipboard(
+      this.workspaceId,
+      this.browserSessionId,
+      options,
+    );
+    if (clipboard.browserSessionId !== this.browserSessionId) {
+      throw new Error("Browser clipboard belongs to another BrowserSession");
+    }
+    return clipboard;
   }
 }
 

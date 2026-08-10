@@ -42,7 +42,9 @@ export function startBrowserConformanceFixture(): BrowserConformanceFixture {
       if (url.pathname === "/same-frame") {
         return html(`<!doctype html>
           <title>Same-origin frame</title>
-          <button onclick="this.textContent='Same frame 1'">Same frame 0</button>`);
+          <button onclick="this.textContent='Same frame 1'">Same frame 0</button>
+          <label>Frame clipboard source <input id="frameClipboardSource" value="same-frame clipboard value"></label>
+          <button onclick="frameClipboardSource.focus(); frameClipboardSource.select()">Select frame clipboard source</button>`);
       }
       if (url.pathname === "/popup") {
         return html(`<!doctype html><title>Fixture popup</title><p>Popup ready</p>`);
@@ -136,6 +138,12 @@ function mainPage(crossOrigin: string): string {
           <label>Fixture file <input id="upload" type="file"></label>
           <p id="uploadOutput"></p>
           <a download href="/download">Download fixture</a>
+
+          <label>Clipboard source <input id="clipboardSource" value="fixture clipboard value"></label>
+          <button id="selectClipboard" onclick="clipboardSource.focus(); clipboardSource.select()">Select clipboard source</button>
+          <label>Clipboard target <input id="clipboardTarget" oninput="clipboardOutput.textContent='Clipboard ' + this.value"></label>
+          <label>Protected clipboard <input id="clipboardPassword" type="password" value="must-not-copy"></label>
+          <p id="clipboardOutput"></p>
 
           <button onclick="console.error('Conformance console error')">Log conformance error</button>
           <button onclick="fetch('/failed-request')">Request fixture failure</button>

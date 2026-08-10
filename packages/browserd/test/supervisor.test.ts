@@ -735,6 +735,17 @@ function fakeDriver(
         truncated: false,
       };
     },
+    readClipboard() {
+      return {
+        browserSessionId: context.browserSessionId,
+        controllerGeneration: context.controllerGeneration,
+        revision: 0,
+        text: "",
+        source: "empty",
+        sourceTargetId: null,
+        updatedAt: null,
+      };
+    },
     async runtimeSnapshot() {
       requireOpen();
       return {

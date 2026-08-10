@@ -27,6 +27,7 @@ import {
   type AttachedBrowserDeviceListResponse,
   type BrowserActionReceipt,
   type BrowserActionRequest,
+  type BrowserClipboard,
   type BrowserDiagnosticBatch,
   type BrowserDiagnosticsOptions,
   type BrowserDownload,
@@ -2733,6 +2734,20 @@ export class OpenGeniClient {
     return await this.requestJson<BrowserSession>(
       "GET",
       `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  async readBrowserClipboard(
+    workspaceId: string,
+    browserSessionId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserClipboard> {
+    return await this.requestJson<BrowserClipboard>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/clipboard`,
       undefined,
       {},
       options,

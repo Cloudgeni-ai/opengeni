@@ -185,6 +185,22 @@ describe("BrowserControlServer", () => {
         200,
       );
 
+      const clipboard = await request(
+        server,
+        `/v1/browser-sessions/${reference.browserSessionId}/clipboard`,
+        { token: viewToken },
+      );
+      expect(clipboard.status).toBe(200);
+      expect((await json(clipboard)).data).toEqual({
+        browserSessionId: reference.browserSessionId,
+        controllerGeneration: reference.controllerGeneration,
+        revision: 0,
+        text: "",
+        source: "empty",
+        sourceTargetId: null,
+        updatedAt: null,
+      });
+
       const screenshot = await request(
         server,
         `/v1/browser-sessions/${reference.browserSessionId}/targets/${encodeURIComponent(observation.target.id)}/screenshot`,
@@ -896,6 +912,17 @@ function fakeDriver(
         entries: [],
         cursor: 0,
         truncated: false,
+      };
+    },
+    readClipboard() {
+      return {
+        browserSessionId: context.browserSessionId,
+        controllerGeneration: context.controllerGeneration,
+        revision: 0,
+        text: "",
+        source: "empty",
+        sourceTargetId: null,
+        updatedAt: null,
       };
     },
     async runtimeSnapshot() {

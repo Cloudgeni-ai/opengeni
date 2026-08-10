@@ -207,6 +207,7 @@ const BROWSER_INTERACTION_METHODS = [
   "listBrowserRevisions",
   "listBrowserSessions",
   "getBrowserSession",
+  "readBrowserClipboard",
   "listBrowserDownloads",
   "getBrowserDownload",
   "saveBrowserDownload",

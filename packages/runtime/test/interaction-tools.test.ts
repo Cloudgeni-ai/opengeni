@@ -39,6 +39,7 @@ describe("interaction attempt tools", () => {
     expect(definitions.map((definition) => definition.identity.toolName)).toEqual([
       "interaction_discover",
       "browser_observe",
+      "browser_clipboard",
       "browser_debug",
       "computer_targets",
       "computer_observe",
@@ -55,7 +56,7 @@ describe("interaction attempt tools", () => {
       generation: 1,
       definitions,
     });
-    expect(environment.catalog.entries).toHaveLength(5);
+    expect(environment.catalog.entries).toHaveLength(6);
     expect(environment.catalog.entries[0]).toMatchObject({
       identity: { serverId: "interaction", toolName: "interaction_discover" },
       modelName: "interaction__interaction_discover",
@@ -64,8 +65,46 @@ describe("interaction attempt tools", () => {
       approval: "none",
       annotations: { readOnlyHint: true, idempotentHint: true },
     });
-    expect(environment.catalog.entries[0]!.inputSchema).toMatchObject({ type: "object" });
-    expect(environment.catalog.entries[0]!.outputSchema).toMatchObject({ type: "object" });
+    expect(environment.catalog.entries[0]!.inputSchema).toMatchObject({
+      type: "object",
+    });
+    expect(environment.catalog.entries[0]!.outputSchema).toMatchObject({
+      type: "object",
+    });
+  });
+
+  test("reads only the private BrowserSession clipboard through the shared catalog", async () => {
+    const clipboard = {
+      browserSessionId,
+      controllerGeneration: "controller-1",
+      revision: 2,
+      text: "copied text",
+      source: "copy" as const,
+      sourceTargetId: "tab-1",
+      updatedAt: now,
+    };
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        readBrowserClipboard: async () => clipboard,
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_clipboard"],
+      permissions: ["sessions:read"],
+    });
+    const result = await definitions[0]!.execute(
+      { browserSessionId },
+      {
+        operationId: randomUUID(),
+        caller: { kind: "model", subjectId: "model:test" },
+      },
+    );
+
+    expect(definitions[0]).toMatchObject({
+      codemodePath: ["interaction", "browser", "clipboard"],
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    });
+    expect(result.structuredContent).toEqual(clipboard);
   });
 
   test("keeps model and Codemode Browser actions on the same durable operation and fences", async () => {
@@ -283,9 +322,18 @@ describe("interaction attempt tools", () => {
       {
         computerSessionId,
         targetId: target.id,
-        action: { type: "pointer", frameId: "frame-user-saw", action: "click", x: 10, y: 20 },
+        action: {
+          type: "pointer",
+          frameId: "frame-user-saw",
+          action: "click",
+          x: 10,
+          y: 20,
+        },
       },
-      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      {
+        operationId: randomUUID(),
+        caller: { kind: "model", subjectId: "model:test" },
+      },
     );
 
     expect(request).toMatchObject({ expectedFrameId: "frame-user-saw" });

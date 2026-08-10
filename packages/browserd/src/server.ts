@@ -414,6 +414,12 @@ export class BrowserControlServer {
         }),
       );
     }
+    if (segments.length === 4 && segments[3] === "clipboard") {
+      if (request.method !== "GET") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      return success(this.supervisor.readClipboard(reference));
+    }
     if (segments.length === 5 && segments[3] === "downloads") {
       if (request.method !== "GET") {
         throw new ProtocolError("invalid_action", "method not allowed", 405);

@@ -5,6 +5,7 @@ import {
   BrowserActionCommand,
   BrowserActionRequest,
   BrowserActionReceipt,
+  BrowserClipboard,
   BrowserDiagnosticBatch,
   BrowserIdentity,
   BrowserObservation,
@@ -377,6 +378,53 @@ describe("interaction contracts", () => {
         action: { type: "pointer", action: "click", x: 1, y: 2, deltaY: 40 },
       }).success,
     ).toBe(false);
+  });
+
+  test("keeps browser clipboard state private, bounded, and action-fenced", () => {
+    expect(
+      BrowserClipboard.parse({
+        browserSessionId,
+        controllerGeneration: "controller-2",
+        revision: 0,
+        text: "",
+        source: "empty",
+        sourceTargetId: null,
+        updatedAt: null,
+      }),
+    ).toMatchObject({ revision: 0, source: "empty" });
+    expect(
+      BrowserClipboard.safeParse({
+        browserSessionId,
+        controllerGeneration: "controller-2",
+        revision: 0,
+        text: "stale",
+        source: "write",
+        sourceTargetId: "target-1",
+        updatedAt: "2026-08-10T12:00:00.000Z",
+      }).success,
+    ).toBe(false);
+
+    const base = {
+      operationId,
+      targetId: "target-1",
+      expectedTargetGeneration: "target-4",
+      expectedDocumentGeneration: "document-9",
+      expectedFrameId: "frame-12",
+    };
+    expect(
+      BrowserActionRequest.parse({
+        ...base,
+        action: { type: "clipboard", operation: "paste", text: "hello" },
+      }).action,
+    ).toMatchObject({ type: "clipboard", operation: "paste", text: "hello" });
+    for (const action of [
+      { type: "clipboard", operation: "write" },
+      { type: "clipboard", operation: "clear", text: "unexpected" },
+      { type: "clipboard", operation: "copy", content: "value" },
+      { type: "clipboard", operation: "paste", content: "text" },
+    ]) {
+      expect(BrowserActionRequest.safeParse({ ...base, action }).success).toBe(false);
+    }
   });
 
   test("bounds browser workspace-file staging and aggregate upload batches", () => {
