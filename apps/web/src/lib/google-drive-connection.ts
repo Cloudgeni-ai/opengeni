@@ -6,6 +6,15 @@ import type {
 
 const GOOGLE_DRIVE_PROVIDER_DOMAIN = "googleapis.com";
 
+export const GOOGLE_DRIVE_APP_DESCRIPTION =
+  "Browse selected folders and Shared Drives for read-only knowledge sync.";
+
+export const GOOGLE_DRIVE_ACCESS_DISCLOSURE =
+  "OpenGeni requests read-only Google Drive access to browse folders and Shared Drives and, only after you enable synchronization, import supported files within the boundaries you select. OAuth tokens stay encrypted on the server. OpenGeni cannot create, edit, or delete files in Drive.";
+
+export const GOOGLE_DRIVE_SYNC_BEHAVIOR =
+  "The first sync inventories existing supported files. Later scheduled runs rescan the selected boundaries and skip unchanged revisions; Google Changes API eventing is not enabled.";
+
 export function localConnectedGoogleDrivePreview(
   search: string,
   workspaceId: string,
