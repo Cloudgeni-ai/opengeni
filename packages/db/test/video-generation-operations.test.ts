@@ -22,11 +22,16 @@ import {
   getVideoGenerationOperation,
   getBillingBalance,
   initializeSessionStartAtomically,
+  loadWorkspaceVercelAiGatewayCredentialLease,
   recordPendingSessionToolCallResult,
   registerPendingSessionToolCall,
   type DbClient,
 } from "../src";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import {
+  acquireSharedTestDatabase,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let available = true;
@@ -141,6 +146,39 @@ async function managedFixture(creditMicros: number) {
 }
 
 describe("durable video generation operation", () => {
+  test("does not require an encryption key when no workspace Gateway credential exists", async () => {
+    if (!available) return;
+    const { grant } = await baseFixture();
+    const credential = await loadWorkspaceVercelAiGatewayCredentialLease(
+      client.db,
+      testSettings({ environmentsEncryptionKey: undefined }),
+      grant.workspaceId,
+    );
+    expect(credential).toBeNull();
+  });
+
+  test("still fails closed when an existing workspace Gateway credential cannot be decrypted", async () => {
+    if (!available) return;
+    const { grant } = await baseFixture();
+    await createConnection(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: null,
+      providerDomain: "ai-gateway.vercel.sh",
+      kind: "api_key",
+      credentialEncrypted: "test-encrypted-credential",
+      metadata: { credentialRole: "vercel_ai_gateway" },
+      createdBySubjectId: grant.subjectId,
+    });
+    await expect(
+      loadWorkspaceVercelAiGatewayCredentialLease(
+        client.db,
+        testSettings({ environmentsEncryptionKey: undefined }),
+        grant.workspaceId,
+      ),
+    ).rejects.toThrow("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY");
+  });
+
   test("keeps one logical paid operation and settles a distinct artifact/File atomically", async () => {
     if (!available) return;
     const { grant, session, claim, attemptId, connection, policy } = await fixture();

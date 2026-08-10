@@ -8896,12 +8896,6 @@ export async function loadWorkspaceVercelAiGatewayCredentialLease(
   credentialEncrypted: string;
   apiKey: string;
 } | null> {
-  const key = environmentsEncryptionKeyBytes(settings);
-  if (!key) {
-    throw new Error(
-      "workspace AI Gateway credential requires OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY",
-    );
-  }
   return await withConnectionSubjectRls(db, workspaceId, null, async (scopedDb) => {
     const [row] = await scopedDb
       .select()
@@ -8918,6 +8912,12 @@ export async function loadWorkspaceVercelAiGatewayCredentialLease(
       .orderBy(desc(schema.connections.updatedAt), desc(schema.connections.id))
       .limit(1);
     if (!row || row.metadata.credentialRole !== VERCEL_AI_GATEWAY_CONNECTION_ROLE) return null;
+    const key = environmentsEncryptionKeyBytes(settings);
+    if (!key) {
+      throw new Error(
+        "workspace AI Gateway credential requires OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY",
+      );
+    }
     let decoded: unknown;
     try {
       decoded = JSON.parse(decryptEnvironmentValue(key, row.credentialEncrypted));

@@ -6495,8 +6495,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         };
       })();
       const videoGenerationPolicy = await getWorkspaceVideoGenerationPolicy(db, input.workspaceId);
+      const videoGenerationEnabled =
+        videoGenerationPolicy.defaultModelId !== null &&
+        videoGenerationPolicy.enabledModelIds.length > 0;
       let videoGenerationCredential: VideoGenerationCredentialLease | null = null;
-      if (objectStorage) {
+      if (objectStorage && videoGenerationEnabled) {
         if (videoGenerationPolicy.fundingSource === "opengeni_credits") {
           videoGenerationCredential = managedVideoGenerationCredentialLease(modelRunSettings);
         } else {
@@ -6518,8 +6521,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           !objectStorage ||
           modelRunSettings.sandboxBackend === "none" ||
           !videoGenerationCredential ||
-          videoGenerationPolicy.defaultModelId === null ||
-          videoGenerationPolicy.enabledModelIds.length === 0
+          !videoGenerationEnabled
         ) {
           return {};
         }
