@@ -2560,7 +2560,9 @@ describe("OpenGeni Slack bot connection", () => {
       deliveryMode: "auto",
       actor: { kind: "human", subjectId: "subject-a" },
     });
-    expect(enqueued.kind).toBe("enqueued");
+    if (enqueued.kind !== "enqueued") throw new Error("expected a newly enqueued publication");
+    const operationId = enqueued.publication.receipts[0]?.operationId;
+    expect(operationId).toMatch(/^[0-9a-f-]{36}$/);
     slack.setMemberChannelState({ isShared: true, isExternallyShared: true });
 
     expect(
@@ -2590,6 +2592,7 @@ describe("OpenGeni Slack bot connection", () => {
       attemptNumber: 1,
       actorKind: "service",
       actorSubjectId: "memory-slack-delivery",
+      operationId,
       errorCode: "slack_connect_unsupported",
       slackChannelId: null,
       slackMessageTimestamp: null,
@@ -2599,7 +2602,7 @@ describe("OpenGeni Slack bot connection", () => {
         client.db,
         workspace.workspaceId,
         connection!.id,
-        publication!.operationId,
+        operationId!,
       ),
     ).toMatchObject({
       status: "provider_started",
