@@ -27,6 +27,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Connected machines | `docs/connected-machines.md` | `README.md`, `AGENTS.md`, client docs and skills should link. |
 | Deployment | `docs/deployment.md` | `README.md`, `AGENTS.md`, Helm/Terraform notes should link. |
 | Release/publishing | `CONTRIBUTING.md` § Release / Publishing, plus workflow files as executable truth | `README.md`, package READMEs, architecture release notes should link. |
+| Pull-request delivery across moving `main` | `AGENTS.md` § Pull-request delivery across moving `main`; executable admission truth in `.github/workflows/source-admission.yml` and `scripts/check-source-admission.mjs` | `.agents/skills/opengeni/SKILL.md`, `CONTRIBUTING.md`, the PR template, and `docs/deployment.md` must preserve the same immutable-candidate distinction. |
 | Client/SDK integration | `packages/sdk/README.md` | `README.md`, `packages/react/README.md`, and customer integration skills should link. |
 | Composer voice input | `docs/transcription.md` | Architecture, SDK/React docs, and host-app guides should link instead of restating provider selection or microphone lifecycle rules. |
 | Workbench embedding & production acceptance | `docs/embedding-workbench.md`, `docs/workbench-acceptance.md` | Host-app guides should link instead of weakening or restating the live evidence contract. |
