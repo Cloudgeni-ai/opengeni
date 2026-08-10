@@ -103,6 +103,20 @@ export type SessionClientLike = Pick<
   | "heartbeatViewer"
   | "detachViewer"
   // Browser/Computer interaction resources
+  | "listNetworkRoutes"
+  | "getNetworkRoute"
+  | "createNetworkRoute"
+  | "updateNetworkRoute"
+  | "listSiteAuthConnections"
+  | "getSiteAuthConnection"
+  | "createSiteAuthConnection"
+  | "updateSiteAuthConnection"
+  | "listAuthRuns"
+  | "getAuthRun"
+  | "startBrowserAuthRun"
+  | "reportBrowserAuthRun"
+  | "protectedBrowserAuthFill"
+  | "verifyBrowserAuthRun"
   | "listAttachedBrowsers"
   | "getAttachedBrowser"
   | "listBrowserIdentities"
@@ -227,9 +241,36 @@ export type EmbeddedRealtimeSessionClientLike = Pick<
   | "endSessionRealtime"
 >;
 
+/** Exact public SDK surface required by cross-surface human interventions. */
+export type EmbeddedInterventionClientLike = Pick<
+  OpenGeniClient,
+  | "listInteractionInterventions"
+  | "getInteractionIntervention"
+  | "createInteractionIntervention"
+  | "resolveInteractionIntervention"
+>;
+
 /** Exact public SDK surface required by BrowserSession hooks and components. */
 export type EmbeddedBrowserInteractionClientLike = Pick<
   OpenGeniClient,
+  | "listNetworkRoutes"
+  | "getNetworkRoute"
+  | "createNetworkRoute"
+  | "updateNetworkRoute"
+  | "listSiteAuthConnections"
+  | "getSiteAuthConnection"
+  | "createSiteAuthConnection"
+  | "updateSiteAuthConnection"
+  | "listAuthRuns"
+  | "getAuthRun"
+  | "startBrowserAuthRun"
+  | "reportBrowserAuthRun"
+  | "protectedBrowserAuthFill"
+  | "verifyBrowserAuthRun"
+  | "listInteractionInterventions"
+  | "getInteractionIntervention"
+  | "createInteractionIntervention"
+  | "resolveInteractionIntervention"
   | "listAttachedBrowsers"
   | "getAttachedBrowser"
   | "listBrowserIdentities"
@@ -253,7 +294,8 @@ export type EmbeddedBrowserInteractionClientLike = Pick<
   | "suspendBrowserSession"
   | "resumeBrowserSession"
   | "endBrowserSession"
->;
+> &
+  EmbeddedInterventionClientLike;
 
 /** Exact public SDK surface required by ComputerSession hooks and components. */
 export type EmbeddedComputerInteractionClientLike = Pick<
@@ -268,7 +310,8 @@ export type EmbeddedComputerInteractionClientLike = Pick<
   | "attachComputerSession"
   | "heartbeatComputerSession"
   | "endComputerSession"
->;
+> &
+  EmbeddedInterventionClientLike;
 
 /** Complete public Browser + Computer interaction surface. */
 export type EmbeddedInteractionClientLike = EmbeddedBrowserInteractionClientLike &

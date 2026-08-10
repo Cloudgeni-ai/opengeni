@@ -135,6 +135,312 @@ export type BrowserSession = {
   failureCode: string | null;
 };
 
+export type InteractionCredentialAuthorityRef = {
+  connectionId: string;
+  connectionSubjectId: string | null;
+  providerDomain: string;
+};
+
+export type NetworkRouteConfiguration =
+  | { kind: "direct" }
+  | {
+      kind: "proxy";
+      protocol: "http" | "https" | "socks5";
+      host: string;
+      port: number;
+      credential: InteractionCredentialAuthorityRef | null;
+    }
+  | {
+      kind: "managed";
+      providerId: string;
+      routeId: string;
+      egressClass: "datacenter" | "residential" | "isp";
+      region: string | null;
+      credential: InteractionCredentialAuthorityRef | null;
+    }
+  | { kind: "tunnel"; placement: InteractionPlacement; tunnelId: string };
+
+export type NetworkRouteConsistency = {
+  dns: "placement" | "proxy" | "provider";
+  expectedPublicIp: string | null;
+  expectedRegion: string | null;
+  locale: string | null;
+  timezone: string | null;
+  geolocation: {
+    latitude: number;
+    longitude: number;
+    accuracyMeters: number;
+  } | null;
+  webRtc: "default" | "disable_non_proxied_udp" | "proxy_only";
+  stability: "session" | "sticky" | "persistent";
+};
+
+export type NetworkRoute = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  name: string;
+  status: "active" | "archived";
+  configuration: NetworkRouteConfiguration;
+  consistency: NetworkRouteConsistency;
+  version: number;
+  createdBySubjectId: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type NetworkRouteListResponse = { revision: number; routes: NetworkRoute[] };
+export type CreateNetworkRouteRequest = {
+  operationId: string;
+  name: string;
+  configuration: NetworkRouteConfiguration;
+  consistency: NetworkRouteConsistency;
+};
+export type UpdateNetworkRouteRequest = {
+  operationId: string;
+  expectedVersion: number;
+  name?: string | undefined;
+  status?: "active" | "archived" | undefined;
+  configuration?: NetworkRouteConfiguration | undefined;
+  consistency?: NetworkRouteConsistency | undefined;
+};
+export type NetworkRouteMutationResponse = {
+  route: NetworkRoute;
+  operationId: string;
+  replayed: boolean;
+};
+
+export type SiteAuthFieldPurpose = "identifier" | "password" | "secret" | "totp";
+export type SiteAuthAuthority =
+  | {
+      id: string;
+      kind: "connection_fields";
+      label: string;
+      credential: InteractionCredentialAuthorityRef;
+      fields: Array<{
+        id: string;
+        purpose: SiteAuthFieldPurpose;
+        credentialKey: string;
+        digits?: number | undefined;
+        periodSeconds?: number | undefined;
+        algorithm?: "sha1" | "sha256" | "sha512" | undefined;
+      }>;
+    }
+  | {
+      id: string;
+      kind: "human";
+      label: string;
+      fields: Array<{ id: string; purpose: SiteAuthFieldPurpose }>;
+    }
+  | {
+      id: string;
+      kind: "external_provider";
+      label: string;
+      adapterId: string;
+      credential: InteractionCredentialAuthorityRef | null;
+    };
+
+export type SiteAuthMethod = {
+  id: string;
+  kind: "password" | "sso" | "magic_link" | "passkey" | "external";
+  label: string;
+  authorityIds: string[];
+};
+
+export type SiteAuthHealthPolicy = {
+  mode: "on_use" | "maintained";
+  intervalSeconds: number | null;
+  automaticRepair: boolean;
+};
+
+export type SiteAuthConnectionConfiguration = {
+  name: string;
+  accountLabel: string;
+  origins: string[];
+  loginUrl: string | null;
+  verificationUrlPrefixes: string[];
+  authorities: SiteAuthAuthority[];
+  methods: SiteAuthMethod[];
+  preferredIdentityId: string | null;
+  preferredPlacement: InteractionPlacement | null;
+  preferredNetworkRouteId: string | null;
+  healthPolicy: SiteAuthHealthPolicy;
+};
+
+export type SiteAuthConnection = SiteAuthConnectionConfiguration & {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  status: "active" | "archived";
+  verificationState: "unknown" | "verified" | "needs_repair" | "failed";
+  lastVerifiedAt: string | null;
+  lastVerifiedUrl: string | null;
+  repairCode: string | null;
+  version: number;
+  createdBySubjectId: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type SiteAuthConnectionListResponse = {
+  revision: number;
+  connections: SiteAuthConnection[];
+};
+export type CreateSiteAuthConnectionRequest = SiteAuthConnectionConfiguration & {
+  operationId: string;
+};
+export type UpdateSiteAuthConnectionRequest = Partial<SiteAuthConnectionConfiguration> & {
+  operationId: string;
+  expectedVersion: number;
+  status?: "active" | "archived" | undefined;
+};
+export type SiteAuthConnectionMutationResponse = {
+  connection: SiteAuthConnection;
+  operationId: string;
+  replayed: boolean;
+};
+
+export type AuthRun = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  siteAuthConnectionId: string;
+  browserSessionId: string;
+  targetId: string;
+  controllerGeneration: string;
+  targetGeneration: string;
+  documentGeneration: string | null;
+  methodId: string | null;
+  authorityId: string | null;
+  state:
+    | "discovering"
+    | "awaiting_choice"
+    | "awaiting_secret"
+    | "awaiting_external_action"
+    | "working"
+    | "verified"
+    | "failed"
+    | "cancelled";
+  choices: Array<{ id: string; label: string; methodId: string }>;
+  pendingFields: Array<{ id: string; label: string; purpose: SiteAuthFieldPurpose }>;
+  externalAction: {
+    kind: "push" | "security_key" | "passkey" | "device" | "human" | "other";
+    label: string;
+    expiresAt: string | null;
+  } | null;
+  interventionId: string | null;
+  verifiedUrl: string | null;
+  failureCode: string | null;
+  version: number;
+  operationId: string;
+  createdBySubjectId: string;
+  createdAt: string;
+  updatedAt: string;
+  settledAt: string | null;
+};
+
+export type AuthRunListResponse = { runs: AuthRun[] };
+export type AuthRunMutationResponse = { run: AuthRun; operationId: string; replayed: boolean };
+export type StartAuthRunRequest = {
+  operationId: string;
+  siteAuthConnectionId: string;
+  targetId: string;
+  expectedTargetGeneration: string;
+  expectedDocumentGeneration: string | null;
+  methodId?: string | undefined;
+  authorityId?: string | undefined;
+};
+export type ReportAuthRunRequest = {
+  operationId: string;
+  expectedVersion: number;
+  methodId?: string | undefined;
+  authorityId?: string | undefined;
+  state:
+    | "awaiting_choice"
+    | "awaiting_secret"
+    | "awaiting_external_action"
+    | "working"
+    | "failed"
+    | "cancelled";
+  choices?: AuthRun["choices"] | undefined;
+  pendingFields?: AuthRun["pendingFields"] | undefined;
+  externalAction?: AuthRun["externalAction"] | undefined;
+  failureCode?: string | null | undefined;
+};
+export type ProtectedAuthFillRequest = {
+  operationId: string;
+  expectedVersion: number;
+  expectedTargetGeneration: string;
+  expectedDocumentGeneration: string | null;
+  expectedFrameId: string | null;
+  authorityId: string;
+  fields: Array<{ fieldId: string; locator: BrowserLocator }>;
+  submit:
+    | { type: "none" }
+    | { type: "click"; locator: BrowserLocator }
+    | { type: "press"; key: string; locator?: BrowserLocator | undefined };
+};
+export type ProtectedAuthFillResponse = {
+  run: AuthRun;
+  status: "submitted" | "working" | "needs_human" | "stale" | "failed";
+  operationId: string;
+  replayed: boolean;
+};
+export type VerifyAuthRunRequest = { operationId: string; expectedVersion: number };
+
+export type InteractionIntervention = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  resourceKind: "browser_session" | "computer_session";
+  resourceId: string;
+  targetId: string;
+  controllerGeneration: string;
+  targetGeneration: string;
+  documentGeneration: string | null;
+  kind: "manual_login" | "mfa" | "external_action" | "confirmation" | "other";
+  reason: string;
+  status: "open" | "completed" | "dismissed" | "expired" | "cancelled";
+  authRunId: string | null;
+  originatingSessionId: string;
+  originatingTurnId: string | null;
+  originatingAttemptId: string | null;
+  originatingToolOperationId: string | null;
+  responseActorSubjectId: string | null;
+  version: number;
+  operationId: string;
+  expiresAt: string;
+  createdAt: string;
+  updatedAt: string;
+  settledAt: string | null;
+};
+export type InteractionInterventionListResponse = {
+  interventions: InteractionIntervention[];
+};
+export type CreateInteractionInterventionRequest = {
+  operationId: string;
+  resourceKind: "browser_session" | "computer_session";
+  resourceId: string;
+  targetId: string;
+  expectedControllerGeneration: string;
+  expectedTargetGeneration: string;
+  expectedDocumentGeneration: string | null;
+  kind: InteractionIntervention["kind"];
+  reason: string;
+  authRunId?: string | undefined;
+  expiresInSeconds?: number | undefined;
+};
+export type ResolveInteractionInterventionRequest = {
+  operationId: string;
+  expectedVersion: number;
+  outcome: "completed" | "dismissed";
+};
+export type InteractionInterventionMutationResponse = {
+  intervention: InteractionIntervention;
+  operationId: string;
+  replayed: boolean;
+};
+
 export type BrowserIdentityStatus = "active" | "archived";
 export type BrowserRevisionComponentKind =
   | "chromium_profile"
@@ -451,6 +757,7 @@ export type CreateBrowserSessionRequest = {
   placement?: InteractionPlacement | undefined;
   identityId?: string | undefined;
   baseRevisionId?: string | undefined;
+  networkRouteId?: string | undefined;
   linkedComputerSessionId?: string | undefined;
 };
 
@@ -721,6 +1028,99 @@ export type BrowserDiagnosticsOptions = {
 
 /** The exact HTTP surface needed by the framework-free interaction client. */
 export interface InteractionTransport {
+  listNetworkRoutes(
+    workspaceId: string,
+    options?: NetworkRouteListOptions,
+  ): Promise<NetworkRouteListResponse>;
+  getNetworkRoute(
+    workspaceId: string,
+    networkRouteId: string,
+    options?: OpenGeniRequestOptions,
+  ): Promise<NetworkRoute>;
+  createNetworkRoute(
+    workspaceId: string,
+    request: CreateNetworkRouteRequest,
+    options?: OpenGeniRequestOptions,
+  ): Promise<NetworkRouteMutationResponse>;
+  updateNetworkRoute(
+    workspaceId: string,
+    networkRouteId: string,
+    request: UpdateNetworkRouteRequest,
+    options?: OpenGeniRequestOptions,
+  ): Promise<NetworkRouteMutationResponse>;
+  listSiteAuthConnections(
+    workspaceId: string,
+    options?: SiteAuthConnectionListOptions,
+  ): Promise<SiteAuthConnectionListResponse>;
+  getSiteAuthConnection(
+    workspaceId: string,
+    siteAuthConnectionId: string,
+    options?: OpenGeniRequestOptions,
+  ): Promise<SiteAuthConnection>;
+  createSiteAuthConnection(
+    workspaceId: string,
+    request: CreateSiteAuthConnectionRequest,
+    options?: OpenGeniRequestOptions,
+  ): Promise<SiteAuthConnectionMutationResponse>;
+  updateSiteAuthConnection(
+    workspaceId: string,
+    siteAuthConnectionId: string,
+    request: UpdateSiteAuthConnectionRequest,
+    options?: OpenGeniRequestOptions,
+  ): Promise<SiteAuthConnectionMutationResponse>;
+  listAuthRuns(workspaceId: string, options?: AuthRunListOptions): Promise<AuthRunListResponse>;
+  getAuthRun(
+    workspaceId: string,
+    authRunId: string,
+    options?: OpenGeniRequestOptions,
+  ): Promise<AuthRun>;
+  startBrowserAuthRun(
+    workspaceId: string,
+    browserSessionId: string,
+    request: StartAuthRunRequest,
+    options?: OpenGeniRequestOptions,
+  ): Promise<AuthRunMutationResponse>;
+  reportBrowserAuthRun(
+    workspaceId: string,
+    browserSessionId: string,
+    authRunId: string,
+    request: ReportAuthRunRequest,
+    options?: OpenGeniRequestOptions,
+  ): Promise<AuthRunMutationResponse>;
+  protectedBrowserAuthFill(
+    workspaceId: string,
+    browserSessionId: string,
+    authRunId: string,
+    request: ProtectedAuthFillRequest,
+    options?: OpenGeniRequestOptions,
+  ): Promise<ProtectedAuthFillResponse>;
+  verifyBrowserAuthRun(
+    workspaceId: string,
+    browserSessionId: string,
+    authRunId: string,
+    request: VerifyAuthRunRequest,
+    options?: OpenGeniRequestOptions,
+  ): Promise<AuthRunMutationResponse>;
+  listInteractionInterventions(
+    workspaceId: string,
+    options?: InteractionInterventionListOptions,
+  ): Promise<InteractionInterventionListResponse>;
+  getInteractionIntervention(
+    workspaceId: string,
+    interventionId: string,
+    options?: OpenGeniRequestOptions,
+  ): Promise<InteractionIntervention>;
+  createInteractionIntervention(
+    workspaceId: string,
+    request: CreateInteractionInterventionRequest,
+    options?: OpenGeniRequestOptions,
+  ): Promise<InteractionInterventionMutationResponse>;
+  resolveInteractionIntervention(
+    workspaceId: string,
+    interventionId: string,
+    request: ResolveInteractionInterventionRequest,
+    options?: OpenGeniRequestOptions,
+  ): Promise<InteractionInterventionMutationResponse>;
   listAttachedBrowsers(
     workspaceId: string,
     options?: AttachedBrowserDeviceListOptions,
@@ -908,6 +1308,26 @@ export type BrowserIdentityListOptions = OpenGeniRequestOptions & {
   includeArchived?: boolean | undefined;
 };
 
+export type NetworkRouteListOptions = OpenGeniRequestOptions & {
+  includeArchived?: boolean | undefined;
+};
+
+export type SiteAuthConnectionListOptions = OpenGeniRequestOptions & {
+  includeArchived?: boolean | undefined;
+};
+
+export type AuthRunListOptions = OpenGeniRequestOptions & {
+  browserSessionId?: string | undefined;
+  siteAuthConnectionId?: string | undefined;
+  includeSettled?: boolean | undefined;
+};
+
+export type InteractionInterventionListOptions = OpenGeniRequestOptions & {
+  resourceKind?: "browser_session" | "computer_session" | undefined;
+  resourceId?: string | undefined;
+  includeSettled?: boolean | undefined;
+};
+
 export type AttachedBrowserDeviceListOptions = OpenGeniRequestOptions & {
   includeDisconnected?: boolean | undefined;
 };
@@ -922,6 +1342,7 @@ export type CurrentOrOpenBrowserOptions = {
   placement?: InteractionPlacement | undefined;
   identityId?: string | undefined;
   baseRevisionId?: string | undefined;
+  networkRouteId?: string | undefined;
   linkedComputerSessionId?: string | undefined;
   signal?: AbortSignal | undefined;
 };
@@ -938,15 +1359,276 @@ export type CurrentOrOpenComputerOptions = {
 /** Framework-free resource facade over the public interaction HTTP API. */
 export class OpenGeniInteractionClient {
   readonly attachedBrowsers: AttachedBrowserDeviceCollection;
+  readonly authRuns: AuthRunCollection;
   readonly browsers: BrowserSessionCollection;
   readonly computers: ComputerSessionCollection;
   readonly identities: BrowserIdentityCollection;
+  readonly interventions: InteractionInterventionCollection;
+  readonly networkRoutes: NetworkRouteCollection;
+  readonly siteAuthConnections: SiteAuthConnectionCollection;
 
   constructor(transport: BrowserInteractionTransport) {
     this.attachedBrowsers = new AttachedBrowserDeviceCollection(transport);
+    this.authRuns = new AuthRunCollection(transport);
     this.browsers = new BrowserSessionCollection(transport);
     this.computers = new ComputerSessionCollection(transport);
     this.identities = new BrowserIdentityCollection(transport);
+    this.interventions = new InteractionInterventionCollection(transport);
+    this.networkRoutes = new NetworkRouteCollection(transport);
+    this.siteAuthConnections = new SiteAuthConnectionCollection(transport);
+  }
+}
+
+export class NetworkRouteCollection {
+  constructor(private readonly transport: BrowserInteractionTransport) {}
+
+  async list(
+    workspaceId: string,
+    options: NetworkRouteListOptions = {},
+  ): Promise<NetworkRouteListResponse> {
+    return await this.transport.listNetworkRoutes(workspaceId, options);
+  }
+
+  route(workspaceId: string, networkRouteId: string): NetworkRouteResource {
+    return new NetworkRouteResource(this.transport, workspaceId, networkRouteId);
+  }
+
+  async create(
+    workspaceId: string,
+    request: CreateNetworkRouteRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<NetworkRouteResource> {
+    const response = await this.transport.createNetworkRoute(workspaceId, request, options);
+    return this.route(workspaceId, response.route.id);
+  }
+}
+
+export class NetworkRouteResource {
+  constructor(
+    private readonly transport: BrowserInteractionTransport,
+    readonly workspaceId: string,
+    readonly id: string,
+  ) {}
+
+  async get(options: OpenGeniRequestOptions = {}): Promise<NetworkRoute> {
+    return await this.transport.getNetworkRoute(this.workspaceId, this.id, options);
+  }
+
+  async update(
+    request: UpdateNetworkRouteRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<NetworkRouteMutationResponse> {
+    return await this.transport.updateNetworkRoute(this.workspaceId, this.id, request, options);
+  }
+}
+
+export class SiteAuthConnectionCollection {
+  constructor(private readonly transport: BrowserInteractionTransport) {}
+
+  async list(
+    workspaceId: string,
+    options: SiteAuthConnectionListOptions = {},
+  ): Promise<SiteAuthConnectionListResponse> {
+    return await this.transport.listSiteAuthConnections(workspaceId, options);
+  }
+
+  connection(workspaceId: string, connectionId: string): SiteAuthConnectionResource {
+    return new SiteAuthConnectionResource(this.transport, workspaceId, connectionId);
+  }
+
+  async create(
+    workspaceId: string,
+    request: CreateSiteAuthConnectionRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<SiteAuthConnectionResource> {
+    const response = await this.transport.createSiteAuthConnection(workspaceId, request, options);
+    return this.connection(workspaceId, response.connection.id);
+  }
+}
+
+export class SiteAuthConnectionResource {
+  constructor(
+    private readonly transport: BrowserInteractionTransport,
+    readonly workspaceId: string,
+    readonly id: string,
+  ) {}
+
+  async get(options: OpenGeniRequestOptions = {}): Promise<SiteAuthConnection> {
+    return await this.transport.getSiteAuthConnection(this.workspaceId, this.id, options);
+  }
+
+  async update(
+    request: UpdateSiteAuthConnectionRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<SiteAuthConnectionMutationResponse> {
+    return await this.transport.updateSiteAuthConnection(
+      this.workspaceId,
+      this.id,
+      request,
+      options,
+    );
+  }
+}
+
+export class AuthRunCollection {
+  constructor(private readonly transport: BrowserInteractionTransport) {}
+
+  async list(workspaceId: string, options: AuthRunListOptions = {}): Promise<AuthRunListResponse> {
+    return await this.transport.listAuthRuns(workspaceId, options);
+  }
+
+  async get(
+    workspaceId: string,
+    authRunId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<AuthRun> {
+    return await this.transport.getAuthRun(workspaceId, authRunId, options);
+  }
+
+  run(workspaceId: string, browserSessionId: string, authRunId: string): AuthRunResource {
+    return new AuthRunResource(this.transport, workspaceId, browserSessionId, authRunId);
+  }
+}
+
+export class BrowserAuthRunCollection {
+  constructor(
+    private readonly transport: BrowserInteractionTransport,
+    readonly workspaceId: string,
+    readonly browserSessionId: string,
+  ) {}
+
+  async list(
+    options: Omit<AuthRunListOptions, "browserSessionId"> = {},
+  ): Promise<AuthRunListResponse> {
+    return await this.transport.listAuthRuns(this.workspaceId, {
+      ...options,
+      browserSessionId: this.browserSessionId,
+    });
+  }
+
+  run(authRunId: string): AuthRunResource {
+    return new AuthRunResource(this.transport, this.workspaceId, this.browserSessionId, authRunId);
+  }
+
+  async start(
+    request: StartAuthRunRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<AuthRunResource> {
+    const response = await this.transport.startBrowserAuthRun(
+      this.workspaceId,
+      this.browserSessionId,
+      request,
+      options,
+    );
+    return this.run(response.run.id);
+  }
+}
+
+export class AuthRunResource {
+  constructor(
+    private readonly transport: BrowserInteractionTransport,
+    readonly workspaceId: string,
+    readonly browserSessionId: string,
+    readonly id: string,
+  ) {}
+
+  async get(options: OpenGeniRequestOptions = {}): Promise<AuthRun> {
+    const run = await this.transport.getAuthRun(this.workspaceId, this.id, options);
+    if (run.browserSessionId !== this.browserSessionId) {
+      throw new Error("AuthRun belongs to another BrowserSession");
+    }
+    return run;
+  }
+
+  async report(
+    request: ReportAuthRunRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<AuthRunMutationResponse> {
+    return await this.transport.reportBrowserAuthRun(
+      this.workspaceId,
+      this.browserSessionId,
+      this.id,
+      request,
+      options,
+    );
+  }
+
+  async protectedFill(
+    request: ProtectedAuthFillRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<ProtectedAuthFillResponse> {
+    return await this.transport.protectedBrowserAuthFill(
+      this.workspaceId,
+      this.browserSessionId,
+      this.id,
+      request,
+      options,
+    );
+  }
+
+  async verify(
+    request: VerifyAuthRunRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<AuthRunMutationResponse> {
+    return await this.transport.verifyBrowserAuthRun(
+      this.workspaceId,
+      this.browserSessionId,
+      this.id,
+      request,
+      options,
+    );
+  }
+}
+
+export class InteractionInterventionCollection {
+  constructor(private readonly transport: BrowserInteractionTransport) {}
+
+  async list(
+    workspaceId: string,
+    options: InteractionInterventionListOptions = {},
+  ): Promise<InteractionInterventionListResponse> {
+    return await this.transport.listInteractionInterventions(workspaceId, options);
+  }
+
+  intervention(workspaceId: string, interventionId: string): InteractionInterventionResource {
+    return new InteractionInterventionResource(this.transport, workspaceId, interventionId);
+  }
+
+  async create(
+    workspaceId: string,
+    request: CreateInteractionInterventionRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<InteractionInterventionResource> {
+    const response = await this.transport.createInteractionIntervention(
+      workspaceId,
+      request,
+      options,
+    );
+    return this.intervention(workspaceId, response.intervention.id);
+  }
+}
+
+export class InteractionInterventionResource {
+  constructor(
+    private readonly transport: BrowserInteractionTransport,
+    readonly workspaceId: string,
+    readonly id: string,
+  ) {}
+
+  async get(options: OpenGeniRequestOptions = {}): Promise<InteractionIntervention> {
+    return await this.transport.getInteractionIntervention(this.workspaceId, this.id, options);
+  }
+
+  async resolve(
+    request: ResolveInteractionInterventionRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<InteractionInterventionMutationResponse> {
+    return await this.transport.resolveInteractionIntervention(
+      this.workspaceId,
+      this.id,
+      request,
+      options,
+    );
   }
 }
 
@@ -1065,6 +1747,7 @@ export class BrowserSessionCollection {
         ...(options.placement !== undefined ? { placement: options.placement } : {}),
         ...(options.identityId !== undefined ? { identityId: options.identityId } : {}),
         ...(options.baseRevisionId !== undefined ? { baseRevisionId: options.baseRevisionId } : {}),
+        ...(options.networkRouteId !== undefined ? { networkRouteId: options.networkRouteId } : {}),
         ...(options.linkedComputerSessionId !== undefined
           ? { linkedComputerSessionId: options.linkedComputerSessionId }
           : {}),
@@ -1075,6 +1758,7 @@ export class BrowserSessionCollection {
 }
 
 export class BrowserSessionResource {
+  readonly auth: BrowserAuthRunCollection;
   readonly tabs: BrowserTargetCollection;
   /** Alias for hosts that prefer the protocol term. */
   readonly targets: BrowserTargetCollection;
@@ -1084,6 +1768,7 @@ export class BrowserSessionResource {
     readonly workspaceId: string,
     readonly id: string,
   ) {
+    this.auth = new BrowserAuthRunCollection(transport, workspaceId, id);
     this.tabs = new BrowserTargetCollection(transport, workspaceId, id);
     this.targets = this.tabs;
   }

@@ -12,6 +12,7 @@ import type {
   BrowserSessionAttachment,
   BrowserSessionMutationResponse,
   BrowserTarget,
+  InteractionIntervention,
 } from "@opengeni/sdk/interaction";
 import { act } from "react";
 import { BrowserViewer } from "../src/components/browser-viewer";
@@ -293,6 +294,36 @@ function attachment(
       protocols: ["opengeni.browser.v1", "opengeni.auth.super-secret"],
     },
     expiresAt: new Date(Date.now() + 120_000).toISOString(),
+  };
+}
+
+function intervention(overrides: Partial<InteractionIntervention> = {}): InteractionIntervention {
+  return {
+    id: "77777777-7777-4777-8777-777777777777",
+    accountId: ACCOUNT_ID,
+    workspaceId: WORKSPACE_ID,
+    resourceKind: "browser_session",
+    resourceId: BROWSER_SESSION_ID,
+    targetId: "target-1",
+    controllerGeneration: "controller-1",
+    targetGeneration: "target-1-generation",
+    documentGeneration: "document-1",
+    kind: "manual_login",
+    reason: "Sign in to continue checkout.",
+    status: "open",
+    authRunId: null,
+    originatingSessionId: SESSION_ID,
+    originatingTurnId: null,
+    originatingAttemptId: null,
+    originatingToolOperationId: null,
+    responseActorSubjectId: null,
+    version: 1,
+    operationId: "88888888-8888-4888-8888-888888888888",
+    expiresAt: "2026-08-10T12:15:00.000Z",
+    createdAt: NOW,
+    updatedAt: NOW,
+    settledAt: null,
+    ...overrides,
   };
 }
 
@@ -722,6 +753,70 @@ describe("BrowserSession frame stream", () => {
 });
 
 describe("BrowserViewer", () => {
+  test("surfaces and resolves an exact durable browser intervention", async () => {
+    const current = browserSession();
+    const currentTarget = target();
+    let pending = intervention();
+    const resolutions: unknown[] = [];
+    const client = fakeClient({
+      listBrowserSessions: async () => ({ revision: 1, sessions: [current] }),
+      getBrowserSession: async () => current,
+      listBrowserTargets: async () => ({
+        browserSessionId: BROWSER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        targets: [currentTarget],
+      }),
+      observeBrowserTarget: async () => observation(BROWSER_SESSION_ID, currentTarget),
+      attachBrowserSession: async () => attachment(currentTarget.id),
+      listInteractionInterventions: async () => ({
+        interventions: pending.status === "open" ? [pending] : [],
+      }),
+      resolveInteractionIntervention: async (_workspaceId, interventionId, request) => {
+        resolutions.push({ interventionId, ...request });
+        pending = {
+          ...pending,
+          status: request.outcome,
+          version: pending.version + 1,
+          settledAt: NOW,
+        };
+        return {
+          intervention: pending,
+          operationId: request.operationId,
+          replayed: false,
+        };
+      },
+    });
+    const rendered = await renderComponent(
+      <BrowserViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        webSocketFactory={(url, protocols) =>
+          new FakeBrowserSocket(url, protocols) as unknown as BrowserFrameWebSocket
+        }
+      />,
+    );
+    await flush(40);
+
+    expect(rendered.container.textContent).toContain("Sign in needed");
+    expect(rendered.container.textContent).toContain("Sign in to continue checkout.");
+    const done = [...rendered.container.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "Done",
+    );
+    expect(done).toBeDefined();
+    await actRun(() => done!.click());
+    await flush(10);
+
+    expect(resolutions).toHaveLength(1);
+    expect(resolutions[0]).toMatchObject({
+      interventionId: pending.id,
+      expectedVersion: 1,
+      outcome: "completed",
+    });
+    expect(rendered.container.textContent).not.toContain("Sign in needed");
+    await rendered.unmount();
+  });
+
   test("wakes a selected suspended browser before touching its controller", async () => {
     const suspended: BrowserSession = {
       ...browserSession(),

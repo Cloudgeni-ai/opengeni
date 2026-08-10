@@ -4,6 +4,7 @@ import type {
   ComputerObservation,
   ComputerSession,
   ComputerTarget,
+  InteractionIntervention,
   InteractionSemanticNode,
 } from "@opengeni/sdk/interaction";
 import {
@@ -37,8 +38,10 @@ import {
 } from "../hooks/use-computer-frame-stream";
 import { useComputerSession } from "../hooks/use-computer-session";
 import { useComputerSessions } from "../hooks/use-computer-sessions";
+import { useInteractionInterventions } from "../hooks/use-interaction-interventions";
 import { cn } from "../lib/cn";
 import type { EmbeddedComputerInteractionClientOverride } from "../session-context";
+import { InteractionInterventionBanner } from "./interaction-intervention-banner";
 
 export type ComputerViewerNotification = { kind: "error" | "info"; message: string };
 
@@ -84,10 +87,16 @@ export function ComputerViewer({
     [registry.relevantSessions],
   );
   const [selection, setSelection] = useState<ComputerSelection>(null);
+  const interventions = useInteractionInterventions({
+    ...override,
+    enabled,
+    resourceKind: "computer_session",
+  });
   const [creating, setCreating] = useState(false);
   const [showControls, setShowControls] = useState(false);
   const previousSessionIdRef = useRef(sessionId);
   const handledRequestRef = useRef<string | null>(null);
+  const seenInterventionIdsRef = useRef(new Set<string>());
 
   const notifyError = useCallback(
     (cause: unknown, fallback: string) => {
@@ -138,6 +147,17 @@ export function ComputerViewer({
     () => liveSessions.find((session) => session.id === selection?.sessionId) ?? null,
     [liveSessions, selection?.sessionId],
   );
+  const interventionCounts = useMemo(
+    () => countInterventions(interventions.interventions),
+    [interventions.interventions],
+  );
+  const selectedInterventions = useMemo(
+    () =>
+      interventions.interventions.filter(
+        (intervention) => intervention.resourceId === selection?.sessionId,
+      ),
+    [interventions.interventions, selection?.sessionId],
+  );
   const controllerReady = selectedRegistrySession?.lifecycle === "active";
   const computer = useComputerSession({
     ...override,
@@ -163,6 +183,36 @@ export function ComputerViewer({
       : null;
   const machineLocked = selectedRegistrySession?.failureCode === "machine_locked";
   const currentIds = useMemo(() => new Set(relevant.map((session) => session.id)), [relevant]);
+
+  useEffect(() => {
+    for (const intervention of interventions.interventions) {
+      if (seenInterventionIdsRef.current.has(intervention.id)) continue;
+      seenInterventionIdsRef.current.add(intervention.id);
+      onNotify?.({
+        kind: "info",
+        message: `${interventionTitle(intervention)}: ${intervention.reason}`,
+      });
+    }
+  }, [interventions.interventions, onNotify]);
+
+  const resolveIntervention = useCallback(
+    (intervention: InteractionIntervention, outcome: "completed" | "dismissed") => {
+      void interventions
+        .resolve(intervention.id, {
+          expectedVersion: intervention.version,
+          outcome,
+        })
+        .then(() => {
+          onNotify?.({
+            kind: "info",
+            message:
+              outcome === "completed" ? "Agent notified. Continuing work." : "Request cancelled.",
+          });
+        })
+        .catch((cause) => notifyError(cause, "Could not update the computer request."));
+    },
+    [interventions, notifyError, onNotify],
+  );
 
   const createComputer = useCallback(() => {
     if (creating) return;
@@ -238,6 +288,7 @@ export function ComputerViewer({
         selectedSessionId={selection?.sessionId ?? null}
         creating={creating}
         refreshing={registry.refreshing}
+        interventionCounts={interventionCounts}
         onSelect={(computerSessionId) =>
           setSelection({ sessionId: computerSessionId, pinned: true })
         }
@@ -246,6 +297,17 @@ export function ComputerViewer({
         }}
         onCreate={createComputer}
         onRefresh={() => void Promise.all([refreshRegistry(), refreshComputer()])}
+      />
+      <InteractionInterventionBanner
+        interventions={selectedInterventions}
+        activeTargetId={computer.selectedTarget?.id ?? null}
+        mutating={interventions.mutating}
+        onOpen={(intervention) =>
+          void computer
+            .selectTarget(intervention.targetId)
+            .catch((cause) => notifyError(cause, "Could not open the requested computer view."))
+        }
+        onResolve={resolveIntervention}
       />
       {selectedRegistrySession && !controllerReady ? (
         <ComputerLifecyclePanel session={selectedRegistrySession} onRefresh={registry.refresh} />
@@ -307,6 +369,7 @@ function ComputerToolbar(props: {
   selectedSessionId: string | null;
   creating: boolean;
   refreshing: boolean;
+  interventionCounts: Map<string, number>;
   onSelect: (id: string) => void;
   onFollow: () => void;
   onCreate: () => void;
@@ -326,6 +389,9 @@ function ComputerToolbar(props: {
         <summary className="flex h-7 max-w-52 cursor-pointer list-none items-center gap-2 rounded-og-sm px-2 text-og-control text-og-fg transition hover:bg-og-surface-2 [&::-webkit-details-marker]:hidden">
           <MonitorIcon className="size-3.5 shrink-0 text-og-muted" />
           <span className="truncate font-medium">{selected?.name ?? "Computer"}</span>
+          {(props.interventionCounts.get(selected?.id ?? "") ?? 0) > 0 ? (
+            <span className="size-1.5 shrink-0 rounded-full bg-og-status-waiting" />
+          ) : null}
           <ChevronDownIcon className="size-3 shrink-0 text-og-subtle" />
         </summary>
         <div className="absolute left-0 top-8 z-30 w-72 overflow-hidden rounded-og-md border border-og-border bg-og-surface-1 p-1 shadow-xl">
@@ -333,12 +399,14 @@ function ComputerToolbar(props: {
             label="Current agent"
             sessions={current}
             selectedId={props.selectedSessionId}
+            interventionCounts={props.interventionCounts}
             onSelect={choose}
           />
           <ComputerSessionGroup
             label="Other agents"
             sessions={others}
             selectedId={props.selectedSessionId}
+            interventionCounts={props.interventionCounts}
             onSelect={choose}
           />
           <div className="mt-1 flex gap-1 border-t border-og-border pt-1">
@@ -383,6 +451,7 @@ function ComputerSessionGroup(props: {
   label: string;
   sessions: ComputerSession[];
   selectedId: string | null;
+  interventionCounts: Map<string, number>;
   onSelect: (id: string) => void;
 }) {
   if (props.sessions.length === 0) return null;
@@ -391,30 +460,38 @@ function ComputerSessionGroup(props: {
       <p className="px-2 pb-1 text-[10px] font-medium uppercase tracking-[0.12em] text-og-subtle">
         {props.label}
       </p>
-      {props.sessions.map((session) => (
-        <button
-          key={session.id}
-          type="button"
-          onClick={() => props.onSelect(session.id)}
-          className={cn(
-            "flex w-full items-center gap-2 rounded-og-sm px-2 py-1.5 text-left transition hover:bg-og-surface-2",
-            session.id === props.selectedId && "bg-og-surface-2",
-          )}
-        >
-          <span
+      {props.sessions.map((session) => {
+        const interventionCount = props.interventionCounts.get(session.id) ?? 0;
+        return (
+          <button
+            key={session.id}
+            type="button"
+            onClick={() => props.onSelect(session.id)}
             className={cn(
-              "size-1.5 rounded-full",
-              session.lifecycle === "active" ? "bg-og-status-running" : "bg-og-muted",
+              "flex w-full items-center gap-2 rounded-og-sm px-2 py-1.5 text-left transition hover:bg-og-surface-2",
+              session.id === props.selectedId && "bg-og-surface-2",
             )}
-          />
-          <span className="min-w-0 flex-1">
-            <span className="block truncate text-og-control text-og-fg">{session.name}</span>
-            <span className="block truncate text-og-xs text-og-subtle">
-              {platformLabel(session)} · {placementLabel(session)}
+          >
+            <span
+              className={cn(
+                "size-1.5 rounded-full",
+                session.lifecycle === "active" ? "bg-og-status-running" : "bg-og-muted",
+              )}
+            />
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-og-control text-og-fg">{session.name}</span>
+              <span className="block truncate text-og-xs text-og-subtle">
+                {platformLabel(session)} · {placementLabel(session)}
+              </span>
             </span>
-          </span>
-        </button>
-      ))}
+            {interventionCount > 0 ? (
+              <span className="rounded-full bg-og-status-waiting/10 px-1.5 py-0.5 text-[10px] font-medium text-og-status-waiting">
+                {interventionCount}
+              </span>
+            ) : null}
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -1078,6 +1155,30 @@ function sameFrameFence(left: ComputerFrame, right: ComputerFrame): boolean {
 
 function isLiveComputer(session: ComputerSession): boolean {
   return !["ending", "ended", "failed", "lost"].includes(session.lifecycle);
+}
+
+function countInterventions(
+  interventions: readonly InteractionIntervention[],
+): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const intervention of interventions) {
+    counts.set(intervention.resourceId, (counts.get(intervention.resourceId) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function interventionTitle(intervention: InteractionIntervention): string {
+  switch (intervention.kind) {
+    case "manual_login":
+      return "Sign in needed";
+    case "mfa":
+      return "Verification needed";
+    case "external_action":
+    case "confirmation":
+      return "Action needed";
+    case "other":
+      return "Computer needs your help";
+  }
 }
 
 function platformLabel(session: ComputerSession): string {

@@ -3778,6 +3778,14 @@
       }
     }
   }
+:where(.og-root).hover\:brightness-105,:where(.og-root) .hover\:brightness-105 {
+    &:hover {
+      @media (hover: hover) {
+        --tw-brightness: brightness(105%);
+        filter: var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,) var(--tw-grayscale,) var(--tw-hue-rotate,) var(--tw-invert,) var(--tw-saturate,) var(--tw-sepia,) var(--tw-drop-shadow,);
+      }
+    }
+  }
 :where(.og-root).hover\:brightness-110,:where(.og-root) .hover\:brightness-110 {
     &:hover {
       @media (hover: hover) {

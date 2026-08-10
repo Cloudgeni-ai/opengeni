@@ -4,17 +4,40 @@ export type {
   EmbeddedBrowserInteractionClientLike,
   EmbeddedComputerInteractionClientLike,
   EmbeddedInteractionClientLike,
+  EmbeddedInterventionClientLike,
 } from "./client";
 export {
   useEmbeddedBrowserInteraction,
   useEmbeddedComputerInteraction,
   useEmbeddedInteraction,
+  useEmbeddedInterventions,
 } from "./session-context";
 export type {
   EmbeddedBrowserInteractionClientOverride,
   EmbeddedComputerInteractionClientOverride,
   EmbeddedInteractionClientOverride,
+  EmbeddedInterventionClientOverride,
 } from "./session-context";
+export { useNetworkRoutes } from "./hooks/use-network-routes";
+export type {
+  NetworkRoutesClient,
+  UseNetworkRoutesOptions,
+  UseNetworkRoutesResult,
+} from "./hooks/use-network-routes";
+export { useSiteAuthConnections } from "./hooks/use-site-auth-connections";
+export type {
+  SiteAuthConnectionsClient,
+  UseSiteAuthConnectionsOptions,
+  UseSiteAuthConnectionsResult,
+} from "./hooks/use-site-auth-connections";
+export { useAuthRuns } from "./hooks/use-auth-runs";
+export type { AuthRunsClient, UseAuthRunsOptions, UseAuthRunsResult } from "./hooks/use-auth-runs";
+export { useInteractionInterventions } from "./hooks/use-interaction-interventions";
+export type {
+  InteractionInterventionsClient,
+  UseInteractionInterventionsOptions,
+  UseInteractionInterventionsResult,
+} from "./hooks/use-interaction-interventions";
 export { useAttachedBrowsers } from "./hooks/use-attached-browsers";
 export type {
   AttachedBrowsersClient,

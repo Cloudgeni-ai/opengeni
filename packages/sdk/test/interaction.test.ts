@@ -22,6 +22,10 @@ const BROWSER_IDENTITY_ID = "00000000-0000-4000-8000-000000000007";
 const BROWSER_REVISION_ID = "00000000-0000-4000-8000-000000000008";
 const ATTACHED_BROWSER_ID = "00000000-0000-4000-8000-000000000012";
 const COMPUTER_SESSION_ID = "00000000-0000-4000-8000-000000000014";
+const NETWORK_ROUTE_ID = "00000000-0000-4000-8000-000000000019";
+const SITE_AUTH_CONNECTION_ID = "00000000-0000-4000-8000-000000000020";
+const AUTH_RUN_ID = "00000000-0000-4000-8000-000000000021";
+const INTERVENTION_ID = "00000000-0000-4000-8000-000000000022";
 
 function attachedBrowser(): AttachedBrowserDevice {
   return {
@@ -312,6 +316,7 @@ describe("BrowserSession SDK", () => {
     const session = browserSession({
       headless: false,
       placement,
+      networkRouteId: NETWORK_ROUTE_ID,
       linkedComputerSessionId: COMPUTER_SESSION_ID,
       capabilities: { ...browserSession().capabilities, linkedComputer: true },
     });
@@ -336,6 +341,7 @@ describe("BrowserSession SDK", () => {
       operationId,
       headless: false,
       placement,
+      networkRouteId: NETWORK_ROUTE_ID,
       linkedComputerSessionId: COMPUTER_SESSION_ID,
     });
 
@@ -346,6 +352,7 @@ describe("BrowserSession SDK", () => {
         sessionId: SOURCE_SESSION_ID,
         headless: false,
         placement,
+        networkRouteId: NETWORK_ROUTE_ID,
         linkedComputerSessionId: COMPUTER_SESSION_ID,
       },
     });
@@ -519,6 +526,188 @@ describe("BrowserSession SDK", () => {
           expectedHeadGeneration: 0,
         },
       },
+    ]);
+  });
+
+  test("exposes network, site-auth, auth-run, and intervention resources end to end", async () => {
+    const calls: Array<{ url: string; method: string; body: unknown }> = [];
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async (input, init) => {
+        const url = String(input);
+        const method = init?.method ?? "GET";
+        const body = typeof init?.body === "string" ? JSON.parse(init.body) : null;
+        calls.push({ url, method, body });
+        if (url.includes("/network-routes?")) return json({ revision: 1, routes: [] });
+        if (url.endsWith("/network-routes") && method === "POST") {
+          return json({
+            route: { id: NETWORK_ROUTE_ID },
+            operationId: "route-create",
+            replayed: false,
+          });
+        }
+        if (url.endsWith(`/network-routes/${NETWORK_ROUTE_ID}`)) {
+          return json({
+            route: { id: NETWORK_ROUTE_ID },
+            operationId: "route-update",
+            replayed: false,
+          });
+        }
+        if (url.includes("/site-auth-connections?")) {
+          return json({ revision: 1, connections: [] });
+        }
+        if (url.endsWith("/site-auth-connections") && method === "POST") {
+          return json({
+            connection: { id: SITE_AUTH_CONNECTION_ID },
+            operationId: "auth-create",
+            replayed: false,
+          });
+        }
+        if (url.endsWith(`/site-auth-connections/${SITE_AUTH_CONNECTION_ID}`)) {
+          return json({
+            connection: { id: SITE_AUTH_CONNECTION_ID },
+            operationId: "auth-update",
+            replayed: false,
+          });
+        }
+        if (url.includes("/auth-runs?")) return json({ runs: [] });
+        if (url.endsWith(`/browser-sessions/${BROWSER_SESSION_ID}/auth-runs`)) {
+          return json({ run: { id: AUTH_RUN_ID }, operationId: "auth-start", replayed: false });
+        }
+        if (url.endsWith(`/auth-runs/${AUTH_RUN_ID}/report`)) {
+          return json({ run: { id: AUTH_RUN_ID }, operationId: "auth-report", replayed: false });
+        }
+        if (url.endsWith(`/auth-runs/${AUTH_RUN_ID}/protected-fill`)) {
+          return json({
+            run: { id: AUTH_RUN_ID },
+            status: "working",
+            operationId: "auth-fill",
+            replayed: false,
+          });
+        }
+        if (url.endsWith(`/auth-runs/${AUTH_RUN_ID}/verify`)) {
+          return json({ run: { id: AUTH_RUN_ID }, operationId: "auth-verify", replayed: false });
+        }
+        if (url.includes("/interaction-interventions?")) return json({ interventions: [] });
+        if (url.endsWith("/interaction-interventions") && method === "POST") {
+          return json({
+            intervention: { id: INTERVENTION_ID },
+            operationId: "intervention-create",
+            replayed: false,
+          });
+        }
+        if (url.endsWith(`/interaction-interventions/${INTERVENTION_ID}/resolve`)) {
+          return json({
+            intervention: { id: INTERVENTION_ID },
+            operationId: "intervention-resolve",
+            replayed: false,
+          });
+        }
+        throw new Error(`unexpected request ${method} ${url}`);
+      },
+    });
+
+    await client.interaction.networkRoutes.list(WORKSPACE_ID, { includeArchived: true });
+    const route = await client.interaction.networkRoutes.create(WORKSPACE_ID, {
+      operationId: "route-create",
+      name: "Oslo direct",
+      configuration: { kind: "direct" },
+      consistency: {
+        dns: "placement",
+        expectedPublicIp: null,
+        expectedRegion: "NO",
+        locale: "nb-NO",
+        timezone: "Europe/Oslo",
+        geolocation: null,
+        webRtc: "default",
+        stability: "session",
+      },
+    });
+    await route.update({ operationId: "route-update", expectedVersion: 1, name: "Norway" });
+
+    await client.interaction.siteAuthConnections.list(WORKSPACE_ID, { includeArchived: true });
+    const siteAuth = await client.interaction.siteAuthConnections.create(WORKSPACE_ID, {
+      operationId: "auth-create",
+      name: "Example",
+      accountLabel: "work",
+      origins: ["https://example.test"],
+      loginUrl: "https://example.test/login",
+      verificationUrlPrefixes: ["https://example.test/app"],
+      authorities: [],
+      methods: [],
+      preferredIdentityId: null,
+      preferredPlacement: null,
+      preferredNetworkRouteId: NETWORK_ROUTE_ID,
+      healthPolicy: { mode: "on_use", intervalSeconds: null, automaticRepair: false },
+    });
+    await siteAuth.update({
+      operationId: "auth-update",
+      expectedVersion: 1,
+      accountLabel: "work account",
+    });
+
+    const browser = client.interaction.browsers.session(WORKSPACE_ID, BROWSER_SESSION_ID);
+    await browser.auth.list({ includeSettled: true });
+    const run = await browser.auth.start({
+      operationId: "auth-start",
+      siteAuthConnectionId: SITE_AUTH_CONNECTION_ID,
+      targetId: "target-1",
+      expectedTargetGeneration: "target-generation-1",
+      expectedDocumentGeneration: "document-generation-1",
+    });
+    await run.report({ operationId: "auth-report", expectedVersion: 1, state: "working" });
+    await run.protectedFill({
+      operationId: "auth-fill",
+      expectedVersion: 2,
+      expectedTargetGeneration: "target-generation-1",
+      expectedDocumentGeneration: "document-generation-1",
+      expectedFrameId: null,
+      authorityId: "password-authority",
+      fields: [{ fieldId: "password", locator: { kind: "ref", ref: "e2" } }],
+      submit: { type: "press", key: "Enter" },
+    });
+    await run.verify({ operationId: "auth-verify", expectedVersion: 3 });
+
+    await client.interaction.interventions.list(WORKSPACE_ID, {
+      resourceKind: "browser_session",
+      resourceId: BROWSER_SESSION_ID,
+      includeSettled: true,
+    });
+    const intervention = await client.interaction.interventions.create(WORKSPACE_ID, {
+      operationId: "intervention-create",
+      resourceKind: "browser_session",
+      resourceId: BROWSER_SESSION_ID,
+      targetId: "target-1",
+      expectedControllerGeneration: "controller-1",
+      expectedTargetGeneration: "target-generation-1",
+      expectedDocumentGeneration: "document-generation-1",
+      kind: "mfa",
+      reason: "Complete security-key verification",
+      authRunId: AUTH_RUN_ID,
+    });
+    await intervention.resolve({
+      operationId: "intervention-resolve",
+      expectedVersion: 1,
+      outcome: "completed",
+    });
+
+    expect(
+      calls.map(({ url, method }) => `${method} ${url.replace("https://api.example.test", "")}`),
+    ).toEqual([
+      `GET /v1/workspaces/${WORKSPACE_ID}/network-routes?includeArchived=true`,
+      `POST /v1/workspaces/${WORKSPACE_ID}/network-routes`,
+      `PATCH /v1/workspaces/${WORKSPACE_ID}/network-routes/${NETWORK_ROUTE_ID}`,
+      `GET /v1/workspaces/${WORKSPACE_ID}/site-auth-connections?includeArchived=true`,
+      `POST /v1/workspaces/${WORKSPACE_ID}/site-auth-connections`,
+      `PATCH /v1/workspaces/${WORKSPACE_ID}/site-auth-connections/${SITE_AUTH_CONNECTION_ID}`,
+      `GET /v1/workspaces/${WORKSPACE_ID}/auth-runs?browserSessionId=${BROWSER_SESSION_ID}&includeSettled=true`,
+      `POST /v1/workspaces/${WORKSPACE_ID}/browser-sessions/${BROWSER_SESSION_ID}/auth-runs`,
+      `POST /v1/workspaces/${WORKSPACE_ID}/browser-sessions/${BROWSER_SESSION_ID}/auth-runs/${AUTH_RUN_ID}/report`,
+      `POST /v1/workspaces/${WORKSPACE_ID}/browser-sessions/${BROWSER_SESSION_ID}/auth-runs/${AUTH_RUN_ID}/protected-fill`,
+      `POST /v1/workspaces/${WORKSPACE_ID}/browser-sessions/${BROWSER_SESSION_ID}/auth-runs/${AUTH_RUN_ID}/verify`,
+      `GET /v1/workspaces/${WORKSPACE_ID}/interaction-interventions?resourceKind=browser_session&resourceId=${BROWSER_SESSION_ID}&includeSettled=true`,
+      `POST /v1/workspaces/${WORKSPACE_ID}/interaction-interventions`,
+      `POST /v1/workspaces/${WORKSPACE_ID}/interaction-interventions/${INTERVENTION_ID}/resolve`,
     ]);
   });
 });

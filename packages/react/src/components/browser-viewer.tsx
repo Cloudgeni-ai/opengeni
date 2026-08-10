@@ -7,6 +7,7 @@ import type {
   BrowserSession,
   BrowserTarget,
   ComputerSession,
+  InteractionIntervention,
   InteractionSemanticNode,
 } from "@opengeni/sdk/interaction";
 import {
@@ -44,8 +45,10 @@ import { useAttachedBrowsers } from "../hooks/use-attached-browsers";
 import { useBrowserIdentities } from "../hooks/use-browser-identities";
 import { useBrowserSession } from "../hooks/use-browser-session";
 import { useBrowserSessions } from "../hooks/use-browser-sessions";
+import { useInteractionInterventions } from "../hooks/use-interaction-interventions";
 import { cn } from "../lib/cn";
 import type { EmbeddedBrowserInteractionClientOverride } from "../session-context";
+import { InteractionInterventionBanner } from "./interaction-intervention-banner";
 
 export type BrowserViewerNotification = {
   kind: "error" | "info";
@@ -118,6 +121,11 @@ export function BrowserViewer({
     [registry.relevantSessions],
   );
   const [selection, setSelection] = useState<BrowserSelection>(null);
+  const interventions = useInteractionInterventions({
+    ...override,
+    enabled,
+    resourceKind: "browser_session",
+  });
   const [creating, setCreating] = useState(false);
   const [savingProfile, setSavingProfile] = useState(false);
   const [baseRevisionOrdinal, setBaseRevisionOrdinal] = useState<number | null>(null);
@@ -127,6 +135,7 @@ export function BrowserViewer({
   } | null>(null);
   const resumeAttemptsRef = useRef(new Map<string, BrowserResumeAttempt>());
   const previousSessionIdRef = useRef(sessionId);
+  const seenInterventionIdsRef = useRef(new Set<string>());
 
   const notifyError = useCallback(
     (cause: unknown, fallback: string) => {
@@ -160,6 +169,17 @@ export function BrowserViewer({
   const selectedRegistrySession = useMemo(
     () => liveSessions.find((session) => session.id === selection?.sessionId) ?? null,
     [liveSessions, selection?.sessionId],
+  );
+  const interventionCounts = useMemo(
+    () => countInterventions(interventions.interventions),
+    [interventions.interventions],
+  );
+  const selectedInterventions = useMemo(
+    () =>
+      interventions.interventions.filter(
+        (intervention) => intervention.resourceId === selection?.sessionId,
+      ),
+    [interventions.interventions, selection?.sessionId],
   );
   const controllerReady = selectedRegistrySession?.lifecycle === "active";
   const resumeSession = registry.resume;
@@ -225,6 +245,36 @@ export function BrowserViewer({
     browserSessionId: selection?.sessionId ?? null,
     enabled: enabled && selection !== null && controllerReady,
   });
+
+  useEffect(() => {
+    for (const intervention of interventions.interventions) {
+      if (seenInterventionIdsRef.current.has(intervention.id)) continue;
+      seenInterventionIdsRef.current.add(intervention.id);
+      onNotify?.({
+        kind: "info",
+        message: `${interventionTitle(intervention)}: ${intervention.reason}`,
+      });
+    }
+  }, [interventions.interventions, onNotify]);
+
+  const resolveIntervention = useCallback(
+    (intervention: InteractionIntervention, outcome: "completed" | "dismissed") => {
+      void interventions
+        .resolve(intervention.id, {
+          expectedVersion: intervention.version,
+          outcome,
+        })
+        .then(() => {
+          onNotify?.({
+            kind: "info",
+            message:
+              outcome === "completed" ? "Agent notified. Continuing work." : "Request cancelled.",
+          });
+        })
+        .catch((cause) => notifyError(cause, "Could not update the browser request."));
+    },
+    [interventions, notifyError, onNotify],
+  );
   const frames = useBrowserFrameStream({
     ...override,
     browserSessionId: selection?.sessionId ?? null,
@@ -417,6 +467,7 @@ export function BrowserViewer({
         creating={creating}
         savingProfile={savingProfile}
         refreshing={registry.refreshing || attached.refreshing}
+        interventionCounts={interventionCounts}
         onSelect={(browserSessionId) => setSelection({ sessionId: browserSessionId, pinned: true })}
         onFollow={() => {
           const preferred = relevant[0];
@@ -425,6 +476,17 @@ export function BrowserViewer({
         onCreate={createBrowser}
         onSaveProfile={saveProfileVersion}
         onRefresh={() => void Promise.all([registry.refresh(), attached.refresh()])}
+      />
+      <InteractionInterventionBanner
+        interventions={selectedInterventions}
+        activeTargetId={browser.selectedTarget?.id ?? null}
+        mutating={interventions.mutating}
+        onOpen={(intervention) =>
+          void browser
+            .selectTarget(intervention.targetId)
+            .catch((cause) => notifyError(cause, "Could not open the requested browser tab."))
+        }
+        onResolve={resolveIntervention}
       />
       {selectedRegistrySession && !controllerReady ? (
         <BrowserLifecyclePanel
@@ -580,6 +642,7 @@ function BrowserToolbar(props: {
   creating: boolean;
   savingProfile: boolean;
   refreshing: boolean;
+  interventionCounts: Map<string, number>;
   onSelect: (id: string) => void;
   onFollow: () => void;
   onCreate: (choice?: BrowserLaunchChoice) => void;
@@ -600,6 +663,9 @@ function BrowserToolbar(props: {
         <summary className="flex h-7 max-w-52 cursor-pointer list-none items-center gap-2 rounded-og-sm px-2 text-og-control text-og-fg transition hover:bg-og-surface-2 [&::-webkit-details-marker]:hidden">
           <Globe2Icon className="size-3.5 shrink-0 text-og-muted" />
           <span className="truncate font-medium">{selected?.name ?? "Browser"}</span>
+          {(props.interventionCounts.get(selected?.id ?? "") ?? 0) > 0 ? (
+            <span className="size-1.5 shrink-0 rounded-full bg-og-status-waiting" />
+          ) : null}
           <ChevronDownIcon className="size-3 shrink-0 text-og-subtle" />
         </summary>
         <div className="absolute left-0 top-8 z-30 w-72 overflow-hidden rounded-og-md border border-og-border bg-og-surface-1 p-1 shadow-xl">
@@ -608,6 +674,7 @@ function BrowserToolbar(props: {
             sessions={current}
             identities={props.identities}
             selectedId={props.selectedSessionId}
+            interventionCounts={props.interventionCounts}
             onSelect={choose}
           />
           <BrowserSessionGroup
@@ -615,6 +682,7 @@ function BrowserToolbar(props: {
             sessions={others}
             identities={props.identities}
             selectedId={props.selectedSessionId}
+            interventionCounts={props.interventionCounts}
             onSelect={choose}
           />
           <div className="mt-1 flex gap-1 border-t border-og-border pt-1">
@@ -660,6 +728,7 @@ function BrowserSessionGroup(props: {
   sessions: BrowserSession[];
   identities: BrowserIdentity[];
   selectedId: string | null;
+  interventionCounts: Map<string, number>;
   onSelect: (id: string) => void;
 }) {
   if (props.sessions.length === 0) return null;
@@ -670,6 +739,7 @@ function BrowserSessionGroup(props: {
       </p>
       {props.sessions.map((session) => {
         const identity = props.identities.find((candidate) => candidate.id === session.identityId);
+        const interventionCount = props.interventionCounts.get(session.id) ?? 0;
         return (
           <button
             key={session.id}
@@ -693,6 +763,11 @@ function BrowserSessionGroup(props: {
                 {placementLabel(session)}
               </span>
             </span>
+            {interventionCount > 0 ? (
+              <span className="rounded-full bg-og-status-waiting/12 px-1.5 py-0.5 text-[10px] font-medium text-og-status-waiting">
+                {interventionCount}
+              </span>
+            ) : null}
           </button>
         );
       })}
@@ -1552,6 +1627,30 @@ function sameFrameFence(left: BrowserFrame, right: BrowserFrame): boolean {
 
 function isLiveBrowser(session: BrowserSession): boolean {
   return !["ending", "ended", "failed", "lost"].includes(session.lifecycle);
+}
+
+function countInterventions(
+  interventions: readonly InteractionIntervention[],
+): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const intervention of interventions) {
+    counts.set(intervention.resourceId, (counts.get(intervention.resourceId) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function interventionTitle(intervention: InteractionIntervention): string {
+  switch (intervention.kind) {
+    case "manual_login":
+      return "Sign in needed";
+    case "mfa":
+      return "Verification needed";
+    case "external_action":
+    case "confirmation":
+      return "Action needed";
+    case "other":
+      return "Browser needs your help";
+  }
 }
 
 function placementLabel(session: BrowserSession | undefined): string {

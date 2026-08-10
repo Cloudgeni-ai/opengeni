@@ -7,6 +7,7 @@ import type {
   EmbeddedBrowserInteractionClientLike,
   EmbeddedComputerInteractionClientLike,
   EmbeddedInteractionClientLike,
+  EmbeddedInterventionClientLike,
   EmbeddedRealtimeSessionClientLike,
   EmbeddedSessionClientLike,
   EmbeddedSessionLineageClientLike,
@@ -81,6 +82,11 @@ export type EmbeddedFileAttachmentClientOverride = {
 
 export type EmbeddedInteractionClientOverride = {
   client?: EmbeddedInteractionClientLike | undefined;
+  workspaceId?: string | undefined;
+};
+
+export type EmbeddedInterventionClientOverride = {
+  client?: EmbeddedInterventionClientLike | undefined;
   workspaceId?: string | undefined;
 };
 
@@ -164,6 +170,24 @@ export function useOpenGeni(override: ClientOverride = {}): OpenGeniContextValue
 }
 
 const BROWSER_INTERACTION_METHODS = [
+  "listNetworkRoutes",
+  "getNetworkRoute",
+  "createNetworkRoute",
+  "updateNetworkRoute",
+  "listSiteAuthConnections",
+  "getSiteAuthConnection",
+  "createSiteAuthConnection",
+  "updateSiteAuthConnection",
+  "listAuthRuns",
+  "getAuthRun",
+  "startBrowserAuthRun",
+  "reportBrowserAuthRun",
+  "protectedBrowserAuthFill",
+  "verifyBrowserAuthRun",
+  "listInteractionInterventions",
+  "getInteractionIntervention",
+  "createInteractionIntervention",
+  "resolveInteractionIntervention",
   "listAttachedBrowsers",
   "getAttachedBrowser",
   "listBrowserIdentities",
@@ -190,6 +214,10 @@ const BROWSER_INTERACTION_METHODS = [
 ] as const;
 
 const COMPUTER_INTERACTION_METHODS = [
+  "listInteractionInterventions",
+  "getInteractionIntervention",
+  "createInteractionIntervention",
+  "resolveInteractionIntervention",
   "listComputerSessions",
   "getComputerSession",
   "createComputerSession",
@@ -201,6 +229,24 @@ const COMPUTER_INTERACTION_METHODS = [
   "heartbeatComputerSession",
   "endComputerSession",
 ] as const;
+
+const INTERVENTION_METHODS = [
+  "listInteractionInterventions",
+  "getInteractionIntervention",
+  "createInteractionIntervention",
+  "resolveInteractionIntervention",
+] as const;
+
+/** Resolve only the workspace-wide Browser/Computer intervention surface. */
+export function useEmbeddedInterventions(
+  override: EmbeddedInterventionClientOverride = {},
+): EmbeddedClientContextValue<EmbeddedInterventionClientLike> {
+  return useEmbeddedClientRefinement(
+    override,
+    INTERVENTION_METHODS,
+    "interaction intervention hooks",
+  );
+}
 
 /** Resolve only BrowserSession methods for a standalone Browser embed. */
 export function useEmbeddedBrowserInteraction(

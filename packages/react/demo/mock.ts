@@ -10,6 +10,10 @@
 
 import type {
   AcknowledgeStreamResponse,
+  AuthRun,
+  AuthRunListOptions,
+  AuthRunListResponse,
+  AuthRunMutationResponse,
   AttachViewerResponse,
   AttachedBrowserDevice,
   AttachedBrowserDeviceListOptions,
@@ -55,6 +59,9 @@ import type {
   CreateSessionRequest,
   CreateBrowserIdentityRequest,
   CreateBrowserSessionRequest,
+  CreateInteractionInterventionRequest,
+  CreateNetworkRouteRequest,
+  CreateSiteAuthConnectionRequest,
   CreateWorkspaceEnvironmentRequest,
   CreateVariableSetRequest,
   CreateRigRequest,
@@ -62,6 +69,8 @@ import type {
   ProposeRigChangeRequest,
   PublishBrowserRevisionRequest,
   PublishBrowserRevisionResponse,
+  ReportAuthRunRequest,
+  ResolveInteractionInterventionRequest,
   Rig,
   RigVersion,
   RigChange,
@@ -83,11 +92,21 @@ import type {
   GetWorkspaceCaptureResponse,
   GetWorkspaceCaptureFileResponse,
   GitStatusResponse,
+  InteractionIntervention,
+  InteractionInterventionListOptions,
+  InteractionInterventionListResponse,
+  InteractionInterventionMutationResponse,
   ListPacksResponse,
+  NetworkRoute,
+  NetworkRouteListOptions,
+  NetworkRouteListResponse,
+  NetworkRouteMutationResponse,
   PackInstallation,
   PackInstallationPreview,
   PackUninstallPreview,
   PreviewPackInstallationRequest,
+  ProtectedAuthFillRequest,
+  ProtectedAuthFillResponse,
   PtyOpenResponse,
   RegisterCapabilityPackRequest,
   SessionCapabilities,
@@ -106,6 +125,11 @@ import type {
   SessionControlResponse,
   SessionStatus,
   SessionTurn,
+  SiteAuthConnection,
+  SiteAuthConnectionListOptions,
+  SiteAuthConnectionListResponse,
+  SiteAuthConnectionMutationResponse,
+  StartAuthRunRequest,
   SteerMessageResult,
   StreamSessionEventsOptions,
   SubmitHumanInputResponseRequest,
@@ -115,6 +139,8 @@ import type {
   UpdateSessionMcpApprovalPolicyResponse,
   UpdateSessionRequest,
   UpdateSessionPinRequest,
+  UpdateNetworkRouteRequest,
+  UpdateSiteAuthConnectionRequest,
   UpdateWorkspaceEnvironmentRequest,
   UpdateVariableSetRequest,
   UpdateWorkspaceRequest,
@@ -127,6 +153,7 @@ import type {
   VariableSet,
   VariableSetSecret,
   VariableSetVariableMetadata,
+  VerifyAuthRunRequest,
   WorkspaceRegisteredPack,
   WorkspaceRealtimeModelCatalogResponse,
 } from "@opengeni/sdk";
@@ -224,6 +251,12 @@ export class MockOpenGeniClient implements SessionClientLike {
   private scripted = false;
   private managerScript: Promise<void> | null = null;
   private responseQueues = new Map<string, Promise<void>>();
+  private networkRouteRevision = 1;
+  private networkRoutes = new Map<string, NetworkRoute>();
+  private siteAuthRevision = 1;
+  private siteAuthConnections = new Map<string, SiteAuthConnection>();
+  private authRuns = new Map<string, AuthRun>();
+  private interventions = new Map<string, InteractionIntervention>();
   private browserRevision = 1;
   private browserIdentities = new Map<string, BrowserIdentity>([
     [DEMO_BROWSER_IDENTITY_ID, fabricateBrowserIdentity()],
@@ -1532,6 +1565,357 @@ export class MockOpenGeniClient implements SessionClientLike {
     // no-op in the demo
   }
 
+  async listNetworkRoutes(
+    _workspaceId: string,
+    options: NetworkRouteListOptions = {},
+  ): Promise<NetworkRouteListResponse> {
+    return {
+      revision: this.networkRouteRevision,
+      routes: [...this.networkRoutes.values()].filter(
+        (route) => options.includeArchived || route.status === "active",
+      ),
+    };
+  }
+
+  async getNetworkRoute(_workspaceId: string, routeId: string): Promise<NetworkRoute> {
+    const route = this.networkRoutes.get(routeId);
+    if (!route) throw new Error("NetworkRoute not found");
+    return route;
+  }
+
+  async createNetworkRoute(
+    _workspaceId: string,
+    request: CreateNetworkRouteRequest,
+  ): Promise<NetworkRouteMutationResponse> {
+    const now = new Date().toISOString();
+    const route: NetworkRoute = {
+      id: demoUuid(),
+      accountId: ACCOUNT_ID,
+      workspaceId: WORKSPACE_ID,
+      name: request.name,
+      status: "active",
+      configuration: request.configuration,
+      consistency: request.consistency,
+      version: 1,
+      createdBySubjectId: "user:demo",
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.networkRoutes.set(route.id, route);
+    this.networkRouteRevision += 1;
+    return { route, operationId: request.operationId, replayed: false };
+  }
+
+  async updateNetworkRoute(
+    _workspaceId: string,
+    routeId: string,
+    request: UpdateNetworkRouteRequest,
+  ): Promise<NetworkRouteMutationResponse> {
+    const current = await this.getNetworkRoute(WORKSPACE_ID, routeId);
+    if (current.version !== request.expectedVersion) throw new Error("NetworkRoute changed");
+    const route: NetworkRoute = {
+      ...current,
+      ...(request.name !== undefined ? { name: request.name } : {}),
+      ...(request.status !== undefined ? { status: request.status } : {}),
+      ...(request.configuration !== undefined ? { configuration: request.configuration } : {}),
+      ...(request.consistency !== undefined ? { consistency: request.consistency } : {}),
+      version: current.version + 1,
+      updatedAt: new Date().toISOString(),
+    };
+    this.networkRoutes.set(route.id, route);
+    this.networkRouteRevision += 1;
+    return { route, operationId: request.operationId, replayed: false };
+  }
+
+  async listSiteAuthConnections(
+    _workspaceId: string,
+    options: SiteAuthConnectionListOptions = {},
+  ): Promise<SiteAuthConnectionListResponse> {
+    return {
+      revision: this.siteAuthRevision,
+      connections: [...this.siteAuthConnections.values()].filter(
+        (connection) => options.includeArchived || connection.status === "active",
+      ),
+    };
+  }
+
+  async getSiteAuthConnection(
+    _workspaceId: string,
+    connectionId: string,
+  ): Promise<SiteAuthConnection> {
+    const connection = this.siteAuthConnections.get(connectionId);
+    if (!connection) throw new Error("SiteAuthConnection not found");
+    return connection;
+  }
+
+  async createSiteAuthConnection(
+    _workspaceId: string,
+    request: CreateSiteAuthConnectionRequest,
+  ): Promise<SiteAuthConnectionMutationResponse> {
+    const now = new Date().toISOString();
+    const { operationId, ...configuration } = request;
+    const connection: SiteAuthConnection = {
+      ...configuration,
+      id: demoUuid(),
+      accountId: ACCOUNT_ID,
+      workspaceId: WORKSPACE_ID,
+      status: "active",
+      verificationState: "unknown",
+      lastVerifiedAt: null,
+      lastVerifiedUrl: null,
+      repairCode: null,
+      version: 1,
+      createdBySubjectId: "user:demo",
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.siteAuthConnections.set(connection.id, connection);
+    this.siteAuthRevision += 1;
+    return { connection, operationId, replayed: false };
+  }
+
+  async updateSiteAuthConnection(
+    _workspaceId: string,
+    connectionId: string,
+    request: UpdateSiteAuthConnectionRequest,
+  ): Promise<SiteAuthConnectionMutationResponse> {
+    const current = await this.getSiteAuthConnection(WORKSPACE_ID, connectionId);
+    if (current.version !== request.expectedVersion) throw new Error("SiteAuthConnection changed");
+    const { operationId, expectedVersion: _expectedVersion, ...requestedChanges } = request;
+    const changes = Object.fromEntries(
+      Object.entries(requestedChanges).filter(([, value]) => value !== undefined),
+    ) as Partial<SiteAuthConnection>;
+    const connection: SiteAuthConnection = {
+      ...current,
+      ...changes,
+      version: current.version + 1,
+      updatedAt: new Date().toISOString(),
+    };
+    this.siteAuthConnections.set(connection.id, connection);
+    this.siteAuthRevision += 1;
+    return { connection, operationId, replayed: false };
+  }
+
+  async listAuthRuns(
+    _workspaceId: string,
+    options: AuthRunListOptions = {},
+  ): Promise<AuthRunListResponse> {
+    return {
+      runs: [...this.authRuns.values()].filter(
+        (run) =>
+          (!options.browserSessionId || run.browserSessionId === options.browserSessionId) &&
+          (!options.siteAuthConnectionId ||
+            run.siteAuthConnectionId === options.siteAuthConnectionId) &&
+          (options.includeSettled || !authRunSettled(run)),
+      ),
+    };
+  }
+
+  async getAuthRun(_workspaceId: string, authRunId: string): Promise<AuthRun> {
+    const run = this.authRuns.get(authRunId);
+    if (!run) throw new Error("AuthRun not found");
+    return run;
+  }
+
+  async startBrowserAuthRun(
+    _workspaceId: string,
+    browserSessionId: string,
+    request: StartAuthRunRequest,
+  ): Promise<AuthRunMutationResponse> {
+    const session = await this.getBrowserSession(WORKSPACE_ID, browserSessionId);
+    const now = new Date().toISOString();
+    const run: AuthRun = {
+      id: demoUuid(),
+      accountId: ACCOUNT_ID,
+      workspaceId: WORKSPACE_ID,
+      siteAuthConnectionId: request.siteAuthConnectionId,
+      browserSessionId,
+      targetId: request.targetId,
+      controllerGeneration: requireDemoBrowserController(session).controllerGeneration,
+      targetGeneration: request.expectedTargetGeneration,
+      documentGeneration: request.expectedDocumentGeneration,
+      methodId: request.methodId ?? null,
+      authorityId: request.authorityId ?? null,
+      state: "discovering",
+      choices: [],
+      pendingFields: [],
+      externalAction: null,
+      interventionId: null,
+      verifiedUrl: null,
+      failureCode: null,
+      version: 1,
+      operationId: request.operationId,
+      createdBySubjectId: "agent:demo",
+      createdAt: now,
+      updatedAt: now,
+      settledAt: null,
+    };
+    this.authRuns.set(run.id, run);
+    return { run, operationId: request.operationId, replayed: false };
+  }
+
+  async reportBrowserAuthRun(
+    _workspaceId: string,
+    browserSessionId: string,
+    authRunId: string,
+    request: ReportAuthRunRequest,
+  ): Promise<AuthRunMutationResponse> {
+    const current = await this.getAuthRun(WORKSPACE_ID, authRunId);
+    if (
+      current.browserSessionId !== browserSessionId ||
+      current.version !== request.expectedVersion
+    ) {
+      throw new Error("AuthRun changed");
+    }
+    const now = new Date().toISOString();
+    const run: AuthRun = {
+      ...current,
+      methodId: request.methodId ?? current.methodId,
+      authorityId: request.authorityId ?? current.authorityId,
+      state: request.state,
+      choices: request.choices ?? [],
+      pendingFields: request.pendingFields ?? [],
+      externalAction: request.externalAction ?? null,
+      failureCode: request.failureCode ?? null,
+      version: current.version + 1,
+      updatedAt: now,
+      settledAt: request.state === "failed" || request.state === "cancelled" ? now : null,
+    };
+    this.authRuns.set(run.id, run);
+    return { run, operationId: request.operationId, replayed: false };
+  }
+
+  async protectedBrowserAuthFill(
+    _workspaceId: string,
+    browserSessionId: string,
+    authRunId: string,
+    request: ProtectedAuthFillRequest,
+  ): Promise<ProtectedAuthFillResponse> {
+    const current = await this.getAuthRun(WORKSPACE_ID, authRunId);
+    if (
+      current.browserSessionId !== browserSessionId ||
+      current.version !== request.expectedVersion
+    ) {
+      throw new Error("AuthRun changed");
+    }
+    const run: AuthRun = {
+      ...current,
+      authorityId: request.authorityId,
+      state: "working",
+      version: current.version + 1,
+      updatedAt: new Date().toISOString(),
+    };
+    this.authRuns.set(run.id, run);
+    return { run, status: "working", operationId: request.operationId, replayed: false };
+  }
+
+  async verifyBrowserAuthRun(
+    _workspaceId: string,
+    browserSessionId: string,
+    authRunId: string,
+    request: VerifyAuthRunRequest,
+  ): Promise<AuthRunMutationResponse> {
+    const current = await this.getAuthRun(WORKSPACE_ID, authRunId);
+    if (
+      current.browserSessionId !== browserSessionId ||
+      current.version !== request.expectedVersion
+    ) {
+      throw new Error("AuthRun changed");
+    }
+    const target = (this.browserTargets.get(browserSessionId) ?? []).find(
+      (candidate) => candidate.id === current.targetId,
+    );
+    const now = new Date().toISOString();
+    const run: AuthRun = {
+      ...current,
+      state: "verified",
+      verifiedUrl: target?.url ?? null,
+      version: current.version + 1,
+      updatedAt: now,
+      settledAt: now,
+    };
+    this.authRuns.set(run.id, run);
+    return { run, operationId: request.operationId, replayed: false };
+  }
+
+  async listInteractionInterventions(
+    _workspaceId: string,
+    options: InteractionInterventionListOptions = {},
+  ): Promise<InteractionInterventionListResponse> {
+    return {
+      interventions: [...this.interventions.values()].filter(
+        (intervention) =>
+          (!options.resourceKind || intervention.resourceKind === options.resourceKind) &&
+          (!options.resourceId || intervention.resourceId === options.resourceId) &&
+          (options.includeSettled || intervention.status === "open"),
+      ),
+    };
+  }
+
+  async getInteractionIntervention(
+    _workspaceId: string,
+    interventionId: string,
+  ): Promise<InteractionIntervention> {
+    const intervention = this.interventions.get(interventionId);
+    if (!intervention) throw new Error("InteractionIntervention not found");
+    return intervention;
+  }
+
+  async createInteractionIntervention(
+    _workspaceId: string,
+    request: CreateInteractionInterventionRequest,
+  ): Promise<InteractionInterventionMutationResponse> {
+    const now = new Date().toISOString();
+    const intervention: InteractionIntervention = {
+      id: demoUuid(),
+      accountId: ACCOUNT_ID,
+      workspaceId: WORKSPACE_ID,
+      resourceKind: request.resourceKind,
+      resourceId: request.resourceId,
+      targetId: request.targetId,
+      controllerGeneration: request.expectedControllerGeneration,
+      targetGeneration: request.expectedTargetGeneration,
+      documentGeneration: request.expectedDocumentGeneration,
+      kind: request.kind,
+      reason: request.reason,
+      status: "open",
+      authRunId: request.authRunId ?? null,
+      originatingSessionId: MANAGER_SESSION_ID,
+      originatingTurnId: null,
+      originatingAttemptId: null,
+      originatingToolOperationId: null,
+      responseActorSubjectId: null,
+      version: 1,
+      operationId: request.operationId,
+      expiresAt: new Date(Date.now() + (request.expiresInSeconds ?? 900) * 1_000).toISOString(),
+      createdAt: now,
+      updatedAt: now,
+      settledAt: null,
+    };
+    this.interventions.set(intervention.id, intervention);
+    return { intervention, operationId: request.operationId, replayed: false };
+  }
+
+  async resolveInteractionIntervention(
+    _workspaceId: string,
+    interventionId: string,
+    request: ResolveInteractionInterventionRequest,
+  ): Promise<InteractionInterventionMutationResponse> {
+    const current = await this.getInteractionIntervention(WORKSPACE_ID, interventionId);
+    if (current.version !== request.expectedVersion) throw new Error("Intervention changed");
+    const now = new Date().toISOString();
+    const intervention: InteractionIntervention = {
+      ...current,
+      status: request.outcome,
+      responseActorSubjectId: "user:demo",
+      version: current.version + 1,
+      updatedAt: now,
+      settledAt: now,
+    };
+    this.interventions.set(intervention.id, intervention);
+    return { intervention, operationId: request.operationId, replayed: false };
+  }
+
   async listAttachedBrowsers(
     _workspaceId: string,
     _options: AttachedBrowserDeviceListOptions = {},
@@ -1616,6 +2000,7 @@ export class MockOpenGeniClient implements SessionClientLike {
       headless: request.headless ?? true,
       identityId: identity?.id ?? null,
       baseRevisionId: request.baseRevisionId ?? identity?.defaultRevisionId ?? null,
+      networkRouteId: request.networkRouteId ?? null,
       linkedComputerSessionId: request.linkedComputerSessionId ?? null,
     });
     const target = fabricateBrowserTarget(id, {
@@ -2620,6 +3005,10 @@ function requireDemoBrowserController(
     throw new Error("The scripted browser controller is not active.");
   }
   return session.controller;
+}
+
+function authRunSettled(run: AuthRun): boolean {
+  return run.state === "verified" || run.state === "failed" || run.state === "cancelled";
 }
 
 function fabricateComputerSession(

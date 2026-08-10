@@ -88,6 +88,7 @@ import { registerGitHubRoutes } from "./routes/github";
 import { registerInstallRoutes } from "./routes/install";
 import { registerApiIntegrationRoutes } from "./routes/api-integrations";
 import { registerIntegrationFeatureRoutes } from "./routes/integration-features";
+import { registerInteractionResourceRoutes } from "./routes/interaction-resources";
 import { registerPackRoutes } from "./routes/packs";
 import { registerPluginRoutes } from "./routes/plugins";
 import { registerSkillRoutes } from "./routes/skills";
@@ -631,6 +632,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerDocumentRoutes(app, routeDeps);
   registerGitHubRoutes(app, routeDeps);
   registerInstallRoutes(app, routeDeps);
+  registerInteractionResourceRoutes(app, routeDeps);
   registerWorkspaceRoutes(app, routeDeps);
   registerInsightsRoutes(app, routeDeps);
   registerWorkspaceInstructionPolicyRoutes(app, routeDeps);
