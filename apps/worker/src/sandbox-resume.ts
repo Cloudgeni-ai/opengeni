@@ -55,6 +55,7 @@ import {
 import {
   captureVerifiedWorkspaceArchive,
   describeLegacyNativeSnapshotArchive,
+  MODAL_EXEC_READINESS_TIMEOUT_MS,
   WorkspaceArchiveIntegrityError,
   establishSandboxSessionFromEnvelope,
   isProviderSandboxNotFoundError,
@@ -218,7 +219,6 @@ export class SandboxLeaseInstanceLostError extends SandboxLeaseSupersededError {
 // Bounded poll while a sibling spawner is mid cold-restore. The wait budget is
 // user-facing and separate from the lease TTL heartbeat/reaper horizon.
 const WARMING_POLL_INTERVAL_MS = 250;
-const MODAL_EXEC_READINESS_TIMEOUT_MS = 15_000;
 
 async function sleep(ms: number): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, ms));
