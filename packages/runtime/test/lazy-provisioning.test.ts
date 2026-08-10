@@ -179,7 +179,9 @@ describe("lazy provisioning synthetic manifest", () => {
     });
 
     // The rig-setup hook exec'd its marker-guarded program against the box.
-    expect(execCmds.some((cmd) => cmd.includes("/var/opengeni/rig-setup-ver-9.done"))).toBe(true);
+    expect(
+      execCmds.some((cmd) => cmd.includes("/tmp/opengeni/rig-setup/rig-setup-ver-9.done")),
+    ).toBe(true);
   });
 
   test("connected-machine setup delivers verified attachments without running platform hooks", async () => {

@@ -32,10 +32,12 @@ import {
   updateCodexAllocatorEligibility,
   upsertCodexSubscriptionCredential,
   withCodexAppsRequestAuthorization,
+  withWorkspaceSessionActivityRls,
   type Database,
   type DbClient,
 } from "../src";
 import { migrate } from "../src/migrate";
+import { sql } from "drizzle-orm";
 
 let shared: SharedTestDatabase | null = null;
 let admin: postgres.Sql;
@@ -133,8 +135,8 @@ async function seedCapacityWaiter(ws: Workspace): Promise<{
   const turnId = crypto.randomUUID();
   const goalId = crypto.randomUUID();
   const workflowId = `session-${sessionId}`;
-  await admin.begin(async (tx) => {
-    await tx`
+  await withWorkspaceSessionActivityRls(dbA, ws.workspaceId, async (tx) => {
+    await tx.execute(sql`
       insert into sessions (
         id, account_id, workspace_id, initial_message, model,
         sandbox_backend, sandbox_group_id, status, temporal_workflow_id, tool_policy
@@ -142,8 +144,8 @@ async function seedCapacityWaiter(ws: Workspace): Promise<{
         ${sessionId}, ${ws.accountId}, ${ws.workspaceId}, 'Codex quota capacity wake',
         'codex/gpt-5.6-sol', 'modal', ${sessionId}, 'idle', ${workflowId},
         jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
-      )`;
-    await tx`
+      )`);
+    await tx.execute(sql`
       insert into session_turns (
         id, account_id, workspace_id, session_id, trigger_event_id,
         temporal_workflow_id, status, position, prompt, model,
@@ -152,15 +154,15 @@ async function seedCapacityWaiter(ws: Workspace): Promise<{
         ${turnId}, ${ws.accountId}, ${ws.workspaceId}, ${sessionId}, ${crypto.randomUUID()},
         ${workflowId}, 'failed', 1, 'Codex quota capacity wake', 'codex/gpt-5.6-sol',
         'xhigh', 'modal', '[]'::jsonb, '[]'::jsonb, '{}'::jsonb
-      )`;
-    await tx`
+      )`);
+    await tx.execute(sql`
       insert into session_goals (
         id, account_id, workspace_id, session_id, status, text,
         success_criteria, version, max_auto_continuations
       ) values (
         ${goalId}, ${ws.accountId}, ${ws.workspaceId}, ${sessionId}, 'active',
         'wait for real Codex capacity', 'resume only after durable capacity changes', 1, 20
-      )`;
+      )`);
   });
   const [waiter] = await admin<{ id: string; wake_revision: number }[]>`
     insert into codex_capacity_waiters (

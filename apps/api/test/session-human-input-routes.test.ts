@@ -9,7 +9,7 @@ import {
   createSession,
   submitHumanPromptInTransaction,
   updateWorkspaceSettings,
-  withWorkspaceSubjectRls,
+  withWorkspaceSubjectSessionActivityRls,
   type DbClient,
 } from "@opengeni/db";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
@@ -93,23 +93,21 @@ async function frozenFixture() {
     model: "scripted-model",
     sandboxBackend: "none",
   });
-  await withWorkspaceSubjectRls(client.db, grant.workspaceId!, subjectId, (db) =>
-    db.transaction((tx) =>
-      submitHumanPromptInTransaction(tx as typeof db, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId!,
-        sessionId: session.id,
-        subjectId,
-        actor: { type: "human", subjectId },
-        operationKey: crypto.randomUUID(),
-        delivery: "send",
-        text: "Proceed with my choice",
-        resources: [],
-        tools: [],
-        reasoningEffortFallback: "low",
-        source: "user",
-      }),
-    ),
+  await withWorkspaceSubjectSessionActivityRls(client.db, grant.workspaceId!, subjectId, (db) =>
+    submitHumanPromptInTransaction(db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      subjectId,
+      actor: { type: "human", subjectId },
+      operationKey: crypto.randomUUID(),
+      delivery: "send",
+      text: "Proceed with my choice",
+      resources: [],
+      tools: [],
+      reasoningEffortFallback: "low",
+      source: "user",
+    }),
   );
   const attemptId = crypto.randomUUID();
   const claimed = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {

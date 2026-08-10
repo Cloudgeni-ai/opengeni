@@ -396,6 +396,20 @@ function insertsSessionEvents(node: t.CallExpression): boolean {
   );
 }
 
+function writesSessions(node: t.CallExpression): boolean {
+  if (!isMemberExpression(node.callee)) return false;
+  const method = callName(node);
+  if (method !== "insert" && method !== "update") return false;
+  const table = node.arguments[0];
+  return Boolean(
+    table &&
+    ((isMemberExpression(table) &&
+      isIdentifier(table.property) &&
+      table.property.name === "sessions") ||
+      (isIdentifier(table) && table.name === "sessions")),
+  );
+}
+
 function insertsSessionSystemUpdateOutbox(node: t.CallExpression): boolean {
   if (!isMemberExpression(node.callee) || callName(node) !== "insert") {
     return false;
@@ -539,6 +553,102 @@ function insertPositions(functionNode: FunctionLikeDeclaration): number[] {
 }
 
 describe("session_events writer inventory", () => {
+  test("every production session-row writer requires the explicit activity gate", () => {
+    const violations: string[] = [];
+    const gateWrappers = [
+      "withSessionActivityRlsContext",
+      "withWorkspaceSessionActivityRls",
+      "withWorkspaceSubjectSessionActivityRls",
+      "retrySessionActivityRls",
+      "withWorkspaceSessionEventActivityRls",
+      "retryWorkspaceSessionEventActivityPersistence",
+    ];
+
+    for (const path of productionTypeScriptFiles()) {
+      const source = readFileSync(path, "utf8");
+      if (!source.includes("sessions")) continue;
+      const file = relative(repoRoot, path).replaceAll("\\", "/");
+      const sourceFile = parseSourceFile(path, source);
+      const checked = new Set<string>();
+      const checkWriter = (node: t.Node): void => {
+        let ancestor = parentNodes.get(node);
+        while (ancestor) {
+          if (isCallExpression(ancestor) && gateWrappers.includes(callName(ancestor) ?? "")) {
+            return;
+          }
+          ancestor = parentNodes.get(ancestor);
+        }
+        const enclosing = namedTopLevelFunction(node);
+        if (!enclosing) {
+          violations.push(`${file}:${lineNumber(source, node)} unnamed session writer`);
+          return;
+        }
+        const key = `${file}#${enclosing.name}`;
+        if (checked.has(key)) return;
+        checked.add(key);
+        const body = enclosing.node.body;
+        if (!body) {
+          violations.push(`${key} has no function body`);
+          return;
+        }
+        const signature = source.slice(enclosing.node.start, body.start);
+        if (!/\bSessionActivityDatabase\b/.test(signature)) {
+          violations.push(`${key} has no activity-gated handle or wrapper`);
+        }
+      };
+      const visit = (node: t.Node): void => {
+        if (isCallExpression(node) && writesSessions(node)) checkWriter(node);
+        if (isTaggedTemplateExpression(node)) {
+          const sqlText = source.slice(nodeStart(node.quasi), node.quasi.end);
+          if (/\b(?:insert\s+into|update)\s+(?:[a-z_]+\.)?sessions\b/i.test(sqlText)) {
+            checkWriter(node);
+          }
+        }
+        forEachChild(node, visit);
+      };
+      visit(sourceFile.program);
+    }
+
+    expect(violations).toEqual([]);
+  });
+
+  test("session activity gate GUCs have one application owner", () => {
+    const violations = productionTypeScriptFiles()
+      .filter(
+        (path) => relative(repoRoot, path).replaceAll("\\", "/") !== "packages/db/src/database.ts",
+      )
+      .filter((path) => readFileSync(path, "utf8").includes("opengeni.session_activity_gate_"))
+      .map((path) => relative(repoRoot, path).replaceAll("\\", "/"));
+    expect(violations).toEqual([]);
+  });
+
+  test("session activity gate branding has one trusted runtime owner", () => {
+    const violations = productionTypeScriptFiles()
+      .filter(
+        (path) => relative(repoRoot, path).replaceAll("\\", "/") !== "packages/db/src/database.ts",
+      )
+      .filter((path) => {
+        const source = readFileSync(path, "utf8");
+        return /as\s+(?:unknown\s+as\s+)?SessionActivityDatabase\b/.test(source);
+      })
+      .map((path) => relative(repoRoot, path).replaceAll("\\", "/"));
+    expect(violations).toEqual([]);
+  });
+
+  test("session discovery keeps created-order clocks outside repeatable-read fencing", () => {
+    const source = readFileSync(join(repoRoot, "packages/db/src/index.ts"), "utf8");
+    const start = source.indexOf("export async function listSessionDiscoverySummaries");
+    const end = source.indexOf("export type SessionDiscoveryAncestor", start);
+    const discovery = source.slice(start, end);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    expect(discovery).toContain("transaction_timestamp()");
+    expect(discovery).not.toContain("statement_timestamp()");
+    expect(discovery).toContain('orderBy === "updatedAt"');
+    expect(discovery).toContain('isolationLevel: "repeatable read"');
+    expect(discovery).toContain('isolationLevel: "read committed"');
+  });
+
   test("every production insert has an explicit canonical or caller-owned lock contract", () => {
     const writers = new Map<
       string,
@@ -722,7 +832,7 @@ describe("session_events writer inventory", () => {
         expect(functionCalls(writer.functionNode, "lockChildLifecycleOutboxWriteRowsTx")).toBe(
           true,
         );
-        expect(functionCalls(writer.functionNode, "retryWorkspacePersistence")).toBe(true);
+        expect(functionCalls(writer.functionNode, "retrySessionActivityRls")).toBe(true);
       } else if (expected.contract === "canonical_pair") {
         expect(functionCalls(writer.functionNode, "lockSessionEventWriteRows")).toBe(true);
         expect(functionCalls(writer.functionNode, "retryRlsPersistence")).toBe(true);
@@ -738,7 +848,7 @@ describe("session_events writer inventory", () => {
       expect(definitions).toHaveLength(1);
       const callerNode = definitions[0]!.functionNode;
       expect(functionCalls(callerNode, "lockChildLifecycleOutboxWriteRowsTx")).toBe(true);
-      expect(functionCalls(callerNode, "retryWorkspacePersistence")).toBe(true);
+      expect(functionCalls(callerNode, "retrySessionActivityRls")).toBe(true);
       const firstLock = callPositions(callerNode, "lockChildLifecycleOutboxWriteRowsTx")[0];
       const enqueue = callPositions(callerNode, "enqueueFailedChildOutboxForTurnTx")[0];
       expect(firstLock).toBeLessThan(enqueue!);
@@ -767,7 +877,7 @@ describe("session_events writer inventory", () => {
     ).toBeGreaterThan(0);
   });
 
-  test("generic append and Agent commands keep external effects outside bounded retry", () => {
+  test("generic append and session commands keep external effects outside bounded retry", () => {
     const definitionsFor = (relativePath: string) => {
       const path = join(repoRoot, relativePath);
       const sourceFile = parseSourceFile(path, readFileSync(path, "utf8"));
@@ -785,28 +895,48 @@ describe("session_events writer inventory", () => {
     const dbDefinitions = definitionsFor("packages/db/src/index.ts");
     const genericAppend = dbDefinitions.get("appendSessionEvents");
     expect(genericAppend).toBeDefined();
-    expect(functionCalls(genericAppend!, "retryWorkspacePersistence")).toBe(true);
-    expect(callPositions(genericAppend!, "retryWorkspacePersistence")[0]).toBeLessThan(
-      insertPositions(genericAppend!)[0]!,
+    expect(functionCalls(genericAppend!, "retryWorkspaceSessionEventActivityPersistence")).toBe(
+      true,
     );
+    expect(
+      callPositions(genericAppend!, "retryWorkspaceSessionEventActivityPersistence")[0],
+    ).toBeLessThan(insertPositions(genericAppend!)[0]!);
 
     const commandDefinitions = definitionsFor("packages/core/src/application/session-commands.ts");
-    const retryHelper = commandDefinitions.get("runAgentCommandPersistenceTransaction");
+    const retryHelper = commandDefinitions.get("runSessionCommandPersistenceTransaction");
     expect(retryHelper).toBeDefined();
     expect(functionCalls(retryHelper!, "runIdempotentPersistenceTransaction")).toBe(true);
-    expect(functionCalls(retryHelper!, "withWorkspaceRls")).toBe(true);
+    expect(functionCalls(retryHelper!, "withWorkspaceSessionActivityRls")).toBe(true);
+    expect(functionCalls(retryHelper!, "withWorkspaceSubjectSessionActivityRls")).toBe(true);
     expect(functionCalls(retryHelper!, "publishAndWakeAgentCommand")).toBe(false);
     expect(functionCalls(retryHelper!, "publishWorkspaceControlEvent")).toBe(false);
+    expect(functionCalls(retryHelper!, "publishSessionEventIds")).toBe(false);
+    expect(functionCalls(retryHelper!, "requestControlWakeDispatch")).toBe(false);
 
-    for (const commandName of ["sendAgentSessionMessage", "steerAgentSession"] as const) {
+    for (const commandName of [
+      "sendAgentSessionMessage",
+      "steerAgentSession",
+      "controlAgentSessionWorkstream",
+      "moveHumanQueuePrompt",
+      "deleteHumanQueuePrompt",
+      "editHumanQueuePrompt",
+      "steerHumanQueuePrompt",
+      "controlHumanSessionWorkstreamWithOutcome",
+    ] as const) {
       const command = commandDefinitions.get(commandName);
       expect(command).toBeDefined();
-      expect(functionCalls(command!, "runAgentCommandPersistenceTransaction")).toBe(true);
-      const persistence = callPositions(command!, "runAgentCommandPersistenceTransaction")[0]!;
-      const publishAndWake = callPositions(command!, "publishAndWakeAgentCommand")[0]!;
-      const publishControl = callPositions(command!, "publishWorkspaceControlEvent")[0]!;
-      expect(persistence).toBeLessThan(publishAndWake);
-      expect(persistence).toBeLessThan(publishControl);
+      expect(functionCalls(command!, "runSessionCommandPersistenceTransaction")).toBe(true);
+      const persistence = callPositions(command!, "runSessionCommandPersistenceTransaction")[0]!;
+      for (const externalEffect of [
+        "publishAndWakeAgentCommand",
+        "publishWorkspaceControlEvent",
+        "publishSessionEventIds",
+        "requestControlWakeDispatch",
+      ]) {
+        for (const effect of callPositions(command!, externalEffect)) {
+          expect(persistence).toBeLessThan(effect);
+        }
+      }
     }
   });
 });

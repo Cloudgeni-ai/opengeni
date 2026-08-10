@@ -20,16 +20,33 @@ process.stdout.write("sharp-native-runtime-ready");
 `,
     );
 
-    const result = await Bun.build({
-      entrypoints: [entrypoint],
-      outdir,
-      target: "bun",
-      format: "esm",
-      splitting: true,
-      minify: { syntax: true, whitespace: true, identifiers: false },
-      external: ["@llamaindex/liteparse", "sharp"],
+    // Bun.build mutates process-global resolver state. Keep the compiler smoke
+    // test in a child process so it cannot contaminate later test modules.
+    const buildProcess = Bun.spawn({
+      cmd: [
+        "bun",
+        "build",
+        entrypoint,
+        `--outdir=${outdir}`,
+        "--target=bun",
+        "--format=esm",
+        "--splitting",
+        "--minify-syntax",
+        "--minify-whitespace",
+        "--external=@llamaindex/liteparse",
+        "--external=sharp",
+      ],
+      cwd: root,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
     });
-    expect(result.success, result.logs.map(String).join("\n")).toBe(true);
+    const [buildExitCode, buildStdout, buildStderr] = await Promise.all([
+      buildProcess.exited,
+      new Response(buildProcess.stdout).text(),
+      new Response(buildProcess.stderr).text(),
+    ]);
+    expect(buildExitCode, `${buildStdout}\n${buildStderr}`).toBe(0);
 
     const process = Bun.spawn({
       cmd: ["bun", join(outdir, "entry.js")],

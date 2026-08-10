@@ -25,7 +25,7 @@ import {
   saveRunState,
   submitHumanPromptInTransaction,
   withWorkspaceRls,
-  withWorkspaceSubjectRls,
+  withWorkspaceSubjectSessionActivityRls,
 } from "@opengeni/db";
 import * as schema from "@opengeni/db/schema";
 import {
@@ -1453,28 +1453,25 @@ describe("standalone context compaction execution", () => {
       ),
     ).toEqual([newUpdate.update.id]);
 
-    await withWorkspaceSubjectRls(
+    await withWorkspaceSubjectSessionActivityRls(
       client.db,
       grant.workspaceId!,
       grant.subjectId,
       async (db) =>
-        await db.transaction(
-          async (tx) =>
-            await submitHumanPromptInTransaction(tx as typeof db, {
-              accountId: grant.accountId,
-              workspaceId: grant.workspaceId!,
-              sessionId: session.id,
-              subjectId: grant.subjectId,
-              actor: { type: "human", subjectId: grant.subjectId },
-              operationKey: crypto.randomUUID(),
-              delivery: "send",
-              text: "Retry after the compaction failure with new human input",
-              resources: [],
-              tools: [],
-              reasoningEffortFallback: "low",
-              source: "user",
-            }),
-        ),
+        await submitHumanPromptInTransaction(db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          subjectId: grant.subjectId,
+          actor: { type: "human", subjectId: grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "Retry after the compaction failure with new human input",
+          resources: [],
+          tools: [],
+          reasoningEffortFallback: "low",
+          source: "user",
+        }),
     );
     const retryClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
       sessionId: session.id,

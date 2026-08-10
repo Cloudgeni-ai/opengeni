@@ -47,6 +47,7 @@ import {
   sumUsageQuantity,
   updateSessionMcpServerCredentials,
   updateScheduledTask,
+  withWorkspaceSessionActivityRls,
   withWorkspaceRls,
   withWorkspaceSubjectRls,
   type Database,
@@ -92,7 +93,7 @@ async function setSessionStatus(
   status: SessionStatus,
   activeTurnId: string | null = null,
 ): Promise<void> {
-  await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) => {
     await scopedDb.execute(dbSql`
       update sessions
       set status = ${status}, active_turn_id = ${activeTurnId}, updated_at = now()

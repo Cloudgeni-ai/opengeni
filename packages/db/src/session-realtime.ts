@@ -8,7 +8,7 @@ import type {
 } from "@opengeni/contracts";
 import { and, asc, eq, gt, inArray, isNull, or } from "drizzle-orm";
 
-import type { Database } from "./database";
+import type { Database, SessionActivityDatabase } from "./database";
 import { LOSSLESS_CONTENT_CODEC_VERSION } from "./lossless-json";
 import { flushSessionRealtimeTranscriptTailInTransaction } from "./session-realtime-context";
 import {
@@ -161,7 +161,7 @@ function assertOwner(
 }
 
 async function appendRealtimeLifecycleEvent(
-  db: Database,
+  db: SessionActivityDatabase,
   session: SessionRow,
   sequence: number,
   type: Extract<SessionEventType, "session.realtime.started" | "session.realtime.ended">,
@@ -259,7 +259,7 @@ async function registerNormalModeWake(db: Database, session: SessionRow, reason:
 }
 
 async function endWithEvent(
-  db: Database,
+  db: SessionActivityDatabase,
   session: SessionRow,
   row: RealtimeRow,
   reason: SessionRealtimeEndReason,
@@ -352,7 +352,7 @@ function assertRealtimeAdmission(session: SessionRow): void {
 }
 
 export async function beginSessionRealtimeInTransaction(
-  db: Database,
+  db: SessionActivityDatabase,
   input: BeginSessionRealtimeInput,
 ): Promise<SessionRealtimeMutationResult> {
   const now = input.now ?? new Date();
@@ -553,7 +553,7 @@ export async function assertSessionRealtimeOwnerInTransaction(
 }
 
 export async function renewSessionRealtimeInTransaction(
-  db: Database,
+  db: SessionActivityDatabase,
   input: RenewSessionRealtimeInput,
 ): Promise<RenewSessionRealtimeResult> {
   const now = input.now ?? new Date();
@@ -616,7 +616,7 @@ export async function renewSessionRealtimeInTransaction(
 }
 
 export async function endSessionRealtimeInTransaction(
-  db: Database,
+  db: SessionActivityDatabase,
   input: EndSessionRealtimeInput,
 ): Promise<SessionRealtimeMutationResult> {
   const now = input.now ?? new Date();
@@ -649,7 +649,7 @@ export async function endSessionRealtimeInTransaction(
 
 /** Lazily settle an expired voice lease under the canonical session lock. */
 export async function settleExpiredSessionRealtimeInTransaction(
-  db: Database,
+  db: SessionActivityDatabase,
   session: SessionRow,
   now = new Date(),
 ): Promise<SessionRow> {

@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { createHash } from "node:crypto";
+import { sql } from "drizzle-orm";
 import postgres from "postgres";
 import {
   acquireLease,
@@ -13,6 +14,7 @@ import {
   commitWarmingToWarm,
   confirmDrainCold,
   createDb,
+  createSession,
   deleteWorkspaceIfQuiescent,
   failSandboxRematerialization,
   failWarmingToCold,
@@ -37,6 +39,7 @@ import {
   replaceWorkspaceArchiveCaptureAfterProof,
   requestDueSandboxRotationsGlobal,
   touchLeaseHolder,
+  withWorkspaceSessionActivityRls,
   workspaceArchiveCaptureDeadlineElapsed,
   SandboxCheckpointArtifactRegistrationConflictError,
   SandboxImageConflictError,
@@ -145,6 +148,44 @@ async function freshWorkspace(): Promise<{
     insert into workspaces (account_id, name) values (${a!.id}, 'ws') returning id`;
   await admin`insert into workspace_inference_controls (workspace_id, account_id) values (${w!.id}, ${a!.id})`;
   return { accountId: a!.id, workspaceId: w!.id, groupId: crypto.randomUUID() };
+}
+
+async function seedSession(input: {
+  accountId: string;
+  workspaceId: string;
+  groupId: string;
+  sessionId: string;
+  status: "idle" | "recovering" | "running";
+  initialMessage: string;
+}): Promise<void> {
+  await createSession(db, {
+    requestedSessionId: input.sessionId,
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    initialMessage: input.initialMessage,
+    resources: [],
+    metadata: {},
+    model: "test-model",
+    sandboxBackend: "modal",
+    sandboxGroupId: input.groupId,
+  });
+  await setSeedSessionStatus(input.workspaceId, input.sessionId, input.status);
+}
+
+async function setSeedSessionStatus(
+  workspaceId: string,
+  sessionId: string,
+  status: "idle" | "recovering" | "running" | "waiting_capacity",
+): Promise<void> {
+  await withWorkspaceSessionActivityRls(db, workspaceId, async (tx) => {
+    await tx.execute(sql`
+      update sessions
+      set status = ${status},
+          temporal_workflow_id = ${`session-${sessionId}`},
+          updated_at = now()
+      where workspace_id = ${workspaceId} and id = ${sessionId}
+    `);
+  });
 }
 
 // Read the raw lease row as the superuser (bypasses RLS) for assertions.
@@ -365,25 +406,22 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     // recoverable turn merely because it is between worker attempts or waiting
     // for provider capacity.
     const recoveringSessionId = crypto.randomUUID();
-    await admin`
-      insert into sessions (
-        id, account_id, workspace_id, status, initial_message, model,
-        sandbox_backend, sandbox_group_id, temporal_workflow_id, tool_policy
-      ) values (
-        ${recoveringSessionId}, ${accountId}, ${workspaceId}, 'recovering',
-        'workspace deletion fixture', 'test-model', 'modal', ${recoveringSessionId},
-        ${`session-${recoveringSessionId}`},
-        jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
-      )`;
+    await seedSession({
+      accountId,
+      workspaceId,
+      groupId: recoveringSessionId,
+      sessionId: recoveringSessionId,
+      status: "recovering",
+      initialMessage: "workspace deletion fixture",
+    });
     expect(await deleteWorkspaceIfQuiescent(db, { accountId, workspaceId })).toEqual({
       status: "active_sessions",
     });
-    await admin`
-      update sessions set status = 'waiting_capacity' where id = ${recoveringSessionId}`;
+    await setSeedSessionStatus(workspaceId, recoveringSessionId, "waiting_capacity");
     expect(await deleteWorkspaceIfQuiescent(db, { accountId, workspaceId })).toEqual({
       status: "active_sessions",
     });
-    await admin`update sessions set status = 'idle' where id = ${recoveringSessionId}`;
+    await setSeedSessionStatus(workspaceId, recoveringSessionId, "idle");
 
     const videoOperationId = crypto.randomUUID();
     await admin`
@@ -1530,16 +1568,14 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     const attemptId = crypto.randomUUID();
     const holderId = `turn-attempt:${attemptId}`;
 
-    await admin`
-      insert into sessions (
-        id, account_id, workspace_id, status, initial_message, model,
-        sandbox_backend, sandbox_group_id, temporal_workflow_id, tool_policy
-      ) values (
-        ${sessionId}, ${accountId}, ${workspaceId}, 'running',
-        'lease heartbeat fixture', 'test-model', 'modal', ${groupId},
-        ${`session-${sessionId}`},
-        jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
-      )`;
+    await seedSession({
+      accountId,
+      workspaceId,
+      groupId,
+      sessionId,
+      status: "running",
+      initialMessage: "lease heartbeat fixture",
+    });
     await admin`
       insert into session_turns (
         id, account_id, workspace_id, session_id, trigger_event_id,
@@ -3098,16 +3134,14 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     const sessionId = crypto.randomUUID();
     const requestId = crypto.randomUUID();
     const holderId = `direct:${requestId}`;
-    await admin`
-      insert into sessions (
-        id, account_id, workspace_id, status, initial_message, model,
-        sandbox_backend, sandbox_group_id, temporal_workflow_id, tool_policy
-      ) values (
-        ${sessionId}, ${accountId}, ${workspaceId}, 'idle',
-        'direct release fixture', 'test-model', 'modal', ${groupId},
-        ${`session-${sessionId}`},
-        jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
-      )`;
+    await seedSession({
+      accountId,
+      workspaceId,
+      groupId,
+      sessionId,
+      status: "idle",
+      initialMessage: "direct release fixture",
+    });
     const acquired = await acquireLease(db, {
       accountId,
       workspaceId,

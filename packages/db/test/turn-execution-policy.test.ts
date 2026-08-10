@@ -21,8 +21,8 @@ import {
   installOrReadTurnExecutionPolicyForAttempt,
   requestSessionTurnRecovery,
   submitHumanPromptInTransaction,
-  withWorkspaceRls,
-  withWorkspaceSubjectRls,
+  withWorkspaceSessionActivityRls as withWorkspaceRls,
+  withWorkspaceSubjectSessionActivityRls as withWorkspaceSubjectRls,
 } from "../src/index";
 import * as schema from "../src/schema";
 
@@ -107,7 +107,7 @@ async function fixture(metadata: Record<string, unknown> = {}): Promise<Fixture>
     grant.subjectId,
     (db) =>
       db.transaction((tx) =>
-        submitHumanPromptInTransaction(tx as typeof db, {
+        submitHumanPromptInTransaction(tx as unknown as typeof db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId!,
           sessionId: session.id,

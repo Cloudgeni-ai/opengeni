@@ -40,8 +40,11 @@ import {
   steerAgentSessionInTransaction,
   steerQueuedTurnInTransaction,
   withWorkspaceRls,
+  withWorkspaceSessionActivityRls,
   withWorkspaceSubjectRls,
+  withWorkspaceSubjectSessionActivityRls,
   type Database,
+  type SessionActivityDatabase,
   type SessionCommandReceiptRow,
 } from "@opengeni/db";
 import {
@@ -148,17 +151,18 @@ function agentActor(context: AgentSessionCommandContext) {
 }
 
 /**
- * Retry only one operation-keyed Agent command transaction. The caller keeps
+ * Retry only one operation-keyed session command transaction. Callers keep
  * event publication and Temporal wake delivery after this returns, so a
- * deadlock/serialization retry can never replay an external effect.
+ * deadlock/serialization retry can never replay an external effect. Human
+ * draft ownership is applied inside every retry attempt when required.
  */
-async function runAgentCommandPersistenceTransaction<T>(
+async function runSessionCommandPersistenceTransaction<T>(
   deps: { db: Database },
-  context: AgentSessionCommandContext,
+  scope: { workspaceId: string; subjectId?: string },
   input: {
     stage: string;
     eventTypes: string[];
-    transaction: (tx: Database) => Promise<T>;
+    transaction: (tx: SessionActivityDatabase) => Promise<T>;
   },
 ): Promise<T> {
   return await runIdempotentPersistenceTransaction(
@@ -167,10 +171,17 @@ async function runAgentCommandPersistenceTransaction<T>(
       eventTypes: input.eventTypes,
       maxAttempts: 3,
     },
-    async () =>
-      await withWorkspaceRls(deps.db, context.workspaceId, async (scoped) =>
-        scoped.transaction(async (tx) => await input.transaction(tx as unknown as Database)),
-      ),
+    async () => {
+      const run = async (scoped: SessionActivityDatabase) => await input.transaction(scoped);
+      return scope.subjectId === undefined
+        ? await withWorkspaceSessionActivityRls(deps.db, scope.workspaceId, run)
+        : await withWorkspaceSubjectSessionActivityRls(
+            deps.db,
+            scope.workspaceId,
+            scope.subjectId,
+            run,
+          );
+    },
   );
 }
 
@@ -287,19 +298,23 @@ export async function sendAgentSessionMessage(
   input: { targetSessionId: string; text: string; idempotencyKey: string },
 ) {
   await authorizeAgentSessionCommand(deps, context, input.targetSessionId, "session.append");
-  const result = await runAgentCommandPersistenceTransaction(deps, context, {
-    stage: "session_commands.agent_message",
-    eventTypes: ["system.update.pending"],
-    transaction: async (tx) =>
-      await sendAgentMessageInTransaction(tx, {
-        accountId: context.accountId,
-        workspaceId: context.workspaceId,
-        targetSessionId: input.targetSessionId,
-        actor: agentActor(context),
-        operationKey: input.idempotencyKey,
-        text: input.text,
-      }),
-  });
+  const result = await runSessionCommandPersistenceTransaction(
+    deps,
+    { workspaceId: context.workspaceId },
+    {
+      stage: "session_commands.agent_message",
+      eventTypes: ["system.update.pending"],
+      transaction: async (tx) =>
+        await sendAgentMessageInTransaction(tx, {
+          accountId: context.accountId,
+          workspaceId: context.workspaceId,
+          targetSessionId: input.targetSessionId,
+          actor: agentActor(context),
+          operationKey: input.idempotencyKey,
+          text: input.text,
+        }),
+    },
+  );
   await publishAndWakeAgentCommand(deps, {
     accountId: context.accountId,
     workspaceId: context.workspaceId,
@@ -322,22 +337,30 @@ export async function steerAgentSession(
     sessionAuthorization?: SessionAuthorizationPort | null;
   },
   context: AgentSessionCommandContext,
-  input: { targetSessionId: string; instruction: string; idempotencyKey: string },
+  input: {
+    targetSessionId: string;
+    instruction: string;
+    idempotencyKey: string;
+  },
 ) {
   await authorizeAgentSessionCommand(deps, context, input.targetSessionId, "session.steer");
-  const result = await runAgentCommandPersistenceTransaction(deps, context, {
-    stage: "session_commands.agent_steer",
-    eventTypes: ["session.control.steer_requested", "system.update.pending", "turn.superseded"],
-    transaction: async (tx) =>
-      await steerAgentSessionInTransaction(tx, {
-        accountId: context.accountId,
-        workspaceId: context.workspaceId,
-        targetSessionId: input.targetSessionId,
-        actor: agentActor(context),
-        operationKey: input.idempotencyKey,
-        instruction: input.instruction,
-      }),
-  });
+  const result = await runSessionCommandPersistenceTransaction(
+    deps,
+    { workspaceId: context.workspaceId },
+    {
+      stage: "session_commands.agent_steer",
+      eventTypes: ["session.control.steer_requested", "system.update.pending", "turn.superseded"],
+      transaction: async (tx) =>
+        await steerAgentSessionInTransaction(tx, {
+          accountId: context.accountId,
+          workspaceId: context.workspaceId,
+          targetSessionId: input.targetSessionId,
+          actor: agentActor(context),
+          operationKey: input.idempotencyKey,
+          instruction: input.instruction,
+        }),
+    },
+  );
   await publishAndWakeAgentCommand(deps, {
     accountId: context.accountId,
     workspaceId: context.workspaceId,
@@ -374,18 +397,23 @@ export async function controlAgentSessionWorkstream(
     input.targetSessionId,
     "session.control",
   );
-  const result = await withWorkspaceRls(deps.db, context.workspaceId, (scoped) =>
-    scoped.transaction((tx) =>
-      mutateSessionControlInTransaction(tx as unknown as Database, {
-        accountId: context.accountId,
-        workspaceId: context.workspaceId,
-        sessionId: input.targetSessionId,
-        actor: agentActor(context),
-        operationKey: input.idempotencyKey,
-        action: input.action,
-        reason: input.reason ?? null,
-      }),
-    ),
+  const result = await runSessionCommandPersistenceTransaction(
+    deps,
+    { workspaceId: context.workspaceId },
+    {
+      stage: "session_commands.agent_control",
+      eventTypes: [input.action === "pause" ? "session.control.paused" : "session.control.resumed"],
+      transaction: async (tx) =>
+        await mutateSessionControlInTransaction(tx, {
+          accountId: context.accountId,
+          workspaceId: context.workspaceId,
+          sessionId: input.targetSessionId,
+          actor: agentActor(context),
+          operationKey: input.idempotencyKey,
+          action: input.action,
+          reason: input.reason ?? null,
+        }),
+    },
   );
   await publishSessionEventIds(deps, context.workspaceId, input.targetSessionId, [
     result.sessionControlEventId,
@@ -447,23 +475,32 @@ async function authoritativeQueue(
 }
 
 export async function moveHumanQueuePrompt(
-  deps: { db: Database; bus: EventBus; sessionAuthorization?: SessionAuthorizationPort | null },
+  deps: {
+    db: Database;
+    bus: EventBus;
+    sessionAuthorization?: SessionAuthorizationPort | null;
+  },
   context: HumanSessionCommandContext,
   turnId: string,
   input: MoveSessionQueueItemRequest,
 ): Promise<SessionQueueMutationResponse> {
   const authorization = await authorizeHumanSessionCommand(deps, context, "session.queue.control");
-  const result = await withWorkspaceRls(deps.db, context.workspaceId, (scoped) =>
-    scoped.transaction((tx) =>
-      moveQueuedTurnInTransaction(tx as unknown as Database, {
-        ...context,
-        turnId,
-        beforeTurnId: input.beforeTurnId,
-        expectedQueueVersion: input.expectedQueueVersion,
-        actor: { type: "human", subjectId: context.subjectId },
-        operationKey: input.clientEventId,
-      }),
-    ),
+  const result = await runSessionCommandPersistenceTransaction(
+    deps,
+    { workspaceId: context.workspaceId },
+    {
+      stage: "session_commands.human_queue_move",
+      eventTypes: ["session.queue.changed"],
+      transaction: async (tx) =>
+        await moveQueuedTurnInTransaction(tx, {
+          ...context,
+          turnId,
+          beforeTurnId: input.beforeTurnId,
+          expectedQueueVersion: input.expectedQueueVersion,
+          actor: { type: "human", subjectId: context.subjectId },
+          operationKey: input.clientEventId,
+        }),
+    },
   );
   const response = {
     receipt: receipt(result.receipt),
@@ -479,23 +516,32 @@ export async function moveHumanQueuePrompt(
 }
 
 export async function deleteHumanQueuePrompt(
-  deps: { db: Database; bus: EventBus; sessionAuthorization?: SessionAuthorizationPort | null },
+  deps: {
+    db: Database;
+    bus: EventBus;
+    sessionAuthorization?: SessionAuthorizationPort | null;
+  },
   context: HumanSessionCommandContext,
   turnId: string,
   input: DeleteSessionQueueItemRequest,
 ): Promise<SessionQueueMutationResponse> {
   const authorization = await authorizeHumanSessionCommand(deps, context, "session.queue.control");
-  const result = await withWorkspaceRls(deps.db, context.workspaceId, (scoped) =>
-    scoped.transaction((tx) =>
-      deleteSessionQueueItemInTransaction(tx as unknown as Database, {
-        ...context,
-        turnId,
-        expectedTurnVersion: input.expectedTurnVersion,
-        actor: { type: "human", subjectId: context.subjectId },
-        operationKey: input.clientEventId,
-        reason: input.reason ?? null,
-      }),
-    ),
+  const result = await runSessionCommandPersistenceTransaction(
+    deps,
+    { workspaceId: context.workspaceId },
+    {
+      stage: "session_commands.human_queue_delete",
+      eventTypes: ["session.queue.changed"],
+      transaction: async (tx) =>
+        await deleteSessionQueueItemInTransaction(tx, {
+          ...context,
+          turnId,
+          expectedTurnVersion: input.expectedTurnVersion,
+          actor: { type: "human", subjectId: context.subjectId },
+          operationKey: input.clientEventId,
+          reason: input.reason ?? null,
+        }),
+    },
   );
   const response = {
     receipt: receipt(result.receipt),
@@ -511,19 +557,24 @@ export async function deleteHumanQueuePrompt(
 }
 
 export async function editHumanQueuePrompt(
-  deps: { db: Database; bus: EventBus; sessionAuthorization?: SessionAuthorizationPort | null },
+  deps: {
+    db: Database;
+    bus: EventBus;
+    sessionAuthorization?: SessionAuthorizationPort | null;
+  },
   context: HumanSessionCommandContext,
   turnId: string,
   input: EditSessionQueueItemRequest,
 ): Promise<SessionQueueMutationResponse> {
   const authorization = await authorizeHumanSessionCommand(deps, context, "session.queue.control");
-  const result = await withWorkspaceSubjectRls(
-    deps.db,
-    context.workspaceId,
-    context.subjectId,
-    (scoped) =>
-      scoped.transaction((tx) =>
-        editQueuedTurnInTransaction(tx as unknown as Database, {
+  const result = await runSessionCommandPersistenceTransaction(
+    deps,
+    { workspaceId: context.workspaceId, subjectId: context.subjectId },
+    {
+      stage: "session_commands.human_queue_edit",
+      eventTypes: ["session.queue.changed"],
+      transaction: async (tx) =>
+        await editQueuedTurnInTransaction(tx, {
           ...context,
           turnId,
           expectedTurnVersion: input.expectedTurnVersion,
@@ -532,7 +583,7 @@ export async function editHumanQueuePrompt(
           actor: { type: "human", subjectId: context.subjectId },
           operationKey: input.clientEventId,
         }),
-      ),
+    },
   );
   const response = {
     receipt: receipt(result.receipt),
@@ -549,23 +600,32 @@ export async function editHumanQueuePrompt(
 }
 
 export async function steerHumanQueuePrompt(
-  deps: { db: Database; bus: EventBus; sessionAuthorization?: SessionAuthorizationPort | null },
+  deps: {
+    db: Database;
+    bus: EventBus;
+    sessionAuthorization?: SessionAuthorizationPort | null;
+  },
   context: HumanSessionCommandContext,
   turnId: string,
   input: SteerSessionQueueItemRequest,
 ): Promise<SessionQueueMutationResponse> {
   const authorization = await authorizeHumanSessionCommand(deps, context, "session.queue.control");
-  const result = await withWorkspaceRls(deps.db, context.workspaceId, (scoped) =>
-    scoped.transaction((tx) =>
-      steerQueuedTurnInTransaction(tx as unknown as Database, {
-        ...context,
-        turnId,
-        expectedTurnVersion: input.expectedTurnVersion,
-        controlEtag: input.controlEtag ?? null,
-        actor: { type: "human", subjectId: context.subjectId },
-        operationKey: input.clientEventId,
-      }),
-    ),
+  const result = await runSessionCommandPersistenceTransaction(
+    deps,
+    { workspaceId: context.workspaceId },
+    {
+      stage: "session_commands.human_queue_steer",
+      eventTypes: ["session.control.steer_requested", "session.queue.changed", "turn.superseded"],
+      transaction: async (tx) =>
+        await steerQueuedTurnInTransaction(tx, {
+          ...context,
+          turnId,
+          expectedTurnVersion: input.expectedTurnVersion,
+          controlEtag: input.controlEtag ?? null,
+          actor: { type: "human", subjectId: context.subjectId },
+          operationKey: input.clientEventId,
+        }),
+    },
   );
   const response = {
     receipt: receipt(result.receipt),
@@ -592,19 +652,26 @@ export async function controlHumanSessionWorkstreamWithOutcome(
   input: SessionControlRequest,
 ): Promise<{ response: SessionControlResponse; replay: boolean }> {
   const authorization = await authorizeHumanSessionCommand(deps, context, "session.control");
-  const result = await withWorkspaceRls(deps.db, context.workspaceId, (scoped) =>
-    scoped.transaction((tx) =>
-      mutateSessionControlInTransaction(tx as unknown as Database, {
-        accountId: context.accountId,
-        workspaceId: context.workspaceId,
-        sessionId: context.sessionId,
-        actor: { type: "human", subjectId: context.subjectId },
-        operationKey: input.clientEventId,
-        action: input.action,
-        reason: input.reason ?? null,
-        expectedControlEtag: input.expectedControlEtag ?? null,
-      }),
-    ),
+  const result = await runSessionCommandPersistenceTransaction(
+    deps,
+    { workspaceId: context.workspaceId },
+    {
+      stage: "session_commands.human_control",
+      eventTypes: [
+        input.action === "resume" ? "session.control.resumed" : "session.control.paused",
+      ],
+      transaction: async (tx) =>
+        await mutateSessionControlInTransaction(tx, {
+          accountId: context.accountId,
+          workspaceId: context.workspaceId,
+          sessionId: context.sessionId,
+          actor: { type: "human", subjectId: context.subjectId },
+          operationKey: input.clientEventId,
+          action: input.action,
+          reason: input.reason ?? null,
+          expectedControlEtag: input.expectedControlEtag ?? null,
+        }),
+    },
   );
   const response = {
     receipt: receipt(result.receipt),

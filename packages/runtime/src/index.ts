@@ -7949,10 +7949,25 @@ const RIG_SETUP_OUTPUT_TAIL_LIMIT = 4_000;
 // exec round-trip.
 const RIG_SETUP_SKIPPED_SENTINEL = "__OPENGENI_RIG_SETUP_SKIPPED__";
 
+const RIG_SETUP_RUNTIME_MARKER_ROOT = "/tmp/opengeni/rig-setup";
+const RIG_SETUP_PROVIDER_IMAGE_MARKER_ROOT = "/var/opengeni";
+
+export type RigSetupScriptCommandOptions = {
+  timeoutMs?: number;
+  /** Box-local writable state. Never place this under /workspace: workspace
+   * archives can outlive the machine packages that the marker attests to. */
+  markerRoot?: string;
+  contentHash?: string;
+  /** Optional immutable-image proof. Runtime reads it without writing into the
+   * provider image's root-owned marker directory. */
+  trustedContentMarkerRoot?: string;
+};
+
 /**
  * The rig-setup command (M3). One idempotent bash program:
- *   1. `mkdir -p /var/opengeni` and, if the per-version or exact content marker
- *      already exists, print the SKIP sentinel and exit 0.
+ *   1. Create the writable box-local marker root and, if its per-version/exact
+ *      content marker or a trusted provider-image content marker already exists,
+ *      print the SKIP sentinel and exit 0.
  *   2. otherwise atomically claim the exact marker lock directory. A loser waits
  *      for the winner's marker, then skips; if the winner fails and releases the
  *      lock, the loser retries the claim.
@@ -7966,10 +7981,23 @@ const RIG_SETUP_SKIPPED_SENTINEL = "__OPENGENI_RIG_SETUP_SKIPPED__";
 export function rigSetupScriptCommand(
   script: string,
   versionId: string,
-  timeoutMs = 600_000,
-  markerRoot = "/var/opengeni",
-  contentHash?: string,
+  options: RigSetupScriptCommandOptions = {},
 ): string {
+  const timeoutMs = options.timeoutMs ?? 600_000;
+  const markerRoot = options.markerRoot ?? RIG_SETUP_PROVIDER_IMAGE_MARKER_ROOT;
+  const contentHash = options.contentHash;
+  const trustedContentMarkerRoot = options.trustedContentMarkerRoot ?? markerRoot;
+  for (const [label, root] of [
+    ["marker", markerRoot],
+    ["trusted content marker", trustedContentMarkerRoot],
+  ] as const) {
+    if (!isAbsolute(root) || root === "/") {
+      throw new Error(`Rig setup ${label} root must be a non-root absolute path`);
+    }
+  }
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new Error("Rig setup timeout must be a positive finite duration");
+  }
   if (contentHash !== undefined && !/^sha256:[0-9a-f]{64}$/u.test(contentHash)) {
     throw new Error("Rig setup content hash must be a canonical SHA-256 value");
   }
@@ -7980,14 +8008,19 @@ export function rigSetupScriptCommand(
   const contentMarker = contentHash
     ? `${normalizedMarkerRoot}/rig-setup-content-${contentHash.slice("sha256:".length)}.done`
     : null;
+  const normalizedTrustedContentMarkerRoot = trustedContentMarkerRoot.replace(/\/+$/, "");
+  const trustedContentMarker = contentHash
+    ? `${normalizedTrustedContentMarkerRoot}/rig-setup-content-${contentHash.slice("sha256:".length)}.done`
+    : null;
   const markerReady = contentMarker
-    ? '[ -f "$__OG_RIG_VERSION_MARKER" ] || [ -f "$__OG_RIG_CONTENT_MARKER" ]'
+    ? '[ -f "$__OG_RIG_VERSION_MARKER" ] || [ -f "$__OG_RIG_CONTENT_MARKER" ] || [ -f "$__OG_RIG_TRUSTED_CONTENT_MARKER" ]'
     : '[ -f "$__OG_RIG_VERSION_MARKER" ]';
   return [
     "set -u",
-    `mkdir -p ${shellQuote(markerRoot)}`,
+    `if ! mkdir -p ${shellQuote(markerRoot)}; then printf '%s\\n' 'unable to create rig setup marker root' >&2; exit 73; fi`,
     `__OG_RIG_VERSION_MARKER=${shellQuote(versionMarker)}`,
     `__OG_RIG_CONTENT_MARKER=${shellQuote(contentMarker ?? "")}`,
+    `__OG_RIG_TRUSTED_CONTENT_MARKER=${shellQuote(trustedContentMarker ?? "")}`,
     `__OG_RIG_MARKER=${shellQuote(contentMarker ?? versionMarker)}`,
     '__OG_RIG_LOCK="$__OG_RIG_MARKER.lock"',
     `__OG_RIG_TIMEOUT_SECS=${timeoutSecs}`,
@@ -7997,7 +8030,7 @@ export function rigSetupScriptCommand(
     '  if mkdir "$__OG_RIG_LOCK" 2>/dev/null; then',
     "    trap 'rm -rf \"$__OG_RIG_LOCK\"' EXIT",
     `    if ${markerReady}; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
-    '__OG_RIG_SCRIPT="$(mktemp)"',
+    "    if ! __OG_RIG_SCRIPT=\"$(mktemp)\"; then printf '%s\\n' 'unable to create rig setup script file' >&2; exit 73; fi",
     "cat > \"$__OG_RIG_SCRIPT\" <<'__OPENGENI_RIG_SETUP_SCRIPT_EOF__'",
     script,
     "__OPENGENI_RIG_SETUP_SCRIPT_EOF__",
@@ -8005,11 +8038,12 @@ export function rigSetupScriptCommand(
     "__OG_RIG_RC=$?",
     '    rm -f "$__OG_RIG_SCRIPT"',
     '    if [ "$__OG_RIG_RC" -eq 0 ]; then',
-    '      touch "$__OG_RIG_VERSION_MARKER"',
-    '      if [ -n "$__OG_RIG_CONTENT_MARKER" ]; then touch "$__OG_RIG_CONTENT_MARKER"; fi',
+    "      if ! touch \"$__OG_RIG_VERSION_MARKER\"; then printf '%s\\n' 'unable to write rig setup version marker' >&2; exit 73; fi",
+    "      if [ -n \"$__OG_RIG_CONTENT_MARKER\" ] && ! touch \"$__OG_RIG_CONTENT_MARKER\"; then printf '%s\\n' 'unable to write rig setup content marker' >&2; exit 73; fi",
     "    fi",
     '    exit "$__OG_RIG_RC"',
     "  fi",
+    "  if [ ! -d \"$__OG_RIG_LOCK\" ]; then printf '%s\\n' 'unable to create rig setup lock' >&2; exit 73; fi",
     "  __OG_RIG_WAITED=0",
     '  while [ "$__OG_RIG_WAITED" -lt "$__OG_RIG_LOCK_WAIT_SECS" ]; do',
     `    if ${markerReady}; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
@@ -8019,7 +8053,7 @@ export function rigSetupScriptCommand(
     "  done",
     `  if ${markerReady}; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
     '  if [ ! -d "$__OG_RIG_LOCK" ]; then continue; fi',
-    '  rmdir "$__OG_RIG_LOCK" 2>/dev/null || true',
+    "  if ! rmdir \"$__OG_RIG_LOCK\" 2>/dev/null && [ -d \"$__OG_RIG_LOCK\" ]; then printf '%s\\n' 'unable to reclaim stale rig setup lock' >&2; exit 73; fi",
     "done",
   ].join("\n");
 }
@@ -8049,13 +8083,12 @@ export async function runRigSetupHook(
     rigName: rigSetup.rigName,
   };
   await context.onRuntimeEvent?.({ type: "rig.setup.started", payload });
-  const command = rigSetupScriptCommand(
-    rigSetup.script,
-    rigSetup.versionId,
-    rigSetup.timeoutMs,
-    "/var/opengeni",
-    rigSetup.contentHash,
-  );
+  const command = rigSetupScriptCommand(rigSetup.script, rigSetup.versionId, {
+    timeoutMs: rigSetup.timeoutMs,
+    markerRoot: RIG_SETUP_RUNTIME_MARKER_ROOT,
+    ...(rigSetup.contentHash !== undefined ? { contentHash: rigSetup.contentHash } : {}),
+    trustedContentMarkerRoot: RIG_SETUP_PROVIDER_IMAGE_MARKER_ROOT,
+  });
   const execArgs = {
     cmd: command,
     workdir: "/workspace",
@@ -8098,7 +8131,8 @@ export async function runRigSetupHook(
       output.length > RIG_SETUP_OUTPUT_TAIL_LIMIT
         ? output.slice(-RIG_SETUP_OUTPUT_TAIL_LIMIT)
         : output;
-    const reason = stillRunning
+    const timedOut = stillRunning || exitCode === 124 || exitCode === 137;
+    const reason = timedOut
       ? `did not finish within the rig setup timeout (${rigSetup.timeoutMs}ms)`
       : exitCode === null
         ? "did not report an exit code"
