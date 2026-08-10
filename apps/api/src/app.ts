@@ -64,6 +64,7 @@ import { registerApiKeyRoutes } from "./routes/api-keys";
 import { registerBillingRoutes } from "./routes/billing";
 import { registerGitHubRoutes } from "./routes/github";
 import { registerInstallRoutes } from "./routes/install";
+import { registerApiIntegrationRoutes } from "./routes/api-integrations";
 import { registerPackRoutes } from "./routes/packs";
 import { registerSkillRoutes } from "./routes/skills";
 import { registerRigRoutes } from "./routes/rigs";
@@ -582,6 +583,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerSocialRoutes(app, routeDeps);
   registerConnectionRoutes(app, routeDeps);
   registerCapabilityRoutes(app, routeDeps);
+  registerApiIntegrationRoutes(app, routeDeps);
   registerCatalogAssetRoutes(app, routeDeps);
   registerEnrollmentRoutes(app, routeDeps);
   registerMachineRoutes(app, routeDeps);
@@ -1169,6 +1171,26 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/capabilities\/[^/]+\/disable$/,
     label: "/v1/workspaces/:workspaceId/capabilities/:id/disable",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/preview$/,
+    label: "/v1/workspaces/:workspaceId/integrations/preview",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/install$/,
+    label: "/v1/workspaces/:workspaceId/integrations/install",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/uninstall-preview$/,
+    label: "/v1/workspaces/:workspaceId/integrations/:id/uninstall-preview",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/integrations/:id",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/integrations$/,
+    label: "/v1/workspaces/:workspaceId/integrations",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/skills\/preview$/,

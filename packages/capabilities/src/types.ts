@@ -60,6 +60,8 @@ export interface ResolveIntegrationCredentialRequest
   readonly operationKey: string;
   readonly destinationUrl: string;
   readonly requiredScopeAlternatives?: readonly (readonly string[])[];
+  /** Refresh the exact bound Connection for a safe retry or a later call. */
+  readonly forceRefresh?: boolean;
 }
 
 export interface IntegrationCredentialResolver {
@@ -83,9 +85,12 @@ export type IntegrationRevisionSource = {
   readonly fetchedAt?: string;
 };
 
-export interface IntegrationRevision<TBinding = unknown> {
+export interface IntegrationRevision<
+  TBinding = unknown,
+  TProtocol extends Exclude<IntegrationProtocol, "mcp"> = Exclude<IntegrationProtocol, "mcp">,
+> {
   readonly id: string;
-  readonly protocol: Exclude<IntegrationProtocol, "mcp">;
+  readonly protocol: TProtocol;
   readonly integrationId: string;
   readonly contentSha256: string;
   readonly source: IntegrationRevisionSource;

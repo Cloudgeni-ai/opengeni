@@ -54,7 +54,7 @@ export interface GraphqlOperationBinding {
   readonly selectionAllowed: boolean;
 }
 
-export type GraphqlRevision = IntegrationRevision<GraphqlOperationBinding>;
+export type GraphqlRevision = IntegrationRevision<GraphqlOperationBinding, "graphql">;
 
 export interface CompileGraphqlOptions {
   readonly integrationId: string;
@@ -192,42 +192,39 @@ export function compileGraphqlRevision(
 export async function fetchGraphqlIntrospection(
   options: Omit<GraphqlServerOptions, "revision">,
 ): Promise<IntrospectionQuery> {
-  const endpoint = new URL(validateGraphqlEndpoint(options.endpoint));
-  for (const [name, value] of Object.entries(options.staticQuery ?? {})) {
-    endpoint.searchParams.set(name, value);
-  }
-  const headers = new Headers(options.staticHeaders);
-  headers.set("accept", "application/json");
-  headers.set("content-type", "application/json");
-  if (options.credentialResolver && options.authority.connectionRef) {
-    const credential = await options.credentialResolver.resolve({
-      ...options.authority,
-      protocol: "graphql",
-      integrationId: "graphql-introspection",
-      revisionId: "pending",
-      operationKey: "__introspection",
-      destinationUrl: endpoint.toString(),
-    });
-    if (!credential) {
+  const request = { query: getIntrospectionQuery({ descriptions: true }) };
+  const firstCredential = await resolveGraphqlCredential(
+    options,
+    "graphql-introspection",
+    "pending",
+    "__introspection",
+    false,
+  );
+  let response = await sendGraphqlRequest(options, request, firstCredential);
+  if (
+    response.status === 401 &&
+    options.credentialResolver &&
+    options.authority.connectionRef
+  ) {
+    const refreshed = await resolveGraphqlCredential(
+      options,
+      "graphql-introspection",
+      "pending",
+      "__introspection",
+      true,
+    );
+    await response.body?.cancel().catch(() => undefined);
+    if (!refreshed) {
       throw new IntegrationInvocationError(
-        "connection_required",
-        "This GraphQL endpoint needs a connected account",
-        "not_started",
+        "graphql_introspection_rejected",
+        "GraphQL endpoint did not return an introspection schema",
+        "failed",
         false,
+        401,
       );
     }
-    applyCredentialPlacements(endpoint, headers, credential);
+    response = await sendGraphqlRequest(options, request, refreshed);
   }
-  const response = await fetchWithDeadline(
-    options.transport,
-    endpoint,
-    {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ query: getIntrospectionQuery({ descriptions: true }) }),
-    },
-    options.timeoutMs ?? DEFAULT_INTEGRATION_TIMEOUT_MS,
-  );
   if (response.status >= 300 && response.status < 400) {
     await response.body?.cancel().catch(() => undefined);
     throw new IntegrationInvocationError(
@@ -323,32 +320,6 @@ export async function invokeGraphqlOperation(
       false,
     );
   }
-  const endpoint = new URL(validateGraphqlEndpoint(options.endpoint));
-  for (const [name, value] of Object.entries(options.staticQuery ?? {})) {
-    endpoint.searchParams.set(name, value);
-  }
-  const headers = new Headers(options.staticHeaders);
-  headers.set("accept", "application/json");
-  headers.set("content-type", "application/json");
-  if (options.credentialResolver && options.authority.connectionRef) {
-    const credential = await options.credentialResolver.resolve({
-      ...options.authority,
-      protocol: "graphql",
-      integrationId: options.revision.integrationId,
-      revisionId: options.revision.id,
-      operationKey: toolId,
-      destinationUrl: endpoint.toString(),
-    });
-    if (!credential) {
-      throw new IntegrationInvocationError(
-        "connection_required",
-        "This GraphQL integration needs a connected account",
-        "not_started",
-        false,
-      );
-    }
-    applyCredentialPlacements(endpoint, headers, credential);
-  }
   const select = binding.selectionAllowed
     ? validateGraphqlSelection(
         typeof args.select === "string" ? args.select : binding.defaultSelection ?? "__typename",
@@ -364,17 +335,40 @@ export async function invokeGraphqlOperation(
     ? `(${binding.variableNames.map((name) => `${name}: $${name}`).join(", ")})`
     : "";
   const query = `${binding.kind} ${binding.operationName}${definitions} { ${binding.fieldName}${argumentsText}${select ? ` { ${select} }` : ""} }`;
-  const response = await fetchWithDeadline(
-    options.transport,
-    endpoint,
-    {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ query, variables, operationName: binding.operationName }),
-      ...(signal ? { signal } : {}),
-    },
-    options.timeoutMs ?? DEFAULT_INTEGRATION_TIMEOUT_MS,
+  const request = { query, variables, operationName: binding.operationName };
+  const firstCredential = await resolveGraphqlCredential(
+    options,
+    options.revision.integrationId,
+    options.revision.id,
+    toolId,
+    false,
   );
+  let response = await sendGraphqlRequest(options, request, firstCredential, signal);
+  if (
+    response.status === 401 &&
+    options.credentialResolver &&
+    options.authority.connectionRef
+  ) {
+    const refreshed = await resolveGraphqlCredential(
+      options,
+      options.revision.integrationId,
+      options.revision.id,
+      toolId,
+      true,
+    );
+    await response.body?.cancel().catch(() => undefined);
+    if (binding.kind === "query" && refreshed) {
+      response = await sendGraphqlRequest(options, request, refreshed, signal);
+    } else {
+      throw new IntegrationInvocationError(
+        "authorization_rejected",
+        "The connected account is no longer authorized for this GraphQL operation",
+        binding.kind === "mutation" ? "unknown" : "failed",
+        false,
+        401,
+      );
+    }
+  }
   if (response.status >= 300 && response.status < 400) {
     await response.body?.cancel().catch(() => undefined);
     throw new IntegrationInvocationError(
@@ -405,6 +399,68 @@ export async function invokeGraphqlOperation(
     data: graph.data ?? null,
     errors: graph.errors ?? null,
   };
+}
+
+async function resolveGraphqlCredential(
+  options: Omit<GraphqlServerOptions, "revision"> | GraphqlServerOptions,
+  integrationId: string,
+  revisionId: string,
+  operationKey: string,
+  forceRefresh: boolean,
+): Promise<Awaited<ReturnType<IntegrationCredentialResolver["resolve"]>>> {
+  if (!options.credentialResolver || !options.authority.connectionRef) return null;
+  const credential = await options.credentialResolver.resolve({
+    ...options.authority,
+    protocol: "graphql",
+    integrationId,
+    revisionId,
+    operationKey,
+    destinationUrl: graphqlEndpoint(options).toString(),
+    ...(forceRefresh ? { forceRefresh: true } : {}),
+  });
+  if (!credential && !forceRefresh) {
+    throw new IntegrationInvocationError(
+      "connection_required",
+      "This GraphQL integration needs a connected account",
+      "not_started",
+      false,
+    );
+  }
+  return credential;
+}
+
+async function sendGraphqlRequest(
+  options: Omit<GraphqlServerOptions, "revision"> | GraphqlServerOptions,
+  request: Record<string, unknown>,
+  credential: Awaited<ReturnType<IntegrationCredentialResolver["resolve"]>>,
+  signal?: AbortSignal,
+): Promise<Response> {
+  const endpoint = graphqlEndpoint(options);
+  const headers = new Headers(options.staticHeaders);
+  headers.set("accept", "application/json");
+  headers.set("content-type", "application/json");
+  if (credential) applyCredentialPlacements(endpoint, headers, credential);
+  return await fetchWithDeadline(
+    options.transport,
+    endpoint,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify(request),
+      ...(signal ? { signal } : {}),
+    },
+    options.timeoutMs ?? DEFAULT_INTEGRATION_TIMEOUT_MS,
+  );
+}
+
+function graphqlEndpoint(
+  options: Pick<GraphqlServerOptions, "endpoint" | "staticQuery">,
+): URL {
+  const endpoint = new URL(validateGraphqlEndpoint(options.endpoint));
+  for (const [name, value] of Object.entries(options.staticQuery ?? {})) {
+    endpoint.searchParams.set(name, value);
+  }
+  return endpoint;
 }
 
 export function validateGraphqlSelection(value: string): string {

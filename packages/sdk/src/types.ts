@@ -4331,6 +4331,130 @@ export type UninstallSkillResult = {
   remainingOwners: CapabilityComponentOwner[];
 };
 
+export type ApiIntegrationProtocol = "openapi" | "graphql";
+
+export type ApiIntegrationSource =
+  | { kind: "preset"; presetId: string }
+  | { kind: "openapi"; url: string; baseUrl?: string | undefined }
+  | { kind: "graphql"; endpoint: string; name?: string | undefined }
+  | { kind: "auto"; url: string; baseUrl?: string | undefined };
+
+export type PreviewApiIntegrationRequest = {
+  source: ApiIntegrationSource;
+  connectionId?: string | undefined;
+  ownership?: ConnectionOwnership | undefined;
+};
+
+export type ApiIntegrationAuthPreview =
+  | { kind: "none" }
+  | { kind: "oauth2"; providerDomain: string; scopes: string[] }
+  | {
+      kind: "api_key";
+      providerDomain: string;
+      carrier: "header" | "query" | "cookie";
+      name: string;
+    }
+  | { kind: "http"; providerDomain: string; scheme: string };
+
+export type ApiIntegrationToolPreview = {
+  id: string;
+  operationKey: string;
+  name: string;
+  description: string;
+  safety: "read" | "write" | "destructive";
+  approvalMode: "never" | "ask";
+  deprecated: boolean;
+};
+
+export type ApiIntegrationPreview = {
+  source: ApiIntegrationSource;
+  presetId: string | null;
+  protocol: ApiIntegrationProtocol;
+  integrationId: string;
+  capabilityId: string;
+  pluginKey: string;
+  serverId: string;
+  name: string;
+  description: string | null;
+  provider: string | null;
+  providerDomain: string;
+  baseUrl: string;
+  sourceUrl: string | null;
+  revisionId: string;
+  contentSha256: string;
+  auth: ApiIntegrationAuthPreview;
+  connectionId: string | null;
+  connectionOwnership: ConnectionOwnership | null;
+  tools: ApiIntegrationToolPreview[];
+  warnings: string[];
+};
+
+export type InstallApiIntegrationRequest = {
+  source: ApiIntegrationSource;
+  expectedRevisionId: string;
+  expectedContentSha256: string;
+  connectionId?: string | undefined;
+  ownership?: ConnectionOwnership | undefined;
+  allowedTools?: string[] | undefined;
+};
+
+export type InstalledApiIntegration = {
+  capabilityId: string;
+  pluginId: string;
+  pluginVersionId: string;
+  integrationFacetId: string;
+  apiFacetId: string;
+  pluginInstallationId: string;
+  integrationFacetInstallationId: string;
+  apiFacetInstallationId: string;
+  installationVersion: number;
+  revisionId: string;
+  serverId: string;
+  status: "installed";
+};
+
+export type ApiIntegrationInstallationSummary = {
+  capabilityId: string;
+  pluginKey: string;
+  installationVersion: number;
+  serverId: string;
+  name: string;
+  description: string | null;
+  protocol: ApiIntegrationProtocol;
+  providerDomain: string;
+  baseUrl: string;
+  sourceUrl: string | null;
+  connected: boolean;
+  ownership: "workspace" | "personal" | "none";
+  toolCount: number;
+  approvalRequiredToolCount: number;
+  revisionId: string;
+  contentSha256: string;
+};
+
+export type ListApiIntegrationsResponse = {
+  integrations: ApiIntegrationInstallationSummary[];
+};
+
+export type ApiIntegrationUninstallPreview = {
+  capabilityId: string;
+  installed: boolean;
+  installationVersion: number | null;
+  directOwner: CapabilityComponentOwner | null;
+  remainingOwners: CapabilityComponentOwner[];
+  removesRuntimeIntegration: boolean;
+};
+
+export type UninstallApiIntegrationRequest = {
+  expectedInstallationVersion: number;
+};
+
+export type UninstallApiIntegrationResult = {
+  capabilityId: string;
+  status: "not_installed" | "uninstalled" | "retained_by_other_owners";
+  remainingOwners: CapabilityComponentOwner[];
+};
+
 // --- GitHub ---------------------------------------------------------------------
 
 export type GitHubRepository = {

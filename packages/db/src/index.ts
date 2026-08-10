@@ -305,6 +305,7 @@ export {
 } from "./environment-crypto";
 export * from "./persistence-errors";
 export * from "./runtime-posture";
+export * from "./capability-integrations";
 export * from "./insights";
 export { memoryTextForStorage } from "./memory-domain";
 // Re-exported so external consumers can `import { migrate } from "@opengeni/db"`.

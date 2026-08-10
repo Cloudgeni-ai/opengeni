@@ -115,6 +115,7 @@ import {
   RunContext,
   type AgentInputItem,
   type CallModelInputFilter,
+  type MCPCallToolOptions,
   type MCPServer,
   type MCPToolErrorFunction,
   type Model,
@@ -3383,6 +3384,20 @@ export type PreparedAgentTools = {
   codexConnectorNamespaces: Set<string>;
 };
 
+/**
+ * One already-compiled, in-process MCP server registered under the same stable
+ * id used by Settings and ToolRef. Local adapters still pass through
+ * PrefixedMcpServer, aggregate schema bounds, lazy disclosure, approval policy,
+ * connector action policy, and lifecycle cleanup; only the remote MCP
+ * transport construction is replaced.
+ */
+export type LocalMcpServerRegistration = {
+  id: string;
+  server: MCPServer;
+  /** Exact connection identity frozen while constructing the local adapter. */
+  resolvedConnectionId?: string;
+};
+
 export type PrepareToolsOptions = {
   accountId?: string;
   workspaceId?: string;
@@ -3420,6 +3435,8 @@ export type PrepareToolsOptions = {
   };
   /** Injectable final MCP transport for tests and embedded hosts. */
   mcpFetchImpl?: FetchLike;
+  /** In-process protocol adapters keyed by their ordinary runtime registry id. */
+  localMcpServers?: readonly LocalMcpServerRegistration[];
 };
 
 type ConnectedMcpServerBatch = Awaited<ReturnType<typeof connectMcpServers>>;
@@ -3541,6 +3558,7 @@ export async function prepareAgentTools(
     };
   }
   const registry = new Map(settings.mcpServers.map((server) => [server.id, server]));
+  const localRegistry = localMcpServerRegistry(options.localMcpServers ?? [], registry);
   const aggregateToolBudget = new McpAggregateToolListBudget();
   // npm Undici's dispatcher transport can hang indefinitely under Bun even
   // after an AbortSignal fires. Bun's native fetch is the supported runtime
@@ -3559,6 +3577,30 @@ export async function prepareAgentTools(
       }
       if (config.id === CODEX_APPS_MCP_SERVER_ID && !isCodexAppsMcpServer(config)) {
         throw new Error("Codex Apps server id is reserved for the canonical endpoint");
+      }
+      const local = localRegistry.get(config.id);
+      if (local) {
+        if (local.resolvedConnectionId) {
+          recordResolvedMcpConnectionId(
+            resolvedMcpConnectionIds,
+            config,
+            local.resolvedConnectionId,
+          );
+        }
+        const optional = tool.optional === true;
+        return {
+          server: new PrefixedMcpServer(
+            local.server,
+            config.id,
+            config.allowedTools,
+            optional || Boolean(config.connectionRef),
+            aggregateToolBudget,
+            `${config.id}:${index}`,
+          ),
+          bestEffort: optional || Boolean(config.connectionRef),
+          optional,
+          timeoutMs: config.timeoutMs,
+        };
       }
       const url = firstPartyMcpServerUrlForRun(settings, config, options.workspaceId) ?? config.url;
       const firstParty = isFirstPartyMcpServer(settings, config);
@@ -3720,6 +3762,30 @@ export async function prepareAgentTools(
     },
     codexConnectorNamespaces,
   };
+}
+
+function localMcpServerRegistry(
+  registrations: readonly LocalMcpServerRegistration[],
+  settingsRegistry: ReadonlyMap<string, Settings["mcpServers"][number]>,
+): ReadonlyMap<string, LocalMcpServerRegistration> {
+  assertMcpServerSelectionWithinBounds(registrations);
+  const registry = new Map<string, LocalMcpServerRegistration>();
+  for (const registration of registrations) {
+    if (!settingsRegistry.has(registration.id)) {
+      throw new Error(`Local MCP server id is not registered in settings: ${registration.id}`);
+    }
+    if (registry.has(registration.id)) {
+      throw new Error(`Duplicate local MCP server id: ${registration.id}`);
+    }
+    if (
+      registration.resolvedConnectionId !== undefined &&
+      registration.resolvedConnectionId.length === 0
+    ) {
+      throw new Error(`Local MCP server ${registration.id} has an empty connection identity`);
+    }
+    registry.set(registration.id, registration);
+  }
+  return registry;
 }
 
 function connectionBrokerFetch(
@@ -5027,13 +5093,14 @@ export class PrefixedMcpServer implements MCPServer {
     toolName: string,
     args: Record<string, unknown> | null,
     meta?: Record<string, unknown> | null,
+    callOptions?: MCPCallToolOptions,
   ): Promise<any> {
     const unprefixed = this.unprefixToolName(toolName);
     if (!this.isAllowed(unprefixed)) {
       throw new Error(`MCP tool ${unprefixed} is not allowed for server ${this.registryId}`);
     }
     try {
-      const output = await this.inner.callTool(unprefixed, args, meta);
+      const output = await this.inner.callTool(unprefixed, args, meta, callOptions);
       assertMcpPayloadWithinBytes(output, MCP_MAX_TOOL_RESULT_BYTES, "MCP tool result");
       return output;
     } catch (error) {

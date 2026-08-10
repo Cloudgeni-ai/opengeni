@@ -59,7 +59,7 @@ export interface OpenApiOperationBinding {
   readonly requiredScopeAlternatives?: readonly (readonly string[])[];
 }
 
-export type OpenApiRevision = IntegrationRevision<OpenApiOperationBinding>;
+export type OpenApiRevision = IntegrationRevision<OpenApiOperationBinding, "openapi">;
 
 export interface CompileOpenApiOptions {
   readonly integrationId: string;
@@ -76,6 +76,19 @@ export interface OpenApiServerOptions {
   readonly timeoutMs?: number;
   readonly maxResponseBytes?: number;
 }
+
+export type OpenApiAuthDiscovery =
+  | { kind: "none" }
+  | {
+      kind: "oauth2";
+      scopes: string[];
+    }
+  | {
+      kind: "api_key";
+      carrier: "header" | "query" | "cookie";
+      name: string;
+    }
+  | { kind: "http"; scheme: string };
 
 type LocalMcpTool = Awaited<ReturnType<MCPServer["listTools"]>>[number];
 
@@ -204,6 +217,35 @@ export function compileOpenApiRevision(
   };
 }
 
+export function discoverOpenApiAuth(document: Record<string, unknown>): OpenApiAuthDiscovery {
+  const components = isRecord(document.components) ? document.components : {};
+  const schemes = isRecord(components.securitySchemes) ? components.securitySchemes : {};
+  for (const raw of Object.values(schemes)) {
+    const scheme = resolveObject(document, raw, "security scheme");
+    if (scheme.type === "oauth2") {
+      const flows = isRecord(scheme.flows) ? scheme.flows : {};
+      const scopes = new Set<string>();
+      for (const flow of Object.values(flows)) {
+        if (!isRecord(flow) || !isRecord(flow.scopes)) continue;
+        for (const scope of Object.keys(flow.scopes)) scopes.add(scope);
+      }
+      return { kind: "oauth2", scopes: [...scopes].sort() };
+    }
+    if (
+      scheme.type === "apiKey" &&
+      (scheme.in === "header" || scheme.in === "query" || scheme.in === "cookie") &&
+      typeof scheme.name === "string" &&
+      scheme.name.length > 0
+    ) {
+      return { kind: "api_key", carrier: scheme.in, name: scheme.name };
+    }
+    if (scheme.type === "http" && typeof scheme.scheme === "string") {
+      return { kind: "http", scheme: scheme.scheme.toLowerCase() };
+    }
+  }
+  return { kind: "none" };
+}
+
 export class OpenApiMcpServer implements MCPServer {
   readonly cacheToolsList = true;
   readonly useStructuredContent = true;
@@ -276,42 +318,28 @@ export async function invokeOpenApiOperation(
       false,
     );
   }
-  const url = buildOperationUrl(binding, args);
-  const headers = buildOperationHeaders(binding, args);
-  const body = buildOperationBody(binding, args, headers);
-  if (options.credentialResolver && options.authority.connectionRef) {
-    const credential = await options.credentialResolver.resolve({
-      ...options.authority,
-      protocol: "openapi",
-      integrationId: options.revision.integrationId,
-      revisionId: options.revision.id,
-      operationKey: toolId,
-      destinationUrl: url.toString(),
-      ...(binding.requiredScopeAlternatives
-        ? { requiredScopeAlternatives: binding.requiredScopeAlternatives }
-        : {}),
-    });
-    if (!credential) {
+  const firstCredential = await resolveOpenApiCredential(options, binding, toolId, args, false);
+  let response = await sendOpenApiRequest(options, binding, args, firstCredential, signal);
+  if (
+    response.status === 401 &&
+    options.credentialResolver &&
+    options.authority.connectionRef
+  ) {
+    const refreshed = await resolveOpenApiCredential(options, binding, toolId, args, true);
+    if (isReplaySafeMethod(binding.method) && refreshed) {
+      await response.body?.cancel().catch(() => undefined);
+      response = await sendOpenApiRequest(options, binding, args, refreshed, signal);
+    } else {
+      await response.body?.cancel().catch(() => undefined);
       throw new IntegrationInvocationError(
-        "connection_required",
-        "This integration needs a connected account",
-        "not_started",
+        "authorization_rejected",
+        "The connected account is no longer authorized for this operation",
+        isReplaySafeMethod(binding.method) ? "failed" : "unknown",
         false,
+        response.status,
       );
     }
-    applyCredentialPlacements(url, headers, credential);
   }
-  const response = await fetchWithDeadline(
-    options.transport,
-    url,
-    {
-      method: binding.method.toUpperCase(),
-      headers,
-      ...(body !== undefined ? { body } : {}),
-      ...(signal ? { signal } : {}),
-    },
-    options.timeoutMs ?? DEFAULT_INTEGRATION_TIMEOUT_MS,
-  );
   if (response.status >= 300 && response.status < 400) {
     await response.body?.cancel().catch(() => undefined);
     throw new IntegrationInvocationError(
@@ -342,6 +370,62 @@ export async function invokeOpenApiOperation(
     );
   }
   return result;
+}
+
+async function resolveOpenApiCredential(
+  options: OpenApiServerOptions,
+  binding: OpenApiOperationBinding,
+  toolId: string,
+  args: Record<string, unknown>,
+  forceRefresh: boolean,
+): Promise<Awaited<ReturnType<IntegrationCredentialResolver["resolve"]>>> {
+  if (!options.credentialResolver || !options.authority.connectionRef) return null;
+  const destinationUrl = buildOperationUrl(binding, args).toString();
+  const credential = await options.credentialResolver.resolve({
+    ...options.authority,
+    protocol: "openapi",
+    integrationId: options.revision.integrationId,
+    revisionId: options.revision.id,
+    operationKey: toolId,
+    destinationUrl,
+    ...(binding.requiredScopeAlternatives
+      ? { requiredScopeAlternatives: binding.requiredScopeAlternatives }
+      : {}),
+    ...(forceRefresh ? { forceRefresh: true } : {}),
+  });
+  if (!credential && !forceRefresh) {
+    throw new IntegrationInvocationError(
+      "connection_required",
+      "This integration needs a connected account",
+      "not_started",
+      false,
+    );
+  }
+  return credential;
+}
+
+async function sendOpenApiRequest(
+  options: OpenApiServerOptions,
+  binding: OpenApiOperationBinding,
+  args: Record<string, unknown>,
+  credential: Awaited<ReturnType<IntegrationCredentialResolver["resolve"]>>,
+  signal?: AbortSignal,
+): Promise<Response> {
+  const url = buildOperationUrl(binding, args);
+  const headers = buildOperationHeaders(binding, args);
+  const body = buildOperationBody(binding, args, headers);
+  if (credential) applyCredentialPlacements(url, headers, credential);
+  return await fetchWithDeadline(
+    options.transport,
+    url,
+    {
+      method: binding.method.toUpperCase(),
+      headers,
+      ...(body !== undefined ? { body } : {}),
+      ...(signal ? { signal } : {}),
+    },
+    options.timeoutMs ?? DEFAULT_INTEGRATION_TIMEOUT_MS,
+  );
 }
 
 function readServers(
@@ -543,6 +627,10 @@ function toolDescription(
 
 function isIdempotentMethod(method: OpenApiHttpMethod | undefined): boolean {
   return method === "get" || method === "head" || method === "options" || method === "put" || method === "delete";
+}
+
+function isReplaySafeMethod(method: OpenApiHttpMethod): boolean {
+  return method === "get" || method === "head" || method === "options";
 }
 
 function buildOperationUrl(

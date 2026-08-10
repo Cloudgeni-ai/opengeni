@@ -39,12 +39,14 @@ import {
   listCapabilityInstallations,
   listConnectionsMetadata,
   listEnabledMcpCapabilityServers,
+  listInstalledApiIntegrations,
   listPackInstallations,
   listSocialConnections,
   mcpServerIdForCapability,
   updatePackInstallationStatus,
   upsertCapabilityCatalogItem,
   type Database,
+  type ApiIntegrationRuntime,
   type EnabledMcpCapabilityServer,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
@@ -125,7 +127,7 @@ export async function buildCapabilityCatalog(input: {
     ...(codexApps ? [codexApps] : []),
   ])
     .map((item) => {
-      const runtimeItem = applyPortableSkillRuntime(item);
+      const runtimeItem = applyInstalledArtifactRuntime(item);
       const projected = applyCapabilityEnablement(
         runtimeItem,
         capabilityInstallationById.get(runtimeItem.id),
@@ -140,7 +142,25 @@ export async function buildCapabilityCatalog(input: {
   };
 }
 
-function applyPortableSkillRuntime(item: CapabilityCatalogItem): CapabilityCatalogItem {
+function applyInstalledArtifactRuntime(item: CapabilityCatalogItem): CapabilityCatalogItem {
+  if (
+    item.kind === "api" &&
+    item.metadata.platformVersion === 2 &&
+    typeof item.metadata.pluginVersionId === "string" &&
+    typeof item.metadata.apiFacetId === "string" &&
+    typeof item.metadata.revisionId === "string" &&
+    typeof item.metadata.serverId === "string"
+  ) {
+    return {
+      ...item,
+      runtime: {
+        available: true,
+        mcpServerId: item.metadata.serverId,
+        transport: "local-adapter",
+        notes: "Available through an immutable workspace API Integration revision.",
+      },
+    };
+  }
   if (
     item.kind !== "skill" ||
     item.metadata.platformVersion !== 2 ||
@@ -770,15 +790,45 @@ export async function settingsWithEnabledCapabilityMcpServers(
   db: Database,
   workspaceId: string,
   settings: Settings,
+  options?: {
+    onResolvedApiIntegrations?: (integrations: readonly ApiIntegrationRuntime[]) => void;
+  },
 ): Promise<Settings> {
-  const [enabled, codexAppsCredentialId] = await Promise.all([
+  const [enabled, apiIntegrations, codexAppsCredentialId] = await Promise.all([
     listEnabledMcpCapabilityServers(db, workspaceId),
+    listInstalledApiIntegrations(db, workspaceId),
     resolveCodexAppsCredentialIdForRun(db, workspaceId),
   ]);
+  options?.onResolvedApiIntegrations?.(apiIntegrations);
   return settingsWithCodexAppsMcpServer(
-    settingsWithMcpCapabilityServers(settings, enabled),
+    settingsWithApiIntegrationServers(settingsWithMcpCapabilityServers(settings, enabled), apiIntegrations),
     codexAppsCredentialId !== null,
   );
+}
+
+export function settingsWithApiIntegrationServers(
+  settings: Settings,
+  integrations: readonly ApiIntegrationRuntime[],
+): Settings {
+  if (integrations.length === 0) return settings;
+  const existingIds = new Set(settings.mcpServers.map((server) => server.id));
+  const dynamicServers = integrations
+    .filter((integration) => !existingIds.has(integration.serverId))
+    .map((integration) => ({
+      id: integration.serverId,
+      name: integration.name,
+      // Local adapters never send MCP traffic to this URL. Keeping the exact
+      // provider base URL in Settings preserves destination identity for policy,
+      // diagnostics, and the stable session-MCP approval fallback.
+      url: integration.baseUrl,
+      allowedTools: [...integration.allowedTools],
+      cacheToolsList: true,
+      requireApproval: integration.requireApproval,
+      ...(integration.connectionRef ? { connectionRef: integration.connectionRef } : {}),
+    }));
+  return dynamicServers.length
+    ? { ...settings, mcpServers: [...settings.mcpServers, ...dynamicServers] }
+    : settings;
 }
 
 /**
@@ -1329,6 +1379,25 @@ export function applyCapabilityEnablement(
   }
   const activeInstallation = installation?.status === "active";
   const enabled = !!activeInstallation && capabilityInstallationRuntimeReady(item, installation);
+  if (item.kind === "api" && item.metadata.platformVersion === 2) {
+    const connectionBound = installation?.metadata.connectionBound === true;
+    const providerDomain = stringMetadata(installation?.metadata.providerDomain);
+    const connectionKind = stringMetadata(installation?.metadata.connectionKind);
+    const connectionOwnership = stringMetadata(installation?.metadata.connectionOwnership);
+    return {
+      ...item,
+      enabled,
+      enabledReason: enabled ? "installed immutable Integration revision" : null,
+      connectionRef:
+        enabled && connectionBound && providerDomain && connectionKind
+          ? {
+              providerDomain,
+              kind: connectionKind,
+              ...(connectionOwnership === "subject" ? { subjectScope: "subject" as const } : {}),
+            }
+          : null,
+    };
+  }
   return {
     ...item,
     enabled,

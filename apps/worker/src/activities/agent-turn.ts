@@ -86,6 +86,7 @@ import {
   type CodexCredentialLeaseResult,
   type CodexCredentialLeaseSelectionContext,
   type ApplySessionTurnSettlementInput,
+  type ApiIntegrationRuntime,
   type SessionAttemptQuiescenceCommit,
   type SessionTurnRecordingSettlement,
 } from "@opengeni/db";
@@ -156,6 +157,7 @@ import {
   stopRecording as stopRecordingOnBox,
 } from "@opengeni/runtime";
 import { connectionTokenResolverForTurn } from "./mcp-credentials";
+import { buildApiIntegrationServersForTurn } from "./api-integrations";
 import {
   assertTurnExecutionPolicyMatchesConfigV1,
   calculateGatewayReportedCostBreakdown,
@@ -3775,10 +3777,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // only exists in the RunState blob), never through a swapped trigger.
     let triggerType: string | null = null;
     try {
+      let installedApiIntegrations: readonly ApiIntegrationRuntime[] = [];
       const mcpSettings = await settingsWithEnabledCapabilityMcpServers(
         db,
         input.workspaceId,
         settings,
+        {
+          onResolvedApiIntegrations: (integrations) => {
+            installedApiIntegrations = integrations;
+          },
+        },
       );
       // Read the active-credential flag once for the runtime capability overlay.
       // Accepted billing/provider identity comes from the turn policy below,
@@ -6168,6 +6176,30 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         return result;
       };
       const credentialSubjectId = credentialSubjectIdForTurnInitiator(turn);
+      const publishToolAuthNeeded = async (payload: ToolAuthNeededPayload): Promise<void> => {
+        if (!shouldPublishToolAuthNeededForTurn(payload, trigger, turn)) {
+          return;
+        }
+        await publish!([{ type: "tool.auth_needed", payload }], true);
+      };
+      const selectedApiIntegrationIds = new Set(turnTools.map((tool) => tool.id));
+      const localMcpServers = buildApiIntegrationServersForTurn({
+        settings: runSettings,
+        integrations: installedApiIntegrations.filter((integration) =>
+          selectedApiIntegrationIds.has(integration.serverId),
+        ),
+        authority: {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          rootSessionId: session.rootSessionId,
+          turnId: turn.id,
+          attemptId: input.attemptId,
+          ...(credentialSubjectId ? { initiatingSubjectId: credentialSubjectId } : {}),
+        },
+        resolveCredential,
+        onAuthNeeded: publishToolAuthNeeded,
+      });
       const codexAppsAuth = codexAppsCredentialId
         ? (() => {
             const resolver = buildCodexTokenResolver(
@@ -6214,12 +6246,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           ...(credentialSubjectId ? { credentialSubjectId } : {}),
           ...(codexAppsAuth ? { codexAppsAuth } : {}),
           resolveCredential,
-          onAuthNeeded: async (payload) => {
-            if (!shouldPublishToolAuthNeededForTurn(payload, trigger, turn)) {
-              return;
-            }
-            await publish!([{ type: "tool.auth_needed", payload }], true);
-          },
+          onAuthNeeded: publishToolAuthNeeded,
+          localMcpServers,
           // Manager-style sessions carry a creation-validated permission set
           // for their first-party MCP token; null keeps the fixed default.
           ...(session.firstPartyMcpPermissions?.length

@@ -67,6 +67,50 @@ Registry entries that declare required headers are tagged `requires-credentials`
 
 The current compatibility table still records existing catalog installations, but product actions route to the owning type-specific domain. A Skill is installed, an Integration is connected/configured, and a Pack is installed/configured; clients must not infer one universal Enable action from catalog membership.
 
+### Protocol-neutral API Integrations
+
+OpenAPI 3.0/3.1 and GraphQL endpoints use an immutable preview-before-install
+flow. Provider presets currently cover Google Drive/Gmail and Microsoft Outlook
+Mail/Calendar/Contacts/OneDrive source definitions; a general OpenAPI URL,
+GraphQL endpoint, or auto-detected URL uses the same contracts. Preview performs
+bounded, pinned source discovery, compiles stable tool identities and safety
+metadata, reports the required authentication without returning credentials,
+and returns the exact revision id and SHA-256. Install re-fetches the source and
+returns `409` if either immutable fact changed, so unreviewed tools are never
+installed from a stale preview.
+
+Authenticated Integrations require an existing active Connection for the exact
+provider domain. The selected Connection's Personal/workspace ownership and
+required scopes are checked during install; caller-supplied ownership cannot
+relabel it. Connections remain independently managed and are never deleted by
+Integration uninstall. Direct, Plugin, Pack, and migration ownership records
+share the normalized component ledger, so uninstall preview identifies whether
+the runtime adapter will actually disappear. Mutation uses the Plugin
+installation version as an optimistic-concurrency fence.
+
+The normalized v2 rows store the protocol-compiled revision, tools, integration
+and API facets, facet installations, and owners under FORCE RLS. Compatibility
+catalog/install rows are dual-written while existing clients migrate, but they
+are not runtime authority. At turn start, active installations are projected as
+ordinary MCP servers and backed by an in-process local adapter. This preserves
+the existing bounded lazy tool search, exact session policy, child and schedule
+inheritance, approval/action policy, frozen Connection resolver, cancellation,
+and auth-needed paths without sending MCP traffic to the provider API.
+
+Safe OpenAPI reads and GraphQL queries may refresh an OAuth credential and retry
+exactly once after a provider `401`. A mutation is never replayed after the
+provider accepted the request path: OpenGeni refreshes only for a future call
+and reports the current outcome as unknown. Credential-bearing redirects remain
+disabled and provider response bodies remain bounded.
+
+The owning endpoints are:
+
+- `GET /v1/workspaces/:workspaceId/integrations`
+- `POST /v1/workspaces/:workspaceId/integrations/preview`
+- `POST /v1/workspaces/:workspaceId/integrations/install`
+- `GET /v1/workspaces/:workspaceId/integrations/:capabilityId/uninstall-preview`
+- `DELETE /v1/workspaces/:workspaceId/integrations/:capabilityId`
+
 ## Curated skill library
 
 The default sandbox carries no Terraform, Checkov, social-marketing, or other domain methodology guidance. Those Skills live in the immutable curated library under `packages/runtime/src/bundled_skill_library/` and are discoverable but uninstalled until explicitly selected. The initial reviewed set is Checkov, Refactor Module, Social Media Marketing, Terraform Search and Import, Terraform Stacks, Terraform Style Guide, Terraform Test, and Azure Verified Modules.

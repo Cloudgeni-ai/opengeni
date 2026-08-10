@@ -22,6 +22,7 @@
         "@openai/agents": "0.14.3",
         "@opengeni/agent-proto": "workspace:*",
         "@opengeni/api-router": "workspace:*",
+        "@opengeni/capabilities": "workspace:*",
         "@opengeni/config": "workspace:*",
         "@opengeni/contracts": "workspace:*",
         "@opengeni/core": "workspace:*",
@@ -65,6 +66,7 @@
         "@modelcontextprotocol/sdk": "^1.29.0",
         "@opengeni/agent-proto": "workspace:*",
         "@opengeni/artifact-tool": "workspace:*",
+        "@opengeni/capabilities": "workspace:*",
         "@opengeni/codex": "workspace:*",
         "@opengeni/config": "workspace:*",
         "@opengeni/contracts": "workspace:*",
@@ -151,6 +153,7 @@
       "dependencies": {
         "@llamaindex/liteparse": "^1.5.3",
         "@opengeni/agent-proto": "workspace:*",
+        "@opengeni/capabilities": "workspace:*",
         "@opengeni/codex": "workspace:*",
         "@opengeni/config": "workspace:*",
         "@opengeni/contracts": "workspace:*",

@@ -41,6 +41,14 @@ import type {
   CapabilityCatalogItem,
   CapabilityCatalogResponse,
   CapabilityInstallation,
+  ApiIntegrationPreview,
+  ApiIntegrationUninstallPreview,
+  InstallApiIntegrationRequest,
+  InstalledApiIntegration,
+  ListApiIntegrationsResponse,
+  PreviewApiIntegrationRequest,
+  UninstallApiIntegrationRequest,
+  UninstallApiIntegrationResult,
   AddDocumentRequest,
   CreateKnowledgeDropRequest,
   MoveDocumentRequest,
@@ -3611,6 +3619,61 @@ export class OpenGeniClient {
         ...(options.query !== undefined ? { query: options.query } : {}),
         ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
       },
+    );
+  }
+
+  /** List installed protocol-neutral OpenAPI and GraphQL Integrations. */
+  async listApiIntegrations(workspaceId: string): Promise<ListApiIntegrationsResponse> {
+    return await this.requestJson<ListApiIntegrationsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/integrations`,
+    );
+  }
+
+  /** Detect and compile an Integration without mutating workspace state. */
+  async previewApiIntegration(
+    workspaceId: string,
+    request: PreviewApiIntegrationRequest,
+  ): Promise<ApiIntegrationPreview> {
+    return await this.requestJson<ApiIntegrationPreview>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/integrations/preview`,
+      request,
+    );
+  }
+
+  /** Install only the exact immutable revision and digest accepted in preview. */
+  async installApiIntegration(
+    workspaceId: string,
+    request: InstallApiIntegrationRequest,
+  ): Promise<InstalledApiIntegration> {
+    return await this.requestJson<InstalledApiIntegration>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/integrations/install`,
+      request,
+    );
+  }
+
+  async previewApiIntegrationUninstall(
+    workspaceId: string,
+    capabilityId: string,
+  ): Promise<ApiIntegrationUninstallPreview> {
+    return await this.requestJson<ApiIntegrationUninstallPreview>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(capabilityId)}/uninstall-preview`,
+    );
+  }
+
+  /** Remove the direct Integration owner under an optimistic version fence. */
+  async uninstallApiIntegration(
+    workspaceId: string,
+    capabilityId: string,
+    request: UninstallApiIntegrationRequest,
+  ): Promise<UninstallApiIntegrationResult> {
+    return await this.requestJson<UninstallApiIntegrationResult>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(capabilityId)}`,
+      request,
     );
   }
 

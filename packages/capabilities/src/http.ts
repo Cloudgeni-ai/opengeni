@@ -15,6 +15,44 @@ export const DEFAULT_INTEGRATION_RESPONSE_BYTES = 4 * 1024 * 1024;
 export const MAX_INTEGRATION_SPEC_BYTES = 8 * 1024 * 1024;
 export const MAX_INTEGRATION_TOOLS = 2_000;
 
+export async function fetchIntegrationSourceDocument(
+  transport: IntegrationTransport,
+  sourceUrl: string,
+  maxBytes = MAX_INTEGRATION_SPEC_BYTES,
+): Promise<Uint8Array> {
+  const url = new URL(sourceUrl);
+  const response = await fetchWithDeadline(
+    transport,
+    url,
+    {
+      method: "GET",
+      headers: { accept: "application/json, application/yaml, text/yaml, */*;q=0.5" },
+    },
+    DEFAULT_INTEGRATION_TIMEOUT_MS,
+  );
+  if (response.status >= 300 && response.status < 400) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new IntegrationInvocationError(
+      "source_redirect_rejected",
+      "Integration source attempted to redirect",
+      "failed",
+      false,
+      response.status,
+    );
+  }
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new IntegrationInvocationError(
+      "source_fetch_rejected",
+      "Integration source could not be read",
+      "failed",
+      response.status >= 500,
+      response.status,
+    );
+  }
+  return await readResponseBodyBounded(response, maxBytes, "Integration source");
+}
+
 export function createPinnedIntegrationTransport(
   options: PinnedIntegrationTransportOptions,
 ): IntegrationTransport {

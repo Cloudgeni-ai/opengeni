@@ -56,6 +56,7 @@
     "@llamaindex/liteparse": "^1.5.3",
     "@opengeni/agent-proto": "workspace:*",
     "@opengeni/codex": "workspace:*",
+    "@opengeni/capabilities": "workspace:*",
     "@opengeni/config": "workspace:*",
     "@opengeni/contracts": "workspace:*",
     "@opengeni/core": "workspace:*",

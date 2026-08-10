@@ -6614,6 +6614,122 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("routes selected local MCP adapters through prefixing, bounds, connection identity, and cancellation", async () => {
+    const connectionId = "11111111-2222-4333-8444-555555555555";
+    let connected = 0;
+    let closed = 0;
+    let observedSignal: AbortSignal | undefined;
+    const local: MCPServer = {
+      name: "local-openapi",
+      cacheToolsList: true,
+      async connect() {
+        connected += 1;
+      },
+      async close() {
+        closed += 1;
+      },
+      async listTools() {
+        return [
+          {
+            name: "list_items",
+            description: "List items.",
+            inputSchema: { type: "object", properties: {}, required: [] },
+          },
+        ];
+      },
+      async callTool(_name, _args, _meta, options) {
+        observedSignal = options?.signal;
+        return { content: [{ type: "text", text: "ok" }] };
+      },
+      async invalidateToolsCache() {},
+    };
+    let remoteFetchCalled = false;
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            id: "inventory_api",
+            name: "Inventory API",
+            url: "https://inventory.example.test/",
+            cacheToolsList: true,
+            connectionRef: {
+              connectionId,
+              providerDomain: "inventory.example.test",
+              kind: "oauth2",
+              subjectScope: "workspace",
+            },
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "inventory_api" }],
+      {
+        localMcpServers: [{ id: "inventory_api", server: local, resolvedConnectionId: connectionId }],
+        mcpFetchImpl: async () => {
+          remoteFetchCalled = true;
+          throw new Error("local adapters must not use the remote MCP transport");
+        },
+      },
+    );
+    try {
+      expect(connected).toBe(1);
+      expect(remoteFetchCalled).toBe(false);
+      expect(prepared.resolvedMcpConnectionIds.get("inventory_api")).toBe(connectionId);
+      const tools = await prepared.mcpServers[0]!.listTools();
+      expect(tools.map((tool) => tool.name)).toEqual(["inventory_api__list_items"]);
+      const controller = new AbortController();
+      await prepared.mcpServers[0]!.callTool(
+        "inventory_api__list_items",
+        {},
+        null,
+        { signal: controller.signal },
+      );
+      expect(observedSignal).toBe(controller.signal);
+    } finally {
+      await prepared.close();
+    }
+    expect(closed).toBe(1);
+  });
+
+  test("rejects duplicate, unregistered, and connection-mismatched local MCP adapters", async () => {
+    const settings = testSettings({
+      mcpServers: [
+        {
+          id: "local_api",
+          url: "https://local.example.test/",
+          connectionRef: {
+            connectionId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            providerDomain: "local.example.test",
+          },
+        },
+      ],
+    });
+    const local = fakeMcpServer("local");
+    await expect(
+      prepareAgentTools(settings, [{ kind: "mcp", id: "local_api" }], {
+        localMcpServers: [
+          { id: "local_api", server: local },
+          { id: "local_api", server: local },
+        ],
+      }),
+    ).rejects.toThrow("Duplicate local MCP server id");
+    await expect(
+      prepareAgentTools(settings, [{ kind: "mcp", id: "local_api" }], {
+        localMcpServers: [{ id: "missing", server: local }],
+      }),
+    ).rejects.toThrow("not registered in settings");
+    await expect(
+      prepareAgentTools(settings, [{ kind: "mcp", id: "local_api" }], {
+        localMcpServers: [
+          {
+            id: "local_api",
+            server: local,
+            resolvedConnectionId: "ffffffff-1111-4222-8333-444444444444",
+          },
+        ],
+      }),
+    ).rejects.toThrow("connection identity changed");
+  });
+
   test("rejects unknown MCP tool ids during runtime preparation", async () => {
     await expect(
       prepareAgentTools(testSettings(), [{ kind: "mcp", id: "missing" }]),

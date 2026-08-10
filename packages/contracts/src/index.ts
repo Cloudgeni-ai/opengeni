@@ -6974,6 +6974,197 @@ export const UninstallSkillResult = z.object({
 });
 export type UninstallSkillResult = z.infer<typeof UninstallSkillResult>;
 
+export const ApiIntegrationProtocol = z.enum(["openapi", "graphql"]);
+export type ApiIntegrationProtocol = z.infer<typeof ApiIntegrationProtocol>;
+
+export const ApiIntegrationSource = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("preset"), presetId: z.string().min(1).max(128) }).strict(),
+  z
+    .object({
+      kind: z.literal("openapi"),
+      url: z.string().url().max(2048),
+      baseUrl: z.string().url().max(2048).optional(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("graphql"),
+      endpoint: z.string().url().max(2048),
+      name: z.string().min(1).max(200).optional(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("auto"),
+      url: z.string().url().max(2048),
+      baseUrl: z.string().url().max(2048).optional(),
+    })
+    .strict(),
+]);
+export type ApiIntegrationSource = z.infer<typeof ApiIntegrationSource>;
+
+export const PreviewApiIntegrationRequest = z
+  .object({
+    source: ApiIntegrationSource,
+    connectionId: z.string().uuid().optional(),
+    ownership: ConnectionOwnership.optional(),
+  })
+  .strict();
+export type PreviewApiIntegrationRequest = z.infer<typeof PreviewApiIntegrationRequest>;
+
+export const ApiIntegrationAuthPreview = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("none") }).strict(),
+  z
+    .object({
+      kind: z.literal("oauth2"),
+      providerDomain: z.string().min(1).max(253),
+      scopes: z.array(z.string().min(1).max(1024)).max(256),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("api_key"),
+      providerDomain: z.string().min(1).max(253),
+      carrier: z.enum(["header", "query", "cookie"]),
+      name: z.string().min(1).max(256),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("http"),
+      providerDomain: z.string().min(1).max(253),
+      scheme: z.string().min(1).max(64),
+    })
+    .strict(),
+]);
+export type ApiIntegrationAuthPreview = z.infer<typeof ApiIntegrationAuthPreview>;
+
+export const ApiIntegrationToolPreview = z
+  .object({
+    id: z.string().min(1).max(200),
+    operationKey: z.string().min(1).max(512),
+    name: z.string().min(1).max(200),
+    description: z.string().max(4000),
+    safety: z.enum(["read", "write", "destructive"]),
+    approvalMode: z.enum(["never", "ask"]),
+    deprecated: z.boolean(),
+  })
+  .strict();
+export type ApiIntegrationToolPreview = z.infer<typeof ApiIntegrationToolPreview>;
+
+export const ApiIntegrationPreview = z
+  .object({
+    source: ApiIntegrationSource,
+    presetId: z.string().min(1).max(128).nullable(),
+    protocol: ApiIntegrationProtocol,
+    integrationId: z.string().min(1).max(200),
+    capabilityId: z.string().min(1).max(512),
+    pluginKey: z.string().min(1).max(200),
+    serverId: SessionMcpServerId,
+    name: z.string().min(1).max(200),
+    description: z.string().max(4000).nullable(),
+    provider: z.string().min(1).max(128).nullable(),
+    providerDomain: z.string().min(1).max(253),
+    baseUrl: z.string().url().max(2048),
+    sourceUrl: z.string().url().max(2048).nullable(),
+    revisionId: z.string().min(1).max(96),
+    contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+    auth: ApiIntegrationAuthPreview,
+    connectionId: z.string().uuid().nullable(),
+    connectionOwnership: ConnectionOwnership.nullable(),
+    tools: z.array(ApiIntegrationToolPreview).min(1).max(2000),
+    warnings: z.array(z.string().min(1).max(500)).max(32).default([]),
+  })
+  .strict();
+export type ApiIntegrationPreview = z.infer<typeof ApiIntegrationPreview>;
+
+export const InstallApiIntegrationRequest = z
+  .object({
+    source: ApiIntegrationSource,
+    expectedRevisionId: z.string().min(1).max(96),
+    expectedContentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+    connectionId: z.string().uuid().optional(),
+    ownership: ConnectionOwnership.optional(),
+    allowedTools: z.array(z.string().min(1).max(200)).max(2000).optional(),
+  })
+  .strict();
+export type InstallApiIntegrationRequest = z.infer<typeof InstallApiIntegrationRequest>;
+
+export const InstalledApiIntegration = z
+  .object({
+    capabilityId: z.string().min(1),
+    pluginId: z.string().uuid(),
+    pluginVersionId: z.string().uuid(),
+    integrationFacetId: z.string().uuid(),
+    apiFacetId: z.string().uuid(),
+    pluginInstallationId: z.string().uuid(),
+    integrationFacetInstallationId: z.string().uuid(),
+    apiFacetInstallationId: z.string().uuid(),
+    installationVersion: z.number().int().positive(),
+    revisionId: z.string().min(1),
+    serverId: SessionMcpServerId,
+    status: z.literal("installed"),
+  })
+  .strict();
+export type InstalledApiIntegration = z.infer<typeof InstalledApiIntegration>;
+
+export const ApiIntegrationInstallationSummary = z
+  .object({
+    capabilityId: z.string().min(1),
+    pluginKey: z.string().min(1),
+    installationVersion: z.number().int().positive(),
+    serverId: SessionMcpServerId,
+    name: z.string().min(1),
+    description: z.string().nullable(),
+    protocol: ApiIntegrationProtocol,
+    providerDomain: z.string().min(1),
+    baseUrl: z.string().url(),
+    sourceUrl: z.string().url().nullable(),
+    connected: z.boolean(),
+    ownership: z.enum(["workspace", "personal", "none"]),
+    toolCount: z.number().int().nonnegative(),
+    approvalRequiredToolCount: z.number().int().nonnegative(),
+    revisionId: z.string().min(1),
+    contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+  })
+  .strict();
+export type ApiIntegrationInstallationSummary = z.infer<
+  typeof ApiIntegrationInstallationSummary
+>;
+
+export const ListApiIntegrationsResponse = z
+  .object({ integrations: z.array(ApiIntegrationInstallationSummary) })
+  .strict();
+export type ListApiIntegrationsResponse = z.infer<typeof ListApiIntegrationsResponse>;
+
+export const ApiIntegrationUninstallPreview = z
+  .object({
+    capabilityId: z.string().min(1),
+    installed: z.boolean(),
+    installationVersion: z.number().int().positive().nullable(),
+    directOwner: CapabilityComponentOwner.nullable(),
+    remainingOwners: z.array(CapabilityComponentOwner),
+    removesRuntimeIntegration: z.boolean(),
+  })
+  .strict();
+export type ApiIntegrationUninstallPreview = z.infer<
+  typeof ApiIntegrationUninstallPreview
+>;
+
+export const UninstallApiIntegrationRequest = z
+  .object({ expectedInstallationVersion: z.number().int().positive() })
+  .strict();
+export type UninstallApiIntegrationRequest = z.infer<typeof UninstallApiIntegrationRequest>;
+
+export const UninstallApiIntegrationResult = z
+  .object({
+    capabilityId: z.string().min(1),
+    status: z.enum(["not_installed", "uninstalled", "retained_by_other_owners"]),
+    remainingOwners: z.array(CapabilityComponentOwner),
+  })
+  .strict();
+export type UninstallApiIntegrationResult = z.infer<typeof UninstallApiIntegrationResult>;
+
 export const Session = z.object({
   id: z.string().uuid(),
   workspaceId: z.string().uuid(),

@@ -15,5 +15,7 @@ Security defaults:
 - redirects are never followed on credential-bearing requests;
 - response bodies, schemas, operation counts, and deadlines are bounded;
 - mutating operations are marked approval-required by default;
-- a 401/403 after a request starts is never replayed automatically; and
+- a safe read/query may refresh and retry exactly once on `401`, while a
+  mutation is never replayed after an ambiguous provider authorization result;
+  and
 - errors contain structural recovery facts, never provider bodies or secrets.

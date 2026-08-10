@@ -115,10 +115,22 @@ describe("OpenAPI compiler and local MCP invocation", () => {
   test("does not replay a mutation after an ambiguous provider authorization failure", async () => {
     const revision = compileOpenApiRevision(document, { integrationId: "widgets" });
     let calls = 0;
+    const credentialResolutions: boolean[] = [];
     const invocation = invokeOpenApiOperation(
       {
         revision,
         authority,
+        credentialResolver: {
+          resolve: async (request) => {
+            credentialResolutions.push(request.forceRefresh === true);
+            return {
+              audience: { origin: "https://api.example.com", pathPrefix: "/v1/" },
+              placements: [
+                { carrier: "header", name: "Authorization", value: "expired-token" },
+              ],
+            };
+          },
+        },
         transport: directIntegrationTransport(async () => {
           calls += 1;
           return new Response(JSON.stringify({ error: "expired" }), {
@@ -137,6 +149,49 @@ describe("OpenAPI compiler and local MCP invocation", () => {
       status: 401,
     });
     expect(calls).toBe(1);
+    expect(credentialResolutions).toEqual([false, true]);
+  });
+
+  test("refreshes and retries a read exactly once after a provider 401", async () => {
+    const revision = compileOpenApiRevision(document, { integrationId: "widgets" });
+    const credentialResolutions: boolean[] = [];
+    const authorizations: string[] = [];
+    const result = await invokeOpenApiOperation(
+      {
+        revision,
+        authority,
+        credentialResolver: {
+          resolve: async (request) => {
+            credentialResolutions.push(request.forceRefresh === true);
+            return {
+              audience: { origin: "https://api.example.com", pathPrefix: "/v1/" },
+              placements: [
+                {
+                  carrier: "header",
+                  name: "Authorization",
+                  value: request.forceRefresh ? "fresh-token" : "expired-token",
+                },
+              ],
+            };
+          },
+        },
+        transport: directIntegrationTransport(async (_input, init) => {
+          const authorization = new Headers(init?.headers).get("authorization") ?? "";
+          authorizations.push(authorization);
+          return authorization === "fresh-token"
+            ? new Response(JSON.stringify({ id: "abc" }), {
+                status: 200,
+                headers: { "content-type": "application/json" },
+              })
+            : new Response(null, { status: 401 });
+        }),
+      },
+      "widgets_get",
+      { path: { id: "abc" } },
+    );
+    expect(credentialResolutions).toEqual([false, true]);
+    expect(authorizations).toEqual(["expired-token", "fresh-token"]);
+    expect(result).toMatchObject({ ok: true, status: 200, data: { id: "abc" } });
   });
 
   test("rejects a near-identical credential whose audience path is too narrow", () => {
