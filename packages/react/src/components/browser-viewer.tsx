@@ -2,6 +2,8 @@ import type {
   AttachedBrowserDevice,
   BrowserAction,
   BrowserDiagnosticBatch,
+  BrowserDownload,
+  BrowserDownloadSaveResponse,
   BrowserFrame,
   BrowserIdentity,
   BrowserObservation,
@@ -15,6 +17,8 @@ import {
   BugIcon,
   ChevronDownIcon,
   CircleAlertIcon,
+  DownloadIcon,
+  FileCheck2Icon,
   Globe2Icon,
   LoaderCircleIcon,
   MonitorIcon,
@@ -44,10 +48,12 @@ import {
 } from "../hooks/use-browser-frame-stream";
 import { useAttachedBrowsers } from "../hooks/use-attached-browsers";
 import { useBrowserIdentities } from "../hooks/use-browser-identities";
+import { useBrowserDownloads } from "../hooks/use-browser-downloads";
 import { useBrowserSession } from "../hooks/use-browser-session";
 import { useBrowserSessions } from "../hooks/use-browser-sessions";
 import { useInteractionInterventions } from "../hooks/use-interaction-interventions";
 import { cn } from "../lib/cn";
+import { formatBytes } from "../lib/format";
 import type { EmbeddedBrowserInteractionClientOverride } from "../session-context";
 import { InteractionInterventionBanner } from "./interaction-intervention-banner";
 
@@ -255,6 +261,15 @@ export function BrowserViewer({
     browserSessionId: selection?.sessionId ?? null,
     enabled: enabled && selection !== null && controllerReady,
   });
+  const downloads = useBrowserDownloads({
+    ...override,
+    browserSessionId: selection?.sessionId ?? null,
+    enabled:
+      enabled &&
+      diagnosticsView !== null &&
+      controllerReady &&
+      browser.session?.capabilities.downloads === true,
+  });
   const loadBrowserDiagnostics = browser.diagnostics;
 
   useEffect(() => {
@@ -350,6 +365,27 @@ export function BrowserViewer({
     diagnosticRequestRef.current += 1;
     setDiagnosticsView(null);
   }, []);
+
+  const refreshDiagnostics = useCallback(() => {
+    loadDiagnostics();
+    if (browser.session?.capabilities.downloads) void downloads.refresh();
+  }, [browser.session?.capabilities.downloads, downloads, loadDiagnostics]);
+
+  const saveDownload = useCallback(
+    async (
+      downloadId: string,
+      destinationPath: string,
+      overwrite: boolean,
+    ): Promise<BrowserDownloadSaveResponse> => {
+      const response = await downloads.saveToWorkspace(downloadId, destinationPath, { overwrite });
+      onNotify?.({
+        kind: "info",
+        message: `${response.download.filename} saved to ${response.destinationPath}.`,
+      });
+      return response;
+    },
+    [downloads, onNotify],
+  );
 
   useEffect(() => {
     const identityId = browser.session?.identityId ?? selectedRegistrySession?.identityId;
@@ -633,7 +669,15 @@ export function BrowserViewer({
           observation={browser.observation}
           baseRevisionOrdinal={baseRevisionOrdinal}
           state={diagnosticsView}
-          onRefresh={loadDiagnostics}
+          downloads={downloads.downloads}
+          downloadsEnabled={browser.session?.capabilities.downloads === true}
+          downloadsLoading={downloads.loading}
+          downloadsRefreshing={downloads.refreshing}
+          downloadsError={downloads.error}
+          savingDownloadIds={downloads.savingDownloadIds}
+          onSaveDownload={saveDownload}
+          onRefreshDownloads={() => void downloads.refresh()}
+          onRefresh={refreshDiagnostics}
           onClose={closeDiagnostics}
         />
       ) : null}
@@ -1568,6 +1612,18 @@ function BrowserDiagnosticsDrawer(props: {
   observation: BrowserObservation | null;
   baseRevisionOrdinal: number | null;
   state: BrowserDiagnosticsView;
+  downloads: BrowserDownload[];
+  downloadsEnabled: boolean;
+  downloadsLoading: boolean;
+  downloadsRefreshing: boolean;
+  downloadsError: Error | null;
+  savingDownloadIds: string[];
+  onSaveDownload: (
+    downloadId: string,
+    destinationPath: string,
+    overwrite: boolean,
+  ) => Promise<BrowserDownloadSaveResponse>;
+  onRefreshDownloads: () => void;
   onRefresh: () => void;
   onClose: () => void;
 }) {
@@ -1664,6 +1720,18 @@ function BrowserDiagnosticsDrawer(props: {
           ) : null}
         </section>
 
+        {props.downloadsEnabled ? (
+          <BrowserDownloadsPanel
+            downloads={props.downloads}
+            loading={props.downloadsLoading}
+            refreshing={props.downloadsRefreshing}
+            error={props.downloadsError}
+            savingDownloadIds={props.savingDownloadIds}
+            onSave={props.onSaveDownload}
+            onRefresh={props.onRefreshDownloads}
+          />
+        ) : null}
+
         <section className="p-3" aria-labelledby="browser-events-title">
           <div className="flex items-center justify-between gap-2">
             <h3
@@ -1729,6 +1797,205 @@ function BrowserDiagnosticsDrawer(props: {
       </div>
     </aside>
   );
+}
+
+function BrowserDownloadsPanel(props: {
+  downloads: BrowserDownload[];
+  loading: boolean;
+  refreshing: boolean;
+  error: Error | null;
+  savingDownloadIds: string[];
+  onSave: (
+    downloadId: string,
+    destinationPath: string,
+    overwrite: boolean,
+  ) => Promise<BrowserDownloadSaveResponse>;
+  onRefresh: () => void;
+}) {
+  const [paths, setPaths] = useState<Record<string, string>>({});
+  const [overwrite, setOverwrite] = useState<Record<string, boolean>>({});
+  const [savedPaths, setSavedPaths] = useState<Record<string, string>>({});
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const saving = useMemo(() => new Set(props.savingDownloadIds), [props.savingDownloadIds]);
+
+  const save = (download: BrowserDownload) => {
+    const destinationPath = (paths[download.id] ?? defaultDownloadDestination(download)).trim();
+    if (!destinationPath || saving.has(download.id)) return;
+    setErrors((current) => ({ ...current, [download.id]: "" }));
+    void props
+      .onSave(download.id, destinationPath, overwrite[download.id] ?? false)
+      .then((response) => {
+        setSavedPaths((current) => ({ ...current, [download.id]: response.destinationPath }));
+      })
+      .catch((cause) => {
+        setErrors((current) => ({
+          ...current,
+          [download.id]: cause instanceof Error ? cause.message : "Could not save this download.",
+        }));
+      });
+  };
+
+  return (
+    <section className="border-b border-og-border p-3" aria-labelledby="browser-downloads-title">
+      <div className="flex items-center gap-2">
+        <DownloadIcon className="size-3.5 text-og-muted" />
+        <h3
+          id="browser-downloads-title"
+          className="text-[10px] font-semibold uppercase tracking-[0.14em] text-og-subtle"
+        >
+          Downloads
+        </h3>
+        {props.refreshing ? (
+          <LoaderCircleIcon className="ml-auto size-3 animate-spin text-og-muted" />
+        ) : null}
+      </div>
+
+      {props.loading ? (
+        <div className="flex items-center gap-2 py-5 text-og-control text-og-muted">
+          <LoaderCircleIcon className="size-3.5 animate-spin" /> Loading downloads…
+        </div>
+      ) : props.error ? (
+        <div className="py-4">
+          <p className="text-og-control text-og-status-error">{props.error.message}</p>
+          <button
+            type="button"
+            onClick={props.onRefresh}
+            className="mt-2 text-og-control font-medium text-og-accent hover:underline"
+          >
+            Try again
+          </button>
+        </div>
+      ) : props.downloads.length === 0 ? (
+        <p className="py-4 text-og-control text-og-muted">No files downloaded yet.</p>
+      ) : (
+        <ol className="mt-2 space-y-2">
+          {props.downloads.map((download) => {
+            const destinationPath = paths[download.id] ?? defaultDownloadDestination(download);
+            const isSaving = saving.has(download.id);
+            const isSaved = savedPaths[download.id] === destinationPath;
+            return (
+              <li
+                key={download.id}
+                className="rounded-og-sm border border-og-border bg-og-bg p-2.5"
+              >
+                <div className="flex min-w-0 items-start gap-2">
+                  <span className="mt-0.5 grid size-6 shrink-0 place-items-center rounded bg-og-surface-2 text-og-muted">
+                    {isSaved ? (
+                      <FileCheck2Icon className="size-3.5 text-og-status-success" />
+                    ) : (
+                      <DownloadIcon className="size-3.5" />
+                    )}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p
+                      className="truncate text-og-xs font-medium text-og-fg"
+                      title={download.filename}
+                    >
+                      {download.filename}
+                    </p>
+                    <p className="mt-0.5 text-[10px] text-og-subtle">
+                      {downloadStatusLabel(download)}
+                    </p>
+                  </div>
+                </div>
+
+                {download.status === "completed" ? (
+                  <div className="mt-2">
+                    <div className="flex gap-1.5">
+                      <input
+                        type="text"
+                        value={destinationPath}
+                        onInput={(event) => {
+                          const value = event.currentTarget.value;
+                          setPaths((current) => ({ ...current, [download.id]: value }));
+                          setErrors((current) => ({ ...current, [download.id]: "" }));
+                        }}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") save(download);
+                        }}
+                        disabled={isSaving}
+                        aria-label={`Workspace path for ${download.filename}`}
+                        className="h-7 min-w-0 flex-1 rounded-og-sm border border-og-border bg-og-surface-0 px-2 font-og-mono text-[10px] text-og-fg outline-none transition focus:border-og-accent disabled:opacity-50"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => save(download)}
+                        disabled={
+                          isSaving ||
+                          !destinationPath.trim() ||
+                          (isSaved && !overwrite[download.id])
+                        }
+                        className="inline-flex h-7 shrink-0 items-center gap-1 rounded-og-sm border border-og-border bg-og-surface-1 px-2 text-[10px] font-medium text-og-fg transition hover:bg-og-surface-2 disabled:opacity-40"
+                      >
+                        {isSaving ? (
+                          <LoaderCircleIcon className="size-3 animate-spin" />
+                        ) : (
+                          <SaveIcon className="size-3" />
+                        )}
+                        {isSaving
+                          ? "Saving"
+                          : isSaved
+                            ? "Saved"
+                            : overwrite[download.id]
+                              ? "Replace"
+                              : "Save"}
+                      </button>
+                    </div>
+                    <label className="mt-1.5 flex w-fit items-center gap-1.5 text-[10px] text-og-subtle">
+                      <input
+                        type="checkbox"
+                        checked={overwrite[download.id] ?? false}
+                        onChange={(event) => {
+                          setOverwrite((current) => ({
+                            ...current,
+                            [download.id]: event.currentTarget.checked,
+                          }));
+                          setErrors((current) => ({ ...current, [download.id]: "" }));
+                        }}
+                        disabled={isSaving}
+                        className="size-3 accent-og-accent"
+                      />
+                      Replace an existing workspace file
+                    </label>
+                    {errors[download.id] ? (
+                      <p className="mt-1.5 break-words text-[10px] text-og-status-error">
+                        {errors[download.id]}
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
+              </li>
+            );
+          })}
+        </ol>
+      )}
+    </section>
+  );
+}
+
+function downloadStatusLabel(download: BrowserDownload): string {
+  if (download.status === "completed") return formatBytes(download.receivedBytes);
+  if (download.status === "in_progress") {
+    const received = formatBytes(download.receivedBytes);
+    return download.totalBytes === null
+      ? `Downloading · ${received}`
+      : `Downloading · ${received} of ${formatBytes(download.totalBytes)}`;
+  }
+  if (download.status === "cancelled") return "Cancelled";
+  if (download.status === "unavailable") return "No longer available";
+  return "Download failed";
+}
+
+function defaultDownloadDestination(download: BrowserDownload): string {
+  const leaf = download.filename.split(/[\\/]/u).at(-1)?.trim() ?? "";
+  const portable = leaf
+    .normalize("NFC")
+    .replace(/[<>:"|?*\u0000-\u001f\u007f]/gu, "-")
+    .replace(/[ .]+$/u, "");
+  if (portable.length === 0 || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(portable)) {
+    return `download-${download.id.slice(0, 8)}`;
+  }
+  return portable;
 }
 
 function DiagnosticFact(props: { label: string; value: string }) {

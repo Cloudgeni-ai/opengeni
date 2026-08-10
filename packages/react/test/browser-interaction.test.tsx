@@ -3,6 +3,7 @@ import { StreamFrame, StreamOpen, StreamOpenAck } from "@opengeni/agent-proto";
 import type {
   AttachedBrowserDevice,
   BrowserActionReceipt,
+  BrowserDownload,
   BrowserFrame,
   BrowserFrameMetadata,
   BrowserIdentity,
@@ -22,6 +23,7 @@ import type {
   BrowserFrameWebSocketFactory,
 } from "../src/hooks/use-browser-frame-stream";
 import { useBrowserFrameStream } from "../src/hooks/use-browser-frame-stream";
+import { useBrowserDownloads } from "../src/hooks/use-browser-downloads";
 import { useBrowserSession } from "../src/hooks/use-browser-session";
 import { useBrowserSessions } from "../src/hooks/use-browser-sessions";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
@@ -39,6 +41,25 @@ const BROWSER_IDENTITY_ID = "88888888-8888-4888-8888-888888888888";
 const BROWSER_REVISION_ID = "99999999-9999-4999-8999-999999999999";
 const COMPUTER_SESSION_ID = "abababab-abab-4bab-8bab-abababababab";
 const NOW = "2026-08-09T12:00:00.000Z";
+
+function browserDownload(overrides: Partial<BrowserDownload> = {}): BrowserDownload {
+  return {
+    id: "12121212-1212-4212-8212-121212121212",
+    browserSessionId: BROWSER_SESSION_ID,
+    controllerGeneration: "controller-1",
+    targetId: "target-1",
+    filename: "report.pdf",
+    status: "completed",
+    receivedBytes: 42_000,
+    totalBytes: 42_000,
+    sha256: "a".repeat(64),
+    version: 1,
+    startedAt: NOW,
+    settledAt: NOW,
+    failureCode: null,
+    ...overrides,
+  };
+}
 
 function attachedBrowserDevice(): AttachedBrowserDevice {
   return {
@@ -499,6 +520,65 @@ describe("BrowserSession React resources", () => {
     await hook.unmount();
   });
 
+  test("lists exact downloads and preserves one save operation across an ambiguous retry", async () => {
+    const download = browserDownload();
+    const operationIds: string[] = [];
+    let saveAttempts = 0;
+    const client = fakeClient({
+      listBrowserDownloads: async () => ({
+        browserSessionId: BROWSER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        downloads: [download],
+      }),
+      saveBrowserDownload: async (_workspaceId, _browserSessionId, _downloadId, request) => {
+        operationIds.push(request.operationId);
+        saveAttempts += 1;
+        if (saveAttempts === 1) throw new Error("connection closed after dispatch");
+        return {
+          download,
+          destinationPath: request.destinationPath,
+          fileId: "13131313-1313-4313-8313-131313131313",
+          operationId: request.operationId,
+          replayed: true,
+        };
+      },
+    });
+    const hook = await renderHook(
+      (enabled: boolean) =>
+        useBrowserDownloads({
+          client,
+          workspaceId: WORKSPACE_ID,
+          browserSessionId: BROWSER_SESSION_ID,
+          enabled,
+          pollIntervalMs: 60_000,
+        }),
+      true as boolean,
+    );
+    await flush(20);
+
+    expect(hook.result.current.downloads).toEqual([download]);
+    let firstError: unknown;
+    await actRun(async () => {
+      try {
+        await hook.result.current.saveToWorkspace(download.id, "reports/report.pdf");
+      } catch (cause) {
+        firstError = cause;
+      }
+    });
+    expect(firstError).toBeInstanceOf(Error);
+    await hook.rerender(false);
+    await hook.rerender(true);
+    await flush(20);
+    const response = await actRun(
+      async () => await hook.result.current.saveToWorkspace(download.id, "reports/report.pdf"),
+    );
+    expect(response.replayed).toBe(true);
+    expect(operationIds).toHaveLength(2);
+    expect(operationIds[0]).toBe(operationIds[1]);
+    expect(hook.result.current.savingDownloadIds).toEqual([]);
+    await hook.unmount();
+  });
+
   test("uses each completed action observation immediately for the next fence", async () => {
     const calls: Array<{
       targetId: string;
@@ -756,6 +836,8 @@ describe("BrowserViewer", () => {
   test("opens actionable runtime and page diagnostics without leaving the browser", async () => {
     const current = browserSession();
     const currentTarget = target();
+    const download = browserDownload();
+    const saves: unknown[] = [];
     const client = fakeClient({
       listBrowserSessions: async () => ({ revision: 1, sessions: [current] }),
       getBrowserSession: async () => current,
@@ -769,7 +851,7 @@ describe("BrowserViewer", () => {
         diagnostics: {
           consoleErrorCount: 1,
           failedRequestCount: 1,
-          downloadCount: 0,
+          downloadCount: 1,
           pageErrorCount: 0,
         },
       }),
@@ -795,6 +877,21 @@ describe("BrowserViewer", () => {
         cursor: 1,
         truncated: false,
       }),
+      listBrowserDownloads: async () => ({
+        browserSessionId: BROWSER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        downloads: [download],
+      }),
+      saveBrowserDownload: async (_workspaceId, browserSessionId, downloadId, request) => {
+        saves.push({ browserSessionId, downloadId, request });
+        return {
+          download,
+          destinationPath: request.destinationPath,
+          fileId: "13131313-1313-4313-8313-131313131313",
+          operationId: request.operationId,
+          replayed: false,
+        };
+      },
     });
     const rendered = await renderComponent(
       <BrowserViewer
@@ -821,6 +918,30 @@ describe("BrowserViewer", () => {
     expect(drawer?.textContent).toContain("Semantic page structure available");
     expect(drawer?.textContent).toContain("Request failed with status 503");
     expect(drawer?.textContent).toContain("GET · 503 · https://opengeni.ai/api/health");
+    expect(drawer?.textContent).toContain("report.pdf");
+
+    const destination = rendered.container.querySelector<HTMLInputElement>(
+      "input[aria-label='Workspace path for report.pdf']",
+    );
+    expect(destination).not.toBeNull();
+    await actRun(() => {
+      const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+      setValue?.call(destination, "reports/final.pdf");
+      destination!.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    });
+    const save = destination
+      ?.closest("li")
+      ?.querySelector<HTMLButtonElement>("button:not([disabled])");
+    expect(save?.textContent?.trim()).toBe("Save");
+    await actRun(() => save!.click());
+    await flush(10);
+    expect(saves).toHaveLength(1);
+    expect(saves[0]).toMatchObject({
+      browserSessionId: BROWSER_SESSION_ID,
+      downloadId: download.id,
+      request: { destinationPath: "reports/final.pdf", overwrite: false },
+    });
+    expect(drawer?.textContent).toContain("Saved");
 
     const close = rendered.container.querySelector<HTMLButtonElement>(
       "button[aria-label='Close browser diagnostics']",
@@ -828,6 +949,57 @@ describe("BrowserViewer", () => {
     expect(close).not.toBeNull();
     await actRun(() => close!.click());
     expect(rendered.container.querySelector("[aria-label='Browser diagnostics']")).toBeNull();
+    await rendered.unmount();
+  });
+
+  test("does not advertise or query downloads when the selected controller lacks them", async () => {
+    const current = browserSession();
+    current.capabilities = { ...current.capabilities, downloads: false };
+    const currentTarget = target();
+    let downloadQueries = 0;
+    const client = fakeClient({
+      listBrowserSessions: async () => ({ revision: 1, sessions: [current] }),
+      getBrowserSession: async () => current,
+      listBrowserTargets: async () => ({
+        browserSessionId: BROWSER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        targets: [currentTarget],
+      }),
+      observeBrowserTarget: async () => observation(BROWSER_SESSION_ID, currentTarget),
+      attachBrowserSession: async () => attachment(currentTarget.id),
+      listBrowserDiagnostics: async () => ({
+        browserSessionId: BROWSER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        targetId: currentTarget.id,
+        targetGeneration: currentTarget.targetGeneration,
+        entries: [],
+        cursor: 0,
+        truncated: false,
+      }),
+      listBrowserDownloads: async () => {
+        downloadQueries += 1;
+        throw new Error("unsupported");
+      },
+    });
+    const rendered = await renderComponent(
+      <BrowserViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        webSocketFactory={(url, protocols) =>
+          new FakeBrowserSocket(url, protocols) as unknown as BrowserFrameWebSocket
+        }
+      />,
+    );
+    await flush(30);
+    const debug = rendered.container.querySelector<HTMLButtonElement>(
+      "button[aria-controls='browser-diagnostics-drawer']",
+    );
+    await actRun(() => debug!.click());
+    await flush(10);
+
+    expect(rendered.container.querySelector("#browser-downloads-title")).toBeNull();
+    expect(downloadQueries).toBe(0);
     await rendered.unmount();
   });
 

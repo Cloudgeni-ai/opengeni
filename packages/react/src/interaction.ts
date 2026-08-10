@@ -61,6 +61,13 @@ export type {
   UseBrowserSessionOptions,
   UseBrowserSessionResult,
 } from "./hooks/use-browser-session";
+export { useBrowserDownloads } from "./hooks/use-browser-downloads";
+export type {
+  BrowserDownloadsClient,
+  BrowserDownloadSaveOptions,
+  UseBrowserDownloadsOptions,
+  UseBrowserDownloadsResult,
+} from "./hooks/use-browser-downloads";
 export { useBrowserFrameStream } from "./hooks/use-browser-frame-stream";
 export type {
   BrowserFrameConnectionState,

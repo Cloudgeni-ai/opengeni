@@ -589,6 +589,9 @@
 :where(.og-root).bottom-4,:where(.og-root) .bottom-4 {
     bottom: calc(var(--spacing) * 4);
   }
+:where(.og-root).bottom-7,:where(.og-root) .bottom-7 {
+    bottom: calc(var(--spacing) * 7);
+  }
 :where(.og-root).bottom-14,:where(.og-root) .bottom-14 {
     bottom: calc(var(--spacing) * 14);
   }
@@ -1364,6 +1367,9 @@
 :where(.og-root).grid-cols-2,:where(.og-root) .grid-cols-2 {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+:where(.og-root).grid-cols-\[7rem_minmax\(0\,1fr\)\],:where(.og-root) .grid-cols-\[7rem_minmax\(0\,1fr\)\] {
+    grid-template-columns: 7rem minmax(0,1fr);
+  }
 :where(.og-root).grid-cols-\[auto_minmax\(0\,1fr\)\],:where(.og-root) .grid-cols-\[auto_minmax\(0\,1fr\)\] {
     grid-template-columns: auto minmax(0,1fr);
   }
@@ -1501,6 +1507,9 @@
   }
 :where(.og-root).gap-y-0\.5,:where(.og-root) .gap-y-0\.5 {
     row-gap: calc(var(--spacing) * 0.5);
+  }
+:where(.og-root).gap-y-1\.5,:where(.og-root) .gap-y-1\.5 {
+    row-gap: calc(var(--spacing) * 1.5);
   }
 :where(.og-root).gap-y-2,:where(.og-root) .gap-y-2 {
     row-gap: calc(var(--spacing) * 2);
@@ -2348,6 +2357,12 @@
 :where(.og-root).py-3,:where(.og-root) .py-3 {
     padding-block: calc(var(--spacing) * 3);
   }
+:where(.og-root).py-4,:where(.og-root) .py-4 {
+    padding-block: calc(var(--spacing) * 4);
+  }
+:where(.og-root).py-5,:where(.og-root) .py-5 {
+    padding-block: calc(var(--spacing) * 5);
+  }
 :where(.og-root).py-6,:where(.og-root) .py-6 {
     padding-block: calc(var(--spacing) * 6);
   }
@@ -2567,6 +2582,10 @@
 :where(.og-root).tracking-\[0\.12em\],:where(.og-root) .tracking-\[0\.12em\] {
     --tw-tracking: 0.12em;
     letter-spacing: 0.12em;
+  }
+:where(.og-root).tracking-\[0\.14em\],:where(.og-root) .tracking-\[0\.14em\] {
+    --tw-tracking: 0.14em;
+    letter-spacing: 0.14em;
   }
 :where(.og-root).tracking-\[0\.25em\],:where(.og-root) .tracking-\[0\.25em\] {
     --tw-tracking: 0.25em;
@@ -3037,6 +3056,10 @@
 :where(.og-root).ease-out,:where(.og-root) .ease-out {
     --tw-ease: var(--ease-out);
     transition-timing-function: var(--ease-out);
+  }
+:where(.og-root).outline-none,:where(.og-root) .outline-none {
+    --tw-outline-style: none;
+    outline-style: none;
   }
 :where(.og-root).select-all,:where(.og-root) .select-all {
     -webkit-user-select: all;

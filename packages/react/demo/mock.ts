@@ -23,6 +23,10 @@ import type {
   BrowserActionRequest,
   BrowserDiagnosticBatch,
   BrowserDiagnosticsOptions,
+  BrowserDownload,
+  BrowserDownloadListResponse,
+  BrowserDownloadSaveRequest,
+  BrowserDownloadSaveResponse,
   BrowserIdentity,
   BrowserIdentityListOptions,
   BrowserIdentityListResponse,
@@ -166,6 +170,7 @@ export const MANAGER_SESSION_ID = "3f6e1a2b-4c5d-4e6f-8a9b-0c1d2e3f4a5b";
 const WORKER_SESSION_ID = "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d";
 export const DEMO_BROWSER_SESSION_ID = "81000000-0000-4000-8000-000000000001";
 export const DEMO_BROWSER_TARGET_ID = "82000000-0000-4000-8000-000000000001";
+export const DEMO_BROWSER_DOWNLOAD_ID = "82000000-0000-4000-8000-000000000002";
 export const DEMO_BROWSER_IDENTITY_ID = "83000000-0000-4000-8000-000000000001";
 export const DEMO_COMPUTER_SESSION_ID = "84000000-0000-4000-8000-000000000001";
 export const DEMO_COMPUTER_WINDOW_ID = "85000000-0000-4000-8000-000000000001";
@@ -270,6 +275,9 @@ export class MockOpenGeniClient implements SessionClientLike {
   ]);
   private browserTargets = new Map<string, BrowserTarget[]>([
     [DEMO_BROWSER_SESSION_ID, [fabricateBrowserTarget(DEMO_BROWSER_SESSION_ID)]],
+  ]);
+  private browserDownloads = new Map<string, BrowserDownload[]>([
+    [DEMO_BROWSER_SESSION_ID, [fabricateBrowserDownload(DEMO_BROWSER_SESSION_ID)]],
   ]);
   private computerRevision = 1;
   private computerSessions = new Map<string, ComputerSession>([
@@ -1999,6 +2007,47 @@ export class MockOpenGeniClient implements SessionClientLike {
     return session;
   }
 
+  async listBrowserDownloads(
+    _workspaceId: string,
+    browserSessionId: string,
+  ): Promise<BrowserDownloadListResponse> {
+    const session = await this.getBrowserSession(WORKSPACE_ID, browserSessionId);
+    return {
+      browserSessionId,
+      controllerGeneration: requireDemoBrowserController(session).controllerGeneration,
+      downloads: [...(this.browserDownloads.get(browserSessionId) ?? [])],
+    };
+  }
+
+  async getBrowserDownload(
+    _workspaceId: string,
+    browserSessionId: string,
+    downloadId: string,
+  ): Promise<BrowserDownload> {
+    const download = (this.browserDownloads.get(browserSessionId) ?? []).find(
+      (candidate) => candidate.id === downloadId,
+    );
+    if (!download) throw new Error("BrowserDownload not found");
+    return download;
+  }
+
+  async saveBrowserDownload(
+    _workspaceId: string,
+    browserSessionId: string,
+    downloadId: string,
+    request: BrowserDownloadSaveRequest,
+  ): Promise<BrowserDownloadSaveResponse> {
+    const download = await this.getBrowserDownload(WORKSPACE_ID, browserSessionId, downloadId);
+    if (download.status !== "completed") throw new Error("BrowserDownload is not complete");
+    return {
+      download,
+      destinationPath: request.destinationPath,
+      fileId: demoUuid(),
+      operationId: request.operationId,
+      replayed: false,
+    };
+  }
+
   async createBrowserSession(
     _workspaceId: string,
     request: CreateBrowserSessionRequest,
@@ -2023,6 +2072,7 @@ export class MockOpenGeniClient implements SessionClientLike {
     });
     this.browserSessions.set(id, session);
     this.browserTargets.set(id, [target]);
+    this.browserDownloads.set(id, []);
     this.browserRevision += 1;
     return {
       session,
@@ -2101,7 +2151,10 @@ export class MockOpenGeniClient implements SessionClientLike {
       (candidate) => candidate.id === targetId,
     );
     if (!target) throw new Error("Browser target not found");
-    return fabricateBrowserObservation(target);
+    return fabricateBrowserObservation(
+      target,
+      this.browserDownloads.get(browserSessionId)?.length ?? 0,
+    );
   }
 
   async actInBrowser(
@@ -2138,7 +2191,10 @@ export class MockOpenGeniClient implements SessionClientLike {
       state: "completed",
       dispatchedAt: now,
       settledAt: now,
-      observation: fabricateBrowserObservation(target),
+      observation: fabricateBrowserObservation(
+        target,
+        this.browserDownloads.get(browserSessionId)?.length ?? 0,
+      ),
       error: null,
     };
   }
@@ -2286,6 +2342,7 @@ export class MockOpenGeniClient implements SessionClientLike {
         controllerGeneration,
       })),
     );
+    this.browserDownloads.set(browserSessionId, []);
     this.browserRevision += 1;
     return {
       session,
@@ -2305,6 +2362,7 @@ export class MockOpenGeniClient implements SessionClientLike {
       lastUsedAt: new Date().toISOString(),
     };
     this.browserSessions.set(browserSessionId, session);
+    this.browserDownloads.delete(browserSessionId);
     this.browserRevision += 1;
     return {
       session,
@@ -3230,7 +3288,26 @@ function fabricateBrowserTarget(
   };
 }
 
-function fabricateBrowserObservation(target: BrowserTarget): BrowserObservation {
+function fabricateBrowserDownload(browserSessionId: string): BrowserDownload {
+  const now = new Date().toISOString();
+  return {
+    id: DEMO_BROWSER_DOWNLOAD_ID,
+    browserSessionId,
+    controllerGeneration: "demo-controller-1",
+    targetId: DEMO_BROWSER_TARGET_ID,
+    filename: "browser-report.pdf",
+    status: "completed",
+    receivedBytes: 184_320,
+    totalBytes: 184_320,
+    sha256: "d".repeat(64),
+    version: 1,
+    startedAt: now,
+    settledAt: now,
+    failureCode: null,
+  };
+}
+
+function fabricateBrowserObservation(target: BrowserTarget, downloadCount = 0): BrowserObservation {
   return {
     protocolVersion: 1,
     observationId: `demo-observation-${Date.now()}`,
@@ -3265,7 +3342,7 @@ function fabricateBrowserObservation(target: BrowserTarget): BrowserObservation 
     diagnostics: {
       consoleErrorCount: 0,
       failedRequestCount: 0,
-      downloadCount: 0,
+      downloadCount,
       pageErrorCount: 0,
     },
     dialog: null,
