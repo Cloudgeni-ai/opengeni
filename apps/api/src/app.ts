@@ -1257,6 +1257,10 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
     label: "/v1/workspaces/:workspaceId/connections/oauth/start",
   },
   {
+    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/oauth\/start$/,
+    label: "/v1/workspaces/:workspaceId/integrations/oauth/start",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/connections\/slack-bot\/install$/,
     label: "/v1/workspaces/:workspaceId/connections/slack-bot/install",
   },
@@ -1268,6 +1272,10 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   {
     pattern: /^\/v1\/integrations\/oauth\/callback$/,
     label: "/v1/integrations/oauth/callback",
+  },
+  {
+    pattern: /^\/v1\/integrations\/provider-oauth\/callback$/,
+    label: "/v1/integrations/provider-oauth/callback",
   },
   {
     pattern: /^\/v1\/integrations\/oauth\/client-metadata\.json$/,

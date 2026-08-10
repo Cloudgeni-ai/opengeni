@@ -3642,6 +3642,15 @@ export type UpdateConnectionInput = {
   updatedBySubjectId?: string | null;
 };
 
+export type PersistProviderOAuthConnectionInput = CreateConnectionInput & {
+  visibleToSubjectId: string;
+  credentialRole: string;
+  providerFamily: string;
+  providerPrincipalId: string;
+  requestedConnectionId?: string;
+  requestedConnectionVersion?: number;
+};
+
 export type UpdateSlackBotDocumentDestinationInput = {
   accountId: string;
   workspaceId: string;
@@ -6986,6 +6995,127 @@ export async function createConnection(
         await setSubjectRlsContext(scopedDb, input.subjectId);
       }
       return await createConnectionInScope(scopedDb, input);
+    },
+  );
+}
+
+/**
+ * Serialize one provider-principal/owner connection generation. Distinct OAuth
+ * starts for the same principal converge on one row, while an explicit
+ * reconnect remains fenced to the exact Connection version captured in state.
+ */
+export async function persistProviderOAuthConnection(
+  db: Database,
+  input: PersistProviderOAuthConnectionInput,
+): Promise<ConnectionMetadataWithVerification | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      if (input.subjectId) {
+        await setSubjectRlsContext(scopedDb, input.subjectId);
+      }
+      return await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        const ownerKey = input.subjectId ?? "workspace";
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${`provider-oauth-connection:${input.workspaceId}:${ownerKey}:${input.providerDomain}:${input.providerFamily}:${input.providerPrincipalId}`}, 0))`,
+        );
+        const exactOwner = connectionExactSubject(input.subjectId ?? null);
+        const requested = input.requestedConnectionId
+          ? (
+              await tx
+                .select(connectionMetadataColumns)
+                .from(schema.connections)
+                .where(
+                  and(
+                    eq(schema.connections.workspaceId, input.workspaceId),
+                    eq(schema.connections.id, input.requestedConnectionId),
+                    exactOwner,
+                  ),
+                )
+                .for("update")
+                .limit(1)
+            )[0]
+          : null;
+        if (
+          input.requestedConnectionId &&
+          (!requested ||
+            requested.version !== input.requestedConnectionVersion ||
+            requested.providerDomain !== input.providerDomain ||
+            requested.kind !== "oauth2" ||
+            requested.metadata.credentialRole !== input.credentialRole ||
+            requested.metadata.providerFamily !== input.providerFamily ||
+            requested.metadata.providerPrincipalId !== input.providerPrincipalId)
+        ) {
+          return null;
+        }
+        const existing =
+          requested ??
+          (
+            await tx
+              .select(connectionMetadataColumns)
+              .from(schema.connections)
+              .where(
+                and(
+                  eq(schema.connections.workspaceId, input.workspaceId),
+                  exactOwner,
+                  eq(schema.connections.providerDomain, input.providerDomain),
+                  eq(schema.connections.kind, "oauth2"),
+                  sql`${schema.connections.metadata} ->> 'credentialRole' = ${input.credentialRole}`,
+                  sql`${schema.connections.metadata} ->> 'providerFamily' = ${input.providerFamily}`,
+                  sql`${schema.connections.metadata} ->> 'providerPrincipalId' = ${input.providerPrincipalId}`,
+                ),
+              )
+              .orderBy(desc(schema.connections.updatedAt), desc(schema.connections.id))
+              .for("update")
+              .limit(1)
+          )[0];
+        if (!existing) {
+          return await createConnectionInScope(tx, input);
+        }
+        if (
+          !input.requestedConnectionId &&
+          existing.grantedScopes.some((scope) => !(input.grantedScopes ?? []).includes(scope))
+        ) {
+          return null;
+        }
+        const existingPresetIds = Array.isArray(existing.metadata.authorizedPresetIds)
+          ? existing.metadata.authorizedPresetIds.filter(
+              (value): value is string => typeof value === "string",
+            )
+          : [];
+        const incomingPresetIds = Array.isArray(input.metadata?.authorizedPresetIds)
+          ? input.metadata.authorizedPresetIds.filter(
+              (value): value is string => typeof value === "string",
+            )
+          : [];
+        return await updateConnectionInScope(tx, {
+          workspaceId: input.workspaceId,
+          connectionId: existing.id,
+          visibleToSubjectId: input.visibleToSubjectId,
+          expectedVersion: existing.version,
+          subjectId: input.subjectId ?? null,
+          providerDomain: input.providerDomain,
+          kind: "oauth2",
+          status: input.status ?? "active",
+          credentialEncrypted: input.credentialEncrypted,
+          grantedScopes: input.grantedScopes ?? [],
+          expiresAt: input.expiresAt ?? null,
+          metadata: {
+            ...existing.metadata,
+            ...(input.metadata ?? {}),
+            ...(existingPresetIds.length > 0 || incomingPresetIds.length > 0
+              ? {
+                  authorizedPresetIds: [
+                    ...new Set([...existingPresetIds, ...incomingPresetIds]),
+                  ].sort(),
+                }
+              : {}),
+          },
+          updatedBySubjectId: input.updatedBySubjectId ?? input.createdBySubjectId ?? null,
+        });
+      });
     },
   );
 }

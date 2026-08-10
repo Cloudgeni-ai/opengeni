@@ -42,6 +42,7 @@ import type {
   CapabilityCatalogResponse,
   CapabilityInstallation,
   ApiIntegrationPreview,
+  ApiIntegrationOAuthStartRequest,
   ApiIntegrationUninstallPreview,
   InstallApiIntegrationRequest,
   InstalledApiIntegration,
@@ -3638,6 +3639,18 @@ export class OpenGeniClient {
     return await this.requestJson<ApiIntegrationPreview>(
       "POST",
       `/v1/workspaces/${workspaceId}/integrations/preview`,
+      request,
+    );
+  }
+
+  /** Start a signed PKCE OAuth flow for a built-in Google or Microsoft preset. */
+  async startApiIntegrationOAuth(
+    workspaceId: string,
+    request: ApiIntegrationOAuthStartRequest,
+  ): Promise<OAuthStartResponse> {
+    return await this.requestJson<OAuthStartResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/integrations/oauth/start`,
       request,
     );
   }

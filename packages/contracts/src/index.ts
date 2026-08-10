@@ -7032,6 +7032,33 @@ export const PreviewApiIntegrationRequest = z
   .strict();
 export type PreviewApiIntegrationRequest = z.infer<typeof PreviewApiIntegrationRequest>;
 
+export const ApiIntegrationOAuthStartRequest = z
+  .object({
+    presetId: z.string().min(1).max(128),
+    ownership: ConnectionOwnership.optional(),
+    connectionId: z.string().uuid().optional(),
+    returnPath: z.string().min(1).max(2048).optional(),
+  })
+  .strict();
+export type ApiIntegrationOAuthStartRequest = z.infer<typeof ApiIntegrationOAuthStartRequest>;
+
+export const API_INTEGRATION_OAUTH_CREDENTIAL_ROLE = "api_integration_oauth" as const;
+
+export const ApiIntegrationOAuthConnectionMetadata = z
+  .object({
+    credentialRole: z.literal(API_INTEGRATION_OAUTH_CREDENTIAL_ROLE),
+    providerFamily: z.enum(["google", "microsoft"]),
+    providerPrincipalId: z.string().min(1).max(512),
+    providerEmail: z.string().min(1).max(512).nullable(),
+    providerDisplayName: z.string().min(1).max(512).nullable(),
+    authorizedPresetIds: z.array(z.string().min(1).max(128)).min(1).max(32),
+    verifiedAt: z.string().datetime({ offset: true }),
+  })
+  .passthrough();
+export type ApiIntegrationOAuthConnectionMetadata = z.infer<
+  typeof ApiIntegrationOAuthConnectionMetadata
+>;
+
 export const ApiIntegrationAuthPreview = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("none") }).strict(),
   z

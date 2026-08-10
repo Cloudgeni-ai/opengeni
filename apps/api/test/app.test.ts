@@ -524,6 +524,12 @@ describe("API helpers", () => {
     expect(routeLabel(`/v1/workspaces/${workspace}/capabilities/mcp%3Aexample/disable`)).toBe(
       "/v1/workspaces/:workspaceId/capabilities/:id/disable",
     );
+    expect(routeLabel(`/v1/workspaces/${workspace}/integrations/oauth/start`)).toBe(
+      "/v1/workspaces/:workspaceId/integrations/oauth/start",
+    );
+    expect(routeLabel("/v1/integrations/provider-oauth/callback")).toBe(
+      "/v1/integrations/provider-oauth/callback",
+    );
     expect(
       routeLabel(`/v1/workspaces/${workspace}/packs/marketing-social-daily-analysis/enable`),
     ).toBe("/v1/workspaces/:workspaceId/packs/:id/enable");

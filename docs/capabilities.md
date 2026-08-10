@@ -95,6 +95,21 @@ remote MCP transport. Duplicate destinations, forbidden transport headers,
 cookie injection, control characters, and oversized values are rejected before
 the request URL or headers are mutated.
 
+Google and Microsoft presets use a dedicated signed PKCE flow:
+
+- `POST /v1/workspaces/:workspaceId/integrations/oauth/start`
+- `GET /v1/integrations/provider-oauth/callback`
+
+The start request names the preset and ownership and may name an existing
+Connection for reconnect/incremental consent. Google can reuse the deployment's
+Google Drive OAuth app; Microsoft and alternate Google clients are selected
+from `OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON` by authorization-server URL.
+Callbacks consume single-use state, recheck `connections:write`, verify the
+provider principal, require every preset scope, preserve an existing refresh
+token when the provider omits a replacement, and CAS-update or duplicate-safe
+create the normal encrypted Connection. Emulator-backed tests are merge proof;
+provider-live consent remains a separately labeled operational check.
+
 The normalized v2 rows store the protocol-compiled revision, tools, integration
 and API facets, facet installations, and owners under FORCE RLS. Compatibility
 catalog/install rows are dual-written while existing clients migrate, but they

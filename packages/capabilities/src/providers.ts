@@ -18,7 +18,7 @@ export interface OpenApiProviderPreset {
   readonly family: "google" | "microsoft";
   readonly sourceFormat: "google-discovery" | "openapi";
   readonly sourceUrl: string;
-  readonly baseUrl?: string;
+  readonly baseUrl: string;
   readonly oauth: OAuthProviderPreset;
   readonly pathPrefixes?: readonly string[];
   readonly healthOperation?: string;
@@ -42,6 +42,7 @@ export const GOOGLE_DRIVE_PRESET: OpenApiProviderPreset = {
   family: "google",
   sourceFormat: "google-discovery",
   sourceUrl: googleDiscoveryUrl("drive", "v3"),
+  baseUrl: "https://www.googleapis.com/drive/v3/",
   oauth: googleOAuth(["https://www.googleapis.com/auth/drive"]),
   healthOperation: "drive.about.get",
   healthArgs: { query: { fields: "user" } },
@@ -54,6 +55,7 @@ export const GOOGLE_GMAIL_PRESET: OpenApiProviderPreset = {
   family: "google",
   sourceFormat: "google-discovery",
   sourceUrl: googleDiscoveryUrl("gmail", "v1"),
+  baseUrl: "https://gmail.googleapis.com/",
   oauth: googleOAuth(["https://mail.google.com/"]),
   healthOperation: "gmail.users.labels.list",
   healthArgs: { path: { userId: "me" } },
@@ -145,6 +147,10 @@ export const CORE_PROVIDER_PRESETS: readonly OpenApiProviderPreset[] = [
 
 export function providerPresetById(id: string): OpenApiProviderPreset | undefined {
   return CORE_PROVIDER_PRESETS.find((preset) => preset.id === id);
+}
+
+export function providerDomainForPreset(preset: OpenApiProviderPreset): string {
+  return new URL(preset.baseUrl).hostname.toLowerCase();
 }
 
 export function filterOpenApiDocumentForPreset(

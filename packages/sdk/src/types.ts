@@ -4345,6 +4345,13 @@ export type PreviewApiIntegrationRequest = {
   ownership?: ConnectionOwnership | undefined;
 };
 
+export type ApiIntegrationOAuthStartRequest = {
+  presetId: string;
+  ownership?: ConnectionOwnership | undefined;
+  connectionId?: string | undefined;
+  returnPath?: string | undefined;
+};
+
 export type ApiIntegrationAuthPreview =
   | { kind: "none" }
   | { kind: "oauth2"; providerDomain: string; scopes: string[] }

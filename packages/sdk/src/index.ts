@@ -731,6 +731,7 @@ export type {
   ApiIntegrationAuthPreview,
   ApiIntegrationInstallationSummary,
   ApiIntegrationPreview,
+  ApiIntegrationOAuthStartRequest,
   ApiIntegrationProtocol,
   ApiIntegrationSource,
   ApiIntegrationToolPreview,
