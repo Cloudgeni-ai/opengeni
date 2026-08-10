@@ -39,6 +39,13 @@ compact self-hosted cluster:
 | Alertmanager | 2 GiB | 120 hours |
 | Grafana | 2 GiB | persistent database and plugins |
 
+The compact profile filters metrics at ingestion, retaining every signal used
+by the pinned Kubernetes mixin and OpenGeni dashboards/rules while excluding
+unused modern Go runtime fanout and redundant zero-valued pod reasons. Validate
+the live target mix with `bun run bench:observability-series -- --prometheus-url
+<url> --check`; the guard requires at least a 4x instantaneous series reduction
+and treats TSDB head series as diagnostic because they include stale data.
+
 `values.production.example.yaml` raises Prometheus to 50 GiB/15 days, Grafana
 to 5 GiB, Alertmanager to 5 GiB, and requires an existing
 `opengeni-grafana-admin` Secret. It is a capacity and credential example, not a

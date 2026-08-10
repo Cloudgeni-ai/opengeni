@@ -2,6 +2,7 @@ type CommandResult = {
   exitCode: number;
   stdout: string;
   stderr: string;
+  timedOut?: boolean;
 };
 
 type Run = (argv: string[]) => Promise<CommandResult>;
@@ -25,6 +26,9 @@ export async function resolveOptionalOciManifest(
     "--format",
     "{{json .Manifest}}",
   ]);
+  if (result.timedOut) {
+    throw new Error(`OCI manifest lookup timed out for ${reference}`);
+  }
   if (result.exitCode === 0) {
     let digest: unknown;
     try {
@@ -50,17 +54,40 @@ export async function resolveOptionalOciManifest(
 }
 
 async function runCommand(argv: string[]): Promise<CommandResult> {
+  const useProcessGroup = process.platform !== "win32";
   const child = Bun.spawn(argv, {
+    detached: useProcessGroup,
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
   });
-  const [exitCode, stdout, stderr] = await Promise.all([
-    child.exited,
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-  ]);
-  return { exitCode, stdout, stderr };
+  let timedOut = false;
+  const terminate = (signal: NodeJS.Signals): void => {
+    try {
+      if (useProcessGroup) process.kill(-child.pid, signal);
+      else child.kill(signal);
+    } catch {
+      // A concurrent normal exit wins the race with timeout cleanup.
+    }
+  };
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    terminate("SIGTERM");
+  }, 30_000);
+  const force = setTimeout(() => {
+    if (timedOut) terminate("SIGKILL");
+  }, 32_000);
+  try {
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    return { exitCode, stdout, stderr, timedOut };
+  } finally {
+    clearTimeout(timeout);
+    clearTimeout(force);
+  }
 }
 
 if (import.meta.main) {
