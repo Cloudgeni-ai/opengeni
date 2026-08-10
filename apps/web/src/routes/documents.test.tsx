@@ -62,24 +62,18 @@ const listDocuments = mock(async (_workspaceId: string, _baseId: string) => []);
 const uploadFile = mock(async (_workspaceId: string, _request: unknown) => ({
   id: "44444444-4444-4444-8444-444444444444",
 }));
-const addDocument = mock(
-  async (
-    _workspaceId: string,
-    _baseId: string,
-    request: { authorityKind?: DocumentAuthorityKind },
-  ) => indexedDocument(request.authorityKind ?? "workspace"),
-);
 const createKnowledgeDrop = mock(
   async (_workspaceId: string, request: { authorityKind?: DocumentAuthorityKind }) =>
     indexedDocument(request.authorityKind ?? "workspace"),
 );
+const searchKnowledge = mock(async () => ({ results: [] }));
 const context = {
   client: {
     listDocumentBases,
     listDocuments,
     uploadFile,
-    addDocument,
     createKnowledgeDrop,
+    searchKnowledge,
   },
   clientConfig: { fileUploads: { enabled: true, maxSizeBytes: 10_000_000 } },
 };
@@ -93,7 +87,6 @@ const {
   DOCUMENT_AUTHORITY_OPTIONS,
   DocumentsRoute,
   documentAuthorityLabel,
-  resolveDocumentCollectionSelection,
 } = await import("./documents");
 
 beforeAll(() => {
@@ -112,8 +105,8 @@ beforeEach(() => {
   listDocumentBases.mockClear();
   listDocuments.mockClear();
   uploadFile.mockClear();
-  addDocument.mockClear();
   createKnowledgeDrop.mockClear();
+  searchKnowledge.mockClear();
 });
 
 async function settleRoute(): Promise<void> {
@@ -139,6 +132,17 @@ function setControlledTextarea(textarea: HTMLTextAreaElement, value: string): vo
   onChange!({ target: textarea });
 }
 
+function setControlledInput(input: HTMLInputElement, value: string): void {
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
+  const reactPropsKey = Object.keys(input).find((key) => key.startsWith("__reactProps$"));
+  expect(reactPropsKey).toBeDefined();
+  const onChange = (
+    input as unknown as Record<string, { onChange?: (event: { target: HTMLInputElement }) => void }>
+  )[reactPropsKey!]!.onChange;
+  expect(typeof onChange).toBe("function");
+  onChange!({ target: input });
+}
+
 function fireFileDrop(target: HTMLElement, files: File[]): void {
   const fileList = {
     ...files,
@@ -154,7 +158,7 @@ function fireFileDrop(target: HTMLElement, files: File[]): void {
   target.dispatchEvent(event);
 }
 
-describe("Documents Default collection UX", () => {
+describe("Documents scope-first UX", () => {
   test("uses the fixed authority labels, mappings, and workspace-safe default", () => {
     expect(DOCUMENT_AUTHORITY_OPTIONS).toEqual([
       { value: "organization", label: "Company" },
@@ -167,19 +171,7 @@ describe("Documents Default collection UX", () => {
     expect(documentAuthorityLabel("personal")).toBe("Only me");
   });
 
-  test("keeps valid choices and recovers missing choices to Default", () => {
-    expect(resolveDocumentCollectionSelection(customBase.id, [customBase, defaultBase])).toBe(
-      customBase.id,
-    );
-    expect(resolveDocumentCollectionSelection(null, [customBase, defaultBase])).toBe(
-      defaultBase.id,
-    );
-    expect(
-      resolveDocumentCollectionSelection("deleted-collection", [customBase, defaultBase]),
-    ).toBe(defaultBase.id);
-  });
-
-  test("renders upload as the primary empty-state action without a create-base gate", async () => {
+  test("shows one upload surface and keeps internal collections out of the UI", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -192,11 +184,14 @@ describe("Documents Default collection UX", () => {
       await settleRoute();
 
       expect(listDocuments).toHaveBeenCalledWith("workspace-a", defaultBase.id);
+      expect(listDocuments).toHaveBeenCalledWith("workspace-a", customBase.id);
       expect(container.textContent).toContain(
         "Add information agents can find when it is relevant",
       );
       expect(container.textContent).toContain("Add knowledge");
-      expect(container.textContent).toContain("Collections (optional)");
+      expect(container.textContent).not.toContain("Collections");
+      expect(container.textContent).not.toContain("Create collection");
+      expect(container.textContent).not.toContain("Add files to collection");
       expect(container.textContent).not.toContain("Advanced access");
       expect(container.textContent).not.toContain("ACL tags");
       expect(container.textContent).not.toContain("Search filters");
@@ -223,7 +218,7 @@ describe("Documents Default collection UX", () => {
     }
   });
 
-  test("propagates the selected authority through uploads and text/file drops", async () => {
+  test("propagates the selected authority through text and file ingestion", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -243,20 +238,19 @@ describe("Documents Default collection UX", () => {
         dropAuthority.dispatchEvent(new Event("change", { bubbles: true }));
       });
 
-      const ordinaryUpload = container.querySelector<HTMLInputElement>(
-        '[aria-label="Upload documents to selected collection"]',
+      const fileUpload = container.querySelector<HTMLInputElement>(
+        '[aria-label="Add files as a knowledge drop"]',
       )!;
       const upload = new File(["company"], "company.txt", { type: "text/plain" });
-      Object.defineProperty(ordinaryUpload, "files", { configurable: true, value: [upload] });
+      Object.defineProperty(fileUpload, "files", { configurable: true, value: [upload] });
       await act(async () => {
-        ordinaryUpload.dispatchEvent(new Event("change", { bubbles: true }));
+        fileUpload.dispatchEvent(new Event("change", { bubbles: true }));
         await Promise.resolve();
       });
       await settleRoute();
 
-      expect(addDocument).toHaveBeenCalledWith(
+      expect(createKnowledgeDrop).toHaveBeenCalledWith(
         "workspace-a",
-        defaultBase.id,
         expect.objectContaining({
           fileId: "44444444-4444-4444-8444-444444444444",
           authorityKind: "organization",
@@ -307,6 +301,42 @@ describe("Documents Default collection UX", () => {
           agentAccess: true,
         }),
       ]);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("searches all effective knowledge without a collection filter", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(<DocumentsRoute workspaceId="workspace-a" />);
+        await Promise.resolve();
+      });
+      await settleRoute();
+
+      const query = container.querySelector<HTMLInputElement>(
+        '[aria-label="Search indexed documents"]',
+      )!;
+      await act(async () => setControlledInput(query, "company policy"));
+      const search = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent?.trim() === "Search",
+      )!;
+      await act(async () => {
+        search.click();
+        await Promise.resolve();
+      });
+      await settleRoute();
+
+      expect(searchKnowledge).toHaveBeenCalledWith("workspace-a", {
+        query: "company policy",
+        limit: 8,
+        mode: "hybrid",
+      });
     } finally {
       await act(async () => root.unmount());
       container.remove();

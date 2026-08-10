@@ -1,14 +1,11 @@
-// Documents: immediate upload into an internal Default collection, with
-// optional collections for organization, reindex, and semantic search — all
-// through the SDK client.
+// Documents: one scope-first surface over the internal document store. Storage
+// collections remain an implementation detail; users add knowledge, choose who
+// it belongs to, and search everything they are authorized to access.
 import {
   ArrowLeftIcon,
-  BotOffIcon,
   FileSearchIcon,
   FilesIcon,
-  FolderInputIcon,
   Loader2Icon,
-  LockIcon,
   PlusIcon,
   RefreshCwIcon,
   SparklesIcon,
@@ -19,7 +16,7 @@ import { toast } from "sonner";
 
 import { LoadErrorState, PageHeader } from "@/components/common";
 import { Button } from "@/components/ui/button";
-import { ContentPage, FormField } from "@/components/ui/content-layout";
+import { ContentPage } from "@/components/ui/content-layout";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { Notice } from "@/components/ui/notice";
@@ -50,20 +47,6 @@ export function documentAuthorityLabel(kind: DocumentAuthorityKind): string {
   return DOCUMENT_AUTHORITY_OPTIONS.find((option) => option.value === kind)?.label ?? kind;
 }
 
-export function isDefaultDocumentCollection(base: Pick<DocumentBase, "name">): boolean {
-  return base.name.trim().toLowerCase() === "default";
-}
-
-export function resolveDocumentCollectionSelection(
-  currentId: string | null,
-  bases: DocumentBase[],
-): string | null {
-  if (currentId && bases.some((base) => base.id === currentId)) {
-    return currentId;
-  }
-  return bases.find(isDefaultDocumentCollection)?.id ?? bases[0]?.id ?? null;
-}
-
 export function DocumentsRoute({
   workspaceId,
   returnToBrain = false,
@@ -78,21 +61,16 @@ export function DocumentsRoute({
   const [bases, setBases] = useState<DocumentBase[]>([]);
   const [basesLoading, setBasesLoading] = useState(true);
   const [basesError, setBasesError] = useState<Error | null>(null);
-  const [selectedBaseId, setSelectedBaseId] = useState<string | null>(null);
   const [documents, setDocuments] = useState<IndexedDocument[]>([]);
   const [documentsLoading, setDocumentsLoading] = useState(false);
   const [documentsError, setDocumentsError] = useState<Error | null>(null);
   const [results, setResults] = useState<DocumentSearchResult[]>([]);
-  const [name, setName] = useState("");
   const [query, setQuery] = useState("");
   const [dropText, setDropText] = useState("");
   const [dropAuthorityKind, setDropAuthorityKind] = useState<DocumentAuthorityKind>(
     DEFAULT_DOCUMENT_AUTHORITY_KIND,
   );
   const [dropping, setDropping] = useState(false);
-  const [creatingBase, setCreatingBase] = useState(false);
-  const [uploading, setUploading] = useState(false);
-  const [movingIds, setMovingIds] = useState<Set<string>>(() => new Set());
   const dropFileInputRef = useRef<HTMLInputElement | null>(null);
   const [searching, setSearching] = useState(false);
   // The query behind the results on screen, so a completed search that found
@@ -103,12 +81,9 @@ export function DocumentsRoute({
   // Set when background indexing-status polling fails, so stale "indexing…"
   // rows carry a visible notice instead of silently freezing.
   const [pollFailed, setPollFailed] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const nameInputRef = useRef<HTMLInputElement | null>(null);
-  const selectedBase = bases.find((base) => base.id === selectedBaseId) ?? null;
   const failedDocuments = documents.filter((document) => document.status === "failed");
   // Honest list states: an initial fetch renders as loading and a failed load
-  // as an error with retry — never as a mandatory collection-creation gate.
+  // as an error with retry instead of exposing the internal storage model.
   const basesView = listViewState({
     loading: basesLoading,
     error: basesError,
@@ -126,20 +101,24 @@ export function DocumentsRoute({
       const next = await client.listDocumentBases(workspaceId);
       setBases(next);
       setBasesError(null);
-      setSelectedBaseId((current) => resolveDocumentCollectionSelection(current, next));
     } catch (error) {
       setBasesError(error instanceof Error ? error : new Error(String(error)));
-      toast.error("Failed to load document collections", { description: String(error) });
+      toast.error("Failed to load documents", { description: String(error) });
     } finally {
       setBasesLoading(false);
     }
   }, [client, workspaceId]);
 
   const refreshDocuments = useCallback(
-    async (baseId: string) => {
+    async (availableBases: DocumentBase[]) => {
       setDocumentsLoading(true);
       try {
-        setDocuments(await client.listDocuments(workspaceId, baseId));
+        const grouped = await Promise.all(
+          availableBases.map((base) => client.listDocuments(workspaceId, base.id)),
+        );
+        setDocuments(
+          grouped.flat().sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)),
+        );
         setDocumentsError(null);
       } catch (error) {
         setDocumentsError(error instanceof Error ? error : new Error(String(error)));
@@ -159,18 +138,18 @@ export function DocumentsRoute({
     setResults([]);
     setSearched(null);
     setPollFailed(false);
-    if (!selectedBaseId) {
+    if (basesLoading || basesError) {
       setDocuments([]);
       setDocumentsError(null);
       return;
     }
-    void refreshDocuments(selectedBaseId);
-  }, [selectedBaseId, refreshDocuments]);
+    void refreshDocuments(bases);
+  }, [bases, basesError, basesLoading, refreshDocuments]);
 
   useEffect(() => {
     if (
       !pageLive ||
-      !selectedBaseId ||
+      bases.length === 0 ||
       !documents.some((document) => document.status === "queued" || document.status === "indexing")
     ) {
       return;
@@ -178,11 +157,12 @@ export function DocumentsRoute({
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const load = async () => {
-      await client
-        .listDocuments(workspaceId, selectedBaseId)
+      await Promise.all(bases.map((base) => client.listDocuments(workspaceId, base.id)))
         .then((next) => {
           if (!cancelled) {
-            setDocuments(next);
+            setDocuments(
+              next.flat().sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)),
+            );
             setPollFailed(false);
           }
         })
@@ -196,68 +176,19 @@ export function DocumentsRoute({
       cancelled = true;
       if (timer !== null) clearTimeout(timer);
     };
-  }, [client, workspaceId, selectedBaseId, documents, pageLive]);
+  }, [client, workspaceId, bases, documents, pageLive]);
 
-  async function handleCreateBase() {
-    const trimmed = name.trim();
-    if (!trimmed) return;
-    setCreatingBase(true);
+  // Refresh every internal storage bucket after a drop. Collections stay
+  // invisible, including when legacy curation rules move a document.
+  async function finishDrop() {
+    let nextBases = bases;
     try {
-      const base = await client.createDocumentBase(workspaceId, { name: trimmed });
-      setBases((current) => [...current, base]);
-      setSelectedBaseId(base.id);
-      setName("");
-      toast.success("Collection created", {
-        description: `“${base.name}” is ready for uploads.`,
-      });
-    } catch (error) {
-      toast.error("Failed to create collection", {
-        description: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setCreatingBase(false);
-    }
-  }
-
-  async function handleFiles(files: FileList | null) {
-    if (!selectedBaseId || !files || files.length === 0) return;
-    setUploading(true);
-    try {
-      for (const file of Array.from(files)) {
-        const asset = await client.uploadFile(workspaceId, {
-          filename: file.name || "file",
-          contentType: file.type || "application/octet-stream",
-          data: file,
-        });
-        const indexed = await client.addDocument(workspaceId, selectedBaseId, {
-          fileId: asset.id,
-          authorityKind: dropAuthorityKind,
-          agentAccess: true,
-        });
-        setDocuments((current) => [indexed, ...current.filter((item) => item.id !== indexed.id)]);
-      }
-      toast.success("Document indexed");
-    } catch (error) {
-      toast.error("Failed to index document", {
-        description: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = "";
-    }
-  }
-
-  // A drop can create Default or auto-file into any collection — re-pull the
-  // collection list and land the user where the document actually went.
-  async function finishDrop(document: IndexedDocument) {
-    try {
-      const nextBases = await client.listDocumentBases(workspaceId);
+      nextBases = await client.listDocumentBases(workspaceId);
       setBases(nextBases);
     } catch {
-      // Base list refresh is cosmetic here; the document view below still lands.
+      // The existing inventory can still be refreshed if the base-list request fails.
     }
-    setSelectedBaseId(document.baseId);
-    await refreshDocuments(document.baseId);
+    await refreshDocuments(nextBases);
   }
 
   async function handleDropText() {
@@ -274,7 +205,7 @@ export function DocumentsRoute({
       toast.success("Dropped into knowledge", {
         description: dropResultDescription(document),
       });
-      await finishDrop(document);
+      await finishDrop();
     } catch (error) {
       toast.error("Drop failed", {
         description: error instanceof Error ? error.message : String(error),
@@ -304,10 +235,10 @@ export function DocumentsRoute({
       toast.success(
         files.length === 1 ? "Dropped into knowledge" : `${files.length} files dropped`,
         {
-          description: last ? dropResultDescription(last) : "The files were added to Default.",
+          description: last ? dropResultDescription(last) : "The files were added to knowledge.",
         },
       );
-      if (last) await finishDrop(last);
+      if (last) await finishDrop();
     } catch (error) {
       toast.error("Drop failed", {
         description: error instanceof Error ? error.message : String(error),
@@ -318,33 +249,11 @@ export function DocumentsRoute({
     }
   }
 
-  async function handleApplySuggestion(document: IndexedDocument) {
-    setMovingIds((current) => new Set(current).add(document.id));
-    try {
-      const moved = await client.moveDocument(workspaceId, document.id);
-      // The document left the currently selected base.
-      setDocuments((current) => current.filter((item) => item.id !== document.id));
-      toast.success(
-        `Filed “${moved.title}” into ${moved.curation?.suggestedBaseName ?? "the suggested base"}`,
-      );
-    } catch (error) {
-      toast.error("Failed to move document", {
-        description: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setMovingIds((current) => {
-        const next = new Set(current);
-        next.delete(document.id);
-        return next;
-      });
-    }
-  }
-
   async function handleSearch() {
-    if (!selectedBaseId || !query.trim()) return;
+    if (!query.trim()) return;
     setSearching(true);
     try {
-      const response = await client.searchDocuments(workspaceId, selectedBaseId, {
+      const response = await client.searchKnowledge(workspaceId, {
         query: query.trim(),
         limit: 8,
         mode: "hybrid",
@@ -456,7 +365,7 @@ export function DocumentsRoute({
             <div className="flex flex-col gap-2">
               <label className="grid gap-1 text-2xs font-medium text-fg-subtle">
                 Save for
-                <select
+                <Select
                   value={dropAuthorityKind}
                   onChange={(event) =>
                     setDropAuthorityKind(event.target.value as DocumentAuthorityKind)
@@ -470,7 +379,7 @@ export function DocumentsRoute({
                       {option.label}
                     </option>
                   ))}
-                </select>
+                </Select>
               </label>
               <div className="flex gap-2">
                 <input
@@ -502,7 +411,7 @@ export function DocumentsRoute({
                   {dropping ? (
                     <Loader2Icon className="size-3.5 animate-spin" />
                   ) : (
-                    <SparklesIcon className="size-3.5" />
+                    <PlusIcon className="size-3.5" />
                   )}
                   Add
                 </Button>
@@ -516,85 +425,9 @@ export function DocumentsRoute({
           ) : null}
         </div>
 
-        <details className="mt-4 rounded-lg border border-border bg-surface">
-          <summary className="cursor-pointer list-none px-4 py-3 text-sm font-medium text-fg [&::-webkit-details-marker]:hidden">
-            Collections (optional)
-          </summary>
-          <div className="grid gap-4 border-t border-border p-4">
-            <p className="text-xs text-fg-muted">
-              Add directly to a collection when you do not want OpenGeni to organize it
-              automatically.
-            </p>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <FormField label="Collection">
-                <Select
-                  value={selectedBaseId ?? ""}
-                  onChange={(event) => setSelectedBaseId(event.target.value || null)}
-                  disabled={basesView !== "ready"}
-                >
-                  {bases.map((base) => (
-                    <option key={base.id} value={base.id}>
-                      {base.name}
-                    </option>
-                  ))}
-                </Select>
-              </FormField>
-              <FormField label="Create collection">
-                <div className="flex gap-2">
-                  <Input
-                    ref={nameInputRef}
-                    aria-label="New document collection name"
-                    value={name}
-                    onChange={(event) => setName(event.target.value)}
-                    placeholder="Collection name"
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") void handleCreateBase();
-                    }}
-                  />
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    onClick={() => void handleCreateBase()}
-                    disabled={creatingBase || !name.trim()}
-                  >
-                    {creatingBase ? (
-                      <Loader2Icon className="size-3.5 animate-spin" />
-                    ) : (
-                      <PlusIcon className="size-3.5" />
-                    )}
-                    Create
-                  </Button>
-                </div>
-              </FormField>
-            </div>
-            <div>
-              <input
-                ref={fileInputRef}
-                type="file"
-                multiple
-                aria-label="Upload documents to selected collection"
-                className="hidden"
-                onChange={(event) => void handleFiles(event.target.files)}
-              />
-              <Button
-                type="button"
-                disabled={uploading || !fileUploadsEnabled || !selectedBaseId}
-                onClick={() => fileInputRef.current?.click()}
-              >
-                {uploading ? (
-                  <Loader2Icon className="size-3.5 animate-spin" />
-                ) : (
-                  <FilesIcon className="size-3.5" />
-                )}
-                Add files to collection
-              </Button>
-            </div>
-          </div>
-        </details>
-
         <div className="mt-5 grid min-h-0 min-w-0 flex-1 gap-5 xl:grid-cols-[minmax(0,1fr)_20rem]">
           <div className="min-w-0">
-            {selectedBase ? (
+            {basesView === "ready" ? (
               <>
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <div className="min-w-0">
@@ -631,9 +464,7 @@ export function DocumentsRoute({
                           type="button"
                           variant="ghost"
                           size="xs"
-                          onClick={() =>
-                            selectedBaseId ? void refreshDocuments(selectedBaseId) : undefined
-                          }
+                          onClick={() => void refreshDocuments(bases)}
                         >
                           <RefreshCwIcon className="size-3" />
                           Refresh
@@ -652,9 +483,7 @@ export function DocumentsRoute({
                     <LoadErrorState
                       title="Couldn't load documents"
                       error={documentsError}
-                      onRetry={() =>
-                        selectedBaseId ? void refreshDocuments(selectedBaseId) : undefined
-                      }
+                      onRetry={() => void refreshDocuments(bases)}
                     />
                   ) : documentsView === "empty" ? (
                     <EmptyState
@@ -681,35 +510,17 @@ export function DocumentsRoute({
                               {document.summary}
                             </p>
                           ) : null}
-                          <div className="mt-1 text-2xs text-fg-subtle">
-                            {document.status} · {document.chunkCount} chunks · {document.parser}
-                          </div>
                           <div className="mt-1 flex flex-wrap gap-1 text-[11px] text-[color:var(--color-fg-subtle)]">
                             <span>{formatToken(document.sourceKind)}</span>
                             {document.sourceTitle ? <span>· {document.sourceTitle}</span> : null}
                             <span className="inline-flex items-center gap-1 rounded border border-[color:var(--color-border)] px-1">
-                              {document.authorityKind === "personal" ? (
-                                <LockIcon className="size-3" />
-                              ) : null}
-                              Authority: {documentAuthorityLabel(document.authorityKind)}
+                              {documentAuthorityLabel(document.authorityKind)}
                             </span>
-                            <span className="inline-flex items-center gap-1 rounded border border-[color:var(--color-border)] px-1">
-                              {document.agentAccess === false ? (
-                                <BotOffIcon className="size-3" />
-                              ) : null}
-                              {document.agentAccess
-                                ? document.visibility === "private"
-                                  ? "creator's subject-aware agent can read"
-                                  : "subject-aware agents can read"
-                                : "agents blocked"}
-                            </span>
-                            {document.curationStatus === "auto_filed" ? (
-                              <span className="inline-flex items-center gap-1 rounded border border-[color:var(--color-border)] px-1">
-                                <SparklesIcon className="size-3" />
-                                auto-filed
-                              </span>
+                            {document.status !== "ready" ? <span>{document.status}</span> : null}
+                            {document.agentAccess === false ? (
+                              <span className="text-danger">Agents cannot access this</span>
                             ) : null}
-                            {document.topics.slice(0, 4).map((topic) => (
+                            {document.topics.slice(0, 2).map((topic) => (
                               <span
                                 key={topic}
                                 className="rounded border border-[color:var(--color-border)] px-1"
@@ -718,31 +529,6 @@ export function DocumentsRoute({
                               </span>
                             ))}
                           </div>
-                          {document.curationStatus === "suggested" &&
-                          document.curation?.suggestedBaseId ? (
-                            <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-fg-muted">
-                              <span>
-                                Suggested base: “{document.curation.suggestedBaseName}”
-                                {typeof document.curation.confidence === "number"
-                                  ? ` (${Math.round(document.curation.confidence * 100)}%)`
-                                  : ""}
-                              </span>
-                              <Button
-                                type="button"
-                                variant="secondary"
-                                size="xs"
-                                disabled={movingIds.has(document.id)}
-                                onClick={() => void handleApplySuggestion(document)}
-                              >
-                                {movingIds.has(document.id) ? (
-                                  <Loader2Icon className="size-3 animate-spin" />
-                                ) : (
-                                  <FolderInputIcon className="size-3" />
-                                )}
-                                Move it there
-                              </Button>
-                            </div>
-                          ) : null}
                           {document.status === "failed" && document.error ? (
                             <div className="mt-2 line-clamp-2 max-w-3xl text-xs leading-5 text-danger">
                               {document.error}
@@ -781,8 +567,8 @@ export function DocumentsRoute({
             ) : basesView === "empty" ? (
               <EmptyState
                 icon={<FileSearchIcon className="size-4" />}
-                title="Preparing Default collection"
-                description="OpenGeni creates Default automatically so uploads never require collection setup."
+                title="Preparing document storage"
+                description="OpenGeni is preparing this workspace for document uploads."
                 action={
                   <Button type="button" size="sm" onClick={() => void refreshBases()}>
                     <RefreshCwIcon className="size-3.5" />
@@ -791,10 +577,10 @@ export function DocumentsRoute({
                 }
               />
             ) : (
-              <EmptyState
-                icon={<FileSearchIcon className="size-4" />}
-                title="No collection selected"
-                description="Pick a collection on the left. Default is selected automatically when needed."
+              <LoadErrorState
+                title="Couldn't load documents"
+                error={basesError}
+                onRetry={() => void refreshBases()}
               />
             )}
           </div>
@@ -817,7 +603,6 @@ export function DocumentsRoute({
                 onChange={(event) => setQuery(event.target.value)}
                 placeholder="Search indexed documents"
                 className="h-9 text-sm pointer-coarse:min-h-10"
-                disabled={!selectedBaseId}
                 onKeyDown={(event) => {
                   if (event.key === "Enter") void handleSearch();
                 }}
@@ -826,7 +611,7 @@ export function DocumentsRoute({
                 type="button"
                 size="sm"
                 onClick={() => void handleSearch()}
-                disabled={searching || !selectedBaseId || !query.trim()}
+                disabled={searching || !query.trim()}
                 className="h-9 pointer-coarse:min-h-10"
               >
                 {searching ? (
@@ -882,13 +667,13 @@ export function DocumentsRoute({
 function dropResultDescription(document: Pick<IndexedDocument, "curationStatus">): string {
   switch (document.curationStatus) {
     case "none":
-      return "Curation is disabled; the document stays in Default with its supplied metadata.";
+      return "The document was added and is being prepared for agent search.";
     case "pending":
-      return "The document was added to Default; curation is still processing.";
+      return "The document was added; processing is still in progress.";
     case "suggested":
-      return "Curation suggested a destination; review the suggestion below.";
+      return "The document was added and prepared for search.";
     case "auto_filed":
-      return "Curation named, summarized, and filed the document automatically.";
+      return "The document was named, summarized, and prepared for search.";
     case "failed":
       return "Curation failed softly; the document remains searchable with safe fallback metadata.";
   }
