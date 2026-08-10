@@ -89,6 +89,24 @@ const serviceMonitors = resources.filter(
 ) as Resource[];
 const apiServerMonitor = serviceMonitorEndingIn(serviceMonitors, "-apiserver");
 assertMetricRetention(apiServerMonitor, "/metrics", "apiserver_request_total", true);
+for (const le of ["0.1", "1", "5", "30", "+Inf"]) {
+  assertMetricRetention(
+    apiServerMonitor,
+    "/metrics",
+    "apiserver_request_sli_duration_seconds_bucket",
+    true,
+    { le },
+  );
+}
+for (const le of ["0.05", "10", "60"]) {
+  assertMetricRetention(
+    apiServerMonitor,
+    "/metrics",
+    "apiserver_request_sli_duration_seconds_bucket",
+    false,
+    { le },
+  );
+}
 assertMetricRetention(
   apiServerMonitor,
   "/metrics",
@@ -160,6 +178,18 @@ assert(allowlistArgument, "kube-state-metrics must render an explicit metric all
 const kubeStateAllowlist = new Set(
   allowlistArgument.slice("--metric-allowlist=".length).split(","),
 );
+const kubeStateMonitor = exactlyOne(
+  serviceMonitors.filter(
+    (resource) => resource.metadata?.labels?.["app.kubernetes.io/name"] === "kube-state-metrics",
+  ),
+  "kube-state-metrics ServiceMonitor",
+);
+assertMetricRetention(kubeStateMonitor, "/metrics", "kube_pod_status_reason", true, {
+  reason: "SchedulingGated",
+});
+assertMetricRetention(kubeStateMonitor, "/metrics", "kube_pod_status_reason", false, {
+  reason: "Evicted",
+});
 for (const metric of referencedMetrics) {
   if (metric.startsWith("kube_") && !metric.includes(":")) {
     assert(
@@ -220,6 +250,9 @@ for (const monitor of [
   operatorMonitor,
 ]) {
   assertMetricRetention(monitor, "/metrics", "go_memstats_heap_alloc_bytes", true);
+  assertMetricRetention(monitor, "/metrics", "go_gc_heap_allocs_by_size_bytes_bucket", false, {
+    le: "1024",
+  });
   assertMetricRetention(monitor, "/metrics", "process_open_fds", true);
 }
 for (const metric of referencedMetrics) {

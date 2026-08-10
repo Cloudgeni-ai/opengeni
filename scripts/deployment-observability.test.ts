@@ -28,7 +28,7 @@ describe("observability deployment plan", () => {
     });
 
     expect(plan.chartPath).toBe("deploy/observability");
-    expect(plan.chartVersion).toBe("0.1.3");
+    expect(plan.chartVersion).toBe("0.1.4");
     expect(plan.kubePrometheusStackVersion).toBe("87.16.1");
     expect(plan.valuesFiles).toEqual(["deploy/observability/values.production.example.yaml"]);
     expect(plan.installCommands.slice(0, 2)).toEqual([
