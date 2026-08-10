@@ -1246,7 +1246,7 @@ describe("BrowserViewer", () => {
     await rendered.unmount();
   });
 
-  test("routes human paste through the private browser clipboard and copies back explicitly", async () => {
+  test("routes clipboard events and only committed IME text through causal browser actions", async () => {
     const current = browserSession();
     const currentTarget = target();
     const currentObservation = observation(BROWSER_SESSION_ID, currentTarget);
@@ -1316,10 +1316,31 @@ describe("BrowserViewer", () => {
       });
       await flush(20);
 
-      expect(actions).toHaveLength(2);
+      const keyboardAfterClipboard = rendered.container.querySelector<HTMLTextAreaElement>(
+        "textarea[aria-label='Browser keyboard input']",
+      );
+      expect(keyboardAfterClipboard).not.toBeNull();
+      await actRun(() => {
+        keyboardAfterClipboard!.dispatchEvent(
+          new CompositionEvent("compositionstart", { bubbles: true, data: "" }),
+        );
+        keyboardAfterClipboard!.value = "に";
+        keyboardAfterClipboard!.dispatchEvent(
+          new InputEvent("input", { bubbles: true, data: "に", isComposing: true }),
+        );
+        keyboardAfterClipboard!.value = "日本";
+        keyboardAfterClipboard!.dispatchEvent(
+          new CompositionEvent("compositionend", { bubbles: true, data: "日本" }),
+        );
+        keyboardAfterClipboard!.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      await flush(20);
+
+      expect(actions).toHaveLength(3);
       expect(actionValues).toEqual([
         { type: "clipboard", operation: "paste", text: "local paste" },
         { type: "clipboard", operation: "copy" },
+        { type: "type", text: "日本" },
       ]);
       expect(copied).toEqual(["remote selection"]);
     } finally {
