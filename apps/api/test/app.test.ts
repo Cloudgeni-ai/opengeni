@@ -473,6 +473,33 @@ describe("API helpers", () => {
     expect(routeLabel(`/v1/workspaces/${workspace}/control-events/stream`)).toBe(
       "/v1/workspaces/:workspaceId/control-events/stream",
     );
+    expect(
+      routeLabel(
+        `/v1/workspaces/${workspace}/browser-sessions/browser-1/targets/target-1/diagnostics`,
+      ),
+    ).toBe(
+      "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/diagnostics",
+    );
+    expect(
+      routeLabel(
+        `/v1/workspaces/${workspace}/browser-sessions/browser-1/auth-runs/run-1/protected-fill`,
+      ),
+    ).toBe(
+      "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/protected-fill",
+    );
+    expect(
+      routeLabel(
+        `/v1/workspaces/${workspace}/computer-sessions/computer-1/targets/window-1/observation`,
+      ),
+    ).toBe(
+      "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/targets/:targetId/observation",
+    );
+    expect(routeLabel(`/v1/workspaces/${workspace}/network-routes/route-1`)).toBe(
+      "/v1/workspaces/:workspaceId/network-routes/:networkRouteId",
+    );
+    expect(
+      routeLabel(`/v1/workspaces/${workspace}/interaction-interventions/intervention-1/resolve`),
+    ).toBe("/v1/workspaces/:workspaceId/interaction-interventions/:interventionId/resolve");
     expect(routeLabel(`/v1/workspaces/${workspace}/inference-control`)).toBe(
       "/v1/workspaces/:workspaceId/inference-control",
     );

@@ -1,6 +1,7 @@
 import type {
   AttachedBrowserDevice,
   BrowserAction,
+  BrowserDiagnosticBatch,
   BrowserFrame,
   BrowserIdentity,
   BrowserObservation,
@@ -90,6 +91,13 @@ type BrowserResumeAttempt = {
   terminal: boolean;
   error: Error | null;
 };
+type BrowserDiagnosticsView = {
+  browserSessionId: string;
+  targetId: string;
+  loading: boolean;
+  batch: BrowserDiagnosticBatch | null;
+  error: Error | null;
+};
 
 /**
  * Complete browser-native session surface: workspace discovery, agent relevance,
@@ -136,6 +144,8 @@ export function BrowserViewer({
   const resumeAttemptsRef = useRef(new Map<string, BrowserResumeAttempt>());
   const previousSessionIdRef = useRef(sessionId);
   const seenInterventionIdsRef = useRef(new Set<string>());
+  const diagnosticRequestRef = useRef(0);
+  const [diagnosticsView, setDiagnosticsView] = useState<BrowserDiagnosticsView | null>(null);
 
   const notifyError = useCallback(
     (cause: unknown, fallback: string) => {
@@ -245,6 +255,7 @@ export function BrowserViewer({
     browserSessionId: selection?.sessionId ?? null,
     enabled: enabled && selection !== null && controllerReady,
   });
+  const loadBrowserDiagnostics = browser.diagnostics;
 
   useEffect(() => {
     for (const intervention of interventions.interventions) {
@@ -296,6 +307,49 @@ export function BrowserViewer({
       ) ?? null,
     [browser.session?.identityId, profiles.identities, selectedRegistrySession?.identityId],
   );
+
+  useEffect(() => {
+    diagnosticRequestRef.current += 1;
+    setDiagnosticsView(null);
+  }, [browser.session?.id, browser.selectedTarget?.id]);
+
+  const loadDiagnostics = useCallback(() => {
+    const browserSessionId = browser.session?.id;
+    const targetId = browser.selectedTarget?.id;
+    if (!browserSessionId || !targetId) return;
+    const requestId = diagnosticRequestRef.current + 1;
+    diagnosticRequestRef.current = requestId;
+    setDiagnosticsView((current) => ({
+      browserSessionId,
+      targetId,
+      loading: true,
+      batch:
+        current?.browserSessionId === browserSessionId && current.targetId === targetId
+          ? current.batch
+          : null,
+      error: null,
+    }));
+    void loadBrowserDiagnostics({ limit: 100 })
+      .then((batch) => {
+        if (diagnosticRequestRef.current !== requestId) return;
+        setDiagnosticsView({ browserSessionId, targetId, loading: false, batch, error: null });
+      })
+      .catch((cause) => {
+        if (diagnosticRequestRef.current !== requestId) return;
+        setDiagnosticsView({
+          browserSessionId,
+          targetId,
+          loading: false,
+          batch: null,
+          error: cause instanceof Error ? cause : new Error(String(cause)),
+        });
+      });
+  }, [browser.selectedTarget?.id, browser.session?.id, loadBrowserDiagnostics]);
+
+  const closeDiagnostics = useCallback(() => {
+    diagnosticRequestRef.current += 1;
+    setDiagnosticsView(null);
+  }, []);
 
   useEffect(() => {
     const identityId = browser.session?.identityId ?? selectedRegistrySession?.identityId;
@@ -455,7 +509,9 @@ export function BrowserViewer({
   }
 
   return (
-    <div className={cn("flex h-full min-h-0 flex-col overflow-hidden bg-og-bg", className)}>
+    <div
+      className={cn("relative flex h-full min-h-0 flex-col overflow-hidden bg-og-bg", className)}
+    >
       <BrowserToolbar
         sessions={liveSessions}
         relevantSessionIds={new Set(relevant.map((session) => session.id))}
@@ -556,6 +612,7 @@ export function BrowserViewer({
             observation={browser.observation}
             connectionState={displayConnectionState}
             refreshing={registry.refreshing}
+            diagnosticsOpen={diagnosticsView !== null}
             onOpenComputer={
               browser.session?.linkedComputerSessionId && onOpenComputer
                 ? () => {
@@ -564,23 +621,22 @@ export function BrowserViewer({
                   }
                 : undefined
             }
-            onDiagnostics={() =>
-              void browser
-                .diagnostics({ limit: 100 })
-                .then((batch) => {
-                  const errors = batch.entries.filter((entry) => entry.level === "error").length;
-                  onNotify?.({
-                    kind: "info",
-                    message: batch.entries.length
-                      ? `${batch.entries.length} browser diagnostic${batch.entries.length === 1 ? "" : "s"} (${errors} errors).`
-                      : "No browser diagnostics.",
-                  });
-                })
-                .catch((cause) => notifyError(cause, "Could not load browser diagnostics."))
-            }
+            onDiagnostics={diagnosticsView ? closeDiagnostics : loadDiagnostics}
           />
         </>
       )}
+      {diagnosticsView ? (
+        <BrowserDiagnosticsDrawer
+          session={browser.session}
+          profile={selectedProfile}
+          target={browser.selectedTarget}
+          observation={browser.observation}
+          baseRevisionOrdinal={baseRevisionOrdinal}
+          state={diagnosticsView}
+          onRefresh={loadDiagnostics}
+          onClose={closeDiagnostics}
+        />
+      ) : null}
     </div>
   );
 }
@@ -1455,10 +1511,13 @@ function BrowserStatusBar(props: {
   observation: ReturnType<typeof useBrowserSession>["observation"];
   connectionState: string;
   refreshing: boolean;
+  diagnosticsOpen: boolean;
   onOpenComputer?: (() => void) | undefined;
   onDiagnostics: () => void;
 }) {
-  const errors = props.observation?.diagnostics.consoleErrorCount ?? 0;
+  const errors =
+    (props.observation?.diagnostics.consoleErrorCount ?? 0) +
+    (props.observation?.diagnostics.pageErrorCount ?? 0);
   const failed = props.observation?.diagnostics.failedRequestCount ?? 0;
   return (
     <div className="flex h-7 shrink-0 items-center gap-2 border-t border-og-border bg-og-surface-0 px-2 text-og-xs text-og-subtle">
@@ -1488,13 +1547,252 @@ function BrowserStatusBar(props: {
       <button
         type="button"
         onClick={props.onDiagnostics}
-        className="flex items-center gap-1 rounded px-1.5 py-0.5 transition hover:bg-og-surface-2 hover:text-og-fg"
+        aria-expanded={props.diagnosticsOpen}
+        aria-controls="browser-diagnostics-drawer"
+        className={cn(
+          "flex items-center gap-1 rounded px-1.5 py-0.5 transition hover:bg-og-surface-2 hover:text-og-fg",
+          props.diagnosticsOpen && "bg-og-surface-2 text-og-fg",
+        )}
       >
         <BugIcon className="size-3" />
         {errors + failed > 0 ? errors + failed : "Debug"}
       </button>
     </div>
   );
+}
+
+function BrowserDiagnosticsDrawer(props: {
+  session: BrowserSession | null;
+  profile: BrowserIdentity | null;
+  target: BrowserTarget | null;
+  observation: BrowserObservation | null;
+  baseRevisionOrdinal: number | null;
+  state: BrowserDiagnosticsView;
+  onRefresh: () => void;
+  onClose: () => void;
+}) {
+  const session = props.session;
+  const diagnostics = props.observation?.diagnostics;
+  const semanticMode = props.observation?.semantic
+    ? "Semantic page structure available"
+    : props.observation?.screenshot
+      ? "Visual fallback in use"
+      : "Waiting for page observation";
+  return (
+    <aside
+      id="browser-diagnostics-drawer"
+      role="region"
+      aria-label="Browser diagnostics"
+      className="absolute bottom-7 right-0 top-10 z-40 flex w-full max-w-md flex-col border-l border-og-border bg-og-surface-0 shadow-2xl"
+    >
+      <div className="flex h-11 shrink-0 items-center gap-2 border-b border-og-border px-3">
+        <BugIcon className="size-4 text-og-muted" />
+        <div className="min-w-0 flex-1">
+          <p className="text-og-control font-semibold text-og-fg">Browser diagnostics</p>
+          <p className="truncate text-og-xs text-og-subtle">
+            {props.target?.title || shortUrl(props.target?.url ?? "") || "Current tab"}
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={props.onRefresh}
+          disabled={props.state.loading}
+          className="grid size-7 place-items-center rounded-og-sm text-og-muted transition hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-40"
+          aria-label="Refresh browser diagnostics"
+        >
+          <RefreshCwIcon className={cn("size-3.5", props.state.loading && "animate-spin")} />
+        </button>
+        <button
+          type="button"
+          onClick={props.onClose}
+          className="grid size-7 place-items-center rounded-og-sm text-og-muted transition hover:bg-og-surface-2 hover:text-og-fg"
+          aria-label="Close browser diagnostics"
+        >
+          <XIcon className="size-3.5" />
+        </button>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <section className="border-b border-og-border p-3" aria-labelledby="browser-runtime-title">
+          <h3
+            id="browser-runtime-title"
+            className="text-[10px] font-semibold uppercase tracking-[0.14em] text-og-subtle"
+          >
+            Runtime
+          </h3>
+          <dl className="mt-2 grid grid-cols-[7rem_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-og-xs">
+            <DiagnosticFact label="Engine" value={browserEngineLabel(session)} />
+            <DiagnosticFact label="Driver" value={session?.driverId ?? "Unavailable"} />
+            <DiagnosticFact label="Placement" value={placementLabel(session ?? undefined)} />
+            <DiagnosticFact
+              label="Profile"
+              value={
+                props.profile
+                  ? `${props.profile.name}${props.baseRevisionOrdinal ? ` · v${props.baseRevisionOrdinal}` : ""}`
+                  : "Temporary"
+              }
+            />
+            <DiagnosticFact
+              label="Controller"
+              value={shortGeneration(session?.controller?.controllerGeneration)}
+            />
+            <DiagnosticFact
+              label="Network"
+              value={session?.networkRouteId ? "Custom route" : "Placement default"}
+            />
+            <DiagnosticFact label="Observation" value={semanticMode} />
+          </dl>
+        </section>
+
+        <section className="border-b border-og-border p-3" aria-labelledby="browser-page-title">
+          <h3
+            id="browser-page-title"
+            className="text-[10px] font-semibold uppercase tracking-[0.14em] text-og-subtle"
+          >
+            Current page
+          </h3>
+          <dl className="mt-2 grid grid-cols-2 gap-2">
+            <DiagnosticCount label="Console errors" value={diagnostics?.consoleErrorCount ?? 0} />
+            <DiagnosticCount label="Page errors" value={diagnostics?.pageErrorCount ?? 0} />
+            <DiagnosticCount label="Failed requests" value={diagnostics?.failedRequestCount ?? 0} />
+            <DiagnosticCount label="Downloads" value={diagnostics?.downloadCount ?? 0} />
+          </dl>
+          {session?.failureCode ? (
+            <p className="mt-2 rounded-og-sm border border-og-status-error/30 bg-og-status-error/5 px-2.5 py-2 text-og-xs text-og-status-error">
+              Browser state: {session.failureCode}
+            </p>
+          ) : null}
+        </section>
+
+        <section className="p-3" aria-labelledby="browser-events-title">
+          <div className="flex items-center justify-between gap-2">
+            <h3
+              id="browser-events-title"
+              className="text-[10px] font-semibold uppercase tracking-[0.14em] text-og-subtle"
+            >
+              Recent events
+            </h3>
+            {props.state.batch?.truncated ? (
+              <span className="text-[10px] text-og-subtle">Newest 100</span>
+            ) : null}
+          </div>
+          {props.state.loading && !props.state.batch ? (
+            <div className="flex items-center gap-2 py-6 text-og-control text-og-muted">
+              <LoaderCircleIcon className="size-3.5 animate-spin" /> Loading diagnostics…
+            </div>
+          ) : props.state.error ? (
+            <div className="py-5">
+              <p className="text-og-control text-og-status-error">{props.state.error.message}</p>
+              <button
+                type="button"
+                onClick={props.onRefresh}
+                className="mt-2 text-og-control font-medium text-og-accent hover:underline"
+              >
+                Try again
+              </button>
+            </div>
+          ) : props.state.batch?.entries.length ? (
+            <ol className="mt-2 space-y-2">
+              {props.state.batch.entries.map((entry) => (
+                <li
+                  key={entry.sequence}
+                  className="rounded-og-sm border border-og-border bg-og-bg p-2.5"
+                >
+                  <div className="flex items-center gap-2 text-[10px] text-og-subtle">
+                    <span
+                      className={cn(
+                        "font-semibold uppercase tracking-wide",
+                        diagnosticTone(entry.level),
+                      )}
+                    >
+                      {diagnosticKindLabel(entry.kind)}
+                    </span>
+                    <span className="ml-auto">{formatDiagnosticTime(entry.occurredAt)}</span>
+                  </div>
+                  <p className="mt-1 whitespace-pre-wrap break-words text-og-xs leading-5 text-og-fg">
+                    {entry.message}
+                  </p>
+                  {entry.url || entry.filename || entry.method || entry.status ? (
+                    <p className="mt-1 truncate font-og-mono text-[10px] text-og-subtle">
+                      {[entry.method, entry.status, entry.filename, entry.url]
+                        .filter((value) => value !== null)
+                        .join(" · ")}
+                    </p>
+                  ) : null}
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <p className="py-6 text-og-control text-og-muted">No diagnostics for this tab.</p>
+          )}
+        </section>
+      </div>
+    </aside>
+  );
+}
+
+function DiagnosticFact(props: { label: string; value: string }) {
+  return (
+    <>
+      <dt className="text-og-subtle">{props.label}</dt>
+      <dd className="min-w-0 truncate text-og-fg" title={props.value}>
+        {props.value}
+      </dd>
+    </>
+  );
+}
+
+function DiagnosticCount(props: { label: string; value: number }) {
+  return (
+    <div className="rounded-og-sm border border-og-border bg-og-bg px-2.5 py-2">
+      <dt className="text-[10px] text-og-subtle">{props.label}</dt>
+      <dd
+        className={cn(
+          "mt-0.5 text-og-sm font-semibold",
+          props.value ? "text-og-fg" : "text-og-muted",
+        )}
+      >
+        {props.value}
+      </dd>
+    </div>
+  );
+}
+
+function browserEngineLabel(session: BrowserSession | null): string {
+  if (!session) return "Unavailable";
+  const version = session.engineVersion ? ` ${session.engineVersion}` : "";
+  return `${session.engine}${version} · ${session.headless ? "headless" : "headed"}`;
+}
+
+function shortGeneration(value: string | null | undefined): string {
+  if (!value) return "Unavailable";
+  return value.length > 16 ? `${value.slice(0, 8)}…${value.slice(-6)}` : value;
+}
+
+function diagnosticKindLabel(kind: BrowserDiagnosticBatch["entries"][number]["kind"]): string {
+  switch (kind) {
+    case "console":
+      return "Console";
+    case "page_error":
+      return "Page error";
+    case "failed_request":
+      return "Request";
+    case "download":
+      return "Download";
+  }
+}
+
+function diagnosticTone(level: BrowserDiagnosticBatch["entries"][number]["level"]): string {
+  if (level === "error") return "text-og-status-error";
+  if (level === "warning") return "text-og-status-waiting";
+  return "text-og-muted";
+}
+
+function formatDiagnosticTime(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? ""
+    : date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
 function BrowserNotice(props: { icon: ReactNode; text: string; className?: string }) {

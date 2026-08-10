@@ -139,6 +139,53 @@ and long-lived credentials are never placed in the WebSocket URL. Hosts may
 inject both `fetch` and the WebSocket factory for authenticated proxies and
 tests; negotiated frame and mutation limits are enforced before work is queued.
 
+## Browser and computer interaction (`@opengeni/sdk/interaction`)
+
+`OpenGeniClient.interaction` is the framework-free resource facade over the same
+public BrowserSession, ComputerSession, identity, auth, network-route, and human
+intervention APIs used by OpenGeni itself. It adds no second state or execution
+path: facade methods call the ordinary typed transport, and every mutation still
+uses the canonical generation fences, operation receipt, permission check, and
+placement controller.
+
+```ts
+const browser = await client.interaction.browsers.currentOrOpen({
+  workspaceId,
+  associationSessionId: session.id,
+  initialUrl: "http://127.0.0.1:3000",
+});
+
+const { targets } = await browser.tabs.list();
+const target = targets.find((candidate) => candidate.selected) ?? targets[0]!;
+const page = await browser.observe(target.id);
+
+const receipt = await browser.act({
+  operationId: crypto.randomUUID(),
+  targetId: target.id,
+  expectedTargetGeneration: target.targetGeneration,
+  expectedDocumentGeneration: target.documentGeneration,
+  expectedFrameId: page.frameId,
+  action: { type: "click", locator: { kind: "role", role: "button", name: "Continue" } },
+});
+
+if (receipt.state === "outcome_unknown") {
+  // Do not replay a mutation blindly. Re-observe, then inspect this exact receipt.
+  console.log(await browser.receipt(receipt.operationId));
+}
+```
+
+Browser identities are immutable version graphs: live browser state stays
+private until `browser.publishRevision(...)` explicitly creates a new revision.
+Protected auth fills resolve connection secrets only inside the broker/controller
+path; normal SDK reads, observations, diagnostics, receipts, and logs never
+return credential values. `client.openWorkspaceInteractionRevisionStream(...)`
+is the low-volume latest-wins invalidation stream for keeping resource catalogs
+fresh without attaching them to an inference/session event stream.
+
+Use the flat `OpenGeniClient` interaction methods when implementing a proxy or
+custom transport. Use `client.interaction` for application logic. Both are the
+same API and authority boundary.
+
 ## Workspace artifacts
 
 Workspace artifacts are generic, immutable HTML publications. The SDK does not

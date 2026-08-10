@@ -753,6 +753,84 @@ describe("BrowserSession frame stream", () => {
 });
 
 describe("BrowserViewer", () => {
+  test("opens actionable runtime and page diagnostics without leaving the browser", async () => {
+    const current = browserSession();
+    const currentTarget = target();
+    const client = fakeClient({
+      listBrowserSessions: async () => ({ revision: 1, sessions: [current] }),
+      getBrowserSession: async () => current,
+      listBrowserTargets: async () => ({
+        browserSessionId: BROWSER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        targets: [currentTarget],
+      }),
+      observeBrowserTarget: async () => ({
+        ...observation(BROWSER_SESSION_ID, currentTarget),
+        diagnostics: {
+          consoleErrorCount: 1,
+          failedRequestCount: 1,
+          downloadCount: 0,
+          pageErrorCount: 0,
+        },
+      }),
+      attachBrowserSession: async () => attachment(currentTarget.id),
+      listBrowserDiagnostics: async () => ({
+        browserSessionId: BROWSER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        targetId: currentTarget.id,
+        targetGeneration: currentTarget.targetGeneration,
+        entries: [
+          {
+            sequence: 1,
+            kind: "failed_request",
+            level: "error",
+            message: "Request failed with status 503",
+            url: "https://opengeni.ai/api/health",
+            method: "GET",
+            status: 503,
+            filename: null,
+            occurredAt: NOW,
+          },
+        ],
+        cursor: 1,
+        truncated: false,
+      }),
+    });
+    const rendered = await renderComponent(
+      <BrowserViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        webSocketFactory={(url, protocols) =>
+          new FakeBrowserSocket(url, protocols) as unknown as BrowserFrameWebSocket
+        }
+      />,
+    );
+    await flush(40);
+
+    const debug = rendered.container.querySelector<HTMLButtonElement>(
+      "button[aria-controls='browser-diagnostics-drawer']",
+    );
+    expect(debug).not.toBeNull();
+    await actRun(() => debug!.click());
+    await flush(10);
+
+    const drawer = rendered.container.querySelector("[aria-label='Browser diagnostics']");
+    expect(drawer?.textContent).toContain("chromium 151 · headless");
+    expect(drawer?.textContent).toContain("opengeni.cdp.v1");
+    expect(drawer?.textContent).toContain("Semantic page structure available");
+    expect(drawer?.textContent).toContain("Request failed with status 503");
+    expect(drawer?.textContent).toContain("GET · 503 · https://opengeni.ai/api/health");
+
+    const close = rendered.container.querySelector<HTMLButtonElement>(
+      "button[aria-label='Close browser diagnostics']",
+    );
+    expect(close).not.toBeNull();
+    await actRun(() => close!.click());
+    expect(rendered.container.querySelector("[aria-label='Browser diagnostics']")).toBeNull();
+    await rendered.unmount();
+  });
+
   test("surfaces and resolves an exact durable browser intervention", async () => {
     const current = browserSession();
     const currentTarget = target();
