@@ -473,7 +473,7 @@ export function DocumentsRoute({
                   }
                   disabled={dropping}
                   aria-label="Drop authority"
-                  className="h-8 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 text-xs font-normal text-[color:var(--color-fg)]"
+                  className="h-8 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 text-xs font-normal text-[color:var(--color-fg)] pointer-coarse:min-h-10"
                 >
                   {DOCUMENT_AUTHORITY_OPTIONS.map((option) => (
                     <option key={option.value} value={option.value}>
@@ -497,7 +497,7 @@ export function DocumentsRoute({
                   size="sm"
                   disabled={!fileUploadsEnabled || dropping}
                   onClick={() => dropFileInputRef.current?.click()}
-                  className="h-8"
+                  className="h-8 pointer-coarse:min-h-10"
                 >
                   <FilesIcon className="size-3.5" />
                   Choose files
@@ -507,7 +507,7 @@ export function DocumentsRoute({
                   size="sm"
                   disabled={!fileUploadsEnabled || dropping || !dropText.trim()}
                   onClick={() => void handleDropText()}
-                  className="h-8"
+                  className="h-8 pointer-coarse:min-h-10"
                 >
                   {dropping ? (
                     <Loader2Icon className="size-3.5 animate-spin" />
@@ -668,6 +668,11 @@ export function DocumentsRoute({
                   )}
                 </div>
               </>
+            ) : visibleBasesView === "loading" ? (
+              <div className="flex items-center justify-center gap-2 rounded-lg border border-border p-6 text-xs text-fg-muted">
+                <Loader2Icon className="size-3.5 animate-spin" />
+                Loading documents
+              </div>
             ) : visibleBasesView === "empty" ? (
               <EmptyState
                 icon={<FileSearchIcon className="size-4" />}
