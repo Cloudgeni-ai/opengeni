@@ -638,10 +638,13 @@ export function CodexDeviceCodePanel({
 }) {
   const [copied, setCopied] = useState(false);
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const copyAttemptRef = useRef(0);
 
   useEffect(() => {
+    copyAttemptRef.current += 1;
     setCopied(false);
     return () => {
+      copyAttemptRef.current += 1;
       if (copiedTimerRef.current !== null) {
         clearTimeout(copiedTimerRef.current);
         copiedTimerRef.current = null;
@@ -650,9 +653,19 @@ export function CodexDeviceCodePanel({
   }, [userCode]);
 
   const copyCode = useCallback(async () => {
+    const attempt = ++copyAttemptRef.current;
+    if (copiedTimerRef.current !== null) {
+      clearTimeout(copiedTimerRef.current);
+      copiedTimerRef.current = null;
+    }
+    setCopied(false);
+
     const ok = await copyTextToClipboard(userCode);
+    if (attempt !== copyAttemptRef.current) return;
     if (!ok) {
-      toast.error("Couldn't copy the code", { description: "Copy it manually instead." });
+      toast.error("Couldn't copy the code", {
+        description: "Copy it manually instead.",
+      });
       return;
     }
     setCopied(true);
@@ -661,6 +674,7 @@ export function CodexDeviceCodePanel({
       clearTimeout(copiedTimerRef.current);
     }
     copiedTimerRef.current = setTimeout(() => {
+      if (attempt !== copyAttemptRef.current) return;
       copiedTimerRef.current = null;
       setCopied(false);
     }, CODE_COPIED_FEEDBACK_MS);
