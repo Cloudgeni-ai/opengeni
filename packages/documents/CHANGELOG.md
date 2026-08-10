@@ -1,5 +1,19 @@
 # @opengeni/documents
 
+## 0.5.30
+
+### Patch Changes
+
+- 5fcad0a: Expose an agent-safe checkpointed listing of newly indexed documents with source and provenance metadata.
+- Updated dependencies [7954468]
+- Updated dependencies [31666e2]
+- Updated dependencies [bd5514e]
+- Updated dependencies [5fcad0a]
+  - @opengeni/db@0.30.0
+  - @opengeni/contracts@0.43.0
+  - @opengeni/config@0.12.11
+  - @opengeni/storage@0.2.85
+
 ## 0.5.29
 
 ### Patch Changes
