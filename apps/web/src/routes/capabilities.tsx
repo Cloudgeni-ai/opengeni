@@ -86,6 +86,7 @@ import {
 import { listViewState } from "@/lib/load-state";
 import {
   googleDriveAccountState,
+  localConnectedGoogleDrivePreview,
   preferredGoogleDriveConnection,
 } from "@/lib/google-drive-connection";
 import { mcpOAuthCallbackFailureMessage, startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
@@ -387,8 +388,16 @@ export function CapabilitiesRoute({
     [client],
   );
   const connectionsLoaded = connections !== null;
-  const googleDriveConnection = preferredGoogleDriveConnection(connections ?? []);
-  const googleDriveState = googleDriveAccountState(googleDriveConnection, connectionsLoaded);
+  const googleDrivePreviewConnection = localConnectedGoogleDrivePreview(
+    window.location.search,
+    workspaceId,
+  );
+  const googleDriveConnection =
+    googleDrivePreviewConnection ?? preferredGoogleDriveConnection(connections ?? []);
+  const googleDriveState = googleDriveAccountState(
+    googleDriveConnection,
+    googleDrivePreviewConnection !== null || connectionsLoaded,
+  );
   const personalSlackItem = personalSlackCapability(items);
   const personalSlackConnection = preferredPersonalSlackConnection(connections ?? []);
   const personalSlackStatus = personalSlackAccountState(personalSlackConnection, connectionsLoaded);

@@ -21,6 +21,7 @@ import {
   googleDriveAccountState,
   googleDriveConnectionMetadata,
   googleDriveDisconnectAttempt,
+  localConnectedGoogleDrivePreview,
   preferredGoogleDriveConnection,
   type GoogleDriveAccountState,
   type GoogleDriveDisconnectAttempt,
@@ -84,8 +85,17 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
   const [syncEnabled, setSyncEnabled] = useState(false);
   const [readPolicy, setReadPolicy] = useState<GoogleDriveReadPolicy>("allow");
 
-  const connection = useMemo(() => preferredGoogleDriveConnection(connections), [connections]);
-  const accountState = googleDriveAccountState(connection, !loading);
+  const previewConnection = useMemo(
+    () => localConnectedGoogleDrivePreview(window.location.search, workspaceId),
+    [workspaceId],
+  );
+  const connection = useMemo(
+    () => previewConnection ?? preferredGoogleDriveConnection(connections),
+    [connections, previewConnection],
+  );
+  const readOnly = previewConnection !== null;
+  const visibleLoading = loading && !readOnly;
+  const accountState = googleDriveAccountState(connection, readOnly || !loading);
   const metadata = connection
     ? (googleDriveConnectionMetadata(connection.metadata) ?? undefined)
     : undefined;
@@ -375,8 +385,8 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
   return (
     <>
       <section className="mt-5 rounded-lg border border-border bg-surface/35 p-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex min-w-0 gap-3">
+        <div className="flex items-center gap-3">
+          <div className="flex min-w-0 flex-1 gap-3">
             <div className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-border bg-bg">
               <img
                 src="https://www.gstatic.com/images/branding/productlogos/drive_2026/v2/web-64dp/logo_drive_2026_color_2x_web_64dp.png"
@@ -394,7 +404,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
             </div>
           </div>
           <div className="flex shrink-0 flex-wrap gap-2">
-            {loading ? (
+            {visibleLoading ? (
               <Button type="button" variant="secondary" size="sm" disabled>
                 <Loader2Icon className="size-3.5 animate-spin" />
                 Loading
@@ -405,7 +415,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
                   <Button
                     type="button"
                     size="sm"
-                    disabled={busy || !canWrite}
+                    disabled={busy || !canWrite || readOnly}
                     onClick={openBrowser}
                   >
                     <FolderOpenIcon className="size-3.5" />
@@ -416,7 +426,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
                   <Button
                     type="button"
                     size="sm"
-                    disabled={busy || !canWrite}
+                    disabled={busy || !canWrite || readOnly}
                     onClick={() => void transitionLifecycle("resume")}
                   >
                     Resume
@@ -426,7 +436,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
                   <Button
                     type="button"
                     size="sm"
-                    disabled={busy || !canWrite}
+                    disabled={busy || !canWrite || readOnly}
                     onClick={() => void connect(true)}
                   >
                     {accountState.state === "reconsent_required"
@@ -440,7 +450,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
                   type="button"
                   variant="ghost"
                   size="sm"
-                  disabled={busy || !canWrite}
+                  disabled={busy || !canWrite || readOnly}
                   onClick={() => setDisconnectOpen(true)}
                 >
                   Disconnect
@@ -450,7 +460,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
               <Button
                 type="button"
                 size="sm"
-                disabled={busy || !canWrite}
+                disabled={busy || !canWrite || readOnly}
                 onClick={() => void connect()}
               >
                 {busy ? <Loader2Icon className="size-3.5 animate-spin" /> : null}
