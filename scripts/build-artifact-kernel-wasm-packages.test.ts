@@ -153,7 +153,7 @@ test("version automation regenerates WASM identity without forcing peer dependen
     changesetConfig.___experimentalUnsafeOptions_WILL_CHANGE_IN_PATCH
       ?.onlyUpdatePeerDependentsWhenOutOfRange,
   ).toBe(true);
-  expect(reactPackage.peerDependencies?.["@opengeni/artifact-tool"]).toBe(">=0.0.0 <0.2.0");
+  expect(reactPackage.peerDependencies?.["@opengeni/artifact-tool"]).toBe(">=0.1.0 <0.3.0");
   expect(
     ciWorkflow.match(
       /@changesets\/cli\/bin\.js" version\n\s+bun scripts\/build-artifact-kernel-wasm-packages\.ts --refresh-package-identities/gu,
