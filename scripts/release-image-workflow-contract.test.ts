@@ -58,6 +58,7 @@ function buildsSandboxCheckovOffTheSerialToolchain(dockerfile: string): boolean 
     checkovCopy,
   );
   const runtimeCopy = dockerfile.indexOf(sandboxArtifactRuntimeCopy, finalStage);
+  const versionProbes = dockerfile.match(/checkov --version/g)?.length ?? 0;
 
   return (
     checkovStage >= 0 &&
@@ -66,7 +67,8 @@ function buildsSandboxCheckovOffTheSerialToolchain(dockerfile: string): boolean 
     ttydInstall > finalStage &&
     checkovCopy > ttydInstall &&
     checkovVerification > checkovCopy &&
-    runtimeCopy > checkovVerification
+    runtimeCopy > checkovVerification &&
+    versionProbes === 1
   );
 }
 
@@ -146,6 +148,12 @@ describe("release image workflow contract", () => {
     expect(checkovFinalizationStart).toBeGreaterThan(-1);
     expect(checkovFinalizationEnd).toBeGreaterThan(checkovFinalizationStart);
     expect(buildsSandboxCheckovOffTheSerialToolchain(serialCheckov)).toBe(false);
+
+    const duplicateBuilderProbe = dockerfile.replace(
+      '/opt/checkov/bin/pip install --no-cache-dir "checkov==${CHECKOV_VERSION}"',
+      '/opt/checkov/bin/pip install --no-cache-dir "checkov==${CHECKOV_VERSION}"; \\\n+    /opt/checkov/bin/checkov --version',
+    );
+    expect(buildsSandboxCheckovOffTheSerialToolchain(duplicateBuilderProbe)).toBe(false);
   });
 
   test("dedicated artifact sidecars run self-contained production bundles", async () => {
