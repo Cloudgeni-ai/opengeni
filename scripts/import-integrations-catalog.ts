@@ -165,11 +165,12 @@ const officialCatalogContractsByMcpUrl = new Map<
       tier: "verified",
       provenance: "official:developers.google.com/workspace/gmail/api/reference/mcp",
       authKind: "oauth2",
-      // Keep the consent surface to the two scopes Google documents for the
-      // Gmail MCP server instead of requesting every scope advertised by PRM.
+      // Keep the consent surface to the union required by the reviewed tools
+      // instead of requesting every scope advertised by PRM.
       scopesHint: [
         "https://www.googleapis.com/auth/gmail.readonly",
         "https://www.googleapis.com/auth/gmail.compose",
+        "https://www.googleapis.com/auth/gmail.modify",
       ],
       // Freeze the reviewed Developer Preview surface. Newly introduced
       // remote tools remain unavailable until the catalog contract is reviewed.

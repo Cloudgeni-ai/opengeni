@@ -192,15 +192,18 @@ host-owned GitHub authority.
 
 The reviewed catalog includes Google's official hosted Gmail MCP at
 `https://gmailmcp.googleapis.com/mcp/v1`. It is currently a Google Developer
-Preview. OpenGeni requests only the two scopes used by the reviewed tool
+Preview. OpenGeni requests only the three scopes used by the reviewed tool
 surface:
 
 - `https://www.googleapis.com/auth/gmail.readonly`
 - `https://www.googleapis.com/auth/gmail.compose`
+- `https://www.googleapis.com/auth/gmail.modify`
 
-Those scopes support search/read, draft creation, and mailbox organization. The
-reviewed Google MCP surface does not expose a direct-send tool. Gmail OAuth is
-handled by the ordinary encrypted connection broker, with a narrow Google
+Those scopes support search/read, draft creation, and the reviewed label and
+unlabel operations. The Google scope is broader than the exposed tools, but the
+reviewed Google MCP surface and REST fallback do not expose a direct-send or
+delete tool. Gmail OAuth is handled by the ordinary encrypted connection broker,
+with a narrow Google
 compatibility path: authorization requests ask for offline consent, Google
 authorization/token origins are pinned, and the RFC 8707 `resource` parameter
 is omitted from Google's authorization, token, and refresh requests. The MCP
@@ -227,13 +230,13 @@ While hosted MCP enrollment is pending, a deployment can set
 `OPENGENI_GMAIL_REST_ADAPTER_ENABLED=true`. This opt-in substitutes a bounded
 Gmail REST implementation for that exact official MCP endpoint in agent turns
 and Toolspace; it does not create a second capability or connection. The
-adapter preserves the reviewed ten-tool allowlist, tool names, subject-owned
-delegation, and approval policy. Its credential broker binding permits only
-`https://gmail.googleapis.com/gmail/v1/users/me/...`: it cannot call another
-Google API or address another mailbox. Read-only calls may refresh after one
-401 and retry once; a mutation is never replayed after an ambiguous provider
-response. Keep the flag off by default and disable it after the hosted endpoint
-works for the enrolled account and project.
+adapter preserves the reviewed ten-tool allowlist, tool names, output field
+shape, subject-owned delegation, and approval policy. Its credential broker
+binding permits only `https://gmail.googleapis.com/gmail/v1/users/me/...`: it
+cannot call another Google API or address another mailbox. Read-only calls may
+refresh after one 401 and retry once; a mutation is never replayed after an
+ambiguous provider response. Keep the flag off by default and disable it after
+the hosted endpoint works for the enrolled account and project.
 
 Before importing/enabling the capability in a deployment:
 

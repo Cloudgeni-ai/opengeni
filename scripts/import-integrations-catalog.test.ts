@@ -225,7 +225,7 @@ describe("integrations.sh catalog import normalization", () => {
     });
   });
 
-  test("promotes Google's official Gmail MCP contract with its documented scopes", () => {
+  test("promotes Google's official Gmail MCP contract with its reviewed tool scopes", () => {
     const normalized = normalizeCatalogSnapshot({
       generatedAt: "2026-08-10T00:00:00.000Z",
       importRows: [
@@ -254,6 +254,7 @@ describe("integrations.sh catalog import normalization", () => {
       scopesHint: [
         "https://www.googleapis.com/auth/gmail.readonly",
         "https://www.googleapis.com/auth/gmail.compose",
+        "https://www.googleapis.com/auth/gmail.modify",
       ],
       allowedTools: [
         "create_draft",

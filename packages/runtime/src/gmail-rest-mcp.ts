@@ -75,6 +75,14 @@ type GmailMessage = {
   sizeEstimate?: number;
   payload?: GmailPart;
 };
+type GmailLabel = {
+  id?: string;
+  name?: string;
+  type?: string;
+  color?: { textColor?: string; backgroundColor?: string };
+  threadsTotal?: number;
+  threadsUnread?: number;
+};
 
 type GmailTool = Awaited<ReturnType<MCPServer["listTools"]>>[number];
 
@@ -203,8 +211,16 @@ export const GMAIL_REST_MCP_TOOLS: GmailTool[] = [
   },
   {
     name: "list_labels",
-    description: "Lists Gmail system and user labels.",
-    inputSchema: { type: "object", properties: {}, required: [], additionalProperties: false },
+    description: "Lists user-defined Gmail labels with bounded pagination.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        pageSize: { type: "integer", minimum: 1, maximum: MAX_PAGE_SIZE },
+        pageToken: { type: "string" },
+      },
+      required: [],
+      additionalProperties: false,
+    },
   },
   {
     name: "label_message",
@@ -235,7 +251,8 @@ export function isOfficialGmailMcpConfig(
   return (
     canonicalUrl(url) === canonicalUrl(OFFICIAL_GMAIL_MCP_URL) &&
     connectionRef?.providerDomain.toLowerCase() === "gmailmcp.googleapis.com" &&
-    connectionRef.kind === "oauth2"
+    connectionRef.kind === "oauth2" &&
+    connectionRef.subjectScope === "subject"
   );
 }
 
@@ -289,7 +306,7 @@ export class GmailRestMcpServer implements MCPServer {
   private async execute(toolName: string, args: Record<string, unknown>): Promise<unknown> {
     switch (toolName) {
       case "list_labels":
-        return await this.request(toolName, `${GMAIL_REST_API_BASE}/labels`, {}, true);
+        return await this.listLabels(args);
       case "get_message":
         return await this.getMessage(args);
       case "get_thread":
@@ -311,6 +328,41 @@ export class GmailRestMcpServer implements MCPServer {
       default:
         throw new GmailRestInputError(`Unsupported Gmail tool: ${toolName}`);
     }
+  }
+
+  private async listLabels(args: Record<string, unknown>): Promise<unknown> {
+    const pageSize = boundedPageSize(args.pageSize);
+    const offset = labelPageOffset(args.pageToken);
+    const payload = await this.request<{ labels?: GmailLabel[] }>(
+      "list_labels",
+      `${GMAIL_REST_API_BASE}/labels`,
+      {},
+      true,
+    );
+    const labels = (payload.labels ?? [])
+      .filter((label) => label.type?.toLowerCase() === "user" && Boolean(label.id))
+      .map((label) => ({
+        labelId: label.id!,
+        name: label.name ?? "",
+        ...(label.color
+          ? {
+              color: {
+                ...(label.color.textColor ? { textColor: label.color.textColor } : {}),
+                ...(label.color.backgroundColor
+                  ? { backgroundColor: label.color.backgroundColor }
+                  : {}),
+              },
+            }
+          : {}),
+        ...(Number.isInteger(label.threadsTotal) ? { threadsTotal: label.threadsTotal } : {}),
+        ...(Number.isInteger(label.threadsUnread) ? { threadsUnread: label.threadsUnread } : {}),
+      }));
+    const page = labels.slice(offset, offset + pageSize);
+    const nextOffset = offset + page.length;
+    return {
+      labels: page,
+      ...(nextOffset < labels.length ? { nextPageToken: `opengeni-rest:${nextOffset}` } : {}),
+    };
   }
 
   private async getMessage(args: Record<string, unknown>): Promise<unknown> {
@@ -381,14 +433,16 @@ export class GmailRestMcpServer implements MCPServer {
     });
     return {
       threads: threads.filter((thread): thread is NonNullable<typeof thread> => thread !== null),
-      nextPageToken: listed.nextPageToken ?? null,
-      resultSizeEstimate: listed.resultSizeEstimate ?? null,
+      ...(listed.nextPageToken ? { nextPageToken: listed.nextPageToken } : {}),
+      ...(Number.isFinite(listed.resultSizeEstimate)
+        ? { resultCountEstimate: String(listed.resultSizeEstimate) }
+        : {}),
     };
   }
 
   private async listDrafts(args: Record<string, unknown>): Promise<unknown> {
     const pageSize = boundedPageSize(args.pageSize);
-    const full = args.view === "DRAFT_VIEW_FULL";
+    const full = draftView(args.view) === "full";
     const url = new URL(`${GMAIL_REST_API_BASE}/drafts`);
     url.searchParams.set("maxResults", String(pageSize));
     const query = optionalString(args.query, "query", 4_096);
@@ -398,7 +452,6 @@ export class GmailRestMcpServer implements MCPServer {
     const listed = await this.request<{
       drafts?: Array<{ id?: string; message?: GmailMessage }>;
       nextPageToken?: string;
-      resultSizeEstimate?: number;
     }>("list_drafts", url, {}, true);
     const drafts = await boundedMap(listed.drafts ?? [], 5, async (draft) => {
       if (!draft.id) return null;
@@ -415,16 +468,13 @@ export class GmailRestMcpServer implements MCPServer {
         true,
       );
       return {
+        ...(detail.message ? projectMessage(detail.message, full ? "full" : "metadata") : {}),
         id: detail.id ?? draft.id,
-        ...(detail.message
-          ? { message: projectMessage(detail.message, full ? "full" : "metadata") }
-          : {}),
       };
     });
     return {
       drafts: drafts.filter((draft): draft is NonNullable<typeof draft> => draft !== null),
-      nextPageToken: listed.nextPageToken ?? null,
-      resultSizeEstimate: listed.resultSizeEstimate ?? null,
+      ...(listed.nextPageToken ? { nextPageToken: listed.nextPageToken } : {}),
     };
   }
 
@@ -591,7 +641,7 @@ function projectMessage(message: GmailMessage, view: "metadata" | "minimal" | "f
     toRecipients: splitHeader(headers.to),
     ccRecipients: splitHeader(headers.cc),
     bccRecipients: splitHeader(headers.bcc),
-    date: headers.date ?? null,
+    date: normalizedMessageDate(headers.date),
     labelIds: message.labelIds ?? [],
     internalDate: message.internalDate ?? null,
     sizeEstimate: message.sizeEstimate ?? null,
@@ -604,6 +654,9 @@ function projectMessage(message: GmailMessage, view: "metadata" | "minimal" | "f
     ...minimal,
     plaintextBody: content.plaintextBody,
     htmlBody: content.htmlBody,
+    attachmentIds: content.attachments.flatMap((attachment) =>
+      attachment.id ? [attachment.id] : [],
+    ),
     attachments: content.attachments,
   };
 }
@@ -731,7 +784,7 @@ function parseAttachments(value: unknown): Array<{
     }
     const record = entry as Record<string, unknown>;
     const encoded = requiredString(record.content, `attachments[${index}].content`, 40_000_000);
-    const content = Buffer.from(encoded, "base64");
+    const content = decodeAttachmentContent(encoded, index);
     total += content.byteLength;
     if (total > MAX_ATTACHMENT_BYTES) {
       throw new GmailRestInputError("combined attachment bytes exceed 25MB");
@@ -743,6 +796,13 @@ function parseAttachments(value: unknown): Array<{
       inline: record.inline === true,
     };
   });
+}
+
+function decodeAttachmentContent(value: string, index: number): Buffer {
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(value)) {
+    throw new GmailRestInputError(`attachments[${index}].content must be valid base64`);
+  }
+  return Buffer.from(value, "base64");
 }
 
 function messageView(value: unknown): "metadata" | "minimal" | "full" {
@@ -760,12 +820,29 @@ function threadView(value: unknown): "metadata" | "minimal" {
   throw new GmailRestInputError("view is invalid");
 }
 
+function draftView(value: unknown): "metadata" | "full" {
+  if (value === undefined || value === "DRAFT_VIEW_UNSPECIFIED" || value === "DRAFT_VIEW_FULL")
+    return "full";
+  if (value === "DRAFT_VIEW_METADATA_ONLY") return "metadata";
+  throw new GmailRestInputError("view is invalid");
+}
+
 function boundedPageSize(value: unknown): number {
   if (value === undefined) return 20;
   if (!Number.isInteger(value) || (value as number) < 1 || (value as number) > MAX_PAGE_SIZE) {
     throw new GmailRestInputError(`pageSize must be an integer from 1 to ${MAX_PAGE_SIZE}`);
   }
   return value as number;
+}
+
+function labelPageOffset(value: unknown): number {
+  const token = optionalString(value, "pageToken", 4_096);
+  if (!token) return 0;
+  const match = /^opengeni-rest:(0|[1-9][0-9]{0,8})$/u.exec(token);
+  if (!match) {
+    throw new GmailRestInputError("pageToken is invalid for the Gmail REST adapter");
+  }
+  return Number(match[1]);
 }
 
 function requiredId(value: unknown, name: string): string {
@@ -823,6 +900,12 @@ function splitHeader(value: string | undefined): string[] {
         .map((entry) => entry.trim())
         .filter(Boolean)
     : [];
+}
+
+function normalizedMessageDate(value: string | undefined): string | null {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value.slice(0, 998) : date.toISOString().slice(0, 10);
 }
 
 function decodeBase64Url(value: string): string {

@@ -119,6 +119,7 @@ export type HostMcpCredentialResolverContext = {
   initiator: TurnInitiator;
   initiatorContext: TurnInitiatorContext;
   surface: McpCredentialsRequest["surface"];
+  allowOfficialGmailRestDestination?: boolean;
 };
 
 export class HostMcpCredentialScopeError extends Error {
@@ -159,7 +160,8 @@ function isOfficialGmailRestDestination(
 ): boolean {
   if (
     ref.providerDomain.toLowerCase() !== "gmailmcp.googleapis.com" ||
-    (ref.kind !== undefined && ref.kind !== "oauth2")
+    ref.kind !== "oauth2" ||
+    ref.subjectScope !== "subject"
   ) {
     return false;
   }
@@ -190,7 +192,10 @@ export function buildHostConnectionTokenResolver(
     if (
       !destinationUrl ||
       (!destinationHostMatchesProvider(destinationUrl, input.connectionRef.providerDomain) &&
-        !isOfficialGmailRestDestination(destinationUrl, input.connectionRef))
+        !(
+          context.allowOfficialGmailRestDestination === true &&
+          isOfficialGmailRestDestination(destinationUrl, input.connectionRef)
+        ))
     ) {
       throw new HostMcpCredentialBindingError("destinationUrl");
     }

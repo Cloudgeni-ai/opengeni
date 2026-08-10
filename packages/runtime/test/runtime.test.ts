@@ -4583,7 +4583,9 @@ describe("runtime event normalization", () => {
         },
         mcpFetchImpl: async (input) => {
           fetched.push(input.toString());
-          return Response.json({ labels: [{ id: "INBOX", name: "INBOX" }] });
+          return Response.json({
+            labels: [{ id: "Label_1", name: "Projects", type: "user" }],
+          });
         },
       },
     );
@@ -4593,7 +4595,7 @@ describe("runtime event normalization", () => {
         "gmail__list_labels",
       ]);
       const result = await prepared.mcpServers[0]!.callTool("gmail__list_labels", {});
-      expect(JSON.stringify(result)).toContain("INBOX");
+      expect(JSON.stringify(result)).toContain("Projects");
       expect(fetched).toEqual(["https://gmail.googleapis.com/gmail/v1/users/me/labels"]);
       expect(resolved).toHaveLength(2);
       expect(resolved[1]).toMatchObject({

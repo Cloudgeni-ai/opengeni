@@ -376,6 +376,7 @@ describe("official Gmail MCP OAuth compatibility", () => {
         scopes: [
           "https://www.googleapis.com/auth/gmail.readonly",
           "https://www.googleapis.com/auth/gmail.compose",
+          "https://www.googleapis.com/auth/gmail.modify",
         ],
         resourceParameterSupported: false,
       }),
@@ -388,6 +389,7 @@ describe("official Gmail MCP OAuth compatibility", () => {
     expect(authorizationUrl.searchParams.get("scope")?.split(" ")).toEqual([
       "https://www.googleapis.com/auth/gmail.readonly",
       "https://www.googleapis.com/auth/gmail.compose",
+      "https://www.googleapis.com/auth/gmail.modify",
     ]);
   });
 

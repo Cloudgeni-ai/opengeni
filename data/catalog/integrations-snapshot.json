@@ -5309,7 +5309,8 @@
       "authKind": "oauth2",
       "scopesHint": [
         "https://www.googleapis.com/auth/gmail.readonly",
-        "https://www.googleapis.com/auth/gmail.compose"
+        "https://www.googleapis.com/auth/gmail.compose",
+        "https://www.googleapis.com/auth/gmail.modify"
       ],
       "allowedTools": [
         "create_draft",
@@ -5336,7 +5337,7 @@
           "id": "google_oauth_client",
           "type": "oauth2",
           "generateUrl": "https://console.cloud.google.com/auth/clients",
-          "setup": "Create a Google OAuth web client for OpenGeni's integration callback, enable the Gmail API and Gmail MCP API, and approve the documented Gmail read-only and compose scopes."
+          "setup": "Create a Google OAuth web client for OpenGeni's integration callback, enable the Gmail API and Gmail MCP API, and approve the documented Gmail read-only, compose, and modify scopes."
         }
       ],
       "tier": "verified",

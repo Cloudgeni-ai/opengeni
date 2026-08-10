@@ -556,6 +556,7 @@ async function connectToolspaceServer(input: {
           initiator: input.turn.initiator,
           initiatorContext: { ...input.turn.initiatorContext },
           surface: "toolspace",
+          allowOfficialGmailRestDestination: input.deps.settings.gmailRestAdapterEnabled,
         })
       : buildConnectionTokenResolver(input.deps.db, input.deps.settings);
     const membershipChecks = new Map<string, Promise<boolean>>();
@@ -1014,6 +1015,7 @@ export function connectionBrokerFetch(
         initiator: input.turn.initiator,
         initiatorContext: input.turn.initiatorContext,
         surface: "toolspace",
+        allowOfficialGmailRestDestination: input.deps.settings.gmailRestAdapterEnabled,
       })
     : buildConnectionTokenResolver(input.deps.db, input.deps.settings);
   const personalDelegations = input.personalConnectionDelegations ?? [];

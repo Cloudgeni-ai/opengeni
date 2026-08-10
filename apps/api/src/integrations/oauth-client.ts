@@ -49,6 +49,7 @@ export const OFFICIAL_GMAIL_MCP_URL = "https://gmailmcp.googleapis.com/mcp/v1";
 export const OFFICIAL_GMAIL_MCP_SCOPES = [
   "https://www.googleapis.com/auth/gmail.readonly",
   "https://www.googleapis.com/auth/gmail.compose",
+  "https://www.googleapis.com/auth/gmail.modify",
 ] as const;
 const SLACK_OAUTH_ORIGIN = "https://slack.com";
 const SLACK_MCP_ORIGIN = "https://mcp.slack.com";
@@ -324,6 +325,7 @@ async function startMcpOAuthWithinDeadline(
       providerDomain,
       mcpUrl,
       hostedSlackMcp,
+      exactMcpBinding: hostedSlackMcp || officialGmailResource,
       connectionId: context.payload.connectionId,
       requestedOwnership: context.payload.ownership,
       newConnectionOwnership: requestedOwnership,
@@ -1209,6 +1211,7 @@ async function existingOAuthConnectionForStart(
     providerDomain: string;
     mcpUrl: string;
     hostedSlackMcp: boolean;
+    exactMcpBinding: boolean;
     connectionId?: string | undefined;
     requestedOwnership?: ConnectionOwnership | undefined;
     newConnectionOwnership: ConnectionOwnership;
@@ -1231,7 +1234,7 @@ async function existingOAuthConnectionForStart(
       });
     }
     return connection.providerDomain === input.providerDomain &&
-      (!input.hostedSlackMcp || connection.metadata.mcpUrl === input.mcpUrl)
+      (!input.exactMcpBinding || connection.metadata.mcpUrl === input.mcpUrl)
       ? connection
       : null;
   }
@@ -1242,7 +1245,7 @@ async function existingOAuthConnectionForStart(
       connection.subjectId === ownerSubjectId &&
       connection.kind === "oauth2" &&
       connection.providerDomain === input.providerDomain &&
-      (!input.hostedSlackMcp || connection.metadata.mcpUrl === input.mcpUrl),
+      (!input.exactMcpBinding || connection.metadata.mcpUrl === input.mcpUrl),
   );
   if (input.hostedSlackMcp && input.newConnectionOwnership === "personal") {
     return selectCanonicalPersonalSlackConnection(matching);

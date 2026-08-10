@@ -3,6 +3,7 @@ import {
   GMAIL_REST_MCP_TOOLS,
   GmailRestMcpServer,
   OFFICIAL_GMAIL_MCP_URL,
+  isOfficialGmailMcpConfig,
   type GmailRestMcpServerOptions,
 } from "../src/gmail-rest-mcp";
 
@@ -50,23 +51,37 @@ describe("Gmail REST MCP adapter", () => {
     );
   });
 
-  test("lists labels through users/me without exposing the token in its result", async () => {
+  test("projects and paginates user labels through users/me without exposing the token", async () => {
     let request: Request | null = null;
     const gmail = server({
       fetchImpl: async (input, init) => {
         request = new Request(input, init);
-        return Response.json({ labels: [{ id: "INBOX", name: "INBOX" }] });
+        return Response.json({
+          labels: [
+            { id: "INBOX", name: "INBOX", type: "system" },
+            { id: "Label_1", name: "Projects", type: "user", threadsTotal: 7 },
+            { id: "Label_2", name: "Receipts", type: "user", threadsUnread: 2 },
+          ],
+        });
       },
     });
-    const result = (await gmail.callTool("list_labels", {})) as {
+    const first = (await gmail.callTool("list_labels", { pageSize: 1 })) as {
       content: Array<{ text: string }>;
     };
     expect(request!.url).toBe("https://gmail.googleapis.com/gmail/v1/users/me/labels");
     expect(request!.headers.get("authorization")).toBe("Bearer gmail-token");
-    expect(JSON.parse(result.content[0]!.text)).toEqual({
-      labels: [{ id: "INBOX", name: "INBOX" }],
+    expect(JSON.parse(first.content[0]!.text)).toEqual({
+      labels: [{ labelId: "Label_1", name: "Projects", threadsTotal: 7 }],
+      nextPageToken: "opengeni-rest:1",
     });
-    expect(JSON.stringify(result)).not.toContain("gmail-token");
+    const second = (await gmail.callTool("list_labels", {
+      pageSize: 1,
+      pageToken: "opengeni-rest:1",
+    })) as { content: Array<{ text: string }> };
+    expect(JSON.parse(second.content[0]!.text)).toEqual({
+      labels: [{ labelId: "Label_2", name: "Receipts", threadsUnread: 2 }],
+    });
+    expect(JSON.stringify([first, second])).not.toContain("gmail-token");
   });
 
   test("refreshes and retries a read once after 401", async () => {
@@ -93,6 +108,57 @@ describe("Gmail REST MCP adapter", () => {
     expect(result.isError).not.toBe(true);
     expect(resolves).toBe(2);
     expect(requests).toBe(2);
+  });
+
+  test("keeps draft and search outputs compatible with the hosted MCP field shape", async () => {
+    const gmail = server({
+      fetchImpl: async (input) => {
+        const url = new URL(input.toString());
+        if (url.pathname.endsWith("/drafts")) {
+          return Response.json({ drafts: [{ id: "draft-1" }], nextPageToken: "draft-next" });
+        }
+        if (url.pathname.endsWith("/drafts/draft-1")) {
+          return Response.json({
+            id: "draft-1",
+            message: {
+              id: "message-1",
+              threadId: "thread-1",
+              payload: { headers: [{ name: "Subject", value: "Draft subject" }] },
+            },
+          });
+        }
+        if (url.pathname.endsWith("/threads")) {
+          return Response.json({
+            threads: [{ id: "thread-1" }],
+            resultSizeEstimate: 42,
+          });
+        }
+        if (url.pathname.endsWith("/threads/thread-1")) {
+          return Response.json({ id: "thread-1", messages: [] });
+        }
+        throw new Error(`unexpected Gmail test URL: ${url}`);
+      },
+    });
+
+    const drafts = (await gmail.callTool("list_drafts", {})) as {
+      structuredContent: Record<string, unknown>;
+    };
+    expect(drafts.structuredContent).toMatchObject({ nextPageToken: "draft-next" });
+    expect((drafts.structuredContent.drafts as Array<Record<string, unknown>>)[0]).toMatchObject({
+      id: "draft-1",
+      threadId: "thread-1",
+      subject: "Draft subject",
+    });
+    expect(JSON.stringify(drafts.structuredContent)).not.toContain('"message"');
+
+    const threads = (await gmail.callTool("search_threads", {})) as {
+      structuredContent: Record<string, unknown>;
+    };
+    expect(threads.structuredContent).toEqual({
+      threads: [{ id: "thread-1", messages: [] }],
+      resultCountEstimate: "42",
+    });
+    expect(threads.structuredContent).not.toHaveProperty("resultSizeEstimate");
   });
 
   test("never replays a mutation after a provider 401", async () => {
@@ -182,6 +248,22 @@ describe("Gmail REST MCP adapter", () => {
     expect(requests).toBe(0);
   });
 
+  test("rejects malformed attachment base64 before a provider request", async () => {
+    let requests = 0;
+    const gmail = server({
+      fetchImpl: async () => {
+        requests += 1;
+        return Response.json({ id: "draft-1" });
+      },
+    });
+    const result = (await gmail.callTool("create_draft", {
+      attachments: [{ content: "not base64!", filename: "bad.txt" }],
+    })) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain("must be valid base64");
+    expect(requests).toBe(0);
+  });
+
   test("reports an uncertain outcome without replaying a failed draft transport", async () => {
     let requests = 0;
     const gmail = server({
@@ -201,5 +283,12 @@ describe("Gmail REST MCP adapter", () => {
 
   test("retains the hosted MCP URL as the OAuth resource identity", () => {
     expect(OFFICIAL_GMAIL_MCP_URL).toBe("https://gmailmcp.googleapis.com/mcp/v1");
+    expect(isOfficialGmailMcpConfig(OFFICIAL_GMAIL_MCP_URL, connectionRef)).toBe(true);
+    expect(
+      isOfficialGmailMcpConfig(OFFICIAL_GMAIL_MCP_URL, {
+        ...connectionRef,
+        subjectScope: "workspace",
+      }),
+    ).toBe(false);
   });
 });

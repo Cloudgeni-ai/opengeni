@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
+import type { McpCredentialsRequest } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import {
   acquireSharedTestDatabase,
@@ -939,10 +940,15 @@ describe("buildHostConnectionTokenResolver", () => {
 
   test("permits only the canonical Gmail users/me REST lane for the Gmail MCP grant", async () => {
     const received: string[] = [];
-    const resolver = buildHostConnectionTokenResolver(async (request) => {
+    const ref = {
+      providerDomain: "gmailmcp.googleapis.com",
+      kind: "oauth2" as const,
+      subjectScope: "subject" as const,
+    };
+    const resolveHost = async (request: McpCredentialsRequest) => {
       received.push(request.destinationUrl);
       return {
-        status: "ok",
+        status: "ok" as const,
         accountId: request.accountId,
         workspaceId: request.workspaceId,
         sessionId: request.sessionId,
@@ -950,12 +956,24 @@ describe("buildHostConnectionTokenResolver", () => {
         connectionId: "gmail-connection",
         providerDomain: "gmailmcp.googleapis.com",
       };
-    }, context);
-    const ref = {
-      providerDomain: "gmailmcp.googleapis.com",
-      kind: "oauth2" as const,
-      subjectScope: "subject" as const,
     };
+    const disabledResolver = buildHostConnectionTokenResolver(resolveHost, context);
+    await expect(
+      disabledResolver({
+        workspaceId: "ws_1",
+        subjectId: "subject-a",
+        serverId: "gmail",
+        toolName: "list_labels",
+        destinationUrl: "https://gmail.googleapis.com/gmail/v1/users/me/labels",
+        connectionRef: ref,
+      }),
+    ).rejects.toBeInstanceOf(HostMcpCredentialBindingError);
+    expect(received).toEqual([]);
+
+    const resolver = buildHostConnectionTokenResolver(resolveHost, {
+      ...context,
+      allowOfficialGmailRestDestination: true,
+    });
 
     await expect(
       resolver({
@@ -968,6 +986,16 @@ describe("buildHostConnectionTokenResolver", () => {
       }),
     ).resolves.toMatchObject({ status: "ok", connectionId: "gmail-connection" });
     expect(received).toEqual(["https://gmail.googleapis.com/gmail/v1/users/me/labels"]);
+
+    await expect(
+      resolver({
+        workspaceId: "ws_1",
+        subjectId: "subject-a",
+        serverId: "gmail",
+        destinationUrl: "https://gmail.googleapis.com/gmail/v1/users/me/labels",
+        connectionRef: { ...ref, subjectScope: "workspace" },
+      }),
+    ).rejects.toBeInstanceOf(HostMcpCredentialBindingError);
 
     for (const destinationUrl of [
       "https://gmail.googleapis.com/gmail/v1/users/someone-else/labels",
@@ -1132,6 +1160,7 @@ describe("buildConnectionTokenResolver", () => {
   test("binds an official Gmail MCP OAuth row to only Gmail REST users/me", async () => {
     const gmailCredential = brokerCredential({
       id: "gmail-connection",
+      subjectId: "subject-a",
       providerDomain: "gmailmcp.googleapis.com",
       kind: "oauth2",
       credential: {
@@ -1143,6 +1172,7 @@ describe("buildConnectionTokenResolver", () => {
       grantedScopes: [
         "https://www.googleapis.com/auth/gmail.readonly",
         "https://www.googleapis.com/auth/gmail.compose",
+        "https://www.googleapis.com/auth/gmail.modify",
       ],
     });
     const { deps, counts } = resolverDeps({ loadCredential: async () => gmailCredential });
@@ -1150,12 +1180,14 @@ describe("buildConnectionTokenResolver", () => {
     await expect(
       disabledResolver({
         workspaceId: "ws_1",
+        subjectId: "subject-a",
         serverId: "gmail",
         toolName: "list_labels",
         destinationUrl: "https://gmail.googleapis.com/gmail/v1/users/me/labels",
         connectionRef: {
           providerDomain: "gmailmcp.googleapis.com",
           kind: "oauth2",
+          subjectScope: "subject",
         },
       }),
     ).resolves.toMatchObject({ status: "auth_needed", reason: "missing_connection" });
@@ -1172,11 +1204,13 @@ describe("buildConnectionTokenResolver", () => {
     const connectionRef = {
       providerDomain: "gmailmcp.googleapis.com",
       kind: "oauth2" as const,
+      subjectScope: "subject" as const,
     };
 
     await expect(
       resolver({
         workspaceId: "ws_1",
+        subjectId: "subject-a",
         serverId: "gmail",
         toolName: "list_labels",
         destinationUrl: "https://gmail.googleapis.com/gmail/v1/users/me/labels",
@@ -1197,6 +1231,7 @@ describe("buildConnectionTokenResolver", () => {
       await expect(
         resolver({
           workspaceId: "ws_1",
+          subjectId: "subject-a",
           serverId: "gmail",
           destinationUrl,
           connectionRef,
