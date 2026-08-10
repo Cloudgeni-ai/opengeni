@@ -783,11 +783,14 @@ export function useComposer(
     }
     if (
       effectiveControl.controlVersion === controlStopping.controlVersion &&
-      effectiveControl.controlEtag !== controlStopping.controlEtag
+      effectiveControl.controlEtag === controlStopping.controlEtag &&
+      effectiveControl.settlement !== null
     ) {
       return;
     }
-    if (effectiveControl.settlement !== null) return;
+    // A newer control revision, an impossible same-version/different-etag
+    // projection, or quiescence at this exact revision supersedes the local
+    // mutation receipt. SessionChrome then falls back to durable queue truth.
     setControlStopping((current) => (current === controlStopping ? null : current));
   }, [controlStopping, options.effectiveControl]);
 
@@ -1086,7 +1089,8 @@ export function useComposer(
                 clientEventId: pending.input.clientEventId ?? null,
                 triggerEventId: result.accepted.id,
                 turnId: result.turn.id,
-                stoppingPreviousAttempt: (result.interruptionCount ?? 0) > 0,
+                stoppingPreviousAttempt:
+                  result.replay !== true && (result.interruptionCount ?? 0) > 0,
               });
             }
           } catch (cause) {
@@ -1172,7 +1176,8 @@ export function useComposer(
               clientEventId: input.clientEventId ?? null,
               triggerEventId: result.accepted.id,
               turnId: result.turn.id,
-              stoppingPreviousAttempt: (result.interruptionCount ?? 0) > 0,
+              stoppingPreviousAttempt:
+                result.replay !== true && (result.interruptionCount ?? 0) > 0,
             });
           }
         } catch (cause) {
@@ -1259,7 +1264,9 @@ export function useComposer(
           targetGeneration.current === ownedGeneration
         ) {
           setControlStopping(
-            result.interruptionCount > 0 && result.effectiveControl.settlement !== null
+            result.interruptionCount > 0 &&
+              result.effectiveControl.state === "paused" &&
+              result.effectiveControl.settlement !== null
               ? {
                   controlVersion: result.effectiveControl.controlVersion,
                   controlEtag: result.effectiveControl.controlEtag,

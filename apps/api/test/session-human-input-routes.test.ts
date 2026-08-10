@@ -258,21 +258,25 @@ describe("structured human-input HTTP surface (real PostgreSQL)", () => {
       },
     });
 
+    const steerClientEventId = crypto.randomUUID();
+    const steerBody = {
+      text: "",
+      clientEventId: steerClientEventId,
+      annotations: [{ ...annotation, id: crypto.randomUUID() }],
+    };
     const steerResponse = await app.request(
       `http://x/v1/workspaces/${grant.workspaceId}/sessions/${session.id}/steer`,
       {
         method: "POST",
         headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-        body: JSON.stringify({
-          text: "",
-          clientEventId: crypto.randomUUID(),
-          annotations: [{ ...annotation, id: crypto.randomUUID() }],
-        }),
+        body: JSON.stringify(steerBody),
       },
     );
     expect(steerResponse.status).toBe(202);
-    expect(await steerResponse.json()).toMatchObject({
+    const steerResult = await steerResponse.json();
+    expect(steerResult).toMatchObject({
       interruptionCount: 0,
+      replay: false,
       accepted: {
         payload: {
           text: "",
@@ -283,6 +287,22 @@ describe("structured human-input HTTP surface (real PostgreSQL)", () => {
         prompt: "",
         annotations: [{ ordinal: 1, quote: "beta", source: { eventId: source!.id } }],
       },
+    });
+
+    const replayResponse = await app.request(
+      `http://x/v1/workspaces/${grant.workspaceId}/sessions/${session.id}/steer`,
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify(steerBody),
+      },
+    );
+    expect(replayResponse.status).toBe(202);
+    expect(await replayResponse.json()).toMatchObject({
+      interruptionCount: 0,
+      replay: true,
+      accepted: { id: steerResult.accepted.id },
+      turn: { id: steerResult.turn.id },
     });
   });
 

@@ -1988,15 +1988,20 @@ export async function acceptSessionUserMessage(
   workspaceId: Parameters<typeof acceptSessionUserMessageWithOutcome>[2],
   sessionId: Parameters<typeof acceptSessionUserMessageWithOutcome>[3],
   input: Parameters<typeof acceptSessionUserMessageWithOutcome>[4],
-): Promise<{ accepted: SessionEvent; turn: SessionTurn; interruptionCount: number }> {
-  const { accepted, turn, interruptionCount } = await acceptSessionUserMessageWithOutcome(
+): Promise<{
+  accepted: SessionEvent;
+  turn: SessionTurn;
+  interruptionCount: number;
+  replay: boolean;
+}> {
+  const { accepted, turn, interruptionCount, replay } = await acceptSessionUserMessageWithOutcome(
     deps,
     grant,
     workspaceId,
     sessionId,
     input,
   );
-  return { accepted, turn, interruptionCount };
+  return { accepted, turn, interruptionCount, replay };
 }
 
 /**

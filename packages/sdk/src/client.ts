@@ -341,6 +341,8 @@ export type SteerMessageResult = {
   turn: SessionTurn;
   /** Number of live attempts durably asked to stop by this atomic Steer. */
   interruptionCount?: number;
+  /** True when this response came from the command's immutable idempotency receipt. */
+  replay?: boolean;
 };
 
 export type TranscribeAudioInput = {

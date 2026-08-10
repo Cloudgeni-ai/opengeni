@@ -198,12 +198,13 @@ describe("OpenGeniClient turn queue", () => {
       triggerEventId: accepted.id,
     });
     const { client, requests } = makeClient(() =>
-      jsonResponse({ accepted, turn: steerTurn, interruptionCount: 1 }, 202),
+      jsonResponse({ accepted, turn: steerTurn, interruptionCount: 1, replay: false }, 202),
     );
     const result = await client.steerMessage(WORKSPACE_ID, SESSION_ID, "do this now");
     expect(result.accepted.id).toBe(accepted.id);
     expect(result.turn.id).toBe(TURN_B);
     expect(result.interruptionCount).toBe(1);
+    expect(result.replay).toBe(false);
     expect(requests).toHaveLength(1);
     expect(requests[0]!.method).toBe("POST");
     expect(requests[0]!.url).toBe(
