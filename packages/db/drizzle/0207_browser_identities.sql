@@ -118,11 +118,13 @@ CREATE TABLE "browser_state_artifacts" (
   "content_digest" text NOT NULL,
   "manifest_digest" text NOT NULL,
   "object_key" text NOT NULL,
-  "encrypted_data_key" text NOT NULL,
+  "encrypted_data_key" text,
   "size_bytes" bigint NOT NULL,
   "materialization" jsonb NOT NULL,
   "state" text NOT NULL DEFAULT 'available',
   "retained_until" timestamptz,
+  "delete_claim_id" uuid,
+  "delete_claimed_at" timestamptz,
   "created_at" timestamptz NOT NULL DEFAULT now(),
   "deleted_at" timestamptz,
   CONSTRAINT "browser_state_artifacts_workspace_account_fk"
@@ -136,7 +138,7 @@ CREATE TABLE "browser_state_artifacts" (
   CONSTRAINT "browser_state_artifacts_kind_check"
     CHECK ("kind" IN ('chromium_profile', 'normalized_web_state', 'provider_snapshot')),
   CONSTRAINT "browser_state_artifacts_state_check"
-    CHECK ("state" IN ('available', 'delete_pending', 'deleted')),
+    CHECK ("state" IN ('available', 'delete_pending', 'deleting', 'deleted')),
   CONSTRAINT "browser_state_artifacts_values_check" CHECK (
     octet_length("format") BETWEEN 1 AND 512
     AND "format" = btrim("format")
@@ -148,7 +150,10 @@ CREATE TABLE "browser_state_artifacts" (
       '^workspaces/' || "workspace_id"::text ||
       '/browser-state/[A-Za-z0-9._=-]+(/[A-Za-z0-9._=-]+)*$'
     )
-    AND octet_length("encrypted_data_key") BETWEEN 16 AND 8192
+    AND (
+      "encrypted_data_key" IS NULL
+      OR octet_length("encrypted_data_key") BETWEEN 16 AND 8192
+    )
     AND "size_bytes" > 0
     AND jsonb_typeof("materialization") = 'object'
     AND octet_length("materialization"::text) BETWEEN 2 AND 65536
@@ -157,13 +162,43 @@ CREATE TABLE "browser_state_artifacts" (
       OR (
         "state" = 'available'
         AND "retained_until" IS NULL
+        AND "delete_claim_id" IS NULL
+        AND "delete_claimed_at" IS NULL
         AND "deleted_at" IS NULL
+        AND "encrypted_data_key" IS NOT NULL
       )
     )
   ),
   CONSTRAINT "browser_state_artifacts_lifecycle_check" CHECK (
-    ("state" = 'deleted' AND "deleted_at" IS NOT NULL)
-    OR ("state" <> 'deleted' AND "deleted_at" IS NULL)
+    (
+      "state" = 'available'
+      AND "retained_until" IS NULL
+      AND "delete_claim_id" IS NULL
+      AND "delete_claimed_at" IS NULL
+      AND "deleted_at" IS NULL
+      AND "encrypted_data_key" IS NOT NULL
+    ) OR (
+      "state" = 'delete_pending'
+      AND "retained_until" IS NOT NULL
+      AND "delete_claim_id" IS NULL
+      AND "delete_claimed_at" IS NULL
+      AND "deleted_at" IS NULL
+      AND "encrypted_data_key" IS NOT NULL
+    ) OR (
+      "state" = 'deleting'
+      AND "retained_until" IS NOT NULL
+      AND "delete_claim_id" IS NOT NULL
+      AND "delete_claimed_at" IS NOT NULL
+      AND "deleted_at" IS NULL
+      AND "encrypted_data_key" IS NOT NULL
+    ) OR (
+      "state" = 'deleted'
+      AND "retained_until" IS NOT NULL
+      AND "delete_claim_id" IS NULL
+      AND "delete_claimed_at" IS NULL
+      AND "deleted_at" IS NOT NULL
+      AND "encrypted_data_key" IS NULL
+    )
   ),
   CONSTRAINT "browser_state_artifacts_workspace_id_uq" UNIQUE ("workspace_id", "id"),
   CONSTRAINT "browser_state_artifacts_component_authority_uq"
@@ -174,7 +209,9 @@ CREATE TABLE "browser_state_artifacts" (
 CREATE INDEX "browser_state_artifacts_source_idx"
   ON "browser_state_artifacts" ("workspace_id", "source_browser_session_id", "created_at");
 CREATE INDEX "browser_state_artifacts_gc_idx"
-  ON "browser_state_artifacts" ("state", "retained_until", "created_at");
+  ON "browser_state_artifacts" (
+    "state", "retained_until", "delete_claimed_at", "created_at"
+  );
 
 CREATE TABLE "browser_revision_components" (
   "id" uuid PRIMARY KEY,
@@ -273,29 +310,56 @@ BEGIN
   IF ROW(
     NEW.id, NEW.account_id, NEW.workspace_id, NEW.source_browser_session_id,
     NEW.purpose, NEW.kind, NEW.format, NEW.artifact_digest, NEW.content_digest,
-    NEW.manifest_digest, NEW.object_key, NEW.encrypted_data_key, NEW.size_bytes, NEW.materialization,
+    NEW.manifest_digest, NEW.object_key, NEW.size_bytes, NEW.materialization,
     NEW.created_at
   ) IS DISTINCT FROM ROW(
     OLD.id, OLD.account_id, OLD.workspace_id, OLD.source_browser_session_id,
     OLD.purpose, OLD.kind, OLD.format, OLD.artifact_digest, OLD.content_digest,
-    OLD.manifest_digest, OLD.object_key, OLD.encrypted_data_key, OLD.size_bytes, OLD.materialization,
+    OLD.manifest_digest, OLD.object_key, OLD.size_bytes, OLD.materialization,
     OLD.created_at
   ) THEN
     RAISE EXCEPTION 'Browser state artifact immutable authority cannot change'
       USING ERRCODE = '23514';
   END IF;
   IF OLD.purpose = 'revision_component'
-     AND ROW(NEW.state, NEW.retained_until, NEW.deleted_at)
-       IS DISTINCT FROM ROW(OLD.state, OLD.retained_until, OLD.deleted_at) THEN
-    RAISE EXCEPTION 'Published BrowserRevision artifacts are immutable'
+     AND ROW(
+       NEW.state, NEW.retained_until, NEW.delete_claim_id, NEW.delete_claimed_at,
+       NEW.deleted_at, NEW.encrypted_data_key
+     ) IS DISTINCT FROM ROW(
+       OLD.state, OLD.retained_until, OLD.delete_claim_id, OLD.delete_claimed_at,
+       OLD.deleted_at, OLD.encrypted_data_key
+     ) THEN
+    RAISE EXCEPTION 'Published BrowserRevision artifact immutable authority cannot change'
       USING ERRCODE = '23514';
   END IF;
   IF NEW.state IS DISTINCT FROM OLD.state
      AND NOT (
        (OLD.state = 'available' AND NEW.state = 'delete_pending')
-       OR (OLD.state = 'delete_pending' AND NEW.state = 'deleted')
+       OR (OLD.state = 'delete_pending' AND NEW.state = 'deleting')
+       OR (OLD.state = 'deleting' AND NEW.state = 'deleted')
      ) THEN
     RAISE EXCEPTION 'Browser state artifact lifecycle cannot move backwards or skip a phase'
+      USING ERRCODE = '23514';
+  END IF;
+  IF NEW.state = OLD.state AND NEW.state <> 'deleting'
+     AND ROW(
+       NEW.retained_until, NEW.delete_claim_id, NEW.delete_claimed_at,
+       NEW.deleted_at, NEW.encrypted_data_key
+     ) IS DISTINCT FROM ROW(
+       OLD.retained_until, OLD.delete_claim_id, OLD.delete_claimed_at,
+       OLD.deleted_at, OLD.encrypted_data_key
+     ) THEN
+    RAISE EXCEPTION 'Browser state artifact lifecycle authority cannot change in place'
+      USING ERRCODE = '23514';
+  END IF;
+  IF NEW.state = OLD.state AND NEW.state = 'deleting'
+     AND (
+       NEW.retained_until IS DISTINCT FROM OLD.retained_until
+       OR NEW.deleted_at IS DISTINCT FROM OLD.deleted_at
+       OR NEW.encrypted_data_key IS DISTINCT FROM OLD.encrypted_data_key
+       OR NEW.delete_claimed_at < OLD.delete_claimed_at
+     ) THEN
+    RAISE EXCEPTION 'Browser state artifact delete claim cannot weaken authority'
       USING ERRCODE = '23514';
   END IF;
   RETURN NEW;
@@ -344,6 +408,64 @@ CREATE POLICY workspace_isolation ON "browser_state_artifacts"
   USING (opengeni_private.workspace_rls_visible("account_id", "workspace_id"))
   WITH CHECK (opengeni_private.workspace_rls_visible("account_id", "workspace_id"));
 
+-- This is the sole bounded FORCE-RLS bypass for browser artifact collection.
+-- Claims are reclaimable after worker loss; provider deletes are idempotent.
+DO $migration$
+DECLARE target_schema text := current_schema();
+BEGIN
+  EXECUTE format($create$
+    CREATE OR REPLACE FUNCTION opengeni_private.claim_browser_state_artifact_cleanup(
+      p_claim_timeout_ms bigint,
+      p_limit integer
+    )
+    RETURNS TABLE (
+      claim_id uuid,
+      artifact_id uuid,
+      account_id uuid,
+      workspace_id uuid,
+      object_key text
+    )
+    LANGUAGE sql
+    SECURITY DEFINER
+    SET search_path = pg_catalog
+    AS $function$
+      WITH candidates AS (
+        SELECT A.id, gen_random_uuid() AS claim_id
+        FROM %1$I.browser_state_artifacts A
+        WHERE A.purpose = 'private_checkpoint'
+          AND (
+            (
+              A.state = 'delete_pending'
+              AND A.retained_until <= clock_timestamp()
+            )
+            OR (
+              A.state = 'deleting'
+              AND A.delete_claimed_at <= clock_timestamp() - (
+                greatest(p_claim_timeout_ms, 0)::double precision * interval '1 millisecond'
+              )
+            )
+          )
+        ORDER BY coalesce(A.delete_claimed_at, A.retained_until), A.id
+        LIMIT least(greatest(p_limit, 0), 1000)
+        FOR UPDATE SKIP LOCKED
+      ), claimed AS (
+        UPDATE %1$I.browser_state_artifacts A
+        SET state = 'deleting',
+          delete_claim_id = C.claim_id,
+          delete_claimed_at = clock_timestamp()
+        FROM candidates C
+        WHERE A.id = C.id
+        RETURNING A.*, C.claim_id
+      )
+      SELECT C.claim_id, C.id, C.account_id, C.workspace_id, C.object_key
+      FROM claimed C;
+    $function$;
+  $create$, target_schema);
+END $migration$;
+
+REVOKE ALL ON FUNCTION opengeni_private.claim_browser_state_artifact_cleanup(bigint, integer)
+  FROM PUBLIC;
+
 ALTER TABLE "browser_revision_components" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "browser_revision_components" FORCE ROW LEVEL SECURITY;
 CREATE POLICY workspace_isolation ON "browser_revision_components"
@@ -354,6 +476,8 @@ DO $grants$
 DECLARE target_schema text := current_schema();
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
+    GRANT EXECUTE ON FUNCTION opengeni_private.claim_browser_state_artifact_cleanup(bigint, integer)
+      TO opengeni_app;
     EXECUTE format(
       'REVOKE ALL ON TABLE %I.browser_identities, %I.browser_revisions, %I.browser_state_artifacts, %I.browser_revision_components FROM opengeni_app',
       target_schema, target_schema, target_schema, target_schema

@@ -57,8 +57,6 @@ export class BrowserIdentityStateError extends Error {
   readonly name = "BrowserIdentityStateError";
 }
 
-export type { BrowserStateArtifactCommitInput } from "./browser-state-artifacts";
-
 export type BrowserRevisionPublicationPreparation =
   | {
       kind: "completed";
@@ -1041,7 +1039,7 @@ async function loadBrowserRevisionArtifactAuthority(
     revision,
     artifacts: components.map((component) => {
       const artifact = byArtifact.get(component.artifactId);
-      if (!artifact || artifact.state !== "available") {
+      if (!artifact || artifact.state !== "available" || artifact.encryptedDataKey === null) {
         throw new BrowserIdentityStateError("BrowserRevision artifact is unavailable");
       }
       return {

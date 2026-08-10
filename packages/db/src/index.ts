@@ -52883,6 +52883,7 @@ export * from "./codemode-operations";
 export * from "./browser-sessions";
 export * from "./computer-sessions";
 export * from "./browser-identities";
+export * from "./browser-state-artifacts";
 export * from "./browser-auth";
 export * from "./browser-downloads";
 export * from "./attached-browser-devices";

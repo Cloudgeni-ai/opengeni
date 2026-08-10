@@ -216,13 +216,17 @@ export const browserStateArtifacts = pgTable(
     contentDigest: text("content_digest").notNull(),
     manifestDigest: text("manifest_digest").notNull(),
     objectKey: text("object_key").notNull(),
-    encryptedDataKey: text("encrypted_data_key").notNull(),
+    encryptedDataKey: text("encrypted_data_key"),
     sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
     materialization: jsonb("materialization").$type<BrowserRevisionMaterialization>().notNull(),
-    state: text("state", { enum: ["available", "delete_pending", "deleted"] })
+    state: text("state", {
+      enum: ["available", "delete_pending", "deleting", "deleted"],
+    })
       .notNull()
       .default("available"),
     retainedUntil: timestamp("retained_until", { withTimezone: true }),
+    deleteClaimId: uuid("delete_claim_id"),
+    deleteClaimedAt: timestamp("delete_claimed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
   },
@@ -240,6 +244,7 @@ export const browserStateArtifacts = pgTable(
     gc: index("browser_state_artifacts_gc_idx").on(
       table.state,
       table.retainedUntil,
+      table.deleteClaimedAt,
       table.createdAt,
     ),
     valuesValid: check(
@@ -251,7 +256,10 @@ export const browserStateArtifacts = pgTable(
         and ${table.manifestDigest} ~ '^[0-9a-f]{64}$'
         and octet_length(${table.objectKey}) between 1 and 2048
         and ${table.objectKey} ~ ('^workspaces/' || ${table.workspaceId}::text || '/browser-state/[A-Za-z0-9._=-]+(/[A-Za-z0-9._=-]+)*$')
-        and octet_length(${table.encryptedDataKey}) between 16 and 8192
+        and (
+          ${table.encryptedDataKey} is null
+          or octet_length(${table.encryptedDataKey}) between 16 and 8192
+        )
         and ${table.sizeBytes} > 0
         and jsonb_typeof(${table.materialization}) = 'object'
         and octet_length(${table.materialization}::text) between 2 and 65536
@@ -261,13 +269,43 @@ export const browserStateArtifacts = pgTable(
             ${table.state} = 'available'
             and ${table.retainedUntil} is null
             and ${table.deletedAt} is null
+            and ${table.deleteClaimId} is null
+            and ${table.deleteClaimedAt} is null
+            and ${table.encryptedDataKey} is not null
           )
         )`,
     ),
     lifecycleValid: check(
       "browser_state_artifacts_lifecycle_check",
-      sql`(${table.state} = 'deleted' and ${table.deletedAt} is not null)
-        or (${table.state} <> 'deleted' and ${table.deletedAt} is null)`,
+      sql`(
+          ${table.state} = 'available'
+          and ${table.retainedUntil} is null
+          and ${table.deleteClaimId} is null
+          and ${table.deleteClaimedAt} is null
+          and ${table.deletedAt} is null
+          and ${table.encryptedDataKey} is not null
+        ) or (
+          ${table.state} = 'delete_pending'
+          and ${table.retainedUntil} is not null
+          and ${table.deleteClaimId} is null
+          and ${table.deleteClaimedAt} is null
+          and ${table.deletedAt} is null
+          and ${table.encryptedDataKey} is not null
+        ) or (
+          ${table.state} = 'deleting'
+          and ${table.retainedUntil} is not null
+          and ${table.deleteClaimId} is not null
+          and ${table.deleteClaimedAt} is not null
+          and ${table.deletedAt} is null
+          and ${table.encryptedDataKey} is not null
+        ) or (
+          ${table.state} = 'deleted'
+          and ${table.retainedUntil} is not null
+          and ${table.deleteClaimId} is null
+          and ${table.deleteClaimedAt} is null
+          and ${table.deletedAt} is not null
+          and ${table.encryptedDataKey} is null
+        )`,
     ),
   }),
 );

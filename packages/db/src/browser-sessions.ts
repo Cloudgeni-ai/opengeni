@@ -518,7 +518,8 @@ export async function getBrowserPrivateCheckpointAuthority(
         !artifact ||
         artifact.sourceBrowserSessionId !== session.id ||
         artifact.purpose !== "private_checkpoint" ||
-        artifact.state !== "available"
+        artifact.state !== "available" ||
+        artifact.encryptedDataKey === null
       ) {
         throw new BrowserSessionStateError(
           "BrowserSession private checkpoint authority is inconsistent",

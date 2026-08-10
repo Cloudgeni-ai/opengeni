@@ -21,6 +21,8 @@ describe("migration 0207 browser identities", () => {
     expect(source).toContain("FORCE ROW LEVEL SECURITY");
     expect(source).toContain('CREATE TRIGGER "browser_identities_update_guard_trg"');
     expect(source).toContain('CREATE TRIGGER "browser_state_artifacts_update_guard_trg"');
+    expect(source).toContain("claim_browser_state_artifact_cleanup");
+    expect(source).toContain("FOR UPDATE SKIP LOCKED");
     expect(source).toContain(
       "REVOKE ALL ON FUNCTION opengeni_private.browser_state_artifacts_update_guard()",
     );
@@ -152,6 +154,23 @@ describe("migration 0207 browser identities", () => {
         "browser_identities_update_guard_trg",
         "browser_state_artifacts_update_guard_trg",
       ]);
+
+      const [cleanupFunction] = await sql<
+        Array<{ securityDefiner: boolean; config: string[] | null; publicExecute: boolean }>
+      >`
+        select p.prosecdef as "securityDefiner", p.proconfig as config,
+          has_function_privilege(
+            'public', p.oid, 'execute'
+          ) as "publicExecute"
+        from pg_proc p
+        join pg_namespace n on n.oid = p.pronamespace
+        where n.nspname = 'opengeni_private'
+          and p.proname = 'claim_browser_state_artifact_cleanup'`;
+      expect(cleanupFunction).toMatchObject({
+        securityDefiner: true,
+        publicExecute: false,
+      });
+      expect(cleanupFunction?.config).toContain("search_path=pg_catalog");
     } finally {
       await sql.end();
       await blank.release();

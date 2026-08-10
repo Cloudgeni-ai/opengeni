@@ -114,6 +114,7 @@ export const reapExpiredFileUploads = defaultControlActivities.reapExpiredFileUp
 export const recoverVideoGenerationWorkflows =
   defaultControlActivities.recoverVideoGenerationWorkflows;
 export const maintainRetainedScreenshots = defaultControlActivities.maintainRetainedScreenshots;
+export const maintainBrowserStateArtifacts = defaultControlActivities.maintainBrowserStateArtifacts;
 export const dispatchSessionWorkflowWakes = defaultControlActivities.dispatchSessionWorkflowWakes;
 export const verifyRigChange = defaultControlActivities.verifyRigChange;
 export const verifyRigVersion = defaultControlActivities.verifyRigVersion;

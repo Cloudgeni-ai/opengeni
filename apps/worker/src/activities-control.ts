@@ -1,5 +1,6 @@
 import { createSharedActivityServices } from "./activity-services";
 import { createCodexCapacityActivities } from "./activities/codex-capacity";
+import { createBrowserStateArtifactMaintenanceActivities } from "./activities/browser-state-artifact-reaper";
 import { createDocumentActivities } from "./activities/documents";
 import { createFileUploadReaperActivities } from "./activities/file-upload-reaper";
 import { createGoalActivities } from "./activities/goals";
@@ -31,6 +32,7 @@ export function createControlActivitiesFromServices(
     ...createGoalActivities(services),
     ...createCodexCapacityActivities(services),
     ...createRigVerificationActivities(services),
+    ...createBrowserStateArtifactMaintenanceActivities(services),
     ...createFileUploadReaperActivities(services),
     ...createRetainedScreenshotMaintenanceActivities(services),
     ...createWorkflowWakeActivities(services),
