@@ -618,6 +618,30 @@ export function CapabilitiesRoute({
         return;
       }
 
+      // First-party Fiken connect / token replacement. The install route
+      // verifies the token against Fiken before storing it, so a bad paste
+      // fails here with a specific message instead of at first tool use.
+      if (action.type === "fiken_api_token") {
+        await client.installFikenConnection(workspaceId, {
+          apiToken: action.apiToken,
+          ...(action.connectionId ? { connectionId: action.connectionId } : {}),
+        });
+        await refresh();
+        onRuntimeChanged();
+        toast.success(`Connected ${item.name}`);
+        setSelected(null);
+        return;
+      }
+
+      if (action.type === "fiken_disconnect") {
+        await client.deleteConnection(workspaceId, action.connectionId);
+        await refresh();
+        onRuntimeChanged();
+        toast.success(`Disconnected ${item.name}`);
+        setSelected(null);
+        return;
+      }
+
       // Reconnect an already-enabled item whose credential lapsed. When the
       // connection row survives, OAuth reuses it (pass connectionId) and the
       // return handler just refreshes; when it was deleted (null id), OAuth

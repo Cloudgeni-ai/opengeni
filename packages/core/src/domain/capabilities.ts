@@ -7,9 +7,11 @@ import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config"
 import {
   CapabilityCatalogItem,
   capabilityCatalogItemIsTrustedForExposure,
+  FIKEN_PROVIDER_DOMAIN,
   type AccessGrant,
   type CapabilityCatalogResponse,
   type CapabilityInstallation,
+  type ConnectionMetadata,
   type CreateCapabilityCatalogItemRequest,
   type EnableCapabilityRequest,
   type McpServerConnectionRef,
@@ -50,6 +52,7 @@ import {
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 import { hasPermission } from "../access";
+import { isFikenConnection, preferredFikenConnection } from "./fiken";
 import {
   getSkillLibraryEntry,
   listSkillLibraryEntries,
@@ -85,6 +88,7 @@ export async function buildCapabilityCatalog(input: {
     packInstallations,
     workspacePacks,
     socialConnections,
+    workspaceConnections,
     bundledSkills,
     curatedLibrarySkills,
     codexAppsCredentialId,
@@ -94,6 +98,7 @@ export async function buildCapabilityCatalog(input: {
     listPackInstallations(input.db, input.workspaceId),
     listWorkspaceCapabilityPacks(input.db, input.workspaceId),
     listSocialConnections(input.db, input.workspaceId, 500, input.subjectId),
+    listConnectionsMetadata(input.db, input.workspaceId, null),
     discoverBundledSkills(),
     discoverCuratedSkillLibraryItems(),
     input.settings.codexConnectedAppsEnabled
@@ -114,7 +119,7 @@ export async function buildCapabilityCatalog(input: {
       packCatalogItem(pack, builtInPackIds.has(pack.id) ? "built_in" : "manual"),
     ),
     ...configuredMcpCatalogItems(input.settings),
-    ...platformApiCatalogItems(socialConnections),
+    ...platformApiCatalogItems(socialConnections, workspaceConnections.filter(isFikenConnection)),
     ...bundledSkills,
     ...curatedLibrarySkills,
   ];
@@ -1092,7 +1097,56 @@ export function codexAppsCatalogItem(available: boolean): CapabilityCatalogItem 
   });
 }
 
-function platformApiCatalogItems(socialConnections: SocialConnection[]): CapabilityCatalogItem[] {
+function platformApiCatalogItems(
+  socialConnections: SocialConnection[],
+  fikenConnections: ConnectionMetadata[] = [],
+): CapabilityCatalogItem[] {
+  const fikenConnection = preferredFikenConnection(fikenConnections);
+  const fikenEnabled =
+    fikenConnection?.status === "active" || fikenConnection?.status === "needs_reauth";
+  const fiken = CapabilityCatalogItem.parse({
+    id: "api:fiken",
+    kind: "api",
+    source: "built_in",
+    name: "Fiken",
+    description:
+      "Connect Fiken accounting for contacts, products, invoices, invoice drafts, purchases, sales, and bank accounts.",
+    category: "finance",
+    tags: ["api", "fiken", "accounting", "invoicing", "norway"],
+    homepageUrl: "https://fiken.no",
+    authModel: "personal_api_token",
+    providerDomain: FIKEN_PROVIDER_DOMAIN,
+    surfaceType: "first_party_fiken",
+    authKind: "api_key",
+    tools: [{ kind: "mcp", id: "opengeni" }],
+    runtime: {
+      available: true,
+      mcpServerId: "opengeni",
+      notes: "Fiken access is provided through OpenGeni's first-party fiken tools.",
+    },
+    enabled: fikenEnabled,
+    enabledReason: fikenEnabled
+      ? fikenConnection.status === "active"
+        ? "workspace Fiken connection active"
+        : "workspace Fiken connection needs reconnection"
+      : null,
+    metadata: {
+      connectorMode: "first_party_fiken",
+      ownership: "workspace",
+      firstPartyMcpTools: [
+        "fiken_companies_list",
+        "fiken_contacts_list",
+        "fiken_contact_create",
+        "fiken_products_list",
+        "fiken_invoices_list",
+        "fiken_invoice_get",
+        "fiken_invoice_draft_create",
+        "fiken_bank_accounts_list",
+        "fiken_purchases_list",
+        "fiken_sales_list",
+      ],
+    },
+  });
   const xConnection = preferredSocialConnection(socialConnections, "x");
   const xEnabled = xConnection?.status === "connected" || xConnection?.status === "needs_reauth";
   const x = CapabilityCatalogItem.parse({
@@ -1218,7 +1272,7 @@ function platformApiCatalogItems(socialConnections: SocialConnection[]): Capabil
       },
     }),
   );
-  return [x, ...platformApis];
+  return [x, fiken, ...platformApis];
 }
 
 function preferredSocialConnection(
@@ -1375,6 +1429,12 @@ export function applyCapabilityEnablement(
     // Social connector state is derived from the authoritative workspace
     // connection row while the catalog is built. Being built in means the
     // connector is browseable, not that an account is already connected.
+    return { ...item, connectionRef: null };
+  }
+  if (item.surfaceType === "first_party_fiken") {
+    // Fiken connector state is derived from the authoritative workspace
+    // connection row while the catalog is built; browseable never means an
+    // account is already connected.
     return { ...item, connectionRef: null };
   }
   if (item.surfaceType === "codex_apps") {

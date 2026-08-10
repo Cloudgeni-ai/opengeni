@@ -45,6 +45,15 @@ export type ConnectAction =
       ownership: ConnectionOwnership;
     }
   | { type: "disconnect_social"; item: CapabilityCatalogItem; connectionId: string }
+  // connectionId is the existing Fiken row to rewrite in place (reconnect /
+  // replace token), or null for a first connect.
+  | {
+      type: "fiken_api_token";
+      item: CapabilityCatalogItem;
+      apiToken: string;
+      connectionId: string | null;
+    }
+  | { type: "fiken_disconnect"; item: CapabilityCatalogItem; connectionId: string }
   | { type: "oauth"; item: CapabilityCatalogItem; ownership: ConnectionOwnership }
   | {
       type: "api_key";
@@ -296,6 +305,14 @@ function DetailBody({
               canManage={canManageSocial}
               onAction={onAction}
             />
+          ) : plan.mode === "fiken_api_token" ? (
+            <FikenConnectorControls
+              item={item}
+              health={health}
+              keyPageUrl={keyPageUrl}
+              busy={busy}
+              onAction={onAction}
+            />
           ) : item.enabled ? (
             <div className="space-y-3">
               <ConnectionStatus item={item} health={health} />
@@ -503,6 +520,106 @@ export function SocialConnectorControls({
           Workspace admin permission is required to manage this connection.
         </p>
       ) : null}
+    </div>
+  );
+}
+
+const FIKEN_TOKEN_FIELD = { name: "apiToken", label: "Personal API token" };
+
+/**
+ * Connect / reconnect / disconnect controls for the first-party Fiken
+ * connector. Phase 1 is workspace-owned only, so there is no ownership
+ * selector; the token is verified against Fiken before it is stored.
+ */
+export function FikenConnectorControls({
+  item,
+  health,
+  keyPageUrl,
+  busy,
+  onAction,
+}: {
+  item: CapabilityCatalogItem;
+  health: ConnectionHealth;
+  keyPageUrl: string | null;
+  busy: boolean;
+  onAction: (action: ConnectAction) => void;
+}) {
+  const [replacing, setReplacing] = useState(false);
+  useEffect(() => setReplacing(false), [item.id]);
+  const connection =
+    health.state === "connected" || health.state === "attention" ? health.connection : null;
+
+  const tokenForm = (submitLabel: string, submitIcon: ReactNode) => (
+    <CredentialForm
+      fields={[FIKEN_TOKEN_FIELD]}
+      itemName={item.name}
+      keyPageUrl={keyPageUrl}
+      submitLabel={submitLabel}
+      submitIcon={submitIcon}
+      busy={busy}
+      onSubmit={(next) =>
+        onAction({
+          type: "fiken_api_token",
+          item,
+          apiToken: next[FIKEN_TOKEN_FIELD.name] ?? "",
+          connectionId: connection?.id ?? null,
+        })
+      }
+    />
+  );
+
+  if (health.state === "connected" && connection) {
+    return (
+      <div className="space-y-3">
+        <ConnectionStatus item={item} health={health} />
+        {replacing ? (
+          tokenForm("Replace API token", <RefreshCwIcon />)
+        ) : (
+          <Button
+            type="button"
+            variant="outline"
+            className="w-full"
+            disabled={busy}
+            onClick={() => setReplacing(true)}
+          >
+            <RefreshCwIcon />
+            Replace API token
+          </Button>
+        )}
+        <Button
+          type="button"
+          variant="outline"
+          className="w-full text-status-failed hover:bg-status-failed/10 hover:text-status-failed pointer-coarse:min-h-11"
+          disabled={busy}
+          onClick={() => onAction({ type: "fiken_disconnect", item, connectionId: connection.id })}
+        >
+          {busy ? <Loader2Icon className="animate-spin" /> : <TrashIcon />}
+          Disconnect
+        </Button>
+        <p className="text-center text-xs text-fg-subtle">
+          Create personal API tokens in Fiken under Rediger konto → API. The token is stored
+          encrypted and used only for this workspace's Fiken tools.
+        </p>
+      </div>
+    );
+  }
+
+  if (health.state === "attention") {
+    return (
+      <div className="space-y-3">
+        <ConnectionStatus item={item} health={health} />
+        {tokenForm(`Reconnect ${item.name}`, <RefreshCwIcon />)}
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      {tokenForm("Connect for workspace", <PlugIcon />)}
+      <p className="text-center text-xs text-fg-subtle">
+        Create a personal API token in Fiken under Rediger konto → API. Everyone in this workspace
+        can then use the Fiken tools through this connection.
+      </p>
     </div>
   );
 }

@@ -201,6 +201,7 @@ export type RequiredHeaderField = {
 export type CapabilityConnectPlan =
   | { mode: "enable" }
   | { mode: "social_oauth"; provider: "x" | "reddit" }
+  | { mode: "fiken_api_token" }
   | { mode: "oauth"; providerDomain: string; mcpUrl: string | null }
   | { mode: "api_key"; providerDomain: string; fields: RequiredHeaderField[] };
 
@@ -210,6 +211,11 @@ export function capabilityConnectPlan(item: CapabilityCatalogItem): CapabilityCo
     if (provider === "x" || provider === "reddit") {
       return { mode: "social_oauth", provider };
     }
+  }
+  // First-party Fiken connects through the verified paste-a-token install
+  // route, not the generic MCP api-key/enable path.
+  if (item.surfaceType === "first_party_fiken") {
+    return { mode: "fiken_api_token" };
   }
   // Non-runtime kinds and MCPs with no auth just enable directly.
   if (item.kind !== "mcp") {
@@ -239,7 +245,7 @@ export function capabilityConnectPlan(item: CapabilityCatalogItem): CapabilityCo
 export function capabilityAuthHint(item: CapabilityCatalogItem): string | null {
   const plan = capabilityConnectPlan(item);
   if (plan.mode === "oauth" || plan.mode === "social_oauth") return "OAuth";
-  if (plan.mode === "api_key") return "API key";
+  if (plan.mode === "api_key" || plan.mode === "fiken_api_token") return "API key";
   return null;
 }
 
@@ -359,11 +365,47 @@ export type ConnectionHealth =
  * and a failed load must not read as "every connection was deleted" and paint
  * healthy integrations amber.
  */
+/**
+ * The workspace-shared Fiken connection the first-party fiken tools resolve:
+ * usable status first, then newest update. Mirrors the server-side selection.
+ */
+export function fikenWorkspaceConnection(
+  connections: ConnectionMetadata[],
+): ConnectionMetadata | null {
+  const statusRank = (status: ConnectionMetadata["status"]): number =>
+    status === "active" ? 0 : status === "needs_reauth" ? 1 : 2;
+  return (
+    connections
+      .filter(
+        (connection) =>
+          connection.subjectId === null &&
+          connection.kind === "api_key" &&
+          normalizeProviderDomain(connection.providerDomain) === "fiken.no" &&
+          connection.metadata.credentialRole === "fiken_api_token",
+      )
+      .sort(
+        (left, right) =>
+          statusRank(left.status) - statusRank(right.status) ||
+          right.updatedAt.localeCompare(left.updatedAt) ||
+          right.id.localeCompare(left.id),
+      )[0] ?? null
+  );
+}
+
 export function connectionHealth(
   item: CapabilityCatalogItem,
   connections: ConnectionMetadata[],
   loaded: boolean,
 ): ConnectionHealth {
+  // The Fiken tile carries no installation connectionRef; its health is the
+  // workspace-shared Fiken row itself.
+  if (item.surfaceType === "first_party_fiken") {
+    if (!loaded) return { state: "unverified" };
+    const connection = fikenWorkspaceConnection(connections);
+    if (!connection) return { state: "none" };
+    if (connection.status !== "active") return { state: "attention", connection };
+    return { state: "connected", connection };
+  }
   const ref = installedConnectionRef(item);
   if (!ref) return { state: "none" };
   if (!loaded) return { state: "unverified" };

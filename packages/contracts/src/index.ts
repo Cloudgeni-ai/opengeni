@@ -848,6 +848,16 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "slack_bot_file_content",
   "slack_bot_post_message",
   "slack_bot_delete_message",
+  "fiken_companies_list",
+  "fiken_contacts_list",
+  "fiken_contact_create",
+  "fiken_products_list",
+  "fiken_invoices_list",
+  "fiken_invoice_get",
+  "fiken_invoice_draft_create",
+  "fiken_bank_accounts_list",
+  "fiken_purchases_list",
+  "fiken_sales_list",
   "artifacts_list",
   "artifacts_get_source",
   "artifacts_create",
@@ -863,7 +873,8 @@ export type FirstPartyMcpToolName = z.infer<typeof FirstPartyMcpToolName>;
  * any catalogued connector tool and remains independently permission-gated.
  */
 export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
-  (name) => !name.startsWith("social_") && !name.startsWith("slack_bot_"),
+  (name) =>
+    !name.startsWith("social_") && !name.startsWith("slack_bot_") && !name.startsWith("fiken_"),
 ) satisfies readonly FirstPartyMcpToolName[];
 
 export function prefixedMcpToolName(registryId: string, toolName: string): string {
@@ -6686,6 +6697,36 @@ export const OpenGeniSlackBotConnectionMetadata = z
   })
   .passthrough();
 export type OpenGeniSlackBotConnectionMetadata = z.infer<typeof OpenGeniSlackBotConnectionMetadata>;
+
+export const FIKEN_PROVIDER_DOMAIN = "fiken.no" as const;
+export const FIKEN_CREDENTIAL_ROLE = "fiken_api_token" as const;
+export const FIKEN_CREDENTIAL_LABEL = "Fiken API token" as const;
+
+export const FikenCompanySummary = z.object({
+  slug: z.string().min(1).max(128),
+  name: z.string().min(1).max(256),
+  organizationNumber: z.string().max(64).nullable(),
+});
+export type FikenCompanySummary = z.infer<typeof FikenCompanySummary>;
+
+export const FikenConnectionMetadata = z
+  .object({
+    credentialRole: z.literal(FIKEN_CREDENTIAL_ROLE),
+    credentialLabel: z.literal(FIKEN_CREDENTIAL_LABEL),
+    companies: z.array(FikenCompanySummary).max(100),
+    defaultCompanySlug: z.string().min(1).max(128).nullable(),
+    verifiedAt: z.string().datetime({ offset: true }),
+  })
+  .passthrough();
+export type FikenConnectionMetadata = z.infer<typeof FikenConnectionMetadata>;
+
+export const FikenInstallRequest = z.object({
+  apiToken: z.string().min(16).max(512),
+  defaultCompanySlug: z.string().min(1).max(128).optional(),
+  /** Existing Fiken connection to rewrite in place (reconnect). */
+  connectionId: z.string().uuid().optional(),
+});
+export type FikenInstallRequest = z.infer<typeof FikenInstallRequest>;
 
 export const ConnectionMetadata = z.object({
   id: z.string().uuid(),

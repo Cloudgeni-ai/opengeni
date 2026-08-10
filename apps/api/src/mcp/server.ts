@@ -203,6 +203,7 @@ import {
   createOpenGeniSlackBotClient,
   resolveSlackBotConnectionForTool,
 } from "../integrations/slack-bot";
+import { createFikenClient, resolveFikenConnectionForTool } from "../integrations/fiken";
 
 export type McpServerOptions = {
   // Origin of the HTTP request that reached the MCP route. Browser-oriented
@@ -310,6 +311,18 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   slack_bot_file_content: { allOf: ["connections:read"] },
   slack_bot_post_message: { allOf: ["connections:read"] },
   slack_bot_delete_message: { allOf: ["connections:read"] },
+  fiken_companies_list: { allOf: ["connections:read"] },
+  fiken_contacts_list: { allOf: ["connections:read"] },
+  fiken_products_list: { allOf: ["connections:read"] },
+  fiken_invoices_list: { allOf: ["connections:read"] },
+  fiken_invoice_get: { allOf: ["connections:read"] },
+  fiken_bank_accounts_list: { allOf: ["connections:read"] },
+  fiken_purchases_list: { allOf: ["connections:read"] },
+  fiken_sales_list: { allOf: ["connections:read"] },
+  // Writes into the workspace's real accounting ledger surface take the write
+  // scope, keeping them out of the default agent permission set.
+  fiken_contact_create: { allOf: ["connections:write"] },
+  fiken_invoice_draft_create: { allOf: ["connections:write"] },
   artifacts_list: { sessionRequired: true, allOf: ["artifacts:read"] },
   artifacts_get_source: { sessionRequired: true, allOf: ["artifacts:read"] },
   artifacts_create: { sessionRequired: true, allOf: ["artifacts:publish"] },
@@ -489,6 +502,7 @@ export function buildOpenGeniMcpServer(
   if (!toolspaceMode) {
     registerRigTools(server, deps, grant, can, sessionId, json);
     registerSlackBotTools(server, deps, grant, sessionId, json);
+    registerFikenTools(server, deps, grant, sessionId, json);
   }
 
   // Orchestration, variableSet, and GitHub status tools are permission-gated
@@ -1442,6 +1456,239 @@ function registerSlackBotTools(
       json(
         await (await clientFor(connectionId)).deleteMessage({ operationId, channelId, timestamp }),
       ),
+  );
+}
+
+function registerFikenTools(
+  server: McpServer,
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  sessionId: string | null,
+  json: JsonResult,
+): void {
+  const clientFor = async (connectionId?: string) => {
+    const resolved = await resolveFikenConnectionForTool({
+      db: deps.db,
+      grant,
+      sessionId,
+      ...(connectionId ? { requestedConnectionId: connectionId } : {}),
+    });
+    return createFikenClient(deps, resolved);
+  };
+  const companySlugInput = z4
+    .string()
+    .min(1)
+    .max(128)
+    .optional()
+    .describe(
+      "Fiken company slug. Optional when the connection has a default company or access to exactly one company.",
+    );
+  const pageInputs = {
+    page: z4.number().int().min(0).optional(),
+    pageSize: z4.number().int().min(1).max(100).optional(),
+  };
+  const isoDate = z4
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .optional();
+
+  server.registerTool(
+    "fiken_companies_list",
+    {
+      description:
+        "List the Fiken companies this workspace's Fiken connection can act on. Use the returned slug as companySlug in other fiken tools.",
+      inputSchema: { connectionId: z4.string().uuid().optional(), ...pageInputs },
+    },
+    async ({ connectionId, page, pageSize }) =>
+      json(
+        await (
+          await clientFor(connectionId)
+        ).listCompanies({
+          ...(page !== undefined ? { page } : {}),
+          ...(pageSize !== undefined ? { pageSize } : {}),
+        }),
+      ),
+  );
+
+  server.registerTool(
+    "fiken_contacts_list",
+    {
+      description:
+        "List or search contacts (customers and suppliers) in a Fiken company. Filters combine with AND. customerId used elsewhere equals a contact's contactId where customer is true.",
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        companySlug: companySlugInput,
+        ...pageInputs,
+        name: z4.string().min(1).max(256).optional(),
+        email: z4.string().min(1).max(256).optional(),
+        organizationNumber: z4.string().min(1).max(64).optional(),
+        customer: z4.boolean().optional(),
+        supplier: z4.boolean().optional(),
+        inactive: z4.boolean().optional(),
+      },
+    },
+    async ({ connectionId, ...input }) =>
+      json(await (await clientFor(connectionId)).listContacts(input)),
+  );
+
+  server.registerTool(
+    "fiken_contact_create",
+    {
+      description:
+        "Create a contact in a Fiken company. Retrying after an unknown outcome may create a duplicate; search fiken_contacts_list first when unsure.",
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        companySlug: companySlugInput,
+        name: z4.string().min(1).max(256),
+        email: z4.string().min(1).max(256).optional(),
+        organizationNumber: z4.string().min(1).max(64).optional(),
+        phoneNumber: z4.string().min(1).max(64).optional(),
+        customer: z4.boolean().optional(),
+        supplier: z4.boolean().optional(),
+      },
+    },
+    async ({ connectionId, ...input }) =>
+      json(await (await clientFor(connectionId)).createContact(input)),
+  );
+
+  server.registerTool(
+    "fiken_products_list",
+    {
+      description: "List products in a Fiken company.",
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        companySlug: companySlugInput,
+        ...pageInputs,
+        name: z4.string().min(1).max(256).optional(),
+        active: z4.boolean().optional(),
+      },
+    },
+    async ({ connectionId, ...input }) =>
+      json(await (await clientFor(connectionId)).listProducts(input)),
+  );
+
+  server.registerTool(
+    "fiken_invoices_list",
+    {
+      description:
+        "List invoices in a Fiken company. Dates are yyyy-mm-dd; monetary amounts in results are in cents/øre of the invoice currency.",
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        companySlug: companySlugInput,
+        ...pageInputs,
+        issueDateGe: isoDate,
+        issueDateLe: isoDate,
+        customerId: z4.number().int().positive().optional(),
+        settled: z4.boolean().optional(),
+        invoiceNumber: z4.string().min(1).max(64).optional(),
+      },
+    },
+    async ({ connectionId, ...input }) =>
+      json(await (await clientFor(connectionId)).listInvoices(input)),
+  );
+
+  server.registerTool(
+    "fiken_invoice_get",
+    {
+      description: "Read a single Fiken invoice by its invoiceId.",
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        companySlug: companySlugInput,
+        invoiceId: z4.number().int().positive(),
+      },
+    },
+    async ({ connectionId, ...input }) =>
+      json(await (await clientFor(connectionId)).getInvoice(input)),
+  );
+
+  server.registerTool(
+    "fiken_invoice_draft_create",
+    {
+      description:
+        "Create an invoice DRAFT in Fiken. Drafts are not sent to the customer; a human finishes and sends them from Fiken. unitPriceCents is the net price per unit in cents/øre. Each line needs either productId or an incomeAccount + vatType. Generate one operationId UUID per intended draft and reuse that same UUID on every retry; a retry returns the existing draft instead of duplicating it.",
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        companySlug: companySlugInput,
+        operationId: z4.string().uuid(),
+        customerId: z4.number().int().positive(),
+        daysUntilDueDate: z4.number().int().min(0).max(365),
+        invoiceText: z4.string().max(500).optional(),
+        yourReference: z4.string().max(128).optional(),
+        ourReference: z4.string().max(128).optional(),
+        currency: z4
+          .string()
+          .regex(/^[A-Z]{3}$/)
+          .optional(),
+        bankAccountNumber: z4.string().min(1).max(64).optional(),
+        lines: z4
+          .array(
+            z4.object({
+              description: z4.string().max(200).optional(),
+              productId: z4.number().int().positive().optional(),
+              unitPriceCents: z4.number().int().optional(),
+              vatType: z4.string().min(1).max(64).optional(),
+              quantity: z4.number().positive(),
+              discountPercent: z4.number().min(0).max(100).optional(),
+              incomeAccount: z4.string().min(1).max(16).optional(),
+              comment: z4.string().max(200).optional(),
+            }),
+          )
+          .min(1)
+          .max(100),
+      },
+    },
+    async ({ connectionId, ...input }) =>
+      json(await (await clientFor(connectionId)).createInvoiceDraft(input)),
+  );
+
+  server.registerTool(
+    "fiken_bank_accounts_list",
+    {
+      description:
+        "List bank accounts in a Fiken company, including reconciled balances in cents/øre.",
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        companySlug: companySlugInput,
+        ...pageInputs,
+        inactive: z4.boolean().optional(),
+      },
+    },
+    async ({ connectionId, ...input }) =>
+      json(await (await clientFor(connectionId)).listBankAccounts(input)),
+  );
+
+  server.registerTool(
+    "fiken_purchases_list",
+    {
+      description: "List purchases in a Fiken company. Dates are yyyy-mm-dd.",
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        companySlug: companySlugInput,
+        ...pageInputs,
+        dateGe: isoDate,
+        dateLe: isoDate,
+        paid: z4.boolean().optional(),
+      },
+    },
+    async ({ connectionId, ...input }) =>
+      json(await (await clientFor(connectionId)).listPurchases(input)),
+  );
+
+  server.registerTool(
+    "fiken_sales_list",
+    {
+      description: "List sales in a Fiken company. Dates are yyyy-mm-dd.",
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        companySlug: companySlugInput,
+        ...pageInputs,
+        dateGe: isoDate,
+        dateLe: isoDate,
+        settled: z4.boolean().optional(),
+      },
+    },
+    async ({ connectionId, ...input }) =>
+      json(await (await clientFor(connectionId)).listSales(input)),
   );
 }
 
