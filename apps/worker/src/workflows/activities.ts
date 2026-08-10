@@ -96,6 +96,23 @@ export const documentActivity = proxyActivities<Pick<typeof activities, "indexDo
   retry: { maximumAttempts: 1 },
 });
 
+/** Connector inventory/download/index batches are provider-I/O activities. The
+ * implementation heartbeats between bounded items and owns its resumable
+ * checkpoint; Temporal retries therefore repeat only idempotent source/object
+ * operations and never invoke the agent runtime. */
+export const knowledgeSourceSyncActivity = proxyActivities<
+  Pick<typeof activities, "runKnowledgeSourceSyncBatch">
+>({
+  startToCloseTimeout: "1 hour",
+  heartbeatTimeout: "2 minutes",
+  retry: {
+    initialInterval: "2 seconds",
+    backoffCoefficient: 2,
+    maximumInterval: "1 minute",
+    maximumAttempts: 5,
+  },
+});
+
 export function workflowFailureMessage(error: unknown): string {
   if (error instanceof Error) {
     return error.message;

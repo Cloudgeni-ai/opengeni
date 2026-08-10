@@ -18,6 +18,7 @@ import {
   createDb,
   getConnectionMetadata,
   listConnectionsMetadata,
+  listScheduledTasks,
   loadConnectionCredentialForBroker,
   type DbClient,
 } from "@opengeni/db";
@@ -227,7 +228,11 @@ function app(googleDriveFetch: typeof globalThis.fetch, overrides: Partial<Setti
     settings: { ...settings, ...overrides },
     db: client.db,
     bus: {} as never,
-    workflowClient: {} as never,
+    workflowClient: {
+      syncScheduledTask: async () => {},
+      triggerScheduledTask: async () => {},
+      deleteScheduledTaskSchedule: async () => {},
+    } as never,
     managedAuth: null,
     googleDriveFetch,
   } as never);
@@ -389,7 +394,7 @@ describe("Google Drive local source preview", () => {
     }
   });
 
-  test("browses metadata server-side and saves only connector configuration", async () => {
+  test("browses metadata server-side and materializes schedules without documents", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const google = googleFixture();
@@ -446,6 +451,7 @@ describe("Google Drive local source preview", () => {
           ],
           destination: { authorityKind: "workspace", collectionId: null },
           syncCadence: "hourly",
+          syncEnabled: true,
           readPolicy: "allow",
         }),
       },
@@ -476,6 +482,8 @@ describe("Google Drive local source preview", () => {
             authoritySubjectId: null,
           },
           syncCadence: "hourly",
+          syncEnabled: true,
+          configGeneration: 1,
           readPolicy: "allow",
         },
         {
@@ -488,15 +496,147 @@ describe("Google Drive local source preview", () => {
             authoritySubjectId: null,
           },
           syncCadence: "hourly",
+          syncEnabled: true,
+          configGeneration: 1,
           readPolicy: "allow",
         },
       ],
     });
+    const tasks = await listScheduledTasks(client.db, workspace.workspaceId, 10);
+    expect(tasks).toHaveLength(2);
+    expect(tasks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          status: "active",
+          schedule: { type: "interval", everySeconds: 3_600 },
+          action: expect.objectContaining({ kind: "knowledge_source_sync" }),
+          metadata: expect.objectContaining({ externalSourceId: "folder-1" }),
+        }),
+        expect.objectContaining({
+          status: "active",
+          schedule: { type: "interval", everySeconds: 3_600 },
+          action: expect.objectContaining({ kind: "knowledge_source_sync" }),
+          metadata: expect.objectContaining({ externalSourceId: "root" }),
+        }),
+      ]),
+    );
     expect(
       await shared!.admin`
       select id from documents where workspace_id = ${workspace.workspaceId}
     `,
     ).toHaveLength(0);
+  });
+
+  test("schedule deletion durably disables sync until the initiating subject explicitly re-enables it", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const google = googleFixture();
+    const connected = await connect(workspace, google);
+    const authorization = await bearer(workspace, "subject-a", [
+      "connections:read",
+      "connections:write",
+      "workspace:admin",
+      "scheduled_tasks:manage",
+    ]);
+    const endpoint =
+      `/v1/workspaces/${workspace.workspaceId}/connections/google-drive/` +
+      `${connected.connection.id}/source`;
+    const saveSelection = async (syncEnabled: boolean): Promise<Response> =>
+      await app(google.fetch).request(endpoint, {
+        method: "POST",
+        headers: {
+          authorization,
+          "content-type": "application/json",
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+        },
+        body: JSON.stringify({
+          sources: [
+            {
+              id: "folder-1",
+              name: "Product",
+              mimeType: "application/vnd.google-apps.folder",
+              driveId: null,
+            },
+          ],
+          destination: { authorityKind: "workspace", collectionId: null },
+          syncCadence: "hourly",
+          syncEnabled,
+          readPolicy: "allow",
+        }),
+      });
+
+    expect((await saveSelection(true)).status).toBe(200);
+    const [createdTask] = await listScheduledTasks(client.db, workspace.workspaceId, 10);
+    expect(createdTask?.action.kind).toBe("knowledge_source_sync");
+    if (!createdTask || createdTask.action.kind !== "knowledge_source_sync") {
+      throw new Error("knowledge source schedule was not created");
+    }
+    const wrongSubjectDelete = await app(google.fetch).request(
+      `/v1/workspaces/${workspace.workspaceId}/scheduled-tasks/${createdTask.id}`,
+      {
+        method: "DELETE",
+        headers: {
+          authorization: await bearer(workspace, "subject-b", ["scheduled_tasks:manage"]),
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+        },
+      },
+    );
+    expect(wrongSubjectDelete.status).toBe(403);
+    expect(await listScheduledTasks(client.db, workspace.workspaceId, 10)).toHaveLength(1);
+    const deleteResponse = await app(google.fetch).request(
+      `/v1/workspaces/${workspace.workspaceId}/scheduled-tasks/${createdTask.id}`,
+      {
+        method: "DELETE",
+        headers: {
+          authorization,
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+        },
+      },
+    );
+    expect(deleteResponse.status).toBe(200);
+    expect(await listScheduledTasks(client.db, workspace.workspaceId, 10)).toHaveLength(0);
+    const disabledConnection = await getConnectionMetadata(
+      client.db,
+      workspace.workspaceId,
+      connected.connection.id,
+      "subject-a",
+    );
+    expect(disabledConnection?.metadata.selectedSources).toEqual([
+      expect.objectContaining({ id: "folder-1", syncEnabled: false, configGeneration: 2 }),
+    ]);
+    const [deletedSource] = await shared!.admin<
+      Array<{ lifecycleState: string; lifecycleGeneration: number }>
+    >`
+      select lifecycle_state as "lifecycleState",
+        lifecycle_generation::int as "lifecycleGeneration"
+      from knowledge_sources where id = ${createdTask.action.sourceId}`;
+    expect(deletedSource).toEqual({ lifecycleState: "deleted", lifecycleGeneration: 2 });
+
+    expect((await saveSelection(false)).status).toBe(200);
+    expect(await listScheduledTasks(client.db, workspace.workspaceId, 10)).toHaveLength(0);
+    const [stillDeleted] = await shared!.admin<
+      Array<{ lifecycleState: string; lifecycleGeneration: number }>
+    >`
+      select lifecycle_state as "lifecycleState",
+        lifecycle_generation::int as "lifecycleGeneration"
+      from knowledge_sources where id = ${createdTask.action.sourceId}`;
+    expect(stillDeleted).toEqual({ lifecycleState: "deleted", lifecycleGeneration: 2 });
+
+    expect((await saveSelection(true)).status).toBe(200);
+    const recreatedTasks = await listScheduledTasks(client.db, workspace.workspaceId, 10);
+    expect(recreatedTasks).toHaveLength(1);
+    expect(recreatedTasks[0]?.action).toMatchObject({
+      kind: "knowledge_source_sync",
+      sourceId: createdTask.action.sourceId,
+      sourceLifecycleGeneration: 3,
+    });
+    const [restoredSource] = await shared!.admin<
+      Array<{ lifecycleState: string; lifecycleGeneration: number }>
+    >`
+      select lifecycle_state as "lifecycleState",
+        lifecycle_generation::int as "lifecycleGeneration"
+      from knowledge_sources where id = ${createdTask.action.sourceId}`;
+    expect(restoredSource).toEqual({ lifecycleState: "active", lifecycleGeneration: 3 });
   });
 
   test("authorizes all connector destinations and keeps legacy config workspace-bound", async () => {

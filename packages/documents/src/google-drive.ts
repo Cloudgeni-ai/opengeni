@@ -262,6 +262,7 @@ export function googleDriveKnowledgeScope(
 
 export function googleDriveKnowledgeSourceIdentity(input: {
   googlePermissionId: string;
+  googleEmail?: string | undefined;
   source: Pick<GoogleDriveSelectedSource, "id" | "driveId" | "destination" | "targetScope">;
   accountId?: string | undefined;
   workspaceId: string;
@@ -270,7 +271,11 @@ export function googleDriveKnowledgeSourceIdentity(input: {
   initiatingSubjectId?: string | undefined;
 }): GoogleDriveKnowledgeSourceIdentity {
   const sourceId = driveId(input.source.id, "source.id");
-  const externalTenantId = normalizedGooglePermissionId(input.googlePermissionId);
+  // permissionId identifies a principal, not a Google tenant. Consumer
+  // accounts intentionally share one provider tenant partition; Workspace
+  // accounts use their normalized hosted domain. Per-principal authority stays
+  // on the immutable connection owner binding.
+  const externalTenantId = googleTenantIdentity(input.googleEmail);
   const sourceDriveId = nullableDriveId(input.source.driveId, "source.driveId");
   const destination = resolveConnectorDocumentDestination(input.source.destination, {
     accountId: input.accountId ?? input.workspaceId,
@@ -293,6 +298,19 @@ export function googleDriveKnowledgeSourceIdentity(input: {
     sourceUri: googleDriveSourceUri(sourceId),
     scope: googleDriveKnowledgeScope(destination),
   };
+}
+
+function googleTenantIdentity(email: string | undefined): string {
+  if (email === undefined) return "google-consumer";
+  const normalized = email.trim().toLowerCase();
+  const separator = normalized.lastIndexOf("@");
+  if (separator <= 0 || separator === normalized.length - 1) {
+    throw new Error("googleEmail must be a normalized email address");
+  }
+  const domain = normalized.slice(separator + 1);
+  return domain === "gmail.com" || domain === "googlemail.com"
+    ? "google-consumer"
+    : `google-workspace:${domain}`;
 }
 
 export function planGoogleDriveTransfer(
@@ -340,6 +358,7 @@ export function planGoogleDriveTransfer(
 
 export async function inventoryGoogleDriveSource(input: {
   googlePermissionId: string;
+  googleEmail?: string | undefined;
   source: GoogleDriveSelectedSource;
   accountId?: string | undefined;
   workspaceId: string;
@@ -355,6 +374,7 @@ export async function inventoryGoogleDriveSource(input: {
   const googlePermissionId = normalizedGooglePermissionId(input.googlePermissionId);
   const source = googleDriveKnowledgeSourceIdentity({
     googlePermissionId,
+    googleEmail: input.googleEmail,
     source: input.source,
     ...(input.accountId ? { accountId: input.accountId } : {}),
     workspaceId: input.workspaceId,

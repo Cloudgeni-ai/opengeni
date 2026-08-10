@@ -132,6 +132,7 @@ import {
   socialSearchLive,
   socialThreadLive,
 } from "../integrations/social-api";
+import { revokeKnowledgeSourceScheduleAuthorization } from "../integrations/google-drive";
 import {
   promoteVerifiedDefinitionEditChangeForApi,
   proposeRigChangeForApi,
@@ -1071,31 +1072,32 @@ export function buildOpenGeniMcpServer(
       },
       async ({ id, triggerId }) => {
         const task = await requireScheduledTask(deps.db, grant.workspaceId, id);
-        await validateScheduledTaskTarget({
-          db: deps.db,
-          sessionAuthorization: deps.sessionAuthorization,
-          authorizationSurface: "first_party_mcp",
-          grant,
-          targetSessionId: task.targetSessionId,
-          runMode: task.runMode,
-          variableSetId: task.variableSetId,
-          rigId: task.rigId,
-          agentConfig: task.agentConfig,
-          missingTargetStatus: 404,
-        });
-        await requireLimit(deps, {
-          accountId: grant.accountId,
-          workspaceId: grant.workspaceId,
-          action: "agent_run:create",
-          quantity: 1,
-          model: task.agentConfig.model ?? deps.settings.openaiModel,
-        });
+        if (task.action.kind === "agent_turn") {
+          await validateScheduledTaskTarget({
+            db: deps.db,
+            sessionAuthorization: deps.sessionAuthorization,
+            authorizationSurface: "first_party_mcp",
+            grant,
+            targetSessionId: task.targetSessionId,
+            runMode: task.runMode,
+            variableSetId: task.variableSetId,
+            rigId: task.rigId,
+            agentConfig: task.agentConfig,
+            missingTargetStatus: 404,
+          });
+          await requireLimit(deps, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            action: "agent_run:create",
+            quantity: 1,
+            model: task.agentConfig.model ?? deps.settings.openaiModel,
+          });
+        }
         const triggerToken = scheduledTaskTriggerToken(triggerId);
-        const agentRunUsageIdempotencyKey = manualScheduledTaskTriggerUsageKey(
-          grant.workspaceId,
-          task.id,
-          triggerToken,
-        );
+        const agentRunUsageIdempotencyKey =
+          task.action.kind === "agent_turn"
+            ? manualScheduledTaskTriggerUsageKey(grant.workspaceId, task.id, triggerToken)
+            : `knowledge-source-sync:manual:${grant.workspaceId}:${task.id}:${triggerToken}`;
         const triggerWorkflowId = manualScheduledTaskTriggerWorkflowId(task.id, triggerToken);
         await deps.workflowClient.triggerScheduledTask({
           task,
@@ -1104,6 +1106,14 @@ export function buildOpenGeniMcpServer(
           initiator: { kind: "subject", subjectId: grant.subjectId },
         });
         try {
+          if (task.action.kind !== "agent_turn") {
+            return json(
+              scheduledTaskReceipt("scheduled_tasks_trigger", task, "triggered", true, {
+                idempotencyStatus: triggerId ? "unknown" : "not_requested",
+                facts: { triggerWorkflowId },
+              }),
+            );
+          }
           await recordWorkspaceUsage(deps, {
             accountId: grant.accountId,
             workspaceId: grant.workspaceId,
@@ -1144,6 +1154,10 @@ export function buildOpenGeniMcpServer(
       },
       async ({ id }) => {
         const task = await requireScheduledTask(deps.db, grant.workspaceId, id);
+        await revokeKnowledgeSourceScheduleAuthorization(deps, {
+          task,
+          subjectId: grant.subjectId,
+        });
         await deps.workflowClient.deleteScheduledTaskSchedule({
           temporalScheduleId: task.temporalScheduleId,
         });
