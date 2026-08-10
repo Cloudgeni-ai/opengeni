@@ -34,10 +34,7 @@ let admin: postgres.Sql;
 let client: DbClient;
 let db: Database;
 
-async function freshWorkspace(): Promise<{
-  accountId: string;
-  workspaceId: string;
-}> {
+async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string }> {
   const [account] = await admin<{ id: string }[]>`
     insert into managed_accounts (name) values ('connected-machine-removal') returning id`;
   const [workspace] = await admin<{ id: string }[]>`
@@ -174,10 +171,7 @@ describe("connected machine removal lifecycle", () => {
       select action, target_id from audit_events
       where workspace_id = ${workspaceId} and target_id = ${enrollment.id}
       order by occurred_at desc limit 1`;
-    expect(audit).toEqual({
-      action: "connected_machine.removed",
-      target_id: enrollment.id,
-    });
+    expect(audit).toEqual({ action: "connected_machine.removed", target_id: enrollment.id });
   }, 60_000);
 
   test("removes only the selected duplicate enrollment", async () => {
@@ -489,10 +483,7 @@ describe("connected machine removal lifecycle", () => {
       enrollmentId: leasedEnrollment.id,
       operationKey: "lease-blocked",
     });
-    expect(leaseBlocked).toMatchObject({
-      outcome: "blocked",
-      code: "active_lease",
-    });
+    expect(leaseBlocked).toMatchObject({ outcome: "blocked", code: "active_lease" });
     await admin`
       update sandbox_leases set liveness = 'cold', refcount = 0
       where workspace_id = ${workspaceId} and sandbox_group_id = ${leasedMachine.id}`;

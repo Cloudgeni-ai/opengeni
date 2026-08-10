@@ -1857,10 +1857,7 @@ export type TemporalScheduleCleanupClaim = {
 };
 
 export type DeleteWorkspaceIfQuiescentResult =
-  | {
-      status: "deleted";
-      temporalScheduleCleanups: TemporalScheduleCleanupClaim[];
-    }
+  | { status: "deleted"; temporalScheduleCleanups: TemporalScheduleCleanupClaim[] }
   | {
       status: "not_found" | "only_workspace" | "active_sessions" | "live_sandboxes";
     };
@@ -2023,9 +2020,7 @@ export async function deleteWorkspaceIfQuiescent(
           }
 
           const schedules = await tx
-            .select({
-              temporalScheduleId: schema.scheduledTasks.temporalScheduleId,
-            })
+            .select({ temporalScheduleId: schema.scheduledTasks.temporalScheduleId })
             .from(schema.scheduledTasks)
             .where(eq(schema.scheduledTasks.workspaceId, input.workspaceId))
             .for("update", { noWait: true });
@@ -4102,11 +4097,7 @@ export async function prepareEditableArtifactSourceFile(
           .limit(1);
         if (existing) {
           assertEditableArtifactSourceFileMatches(existing.file, existing.upload, input);
-          return {
-            file: mapFile(existing.file),
-            uploadId: existing.upload.id,
-            created: false,
-          };
+          return { file: mapFile(existing.file), uploadId: existing.upload.id, created: false };
         }
 
         const [file] = await tx
@@ -4231,9 +4222,7 @@ export function durableUserHistoryItem(
     content: renderTimelineAnnotationsForModel(prompt, annotations),
     ...(attachmentRefs.length > 0 ? { [MODEL_ATTACHMENT_REFS_FIELD]: attachmentRefs } : {}),
     ...(annotations.length > 0
-      ? {
-          [MODEL_TIMELINE_ANNOTATIONS_FIELD]: TimelineAnnotations.parse(annotations),
-        }
+      ? { [MODEL_TIMELINE_ANNOTATIONS_FIELD]: TimelineAnnotations.parse(annotations) }
       : {}),
   };
 }
@@ -4373,19 +4362,11 @@ export async function prepareRetainedScreenshotArtifact(
       await scopedDb.transaction(async (tx) => {
         await tx
           .insert(schema.workspaceScreenshotQuotas)
-          .values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-          })
-          .onConflictDoNothing({
-            target: schema.workspaceScreenshotQuotas.workspaceId,
-          });
+          .values({ accountId: input.accountId, workspaceId: input.workspaceId })
+          .onConflictDoNothing({ target: schema.workspaceScreenshotQuotas.workspaceId });
 
         const [existing] = await tx
-          .select({
-            artifact: schema.retainedScreenshotArtifacts,
-            file: schema.files,
-          })
+          .select({ artifact: schema.retainedScreenshotArtifacts, file: schema.files })
           .from(schema.retainedScreenshotArtifacts)
           .innerJoin(
             schema.files,
@@ -4631,10 +4612,7 @@ export async function getRetainedScreenshotArtifact(
 ): Promise<RetainedScreenshotArtifact | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
-      .select({
-        artifact: schema.retainedScreenshotArtifacts,
-        file: schema.files,
-      })
+      .select({ artifact: schema.retainedScreenshotArtifacts, file: schema.files })
       .from(schema.retainedScreenshotArtifacts)
       .innerJoin(
         schema.files,
@@ -4752,9 +4730,7 @@ export async function promoteRetainedScreenshotMaintenanceCleanup(
             eq(schema.retainedScreenshotArtifacts.maintenanceClaimId, input.claimId),
           ),
         )
-        .returning({
-          artifactId: schema.retainedScreenshotArtifacts.artifactId,
-        });
+        .returning({ artifactId: schema.retainedScreenshotArtifacts.artifactId });
       return updated !== undefined;
     },
   );
@@ -4965,10 +4941,7 @@ async function getRetainedScreenshotArtifactByWorkspace(
 ): Promise<RetainedScreenshotArtifact | null> {
   return await withRlsContext(db, { accountId, workspaceId }, async (scopedDb) => {
     const [row] = await scopedDb
-      .select({
-        artifact: schema.retainedScreenshotArtifacts,
-        file: schema.files,
-      })
+      .select({ artifact: schema.retainedScreenshotArtifacts, file: schema.files })
       .from(schema.retainedScreenshotArtifacts)
       .innerJoin(schema.files, eq(schema.files.id, schema.retainedScreenshotArtifacts.artifactId))
       .where(
@@ -12607,10 +12580,7 @@ export async function getRigVersionById(
 
 export type RigProviderImageBuildClaim =
   | { status: "claimed"; image: RigProviderImage }
-  | {
-      status: "ready" | "in_progress" | "unsupported" | "conflict";
-      image: RigProviderImage;
-    };
+  | { status: "ready" | "in_progress" | "unsupported" | "conflict"; image: RigProviderImage };
 
 async function retainRigProviderImageArtifacts(
   db: Database,
@@ -34043,10 +34013,7 @@ export async function acquireSandboxLeaseReaperHold(
       await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
         const rows = await tx.execute<
-          LeaseRow & {
-            reaper_hold_active: boolean;
-            provider_hold_safe: boolean;
-          }
+          LeaseRow & { reaper_hold_active: boolean; provider_hold_safe: boolean }
         >(sql`
           select lease.*,
             (lease.reaper_hold_id is not null and lease.reaper_hold_until > now())
@@ -34082,28 +34049,16 @@ export async function acquireSandboxLeaseReaperHold(
           return { status: "held_by_other" as const, lease: mapLeaseRow(row) };
         }
         if (renewing && row.reaper_hold_reason !== reason) {
-          return {
-            status: "reason_conflict" as const,
-            lease: mapLeaseRow(row),
-          };
+          return { status: "reason_conflict" as const, lease: mapLeaseRow(row) };
         }
         if (row.archive_capture_id !== null || row.rotation_reason === "teardown_claim") {
-          return {
-            status: "teardown_in_progress" as const,
-            lease: mapLeaseRow(row),
-          };
+          return { status: "teardown_in_progress" as const, lease: mapLeaseRow(row) };
         }
         if (row.rotation_requested_at !== null) {
-          return {
-            status: "rotation_in_progress" as const,
-            lease: mapLeaseRow(row),
-          };
+          return { status: "rotation_in_progress" as const, lease: mapLeaseRow(row) };
         }
         if (!row.provider_hold_safe) {
-          return {
-            status: "provider_deadline_conflict" as const,
-            lease: mapLeaseRow(row),
-          };
+          return { status: "provider_deadline_conflict" as const, lease: mapLeaseRow(row) };
         }
         const held = await tx.execute<LeaseRow>(sql`
           update sandbox_leases set
@@ -34121,11 +34076,7 @@ export async function acquireSandboxLeaseReaperHold(
         if (!lease) {
           return { status: "lease_fenced" as const, lease: mapLeaseRow(row) };
         }
-        return {
-          status: "held" as const,
-          renewed: renewing,
-          lease: mapLeaseRow(lease),
-        };
+        return { status: "held" as const, renewed: renewing, lease: mapLeaseRow(lease) };
       }),
   );
 }
@@ -44604,10 +44555,7 @@ export async function settleSessionAttemptInterruptions(
                       turnGeneration: turn.executionGeneration,
                       turnAttemptId: attemptId,
                       turnAssociation: null,
-                      payload: {
-                        status: "idle",
-                        reason: "paused_recovery_settled",
-                      },
+                      payload: { status: "idle", reason: "paused_recovery_settled" },
                       clientEventId: `opengeni:paused-recovery-settled:${attemptId}`,
                       occurredAt: now,
                     },
