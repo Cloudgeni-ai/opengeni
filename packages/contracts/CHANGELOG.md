@@ -1,5 +1,23 @@
 # @opengeni/contracts
 
+## 0.43.0
+
+### Minor Changes
+
+- b46f4de: Add a compact, cursor-paginated agent-topology read surface with root, direct-child, and search filters for lazy hierarchy browsers.
+- 31666e2: Add immutable workspace learning-policy revisions, lifecycle-only activation and rollback, accepted-attempt snapshots, and deterministic effective-mode resolution for `off`, `suggest`, and `automatic`.
+
+### Patch Changes
+
+- 2f4ce5e: Add durable Seedance video generation with workspace model and funding policy,
+  secure media references, retained video artifacts, sandbox materialization,
+  OpenGeni-credit and workspace-gateway funding, and SDK/React playback surfaces.
+- d55a093: Use truthful Google Drive read-only source-sync metadata for new connections while retaining compatibility with the legacy metadata-browser label.
+- ad9123b: Pin the Slack reaction shortcut to the OpenGeni genie emoji across contracts and SDK types.
+- bd5514e: Add explicitly enabled provider-neutral knowledge-source schedules with durable wake provenance, generation-fenced execution checkpoints and index obligations, fail-closed ACL activation seams, no-agent execution, layered pause state, shared schedule administration, and Google Drive source lifecycle integration.
+- 90eea29: Make connected-machine removal show every dependent session and support an explicit canonical move-to-default-sandbox confirmation before revocation. Default moves prove managed sandbox readiness through the existing fleet route, active turns remain fail-closed, and typed swap rejections surface as visible errors instead of false success.
+- 5fcad0a: Expose an agent-safe checkpointed listing of newly indexed documents with source and provenance metadata.
+
 ## 0.42.1
 
 ### Patch Changes
