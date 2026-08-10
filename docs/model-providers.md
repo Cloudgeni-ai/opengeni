@@ -447,10 +447,15 @@ credential-bearing URL.
 
 ## Runtime routing and billing
 
-`packages/runtime/src/model-provider.ts` is the canonical runtime implementation
-for provider clients, object-stage request policy, provider-bound model
-construction, and model-name routing. The package root re-exports that surface
-for compatibility.
+`packages/runtime/src/model-provider.ts` is the canonical package-private facade
+for the runtime provider surface. Cohesive sibling leaves own client/transport
+construction (`model-provider-client.ts`), typed failures
+(`model-provider-errors.ts`), object-stage request policy
+(`model-provider-request-policy.ts`), and provider-bound model construction plus
+name routing (`model-provider-routing.ts`). Gateway HTTP fallback and shared
+model-call detection live in `model-provider-transport.ts`. The package root
+re-exports only the facade surface for compatibility; none of the leaves is a
+public package subpath.
 
 `MultiProviderModelProvider` is installed as the process default so both
 in-process and sandboxed agent paths resolve the same product model. A resolved
