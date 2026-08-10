@@ -127,6 +127,7 @@ disabled and provider response bodies remain bounded.
 
 The owning endpoints are:
 
+- `GET /v1/workspaces/:workspaceId/integrations/presets`
 - `GET /v1/workspaces/:workspaceId/integrations`
 - `POST /v1/workspaces/:workspaceId/integrations/preview`
 - `POST /v1/workspaces/:workspaceId/integrations/install`
@@ -140,6 +141,13 @@ ledger. This supports two Gmail accounts, two Linear workspaces, or several
 resource-scoped configurations without copying the schema or overwriting a
 sibling. Reconnect and uninstall operate on the exact instance; the underlying
 Connection and shared definition survive unless separately removed.
+
+The preset inventory returns only safe public metadata (id, label, provider
+family/domain, protocol, summary, and requested scope names). Deployment OAuth
+client identifiers and secrets never cross this boundary. `/capabilities`
+renders that inventory as one service card per immutable definition and one
+independent row per named account instance; “Add another account” always creates
+a new Connection/binding instead of replacing a sibling.
 
 ### Plugin packages
 

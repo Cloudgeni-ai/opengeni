@@ -46,6 +46,7 @@ import type {
   ApiIntegrationUninstallPreview,
   InstallApiIntegrationRequest,
   InstalledApiIntegration,
+  ListApiIntegrationPresetsResponse,
   ListApiIntegrationsResponse,
   PreviewApiIntegrationRequest,
   UninstallApiIntegrationRequest,
@@ -3635,6 +3636,14 @@ export class OpenGeniClient {
     return await this.requestJson<ListApiIntegrationsResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/integrations`,
+    );
+  }
+
+  /** List curated provider presets without exposing deployment OAuth credentials. */
+  async listApiIntegrationPresets(workspaceId: string): Promise<ListApiIntegrationPresetsResponse> {
+    return await this.requestJson<ListApiIntegrationPresetsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/integrations/presets`,
     );
   }
 

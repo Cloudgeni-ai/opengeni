@@ -6,6 +6,8 @@ export type {
   AccessGrant,
   AccountGrant,
   AddWorkspaceMemberRequest,
+  ApiIntegrationInstallationSummary,
+  ApiIntegrationPresetSummary,
   ApiKey,
   BillingBalance,
   BillingEntitlementsResponse,

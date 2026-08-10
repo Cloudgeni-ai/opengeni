@@ -31,6 +31,7 @@ import {
 } from "@/components/capabilities/capability-detail-sheet";
 import { CapabilityLogo } from "@/components/capabilities/capability-logo";
 import { CapabilityTile } from "@/components/capabilities/capability-tile";
+import { IntegrationControlCenter } from "@/components/capabilities/integration-control-center";
 import { PacksSection } from "@/components/capabilities/packs-section";
 import { PersonalSlackAccountCard } from "@/components/capabilities/personal-slack-account-card";
 import { SlackReactionSummonCard } from "@/components/capabilities/slack-reaction-summon-card";
@@ -88,6 +89,7 @@ const GoogleDriveConnectorCard = lazy(async () => {
   const module = await import("@/components/capabilities/google-drive-connector-card");
   return { default: module.GoogleDriveConnectorCard };
 });
+
 import type {
   AccessContext,
   CapabilityCatalogItem,
@@ -130,6 +132,13 @@ export function canManageSlackReactionSummon(
     (candidate) => candidate.workspaceId === workspaceId,
   );
   return grant?.permissions.includes("workspace:admin") === true;
+}
+
+export function canManageApiIntegrations(
+  accessContext: AccessContext | null,
+  workspaceId: string,
+): boolean {
+  return hasWorkspacePermission(accessContext, workspaceId, "workspace:admin");
 }
 
 export function WorkspaceSlackBotRequestedScopes() {
@@ -317,6 +326,10 @@ export function CapabilitiesRoute({
   const personalSlackConnection = preferredPersonalSlackConnection(connections ?? []);
   const personalSlackStatus = personalSlackAccountState(personalSlackConnection, connectionsLoaded);
   const canManagePersonalSlack = canWriteWorkspaceConnections(context.accessContext, workspaceId);
+  const canManageApiIntegrationInstances = canManageApiIntegrations(
+    context.accessContext,
+    workspaceId,
+  );
 
   useEffect(() => {
     const authority = slackBotDocumentDestinationAuthority(slackBotConnection?.metadata);
@@ -804,6 +817,10 @@ export function CapabilitiesRoute({
     const params = new URLSearchParams(window.location.search);
     const outcome = params.get("integration_oauth");
     if (!outcome) return;
+    // Provider-preset API integrations have their own immutable preview/install
+    // continuation. Leave those callback parameters intact for the control
+    // center instead of treating them as a legacy MCP catalog connection.
+    if (params.has("api_integration_preset")) return;
     oauthHandled.current = true;
 
     const itemId = params.get("connect_item");
@@ -1158,6 +1175,16 @@ export function CapabilitiesRoute({
               </Button>
             </>
           }
+        />
+
+        <IntegrationControlCenter
+          workspaceId={workspaceId}
+          connections={connections}
+          canManage={canManageApiIntegrationInstances}
+          onChanged={async () => {
+            await refresh();
+            onRuntimeChanged();
+          }}
         />
 
         <Suspense fallback={<Skeleton className="mt-6 h-40 w-full rounded-xl" />}>

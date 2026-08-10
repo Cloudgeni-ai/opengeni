@@ -19,6 +19,7 @@ function integration(): ApiIntegrationRuntime {
     name: "Inventory API",
     description: "Inventory operations.",
     protocol: "openapi",
+    presetId: null,
     baseUrl: "https://127.0.0.1/v1/",
     sourceUrl: "https://127.0.0.1/openapi.json",
     providerDomain: "127.0.0.1",
@@ -276,10 +277,7 @@ describe("installed API Integration worker adapters", () => {
             (await server.listTools()).map((tool) => tool.name),
           ),
         ),
-      ).toEqual([
-        [`${finance.serverId}__list_items`],
-        [`${sales.serverId}__list_items`],
-      ]);
+      ).toEqual([[`${finance.serverId}__list_items`], [`${sales.serverId}__list_items`]]);
       await prepared.mcpServers[0]!.callTool(`${finance.serverId}__list_items`, {});
       await prepared.mcpServers[1]!.callTool(`${sales.serverId}__list_items`, {});
       expect(resolutions).toEqual([

@@ -527,6 +527,9 @@ describe("API helpers", () => {
     expect(routeLabel(`/v1/workspaces/${workspace}/integrations/oauth/start`)).toBe(
       "/v1/workspaces/:workspaceId/integrations/oauth/start",
     );
+    expect(routeLabel(`/v1/workspaces/${workspace}/integrations/presets`)).toBe(
+      "/v1/workspaces/:workspaceId/integrations/presets",
+    );
     expect(
       routeLabel(
         `/v1/workspaces/${workspace}/integrations/api%3Aopenapi%3Agmail/instances/account-a/uninstall-preview`,
@@ -538,9 +541,7 @@ describe("API helpers", () => {
       routeLabel(
         `/v1/workspaces/${workspace}/integrations/api%3Aopenapi%3Agmail/instances/account-a`,
       ),
-    ).toBe(
-      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey",
-    );
+    ).toBe("/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey");
     expect(routeLabel("/v1/integrations/provider-oauth/callback")).toBe(
       "/v1/integrations/provider-oauth/callback",
     );

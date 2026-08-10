@@ -1229,6 +1229,7 @@ describe("OpenGeniClient capabilities", () => {
     const { client, requests } = makeClient(() => jsonResponse({ integrations: [] }));
     const source = { kind: "openapi" as const, url: "https://api.example.test/openapi.json" };
     const capabilityId = "api:openapi:example-deadbeef1234";
+    await client.listApiIntegrationPresets(WORKSPACE_ID);
     await client.previewApiIntegration(WORKSPACE_ID, { source });
     await client.installApiIntegration(WORKSPACE_ID, {
       source,
@@ -1245,6 +1246,7 @@ describe("OpenGeniClient capabilities", () => {
 
     expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
       [
+        `GET /v1/workspaces/${WORKSPACE_ID}/integrations/presets`,
         `POST /v1/workspaces/${WORKSPACE_ID}/integrations/preview`,
         `POST /v1/workspaces/${WORKSPACE_ID}/integrations/install`,
         `GET /v1/workspaces/${WORKSPACE_ID}/integrations`,
@@ -1252,14 +1254,14 @@ describe("OpenGeniClient capabilities", () => {
         `DELETE /v1/workspaces/${WORKSPACE_ID}/integrations/api%3Aopenapi%3Aexample-deadbeef1234/instances/finance`,
       ],
     );
-    expect(JSON.parse(requests[0]!.body!)).toEqual({ source });
-    expect(JSON.parse(requests[1]!.body!)).toEqual({
+    expect(JSON.parse(requests[1]!.body!)).toEqual({ source });
+    expect(JSON.parse(requests[2]!.body!)).toEqual({
       source,
       expectedRevisionId: "openapi:aaaaaaaaaaaaaaaaaaaaaaaa",
       expectedContentSha256: "b".repeat(64),
       allowedTools: ["list_items"],
     });
-    expect(JSON.parse(requests[4]!.body!)).toEqual({
+    expect(JSON.parse(requests[5]!.body!)).toEqual({
       expectedInstallationVersion: 4,
       expectedInstanceVersion: 2,
     });

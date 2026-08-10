@@ -65,9 +65,15 @@ export async function resolveApiIntegrationPreview(input: {
   try {
     return await resolveGraphql(input, input.source.url);
   } catch (graphqlFailure) {
-    throw new Error("The URL is neither a supported OpenAPI document nor a GraphQL endpoint", {
-      cause: { openApiFailure, graphqlFailure },
+    const detectionFailure = new Error(
+      "The URL is neither a supported OpenAPI document nor a GraphQL endpoint",
+      { cause: graphqlFailure },
+    );
+    Object.defineProperty(detectionFailure, "openApiFailure", {
+      value: openApiFailure,
+      enumerable: false,
     });
+    throw detectionFailure;
   }
 }
 
@@ -214,7 +220,9 @@ function resolvedPreview(input: {
 }): ResolvedApiIntegrationPreview {
   const deprecated = input.revision.tools.filter((tool) => tool.deprecated).length;
   const warnings = [
-    ...(deprecated > 0 ? [`${deprecated} deprecated operation${deprecated === 1 ? "" : "s"} will not be enabled.`] : []),
+    ...(deprecated > 0
+      ? [`${deprecated} deprecated operation${deprecated === 1 ? "" : "s"} will not be enabled.`]
+      : []),
     ...(input.revision.tools.length > 500
       ? ["This Integration has many tools; schemas stay behind lazy tool discovery."]
       : []),
@@ -259,11 +267,12 @@ function resolvedPreview(input: {
 
 function integrationIdentity(protocol: "openapi" | "graphql", label: string, locator: string) {
   const hash = createHash("sha256").update(`${protocol}\0${locator}`).digest("hex").slice(0, 12);
-  const slug = label
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 48) || "integration";
+  const slug =
+    label
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 48) || "integration";
   return {
     integrationId: `${slug}-${hash}`,
     pluginKey: `integration/${protocol}/${slug}-${hash}`,

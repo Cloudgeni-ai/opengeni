@@ -6997,6 +6997,24 @@ export type UninstallSkillResult = z.infer<typeof UninstallSkillResult>;
 export const ApiIntegrationProtocol = z.enum(["openapi", "graphql"]);
 export type ApiIntegrationProtocol = z.infer<typeof ApiIntegrationProtocol>;
 
+export const ApiIntegrationPresetSummary = z
+  .object({
+    id: z.string().min(1).max(128),
+    name: z.string().min(1).max(200),
+    summary: z.string().min(1).max(1000),
+    family: z.enum(["google", "microsoft"]),
+    protocol: z.literal("openapi"),
+    providerDomain: z.string().min(1).max(253),
+    scopes: z.array(z.string().min(1).max(1024)).max(256),
+  })
+  .strict();
+export type ApiIntegrationPresetSummary = z.infer<typeof ApiIntegrationPresetSummary>;
+
+export const ListApiIntegrationPresetsResponse = z
+  .object({ presets: z.array(ApiIntegrationPresetSummary).max(128) })
+  .strict();
+export type ListApiIntegrationPresetsResponse = z.infer<typeof ListApiIntegrationPresetsResponse>;
+
 export const IntegrationInstanceKey = z
   .string()
   .min(1)
@@ -7182,10 +7200,12 @@ export const ApiIntegrationInstallationSummary = z
     name: z.string().min(1),
     description: z.string().nullable(),
     protocol: ApiIntegrationProtocol,
+    presetId: z.string().min(1).max(128).nullable(),
     providerDomain: z.string().min(1),
     baseUrl: z.string().url(),
     sourceUrl: z.string().url().nullable(),
     connected: z.boolean(),
+    connectionId: z.string().uuid().nullable(),
     ownership: z.enum(["workspace", "personal", "none"]),
     toolCount: z.number().int().nonnegative(),
     approvalRequiredToolCount: z.number().int().nonnegative(),

@@ -1,13 +1,6 @@
-import {
-  pinnedFetch,
-  readResponseBodyBounded,
-  type FetchLike,
-} from "@opengeni/network";
+import { pinnedFetch, readResponseBodyBounded, type FetchLike } from "@opengeni/network";
 
-import type {
-  IntegrationTransport,
-  PinnedIntegrationTransportOptions,
-} from "./types";
+import type { IntegrationTransport, PinnedIntegrationTransportOptions } from "./types";
 import { IntegrationInvocationError } from "./types";
 
 export const DEFAULT_INTEGRATION_TIMEOUT_MS = 30_000;
@@ -83,14 +76,17 @@ export async function fetchWithDeadline(
   const onAbort = () => controller.abort(init.signal?.reason);
   if (init.signal?.aborted) onAbort();
   else init.signal?.addEventListener("abort", onAbort, { once: true });
-  const timer = setTimeout(() => controller.abort(new Error("integration request timed out")), timeoutMs);
+  const timer = setTimeout(
+    () => controller.abort(new Error("integration request timed out")),
+    timeoutMs,
+  );
   try {
     return await transport.fetch(url, {
       ...init,
       signal: controller.signal,
       redirect: "manual",
     });
-  } catch (error) {
+  } catch {
     const timedOut = controller.signal.aborted && !init.signal?.aborted;
     throw new IntegrationInvocationError(
       timedOut ? "request_timeout" : "request_failed",
@@ -114,7 +110,8 @@ export async function readIntegrationResponse(
   maxBytes = DEFAULT_INTEGRATION_RESPONSE_BYTES,
 ): Promise<{ data: unknown; contentType: string; bytes: number }> {
   const body = await readResponseBodyBounded(response, maxBytes, "Integration response");
-  const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
+  const contentType =
+    response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
   if (body.byteLength === 0) return { data: null, contentType, bytes: 0 };
   const text = new TextDecoder("utf-8", { fatal: false }).decode(body);
   if (contentType === "application/json" || contentType.endsWith("+json")) {

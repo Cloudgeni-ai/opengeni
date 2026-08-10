@@ -431,6 +431,7 @@ async function resolvePluginPackage(input: {
             description: resolved.preview.description,
             category: "integrations",
             tags: [resolved.preview.protocol, resolved.preview.provider ?? "custom", "plugin"],
+            presetId: resolved.preview.presetId,
             ...(resolved.provider ? { provider: resolved.provider } : {}),
             providerDomain: resolved.preview.providerDomain,
             protocol: resolved.preview.protocol,

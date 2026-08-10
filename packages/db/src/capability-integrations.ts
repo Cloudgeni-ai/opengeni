@@ -108,6 +108,7 @@ export type InstallApiIntegrationInput = {
   description?: string | null;
   category?: string;
   tags?: string[];
+  presetId?: string | null;
   provider?: string;
   providerDomain: string;
   protocol: ApiIntegrationProtocol;
@@ -157,6 +158,7 @@ export type ApiIntegrationRuntime = {
   name: string;
   description: string | null;
   protocol: ApiIntegrationProtocol;
+  presetId: string | null;
   baseUrl: string;
   sourceUrl: string | null;
   providerDomain: string;
@@ -279,6 +281,7 @@ export async function installApiIntegration(
           capabilityId: input.capabilityId,
           serverId: input.serverId,
           protocol: input.protocol,
+          presetId: input.presetId ?? null,
           provider: input.provider ?? null,
           providerDomain: input.providerDomain,
           baseUrl: input.baseUrl,
@@ -503,31 +506,28 @@ export async function installApiIntegration(
         const approvalRequiredTools = input.revision.tools
           .filter((tool) => selectedTools.includes(tool.id) && tool.approvalMode === "ask")
           .map((tool) => tool.id);
-        const bindingResult = await upsertIntegrationFeatureBinding(
-          tx as unknown as Database,
-          {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            integrationFacetInstallationId: integrationFacetInstallation.id,
-            featureFacetId: toolsFeature.id,
-            bindingKey: instanceKey,
-            displayName,
-            runtimeKey: runtimeServerId,
-            connectionId: input.connectionId ?? null,
-            config: {
-              baseServerId: input.serverId,
-              allowedTools: selectedTools,
-              requireApproval: approvalRequiredTools,
-              connectionKind: connection?.kind ?? null,
-              subjectScope: connection?.subjectId ? "subject" : connection ? "workspace" : "none",
-            },
-            createdBySubjectId: input.subjectId,
-            owner,
-            ...(input.expectedInstanceVersion !== undefined
-              ? { expectedVersion: input.expectedInstanceVersion }
-              : {}),
+        const bindingResult = await upsertIntegrationFeatureBinding(tx as unknown as Database, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          integrationFacetInstallationId: integrationFacetInstallation.id,
+          featureFacetId: toolsFeature.id,
+          bindingKey: instanceKey,
+          displayName,
+          runtimeKey: runtimeServerId,
+          connectionId: input.connectionId ?? null,
+          config: {
+            baseServerId: input.serverId,
+            allowedTools: selectedTools,
+            requireApproval: approvalRequiredTools,
+            connectionKind: connection?.kind ?? null,
+            subjectScope: connection?.subjectId ? "subject" : connection ? "workspace" : "none",
           },
-        );
+          createdBySubjectId: input.subjectId,
+          owner,
+          ...(input.expectedInstanceVersion !== undefined
+            ? { expectedVersion: input.expectedInstanceVersion }
+            : {}),
+        });
         if (
           existingPluginInstallation &&
           !pluginInstallationGenerationAdvanced &&
@@ -561,14 +561,12 @@ export async function installApiIntegration(
             .onConflictDoNothing();
         }
         if (pluginInstallationGenerationAdvanced && oldFacetInstallations.length > 0) {
-          await tx
-            .delete(schema.capabilityFacetInstallations)
-            .where(
-              inArray(
-                schema.capabilityFacetInstallations.id,
-                oldFacetInstallations.map((row) => row.id),
-              ),
-            );
+          await tx.delete(schema.capabilityFacetInstallations).where(
+            inArray(
+              schema.capabilityFacetInstallations.id,
+              oldFacetInstallations.map((row) => row.id),
+            ),
+          );
         }
 
         const compatibilityMetadata = {
@@ -721,10 +719,7 @@ export async function listInstalledApiIntegrations(
       .from(schema.integrationFeatureBindings)
       .innerJoin(
         schema.integrationFeatureFacets,
-        eq(
-          schema.integrationFeatureFacets.id,
-          schema.integrationFeatureBindings.featureFacetId,
-        ),
+        eq(schema.integrationFeatureFacets.id, schema.integrationFeatureBindings.featureFacetId),
       )
       .innerJoin(
         schema.capabilityIntegrationFacets,
@@ -837,6 +832,7 @@ export async function listInstalledApiIntegrations(
       const config = objectValue(row.bindingConfig);
       const manifest = objectValue(row.manifest);
       const capabilityId = stringValue(manifest.capabilityId);
+      const presetId = stringValue(manifest.presetId) ?? null;
       const serverId = row.runtimeKey;
       if (!capabilityId || !serverId || row.protocol !== revision.protocol) {
         throw new Error(
@@ -881,6 +877,7 @@ export async function listInstalledApiIntegrations(
           name: row.displayName,
           description: row.pluginDescription,
           protocol: revision.protocol,
+          presetId,
           baseUrl: row.baseUrl,
           sourceUrl: row.sourceUrl,
           providerDomain: row.providerDomain,
@@ -1005,9 +1002,7 @@ export async function uninstallApiIntegration(
           context.instanceId,
         );
         if (
-          !bindingOwners.some(
-            (owner) => owner.kind === "direct" && owner.id === input.capabilityId,
-          )
+          !bindingOwners.some((owner) => owner.kind === "direct" && owner.id === input.capabilityId)
         ) {
           return {
             capabilityId: input.capabilityId,
@@ -1057,10 +1052,7 @@ export async function uninstallApiIntegration(
           return {
             capabilityId: input.capabilityId,
             instanceKey: input.instanceKey,
-            status:
-              removed.remainingOwners.length > 0
-                ? "retained_by_other_owners"
-                : "uninstalled",
+            status: removed.remainingOwners.length > 0 ? "retained_by_other_owners" : "uninstalled",
             remainingOwners: removed.remainingOwners,
             definitionStatus: "retained",
           };
@@ -1093,8 +1085,7 @@ export async function uninstallApiIntegration(
         return {
           capabilityId: input.capabilityId,
           instanceKey: input.instanceKey,
-          status:
-            removed.remainingOwners.length > 0 ? "retained_by_other_owners" : "uninstalled",
+          status: removed.remainingOwners.length > 0 ? "retained_by_other_owners" : "uninstalled",
           remainingOwners: removed.remainingOwners,
           definitionStatus: "disabled",
         };
@@ -1122,9 +1113,7 @@ async function installedFacetRows(
       schema.capabilityFacets,
       eq(schema.capabilityFacets.id, schema.capabilityFacetInstallations.facetId),
     )
-    .where(
-      eq(schema.capabilityFacetInstallations.pluginInstallationId, pluginInstallationId),
-    );
+    .where(eq(schema.capabilityFacetInstallations.pluginInstallationId, pluginInstallationId));
 }
 
 async function migrateApiIntegrationFacetInstallations(
@@ -1180,10 +1169,7 @@ async function migrateApiIntegrationFacetInstallations(
     .where(
       and(
         eq(schema.integrationFeatureBindings.workspaceId, input.workspaceId),
-        eq(
-          schema.integrationFeatureBindings.integrationFacetInstallationId,
-          oldIntegration.id,
-        ),
+        eq(schema.integrationFeatureBindings.integrationFacetInstallationId, oldIntegration.id),
         ne(schema.integrationFeatureBindings.runtimeKey, input.excludedRuntimeKey),
       ),
     )
@@ -1191,9 +1177,7 @@ async function migrateApiIntegrationFacetInstallations(
   const available = new Set(input.revision.tools.map((tool) => tool.id));
   for (const binding of bindings) {
     const config = objectValue(binding.config);
-    const selected = (stringArray(config.allowedTools) ?? []).filter((tool) =>
-      available.has(tool),
-    );
+    const selected = (stringArray(config.allowedTools) ?? []).filter((tool) => available.has(tool));
     const requireApproval = input.revision.tools
       .filter((tool) => selected.includes(tool.id) && tool.approvalMode === "ask")
       .map((tool) => tool.id);
@@ -1380,10 +1364,7 @@ async function integrationInstanceContext(
     )
     .innerJoin(
       schema.capabilityPluginVersions,
-      eq(
-        schema.capabilityPluginVersions.id,
-        schema.capabilityPluginInstallations.pluginVersionId,
-      ),
+      eq(schema.capabilityPluginVersions.id, schema.capabilityPluginInstallations.pluginVersionId),
     )
     .where(
       and(
@@ -1414,10 +1395,7 @@ async function integrationDefinitionHasOtherBindingOwner(
     .from(schema.integrationFeatureBindingOwners)
     .innerJoin(
       schema.integrationFeatureBindings,
-      eq(
-        schema.integrationFeatureBindings.id,
-        schema.integrationFeatureBindingOwners.bindingId,
-      ),
+      eq(schema.integrationFeatureBindings.id, schema.integrationFeatureBindingOwners.bindingId),
     )
     .innerJoin(
       schema.capabilityFacetInstallations,
@@ -1432,10 +1410,7 @@ async function integrationDefinitionHasOtherBindingOwner(
         eq(schema.integrationFeatureBindingOwners.ownerKind, input.owner.kind),
         eq(schema.integrationFeatureBindingOwners.ownerId, input.owner.id),
         ne(schema.integrationFeatureBindingOwners.bindingId, input.excludedBindingId),
-        eq(
-          schema.capabilityFacetInstallations.pluginInstallationId,
-          input.pluginInstallationId,
-        ),
+        eq(schema.capabilityFacetInstallations.pluginInstallationId, input.pluginInstallationId),
         or(
           eq(schema.integrationFeatureBindings.status, "active"),
           eq(schema.integrationFeatureBindings.status, "needs_attention"),

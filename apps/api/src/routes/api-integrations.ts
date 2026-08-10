@@ -1,9 +1,12 @@
 import {
+  CORE_PROVIDER_PRESETS,
   createPinnedIntegrationTransport,
+  providerDomainForPreset,
   type IntegrationCredentialResolver,
 } from "@opengeni/capabilities";
 import {
   ApiIntegrationPreview,
+  ListApiIntegrationPresetsResponse,
   ApiIntegrationUninstallPreview,
   InstallApiIntegrationRequest,
   InstalledApiIntegration,
@@ -47,14 +50,28 @@ export function registerApiIntegrationRoutes(
     ...(overrides.fetchImpl ? { fetchImpl: overrides.fetchImpl } : {}),
   });
 
+  app.get("/v1/workspaces/:workspaceId/integrations/presets", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    return c.json(
+      ListApiIntegrationPresetsResponse.parse({
+        presets: CORE_PROVIDER_PRESETS.map((preset) => ({
+          id: preset.id,
+          name: preset.name,
+          summary: preset.summary,
+          family: preset.family,
+          protocol: "openapi",
+          providerDomain: providerDomainForPreset(preset),
+          scopes: [...preset.oauth.scopes],
+        })),
+      }),
+    );
+  });
+
   app.get("/v1/workspaces/:workspaceId/integrations", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    const integrations = await listInstalledApiIntegrations(
-      deps.db,
-      workspaceId,
-      grant.subjectId,
-    );
+    const integrations = await listInstalledApiIntegrations(deps.db, workspaceId, grant.subjectId);
     return c.json(
       ListApiIntegrationsResponse.parse({
         integrations: integrations.map((integration) => ({
@@ -69,10 +86,12 @@ export function registerApiIntegrationRoutes(
           name: integration.name,
           description: integration.description,
           protocol: integration.protocol,
+          presetId: integration.presetId,
           providerDomain: integration.providerDomain,
           baseUrl: integration.baseUrl,
           sourceUrl: integration.sourceUrl,
           connected: integration.connectionRef !== null,
+          connectionId: integration.connectionRef?.connectionId ?? null,
           ownership:
             integration.connectionRef?.subjectScope === "subject"
               ? "personal"
@@ -148,22 +167,23 @@ export function registerApiIntegrationRoutes(
       return c.json(
         InstalledApiIntegration.parse(
           await installApiIntegration(deps.db, {
-          accountId: grant.accountId,
-          workspaceId,
-          subjectId: grant.subjectId,
-          capabilityId: resolved.preview.capabilityId,
-          pluginKey: resolved.preview.pluginKey,
-          serverId: resolved.preview.serverId,
-          name: resolved.preview.name,
-          description: resolved.preview.description,
-          category: "integrations",
-          tags: [resolved.preview.protocol, resolved.preview.provider ?? "custom"],
-          ...(resolved.provider ? { provider: resolved.provider } : {}),
-          providerDomain: resolved.preview.providerDomain,
-          protocol: resolved.preview.protocol,
-          baseUrl: resolved.preview.baseUrl,
-          sourceUrl: resolved.preview.sourceUrl,
-          authScheme: resolved.authScheme,
+            accountId: grant.accountId,
+            workspaceId,
+            subjectId: grant.subjectId,
+            capabilityId: resolved.preview.capabilityId,
+            pluginKey: resolved.preview.pluginKey,
+            serverId: resolved.preview.serverId,
+            name: resolved.preview.name,
+            description: resolved.preview.description,
+            category: "integrations",
+            tags: [resolved.preview.protocol, resolved.preview.provider ?? "custom"],
+            presetId: resolved.preview.presetId,
+            ...(resolved.provider ? { provider: resolved.provider } : {}),
+            providerDomain: resolved.preview.providerDomain,
+            protocol: resolved.preview.protocol,
+            baseUrl: resolved.preview.baseUrl,
+            sourceUrl: resolved.preview.sourceUrl,
+            authScheme: resolved.authScheme,
             ...(payload.connectionId ? { connectionId: payload.connectionId } : {}),
             ...(payload.instanceKey ? { instanceKey: payload.instanceKey } : {}),
             ...(payload.displayName ? { displayName: payload.displayName } : {}),

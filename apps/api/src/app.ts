@@ -1183,8 +1183,11 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
     label: "/v1/workspaces/:workspaceId/integrations/install",
   },
   {
-    pattern:
-      /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/uninstall-preview$/,
+    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/presets$/,
+    label: "/v1/workspaces/:workspaceId/integrations/presets",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/uninstall-preview$/,
     label:
       "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/uninstall-preview",
   },

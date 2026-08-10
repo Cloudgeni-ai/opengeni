@@ -179,6 +179,24 @@ async function request(path: string, init: RequestInit = {}): Promise<Response> 
 }
 
 describe("API Integration routes", () => {
+  test("lists curated provider presets without deployment OAuth credentials", async () => {
+    if (!available) return;
+    const response = await request("/integrations/presets");
+    expect(response.status).toBe(200);
+    const payload = await response.json();
+    expect(payload.presets).toHaveLength(6);
+    expect(payload.presets).toContainEqual(
+      expect.objectContaining({
+        id: "google-gmail",
+        name: "Gmail",
+        family: "google",
+        providerDomain: "gmail.googleapis.com",
+      }),
+    );
+    expect(JSON.stringify(payload)).not.toContain("clientSecret");
+    expect(JSON.stringify(payload)).not.toContain("clientId");
+  });
+
   test("previews, fences source drift, installs, lists, and OCC-uninstalls", async () => {
     if (!available) return;
     const source = { kind: "openapi", url: "https://127.0.0.1/openapi.json" };
@@ -242,7 +260,9 @@ describe("API Integration routes", () => {
           instanceId: installed.instanceId,
           instanceKey: installed.instanceKey,
           instanceVersion: installed.instanceVersion,
+          presetId: null,
           connected: false,
+          connectionId: null,
           ownership: "none",
           toolCount: 2,
           approvalRequiredToolCount: 1,
@@ -268,7 +288,7 @@ describe("API Integration routes", () => {
     const stale = await request(
       `/integrations/${encodedCapabilityId}/instances/${encodedInstanceKey}`,
       {
-      method: "DELETE",
+        method: "DELETE",
         body: JSON.stringify({
           expectedInstallationVersion: 2,
           expectedInstanceVersion: installed.instanceVersion,

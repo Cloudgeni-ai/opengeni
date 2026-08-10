@@ -4333,6 +4333,20 @@ export type UninstallSkillResult = {
 
 export type ApiIntegrationProtocol = "openapi" | "graphql";
 
+export type ApiIntegrationPresetSummary = {
+  id: string;
+  name: string;
+  summary: string;
+  family: "google" | "microsoft";
+  protocol: "openapi";
+  providerDomain: string;
+  scopes: string[];
+};
+
+export type ListApiIntegrationPresetsResponse = {
+  presets: ApiIntegrationPresetSummary[];
+};
+
 export type ApiIntegrationSource =
   | { kind: "preset"; presetId: string }
   | { kind: "openapi"; url: string; baseUrl?: string | undefined }
@@ -4439,10 +4453,12 @@ export type ApiIntegrationInstallationSummary = {
   name: string;
   description: string | null;
   protocol: ApiIntegrationProtocol;
+  presetId: string | null;
   providerDomain: string;
   baseUrl: string;
   sourceUrl: string | null;
   connected: boolean;
+  connectionId: string | null;
   ownership: "workspace" | "personal" | "none";
   toolCount: number;
   approvalRequiredToolCount: number;

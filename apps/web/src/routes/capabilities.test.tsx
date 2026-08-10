@@ -7,6 +7,7 @@ import { createRoot } from "react-dom/client";
 import type { AccessContext } from "@/types";
 import {
   canInstallOpenGeniSlackBot,
+  canManageApiIntegrations,
   canManageSlackReactionSummon,
   canWriteWorkspaceConnections,
   SlackBotInstallControls,
@@ -107,6 +108,10 @@ describe("OpenGeni Slack bot install controls", () => {
     expect(canManageSlackReactionSummon(accessContext(["workspace:admin"]), "workspace-a")).toBe(
       true,
     );
+    expect(canManageApiIntegrations(accessContext(["connections:write"]), "workspace-a")).toBe(
+      false,
+    );
+    expect(canManageApiIntegrations(accessContext(["workspace:admin"]), "workspace-a")).toBe(true);
   });
 
   test("renders a disabled install control and administrator guidance without connections:write", async () => {
