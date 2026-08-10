@@ -8,6 +8,7 @@ import {
 import {
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
+  type RemoveEnrollmentResponse,
   type Session,
   OPENGENI_CORRELATION_HEADER,
   type ComposerDraft,
@@ -115,7 +116,7 @@ describe("OpenGeniClient", () => {
 
   test("removeEnrollment posts the workspace-scoped idempotent removal contract", async () => {
     const enrollmentId = "11111111-1111-4111-8111-111111111111";
-    const response = {
+    const response: RemoveEnrollmentResponse = {
       revoked: true,
       outcome: "removed",
       enrollmentId,
@@ -125,11 +126,13 @@ describe("OpenGeniClient", () => {
       code: null,
       message: "Machine access was revoked. History was retained for audit.",
       action: "A fresh human-approved device-flow enrollment is required to reconnect.",
-    } as const;
+      dependentSessions: [],
+    };
     const { client, requests } = makeClient(() => jsonResponse(response));
     const result = await client.removeEnrollment(WORKSPACE_ID, enrollmentId, {
       expectedUpdatedAt: "2026-08-04T09:00:00.000Z",
       idempotencyKey: "remove-sdk-contract-1",
+      moveSessionsToDefaultSandbox: true,
     });
 
     expect(result).toEqual(response);
@@ -140,6 +143,7 @@ describe("OpenGeniClient", () => {
     expect(JSON.parse(requests[0]!.body!)).toEqual({
       expectedUpdatedAt: "2026-08-04T09:00:00.000Z",
       idempotencyKey: "remove-sdk-contract-1",
+      moveSessionsToDefaultSandbox: true,
     });
   });
 

@@ -4838,6 +4838,9 @@ export type MachineMetricsSeriesResponse = {
 export type RemoveEnrollmentRequest = {
   expectedUpdatedAt?: string;
   idempotencyKey?: string;
+  /** Explicit confirmation to repoint dependent sessions to their default
+   * managed sandbox before revoking the connected machine. */
+  moveSessionsToDefaultSandbox?: boolean;
 };
 
 /** Typed removal/revocation outcome. Blocked outcomes preserve the exact
@@ -4858,6 +4861,7 @@ export type RemoveEnrollmentResponse = {
     | null;
   message: string;
   action: string;
+  dependentSessions: Array<{ id: string; title: string | null }>;
 };
 
 /** POST /v1/workspaces/:ws/sessions/:sessionId/active-sandbox — swap a session's

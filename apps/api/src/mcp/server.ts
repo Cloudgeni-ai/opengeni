@@ -2407,20 +2407,22 @@ function registerConnectedMachineTools(
     "connected_machine_remove",
     {
       description:
-        "Remove one enrolled self-hosted machine while it is offline. Access is revoked, future heartbeat/reconnect credentials are rejected, session/route/lease/archive history is retained, and a fresh human-approved device-flow enrollment is required to reconnect. Pass the enrollmentId from the Machines surface, never a Modal sandbox id. Blocked outcomes include the exact active dependency and the action needed before retrying.",
+        "Remove one enrolled self-hosted machine while it is offline. Access is revoked, future heartbeat/reconnect credentials are rejected, session/route/lease/archive history is retained, and a fresh human-approved device-flow enrollment is required to reconnect. Pass the enrollmentId from the Machines surface, never a Modal sandbox id. Blocked outcomes include every dependent session and the action needed before retrying. Set moveSessionsToDefaultSandbox only after explicitly reviewing those sessions; the removal then atomically repoints them before revocation.",
       inputSchema: {
         enrollmentId: z4.string().uuid(),
         expectedUpdatedAt: z4.string().datetime({ offset: true }).optional(),
         idempotencyKey: z4.string().trim().min(1).max(200).optional(),
+        moveSessionsToDefaultSandbox: z4.boolean().optional(),
       },
     },
-    async ({ enrollmentId, expectedUpdatedAt, idempotencyKey }) => {
+    async ({ enrollmentId, expectedUpdatedAt, idempotencyKey, moveSessionsToDefaultSandbox }) => {
       const result = await removeEnrollment(deps.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         enrollmentId,
         operationKey: idempotencyKey?.trim() || randomUUID(),
         ...(expectedUpdatedAt ? { expectedUpdatedAt } : {}),
+        moveSessionsToDefaultSandbox: moveSessionsToDefaultSandbox ?? false,
         subjectId: grant.subjectId,
       });
       if (!result) {

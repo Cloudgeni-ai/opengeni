@@ -37097,6 +37097,7 @@ export type MachineRemovalResult = {
   code: MachineRemovalBlockCode | null;
   message: string;
   action: string;
+  dependentSessions: Array<{ id: string; title: string | null }>;
 };
 
 export class MachineRemovalIdempotencyError extends Error {
@@ -37114,12 +37115,17 @@ export class MachineRemovalRevisionConflictError extends Error {
   }
 }
 
-function machineRemovalFingerprint(enrollmentId: string, expectedUpdatedAt?: string): string {
+function machineRemovalFingerprint(
+  enrollmentId: string,
+  expectedUpdatedAt?: string,
+  moveSessionsToDefaultSandbox = false,
+): string {
   return createHash("sha256")
     .update(
       JSON.stringify({
         enrollmentId,
         expectedUpdatedAt: expectedUpdatedAt ?? null,
+        moveSessionsToDefaultSandbox,
       }),
     )
     .digest("hex");
@@ -37130,6 +37136,7 @@ function machineRemovalResultFromStored(value: unknown): MachineRemovalResult {
     throw new Error("Invalid stored machine removal result");
   }
   const result = value as Partial<MachineRemovalResult>;
+  const dependentSessions = result.dependentSessions ?? [];
   if (
     typeof result.enrollmentId !== "string" ||
     (result.outcome !== "removed" &&
@@ -37146,11 +37153,19 @@ function machineRemovalResultFromStored(value: unknown): MachineRemovalResult {
       result.code !== "recovery_pending" &&
       result.code !== "not_selfhosted") ||
     typeof result.message !== "string" ||
-    typeof result.action !== "string"
+    typeof result.action !== "string" ||
+    !Array.isArray(dependentSessions) ||
+    dependentSessions.some(
+      (session) =>
+        !session ||
+        typeof session !== "object" ||
+        typeof session.id !== "string" ||
+        (session.title !== null && typeof session.title !== "string"),
+    )
   ) {
     throw new Error("Invalid stored machine removal result");
   }
-  return result as MachineRemovalResult;
+  return { ...(result as MachineRemovalResult), dependentSessions };
 }
 
 /**
@@ -37173,6 +37188,7 @@ export async function removeEnrollment(
     enrollmentId: string;
     operationKey: string;
     expectedUpdatedAt?: string;
+    moveSessionsToDefaultSandbox?: boolean;
     subjectId?: string | null;
   },
 ): Promise<MachineRemovalResult | null> {
@@ -37180,7 +37196,11 @@ export async function removeEnrollment(
   if (operationKey.length === 0 || operationKey.length > 200) {
     throw new Error("machine removal operation key must be 1-200 characters");
   }
-  const requestFingerprint = machineRemovalFingerprint(input.enrollmentId, input.expectedUpdatedAt);
+  const requestFingerprint = machineRemovalFingerprint(
+    input.enrollmentId,
+    input.expectedUpdatedAt,
+    input.moveSessionsToDefaultSandbox ?? false,
+  );
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -37261,11 +37281,13 @@ export async function removeEnrollment(
         .for("share");
       const nonSelfhosted = sandboxes.find((sandbox) => sandbox.kind !== "selfhosted");
       const machine = sandboxes.find((sandbox) => sandbox.kind === "selfhosted") ?? null;
+      const dependentSessions: Array<{ id: string; title: string | null }> = [];
       const baseResult = {
         enrollmentId: enrollment.id,
         machineName: machine?.name ?? null,
         lastSeenAt: enrollment.lastSeenAt?.toISOString() ?? null,
         revokedAt: enrollment.revokedAt?.toISOString() ?? null,
+        dependentSessions,
       };
 
       if (nonSelfhosted) {
@@ -37330,7 +37352,7 @@ export async function removeEnrollment(
       }
 
       if (machine) {
-        const [activePointer] = await scopedDb.execute<{
+        const activePointers = await scopedDb.execute<{
           session_id: string;
           title: string | null;
         }>(sql`
@@ -37339,42 +37361,14 @@ export async function removeEnrollment(
           where workspace_id = ${input.workspaceId}
             and active_sandbox_id = ${machine.id}
           order by created_at asc, id asc
-          limit 1
           for update
         `);
-        if (activePointer) {
-          const result: MachineRemovalResult = {
-            ...baseResult,
-            outcome: "blocked",
-            removed: false,
-            code: "active_route",
-            message: `Machine is still selected by session ${activePointer.title?.trim() || activePointer.session_id}.`,
-            action: "Move that session back to its managed sandbox, then retry removal.",
-          };
-          await scopedDb.insert(schema.machineRemovalOperations).values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            enrollmentId: enrollment.id,
-            operationKey,
-            requestFingerprint,
-            outcome: result.outcome,
-            result,
-          });
-          await scopedDb.insert(schema.auditEvents).values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            subjectId: input.subjectId ?? null,
-            action: "connected_machine.removal_blocked",
-            targetType: "enrollment",
-            targetId: enrollment.id,
-            metadata: {
-              code: result.code,
-              sessionId: activePointer.session_id,
-              message: result.message,
-            },
-          });
-          return result;
-        }
+        dependentSessions.push(
+          ...activePointers.map((pointer: { session_id: string; title: string | null }) => ({
+            id: pointer.session_id,
+            title: pointer.title?.trim() || null,
+          })),
+        );
 
         const [activeGroup] = await scopedDb.execute<{
           session_id: string;
@@ -37493,6 +37487,57 @@ export async function removeEnrollment(
           });
           return result;
         }
+
+        if (dependentSessions.length > 0 && !input.moveSessionsToDefaultSandbox) {
+          const count = dependentSessions.length;
+          const result: MachineRemovalResult = {
+            ...baseResult,
+            outcome: "blocked",
+            removed: false,
+            code: "active_route",
+            message: `Machine is still selected by ${count} ${count === 1 ? "session" : "sessions"}.`,
+            action:
+              "Review the affected sessions, then explicitly move them to their default managed sandbox and remove the machine.",
+          };
+          await scopedDb.insert(schema.machineRemovalOperations).values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            enrollmentId: enrollment.id,
+            operationKey,
+            requestFingerprint,
+            outcome: result.outcome,
+            result,
+          });
+          await scopedDb.insert(schema.auditEvents).values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: input.subjectId ?? null,
+            action: "connected_machine.removal_blocked",
+            targetType: "enrollment",
+            targetId: enrollment.id,
+            metadata: {
+              code: result.code,
+              sessionIds: dependentSessions.map((session) => session.id),
+              message: result.message,
+            },
+          });
+          return result;
+        }
+
+        if (dependentSessions.length > 0) {
+          const moved = await scopedDb.execute<{ id: string }>(sql`
+            update sessions
+            set active_sandbox_id = null,
+                active_epoch = active_epoch + 1,
+                updated_at = now()
+            where workspace_id = ${input.workspaceId}
+              and active_sandbox_id = ${machine.id}
+            returning id
+          `);
+          if (moved.length !== dependentSessions.length) {
+            throw new Error("dependent session routes changed while the removal lock was held");
+          }
+        }
       }
 
       const now = new Date();
@@ -37516,7 +37561,10 @@ export async function removeEnrollment(
         removed: true,
         revokedAt: now.toISOString(),
         code: null,
-        message: "Machine access was revoked. History was retained for audit.",
+        message:
+          dependentSessions.length > 0
+            ? `Moved ${dependentSessions.length} ${dependentSessions.length === 1 ? "session" : "sessions"} to their default managed sandbox and revoked machine access. History was retained for audit.`
+            : "Machine access was revoked. History was retained for audit.",
         action: "A fresh human-approved device-flow enrollment is required to reconnect.",
       };
       await scopedDb.insert(schema.machineRemovalOperations).values({
@@ -37539,6 +37587,7 @@ export async function removeEnrollment(
           machineName: result.machineName,
           lastSeenAt: result.lastSeenAt,
           credentialGeneration: Number(updated.credentialGeneration),
+          movedSessionIds: dependentSessions.map((session) => session.id),
         },
       });
       return result;

@@ -328,21 +328,98 @@ describe("connected machine removal lifecycle", () => {
       expectedEpoch: session.activeEpoch,
     });
     expect(routed.swapped).toBe(true);
+    const secondSession = await createSession(db, {
+      accountId,
+      workspaceId,
+      initialMessage: "second active route fixture",
+      resources: [],
+      metadata: {},
+      model: "gpt",
+      sandboxBackend: "modal",
+    });
+    await admin`update sessions set title = 'Second routed session' where id = ${secondSession.id}`;
+    const secondRouted = await setActiveSandbox(db, {
+      accountId,
+      workspaceId,
+      sessionId: secondSession.id,
+      targetSandboxId: routedMachine.id,
+      expectedEpoch: secondSession.activeEpoch,
+    });
+    expect(secondRouted.swapped).toBe(true);
     const routeBlocked = await removeEnrollment(db, {
       accountId,
       workspaceId,
       enrollmentId: routedEnrollment.id,
       operationKey: "route-blocked",
     });
-    expect(routeBlocked).toMatchObject({ outcome: "blocked", code: "active_route" });
-    const detached = await setActiveSandbox(db, {
+    expect(routeBlocked).toMatchObject({
+      outcome: "blocked",
+      code: "active_route",
+      dependentSessions: [
+        { id: session.id, title: null },
+        { id: secondSession.id, title: "Second routed session" },
+      ],
+    });
+    await expect(
+      removeEnrollment(db, {
+        accountId,
+        workspaceId,
+        enrollmentId: routedEnrollment.id,
+        operationKey: "route-blocked",
+        moveSessionsToDefaultSandbox: true,
+      }),
+    ).rejects.toBeInstanceOf(MachineRemovalIdempotencyError);
+
+    const [beforeMove] = await admin<
+      {
+        id: string;
+        status: string;
+        active_turn_id: string | null;
+        queue_version: number;
+        queue_head_position: string;
+        queue_tail_position: string;
+        last_sequence: number;
+      }[]
+    >`
+      select id, status, active_turn_id, queue_version, queue_head_position,
+             queue_tail_position, last_sequence
+      from sessions where id = ${session.id}`;
+    const forced = await removeEnrollment(db, {
       accountId,
       workspaceId,
-      sessionId: session.id,
-      targetSandboxId: null,
-      expectedEpoch: routed.pointer!.activeEpoch,
+      enrollmentId: routedEnrollment.id,
+      operationKey: "route-force-move",
+      moveSessionsToDefaultSandbox: true,
     });
-    expect(detached.swapped).toBe(true);
+    expect(forced).toMatchObject({
+      outcome: "removed",
+      removed: true,
+      dependentSessions: [
+        { id: session.id, title: null },
+        { id: secondSession.id, title: "Second routed session" },
+      ],
+    });
+    const movedSessions = await admin<
+      {
+        id: string;
+        active_sandbox_id: string | null;
+        active_epoch: number;
+        status: string;
+        active_turn_id: string | null;
+        queue_version: number;
+        queue_head_position: string;
+        queue_tail_position: string;
+        last_sequence: number;
+      }[]
+    >`
+      select id, active_sandbox_id, active_epoch, status, active_turn_id,
+             queue_version, queue_head_position, queue_tail_position, last_sequence
+      from sessions where id in (${session.id}, ${secondSession.id}) order by created_at, id`;
+    expect(movedSessions.map((row) => [row.id, row.active_sandbox_id, row.active_epoch])).toEqual([
+      [session.id, null, routed.pointer!.activeEpoch + 1],
+      [secondSession.id, null, secondRouted.pointer!.activeEpoch + 1],
+    ]);
+    expect(movedSessions[0]).toMatchObject(beforeMove!);
 
     const leasedEnrollment = await createEnrollment(db, {
       accountId,

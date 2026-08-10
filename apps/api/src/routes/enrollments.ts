@@ -357,6 +357,7 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
         ...(parsed.data.expectedUpdatedAt
           ? { expectedUpdatedAt: parsed.data.expectedUpdatedAt }
           : {}),
+        moveSessionsToDefaultSandbox: parsed.data.moveSessionsToDefaultSandbox ?? false,
         subjectId: grant.subjectId,
       });
       if (!result) {

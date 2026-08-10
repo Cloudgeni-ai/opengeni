@@ -10302,6 +10302,12 @@ export const RevokeEnrollmentResponse = z.object({
     .nullable(),
   message: z.string(),
   action: z.string(),
+  dependentSessions: z.array(
+    z.object({
+      id: z.string().uuid(),
+      title: z.string().nullable(),
+    }),
+  ),
 });
 export type RevokeEnrollmentResponse = z.infer<typeof RevokeEnrollmentResponse>;
 
@@ -10309,6 +10315,7 @@ export type RevokeEnrollmentResponse = z.infer<typeof RevokeEnrollmentResponse>;
 export const RemoveEnrollmentRequest = z.object({
   expectedUpdatedAt: z.string().datetime({ offset: true }).optional(),
   idempotencyKey: z.string().trim().min(1).max(200).optional(),
+  moveSessionsToDefaultSandbox: z.boolean().optional(),
 });
 export type RemoveEnrollmentRequest = z.infer<typeof RemoveEnrollmentRequest>;
 
