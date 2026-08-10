@@ -25,6 +25,13 @@ outputs and the current shell variable set. The generated Helm values file
 contains non-secret provider wiring; `runtime.env` is intended for a private
 Kubernetes Secret and must not be committed:
 
+For the API, control worker, and turn worker, the chart loads the Helm ConfigMap
+before the selected runtime Secret. If both sources define the same key, the
+protected runtime value is authoritative. This permits reviewed runtime
+provider/model rotations without weakening the application's configured-model
+allow-list; keep the Secret and non-secret Helm defaults intentionally aligned
+for the next ordinary deployment.
+
 ```bash
 terraform -chdir=deploy/terraform/gcp output -json \
   > .agent/generated/gcp-managed/terraform-output.json
