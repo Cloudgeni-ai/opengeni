@@ -6,6 +6,71 @@ import type {
 
 const GOOGLE_DRIVE_PROVIDER_DOMAIN = "googleapis.com";
 
+export function localConnectedGoogleDrivePreview(
+  search: string,
+  workspaceId: string,
+  enabled = import.meta.env.DEV,
+): ConnectionMetadata | null {
+  if (!enabled || new URLSearchParams(search).get("previewGoogleDrive") !== "connected") {
+    return null;
+  }
+
+  const now = new Date().toISOString();
+  return {
+    id: "00000000-0000-4000-8000-000000000011",
+    accountId: "00000000-0000-4000-8000-000000000001",
+    workspaceId,
+    subjectId: "preview-user",
+    providerDomain: GOOGLE_DRIVE_PROVIDER_DOMAIN,
+    kind: "oauth2",
+    status: "active",
+    grantedScopes: ["https://www.googleapis.com/auth/drive.readonly"],
+    expiresAt: null,
+    lastRefreshAt: now,
+    lastUsedAt: now,
+    lastError: null,
+    version: 1,
+    metadata: {
+      credentialRole: "google_drive_metadata",
+      credentialLabel: "Google Drive metadata browser",
+      googlePermissionId: "preview-permission",
+      googleEmail: "bendik@cloudgeni.ai",
+      googleDisplayName: "Bendik Nyheim",
+      verifiedAt: now,
+      accessMode: "readonly",
+      lifecycle: { state: "active", recoverable: true, observedAt: now },
+      selectedSources: [
+        {
+          id: "preview-cloudgeni-drive",
+          name: "CloudGeni",
+          mimeType: "application/vnd.google-apps.folder",
+          driveId: "preview-cloudgeni-drive",
+          syncCadence: "hourly",
+          syncEnabled: true,
+          configGeneration: 1,
+          readPolicy: "allow",
+          selectedAt: now,
+        },
+        {
+          id: "preview-research-folder",
+          name: "Research",
+          mimeType: "application/vnd.google-apps.folder",
+          driveId: "preview-cloudgeni-drive",
+          syncCadence: "hourly",
+          syncEnabled: true,
+          configGeneration: 1,
+          readPolicy: "allow",
+          selectedAt: now,
+        },
+      ],
+    },
+    createdBySubjectId: "preview-user",
+    updatedBySubjectId: "preview-user",
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
 export type GoogleDriveAccountState =
   | { state: "unverified" }
   | { state: "not_connected" }
