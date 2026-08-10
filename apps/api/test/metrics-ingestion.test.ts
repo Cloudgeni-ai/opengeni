@@ -154,7 +154,7 @@ describe("wireAttachedBrowserInventoryToContract", () => {
       devices: [
         {
           id: "11111111-1111-4111-8111-111111111111",
-          name: "Jørgen’s Chrome",
+          name: "Primary Chrome",
           profileLabel: "cloudgeni.ai",
           browserName: "Chrome",
           browserVersion: "151.0.0.0",
@@ -188,7 +188,7 @@ describe("wireAttachedBrowserInventoryToContract", () => {
       devices: [
         {
           id: "11111111-1111-4111-8111-111111111111",
-          name: "Jørgen’s Chrome",
+          name: "Primary Chrome",
           profileLabel: "cloudgeni.ai",
           browserName: "Chrome",
           browserVersion: "151.0.0.0",

@@ -11,6 +11,9 @@ import {
   editableArtifactScope,
   hasPermission,
   requireAccessGrant,
+  requireSessionAuthorization,
+  SessionAuthorizationDeniedError,
+  SessionAuthorizationUnavailableError,
   type AccessDeps,
   type EditableArtifact,
   type EditableArtifactActor,
@@ -338,6 +341,7 @@ export function registerEditableArtifactRoutes(
         message: "Invalid editable artifact list query.",
       });
     }
+    await authorizeSourceSession(deps, grant, query.data.sourceSessionId);
     const scope = editableArtifactScope({ accountId: grant.accountId, workspaceId });
     const actor = editableArtifactActorForGrant(grant, query.data.replicaId);
     const candidateIds = await (deps.editableArtifactSessionArtifactIds
@@ -608,6 +612,35 @@ export function registerEditableArtifactRoutes(
       },
     });
   });
+}
+
+async function authorizeSourceSession(
+  deps: EditableArtifactRouteDependencies,
+  grant: AccessGrant,
+  sessionId: string,
+): Promise<void> {
+  try {
+    await requireSessionAuthorization(deps, grant, {
+      sessionId,
+      operation: "session.read",
+      surface: "http",
+    });
+  } catch (error) {
+    if (error instanceof SessionAuthorizationDeniedError) {
+      throw new ApiHttpError(404, {
+        code: "not_found",
+        message: "Session not found.",
+      });
+    }
+    if (error instanceof SessionAuthorizationUnavailableError) {
+      throw new ApiHttpError(503, {
+        code: "upstream_unavailable",
+        message: "Session authorization is temporarily unavailable.",
+        retryable: true,
+      });
+    }
+    throw error;
+  }
 }
 
 function requireEditableArtifactApplication(

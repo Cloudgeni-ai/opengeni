@@ -29,7 +29,7 @@ function attachedBrowser(): AttachedBrowserDevice {
     accountId: "00000000-0000-4000-8000-000000000004",
     workspaceId: WORKSPACE_ID,
     enrollmentId: "00000000-0000-4000-8000-000000000013",
-    name: "Jørgen’s Chrome",
+    name: "Primary Chrome",
     profileLabel: "cloudgeni.ai",
     browserName: "Chrome",
     browserVersion: "151.0.0.0",

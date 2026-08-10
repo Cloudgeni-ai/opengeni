@@ -14,22 +14,27 @@ Read [references/api.md](references/api.md) before editing.
 ## Choose the canonical object
 
 - If the user means “this workbook” or a visible workbook, call
-  `editable_artifact_list`, then `editable_artifact_get` when needed. Do not guess from chat text.
-- To begin empty, call `editable_artifact_create` with modality `spreadsheet`.
-- To begin from a ready workspace XLSX, call `editable_artifact_import` with its `fileId`.
+  `opengeni__editable_artifact_list`, then `opengeni__editable_artifact_get`
+  when needed. Do not guess from chat text.
+- To begin empty, call `opengeni__editable_artifact_create` with modality `spreadsheet`.
+- To begin from a ready workspace XLSX, call `opengeni__editable_artifact_import`
+  with its `fileId`.
   The source file remains immutable provenance; the returned artifact becomes
   the working workbook.
-- Use a standalone local XLSX/CSV only when the user explicitly asks for
-  local-file manipulation or when crossing an import/export boundary.
+- Use a standalone local XLSX/CSV only when the user explicitly asks to
+  manipulate sandbox-local bytes and the pinned local runtime is actually
+  available. Normal import/export uses workspace `fileId` boundaries without
+  local bytes.
 
 ## Edit and verify
 
 1. Inspect `workbook-metadata`, then query only the relevant bounded viewport.
-2. Make the smallest coherent edit. One `editable_artifact_apply` call is one atomic
-   command batch. Use the inspected sheet id and generation id for existing
-   sheets. Generate new stable ids with `openGeni.artifacts.ids.stable()`. A
-   direct call must pass the inspected `headSequence` and `stateHash`; CodeMode
-   carries its last read head automatically.
+2. Make the smallest coherent edit. One `opengeni__editable_artifact_apply`
+   call is one atomic command batch. Use the inspected sheet id and generation
+   id for existing sheets. Generate new stable ids with
+   `openGeni.artifacts.ids.stable()`. A direct call must pass the inspected
+   `headSequence` and `stateHash`; CodeMode carries its last read head
+   automatically.
 3. For one simple edit, call the artifact tools directly. For loops, bulk data,
    formula generation, polling, or several inspections, write auditable Bun
    code using `openGeni.artifacts` from `@opengeni/codemode`. Both paths execute
@@ -40,8 +45,9 @@ Read [references/api.md](references/api.md) before editing.
    formula errors. If concurrent work invalidates an assumption, re-inspect and
    recompute; never force a stale range rewrite.
 6. Export only when the user needs XLSX/PDF/image delivery or visual QA.
-   `editable_artifact_export_status` returns a durable workspace `fileId`; it does not
-   write into the sandbox. Download only when local bytes are actually needed.
+   `opengeni__editable_artifact_export_status` returns a durable workspace
+   `fileId`; it does not write into the sandbox. Download only when local bytes
+   are actually needed.
 
 ## Fidelity and safety
 

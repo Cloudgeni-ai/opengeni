@@ -2047,9 +2047,11 @@ export type SandboxArtifactRuntimeAdmission = Readonly<{
 }>;
 
 /**
- * Admit native artifact skills only for the deployment's exact base sandbox
- * image contract. A pack/rig image override is an independent filesystem and
- * therefore fails closed even when the deployment base image is capable.
+ * Admit the optional native standalone-file runtime only for the deployment's
+ * exact base sandbox image contract. A pack/rig image override is an
+ * independent filesystem and therefore fails closed even when the deployment
+ * base image is capable. Collaborative artifact skills are admitted separately
+ * from the frozen canonical tool catalog.
  *
  * This keeps lazy provisioning intact: CI/release proves the image closure,
  * while a before-agent-start doctor verifies the actual box before any model
@@ -6659,6 +6661,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           titleIsSet: Boolean(session.title?.trim()),
         },
         sandboxEnvironment,
+        ...(preparedTools.attemptToolCatalog
+          ? { attemptToolCatalog: preparedTools.attemptToolCatalog }
+          : {}),
         ...(sandboxArtifactRuntime.available ? { artifactRuntimeAvailable: true } : {}),
         ...(cancellationSignal ? { turnCancellationSignal: cancellationSignal } : {}),
         onToolCancellationFence: (fence) => {

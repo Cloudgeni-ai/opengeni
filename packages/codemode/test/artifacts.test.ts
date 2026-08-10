@@ -13,6 +13,14 @@ const artifact = {
   createdAt: "2026-08-10T10:00:00.000Z",
   updatedAt: "2026-08-10T10:00:00.000Z",
 };
+const mutatedArtifact = {
+  ...artifact,
+  headSequence: 1,
+  stateHash: `sha256:${"d".repeat(64)}`,
+  updatedAt: "2026-08-10T10:00:01.000Z",
+};
+const versionId = "e".repeat(32);
+const jobId = "f".repeat(32);
 
 describe("authored artifact CodeMode facade", () => {
   test("creates, edits, inspects, and exports through exact artifacts paths", async () => {
@@ -20,7 +28,7 @@ describe("authored artifact CodeMode facade", () => {
       if (path === "artifacts.create") return result(artifact);
       if (path === "artifacts.apply") {
         return result({
-          artifact: { ...artifact, headSequence: 1 },
+          artifact: mutatedArtifact,
           transaction: {
             id: "c".repeat(32),
             clientTransactionId: "call-1",
@@ -33,13 +41,13 @@ describe("authored artifact CodeMode facade", () => {
         });
       }
       if (path === "artifacts.inspect") {
-        return result({ artifact: { ...artifact, headSequence: 1 }, projection: { sheets: 1 } });
+        return result({ artifact: mutatedArtifact, projection: { sheets: 1 } });
       }
       if (path === "artifacts.export") {
         return result({
-          artifact,
-          versionId: "version-1",
-          jobId: "job-1",
+          artifact: mutatedArtifact,
+          versionId,
+          jobId,
           sourceHeadSequence: 1,
           sourceStateHash: `sha256:${"d".repeat(64)}`,
           state: "pending",
@@ -47,9 +55,9 @@ describe("authored artifact CodeMode facade", () => {
       }
       if (path === "artifacts.exportStatus") {
         return result({
-          artifact,
-          versionId: "version-1",
-          jobId: "job-1",
+          artifact: mutatedArtifact,
+          versionId,
+          jobId,
           sourceHeadSequence: 1,
           sourceStateHash: `sha256:${"d".repeat(64)}`,
           state: "succeeded",
@@ -93,6 +101,14 @@ describe("authored artifact CodeMode facade", () => {
       expectedHeadSequence: artifact.headSequence,
       expectedStateHash: artifact.stateHash,
       commands: [{ kind: "sheet.create", name: "Data" }],
+    });
+    expect(fake.calls[2]?.args).toEqual({
+      artifactId: artifact.id,
+      modality: "spreadsheet",
+      request: {
+        kind: "workbook-metadata",
+        query: { maxSheets: 16, maxBytes: 16_384 },
+      },
     });
   });
 

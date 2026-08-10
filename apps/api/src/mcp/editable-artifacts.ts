@@ -18,20 +18,16 @@ import * as z from "zod/v4";
 
 import type { ApiRouteDeps } from "@opengeni/core";
 import { editableArtifactActorForGrant } from "../routes/editable-artifacts";
+import { EditableArtifactQueryRequestSchema } from "./editable-artifact-query-schema";
 
-const ArtifactId = z.string().regex(/^[0-9a-f]{32}$/u);
-const StateHash = z.string().regex(/^sha256:[0-9a-f]{64}$/u);
-const PortableId = z
+const ArtifactId = z
   .string()
-  .min(1)
-  .max(200)
-  .regex(/^[A-Za-z0-9._:-]+$/u);
+  .regex(/^[0-9a-f]{32}$/u)
+  .refine((value) => value !== "0".repeat(32));
+const StateHash = z.string().regex(/^sha256:[0-9a-f]{64}$/u);
 const Modality = z.enum(["spreadsheet", "document", "presentation"]);
 const Format = z.enum(["xlsx", "pptx", "docx", "pdf", "png", "webp"]);
 const JsonRecord = z.record(z.string(), z.unknown());
-const ArtifactQuery = JsonRecord.describe(
-  "Typed query for the selected modality. Spreadsheet: workbook-metadata or viewport. Document: summary, body, story, sections, or review. Presentation: metadata, slide-catalog, editor-slide, resolved-slide, viewport, or hit-test.",
-);
 const ArtifactCommand = z
   .object({ kind: z.string().min(1).max(128) })
   .passthrough()
@@ -56,11 +52,11 @@ const MutationReceipt = z
     artifact: ArtifactMetadata,
     transaction: z
       .object({
-        id: z.string(),
+        id: ArtifactId,
         clientTransactionId: z.string(),
         sequenceStart: z.number().int().positive(),
         sequenceEnd: z.number().int().positive(),
-        stateHash: z.string(),
+        stateHash: StateHash,
         committedAt: z.string(),
         replayed: z.boolean(),
       })
@@ -75,10 +71,10 @@ const ExportFile = z
     sizeBytes: z.number().int().positive(),
     sha256: z.string().regex(/^[0-9a-f]{64}$/u),
     artifactId: ArtifactId,
-    versionId: z.string(),
-    materializationJobId: z.string(),
+    versionId: ArtifactId,
+    materializationJobId: ArtifactId,
     sourceHeadSequence: z.number().int().nonnegative(),
-    sourceStateHash: z.string(),
+    sourceStateHash: StateHash,
   })
   .strict();
 
@@ -129,7 +125,7 @@ export function registerEditableArtifactAgentTools(
     {
       title: "Create editable artifact",
       description:
-        "Create an empty durable workbook, document, or presentation and associate it with this session. Continue editing it with editable_artifact_apply; do not create a shadow Office file.",
+        "Create an empty durable workbook, document, or presentation and associate it with this session. Continue editing it with opengeni__editable_artifact_apply; do not create a shadow Office file.",
       inputSchema: {
         modality: Modality,
         title: z.string().trim().min(1).max(512),
@@ -211,18 +207,18 @@ export function registerEditableArtifactAgentTools(
       inputSchema: {
         artifactId: ArtifactId,
         modality: Modality,
-        query: ArtifactQuery,
+        request: EditableArtifactQueryRequestSchema,
       },
       outputSchema: { artifact: ArtifactMetadata, projection: z.unknown() },
       annotations: readOnlyAnnotations("Inspect editable artifact"),
     },
-    async ({ artifactId, modality, query }, extra) =>
+    async ({ artifactId, modality, request }, extra) =>
       await execute(
         async () =>
           await application().inspect({
             ...context("editable_artifact_inspect", extra),
             artifactId: editableArtifactId(artifactId),
-            request: { modality, query } as EditableArtifactAgentQuery,
+            request: { modality, query: request } as EditableArtifactAgentQuery,
           }),
       ),
   );
@@ -267,7 +263,7 @@ export function registerEditableArtifactAgentTools(
     {
       title: "Export editable artifact",
       description:
-        "Pin the current artifact head and start an immutable Office/PDF/image export. This does not write into the sandbox. Poll editable_artifact_export_status for the resulting workspace file ID.",
+        "Pin the current artifact head and start an immutable Office/PDF/image export. This does not write into the sandbox. Poll opengeni__editable_artifact_export_status for the resulting workspace file ID.",
       inputSchema: {
         artifactId: ArtifactId,
         format: Format,
@@ -275,10 +271,10 @@ export function registerEditableArtifactAgentTools(
       },
       outputSchema: {
         artifact: ArtifactMetadata,
-        versionId: z.string(),
-        jobId: z.string(),
+        versionId: ArtifactId,
+        jobId: ArtifactId,
         sourceHeadSequence: z.number().int().nonnegative(),
-        sourceStateHash: z.string(),
+        sourceStateHash: StateHash,
         state: z.enum(["pending", "running", "succeeded", "failed"]),
       },
       annotations: mutationAnnotations("Export editable artifact", { idempotent: true }),
@@ -307,15 +303,15 @@ export function registerEditableArtifactAgentTools(
         "Read export status. When complete, atomically promote the immutable result into the workspace file domain and return its file ID; download it only when sandbox-local bytes are actually needed.",
       inputSchema: {
         artifactId: ArtifactId,
-        versionId: PortableId,
-        jobId: PortableId,
+        versionId: ArtifactId,
+        jobId: ArtifactId,
       },
       outputSchema: {
         artifact: ArtifactMetadata,
-        versionId: z.string(),
-        jobId: z.string(),
+        versionId: ArtifactId,
+        jobId: ArtifactId,
         sourceHeadSequence: z.number().int().nonnegative(),
-        sourceStateHash: z.string(),
+        sourceStateHash: StateHash,
         state: z.enum(["pending", "running", "succeeded", "failed"]),
         errorCode: z.string().nullable(),
         file: ExportFile.nullable(),

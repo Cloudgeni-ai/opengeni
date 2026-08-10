@@ -46,6 +46,7 @@ function routeFixture(
     modality?: "document" | "spreadsheet" | "presentation";
     ticketProtocolVersion?: number;
     uncomposed?: boolean;
+    privateSessionOwner?: string;
   }> = {},
 ): RecordedApplication {
   const modality = options.modality ?? "spreadsheet";
@@ -95,7 +96,7 @@ function routeFixture(
       productAccessMode: "managed",
       delegationSecret: SECRET,
     }),
-    db: {} as never,
+    db: sessionAuthorizationDb(options.privateSessionOwner),
     managedAuth: null,
     editableArtifactOfficeImports: {
       prepare: async (input) => {
@@ -121,6 +122,43 @@ function routeFixture(
     officeImportError,
     failWith,
   };
+}
+
+function sessionAuthorizationDb(privateSessionOwner?: string) {
+  let operation = 0;
+  type FakeDatabase = {
+    transaction<T>(execute: (transaction: FakeDatabase) => Promise<T>): Promise<T>;
+    execute(): Promise<Record<string, unknown>[]>;
+  };
+  const db: FakeDatabase = {
+    async transaction<T>(execute: (transaction: FakeDatabase) => Promise<T>): Promise<T> {
+      operation = 0;
+      return await execute(db);
+    },
+    async execute(): Promise<Record<string, unknown>[]> {
+      operation += 1;
+      if (operation <= 4) return [];
+      if (operation === 5) {
+        return [{ account_id: ACCOUNT_ID, workspace_id: WORKSPACE_ID }];
+      }
+      if (operation === 6) {
+        return privateSessionOwner
+          ? [
+              {
+                rootSessionId: SESSION_ID,
+                parentSessionId: null,
+                depth: 0,
+                cycle: false,
+                owningSubjectId: privateSessionOwner,
+                visibility: "private",
+              },
+            ]
+          : [];
+      }
+      throw new Error("Unexpected editable artifact route database operation");
+    },
+  };
+  return db as never;
 }
 
 function preparedOfficeImport(modality: "document" | "spreadsheet" | "presentation") {
@@ -391,6 +429,17 @@ describe("editable artifact create/open routes", () => {
       { headers: { authorization: await bearer() } },
     );
     expect(response.status).toBe(422);
+    expect(fixture.listCalls).toEqual([]);
+    expect(fixture.readCalls).toEqual([]);
+  });
+
+  test("does not reveal artifacts associated with another subject's private session", async () => {
+    const fixture = routeFixture({ privateSessionOwner: "user:someone-else" });
+    const response = await fixture.app.request(
+      `http://api.test/v1/workspaces/${WORKSPACE_ID}/editable-artifacts?sourceSessionId=${SESSION_ID}&replicaId=${REPLICA_ID}`,
+      { headers: { authorization: await bearer() } },
+    );
+    expect(response.status).toBe(404);
     expect(fixture.listCalls).toEqual([]);
     expect(fixture.readCalls).toEqual([]);
   });

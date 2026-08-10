@@ -56,6 +56,7 @@ import {
   type EditableArtifactScope,
   type EditableArtifactReceipt,
   type ImportEditableArtifactRequest,
+  type EditableArtifactStateHash,
 } from "./types";
 import type { EditableArtifactKernelState } from "./ports";
 
@@ -343,10 +344,13 @@ export class EditableArtifactAgentApplication {
         clientTransactionId,
       });
       if (existing) {
-        const existingIntent = decodeEditableArtifactMutationIntent(existing.intentBytes);
         if (
-          existingIntent.observedHeadSequence !== expectedHeadSequence ||
-          !sameBytes(commandBytes, existingIntent.commandBytes)
+          !receiptMatchesAgentMutation(
+            existing,
+            expectedHeadSequence,
+            expectedStateHash,
+            commandBytes,
+          )
         ) {
           throw new EditableArtifactIdempotencyConflictError();
         }
@@ -396,7 +400,12 @@ export class EditableArtifactAgentApplication {
         artifactId,
         clientTransactionId,
       });
-      if (!receipt || !sameBytes(commandBytes, receiptCommandBytes(receipt))) throw error;
+      if (
+        !receipt ||
+        !receiptMatchesAgentMutation(receipt, expectedHeadSequence, expectedStateHash, commandBytes)
+      ) {
+        throw error;
+      }
       applied = Object.freeze({ receipt, replayed: true });
     }
     const current = await this.dependencies.domain.getArtifact({
@@ -611,8 +620,18 @@ function projectReceipt(
   });
 }
 
-function receiptCommandBytes(receipt: EditableArtifactReceipt): Uint8Array {
-  return decodeEditableArtifactMutationIntent(receipt.intentBytes).commandBytes;
+function receiptMatchesAgentMutation(
+  receipt: EditableArtifactReceipt,
+  expectedHeadSequence: number,
+  expectedStateHash: EditableArtifactStateHash,
+  commandBytes: Uint8Array,
+): boolean {
+  const intent = decodeEditableArtifactMutationIntent(receipt.intentBytes);
+  return (
+    intent.observedHeadSequence === expectedHeadSequence &&
+    receipt.priorStateHash === expectedStateHash &&
+    sameBytes(commandBytes, intent.commandBytes)
+  );
 }
 
 function sameBytes(left: Uint8Array, right: Uint8Array): boolean {

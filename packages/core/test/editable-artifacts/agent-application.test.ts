@@ -105,6 +105,68 @@ describe("editable artifact agent application", () => {
       }),
     ).rejects.toMatchObject({ code: "idempotency_conflict" });
     expect(fixture.kernel.calls).toHaveLength(1);
+
+    await expect(
+      application.apply({
+        scope,
+        actor: agentActor,
+        sessionId,
+        artifactId,
+        clientTransactionId,
+        expectedHeadSequence: 0,
+        expectedStateHash: `sha256:${"f".repeat(64)}`,
+        batch,
+      }),
+    ).rejects.toMatchObject({ code: "idempotency_conflict" });
+    expect(fixture.kernel.calls).toHaveLength(1);
+
+    const competingActor: EditableArtifactActor = {
+      kind: "human",
+      subjectId: "human:competing",
+      replicaId: editableArtifactReplicaId("1111222233334444"),
+    };
+    const beforeCompetingEdit = await fixture.service.getArtifact({
+      scope,
+      actor: competingActor,
+      artifactId,
+    });
+    const competingRequest = await transactionRequest(fixture.service, {
+      actor: competingActor,
+      observedHeadSequence: beforeCompetingEdit.headSequence,
+      causalBase: beforeCompetingEdit.causalFrontier,
+      clientTransactionId: editableArtifactClientTransactionId("competing-after-replay"),
+    });
+    await fixture.service.applyTransaction({
+      scope,
+      actor: competingActor,
+      artifactId,
+      request: {
+        intentBytes: competingRequest.intentBytes,
+        requestHash: competingRequest.requestHash,
+        expectedHead: {
+          sequence: beforeCompetingEdit.headSequence,
+          stateHash: beforeCompetingEdit.stateHash,
+        },
+      },
+    });
+    const current = await fixture.service.getArtifact({
+      scope,
+      actor: agentActor,
+      artifactId,
+    });
+    await expect(
+      application.apply({
+        scope,
+        actor: agentActor,
+        sessionId,
+        artifactId,
+        clientTransactionId,
+        expectedHeadSequence: current.headSequence,
+        expectedStateHash: current.stateHash,
+        batch,
+      }),
+    ).rejects.toMatchObject({ code: "idempotency_conflict" });
+    expect(fixture.kernel.calls).toHaveLength(2);
   });
 
   test("rejects an edit when the inspected head changed", async () => {

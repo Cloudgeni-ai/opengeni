@@ -231,7 +231,7 @@ export class CodemodeArtifact {
     const result = await callStructured<{
       artifact: CodemodeArtifactMetadata;
       projection: T;
-    }>(this.client, PATH.inspect, { artifactId: this.id, modality, query }, callOptions);
+    }>(this.client, PATH.inspect, { artifactId: this.id, modality, request: query }, callOptions);
     this.metadata = result.artifact;
     return result;
   }

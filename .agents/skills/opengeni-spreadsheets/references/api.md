@@ -2,16 +2,21 @@
 
 ## Direct tools and CodeMode
 
-The direct tool family is `editable_artifact_list`, `editable_artifact_create`,
-`editable_artifact_import`, `editable_artifact_get`, `editable_artifact_inspect`,
-`editable_artifact_apply`, `editable_artifact_export`, and
-`editable_artifact_export_status`. Complex work uses the authored facade over those same
-calls:
+The model-facing direct tool family is `opengeni__editable_artifact_list`,
+`opengeni__editable_artifact_create`, `opengeni__editable_artifact_import`,
+`opengeni__editable_artifact_get`, `opengeni__editable_artifact_inspect`,
+`opengeni__editable_artifact_apply`, `opengeni__editable_artifact_export`, and
+`opengeni__editable_artifact_export_status`. Complex work uses the authored
+facade over those same calls:
 
-Direct `editable_artifact_apply` calls require `expectedHeadSequence` and
+Direct `opengeni__editable_artifact_apply` calls require `expectedHeadSequence` and
 `expectedStateHash` from the inspection that informed the edit. A mismatch is a
 conflict: inspect again and recompute. The CodeMode facade carries this fence
 automatically.
+
+For a direct `opengeni__editable_artifact_inspect` call, pass the query below as
+`request`, alongside `artifactId` and `modality: "spreadsheet"`. Keep the shown
+nested `query` object; it is part of the spreadsheet kernel envelope.
 
 ```js
 import { openGeni } from "@opengeni/codemode";
@@ -35,6 +40,21 @@ await workbook.apply([
 ]);
 ```
 
+To continue an existing session workbook, bind the current list result instead
+of creating a file or guessing an id:
+
+```js
+const candidates = (await openGeni.artifacts.list()).filter(
+  (artifact) => artifact.modality === "spreadsheet",
+);
+if (candidates.length !== 1) throw new Error("Select the intended workbook first");
+const workbook = openGeni.artifacts.use(candidates[0]);
+await workbook.inspect({
+  kind: "workbook-metadata",
+  query: { maxSheets: 1000, maxBytes: 1048576 },
+});
+```
+
 Rows and columns are zero-based. `cells` is row-major and its length must equal
 `rows * columns`.
 
@@ -43,16 +63,20 @@ Rows and columns are zero-based. `cells` is row-major and its length must equal
 List sheets and their ids/generations:
 
 ```js
-const { projection } = await workbook.inspect({
+const metadataResult = await workbook.inspect({
   kind: "workbook-metadata",
   query: { maxSheets: 1000, maxBytes: 1048576 },
 });
+if (metadataResult.projection.kind !== "workbook-metadata") {
+  throw new Error("Workbook metadata is unavailable");
+}
 ```
 
 Read a bounded rectangle:
 
 ```js
-const sheet = projection.projection.sheets[0];
+const sheet = metadataResult.projection.projection.sheets[0];
+if (!sheet) throw new Error("Workbook has no sheet");
 const viewport = await workbook.inspect({
   kind: "viewport",
   query: {
@@ -107,11 +131,13 @@ Cell inputs are `null`, boolean, finite number, string, `{ date: ISO_STRING }`,
 ```js
 const workbook = await openGeni.artifacts.import(fileId, "spreadsheet", "Imported model");
 const job = await workbook.export("xlsx");
-let status;
-do {
+const deadline = Date.now() + 300_000;
+let status = await job.status();
+while (status.state === "pending" || status.state === "running") {
+  if (Date.now() >= deadline) throw new Error("spreadsheet export timed out");
   await Bun.sleep(500);
   status = await job.status();
-} while (status.state === "pending" || status.state === "running");
+}
 if (status.state !== "succeeded" || !status.file) throw new Error(status.errorCode ?? "export failed");
 console.log(status.file.fileId, status.file.sourceHeadSequence, status.file.sourceStateHash);
 ```
@@ -120,8 +146,9 @@ Do not export and re-import to continue editing.
 
 ## Explicit standalone XLSX/CSV work
 
-Only for an explicitly local file boundary, locate the deployment-pinned
-runtime, import its absolute `$OPENGENI_ARTIFACT_TOOL_ENTRY`, and use
-`Workbook`/`SpreadsheetFile`. Import only through that pinned entry. A
-standalone result becomes shared work only after it is uploaded as a workspace
-file and passed to `editable_artifact_import`.
+Only when the user explicitly needs sandbox-local bytes and
+`$OPENGENI_ARTIFACT_TOOL_ENTRY` is present, import that absolute pinned entry
+and use `Workbook`/`SpreadsheetFile`. Never guess, install, or substitute
+another runtime. If the entry is absent, stay on the durable artifact surface
+and use workspace import/export boundaries. A standalone result becomes shared
+work only after upload and `opengeni__editable_artifact_import`.

@@ -15,23 +15,26 @@ Read [references/api.md](references/api.md) before editing.
 ## Choose the canonical object
 
 - If the user means “this document” or a visible document, call
-  `editable_artifact_list`, then `editable_artifact_get` when needed. Do not guess an id from chat.
-- To begin empty, call `editable_artifact_create` with modality `document`.
-- To begin from a ready workspace DOCX, call `editable_artifact_import` with its `fileId`.
+  `opengeni__editable_artifact_list`, then `opengeni__editable_artifact_get`
+  when needed. Do not guess an id from chat.
+- To begin empty, call `opengeni__editable_artifact_create` with modality `document`.
+- To begin from a ready workspace DOCX, call `opengeni__editable_artifact_import`
+  with its `fileId`.
   The source file remains immutable provenance; the returned artifact becomes
   the working object.
-- Use a standalone local DOCX only when the user explicitly asks for local-file
-  manipulation or when crossing an import/export boundary.
+- Use a standalone local DOCX only when the user explicitly asks to manipulate
+  sandbox-local bytes and the pinned local runtime is actually available.
+  Normal import/export uses workspace `fileId` boundaries without local bytes.
 
 ## Edit and verify
 
 1. Inspect the current head. Start with `summary`; inspect the relevant body,
    section, header/footer story, or review page before changing it.
-2. Make the smallest coherent edit. One `editable_artifact_apply` call is one atomic
-   command batch. Use stable ids from inspection for existing objects and
-   `openGeni.artifacts.ids.document(...)` for new objects in CodeMode. A direct
-   call must pass the inspected `headSequence` and `stateHash`; CodeMode carries
-   its last read head automatically.
+2. Make the smallest coherent edit. One `opengeni__editable_artifact_apply`
+   call is one atomic command batch. Use stable ids from inspection for existing
+   objects and `openGeni.artifacts.ids.document(...)` for new objects in
+   CodeMode. A direct call must pass the inspected `headSequence` and
+   `stateHash`; CodeMode carries its last read head automatically.
 3. For one simple edit, call the artifact tools directly. For loops, several
    inspections, generated ids, or a multi-part batch, write auditable Bun code
    using `openGeni.artifacts` from `@opengeni/codemode`. Both paths execute the
@@ -41,8 +44,9 @@ Read [references/api.md](references/api.md) before editing.
 5. Use real paragraphs, styles, tables, sections, page breaks, comments, and
    tracked changes—not spaces, Unicode bullets, or flattened screenshots.
 6. Export only when the user needs DOCX/PDF/image delivery or visual QA.
-   `editable_artifact_export_status` returns a durable workspace `fileId`; it does not
-   write into the sandbox. Download that file only if local bytes are needed.
+   `opengeni__editable_artifact_export_status` returns a durable workspace
+   `fileId`; it does not write into the sandbox. Download that file only if
+   local bytes are needed.
 
 ## Fidelity and safety
 

@@ -1391,7 +1391,7 @@ mod tests {
             "protocolVersion": 1,
             "device": {
                 "id": device_id,
-                "name": "Jørgen’s Chrome",
+                "name": "Primary Chrome",
                 "profileLabel": "cloudgeni.ai",
                 "browserName": "Chrome",
                 "browserVersion": "151.0.0.0",

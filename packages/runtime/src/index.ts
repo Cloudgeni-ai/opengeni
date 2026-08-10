@@ -10,6 +10,7 @@ import {
 import {
   AttemptToolEnvironment,
   createAttemptToolEnvironment,
+  parseVerifiedAttemptToolCatalog,
   type AttemptToolDefinition,
   type AttemptToolScope,
 } from "@opengeni/codemode";
@@ -1401,9 +1402,9 @@ export type BuildAgentOptions = {
   sandboxEnvironment?: Record<string, string>;
   /**
    * Host assertion that the selected sandbox/machine passed the exact artifact
-   * runtime manifest, integrity, target, and capability preflight. The runtime
-   * also requires absolute manifest/facade paths in `sandboxEnvironment` before
-   * advertising artifact skills. Omitted/false keeps those skills absent.
+   * runtime manifest, integrity, target, and capability preflight. This enables
+   * the optional standalone-file runtime and its startup doctor; collaborative
+   * artifact skills are admitted independently from the frozen attempt catalog.
    */
   artifactRuntimeAvailable?: boolean;
   // The EFFECTIVE/active compute backend for this turn. `settings.sandboxBackend`
@@ -1421,6 +1422,8 @@ export type BuildAgentOptions = {
   activeSandboxBackend?: Settings["sandboxBackend"];
   fileResourceDownloads?: SandboxFileDownload[];
   mcpServers?: MCPServer[];
+  /** Exact prepared tool authority used to admit tool-dependent bundled skills. */
+  attemptToolCatalog?: AttemptToolCatalog;
   /** Exact broker-resolved connection identity frozen during MCP preparation. */
   resolvedMcpConnectionIds?: ReadonlyMap<string, string>;
   /** Attempt-bound connector Allow/Ask/Block enforcement and safe audit hooks. */
@@ -1884,7 +1887,7 @@ const mcpToolErrorFunction: MCPToolErrorFunction = ({ error }) =>
 const ARTIFACT_RUNTIME_MANIFEST_ENV = "OPENGENI_ARTIFACT_RUNTIME_MANIFEST";
 const ARTIFACT_TOOL_ENTRY_ENV = "OPENGENI_ARTIFACT_TOOL_ENTRY";
 
-function artifactRuntimeSkillsAvailable(options: BuildAgentOptions): boolean {
+function artifactRuntimeIsAvailable(options: BuildAgentOptions): boolean {
   if (options.artifactRuntimeAvailable !== true) return false;
   const environment = options.sandboxEnvironment;
   const manifest = environment?.[ARTIFACT_RUNTIME_MANIFEST_ENV];
@@ -1897,6 +1900,36 @@ function artifactRuntimeSkillsAvailable(options: BuildAgentOptions): boolean {
   return true;
 }
 
+/**
+ * True only when one frozen attempt catalog contains the complete canonical
+ * editable-artifact tool family under its authored model and CodeMode names.
+ * The catalog is the execution authority; sandbox runtime presence is unrelated.
+ */
+export function hasCanonicalEditableArtifactToolSurface(
+  catalog: AttemptToolCatalog | null | undefined,
+): boolean {
+  if (!catalog) return false;
+  let verified: AttemptToolCatalog;
+  try {
+    verified = parseVerifiedAttemptToolCatalog(catalog);
+  } catch {
+    return false;
+  }
+  return Object.entries(EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS).every(([toolName, path]) => {
+    const matches = verified.entries.filter(
+      (entry) => entry.identity.serverId === "opengeni" && entry.identity.toolName === toolName,
+    );
+    if (matches.length !== 1) return false;
+    const entry = matches[0]!;
+    return (
+      entry.source === "opengeni" &&
+      entry.modelName === sharedPrefixedMcpToolName("opengeni", toolName) &&
+      entry.codemodePath.length === path.length &&
+      entry.codemodePath.every((segment, index) => segment === path[index])
+    );
+  });
+}
+
 export function buildOpenGeniAgent(
   settings: Settings,
   resources: ResourceRef[],
@@ -1905,7 +1938,10 @@ export function buildOpenGeniAgent(
   if (Boolean(options.codemodeTokenSeed) !== Boolean(options.codemodeTokenSessionId)) {
     throw new Error("codemodeTokenSeed and codemodeTokenSessionId must be supplied together");
   }
-  const artifactRuntimeAvailable = artifactRuntimeSkillsAvailable(options);
+  const artifactRuntimeAvailable = artifactRuntimeIsAvailable(options);
+  const editableArtifactToolsAvailable = hasCanonicalEditableArtifactToolSurface(
+    options.attemptToolCatalog,
+  );
   // Resolved per-turn gating. Each override defaults to today's settings-derived
   // behaviour, so the legacy global-client callers (no resolved model) build the
   // exact same agent as before; the multi-provider worker path passes the
@@ -2130,7 +2166,7 @@ export function buildOpenGeniAgent(
         ? { skillLibrarySkills: options.skillLibrarySkills }
         : {}),
       ...(options.sessionSkills?.length ? { sessionSkills: options.sessionSkills } : {}),
-      ...(artifactRuntimeAvailable ? { artifactRuntimeAvailable: true } : {}),
+      ...(editableArtifactToolsAvailable ? { editableArtifactToolsAvailable: true } : {}),
       ...(options.videoGeneration ? { videoGenerationAvailable: true } : {}),
       ...repositoryWorkspaceSkillPathsOption(resources),
       ...(options.structuredToolTransport !== undefined
@@ -2162,7 +2198,7 @@ export function buildOpenGeniAgent(
         options.skillLibrarySkills ?? [],
         options.packSkills ?? [],
         options.sessionSkills ?? [],
-        artifactRuntimeAvailable,
+        editableArtifactToolsAvailable,
         Boolean(options.videoGeneration),
       ).map((selection) => Object.freeze(selection)),
     ),
@@ -2645,7 +2681,7 @@ export function buildAgentCapabilities(
   options: {
     skillLibrarySkills?: PackSkill[];
     sessionSkills?: PackSkill[];
-    artifactRuntimeAvailable?: boolean;
+    editableArtifactToolsAvailable?: boolean;
     videoGenerationAvailable?: boolean;
     workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
     structuredToolTransport?: boolean;
@@ -2705,7 +2741,7 @@ export function buildAgentCapabilities(
     packSkills,
     options.skillLibrarySkills ?? [],
     options.sessionSkills ?? [],
-    options.artifactRuntimeAvailable === true,
+    options.editableArtifactToolsAvailable === true,
     options.videoGenerationAvailable === true,
   );
   caps.push(
@@ -2713,7 +2749,7 @@ export function buildAgentCapabilities(
       lazyFrom: lazySkillSourceWithPackSkills(
         [...packSkills, ...sessionSkills],
         options.skillLibrarySkills ?? [],
-        options.artifactRuntimeAvailable === true,
+        options.editableArtifactToolsAvailable === true,
         options.videoGenerationAvailable === true,
       ),
     }),
@@ -2722,7 +2758,7 @@ export function buildAgentCapabilities(
     caps.push(
       workspaceSkills(options.workspaceSkillPaths, [
         ...bundledSkillDirNames(bundledSkillsDir()),
-        ...(options.artifactRuntimeAvailable
+        ...(options.editableArtifactToolsAvailable
           ? bundledSkillDirNames(bundledArtifactSkillsDir())
           : []),
         ...(options.videoGenerationAvailable ? bundledSkillDirNames(bundledVideoSkillsDir()) : []),
@@ -8334,7 +8370,7 @@ function isPathWithin(root: string, candidate: string): boolean {
 export function lazySkillSourceWithPackSkills(
   packSkills: PackSkill[],
   skillLibrarySkills: PackSkill[] = [],
-  artifactRuntimeAvailable = false,
+  editableArtifactToolsAvailable = false,
   videoGenerationAvailable = false,
 ): LocalDirLazySkillSource {
   const bundledDir = bundledSkillsDir();
@@ -8342,7 +8378,7 @@ export function lazySkillSourceWithPackSkills(
   if (
     packSkills.length === 0 &&
     skillLibrarySkills.length === 0 &&
-    !artifactRuntimeAvailable &&
+    !editableArtifactToolsAvailable &&
     !videoGenerationAvailable
   ) {
     return bundled;
@@ -8352,7 +8388,7 @@ export function lazySkillSourceWithPackSkills(
     children[name] = localDir({ src: join(bundledDir, name) });
   }
   let artifactBundled: LocalDirLazySkillSource | null = null;
-  if (artifactRuntimeAvailable) {
+  if (editableArtifactToolsAvailable) {
     const artifactDir = bundledArtifactSkillsDir();
     artifactBundled = localDirLazySkillSource({ src: artifactDir });
     for (const name of bundledSkillDirNames(artifactDir)) {
@@ -8431,12 +8467,12 @@ function effectiveSkillSelections(
   librarySkills: readonly PackSkill[],
   packSkills: readonly PackSkill[],
   sessionSkills: readonly PackSkill[],
-  artifactRuntimeAvailable = false,
+  editableArtifactToolsAvailable = false,
   videoGenerationAvailable = false,
 ): readonly EffectiveSkillSelection[] {
   const defaultSkillNames = [
     ...bundledSkillDirNames(bundledSkillsDir()),
-    ...(artifactRuntimeAvailable ? bundledSkillDirNames(bundledArtifactSkillsDir()) : []),
+    ...(editableArtifactToolsAvailable ? bundledSkillDirNames(bundledArtifactSkillsDir()) : []),
     ...(videoGenerationAvailable ? bundledSkillDirNames(bundledVideoSkillsDir()) : []),
   ];
   const defaultSelections = defaultSkillNames.map((name) => ({
@@ -8453,7 +8489,7 @@ function effectiveSkillSelections(
     packSkills,
     librarySkills,
     sessionSkills,
-    artifactRuntimeAvailable,
+    editableArtifactToolsAvailable,
     videoGenerationAvailable,
   );
   const sessionNameKeys = new Set(effectiveSessionSkills.map((skill) => skill.name.toLowerCase()));
@@ -8495,7 +8531,7 @@ function sessionSkillsForMaterialization(
   packSkills: readonly PackSkill[],
   librarySkills: readonly PackSkill[],
   sessionSkills: readonly PackSkill[],
-  artifactRuntimeAvailable = false,
+  editableArtifactToolsAvailable = false,
   videoGenerationAvailable = false,
 ): PackSkill[] {
   const configured = new Map<string, PackSkill>();
@@ -8505,7 +8541,7 @@ function sessionSkillsForMaterialization(
   const bundledNames = new Set(
     [
       ...bundledSkillDirNames(bundledSkillsDir()),
-      ...(artifactRuntimeAvailable ? bundledSkillDirNames(bundledArtifactSkillsDir()) : []),
+      ...(editableArtifactToolsAvailable ? bundledSkillDirNames(bundledArtifactSkillsDir()) : []),
       ...(videoGenerationAvailable ? bundledSkillDirNames(bundledVideoSkillsDir()) : []),
     ].map((name) => name.toLowerCase()),
   );

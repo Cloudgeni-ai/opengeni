@@ -59,6 +59,16 @@ describe("editable artifact MCP surface", () => {
       expect(
         listed.tools.find((tool) => tool.name === "editable_artifact_apply")?.annotations,
       ).toMatchObject({ destructiveHint: true, idempotentHint: true });
+      const inspectSchema = listed.tools.find(
+        (tool) => tool.name === "editable_artifact_inspect",
+      )?.inputSchema;
+      expect(inspectSchema).toMatchObject({
+        required: expect.arrayContaining(["artifactId", "modality", "request"]),
+        properties: {
+          request: { anyOf: expect.any(Array) },
+        },
+      });
+      expect(inspectSchema?.properties).not.toHaveProperty("query");
 
       const first = await client.callTool({
         name: "editable_artifact_create",
@@ -124,7 +134,7 @@ describe("editable artifact MCP surface", () => {
         arguments: {
           artifactId,
           modality: "presentation",
-          query: { kind: "metadata", maxBytes: 1024 },
+          request: { kind: "metadata", maxBytes: 1024 },
         },
       });
       expect(result.structuredContent).toMatchObject({
@@ -133,6 +143,59 @@ describe("editable artifact MCP surface", () => {
           digest: { encoding: "base64", data: "AQID" },
         },
       });
+      const legacy = await client.callTool({
+        name: "editable_artifact_inspect",
+        arguments: {
+          artifactId,
+          modality: "presentation",
+          query: { kind: "metadata", maxBytes: 1024 },
+        },
+      });
+      expect(legacy.isError).toBe(true);
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+  });
+
+  test("rejects document structural ids outside the kernel counter domain", async () => {
+    let inspectCalls = 0;
+    const server = new McpServer({ name: "artifact-query-test", version: "1" });
+    registerEditableArtifactAgentTools({
+      server,
+      deps: {
+        editableArtifactAgent: {
+          async inspect() {
+            inspectCalls += 1;
+            return { artifact: metadata("document"), projection: {} };
+          },
+        },
+      } as never,
+      grant: grant(),
+      sessionId,
+      async authorize() {},
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "artifact-query-test", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const result = await client.callTool({
+        name: "editable_artifact_inspect",
+        arguments: {
+          artifactId,
+          modality: "document",
+          request: {
+            kind: "story",
+            sectionId: "sec/1111111111111111001fffffffffffff",
+            storyKind: "header",
+            variant: "default",
+            startBlock: 0,
+            limits: { maxItems: 1, maxTextUtf16: 1, maxTableCells: 1 },
+          },
+        },
+      });
+      expect(result.isError).toBe(true);
+      expect(inspectCalls).toBe(0);
     } finally {
       await Promise.all([client.close(), server.close()]);
     }
@@ -202,6 +265,100 @@ describe("editable artifact MCP surface", () => {
         expectedStateHash: `sha256:${"b".repeat(64)}`,
         batch: { modality: "spreadsheet", commands: [command] },
       });
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+  });
+
+  test("keeps export identities exact and returns the promoted workspace file", async () => {
+    const versionId = "b".repeat(32);
+    const jobId = "c".repeat(32);
+    const starts: Array<Record<string, unknown>> = [];
+    const statusReads: Array<Record<string, unknown>> = [];
+    const server = new McpServer({ name: "artifact-export-test", version: "1" });
+    registerEditableArtifactAgentTools({
+      server,
+      deps: {
+        editableArtifactAgent: {
+          async startExport(input: Record<string, unknown>) {
+            starts.push(input);
+            return {
+              artifact: metadata("spreadsheet"),
+              versionId,
+              jobId,
+              sourceHeadSequence: 0,
+              sourceStateHash: `sha256:${"b".repeat(64)}`,
+              state: "pending",
+            };
+          },
+          async exportStatus(input: Record<string, unknown>) {
+            statusReads.push(input);
+            return {
+              artifact: metadata("spreadsheet"),
+              versionId,
+              jobId,
+              sourceHeadSequence: 0,
+              sourceStateHash: `sha256:${"b".repeat(64)}`,
+              state: "succeeded",
+              errorCode: null,
+              file: {
+                fileId: "66666666-6666-4666-8666-666666666666",
+                filename: "Plan.xlsx",
+                contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                sizeBytes: 1_024,
+                sha256: "d".repeat(64),
+                artifactId,
+                versionId,
+                materializationJobId: jobId,
+                sourceHeadSequence: 0,
+                sourceStateHash: `sha256:${"b".repeat(64)}`,
+              },
+            };
+          },
+        },
+      } as never,
+      grant: grant(),
+      sessionId,
+      async authorize() {},
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "artifact-export-test", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const started = await client.callTool({
+        name: "editable_artifact_export",
+        arguments: { artifactId, format: "xlsx" },
+        _meta: { opengeniOperationId: "export-operation-1" },
+      });
+      expect(started.isError).not.toBe(true);
+      expect(started.structuredContent).toMatchObject({ versionId, jobId, state: "pending" });
+      expect(starts[0]).toMatchObject({ artifactId, format: "xlsx" });
+
+      const invalid = await client.callTool({
+        name: "editable_artifact_export_status",
+        arguments: { artifactId, versionId: "short", jobId },
+      });
+      expect(invalid.isError).toBe(true);
+      expect(statusReads).toHaveLength(0);
+
+      const completed = await client.callTool({
+        name: "editable_artifact_export_status",
+        arguments: { artifactId, versionId, jobId },
+      });
+      expect(completed.isError).not.toBe(true);
+      expect(completed.structuredContent).toMatchObject({
+        versionId,
+        jobId,
+        state: "succeeded",
+        file: {
+          fileId: "66666666-6666-4666-8666-666666666666",
+          artifactId,
+          versionId,
+          materializationJobId: jobId,
+        },
+      });
+      expect(statusReads[0]).toMatchObject({ artifactId, versionId, jobId });
     } finally {
       await Promise.all([client.close(), server.close()]);
     }

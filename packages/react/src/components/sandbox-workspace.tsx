@@ -14,7 +14,16 @@
 // (no `sonner` import), and every surface renders with package primitives + og
 // tokens only. `apps/web` consumes this through the exact public surface an
 // external embedder uses — that is criterion F1.
-import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  lazy,
+  type ReactNode,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { SessionEvent } from "@opengeni/sdk";
 import {
   CircleCheckIcon,
@@ -50,9 +59,17 @@ import type { MachineView } from "../types/machines";
 import { SandboxFiles } from "./sandbox-files";
 import { WorkbenchChanges } from "./workbench-changes";
 import { SandboxTerminal, type XtermTheme } from "./sandbox-terminal";
-import { BrowserViewer } from "./browser-viewer";
-import { ComputerViewer } from "./computer-viewer";
 import { WorkspaceDock, type WorkspaceDockProps, type WorkspaceTab } from "./workspace-dock";
+
+const LazyBrowserViewer = lazy(async () => {
+  const viewers = await import("./interactive-workbench-viewers");
+  return { default: viewers.BrowserViewer };
+});
+
+const LazyComputerViewer = lazy(async () => {
+  const viewers = await import("./interactive-workbench-viewers");
+  return { default: viewers.ComputerViewer };
+});
 
 /** A host-routed notification (replaces the app-only `sonner` toast coupling). */
 export type WorkspaceNotification = { kind: "error" | "info"; message: string };
@@ -115,6 +132,18 @@ function WorkbenchTabLabel({ icon, children }: { icon: ReactNode; children: Reac
       </span>
       <span>{children}</span>
     </span>
+  );
+}
+
+function WorkbenchSurfaceLoading({ name }: { name: "Browser" | "Computer" }) {
+  return (
+    <CenteredState
+      icon={
+        <LoaderCircleIcon className="size-5 animate-spin motion-reduce:animate-none" aria-hidden />
+      }
+    >
+      <p className="text-og-sm font-medium text-og-fg">Opening {name}</p>
+    </CenteredState>
   );
 }
 
@@ -737,17 +766,19 @@ export function useSandboxWorkspaceTabs(
         id: WORKBENCH_TAB_BROWSER,
         label: <WorkbenchTabLabel icon={<Globe2Icon />}>Browser</WorkbenchTabLabel>,
         content: (
-          <BrowserViewer
-            key={sessionId}
-            client={client}
-            workspaceId={workspaceId}
-            sessionId={sessionId}
-            onNotify={onNotify}
-            {...(desktopEnabled ? { createLinkedComputer } : {})}
-            {...(onOpenComputerSession ? { onOpenComputer: onOpenComputerSession } : {})}
-            {...(browserWebSocketFactory ? { webSocketFactory: browserWebSocketFactory } : {})}
-            className="h-full"
-          />
+          <Suspense fallback={<WorkbenchSurfaceLoading name="Browser" />}>
+            <LazyBrowserViewer
+              key={sessionId}
+              client={client}
+              workspaceId={workspaceId}
+              sessionId={sessionId}
+              onNotify={onNotify}
+              {...(desktopEnabled ? { createLinkedComputer } : {})}
+              {...(onOpenComputerSession ? { onOpenComputer: onOpenComputerSession } : {})}
+              {...(browserWebSocketFactory ? { webSocketFactory: browserWebSocketFactory } : {})}
+              className="h-full"
+            />
+          </Suspense>
         ),
       });
     }
@@ -759,17 +790,19 @@ export function useSandboxWorkspaceTabs(
         id: WORKBENCH_TAB_DESKTOP,
         label: <WorkbenchTabLabel icon={<MonitorIcon />}>Computer</WorkbenchTabLabel>,
         content: (
-          <ComputerViewer
-            key={sessionId}
-            client={client}
-            workspaceId={workspaceId}
-            sessionId={sessionId}
-            onNotify={onNotify}
-            requestedComputerSessionId={requestedComputerSessionId}
-            requestedComputerRequestId={requestedComputerRequestId}
-            {...(computerWebSocketFactory ? { webSocketFactory: computerWebSocketFactory } : {})}
-            className="h-full"
-          />
+          <Suspense fallback={<WorkbenchSurfaceLoading name="Computer" />}>
+            <LazyComputerViewer
+              key={sessionId}
+              client={client}
+              workspaceId={workspaceId}
+              sessionId={sessionId}
+              onNotify={onNotify}
+              requestedComputerSessionId={requestedComputerSessionId}
+              requestedComputerRequestId={requestedComputerRequestId}
+              {...(computerWebSocketFactory ? { webSocketFactory: computerWebSocketFactory } : {})}
+              className="h-full"
+            />
+          </Suspense>
         ),
       });
     }

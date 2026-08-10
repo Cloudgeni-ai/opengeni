@@ -30,7 +30,8 @@ it owns no authorization, persistence, retry, or alternate editing logic.
 ## Agent surface
 
 One first-party tool family is available when the exact attempt has artifact
-permissions:
+permissions. The table uses the server-owned operation identities; the direct
+model-facing names are the same identities prefixed with `opengeni__`:
 
 | Operation | Purpose |
 | --- | --- |
@@ -48,13 +49,19 @@ fresh replica for that atomic transaction, so it never depends on process-local
 writer state. Direct edits must carry the inspected head sequence and state
 hash; CodeMode carries its cached read head automatically. The core checks that
 fence before work and again after every commit race, so stale agent work never
-silently rebases over human changes. Tool results contain bounded JSON metadata and file ids,
-never snapshot bytes, object keys, platform credentials, or signed URLs.
+silently rebases over human changes. Tool results contain bounded JSON metadata
+and file ids, never snapshot bytes, object keys, platform credentials, or signed
+URLs.
 
 Simple actions may call these tools directly. Complex work uses
 `openGeni.artifacts` in a sandbox script for loops, batching, and intermediate
 inspection without filling model context. Both routes execute the same tool
 definitions.
+
+The bundled artifact skills are admitted only when that frozen catalog contains
+the complete canonical family. They do not depend on a sandbox-local Office
+runtime; that optional runtime exists solely for explicitly standalone file
+work.
 
 ## Files are boundaries
 
@@ -98,7 +105,7 @@ excuse to switch mutable truth back to an Office file.
 | --- | --- | --- |
 | Spreadsheet | sheet create/rename/delete, rectangular value/formula write, range clear; workbook metadata and bounded viewport inspection | styles, merges, dimensions, validation, comments, charts, drawings |
 | Document | document flags; paragraph add/edit/format/style; table add/style; page breaks; sections/page geometry; comments/replies/resolution; tracked changes; summary/body/story/section/review inspection | fields, notes, figures/media, footnotes/endnotes, arbitrary block deletion/reordering |
-| Presentation | masters/layouts/slides; titles/layout/notes; node insert/delete/move/bounds/transform/content; slide size; metadata/catalog/editor/resolved-slide/viewport inspection | animation/timing, executable media, arbitrary OOXML relationship editing |
+| Presentation | masters/layouts/slides; titles/layout/notes; shape/group/connector/chart/table node insert/delete/move/bounds/transform/content; slide size; metadata/catalog/editor/resolved-slide/viewport inspection | new media upload, animation/timing, executable media, arbitrary OOXML relationship editing |
 
 Import may retain safe unsupported OOXML parts as inert fidelity data, but an
 edit that would invalidate an unsupported part must fail closed. Export never

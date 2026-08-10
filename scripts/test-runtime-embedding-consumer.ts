@@ -4,14 +4,22 @@
  * Zod 3. OpenAI Agents uses Zod 4 internally; that implementation must stay
  * inside the runtime bundle instead of resolving against the host's root.
  */
-import { cp, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { rewriteEntryPointsToDist } from "./rewrite-entry-points";
 import { rewriteWorkspaceDependenciesToConcrete } from "./rewrite-workspace-deps";
-import type { PackageJson } from "./publishable-workspaces";
+import {
+  PUBLISHED_DEP_FIELDS,
+  topologicallySortedPackages,
+  workspaceDependencyNames,
+  workspacePackageByName,
+  workspaceVersionMap,
+  type PackageJson,
+  type WorkspacePackage,
+} from "./publishable-workspaces";
 
 type PackageManifest = {
   name: string;
@@ -28,15 +36,6 @@ type PackageManifest = {
 
 const repoRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const keepArtifacts = process.env.OPENGENI_KEEP_RUNTIME_CONSUMER === "1";
-const packageDirectories = [
-  "packages/agent-proto",
-  "packages/contracts",
-  "packages/codex",
-  "packages/config",
-  "packages/network",
-  "packages/runtime",
-] as const;
-
 async function run(command: string[], cwd: string, capture = false): Promise<string> {
   const child = Bun.spawn({
     cmd: command,
@@ -69,18 +68,24 @@ function releaseShape(
   return manifest;
 }
 
-async function workspaceVersions(): Promise<Map<string, string>> {
-  const versions = new Map<string, string>();
-  for (const group of ["apps", "packages"]) {
-    for (const entry of await readdir(join(repoRoot, group), { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue;
-      const path = join(repoRoot, group, entry.name, "package.json");
-      if (!existsSync(path)) continue;
-      const manifest = JSON.parse(await readFile(path, "utf8")) as Partial<PackageManifest>;
-      if (manifest.name && manifest.version) versions.set(manifest.name, manifest.version);
+function runtimePackageClosure(): WorkspacePackage[] {
+  const packagesByName = workspacePackageByName();
+  const root = packagesByName.get("@opengeni/runtime");
+  if (!root) throw new Error("@opengeni/runtime is missing from the workspace");
+  const closure = new Map<string, WorkspacePackage>();
+  const collect = (pkg: WorkspacePackage): void => {
+    if (closure.has(pkg.name)) return;
+    closure.set(pkg.name, pkg);
+    for (const dependencyName of workspaceDependencyNames(pkg, PUBLISHED_DEP_FIELDS)) {
+      const dependency = packagesByName.get(dependencyName);
+      if (!dependency) {
+        throw new Error(`${pkg.name} references missing workspace package ${dependencyName}`);
+      }
+      collect(dependency);
     }
-  }
-  return versions;
+  };
+  collect(root);
+  return topologicallySortedPackages([...closure.values()], PUBLISHED_DEP_FIELDS);
 }
 
 async function stageTarball(
@@ -126,10 +131,10 @@ try {
     [stagingRoot, tarballRoot, consumerRoot].map((path) => mkdir(path, { recursive: true })),
   );
 
-  const versions = await workspaceVersions();
+  const versions = workspaceVersionMap();
   const staged = [];
-  for (const packageDirectory of packageDirectories) {
-    staged.push(await stageTarball(packageDirectory, stagingRoot, tarballRoot, versions));
+  for (const workspacePackage of runtimePackageClosure()) {
+    staged.push(await stageTarball(workspacePackage.dir, stagingRoot, tarballRoot, versions));
   }
   const files = Object.fromEntries(staged.map(({ name, tarball }) => [name, `file:${tarball}`]));
   await Promise.all([

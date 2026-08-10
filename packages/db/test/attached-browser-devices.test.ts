@@ -97,7 +97,7 @@ describe("attached browser endpoint registry", () => {
       snapshot: {
         bridgeGeneration: "bridge-1",
         revision: 1,
-        devices: [device(firstId, "Jørgen Chrome"), device(secondId, "Work Chrome")],
+        devices: [device(firstId, "Primary Chrome"), device(secondId, "Work Chrome")],
       },
     });
     expect(created).toMatchObject({ accepted: true, changed: true });
@@ -110,7 +110,7 @@ describe("attached browser endpoint registry", () => {
       snapshot: {
         bridgeGeneration: "bridge-1",
         revision: 1,
-        devices: [device(firstId, "Jørgen Chrome"), device(secondId, "Work Chrome")],
+        devices: [device(firstId, "Primary Chrome"), device(secondId, "Work Chrome")],
       },
     });
     expect(replay).toEqual({

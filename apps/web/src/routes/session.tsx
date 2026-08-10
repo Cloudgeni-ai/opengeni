@@ -58,7 +58,10 @@ import { Notice } from "@/components/ui/notice";
 import type { WorkspaceTab } from "@opengeni/react";
 import type { EditableArtifactResource } from "@opengeni/sdk/artifacts";
 import { useAppContext } from "@/context";
-import type { SessionEditableArtifactSummary } from "@/components/session/editable-artifacts-workspace";
+import type {
+  SessionEditableArtifactSummary,
+  SessionEditableArtifactsStatus,
+} from "@/components/session/editable-artifacts-workspace";
 import {
   normalizeProviderDomain,
   oauthConnectionOwnership,
@@ -632,14 +635,14 @@ function SessionDock(props: {
     }
     return 0;
   }, [props.events]);
-  const artifactSummaries = useSessionEditableArtifactSummaries({
+  const artifactState = useSessionEditableArtifactSummaries({
     workspaceId: props.workspaceId,
     sessionId: props.sessionId,
     refreshSequence: artifactRefreshSequence,
   });
-  const trailingTabs: WorkspaceTab[] = [];
-  if (artifactSummaries.length > 0) {
-    trailingTabs.push({
+  const artifactSummaries = artifactState.artifacts;
+  const trailingTabs: WorkspaceTab[] = [
+    {
       id: "artifacts",
       label: (
         <span className="inline-flex items-center gap-1.5">
@@ -647,21 +650,27 @@ function SessionDock(props: {
           <span>Artifacts</span>
         </span>
       ),
-      badge: (
-        <span className="rounded-og-xs bg-og-accent-soft px-1 text-og-xs text-og-fg-muted">
-          {artifactSummaries.length}
-        </span>
-      ),
+      ...(artifactSummaries.length > 0
+        ? {
+            badge: (
+              <span className="rounded-og-xs bg-og-accent-soft px-1 text-og-xs text-og-fg-muted">
+                {artifactSummaries.length}
+              </span>
+            ),
+          }
+        : {}),
       content: (
         <Suspense fallback={<LoadingPanel label="Opening artifact" />}>
           <LazySessionEditableArtifactsWorkspace
             workspaceId={props.workspaceId}
             artifacts={artifactSummaries}
+            status={artifactState.status}
+            onRetry={artifactState.retry}
           />
         </Suspense>
       ),
-    });
-  }
+    },
+  ];
   if (props.session) {
     trailingTabs.push({
       id: "debug",
@@ -707,18 +716,32 @@ function useSessionEditableArtifactSummaries(input: {
   workspaceId: string;
   sessionId: string;
   refreshSequence: number;
-}): readonly SessionEditableArtifactSummary[] {
+}): Readonly<{
+  artifacts: readonly SessionEditableArtifactSummary[];
+  status: SessionEditableArtifactsStatus;
+  retry: () => void;
+}> {
   const context = useAppContext();
   const authorityKey = `${input.workspaceId}:${input.sessionId}:${context.accessKeyVersion}`;
-  const refreshKey = `${authorityKey}:${input.refreshSequence}`;
+  const [retrySequence, setRetrySequence] = useState(0);
   const [loaded, setLoaded] = useState<{
     key: string;
+    status: SessionEditableArtifactsStatus;
     artifacts: readonly EditableArtifactResource[];
   } | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
     let current = true;
+    setLoaded((previous) =>
+      previous?.key === authorityKey && previous.status === "ready"
+        ? previous
+        : {
+            key: authorityKey,
+            status: "loading",
+            artifacts: previous?.key === authorityKey ? previous.artifacts : [],
+          },
+    );
     void Promise.all([
       import("@/lib/editable-artifact-client"),
       import("@/lib/editable-artifact-browser"),
@@ -732,20 +755,28 @@ function useSessionEditableArtifactSummaries(input: {
             signal: controller.signal,
           },
         );
-        if (current) setLoaded({ key: authorityKey, artifacts: result.artifacts });
+        if (current) {
+          setLoaded({ key: authorityKey, status: "ready", artifacts: result.artifacts });
+        }
       })
       .catch(() => {
-        // Preserve the last authorized projection; retry after the next terminal
-        // tool/turn event or authentication change. Never infer durable state
-        // from timeline text.
+        if (!current || controller.signal.aborted) return;
+        setLoaded((previous) => ({
+          key: authorityKey,
+          status: "error",
+          artifacts: previous?.key === authorityKey ? previous.artifacts : [],
+        }));
       });
     return () => {
       current = false;
       controller.abort();
     };
-  }, [authorityKey, input.sessionId, input.workspaceId, refreshKey]);
+  }, [authorityKey, input.refreshSequence, input.sessionId, input.workspaceId, retrySequence]);
 
-  return loaded?.key === authorityKey ? loaded.artifacts : [];
+  const retry = useCallback(() => setRetrySequence((value) => value + 1), []);
+  return loaded?.key === authorityKey
+    ? { artifacts: loaded.artifacts, status: loaded.status, retry }
+    : { artifacts: [], status: "loading", retry };
 }
 
 function SessionChatPane(props: {

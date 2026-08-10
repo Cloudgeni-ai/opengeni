@@ -31,6 +31,7 @@ import {
 } from "@opengeni/config";
 import {
   CLEARED_RUN_STATE_BLOB,
+  EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS,
   MODEL_ATTACHMENT_REFS_FIELD,
   sessionSystemUpdateBatchHistoryItem,
   type ToolAuthNeededPayload,
@@ -55,6 +56,7 @@ import {
   appendWorkspaceMemory,
   CODEMODE_PROGRAMMATIC_DIRECTIVE,
   GENESIS_TITLE_DIRECTIVE,
+  hasCanonicalEditableArtifactToolSurface,
   oneShotGenesisTitleInputFilter,
   lazySkillSourceWithPackSkills,
   effectiveSkillSelectionsForAgent,
@@ -110,6 +112,7 @@ import {
 } from "../src/index";
 
 import { Manifest } from "@openai/agents/sandbox";
+import { createAttemptToolEnvironment } from "@opengeni/codemode";
 import { TurnSandboxCommandCancelledError } from "../src/sandbox/turn-tool-cancellation";
 import { CompactionNeededError } from "../src/context-compaction";
 import { readSkillLibraryArtifact, verifySkillLibraryArtifact } from "../src/skill-library";
@@ -6946,6 +6949,34 @@ function fakeMcpServer(name: string): MCPServer {
   };
 }
 
+function editableArtifactAttemptToolCatalog() {
+  return createAttemptToolEnvironment({
+    scope: {
+      accountId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      sessionId: "33333333-3333-4333-8333-333333333333",
+      turnId: "44444444-4444-4444-8444-444444444444",
+      attemptId: "55555555-5555-4555-8555-555555555555",
+      executionGeneration: 1,
+    },
+    generation: 1,
+    definitions: Object.entries(EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS).map(
+      ([toolName, codemodePath]) => ({
+        identity: { serverId: "opengeni", toolName },
+        modelName: `opengeni__${toolName}`,
+        codemodePath,
+        inputSchema: { type: "object", additionalProperties: false },
+        source: "opengeni" as const,
+        approval: "none" as const,
+        execute: async () => ({
+          content: [{ type: "text" as const, text: "ok" }],
+          structuredContent: { ok: true },
+        }),
+      }),
+    ),
+  }).catalog;
+}
+
 describe("pack skills in the sandbox skill index", () => {
   const infraSkill = {
     name: "infra-ops",
@@ -6974,7 +7005,7 @@ describe("pack skills in the sandbox skill index", () => {
     expect(index.map((entry) => entry.name)).not.toContain("opengeni-spreadsheets");
   });
 
-  test("artifact skills are indexed only after an exact host runtime preflight", () => {
+  test("artifact skills join the index when their canonical tool surface is available", () => {
     const source = lazySkillSourceWithPackSkills([], [], true);
     const index = source.getIndex?.(emptyManifest, ".agents") ?? [];
     expect(index.map((entry) => entry.name)).toEqual(
@@ -6988,7 +7019,7 @@ describe("pack skills in the sandbox skill index", () => {
     expect(sourceDir.children["opengeni-spreadsheets"].type).toBe("local_dir");
   });
 
-  test("buildOpenGeniAgent refuses to advertise artifact skills without absolute host paths", () => {
+  test("artifact skills follow the exact tool catalog, independently of local runtime support", () => {
     const settings = testSettings({ sandboxBackend: "docker" });
     expect(() =>
       buildOpenGeniAgent(settings, [], {
@@ -6997,13 +7028,28 @@ describe("pack skills in the sandbox skill index", () => {
       }),
     ).toThrow("artifactRuntimeAvailable requires absolute");
 
-    const agent = buildOpenGeniAgent(settings, [], {
+    const runtimeOnlyAgent = buildOpenGeniAgent(settings, [], {
       artifactRuntimeAvailable: true,
       sandboxEnvironment: {
         OPENGENI_ARTIFACT_RUNTIME_MANIFEST: "/opt/opengeni/artifacts/installation.json",
         OPENGENI_ARTIFACT_TOOL_ENTRY: "/opt/opengeni/artifacts/skill-facade-entry.mjs",
       },
     });
+    expect(indexedSkillNames(runtimeOnlyAgent, emptyManifest)).not.toContain("opengeni-documents");
+
+    const catalog = editableArtifactAttemptToolCatalog();
+    expect(hasCanonicalEditableArtifactToolSurface(catalog)).toBe(true);
+    const agent = buildOpenGeniAgent(settings, [], { attemptToolCatalog: catalog });
+    expect(indexedSkillNames(agent, emptyManifest)).toContain("opengeni-documents");
+
+    const incompleteCatalog = {
+      ...catalog,
+      entries: catalog.entries.slice(1),
+    };
+    expect(hasCanonicalEditableArtifactToolSurface(incompleteCatalog)).toBe(false);
+  });
+
+  function indexedSkillNames(agent: unknown, manifest: Manifest): string[] {
     const skillsCapability = (
       (agent as any).capabilities as Array<{
         type: string;
@@ -7012,11 +7058,10 @@ describe("pack skills in the sandbox skill index", () => {
         };
       }>
     ).find((capability) => capability.type === "skills");
-    const names =
-      skillsCapability?.lazyFrom?.getIndex?.(emptyManifest, ".agents").map((entry) => entry.name) ??
-      [];
-    expect(names).toContain("opengeni-documents");
-  });
+    return (
+      skillsCapability?.lazyFrom?.getIndex?.(manifest, ".agents").map((entry) => entry.name) ?? []
+    );
+  }
 
   test("artifact runtime doctor blocks the agent before an unavailable image can be used", async () => {
     const hooks = sandboxArtifactRuntimeDoctorHooks({
