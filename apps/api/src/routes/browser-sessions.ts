@@ -16,6 +16,7 @@ import {
   BrowserActionRequest,
   BrowserDiagnosticKind,
   BrowserOpenTargetRequest,
+  BrowserProtectedAuthFillCommand,
   BrowserSessionAttachment,
   BrowserSessionAttachmentRequest,
   BrowserSessionHeartbeatResponse,
@@ -25,15 +26,22 @@ import {
   BrowserTargetListResponse,
   CreateBrowserSessionRequest,
   InteractionActor,
+  ProtectedAuthFillRequest,
+  ProtectedAuthFillResponse,
+  ReportAuthRunRequest,
+  StartAuthRunRequest,
+  VerifyAuthRunRequest,
   PublishBrowserRevisionRequest,
   PublishBrowserRevisionResponse,
   type AccessGrant,
+  type BrowserProtectedAuthFillReceipt as BrowserProtectedAuthFillReceiptValue,
   type BrowserSession as BrowserSessionValue,
   type CreateBrowserSessionRequest as CreateBrowserSessionRequestValue,
   type InteractionPlacement,
   type BrowserRevisionMaterialization as BrowserRevisionMaterializationValue,
   type Session,
   type SessionAuthorizationOperation,
+  type SiteAuthAuthority,
 } from "@opengeni/contracts";
 import {
   acquireLease,
@@ -48,10 +56,12 @@ import {
   BrowserSessionOperationConflictError,
   BrowserSessionStateError,
   completeBrowserSessionEnd,
+  completeProtectedAuthFill,
   commitBrowserSessionSuspension,
   commitBrowserRevisionPublication,
   dispatchBrowserRevisionPublication,
   dispatchBrowserSessionOperation,
+  dispatchProtectedAuthFill,
   failBrowserSessionOperation,
   failBrowserSessionResume,
   failBrowserSessionResumePreparation,
@@ -64,7 +74,14 @@ import {
   getAttachedBrowserDevice,
   getBrowserRevisionArtifactAuthority,
   getEnrollment,
+  getAuthRun,
+  getProtectedAuthFillPreparation,
+  getSiteAuthConnection,
   getSession,
+  InteractionResourceConflictError,
+  InteractionResourceNotFoundError,
+  InteractionResourceStateError,
+  listAuthRuns,
   listBrowserSessions,
   listAttachedBrowserDevices,
   prepareBrowserSessionCreate,
@@ -72,8 +89,14 @@ import {
   prepareBrowserSessionResume,
   prepareBrowserSessionSuspend,
   prepareBrowserRevisionPublication,
+  prepareProtectedAuthFill,
+  reportAuthRun,
   releaseLeaseHolder,
+  loadConnectionCredentialForBroker,
+  markProtectedAuthFillOutcomeUnknown,
+  startAuthRun,
   touchBrowserSessionController,
+  verifyAuthRun,
   type BrowserSessionControlRecord,
   type BrowserPrivateCheckpointAuthority,
   type BrowserRevisionArtifactAuthority,
@@ -122,6 +145,10 @@ import {
   unwrapBrowserStateDataKey,
   wrapBrowserStateDataKey,
 } from "../browser-state-authority";
+import {
+  BrowserAuthCredentialError,
+  resolveProtectedAuthFieldValues,
+} from "../browser-auth-broker";
 import { allowedCorsOrigin } from "../http/cors";
 import { withChannelA, type ChannelAOperation } from "../sandbox/channel-a";
 
@@ -540,6 +567,377 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
               action: request.action,
             }),
           ),
+      );
+      return context.json(result);
+    },
+  );
+
+  app.get(
+    "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs",
+    async (context) => {
+      const { workspaceId, grant, browserSessionId } = await browserRoutePreamble(
+        context,
+        "sessions:read",
+      );
+      const result = await withActiveBrowserController(
+        context,
+        grant,
+        workspaceId,
+        browserSessionId,
+        "session.read",
+        "browser.read",
+        async () =>
+          await listAuthRuns(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            browserSessionId,
+            includeSettled: context.req.query("includeSettled") === "true",
+          }),
+      );
+      return context.json(result);
+    },
+  );
+
+  app.post(
+    "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs",
+    async (context) => {
+      const { workspaceId, grant, browserSessionId } = await browserRoutePreamble(
+        context,
+        "sessions:control",
+      );
+      const request = await parseJsonBody(context, StartAuthRunRequest);
+      const result = await withActiveBrowserController(
+        context,
+        grant,
+        workspaceId,
+        browserSessionId,
+        "session.control",
+        "browser.control",
+        async ({ sessionClient, binding }) => {
+          const observation = await sessionClient.observe(request.targetId);
+          if (
+            observation.target.targetGeneration !== request.expectedTargetGeneration ||
+            observation.target.documentGeneration !== request.expectedDocumentGeneration
+          ) {
+            throw new InteractionResourceConflictError(
+              "Auth run does not match the currently observed browser document",
+            );
+          }
+          return await startAuthRun(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            actorSubjectId: grant.subjectId,
+            browserSessionId,
+            controllerGeneration: binding.controllerGeneration,
+            ...request,
+          });
+        },
+      );
+      return context.json(result, result.replayed ? 200 : 201);
+    },
+  );
+
+  app.get(
+    "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId",
+    async (context) => {
+      const { workspaceId, grant, browserSessionId } = await browserRoutePreamble(
+        context,
+        "sessions:read",
+      );
+      const authRunId = requireUuidParam(context, "authRunId");
+      const result = await withActiveBrowserController(
+        context,
+        grant,
+        workspaceId,
+        browserSessionId,
+        "session.read",
+        "browser.read",
+        async () => {
+          const run = await getAuthRun(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            authRunId,
+          });
+          assertAuthRunBrowser(run.browserSessionId, browserSessionId);
+          return run;
+        },
+      );
+      return context.json(result);
+    },
+  );
+
+  app.post(
+    "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/report",
+    async (context) => {
+      const { workspaceId, grant, browserSessionId } = await browserRoutePreamble(
+        context,
+        "sessions:control",
+      );
+      const authRunId = requireUuidParam(context, "authRunId");
+      const request = await parseJsonBody(context, ReportAuthRunRequest);
+      const result = await withActiveBrowserController(
+        context,
+        grant,
+        workspaceId,
+        browserSessionId,
+        "session.control",
+        "browser.control",
+        async ({ binding }) => {
+          const current = await getAuthRun(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            authRunId,
+          });
+          assertAuthRunBrowser(current.browserSessionId, browserSessionId);
+          return await reportAuthRun(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            actorSubjectId: grant.subjectId,
+            authRunId,
+            controllerGeneration: binding.controllerGeneration,
+            ...request,
+          });
+        },
+      );
+      return context.json(result);
+    },
+  );
+
+  app.post(
+    "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/protected-fill",
+    async (context) => {
+      const { workspaceId, grant, browserSessionId } = await browserRoutePreamble(
+        context,
+        "sessions:control",
+      );
+      const authRunId = requireUuidParam(context, "authRunId");
+      const request = await parseJsonBody(context, ProtectedAuthFillRequest);
+      try {
+        const replay = await getProtectedAuthFillPreparation(deps.db, {
+          accountId: grant.accountId,
+          workspaceId,
+          actorSubjectId: grant.subjectId,
+          authRunId,
+          ...request,
+        });
+        if (replay?.response) {
+          const record = await getBrowserSessionControlRecord(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            browserSessionId,
+          });
+          await authorizeSourceSession(deps, grant, record.sourceSessionId, "session.control");
+          assertAuthRunBrowser(replay.run.browserSessionId, browserSessionId);
+          return context.json(ProtectedAuthFillResponse.parse(replay.response));
+        }
+      } catch (error) {
+        throw browserRouteError(error);
+      }
+      const result = await withActiveBrowserController(
+        context,
+        grant,
+        workspaceId,
+        browserSessionId,
+        "session.control",
+        "browser.control",
+        async ({ sessionClient, binding, record }) => {
+          const actor = interactionActorForGrant(grant);
+          const scope = {
+            accountId: grant.accountId,
+            workspaceId,
+            actorSubjectId: grant.subjectId,
+            authRunId,
+          };
+          let preparation = await getProtectedAuthFillPreparation(deps.db, {
+            ...scope,
+            ...request,
+          });
+          let credential: Awaited<ReturnType<typeof loadConnectionCredentialForBroker>> = null;
+          if (!preparation) {
+            const run = await getAuthRun(deps.db, {
+              accountId: grant.accountId,
+              workspaceId,
+              authRunId,
+            });
+            assertAuthRunBrowser(run.browserSessionId, browserSessionId);
+            const connection = await getSiteAuthConnection(deps.db, {
+              accountId: grant.accountId,
+              workspaceId,
+              siteAuthConnectionId: run.siteAuthConnectionId,
+            });
+            const authority = connection.authorities.find(
+              (candidate) => candidate.id === request.authorityId,
+            );
+            if (!authority) {
+              throw new InteractionResourceStateError("Auth authority is not configured");
+            }
+            if (authority.kind === "external_provider") {
+              throw new InteractionResourceStateError(
+                "External auth providers cannot use protected field fill",
+              );
+            }
+            if (authority.kind === "connection_fields") {
+              credential = await loadBoundBrowserCredential(deps, grant, workspaceId, authority);
+            }
+            preparation = await prepareProtectedAuthFill(deps.db, {
+              ...scope,
+              ...request,
+              credentialVersion: credential?.version ?? null,
+            });
+          }
+          assertAuthRunBrowser(preparation.run.browserSessionId, browserSessionId);
+          if (preparation.run.controllerGeneration !== binding.controllerGeneration) {
+            throw new InteractionResourceConflictError(
+              "Auth run belongs to a stale browser controller",
+            );
+          }
+          if (preparation.response) return preparation.response;
+          if (
+            preparation.operationState === "failed" ||
+            preparation.operationState === "outcome_unknown"
+          ) {
+            throw new InteractionResourceStateError(
+              `Protected-fill operation is ${preparation.operationState.replace("_", " ")}`,
+            );
+          }
+          if (preparation.authority.kind === "human") {
+            if (preparation.operationState !== "prepared") {
+              throw new InteractionResourceStateError(
+                "Human protected-fill operation entered an invalid dispatch state",
+              );
+            }
+            return await completeProtectedAuthFill(deps.db, {
+              ...scope,
+              operationId: request.operationId,
+              status: "needs_human",
+              intervention: {
+                originatingSessionId: record.sourceSessionId,
+                originatingTurnId: actor.kind === "agent" ? (actor.turnId ?? null) : null,
+                originatingAttemptId: actor.kind === "agent" ? (actor.attemptId ?? null) : null,
+                originatingToolOperationId:
+                  actor.kind === "agent" && actor.attemptId ? request.operationId : null,
+                kind: preparation.authority.fields.some((field) => field.purpose === "totp")
+                  ? "mfa"
+                  : "manual_login",
+                reason: "Sign in or complete authentication in this browser tab.",
+                expiresInSeconds: 900,
+              },
+            });
+          }
+          if (preparation.authority.kind === "external_provider") {
+            throw new InteractionResourceStateError(
+              "External auth providers cannot use protected field fill",
+            );
+          }
+
+          if (preparation.operationState === "dispatched") {
+            try {
+              const receipt = await sessionClient.protectedAuthReceipt(request.operationId);
+              return await settleProtectedAuthReceipt({
+                deps,
+                scope,
+                receipt,
+              });
+            } catch (error) {
+              if (
+                error instanceof BrowserControlRequestError &&
+                error.error.code === "resource_not_found"
+              ) {
+                await markProtectedAuthFillOutcomeUnknown(deps.db, {
+                  ...scope,
+                  operationId: request.operationId,
+                  errorCode: "controller_receipt_missing",
+                });
+                throw new InteractionResourceStateError(
+                  "Protected-fill outcome is unknown after controller recovery",
+                );
+              }
+              throw error;
+            }
+          }
+
+          credential ??= await loadBoundBrowserCredential(
+            deps,
+            grant,
+            workspaceId,
+            preparation.authority,
+          );
+          if (credential.version !== preparation.credentialVersion) {
+            throw new InteractionResourceConflictError(
+              "Credential changed after protected fill was prepared; use a new operation id",
+            );
+          }
+          const fields = resolveProtectedAuthFieldValues({
+            authority: preparation.authority,
+            requestedFields: request.fields,
+            credential: credential.credential,
+          });
+          await dispatchProtectedAuthFill(deps.db, {
+            ...scope,
+            operationId: request.operationId,
+          });
+          const receipt = await sessionClient.protectedAuthFill(
+            BrowserProtectedAuthFillCommand.parse({
+              protocolVersion: BROWSER_CONTROL_PROTOCOL_VERSION,
+              operationId: request.operationId,
+              browserSessionId,
+              controllerGeneration: binding.controllerGeneration,
+              targetId: preparation.run.targetId,
+              expectedTargetGeneration: request.expectedTargetGeneration,
+              expectedDocumentGeneration: request.expectedDocumentGeneration,
+              expectedFrameId: request.expectedFrameId,
+              actor,
+              authorityId: preparation.authority.id,
+              credentialVersion: preparation.credentialVersion,
+              allowedOrigins: preparation.origins,
+              fields,
+              submit: request.submit,
+            }),
+          );
+          return await settleProtectedAuthReceipt({ deps, scope, receipt });
+        },
+      );
+      return context.json(ProtectedAuthFillResponse.parse(result));
+    },
+  );
+
+  app.post(
+    "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/verify",
+    async (context) => {
+      const { workspaceId, grant, browserSessionId } = await browserRoutePreamble(
+        context,
+        "sessions:control",
+      );
+      const authRunId = requireUuidParam(context, "authRunId");
+      const request = await parseJsonBody(context, VerifyAuthRunRequest);
+      const result = await withActiveBrowserController(
+        context,
+        grant,
+        workspaceId,
+        browserSessionId,
+        "session.control",
+        "browser.control",
+        async ({ sessionClient, binding }) => {
+          const run = await getAuthRun(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            authRunId,
+          });
+          assertAuthRunBrowser(run.browserSessionId, browserSessionId);
+          const observation = await sessionClient.observe(run.targetId);
+          return await verifyAuthRun(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            actorSubjectId: grant.subjectId,
+            authRunId,
+            controllerGeneration: binding.controllerGeneration,
+            targetId: observation.target.id,
+            targetGeneration: observation.target.targetGeneration,
+            documentGeneration: observation.target.documentGeneration,
+            url: observation.target.url,
+            ...request,
+          });
+        },
       );
       return context.json(result);
     },
@@ -2451,6 +2849,95 @@ function isTerminalOperation(state: string): boolean {
   return state === "completed" || state === "failed" || state === "outcome_unknown";
 }
 
+async function loadBoundBrowserCredential(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  workspaceId: string,
+  authority: Extract<SiteAuthAuthority, { kind: "connection_fields" }>,
+) {
+  const reference = authority.credential;
+  const credential = await loadConnectionCredentialForBroker(deps.db, deps.settings, {
+    workspaceId,
+    connectionId: reference.connectionId,
+    providerDomain: reference.providerDomain,
+    subjectId: reference.connectionSubjectId,
+    allowSubjectOwned: reference.connectionSubjectId !== null,
+  });
+  if (
+    !credential ||
+    credential.id !== reference.connectionId ||
+    credential.accountId !== grant.accountId ||
+    credential.workspaceId !== workspaceId ||
+    credential.subjectId !== reference.connectionSubjectId ||
+    credential.providerDomain !== reference.providerDomain ||
+    credential.status !== "active"
+  ) {
+    throw new BrowserAuthCredentialError("Configured browser credential is unavailable");
+  }
+  return credential;
+}
+
+async function settleProtectedAuthReceipt(input: {
+  deps: ApiRouteDeps;
+  scope: {
+    accountId: string;
+    workspaceId: string;
+    actorSubjectId: string;
+    authRunId: string;
+  };
+  receipt: BrowserProtectedAuthFillReceiptValue;
+}) {
+  const { deps, scope, receipt } = input;
+  if (receipt.state === "completed") {
+    if (!receipt.observation) {
+      throw new BrowserControlProtocolError("protected-fill receipt omitted its observation");
+    }
+    return await completeProtectedAuthFill(deps.db, {
+      ...scope,
+      operationId: receipt.operationId,
+      status: receipt.observation.status,
+      targetGeneration: receipt.observation.target.targetGeneration,
+      documentGeneration: receipt.observation.target.documentGeneration,
+    });
+  }
+  if (receipt.state === "failed") {
+    if (!receipt.error) {
+      throw new BrowserControlProtocolError("protected-fill failure omitted its error");
+    }
+    const staleCodes = new Set([
+      "controller_stale",
+      "target_not_found",
+      "target_stale",
+      "observation_stale",
+      "document_stale",
+      "frame_stale",
+      "locator_not_found",
+      "locator_ambiguous",
+    ]);
+    return await completeProtectedAuthFill(deps.db, {
+      ...scope,
+      operationId: receipt.operationId,
+      status: staleCodes.has(receipt.error.code) ? "stale" : "failed",
+      failureCode: receipt.error.code,
+    });
+  }
+  if (receipt.state === "outcome_unknown") {
+    await markProtectedAuthFillOutcomeUnknown(deps.db, {
+      ...scope,
+      operationId: receipt.operationId,
+      errorCode: receipt.error?.code ?? "outcome_unknown",
+    });
+    throw new InteractionResourceStateError("Protected-fill outcome is unknown");
+  }
+  throw new InteractionResourceStateError(`Protected-fill operation is still ${receipt.state}`);
+}
+
+function assertAuthRunBrowser(actual: string, expected: string): void {
+  if (actual !== expected) {
+    throw new InteractionResourceConflictError("Auth run belongs to another browser session");
+  }
+}
+
 function interactionFailure(error: unknown) {
   if (error instanceof BrowserControlRequestError) return error.error;
   if (
@@ -2491,11 +2978,17 @@ function browserRouteError(error: unknown): HTTPException {
   if (error instanceof BrowserIdentityNotFoundError) {
     return new HTTPException(404, { message: error.message, cause: error });
   }
+  if (error instanceof InteractionResourceNotFoundError) {
+    return new HTTPException(404, { message: error.message, cause: error });
+  }
   if (
     error instanceof BrowserSessionOperationConflictError ||
     error instanceof BrowserSessionStateError ||
     error instanceof BrowserIdentityConflictError ||
-    error instanceof BrowserIdentityStateError
+    error instanceof BrowserIdentityStateError ||
+    error instanceof InteractionResourceConflictError ||
+    error instanceof InteractionResourceStateError ||
+    error instanceof BrowserAuthCredentialError
   ) {
     return new HTTPException(409, { message: error.message, cause: error });
   }

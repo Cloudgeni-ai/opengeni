@@ -1903,6 +1903,104 @@ export const BrowserActionReceipt = z
   });
 export type BrowserActionReceipt = z.infer<typeof BrowserActionReceipt>;
 
+/** Controller-private protected-fill wire contract. Secret values cross only
+ * the credential broker -> exact placement controller boundary; this command
+ * is never projected into model MCP, Codemode, public action history, or UI. */
+export const BrowserProtectedAuthFieldValue = ProtectedAuthField.extend({
+  purpose: SiteAuthFieldPurpose,
+  value: z.string().min(1).max(65_536),
+}).strict();
+export type BrowserProtectedAuthFieldValue = z.infer<typeof BrowserProtectedAuthFieldValue>;
+
+export const BrowserProtectedAuthFillCommand = z
+  .object({
+    protocolVersion: z.literal(INTERACTION_PROTOCOL_VERSION),
+    operationId: z.string().uuid(),
+    browserSessionId: z.string().uuid(),
+    controllerGeneration: opaqueGeneration,
+    targetId: boundedOpaqueId,
+    expectedTargetGeneration: opaqueGeneration,
+    expectedDocumentGeneration: opaqueGeneration,
+    expectedFrameId: opaqueGeneration,
+    actor: InteractionActor,
+    authorityId: boundedOpaqueId,
+    credentialVersion: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    allowedOrigins: z.array(canonicalWebOrigin).min(1).max(64),
+    fields: z.array(BrowserProtectedAuthFieldValue).min(1).max(32),
+    submit: ProtectedAuthSubmit,
+  })
+  .strict()
+  .superRefine((command, context) => {
+    if (new Set(command.allowedOrigins).size !== command.allowedOrigins.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["allowedOrigins"],
+        message: "protected-fill origins repeat",
+      });
+    }
+    const fieldIds = command.fields.map((field) => field.fieldId);
+    if (new Set(fieldIds).size !== fieldIds.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["fields"],
+        message: "protected-fill field ids repeat",
+      });
+    }
+  });
+export type BrowserProtectedAuthFillCommand = z.infer<typeof BrowserProtectedAuthFillCommand>;
+
+export const BrowserProtectedAuthObservation = z
+  .object({
+    target: BrowserTarget,
+    status: z.enum(["submitted", "working"]),
+  })
+  .strict();
+export type BrowserProtectedAuthObservation = z.infer<typeof BrowserProtectedAuthObservation>;
+
+/** Secret-free placement receipt. It can be journaled, replayed, and returned
+ * to the broker without retaining any field value or model-visible page tree. */
+export const BrowserProtectedAuthFillReceipt = z
+  .object({
+    protocolVersion: z.literal(INTERACTION_PROTOCOL_VERSION),
+    operationId: z.string().uuid(),
+    browserSessionId: z.string().uuid(),
+    controllerGeneration: opaqueGeneration,
+    targetId: boundedOpaqueId,
+    state: InteractionOperationState,
+    dispatchedAt: z.string().datetime({ offset: true }).nullable(),
+    settledAt: z.string().datetime({ offset: true }).nullable(),
+    observation: BrowserProtectedAuthObservation.nullable(),
+    error: InteractionError.nullable(),
+  })
+  .strict()
+  .superRefine((receipt, context) => {
+    if (
+      receipt.state === "completed" &&
+      (receipt.error !== null || receipt.observation === null || receipt.settledAt === null)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "completed protected-fill receipt requires a result and no error",
+      });
+    }
+    if (
+      (receipt.state === "failed" || receipt.state === "outcome_unknown") &&
+      (receipt.error === null || receipt.observation !== null || receipt.settledAt === null)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "terminal protected-fill error requires error, no result, and time",
+      });
+    }
+    if (receipt.state === "dispatched" && receipt.dispatchedAt === null) {
+      context.addIssue({
+        code: "custom",
+        message: "dispatched protected-fill receipt requires dispatch time",
+      });
+    }
+  });
+export type BrowserProtectedAuthFillReceipt = z.infer<typeof BrowserProtectedAuthFillReceipt>;
+
 export const ComputerSessionCapabilities = z
   .object({
     semanticObservation: z.boolean(),

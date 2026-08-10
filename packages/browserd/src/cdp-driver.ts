@@ -5,6 +5,7 @@ import {
   BrowserDiagnosticEntry,
   BrowserDialog,
   BrowserObservation,
+  BrowserProtectedAuthFillCommand,
   BrowserTarget,
   INTERACTION_MAX_DIAGNOSTIC_ENTRIES,
   INTERACTION_PROTOCOL_VERSION,
@@ -14,6 +15,8 @@ import {
   type BrowserDiagnosticKind,
   type BrowserLocator,
   type BrowserObservation as BrowserObservationValue,
+  type BrowserProtectedAuthFillCommand as BrowserProtectedAuthFillCommandValue,
+  type BrowserProtectedAuthObservation as BrowserProtectedAuthObservationValue,
   type BrowserTarget as BrowserTargetValue,
 } from "@opengeni/contracts";
 import {
@@ -46,6 +49,8 @@ const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
 const BROWSER_START_TIMEOUT_MS = 30_000;
 const GRACEFUL_BROWSER_CLOSE_TIMEOUT_MS = 30_000;
 const NETWORK_IDLE_MS = 500;
+const PROTECTED_AUTH_AUTO_ADVANCE_TIMEOUT_MS = 3_000;
+const PROTECTED_AUTH_DIAGNOSTIC_QUIET_MS = 5_000;
 
 class DialogOpenedSignal extends Error {}
 
@@ -119,9 +124,33 @@ type TargetState = {
   failedRequests: Set<string>;
   requests: Map<string, { method: string; url: string }>;
   lastNetworkActivityAt: number;
+  networkActivitySequence: number;
   screencast: TargetScreencast | null;
+  protectedAuthActive: boolean;
+  protectedAuthQuietUntil: number;
   tail: Promise<void>;
   unsubscribe: Array<() => void>;
+};
+
+type ProtectedElementMetadata = {
+  connected: boolean;
+  visible: boolean;
+  editable: boolean;
+  disabled: boolean;
+  readOnly: boolean;
+  tag: string;
+  inputType: string;
+  origin: string;
+  hasForm: boolean;
+  formAction: string | null;
+  formMethod: string | null;
+  submitType: string | null;
+};
+
+type ResolvedProtectedField = {
+  backendDOMNodeId: number;
+  purpose: BrowserProtectedAuthFillCommandValue["fields"][number]["purpose"];
+  value: string;
 };
 
 export type AgentBrowserDriverOptions = {
@@ -500,6 +529,122 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     });
   }
 
+  /** Controller-private credential injection. This path returns no semantic
+   * tree and suppresses screenshots/diagnostics while values exist in-page. */
+  async protectedFill(
+    commandInput: BrowserProtectedAuthFillCommandValue,
+  ): Promise<BrowserProtectedAuthObservationValue> {
+    const command = BrowserProtectedAuthFillCommand.parse(commandInput);
+    return await this.withTarget(command.targetId, async (state, info) => {
+      if (state.dialog) {
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          "browser JavaScript dialog must be handled before protected fill",
+        );
+      }
+      await this.refreshFrame(state);
+      this.assertProtectedAuthGenerations(command, state);
+      state.protectedAuthActive = true;
+      const startingDocumentGeneration = state.documentGeneration;
+      const startingNetworkActivitySequence = state.networkActivitySequence;
+      const allowedOrigins = new Set(command.allowedOrigins);
+      const resolvedFields: ResolvedProtectedField[] = [];
+      let submitNodeId: number | null = null;
+      let submitted = false;
+      try {
+        for (const field of command.fields) {
+          const node = await this.resolveLocator(state, field.locator);
+          if (node.backendDOMNodeId === null) {
+            throw new InteractionDefiniteDriverError(
+              "invalid_action",
+              "protected-fill field has no DOM action target",
+            );
+          }
+          const metadata = await this.protectedElementMetadata(state, node.backendDOMNodeId);
+          this.assertProtectedField(metadata, field.purpose, allowedOrigins);
+          resolvedFields.push({
+            backendDOMNodeId: node.backendDOMNodeId,
+            purpose: field.purpose,
+            value: field.value,
+          });
+        }
+        if (command.submit.type === "click") {
+          const node = await this.resolveLocator(state, command.submit.locator);
+          if (node.backendDOMNodeId === null) {
+            throw new InteractionDefiniteDriverError(
+              "invalid_action",
+              "protected-fill submit control has no DOM action target",
+            );
+          }
+          const metadata = await this.protectedElementMetadata(state, node.backendDOMNodeId);
+          this.assertProtectedSubmit(metadata, allowedOrigins);
+          submitNodeId = node.backendDOMNodeId;
+        } else if (command.submit.type === "press" && command.submit.locator) {
+          const node = await this.resolveLocator(state, command.submit.locator);
+          if (node.backendDOMNodeId === null) {
+            throw new InteractionDefiniteDriverError(
+              "invalid_action",
+              "protected-fill key target has no DOM action target",
+            );
+          }
+          const metadata = await this.protectedElementMetadata(state, node.backendDOMNodeId);
+          this.assertProtectedSubmit(metadata, allowedOrigins);
+          submitNodeId = node.backendDOMNodeId;
+        }
+
+        // Locator resolution refreshes browser state. Recheck every causal
+        // fence once more immediately before the first value crosses CDP.
+        await this.refreshFrame(state);
+        this.assertProtectedAuthGenerations(command, state);
+        for (const field of resolvedFields) {
+          await this.focusNode(state, field.backendDOMNodeId);
+          await this.selectAllAndDelete(state);
+          await this.sendActionTarget(state, "Input.insertText", { text: field.value });
+        }
+
+        if (command.submit.type === "click") {
+          await this.clickNode(state, submitNodeId, "left", 1);
+          submitted = true;
+        } else if (command.submit.type === "press") {
+          await this.focusNode(
+            state,
+            submitNodeId ?? resolvedFields.at(-1)?.backendDOMNodeId ?? null,
+          );
+          await this.pressKey(state, command.submit.key);
+          submitted = true;
+        }
+
+        const transitioned = await this.waitForProtectedAuthTransition(
+          state,
+          startingDocumentGeneration,
+          startingNetworkActivitySequence,
+        );
+        if (!submitted && !transitioned) {
+          await this.clearProtectedFields(state, resolvedFields);
+          throw new Error("protected fill without submit did not produce an observable transition");
+        }
+        if (!transitioned && state.documentGeneration === startingDocumentGeneration) {
+          await this.clearProtectedFields(state, resolvedFields);
+        }
+        const currentInfo = await this.requireTargetInfo(
+          await this.ensureConnection(),
+          info.targetId,
+        );
+        await this.refreshFrame(state);
+        return {
+          target: this.targetFromInfo(currentInfo, state),
+          status: submitted || transitioned ? "submitted" : "working",
+        };
+      } catch (error) {
+        await this.clearProtectedFields(state, resolvedFields).catch(() => undefined);
+        throw error;
+      } finally {
+        state.protectedAuthActive = false;
+        state.protectedAuthQuietUntil = Date.now() + PROTECTED_AUTH_DIAGNOSTIC_QUIET_MS;
+      }
+    });
+  }
+
   private async ensureConnection(): Promise<BrowserCdpConnection> {
     if (this.connection) return this.connection;
     if (this.connectionPromise) return await this.connectionPromise;
@@ -525,7 +670,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           const state = [...this.states.values()].find(
             (candidate) => candidate.frame.id === frameId,
           );
-          if (state) {
+          if (state && !this.protectedAuthQuiet(state)) {
             state.diagnostics.downloadCount += 1;
             this.appendDiagnostic(state, {
               kind: "download",
@@ -622,7 +767,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       failedRequests: new Set(),
       requests: new Map(),
       lastNetworkActivityAt: Date.now(),
+      networkActivitySequence: 0,
       screencast: null,
+      protectedAuthActive: false,
+      protectedAuthQuietUntil: 0,
       tail: Promise.resolve(),
       unsubscribe: [],
     };
@@ -635,6 +783,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       connection.on(
         "Runtime.consoleAPICalled",
         (event) => {
+          if (this.protectedAuthQuiet(state)) return;
           const level = consoleLevel(event.params.type);
           if (level === "error") state.diagnostics.consoleErrorCount += 1;
           this.appendDiagnostic(state, {
@@ -652,6 +801,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       connection.on(
         "Runtime.exceptionThrown",
         (event) => {
+          if (this.protectedAuthQuiet(state)) return;
           state.diagnostics.pageErrorCount += 1;
           const details = isRecord(event.params.exceptionDetails)
             ? event.params.exceptionDetails
@@ -679,12 +829,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               state.inflightRequests.add(requestId);
             }
             const request = isRecord(event.params.request) ? event.params.request : {};
-            state.requests.set(requestId, {
-              method: boundedMethod(request.method),
-              url: boundedUrlField(request.url) ?? "about:blank",
-            });
-            boundMap(state.requests, 10_000);
+            if (!this.protectedAuthQuiet(state)) {
+              state.requests.set(requestId, {
+                method: boundedMethod(request.method),
+                url: boundedUrlField(request.url) ?? "about:blank",
+              });
+              boundMap(state.requests, 10_000);
+            }
           }
+          state.networkActivitySequence += 1;
           state.lastNetworkActivityAt = Date.now();
         },
         sessionId,
@@ -698,6 +851,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             state.failedRequests.delete(requestId);
             state.requests.delete(requestId);
           }
+          state.networkActivitySequence += 1;
           state.lastNetworkActivityAt = Date.now();
         },
         sessionId,
@@ -717,6 +871,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             state.failedRequests.delete(requestId);
             state.requests.delete(requestId);
           }
+          state.networkActivitySequence += 1;
           state.lastNetworkActivityAt = Date.now();
         },
         sessionId,
@@ -726,7 +881,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         (event) => {
           const requestId = stringField(event.params, "requestId");
           const response = isRecord(event.params.response) ? event.params.response : null;
-          if (requestId && typeof response?.status === "number" && response.status >= 400) {
+          if (
+            !this.protectedAuthQuiet(state) &&
+            requestId &&
+            typeof response?.status === "number" &&
+            response.status >= 400
+          ) {
             this.recordFailedRequest(state, requestId, {
               message: `HTTP ${Math.trunc(response.status)}`,
               status: Math.trunc(response.status),
@@ -898,6 +1058,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         this.failScreencast(state, transportError(error));
       });
     }
+    if (state.protectedAuthActive) return;
     try {
       const metadata = isRecord(event.params.metadata) ? event.params.metadata : {};
       const data = decodeBoundedBase64Image(event.params.data);
@@ -951,6 +1112,217 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     screencast.unsubscribe();
     for (const subscription of screencast.subscriptions.values()) subscription.fail(error);
     screencast.subscriptions.clear();
+  }
+
+  private assertProtectedAuthGenerations(
+    command: BrowserProtectedAuthFillCommandValue,
+    state: TargetState,
+  ): void {
+    if (command.browserSessionId !== this.browserSessionId) {
+      throw new InteractionDefiniteDriverError(
+        "resource_not_found",
+        "protected fill targets another browser session",
+      );
+    }
+    if (command.controllerGeneration !== this.controllerGeneration) {
+      throw new InteractionDefiniteDriverError(
+        "controller_stale",
+        "protected fill targets an earlier browser controller",
+      );
+    }
+    if (command.expectedTargetGeneration !== this.targetGeneration(state.targetId)) {
+      throw new InteractionDefiniteDriverError(
+        "target_stale",
+        "protected fill targets an earlier browser target",
+      );
+    }
+    if (command.expectedDocumentGeneration !== state.documentGeneration) {
+      throw new InteractionDefiniteDriverError(
+        "document_stale",
+        "protected fill targets an earlier browser document",
+      );
+    }
+    if (command.expectedFrameId !== state.frameGeneration) {
+      throw new InteractionDefiniteDriverError(
+        "frame_stale",
+        "protected fill targets an earlier browser frame",
+      );
+    }
+  }
+
+  private async protectedElementMetadata(
+    state: TargetState,
+    backendDOMNodeId: number,
+  ): Promise<ProtectedElementMetadata> {
+    const value = await this.callOnNode(
+      state,
+      backendDOMNodeId,
+      PROTECTED_ELEMENT_METADATA_FUNCTION,
+      [],
+    );
+    if (!isRecord(value)) throw new Error("browser returned invalid protected-field metadata");
+    const metadata: ProtectedElementMetadata = {
+      connected: value.connected === true,
+      visible: value.visible === true,
+      editable: value.editable === true,
+      disabled: value.disabled === true,
+      readOnly: value.readOnly === true,
+      tag: typeof value.tag === "string" ? value.tag : "",
+      inputType: typeof value.inputType === "string" ? value.inputType : "",
+      origin: typeof value.origin === "string" ? value.origin : "",
+      hasForm: value.hasForm === true,
+      formAction: typeof value.formAction === "string" ? value.formAction : null,
+      formMethod: typeof value.formMethod === "string" ? value.formMethod : null,
+      submitType: typeof value.submitType === "string" ? value.submitType : null,
+    };
+    if (
+      metadata.tag.length === 0 ||
+      metadata.origin.length === 0 ||
+      Buffer.byteLength(metadata.origin) > 16_384 ||
+      (metadata.formAction !== null && Buffer.byteLength(metadata.formAction) > 16_384)
+    ) {
+      throw new Error("browser returned invalid protected-field metadata");
+    }
+    return metadata;
+  }
+
+  private assertProtectedField(
+    metadata: ProtectedElementMetadata,
+    purpose: ResolvedProtectedField["purpose"],
+    allowedOrigins: ReadonlySet<string>,
+  ): void {
+    this.assertProtectedElement(metadata, allowedOrigins);
+    if (!metadata.editable || metadata.disabled || metadata.readOnly) {
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        "protected-fill field is not editable",
+      );
+    }
+    const ordinaryInputTypes = new Set(["email", "number", "search", "tel", "text", "url"]);
+    const acceptsOrdinaryText =
+      metadata.tag === "textarea" ||
+      metadata.inputType === "contenteditable" ||
+      ordinaryInputTypes.has(metadata.inputType);
+    if (purpose === "password" && metadata.inputType !== "password") {
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        "password authority requires a password field",
+      );
+    }
+    if (purpose === "identifier" && !acceptsOrdinaryText) {
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        "identifier authority requires a visible text field",
+      );
+    }
+    if (
+      (purpose === "secret" || purpose === "totp") &&
+      metadata.inputType !== "password" &&
+      !acceptsOrdinaryText
+    ) {
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        "secret authority requires a visible text or password field",
+      );
+    }
+    if (purpose !== "identifier" && metadata.hasForm && metadata.formMethod === "get") {
+      throw new InteractionDefiniteDriverError(
+        "permission_denied",
+        "protected secrets cannot be submitted through a GET form",
+      );
+    }
+  }
+
+  private assertProtectedSubmit(
+    metadata: ProtectedElementMetadata,
+    allowedOrigins: ReadonlySet<string>,
+  ): void {
+    this.assertProtectedElement(metadata, allowedOrigins);
+    if (metadata.disabled) {
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        "protected-fill submit target is disabled",
+      );
+    }
+    if (metadata.hasForm && metadata.formMethod === "get" && metadata.submitType !== "button") {
+      throw new InteractionDefiniteDriverError(
+        "permission_denied",
+        "protected secrets cannot be submitted through a GET form",
+      );
+    }
+  }
+
+  private assertProtectedElement(
+    metadata: ProtectedElementMetadata,
+    allowedOrigins: ReadonlySet<string>,
+  ): void {
+    if (!metadata.connected || !metadata.visible) {
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        "protected-fill target is not visible and connected",
+      );
+    }
+    if (!allowedOrigins.has(metadata.origin)) {
+      throw new InteractionDefiniteDriverError(
+        "permission_denied",
+        "protected-fill target frame origin is not authorized",
+      );
+    }
+    if (metadata.formAction !== null) {
+      let actionOrigin: string;
+      try {
+        actionOrigin = new URL(metadata.formAction).origin;
+      } catch {
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          "protected-fill form action is invalid",
+        );
+      }
+      if (!allowedOrigins.has(actionOrigin)) {
+        throw new InteractionDefiniteDriverError(
+          "permission_denied",
+          "protected-fill form action origin is not authorized",
+        );
+      }
+    }
+  }
+
+  private async waitForProtectedAuthTransition(
+    state: TargetState,
+    startingDocumentGeneration: string,
+    startingNetworkActivitySequence: number,
+  ): Promise<boolean> {
+    const deadline = Date.now() + PROTECTED_AUTH_AUTO_ADVANCE_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      await this.refreshFrame(state);
+      if (state.documentGeneration !== startingDocumentGeneration) return true;
+      if (
+        state.networkActivitySequence > startingNetworkActivitySequence &&
+        state.inflightRequests.size === 0 &&
+        Date.now() - state.lastNetworkActivityAt >= NETWORK_IDLE_MS
+      ) {
+        return true;
+      }
+      await delay(50);
+    }
+    return false;
+  }
+
+  private async clearProtectedFields(
+    state: TargetState,
+    fields: readonly ResolvedProtectedField[],
+  ): Promise<void> {
+    const failures: unknown[] = [];
+    for (const field of fields) {
+      try {
+        await this.callOnNode(state, field.backendDOMNodeId, CLEAR_PROTECTED_VALUE_FUNCTION, []);
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    if (failures.length > 0) {
+      throw new AggregateError(failures, "protected fields could not be cleared safely");
+    }
   }
 
   private async dispatchAction(state: TargetState, action: BrowserAction): Promise<void> {
@@ -1821,6 +2193,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     requestId: string,
     details: { message: string; status?: number; url?: string | null },
   ): void {
+    if (this.protectedAuthQuiet(state)) return;
     if (state.failedRequests.has(requestId)) return;
     state.failedRequests.add(requestId);
     state.diagnostics.failedRequestCount += 1;
@@ -1840,6 +2213,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     state: TargetState,
     entry: Omit<BrowserDiagnosticEntry, "sequence" | "occurredAt">,
   ): void {
+    if (this.protectedAuthQuiet(state)) return;
     const parsed = BrowserDiagnosticEntry.parse({
       ...entry,
       sequence: ++state.diagnosticSequence,
@@ -1861,6 +2235,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     for (const unsubscribe of state.unsubscribe) unsubscribe();
     this.states.delete(targetId);
     this.firstSeenAt.delete(targetId);
+  }
+
+  private protectedAuthQuiet(state: TargetState): boolean {
+    return state.protectedAuthActive || Date.now() < state.protectedAuthQuietUntil;
   }
 
   private firstSeen(targetId: string): string {
@@ -2067,6 +2445,63 @@ const SELECT_OPTIONS_FUNCTION = `function(values) {
 
 const SCROLL_FUNCTION = `function(deltaX, deltaY) {
   this.scrollBy({ left: deltaX, top: deltaY, behavior: "instant" });
+  return true;
+}`;
+
+const PROTECTED_ELEMENT_METADATA_FUNCTION = `function() {
+  if (!(this instanceof Element)) return null;
+  const document = this.ownerDocument;
+  const view = document?.defaultView;
+  if (!document || !view) return null;
+  const tag = String(this.tagName || "").toLowerCase();
+  const style = view.getComputedStyle(this);
+  const rect = this.getBoundingClientRect();
+  const connected = this.isConnected === true;
+  const visible = connected && style.visibility !== "hidden" && style.display !== "none" &&
+    style.opacity !== "0" && rect.width > 0 && rect.height > 0;
+  const disabled = this.disabled === true;
+  const readOnly = this.readOnly === true;
+  const contentEditable = this.isContentEditable === true;
+  const inputType = tag === "input"
+    ? String(this.getAttribute("type") || "text").toLowerCase()
+    : contentEditable ? "contenteditable" : tag === "textarea" ? "text" : "";
+  const editableInputTypes = new Set(["email", "number", "password", "search", "tel", "text", "url"]);
+  const editable = !disabled && !readOnly &&
+    (tag === "textarea" || contentEditable || (tag === "input" && editableInputTypes.has(inputType)));
+  const form = this.form instanceof view.HTMLFormElement ? this.form : this.closest?.("form");
+  const ownFormAction = typeof this.formAction === "string" && this.formAction.length > 0
+    ? this.formAction
+    : null;
+  const formAction = ownFormAction || (form ? form.action : null);
+  const ownFormMethod = typeof this.formMethod === "string" && this.formMethod.length > 0
+    ? this.formMethod
+    : null;
+  const formMethod = form ? String(ownFormMethod || form.method || "get").toLowerCase() : null;
+  const submitType = tag === "button"
+    ? String(this.getAttribute("type") || "submit").toLowerCase()
+    : tag === "input" ? inputType : null;
+  return {
+    connected,
+    visible,
+    editable,
+    disabled,
+    readOnly,
+    tag,
+    inputType,
+    origin: document.location.origin,
+    hasForm: Boolean(form),
+    formAction,
+    formMethod,
+    submitType,
+  };
+}`;
+
+const CLEAR_PROTECTED_VALUE_FUNCTION = `function() {
+  if (!(this instanceof Element) || !this.isConnected) return false;
+  const tag = String(this.tagName || "").toLowerCase();
+  if (tag === "input" || tag === "textarea") this.value = "";
+  else if (this.isContentEditable === true) this.textContent = "";
+  else return false;
   return true;
 }`;
 

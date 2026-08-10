@@ -8,20 +8,25 @@ import {
   createNetworkRoute,
   createSession,
   createSiteAuthConnection,
+  completeProtectedAuthFill,
   dispatchBrowserSessionOperation,
+  dispatchProtectedAuthFill,
   getAuthRun,
   getInteractionIntervention,
+  getProtectedAuthFillPreparation,
   InteractionResourceConflictError,
   InteractionResourceNotFoundError,
   listInteractionInterventions,
   listNetworkRoutes,
   listSiteAuthConnections,
+  prepareProtectedAuthFill,
   prepareBrowserSessionCreate,
   reportAuthRun,
   resolveInteractionIntervention,
   startAuthRun,
   updateNetworkRoute,
   updateSiteAuthConnection,
+  verifyAuthRun,
 } from "../src";
 
 let available = true;
@@ -371,5 +376,238 @@ describe("browser auth and network resources", () => {
         interventionId: intervention.intervention.id,
       }),
     ).toMatchObject({ status: "completed" });
+  });
+
+  test("atomically turns a human protected fill into one replay-safe intervention", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const auth = await createSiteAuthConnection(client.db, { ...scope, ...humanSiteAuth() });
+    const browser = await activeBrowser(scope);
+    const started = await startAuthRun(client.db, {
+      ...scope,
+      ...browser,
+      operationId: crypto.randomUUID(),
+      siteAuthConnectionId: auth.connection.id,
+      targetId: "target-human",
+      expectedTargetGeneration: "target-generation-human",
+      expectedDocumentGeneration: "document-generation-human",
+      methodId: "password",
+      authorityId: "human",
+    });
+    const operationId = crypto.randomUUID();
+    const request = {
+      operationId,
+      expectedVersion: started.run.version,
+      expectedTargetGeneration: "target-generation-human",
+      expectedDocumentGeneration: "document-generation-human",
+      expectedFrameId: "frame-human",
+      authorityId: "human",
+      fields: [
+        { fieldId: "email", locator: { kind: "css" as const, selector: "#email" } },
+        { fieldId: "password", locator: { kind: "css" as const, selector: "#password" } },
+      ],
+      submit: { type: "none" as const },
+    };
+    await prepareProtectedAuthFill(client.db, {
+      ...scope,
+      authRunId: started.run.id,
+      credentialVersion: null,
+      ...request,
+    });
+    const waiting = await completeProtectedAuthFill(client.db, {
+      ...scope,
+      authRunId: started.run.id,
+      operationId,
+      status: "needs_human",
+      intervention: {
+        originatingSessionId: scope.sessionId,
+        kind: "manual_login",
+        reason: "Sign in in this browser tab.",
+        expiresInSeconds: 900,
+      },
+    });
+    expect(waiting).toMatchObject({
+      status: "needs_human",
+      replayed: false,
+      run: { state: "awaiting_secret", version: 2 },
+    });
+    expect(waiting.run.interventionId).toBeString();
+    expect((await listInteractionInterventions(client.db, scope)).interventions).toEqual([
+      expect.objectContaining({
+        id: waiting.run.interventionId,
+        operationId,
+        status: "open",
+        authRunId: started.run.id,
+      }),
+    ]);
+    expect(
+      await prepareProtectedAuthFill(client.db, {
+        ...scope,
+        authRunId: started.run.id,
+        credentialVersion: null,
+        ...request,
+      }),
+    ).toMatchObject({
+      replayed: true,
+      response: { replayed: true, run: { interventionId: waiting.run.interventionId } },
+    });
+    await resolveInteractionIntervention(client.db, {
+      ...scope,
+      interventionId: waiting.run.interventionId!,
+      operationId: crypto.randomUUID(),
+      expectedVersion: 1,
+      outcome: "completed",
+    });
+    expect(await getAuthRun(client.db, { ...scope, authRunId: started.run.id })).toMatchObject({
+      state: "working",
+      interventionId: null,
+      version: 3,
+    });
+  });
+
+  test("fences protected credential fill and verifies only the observed exact target", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const credentialId = crypto.randomUUID();
+    await shared!.admin`
+      insert into connections (
+        id, account_id, workspace_id, subject_id, provider_domain, kind,
+        credential_encrypted, status, version, created_by_subject_id, updated_by_subject_id
+      ) values (
+        ${credentialId}, ${scope.accountId}, ${scope.workspaceId}, ${scope.actorSubjectId},
+        'example.com', 'api_key', 'encrypted-outside-auth-run', 'active', 7,
+        ${scope.actorSubjectId}, ${scope.actorSubjectId}
+      )`;
+    const base = humanSiteAuth();
+    const auth = await createSiteAuthConnection(client.db, {
+      ...scope,
+      ...base,
+      authorities: [
+        {
+          id: "saved",
+          kind: "connection_fields",
+          label: "Saved login",
+          credential: {
+            connectionId: credentialId,
+            connectionSubjectId: scope.actorSubjectId,
+            providerDomain: "example.com",
+          },
+          fields: [
+            { id: "email", purpose: "identifier", credentialKey: "email" },
+            { id: "password", purpose: "password", credentialKey: "password" },
+          ],
+        },
+      ],
+      methods: [{ ...base.methods[0]!, authorityIds: ["saved"] }],
+    });
+    const browser = await activeBrowser(scope);
+    const started = await startAuthRun(client.db, {
+      ...scope,
+      ...browser,
+      operationId: crypto.randomUUID(),
+      siteAuthConnectionId: auth.connection.id,
+      targetId: "target-1",
+      expectedTargetGeneration: "target-generation-1",
+      expectedDocumentGeneration: "document-generation-1",
+      methodId: "password",
+      authorityId: "saved",
+    });
+    const operationId = crypto.randomUUID();
+    const request = {
+      operationId,
+      expectedVersion: started.run.version,
+      expectedTargetGeneration: "target-generation-1",
+      expectedDocumentGeneration: "document-generation-1",
+      expectedFrameId: "frame-1",
+      authorityId: "saved",
+      fields: [
+        { fieldId: "email", locator: { kind: "css" as const, selector: "#email" } },
+        { fieldId: "password", locator: { kind: "css" as const, selector: "#password" } },
+      ],
+      submit: { type: "click" as const, locator: { kind: "css" as const, selector: "#login" } },
+    };
+    expect(
+      await getProtectedAuthFillPreparation(client.db, {
+        ...scope,
+        authRunId: started.run.id,
+        ...request,
+      }),
+    ).toBeNull();
+    const prepared = await prepareProtectedAuthFill(client.db, {
+      ...scope,
+      authRunId: started.run.id,
+      credentialVersion: 7,
+      ...request,
+    });
+    expect(prepared).toMatchObject({
+      operationState: "prepared",
+      credentialVersion: 7,
+      response: null,
+    });
+    expect(
+      await getProtectedAuthFillPreparation(client.db, {
+        ...scope,
+        authRunId: started.run.id,
+        ...request,
+      }),
+    ).toMatchObject({ operationState: "prepared", credentialVersion: 7 });
+    expect(
+      await dispatchProtectedAuthFill(client.db, {
+        ...scope,
+        authRunId: started.run.id,
+        operationId,
+      }),
+    ).toBe("dispatched");
+    const completed = await completeProtectedAuthFill(client.db, {
+      ...scope,
+      authRunId: started.run.id,
+      operationId,
+      status: "submitted",
+      targetGeneration: "target-generation-1",
+      documentGeneration: "document-generation-2",
+    });
+    expect(completed).toMatchObject({
+      status: "submitted",
+      replayed: false,
+      run: { state: "working", version: 2, documentGeneration: "document-generation-2" },
+    });
+    expect(
+      await prepareProtectedAuthFill(client.db, {
+        ...scope,
+        authRunId: started.run.id,
+        credentialVersion: 99,
+        ...request,
+      }),
+    ).toMatchObject({
+      operationState: "completed",
+      credentialVersion: 7,
+      replayed: true,
+      response: { replayed: true },
+    });
+    const [operation] = await shared!.admin<
+      Array<{ metadata: unknown; result: unknown }>
+    >`select metadata, result from interaction_resource_operations where operation_id = ${operationId}`;
+    expect(JSON.stringify(operation)).not.toContain("encrypted-outside-auth-run");
+
+    const verified = await verifyAuthRun(client.db, {
+      ...scope,
+      authRunId: started.run.id,
+      controllerGeneration: browser.controllerGeneration,
+      targetId: "target-1",
+      targetGeneration: "target-generation-1",
+      documentGeneration: "document-generation-2",
+      url: "https://example.com/app/home",
+      operationId: crypto.randomUUID(),
+      expectedVersion: completed.run.version,
+    });
+    expect(verified.run).toMatchObject({
+      state: "verified",
+      verifiedUrl: "https://example.com/app/home",
+      version: 3,
+    });
+    expect((await listSiteAuthConnections(client.db, scope)).connections[0]).toMatchObject({
+      verificationState: "verified",
+      lastVerifiedUrl: "https://example.com/app/home",
+    });
   });
 });

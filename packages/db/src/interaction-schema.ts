@@ -1159,6 +1159,7 @@ export const interactionResourceOperations = pgTable(
       enum: ["create", "update", "start", "report", "protected_fill", "verify", "resolve"],
     }).notNull(),
     requestDigest: text("request_digest").notNull(),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     state: text("state", {
       enum: ["prepared", "dispatched", "completed", "failed", "outcome_unknown"],
     })
@@ -1185,6 +1186,8 @@ export const interactionResourceOperations = pgTable(
     valuesValid: check(
       "interaction_resource_operations_values_check",
       sql`${table.requestDigest} ~ '^[0-9a-f]{64}$'
+        and jsonb_typeof(${table.metadata}) = 'object'
+        and octet_length(${table.metadata}::text) between 2 and 65536
         and (${table.resultVersion} is null or ${table.resultVersion} > 0)
         and (${table.result} is null or (
           jsonb_typeof(${table.result}) = 'object'

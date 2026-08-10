@@ -14,6 +14,7 @@ export * from "./computer-supervisor";
 export * from "./journal";
 export * from "./media";
 export * from "./protocol";
+export * from "./protected-auth-journal";
 export * from "./runner";
 export * from "./server";
 export * from "./state-artifact";

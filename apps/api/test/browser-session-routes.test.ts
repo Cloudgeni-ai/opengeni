@@ -20,6 +20,11 @@ describe("BrowserSession route discipline", () => {
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/select"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/observation"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/actions"',
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs"',
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId"',
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/report"',
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/protected-fill"',
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/verify"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/operations/:operationId"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/diagnostics"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/attachments"',
@@ -61,6 +66,30 @@ describe("BrowserSession route discipline", () => {
     expect(activeController.indexOf("if (!admitted)")).toBeLessThan(
       activeController.indexOf("return await withBrowserPlacement("),
     );
+  });
+
+  test("brokers protected auth outside model-visible browser actions", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const start = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/protected-fill"',
+    );
+    const end = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/verify"',
+      start,
+    );
+    const route = source.slice(start, end);
+    expect(route.indexOf("if (replay?.response)")).toBeLessThan(
+      route.indexOf("withActiveBrowserController"),
+    );
+    expect(route.indexOf("getProtectedAuthFillPreparation")).toBeLessThan(
+      route.indexOf("loadBoundBrowserCredential"),
+    );
+    expect(route.indexOf("dispatchProtectedAuthFill")).toBeLessThan(
+      route.indexOf("sessionClient.protectedAuthFill"),
+    );
+    expect(route).toContain("resolveProtectedAuthFieldValues");
+    expect(route).toContain("protectedAuthReceipt");
+    expect(route).not.toContain("BrowserActionCommand.parse");
   });
 
   test("resolves linked browsers through the exact active ComputerSession placement", async () => {

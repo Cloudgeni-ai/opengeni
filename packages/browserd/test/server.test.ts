@@ -2,7 +2,12 @@ import { describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
-import type { BrowserActionCommand, BrowserObservation, BrowserTarget } from "@opengeni/contracts";
+import type {
+  BrowserActionCommand,
+  BrowserObservation,
+  BrowserProtectedAuthFillCommand,
+  BrowserTarget,
+} from "@opengeni/contracts";
 import {
   BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX,
   BROWSER_CONTROL_WEBSOCKET_PROTOCOL,
@@ -130,6 +135,32 @@ describe("BrowserControlServer", () => {
       );
       expect(acted.status).toBe(200);
       expect((await json(acted)).data.state).toBe("completed");
+
+      const protectedCommand = protectedAuthCommand(observation);
+      const protectedPath = `/v1/browser-sessions/${reference.browserSessionId}/protected-auth-fills`;
+      expect(
+        (
+          await request(server, protectedPath, {
+            method: "POST",
+            token: viewToken,
+            body: protectedCommand,
+          })
+        ).status,
+      ).toBe(401);
+      const protectedFill = await request(server, protectedPath, {
+        method: "POST",
+        token: controlToken,
+        body: protectedCommand,
+      });
+      expect(protectedFill.status).toBe(200);
+      const protectedBody = await protectedFill.text();
+      expect(protectedBody).not.toContain("server-test-password");
+      expect(JSON.parse(protectedBody).data.state).toBe("completed");
+      const protectedReceiptPath = `/v1/browser-sessions/${reference.browserSessionId}/protected-auth-operations/${protectedCommand.operationId}`;
+      expect((await request(server, protectedReceiptPath, { token: viewToken })).status).toBe(401);
+      expect((await request(server, protectedReceiptPath, { token: controlToken })).status).toBe(
+        200,
+      );
 
       const screenshot = await request(
         server,
@@ -617,6 +648,9 @@ function fakeDriver(
     async dispatch() {
       return observation();
     },
+    async protectedFill() {
+      return { target: { ...target }, status: "submitted" };
+    },
     async captureScreenshot() {
       return frame(context, target);
     },
@@ -719,9 +753,35 @@ function command(observation: BrowserObservation): BrowserActionCommand {
     targetId: observation.target.id,
     expectedTargetGeneration: observation.target.targetGeneration,
     expectedDocumentGeneration: observation.target.documentGeneration,
-    expectedFrameId: observation.frameId,
+    expectedFrameId: observation.frameId!,
     actor: { kind: "system", subjectId: "server-test" },
     action: { type: "click", locator: { kind: "ref", ref: "e1" } },
+  };
+}
+
+function protectedAuthCommand(observation: BrowserObservation): BrowserProtectedAuthFillCommand {
+  return {
+    protocolVersion: 1,
+    operationId: randomUUID(),
+    browserSessionId: observation.browserSessionId,
+    controllerGeneration: observation.target.controllerGeneration,
+    targetId: observation.target.id,
+    expectedTargetGeneration: observation.target.targetGeneration,
+    expectedDocumentGeneration: observation.target.documentGeneration!,
+    expectedFrameId: observation.frameId!,
+    actor: { kind: "system", subjectId: "credential-broker-test" },
+    authorityId: "password-authority",
+    credentialVersion: 1,
+    allowedOrigins: ["https://example.test"],
+    fields: [
+      {
+        fieldId: "password",
+        locator: { kind: "ref", ref: "e-password" },
+        purpose: "password",
+        value: "server-test-password",
+      },
+    ],
+    submit: { type: "press", key: "Enter" },
   };
 }
 

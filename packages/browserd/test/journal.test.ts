@@ -1,11 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { BrowserActionReceipt } from "@opengeni/contracts";
-import { BrowserInteractionController, type BrowserInteractionDriver } from "@opengeni/interaction";
+import {
+  BrowserInteractionController,
+  BrowserProtectedAuthController,
+  type BrowserInteractionDriver,
+} from "@opengeni/interaction";
 import { Database } from "bun:sqlite";
-import { SqliteBrowserOperationJournal } from "../src";
+import { SqliteBrowserOperationJournal, SqliteBrowserProtectedAuthJournal } from "../src";
 
 const browserSessionId = "11111111-1111-4111-8111-111111111111";
 const controllerGeneration = "controller-1";
@@ -192,6 +196,52 @@ describe("SqliteBrowserOperationJournal", () => {
   });
 });
 
+describe("SqliteBrowserProtectedAuthJournal", () => {
+  test("never persists secret values and replays an exact non-secret command identity", async () => {
+    const directory = await mkdtemp("/tmp/ogb-protected-journal-");
+    const path = join(directory, "protected.sqlite");
+    const operationId = id(9);
+    const journal = await SqliteBrowserProtectedAuthJournal.open({
+      path,
+      browserSessionId,
+      controllerGeneration,
+    });
+    let dispatches = 0;
+    const makeController = () =>
+      new BrowserProtectedAuthController({
+        browserSessionId,
+        controllerGeneration,
+        initialJournal: journal.loadAndRecover(settledAt),
+        onJournalRecord: (next) => journal.write(next),
+        driver: {
+          async target() {
+            return protectedTarget();
+          },
+          async observe() {
+            return { target: protectedTarget(), status: "working" };
+          },
+          async dispatch() {
+            dispatches += 1;
+            return { target: protectedTarget(), status: "submitted" };
+          },
+        },
+      });
+    try {
+      const first = await makeController().run(protectedCommand(operationId, "journal-secret"));
+      const replay = await makeController().run(protectedCommand(operationId, "rotated-secret"));
+      expect(first.state).toBe("completed");
+      expect(replay).toEqual(first);
+      expect(dispatches).toBe(1);
+    } finally {
+      journal.close();
+    }
+    const durableBytes = await readFile(path, "utf8");
+    expect(durableBytes).not.toContain("journal-secret");
+    expect(durableBytes).not.toContain("rotated-secret");
+    await rm(directory, { recursive: true, force: true });
+  });
+});
+
 async function withJournal(
   callback: (fixture: { path: string; journal: SqliteBrowserOperationJournal }) => Promise<void>,
   options: { maxEntries?: number } = {},
@@ -256,6 +306,48 @@ function command(operationId: string) {
     expectedFrameId: "frame-1",
     actor: { kind: "system" as const, subjectId: "fixture" },
     action: { type: "click" as const, locator: { kind: "ref" as const, ref: "e1" } },
+  };
+}
+
+function protectedTarget() {
+  return {
+    id: "target-1",
+    browserSessionId,
+    controllerGeneration,
+    targetGeneration: "target-1",
+    documentGeneration: "document-1",
+    kind: "page" as const,
+    title: "Fixture",
+    url: "https://fixture.test/",
+    selected: true,
+    attached: true,
+    createdAt: settledAt,
+  };
+}
+
+function protectedCommand(operationId: string, value: string) {
+  return {
+    protocolVersion: 1 as const,
+    operationId,
+    browserSessionId,
+    controllerGeneration,
+    targetId: "target-1",
+    expectedTargetGeneration: "target-1",
+    expectedDocumentGeneration: "document-1",
+    expectedFrameId: "frame-1",
+    actor: { kind: "system" as const, subjectId: "credential-broker" },
+    authorityId: "password-authority",
+    credentialVersion: 1,
+    allowedOrigins: ["https://fixture.test"],
+    fields: [
+      {
+        fieldId: "password",
+        locator: { kind: "ref" as const, ref: "e-password" },
+        purpose: "password" as const,
+        value,
+      },
+    ],
+    submit: { type: "press" as const, key: "Enter" },
   };
 }
 

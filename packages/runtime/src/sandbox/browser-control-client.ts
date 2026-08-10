@@ -10,6 +10,8 @@ import {
   BrowserActionReceipt,
   BrowserDiagnosticBatch,
   BrowserObservation,
+  BrowserProtectedAuthFillCommand,
+  BrowserProtectedAuthFillReceipt,
   BrowserRevisionMaterialization,
   BrowserTarget,
   ComputerActionCommand,
@@ -23,6 +25,8 @@ import {
   type BrowserDiagnosticBatch as BrowserDiagnosticBatchValue,
   type BrowserDiagnosticKind,
   type BrowserObservation as BrowserObservationValue,
+  type BrowserProtectedAuthFillCommand as BrowserProtectedAuthFillCommandValue,
+  type BrowserProtectedAuthFillReceipt as BrowserProtectedAuthFillReceiptValue,
   type BrowserRevisionMaterialization as BrowserRevisionMaterializationValue,
   type BrowserTarget as BrowserTargetValue,
   type ComputerActionCommand as ComputerActionCommandValue,
@@ -954,6 +958,40 @@ export class BrowserControlSessionClient {
         method: "GET",
         path: this.path(`operations/${requireUuid(operationId, "operation id")}`),
         token: this.viewToken,
+      }),
+    );
+  }
+
+  /** Broker-only credential path. Callers must never pass this command through
+   * model-visible tool arguments, events, logs, or durable session history. */
+  async protectedAuthFill(
+    command: BrowserProtectedAuthFillCommandValue,
+  ): Promise<BrowserProtectedAuthFillReceiptValue> {
+    const parsed = BrowserProtectedAuthFillCommand.parse(command);
+    if (
+      parsed.browserSessionId !== this.reference.browserSessionId ||
+      parsed.controllerGeneration !== this.reference.controllerGeneration
+    ) {
+      throw new BrowserControlProtocolError(
+        "protected fill targets another browser controller binding",
+      );
+    }
+    return BrowserProtectedAuthFillReceipt.parse(
+      await this.parent.requestForSession({
+        method: "POST",
+        path: this.path("protected-auth-fills"),
+        token: this.controlToken,
+        body: parsed,
+      }),
+    );
+  }
+
+  async protectedAuthReceipt(operationId: string): Promise<BrowserProtectedAuthFillReceiptValue> {
+    return BrowserProtectedAuthFillReceipt.parse(
+      await this.parent.requestForSession({
+        method: "GET",
+        path: this.path(`protected-auth-operations/${requireUuid(operationId, "operation id")}`),
+        token: this.controlToken,
       }),
     );
   }

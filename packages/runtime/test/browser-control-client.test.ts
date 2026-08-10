@@ -32,10 +32,11 @@ afterEach(async () => {
 });
 
 describe("BrowserControlClient", () => {
-  test("drives the typed placement protocol without putting credentials in commands", async () => {
+  test("drives the typed placement protocol without putting credentials in shell commands", async () => {
     const browserSessionId = randomUUID();
     const workspaceId = randomUUID();
     const stateOperationId = randomUUID();
+    const protectedAuthOperationId = randomUUID();
     const controllerGeneration = "controller-1";
     const linkedComputerSessionId = randomUUID();
     const restoreKey = Buffer.alloc(32, 9);
@@ -96,6 +97,38 @@ describe("BrowserControlClient", () => {
         }
         if (url.pathname.endsWith("/targets") && request.method === "GET") {
           return success([target]);
+        }
+        if (url.pathname.endsWith("/protected-auth-fills") && request.method === "POST") {
+          const body = (await request.json()) as { operationId: string };
+          return success({
+            protocolVersion: 1,
+            operationId: body.operationId,
+            browserSessionId,
+            controllerGeneration,
+            targetId: target.id,
+            state: "completed",
+            dispatchedAt: "2026-08-10T12:00:00.000Z",
+            settledAt: "2026-08-10T12:00:01.000Z",
+            observation: { target, status: "submitted" },
+            error: null,
+          });
+        }
+        if (
+          url.pathname.endsWith(`/protected-auth-operations/${protectedAuthOperationId}`) &&
+          request.method === "GET"
+        ) {
+          return success({
+            protocolVersion: 1,
+            operationId: protectedAuthOperationId,
+            browserSessionId,
+            controllerGeneration,
+            targetId: target.id,
+            state: "completed",
+            dispatchedAt: "2026-08-10T12:00:00.000Z",
+            settledAt: "2026-08-10T12:00:01.000Z",
+            observation: { target, status: "submitted" },
+            error: null,
+          });
         }
         if (url.pathname === "/v1/failure") {
           return failure(409, "controller_stale", "controller moved");
@@ -195,15 +228,43 @@ describe("BrowserControlClient", () => {
         controllerGeneration,
         artifactDigest: "a".repeat(64),
       });
-      expect(
-        await client
-          .sessionClient({
-            reference: { browserSessionId, controllerGeneration },
-            controlToken,
-            viewToken,
-          })
-          .listTargets(),
-      ).toEqual([target]);
+      const browserSession = client.sessionClient({
+        reference: { browserSessionId, controllerGeneration },
+        controlToken,
+        viewToken,
+      });
+      expect(await browserSession.listTargets()).toEqual([target]);
+      const protectedAuthCommand = {
+        protocolVersion: 1 as const,
+        operationId: protectedAuthOperationId,
+        browserSessionId,
+        controllerGeneration,
+        targetId: target.id,
+        expectedTargetGeneration: target.targetGeneration,
+        expectedDocumentGeneration: target.documentGeneration!,
+        expectedFrameId: observation.frameId!,
+        actor: { kind: "system" as const, subjectId: "credential-broker" },
+        authorityId: "password-authority",
+        credentialVersion: 1,
+        allowedOrigins: ["https://example.test"],
+        fields: [
+          {
+            fieldId: "password",
+            locator: { kind: "css" as const, selector: "#password" },
+            purpose: "password" as const,
+            value: "placement-private-password",
+          },
+        ],
+        submit: { type: "press" as const, key: "Enter" },
+      };
+      expect(await browserSession.protectedAuthFill(protectedAuthCommand)).toMatchObject({
+        operationId: protectedAuthOperationId,
+        state: "completed",
+      });
+      expect(await browserSession.protectedAuthReceipt(protectedAuthOperationId)).toMatchObject({
+        operationId: protectedAuthOperationId,
+        state: "completed",
+      });
       expect(
         await client.frameStreamUrl({ browserSessionId, controllerGeneration }, target.id),
       ).toBe(
@@ -236,13 +297,16 @@ describe("BrowserControlClient", () => {
       expect(placement.commands.every((command) => !command.includes(controlToken))).toBe(true);
       expect(placement.commands.every((command) => !command.includes(viewToken))).toBe(true);
       expect(
+        placement.commands.every((command) => !command.includes("placement-private-password")),
+      ).toBe(true);
+      expect(
         placement.commands.every((command) => !command.includes(restoreKey.toString("base64"))),
       ).toBe(true);
       expect(
         placement.commands.every((command) => !command.includes(restoreAad.toString("base64"))),
       ).toBe(true);
       expect(placement.writes.some((entry) => entry.content.includes(adminToken))).toBe(true);
-      expect(placement.finalizations).toBe(6);
+      expect(placement.finalizations).toBe(8);
       for (const path of placement.writes.map((entry) => dirname(entry.path))) {
         if (!path.includes("opengeni-browser-control-client")) continue;
         await expect(stat(path)).rejects.toThrow();

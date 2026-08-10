@@ -5,6 +5,8 @@ import {
   BrowserActionCommand,
   BrowserRevisionMaterialization,
   type BrowserActionCommand as BrowserActionCommandValue,
+  BrowserProtectedAuthFillCommand,
+  type BrowserProtectedAuthFillCommand as BrowserProtectedAuthFillCommandValue,
   ComputerActionCommand,
   type ComputerActionCommand as ComputerActionCommandValue,
   type InteractionError,
@@ -342,12 +344,35 @@ export class BrowserControlServer {
       }
       return success(await this.supervisor.action(command));
     }
+    if (segments.length === 4 && segments[3] === "protected-auth-fills") {
+      if (request.method !== "POST") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      const command = parseProtectedAuthFillCommand(await readJson(request));
+      if (command.browserSessionId !== browserSessionId) {
+        throw new ProtocolError(
+          "operation_conflict",
+          "protected fill targets another browser session",
+          409,
+        );
+      }
+      return success(await this.supervisor.protectedAuthFill(command));
+    }
     if (segments.length === 5 && segments[3] === "operations") {
       if (request.method !== "GET") {
         throw new ProtocolError("invalid_action", "method not allowed", 405);
       }
       const operationId = requireUuid(segments[4], "operation id");
       const receipt = this.supervisor.receipt(reference, operationId);
+      if (!receipt) throw new ProtocolError("resource_not_found", "operation not found", 404);
+      return success(receipt);
+    }
+    if (segments.length === 5 && segments[3] === "protected-auth-operations") {
+      if (request.method !== "GET") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      const operationId = requireUuid(segments[4], "operation id");
+      const receipt = this.supervisor.protectedAuthReceipt(reference, operationId);
       if (!receipt) throw new ProtocolError("resource_not_found", "operation not found", 404);
       return success(receipt);
     }
@@ -1319,7 +1344,13 @@ function interactionStatus(code: string): number {
 }
 
 function routeNeedsControl(segments: readonly string[], request: Request): boolean {
-  if (segments[3] === "actions") return true;
+  if (
+    segments[3] === "actions" ||
+    segments[3] === "protected-auth-fills" ||
+    segments[3] === "protected-auth-operations"
+  ) {
+    return true;
+  }
   if (segments[3] !== "targets") return false;
   if (segments.length === 4) return request.method === "POST";
   if (segments.length === 5) return request.method === "DELETE";
@@ -1364,6 +1395,14 @@ async function readJsonObject(request: Request): Promise<Record<string, unknown>
 function parseActionCommand(value: unknown): BrowserActionCommandValue {
   const result = BrowserActionCommand.safeParse(value);
   if (!result.success) throw new ProtocolError("invalid_action", "browser action is invalid", 400);
+  return result.data;
+}
+
+function parseProtectedAuthFillCommand(value: unknown): BrowserProtectedAuthFillCommandValue {
+  const result = BrowserProtectedAuthFillCommand.safeParse(value);
+  if (!result.success) {
+    throw new ProtocolError("invalid_action", "protected-fill command is invalid", 400);
+  }
   return result.data;
 }
 

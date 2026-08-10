@@ -8,6 +8,8 @@ import type {
   BrowserDiagnosticBatch,
   BrowserDiagnosticKind,
   BrowserObservation,
+  BrowserProtectedAuthFillCommand,
+  BrowserProtectedAuthObservation,
   BrowserRevisionMaterialization,
   BrowserTarget,
 } from "@opengeni/contracts";
@@ -17,7 +19,9 @@ import {
 } from "@opengeni/contracts";
 import {
   BrowserInteractionController,
+  BrowserProtectedAuthController,
   InteractionControllerError,
+  InteractionDefiniteDriverError,
   type BrowserInteractionAuthority,
   type BrowserInteractionDriver,
 } from "@opengeni/interaction";
@@ -32,6 +36,7 @@ import {
 } from "./media";
 import { AgentBrowserJsonRunner, browserProfileCryptoPolicy } from "./runner";
 import { SqliteBrowserOperationJournal } from "./journal";
+import { SqliteBrowserProtectedAuthJournal } from "./protected-auth-journal";
 import {
   captureEncryptedBrowserProfile,
   restoreEncryptedBrowserProfile,
@@ -145,6 +150,7 @@ export type BrowserSupervisorDriver = BrowserInteractionDriver & {
     },
   ): Promise<BrowserDiagnosticBatch>;
   runtimeSnapshot(): Promise<BrowserRuntimeSnapshot>;
+  protectedFill(command: BrowserProtectedAuthFillCommand): Promise<BrowserProtectedAuthObservation>;
   close(): Promise<void>;
 };
 
@@ -174,9 +180,11 @@ type Runtime = {
   sessionDirectory: string;
   driverContext: BrowserSupervisorDriverContext;
   journal: SqliteBrowserOperationJournal;
+  protectedAuthJournal: SqliteBrowserProtectedAuthJournal;
   stateJournal: SqliteBrowserStateTransferJournal;
   driver: BrowserSupervisorDriver;
   controller: BrowserInteractionController;
+  protectedAuthController: BrowserProtectedAuthController;
   lifecycle: "active" | "capturing" | "captured" | "ending";
 };
 
@@ -345,8 +353,19 @@ export class BrowserSupervisor {
     }).controller.run(command);
   }
 
+  protectedAuthFill(command: BrowserProtectedAuthFillCommand) {
+    return this.requireActive({
+      browserSessionId: command.browserSessionId,
+      controllerGeneration: command.controllerGeneration,
+    }).protectedAuthController.run(command);
+  }
+
   receipt(reference: BrowserSessionReference, operationId: string): BrowserActionReceipt | null {
     return this.requireBound(reference).controller.receipt(operationId);
+  }
+
+  protectedAuthReceipt(reference: BrowserSessionReference, operationId: string) {
+    return this.requireBound(reference).protectedAuthController.receipt(operationId);
   }
 
   async screenshot(
@@ -468,6 +487,17 @@ export class BrowserSupervisor {
       browserSessionId: options.browserSessionId,
       controllerGeneration: options.controllerGeneration,
     });
+    let protectedAuthJournal: SqliteBrowserProtectedAuthJournal;
+    try {
+      protectedAuthJournal = await SqliteBrowserProtectedAuthJournal.open({
+        path: join(sessionDirectory, "protected-auth-operations.sqlite"),
+        browserSessionId: options.browserSessionId,
+        controllerGeneration: options.controllerGeneration,
+      });
+    } catch (error) {
+      journal.close();
+      throw error;
+    }
     let stateJournal: SqliteBrowserStateTransferJournal;
     try {
       stateJournal = await SqliteBrowserStateTransferJournal.open({
@@ -477,6 +507,7 @@ export class BrowserSupervisor {
       });
     } catch (error) {
       journal.close();
+      protectedAuthJournal.close();
       throw error;
     }
     const driverContext: BrowserSupervisorDriverContext = {
@@ -497,18 +528,26 @@ export class BrowserSupervisor {
     let driver: BrowserSupervisorDriver | null = null;
     try {
       const initialJournal = journal.loadAndRecover();
+      const initialProtectedAuthJournal = protectedAuthJournal.loadAndRecover();
       driver = await this.createDriver(driverContext);
       const runtime = {
         options: runtimeOptions(options),
         sessionDirectory,
         driverContext,
         journal,
+        protectedAuthJournal,
         stateJournal,
         driver,
         lifecycle: "active" as const,
         controller: null as unknown as BrowserInteractionController,
+        protectedAuthController: null as unknown as BrowserProtectedAuthController,
       };
       runtime.controller = this.createController(runtime, driver, initialJournal);
+      runtime.protectedAuthController = this.createProtectedAuthController(
+        runtime,
+        driver,
+        initialProtectedAuthJournal,
+      );
       if (restoredManifest) {
         await restoreTabs(
           driver,
@@ -539,6 +578,11 @@ export class BrowserSupervisor {
       }
       try {
         journal.close();
+      } catch (cleanupError) {
+        failures.push(cleanupError);
+      }
+      try {
+        protectedAuthJournal.close();
       } catch (cleanupError) {
         failures.push(cleanupError);
       }
@@ -599,7 +643,10 @@ export class BrowserSupervisor {
     let uploadDispatched = false;
     try {
       runtime.lifecycle = "capturing";
-      await runtime.controller.waitForIdle();
+      await Promise.all([
+        runtime.controller.waitForIdle(),
+        runtime.protectedAuthController.waitForIdle(),
+      ]);
       snapshot = await runtime.driver.runtimeSnapshot();
       await runtime.driver.close();
       driverClosed = true;
@@ -666,6 +713,11 @@ export class BrowserSupervisor {
       await restoreTabs(driver, snapshot.tabs);
       runtime.driver = driver;
       runtime.controller = this.createController(runtime, driver, runtime.journal.loadAndRecover());
+      runtime.protectedAuthController = this.createProtectedAuthController(
+        runtime,
+        driver,
+        runtime.protectedAuthJournal.loadAndRecover(),
+      );
     } catch (error) {
       await driver.close().catch(() => undefined);
       throw error;
@@ -693,6 +745,44 @@ export class BrowserSupervisor {
             );
           }
           await runtime.options.authority?.authorizeDispatch(command);
+        },
+      },
+    });
+  }
+
+  private createProtectedAuthController(
+    runtime: Runtime,
+    driver: BrowserSupervisorDriver,
+    initialJournal: ReturnType<SqliteBrowserProtectedAuthJournal["loadAndRecover"]>,
+  ): BrowserProtectedAuthController {
+    return new BrowserProtectedAuthController({
+      browserSessionId: runtime.options.browserSessionId,
+      controllerGeneration: runtime.options.controllerGeneration,
+      initialJournal,
+      onJournalRecord: (record) => runtime.protectedAuthJournal.write(record),
+      driver: {
+        target: async (targetId) => await driver.target(targetId),
+        observe: async (targetId) => {
+          const target = await driver.target(targetId);
+          if (!target) {
+            throw new InteractionDefiniteDriverError(
+              "target_not_found",
+              "protected-fill browser target does not exist",
+            );
+          }
+          return { target, status: "working" };
+        },
+        dispatch: async (command) => await driver.protectedFill(command),
+      },
+      authority: {
+        authorizeDispatch: () => {
+          if (runtime.lifecycle !== "active") {
+            throw new InteractionControllerError(
+              "resource_unavailable",
+              "browser session is changing state",
+              true,
+            );
+          }
         },
       },
     });
@@ -761,6 +851,7 @@ export class BrowserSupervisor {
     const failures: unknown[] = [];
     let driverClosed = driverAlreadyClosed;
     let actionJournalClosed = false;
+    let protectedAuthJournalClosed = false;
     let stateJournalClosed = false;
     if (!driverAlreadyClosed) {
       try {
@@ -773,6 +864,12 @@ export class BrowserSupervisor {
     try {
       runtime.journal.close();
       actionJournalClosed = true;
+    } catch (error) {
+      failures.push(error);
+    }
+    try {
+      runtime.protectedAuthJournal.close();
+      protectedAuthJournalClosed = true;
     } catch (error) {
       failures.push(error);
     }
@@ -792,7 +889,13 @@ export class BrowserSupervisor {
         failures.push(error);
       }
     }
-    if (removeState && driverClosed && actionJournalClosed && stateJournalClosed) {
+    if (
+      removeState &&
+      driverClosed &&
+      actionJournalClosed &&
+      protectedAuthJournalClosed &&
+      stateJournalClosed
+    ) {
       try {
         await rm(runtime.sessionDirectory, { recursive: true, force: true });
       } catch (error) {
@@ -809,6 +912,14 @@ export class BrowserSupervisor {
       throw new InteractionControllerError("resource_unavailable", "browser supervisor is closed");
     }
   }
+}
+
+function aggregateFailure(
+  errors: readonly unknown[],
+  message: string,
+  cause: unknown,
+): AggregateError {
+  return new AggregateError(errors, message, { cause });
 }
 
 async function createBrowserDriver(

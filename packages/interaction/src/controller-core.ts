@@ -113,6 +113,10 @@ export type InteractionControllerCoreOptions<
   now?: () => Date;
   initialJournal?: readonly InteractionOperationJournalRecord<TReceipt>[];
   onJournalRecord?: (record: InteractionOperationJournalRecord<TReceipt>) => Promise<void> | void;
+  /** Override only when a private command contains ephemeral secret material.
+   * The callback must bind every non-secret semantic input while excluding the
+   * value bytes themselves and return lowercase SHA-256. */
+  commandDigest?: (command: TCommand) => string;
 };
 
 type JournalEntry<TReceipt> = InteractionOperationJournalRecord<TReceipt> & {
@@ -145,6 +149,7 @@ export class InteractionControllerCore<
   private readonly onJournalRecord:
     | ((record: InteractionOperationJournalRecord<TReceipt>) => Promise<void> | void)
     | undefined;
+  private readonly commandDigest: (command: TCommand) => string;
   private readonly journal = new Map<string, JournalEntry<TReceipt>>();
   private readonly targetTails = new Map<string, Promise<void>>();
 
@@ -157,6 +162,7 @@ export class InteractionControllerCore<
     this.maxJournalEntries = options.maxJournalEntries ?? 10_000;
     this.now = options.now ?? (() => new Date());
     this.onJournalRecord = options.onJournalRecord;
+    this.commandDigest = options.commandDigest ?? digestJson;
     if (!Number.isSafeInteger(this.maxJournalEntries) || this.maxJournalEntries < 1) {
       throw new Error("maxJournalEntries must be a positive safe integer");
     }
@@ -173,7 +179,10 @@ export class InteractionControllerCore<
   run(commandInput: TCommand): Promise<TReceipt> {
     const command = this.adapter.parseCommand(commandInput);
     this.adapter.assertCommandAuthority(command);
-    const commandDigest = digestJson(command);
+    const commandDigest = this.commandDigest(command);
+    if (!/^[0-9a-f]{64}$/u.test(commandDigest)) {
+      throw new Error(`${this.adapter.resourceLabel} command digest must be lowercase SHA-256`);
+    }
     const existing = this.journal.get(command.operationId);
     if (existing) {
       if (existing.commandDigest !== commandDigest) {

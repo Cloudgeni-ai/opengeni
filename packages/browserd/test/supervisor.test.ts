@@ -594,6 +594,10 @@ function fakeDriver(
       await hooks.dispatch?.();
       return observation();
     },
+    async protectedFill() {
+      requireOpen();
+      return { target: { ...target }, status: "submitted" };
+    },
     async captureScreenshot() {
       requireOpen();
       return {

@@ -336,6 +336,7 @@ CREATE TABLE "interaction_resource_operations" (
   "resource_id" uuid NOT NULL,
   "kind" text NOT NULL,
   "request_digest" text NOT NULL,
+  "metadata" jsonb NOT NULL DEFAULT '{}'::jsonb,
   "state" text NOT NULL DEFAULT 'completed',
   "result_version" bigint,
   "result" jsonb,
@@ -354,6 +355,8 @@ CREATE TABLE "interaction_resource_operations" (
     CHECK ("state" IN ('prepared', 'dispatched', 'completed', 'failed', 'outcome_unknown')),
   CONSTRAINT "interaction_resource_operations_values_check" CHECK (
     "request_digest" ~ '^[0-9a-f]{64}$'
+    AND jsonb_typeof("metadata") = 'object'
+    AND octet_length("metadata"::text) BETWEEN 2 AND 65536
     AND ("result_version" IS NULL OR "result_version" > 0)
     AND ("result" IS NULL OR (
       jsonb_typeof("result") = 'object'
