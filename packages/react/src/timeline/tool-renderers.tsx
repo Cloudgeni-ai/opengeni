@@ -1,14 +1,18 @@
 import type { GitFileDiff, RetainedArtifactReference } from "@opengeni/sdk";
+import { parseEditableArtifactPublicationReceipt } from "@opengeni/sdk/editable-artifact-publication";
 import {
+  ArrowRightIcon,
   BoxIcon,
   BrainCircuitIcon,
   CalendarClockIcon,
   CameraIcon,
   CameraOffIcon,
   FileDiffIcon,
+  FilePenLineIcon,
   FileSearchIcon,
   FolderGitIcon,
   GlobeIcon,
+  GalleryHorizontalEndIcon,
   ImageIcon,
   KeyboardIcon,
   KeyRoundIcon,
@@ -25,11 +29,12 @@ import {
   ServerIcon,
   Share2Icon,
   TargetIcon,
+  Table2Icon,
   TerminalIcon,
   WrenchIcon,
 } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { stringifyPayload, tryParseJson } from "../lib/format";
+import { formatBytes, stringifyPayload, tryParseJson } from "../lib/format";
 import { useTimelineComputeLabel } from "./compute-label";
 import {
   applyPatchOpsFromToolItem,
@@ -965,6 +970,83 @@ function GeneratedImageRenderer({ item, loadRetainedArtifact }: ToolRendererProp
       cancelled={item.status === "cancelled"}
     />
   );
+}
+
+function EditableArtifactPublicationRenderer({ item }: ToolRendererProps) {
+  const args = parseToolArgs(item.arguments);
+  const requestedTitle = typeof args.title === "string" ? args.title : "artifact";
+  const requestedModality =
+    args.modality === "document" ||
+    args.modality === "spreadsheet" ||
+    args.modality === "presentation"
+      ? args.modality
+      : null;
+  const noun = requestedModality ?? "artifact";
+  const icon = editableArtifactIcon(requestedModality);
+  if (item.status === "running") {
+    return (
+      <ActivityDisclosure
+        icon={icon}
+        iconTone="running"
+        title={`Publishing editable ${noun}`}
+        running
+        preview={<RunningPreview>{truncatePreview(requestedTitle, 80)}</RunningPreview>}
+      />
+    );
+  }
+  const raw =
+    item.raw && typeof item.raw === "object" && !Array.isArray(item.raw)
+      ? (item.raw as Record<string, unknown>)
+      : null;
+  const receipt =
+    parseEditableArtifactPublicationReceipt(item.output) ??
+    parseEditableArtifactPublicationReceipt(raw?.output);
+  if (!receipt) {
+    if (item.status !== "failed" && item.status !== "cancelled") {
+      return <GenericRenderer item={item} />;
+    }
+    return (
+      <ActivityDisclosure
+        icon={icon}
+        title={`Publish editable ${noun}`}
+        failed={item.status === "failed"}
+        cancelled={item.status === "cancelled"}
+        preview={truncatePreview(requestedTitle, 80)}
+      >
+        <PayloadBlock label="Arguments" value={args} />
+        {item.output !== undefined ? <PayloadBlock label="Output" value={item.output} /> : null}
+      </ActivityDisclosure>
+    );
+  }
+  return (
+    <ActivityDisclosure
+      icon={editableArtifactIcon(receipt.artifact.modality)}
+      iconTone="accent"
+      title={`Published editable ${receipt.artifact.modality}`}
+      preview={`${receipt.artifact.title} · ${receipt.sourceFile.filename}`}
+    >
+      <BodyNote>{receipt.artifact.title}</BodyNote>
+      <a
+        href={receipt.editorPath}
+        className="group/memlink inline-flex min-h-9 items-center gap-1.5 rounded-og-md bg-og-accent px-3 py-1.5 text-og-sm font-medium text-og-accent-fg transition-colors hover:bg-og-accent-strong"
+      >
+        Open editor
+        <ArrowRightIcon className="size-3.5 transition-transform group-hover/memlink:translate-x-0.5" />
+      </a>
+      <BodyNote>
+        {receipt.sourceFile.filename} · {formatBytes(receipt.sourceFile.sizeBytes)}
+      </BodyNote>
+    </ActivityDisclosure>
+  );
+}
+
+function editableArtifactIcon(
+  modality: "document" | "spreadsheet" | "presentation" | null,
+): ReactNode {
+  if (modality === "document") return <FilePenLineIcon className={ICON_SIZE} />;
+  if (modality === "spreadsheet") return <Table2Icon className={ICON_SIZE} />;
+  if (modality === "presentation") return <GalleryHorizontalEndIcon className={ICON_SIZE} />;
+  return <PanelsTopLeftIcon className={ICON_SIZE} />;
 }
 
 function GeneratedImageDisclosure({
@@ -2173,6 +2255,11 @@ const BASE_ENTRIES: ToolRegistryEntry[] = [
   { match: "name", name: "web_search_call", render: WebSearchRenderer },
   { match: "name", name: "image_generation_call", render: GeneratedImageRenderer },
   { match: "name", name: "generate_image", render: GeneratedImageRenderer },
+  {
+    match: "name",
+    name: "publish_editable_artifact",
+    render: EditableArtifactPublicationRenderer,
+  },
   { match: "name", name: "tool_search", render: ToolSearchRenderer },
   { match: "name", name: "view_image", render: ViewImageRenderer },
   { match: "name", name: "environment_set_variable", render: SecretSetRenderer },

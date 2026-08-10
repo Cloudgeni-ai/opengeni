@@ -334,10 +334,11 @@ export async function withRlsContext<T>(
     // manufacturing a phantom "no active subscription" from a credential that is
     // in fact active. Convert that silent false into a loud, root-cause-bearing
     // error so the caller can retry rather than permanently mis-decide.
-    const applied = await tx.execute<{
+    const applied = await rawRows<{
       account_id: string | null;
       workspace_id: string | null;
     }>(
+      scoped,
       sql`select
         current_setting('opengeni.account_id', true) as account_id,
         current_setting('opengeni.workspace_id', true) as workspace_id`,

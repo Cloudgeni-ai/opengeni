@@ -1,0 +1,1 @@
+OpenGeni artifact native/WASM binding protocol corpus seed v1

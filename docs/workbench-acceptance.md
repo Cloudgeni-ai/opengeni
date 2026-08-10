@@ -370,7 +370,7 @@ replacement for review or acceptance.
 2. Merge the generated Version PR so the release source has exact package
    versions and no pending changesets.
 3. Dispatch `release-candidate.yml` from that exact current `main` SHA and
-   package plan. Build the five physical images once, record their digests, and
+   package plan. Build the seven physical images once, record their digests, and
    record `migration → api`. The selected public OCI prefix must remain
    identical through candidate, embedded/final promotion, and BOM publication.
 4. Deploy those exact receipt digests to staging.

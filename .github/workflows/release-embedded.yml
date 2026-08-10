@@ -292,7 +292,7 @@ jobs:
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
         run: |
           set -euo pipefail
-          for role in api worker web relay sandbox; do
+          for role in api worker web relay sandbox artifact-materializer artifact-outbox-dispatcher; do
             name="$(jq -er --arg role "$role" '.images[$role].name' evidence/release-candidate.json)"
             expected="$(jq -er --arg role "$role" '.images[$role].digest' evidence/release-candidate.json)"
             for tag in "$RELEASE_VERSION" "sha-${SOURCE_SHA}"; do
@@ -489,7 +489,7 @@ jobs:
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
         run: |
           set -euo pipefail
-          for role in api worker web relay sandbox; do
+          for role in api worker web relay sandbox artifact-materializer artifact-outbox-dispatcher; do
             name="$(jq -er --arg role "$role" '.images[$role].name' evidence/release-candidate.json)"
             digest="$(jq -er --arg role "$role" '.images[$role].digest' evidence/release-candidate.json)"
             source="${name}@${digest}"
@@ -516,7 +516,7 @@ jobs:
         run: |
           set -euo pipefail
           docker logout "$REGISTRY"
-          for role in api worker web relay sandbox; do
+          for role in api worker web relay sandbox artifact-materializer artifact-outbox-dispatcher; do
             name="$(jq -er --arg role "$role" '.images[$role].name' evidence/release-candidate.json)"
             expected="$(jq -er --arg role "$role" '.images[$role].digest' evidence/release-candidate.json)"
             for tag in "$RELEASE_VERSION" "sha-${SOURCE_SHA}"; do

@@ -9,6 +9,9 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { rewriteEntryPointsToDist } from "./rewrite-entry-points";
+import { rewriteWorkspaceDependenciesToConcrete } from "./rewrite-workspace-deps";
+import type { PackageJson } from "./publishable-workspaces";
 
 type PackageManifest = {
   name: string;
@@ -55,46 +58,14 @@ async function run(command: string[], cwd: string, capture = false): Promise<str
   return stdout;
 }
 
-function toDist(value: string, kind: "runtime" | "types"): string {
-  if (!value.startsWith("./src/")) return value;
-  return `./dist/${value
-    .slice("./src/".length)
-    .replace(/\.ts$/u, kind === "types" ? ".d.ts" : ".js")}`;
-}
-
 function releaseShape(
   source: PackageManifest,
   workspaceVersionByName: ReadonlyMap<string, string>,
 ): PackageManifest {
   const manifest = structuredClone(source);
   delete manifest.devDependencies;
-  for (const field of ["dependencies", "optionalDependencies", "peerDependencies"] as const) {
-    const dependencies = manifest[field];
-    if (!dependencies) continue;
-    for (const [name, range] of Object.entries(dependencies)) {
-      if (!range.startsWith("workspace:")) continue;
-      const version = workspaceVersionByName.get(name);
-      if (!version) throw new Error(`No workspace version found for ${name}`);
-      dependencies[name] = `^${version}`;
-    }
-  }
-  if (manifest.main) manifest.main = toDist(manifest.main, "runtime");
-  if (manifest.module) manifest.module = toDist(manifest.module, "runtime");
-  if (manifest.types) manifest.types = toDist(manifest.types, "types");
-  for (const [subpath, entry] of Object.entries(manifest.exports ?? {})) {
-    if (typeof entry === "string") {
-      manifest.exports![subpath] = toDist(entry, "runtime");
-      continue;
-    }
-    const next = { ...entry };
-    if (next.types) next.types = toDist(next.types, "types");
-    const runtime = next.import ?? next.default;
-    if (runtime) {
-      next.import = toDist(runtime, "runtime");
-      delete next.default;
-    }
-    manifest.exports![subpath] = next;
-  }
+  rewriteWorkspaceDependenciesToConcrete(manifest as PackageJson, workspaceVersionByName);
+  rewriteEntryPointsToDist(manifest as PackageJson);
   return manifest;
 }
 
@@ -131,12 +102,17 @@ async function stageTarball(
   const manifest = releaseShape(sourceManifest, versions);
   await writeFile(join(destination, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`);
   const packed = await run(
-    ["npm", "pack", "--ignore-scripts", "--json", "--pack-destination", tarballRoot],
+    ["bun", "pm", "pack", "--ignore-scripts", "--quiet", "--destination", tarballRoot],
     destination,
     true,
   );
-  const filename = (JSON.parse(packed) as Array<{ filename?: string }>)[0]?.filename;
-  if (!filename) throw new Error(`npm pack did not report a filename for ${manifest.name}`);
+  const filename = packed
+    .trim()
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .at(-1);
+  if (!filename) throw new Error(`bun pm pack did not report a filename for ${manifest.name}`);
   return { name: manifest.name, tarball: join(tarballRoot, basename(filename)) };
 }
 
@@ -184,13 +160,9 @@ try {
   process.stdout.write("[runtime-consumer] repeating install from the frozen lock\n");
   await run(["bun", "install", "--frozen-lockfile"], consumerRoot);
   await run(["bun", "probe.mjs"], consumerRoot);
-  await rm(join(consumerRoot, "node_modules"), { recursive: true, force: true });
-  process.stdout.write("[runtime-consumer] installing with npm for a Node host\n");
-  await run(["npm", "install", "--ignore-scripts", "--no-audit", "--no-fund"], consumerRoot);
-  await run(["node", "probe.mjs"], consumerRoot);
-  await rm(join(consumerRoot, "node_modules"), { recursive: true, force: true });
-  process.stdout.write("[runtime-consumer] repeating npm install from package-lock\n");
-  await run(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"], consumerRoot);
+  // Bun owns installation in this repository. Running the exact installed ESM
+  // under Node still proves Node resolver/runtime compatibility without a
+  // second package-manager lock or a different dependency graph.
   await run(["node", "probe.mjs"], consumerRoot);
   passed = true;
   process.stdout.write(

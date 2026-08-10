@@ -10,6 +10,7 @@ import {
   registerSlackInteractionRoutes,
   slackEventInboxEntry,
   slackInteractionRoutePolicy,
+  slackInvocationTaskText,
   slackReactionInboxEntry,
   slackReactionTaskText,
   SLACK_DELIVERY_EVENT_TYPES,
@@ -184,6 +185,19 @@ describe("Slack event classification and safe projection", () => {
     expect(
       slackEventInboxEntry(
         envelope({
+          type: "message",
+          user: "U1",
+          channel: "C1",
+          ts: "1.3",
+          thread_ts: "1.1",
+          text: "<@U_OPEN_GENI> Slack delivered this threaded mention as a message",
+        }),
+        bot,
+      )?.triggerKind,
+    ).toBe("app_mention");
+    expect(
+      slackEventInboxEntry(
+        envelope({
           type: "app_mention",
           user: "U1",
           channel: "C1",
@@ -220,6 +234,33 @@ describe("Slack event classification and safe projection", () => {
         bot,
       )?.triggerKind,
     ).toBe("thread_reply");
+  });
+
+  test("keeps a maximum-size mention plus context inside the Slack input budget", () => {
+    const prompt = slackInvocationTaskText(
+      {
+        slackMessageTs: "1.2",
+        slackUserId: "U1",
+        text: `<@U_OPEN_GENI> ${"x".repeat(8_000)}`,
+      },
+      {
+        kind: "channel",
+        nextCursor: "more",
+        messages: [
+          {
+            timestamp: "1.1",
+            userId: "U1",
+            botId: "",
+            threadTimestamp: "",
+            text: "preceding context",
+            files: [],
+          },
+        ],
+      },
+    );
+    expect(prompt.length).toBeLessThanOrEqual(8_000);
+    expect(prompt).toContain("The exact Slack invocation was truncated");
+    expect(prompt).toContain("Only bounded nearby channel context was provided.");
   });
 
   test("keeps human-DM shortcuts private and user-scoped before bot-DM rekey", () => {

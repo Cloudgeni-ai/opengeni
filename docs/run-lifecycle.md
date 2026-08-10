@@ -534,9 +534,10 @@ v1 WAIT/fallback command order only for deterministic replay; new workflow runs
 never select that path, and the current activity still writes the authoritative
 receipt. Temporal cancellation,
 completion, or failure is transport state and can never prove that a sandbox
-process or parallel tool operation stopped. Worker heartbeat throttles cap
-cancellation delivery at five seconds independently of the two-minute
-heartbeat timeout and the activity's ten-second heartbeat timer.
+process or parallel tool operation stopped. The turn activity heartbeat timer
+and worker SDK throttle share a 500 ms bound, leaving the unchanged four-second
+live control budget for physical writer drain and receipt-gated replacement
+admission independently of the two-minute heartbeat timeout.
 
 The dying `runAgentTurn` activity owns physical proof. It cancels the exact
 turn's tool/sandbox controller, waits for all controller-owned operations to
@@ -547,7 +548,11 @@ attempt-qualified credential deletion, cache, recording, provider, lease, or
 workspace housekeeping. The
 receipt, its `session.queue.changed` event, the session queue/sequence update,
 and the exact `session_workflow_wake_outbox` revision commit in one retryable,
-idempotent transaction. Provider completion and batch flushes that ignore
+idempotent transaction. The commit returns that exact still-undelivered wake;
+the activity immediately attempts its `signalWithStart` before NATS fanout, and
+the durable outbox retains the same revision for bounded repair if transport
+fails or the worker dies after commit. Provider completion and batch flushes
+that ignore
 cancellation are detached with rejection handlers; all later housekeeping is
 attempt-fenced and detachable. While either logical interruption or the exact
 physical receipt remains pending, `effectiveControl.settlement` stays typed as
@@ -559,7 +564,13 @@ and randomized command token before signalling; it reads those facts through
 or malformed identity remains fail-closed. An explicit `tty:false` command keeps
 pipe-mode stdin/stdout/stderr and never receives terminal control bytes during
 cancellation; the same marker-bound process-group TERM/KILL proof remains
-authoritative. Omitting `tty` preserves the existing interactive default.
+authoritative. Omitting `tty` preserves the existing interactive default. A
+durably retained command performs marker read, token/PGID validation, TERM/KILL,
+and group-absence proof in one bounded in-box helper on its exact pinned backend,
+then enters one exact provider-session settlement phase. Inconclusive identity,
+transport failure, or a still-live group retries that same idempotent proof and
+keeps admission closed; the ordinary path does not serialize one provider round
+trip per signal and poll.
 Modal turn-owned exec starts use isolated command-router handles. If cancellation
 arrives before `TaskExecStart` returns a provider session id, the controller
 closes only that pending handle, reattaches the same sandbox for control, writes
@@ -602,8 +613,8 @@ is never admission authority. The workflow waits up to five seconds for a wake
 and may then close without running another turn activity; the outbox continues
 bounded redelivery until the exact activity disappears or supplies its proof. A
 proof accepted at that timeout boundary is persisted before close. Once the
-receipt commits, its coalescing outbox wake uses
-`signalWithStart` on the same stable workflow id, which restarts the exact
+receipt commits, its coalescing outbox wake uses immediate `signalWithStart` on
+the same stable workflow id, which restarts the exact
 session and admits the replacement once. This event-driven path needs no
 quiescence scanner, inferred timeout, polling loop, synthetic user message,
 prompt/history/effect replay, or duplicate visible queue row. Admission searches

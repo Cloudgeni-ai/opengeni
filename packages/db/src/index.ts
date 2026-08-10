@@ -93,6 +93,8 @@ import type {
   WorkspaceMember,
   WorkspaceRegisteredPack,
   Rig,
+  RigProviderImage,
+  RigProviderImages,
   RigVersion,
   RigVerificationHealth,
   RigChange,
@@ -143,6 +145,7 @@ import {
   type LatencyMode,
   resolveWorkspaceMemoryEnabled,
   RigChange as RigChangeContract,
+  RigProviderImage as RigProviderImageContract,
   SessionGoal as SessionGoalContract,
   SessionSystemUpdatePayload,
   sessionSystemUpdateBatchHistoryItem,
@@ -1244,6 +1247,11 @@ export async function bootstrapWorkspace(
         subjectId: input.subjectId,
         ...(input.subjectLabel ? { subjectLabel: input.subjectLabel } : {}),
         permissions: row.membership.permissions as Permission[],
+        ...(input.accountExternalSource === "opengeni:local"
+          ? { principalKind: "human_session" as const }
+          : input.accountExternalSource === "opengeni:configured"
+            ? { principalKind: "configured_key" as const }
+            : {}),
       })),
       defaultAccountId: account.id,
       defaultWorkspaceId: workspace.id,
@@ -4024,6 +4032,128 @@ export async function createFileUpload(
         };
       }),
   );
+}
+
+export type PrepareEditableArtifactSourceFileInput = {
+  accountId: string;
+  workspaceId: string;
+  fileId: string;
+  uploadId: string;
+  filename: string;
+  safeFilename: string;
+  contentType: string;
+  sizeBytes: number;
+  sha256: string;
+  bucket: string;
+  objectKey: string;
+  expiresAt: Date;
+};
+
+/**
+ * Prepare one deterministic upload intent for an agent-published Office source.
+ * Retries return the same pending/ready file only when every immutable byte and
+ * storage fact matches; identity reuse with different content fails closed.
+ */
+export async function prepareEditableArtifactSourceFile(
+  db: Database,
+  input: PrepareEditableArtifactSourceFileInput,
+): Promise<{ file: FileAsset; uploadId: string; created: boolean }> {
+  if (!Number.isSafeInteger(input.sizeBytes) || input.sizeBytes < 1) {
+    throw new TypeError("Editable artifact source size is invalid");
+  }
+  if (!/^[0-9a-f]{64}$/u.test(input.sha256)) {
+    throw new TypeError("Editable artifact source sha256 is invalid");
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${`editable-artifact-source:${input.workspaceId}:${input.fileId}`}, 0))`,
+        );
+        const [existing] = await tx
+          .select({ file: schema.files, upload: schema.fileUploads })
+          .from(schema.files)
+          .innerJoin(
+            schema.fileUploads,
+            and(
+              eq(schema.fileUploads.workspaceId, schema.files.workspaceId),
+              eq(schema.fileUploads.fileId, schema.files.id),
+              eq(schema.fileUploads.id, input.uploadId),
+            ),
+          )
+          .where(
+            and(eq(schema.files.workspaceId, input.workspaceId), eq(schema.files.id, input.fileId)),
+          )
+          .for("update")
+          .limit(1);
+        if (existing) {
+          assertEditableArtifactSourceFileMatches(existing.file, existing.upload, input);
+          return { file: mapFile(existing.file), uploadId: existing.upload.id, created: false };
+        }
+
+        const [file] = await tx
+          .insert(schema.files)
+          .values({
+            id: input.fileId,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            status: "pending_upload",
+            filename: input.filename,
+            safeFilename: input.safeFilename,
+            contentType: input.contentType,
+            sizeBytes: input.sizeBytes,
+            sha256: input.sha256,
+            bucket: input.bucket,
+            objectKey: input.objectKey,
+          })
+          .returning();
+        if (!file) throw new Error("Failed to prepare editable artifact source file");
+        const [upload] = await tx
+          .insert(schema.fileUploads)
+          .values({
+            id: input.uploadId,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            fileId: input.fileId,
+            status: "pending",
+            expiresAt: input.expiresAt,
+          })
+          .returning();
+        if (!upload) throw new Error("Failed to prepare editable artifact source upload");
+        return { file: mapFile(file), uploadId: upload.id, created: true };
+      }),
+  );
+}
+
+function assertEditableArtifactSourceFileMatches(
+  file: typeof schema.files.$inferSelect,
+  upload: typeof schema.fileUploads.$inferSelect,
+  input: PrepareEditableArtifactSourceFileInput,
+): void {
+  const statusMatches =
+    (file.status === "pending_upload" && upload.status === "pending") ||
+    (file.status === "ready" && upload.status === "completed");
+  if (
+    !statusMatches ||
+    file.accountId !== input.accountId ||
+    file.workspaceId !== input.workspaceId ||
+    file.id !== input.fileId ||
+    upload.id !== input.uploadId ||
+    upload.accountId !== input.accountId ||
+    upload.workspaceId !== input.workspaceId ||
+    upload.fileId !== input.fileId ||
+    file.filename !== input.filename ||
+    file.safeFilename !== input.safeFilename ||
+    file.contentType !== input.contentType ||
+    file.sizeBytes !== input.sizeBytes ||
+    file.sha256 !== input.sha256 ||
+    file.bucket !== input.bucket ||
+    file.objectKey !== input.objectKey
+  ) {
+    throw new Error(`Editable artifact source identity conflict: ${input.fileId}`);
+  }
 }
 
 export async function getFile(
@@ -7142,6 +7272,83 @@ export type SlackInteractionProgressClaim =
     }
   | { kind: "limit_reached"; progressCount: number }
   | { kind: "not_owned" };
+
+export type SlackInteractionProgressDeliveryEvidence = {
+  sessionEventSequence: number;
+  operationId: string;
+  text: string;
+  turnId: string | null;
+};
+
+/**
+ * Read the at-most-three durable progress identities for terminal-delivery
+ * reconciliation. A reserved operation may still be provider-started after a
+ * response loss, so callers must retry the same operation id rather than
+ * inventing a second final post.
+ */
+export async function listSlackInteractionProgressDeliveryEvidence(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    interactionId: string;
+    sessionId: string;
+  },
+): Promise<SlackInteractionProgressDeliveryEvidence[]> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({
+        sessionEventSequence: schema.slackInteractionProgressDeliveries.sessionEventSequence,
+        operationId: schema.slackInteractionProgressDeliveries.operationId,
+        payload: schema.sessionEvents.payload,
+        payloadCodecVersion: schema.sessionEvents.payloadCodecVersion,
+        turnId: schema.sessionEvents.turnId,
+      })
+      .from(schema.slackInteractionProgressDeliveries)
+      .innerJoin(
+        schema.sessionEvents,
+        and(
+          eq(
+            schema.sessionEvents.workspaceId,
+            schema.slackInteractionProgressDeliveries.workspaceId,
+          ),
+          eq(schema.sessionEvents.sessionId, input.sessionId),
+          eq(
+            schema.sessionEvents.sequence,
+            schema.slackInteractionProgressDeliveries.sessionEventSequence,
+          ),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.slackInteractionProgressDeliveries.accountId, input.accountId),
+          eq(schema.slackInteractionProgressDeliveries.workspaceId, input.workspaceId),
+          eq(schema.slackInteractionProgressDeliveries.interactionId, input.interactionId),
+          eq(schema.sessionEvents.type, "agent.message.completed"),
+          or(
+            isNull(schema.sessionEvents.turnAssociation),
+            eq(schema.sessionEvents.turnAssociation, "current"),
+          ),
+          isNull(schema.sessionEvents.duplicateOfEventId),
+        ),
+      )
+      .orderBy(desc(schema.slackInteractionProgressDeliveries.sessionEventSequence))
+      .limit(3);
+    return rows.map((row) => {
+      const payload = fromPostgresLosslessJson(row.payload, row.payloadCodecVersion);
+      const text =
+        payload && typeof payload === "object" && !Array.isArray(payload)
+          ? (payload as Record<string, unknown>).text
+          : null;
+      return {
+        sessionEventSequence: row.sessionEventSequence,
+        operationId: row.operationId,
+        text: typeof text === "string" ? text : "",
+        turnId: row.turnId,
+      };
+    });
+  });
+}
 
 /**
  * Reserve one globally bounded progress slot before any Slack provider call.
@@ -11743,6 +11950,7 @@ function mapRigVersion(row: typeof schema.rigVersions.$inferSelect): RigVersion 
     credentialHooks: row.credentialHooks,
     defaultVariableSetIds: row.defaultVariableSetIds,
     changelog: row.changelog,
+    providerImages: row.providerImages,
     createdBy: row.createdBy,
     active: row.active,
     createdAt: row.createdAt.toISOString(),
@@ -11991,6 +12199,7 @@ export async function createRig(
           credentialHooks: content.credentialHooks ?? [],
           defaultVariableSetIds: content.defaultVariableSetIds ?? [],
           changelog: content.changelog ?? null,
+          providerImages: {},
           createdBy: content.createdBy ?? input.createdBy ?? null,
           active: true,
         })
@@ -12289,6 +12498,7 @@ export async function createRigVersion(
         credentialHooks: input.credentialHooks ?? [],
         defaultVariableSetIds: input.defaultVariableSetIds ?? [],
         changelog: input.changelog ?? null,
+        providerImages: {},
         createdBy: input.createdBy ?? null,
         active: options.activate ?? false,
       })
@@ -12311,6 +12521,7 @@ export async function createRigVersionForChangePromotion(
   changeId: string,
   input: RigVersionContentInput & {
     expectedActiveVersionId: string;
+    providerImages?: RigProviderImages;
   },
 ): Promise<{ version: RigVersion; change: RigChange }> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
@@ -12375,6 +12586,11 @@ export async function createRigVersionForChangePromotion(
         and(eq(schema.rigVersions.workspaceId, workspaceId), eq(schema.rigVersions.rigId, rigId)),
       );
     const nextVersion = Number(max) + 1;
+    const providerImages = await retainRigProviderImageArtifacts(
+      scopedDb,
+      workspaceId,
+      input.providerImages ?? {},
+    );
     await scopedDb
       .update(schema.rigVersions)
       .set({ active: false })
@@ -12398,6 +12614,7 @@ export async function createRigVersionForChangePromotion(
         credentialHooks: input.credentialHooks ?? [],
         defaultVariableSetIds: input.defaultVariableSetIds ?? [],
         changelog: input.changelog ?? null,
+        providerImages,
         createdBy: input.createdBy ?? null,
         active: true,
       })
@@ -12562,6 +12779,208 @@ export async function getRigVersionById(
       )
       .limit(1);
     return row ? mapRigVersion(row) : null;
+  });
+}
+
+export type RigProviderImageBuildClaim =
+  | { status: "claimed"; image: RigProviderImage }
+  | { status: "ready" | "in_progress" | "unsupported" | "conflict"; image: RigProviderImage };
+
+async function retainRigProviderImageArtifacts(
+  db: Database,
+  workspaceId: string,
+  images: RigProviderImages,
+): Promise<RigProviderImages> {
+  const retained: RigProviderImages = {};
+  for (const [backend, image] of Object.entries(images) as Array<
+    [SandboxBackend, RigProviderImage]
+  >) {
+    if (image.status !== "ready" || backend !== "modal") {
+      retained[backend] = image;
+      continue;
+    }
+    if (!image.artifactId || !image.imageId || !image.providerBindingKeyHash) continue;
+    const [artifact] = await db
+      .select({
+        id: schema.sandboxCheckpointArtifacts.id,
+        providerBindingKey: schema.sandboxCheckpointArtifacts.providerBindingKey,
+      })
+      .from(schema.sandboxCheckpointArtifacts)
+      .where(
+        and(
+          eq(schema.sandboxCheckpointArtifacts.id, image.artifactId),
+          eq(schema.sandboxCheckpointArtifacts.workspaceId, workspaceId),
+          eq(schema.sandboxCheckpointArtifacts.providerBackend, "modal"),
+          eq(schema.sandboxCheckpointArtifacts.objectKind, "modal_filesystem_snapshot"),
+          eq(schema.sandboxCheckpointArtifacts.objectId, image.imageId),
+          inArray(schema.sandboxCheckpointArtifacts.state, ["candidate", "current"]),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    const bindingHash = artifact
+      ? `sha256:${createHash("sha256").update(artifact.providerBindingKey, "utf8").digest("hex")}`
+      : null;
+    if (!artifact || bindingHash !== image.providerBindingKeyHash) continue;
+    // Checkpoint states `current` and `previous` are reserved for exact lease
+    // references by the ledger's deferred integrity trigger. Rig ownership is
+    // the transactionally published providerImages.artifactId reference, so a
+    // rig-owned artifact remains a candidate and the global GC function skips
+    // it while that ready reference exists.
+    retained[backend] = image;
+  }
+  return retained;
+}
+
+/**
+ * Claim the one provider-image build slot for an existing immutable rig
+ * version. A finalized ready image is never overwritten in place: if the
+ * effective base/content identity changed, callers must mint/verify a new rig
+ * version and runtime setup remains the truthful fallback for this one.
+ */
+export async function claimRigVersionProviderImageBuild(
+  db: Database,
+  input: {
+    workspaceId: string;
+    versionId: string;
+    image: RigProviderImage;
+    staleAfterMs: number;
+    /** Retry a same-content unsupported record only after runtime support exists. */
+    retryUnsupported?: boolean;
+  },
+): Promise<RigProviderImageBuildClaim> {
+  const candidate = RigProviderImageContract.parse(input.image);
+  if (candidate.status !== "building") {
+    throw new Error("Rig provider image build claims require status=building");
+  }
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.rigVersions)
+      .where(
+        and(
+          eq(schema.rigVersions.workspaceId, input.workspaceId),
+          eq(schema.rigVersions.id, input.versionId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!row) throw new Error(`Rig version not found: ${input.versionId}`);
+
+    const existing = row.providerImages[candidate.backend];
+    if (existing) {
+      const sameContent =
+        existing.contentHash === candidate.contentHash &&
+        existing.setupHash === candidate.setupHash &&
+        existing.sourceImage === candidate.sourceImage;
+      if (existing.status === "ready") {
+        if (!sameContent) return { status: "conflict", image: existing };
+        const retained = await retainRigProviderImageArtifacts(scopedDb, input.workspaceId, {
+          [existing.backend]: existing,
+        });
+        if (retained[existing.backend]) {
+          return { status: "ready", image: existing };
+        }
+      }
+      if (existing.status === "unsupported" && sameContent && !input.retryUnsupported) {
+        return { status: "unsupported", image: existing };
+      }
+      if (!sameContent) {
+        return { status: "conflict", image: existing };
+      }
+      if (existing.status === "building") {
+        const startedAtMs = Date.parse(existing.startedAt);
+        if (
+          Number.isFinite(startedAtMs) &&
+          Date.now() - startedAtMs < Math.max(1, input.staleAfterMs)
+        ) {
+          return { status: "in_progress", image: existing };
+        }
+      }
+    }
+
+    // Failed or stale retries retain the original provider idempotency key so
+    // an ambiguous first snapshot converges on the same immutable Image.
+    const claimed = RigProviderImageContract.parse({
+      ...candidate,
+      ...(existing?.buildRequestId ? { buildRequestId: existing.buildRequestId } : {}),
+    });
+    const providerImages: RigProviderImages = {
+      ...row.providerImages,
+      [claimed.backend]: claimed,
+    };
+    await scopedDb
+      .update(schema.rigVersions)
+      .set({ providerImages })
+      .where(
+        and(
+          eq(schema.rigVersions.workspaceId, input.workspaceId),
+          eq(schema.rigVersions.id, input.versionId),
+        ),
+      );
+    return { status: "claimed", image: claimed };
+  });
+}
+
+/** Finalize only the exact claimed build request; late callbacks are fenced. */
+export async function finalizeRigVersionProviderImageBuild(
+  db: Database,
+  input: {
+    workspaceId: string;
+    versionId: string;
+    image: RigProviderImage;
+  },
+): Promise<boolean> {
+  const finalized = RigProviderImageContract.parse(input.image);
+  if (finalized.status === "building") {
+    throw new Error("Rig provider image finalization requires a terminal status");
+  }
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.rigVersions)
+      .where(
+        and(
+          eq(schema.rigVersions.workspaceId, input.workspaceId),
+          eq(schema.rigVersions.id, input.versionId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!row) throw new Error(`Rig version not found: ${input.versionId}`);
+    const current = row.providerImages[finalized.backend];
+    if (
+      current?.status !== "building" ||
+      current.buildRequestId !== finalized.buildRequestId ||
+      current.contentHash !== finalized.contentHash ||
+      current.setupHash !== finalized.setupHash
+    ) {
+      return (
+        current?.status === finalized.status &&
+        current.buildRequestId === finalized.buildRequestId &&
+        current.contentHash === finalized.contentHash
+      );
+    }
+    if (finalized.status === "ready") {
+      const retained = await retainRigProviderImageArtifacts(scopedDb, input.workspaceId, {
+        [finalized.backend]: finalized,
+      });
+      if (!retained[finalized.backend]) return false;
+    }
+    const providerImages: RigProviderImages = {
+      ...row.providerImages,
+      [finalized.backend]: finalized,
+    };
+    await scopedDb
+      .update(schema.rigVersions)
+      .set({ providerImages })
+      .where(
+        and(
+          eq(schema.rigVersions.workspaceId, input.workspaceId),
+          eq(schema.rigVersions.id, input.versionId),
+        ),
+      );
+    return true;
   });
 }
 
@@ -34561,6 +34980,26 @@ export async function markSandboxCheckpointArtifactDeletePending(
             where lease.current_checkpoint_artifact_id = artifact.id
                or lease.previous_checkpoint_artifact_id = artifact.id
           )
+          and not exists (
+            select 1
+            from rig_versions version
+            cross join lateral jsonb_each(version.provider_images) provider_image
+            where version.workspace_id = ${input.workspaceId}
+              and provider_image.value ->> 'artifactId' = artifact.id::text
+              and provider_image.value ->> 'status' = 'ready'
+          )
+          and not exists (
+            select 1
+            from rig_changes change
+            join rig_versions base
+              on base.id = change.base_version_id
+             and base.workspace_id = change.workspace_id
+             and base.active = true
+            where change.workspace_id = ${input.workspaceId}
+              and change.status in ('verifying', 'proposed')
+              and change.verification #>> '{providerImage,artifactId}' = artifact.id::text
+              and change.verification #>> '{providerImage,status}' = 'ready'
+          )
         returning artifact.id
       `);
       return rows.length > 0;
@@ -43191,25 +43630,35 @@ export type SessionAttemptInterruptionSettlement = {
  * that recovery event is the logical settlement cause in place of a
  * Pause/Steer interruption row.
  */
-export async function markSessionAttemptQuiesced(
+export type MarkSessionAttemptQuiescedInput = {
+  accountId?: string;
+  workspaceId: string;
+  sessionId: string;
+  attemptId: string;
+  temporalWorkflowId: string;
+  /** When supplied, both values bind an activity-owned recovery proof to the
+   * exact persisted Temporal dispatch. Legacy v1 replay callers omit them. */
+  temporalWorkflowRunId?: string;
+  temporalActivityId?: string;
+  /** The dying activity also reaches this boundary for non-control ownership
+   * fences. It may no-op when no Pause/Steer interruption exists; replacement
+   * admission remains strict because only a durable interruption needs this
+   * receipt. */
+  allowUninterrupted?: boolean;
+};
+
+export type SessionAttemptQuiescenceCommit = {
+  events: SessionEvent[];
+  /** The exact still-undelivered outbox fact created by this commit, or found
+   * on an idempotent replay after a post-commit caller failure. Postgres remains
+   * the durable fallback; callers may deliver this fact immediately. */
+  workflowWake: SessionWorkflowWake | null;
+};
+
+export async function commitSessionAttemptQuiescence(
   db: Database,
-  input: {
-    accountId?: string;
-    workspaceId: string;
-    sessionId: string;
-    attemptId: string;
-    temporalWorkflowId: string;
-    /** When supplied, both values bind an activity-owned recovery proof to the
-     * exact persisted Temporal dispatch. Legacy v1 replay callers omit them. */
-    temporalWorkflowRunId?: string;
-    temporalActivityId?: string;
-    /** The dying activity also reaches this boundary for non-control ownership
-     * fences. It may no-op when no Pause/Steer interruption exists; replacement
-     * admission remains strict because only a durable interruption needs this
-     * receipt. */
-    allowUninterrupted?: boolean;
-  },
-): Promise<SessionEvent[]> {
+  input: MarkSessionAttemptQuiescedInput,
+): Promise<SessionAttemptQuiescenceCommit> {
   const persistence = {
     stage: "session_attempts.mark_quiesced",
     eventTypes: ["session.queue.changed"],
@@ -43308,7 +43757,7 @@ export async function markSessionAttemptQuiesced(
       attempt.state === "closed" &&
       attempt.outcome === "interrupted_recoverable";
     if (!interruption && !recoveryQuiescence) {
-      if (input.allowUninterrupted) return [];
+      if (input.allowUninterrupted) return { events: [], workflowWake: null };
       throw new SessionControlInvariantError(
         `Attempt ${input.attemptId} cannot acknowledge quiescence without its interruption or recovery request`,
       );
@@ -43439,6 +43888,35 @@ export async function markSessionAttemptQuiesced(
     };
 
     const clientEventId = `opengeni:attempt-quiesced:${input.attemptId}`;
+    const pendingWorkflowWake = async (): Promise<SessionWorkflowWake | null> => {
+      const [wake] = await scopedDb
+        .select({
+          accountId: schema.sessionWorkflowWakeOutbox.accountId,
+          workspaceId: schema.sessionWorkflowWakeOutbox.workspaceId,
+          sessionId: schema.sessionWorkflowWakeOutbox.sessionId,
+          temporalWorkflowId: schema.sessionWorkflowWakeOutbox.temporalWorkflowId,
+          wakeRevision: schema.sessionWorkflowWakeOutbox.wakeRevision,
+          deliveredRevision: schema.sessionWorkflowWakeOutbox.deliveredRevision,
+          controlRevision: schema.sessionWorkflowWakeOutbox.controlRevision,
+        })
+        .from(schema.sessionWorkflowWakeOutbox)
+        .where(
+          and(
+            eq(schema.sessionWorkflowWakeOutbox.workspaceId, input.workspaceId),
+            eq(schema.sessionWorkflowWakeOutbox.sessionId, input.sessionId),
+          ),
+        )
+        .limit(1);
+      if (!wake || wake.wakeRevision <= wake.deliveredRevision) return null;
+      return {
+        accountId: wake.accountId,
+        workspaceId: wake.workspaceId,
+        sessionId: wake.sessionId,
+        temporalWorkflowId: wake.temporalWorkflowId,
+        wakeRevision: wake.wakeRevision,
+        interruptionRequested: wake.controlRevision > wake.deliveredRevision,
+      };
+    };
     if (attempt.quiescedAt) {
       const [existing] = await scopedDb
         .select()
@@ -43456,9 +43934,15 @@ export async function markSessionAttemptQuiesced(
       // workflow may still execute this idempotent fallback after rollout. It
       // has no queue receipt to republish, but paused recovery projection still
       // converges through the same exact-attempt transaction.
-      return (
-        await projectPausedRecovery(existing ? [mapEvent(existing)] : [], session.lastSequence)
-      ).events;
+      const projected = await projectPausedRecovery(
+        existing ? [mapEvent(existing)] : [],
+        session.lastSequence,
+      );
+      return {
+        events: projected.events,
+        workflowWake:
+          projected.effectiveControl.state === "active" ? await pendingWorkflowWake() : null,
+      };
     }
 
     const now = new Date();
@@ -43519,6 +44003,7 @@ export async function markSessionAttemptQuiesced(
       );
     const projected = await projectPausedRecovery([mapEvent(event)], event.sequence);
     const effectiveControl = projected.effectiveControl;
+    let workflowWake: SessionWorkflowWake | null = null;
     if (effectiveControl.state === "active") {
       await enqueueSessionWorkflowWakeInTransaction(scopedDb, {
         accountId: session.accountId,
@@ -43527,9 +44012,26 @@ export async function markSessionAttemptQuiesced(
         temporalWorkflowId: input.temporalWorkflowId,
         reason: "attempt_quiesced",
       });
+      // Derive the transport kind from the coalesced row. An older undelivered
+      // control revision keeps priority even though this producer is an
+      // ordinary queue wake.
+      workflowWake = await pendingWorkflowWake();
+      if (!workflowWake) {
+        throw new Error(`Attempt-quiescence wake was not pending for session ${input.sessionId}`);
+      }
     }
-    return projected.events;
+    return { events: projected.events, workflowWake };
   });
+}
+
+/** Compatibility projection for callers that only publish the committed
+ * events. The turn activity uses `commitSessionAttemptQuiescence` so it can
+ * immediately deliver the returned durable wake without waiting for repair. */
+export async function markSessionAttemptQuiesced(
+  db: Database,
+  input: MarkSessionAttemptQuiescedInput,
+): Promise<SessionEvent[]> {
+  return (await commitSessionAttemptQuiescence(db, input)).events;
 }
 
 export type ReconcileSessionAttemptQuiescenceResult =
@@ -50271,3 +50773,5 @@ export {
 
 export * from "./workspace-artifacts";
 export * from "./transcription-recordings";
+export * from "./editable-artifacts";
+export * from "./editable-artifact-materialization";

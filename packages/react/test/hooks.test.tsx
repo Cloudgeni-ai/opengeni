@@ -1700,8 +1700,16 @@ describe("useComposer queue-vs-steer", () => {
   });
 
   test("projects Steer immediately, keeps it accepted, then settles when execution starts", async () => {
-    let resolveSteer!: (value: { accepted: SessionEvent; turn: SessionTurn }) => void;
-    const pendingSteer = new Promise<{ accepted: SessionEvent; turn: SessionTurn }>((resolve) => {
+    let resolveSteer!: (value: {
+      accepted: SessionEvent;
+      turn: SessionTurn;
+      interruptionCount: number;
+    }) => void;
+    const pendingSteer = new Promise<{
+      accepted: SessionEvent;
+      turn: SessionTurn;
+      interruptionCount: number;
+    }>((resolve) => {
       resolveSteer = resolve;
     });
     const turn = fakeTurn({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" });
@@ -1729,14 +1737,16 @@ describe("useComposer queue-vs-steer", () => {
     });
 
     await reactAct(async () => {
-      resolveSteer({ accepted, turn });
+      resolveSteer({ accepted, turn, interruptionCount: 1 });
       expect(await result).toBe(true);
     });
     expect(hook.result.current.steering).toMatchObject({
       phase: "accepted",
       triggerEventId: accepted.id,
       turnId: turn.id,
+      stoppingPreviousAttempt: true,
     });
+    expect(hook.result.current.stoppingAttempt).toBe("previous");
 
     await hook.rerender({
       events: [
@@ -1748,6 +1758,144 @@ describe("useComposer queue-vs-steer", () => {
       ],
     });
     expect(hook.result.current.steering).toBeNull();
+    expect(hook.result.current.stoppingAttempt).toBeNull();
+    await hook.unmount();
+  });
+
+  test("does not resurrect physical stopping from an idempotent Steer replay", async () => {
+    const client = fakeClient({
+      steerMessage: async () => ({
+        accepted: makeEvent(10, "user.message", { delivery: "steer" }),
+        turn: fakeTurn({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }),
+        interruptionCount: 1,
+        replay: true,
+      }),
+    });
+    const hook = await renderHook(
+      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+
+    await flushing(async () => {
+      expect(await hook.result.current.steer("Retry the accepted direction")).toBe(true);
+    });
+    expect(hook.result.current.steering?.phase).toBe("accepted");
+    expect(hook.result.current.stoppingAttempt).toBeNull();
+    await hook.unmount();
+  });
+
+  test("projects a Pause receipt until the authoritative quiescence snapshot arrives", async () => {
+    const pendingControl = {
+      ...queueSnapshot([]).effectiveControl,
+      state: "paused" as const,
+      directState: "paused" as const,
+      controlVersion: 4,
+      controlEtag: "control-4",
+      settlement: {
+        state: "stopping" as const,
+        attemptCount: 1,
+        interruptionPendingCount: 0,
+        quiescencePendingCount: 1,
+      },
+    };
+    const client = fakeClient({
+      pauseSession: async () => ({
+        receipt: {
+          id: crypto.randomUUID(),
+          action: "session.paused",
+          operationKey: crypto.randomUUID(),
+          targetSessionId: SESSION_ID,
+          targetTurnId: null,
+          appliedControlRevision: 4,
+          appliedQueueVersion: null,
+          appliedTurnVersion: null,
+          appliedDraftRevision: null,
+          createdAt: new Date().toISOString(),
+        },
+        effectiveControl: pendingControl,
+        interruptionCount: 1,
+        wakeCount: 0,
+        cancelledSessionCount: 0,
+        cancelledTurnCount: 0,
+      }),
+    });
+    const hook = await renderHook(
+      (effectiveControl: SessionQueueSnapshot["effectiveControl"]) =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          effectiveControl,
+        }),
+      queueSnapshot([]).effectiveControl,
+    );
+    await flush();
+
+    await flushing(async () => await hook.result.current.pause());
+    expect(hook.result.current.stoppingAttempt).toBe("current");
+
+    await hook.rerender({ ...pendingControl, settlement: null });
+    expect(hook.result.current.stoppingAttempt).toBeNull();
+    await hook.unmount();
+  });
+
+  test("retires a Pause receipt when a newer control revision supersedes it", async () => {
+    const pendingControl = {
+      ...queueSnapshot([]).effectiveControl,
+      state: "paused" as const,
+      directState: "paused" as const,
+      controlVersion: 4,
+      controlEtag: "control-4",
+      settlement: {
+        state: "stopping" as const,
+        attemptCount: 1,
+        interruptionPendingCount: 0,
+        quiescencePendingCount: 1,
+      },
+    };
+    const client = fakeClient({
+      pauseSession: async () => ({
+        receipt: {
+          id: crypto.randomUUID(),
+          action: "session.paused",
+          operationKey: crypto.randomUUID(),
+          targetSessionId: SESSION_ID,
+          targetTurnId: null,
+          appliedControlRevision: 4,
+          appliedQueueVersion: null,
+          appliedTurnVersion: null,
+          appliedDraftRevision: null,
+          createdAt: new Date().toISOString(),
+        },
+        effectiveControl: pendingControl,
+        interruptionCount: 1,
+        wakeCount: 0,
+        cancelledSessionCount: 0,
+        cancelledTurnCount: 0,
+      }),
+    });
+    const hook = await renderHook(
+      (effectiveControl: SessionQueueSnapshot["effectiveControl"]) =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          effectiveControl,
+        }),
+      queueSnapshot([]).effectiveControl,
+    );
+    await flush();
+
+    await flushing(async () => await hook.result.current.pause());
+    expect(hook.result.current.stoppingAttempt).toBe("current");
+
+    await hook.rerender({
+      ...pendingControl,
+      state: "active",
+      directState: "active",
+      controlVersion: 5,
+      controlEtag: "control-5",
+    });
+    expect(hook.result.current.stoppingAttempt).toBeNull();
     await hook.unmount();
   });
 

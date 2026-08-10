@@ -35,7 +35,7 @@ kube-prometheus-stack:
       metricRelabelings:
         - action: keep
           sourceLabels: [__name__]
-          regex: '^(?:go_.*|process_.*|prometheus_operator_(?:list_operations_(?:failed_)?total|managed_resources|node_address_lookup_errors_total|ready|reconcile_(?:errors|operations)_total|status_update_(?:errors|operations)_total|syncs|watch_operations_(?:failed_)?total))$'
+          regex: '^(?:go_(?:gc_duration_seconds(?:_count|_sum)?|goroutines|info|memstats_.*|threads)|process_.*|prometheus_operator_(?:list_operations_(?:failed_)?total|managed_resources|node_address_lookup_errors_total|ready|reconcile_(?:errors|operations)_total|status_update_(?:errors|operations)_total|syncs|watch_operations_(?:failed_)?total))$'
     resources:
       requests:
         cpu: 50m
@@ -48,14 +48,16 @@ kube-prometheus-stack:
     serviceMonitor:
       # Preserve the Kubernetes-mixin API availability, latency, certificate,
       # client, process, and workqueue signals while rejecting unrelated
-      # high-cardinality API-server internals before they enter the TSDB.
+      # high-cardinality API-server internals before they enter the TSDB. The
+      # retained SLI buckets are 0.1s plus the mixin's exact 1s/5s/30s SLO
+      # boundaries and +Inf; count/sum remain available.
       metricRelabelings:
         - action: drop
           sourceLabels: [__name__, le]
-          regex: '(etcd_request|apiserver_request_slo|apiserver_request_sli|apiserver_request)_duration_seconds_bucket;(0\.15|0\.2|0\.3|0\.35|0\.4|0\.45|0\.6|0\.7|0\.8|0\.9|1\.25|1\.5|1\.75|2|3|3\.5|4|4\.5|6|7|8|9|15|20|40|45|50)(\.0)?'
+          regex: '(etcd_request|apiserver_request_slo|apiserver_request_sli|apiserver_request)_duration_seconds_bucket;(0\.05|0\.15|0\.2|0\.3|0\.35|0\.4|0\.45|0\.6|0\.7|0\.8|0\.9|1\.25|1\.5|1\.75|2|3|3\.5|4|4\.5|6|7|8|9|10|15|20|40|45|50|60)(\.0)?'
         - action: keep
           sourceLabels: [__name__]
-          regex: '^(?:aggregator_unavailable_apiservice(?:_total)?|apiserver_client_certificate_expiration_seconds_(?:bucket|count|sum)|apiserver_request_sli_duration_seconds_(?:bucket|count|sum)|apiserver_request_terminations_total|apiserver_request_total|go_.*|kubernetes_build_info|process_.*|rest_client_request_duration_seconds_(?:bucket|count|sum)|rest_client_requests_total|workqueue_(?:adds_total|depth|queue_duration_seconds_(?:bucket|count|sum)))$'
+          regex: '^(?:aggregator_unavailable_apiservice(?:_total)?|apiserver_client_certificate_expiration_seconds_(?:bucket|count|sum)|apiserver_request_sli_duration_seconds_(?:bucket|count|sum)|apiserver_request_terminations_total|apiserver_request_total|go_(?:gc_duration_seconds(?:_count|_sum)?|goroutines|info|memstats_.*|threads)|kubernetes_build_info|process_.*|rest_client_request_duration_seconds_(?:bucket|count|sum)|rest_client_requests_total|workqueue_(?:adds_total|depth|queue_duration_seconds_(?:bucket|count|sum)))$'
 
   kubelet:
     serviceMonitor:
@@ -79,14 +81,14 @@ kube-prometheus-stack:
           regex: '(csi_operations|storage_operation_duration)_seconds_bucket;(0.25|2.5|15|25|120|600)(\.0)?'
         - action: keep
           sourceLabels: [__name__]
-          regex: '^(?:apiserver_client_certificate_expiration_seconds_(?:bucket|count|sum)|go_.*|kubelet_(?:certificate_manager_.*|cgroup_manager_duration_seconds_(?:bucket|count|sum)|evictions|node_config_error|node_name|pleg_relist_.*|pod_start_duration_seconds_(?:bucket|count|sum)|pod_worker_duration_seconds_(?:bucket|count|sum)|running_containers|running_pods|runtime_operations_.*|server_expiration_renew_errors|volume_stats_.*)|kubernetes_build_info|process_.*|rest_client_request_duration_seconds_(?:bucket|count|sum)|rest_client_requests_total|storage_operation_(?:duration_seconds_(?:bucket|count|sum)|errors_total)|volume_manager_total_volumes|workqueue_(?:adds_total|depth|queue_duration_seconds_(?:bucket|count|sum)))$'
+          regex: '^(?:apiserver_client_certificate_expiration_seconds_(?:bucket|count|sum)|go_(?:gc_duration_seconds(?:_count|_sum)?|goroutines|info|memstats_.*|threads)|kubelet_(?:certificate_manager_.*|cgroup_manager_duration_seconds_(?:bucket|count|sum)|evictions|node_config_error|node_name|pleg_relist_.*|pod_start_duration_seconds_(?:bucket|count|sum)|pod_worker_duration_seconds_(?:bucket|count|sum)|running_containers|running_pods|runtime_operations_.*|server_expiration_renew_errors|volume_stats_.*)|kubernetes_build_info|process_.*|rest_client_request_duration_seconds_(?:bucket|count|sum)|rest_client_requests_total|storage_operation_(?:duration_seconds_(?:bucket|count|sum)|errors_total)|volume_manager_total_volumes|workqueue_(?:adds_total|depth|queue_duration_seconds_(?:bucket|count|sum)))$'
 
   prometheus:
     serviceMonitor:
       metricRelabelings:
         - action: keep
           sourceLabels: [__name__]
-          regex: '^(?:go_.*|process_.*|reloader_last_reload_successful|prometheus_(?:build_info|config_last_reload_successful|engine_queries|engine_queries_concurrent_max|engine_query_duration_seconds(?:_count|_sum)?|notifications_.*|remote_storage_.*|rule_evaluation_failures_total|rule_group_(?:iterations_missed_total|rules)|sd_(?:discovered_targets|kubernetes_failures_total|refresh_failures_total)|target_(?:interval_length_seconds_(?:count|sum)|metadata_cache_entries|scrape_pool_.*|scrapes_.*|sync_failed_total|sync_length_seconds_(?:count|sum))|tsdb_(?:compactions_failed_total|head_chunks|head_samples_appended_total|head_series|reloads_failures_total)))$'
+          regex: '^(?:go_(?:gc_duration_seconds(?:_count|_sum)?|goroutines|info|memstats_.*|threads)|process_.*|reloader_last_reload_successful|prometheus_(?:build_info|config_last_reload_successful|engine_queries|engine_queries_concurrent_max|engine_query_duration_seconds(?:_count|_sum)?|notifications_.*|remote_storage_.*|rule_evaluation_failures_total|rule_group_(?:iterations_missed_total|rules)|sd_(?:discovered_targets|kubernetes_failures_total|refresh_failures_total)|target_(?:interval_length_seconds_(?:count|sum)|metadata_cache_entries|scrape_pool_.*|scrapes_.*|sync_failed_total|sync_length_seconds_(?:count|sum))|tsdb_(?:compactions_failed_total|head_chunks|head_samples_appended_total|head_series|reloads_failures_total)))$'
     prometheusSpec:
       externalLabels:
         environment: self-hosted
@@ -127,7 +129,7 @@ kube-prometheus-stack:
       metricRelabelings:
         - action: keep
           sourceLabels: [__name__]
-          regex: '^(?:alertmanager_(?:alerts|alerts_invalid_total|alerts_received_total|cluster_(?:failed_peers|members)|config_(?:hash|last_reload_successful)|notification_latency_seconds_(?:bucket|count|sum)|notifications_(?:failed_)?total)|go_.*|process_.*|reloader_last_reload_successful)$'
+          regex: '^(?:alertmanager_(?:alerts|alerts_invalid_total|alerts_received_total|cluster_(?:failed_peers|members)|config_(?:hash|last_reload_successful)|notification_latency_seconds_(?:bucket|count|sum)|notifications_(?:failed_)?total)|go_(?:gc_duration_seconds(?:_count|_sum)?|goroutines|info|memstats_.*|threads)|process_.*|reloader_last_reload_successful)$'
     alertmanagerSpec:
       retention: 120h
       resources:
@@ -155,7 +157,7 @@ kube-prometheus-stack:
       metricRelabelings:
         - action: keep
           sourceLabels: [__name__]
-          regex: '^(?:grafana_(?:alerting_result_total|build_info|http_request_duration_seconds_(?:bucket|count|sum)|stat_totals_dashboard)|go_.*|process_.*)$'
+          regex: '^(?:grafana_(?:alerting_result_total|build_info|http_request_duration_seconds_(?:bucket|count|sum)|stat_totals_dashboard)|go_(?:gc_duration_seconds(?:_count|_sum)?|goroutines|info|memstats_.*|threads)|process_.*)$'
     resources:
       requests:
         cpu: 100m
@@ -267,6 +269,13 @@ kube-prometheus-stack:
       monitor:
         additionalLabels:
           opengeni.ai/monitoring: enabled
+        # kube_pod_status_reason exports one zero-valued series per known reason
+        # for every pod. The pinned mixin consumes only SchedulingGated; retain
+        # that exact exception and allow future reasons through for review.
+        metricRelabelings:
+          - action: drop
+            sourceLabels: [__name__, reason]
+            regex: 'kube_pod_status_reason;(?:Evicted|NodeAffinity|NodeLost|PreemptionByScheduler|Shutdown|TerminationByKubelet|UnexpectedAdmissionError)'
     resources:
       requests:
         cpu: 50m
@@ -283,7 +292,7 @@ kube-prometheus-stack:
         metricRelabelings:
           - action: keep
             sourceLabels: [__name__]
-            regex: '^(?:go_.*|node_(?:bonding_(?:active|slaves)|cpu_seconds_total|disk_(?:io_time_seconds_total|io_time_weighted_seconds_total|read_bytes_total|written_bytes_total)|exporter_build_info|filefd_(?:allocated|maximum)|filesystem_(?:avail_bytes|files|files_free|readonly|size_bytes)|load(?:1|5|15)|md_disks(?:_required)?|memory_(?:Buffers_bytes|Cached_bytes|MemAvailable_bytes|MemFree_bytes|MemTotal_bytes|Slab_bytes|available_bytes|compressed_bytes|internal_bytes|purgeable_bytes|total_bytes|wired_bytes)|netstat_(?:TcpExt_TCPSynRetrans|Tcp_OutSegs|Tcp_RetransSegs)|network_(?:receive|transmit)_(?:bytes_total|drop_total|errs_total|packets_total)|network_up|nf_conntrack_entries(?:_limit)?|pressure_(?:io|memory)_stalled_seconds_total|systemd_(?:service_restart_total|unit_state)|textfile_scrape_error|time_seconds|timex_(?:maxerror_seconds|offset_seconds|sync_status)|uname_info|vmstat_(?:pgmajfault|pswpout))|process_.*)$'
+            regex: '^(?:go_(?:gc_duration_seconds(?:_count|_sum)?|goroutines|info|memstats_.*|threads)|node_(?:bonding_(?:active|slaves)|cpu_seconds_total|disk_(?:io_time_seconds_total|io_time_weighted_seconds_total|read_bytes_total|written_bytes_total)|exporter_build_info|filefd_(?:allocated|maximum)|filesystem_(?:avail_bytes|files|files_free|readonly|size_bytes)|load(?:1|5|15)|md_disks(?:_required)?|memory_(?:Buffers_bytes|Cached_bytes|MemAvailable_bytes|MemFree_bytes|MemTotal_bytes|Slab_bytes|available_bytes|compressed_bytes|internal_bytes|purgeable_bytes|total_bytes|wired_bytes)|netstat_(?:TcpExt_TCPSynRetrans|Tcp_OutSegs|Tcp_RetransSegs)|network_(?:receive|transmit)_(?:bytes_total|drop_total|errs_total|packets_total)|network_up|nf_conntrack_entries(?:_limit)?|pressure_(?:io|memory)_stalled_seconds_total|systemd_(?:service_restart_total|unit_state)|textfile_scrape_error|time_seconds|timex_(?:maxerror_seconds|offset_seconds|sync_status)|uname_info|vmstat_(?:pgmajfault|pswpout))|process_.*)$'
     resources:
       requests:
         cpu: 25m

@@ -1,0 +1,51 @@
+[package]
+name = "opengeni-artifact-kernel-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+opengeni-artifact-kernel = { path = ".." }
+opengeni-artifact-kernel-binding-protocol = { path = "../bindings/protocol" }
+
+[[bin]]
+name = "snapshot_decode"
+path = "fuzz_targets/snapshot_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "operation_sequences"
+path = "fuzz_targets/operation_sequences.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "collaboration_snapshot_decode"
+path = "fuzz_targets/collaboration_snapshot_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "collaboration_sequences"
+path = "fuzz_targets/collaboration_sequences.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "binding_protocol_decode"
+path = "fuzz_targets/binding_protocol_decode.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

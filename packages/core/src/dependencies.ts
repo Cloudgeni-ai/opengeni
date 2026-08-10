@@ -16,6 +16,8 @@ import type { createObjectStorage } from "@opengeni/storage";
 import type { ManagedAuth } from "./managed-auth-type";
 import type { ApiSandboxClient, ResumeBoxByIdInput, ResumedSandboxSession } from "./sandbox-types";
 import type { TranscriptionSegmenter, TranscriptionService } from "./transcription";
+import type { EditableArtifactApplicationPort } from "./editable-artifact-live";
+import type { EditableArtifactDurableExportService } from "./editable-artifacts";
 
 export type SessionWorkflowClient = {
   signalUserMessage: (input: {
@@ -83,6 +85,14 @@ export type DocumentIndexClient = {
 export type AppDependencies = {
   settings: Settings;
   db: Database;
+  /**
+   * Host-composed editable artifact engine. Standalone startup binds the same
+   * native kernel/DB/object-store implementation; embedded hosts may inject an
+   * equivalent deployment-scoped composition.
+   */
+  editableArtifacts?: EditableArtifactApplicationPort;
+  /** Durable immutable version/materialization API paired with editableArtifacts. */
+  editableArtifactExports?: EditableArtifactDurableExportService;
   bus: EventBus;
   workflowClient: SessionWorkflowClient;
   /** Optional provider override for deterministic API/object-storage tests. */

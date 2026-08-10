@@ -1,5 +1,50 @@
 # @opengeni/worker-bundle
 
+## 0.16.49
+
+### Patch Changes
+
+- 2cd6dce: Build and reuse version-bound immutable provider images after clean rig verification, with content-hash invalidation and runtime-setup fallback for missing or unsupported providers.
+- Updated dependencies [98b94e8]
+- Updated dependencies [2cd6dce]
+  - @opengeni/core@0.22.2
+  - @opengeni/contracts@0.42.1
+  - @opengeni/db@0.29.1
+  - @opengeni/runtime@0.18.39
+  - @opengeni/config@0.12.10
+  - @opengeni/documents@0.5.29
+  - @opengeni/events@0.3.100
+  - @opengeni/github@0.4.47
+  - @opengeni/observability@0.5.16
+  - @opengeni/storage@0.2.84
+
+## 0.16.48
+
+### Patch Changes
+
+- df985c0: Keep turn-activity heartbeats and the Temporal SDK cancellation throttle at 500
+  milliseconds so Pause and Steer retain the full four-second physical-cancellation
+  budget for writer drain and receipt-gated replacement admission.
+- Updated dependencies [df985c0]
+  - @opengeni/core@0.22.1
+
+## 0.16.47
+
+### Patch Changes
+
+- Updated dependencies [7b2d5ff]
+- Updated dependencies [d1189ba]
+  - @opengeni/contracts@0.42.0
+  - @opengeni/core@0.22.0
+  - @opengeni/db@0.29.0
+  - @opengeni/config@0.12.9
+  - @opengeni/documents@0.5.28
+  - @opengeni/events@0.3.99
+  - @opengeni/github@0.4.46
+  - @opengeni/observability@0.5.15
+  - @opengeni/runtime@0.18.38
+  - @opengeni/storage@0.2.83
+
 ## 0.16.46
 
 ### Patch Changes

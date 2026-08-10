@@ -95,16 +95,16 @@ export function runtimeMetricsHooksForObservability(
         value: durationSeconds,
       });
     },
-    onSandboxCreate: ({ backend, outcome, durationSeconds }) => {
+    onSandboxCreate: ({ backend, imageSource, outcome, durationSeconds }) => {
       observability.incrementCounter({
         name: "opengeni_sandbox_creates_total",
         help: "Total sandbox create attempts by backend and outcome.",
-        labels: { backend, outcome },
+        labels: { backend, image_source: imageSource, outcome },
       });
       observability.observeHistogram({
         name: "opengeni_sandbox_create_duration_seconds",
         help: "Sandbox create duration in seconds by backend.",
-        labels: { backend },
+        labels: { backend, image_source: imageSource },
         value: durationSeconds,
       });
     },

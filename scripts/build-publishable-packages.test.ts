@@ -265,6 +265,45 @@ test("tolerates an excluded directory removed between readdir and lstat", async 
   expect(readFileSync(outputPath(root), "utf8")).toBe("BASE|A|644\n");
 });
 
+test("ignores Cargo target output in package input hashes", async () => {
+  const root = createFixture();
+  const kernel = join(root, "packages", "demo", "kernel");
+  mkdirSync(kernel, { recursive: true });
+  writeFileSync(
+    join(kernel, "Cargo.toml"),
+    '[package]\nname = "fixture-kernel"\nversion = "0.0.0"\n',
+  );
+  const target = join(kernel, "target", "debug", "incremental");
+  mkdirSync(target, { recursive: true });
+  const generated = join(target, "compiler-state.bin");
+  writeFileSync(generated, "generation one\n");
+
+  const cold = await runBuilder(root, { OPENGENI_BUILD_VARIANT: "BASE" });
+  expect(cold.code).toBe(0);
+  expect(cold.stdout).not.toContain("cached");
+
+  writeFileSync(generated, "generation two\n");
+  const warm = await runBuilder(root, { OPENGENI_BUILD_VARIANT: "BASE" });
+  expect(warm.code).toBe(0);
+  expect(warm.stdout).toContain("cached @opengeni/demo");
+});
+
+test("keeps non-Cargo target directories in package input hashes", async () => {
+  const root = createFixture();
+  const target = join(root, "packages", "demo", "src", "target");
+  mkdirSync(target, { recursive: true });
+  const source = join(target, "domain-source.ts");
+  writeFileSync(source, 'export const value = "one";\n');
+
+  const cold = await runBuilder(root, { OPENGENI_BUILD_VARIANT: "BASE" });
+  expect(cold.code).toBe(0);
+
+  writeFileSync(source, 'export const value = "two";\n');
+  const changed = await runBuilder(root, { OPENGENI_BUILD_VARIANT: "BASE" });
+  expect(changed.code).toBe(0);
+  expect(changed.stdout).not.toContain("cached");
+});
+
 test("serializes concurrent builders and keeps environment keys bound to their bytes", async () => {
   const root = createFixture();
   const gate = join(root, "build-gate");

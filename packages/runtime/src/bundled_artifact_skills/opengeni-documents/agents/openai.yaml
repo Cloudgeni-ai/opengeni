@@ -1,0 +1,4 @@
+interface:
+  display_name: "OpenGeni Documents"
+  short_description: "Create and edit verified document artifacts"
+  default_prompt: "Use $opengeni-documents to create a polished, editable document."

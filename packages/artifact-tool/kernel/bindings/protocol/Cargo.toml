@@ -1,0 +1,25 @@
+[package]
+name = "opengeni-artifact-kernel-binding-protocol"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Bounded binary ABI protocol for OpenGeni artifact kernel bindings"
+publish = false
+
+[dependencies]
+opengeni-artifact-kernel = { path = "../.." }
+sha2 = "0.10.9"
+
+[build-dependencies]
+blake3 = "1.8.2"
+
+[dev-dependencies]
+serde_json = "1.0.145"
+
+[[bench]]
+name = "session"
+harness = false
+
+[[bench]]
+name = "document"
+harness = false

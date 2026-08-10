@@ -2826,12 +2826,36 @@ describe("workflow contracts", () => {
       "${{ always() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'docs' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",
     );
     expect(ci.jobs.images.if).toBe(ci.jobs.deployment.if);
-    const imageLeaves = ["api-image", "worker-web-images", "relay-image", "sandbox-image"];
-    for (const jobName of imageLeaves) expect(ci.jobs[jobName].if).toBe(ci.jobs.deployment.if);
+    const imageLeaves = [
+      "api-image",
+      "worker-web-images",
+      "artifact-materializer-image",
+      "artifact-outbox-dispatcher-image",
+      "relay-image",
+      "sandbox-image",
+    ];
+    for (const jobName of [
+      "worker-web-images",
+      "artifact-outbox-dispatcher-image",
+      "relay-image",
+    ]) {
+      expect(ci.jobs[jobName].if).toBe(ci.jobs.deployment.if);
+    }
+    for (const jobName of ["api-image", "artifact-materializer-image", "sandbox-image"]) {
+      expect(ci.jobs[jobName].if).toContain("needs.artifact-runtime.result == 'success'");
+    }
     const imageSteps = imageLeaves.flatMap((jobName) =>
       ci.jobs[jobName].steps.filter((candidate: any) => candidate.with?.push),
     );
-    expect(imageSteps).toHaveLength(5);
+    expect(imageSteps.map((step: any) => step.name)).toEqual([
+      "Build API image",
+      "Build worker image",
+      "Build web image",
+      "Build artifact materializer image",
+      "Build artifact outbox dispatcher image",
+      "Build relay image",
+      "Build headless sandbox image",
+    ]);
     for (const imageStep of imageSteps)
       expect(imageStep.with.push).toBe("${{ github.event_name == 'push' }}");
   });
@@ -2848,6 +2872,16 @@ describe("workflow contracts", () => {
     });
     expect(ciText).not.toContain("pull-requests: write");
     expect(ciText).not.toMatch(/pulls\/.+\/reviews/);
+    const exactSelectorJobs = new Set([
+      "deployment",
+      "api-image",
+      "worker-web-images",
+      "artifact-materializer-image",
+      "artifact-outbox-dispatcher-image",
+      "relay-image",
+      "sandbox-image",
+      "images",
+    ]);
     for (const jobName of [
       "plan",
       "source-contracts",
@@ -2861,6 +2895,8 @@ describe("workflow contracts", () => {
       "deployment",
       "api-image",
       "worker-web-images",
+      "artifact-materializer-image",
+      "artifact-outbox-dispatcher-image",
       "relay-image",
       "sandbox-image",
       "images",
@@ -2869,7 +2905,9 @@ describe("workflow contracts", () => {
         (step: any) => step.uses === "actions/checkout@v6",
       );
       expect(checkout.with.ref).toBe(
-        "${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}",
+        exactSelectorJobs.has(jobName)
+          ? "${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
+          : "${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}",
       );
       expect(checkout.with["persist-credentials"]).toBe(false);
     }
@@ -3001,7 +3039,10 @@ describe("workflow contracts", () => {
         "Recovery integration regressions",
       ],
       "browser-acceptance": [
-        "Install pinned Playwright Chromium runtime",
+        "Install pinned Playwright browser runtimes",
+        "Editable artifact browser acceptance",
+        "Install pinned artifact native toolchain",
+        "Editable artifact full-stack browser acceptance",
         "Codex quota Codex quota and entitlement browser acceptance",
         "Queue surface browser acceptance",
         "Long user-message disclosure browser acceptance",
@@ -3013,9 +3054,15 @@ describe("workflow contracts", () => {
         "Upload Codex quota visual evidence",
         "Upload responsive knowledge-surface evidence",
         "Upload workbench visual evidence",
+        "Upload editable artifact visual evidence",
       ],
       "package-contracts": [
+        "Install pinned artifact-kernel build toolchain",
+        "Production native artifact contracts",
         "Build client packages (contracts + SDK + React)",
+        "Reproduce committed modality WASM packages from clean Rust sources",
+        "Install Chromium for packed WASM package proof",
+        "Packed SDK Worker and modality WASM packages",
         "Publish closure guard",
         "Clean published consumer",
         "Runtime embedding consumer",
@@ -3110,15 +3157,30 @@ describe("workflow contracts", () => {
     expect(hasCompleteBrowserLaneContract(misroutedWorkbenchGate)).toBe(false);
 
     const browserInstall = browser.steps.find(
-      (step: any) => step.name === "Install pinned Playwright Chromium runtime",
+      (step: any) => step.name === "Install pinned Playwright browser runtimes",
     );
     expect(browserInstall).toEqual({
-      name: "Install pinned Playwright Chromium runtime",
-      run: "bunx playwright install --with-deps --only-shell chromium",
+      name: "Install pinned Playwright browser runtimes",
+      run: "bun x playwright install --with-deps chromium firefox webkit",
     });
     expect(
       browser.steps.filter((step: any) => String(step.run ?? "").includes("playwright install")),
     ).toEqual([browserInstall]);
+    for (const stepName of [
+      "Editable artifact browser acceptance",
+      "Install pinned artifact native toolchain",
+      "Editable artifact full-stack browser acceptance",
+    ]) {
+      expect(browser.steps.find((step: any) => step.name === stepName).if).toBe(
+        "${{ matrix.lane == 'workbench' }}",
+      );
+    }
+    expect(
+      browser.steps.find((step: any) => step.name === "Upload editable artifact visual evidence")
+        .if,
+    ).toBe(
+      "${{ always() && matrix.lane == 'workbench' && (steps.editable_artifact_browser.outcome == 'success' || steps.editable_artifact_browser.outcome == 'failure') }}",
+    );
     expect(
       browser.steps.some(
         (step: any) =>

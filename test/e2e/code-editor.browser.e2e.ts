@@ -93,7 +93,7 @@ describe("sandbox code editor browser acceptance", () => {
       await editable.pressSequentially("x");
       await waitForDirty(page, true);
 
-      await editable.press("Control+Z");
+      await editable.press(process.platform === "darwin" ? "Meta+Z" : "Control+Z");
       await waitForDirty(page, false);
       expect(await save.isDisabled()).toBe(true);
       expect(pageErrors).toEqual([]);

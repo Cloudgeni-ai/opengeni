@@ -1,0 +1,43 @@
+{
+  "name": "@opengeni/artifact-kernel-wasm-spreadsheet",
+  "version": "0.1.1",
+  "description": "Exact lazy WebAssembly runtime for OpenGeni spreadsheet editing.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Cloudgeni-ai/opengeni.git",
+    "directory": "packages/artifact-kernel-wasm-spreadsheet"
+  },
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./runtime-manifest": "./dist/artifact-kernel-runtime.json"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "bun ../../scripts/build-artifact-kernel-wasm-packages.ts --modality spreadsheet --asset-root ./dist",
+    "prepublishOnly": "bash ../../scripts/prepublish-guard"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "opengeniArtifactKernelAsset": {
+    "schemaVersion": 1,
+    "target": "wasm-web",
+    "modality": "spreadsheet"
+  }
+}

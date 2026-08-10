@@ -87,6 +87,58 @@ through a tenant-scoped, same-origin proxy. The SDK does not move persistence,
 prompt construction, context processing, delegation, or provider credentials
 out of `apps/api`, `apps/worker`, or `packages/db`.
 
+## Editable artifact sync (`@opengeni/sdk/editable-artifacts`)
+
+Editable-artifact storage, sync, and Worker clients live behind an isolated
+subpath; importing the ordinary SDK never loads them. Browser hosts should
+bundle the dedicated module-Worker entry and pass its URL plus the exact,
+version-matched kernel assets to the client:
+
+```ts
+import { OpenGeniClient } from "@opengeni/sdk/artifacts";
+import workerUrl from "@opengeni/sdk/editable-artifacts/worker?worker&url";
+import {
+  createBrowserEditableArtifactSession,
+} from "@opengeni/sdk/editable-artifacts";
+
+const client = new OpenGeniClient({ baseUrl: "https://api.example.com" });
+const artifact = await client.getEditableArtifact(workspaceId, artifactId, {
+  replicaId,
+});
+const kernels = {
+  spreadsheet: () => import("@opengeni/artifact-kernel-wasm-spreadsheet"),
+  document: () => import("@opengeni/artifact-kernel-wasm-document"),
+  presentation: () => import("@opengeni/artifact-kernel-wasm-presentation"),
+} as const;
+const { editableArtifactKernelRuntime } = await kernels[artifact.modality]();
+const session = createBrowserEditableArtifactSession({
+  baseUrl: "https://api.example.com",
+  workspaceId,
+  artifact,
+  storageAuthority,
+  runtime: {
+    workerUrl,
+    ...editableArtifactKernelRuntime,
+    applicationOrigin: window.location.origin,
+  },
+});
+```
+
+Each kernel package contains only one editor modality, carries a static typed
+build/protocol/model/command identity, and is reproduced from smoke-tested Rust
+outputs under separate raw and gzip budgets. The Worker verifies that identity
+against executable WASM capabilities before accepting state. A self-hosted host
+may instead serve the exact version-matched glue and WASM binary together.
+Canonical OGASC commands, OGATX intents, OGACO commits, and OGAKQ/OGAKV
+queries/projections pass directly through the kernel; there is no JavaScript
+operation mapper.
+
+The live transport mints a short-lived, one-use ticket over authenticated HTTP,
+then sends that ticket inside the first binary OGALV WebSocket frame. API keys
+and long-lived credentials are never placed in the WebSocket URL. Hosts may
+inject both `fetch` and the WebSocket factory for authenticated proxies and
+tests; negotiated frame and mutation limits are enforced before work is queued.
+
 ## Workspace artifacts
 
 Workspace artifacts are generic, immutable HTML publications. The SDK does not

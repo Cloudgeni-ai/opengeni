@@ -65,6 +65,38 @@ spec:
       {{- include "opengeni.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: web
 {{- end }}
+{{- if and .Values.artifactMaterializer.enabled .Values.artifactMaterializer.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "opengeni.fullname" . }}-artifact-materializer
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: artifact-materializer
+spec:
+  minAvailable: {{ .Values.artifactMaterializer.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "opengeni.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: artifact-materializer
+{{- end }}
+{{- if and .Values.artifactOutboxDispatcher.enabled .Values.artifactOutboxDispatcher.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "opengeni.fullname" . }}-artifact-outbox-dispatcher
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: artifact-outbox-dispatcher
+spec:
+  minAvailable: {{ .Values.artifactOutboxDispatcher.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "opengeni.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: artifact-outbox-dispatcher
+{{- end }}
 {{- if and .Values.relay.enabled .Values.relay.podDisruptionBudget.enabled }}
 ---
 apiVersion: policy/v1

@@ -116,6 +116,9 @@ describe("WorkbenchChanges — windowing (D2)", () => {
     await flush();
     const pane = container(r).querySelector<HTMLElement>("[data-opengeni-changes-pane]");
     expect(pane).not.toBeNull();
+    expect(pane?.getAttribute("role")).toBe("region");
+    expect(pane?.getAttribute("aria-label")).toBe("Changed files diff");
+    expect(pane?.tabIndex).toBe(0);
 
     const atTop = mountedIndices(container(r));
     expect(atTop[0]).toBe(0); // top of the list is mounted at rest

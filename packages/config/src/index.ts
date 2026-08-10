@@ -543,6 +543,13 @@ const SettingsSchema = z.object({
   disableOpenaiTracing: EnvBoolean.default(false),
   sandboxBackend: SandboxBackend.default("docker"),
   dockerImage: z.string().default("opengeni-sandbox:local"),
+  // Explicit deployment contract: the configured base sandbox image contains
+  // the verified, self-contained native artifact runtime at its fixed image
+  // paths. Disabled by default so arbitrary/custom provider images never make
+  // document/spreadsheet/presentation skills appear when their runtime is
+  // absent. Per-pack/per-rig image overrides fail closed in the worker even
+  // when this base-image contract is enabled.
+  sandboxArtifactRuntimeEnabled: EnvBoolean.default(false),
   dockerExposedPorts: z.string().default(""),
   dockerNetwork: z.string().optional(),
   // When the worker itself runs in a container and talks to a host Docker daemon,
@@ -1911,6 +1918,7 @@ export function getSettings(): Settings {
     disableOpenaiTracing: optional("OPENGENI_DISABLE_OPENAI_TRACING"),
     sandboxBackend: optional("OPENGENI_SANDBOX_BACKEND"),
     dockerImage: optional("OPENGENI_DOCKER_IMAGE"),
+    sandboxArtifactRuntimeEnabled: optional("OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED"),
     dockerExposedPorts: optional("OPENGENI_DOCKER_EXPOSED_PORTS"),
     dockerNetwork: optional("OPENGENI_DOCKER_NETWORK"),
     dockerWorkspaceBaseDir: optional("OPENGENI_DOCKER_WORKSPACE_BASE_DIR"),

@@ -338,24 +338,18 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     expect(rawExecs).toBe(1);
     expect(mutations).toBe(0);
     expect(controlWrites.at(-1)).toMatchObject({ sessionId: 32, chars: "" });
-    expect(helperCommands.some((command) => command.includes("command cat"))).toBe(true);
-    expect(helperCommands.some((command) => command.includes("command kill -TERM"))).toBe(true);
-    expect(helperCommands.some((command) => command.includes("command kill -KILL"))).toBe(true);
-    expect(
-      helperCommands.some((command) => command.includes("/proc/$__opengeni_lookup_pid/cmdline")),
-    ).toBe(true);
-    expect(
-      helperCommands.some((command) => command.includes("/proc/$__opengeni_lookup_pid/stat")),
-    ).toBe(true);
-    const guardedIdentityProbe = helperCommands.find(
-      (command) =>
-        command.includes("__opengeni_process_args") && command.includes("command kill -0"),
+    expect(helperCommands).toHaveLength(1);
+    const guardedIdentityProbe = helperCommands[0];
+    expect(guardedIdentityProbe).toContain("command kill -TERM");
+    expect(guardedIdentityProbe).toContain("command kill -KILL");
+    expect(guardedIdentityProbe).toContain("/proc/$__opengeni_lookup_pid/cmdline");
+    expect(guardedIdentityProbe).toContain("/proc/$__opengeni_lookup_pid/stat");
+    expect(guardedIdentityProbe).toContain(": > '/tmp/opengeni-turn-shell/");
+    expect(guardedIdentityProbe).toContain(
+      '__opengeni_args="$(__opengeni_process_args "$__opengeni_pid")"',
     );
     expect(guardedIdentityProbe).toContain(
-      '__opengeni_args="$(__opengeni_process_args "$__opengeni_pid")" || exit 76',
-    );
-    expect(guardedIdentityProbe).toContain(
-      '__opengeni_live_pgid="$(__opengeni_process_group_id "$__opengeni_pid")" || exit 76',
+      '__opengeni_live_pgid="$(__opengeni_process_group_id "$__opengeni_pid")"',
     );
     const emptyBin = mkdtempSync(join(tmpdir(), "opengeni-inspection-unavailable-"));
     try {
@@ -377,6 +371,76 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     expect(settlementOrder.lastIndexOf("provider-control")).toBeGreaterThan(
       settlementOrder.indexOf("group-absent"),
     );
+  });
+
+  test("retained cancellation uses one helper round trip before exact settlement", async () => {
+    const abort = new AbortController();
+    const controller = createTurnToolCancellationController(abort.signal);
+    let retained = true;
+    let helperCalls = 0;
+    let settlementCalls = 0;
+    const providerLatencyMs = 60;
+    const exec = functionTool("exec_command", async () => running(320));
+    const session = {
+      hasRetainedProcess: (sessionId: number) => sessionId === 320 && retained,
+      execCommandForProcessControl: async () => {
+        helperCalls += 1;
+        await Bun.sleep(providerLatencyMs);
+        return exited(0);
+      },
+      writeStdinForProcessControl: async () => {
+        settlementCalls += 1;
+        await Bun.sleep(providerLatencyMs);
+        retained = false;
+        return exited(137);
+      },
+    };
+    const [wrappedExec] = controller.wrapTools([exec], session) as Array<
+      Extract<Tool<unknown>, { type: "function" }>
+    >;
+
+    await wrappedExec!.invoke(runContext, JSON.stringify({ cmd: "sleep 60" }));
+    const startedAt = performance.now();
+    abort.abort(new Error("steered"));
+    await controller.waitForQuiescence();
+
+    expect(helperCalls).toBe(1);
+    expect(settlementCalls).toBe(1);
+    expect(performance.now() - startedAt).toBeLessThan(providerLatencyMs * 3);
+  });
+
+  test("retained cancellation revalidates authority after inconclusive and live-group retries", async () => {
+    const abort = new AbortController();
+    const controller = createTurnToolCancellationController(abort.signal);
+    let retained = true;
+    const helperCommands: string[] = [];
+    const exec = functionTool("exec_command", async () => running(321));
+    const session = {
+      hasRetainedProcess: (sessionId: number) => sessionId === 321 && retained,
+      execCommandForProcessControl: async (_sessionId: number, args: { cmd: string }) => {
+        helperCommands.push(args.cmd);
+        return exited(helperCommands.length === 1 ? 76 : helperCommands.length === 2 ? 75 : 0);
+      },
+      writeStdinForProcessControl: async () => {
+        retained = false;
+        return exited(137);
+      },
+    };
+    const [wrappedExec] = controller.wrapTools([exec], session) as Array<
+      Extract<Tool<unknown>, { type: "function" }>
+    >;
+
+    await wrappedExec!.invoke(runContext, JSON.stringify({ cmd: "sleep 60" }));
+    abort.abort(new Error("steered"));
+    await controller.waitForQuiescence();
+
+    expect(helperCommands).toHaveLength(3);
+    for (const command of helperCommands) {
+      expect(command).toContain("read -r __opengeni_pid __opengeni_pgid");
+      expect(command).toContain('__opengeni_process_args "$__opengeni_pid"');
+      expect(command).toContain('"$__opengeni_token"');
+      expect(command).toContain('__opengeni_process_group_id "$__opengeni_pid"');
+    }
   });
 
   test("registers a durably promoted process even when stale authority rejects the exec output", async () => {
@@ -1281,6 +1345,75 @@ describe("turn sandbox-tool cancellation against a real local process", () => {
     abort.abort(new Error("steered"));
     await controller.waitForQuiescence();
     expect(performance.now() - started).toBeLessThan(2_000);
+    await Bun.sleep(3_250);
+    expect(existsSync(zombiePath)).toBe(false);
+  });
+
+  test("a retained local process uses the exact-backend single-helper cancellation path", async () => {
+    const python = Bun.which("python3");
+    expect(python).not.toBeNull();
+    process.env.OPENAI_AGENTS_PYTHON = python!;
+    const settings = testSettings({ sandboxBackend: "local", webSearchEnabled: false });
+    const client = createSandboxClientForBackend("local", settings) as {
+      create(manifest?: unknown): Promise<{
+        close(): Promise<void>;
+        state: { workspaceRootPath: string };
+      }>;
+    };
+    const session = await client.create({});
+    sessions.push(session);
+    const routed = new RoutingSandboxSession({
+      defaultResolved: {
+        session: session as never,
+        sandboxId: null,
+        kind: "local",
+        activeEpoch: 0,
+      },
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({
+        session: session as never,
+        sandboxId: null,
+        kind: "local",
+      }),
+      beforeMutation: async () => "parent",
+      afterMutation: async () => undefined,
+    });
+    const zombiePath = `${session.state.workspaceRootPath}/retained-steer-zombie-${crypto.randomUUID()}`;
+    const abort = new AbortController();
+    const controller = createTurnToolCancellationController(abort.signal);
+    const capability = shell({ configureTools: (tools) => controller.wrapTools(tools) });
+    const tools = capability
+      .clone()
+      .bind(routed as never)
+      .tools();
+    const exec = tools.find(
+      (tool): tool is Extract<Tool<unknown>, { type: "function" }> =>
+        tool.type === "function" && tool.name === "exec_command",
+    );
+    expect(exec).toBeDefined();
+
+    const output = await exec!.invoke(
+      runContext,
+      JSON.stringify({
+        cmd: `trap '' INT TERM; sleep 3; printf zombie > '${zombiePath}'`,
+        yield_time_ms: 10_000,
+      }),
+    );
+    const providerSessionId = parseExecResponseBanner(String(output));
+    expect(providerSessionId.kind).toBe("running");
+    expect(
+      providerSessionId.kind === "running" &&
+        routed.hasRetainedProcess(providerSessionId.sessionId),
+    ).toBe(true);
+
+    const startedAt = performance.now();
+    abort.abort(new Error("steered"));
+    await controller.waitForQuiescence();
+    expect(performance.now() - startedAt).toBeLessThan(2_000);
+    expect(
+      providerSessionId.kind === "running" &&
+        routed.hasRetainedProcess(providerSessionId.sessionId),
+    ).toBe(false);
     await Bun.sleep(3_250);
     expect(existsSync(zombiePath)).toBe(false);
   });

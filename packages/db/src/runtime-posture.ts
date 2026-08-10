@@ -6,6 +6,42 @@ import {
   type RoleRelationshipCatalogRow,
 } from "./role-relationships";
 
+const ARTIFACT_OUTBOX_CAPABILITY_ROUTINES = [
+  "claim_editable_artifact_live_outbox(text, integer, integer, name)",
+  "mark_editable_artifact_live_outbox_published(text, text, integer, name)",
+  "renew_editable_artifact_live_outbox(text, text, integer, integer, name)",
+  "retry_editable_artifact_live_outbox(text, text, integer, integer, text, name)",
+  "dead_letter_editable_artifact_live_outbox(text, text, integer, text, name)",
+  "release_editable_artifact_live_outbox(text, text, integer, name)",
+] as const;
+
+const ARTIFACT_MATERIALIZER_CAPABILITY_ROUTINES = [
+  "claim_editable_artifact_materializations(text, integer, integer, name)",
+  "renew_editable_artifact_materialization(uuid, uuid, text, text, text, integer, integer, name)",
+  "succeed_editable_artifact_materialization(uuid, uuid, text, text, text, integer, text, text, text, bigint, text, text, timestamp with time zone, name)",
+  "fail_editable_artifact_materialization(uuid, uuid, text, text, text, integer, text, name)",
+] as const;
+
+const ARTIFACT_LIVE_TICKET_CAPABILITY_ROUTINES = [
+  "put_editable_artifact_live_ticket(text, uuid, uuid, text, text, text, text, text, text, text, text, integer, text, boolean, integer, timestamp with time zone, timestamp with time zone, name)",
+  "consume_editable_artifact_live_ticket(text, name)",
+  "cleanup_expired_editable_artifact_live_tickets(integer, name)",
+] as const;
+
+const ARTIFACT_LIVE_TICKET_INTERNAL_ROUTINES = [
+  "resolve_editable_artifact_ticket_data_schema(name)",
+] as const;
+
+const ARTIFACT_AUTHORIZATION_CAPABILITY_ROUTINES = [
+  "authorize_editable_artifact_actor(uuid, uuid, text, text, text, text, text, text, integer, text, text, name)",
+] as const;
+
+const DEDICATED_ARTIFACT_CAPABILITY_ROUTINES = new Set<string>([
+  ...ARTIFACT_OUTBOX_CAPABILITY_ROUTINES,
+  ...ARTIFACT_MATERIALIZER_CAPABILITY_ROUTINES,
+  ...ARTIFACT_LIVE_TICKET_INTERNAL_ROUTINES,
+]);
+
 /**
  * The complete standalone tenant-table contract. Adding or removing a
  * FORCE-RLS table is an architectural change: update this list in the same
@@ -38,6 +74,21 @@ export const FORCE_RLS_TABLES = [
   "durable_learning_attempts",
   "durable_learning_authority_results",
   "durable_learning_receipts",
+  "editable_artifact_blob_refs",
+  "editable_artifact_idempotency_receipts",
+  "editable_artifact_live_outbox",
+  "editable_artifact_live_tickets",
+  "editable_artifact_materialization_jobs",
+  "editable_artifact_materialization_results",
+  "editable_artifact_operations",
+  "editable_artifact_replica_leases",
+  "editable_artifact_scope_authorization_heads",
+  "editable_artifact_sequence_checkpoints",
+  "editable_artifact_snapshots",
+  "editable_artifact_transactions",
+  "editable_artifact_undo_claims",
+  "editable_artifact_versions",
+  "editable_artifacts",
   "enrollments",
   "file_uploads",
   "files",
@@ -204,6 +255,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "document_chunks",
   "documents",
   "durable_learning_attempt_claims",
+  "editable_artifact_replica_leases",
   "enrollments",
   "file_uploads",
   "files",
@@ -303,6 +355,17 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "durable_learning_attempts",
   "durable_learning_authority_results",
   "durable_learning_receipts",
+  "editable_artifact_blob_refs",
+  "editable_artifact_idempotency_receipts",
+  "editable_artifact_live_outbox",
+  "editable_artifact_materialization_jobs",
+  "editable_artifact_materialization_results",
+  "editable_artifact_operations",
+  "editable_artifact_sequence_checkpoints",
+  "editable_artifact_snapshots",
+  "editable_artifact_transactions",
+  "editable_artifact_undo_claims",
+  "editable_artifact_versions",
   "knowledge_change_proposals",
   "knowledge_claim_evidence",
   "knowledge_claim_relations",
@@ -329,11 +392,16 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "workspace_instruction_policy_revisions",
 ] as const;
 
+/** Mutable authorities that intentionally forbid runtime deletion. */
+export const RUNTIME_READ_INSERT_UPDATE_TABLES = ["editable_artifacts"] as const;
+
 /**
  * These FORCE-RLS tables are owned by security-definer host-export routines.
  * The ordinary application role must have no direct table privileges on them.
  */
 export const PROTECTED_NO_DIRECT_DML_TABLES = [
+  "editable_artifact_live_tickets",
+  "editable_artifact_scope_authorization_heads",
   "host_export_config",
   "host_export_consumers",
   "host_export_cursor_state",
@@ -354,6 +422,12 @@ export const RUNTIME_TABLE_PRIVILEGES: RuntimeTablePrivilegeContract = Object.fr
   ...Object.fromEntries(RUNTIME_READ_ONLY_TABLES.map((table) => [table, ["SELECT"] as const])),
   ...Object.fromEntries(
     RUNTIME_READ_INSERT_TABLES.map((table) => [table, ["SELECT", "INSERT"] as const]),
+  ),
+  ...Object.fromEntries(
+    RUNTIME_READ_INSERT_UPDATE_TABLES.map((table) => [
+      table,
+      ["SELECT", "INSERT", "UPDATE"] as const,
+    ]),
   ),
 });
 
@@ -401,6 +475,8 @@ export type RuntimeTablePosture = {
   rlsForced: boolean;
   rlsActive: boolean;
   policyCount: number;
+  artifactOutboxDispatcherPolicy: boolean;
+  artifactMaterializerPolicy: boolean;
   select: boolean;
   insert: boolean;
   update: boolean;
@@ -414,6 +490,7 @@ export type RuntimeRoutinePosture = {
   name: string;
   owner: string;
   execute: boolean;
+  securityDefiner: boolean;
 };
 
 export type RuntimeDatabasePosture = {
@@ -594,6 +671,8 @@ export async function inspectRuntimeDatabasePosture(
         rls_forced: boolean;
         rls_active: boolean;
         policy_count: number;
+        artifact_outbox_dispatcher_policy: boolean;
+        artifact_materializer_policy: boolean;
         can_select: boolean;
         can_insert: boolean;
         can_update: boolean;
@@ -610,6 +689,16 @@ export async function inspectRuntimeDatabasePosture(
             c.relforcerowsecurity as rls_forced,
             row_security_active(c.oid) as rls_active,
             (select count(*)::int from pg_policy policy where policy.polrelid = c.oid) as policy_count,
+            exists(
+              select 1 from pg_policy policy
+              where policy.polrelid = c.oid
+                and policy.polname = 'editable_artifact_outbox_dispatcher'
+            ) as artifact_outbox_dispatcher_policy,
+            exists(
+              select 1 from pg_policy policy
+              where policy.polrelid = c.oid
+                and policy.polname = 'editable_artifact_materializer_owner'
+            ) as artifact_materializer_policy,
             has_table_privilege(current_user, c.oid, 'SELECT') as can_select,
             has_table_privilege(current_user, c.oid, 'INSERT') as can_insert,
             has_table_privilege(current_user, c.oid, 'UPDATE') as can_update,
@@ -630,6 +719,8 @@ export async function inspectRuntimeDatabasePosture(
         rlsForced: row.rls_forced,
         rlsActive: row.rls_active,
         policyCount: row.policy_count,
+        artifactOutboxDispatcherPolicy: row.artifact_outbox_dispatcher_policy,
+        artifactMaterializerPolicy: row.artifact_materializer_policy,
         select: row.can_select,
         insert: row.can_insert,
         update: row.can_update,
@@ -643,22 +734,25 @@ export async function inspectRuntimeDatabasePosture(
         name: string;
         owner: string;
         can_execute: boolean;
+        security_definer: boolean;
       }>(
         await tx.execute(sql`
           select
-            (p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')')::text as name,
+            (p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')')::text as name,
             pg_get_userbyid(p.proowner)::text as owner,
-            has_function_privilege(current_user, p.oid, 'EXECUTE') as can_execute
+            has_function_privilege(current_user, p.oid, 'EXECUTE') as can_execute,
+            p.prosecdef as security_definer
           from pg_proc p
           join pg_namespace n on n.oid = p.pronamespace
           where n.nspname = 'opengeni_private'
             and p.prokind in ('f', 'p')
-          order by p.proname, pg_get_function_identity_arguments(p.oid)
+          order by p.proname, pg_catalog.oidvectortypes(p.proargtypes)
         `),
       ).map((row) => ({
         name: row.name,
         owner: row.owner,
         execute: row.can_execute,
+        securityDefiner: row.security_definer,
       }));
 
       return {
@@ -837,6 +931,172 @@ export function evaluateRuntimeDatabasePosture(
     if (table.policyCount < 1) violations.push(`table ${tableName} has no RLS policy`);
   }
 
+  const artifactOutbox = tableByName.get("editable_artifact_live_outbox");
+  if (artifactOutbox) {
+    if (!artifactOutbox.artifactOutboxDispatcherPolicy) {
+      violations.push("table editable_artifact_live_outbox lacks its owner dispatcher RLS policy");
+    }
+    for (const expectedRoutine of ARTIFACT_OUTBOX_CAPABILITY_ROUTINES) {
+      const matches = posture.privateRoutines.filter((routine) => routine.name === expectedRoutine);
+      if (matches.length !== 1) {
+        violations.push(`artifact outbox capability ${expectedRoutine} is missing or ambiguous`);
+        continue;
+      }
+      const routine = matches[0]!;
+      if (!routine.securityDefiner) {
+        violations.push(`artifact outbox capability ${routine.name} is not SECURITY DEFINER`);
+      }
+      if (routine.owner !== artifactOutbox.owner) {
+        violations.push(
+          `artifact outbox capability ${routine.name} owner ${routine.owner} does not match table owner ${artifactOutbox.owner}`,
+        );
+      }
+      if (routine.execute) {
+        violations.push(
+          `generic runtime role has forbidden global artifact outbox capability ${routine.name}`,
+        );
+      }
+    }
+  }
+
+  const artifactMaterializationJobs = tableByName.get("editable_artifact_materialization_jobs");
+  if (artifactMaterializationJobs) {
+    for (const tableName of [
+      "editable_artifact_materialization_jobs",
+      "editable_artifact_materialization_results",
+      "editable_artifact_blob_refs",
+      "editable_artifact_sequence_checkpoints",
+      "editable_artifact_versions",
+      "editable_artifact_idempotency_receipts",
+    ]) {
+      const table = tableByName.get(tableName);
+      if (table && !table.artifactMaterializerPolicy) {
+        violations.push(`table ${tableName} lacks its owner materializer RLS policy`);
+      }
+    }
+    for (const expectedRoutine of ARTIFACT_MATERIALIZER_CAPABILITY_ROUTINES) {
+      const matches = posture.privateRoutines.filter((routine) => routine.name === expectedRoutine);
+      if (matches.length !== 1) {
+        violations.push(
+          `artifact materializer capability ${expectedRoutine} is missing or ambiguous`,
+        );
+        continue;
+      }
+      const routine = matches[0]!;
+      if (!routine.securityDefiner) {
+        violations.push(`artifact materializer capability ${routine.name} is not SECURITY DEFINER`);
+      }
+      if (routine.owner !== artifactMaterializationJobs.owner) {
+        violations.push(
+          `artifact materializer capability ${routine.name} owner ${routine.owner} does not match table owner ${artifactMaterializationJobs.owner}`,
+        );
+      }
+      if (routine.execute) {
+        violations.push(
+          `generic runtime role has forbidden global artifact materializer capability ${routine.name}`,
+        );
+      }
+    }
+  }
+  const artifactAuthority = tableByName.get("editable_artifacts");
+  if (artifactAuthority) {
+    const matches = posture.privateRoutines.filter((routine) =>
+      routine.name.startsWith("advance_editable_artifact_authorization_revision("),
+    );
+    if (matches.length !== 1) {
+      violations.push(
+        "editable artifact authorization revision capability is missing or ambiguous",
+      );
+    } else {
+      const routine = matches[0]!;
+      if (!routine.securityDefiner) {
+        violations.push(
+          `editable artifact authorization revision capability ${routine.name} is not SECURITY DEFINER`,
+        );
+      }
+      if (routine.owner !== artifactAuthority.owner) {
+        violations.push(
+          `editable artifact authorization revision capability ${routine.name} owner ${routine.owner} does not match table owner ${artifactAuthority.owner}`,
+        );
+      }
+    }
+    for (const expectedRoutine of ARTIFACT_AUTHORIZATION_CAPABILITY_ROUTINES) {
+      const capabilityMatches = posture.privateRoutines.filter(
+        (routine) => routine.name === expectedRoutine,
+      );
+      if (capabilityMatches.length !== 1) {
+        violations.push(
+          `editable artifact authorization capability ${expectedRoutine} is missing or ambiguous`,
+        );
+        continue;
+      }
+      const routine = capabilityMatches[0]!;
+      if (!routine.securityDefiner) {
+        violations.push(
+          `editable artifact authorization capability ${routine.name} is not SECURITY DEFINER`,
+        );
+      }
+      if (routine.owner !== artifactAuthority.owner) {
+        violations.push(
+          `editable artifact authorization capability ${routine.name} owner ${routine.owner} does not match table owner ${artifactAuthority.owner}`,
+        );
+      }
+      if (!routine.execute) {
+        violations.push(
+          `runtime role lacks editable artifact authorization capability ${routine.name}`,
+        );
+      }
+    }
+  }
+
+  const artifactLiveTickets = tableByName.get("editable_artifact_live_tickets");
+  if (artifactLiveTickets) {
+    for (const expectedRoutine of ARTIFACT_LIVE_TICKET_CAPABILITY_ROUTINES) {
+      const matches = posture.privateRoutines.filter((routine) => routine.name === expectedRoutine);
+      if (matches.length !== 1) {
+        violations.push(
+          `artifact live ticket capability ${expectedRoutine} is missing or ambiguous`,
+        );
+        continue;
+      }
+      const routine = matches[0]!;
+      if (!routine.securityDefiner) {
+        violations.push(`artifact live ticket capability ${routine.name} is not SECURITY DEFINER`);
+      }
+      if (routine.owner !== artifactLiveTickets.owner) {
+        violations.push(
+          `artifact live ticket capability ${routine.name} owner ${routine.owner} does not match table owner ${artifactLiveTickets.owner}`,
+        );
+      }
+      if (!routine.execute) {
+        violations.push(`runtime role lacks artifact live ticket capability ${routine.name}`);
+      }
+    }
+    for (const internalRoutine of ARTIFACT_LIVE_TICKET_INTERNAL_ROUTINES) {
+      const matches = posture.privateRoutines.filter((routine) => routine.name === internalRoutine);
+      if (matches.length !== 1) {
+        violations.push(
+          `artifact live ticket internal routine ${internalRoutine} is missing or ambiguous`,
+        );
+        continue;
+      }
+      const routine = matches[0]!;
+      if (!routine.securityDefiner) {
+        violations.push(
+          `artifact live ticket internal routine ${routine.name} is not SECURITY DEFINER`,
+        );
+      }
+      if (routine.owner !== artifactLiveTickets.owner) {
+        violations.push(
+          `artifact live ticket internal routine ${routine.name} owner ${routine.owner} does not match table owner ${artifactLiveTickets.owner}`,
+        );
+      }
+      if (routine.execute) {
+        violations.push(`runtime role has forbidden ticket schema resolver ${routine.name}`);
+      }
+    }
+  }
+
   if (posture.privateRoutines.length === 0) {
     violations.push("opengeni_private has no helper routines");
   }
@@ -844,7 +1104,8 @@ export function evaluateRuntimeDatabasePosture(
     if (routine.owner === expectedRole) {
       violations.push(`runtime role owns private routine ${routine.name}`);
     }
-    if (!routine.execute) {
+    const dedicatedArtifactCapability = DEDICATED_ARTIFACT_CAPABILITY_ROUTINES.has(routine.name);
+    if (!routine.execute && !dedicatedArtifactCapability) {
       violations.push(`runtime role lacks EXECUTE on private routine ${routine.name}`);
     }
   }

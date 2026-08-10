@@ -1,0 +1,33 @@
+[package]
+name = "opengeni-artifact-kernel-wasm"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "WebAssembly byte-envelope adapter for the OpenGeni artifact kernel"
+publish = false
+
+[features]
+default = ["spreadsheet", "legacy-spreadsheet", "document", "presentation", "text-layout"]
+spreadsheet = []
+legacy-spreadsheet = ["spreadsheet"]
+document = []
+presentation = []
+text-layout = []
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+opengeni-artifact-kernel-binding-protocol = { path = "../protocol" }
+wasm-bindgen = "0.2.100"
+
+[dev-dependencies]
+sha2 = "0.10.9"
+opengeni-artifact-kernel = { path = "../.." }
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+opt-level = "z"
+panic = "abort"
+strip = true

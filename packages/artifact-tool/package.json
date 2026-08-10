@@ -1,0 +1,130 @@
+{
+  "name": "@opengeni/artifact-tool",
+  "version": "0.1.1",
+  "description": "OpenGeni-owned document, spreadsheet, and presentation engine with skill-compatible authoring APIs.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Cloudgeni-ai/opengeni.git",
+    "directory": "packages/artifact-tool"
+  },
+  "bin": {
+    "opengeni-artifact-materializer": "./src/materializer-cli-entry.ts",
+    "opengeni-artifact-runtime": "./src/runtime-cli-entry.ts"
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "main": "./src/index.ts",
+  "module": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./reference": {
+      "types": "./src/reference.ts",
+      "default": "./src/reference.ts"
+    },
+    "./native": {
+      "types": "./src/native.ts",
+      "default": "./src/native.ts"
+    },
+    "./runtime": {
+      "types": "./src/runtime.ts",
+      "default": "./src/runtime.ts"
+    },
+    "./runtime/locator": {
+      "types": "./src/runtime-cli.ts",
+      "default": "./src/runtime-cli.ts"
+    },
+    "./runtime/development": {
+      "types": "./src/runtime-development.ts",
+      "default": "./src/runtime-development.ts"
+    },
+    "./runtime/materializer": {
+      "types": "./src/materializer-cli.ts",
+      "default": "./src/materializer-cli.ts"
+    },
+    "./publication": {
+      "types": "./src/publication.ts",
+      "default": "./src/publication.ts"
+    },
+    "./spreadsheet": {
+      "types": "./src/production-spreadsheet.ts",
+      "default": "./src/production-spreadsheet.ts"
+    },
+    "./spreadsheet/render": {
+      "types": "./src/spreadsheet-render.ts",
+      "default": "./src/spreadsheet-render.ts"
+    },
+    "./spreadsheet/xlsx": {
+      "types": "./src/spreadsheet-xlsx-codec.ts",
+      "default": "./src/spreadsheet-xlsx-codec.ts"
+    },
+    "./document": {
+      "types": "./src/production-document.ts",
+      "default": "./src/production-document.ts"
+    },
+    "./document/render": {
+      "types": "./src/document-render.ts",
+      "default": "./src/document-render.ts"
+    },
+    "./document/docx": {
+      "types": "./src/document-docx-codec.ts",
+      "default": "./src/document-docx-codec.ts"
+    },
+    "./presentation": {
+      "types": "./src/production-presentation.ts",
+      "default": "./src/production-presentation.ts"
+    },
+    "./presentation/render": {
+      "types": "./src/presentation-render.ts",
+      "default": "./src/presentation-render.ts"
+    },
+    "./presentation/pptx": {
+      "types": "./src/presentation-pptx.ts",
+      "default": "./src/presentation-pptx.ts"
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "bun ../../scripts/build-typescript-package.ts",
+    "bench": "bun bench/run.ts",
+    "bench:deep": "bun bench/run.ts --deep",
+    "bench:release": "bun bench/release.ts",
+    "test:kernel": "cargo test --manifest-path kernel/Cargo.toml",
+    "test:kernel-packages": "bun ../../scripts/test-artifact-kernel-package-consumers.ts",
+    "test:production-native": "bun ../../scripts/run-artifact-native-tests.ts",
+    "bench:kernel": "cargo bench --manifest-path kernel/Cargo.toml --bench kernel",
+    "test:perf": "bun test --timeout 30000 test/perf",
+    "fuzz:check": "cargo check --manifest-path kernel/fuzz/Cargo.toml",
+    "fuzz:smoke": "bun kernel/fuzz/smoke.ts",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "bash ../../scripts/prepublish-guard"
+  },
+  "dependencies": {
+    "@opengeni/contracts": "workspace:*",
+    "@resvg/resvg-js": "^2.6.2",
+    "docx": "9.7.1",
+    "exceljs": "^4.4.0",
+    "pptxgenjs": "^4.0.1",
+    "saxes": "5.0.1",
+    "sharp": "^0.34.5"
+  },
+  "devDependencies": {
+    "jszip": "^3.10.1",
+    "tsup": "^8.5.0",
+    "typescript": "7.0.2"
+  },
+  "engines": {
+    "node": "^18.17.0 || ^20.3.0 || >=21.0.0"
+  }
+}

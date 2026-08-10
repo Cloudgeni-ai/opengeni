@@ -35,6 +35,7 @@ import type {
 } from "@openai/agents/sandbox";
 import { serializeManifestRecord } from "@openai/agents-core/sandbox/internal";
 import { PROVIDER_REGISTRY } from "./providers";
+import { ensureModalRegistryImage } from "./providers/modal";
 import type { ProviderRegistration } from "./providers/types";
 import { sandboxBackendForSdkBackendId } from "./select";
 import {
@@ -94,11 +95,15 @@ export {
 export {
   PROVIDER_REGISTRY,
   assertProviderRegistryInvariants,
+  buildImmutableProviderImage,
   prepareProviderForTeardownAfterCapture,
+  providerSupportsImmutableImageBuild,
   providerWorkspaceCapturePolicy,
   type ProviderRegistration,
   type ProviderConstructionContext,
   type ProviderExactResumeMode,
+  type ProviderImmutableImageBuildInput,
+  type ProviderImmutableImageBuildResult,
   type ProviderWorkspaceCapturePolicy,
   type ProviderWorkspaceCaptureTakeover,
 } from "./providers";
@@ -115,6 +120,7 @@ export {
   WorkspaceArchiveIntegrityError,
   captureVerifiedWorkspaceArchive,
   decodeNativeSnapshotRef,
+  encodeNativeSnapshotRef,
   describeLegacyNativeSnapshotArchive,
   describeNativeSnapshotArchive,
   fingerprintSandboxWorkspace,
@@ -1472,6 +1478,11 @@ export async function establishSandboxSessionFromEnvelope(
      * is never observable as ready while verification is in flight. */
     onWorkspaceRestoreVerifying?: (descriptor: WorkspaceArchiveDescriptor) => Promise<void>;
     metrics?: RuntimeMetricsHooks;
+    /** Exact pre-optimization sandbox settings. When a provider-immutable rig
+     * image is missing, retry from this logical image identity rather than
+     * guessing from a possibly absent tag or falling through to provider
+     * defaults. */
+    logicalFallbackSettings?: Settings;
     /** Isolated conformance-test/embedding seam. Ordinary runtime callers use
      * the validated provider registry. */
     clientFactory?: (
@@ -1485,6 +1496,8 @@ export async function establishSandboxSessionFromEnvelope(
     typeof envelope?.backendId === "string" ? (envelope.backendId as SandboxBackend) : undefined;
   const backend =
     opts.backendOverride ?? envelopeBackend ?? (settings.sandboxBackend as SandboxBackend);
+  const createImageSource =
+    backend === "modal" && settings.modalImageId ? "provider_immutable" : "logical";
   const environment = opts.environment ?? collectSandboxEnvironment(settings);
   const client = (opts.clientFactory ?? createSandboxClientForBackend)(
     backend,
@@ -1557,36 +1570,97 @@ export async function establishSandboxSessionFromEnvelope(
       workspaceArchiveBase64,
       workspaceArchiveMetadata,
     );
+    let createdClient = client;
     const createStarted = Date.now();
     let restored: Awaited<ReturnType<NonNullable<typeof client.create>>>;
     try {
       restored = await client.create!({ manifest: createManifest });
-      recordSandboxCreateMetric(opts.metrics, client.backendId, "completed", createStarted);
+      recordSandboxCreateMetric(
+        opts.metrics,
+        client.backendId,
+        createImageSource,
+        "completed",
+        createStarted,
+      );
     } catch (error) {
-      recordSandboxCreateMetric(opts.metrics, client.backendId, "failed", createStarted);
-      throw error;
+      recordSandboxCreateMetric(
+        opts.metrics,
+        client.backendId,
+        createImageSource,
+        "failed",
+        createStarted,
+      );
+      if (
+        createImageSource !== "provider_immutable" ||
+        backend !== "modal" ||
+        !isProviderSandboxNotFoundError(client.backendId, error)
+      ) {
+        throw error;
+      }
+      const fallbackSettings =
+        opts.logicalFallbackSettings ??
+        (settings.modalImageRef ? { ...settings, modalImageId: undefined } : null);
+      if (!fallbackSettings) {
+        // An ID-only logical base is supported. Without the exact pre-selection
+        // settings, clearing the optimized ID would silently boot Modal's
+        // default image, so fail closed instead of changing the rig base.
+        throw error;
+      }
+      await ensureModalRegistryImage(fallbackSettings);
+      const fallbackClient = (opts.clientFactory ?? createSandboxClientForBackend)(
+        backend,
+        fallbackSettings,
+        environment,
+      ) as ResumeCapableClient | undefined;
+      if (!fallbackClient?.create) {
+        throw new SandboxConfigError(
+          backend,
+          "Modal logical-image fallback does not support fresh creation",
+        );
+      }
+      const fallbackStarted = Date.now();
+      try {
+        restored = await fallbackClient.create({ manifest: createManifest });
+        recordSandboxCreateMetric(
+          opts.metrics,
+          fallbackClient.backendId,
+          "logical",
+          "completed",
+          fallbackStarted,
+        );
+        createdClient = fallbackClient;
+      } catch (fallbackError) {
+        recordSandboxCreateMetric(
+          opts.metrics,
+          fallbackClient.backendId,
+          "logical",
+          "failed",
+          fallbackStarted,
+        );
+        throw fallbackError;
+      }
     }
     let restoredState = (restored as { state?: unknown }).state;
     const restoredInstanceId = readInstanceId(backend, restored);
     if (!restoredInstanceId) {
-      await terminateCreatedSandbox(client, restored, restoredState);
+      await terminateCreatedSandbox(createdClient, restored, restoredState);
       throw new SandboxConfigError(
         backend,
         `Sandbox backend "${backend}" created a handle without its declared provider identity`,
       );
     }
     let established: EstablishedSandboxSession = {
-      client,
+      client: createdClient,
       session: restored,
       sessionState: restoredState ?? resumeFallbackState,
       instanceId: restoredInstanceId,
-      backendId: client.backendId,
+      backendId: createdClient.backendId,
     };
     if (opts.onSandboxCreated) {
       try {
         await opts.onSandboxCreated(established);
       } catch (createCallbackError) {
-        await terminateCreatedSandbox(client, restored, restoredState);
+        await terminateCreatedSandbox(createdClient, restored, restoredState);
         throw createCallbackError;
       }
     }
@@ -1595,17 +1669,21 @@ export async function establishSandboxSessionFromEnvelope(
       const hydrate = (restored as { hydrateWorkspace?: (data: Uint8Array) => Promise<void> })
         .hydrateWorkspace;
       if (typeof hydrate !== "function") {
-        await terminateCreatedSandbox(client, restored, restoredState);
+        await terminateCreatedSandbox(createdClient, restored, restoredState);
         throw new WorkspaceArchiveIntegrityError(
           "archive_hydration_failed",
-          `sandbox backend ${client.backendId} cannot hydrate selected archive revision ${workspaceArchive.descriptor.revision}`,
+          `sandbox backend ${createdClient.backendId} cannot hydrate selected archive revision ${workspaceArchive.descriptor.revision}`,
         );
       }
       try {
         // hydrateWorkspace may internally replace the underlying box.
         await hydrate.call(restored, workspaceArchive.bytes);
       } catch (error) {
-        await terminateCreatedSandbox(client, restored, (restored as { state?: unknown }).state);
+        await terminateCreatedSandbox(
+          createdClient,
+          restored,
+          (restored as { state?: unknown }).state,
+        );
         if (error instanceof WorkspaceArchiveIntegrityError) throw error;
         throw new WorkspaceArchiveIntegrityError(
           "archive_hydration_failed",
@@ -1622,7 +1700,7 @@ export async function establishSandboxSessionFromEnvelope(
       const hydratedState = (restored as { state?: unknown }).state;
       const hydratedInstanceId = readInstanceId(backend, restored);
       if (!hydratedInstanceId) {
-        await terminateCreatedSandbox(client, restored, hydratedState);
+        await terminateCreatedSandbox(createdClient, restored, hydratedState);
         throw new SandboxConfigError(
           backend,
           `Sandbox backend "${backend}" hydrated a handle without its declared provider identity`,
@@ -1630,17 +1708,17 @@ export async function establishSandboxSessionFromEnvelope(
       }
       if (hydratedInstanceId !== established.instanceId) {
         established = {
-          client,
+          client: createdClient,
           session: restored,
           sessionState: hydratedState ?? resumeFallbackState,
           instanceId: hydratedInstanceId,
-          backendId: client.backendId,
+          backendId: createdClient.backendId,
         };
         if (opts.onSandboxCreated) {
           try {
             await opts.onSandboxCreated(established);
           } catch (createCallbackError) {
-            await terminateCreatedSandbox(client, restored, hydratedState);
+            await terminateCreatedSandbox(createdClient, restored, hydratedState);
             throw createCallbackError;
           }
         }
@@ -1649,7 +1727,11 @@ export async function establishSandboxSessionFromEnvelope(
         try {
           await opts.onWorkspaceRestoreVerifying(workspaceArchive.descriptor);
         } catch (error) {
-          await terminateCreatedSandbox(client, restored, (restored as { state?: unknown }).state);
+          await terminateCreatedSandbox(
+            createdClient,
+            restored,
+            (restored as { state?: unknown }).state,
+          );
           throw error;
         }
       }
@@ -1661,7 +1743,11 @@ export async function establishSandboxSessionFromEnvelope(
         try {
           await verifyRestoredWorkspace(restored, workspaceArchive.descriptor);
         } catch (error) {
-          await terminateCreatedSandbox(client, restored, (restored as { state?: unknown }).state);
+          await terminateCreatedSandbox(
+            createdClient,
+            restored,
+            (restored as { state?: unknown }).state,
+          );
           if (error instanceof WorkspaceArchiveIntegrityError) throw error;
           throw new WorkspaceArchiveIntegrityError(
             "workspace_fingerprint_unavailable",
@@ -1678,18 +1764,18 @@ export async function establishSandboxSessionFromEnvelope(
     restoredState = (restored as { state?: unknown }).state;
     const finalInstanceId = readInstanceId(backend, restored);
     if (!finalInstanceId) {
-      await terminateCreatedSandbox(client, restored, restoredState);
+      await terminateCreatedSandbox(createdClient, restored, restoredState);
       throw new SandboxConfigError(
         backend,
         `Sandbox backend "${backend}" returned a handle without its declared provider identity`,
       );
     }
     return {
-      client,
+      client: createdClient,
       session: restored,
       sessionState: restoredState ?? resumeFallbackState,
       instanceId: finalInstanceId,
-      backendId: client.backendId,
+      backendId: createdClient.backendId,
       origin: hydrationApplied ? ("restored" as const) : ("created" as const),
       ...(workspaceArchive ? { restoredArchive: workspaceArchive.descriptor } : {}),
     };
@@ -1821,12 +1907,14 @@ export async function establishSandboxSessionFromEnvelope(
 function recordSandboxCreateMetric(
   metrics: RuntimeMetricsHooks | undefined,
   backend: string,
+  imageSource: "logical" | "provider_immutable",
   outcome: "completed" | "failed",
   startedMs: number,
 ): void {
   try {
     metrics?.onSandboxCreate?.({
       backend,
+      imageSource,
       outcome,
       durationSeconds: Math.max(0, (Date.now() - startedMs) / 1000),
     });

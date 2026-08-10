@@ -3,6 +3,7 @@ import type {
   FirstPartyMcpToolName,
   McpPersonalConnectionDelegation,
   McpServerConnectionRef,
+  RigProviderImages,
   SessionMcpApprovalPolicy,
   TimelineAnnotation,
 } from "@opengeni/contracts";
@@ -26,6 +27,8 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 import { losslessCodecVersion, losslessJsonb, losslessText } from "./lossless-columns";
+
+export * from "./editable-artifacts-schema";
 
 const vector = customType<{ data: number[]; driverData: string }>({
   dataType() {
@@ -2139,6 +2142,11 @@ export const files = pgTable(
   (table) => ({
     workspaceCreated: index("files_workspace_created_idx").on(table.workspaceId, table.createdAt),
     objectKey: uniqueIndex("files_object_key_idx").on(table.objectKey),
+    scopeIdentity: uniqueIndex("files_scope_id_uq").on(
+      table.accountId,
+      table.workspaceId,
+      table.id,
+    ),
     status: index("files_status_idx").on(table.status),
   }),
 );
@@ -6482,9 +6490,9 @@ export const rigs = pgTable(
   }),
 );
 
-// Append-only, content-immutable rig versions. Exactly one active per rig
-// (partial unique index). The domain layer never UPDATEs a content column; only
-// the `active` flag flips (activateRigVersion).
+// Append-only, definition-content-immutable rig versions. Exactly one active
+// per rig (partial unique index). Definition columns never UPDATE; only the
+// `active` flag and provider-image build metadata are operationally mutable.
 export const rigVersions = pgTable(
   "rig_versions",
   {
@@ -6511,6 +6519,11 @@ export const rigVersions = pgTable(
       .notNull()
       .default([]),
     changelog: text("changelog"),
+    // Build-once provider-native image state, keyed by sandbox backend. This is
+    // operational metadata bound to the exact immutable version definition;
+    // it never contains credentials, variable values, repositories, archives,
+    // session state, or process state.
+    providerImages: jsonb("provider_images").$type<RigProviderImages>().notNull().default({}),
     createdBy: text("created_by"),
     active: boolean("active").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

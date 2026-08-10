@@ -18,6 +18,12 @@ describe("publish closure import discovery", () => {
     ]);
   });
 
+  test("accepts executable hashbangs without hiding runtime imports", async () => {
+    const source = '#!/usr/bin/env node\nimport "@opengeni/cli-runtime";\n';
+
+    expect(await runtimeModuleSpecifiers(source, "ts")).toEqual(["@opengeni/cli-runtime"]);
+  });
+
   test("finds every dependency-bearing declaration form", () => {
     const source = `
       /// <reference types="@opengeni/reference" />

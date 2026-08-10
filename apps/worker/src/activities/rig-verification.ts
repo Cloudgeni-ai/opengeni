@@ -1,31 +1,53 @@
-import type { AccessGrant, Rig, RigChange, RigVersion } from "@opengeni/contracts";
+import type {
+  AccessGrant,
+  Rig,
+  RigChange,
+  RigProviderImage,
+  RigVersion,
+  SandboxBackend,
+} from "@opengeni/contracts";
 import { sandboxLifecycleTransitionWaitMs } from "@opengeni/config";
 import {
+  appendRigSetupCommand,
   recordRigAuditEvent,
   classifyRigVerificationOutcome,
   promoteSetupAppendChange,
+  rigProviderImageBuildRequestId,
+  rigProviderImageContentHash,
+  rigProviderImageProviderBindingKeyHash,
+  rigProviderImageSetupHash,
+  type RigProviderImageDefinition,
 } from "@opengeni/core";
 import {
   acquireLease,
   beginRigChangeVerificationAttempt,
+  claimRigVersionProviderImageBuild,
   commitWarmingToWarm,
   failWarmingToCold,
+  finalizeRigVersionProviderImageBuild,
   getRig,
   getRigChange,
   getRigVersionById,
   markWarmLeaseInstanceLost,
+  markSandboxCheckpointArtifactDeletePending,
   recordWarmingSandboxCreated,
+  registerSandboxCheckpointArtifact,
   releaseLeaseHolder,
   touchLeaseHolder,
   updateRigChangeStatus,
   type Database,
 } from "@opengeni/db";
 import {
+  buildImmutableProviderImage,
   createTurnToolCancellationController,
+  deleteModalCheckpointSnapshot,
+  describeNativeSnapshotArchive,
+  encodeNativeSnapshotRef,
   establishSandboxSessionFromEnvelope,
   sandboxCommandExitCode,
   sandboxCommandOutput,
   serializeEstablishedSandboxEnvelope,
+  providerSupportsImmutableImageBuild,
   tagModalSandbox,
   terminateManagedSandboxSession,
   type EstablishedSandboxSession,
@@ -34,7 +56,12 @@ import {
 } from "@opengeni/runtime/sandbox";
 import type { Context } from "@temporalio/activity";
 import type { ControlActivityServices } from "./types";
-import { settingsWithRigImage } from "./sandbox-images";
+import {
+  rigProviderImageSourceImage,
+  settingsWithPackSandboxImage,
+  settingsWithRigImage,
+} from "./sandbox-images";
+import { resolveWorkspacePackRuntime, type WorkspacePackRuntime } from "./packs";
 import { currentActivityContext } from "./streaming";
 
 type RigSetupHook = typeof import("@opengeni/runtime").runRigSetupHook;
@@ -313,6 +340,12 @@ const defaultOwnershipDependencies: RigVerificationOwnershipDependencies = {
 export type RigVerificationSandboxRunContext = {
   signal: AbortSignal;
   commandRunner: SandboxLifecycleCommandRunner;
+  ownership: {
+    leaseId: string;
+    leaseEpoch: number;
+    workspaceGeneration: number;
+    instanceId: string;
+  };
 };
 
 export class RigVerificationLeaseUnavailableError extends Error {
@@ -581,7 +614,16 @@ export async function runWithOwnedRigVerificationSandbox<T>(
     if (!committed.committed || !committed.lease) {
       throw new RigVerificationLeaseUnavailableError(input.sandboxGroupId, "fenced");
     }
-    const result = await run(established, { signal, commandRunner });
+    const result = await run(established, {
+      signal,
+      commandRunner,
+      ownership: {
+        leaseId: committed.lease.id,
+        leaseEpoch: committed.lease.leaseEpoch,
+        workspaceGeneration: committed.lease.workspaceGeneration,
+        instanceId: established.instanceId,
+      },
+    });
     throwIfAborted(signal);
     return result;
   } catch (error) {
@@ -715,7 +757,7 @@ function setupAppendCommand(change: RigChange): string | null {
 
 function candidateVersionForChange(baseVersion: RigVersion, change: RigChange): RigVersion {
   if (change.kind !== "definition_edit") {
-    return baseVersion;
+    return { ...baseVersion, providerImages: {} };
   }
   const payload = change.payload as {
     image?: unknown;
@@ -742,7 +784,286 @@ function candidateVersionForChange(baseVersion: RigVersion, change: RigChange): 
       ? (payload.defaultVariableSetIds as string[])
       : baseVersion.defaultVariableSetIds,
     changelog: typeof payload.changelog === "string" ? payload.changelog : baseVersion.changelog,
+    providerImages: {},
   };
+}
+
+function providerImageDefinitionForChange(
+  baseVersion: RigVersion,
+  change: RigChange,
+  candidateVersion: RigVersion,
+): RigProviderImageDefinition {
+  if (change.kind !== "setup_append") return candidateVersion;
+  const command = setupAppendCommand(change);
+  return {
+    image: baseVersion.image,
+    setupScript: command
+      ? appendRigSetupCommand(baseVersion.setupScript, command)
+      : baseVersion.setupScript,
+    checks: baseVersion.checks,
+    credentialHooks: baseVersion.credentialHooks,
+    defaultVariableSetIds: baseVersion.defaultVariableSetIds,
+  };
+}
+
+export function rigProviderImageContentMarkerCommand(
+  contentHash: string,
+  markerRoot = "/var/opengeni",
+): string {
+  if (!/^sha256:[0-9a-f]{64}$/u.test(contentHash)) {
+    throw new Error("Rig provider image content marker requires a canonical SHA-256 value");
+  }
+  if (!/^\/[A-Za-z0-9._/-]+$/u.test(markerRoot)) {
+    throw new Error("Rig provider image marker root must be a safe absolute path");
+  }
+  const normalizedRoot = markerRoot.replace(/\/+$/u, "");
+  const marker = `${normalizedRoot}/rig-setup-content-${contentHash.slice("sha256:".length)}.done`;
+  return `mkdir -p '${normalizedRoot}' && touch '${marker}'`;
+}
+
+export async function buildVerifiedRigProviderImage(input: {
+  settings: ControlActivityServices["settings"];
+  db: Database;
+  accountId: string;
+  workspaceId: string;
+  existingVersionId?: string;
+  definition: RigProviderImageDefinition;
+  target: { kind: "change" | "version"; id: string };
+  established: EstablishedSandboxSession;
+  ownership: RigVerificationSandboxRunContext["ownership"];
+  signal: AbortSignal;
+}): Promise<RigProviderImage> {
+  const backend = input.settings.sandboxBackend as SandboxBackend;
+  const providerSupportsBuild = providerSupportsImmutableImageBuild(backend);
+  const sourceImage = rigProviderImageSourceImage(input.settings, backend);
+  const contentHash = rigProviderImageContentHash({
+    backend,
+    sourceImage,
+    definition: input.definition,
+  });
+  const startedAt = new Date().toISOString();
+  let building: RigProviderImage = {
+    backend,
+    provider: backend,
+    status: "building",
+    contentHash,
+    setupHash: rigProviderImageSetupHash(input.definition),
+    sourceImage,
+    buildRequestId: rigProviderImageBuildRequestId({
+      targetId: input.target.id,
+      backend,
+      contentHash,
+    }),
+    imageId: null,
+    imageDigest: null,
+    artifactId: null,
+    providerBindingKeyHash: null,
+    provenance: {
+      kind: "rig_verification",
+      targetKind: input.target.kind,
+      targetId: input.target.id,
+    },
+    startedAt,
+    finishedAt: null,
+    error: null,
+  };
+
+  if (input.existingVersionId) {
+    const claim = await claimRigVersionProviderImageBuild(input.db, {
+      workspaceId: input.workspaceId,
+      versionId: input.existingVersionId,
+      image: building,
+      staleAfterMs: RIG_VERIFICATION_OWNER_TTL_MS,
+      retryUnsupported: providerSupportsBuild,
+    });
+    if (
+      claim.status === "ready" ||
+      claim.status === "in_progress" ||
+      claim.status === "unsupported"
+    ) {
+      return claim.image;
+    }
+    if (claim.status === "conflict") {
+      return {
+        ...building,
+        status: "failed",
+        finishedAt: new Date().toISOString(),
+        error: {
+          code: "provider_image_content_conflict",
+          message:
+            "this exact rig version already records a provider image for different effective content; mint and verify a new version",
+          retryable: false,
+        },
+      };
+    }
+    building = claim.image;
+  }
+
+  const finalize = async (image: RigProviderImage): Promise<RigProviderImage> => {
+    if (input.existingVersionId) {
+      const persisted = await finalizeRigVersionProviderImageBuild(input.db, {
+        workspaceId: input.workspaceId,
+        versionId: input.existingVersionId,
+        image,
+      });
+      if (!persisted) {
+        if (image.artifactId) {
+          await markSandboxCheckpointArtifactDeletePending(input.db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            artifactId: image.artifactId,
+            reason: "rig_provider_image_publication_fenced",
+          }).catch(() => false);
+        }
+        return {
+          ...image,
+          status: "failed",
+          imageId: null,
+          imageDigest: null,
+          artifactId: null,
+          providerBindingKeyHash: null,
+          finishedAt: new Date().toISOString(),
+          error: {
+            code: "provider_image_publication_fenced",
+            message: "provider image ownership changed before this build could be published",
+            retryable: true,
+          },
+        };
+      }
+    }
+    return image;
+  };
+
+  if (!providerSupportsBuild) {
+    return await finalize({
+      ...building,
+      status: "unsupported",
+      finishedAt: new Date().toISOString(),
+      error: {
+        code: "provider_image_build_unsupported",
+        message: `sandbox backend ${backend} does not support immutable provider image builds`,
+        retryable: false,
+      },
+    });
+  }
+
+  throwIfAborted(input.signal);
+  let builtIdentity: {
+    imageId: string;
+    providerBindingKey: string;
+  } | null = null;
+  let artifactId: string | null = null;
+  try {
+    const built = await buildImmutableProviderImage({
+      backend,
+      settings: input.settings,
+      session: input.established.session,
+      requestId: building.buildRequestId,
+      timeoutMs: input.settings.sandboxSnapshotTimeoutMs,
+    });
+    if (!built || (!built.imageId && !built.imageDigest)) {
+      throw new Error("provider image builder returned no immutable image identity");
+    }
+    if (backend === "modal") {
+      if (!built.imageId || !built.providerBindingKey || !built.providerBinding) {
+        throw new Error("Modal provider image build returned incomplete ownership identity");
+      }
+      builtIdentity = {
+        imageId: built.imageId,
+        providerBindingKey: built.providerBindingKey,
+      };
+      const archiveBytes = encodeNativeSnapshotRef({
+        provider: "modal_snapshot_filesystem",
+        snapshotId: built.imageId,
+        workspacePersistence: "snapshot_filesystem",
+      });
+      const descriptor = describeNativeSnapshotArchive(archiveBytes);
+      if (!descriptor) {
+        throw new Error("Modal provider image build returned an invalid snapshot identity");
+      }
+      const artifact = await registerSandboxCheckpointArtifact(input.db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sandboxGroupId: input.target.id,
+        sourceLeaseId: input.ownership.leaseId,
+        sourceLeaseEpoch: input.ownership.leaseEpoch,
+        sourceInstanceId: input.ownership.instanceId,
+        sourceWorkspaceGeneration: input.ownership.workspaceGeneration,
+        providerBindingKey: built.providerBindingKey,
+        providerBinding: built.providerBinding,
+        workspaceArchive: Buffer.from(archiveBytes).toString("base64"),
+        workspaceArchiveMeta: descriptor,
+      });
+      artifactId = artifact.id;
+    }
+    if (input.signal.aborted) {
+      if (artifactId) {
+        await markSandboxCheckpointArtifactDeletePending(input.db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          artifactId,
+          reason: "rig_provider_image_build_cancelled",
+        }).catch(() => false);
+      }
+      throw abortReason(input.signal);
+    }
+    return await finalize({
+      ...building,
+      provider: built.provider,
+      status: "ready",
+      imageId: built.imageId,
+      imageDigest: built.imageDigest,
+      artifactId,
+      providerBindingKeyHash: built.providerBindingKey
+        ? rigProviderImageProviderBindingKeyHash(built.providerBindingKey)
+        : null,
+      finishedAt: new Date().toISOString(),
+      error: null,
+    });
+  } catch (error) {
+    if (input.signal.aborted) throw abortReason(input.signal);
+    if (artifactId) {
+      await markSandboxCheckpointArtifactDeletePending(input.db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        artifactId,
+        reason: "rig_provider_image_build_failed",
+      }).catch(() => false);
+    } else if (backend === "modal" && builtIdentity) {
+      await deleteModalCheckpointSnapshot(
+        input.settings,
+        builtIdentity.providerBindingKey,
+        builtIdentity.imageId,
+      ).catch(() => "not_found" as const);
+    }
+    const message = (error instanceof Error ? error.message : String(error)).slice(0, 2000);
+    return await finalize({
+      ...building,
+      status: "failed",
+      artifactId: null,
+      finishedAt: new Date().toISOString(),
+      error: {
+        code: "provider_image_build_failed",
+        message: message || "provider image build failed",
+        retryable: true,
+      },
+    });
+  }
+}
+
+export function settingsForRigVerification(
+  settings: ControlActivityServices["settings"],
+  packRuntime: WorkspacePackRuntime,
+  rigImage: string | null,
+): ControlActivityServices["settings"] {
+  return settingsWithRigImage(
+    settingsWithPackSandboxImage(
+      settings,
+      packRuntime.sandboxImage,
+      packRuntime.sandboxProviderImages,
+    ),
+    rigImage,
+  );
 }
 
 async function loadChangeTarget(
@@ -826,7 +1147,22 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
         const verification: Record<string, unknown> = { startedAt, checkResults: [] };
         try {
           const candidateVersion = candidateVersionForChange(baseVersion, change);
-          const runSettings = settingsWithRigImage(settings, candidateVersion.image);
+          const providerImageDefinition = providerImageDefinitionForChange(
+            baseVersion,
+            change,
+            candidateVersion,
+          );
+          const packRuntime = await resolveWorkspacePackRuntime(db, input.workspaceId);
+          const runSettings = settingsForRigVerification(
+            settings,
+            packRuntime,
+            candidateVersion.image,
+          );
+          const providerImageContentHash = rigProviderImageContentHash({
+            backend: runSettings.sandboxBackend,
+            sourceImage: rigProviderImageSourceImage(runSettings, runSettings.sandboxBackend),
+            definition: providerImageDefinition,
+          });
           return await runWithOwnedRigVerificationSandbox(
             {
               settings: runSettings,
@@ -851,6 +1187,7 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                     versionId: candidateVersion.id,
                     script: candidateVersion.setupScript ?? "",
                     timeoutMs: settings.rigSetupTimeoutMs,
+                    contentHash: providerImageContentHash,
                   },
                 });
                 verification.setupResult = { exitCode: 0, output: "" };
@@ -885,6 +1222,17 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                   });
                   return updated;
                 }
+                const markerResult = await runCommand(
+                  established.session as TurnSandboxCommandSession,
+                  rigProviderImageContentMarkerCommand(providerImageContentHash),
+                  settings.rigSetupTimeoutMs,
+                  runContext.commandRunner,
+                );
+                if (markerResult.exitCode !== 0) {
+                  throw new Error(
+                    `Failed to seal rig provider image content marker: ${markerResult.output.slice(-2000)}`,
+                  );
+                }
               }
               const checkResults = [];
               for (const check of candidateVersion.checks) {
@@ -902,6 +1250,19 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
               }
               verification.checkResults = checkResults;
               const passed = checkResults.every((result) => result.exitCode === 0);
+              if (passed) {
+                verification.providerImage = await buildVerifiedRigProviderImage({
+                  settings: runSettings,
+                  db,
+                  accountId: rig.accountId,
+                  workspaceId: input.workspaceId,
+                  definition: providerImageDefinition,
+                  target: { kind: "change", id: change.id },
+                  established,
+                  ownership: runContext.ownership,
+                  signal: runContext.signal,
+                });
+              }
               verification.finishedAt = new Date().toISOString();
               verification.passed = passed;
               const classified = classifyRigVerificationOutcome({ kind: change.kind, passed });
@@ -987,7 +1348,13 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
           metadata: { versionId: version.id },
         });
         try {
-          const runSettings = settingsWithRigImage(settings, version.image);
+          const packRuntime = await resolveWorkspacePackRuntime(db, input.workspaceId);
+          const runSettings = settingsForRigVerification(settings, packRuntime, version.image);
+          const providerImageContentHash = rigProviderImageContentHash({
+            backend: runSettings.sandboxBackend,
+            sourceImage: rigProviderImageSourceImage(runSettings, runSettings.sandboxBackend),
+            definition: version,
+          });
           return await runWithOwnedRigVerificationSandbox(
             {
               settings: runSettings,
@@ -1012,6 +1379,7 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                     versionId: version.id,
                     script: version.setupScript ?? "",
                     timeoutMs: settings.rigSetupTimeoutMs,
+                    contentHash: providerImageContentHash,
                   },
                 });
               }
@@ -1029,6 +1397,20 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                 });
               }
               const passed = checkResults.every((result) => result.exitCode === 0);
+              const providerImage = passed
+                ? await buildVerifiedRigProviderImage({
+                    settings: runSettings,
+                    db,
+                    accountId: rig.accountId,
+                    workspaceId: input.workspaceId,
+                    existingVersionId: version.id,
+                    definition: version,
+                    target: { kind: "version", id: version.id },
+                    established,
+                    ownership: runContext.ownership,
+                    signal: runContext.signal,
+                  })
+                : null;
               await recordRigAuditEvent(db, {
                 grant,
                 action: passed ? "rig.verification.passed" : "rig.verification.failed",
@@ -1039,9 +1421,10 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                   finishedAt: new Date().toISOString(),
                   passed,
                   checkResults,
+                  providerImage,
                 },
               });
-              return { versionId: version.id, passed, checkResults };
+              return { versionId: version.id, passed, checkResults, providerImage };
             },
           );
         } catch (error) {

@@ -15,7 +15,7 @@ Canonical implementation:
   resolver: `packages/db/src/durable-learning-router.ts`;
 - ledger schema and rolling migration:
   `packages/db/src/durable-learning-schema.ts` and
-  `packages/db/drizzle/0193_durable_learning_router.sql`;
+  `packages/db/drizzle/0200_durable_learning_router.sql`;
 - current Workspace Memory authority adapter and legacy write integration:
   `packages/core/src/domain/durable-learning-memory-adapter.ts`.
 

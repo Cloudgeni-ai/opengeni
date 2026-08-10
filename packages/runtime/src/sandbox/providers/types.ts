@@ -20,6 +20,24 @@ export interface ProviderConstructionContext {
   exposedPorts: number[];
 }
 
+export type ProviderImmutableImageBuildResult = {
+  provider: string;
+  backend: SandboxBackend;
+  imageId: string | null;
+  imageDigest: string | null;
+  /** Exact provider account/workspace binding. Persist only a hash publicly. */
+  providerBindingKey: string | null;
+  /** Non-secret canonical binding retained only for durable provider artifact ownership. */
+  providerBinding: Record<string, unknown> | null;
+};
+
+export type ProviderImmutableImageBuildInput = {
+  settings: Settings;
+  session: unknown;
+  requestId: string;
+  timeoutMs: number;
+};
+
 /**
  * Crash-recovery contract for one provider's /workspace capture path.
  *
@@ -117,6 +135,14 @@ export interface ProviderRegistration {
    * immediately before generic SDK teardown. This may only suppress redundant
    * provider persistence; it must not alter durable identity or workspace data. */
   prepareForTeardownAfterCapture?(session: unknown): void;
+  /**
+   * Build one provider-native immutable image from an already verified clean
+   * sandbox. Omission is the truthful unsupported-provider signal; callers
+   * must retain runtime setup as the fallback.
+   */
+  buildImmutableImage?(
+    input: ProviderImmutableImageBuildInput,
+  ): Promise<ProviderImmutableImageBuildResult>;
   descriptor: CapabilityDescriptor;
   /**
    * Validate that the settings carry the credentials/config this provider

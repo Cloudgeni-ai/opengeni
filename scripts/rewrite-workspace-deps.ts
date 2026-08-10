@@ -34,17 +34,17 @@
  * to point at the about-to-be-published versions.
  *
  * IDEMPOTENT: a spec with no `workspace:` prefix is left untouched, so running
- * twice is a no-op.
+ * twice is a no-op. This script intentionally has no `--restore`: the concrete
+ * range does not retain enough information to recover the exact original
+ * workspace protocol, and guessing would corrupt intentional concrete peers.
  *
- * CI SAFETY: in CI this runs in the ephemeral checkout right before publish, so
- * the rewritten package.json files are never committed. For local proving, pass
- * `--restore` to put the `workspace:*` form back (it reverts every @opengeni/*
- * published dep in the publishable packages to `workspace:*`).
+ * CI SAFETY: run this only in the ephemeral release checkout. Local validation
+ * uses the exported pure transformer and packed-consumer tests, never mutation
+ * plus a lossy reverse transform.
  *
  * Usage:
  *   bun scripts/rewrite-workspace-deps.ts            # rewrite -> concrete
  *   bun scripts/rewrite-workspace-deps.ts --strip-dev-dependencies
- *   bun scripts/rewrite-workspace-deps.ts --restore  # concrete -> workspace:*
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -52,25 +52,15 @@ import {
   PUBLISHED_DEP_FIELDS,
   publishableWorkspacePackages,
   repoRoot,
-  workspacePackageByName,
   workspaceVersionMap,
   type PackageJson,
 } from "./publishable-workspaces";
-
-const restore = process.argv.includes("--restore");
-const stripDevDependencies = process.argv.includes("--strip-dev-dependencies");
-const versions = workspaceVersionMap();
-const workspaceNames = workspacePackageByName();
-
-if (restore && stripDevDependencies) {
-  throw new Error("--restore cannot be combined with --strip-dev-dependencies.");
-}
 
 /**
  * Translate a single `workspace:` spec to a concrete range using pnpm/bun rules.
  * Returns the original string unchanged if it is not a workspace spec.
  */
-function resolveWorkspaceSpec(
+export function resolveWorkspaceSpec(
   depName: string,
   spec: string,
   versionByPackage: Map<string, string>,
@@ -96,67 +86,77 @@ function resolveWorkspaceSpec(
   return rest;
 }
 
-let changed = 0;
+export type WorkspaceDependencyRewrite = Readonly<{
+  field: (typeof PUBLISHED_DEP_FIELDS)[number];
+  dependency: string;
+  before: string;
+  after: string;
+}>;
 
-for (const { dir: pkgDir } of publishableWorkspacePackages()) {
-  const pkgPath = join(repoRoot, pkgDir, "package.json");
-  const raw = readFileSync(pkgPath, "utf8");
-  const pkg = JSON.parse(raw) as PackageJson;
-  let pkgChanged = false;
-
+export function rewriteWorkspaceDependenciesToConcrete(
+  pkg: PackageJson,
+  versions: Map<string, string>,
+): WorkspaceDependencyRewrite[] {
+  const rewrites: WorkspaceDependencyRewrite[] = [];
   for (const field of PUBLISHED_DEP_FIELDS) {
     const deps = pkg[field] as Record<string, string> | undefined;
-    if (!deps) {
-      continue;
-    }
+    if (!deps) continue;
     for (const [depName, spec] of Object.entries(deps)) {
-      if (restore) {
-        // Put the workspace protocol back on @opengeni/* deps (local proving).
-        if (
-          workspaceNames.has(depName) &&
-          depName.startsWith("@opengeni/") &&
-          !spec.startsWith("workspace:")
-        ) {
-          deps[depName] = "workspace:*";
-          pkgChanged = true;
-          changed += 1;
-        }
-        continue;
-      }
       const next = resolveWorkspaceSpec(depName, spec, versions);
       if (next !== spec) {
         deps[depName] = next;
-        pkgChanged = true;
-        changed += 1;
-        process.stdout.write(`  ${pkg.name ?? pkgDir}: ${field}.${depName} ${spec} -> ${next}\n`);
+        rewrites.push({ field, dependency: depName, before: spec, after: next });
       }
     }
   }
-
-  if (stripDevDependencies && pkg.devDependencies) {
-    delete pkg.devDependencies;
-    pkgChanged = true;
-    changed += 1;
-    process.stdout.write(
-      `  ${pkg.name ?? pkgDir}: removed devDependencies from publish manifest\n`,
-    );
-  }
-
-  if (pkgChanged) {
-    // Preserve trailing newline if the file had one.
-    const trailing = raw.endsWith("\n") ? "\n" : "";
-    writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}${trailing}`);
-  }
+  return rewrites;
 }
 
-if (restore) {
-  process.stdout.write(
-    `rewrite-workspace-deps: restored ${changed} @opengeni/* dep(s) to workspace:*.\n`,
-  );
-} else if (changed === 0) {
-  process.stdout.write(
-    "rewrite-workspace-deps: no workspace: specs found in publishable packages (already concrete).\n",
-  );
-} else {
-  process.stdout.write(`rewrite-workspace-deps: applied ${changed} publish manifest rewrite(s).\n`);
+if (import.meta.main) {
+  if (process.argv.includes("--restore")) {
+    throw new Error(
+      "--restore was removed because concrete ranges cannot faithfully recover their original workspace specs; validate in a disposable checkout instead.",
+    );
+  }
+  const stripDevDependencies = process.argv.includes("--strip-dev-dependencies");
+  const versions = workspaceVersionMap();
+  let changed = 0;
+
+  for (const { dir: pkgDir } of publishableWorkspacePackages()) {
+    const pkgPath = join(repoRoot, pkgDir, "package.json");
+    const raw = readFileSync(pkgPath, "utf8");
+    const pkg = JSON.parse(raw) as PackageJson;
+    const rewrites = rewriteWorkspaceDependenciesToConcrete(pkg, versions);
+    let pkgChanged = rewrites.length > 0;
+    changed += rewrites.length;
+    for (const rewrite of rewrites) {
+      process.stdout.write(
+        `  ${pkg.name ?? pkgDir}: ${rewrite.field}.${rewrite.dependency} ${rewrite.before} -> ${rewrite.after}\n`,
+      );
+    }
+
+    if (stripDevDependencies && pkg.devDependencies) {
+      delete pkg.devDependencies;
+      pkgChanged = true;
+      changed += 1;
+      process.stdout.write(
+        `  ${pkg.name ?? pkgDir}: removed devDependencies from publish manifest\n`,
+      );
+    }
+
+    if (pkgChanged) {
+      const trailing = raw.endsWith("\n") ? "\n" : "";
+      writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}${trailing}`);
+    }
+  }
+
+  if (changed === 0) {
+    process.stdout.write(
+      "rewrite-workspace-deps: no workspace: specs found in publishable packages (already concrete).\n",
+    );
+  } else {
+    process.stdout.write(
+      `rewrite-workspace-deps: applied ${changed} publish manifest rewrite(s).\n`,
+    );
+  }
 }

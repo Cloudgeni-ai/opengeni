@@ -92,6 +92,8 @@ describe("assemble release acceptance", () => {
         web: candidateReceipt.images.web.digest,
         relay: candidateReceipt.images.relay.digest,
         sandbox: candidateReceipt.images.sandbox.digest,
+        "artifact-materializer": candidateReceipt.images["artifact-materializer"].digest,
+        "artifact-outbox-dispatcher": candidateReceipt.images["artifact-outbox-dispatcher"].digest,
       },
       chart: candidateReceipt.chart,
       producer: candidateProducer,

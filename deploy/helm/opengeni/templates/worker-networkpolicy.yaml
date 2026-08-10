@@ -1,4 +1,4 @@
-{{- if and .Values.networkPolicy.enabled .Values.worker.enabled }}
+{{- if and .Values.networkPolicy.enabled (or .Values.worker.enabled .Values.artifactMaterializer.enabled .Values.artifactOutboxDispatcher.enabled) }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

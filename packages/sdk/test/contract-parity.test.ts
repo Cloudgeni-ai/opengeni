@@ -164,9 +164,9 @@ import type {
 } from "../src/types";
 import type { TranscriptionEvent, WorkspaceTranscriptionPolicy } from "../src/transcription";
 
-// The SDK ships hand-written wire types so it carries zero runtime
-// dependencies. This suite pins them to `@opengeni/contracts`: if the public
-// contracts move, these checks (value-level and type-level) fail the gate.
+// The SDK ships hand-written general wire types so ordinary entries do not
+// import the contracts runtime. This suite pins them to `@opengeni/contracts`:
+// if the public contracts move, these checks fail the gate.
 
 describe("SDK / contracts parity", () => {
   test("pins the exact API revision and transport header values", () => {

@@ -193,8 +193,9 @@ describe("compiled CSS contract", () => {
       "--_og-color-accent-soft: var(--og-color-accent-soft, var(--og-color-accent));",
     );
     expect(compiled).toContain(
-      "--og-color-accent-soft: color-mix(in oklch, var(--og-color-accent) 16%, transparent);",
+      "--_og-color-accent-soft: var(--og-color-accent-soft, color-mix(in oklch, var(--og-color-accent) 16%, transparent));",
     );
+    expect(compiled.match(/--og-color-accent-soft: color-mix/gu)).toHaveLength(1);
     expect(compiled).toContain("background-color: var(--_og-color-accent-soft)");
     const effective = parse(effectiveTokens);
     const derivedTokens = new Set<string>();

@@ -595,6 +595,64 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
     expect(established.instanceId).toBe("sb-fresh");
   });
 
+  test("a missing provider-immutable Modal image retries one fresh create from the logical image", async () => {
+    const imageIds: Array<string | undefined> = [];
+    const createMetrics: Array<{
+      backend: string;
+      imageSource: "logical" | "provider_immutable";
+      outcome: "completed" | "failed";
+    }> = [];
+    const settings = testSettings({
+      sandboxBackend: "modal",
+      modalImageRef: undefined,
+      modalImageId: "im-stale-rig-image",
+    });
+    const logicalFallbackSettings = testSettings({
+      sandboxBackend: "modal",
+      modalImageRef: undefined,
+      modalImageId: "im-logical-base-image",
+    });
+
+    const established = await establishRuntimeSandboxSessionFromEnvelope(settings, null, {
+      sessionId: "sess-stale-rig-image",
+      recovery: "create-or-restore",
+      environment: {},
+      logicalFallbackSettings,
+      clientFactory: (_backend, currentSettings) => {
+        imageIds.push(currentSettings.modalImageId);
+        const providerImmutable = currentSettings.modalImageId === "im-stale-rig-image";
+        return {
+          backendId: "modal",
+          async create() {
+            if (providerImmutable) throw { status: 404 };
+            return { state: { sandboxId: "sb-logical-fallback" } };
+          },
+        };
+      },
+      metrics: {
+        onSandboxCreate(input) {
+          createMetrics.push(input);
+        },
+      },
+    });
+
+    expect(imageIds).toEqual(["im-stale-rig-image", "im-logical-base-image"]);
+    expect(createMetrics).toEqual([
+      expect.objectContaining({
+        backend: "modal",
+        imageSource: "provider_immutable",
+        outcome: "failed",
+      }),
+      expect.objectContaining({
+        backend: "modal",
+        imageSource: "logical",
+        outcome: "completed",
+      }),
+    ]);
+    expect(established.instanceId).toBe("sb-logical-fallback");
+    expect(established.origin).toBe("created");
+  });
+
   test("cold-restore never silently selects workspaceArchivePrev when the selected revision fails", async () => {
     hydrateCalls.length = 0;
     createArgs.length = 0;

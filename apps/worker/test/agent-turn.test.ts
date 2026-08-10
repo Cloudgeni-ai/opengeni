@@ -85,6 +85,7 @@ import {
   resolveActiveSandboxBackend,
   runMandatoryHistoryPersistenceStep,
   safeErrorDiagnostic,
+  sandboxArtifactRuntimeAdmission,
   sandboxDeadlineRotationRecoveryDelayMs,
   shouldRecoverCompactionProviderFailure,
   shouldStartOnTurnRecording,
@@ -2376,6 +2377,83 @@ describe("turn-time Modal private-registry warm", () => {
   });
 });
 
+describe("sandbox artifact runtime admission", () => {
+  test("admits the configured Docker base image and injects only fixed image paths", () => {
+    const settings = testSettings({
+      sandboxBackend: "docker",
+      dockerImage: "opengeni-sandbox:local-0123456789ab",
+      sandboxArtifactRuntimeEnabled: true,
+    });
+
+    expect(sandboxArtifactRuntimeAdmission(settings, settings, "docker")).toEqual({
+      available: true,
+      environment: {
+        OPENGENI_ARTIFACT_RUNTIME_MANIFEST: "/opt/opengeni/artifact-runtime/installation.json",
+        OPENGENI_ARTIFACT_TOOL_ENTRY: "/opt/opengeni/artifact-runtime/skill-facade-entry.mjs",
+      },
+    });
+  });
+
+  test("admits exact digest-pinned production Docker and Modal base images", () => {
+    const docker = testSettings({
+      sandboxBackend: "docker",
+      dockerImage: `ghcr.io/cloudgeni-ai/opengeni-sandbox@sha256:${"a".repeat(64)}`,
+      sandboxArtifactRuntimeEnabled: true,
+    });
+    expect(
+      sandboxArtifactRuntimeAdmission(docker, docker, "docker", { production: true }).available,
+    ).toBe(true);
+
+    const modal = testSettings({
+      sandboxBackend: "modal",
+      modalImageRef: `ghcr.io/cloudgeni-ai/opengeni-sandbox@sha256:${"b".repeat(64)}`,
+      modalImageId: "im-1234567890123456789012",
+      sandboxArtifactRuntimeEnabled: true,
+    });
+    expect(
+      sandboxArtifactRuntimeAdmission(modal, modal, "modal", { production: true }).available,
+    ).toBe(true);
+  });
+
+  test("fails closed for disabled, custom-image, missing-Modal-image, and machine turns", () => {
+    const disabled = testSettings({
+      sandboxBackend: "docker",
+      sandboxArtifactRuntimeEnabled: false,
+    });
+    expect(sandboxArtifactRuntimeAdmission(disabled, disabled, "docker").available).toBe(false);
+
+    const modal = testSettings({
+      sandboxBackend: "modal",
+      modalImageRef: `ghcr.io/cloudgeni-ai/opengeni-sandbox@sha256:${"a".repeat(64)}`,
+      sandboxArtifactRuntimeEnabled: true,
+    });
+    const custom = {
+      ...modal,
+      modalImageRef: `ghcr.io/example/custom-sandbox@sha256:${"b".repeat(64)}`,
+    };
+    expect(sandboxArtifactRuntimeAdmission(modal, custom, "modal").available).toBe(false);
+    expect(
+      sandboxArtifactRuntimeAdmission(
+        { ...modal, modalImageRef: undefined },
+        { ...modal, modalImageRef: undefined },
+        "modal",
+      ).available,
+    ).toBe(false);
+    expect(sandboxArtifactRuntimeAdmission(modal, modal, "selfhosted").available).toBe(false);
+
+    const mutableProduction = testSettings({
+      sandboxBackend: "docker",
+      dockerImage: "opengeni-sandbox:local-0123456789ab",
+      sandboxArtifactRuntimeEnabled: true,
+    });
+    expect(
+      sandboxArtifactRuntimeAdmission(mutableProduction, mutableProduction, "docker", {
+        production: true,
+      }).available,
+    ).toBe(false);
+  });
+});
+
 describe("on-turn recording gate (selfhosted machines have no in-box capture plumbing)", () => {
   const base: Parameters<typeof shouldStartOnTurnRecording>[0] = {
     recordingEnabled: true,
@@ -2914,7 +2992,7 @@ describe("worker shutdown preemption", () => {
           workflowRunId: "run-1",
           activityId: "activity-1",
         },
-        persistReceipt: async () => [],
+        persistReceipt: async () => ({ events: [], workflowWake: null }),
         publishEvents: async () => {
           throw new Error("NATS unavailable");
         },
@@ -2928,6 +3006,51 @@ describe("worker shutdown preemption", () => {
     ).toBe("receipt");
     expect(signalCalls).toBe(0);
     expect(publishFailures).toBe(1);
+  });
+
+  test("delivers the exact committed wake before best-effort event fanout", async () => {
+    const order: string[] = [];
+    const wake = {
+      accountId: "account-1",
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      temporalWorkflowId: "workflow-1",
+      wakeRevision: 17,
+      interruptionRequested: false,
+    };
+    let signalCalls = 0;
+    let wakeFailures = 0;
+    expect(
+      await persistOrSignalSessionAttemptQuiescence({
+        proof: {
+          accountId: "account-1",
+          workspaceId: "workspace-1",
+          sessionId: "session-1",
+          attemptId: "attempt-1",
+          workflowId: "workflow-1",
+          workflowRunId: "run-1",
+          activityId: "activity-1",
+        },
+        persistReceipt: async () => ({ events: [], workflowWake: wake }),
+        deliverWorkflowWake: async (delivered) => {
+          order.push("wake");
+          expect(delivered).toEqual(wake);
+          throw new Error("Temporal unavailable");
+        },
+        publishEvents: async () => {
+          order.push("fanout");
+        },
+        signalProof: async () => {
+          signalCalls += 1;
+        },
+        onWakeFailure: () => {
+          wakeFailures += 1;
+        },
+      }),
+    ).toBe("receipt");
+    expect(order).toEqual(["wake", "fanout"]);
+    expect(signalCalls).toBe(0);
+    expect(wakeFailures).toBe(1);
   });
 
   test("receipt exhaustion fails closed when the proof signaler is missing", async () => {
