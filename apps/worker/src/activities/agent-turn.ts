@@ -72,6 +72,7 @@ import {
   getEnrollment,
   abandonRecordingForTurnAttempt,
   commitSessionAttemptQuiescence,
+  getOrCreateCompanyProfileSnapshot,
   getOrCreatePreferenceRegistrySnapshot,
   getOrCreateWorkspaceInstructionPolicySnapshot,
   PreferenceRegistryInitiatorError,
@@ -401,6 +402,7 @@ import {
   type TurnExecutionPolicyV1,
 } from "@opengeni/contracts";
 import { createHash, randomUUID } from "node:crypto";
+import { createModelCheckpointMemoryCollector } from "../model-checkpoint-memory-collector";
 
 // Retryable provider connectivity/5xx failures start quickly and back off to
 // this ceiling. Explicit rate limits retain the minute-granular fallback.
@@ -2651,6 +2653,7 @@ export async function finalizeDurableTurnOpStreams(
 }
 
 export function createRunAgentTurnActivity(services: () => Promise<ActivityServices>) {
+  const modelCheckpointMemoryCollector = createModelCheckpointMemoryCollector();
   return async function runAgentTurn(input: RunAgentTurnInput): Promise<RunAgentTurnResult> {
     const {
       settings,
@@ -4741,19 +4744,22 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         attemptId: input.attemptId,
         executionGeneration: turn.executionGeneration,
       };
-      const [workspace, instructionPolicySnapshot, preferenceSnapshot] = await Promise.all([
-        getWorkspace(db, input.workspaceId),
-        getOrCreateWorkspaceInstructionPolicySnapshot(db, governanceClaims),
-        getOrCreatePreferenceRegistrySnapshot(db, governanceClaims).catch((error) => {
-          if (error instanceof PreferenceRegistryInitiatorError) return null;
-          throw error;
-        }),
-      ]);
+      const [workspace, companyProfileSnapshot, instructionPolicySnapshot, preferenceSnapshot] =
+        await Promise.all([
+          getWorkspace(db, input.workspaceId),
+          getOrCreateCompanyProfileSnapshot(db, governanceClaims),
+          getOrCreateWorkspaceInstructionPolicySnapshot(db, governanceClaims),
+          getOrCreatePreferenceRegistrySnapshot(db, governanceClaims).catch((error) => {
+            if (error instanceof PreferenceRegistryInitiatorError) return null;
+            throw error;
+          }),
+        ]);
       if (!workspace) throw new Error(`Workspace not found: ${input.workspaceId}`);
       const workspaceAgentInstructions = workspace.agentInstructions;
       const agentHumanInputEnabled = resolveWorkspaceAgentHumanInputEnabled(workspace.settings);
       assertWorkspaceHumanInputAllowed(agentHumanInputEnabled, "resume", humanInputResume !== null);
       const workspaceGovernance = renderWorkspaceGovernanceContext({
+        companyProfile: companyProfileSnapshot,
         instructionPolicy: instructionPolicySnapshot,
         preferences: preferenceSnapshot,
       });
@@ -7494,6 +7500,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               currentToolBatchCallIds = new Set<string>();
               currentToolBatchCompletedCallIds = new Set<string>();
               await reconcileConversationTruth();
+              modelCheckpointMemoryCollector.schedule(observability);
               try {
                 await ensureRunAllowed(
                   settings,

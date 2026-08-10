@@ -1,4 +1,5 @@
 import type {
+  CompanyProfileListResponse,
   OpenGeniClient,
   PreferenceRegistryDetailResponse,
   PreferenceRegistryListResponse,
@@ -334,6 +335,79 @@ export function usePreferenceRegistryDetail(
       loading: preferenceId !== null,
       reload,
     };
+  }
+  return {
+    response: result.response,
+    error: result.error,
+    loading: result.loading,
+    reload,
+  };
+}
+
+type CompanyProfileClient = Pick<OpenGeniClient, "listCompanyProfile">;
+
+type CompanyProfileInventoryLoad = {
+  client: CompanyProfileClient;
+  workspaceId: string;
+  response: CompanyProfileListResponse | null;
+  error: Error | null;
+  loading: boolean;
+};
+
+export function useCompanyProfileInventory(
+  client: CompanyProfileClient,
+  workspaceId: string,
+): Omit<CompanyProfileInventoryLoad, "client" | "workspaceId"> & {
+  reload: () => Promise<void>;
+} {
+  const generation = useRef(0);
+  const [result, setResult] = useState<CompanyProfileInventoryLoad>(() => ({
+    client,
+    workspaceId,
+    response: null,
+    error: null,
+    loading: true,
+  }));
+  const reload = useCallback(async () => {
+    const requestGeneration = ++generation.current;
+    setResult((previous) => ({
+      client,
+      workspaceId,
+      response:
+        previous.client === client && previous.workspaceId === workspaceId
+          ? previous.response
+          : null,
+      error: null,
+      loading: true,
+    }));
+    try {
+      const response = await client.listCompanyProfile(workspaceId, { limit: 50 });
+      if (generation.current !== requestGeneration) return;
+      setResult({ client, workspaceId, response, error: null, loading: false });
+    } catch (loadError) {
+      if (generation.current !== requestGeneration) return;
+      setResult((previous) => ({
+        client,
+        workspaceId,
+        response:
+          previous.client === client && previous.workspaceId === workspaceId
+            ? previous.response
+            : null,
+        error: loadError instanceof Error ? loadError : new Error(String(loadError)),
+        loading: false,
+      }));
+    }
+  }, [client, workspaceId]);
+
+  useEffect(() => {
+    void reload();
+    return () => {
+      generation.current += 1;
+    };
+  }, [reload]);
+
+  if (result.client !== client || result.workspaceId !== workspaceId) {
+    return { response: null, error: null, loading: true, reload };
   }
   return {
     response: result.response,

@@ -46,6 +46,12 @@ const sharedBuild = {
   sourcemap: "none" as const,
 };
 
+// LiteParse and its native Sharp dependency must resolve from the workload
+// package's node_modules at runtime. Bundling either package detaches Sharp's
+// dynamic @img/* binding lookups and LiteParse's packaged PDF.js assets from
+// their installed dependency graph.
+const nativeRuntimeExternals = ["@llamaindex/liteparse", "sharp"];
+
 async function buildApi(): Promise<void> {
   const outdir = join(repositoryRoot, "apps/api/dist/process");
   await rm(outdir, { recursive: true, force: true });
@@ -53,7 +59,7 @@ async function buildApi(): Promise<void> {
     ...sharedBuild,
     entrypoints: [join(repositoryRoot, "apps/api/src/index.ts")],
     outdir,
-    external: ["better-auth", "better-auth/*", "@better-auth/*"],
+    external: [...nativeRuntimeExternals, "better-auth", "better-auth/*", "@better-auth/*"],
   });
   await copyDirectory(join(repositoryRoot, "agent/install"), join(outdir, "assets/agent-install"));
   await copyDirectory(
@@ -69,7 +75,7 @@ async function buildWorker(): Promise<void> {
     ...sharedBuild,
     entrypoints: [join(repositoryRoot, "apps/worker/src/index.ts")],
     outdir,
-    external: ["@temporalio/*"],
+    external: [...nativeRuntimeExternals, "@temporalio/*"],
   });
 
   // Generate with the worker package's own Temporal dependency, then colocate
