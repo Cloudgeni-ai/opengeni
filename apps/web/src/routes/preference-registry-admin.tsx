@@ -35,6 +35,7 @@ import {
   usePreferenceRegistryDetail,
   usePreferenceRegistryInventory,
 } from "./workspace-state-loader";
+import { AgentBrainPrompt } from "./agent-brain-prompt";
 
 const fieldClass =
   "rounded-md border border-border bg-surface px-3 py-2 text-sm text-fg outline-none focus:border-brand disabled:cursor-not-allowed disabled:opacity-60";
@@ -73,6 +74,15 @@ function normalizedConflictKeys(value: string): string[] {
         .filter(Boolean),
     ),
   ].sort();
+}
+
+function stableKeyFromTitle(value: string): string {
+  const normalized = normalizePreferenceRegistryStableKey(value)
+    .replace(/[^a-z0-9._-]+/gu, "-")
+    .replace(/^[._-]+|[._-]+$/gu, "")
+    .slice(0, PREFERENCE_REGISTRY_STABLE_KEY_MAX_CHARS)
+    .replace(/[._-]+$/gu, "");
+  return normalized || `preference-${crypto.randomUUID().slice(0, 8)}`;
 }
 
 function optionalDateTime(value: string): string | null {
@@ -160,12 +170,16 @@ function PreferenceProposalComposer({
   directHuman,
   canManageOrganization,
   canManageWorkspace,
+  defaultOpen = true,
+  compact = false,
   onCreated,
 }: {
   workspaceId: string;
   directHuman: boolean;
   canManageOrganization: boolean;
   canManageWorkspace: boolean;
+  defaultOpen?: boolean;
+  compact?: boolean;
   onCreated: (preference: PreferenceRegistryRecord) => Promise<void>;
 }) {
   const { client } = useAppContext();
@@ -193,7 +207,7 @@ function PreferenceProposalComposer({
   const submit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     if (!canManageScope || submitting) return;
-    const rank = Number(precedenceRank);
+    const rank = compact ? 0 : Number(precedenceRank);
     if (!Number.isInteger(rank) || rank < -1_000 || rank > 1_000) {
       setSubmitError("Precedence rank must be a whole number from -1000 to 1000.");
       return;
@@ -202,8 +216,8 @@ function PreferenceProposalComposer({
     setSubmitError(null);
     setCreatedMessage(null);
     try {
-      const preference = await client.createPreferenceRegistryProposal(workspaceId, {
-        stableKey,
+      let preference = await client.createPreferenceRegistryProposal(workspaceId, {
+        stableKey: compact ? stableKeyFromTitle(title) : stableKey,
         scope,
         title,
         description,
@@ -215,6 +229,23 @@ function PreferenceProposalComposer({
         provenanceSource: "human",
         provenanceSourceId: null,
       });
+      if (compact) {
+        const detail = await client.getPreferenceRegistry(workspaceId, preference.id);
+        const revision = detail.revisions.reduce((latest, candidate) =>
+          candidate.revision > latest.revision ? candidate : latest,
+        );
+        const activated = await client.activatePreferenceRegistryRevision(
+          workspaceId,
+          preference.id,
+          {
+            revisionId: revision.id,
+            expectedCurrentRevisionId: null,
+            expectedScopeVersion: preference.scopeVersion,
+            reason: "Saved by a user from Agent Brain",
+          },
+        );
+        preference = activated.preference;
+      }
       setStableKey("");
       setTitle("");
       setDescription("");
@@ -224,7 +255,9 @@ function PreferenceProposalComposer({
       setConflictsWith("");
       setExpiresAt("");
       setCreatedMessage(
-        `${scopeLabel(preference.target.scope)} proposal created inactive. No prompt behavior changed.`,
+        compact
+          ? `${scopeLabel(preference.target.scope)} preference saved. Agents can now use it.`
+          : `${scopeLabel(preference.target.scope)} proposal created inactive. No prompt behavior changed.`,
       );
       await onCreated(preference);
     } catch (error) {
@@ -235,18 +268,18 @@ function PreferenceProposalComposer({
   };
 
   return (
-    <details open className="rounded-md border border-border bg-surface-2/20">
+    <details open={defaultOpen} className="rounded-md border border-border bg-surface-2/20">
       <summary className="cursor-pointer px-3 py-3 text-sm font-medium text-fg">
-        Create structured preference proposal
+        {compact ? "Write manually" : "Create structured preference proposal"}
       </summary>
       <form
-        aria-label="Create structured preference proposal"
+        aria-label={compact ? "Add preference" : "Create structured preference proposal"}
         className="grid gap-3 border-t border-border p-3"
         onSubmit={(event) => void submit(event)}
       >
-        <div className="grid gap-3 md:grid-cols-3">
+        <div className={compact ? "grid gap-3 md:grid-cols-2" : "grid gap-3 md:grid-cols-3"}>
           <label className="grid gap-1 text-xs font-medium text-fg-muted">
-            Authority scope
+            {compact ? "Who should use it?" : "Authority scope"}
             <select
               className={fieldClass}
               value={scope}
@@ -257,33 +290,52 @@ function PreferenceProposalComposer({
               <ScopeOption scope="user" enabled={directHuman} />
             </select>
           </label>
-          <label className="grid gap-1 text-xs font-medium text-fg-muted md:col-span-2">
-            Stable key
-            <input
-              className={fieldClass}
-              placeholder="response.format"
-              value={stableKey}
-              maxLength={PREFERENCE_REGISTRY_STABLE_KEY_MAX_CHARS}
-              required
-              onChange={(event) => setStableKey(event.target.value)}
-            />
-          </label>
+          {compact ? (
+            <label className="grid gap-1 text-xs font-medium text-fg-muted">
+              Name
+              <input
+                className={fieldClass}
+                placeholder="Concise status updates"
+                value={title}
+                maxLength={PREFERENCE_REGISTRY_TITLE_MAX_CHARS}
+                required
+                onChange={(event) => setTitle(event.target.value)}
+              />
+            </label>
+          ) : (
+            <label className="grid gap-1 text-xs font-medium text-fg-muted md:col-span-2">
+              Stable key
+              <input
+                className={fieldClass}
+                placeholder="response.format"
+                value={stableKey}
+                maxLength={PREFERENCE_REGISTRY_STABLE_KEY_MAX_CHARS}
+                required
+                onChange={(event) => setStableKey(event.target.value)}
+              />
+            </label>
+          )}
         </div>
-        <div className="grid gap-3 md:grid-cols-2">
+        <div className={compact ? "grid gap-3" : "grid gap-3 md:grid-cols-2"}>
+          {compact ? null : (
+            <label className="grid gap-1 text-xs font-medium text-fg-muted">
+              Descriptor title
+              <input
+                className={fieldClass}
+                value={title}
+                maxLength={PREFERENCE_REGISTRY_TITLE_MAX_CHARS}
+                required
+                onChange={(event) => setTitle(event.target.value)}
+              />
+            </label>
+          )}
           <label className="grid gap-1 text-xs font-medium text-fg-muted">
-            Descriptor title
+            {compact ? "Short summary" : "Compact descriptor"}
             <input
               className={fieldClass}
-              value={title}
-              maxLength={PREFERENCE_REGISTRY_TITLE_MAX_CHARS}
-              required
-              onChange={(event) => setTitle(event.target.value)}
-            />
-          </label>
-          <label className="grid gap-1 text-xs font-medium text-fg-muted">
-            Compact descriptor
-            <input
-              className={fieldClass}
+              placeholder={
+                compact ? "Keep progress updates short and lead with the outcome." : undefined
+              }
               value={description}
               maxLength={PREFERENCE_REGISTRY_DESCRIPTOR_DESCRIPTION_MAX_CHARS}
               required
@@ -292,73 +344,82 @@ function PreferenceProposalComposer({
           </label>
         </div>
         <label className="grid gap-1 text-xs font-medium text-fg-muted">
-          Full preference content
+          {compact ? "Instructions" : "Full preference content"}
           <textarea
             className={`${fieldClass} min-h-36 leading-6`}
+            placeholder={
+              compact
+                ? "Use short paragraphs. Mention decisions, blockers, and the next action. Avoid long implementation diaries."
+                : undefined
+            }
             value={content}
             maxLength={PREFERENCE_REGISTRY_CONTENT_MAX_CHARS}
             required
             onChange={(event) => setContent(event.target.value)}
           />
           <span className="font-normal leading-5 text-fg-subtle">
-            The browser sends this once to create an immutable revision. Agents receive only the
-            compact descriptor automatically and retrieve this body on demand from an authorized
-            attempt snapshot.
+            {compact
+              ? "Agents always see the short summary and fetch these instructions when relevant."
+              : "The browser sends this once to create an immutable revision. Agents receive only the compact descriptor automatically and retrieve this body on demand from an authorized attempt snapshot."}
           </span>
         </label>
-        <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
-          <label className="grid gap-1 text-xs font-medium text-fg-muted">
-            Precedence rank
-            <input
-              className={fieldClass}
-              type="number"
-              min="-1000"
-              max="1000"
-              step="1"
-              value={precedenceRank}
-              required
-              onChange={(event) => setPrecedenceRank(event.target.value)}
-            />
-          </label>
-          <label className="grid gap-1 text-xs font-medium text-fg-muted">
-            Conflict strategy
-            <select
-              className={fieldClass}
-              value={conflictStrategy}
-              onChange={(event) =>
-                setConflictStrategy(event.target.value as PreferenceRegistryConflictStrategy)
-              }
-            >
-              <option value="override">Override</option>
-              <option value="merge">Merge</option>
-              <option value="reject">Reject</option>
-              <option value="inform">Inform</option>
-            </select>
-          </label>
-          <label className="grid gap-1 text-xs font-medium text-fg-muted">
-            Conflicts with
-            <input
-              className={fieldClass}
-              placeholder="key.one, key.two"
-              value={conflictsWith}
-              onChange={(event) => setConflictsWith(event.target.value)}
-            />
-          </label>
-          <label className="grid gap-1 text-xs font-medium text-fg-muted">
-            Expires at
-            <input
-              className={fieldClass}
-              type="datetime-local"
-              value={expiresAt}
-              onChange={(event) => setExpiresAt(event.target.value)}
-            />
-          </label>
-        </div>
-        <div className="rounded-md border border-status-waiting/30 bg-status-waiting/10 p-3 text-xs leading-5 text-fg-muted">
-          Human-created entries still begin as inactive proposals. Documents, Memory, connectors,
-          and imported evidence cannot activate this registry. Only the separately authorized
-          governed-learning controller may use the automatic-activation seam.
-        </div>
+        {compact ? null : (
+          <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
+            <label className="grid gap-1 text-xs font-medium text-fg-muted">
+              Precedence rank
+              <input
+                className={fieldClass}
+                type="number"
+                min="-1000"
+                max="1000"
+                step="1"
+                value={precedenceRank}
+                required
+                onChange={(event) => setPrecedenceRank(event.target.value)}
+              />
+            </label>
+            <label className="grid gap-1 text-xs font-medium text-fg-muted">
+              Conflict strategy
+              <select
+                className={fieldClass}
+                value={conflictStrategy}
+                onChange={(event) =>
+                  setConflictStrategy(event.target.value as PreferenceRegistryConflictStrategy)
+                }
+              >
+                <option value="override">Override</option>
+                <option value="merge">Merge</option>
+                <option value="reject">Reject</option>
+                <option value="inform">Inform</option>
+              </select>
+            </label>
+            <label className="grid gap-1 text-xs font-medium text-fg-muted">
+              Conflicts with
+              <input
+                className={fieldClass}
+                placeholder="key.one, key.two"
+                value={conflictsWith}
+                onChange={(event) => setConflictsWith(event.target.value)}
+              />
+            </label>
+            <label className="grid gap-1 text-xs font-medium text-fg-muted">
+              Expires at
+              <input
+                className={fieldClass}
+                type="datetime-local"
+                value={expiresAt}
+                onChange={(event) => setExpiresAt(event.target.value)}
+              />
+            </label>
+          </div>
+        )}
+        {compact ? null : (
+          <div className="rounded-md border border-status-waiting/30 bg-status-waiting/10 p-3 text-xs leading-5 text-fg-muted">
+            Human-created entries still begin as inactive proposals. Documents, Memory, connectors,
+            and imported evidence cannot activate this registry. Only the separately authorized
+            governed-learning controller may use the automatic-activation seam.
+          </div>
+        )}
         {!directHuman ? (
           <div role="alert" className="text-xs text-status-waiting">
             A direct signed-in human session is required for registry changes. API keys, workers,
@@ -381,7 +442,13 @@ function PreferenceProposalComposer({
             className={primaryButtonClass}
             disabled={!canManageScope || submitting}
           >
-            {submitting ? "Creating proposal…" : "Create inactive proposal"}
+            {submitting
+              ? compact
+                ? "Saving…"
+                : "Creating proposal…"
+              : compact
+                ? "Save preference"
+                : "Create inactive proposal"}
           </button>
         </div>
       </form>
@@ -430,6 +497,27 @@ function PreferenceRecordButton({
         </span>
       )}
     </button>
+  );
+}
+
+function PreferenceExample() {
+  return (
+    <div className="rounded-lg border border-dashed border-border bg-surface-2/20 p-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-sm font-medium text-fg">Concise status updates</span>
+        <span className="rounded-full border border-border px-2 py-0.5 text-2xs text-fg-muted">
+          Example
+        </span>
+      </div>
+      <p className="mt-2 text-xs leading-5 text-fg-muted">
+        <span className="font-medium text-fg">Always visible summary:</span> Keep progress updates
+        short and lead with the outcome.
+      </p>
+      <p className="mt-2 text-xs leading-5 text-fg-muted">
+        <span className="font-medium text-fg">Fetched when relevant:</span> Use short paragraphs.
+        Mention decisions, blockers, and the next action. Avoid long implementation diaries.
+      </p>
+    </div>
   );
 }
 
@@ -1065,9 +1153,11 @@ function PreferenceDetailPanel({
 export function PreferenceRegistryAdministration({
   workspaceId,
   onWorkspaceStateReload,
+  compact = false,
 }: {
   workspaceId: string;
   onWorkspaceStateReload: () => Promise<void>;
+  compact?: boolean;
 }) {
   const context = useAppContext();
   const { client } = context;
@@ -1124,34 +1214,40 @@ export function PreferenceRegistryAdministration({
   );
 
   return (
-    <section className="rounded-lg border border-border bg-surface p-4">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h2 className="text-sm font-semibold text-fg">Structured preference administration</h2>
-          <p className="mt-1 max-w-4xl text-xs leading-5 text-fg-muted">
-            This is the dedicated organization/workspace/personal registry—not ordinary Memory.
-            Descriptors, precedence, immutable revisions, provenance, and audit state are visible
-            here. Documents and retrieved knowledge remain evidence or inactive proposals only.
-          </p>
+    <section className={compact ? "grid gap-4" : "rounded-lg border border-border bg-surface p-4"}>
+      {compact ? null : (
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-semibold text-fg">Structured preference administration</h2>
+            <p className="mt-1 max-w-4xl text-xs leading-5 text-fg-muted">
+              This is the dedicated organization/workspace/personal registry—not ordinary Memory.
+              Descriptors, precedence, immutable revisions, provenance, and audit state are visible
+              here. Documents and retrieved knowledge remain evidence or inactive proposals only.
+            </p>
+          </div>
+          <button
+            type="button"
+            className={secondaryButtonClass}
+            disabled={inventory.loading || detail.loading}
+            onClick={() => void refreshAll()}
+          >
+            <RefreshCwIcon className="mr-1.5 inline size-3.5" />
+            Refresh registry and detail
+          </button>
         </div>
-        <button
-          type="button"
-          className={secondaryButtonClass}
-          disabled={inventory.loading || detail.loading}
-          onClick={() => void refreshAll()}
-        >
-          <RefreshCwIcon className="mr-1.5 inline size-3.5" />
-          Refresh registry and detail
-        </button>
-      </div>
+      )}
 
-      <div className="mt-4">
-        <ScopeAuthorityNotice
-          directHuman={directHuman}
-          canManageOrganization={canManageOrganization}
-          canManageWorkspace={canManageWorkspace}
-        />
-      </div>
+      {compact ? null : (
+        <div className="mt-4">
+          <ScopeAuthorityNotice
+            directHuman={directHuman}
+            canManageOrganization={canManageOrganization}
+            canManageWorkspace={canManageWorkspace}
+          />
+        </div>
+      )}
+
+      {compact ? <AgentBrainPrompt kind="preference" workspaceId={workspaceId} /> : null}
 
       <div className="mt-4">
         <PreferenceProposalComposer
@@ -1159,6 +1255,8 @@ export function PreferenceRegistryAdministration({
           directHuman={directHuman}
           canManageOrganization={canManageOrganization}
           canManageWorkspace={canManageWorkspace}
+          defaultOpen={!compact}
+          compact={compact}
           onCreated={async (preference) => {
             setSelectedId(preference.id);
             await Promise.all([inventory.reload(), onWorkspaceStateReload()]);
@@ -1166,14 +1264,22 @@ export function PreferenceRegistryAdministration({
         />
       </div>
 
-      <div className="mt-4 grid min-w-0 gap-4 lg:grid-cols-[20rem_minmax(0,1fr)]">
+      <div
+        className={
+          compact && inventory.response?.preferences.length === 0
+            ? "min-w-0"
+            : "grid min-w-0 gap-4 lg:grid-cols-[20rem_minmax(0,1fr)]"
+        }
+      >
         <div className="min-w-0">
-          <div className="mb-2 flex items-center justify-between gap-2">
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-fg-subtle">
-              Authorized registry records
-            </h3>
-            <span className="text-2xs text-fg-subtle">Up to 100 records</span>
-          </div>
+          {compact ? null : (
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-fg-subtle">
+                Authorized registry records
+              </h3>
+              <span className="text-2xs text-fg-subtle">Up to 100 records</span>
+            </div>
+          )}
           {inventory.loading && !inventory.response ? (
             <Skeleton aria-label="Loading preference registry" className="h-40 w-full" />
           ) : null}
@@ -1185,9 +1291,13 @@ export function PreferenceRegistryAdministration({
             />
           ) : null}
           {inventory.response?.preferences.length === 0 ? (
-            <EmptyState>
-              No structured preferences are visible in your authorized scopes.
-            </EmptyState>
+            compact ? (
+              <PreferenceExample />
+            ) : (
+              <EmptyState>
+                No structured preferences are visible in your authorized scopes.
+              </EmptyState>
+            )
           ) : null}
           {inventory.response?.preferences.length ? (
             <div className="max-h-[36rem] divide-y divide-border overflow-y-auto rounded-md border border-border">
@@ -1208,38 +1318,42 @@ export function PreferenceRegistryAdministration({
           ) : null}
         </div>
 
-        <div className="min-w-0">
-          <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-fg-subtle">
-            Selected preference
-          </h3>
-          {!selectedId ? <EmptyState>Select a registry record to inspect it.</EmptyState> : null}
-          {selectedId && detail.loading && !detail.response ? (
-            <Skeleton aria-label="Loading preference detail" className="h-64 w-full" />
-          ) : null}
-          {selectedId && detail.error && !detail.response ? (
-            <LoadErrorState
-              title="Couldn't load preference detail"
-              error={detail.error}
-              onRetry={() => void detail.reload()}
-            />
-          ) : null}
-          {detail.response ? (
-            <PreferenceDetailPanel
-              key={`${detail.response.preference.id}:${detail.response.preference.status}:${detail.response.preference.activeRevision?.id ?? "none"}:${detail.response.preference.scopeVersion}:${detail.response.preference.activationVersion}:${manualDetailRefreshVersion}`}
-              workspaceId={workspaceId}
-              detail={detail.response}
-              replacementCandidates={replacementCandidates}
-              canManageScope={canManageScope}
-              canManageOrganization={canManageOrganization}
-              canManageWorkspace={canManageWorkspace}
-              directHuman={directHuman}
-              onMutated={reloadAll}
-            />
-          ) : null}
-          {detail.error && detail.response ? (
-            <p className="mt-2 text-xs text-status-error">Refresh failed: {detail.error.message}</p>
-          ) : null}
-        </div>
+        {compact && !selectedId ? null : (
+          <div className="min-w-0">
+            <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-fg-subtle">
+              Selected preference
+            </h3>
+            {!selectedId ? <EmptyState>Select a registry record to inspect it.</EmptyState> : null}
+            {selectedId && detail.loading && !detail.response ? (
+              <Skeleton aria-label="Loading preference detail" className="h-64 w-full" />
+            ) : null}
+            {selectedId && detail.error && !detail.response ? (
+              <LoadErrorState
+                title="Couldn't load preference detail"
+                error={detail.error}
+                onRetry={() => void detail.reload()}
+              />
+            ) : null}
+            {detail.response ? (
+              <PreferenceDetailPanel
+                key={`${detail.response.preference.id}:${detail.response.preference.status}:${detail.response.preference.activeRevision?.id ?? "none"}:${detail.response.preference.scopeVersion}:${detail.response.preference.activationVersion}:${manualDetailRefreshVersion}`}
+                workspaceId={workspaceId}
+                detail={detail.response}
+                replacementCandidates={replacementCandidates}
+                canManageScope={canManageScope}
+                canManageOrganization={canManageOrganization}
+                canManageWorkspace={canManageWorkspace}
+                directHuman={directHuman}
+                onMutated={reloadAll}
+              />
+            ) : null}
+            {detail.error && detail.response ? (
+              <p className="mt-2 text-xs text-status-error">
+                Refresh failed: {detail.error.message}
+              </p>
+            ) : null}
+          </div>
+        )}
       </div>
     </section>
   );

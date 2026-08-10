@@ -262,8 +262,10 @@ const workspaceDocumentsRoute = createRoute({
   // Memory used to live inside Documents, so existing timeline links and
   // bookmarks can still carry `?memory=<id>`. Preserve that public URL as a
   // compatibility redirect to the first-class Memory surface.
-  validateSearch: (search: Record<string, unknown>): { memory?: string } =>
-    typeof search.memory === "string" ? { memory: search.memory } : {},
+  validateSearch: (search: Record<string, unknown>): { memory?: string; from?: "brain" } => ({
+    ...(typeof search.memory === "string" ? { memory: search.memory } : {}),
+    ...(search.from === "brain" ? { from: "brain" as const } : {}),
+  }),
   component: Documents,
 });
 const workspaceMemoryRoute = createRoute({
@@ -272,8 +274,10 @@ const workspaceMemoryRoute = createRoute({
   // `?memory=<id>` deep-links a memory record (from a timeline memory step): the
   // Memory page reveals + highlights that record even when the filters would
   // otherwise hide it. Unknown values are ignored.
-  validateSearch: (search: Record<string, unknown>): { memory?: string } =>
-    typeof search.memory === "string" ? { memory: search.memory } : {},
+  validateSearch: (search: Record<string, unknown>): { memory?: string; from?: "brain" } => ({
+    ...(typeof search.memory === "string" ? { memory: search.memory } : {}),
+    ...(search.from === "brain" ? { from: "brain" as const } : {}),
+  }),
   component: Memory,
 });
 const workspaceSettingsRoute = createRoute({
@@ -284,6 +288,12 @@ const workspaceSettingsRoute = createRoute({
 const workspaceStateRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "state",
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { view?: "company" | "instructions" | "preferences" } =>
+    search.view === "company" || search.view === "instructions" || search.view === "preferences"
+      ? { view: search.view }
+      : {},
   component: WorkspaceState,
 });
 const workspaceArtifactsRoute = createRoute({
@@ -485,24 +495,30 @@ function Schedules() {
 
 function Documents() {
   const { workspaceId } = workspaceDocumentsRoute.useParams();
-  const { memory } = workspaceDocumentsRoute.useSearch();
+  const { memory, from } = workspaceDocumentsRoute.useSearch();
   if (memory) {
     return (
       <Navigate
         to="/workspaces/$workspaceId/memory"
         params={{ workspaceId }}
-        search={{ memory }}
+        search={{ memory, ...(from ? { from } : {}) }}
         replace
       />
     );
   }
-  return <LazyDocumentsRoute workspaceId={workspaceId} />;
+  return <LazyDocumentsRoute workspaceId={workspaceId} returnToBrain={from === "brain"} />;
 }
 
 function Memory() {
   const { workspaceId } = workspaceMemoryRoute.useParams();
-  const { memory } = workspaceMemoryRoute.useSearch();
-  return <LazyMemoryRoute workspaceId={workspaceId} focusMemoryId={memory} />;
+  const { memory, from } = workspaceMemoryRoute.useSearch();
+  return (
+    <LazyMemoryRoute
+      workspaceId={workspaceId}
+      focusMemoryId={memory}
+      returnToBrain={from === "brain"}
+    />
+  );
 }
 
 function WorkspaceSettings() {
@@ -512,7 +528,8 @@ function WorkspaceSettings() {
 
 function WorkspaceState() {
   const { workspaceId } = workspaceStateRoute.useParams();
-  return <LazyWorkspaceStateRoute workspaceId={workspaceId} />;
+  const { view } = workspaceStateRoute.useSearch();
+  return <LazyWorkspaceStateRoute workspaceId={workspaceId} view={view} />;
 }
 
 function Artifacts() {

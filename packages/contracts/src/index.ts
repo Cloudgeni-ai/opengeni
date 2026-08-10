@@ -1281,12 +1281,7 @@ export * from "./transcription-recordings";
 export const CodexCompactionMode = z.enum(["remote_v2", "portable"]);
 export type CodexCompactionMode = z.infer<typeof CodexCompactionMode>;
 
-export const SlackReactionEmojiName = z
-  .string()
-  .trim()
-  .min(1)
-  .max(64)
-  .regex(/^[a-z0-9_+-]+$/, "use the exact Slack emoji name without surrounding colons");
+export const SlackReactionEmojiName = z.literal("genie");
 export type SlackReactionEmojiName = z.infer<typeof SlackReactionEmojiName>;
 
 export const WorkspaceSlackReactionChannelPolicy = z.discriminatedUnion("mode", [
