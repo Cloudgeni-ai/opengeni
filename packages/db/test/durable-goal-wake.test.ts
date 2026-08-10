@@ -653,6 +653,11 @@ describe("durable active-goal wake", () => {
     expect(claimed.action).toBe("claimed");
     if (claimed.action !== "claimed") throw new Error("goal continuation was not claimed");
     expect(claimed.turn.source).toBe("goal");
+    expect(claimed.turn.initiator).toMatchObject({
+      kind: "service",
+      subjectId: "goal-continuation",
+    });
+    expect(claimed.turn.initiatingHumanSubjectId).toBe(ctx.grant.subjectId);
     expect(
       (await getSessionGoalWithContinuation(client.db, ctx.grant.workspaceId!, ctx.session.id))
         ?.continuation,

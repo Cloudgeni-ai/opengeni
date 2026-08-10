@@ -1,8 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { acquireBlankTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase } from "@opengeni/testing";
 import { readFile } from "node:fs/promises";
-import postgres from "postgres";
-import { migrate } from "../src/migrate";
 
 const migrationUrl = new URL(
   "../drizzle/0198_memory_slack_publication_delivery.sql",
@@ -10,7 +8,7 @@ const migrationUrl = new URL(
 );
 
 describe("migration 0198 Memory Slack publication delivery", () => {
-  test("is rolling, FORCE-RLS protected, immutable, and safely claimable", async () => {
+  test("is rolling and declares the protected delivery contract", async () => {
     const source = await readFile(migrationUrl, "utf8");
     expect(source.startsWith("-- deployment-mode: rolling\n")).toBe(true);
     expect(source.match(/FORCE ROW LEVEL SECURITY/g)).toHaveLength(3);
@@ -35,12 +33,17 @@ describe("migration 0198 Memory Slack publication delivery", () => {
     expect(source).toContain("state\" = 'retry_wait'");
     expect(source).not.toMatch(/credential|access_token|refresh_token|raw_text/i);
     expect(source).not.toMatch(/ACCESS\s+EXCLUSIVE/i);
+  });
 
-    const blank = await acquireBlankTestDatabase("migration-0198-memory-slack");
-    if (!blank) return;
-    const sql = postgres(blank.databaseUrl, { max: 1, onnotice: () => undefined });
+  test("freezes causal identity and safely claims immutable receipt history", async () => {
+    // The shared template applies the exact ordered migration history once per
+    // test process, then clones a clean database. Replaying all migrations in
+    // this one file caused shard-dependent CI stalls after migration 0198 had
+    // already committed, without adding coverage beyond this runtime proof.
+    const shared = await acquireSharedTestDatabase("migration-0198-memory-slack");
+    if (!shared) return;
+    const sql = shared.admin;
     try {
-      await migrate(blank.databaseUrl);
       const [account] = await sql<{ id: string }[]>`
         insert into managed_accounts (name) values ('migration-0198-account') returning id`;
       const [workspace] = await sql<{ id: string }[]>`
@@ -57,19 +60,24 @@ describe("migration 0198 Memory Slack publication delivery", () => {
         ) returning id`;
       const publicationId = crypto.randomUUID();
       const operationId = crypto.randomUUID();
+      const sessionId = crypto.randomUUID();
+      const turnId = crypto.randomUUID();
+      const attemptId = crypto.randomUUID();
       await sql`
         insert into memory_slack_publications (
           id, account_id, workspace_id, configuration_id, configuration_revision,
           connection_id, slack_team_id, slack_channel_id, source_type, source_id,
           source_version, source_idempotency_key, projection, projection_sha256,
           importance, delivery_mode, state, operation_id, initiator_kind,
-          initiator_subject_id
+          initiator_subject_id, initiating_human_subject_id, session_id, turn_id,
+          attempt_id
         ) values (
           ${publicationId}, ${account!.id}, ${workspace!.id}, ${configuration!.id}, 1,
           ${crypto.randomUUID()}, 'T_TEST', 'C_TEST', 'workspace_memory', 'memory-1',
           '1', 'memory-1:v1', ${sql.json({ summary: "Durable decision" })}::jsonb,
           ${"a".repeat(64)},
-          'major', 'auto', 'queued', ${operationId}, 'human', 'subject-1'
+          'major', 'auto', 'queued', ${operationId}, 'service', 'goal-continuation',
+          'user:causal-owner', ${sessionId}, ${turnId}, ${attemptId}
         )`;
       await sql`
         insert into memory_slack_publication_receipts (
@@ -77,8 +85,30 @@ describe("migration 0198 Memory Slack publication delivery", () => {
           attempt_number, actor_kind, actor_subject_id, operation_id
         ) values (
           ${account!.id}, ${workspace!.id}, ${publicationId}, 1, 'enqueued', 'queued',
-          0, 'human', 'subject-1', ${operationId}
+          0, 'service', 'goal-continuation', ${operationId}
         )`;
+
+      const [frozenIdentity] = await sql<
+        Array<{
+          initiator_kind: string;
+          initiator_subject_id: string;
+          initiating_human_subject_id: string | null;
+          session_id: string | null;
+          turn_id: string | null;
+          attempt_id: string | null;
+        }>
+      >`
+        select initiator_kind, initiator_subject_id, initiating_human_subject_id,
+               session_id, turn_id, attempt_id
+        from memory_slack_publications where id = ${publicationId}`;
+      expect(frozenIdentity).toEqual({
+        initiator_kind: "service",
+        initiator_subject_id: "goal-continuation",
+        initiating_human_subject_id: "user:causal-owner",
+        session_id: sessionId,
+        turn_id: turnId,
+        attempt_id: attemptId,
+      });
 
       await sql`
         insert into memory_slack_publication_configurations (
@@ -116,6 +146,17 @@ describe("migration 0198 Memory Slack publication delivery", () => {
         { kind: "enqueued", sequence: 1 },
         { kind: "delivery_claimed", sequence: 2 },
       ]);
+      const [enqueuedReceipt] = await sql<
+        Array<{ actor_kind: string; actor_subject_id: string; operation_id: string }>
+      >`
+        select actor_kind, actor_subject_id, operation_id
+        from memory_slack_publication_receipts
+        where publication_id = ${publicationId} and kind = 'enqueued'`;
+      expect(enqueuedReceipt).toEqual({
+        actor_kind: "service",
+        actor_subject_id: "goal-continuation",
+        operation_id: operationId,
+      });
 
       await sql`update memory_slack_publications set claim_expires_at = now() - interval '1 second'
         where id = ${publicationId}`;
@@ -131,7 +172,7 @@ describe("migration 0198 Memory Slack publication delivery", () => {
         () =>
           sql`update memory_slack_publication_receipts set actor_subject_id = 'other' where publication_id = ${publicationId}`,
         () =>
-          sql`update memory_slack_publications set source_id = 'other' where id = ${publicationId}`,
+          sql`update memory_slack_publications set initiating_human_subject_id = 'user:other' where id = ${publicationId}`,
       ]) {
         await expect(mutation()).rejects.toThrow();
       }
@@ -147,8 +188,7 @@ describe("migration 0198 Memory Slack publication delivery", () => {
           ) order by C.relname`;
       expect(tables.every((table) => table.forced)).toBe(true);
     } finally {
-      await sql.end();
-      await blank.release();
+      await shared.release();
     }
-  }, 180_000);
+  }, 60_000);
 });

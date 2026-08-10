@@ -988,6 +988,7 @@ describe("embedding host session authorization routes", () => {
         label: "Test owner",
       },
       initiatorContext: { label: "Test owner" },
+      initiatingHumanSubjectId: value.grant.subjectId,
     });
 
     const admin = postgres(shared.adminUrl, { max: 1 });

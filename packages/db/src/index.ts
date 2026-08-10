@@ -3967,6 +3967,8 @@ export type EnqueueSessionTurnInput = {
 export type SessionTurnForExecution = SessionTurn & {
   turnInstructions: string | null;
   personalConnectionDelegations: McpPersonalConnectionDelegation[];
+  /** Worker-only causal authority; never inferred from the current worker. */
+  initiatingHumanSubjectId: string | null;
 };
 
 export async function createFileUpload(
@@ -49582,6 +49584,7 @@ function mapSessionTurnForExecution(
   return {
     ...mapSessionTurn(row),
     turnInstructions: row.turnInstructions ?? null,
+    initiatingHumanSubjectId: row.initiatingHumanSubjectId ?? null,
     personalConnectionDelegations: parsedPersonalConnectionDelegations(
       row.personalConnectionDelegations,
       `session_turns:${row.workspaceId}:${row.sessionId}:${row.id}`,

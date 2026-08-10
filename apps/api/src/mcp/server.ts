@@ -27,6 +27,7 @@ import {
   type Permission,
   type ResourceRef,
   type SessionAuthorizationOperation,
+  type SessionAuthorizationActor,
   type SessionAuthorizationSurface,
   type Session,
   type ScheduledTask,
@@ -2082,6 +2083,24 @@ function memoryPreview(text: string): string {
   return normalized.length <= 120 ? normalized : `${normalized.slice(0, 119)}…`;
 }
 
+export function memorySlackPublicationActor(
+  actor: Extract<SessionAuthorizationActor, { kind: "agent_attempt" }>,
+  sessionId: string,
+  fallbackOwnerLabel: string | null,
+) {
+  return {
+    actor: {
+      kind: actor.initiator.kind === "subject" ? ("human" as const) : ("service" as const),
+      subjectId: actor.initiator.subjectId,
+      initiatingHumanSubjectId: actor.initiatingHumanSubjectId,
+      sessionId,
+      turnId: actor.turnId,
+      attemptId: actor.attemptId,
+    },
+    ownerLabel: actor.initiator.label ?? fallbackOwnerLabel,
+  };
+}
+
 function registerMemoryTools(
   server: McpServer,
   deps: ApiRouteDeps,
@@ -2091,18 +2110,7 @@ function registerMemoryTools(
 ): void {
   const publicationActor = async () => {
     const actor = await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
-    return {
-      actor: {
-        kind: actor.initiator.kind === "subject" ? ("human" as const) : ("service" as const),
-        subjectId: actor.initiator.subjectId,
-        initiatingHumanSubjectId:
-          actor.initiator.kind === "subject" ? actor.initiator.subjectId : null,
-        sessionId,
-        turnId: actor.turnId,
-        attemptId: actor.attemptId,
-      },
-      ownerLabel: actor.initiator.label ?? grant.subjectLabel ?? null,
-    };
+    return memorySlackPublicationActor(actor, sessionId, grant.subjectLabel ?? null);
   };
   const publicationInputSchema = z4.object({
     importance: z4.enum(["major", "normal", "minor"]),
