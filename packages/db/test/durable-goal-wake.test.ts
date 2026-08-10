@@ -85,6 +85,7 @@ async function runningGoalFixture(
     resources: [],
     tools: [],
     metadata: {},
+    createdBy: { kind: "subject", subjectId: grant.subjectId },
     model: "scripted-model",
     sandboxBackend: "none",
     personalConnectionDelegations,
