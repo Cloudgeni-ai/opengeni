@@ -6135,6 +6135,111 @@ describe("API component integration", () => {
     expect(enabled.settings.someFutureKey).toBe("keep-me");
   });
 
+  test("binds active REST memory replay to a caller operation key, not payload identity", async () => {
+    const app = createApp({
+      settings: objectStorageSettings(services.databaseUrl, services.objectStorageEndpoint!),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const workspaceId = await defaultWorkspaceId(app);
+    const text = `REST operation identity ${crypto.randomUUID()}`;
+    const payload = {
+      text,
+      kind: "decision",
+      metadata: { source: "rest-idempotency" },
+    };
+    const create = (body: typeof payload, idempotencyKey?: string) =>
+      app.request(workspacePath(workspaceId, "/knowledge/memories"), {
+        method: "POST",
+        body: JSON.stringify(body),
+        headers: {
+          "content-type": "application/json",
+          ...(idempotencyKey ? { "idempotency-key": idempotencyKey } : {}),
+        },
+      });
+
+    const firstResponse = await create(payload);
+    expect(firstResponse.status).toBe(201);
+    const first = (await firstResponse.json()) as {
+      id: string;
+      kind: string;
+      status: string;
+    };
+    expect(first).toMatchObject({ kind: "decision", status: "active" });
+
+    const editResponse = await app.request(
+      workspacePath(workspaceId, `/knowledge/memories/${first.id}`),
+      {
+        method: "PATCH",
+        body: JSON.stringify({ text: `${text} edited` }),
+        headers: { "content-type": "application/json" },
+      },
+    );
+    expect(editResponse.status).toBe(200);
+
+    const afterEditResponse = await create(payload);
+    expect(afterEditResponse.status).toBe(201);
+    const afterEdit = (await afterEditResponse.json()) as {
+      id: string;
+      kind: string;
+      status: string;
+    };
+    expect(afterEdit.id).not.toBe(first.id);
+    expect(afterEdit).toMatchObject({ kind: "decision", status: "active" });
+
+    const archiveResponse = await app.request(
+      workspacePath(workspaceId, `/knowledge/memories/${afterEdit.id}`),
+      {
+        method: "PATCH",
+        body: JSON.stringify({ status: "archived" }),
+        headers: { "content-type": "application/json" },
+      },
+    );
+    expect(archiveResponse.status).toBe(200);
+
+    const afterArchiveResponse = await create(payload);
+    expect(afterArchiveResponse.status).toBe(201);
+    const afterArchive = (await afterArchiveResponse.json()) as {
+      id: string;
+      kind: string;
+      status: string;
+    };
+    expect(afterArchive.id).not.toBe(afterEdit.id);
+    expect(afterArchive).toMatchObject({ kind: "decision", status: "active" });
+
+    const keyedPayload = {
+      text: `Keyed REST operation ${crypto.randomUUID()}`,
+      kind: "semantic",
+      metadata: { source: "rest-idempotency-key" },
+    };
+    const idempotencyKey = `memory-create-${crypto.randomUUID()}`;
+    const keyedFirstResponse = await create(keyedPayload, idempotencyKey);
+    expect(keyedFirstResponse.status).toBe(201);
+    const keyedFirst = (await keyedFirstResponse.json()) as { id: string };
+    const keyedReplayResponse = await create(keyedPayload, idempotencyKey);
+    expect(keyedReplayResponse.status).toBe(201);
+    expect((await keyedReplayResponse.json()) as { id: string }).toEqual(keyedFirst);
+
+    const keyConflictResponse = await create(
+      { ...keyedPayload, text: `${keyedPayload.text} changed` },
+      idempotencyKey,
+    );
+    expect(keyConflictResponse.status).toBe(409);
+
+    const oversizedKeyResponse = await create(keyedPayload, "x".repeat(201));
+    expect(oversizedKeyResponse.status).toBe(400);
+
+    for (const id of [first.id, afterArchive.id, keyedFirst.id]) {
+      const cleanup = await app.request(workspacePath(workspaceId, `/knowledge/memories/${id}`), {
+        method: "PATCH",
+        body: JSON.stringify({ status: "archived" }),
+        headers: { "content-type": "application/json" },
+      });
+      expect(cleanup.status).toBe(200);
+    }
+  });
+
   test("drops raw text into the Default base, auto-curates it, and enforces visibility + agent access", async () => {
     const app = createApp({
       settings: objectStorageSettings(services.databaseUrl, services.objectStorageEndpoint!),
@@ -7285,6 +7390,22 @@ describe("API component integration", () => {
       expect(
         ((saveEvents[0]?.payload as { preview?: string } | undefined)?.preview ?? "").length,
       ).toBeLessThanOrEqual(120);
+
+      const decisionSaved = JSON.parse(
+        mcpText(
+          await prepared.mcpServers[0]!.callTool("opengeni__memory_save", {
+            text: `Canonical MCP decision ${crypto.randomUUID()}`,
+            kind: "decision",
+          }),
+        ),
+      ) as McpMutationReceiptType;
+      expect(decisionSaved).toMatchObject({
+        outcome: "created",
+        resource: { type: "knowledge_memory", state: "active" },
+      });
+      expect(
+        await getKnowledgeMemory(dbClient.db, workspaceId, decisionSaved.resource.id),
+      ).toMatchObject({ kind: "decision", status: "active" });
 
       const search = JSON.parse(
         mcpText(

@@ -3,11 +3,17 @@ import { randomUUID } from "node:crypto";
 import {
   bootstrapWorkspace,
   correctWorkspaceMemory,
+  createDurableLearningAttemptLedger,
   createDb,
   saveWorkspaceMemory,
 } from "@opengeni/db";
+import { DURABLE_LEARNING_CONTRACT_VERSION } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
-import { routeLegacyWorkspaceMemoryWrite } from "../src/domain/durable-learning-memory-adapter";
+import {
+  createWorkspaceMemoryDurableLearningAdapter,
+  routeLegacyWorkspaceMemoryWrite,
+} from "../src/domain/durable-learning-memory-adapter";
+import { routeDurableLearning } from "../src/domain/durable-learning-router";
 
 let shared: SharedTestDatabase | null = null;
 let client: ReturnType<typeof createDb> | null = null;
@@ -29,6 +35,94 @@ afterAll(async () => {
 }, 60_000);
 
 describe("Workspace Memory durable-learning adapter", () => {
+  test("persists every canonical Memory subject with its deliberate Memory kind", async () => {
+    if (!client) return;
+    const suffix = randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "durable-learning-memory-kind",
+      accountExternalId: `account-${suffix}`,
+      accountName: "Durable learning Memory kinds",
+      workspaceExternalSource: "durable-learning-memory-kind",
+      workspaceExternalId: `workspace-${suffix}`,
+      workspaceName: "Durable learning Memory kinds",
+      subjectId: `human:${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const cases = [
+      ["fact", "semantic"],
+      ["observation", "semantic"],
+      ["decision", "decision"],
+      ["history", "episodic"],
+    ] as const;
+
+    for (const [subjectKind, memoryKind] of cases) {
+      let writeResult: Awaited<ReturnType<typeof saveWorkspaceMemory>> | null = null;
+      const response = await routeDurableLearning(
+        {
+          contractVersion: DURABLE_LEARNING_CONTRACT_VERSION,
+          operation: "write",
+          attemptId: randomUUID(),
+          origin: "explicit_remember",
+          requestedAuthority: "active",
+          requestedScope: { kind: "workspace" },
+          targetSurface: "memory",
+          subject: {
+            kind: subjectKind,
+            content: `Canonical ${subjectKind} subject ${suffix}`,
+            stableKey: null,
+            title: null,
+            summary: null,
+            roleKey: null,
+            replacesResourceId: null,
+            legacyMemory: null,
+          },
+          evidence: [],
+        },
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          actor: { kind: "human", subjectId: grant.subjectId },
+          initiatingHumanSubjectId: grant.subjectId,
+          sessionId: null,
+          grants: {
+            organization: false,
+            workspace: true,
+            selfUser: false,
+            roleKeys: [],
+            sessionIds: [],
+            ephemeralSessionIds: [],
+            activate: true,
+          },
+          learningPolicy: null,
+          availableSurfaces: {
+            memory: true,
+            preferenceRegistry: false,
+            instructionPolicy: false,
+            companyProfile: false,
+            documentsEvidence: false,
+          },
+        },
+        {
+          ledger: createDurableLearningAttemptLedger(client.db),
+          authorities: {
+            memory: createWorkspaceMemoryDurableLearningAdapter({
+              db: client.db,
+              onWriteResult: (result) => {
+                writeResult = result;
+              },
+            }),
+          },
+        },
+      );
+
+      expect(response).toMatchObject({
+        idempotency: "created",
+        receipt: { outcome: "applied", resource: { surface: "memory" } },
+      });
+      expect(writeResult?.memory.kind).toBe(memoryKind);
+    }
+  });
+
   test("reconstructs stable create, update, and supersession replays", async () => {
     if (!client) return;
     const suffix = randomUUID();

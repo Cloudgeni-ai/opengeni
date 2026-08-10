@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   AddDocumentRequest,
   CreateKnowledgeDropRequest,
@@ -40,6 +41,8 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import {
+  DurableLearningAttemptConflictError,
+  DurableLearningAttemptInProgressError,
   requireAccessGrant,
   requireAccessGrantAuthorization,
   durableLearningStableAttemptId,
@@ -570,6 +573,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     // the legacy curated create.
     if (payload.status === "active") {
       try {
+        const operationKey = durableLearningRestOperationKey(c);
         const routed = await routeLegacyWorkspaceMemoryWrite({
           db,
           embedder: getDocumentServices().embedder,
@@ -583,7 +587,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
             accountId: grant.accountId,
             workspaceId,
             subjectId: grant.subjectId,
-            payload,
+            operationKey,
           }),
           text: payload.text,
           kind: payload.kind,
@@ -680,6 +684,13 @@ function dropFilename(preferred: string | undefined): string {
 }
 
 function documentHttpException(error: unknown): HTTPException {
+  if (error instanceof HTTPException) return error;
+  if (
+    error instanceof DurableLearningAttemptConflictError ||
+    error instanceof DurableLearningAttemptInProgressError
+  ) {
+    return new HTTPException(409, { message: error.message });
+  }
   const message = error instanceof Error ? error.message : String(error);
   if (message.includes("organization document") && message.includes("exact account authority")) {
     return new HTTPException(403, { message: "missing permission: account:admin" });
@@ -707,6 +718,19 @@ function documentHttpException(error: unknown): HTTPException {
     return new HTTPException(400, { message });
   }
   return new HTTPException(500, { message });
+}
+
+const DURABLE_LEARNING_REST_IDEMPOTENCY_KEY_MAX_CHARS = 200;
+
+function durableLearningRestOperationKey(context: Context): string {
+  const supplied = context.req.header("idempotency-key")?.trim();
+  if (!supplied) return randomUUID();
+  if (supplied.length > DURABLE_LEARNING_REST_IDEMPOTENCY_KEY_MAX_CHARS) {
+    throw new HTTPException(400, {
+      message: `idempotency-key must be at most ${DURABLE_LEARNING_REST_IDEMPOTENCY_KEY_MAX_CHARS} characters`,
+    });
+  }
+  return supplied;
 }
 
 function hasAccountAdminAuthority(

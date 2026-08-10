@@ -2,16 +2,21 @@ import type {
   DurableLearningAuthorityAdapter,
   DurableLearningAuthorityWriteResult,
 } from "./durable-learning-router";
-import { routeDurableLearning } from "./durable-learning-router";
+import {
+  DurableLearningAttemptConflictError,
+  routeDurableLearning,
+} from "./durable-learning-router";
 import { durableLearningStableAttemptId } from "./durable-learning-router";
 import {
   DURABLE_LEARNING_CONTRACT_VERSION,
+  type DurableLearningSubjectKind,
   type DurableLearningRouterResponse,
   type KnowledgeMemoryKind,
 } from "@opengeni/contracts";
 import {
   correctWorkspaceMemory,
   createDurableLearningAttemptLedger,
+  DurableLearningLedgerConflictError,
   getDurableLearningMemoryWriteResult,
   saveWorkspaceMemory,
   type Database,
@@ -43,8 +48,18 @@ export type LegacyWorkspaceMemoryLearningWriteInput = {
   attemptId?: string;
 };
 
-function memoryKindForSubject(kind: string): "semantic" | "episodic" {
-  return kind === "history" ? "episodic" : "semantic";
+function memoryKindForSubject(kind: DurableLearningSubjectKind): KnowledgeMemoryKind {
+  switch (kind) {
+    case "decision":
+      return "decision";
+    case "history":
+      return "episodic";
+    case "fact":
+    case "observation":
+      return "semantic";
+    default:
+      throw new Error(`The Memory adapter does not accept subject kind ${kind}`);
+  }
 }
 
 function memoryRollbackToken(memoryId: string): string {
@@ -280,6 +295,9 @@ export async function routeLegacyWorkspaceMemoryWrite(
     );
   } catch (error) {
     if (writeError !== null) throw writeError;
+    if (error instanceof DurableLearningLedgerConflictError) {
+      throw new DurableLearningAttemptConflictError(error.message);
+    }
     throw error;
   }
   if (writeError !== null) throw writeError;

@@ -10855,6 +10855,7 @@ export function evaluateWorkspaceModelPolicy(
 
 export * from "./codex-fleet-policy";
 export * from "./workspace-instruction-policies";
+export * from "./workspace-learning-policy";
 export * from "./workspace-state";
 export * from "./preference-registry";
 export * from "./scoped-knowledge";

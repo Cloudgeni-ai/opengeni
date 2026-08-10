@@ -28,13 +28,13 @@ The caller supplies an explicit origin, requested scope, requested authority,
 target surface, structured subject, immutable evidence references, and frozen
 authority context. The router invokes at most one canonical authority adapter:
 
-| Subject | Canonical surface |
-| --- | --- |
-| facts, decisions, observations, history | hierarchical Memory |
-| preferences, procedures, working methods, skill guidance | Preference Registry |
-| workspace charter, mandatory workspace context, workspace goals | workspace instruction-policy authority |
-| organization identity, mission, products, customers, goals, constraints | company-profile authority |
-| documents, connector content, transcripts | Documents/RAG evidence |
+| Subject                                                                 | Canonical surface                      |
+| ----------------------------------------------------------------------- | -------------------------------------- |
+| facts, decisions, observations, history                                 | hierarchical Memory                    |
+| preferences, procedures, working methods, skill guidance                | Preference Registry                    |
+| workspace charter, mandatory workspace context, workspace goals         | workspace instruction-policy authority |
+| organization identity, mission, products, customers, goals, constraints | company-profile authority              |
+| documents, connector content, transcripts                               | Documents/RAG evidence                 |
 
 Documents and connector content remain evidence. They cannot become active
 Memory, preference, charter, policy, or company-profile content merely because
@@ -159,10 +159,22 @@ preference-shaped Memory remains retrievable until a separate deterministic
 promotion/supersession writes the Preference Registry; the router does not
 rewrite historical Memory or create duplicate prompt injection.
 
-Compatibility callers never mint a process-local random router id. First-party
-MCP derives the id from the immutable logical turn and exact tool arguments;
-the human REST path derives it from the authenticated subject and canonical
-request payload. The compatibility helper also has a deterministic fallback.
+Compatibility callers bind retry to a real logical operation rather than
+content identity. First-party MCP derives the id from the immutable logical
+turn and exact tool arguments. The human REST path accepts an optional bounded
+`Idempotency-Key`; a keyed retry derives the same attempt id, while an unkeyed
+request receives a fresh operation UUID. The key is intentionally independent
+of request content so reusing it with different immutable input reaches the
+router's attempt-conflict guard instead of creating a second operation. Payload
+bytes alone never identify an operation, so a later archive or edit cannot make
+a distinct identical POST replay a stale authority-result snapshot. The
+compatibility helper retains a deterministic fallback only for callers that
+already possess durable operation identity.
+
+The Memory adapter preserves canonical subject kinds deliberately: `decision`
+persists as `KnowledgeMemory.kind = decision`, `history` persists as
+`episodic`, and `fact`/`observation` persist as `semantic`. Legacy
+`memory_save` continues to preserve its explicit existing Memory kind.
 Workspace Memory stamps the exact attempt/input identity onto a created or
 in-place-updated resource and stamps supersession convergence evidence onto the
 retired target. A retry can therefore reconstruct create, update,
