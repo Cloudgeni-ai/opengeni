@@ -475,6 +475,21 @@
   }
 }
 
+/* A phone footer cannot fit capture chrome beside model, realtime, Pause, and
+   Send controls. While voice input owns the microphone, reserve the row for its
+   Cancel/Stop actions so unrelated Pause chrome cannot masquerade as Stop. */
+@media (max-width: 39.999rem) {
+  .og-composer-footer:has([data-transcription-capturing])
+    .og-composer-controls
+    > :not([data-transcription-capturing]) {
+    display: none;
+  }
+
+  .og-composer-footer:has([data-transcription-capturing]) .og-composer-actions {
+    display: none;
+  }
+}
+
 @media (forced-colors: active) {
   /* Forced-colors can replace a painted background with Canvas while custom
      properties retain their authored dark/light values. That combination is

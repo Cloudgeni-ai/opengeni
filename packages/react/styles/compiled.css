@@ -5026,6 +5026,14 @@
     animation-delay: 0ms !important;
   }
 }
+@media (max-width: 39.999rem) {
+  :where(.og-root).og-composer-footer:has([data-transcription-capturing]) .og-composer-controls > :not([data-transcription-capturing]),:where(.og-root) .og-composer-footer:has([data-transcription-capturing]) .og-composer-controls > :not([data-transcription-capturing]) {
+    display: none;
+  }
+  :where(.og-root).og-composer-footer:has([data-transcription-capturing]) .og-composer-actions,:where(.og-root) .og-composer-footer:has([data-transcription-capturing]) .og-composer-actions {
+    display: none;
+  }
+}
 @media (forced-colors: active) {
   :where(.og-root) {
     --og-color-bg: Canvas;
@@ -5181,6 +5189,12 @@
     border-radius: var(--og-radius-md);
   }
   :where(.og-root)[data-og-responsive-basis="container"] .og-realtime-control[data-model-menu="split-desktop"] .og-realtime-model-trigger,:where(.og-root) [data-og-responsive-basis="container"] .og-realtime-control[data-model-menu="split-desktop"] .og-realtime-model-trigger {
+    display: none;
+  }
+  :where(.og-root)[data-og-responsive-basis="container"] .og-composer-footer:has([data-transcription-capturing]) .og-composer-controls > :not([data-transcription-capturing]),:where(.og-root) [data-og-responsive-basis="container"] .og-composer-footer:has([data-transcription-capturing]) .og-composer-controls > :not([data-transcription-capturing]) {
+    display: none;
+  }
+  :where(.og-root)[data-og-responsive-basis="container"] .og-composer-footer:has([data-transcription-capturing]) .og-composer-actions,:where(.og-root) [data-og-responsive-basis="container"] .og-composer-footer:has([data-transcription-capturing]) .og-composer-actions {
     display: none;
   }
 }
