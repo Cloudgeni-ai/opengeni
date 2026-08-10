@@ -1,5 +1,22 @@
 # @opengeni/worker-bundle
 
+## 0.16.49
+
+### Patch Changes
+
+- 2cd6dce: Build and reuse version-bound immutable provider images after clean rig verification, with content-hash invalidation and runtime-setup fallback for missing or unsupported providers.
+- Updated dependencies [2cd6dce]
+  - @opengeni/contracts@0.42.1
+  - @opengeni/core@0.22.2
+  - @opengeni/db@0.29.1
+  - @opengeni/runtime@0.18.39
+  - @opengeni/config@0.12.10
+  - @opengeni/documents@0.5.29
+  - @opengeni/events@0.3.100
+  - @opengeni/github@0.4.47
+  - @opengeni/observability@0.5.16
+  - @opengeni/storage@0.2.84
+
 ## 0.16.48
 
 ### Patch Changes
