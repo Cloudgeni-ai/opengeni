@@ -11,7 +11,6 @@ import {
 } from "@opengeni/contracts/slack-bot-scopes";
 import { usePacks, useVariableSets } from "@opengeni/react";
 import {
-  Building2Icon,
   CheckCircle2Icon,
   ChevronDownIcon,
   GlobeIcon,
@@ -1271,14 +1270,14 @@ export function CapabilitiesRoute({
           </div>
           <div className="grid gap-2 sm:grid-cols-2">
             <ManagedAppTile
-              icon={<HardDriveIcon className="size-5" />}
+              icon={<AppLogo app="googleDrive" />}
               name="Google Drive"
               description="Search, sync, and create files in Drive."
               status={googleDriveStatusLabel(googleDriveState.state)}
               onOpen={() => setManagedApp("google-drive")}
             />
             <ManagedAppTile
-              icon={<MessagesSquareIcon className="size-5" />}
+              icon={<AppLogo app="slack" />}
               name="Slack"
               description="Chat with OpenGeni and start work from Slack."
               status={slackAppStatus}
@@ -1315,8 +1314,8 @@ export function CapabilitiesRoute({
               >
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div className="flex min-w-0 items-start gap-3">
-                    <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-brand/10 text-brand">
-                      <Building2Icon className="size-4" />
+                    <span className="grid size-9 shrink-0 place-items-center rounded-lg border border-border bg-bg">
+                      <AppLogo app="slack" className="size-5" />
                     </span>
                     <div className="min-w-0">
                       <h3
@@ -1495,8 +1494,8 @@ export function CapabilitiesRoute({
               <details className="group mt-3 rounded-xl border border-border bg-surface px-4 py-3">
                 <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
                   <div className="flex min-w-0 items-start gap-3">
-                    <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-fg-muted/10 text-fg-muted">
-                      <PlugIcon className="size-4" />
+                    <span className="grid size-8 shrink-0 place-items-center rounded-lg border border-border bg-bg">
+                      <AppLogo app="slack" className="size-4" />
                     </span>
                     <div>
                       <p className="text-sm font-medium text-fg">Personal Slack</p>
@@ -1728,6 +1727,30 @@ export function googleDriveStatusLabel(
   if (state === "not_connected" || state === "disconnected") return "Not connected";
   if (state === "unverified") return "Loading";
   return "Needs attention";
+}
+
+const APP_LOGO_URLS = {
+  googleDrive:
+    "https://www.gstatic.com/images/branding/productlogos/drive_2026/v2/web-64dp/logo_drive_2026_color_2x_web_64dp.png",
+  slack: "https://a.slack-edge.com/80588/marketing/img/meta/slack_hash_256.png",
+} as const;
+
+function AppLogo({ app, className }: { app: keyof typeof APP_LOGO_URLS; className?: string }) {
+  const [failed, setFailed] = useState(false);
+  if (failed) {
+    const FallbackIcon = app === "googleDrive" ? HardDriveIcon : MessagesSquareIcon;
+    return <FallbackIcon className={cn("size-5 text-fg-muted", className)} aria-hidden="true" />;
+  }
+  return (
+    <img
+      src={APP_LOGO_URLS[app]}
+      alt=""
+      aria-hidden="true"
+      draggable={false}
+      onError={() => setFailed(true)}
+      className={cn("size-6 object-contain", className)}
+    />
+  );
 }
 
 function ManagedAppTile({

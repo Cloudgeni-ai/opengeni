@@ -377,8 +377,14 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
       <section className="mt-5 rounded-lg border border-border bg-surface/35 p-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div className="flex min-w-0 gap-3">
-            <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-brand/10 text-brand">
-              <HardDriveIcon className="size-4" />
+            <div className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-border bg-bg">
+              <img
+                src="https://www.gstatic.com/images/branding/productlogos/drive_2026/v2/web-64dp/logo_drive_2026_color_2x_web_64dp.png"
+                alt=""
+                aria-hidden="true"
+                draggable={false}
+                className="size-5 object-contain"
+              />
             </div>
             <div className="min-w-0">
               <div className="text-sm font-medium">Google Drive</div>
