@@ -2,6 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { SandboxBackend } from "@opengeni/contracts";
 import {
   createObservability,
+  interactionAuthMetricObserver,
+  interactionInterventionMetricObserver,
+  interactionOperationMetricObserver,
   logStartupDependencyRetry,
   parseHeaders,
   sandboxOperationMetricObserver,
@@ -141,6 +144,97 @@ describe("observability", () => {
     const metrics = await obs.prometheusMetrics();
     expect(metrics).toMatch(
       /opengeni_observability_observer_errors_total\{[^}]*observer="sandbox_operation"[^}]*\} 1\b/,
+    );
+  });
+
+  test("records interaction operations with closed low-cardinality labels", async () => {
+    const obs = createObservability(settings, { component: "api", now: () => 1 });
+    const observe = interactionOperationMetricObserver(obs);
+    observe({
+      resource: "browser",
+      operation: "act",
+      mode: "semantic",
+      outcome: "completed",
+      durationMs: 250,
+    });
+    observe({
+      resource: "browser-session-private-id",
+      operation: "click:https://private.example/secret",
+      mode: "locator:#private-input",
+      outcome: "PRIVATE_PAGE_TEXT",
+      durationMs: Number.POSITIVE_INFINITY,
+    });
+
+    const metrics = await obs.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_interaction_operations_total\{[^}]*mode="semantic"[^}]*operation="act"[^}]*outcome="completed"[^}]*resource="browser"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_interaction_operations_total\{[^}]*mode="unknown"[^}]*operation="unknown"[^}]*outcome="unknown"[^}]*resource="unknown"[^}]*\} 1\b/,
+    );
+    expect(metrics).toContain("opengeni_interaction_operation_duration_seconds_bucket");
+    expect(metrics).not.toContain("browser-session-private-id");
+    expect(metrics).not.toContain("private.example");
+    expect(metrics).not.toContain("private-input");
+    expect(metrics).not.toContain("PRIVATE_PAGE_TEXT");
+  });
+
+  test("records auth and human-intervention lifecycle without replay inflation", async () => {
+    const obs = createObservability(settings, { component: "api", now: () => 1 });
+    const observeAuth = interactionAuthMetricObserver(obs);
+    const observeIntervention = interactionInterventionMetricObserver(obs);
+
+    observeAuth({ state: "awaiting_external_action", durationMs: 25 });
+    observeAuth({ state: "verified", durationMs: 10, replayed: true });
+    observeAuth({ state: "private-auth-state", durationMs: 1 });
+    observeIntervention({ kind: "mfa", outcome: "opened" });
+    observeIntervention({ kind: "mfa", outcome: "completed", waitMs: 1_250 });
+    observeIntervention({
+      kind: "private-kind",
+      outcome: "private-outcome",
+      waitMs: 50,
+      replayed: true,
+    });
+
+    const metrics = await obs.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_interaction_auth_transitions_total\{[^}]*state="awaiting_external_action"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_interaction_auth_transitions_total\{[^}]*state="unknown"[^}]*\} 1\b/,
+    );
+    expect(metrics).not.toContain('state="verified"');
+    expect(metrics).toMatch(
+      /opengeni_interaction_interventions_total\{[^}]*kind="mfa"[^}]*outcome="opened"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_interaction_interventions_total\{[^}]*kind="mfa"[^}]*outcome="completed"[^}]*\} 1\b/,
+    );
+    expect(metrics).toContain("opengeni_interaction_intervention_wait_seconds_bucket");
+    expect(metrics).not.toContain("private-kind");
+    expect(metrics).not.toContain("private-outcome");
+  });
+
+  test("isolates interaction observer registration failures", async () => {
+    const obs = createObservability(settings, { component: "api", now: () => 1 });
+    obs.incrementCounter({
+      name: "opengeni_interaction_operations_total",
+      labels: { incompatible_test_label: "seed" },
+    });
+
+    expect(() =>
+      interactionOperationMetricObserver(obs)({
+        resource: "browser",
+        operation: "act",
+        mode: "semantic",
+        outcome: "completed",
+        durationMs: 1,
+      }),
+    ).not.toThrow();
+
+    const metrics = await obs.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_observability_observer_errors_total\{[^}]*observer="interaction_operation"[^}]*\} 1\b/,
     );
   });
 

@@ -154,6 +154,12 @@ import {
   resolveProtectedAuthFieldValues,
 } from "../browser-auth-broker";
 import { allowedCorsOrigin } from "../http/cors";
+import {
+  observeAuthMutation,
+  observeBrowserActionResult,
+  observeBrowserRevisionPublication,
+  observeLifecycleResult,
+} from "../interaction-metrics";
 import { withChannelA, type ChannelAOperation } from "../sandbox/channel-a";
 
 const BROWSER_DRIVER_ID = "opengeni.cdp.v1";
@@ -245,6 +251,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
     const workspaceId = context.req.param("workspaceId");
     const grant = await requireAccessGrant(context, deps, workspaceId, "sessions:control");
     const request = await parseJsonBody(context, CreateBrowserSessionRequest);
+    const startedAtMs = performance.now();
     await authorizeSourceSession(deps, grant, request.sessionId, "session.control");
     const origin = requestOrigin(context, deps.settings.corsAllowOriginRegex);
     const authority = browserAuthorityRoot(deps);
@@ -268,7 +275,9 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
           )
         : null;
       if (prepared && isTerminalOperation(prepared.operation.state)) {
-        return context.json(BrowserSessionMutationResponse.parse(prepared), 200);
+        const parsed = BrowserSessionMutationResponse.parse(prepared);
+        observeLifecycleResult(deps.observability, startedAtMs, parsed);
+        return context.json(parsed, 200);
       }
 
       const sourceSession = await requireSourceSession(deps, workspaceId, request.sessionId);
@@ -426,6 +435,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         },
       );
       const parsed = BrowserSessionMutationResponse.parse(response);
+      observeLifecycleResult(deps.observability, startedAtMs, parsed);
       return context.json(
         parsed,
         parsed.operation.state === "completed" && !parsed.operation.replayed ? 201 : 200,
@@ -558,6 +568,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         "sessions:control",
       );
       const request = await parseJsonBody(context, BrowserActionRequest);
+      const startedAtMs = performance.now();
       const result = await withActiveBrowserController(
         context,
         grant,
@@ -581,6 +592,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
             }),
           ),
       );
+      observeBrowserActionResult(deps.observability, startedAtMs, request, result);
       return context.json(result);
     },
   );
@@ -619,6 +631,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         "sessions:control",
       );
       const request = await parseJsonBody(context, StartAuthRunRequest);
+      const startedAtMs = performance.now();
       const result = await withActiveBrowserController(
         context,
         grant,
@@ -646,6 +659,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
           });
         },
       );
+      observeAuthMutation(deps.observability, startedAtMs, result);
       return context.json(result, result.replayed ? 200 : 201);
     },
   );
@@ -688,6 +702,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       );
       const authRunId = requireUuidParam(context, "authRunId");
       const request = await parseJsonBody(context, ReportAuthRunRequest);
+      const startedAtMs = performance.now();
       const result = await withActiveBrowserController(
         context,
         grant,
@@ -712,6 +727,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
           });
         },
       );
+      observeAuthMutation(deps.observability, startedAtMs, result);
       return context.json(result);
     },
   );
@@ -725,6 +741,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       );
       const authRunId = requireUuidParam(context, "authRunId");
       const request = await parseJsonBody(context, ProtectedAuthFillRequest);
+      const startedAtMs = performance.now();
       try {
         const replay = await getProtectedAuthFillPreparation(deps.db, {
           accountId: grant.accountId,
@@ -741,7 +758,9 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
           });
           await authorizeSourceSession(deps, grant, record.sourceSessionId, "session.control");
           assertAuthRunBrowser(replay.run.browserSessionId, browserSessionId);
-          return context.json(ProtectedAuthFillResponse.parse(replay.response));
+          const response = ProtectedAuthFillResponse.parse(replay.response);
+          observeAuthMutation(deps.observability, startedAtMs, response);
+          return context.json(response);
         }
       } catch (error) {
         throw browserRouteError(error);
@@ -910,7 +929,9 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
           return await settleProtectedAuthReceipt({ deps, scope, receipt });
         },
       );
-      return context.json(ProtectedAuthFillResponse.parse(result));
+      const response = ProtectedAuthFillResponse.parse(result);
+      observeAuthMutation(deps.observability, startedAtMs, response);
+      return context.json(response);
     },
   );
 
@@ -923,6 +944,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       );
       const authRunId = requireUuidParam(context, "authRunId");
       const request = await parseJsonBody(context, VerifyAuthRunRequest);
+      const startedAtMs = performance.now();
       const result = await withActiveBrowserController(
         context,
         grant,
@@ -952,6 +974,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
           });
         },
       );
+      observeAuthMutation(deps.observability, startedAtMs, result);
       return context.json(result);
     },
   );
@@ -1141,6 +1164,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       const grant = await requireAccessGrant(context, deps, workspaceId, "sessions:control");
       const browserSessionId = requireUuidParam(context, "browserSessionId");
       const request = await parseJsonBody(context, PublishBrowserRevisionRequest);
+      const startedAtMs = performance.now();
       try {
         const record = await getBrowserSessionControlRecord(deps.db, {
           accountId: grant.accountId,
@@ -1160,7 +1184,9 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         };
         const prepared = await prepareBrowserRevisionPublication(deps.db, publicationInput);
         if (prepared.kind === "completed") {
-          return context.json(PublishBrowserRevisionResponse.parse(prepared.response), 200);
+          const parsed = PublishBrowserRevisionResponse.parse(prepared.response);
+          observeBrowserRevisionPublication(deps.observability, startedAtMs, parsed);
+          return context.json(parsed, 200);
         }
         const objectStorage = deps.objectStorage;
         if (!objectStorage) {
@@ -1278,6 +1304,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
           },
         );
         const parsed = PublishBrowserRevisionResponse.parse(response);
+        observeBrowserRevisionPublication(deps.observability, startedAtMs, parsed);
         return context.json(parsed, parsed.replayed ? 200 : 201);
       } catch (error) {
         throw browserRouteError(error);
@@ -1292,6 +1319,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       const grant = await requireAccessGrant(context, deps, workspaceId, "sessions:control");
       const browserSessionId = requireUuidParam(context, "browserSessionId");
       const request = await parseJsonBody(context, BrowserSessionLifecycleRequest);
+      const startedAtMs = performance.now();
       const origin = requestOrigin(context, deps.settings.corsAllowOriginRegex);
       try {
         const before = await getBrowserSessionControlRecord(deps.db, {
@@ -1321,21 +1349,22 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
               workspaceId,
               browserSessionId,
             );
-            return context.json(
-              BrowserSessionMutationResponse.parse({
-                session: (
-                  await getBrowserSessionControlRecord(deps.db, {
-                    accountId: grant.accountId,
-                    workspaceId,
-                    browserSessionId,
-                  })
-                ).session,
-                operation: prepared.operation,
-              }),
-              200,
-            );
+            const parsed = BrowserSessionMutationResponse.parse({
+              session: (
+                await getBrowserSessionControlRecord(deps.db, {
+                  accountId: grant.accountId,
+                  workspaceId,
+                  browserSessionId,
+                })
+              ).session,
+              operation: prepared.operation,
+            });
+            observeLifecycleResult(deps.observability, startedAtMs, parsed);
+            return context.json(parsed, 200);
           }
-          return context.json(BrowserSessionMutationResponse.parse(prepared), 200);
+          const parsed = BrowserSessionMutationResponse.parse(prepared);
+          observeLifecycleResult(deps.observability, startedAtMs, parsed);
+          return context.json(parsed, 200);
         }
 
         const record = await getBrowserSessionControlRecord(deps.db, {
@@ -1477,7 +1506,9 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
             }
           },
         );
-        return context.json(BrowserSessionMutationResponse.parse(response), 200);
+        const parsed = BrowserSessionMutationResponse.parse(response);
+        observeLifecycleResult(deps.observability, startedAtMs, parsed);
+        return context.json(parsed, 200);
       } catch (error) {
         throw browserRouteError(error);
       }
@@ -1491,6 +1522,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       const grant = await requireAccessGrant(context, deps, workspaceId, "sessions:control");
       const browserSessionId = requireUuidParam(context, "browserSessionId");
       const request = await parseJsonBody(context, BrowserSessionLifecycleRequest);
+      const startedAtMs = performance.now();
       const origin = requestOrigin(context, deps.settings.corsAllowOriginRegex);
       let restore: RestorePlacementBrowserStateInput | null = null;
       try {
@@ -1522,7 +1554,9 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
           actorSubjectId: grant.subjectId,
         });
         if (isTerminalOperation(prepared.operation.state)) {
-          return context.json(BrowserSessionMutationResponse.parse(prepared), 200);
+          const parsed = BrowserSessionMutationResponse.parse(prepared);
+          observeLifecycleResult(deps.observability, startedAtMs, parsed);
+          return context.json(parsed, 200);
         }
 
         const privateCheckpoint = await getBrowserPrivateCheckpointAuthority(deps.db, {
@@ -1686,7 +1720,9 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
             });
           },
         );
-        return context.json(BrowserSessionMutationResponse.parse(response), 200);
+        const parsed = BrowserSessionMutationResponse.parse(response);
+        observeLifecycleResult(deps.observability, startedAtMs, parsed);
+        return context.json(parsed, 200);
       } catch (error) {
         throw browserRouteError(error);
       } finally {
@@ -1703,6 +1739,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       const grant = await requireAccessGrant(context, deps, workspaceId, "sessions:control");
       const browserSessionId = requireUuidParam(context, "browserSessionId");
       const request = await parseJsonBody(context, BrowserSessionLifecycleRequest);
+      const startedAtMs = performance.now();
       const origin = requestOrigin(context, deps.settings.corsAllowOriginRegex);
       try {
         const before = await getBrowserSessionControlRecord(deps.db, {
@@ -1729,7 +1766,9 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
               before.session.placement,
             ).catch(() => undefined);
           }
-          return context.json(BrowserSessionMutationResponse.parse(prepared), 200);
+          const parsed = BrowserSessionMutationResponse.parse(prepared);
+          observeLifecycleResult(deps.observability, startedAtMs, parsed);
+          return context.json(parsed, 200);
         }
 
         const record = await getBrowserSessionControlRecord(deps.db, {
@@ -1754,7 +1793,9 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
             browserSessionId,
             record.session.placement,
           ).catch(() => undefined);
-          return context.json(BrowserSessionMutationResponse.parse(completed), 200);
+          const parsed = BrowserSessionMutationResponse.parse(completed);
+          observeLifecycleResult(deps.observability, startedAtMs, parsed);
+          return context.json(parsed, 200);
         }
         const sourceSession = await requireSourceSession(deps, workspaceId, record.sourceSessionId);
         const response = await withBrowserPlacement(
@@ -1805,7 +1846,9 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
             return completed;
           },
         );
-        return context.json(BrowserSessionMutationResponse.parse(response), 200);
+        const parsed = BrowserSessionMutationResponse.parse(response);
+        observeLifecycleResult(deps.observability, startedAtMs, parsed);
+        return context.json(parsed, 200);
       } catch (error) {
         throw browserRouteError(error);
       }

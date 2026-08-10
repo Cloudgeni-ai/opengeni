@@ -56,6 +56,7 @@ import { publishDurableSessionEvents } from "@opengeni/events";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { sseWorkspaceInteractionRevisionStream } from "../http/sse";
+import { observeInterventionMutation } from "../interaction-metrics";
 
 export function registerInteractionResourceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/interaction-events/stream", async (context) => {
@@ -305,10 +306,9 @@ export function registerInteractionResourceRoutes(app: Hono, deps: ApiRouteDeps)
         originatingAttemptId: actor.attemptId,
         originatingToolOperationId: actor.attemptId ? request.operationId : null,
       });
-      return context.json(
-        InteractionInterventionMutationResponse.parse(response),
-        response.replayed ? 200 : 201,
-      );
+      const parsed = InteractionInterventionMutationResponse.parse(response);
+      observeInterventionMutation(deps.observability, parsed);
+      return context.json(parsed, response.replayed ? 200 : 201);
     } catch (error) {
       throw interactionResourceRouteError(error);
     }
@@ -350,17 +350,17 @@ export function registerInteractionResourceRoutes(app: Hono, deps: ApiRouteDeps)
           await authorizeSession(deps, grant, approvalTarget.sessionId, "session.approval.write");
         }
         if (!approvalTarget) {
-          return context.json(
-            InteractionInterventionMutationResponse.parse(
-              await resolveInteractionIntervention(deps.db, {
-                accountId: grant.accountId,
-                workspaceId,
-                actorSubjectId: grant.subjectId,
-                interventionId,
-                ...request,
-              }),
-            ),
+          const response = InteractionInterventionMutationResponse.parse(
+            await resolveInteractionIntervention(deps.db, {
+              accountId: grant.accountId,
+              workspaceId,
+              actorSubjectId: grant.subjectId,
+              interventionId,
+              ...request,
+            }),
           );
+          observeInterventionMutation(deps.observability, response);
+          return context.json(response);
         }
         const decision = request.outcome === "completed" ? "approve" : "reject";
         const accepted = await acceptSessionApprovalDecision(deps.db, {
@@ -411,6 +411,7 @@ export function registerInteractionResourceRoutes(app: Hono, deps: ApiRouteDeps)
           operationId: request.operationId,
           replayed: accepted.events.length === 0,
         });
+        observeInterventionMutation(deps.observability, response);
         return context.json(response);
       } catch (error) {
         throw interactionResourceRouteError(error);

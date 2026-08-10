@@ -71,6 +71,7 @@ import {
   deriveComputerViewGrantToken,
 } from "../browser-controller-authority";
 import { allowedCorsOrigin } from "../http/cors";
+import { observeComputerActionResult, observeLifecycleResult } from "../interaction-metrics";
 import { withChannelA, type ChannelAOperation } from "../sandbox/channel-a";
 
 type ComputerPlacement = {
@@ -125,6 +126,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
     const workspaceId = context.req.param("workspaceId") ?? "";
     const grant = await requireAccessGrant(context, deps, workspaceId, "sessions:control");
     const request = await parseJsonBody(context, CreateComputerSessionRequest);
+    const startedAtMs = performance.now();
     await authorizeSourceSession(deps, grant, request.sessionId, "session.control");
     const origin = requestOrigin(context, deps.settings.corsAllowOriginRegex);
     const authority = controllerAuthorityRoot(deps);
@@ -148,7 +150,9 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
           )
         : null;
       if (prepared && isTerminalOperation(prepared.operation.state)) {
-        return context.json(ComputerSessionMutationResponse.parse(prepared), 200);
+        const parsed = ComputerSessionMutationResponse.parse(prepared);
+        observeLifecycleResult(deps.observability, startedAtMs, parsed);
+        return context.json(parsed, 200);
       }
 
       const sourceSession = await requireSourceSession(deps, workspaceId, request.sessionId);
@@ -262,6 +266,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         },
       );
       const parsed = ComputerSessionMutationResponse.parse(response);
+      observeLifecycleResult(deps.observability, startedAtMs, parsed);
       return context.json(
         parsed,
         parsed.operation.state === "completed" && !parsed.operation.replayed ? 201 : 200,
@@ -325,6 +330,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         "sessions:control",
       );
       const request = await parseJsonBody(context, ComputerActionRequest);
+      const startedAtMs = performance.now();
       const result = await withActiveComputerController(
         context,
         grant,
@@ -348,6 +354,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
             }),
           ),
       );
+      observeComputerActionResult(deps.observability, startedAtMs, request, result);
       return context.json(result);
     },
   );
@@ -500,6 +507,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
       const grant = await requireAccessGrant(context, deps, workspaceId, "sessions:control");
       const computerSessionId = requireUuidParam(context, "computerSessionId");
       const request = await parseJsonBody(context, ComputerSessionLifecycleRequest);
+      const startedAtMs = performance.now();
       const origin = requestOrigin(context, deps.settings.corsAllowOriginRegex);
       try {
         const before = await getComputerSessionControlRecord(deps.db, {
@@ -525,7 +533,9 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
               before.session.placement,
             ).catch(() => undefined);
           }
-          return context.json(ComputerSessionMutationResponse.parse(prepared), 200);
+          const parsed = ComputerSessionMutationResponse.parse(prepared);
+          observeLifecycleResult(deps.observability, startedAtMs, parsed);
+          return context.json(parsed, 200);
         }
 
         const record = await getComputerSessionControlRecord(deps.db, {
@@ -549,7 +559,9 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
             computerSessionId,
             record.session.placement,
           ).catch(() => undefined);
-          return context.json(ComputerSessionMutationResponse.parse(completed), 200);
+          const parsed = ComputerSessionMutationResponse.parse(completed);
+          observeLifecycleResult(deps.observability, startedAtMs, parsed);
+          return context.json(parsed, 200);
         }
 
         const sourceSession = await requireSourceSession(deps, workspaceId, record.sourceSessionId);
@@ -598,7 +610,9 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
             return completed;
           },
         );
-        return context.json(ComputerSessionMutationResponse.parse(response), 200);
+        const parsed = ComputerSessionMutationResponse.parse(response);
+        observeLifecycleResult(deps.observability, startedAtMs, parsed);
+        return context.json(parsed, 200);
       } catch (error) {
         throw computerRouteError(error);
       }

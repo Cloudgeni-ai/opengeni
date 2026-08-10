@@ -85,6 +85,69 @@ const SANDBOX_OPERATION_NAMES = new Set([
   "serializeSessionState",
 ]);
 
+const INTERACTION_RESOURCES = new Set(["browser", "computer"]);
+const INTERACTION_OPERATIONS = new Set([
+  "create",
+  "end",
+  "suspend",
+  "resume",
+  "publish",
+  "observe",
+  "act",
+  "open_target",
+  "select_target",
+  "close_target",
+  "attach",
+  "auth_start",
+  "auth_report",
+  "auth_fill",
+  "auth_verify",
+  "intervention_create",
+  "intervention_resolve",
+]);
+const INTERACTION_OUTCOMES = new Set([
+  "prepared",
+  "dispatched",
+  "completed",
+  "failed",
+  "outcome_unknown",
+  "stale",
+  "cancelled",
+]);
+const INTERACTION_MODES = new Set([
+  "semantic",
+  "coordinate",
+  "keyboard",
+  "lifecycle",
+  "media",
+  "auth",
+  "human",
+]);
+const INTERACTION_AUTH_STATES = new Set([
+  "discovering",
+  "awaiting_choice",
+  "awaiting_secret",
+  "awaiting_external_action",
+  "working",
+  "verified",
+  "failed",
+  "cancelled",
+]);
+const INTERACTION_INTERVENTION_KINDS = new Set([
+  "manual_login",
+  "mfa",
+  "external_action",
+  "confirmation",
+  "other",
+]);
+const INTERACTION_INTERVENTION_OUTCOMES = new Set([
+  "opened",
+  "completed",
+  "dismissed",
+  "expired",
+  "cancelled",
+]);
+
 /**
  * External logs and OTLP are public/third-party projections, not canonical
  * OpenGeni storage. Only this reviewed closed set of operational fields may
@@ -728,6 +791,136 @@ export function sandboxOperationMetricObserver(
       }
     }
   };
+}
+
+export type InteractionOperationMetricObservation = {
+  resource: string;
+  operation: string;
+  outcome: string;
+  mode: string;
+  durationMs: number;
+  replayed?: boolean | undefined;
+};
+
+/** Safe low-cardinality telemetry for Browser/Computer control operations.
+ * Resource ids, URLs, locators, page/app text, and input values are excluded by
+ * construction. Unknown future enum values collapse until explicitly reviewed. */
+export function interactionOperationMetricObserver(
+  observability: Observability | null | undefined,
+): (observation: InteractionOperationMetricObservation) => void {
+  if (!observability) return () => undefined;
+  return (observation) => {
+    if (observation.replayed) return;
+    const resource = boundedMetricEnum(INTERACTION_RESOURCES, observation.resource);
+    const operation = boundedMetricEnum(INTERACTION_OPERATIONS, observation.operation);
+    const outcome = boundedMetricEnum(INTERACTION_OUTCOMES, observation.outcome);
+    const mode = boundedMetricEnum(INTERACTION_MODES, observation.mode);
+    try {
+      observability.incrementCounter({
+        name: "opengeni_interaction_operations_total",
+        help: "Browser and Computer operations by bounded resource, operation, mode, and outcome.",
+        labels: { resource, operation, mode, outcome },
+      });
+      observability.observeHistogram({
+        name: "opengeni_interaction_operation_duration_seconds",
+        help: "Browser and Computer operation duration in seconds.",
+        labels: { resource, operation, mode },
+        value: boundedMetricDuration(observation.durationMs),
+      });
+    } catch {
+      recordObserverFailure(observability, "interaction_operation");
+    }
+  };
+}
+
+export type InteractionAuthMetricObservation = {
+  state: string;
+  durationMs: number;
+  replayed?: boolean | undefined;
+};
+
+export function interactionAuthMetricObserver(
+  observability: Observability | null | undefined,
+): (observation: InteractionAuthMetricObservation) => void {
+  if (!observability) return () => undefined;
+  return (observation) => {
+    if (observation.replayed) return;
+    const state = boundedMetricEnum(INTERACTION_AUTH_STATES, observation.state);
+    try {
+      observability.incrementCounter({
+        name: "opengeni_interaction_auth_transitions_total",
+        help: "Browser authentication transitions by bounded resulting state.",
+        labels: { state },
+      });
+      observability.observeHistogram({
+        name: "opengeni_interaction_auth_transition_duration_seconds",
+        help: "Browser authentication transition request duration in seconds.",
+        labels: { state },
+        value: boundedMetricDuration(observation.durationMs),
+      });
+    } catch {
+      recordObserverFailure(observability, "interaction_auth");
+    }
+  };
+}
+
+export type InteractionInterventionMetricObservation = {
+  kind: string;
+  outcome: string;
+  waitMs?: number | undefined;
+  replayed?: boolean | undefined;
+};
+
+export function interactionInterventionMetricObserver(
+  observability: Observability | null | undefined,
+): (observation: InteractionInterventionMetricObservation) => void {
+  if (!observability) return () => undefined;
+  return (observation) => {
+    if (observation.replayed) return;
+    const kind = boundedMetricEnum(INTERACTION_INTERVENTION_KINDS, observation.kind);
+    const outcome = boundedMetricEnum(
+      INTERACTION_INTERVENTION_OUTCOMES,
+      observation.outcome,
+    );
+    try {
+      observability.incrementCounter({
+        name: "opengeni_interaction_interventions_total",
+        help: "Human browser/computer interventions by bounded kind and outcome.",
+        labels: { kind, outcome },
+      });
+      if (observation.waitMs !== undefined) {
+        observability.observeHistogram({
+          name: "opengeni_interaction_intervention_wait_seconds",
+          help: "Time an interaction intervention remained open before settlement.",
+          labels: { kind, outcome },
+          value: boundedMetricDuration(observation.waitMs),
+        });
+      }
+    } catch {
+      recordObserverFailure(observability, "interaction_intervention");
+    }
+  };
+}
+
+function boundedMetricEnum(allowed: ReadonlySet<string>, value: string): string {
+  return allowed.has(value) ? value : "unknown";
+}
+
+function boundedMetricDuration(durationMs: number): number {
+  return Number.isFinite(durationMs) ? Math.max(0, durationMs) / 1_000 : 0;
+}
+
+function recordObserverFailure(observability: Observability, observer: string): void {
+  try {
+    observability.incrementCounter({
+      name: "opengeni_observability_observer_errors_total",
+      help: "Observability observer failures isolated from product execution.",
+      labels: { observer },
+    });
+  } catch {
+    // The metrics registry itself is unhealthy. Product execution remains
+    // authoritative and must not inherit an observability failure.
+  }
 }
 
 export type StartupDependencyRetryEvent = {
