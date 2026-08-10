@@ -150,6 +150,80 @@ describe("subject-owned capability connection references", () => {
     });
   });
 
+  test("does not treat built-in provenance as lifecycle enablement", () => {
+    const item = CapabilityCatalogItem.parse({
+      id: "plugin:platform-example",
+      kind: "plugin",
+      source: "built_in",
+      name: "Platform example",
+      category: "examples",
+      runtime: { available: true },
+    });
+    expect(applyCapabilityEnablement(item, undefined, new Set())).toMatchObject({
+      enabled: false,
+      enabledReason: null,
+      connectionRef: null,
+    });
+  });
+
+  test("keeps native runtime surfaces out of the catalog and marks external config as managed", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const catalog = await buildCapabilityCatalog({
+      db,
+      workspaceId: workspace.workspaceId,
+      settings: {
+        ...settings,
+        mcpServers: [
+          { id: "opengeni", name: "OpenGeni", url: "http://localhost:8000/mcp" },
+          { id: "files", name: "Files", url: "http://localhost:8000/mcp/files" },
+          { id: "docs", name: "Document Search", url: "http://localhost:8000/mcp/docs" },
+          {
+            id: "team-search",
+            name: "Team Search",
+            url: "https://search.example.test/mcp",
+          },
+        ],
+      },
+    });
+
+    const ids = new Set(catalog.items.map((item) => item.id));
+    for (const nativeId of [
+      "mcp:opengeni",
+      "mcp:files",
+      "mcp:docs",
+      "api:github-app",
+      "api:documents",
+      "api:social",
+      "api:scheduled-tasks",
+    ]) {
+      expect(ids.has(nativeId)).toBe(false);
+    }
+    expect(catalog.items.find((item) => item.id === "skill:terraform-style-guide")).toMatchObject({
+      source: "library",
+      enabled: false,
+      lifecycle: { status: "available", readiness: "setup_required" },
+      actions: ["install", "inspect"],
+    });
+    expect(catalog.items.find((item) => item.id === "skill:social-media-marketing")).toMatchObject({
+      source: "library",
+      enabled: false,
+      lifecycle: { status: "available", readiness: "setup_required" },
+      actions: ["install", "inspect"],
+    });
+    expect(catalog.items.find((item) => item.id === "mcp:team-search")).toMatchObject({
+      source: "configured",
+      enabled: true,
+      enabledReason: "managed by deployment",
+      lifecycle: {
+        status: "managed",
+        readiness: "ready",
+        managedBy: "deployment",
+      },
+      actions: ["inspect"],
+    });
+  });
+
   test("publishes X as a workspace-shared first-party connector with truthful state", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();

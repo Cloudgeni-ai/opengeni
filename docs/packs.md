@@ -3,7 +3,7 @@
 Capability packs are role-oriented bundles that expand into existing OpenGeni runtime primitives:
 
 - MCP tool selections
-- bundled skills
+- pinned or inline Skills
 - connector requirements
 - optional document-base knowledge
 - scheduled-task templates
@@ -37,7 +37,7 @@ A pack `sandboxImage` in a **private** registry (a cloud-hosted ACR/ECR/GCR dige
 
 1. Prefer a provider-native `sandboxProviderImages.modal.imageId` built from the same source recipe. This bypasses registry import and keeps the OCI digest plus Modal image ID as distinct, truthful identities.
 2. Without a provider-native ID, configure `OPENGENI_MODAL_IMAGE_REGISTRY_SECRET` (see the Modal section in [`../.env.example`](../.env.example)); the worker warms that pack-specific ref at turn time after pack settings resolve. The Modal registry Secret is resolved with the configured `OPENGENI_MODAL_TOKEN_ID`/`OPENGENI_MODAL_TOKEN_SECRET` client, so embedded hosts do not also need standard `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` env or `~/.modal.toml`. Without a registry secret the image is pulled unauthenticated and must be public.
-- `skills` (optional array): skills delivered into the sandbox skill index. Each skill is `{ name, description?, files: [{ path, content }] }` where `files` must include a top-level `SKILL.md` and paths are safe relative POSIX paths (`references/...`, `scripts/...`). Skill content travels inline in the manifest and is stored with it (the `workspace_packs` JSONB row); no image baking or extra storage is involved. At run time the worker feeds enabled packs' skills into the OpenAI Agents SDK Skills capability alongside the bundled skills, so they appear in the same `.agents/` skill index, are lazily materialized via `load_skill`, and `skills/<name>` references resolve. A pack skill with the same directory name as a bundled skill shadows it; two enabled packs declaring the same skill name fail the turn plainly.
+- `skills` (optional array): skills delivered into the sandbox skill index. Each skill is `{ name, description?, files: [{ path, content }] }` where `files` must include a top-level `SKILL.md` and paths are safe relative POSIX paths (`references/...`, `scripts/...`). Skill content travels inline in the manifest and is stored with it (the `workspace_packs` JSONB row); no image baking or extra storage is involved. At run time the worker feeds enabled Packs' skills into the OpenAI Agents SDK Skills capability alongside explicitly installed library, session, repository, and native artifact Skills, so they appear in the same `.agents/` skill index and are lazily materialized via `load_skill`. A Pack skill with the same directory name as a selected library Skill takes precedence; two enabled Packs declaring the same skill name fail the turn plainly.
 
 Built-in packs never declare `sandboxImage` or `skills`; only registered (manifest-backed) packs participate in pack-scoped runtime composition.
 
@@ -53,7 +53,7 @@ The pack exposes:
   - `social_connections_list`
   - `social_posts_recent`
   - `social_daily_analysis_context`
-- Bundled skill: `social-media-marketing`
+- Optional Skill: `social-media-marketing` (the Pack may contribute it explicitly; it is not a deployment default)
 - Optional document knowledge through existing document-base routes and the `docs` MCP server
 
 Provider OAuth and API access vary by platform. The pack manifest records official reference URLs for X OAuth 2.0 with PKCE, LinkedIn Community Management APIs, Instagram Graph API, TikTok APIs, and YouTube APIs. Use provider docs as the source of truth for scopes, approval, rate limits, and app review.

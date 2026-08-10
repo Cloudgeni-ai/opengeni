@@ -1,5 +1,3 @@
-import { existsSync } from "node:fs";
-import { readdir, readFile } from "node:fs/promises";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
@@ -8,6 +6,7 @@ import {
   CapabilityCatalogItem,
   capabilityCatalogItemIsTrustedForExposure,
   type AccessGrant,
+  type CapabilityAction,
   type CapabilityCatalogResponse,
   type CapabilityInstallation,
   type CreateCapabilityCatalogItemRequest,
@@ -85,7 +84,6 @@ export async function buildCapabilityCatalog(input: {
     packInstallations,
     workspacePacks,
     socialConnections,
-    bundledSkills,
     curatedLibrarySkills,
     codexAppsCredentialId,
   ] = await Promise.all([
@@ -94,7 +92,6 @@ export async function buildCapabilityCatalog(input: {
     listPackInstallations(input.db, input.workspaceId),
     listWorkspaceCapabilityPacks(input.db, input.workspaceId),
     listSocialConnections(input.db, input.workspaceId, 500, input.subjectId),
-    discoverBundledSkills(),
     discoverCuratedSkillLibraryItems(),
     input.settings.codexConnectedAppsEnabled
       ? resolveCodexAppsCredentialIdForRun(input.db, input.workspaceId)
@@ -115,7 +112,6 @@ export async function buildCapabilityCatalog(input: {
     ),
     ...configuredMcpCatalogItems(input.settings),
     ...platformApiCatalogItems(socialConnections),
-    ...bundledSkills,
     ...curatedLibrarySkills,
   ];
   const codexApps = input.settings.codexConnectedAppsEnabled
@@ -128,9 +124,14 @@ export async function buildCapabilityCatalog(input: {
     // legacy catalog row with the same id.
     ...(codexApps ? [codexApps] : []),
   ])
-    .map((item) =>
-      applyCapabilityEnablement(item, capabilityInstallationById.get(item.id), activePackIds),
-    )
+    .map((item) => {
+      const projected = applyCapabilityEnablement(
+        item,
+        capabilityInstallationById.get(item.id),
+        activePackIds,
+      );
+      return applyCapabilityLifecycle(projected);
+    })
     .sort(compareCatalogItems);
   return {
     items,
@@ -1014,34 +1015,40 @@ function packCatalogItem(
 }
 
 function configuredMcpCatalogItems(settings: Settings): CapabilityCatalogItem[] {
-  return settings.mcpServers
-    .filter((server) => server.id !== CODEX_APPS_MCP_SERVER_ID)
-    .map((server) =>
-      CapabilityCatalogItem.parse({
-        id: `mcp:${server.id}`,
-        kind: "mcp",
-        source: firstPartyMcpServerIds.has(server.id) ? "built_in" : "configured",
-        name: server.name ?? server.id,
-        description: firstPartyMcpDescription(server.id),
-        category: firstPartyMcpServerIds.has(server.id) ? "platform" : "configured",
-        tags: ["mcp", ...(server.allowedTools?.length ? ["limited-tools"] : [])],
-        endpointUrl: server.url,
-        tools: [{ kind: "mcp", id: server.id }],
-        runtime: {
-          available: true,
-          mcpServerId: server.id,
-          transport: "streamable-http",
-          notes: firstPartyMcpServerIds.has(server.id)
-            ? "Available from OpenGeni runtime configuration."
-            : "Configured through OPENGENI_MCP_SERVERS.",
-        },
-        metadata: {
-          mcpServerId: server.id,
-          allowedTools: server.allowedTools ?? [],
-          cacheToolsList: server.cacheToolsList,
-        },
-      }),
-    );
+  return (
+    settings.mcpServers
+      // OpenGeni, Files, and Document Search are native runtime surfaces. They
+      // remain available to sessions through configuration, but are not things a
+      // user installs, connects, or enables in the Capabilities control center.
+      .filter(
+        (server) =>
+          server.id !== CODEX_APPS_MCP_SERVER_ID && !firstPartyMcpServerIds.has(server.id),
+      )
+      .map((server) =>
+        CapabilityCatalogItem.parse({
+          id: `mcp:${server.id}`,
+          kind: "mcp",
+          source: "configured",
+          name: server.name ?? server.id,
+          description: null,
+          category: "configured",
+          tags: ["mcp", ...(server.allowedTools?.length ? ["limited-tools"] : [])],
+          endpointUrl: server.url,
+          tools: [{ kind: "mcp", id: server.id }],
+          runtime: {
+            available: true,
+            mcpServerId: server.id,
+            transport: "streamable-http",
+            notes: "Managed by this OpenGeni deployment through OPENGENI_MCP_SERVERS.",
+          },
+          metadata: {
+            mcpServerId: server.id,
+            allowedTools: server.allowedTools ?? [],
+            cacheToolsList: server.cacheToolsList,
+          },
+        }),
+      )
+  );
 }
 
 function isReservedCodexAppsCatalogItem(item: CapabilityCatalogItem): boolean {
@@ -1137,88 +1144,50 @@ function platformApiCatalogItems(socialConnections: SocialConnection[]): Capabil
       ],
     },
   });
-  const platformApiDefinitions: Array<{
-    id: string;
-    name: string;
-    description: string;
-    category: string;
-    tags: string[];
-    endpointPath: string;
-    homepageUrl?: string;
-    providerDomain?: string;
-    authModel?: string;
-    authKind?: "oauth2" | "api_key" | "none" | "unknown";
-    surfaceType?: string;
-    firstPartyMcpTools?: string[];
-  }> = [
-    {
+  return [x];
+}
+
+/**
+ * Native product connection recommendations are intentionally separate from
+ * the installable catalog returned to the Capabilities UI. Agents may still
+ * recommend the owning product flow without manufacturing an enabled catalog
+ * row for GitHub resources, Documents, schedules, or other platform features.
+ */
+export function nativeConnectionCapabilityRecommendations(): CapabilityCatalogItem[] {
+  return [
+    CapabilityCatalogItem.parse({
       id: "api:github-app",
+      kind: "api",
+      source: "built_in",
       name: "GitHub App",
-      description: "Repository discovery, scoped clone tokens, pushes, and pull requests.",
+      description: "Connect repositories through OpenGeni's GitHub resource picker.",
       category: "source-control",
-      tags: ["api", "github", "repositories"],
-      endpointPath: "/v1/workspaces/{workspaceId}/github/app",
+      tags: ["github", "repositories", "source-control"],
       homepageUrl: "https://github.com",
       providerDomain: "github.com",
       authModel: "github_app_owner_consent",
-      authKind: "oauth2" as const,
+      authKind: "oauth2",
       surfaceType: "first_party_github",
-      firstPartyMcpTools: ["github_connect_link", "github_repositories_list"],
-    },
-    {
-      id: "api:documents",
-      name: "Document Knowledge Base",
-      description: "Upload, index, search, and attach knowledge bases to agents.",
-      category: "knowledge",
-      tags: ["api", "documents", "knowledge"],
-      endpointPath: "/v1/workspaces/{workspaceId}/document-bases",
-    },
-    {
-      id: "api:social",
-      name: "Social Accounts",
-      description: "Connect social accounts and ingest posts for marketing agents.",
-      category: "marketing",
-      tags: ["api", "social", "marketing"],
-      endpointPath: "/v1/workspaces/{workspaceId}/social/connections",
-    },
-    {
-      id: "api:scheduled-tasks",
-      name: "Scheduled Tasks",
-      description: "Run agents once, on intervals, or on calendar schedules.",
-      category: "automation",
-      tags: ["api", "schedules", "agents"],
-      endpointPath: "/v1/workspaces/{workspaceId}/scheduled-tasks",
-    },
-  ];
-  const platformApis = platformApiDefinitions.map((item) =>
-    CapabilityCatalogItem.parse({
-      id: item.id,
-      name: item.name,
-      description: item.description,
-      category: item.category,
-      tags: item.tags,
-      kind: "api",
-      source: "built_in",
-      ...(item.homepageUrl ? { homepageUrl: item.homepageUrl } : {}),
-      ...(item.providerDomain ? { providerDomain: item.providerDomain } : {}),
-      ...(item.authModel ? { authModel: item.authModel } : {}),
-      ...(item.authKind ? { authKind: item.authKind } : {}),
-      ...(item.surfaceType ? { surfaceType: item.surfaceType } : {}),
-      ...(item.firstPartyMcpTools ? { tools: [{ kind: "mcp", id: "opengeni" }] } : {}),
+      tools: [{ kind: "mcp", id: "opengeni" }],
       runtime: {
         available: true,
         notes:
-          item.surfaceType === "first_party_github"
-            ? "GitHub credentials stay host-owned; a workspace owner must approve repository access."
-            : "Available through the OpenGeni API.",
+          "GitHub credentials stay host-owned; a workspace owner must approve repository access.",
       },
+      lifecycle: {
+        status: "available",
+        readiness: "setup_required",
+        detail: "Connect GitHub from the repository resource flow.",
+        managedBy: "platform",
+      },
+      actions: ["connect", "inspect"],
       metadata: {
-        endpointPath: item.endpointPath,
-        ...(item.firstPartyMcpTools ? { firstPartyMcpTools: item.firstPartyMcpTools } : {}),
+        endpointPath: "/v1/workspaces/{workspaceId}/github/app",
+        firstPartyMcpTools: ["github_connect_link", "github_repositories_list"],
+        recommendationOnly: true,
       },
     }),
-  );
-  return [x, ...platformApis];
+  ];
 }
 
 function preferredSocialConnection(
@@ -1237,49 +1206,6 @@ function preferredSocialConnection(
           left.id.localeCompare(right.id),
       )[0] ?? null
   );
-}
-
-async function discoverBundledSkills(): Promise<CapabilityCatalogItem[]> {
-  const skillsDir = [
-    new URL("./assets/runtime/bundled_hashicorp_terraform_skills/", import.meta.url),
-    new URL(
-      "../../../../packages/runtime/src/bundled_hashicorp_terraform_skills/",
-      import.meta.url,
-    ),
-  ].find((candidate) => existsSync(candidate));
-  if (!skillsDir) return [];
-  try {
-    const entries = await readdir(skillsDir, { withFileTypes: true });
-    const skills = await Promise.all(
-      entries
-        .filter((entry) => entry.isDirectory())
-        .map(async (entry) => {
-          const skill = await readSkillMetadata(
-            new URL(`${entry.name}/SKILL.md`, skillsDir),
-            entry.name,
-          );
-          return CapabilityCatalogItem.parse({
-            id: `skill:${entry.name}`,
-            kind: "skill",
-            source: "built_in",
-            name: skill.name,
-            description: skill.description,
-            category: skill.category,
-            tags: ["skill", skill.category],
-            runtime: {
-              available: true,
-              notes: "Bundled into the sandbox skill library.",
-            },
-            metadata: {
-              path: `packages/runtime/src/bundled_hashicorp_terraform_skills/${entry.name}/SKILL.md`,
-            },
-          });
-        }),
-    );
-    return skills;
-  } catch {
-    return [];
-  }
 }
 
 /**
@@ -1328,33 +1254,6 @@ function stringMetadata(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
-async function readSkillMetadata(
-  url: URL,
-  fallbackName: string,
-): Promise<{ name: string; description: string | null; category: string }> {
-  const content = await readFile(url, "utf8");
-  const frontMatter = content.match(/^---\n([\s\S]*?)\n---/);
-  const frontMatterBody = frontMatter?.[1] ?? "";
-  const name = frontMatterBody.match(/^name:\s*(.+)$/m)?.[1]?.trim() || fallbackName;
-  const blockDescription = frontMatterBody
-    .match(/^description:\s*>-\s*\n([\s\S]*?)(?:\n[a-zA-Z_-]+:|\n?$)/m)?.[1]
-    ?.split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .join(" ");
-  const inlineDescription = frontMatterBody.match(/^description:\s*(?!>-\s*$)(.+)$/m)?.[1]?.trim();
-  const description =
-    blockDescription || inlineDescription || content.match(/^#\s+(.+)$/m)?.[1]?.trim() || null;
-  const lower = `${fallbackName} ${name} ${description ?? ""}`.toLowerCase();
-  const category =
-    lower.includes("social") || lower.includes("marketing")
-      ? "marketing"
-      : lower.includes("checkov") || lower.includes("terraform") || lower.includes("azure")
-        ? "infrastructure"
-        : "general";
-  return { name, description, category };
-}
-
 export function applyCapabilityEnablement(
   item: CapabilityCatalogItem,
   installation: CapabilityInstallation | undefined,
@@ -1383,12 +1282,19 @@ export function applyCapabilityEnablement(
     // generic source-based "built in" enablement rule.
     return { ...item, connectionRef: null };
   }
-  if (item.source === "built_in" || item.source === "configured") {
+  if (item.source === "configured") {
     return {
       ...item,
       enabled: true,
-      enabledReason: item.source === "configured" ? "configured" : "built in",
+      enabledReason: "managed by deployment",
+      connectionRef: null,
     };
+  }
+  if (item.source === "built_in") {
+    // "Built in" describes provenance, not lifecycle. Native product
+    // surfaces and first-party connectors must project their authoritative
+    // state explicitly above rather than becoming enabled by taxonomy.
+    return { ...item, connectionRef: null };
   }
   if (item.source === "library") {
     const enabled =
@@ -1407,6 +1313,88 @@ export function applyCapabilityEnablement(
     enabled,
     enabledReason: enabled ? "enabled" : null,
     connectionRef: enabled && installation ? installationConnectionRef(installation.config) : null,
+  };
+}
+
+function applyCapabilityLifecycle(item: CapabilityCatalogItem): CapabilityCatalogItem {
+  if (item.source === "configured") {
+    return {
+      ...item,
+      lifecycle: {
+        status: "managed",
+        readiness: item.runtime.available ? "ready" : "unavailable",
+        detail: item.runtime.notes,
+        managedBy: "deployment",
+      },
+      actions: ["inspect"],
+    };
+  }
+
+  if (!item.runtime.available) {
+    return {
+      ...item,
+      lifecycle: {
+        status: "unavailable",
+        readiness: "unavailable",
+        detail: item.runtime.notes,
+        managedBy: item.source === "built_in" ? "platform" : null,
+      },
+      actions: ["inspect"],
+    };
+  }
+
+  if (item.surfaceType === "first_party_social") {
+    const needsAttention = item.enabledReason?.includes("needs reconnection") ?? false;
+    return {
+      ...item,
+      lifecycle: {
+        status: needsAttention ? "needs_attention" : item.enabled ? "connected" : "available",
+        readiness: needsAttention ? "attention" : item.enabled ? "ready" : "setup_required",
+        detail: item.enabledReason,
+        managedBy: "platform",
+      },
+      actions: needsAttention
+        ? ["repair", "disconnect", "inspect"]
+        : item.enabled
+          ? ["configure", "disconnect", "inspect"]
+          : ["connect", "inspect"],
+    };
+  }
+
+  if (item.surfaceType === "codex_apps") {
+    return {
+      ...item,
+      lifecycle: {
+        status: item.enabled ? "connected" : "available",
+        readiness: item.enabled ? "ready" : "setup_required",
+        detail: item.enabledReason,
+        managedBy: "platform",
+      },
+      actions: item.enabled ? ["configure", "disconnect", "inspect"] : ["connect", "inspect"],
+    };
+  }
+
+  const installed = item.enabled;
+  const actions: CapabilityAction[] = installed
+    ? item.kind === "pack" || item.kind === "skill" || item.kind === "plugin"
+      ? ["configure", "update", "uninstall", "inspect"]
+      : ["configure", "disconnect", "inspect"]
+    : item.kind === "mcp" || item.kind === "api"
+      ? ["connect", "inspect"]
+      : ["install", "inspect"];
+  return {
+    ...item,
+    lifecycle: {
+      status: installed
+        ? item.kind === "mcp" || item.kind === "api"
+          ? "ready"
+          : "installed"
+        : "available",
+      readiness: installed ? "ready" : "setup_required",
+      detail: item.enabledReason,
+      managedBy: item.source === "built_in" ? "platform" : "workspace",
+    },
+    actions,
   };
 }
 
@@ -1577,19 +1565,6 @@ function normalizeCapabilitySearchText(value: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
-}
-
-function firstPartyMcpDescription(id: string): string | null {
-  if (id === "opengeni") {
-    return "First-party OpenGeni MCP tools for files, documents, schedules, and social analysis.";
-  }
-  if (id === "docs") {
-    return "Document-base search tools for indexed knowledge.";
-  }
-  if (id === "files") {
-    return "File download URL tools for sandbox-mounted file resources.";
-  }
-  return null;
 }
 
 function generatedCapabilityId(payload: CreateCapabilityCatalogItemRequest): string {

@@ -460,7 +460,7 @@ Before publishing:
 - Run a secret scan against the export, for example `gitleaks detect --no-git --source <export-dir>` and optionally `trufflehog filesystem <export-dir>`.
 - Rotate any credential that ever appeared in the old private history, even if the new public export is clean.
 
-The project license is Apache-2.0. Bundled HashiCorp Terraform-oriented agent skills include their own license at `packages/runtime/src/bundled_hashicorp_terraform_skills/LICENSE`.
+The project license is Apache-2.0. Optional curated skills under `packages/runtime/src/bundled_skill_library` retain per-entry provenance and license metadata; HashiCorp-derived Terraform guidance is MPL-2.0 and is never mounted by default.
 
 ## Roadmap
 

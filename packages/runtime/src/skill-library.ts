@@ -56,6 +56,161 @@ export type SkillLibrarySkill = Readonly<{
 
 const skillLibraryEntries: readonly SkillLibraryEntry[] = Object.freeze([
   Object.freeze({
+    id: "checkov",
+    name: "checkov",
+    version: "1.0.0",
+    description:
+      "Use Checkov to scan Terraform and infrastructure-as-code repositories, explain findings, apply safe fixes, and verify remediations.",
+    category: "infrastructure",
+    tags: Object.freeze(["skill", "infrastructure", "terraform", "security", "opt-in"]),
+    contentSha256: "0331b987cd609946c4b95928fec9982b96b0a8614a95e5e628a531efb8ad8577",
+    sourceCommit: "e9734c4aa062e0421a68acb5650bd5bf33ce2e10",
+    sourceUrl:
+      "https://github.com/Cloudgeni-ai/opengeni/tree/e9734c4aa062e0421a68acb5650bd5bf33ce2e10/packages/runtime/src/bundled_hashicorp_terraform_skills/checkov",
+    provenance: "OpenGeni-authored guidance; reviewed immutable opt-in entry.",
+    license: "Apache-2.0",
+    documentationUrl: "https://www.checkov.io/",
+    compatibility: Object.freeze({
+      runtime: "openai-agents-skills",
+      minimumSkillCapabilityVersion: "0.13.3",
+    }),
+    upgrade: Object.freeze({ policy: "immutable-replacement", supersedes: null }),
+    relativePath: "checkov",
+  }),
+  Object.freeze({
+    id: "refactor-module",
+    name: "refactor-module",
+    version: "0.0.1",
+    description:
+      "Transform monolithic Terraform configurations into reusable, maintainable modules following HashiCorp module-design practices.",
+    category: "infrastructure",
+    tags: Object.freeze(["skill", "infrastructure", "terraform", "modules", "opt-in"]),
+    contentSha256: "cc6d70034c4d11ef6a496c0081ca28219cbd310283d77e327914bcd2f27f3a09",
+    sourceCommit: "de4323afdfbc30d1387f287b55062fa8d82b62e8",
+    sourceUrl:
+      "https://github.com/hashicorp/agent-skills/tree/de4323afdfbc30d1387f287b55062fa8d82b62e8/terraform/module-generation/skills/refactor-module",
+    provenance: "Vendored from hashicorp/agent-skills; reviewed immutable opt-in entry.",
+    license: "MPL-2.0",
+    documentationUrl: "https://developer.hashicorp.com/terraform/language/modules/develop",
+    compatibility: Object.freeze({
+      runtime: "openai-agents-skills",
+      minimumSkillCapabilityVersion: "0.13.3",
+    }),
+    upgrade: Object.freeze({ policy: "immutable-replacement", supersedes: null }),
+    relativePath: "refactor-module",
+  }),
+  Object.freeze({
+    id: "social-media-marketing",
+    name: "social-media-marketing",
+    version: "1.0.0",
+    description:
+      "Analyze connected social accounts, content performance, audience signals, campaigns, and daily media activity without inventing unavailable metrics.",
+    category: "marketing",
+    tags: Object.freeze(["skill", "marketing", "social", "analysis", "opt-in"]),
+    contentSha256: "66893de1fd2110f18d9be69b1e0adb61193e0a736a88f0c0725168465d2b06a3",
+    sourceCommit: "e9734c4aa062e0421a68acb5650bd5bf33ce2e10",
+    sourceUrl:
+      "https://github.com/Cloudgeni-ai/opengeni/tree/e9734c4aa062e0421a68acb5650bd5bf33ce2e10/packages/runtime/src/bundled_hashicorp_terraform_skills/social-media-marketing",
+    provenance: "OpenGeni-authored guidance; reviewed immutable opt-in entry.",
+    license: "Apache-2.0",
+    documentationUrl:
+      "https://github.com/Cloudgeni-ai/opengeni/blob/e9734c4aa062e0421a68acb5650bd5bf33ce2e10/docs/social-connectors.md",
+    compatibility: Object.freeze({
+      runtime: "openai-agents-skills",
+      minimumSkillCapabilityVersion: "0.13.3",
+    }),
+    upgrade: Object.freeze({ policy: "immutable-replacement", supersedes: null }),
+    relativePath: "social-media-marketing",
+  }),
+  Object.freeze({
+    id: "terraform-search-import",
+    name: "terraform-search-import",
+    version: "0.1.0",
+    description:
+      "Discover existing cloud resources with Terraform Search and bring supported resources under Terraform management.",
+    category: "infrastructure",
+    tags: Object.freeze(["skill", "infrastructure", "terraform", "import", "opt-in"]),
+    contentSha256: "994d7a48dd6a610daa8a4dbdf4b0f0e52eaf8662a509b6a163bc6e76611227f9",
+    sourceCommit: "de4323afdfbc30d1387f287b55062fa8d82b62e8",
+    sourceUrl:
+      "https://github.com/hashicorp/agent-skills/tree/de4323afdfbc30d1387f287b55062fa8d82b62e8/terraform/code-generation/skills/terraform-search-import",
+    provenance: "Vendored from hashicorp/agent-skills; reviewed immutable opt-in entry.",
+    license: "MPL-2.0",
+    documentationUrl: "https://developer.hashicorp.com/terraform/language/import",
+    compatibility: Object.freeze({
+      runtime: "openai-agents-skills",
+      minimumSkillCapabilityVersion: "0.13.3",
+    }),
+    upgrade: Object.freeze({ policy: "immutable-replacement", supersedes: null }),
+    relativePath: "terraform-search-import",
+  }),
+  Object.freeze({
+    id: "terraform-stacks",
+    name: "terraform-stacks",
+    version: "0.0.1",
+    description:
+      "Create, modify, validate, and troubleshoot Terraform Stack component and deployment configurations.",
+    category: "infrastructure",
+    tags: Object.freeze(["skill", "infrastructure", "terraform", "stacks", "opt-in"]),
+    contentSha256: "0a6244ecddf1cce0357db41b41b3b20a1bfa71f331092ebc8bbd15e649733d35",
+    sourceCommit: "de4323afdfbc30d1387f287b55062fa8d82b62e8",
+    sourceUrl:
+      "https://github.com/hashicorp/agent-skills/tree/de4323afdfbc30d1387f287b55062fa8d82b62e8/terraform/code-generation/skills/terraform-stacks",
+    provenance: "Vendored from hashicorp/agent-skills; reviewed immutable opt-in entry.",
+    license: "MPL-2.0",
+    documentationUrl: "https://developer.hashicorp.com/terraform/language/stacks",
+    compatibility: Object.freeze({
+      runtime: "openai-agents-skills",
+      minimumSkillCapabilityVersion: "0.13.3",
+    }),
+    upgrade: Object.freeze({ policy: "immutable-replacement", supersedes: null }),
+    relativePath: "terraform-stacks",
+  }),
+  Object.freeze({
+    id: "terraform-style-guide",
+    name: "terraform-style-guide",
+    version: "1.0.0",
+    description:
+      "Generate and review Terraform HCL using HashiCorp's official style conventions and maintainability practices.",
+    category: "infrastructure",
+    tags: Object.freeze(["skill", "infrastructure", "terraform", "style", "opt-in"]),
+    contentSha256: "1453c4f11636d2d88c5186a4ce2d7532d4b2056a861ed69653df21e8e45e19cd",
+    sourceCommit: "de4323afdfbc30d1387f287b55062fa8d82b62e8",
+    sourceUrl:
+      "https://github.com/hashicorp/agent-skills/tree/de4323afdfbc30d1387f287b55062fa8d82b62e8/terraform/code-generation/skills/terraform-style-guide",
+    provenance: "Vendored from hashicorp/agent-skills; reviewed immutable opt-in entry.",
+    license: "MPL-2.0",
+    documentationUrl: "https://developer.hashicorp.com/terraform/language/style",
+    compatibility: Object.freeze({
+      runtime: "openai-agents-skills",
+      minimumSkillCapabilityVersion: "0.13.3",
+    }),
+    upgrade: Object.freeze({ policy: "immutable-replacement", supersedes: null }),
+    relativePath: "terraform-style-guide",
+  }),
+  Object.freeze({
+    id: "terraform-test",
+    name: "terraform-test",
+    version: "0.0.2",
+    description:
+      "Write and run Terraform tests with assertions, mocked providers, data sources, and plan/apply scenarios.",
+    category: "infrastructure",
+    tags: Object.freeze(["skill", "infrastructure", "terraform", "testing", "opt-in"]),
+    contentSha256: "61be0fa43c48f49980fee28c64215f593c4ab55d55a93c8f2e514d9ca566a97b",
+    sourceCommit: "de4323afdfbc30d1387f287b55062fa8d82b62e8",
+    sourceUrl:
+      "https://github.com/hashicorp/agent-skills/tree/de4323afdfbc30d1387f287b55062fa8d82b62e8/terraform/code-generation/skills/terraform-test",
+    provenance: "Vendored from hashicorp/agent-skills; reviewed immutable opt-in entry.",
+    license: "MPL-2.0",
+    documentationUrl: "https://developer.hashicorp.com/terraform/language/tests",
+    compatibility: Object.freeze({
+      runtime: "openai-agents-skills",
+      minimumSkillCapabilityVersion: "0.13.3",
+    }),
+    upgrade: Object.freeze({ policy: "immutable-replacement", supersedes: null }),
+    relativePath: "terraform-test",
+  }),
+  Object.freeze({
     id: "azure-verified-modules",
     name: "azure-verified-modules",
     version: "1.0.0",

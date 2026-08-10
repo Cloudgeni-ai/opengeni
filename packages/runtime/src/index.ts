@@ -3311,7 +3311,6 @@ export function buildAgentCapabilities(
   if (options.workspaceSkillPaths?.length) {
     caps.push(
       workspaceSkills(options.workspaceSkillPaths, [
-        ...bundledSkillDirNames(bundledSkillsDir()),
         ...(options.artifactRuntimeAvailable
           ? bundledSkillDirNames(bundledArtifactSkillsDir())
           : []),
@@ -6464,9 +6463,9 @@ export function buildManifest(
   }
   // No extraPathGrants here: remote sandbox clients (Modal) reject manifests
   // that carry them at create/apply time, which broke every Modal session.
-  // The lazy bundled-skills source no longer needs a grant because
-  // bundledSkillsDir() stages the skills inside the process working directory
-  // whenever the packaged copy lives outside it.
+  // Pack, selected-library, session, and artifact skills are represented by
+  // sandbox-safe in-memory or staged local-dir sources, so no host path grant
+  // is required here.
   return new Manifest({
     root: "/workspace",
     entries,
@@ -8502,29 +8501,7 @@ export function azureOpenAIDefaultQuery(
 // packaged skills live inside the runtime package — outside the worker's cwd
 // in production — so stage a copy under the working directory once per
 // process instead of granting the packaged path.
-let stagedBundledSkillsDir: string | null = null;
 let stagedBundledArtifactSkillsDir: string | null = null;
-
-function bundledSkillsDir(): string {
-  const moduleDir = dirname(fileURLToPath(import.meta.url));
-  const packaged =
-    [
-      join(moduleDir, "assets", "runtime", "bundled_hashicorp_terraform_skills"),
-      join(moduleDir, "bundled_hashicorp_terraform_skills"),
-      join(moduleDir, "..", "src", "bundled_hashicorp_terraform_skills"),
-    ].find((candidate) => existsSync(candidate)) ??
-    join(moduleDir, "bundled_hashicorp_terraform_skills");
-  if (isPathWithin(process.cwd(), packaged)) {
-    return packaged;
-  }
-  if (!stagedBundledSkillsDir) {
-    stagedBundledSkillsDir = stageBundledSkills(
-      packaged,
-      join(process.cwd(), ".opengeni", "bundled_hashicorp_terraform_skills"),
-    );
-  }
-  return stagedBundledSkillsDir;
-}
 
 function bundledArtifactSkillsDir(): string {
   const moduleDir = dirname(fileURLToPath(import.meta.url));
@@ -8567,29 +8544,17 @@ function isPathWithin(root: string, candidate: string): boolean {
 }
 
 /**
- * The skill source fed to the SDK Skills capability. Without pack or curated
- * skills this is the plain bundled local-dir source, byte-for-byte the
- * pre-pack behavior. With either selected source it becomes a single
- * in-memory dir source combining bundled skill directories (as local_dir
- * entries the SDK materializes lazily) with selected in-memory skill
- * directories — one skill index, one `## Skills` instruction section, lazy
- * `load_skill` for all of them. A pack skill shadows a bundled or curated
- * skill with the same directory name, case-insensitively.
+ * The skill source fed to the SDK Skills capability. Domain guidance is never
+ * mounted by deployment default: only explicitly selected library, Pack, and
+ * session skills join native artifact skills in one lazy index. Pack content
+ * shadows selected library content with the same name, case-insensitively.
  */
 export function lazySkillSourceWithPackSkills(
   packSkills: PackSkill[],
   skillLibrarySkills: PackSkill[] = [],
   artifactRuntimeAvailable = false,
 ): LocalDirLazySkillSource {
-  const bundledDir = bundledSkillsDir();
-  const bundled = localDirLazySkillSource({ src: bundledDir });
-  if (packSkills.length === 0 && skillLibrarySkills.length === 0 && !artifactRuntimeAvailable) {
-    return bundled;
-  }
   const children: Record<string, Entry> = {};
-  for (const name of bundledSkillDirNames(bundledDir)) {
-    children[name] = localDir({ src: join(bundledDir, name) });
-  }
   let artifactBundled: LocalDirLazySkillSource | null = null;
   if (artifactRuntimeAvailable) {
     const artifactDir = bundledArtifactSkillsDir();
@@ -8634,11 +8599,6 @@ export function lazySkillSourceWithPackSkills(
   return {
     source: dir({ children }),
     getIndex: (manifest, skillsPath) => [
-      ...(bundled.getIndex?.(manifest, skillsPath) ?? []).filter(
-        (entry) =>
-          !packNameKeys.has((entry.path ?? entry.name).toLowerCase()) &&
-          !libraryNameKeys.has((entry.path ?? entry.name).toLowerCase()),
-      ),
       ...(artifactBundled?.getIndex?.(manifest, skillsPath) ?? []).filter(
         (entry) =>
           !packNameKeys.has((entry.path ?? entry.name).toLowerCase()) &&
@@ -8659,17 +8619,16 @@ function effectiveSkillSelections(
   sessionSkills: readonly PackSkill[],
   artifactRuntimeAvailable = false,
 ): readonly EffectiveSkillSelection[] {
-  const defaultSkillNames = [
-    ...bundledSkillDirNames(bundledSkillsDir()),
-    ...(artifactRuntimeAvailable ? bundledSkillDirNames(bundledArtifactSkillsDir()) : []),
-  ];
+  const defaultSkillNames = artifactRuntimeAvailable
+    ? bundledSkillDirNames(bundledArtifactSkillsDir())
+    : [];
   const defaultSelections = defaultSkillNames.map((name) => ({
     id: `bundled:${name}`,
     name,
     source: "bundled" as const,
     version: null,
     contentSha256: null,
-    reason: "deployment default skill bundle",
+    reason: "native artifact capability",
   }));
   const libraryNameKeys = new Set(librarySkills.map((skill) => skill.name.toLowerCase()));
   const packNameKeys = new Set(packSkills.map((skill) => skill.name.toLowerCase()));
@@ -8725,10 +8684,9 @@ function sessionSkillsForMaterialization(
     configured.set(skill.name.toLowerCase(), skill);
   }
   const bundledNames = new Set(
-    [
-      ...bundledSkillDirNames(bundledSkillsDir()),
-      ...(artifactRuntimeAvailable ? bundledSkillDirNames(bundledArtifactSkillsDir()) : []),
-    ].map((name) => name.toLowerCase()),
+    (artifactRuntimeAvailable ? bundledSkillDirNames(bundledArtifactSkillsDir()) : []).map((name) =>
+      name.toLowerCase(),
+    ),
   );
   const selected = new Map<string, PackSkill>();
   for (const skill of sessionSkills) {

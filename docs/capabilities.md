@@ -1,15 +1,19 @@
 # Capability Catalog
 
-OpenGeni exposes a workspace-level capability catalog for packs, MCP servers, APIs, skills, and plugins.
+OpenGeni exposes a workspace-level Capabilities control-plane read model for Packs, external MCP/API integrations, Skills, and Plugins. Capability is a UI and discovery umbrella, not one runtime type or one generic enable/disable lifecycle.
 
 The catalog merges:
 
-- built-in OpenGeni packs, APIs, MCP servers, and bundled sandbox skills
+- built-in and workspace-registered Packs
 - immutable, reviewed curated skill-library entries (`source: "library"`)
-- MCP servers configured through `OPENGENI_MCP_SERVERS`
+- external MCP servers managed through `OPENGENI_MCP_SERVERS`
 - local catalog items added through the API or web app
 - reviewed integrations.sh snapshot imports stored as global `source: "registry"` catalog rows
 - public remote MCP servers discovered from the official MCP Registry
+
+Native OpenGeni product surfaces are deliberately absent from the installable catalog. The internal `opengeni`, `files`, and `docs` MCP carriers, Documents, Scheduled Tasks, GitHub repository resources, Rigs, and Sandboxes remain available through their owning runtime and product surfaces; they are never manufactured as enabled catalog rows. Agent discovery may return a separate native connection recommendation, such as GitHub owner consent, without adding that recommendation to the workspace catalog.
+
+Every catalog item includes a typed `lifecycle` projection and a bounded list of supported `actions` (`install`, `connect`, `configure`, `update`, `repair`, `disconnect`, `uninstall`, or `inspect`). The legacy `enabled` fields remain a compatibility projection while clients migrate; provenance such as `built_in` never implies lifecycle state. External configured MCPs are reported as deployment-managed and inspect-only.
 
 ## Runtime Behavior
 
@@ -61,11 +65,11 @@ The probe runs with those headers, and on success the values are stored encrypte
 
 Registry entries that declare required headers are tagged `requires-credentials` and cannot be enabled until the declared headers are supplied.
 
-APIs, skills, and plugins use the same catalog and enablement table so operators can build a role-oriented workspace inventory. Built-in APIs and bundled skills are already available. Custom APIs, skills, and plugins need their own adapter or runtime implementation before enabling them changes agent execution.
+The current compatibility table still records existing catalog installations, but product actions route to the owning type-specific domain. A Skill is installed, an Integration is connected/configured, and a Pack is installed/configured; clients must not infer one universal Enable action from catalog membership.
 
 ## Curated skill library
 
-The default sandbox bundle is intentionally provider-neutral. Infrastructure guidance that is not appropriate for every workspace, such as Azure Verified Modules guidance, lives in the immutable curated library under `packages/runtime/src/bundled_skill_library/` instead of the always-mounted bundle. A library entry is discoverable in the catalog but starts disabled:
+The default sandbox carries no Terraform, Checkov, social-marketing, or other domain methodology guidance. Those Skills live in the immutable curated library under `packages/runtime/src/bundled_skill_library/` and are discoverable but uninstalled until explicitly selected. The initial reviewed set is Checkov, Refactor Module, Social Media Marketing, Terraform Search and Import, Terraform Stacks, Terraform Style Guide, Terraform Test, and Azure Verified Modules.
 
 - `id` is stable (`skill:azure-verified-modules` in the catalog).
 - `metadata.libraryId`, `metadata.version`, `metadata.contentSha256`, `metadata.sourceCommit`, `metadata.sourceUrl`, `metadata.provenance`, `metadata.license`, `metadata.documentationUrl`, `metadata.compatibility`, and `metadata.upgrade` make provenance inspectable. `contentSha256` is a canonical whole-artifact digest over sorted normalized relative paths and the exact bytes of every recursively materialized regular file, not only `SKILL.md`.
@@ -81,23 +85,25 @@ curl -X POST "http://127.0.0.1:8000/v1/workspaces/$WORKSPACE_ID/capabilities/ski
   -d '{"config":{"version":"1.0.0"},"metadata":{"enabledBy":"operator"}}'
 ```
 
-The resulting catalog row reports `enabled: true` with `enabledReason: "explicitly selected"`. Disabling the installation removes the curated skill from subsequent turns; it does not change the default bundle.
+The resulting catalog row reports an installed/ready lifecycle (and retains `enabled: true` with `enabledReason: "explicitly selected"` for compatibility). Uninstalling the selection removes the curated skill from subsequent turns.
 
 ### Skill source precedence
 
-The runtime keeps three sources inspectable and separate:
+The runtime keeps these sources inspectable and separate:
 
-1. deployment-default bundled/repository-local skills (always enabled where the sandbox Skills capability is available);
-2. explicitly selected immutable curated-library skills;
-3. enabled capability-pack skills.
+1. explicitly selected immutable curated-library skills;
+2. enabled capability-Pack skills;
+3. inline per-session skills;
+4. repository-local `.agents/skills` or `.claude/skills` discovered at their real mounted path; and
+5. native editable-artifact skills, only after the exact artifact runtime preflight succeeds.
 
-Pack skills retain their existing behavior and have explicit precedence when a pack declares the same skill directory name as a bundled or curated entry. Duplicate names within the curated selection are rejected. The effective runtime selection reports source, version, hash, and reason without exposing secrets.
+Pack skills retain explicit precedence when a Pack declares the same skill directory name as a curated entry. Duplicate or conflicting names fail instead of shadowing ambiguously. The effective runtime selection reports source, version, hash, and reason without exposing secrets.
 
 Self-hosted/Connected Machine deployments may omit the curated artifact from their runtime image. Such a deployment omits the entry from discovery and cannot activate it; it does not download, substitute, or silently route the turn to Azure-hosted inference.
 
 ### Compatibility and migration
 
-Skill-library selection is currently workspace-scoped through the capability installation. Existing session rows do not contain a per-session skill pin, so resumed and newly created sessions use the same current default bundle plus the workspace's active exact-pinned library installations. This deliberately removes the former default Azure guidance rather than silently preserving provider-specific guidance in a session that was expected to be provider-neutral. Pack and repository-local skill behavior remains unchanged. A future per-session pin migration can preserve historical skill context for long-lived sessions if product requirements call for that stronger continuation guarantee; it must use the same immutable id/version/hash records and must not broaden authorization.
+Skill-library selection is currently workspace-scoped through the capability installation. Existing session rows do not contain a per-session library pin, so resumed and newly created sessions use the workspace's active exact-pinned library installations plus their Pack/session/repository sources. This deliberately removes the former seven deployment-default domain Skills rather than silently retaining methodology a workspace never selected. A future per-session pin migration can preserve historical library context for long-lived sessions if product requirements call for that stronger continuation guarantee; it must use the same immutable id/version/hash records and must not broaden authorization.
 
 Configured MCP endpoint URLs are visible in the catalog. Do not put tokens or other secrets in `OPENGENI_MCP_SERVERS` URLs.
 
@@ -146,9 +152,10 @@ If the MCP endpoint initializes successfully, the enabled MCP is returned by the
 Open the **Capabilities** view in the web app to:
 
 - filter and search the local catalog
-- enable role packs
+- install and configure role Packs
 - add and enable public MCP Registry results
-- add manual MCP entries and enable API/skill/plugin entries
+- add and connect manual MCP integrations
+- install immutable Skills and inspect their provenance
 - select enabled custom MCPs in the agent composer
 
 The official MCP Registry is public metadata. Evaluate any server and its endpoint before enabling it in a workspace with sensitive data.
@@ -179,8 +186,8 @@ never enter the event or model-visible tool result. Existing explicit session
 tool policies remain exact and do not silently gain the two discovery tools.
 
 GitHub is the first fully specialized adapter. Search prefers the built-in
-`api:github-app` capability, checks the live workspace binding, and reports it
-ready only when an active owner-authorized installation exists. Otherwise the
+  native GitHub connection recommendation, checks the live workspace binding,
+  and reports it ready only when an active owner-authorized installation exists. Otherwise the
 human click mints fresh `github:manage` owner-consent state and carries only a
 validated same-workspace session return path across GitHub redirects. The agent
 never receives `github:manage`, an installation token, the signed browser state,

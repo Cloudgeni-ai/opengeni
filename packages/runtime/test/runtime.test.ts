@@ -6650,11 +6650,11 @@ describe("pack skills in the sandbox skill index", () => {
     environment: {},
   });
 
-  test("without pack skills the source is the unchanged bundled local-dir source", () => {
+  test("without explicit selections the skill index has no domain guidance", () => {
     const source = lazySkillSourceWithPackSkills([]);
-    expect((source.source as { type: string }).type).toBe("local_dir");
+    expect((source.source as { type: string }).type).toBe("dir");
     const index = source.getIndex?.(emptyManifest, ".agents") ?? [];
-    expect(index.map((entry) => entry.name)).toContain("checkov");
+    expect(index.map((entry) => entry.name)).not.toContain("checkov");
     expect(index.map((entry) => entry.name)).not.toContain("infra-ops");
     expect(index.map((entry) => entry.name)).not.toContain("azure-verified-modules");
     expect(index.map((entry) => entry.name)).not.toContain("opengeni-spreadsheets");
@@ -6759,15 +6759,13 @@ describe("pack skills in the sandbox skill index", () => {
     );
   });
 
-  test("pack skills join the bundled skills in one lazy skill index", () => {
+  test("pack skills join the explicit skill index", () => {
     const source = lazySkillSourceWithPackSkills([infraSkill]);
     const sourceDir = source.source as {
       type: string;
       children: Record<string, any>;
     };
     expect(sourceDir.type).toBe("dir");
-    // Bundled skills stay lazily materializable from their local directories.
-    expect(sourceDir.children.checkov.type).toBe("local_dir");
     // Pack skill content is carried in-memory from the manifest.
     expect(sourceDir.children["infra-ops"].type).toBe("dir");
     expect(sourceDir.children["infra-ops"].children["SKILL.md"].content).toContain("# Infra ops");
@@ -6776,7 +6774,7 @@ describe("pack skills in the sandbox skill index", () => {
     );
     const index = source.getIndex?.(emptyManifest, ".agents") ?? [];
     const names = index.map((entry) => entry.name);
-    expect(names).toContain("checkov");
+    expect(names).not.toContain("checkov");
     expect(names).toContain("infra-ops");
     const infra = index.find((entry) => entry.name === "infra-ops");
     expect(infra?.description).toBe("Operate workspace infrastructure.");
@@ -6793,7 +6791,7 @@ describe("pack skills in the sandbox skill index", () => {
     );
   });
 
-  test("a pack skill shadows a bundled skill with the same name", () => {
+  test("a Pack may explicitly contribute a former deployment-default skill", () => {
     const source = lazySkillSourceWithPackSkills([
       {
         name: "checkov",
@@ -6892,8 +6890,8 @@ describe("pack skills in the sandbox skill index", () => {
     expect(skillsCapability?.lazyFrom?.source.type).toBe("dir");
     const index = skillsCapability?.lazyFrom?.getIndex?.(emptyManifest, ".agents") ?? [];
     expect(index.map((entry) => entry.name)).toContain("infra-ops");
-    // Backward compatibility: without pack skills the capability keeps the
-    // plain bundled local-dir source.
+    // Without explicit skills, the capability retains an empty in-memory
+    // source so repository and later session skills can still compose.
     const plainAgent = buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), []);
     const plainCapability = (
       (plainAgent as any).capabilities as Array<{
@@ -6901,7 +6899,7 @@ describe("pack skills in the sandbox skill index", () => {
         lazyFrom?: { source: { type: string } };
       }>
     ).find((capability) => capability.type === "skills");
-    expect(plainCapability?.lazyFrom?.source.type).toBe("local_dir");
+    expect(plainCapability?.lazyFrom?.source.type).toBe("dir");
   });
 
   test("buildOpenGeniAgent exposes secret-free curated skill provenance", () => {

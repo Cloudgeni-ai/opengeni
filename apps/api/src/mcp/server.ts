@@ -111,6 +111,7 @@ import {
   hasPermission,
   authorizedSocialConnectionsForGrant,
   buildCapabilityCatalog,
+  nativeConnectionCapabilityRecommendations,
   requireLiveAgentAttemptAuthorization,
   requireSessionAuthorization,
   requireSessionAuthorizationListScope,
@@ -3657,7 +3658,11 @@ function registerCapabilityDiscoveryTools(
     async ({ query, limit }) => {
       await authorize();
       const current = await catalog();
-      const ranked = searchCapabilityCatalogItems(current.items, query, limit ?? 8);
+      const ranked = searchCapabilityCatalogItems(
+        [...current.items, ...nativeConnectionCapabilityRecommendations()],
+        query,
+        limit ?? 8,
+      );
       const matches = await Promise.all(
         ranked.map(async ({ item, matchedOn }) => ({
           capabilityId: item.id,
@@ -3694,7 +3699,9 @@ function registerCapabilityDiscoveryTools(
     async ({ capabilityId, rationale }) => {
       await authorize();
       const current = await catalog();
-      const item = current.items.find((candidate) => candidate.id === capabilityId);
+      const item = [...current.items, ...nativeConnectionCapabilityRecommendations()].find(
+        (candidate) => candidate.id === capabilityId,
+      );
       if (!item || !capabilityCatalogItemIsTrustedForExposure(item)) {
         throw new Error("Unknown or untrusted capability; search the catalog again.");
       }

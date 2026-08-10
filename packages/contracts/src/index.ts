@@ -6676,6 +6676,50 @@ export type CapabilityCatalogAuthKind = z.infer<typeof CapabilityCatalogAuthKind
 export const CapabilityCatalogTier = z.enum(["verified", "community"]);
 export type CapabilityCatalogTier = z.infer<typeof CapabilityCatalogTier>;
 
+/**
+ * User-facing lifecycle truth for the Capabilities control center. This is a
+ * read-model projection only: each action is still executed by the owning
+ * Plugin, Integration, Connection, Skill, or Pack domain.
+ */
+export const CapabilityLifecycleStatus = z.enum([
+  "available",
+  "installed",
+  "connected",
+  "ready",
+  "needs_attention",
+  "unavailable",
+  "managed",
+]);
+export type CapabilityLifecycleStatus = z.infer<typeof CapabilityLifecycleStatus>;
+
+export const CapabilityReadiness = z.enum([
+  "ready",
+  "setup_required",
+  "attention",
+  "unavailable",
+]);
+export type CapabilityReadiness = z.infer<typeof CapabilityReadiness>;
+
+export const CapabilityAction = z.enum([
+  "install",
+  "connect",
+  "configure",
+  "update",
+  "repair",
+  "disconnect",
+  "uninstall",
+  "inspect",
+]);
+export type CapabilityAction = z.infer<typeof CapabilityAction>;
+
+export const CapabilityLifecycle = z.object({
+  status: CapabilityLifecycleStatus,
+  readiness: CapabilityReadiness,
+  detail: z.string().nullable().default(null),
+  managedBy: z.enum(["deployment", "platform", "workspace"]).nullable().default(null),
+});
+export type CapabilityLifecycle = z.infer<typeof CapabilityLifecycle>;
+
 export const CapabilityRuntime = z.object({
   available: z.boolean().default(false),
   mcpServerId: z.string().min(1).optional(),
@@ -6725,7 +6769,20 @@ export const CapabilityCatalogItem = z.object({
   staleAt: z.string().nullable().default(null),
   tools: z.array(ToolRef).default([]),
   runtime: CapabilityRuntime.default({ available: false, notes: null }),
+  lifecycle: CapabilityLifecycle.default({
+    status: "available",
+    readiness: "setup_required",
+    detail: null,
+    managedBy: null,
+  }),
+  actions: z.array(CapabilityAction).default([]),
+  /**
+   * @deprecated Compatibility projection for existing clients. New surfaces
+   * must use lifecycle and actions rather than treating every type as an
+   * enable/disable toggle.
+   */
   enabled: z.boolean().default(false),
+  /** @deprecated Compatibility explanation paired with enabled. */
   enabledReason: z.string().nullable().default(null),
   // The non-secret connection binding stored with an enabled installation.
   // Workspace refs retain an exact row id. Subject refs deliberately omit it:

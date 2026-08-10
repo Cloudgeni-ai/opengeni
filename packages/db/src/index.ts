@@ -49894,6 +49894,15 @@ function mapCapabilityCatalogItem(
     staleAt: row.staleAt?.toISOString() ?? null,
     tools: [],
     runtime,
+    // Lifecycle is projected with installation/connection truth by
+    // @opengeni/core. A storage row on its own is only available for setup.
+    lifecycle: {
+      status: "available",
+      readiness: runtime.available ? "setup_required" : "unavailable",
+      detail: runtime.notes,
+      managedBy: "workspace",
+    },
+    actions: [],
     enabled: false,
     enabledReason: null,
     // Overwritten by applyCapabilityEnablement in @opengeni/core, which knows
