@@ -22,6 +22,7 @@ export type {
 export { OpenGeniProvider } from "./provider";
 export type { OpenGeniProviderProps } from "./provider";
 export { useOpenGeni, useOpenGeniClient } from "./session-context";
+export { useVideoArtifactPlaybackLoader } from "./hooks/use-video-artifact-playback";
 export type { ClientOverride, OpenGeniContextValue } from "./session-context";
 export { usePageLiveActivity } from "./hooks/internal";
 
@@ -334,6 +335,7 @@ export type {
   CreateToolRegistryOptions,
   RetainedArtifactLoader,
   RetainedScreenshotLoader,
+  VideoArtifactPlaybackLoader,
   ToolRegistry,
   ToolRegistryEntry,
   ToolRenderer,
@@ -466,6 +468,8 @@ export {
 } from "./model-policy";
 export type { LatencyModeId, PickerBillingClass, PickerModelRow } from "./model-policy";
 export { MessageTimeline, TimelineRow } from "./components/message-timeline";
+export { GeneratedVideoPlayer } from "./components/generated-video-player";
+export type { GeneratedVideoPlayerProps } from "./components/generated-video-player";
 export type { MessageTimelineProps } from "./components/message-timeline";
 export { UserMessageBody, userMessageLikelyNeedsDisclosure } from "./components/user-message-body";
 export type { UserMessageBodyProps } from "./components/user-message-body";

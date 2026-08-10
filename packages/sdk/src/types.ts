@@ -3205,7 +3205,8 @@ export type SessionSystemUpdateKind =
   | "goal_continuation"
   | "agent_message"
   | "agent_steer_instruction"
-  | "child_terminal_result";
+  | "child_terminal_result"
+  | "media_generation_result";
 
 export type SessionSystemUpdateState =
   | "pending"
@@ -3674,6 +3675,7 @@ export const RETAINED_OUTPUT_DEFAULT_PAGE_BYTES = 256 * 1024;
 export const RETAINED_OUTPUT_MAX_PAGE_BYTES = 1024 * 1024;
 export const COMPUTER_SCREENSHOT_MAX_BYTES = 32 * 1024 * 1024;
 export const GENERATED_IMAGE_MAX_BYTES = 64 * 1024 * 1024;
+export const GENERATED_VIDEO_MAX_BYTES = 512 * 1024 * 1024;
 
 export type RetainedOutputKind =
   | "tool_result"
@@ -3682,6 +3684,7 @@ export type RetainedOutputKind =
   | "event_media"
   | "computer_screenshot"
   | "generated_image"
+  | "generated_video"
   | "file";
 
 export type RetainedOutputUnavailableReason =
@@ -3729,6 +3732,151 @@ export type GeneratedImageReceipt = {
   type: "generated_image";
   artifact: RetainedArtifactReference;
   sandboxPath: string;
+};
+
+export type VideoGenerationSourceMode =
+  | "text"
+  | "first_frame"
+  | "first_and_last_frames"
+  | "image_reference"
+  | "video_reference";
+
+export type VideoGenerationResolution = "480p" | "720p";
+
+export type VideoGenerationAspectRatio =
+  | "16:9"
+  | "4:3"
+  | "1:1"
+  | "3:4"
+  | "9:16"
+  | "21:9"
+  | "adaptive";
+
+export type VideoGenerationModelCapability = {
+  modelId: string;
+  label: string;
+  providerLabel: string;
+  sourceModes: VideoGenerationSourceMode[];
+  resolutions: VideoGenerationResolution[];
+  aspectRatios: VideoGenerationAspectRatio[];
+  duration: {
+    minSeconds: number;
+    maxSeconds: number;
+    stepSeconds: number;
+  };
+  supportsAudio: boolean;
+};
+
+export type VideoGenerationCapabilities = {
+  schemaVersion: 1;
+  capabilityRevision: string;
+  defaultModelId: string;
+  models: VideoGenerationModelCapability[];
+};
+
+export type VideoGenerationPolicy = {
+  schemaVersion: 1;
+  revision: number;
+  fundingSource: VideoGenerationFundingSource;
+  enabledModelIds: string[];
+  defaultModelId: string | null;
+};
+
+export type UpdateVideoGenerationPolicyRequest = {
+  expectedRevision: number;
+  fundingSource: VideoGenerationFundingSource;
+  enabledModelIds: string[];
+  defaultModelId: string | null;
+};
+
+export type VideoGenerationFundingSource = "opengeni_credits" | "workspace_gateway";
+
+export type VideoGenerationFundingOption = {
+  source: VideoGenerationFundingSource;
+  label: string;
+  description: string;
+  available: boolean;
+  unavailableReason: string | null;
+};
+
+export type WorkspaceVideoGenerationSettings = {
+  schemaVersion: 1;
+  policy: VideoGenerationPolicy;
+  fundingOptions: VideoGenerationFundingOption[];
+  availableModels: VideoGenerationModelCapability[];
+  capabilities: VideoGenerationCapabilities | null;
+};
+
+export type GeneratedVideoFacts = {
+  durationSeconds: number;
+  width: number;
+  height: number;
+  fps: number;
+  hasAudio: boolean;
+  videoCodec: "h264";
+  audioCodec: "aac" | null;
+};
+
+export type GeneratedVideoReceipt = {
+  type: "generated_video";
+  schemaVersion: 1;
+  operationId: string;
+  artifact: RetainedArtifactReference;
+  video: GeneratedVideoFacts;
+  sandboxPath: string;
+};
+
+export type VideoGenerationTerminalFailureStatus =
+  | "provider_failed"
+  | "retention_failed"
+  | "cancelled_before_submit"
+  | "outcome_unknown";
+
+export type MediaGenerationResult =
+  | {
+      type: "media_generation_result";
+      schemaVersion: 1;
+      status: "ready";
+      operationId: string;
+      receipt: GeneratedVideoReceipt;
+    }
+  | {
+      type: "media_generation_result";
+      schemaVersion: 1;
+      status: VideoGenerationTerminalFailureStatus;
+      operationId: string;
+      boundedPublicReason: string;
+    };
+
+export type VideoGenerationPublicStatus =
+  | "preparing"
+  | "prepared"
+  | "accepted"
+  | "provider_started"
+  | "retaining"
+  | "completed"
+  | VideoGenerationTerminalFailureStatus;
+
+export type VideoGenerationOperationSummary = {
+  schemaVersion: 1;
+  operationId: string;
+  modelId: string;
+  status: VideoGenerationPublicStatus;
+  createdAt: string;
+  updatedAt: string;
+  terminal: MediaGenerationResult | null;
+};
+
+/** Ephemeral source minted for native browser playback; never persist the URL. */
+export type VideoArtifactPlaybackSource = {
+  schemaVersion: 1;
+  artifactId: string;
+  url: string;
+  expiresAt: string;
+  contentType: "video/mp4";
+  sizeBytes: number;
+  sha256: string;
+  acceptRanges: "bytes";
 };
 
 export type RetainedArtifactContentOptions = {

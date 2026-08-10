@@ -1,6 +1,7 @@
 import { createProductionAgentRuntime, summarizeForCompaction } from "@opengeni/runtime";
 import { createSharedActivityServices } from "./activity-services";
 import { createRunAgentTurnActivity } from "./activities/agent-turn";
+import { createVideoGenerationActivities } from "./activities/video-generation-reconciliation";
 import type { ActivityDependencies, TurnActivityServices } from "./activities/types";
 import { runtimeMetricsHooksForObservability } from "./observability-metrics";
 
@@ -34,5 +35,6 @@ export function createTurnActivities(dependencies: ActivityDependencies = {}) {
 export function createTurnActivitiesFromServices(services: () => Promise<TurnActivityServices>) {
   return {
     runAgentTurn: createRunAgentTurnActivity(services),
+    ...createVideoGenerationActivities(services),
   };
 }

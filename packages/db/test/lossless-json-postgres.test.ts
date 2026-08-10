@@ -448,6 +448,9 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
         throw new Error(`goal continuation did not materialize: ${materialized.action}`);
       }
       expect(materialized.update.summary).toBe(newUnsafePrompt);
+      if (materialized.update.payload.type !== "goal_continuation") {
+        throw new Error("goal continuation materialized with the wrong payload kind");
+      }
       expect(materialized.update.payload.prompt).toBe(newUnsafePrompt);
 
       const [quarantined] = await admin<

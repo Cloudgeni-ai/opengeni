@@ -16,6 +16,7 @@ import {
   useFileAttachments,
   useSession,
   useSessionEvents,
+  useVideoArtifactPlaybackLoader,
   useWorkspaceModelCatalog,
   type ComposerState,
   type UseFileAttachmentsResult,
@@ -344,6 +345,7 @@ function LiveAgentSession({
     error,
   } = useSessionEvents(sessionId);
   const attachments = useFileAttachments();
+  const loadVideoArtifactPlayback = useVideoArtifactPlaybackLoader();
   const composer = useComposer(sessionId, {
     sendExtras: () => ({
       resources: attachments.readyResources,
@@ -393,6 +395,7 @@ function LiveAgentSession({
         loadingOlder={loadingOlder}
         onLoadOlder={() => void loadOlder()}
         renderMessageText={renderNorthstarMessage}
+        loadVideoArtifactPlayback={loadVideoArtifactPlayback}
         className="northstar-agent-timeline min-h-0 flex-1"
       />
 

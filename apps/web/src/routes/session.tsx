@@ -73,6 +73,7 @@ import { resolveSessionComposerModel } from "@/lib/session-model";
 import { mergeSessionContextProjection } from "@/lib/session-pins";
 import { createWorkspaceRetainedArtifactLoader } from "@/lib/retained-artifact-loader";
 import { createSessionRetainedScreenshotLoader } from "@/lib/retained-screenshot-loader";
+import { createWorkspaceRetainedVideoLoader } from "@/lib/retained-video-loader";
 import {
   firstPartySessionToolOptions,
   isIntelligenceEffort,
@@ -697,6 +698,10 @@ function SessionChatPane(props: {
     () => createWorkspaceRetainedArtifactLoader(context.client, props.session.workspaceId),
     [context.client, props.session.workspaceId],
   );
+  const loadVideoArtifactPlayback = useMemo(
+    () => createWorkspaceRetainedVideoLoader(context.client, props.session.workspaceId),
+    [context.client, props.session.workspaceId],
+  );
   const terminal = isTerminalSessionStatus(props.session.status);
   const agentsSignal = useMemo(() => {
     const agents = props.agentNodes;
@@ -1124,6 +1129,7 @@ function SessionChatPane(props: {
               resolveProviderLogo={props.resolveProviderLogo}
               loadRetainedScreenshot={loadRetainedScreenshot}
               loadRetainedArtifact={loadRetainedArtifact}
+              loadVideoArtifactPlayback={loadVideoArtifactPlayback}
               hasOlder={props.hasOlder}
               loadingOlder={props.loadingOlder}
               onLoadOlder={() => void props.onLoadOlder()}

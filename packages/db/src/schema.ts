@@ -21,6 +21,7 @@ import {
   jsonb,
   numeric,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   uniqueIndex,
@@ -2367,6 +2368,342 @@ export const imageGenerationOperations = pgTable(
   }),
 );
 
+/** Workspace policy for provider-neutral video generation. Disabled by default. */
+export const workspaceVideoGenerationPolicies = pgTable(
+  "workspace_video_generation_policies",
+  {
+    workspaceId: uuid("workspace_id")
+      .primaryKey()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    revision: bigint("revision", { mode: "number" }).notNull().default(0),
+    fundingSource: text("funding_source").notNull().default("workspace_gateway"),
+    enabledModelIds: jsonb("enabled_model_ids").$type<string[]>().notNull().default([]),
+    defaultModelId: text("default_model_id"),
+    updatedBySubjectId: text("updated_by_subject_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "workspace_video_generation_policies_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    revisionValid: check(
+      "workspace_video_generation_policies_revision_chk",
+      sql`${table.revision} between 0 and 9007199254740991`,
+    ),
+    modelsValid: check(
+      "workspace_video_generation_policies_models_chk",
+      sql`jsonb_typeof(${table.enabledModelIds}) = 'array'
+        and jsonb_array_length(${table.enabledModelIds}) <= 16
+        and (${table.defaultModelId} is null or ${table.enabledModelIds} ? ${table.defaultModelId})`,
+    ),
+    fundingSourceValid: check(
+      "workspace_video_generation_policies_funding_source_chk",
+      sql`${table.fundingSource} in ('opengeni_credits', 'workspace_gateway')`,
+    ),
+  }),
+);
+
+/** Exact pending/ready accounting for permanent generated-video files. */
+export const workspaceVideoGenerationQuotas = pgTable(
+  "workspace_video_generation_quotas",
+  {
+    workspaceId: uuid("workspace_id")
+      .primaryKey()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    reservedBytes: bigint("reserved_bytes", { mode: "number" }).notNull().default(0),
+    readyBytes: bigint("ready_bytes", { mode: "number" }).notNull().default(0),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "workspace_video_generation_quotas_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    nonnegative: check(
+      "workspace_video_generation_quotas_nonnegative_chk",
+      sql`${table.reservedBytes} >= 0 and ${table.readyBytes} >= 0`,
+    ),
+  }),
+);
+
+/**
+ * Paid asynchronous provider operation. This aggregate owns recovery; the
+ * originating session is nullable provenance and never owns its lifecycle.
+ */
+export const videoGenerationOperations = pgTable(
+  "video_generation_operations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id").references(() => sessions.id, { onDelete: "set null" }),
+    turnId: uuid("turn_id"),
+    attemptId: uuid("attempt_id"),
+    toolCallId: text("tool_call_id").notNull(),
+    admissionKey: text("admission_key").notNull(),
+    requestDigest: text("request_digest").notNull(),
+    promptDigest: text("prompt_digest").notNull(),
+    requestEncrypted: text("request_encrypted"),
+    modelId: text("model_id").notNull(),
+    sourceMode: text("source_mode").notNull(),
+    capabilityRevision: text("capability_revision").notNull(),
+    fundingSource: text("funding_source").notNull().default("workspace_gateway"),
+    pricedCostMicros: bigint("priced_cost_micros", { mode: "number" }).notNull().default(0),
+    creditState: text("credit_state").notNull().default("not_applicable"),
+    connectionId: uuid("connection_id"),
+    credentialVersion: integer("credential_version").notNull(),
+    credentialEncrypted: text("credential_encrypted"),
+    providerIdempotencyKey: text("provider_idempotency_key").notNull(),
+    providerJobId: text("provider_job_id"),
+    /** Exact provider start body, encrypted before the first network byte. */
+    providerRequestEncrypted: text("provider_request_encrypted"),
+    /** Bearer URLs inside the frozen body are unusable after this instant. */
+    providerRequestExpiresAt: timestamp("provider_request_expires_at", { withTimezone: true }),
+    expectedArtifactId: uuid("expected_artifact_id").notNull(),
+    expectedFileId: uuid("expected_file_id").notNull(),
+    reservedBytes: bigint("reserved_bytes", { mode: "number" }).notNull(),
+    quotaState: text("quota_state").notNull().default("reserved"),
+    status: text("status").notNull().default("preparing"),
+    admissionOutputState: text("admission_output_state").notNull().default("pending"),
+    terminalUpdateState: text("terminal_update_state").notNull().default("ineligible"),
+    terminalUpdateId: uuid("terminal_update_id"),
+    reconcileRevision: bigint("reconcile_revision", { mode: "number" }).notNull().default(0),
+    reconcileLeaseOwner: text("reconcile_lease_owner"),
+    reconcileLeaseExpiresAt: timestamp("reconcile_lease_expires_at", { withTimezone: true }),
+    nextReconcileAt: timestamp("next_reconcile_at", { withTimezone: true }),
+    providerRequestSentAt: timestamp("provider_request_sent_at", { withTimezone: true }),
+    providerStartedAt: timestamp("provider_started_at", { withTimezone: true }),
+    recoveryDeadlineAt: timestamp("recovery_deadline_at", { withTimezone: true }).notNull(),
+    terminalAt: timestamp("terminal_at", { withTimezone: true }),
+    privateDataEraseAfter: timestamp("private_data_erase_after", { withTimezone: true }),
+    boundedPublicReason: text("bounded_public_reason"),
+    lastError: text("last_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    admission: uniqueIndex("video_generation_operations_admission_uq").on(
+      table.workspaceId,
+      table.admissionKey,
+    ),
+    expectedArtifact: uniqueIndex("video_generation_operations_expected_artifact_uq").on(
+      table.workspaceId,
+      table.expectedArtifactId,
+    ),
+    expectedFile: uniqueIndex("video_generation_operations_expected_file_uq").on(
+      table.workspaceId,
+      table.expectedFileId,
+    ),
+    due: index("video_generation_operations_due_idx").on(
+      table.status,
+      table.nextReconcileAt,
+      table.id,
+    ),
+    workspaceCreated: index("video_generation_operations_workspace_created_idx").on(
+      table.workspaceId,
+      table.createdAt,
+      table.id,
+    ),
+    workspaceAccount: foreignKey({
+      name: "video_generation_operations_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    hashesValid: check(
+      "video_generation_operations_hashes_chk",
+      sql`${table.admissionKey} ~ '^[0-9a-f]{64}$'
+        and ${table.requestDigest} ~ '^[0-9a-f]{64}$'
+        and ${table.promptDigest} ~ '^[0-9a-f]{64}$'
+        and ${table.capabilityRevision} ~ '^[0-9a-f]{64}$'`,
+    ),
+    shapeValid: check(
+      "video_generation_operations_shape_chk",
+      sql`octet_length(${table.toolCallId}) between 1 and 512
+        and octet_length(${table.modelId}) between 1 and 256
+        and octet_length(${table.providerIdempotencyKey}) between 1 and 128
+        and ${table.sourceMode} in ('text','first_frame','first_and_last_frames','image_reference','video_reference')
+        and ${table.reservedBytes} > 0 and ${table.reservedBytes} <= 536870912
+        and (${table.boundedPublicReason} is null or octet_length(${table.boundedPublicReason}) <= 4000)
+        and (${table.lastError} is null or octet_length(${table.lastError}) <= 16384)`,
+    ),
+    stateValid: check(
+      "video_generation_operations_state_chk",
+      sql`${table.status} in ('preparing','prepared','accepted','submission_uncertain','provider_started','retaining','completed','provider_failed','cancelled_before_submit','outcome_unknown','retention_failed')
+        and ${table.admissionOutputState} in ('pending','recorded')
+        and ${table.terminalUpdateState} in ('ineligible','pending','leased','delivered','suppressed')
+        and ${table.quotaState} in ('reserved','ready','released')
+        and ((${table.terminalAt} is not null) = (${table.status} in ('completed','provider_failed','cancelled_before_submit','outcome_unknown','retention_failed')))
+        and (${table.status} <> 'submission_uncertain' or (${table.providerRequestEncrypted} is not null and ${table.providerRequestExpiresAt} is not null))
+        and (${table.providerRequestEncrypted} is null or ${table.status} = 'submission_uncertain')
+        and (${table.status} not in ('provider_started','retaining','completed','retention_failed') or ${table.providerJobId} is not null)
+        and (${table.providerJobId} is null or ${table.status} in ('provider_started','retaining','completed','provider_failed','retention_failed'))`,
+    ),
+    fundingStateValid: check(
+      "video_generation_operations_funding_state_chk",
+      sql`(${table.fundingSource} = 'workspace_gateway'
+          and ${table.connectionId} is not null
+          and ${table.pricedCostMicros} = 0
+          and ${table.creditState} = 'not_applicable')
+        or (${table.fundingSource} = 'opengeni_credits'
+          and ${table.connectionId} is null
+          and ((${table.pricedCostMicros} = 0 and ${table.creditState} = 'not_applicable')
+            or (${table.pricedCostMicros} > 0
+              and ((${table.status} in ('provider_failed','cancelled_before_submit','outcome_unknown','retention_failed')
+                    and ${table.creditState} = 'refunded')
+                or (${table.status} not in ('provider_failed','cancelled_before_submit','outcome_unknown','retention_failed')
+                    and ${table.creditState} = 'debited')))))`,
+    ),
+    fundingValuesValid: check(
+      "video_generation_operations_funding_values_chk",
+      sql`${table.fundingSource} in ('opengeni_credits','workspace_gateway')
+        and ${table.pricedCostMicros} between 0 and 1000000000
+        and ${table.creditState} in ('not_applicable','debited','refunded')`,
+    ),
+  }),
+);
+
+/** Immutable operation reference snapshots; provider-facing URLs never persist here. */
+export const videoGenerationReferences = pgTable(
+  "video_generation_references",
+  {
+    operationId: uuid("operation_id")
+      .notNull()
+      .references(() => videoGenerationOperations.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    ordinal: integer("ordinal").notNull(),
+    role: text("role").notNull(),
+    contentType: text("content_type").notNull(),
+    sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
+    sha256: text("sha256").notNull(),
+    stagingObjectKey: text("staging_object_key"),
+    grantExpiresAt: timestamp("grant_expires_at", { withTimezone: true }),
+    cleanupAfter: timestamp("cleanup_after", { withTimezone: true }),
+    cleanedAt: timestamp("cleaned_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({
+      name: "video_generation_references_pk",
+      columns: [table.operationId, table.ordinal],
+    }),
+    workspaceAccount: foreignKey({
+      name: "video_generation_references_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    hashValid: check(
+      "video_generation_references_hash_chk",
+      sql`${table.sha256} ~ '^[0-9a-f]{64}$'`,
+    ),
+    boundsValid: check(
+      "video_generation_references_bounds_chk",
+      sql`${table.ordinal} between 0 and 1
+        and ${table.role} in ('first_frame','last_frame','image_reference','video_reference')
+        and octet_length(${table.contentType}) between 3 and 128
+        and ${table.sizeBytes} > 0 and ${table.sizeBytes} <= 209715200`,
+    ),
+  }),
+);
+
+/** Permanent generated-video product; canonical bytes remain a separate File. */
+export const generatedVideoArtifacts = pgTable(
+  "generated_video_artifacts",
+  {
+    id: uuid("id").primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    primaryFileId: uuid("primary_file_id")
+      .notNull()
+      .references(() => files.id, { onDelete: "restrict" }),
+    operationId: uuid("operation_id")
+      .notNull()
+      .references(() => videoGenerationOperations.id, { onDelete: "restrict" }),
+    sessionId: uuid("session_id").references(() => sessions.id, { onDelete: "set null" }),
+    turnId: uuid("turn_id"),
+    attemptId: uuid("attempt_id"),
+    modelId: text("model_id").notNull(),
+    sourceMode: text("source_mode").notNull(),
+    promptDigest: text("prompt_digest").notNull(),
+    contentType: text("content_type").notNull(),
+    sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
+    sha256: text("sha256").notNull(),
+    durationMillis: integer("duration_millis").notNull(),
+    width: integer("width").notNull(),
+    height: integer("height").notNull(),
+    fpsMilli: integer("fps_milli").notNull(),
+    videoCodec: text("video_codec").notNull(),
+    audioCodec: text("audio_codec"),
+    hasAudio: boolean("has_audio").notNull(),
+    sandboxFilename: text("sandbox_filename").notNull(),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    readyAt: timestamp("ready_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceFile: uniqueIndex("generated_video_artifacts_workspace_file_uq").on(
+      table.workspaceId,
+      table.primaryFileId,
+    ),
+    workspaceOperation: uniqueIndex("generated_video_artifacts_workspace_operation_uq").on(
+      table.workspaceId,
+      table.operationId,
+    ),
+    sessionCreated: index("generated_video_artifacts_session_created_idx").on(
+      table.workspaceId,
+      table.sessionId,
+      table.createdAt,
+      table.id,
+    ),
+    workspaceAccount: foreignKey({
+      name: "generated_video_artifacts_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceFileScope: foreignKey({
+      name: "generated_video_artifacts_workspace_file_scope_fk",
+      columns: [table.accountId, table.workspaceId, table.primaryFileId],
+      foreignColumns: [files.accountId, files.workspaceId, files.id],
+    }).onDelete("restrict"),
+    valuesValid: check(
+      "generated_video_artifacts_values_chk",
+      sql`${table.contentType} = 'video/mp4'
+        and ${table.sizeBytes} > 0 and ${table.sizeBytes} <= 536870912
+        and ${table.sha256} ~ '^[0-9a-f]{64}$'
+        and ${table.promptDigest} ~ '^[0-9a-f]{64}$'
+        and ${table.durationMillis} between 1 and 120000
+        and ${table.width} between 1 and 8192
+        and ${table.height} between 1 and 8192
+        and ${table.fpsMilli} between 1 and 120000
+        and ${table.videoCodec} = 'h264'
+        and ((${table.hasAudio} and ${table.audioCodec} = 'aac') or (not ${table.hasAudio} and ${table.audioCodec} is null))
+        and ${table.sandboxFilename} = 'generated-video-' || ${table.id}::text || '.mp4'`,
+    ),
+  }),
+);
+
 /** Exact pending/ready byte accounting for retained computer screenshots. */
 export const workspaceScreenshotQuotas = pgTable(
   "workspace_screenshot_quotas",
@@ -3543,7 +3880,7 @@ export const sessionSystemUpdates = pgTable(
   (table) => ({
     kindValid: check(
       "system_updates_kind_check",
-      sql`${table.kind} in ('scheduled_occurrence', 'goal_continuation', 'agent_message', 'agent_steer_instruction', 'child_terminal_result')`,
+      sql`${table.kind} in ('scheduled_occurrence', 'goal_continuation', 'agent_message', 'agent_steer_instruction', 'child_terminal_result', 'media_generation_result')`,
     ),
     payloadKindValid: check(
       "system_updates_payload_kind_check",

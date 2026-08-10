@@ -1,4 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
+import {
+  cancelUnacceptedVideoGenerationsForToolCallsInTransaction,
+  markVideoGenerationAcceptedInTransaction,
+  markVideoGenerationTerminalUpdateInTransaction,
+} from "./video-generation";
 import type {
   AccessContext,
   AccessGrant,
@@ -301,6 +306,7 @@ export * from "./memory-governance";
 export * from "./scoped-knowledge";
 export * from "./knowledge-source-sync";
 export * from "./generated-images";
+export * from "./video-generation";
 export { interruptedToolCallResult } from "./session-tool-call-settlement";
 export { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 export {
@@ -1859,7 +1865,12 @@ export type TemporalScheduleCleanupClaim = {
 export type DeleteWorkspaceIfQuiescentResult =
   | { status: "deleted"; temporalScheduleCleanups: TemporalScheduleCleanupClaim[] }
   | {
-      status: "not_found" | "only_workspace" | "active_sessions" | "live_sandboxes";
+      status:
+        | "not_found"
+        | "only_workspace"
+        | "active_sessions"
+        | "active_video_generations"
+        | "live_sandboxes";
     };
 
 /**
@@ -1934,6 +1945,30 @@ export async function deleteWorkspaceIfQuiescent(
             .for("update", { noWait: true });
           if (liveAttempts.length > 0) {
             return { status: "active_sessions" as const };
+          }
+
+          // A paid asynchronous video operation owns provider recovery outside
+          // the originating turn. Cascading its row would lose the only stable
+          // job/idempotency identity and could strand an already-paid result.
+          const activeVideoGenerations = await tx
+            .select({ id: schema.videoGenerationOperations.id })
+            .from(schema.videoGenerationOperations)
+            .where(
+              and(
+                eq(schema.videoGenerationOperations.workspaceId, input.workspaceId),
+                inArray(schema.videoGenerationOperations.status, [
+                  "preparing",
+                  "prepared",
+                  "accepted",
+                  "submission_uncertain",
+                  "provider_started",
+                  "retaining",
+                ]),
+              ),
+            )
+            .for("update", { noWait: true });
+          if (activeVideoGenerations.length > 0) {
+            return { status: "active_video_generations" as const };
           }
 
           const leases = await tx
@@ -8789,15 +8824,25 @@ export async function workspaceVercelAiGatewayConnectionActive(
   db: Database,
   workspaceId: string,
 ): Promise<boolean> {
-  const connections = await listConnectionsMetadata(db, workspaceId, null);
-  return connections.some(
-    (connection) =>
-      connection.subjectId === null &&
-      connection.providerDomain === VERCEL_AI_GATEWAY_CONNECTION_DOMAIN &&
-      connection.kind === "api_key" &&
-      connection.status === "active" &&
-      connection.metadata.credentialRole === VERCEL_AI_GATEWAY_CONNECTION_ROLE,
+  return (await getWorkspaceVercelAiGatewayConnectionMetadata(db, workspaceId)) !== null;
+}
+
+/** Metadata-only capability revision input; never selects/decrypts the API key. */
+export async function getWorkspaceVercelAiGatewayConnectionMetadata(
+  db: Database,
+  workspaceId: string,
+): Promise<{ connectionId: string; version: number } | null> {
+  const gatewayConnection = (await listConnectionsMetadata(db, workspaceId, null)).find(
+    (candidate) =>
+      candidate.subjectId === null &&
+      candidate.providerDomain === VERCEL_AI_GATEWAY_CONNECTION_DOMAIN &&
+      candidate.kind === "api_key" &&
+      candidate.status === "active" &&
+      candidate.metadata.credentialRole === VERCEL_AI_GATEWAY_CONNECTION_ROLE,
   );
+  return gatewayConnection
+    ? { connectionId: gatewayConnection.id, version: gatewayConnection.version }
+    : null;
 }
 
 /** Resolve only the reviewed workspace-shared AI Gateway credential shape. */
@@ -8833,6 +8878,66 @@ export async function loadWorkspaceVercelAiGatewayApiKey(
   }
   const apiKey = connection.credential.apiKey;
   return typeof apiKey === "string" && apiKey.trim().length > 0 ? apiKey : null;
+}
+
+/**
+ * Worker-only immutable credential lease for an asynchronous video operation.
+ * The operation copies the already-encrypted credential envelope before its
+ * accepted receipt commits, so a later workspace disconnect cannot strand a
+ * paid provider job. Never expose this return value from an API route.
+ */
+export async function loadWorkspaceVercelAiGatewayCredentialLease(
+  db: Database,
+  settings: Settings,
+  workspaceId: string,
+): Promise<{
+  connectionId: string;
+  version: number;
+  credentialEncrypted: string;
+  apiKey: string;
+} | null> {
+  return await withConnectionSubjectRls(db, workspaceId, null, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.connections)
+      .where(
+        and(
+          eq(schema.connections.workspaceId, workspaceId),
+          isNull(schema.connections.subjectId),
+          sql`lower(${schema.connections.providerDomain}) = lower(${VERCEL_AI_GATEWAY_CONNECTION_DOMAIN})`,
+          eq(schema.connections.kind, "api_key"),
+          eq(schema.connections.status, "active"),
+        ),
+      )
+      .orderBy(desc(schema.connections.updatedAt), desc(schema.connections.id))
+      .limit(1);
+    if (!row || row.metadata.credentialRole !== VERCEL_AI_GATEWAY_CONNECTION_ROLE) return null;
+    const key = environmentsEncryptionKeyBytes(settings);
+    if (!key) {
+      throw new Error(
+        "workspace AI Gateway credential requires OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY",
+      );
+    }
+    let decoded: unknown;
+    try {
+      decoded = JSON.parse(decryptEnvironmentValue(key, row.credentialEncrypted));
+    } catch {
+      // JSON parser errors can quote decrypted plaintext. Never attach them to
+      // a worker error that may be serialized into Temporal history or logs.
+      throw new Error("workspace AI Gateway credential could not be decrypted");
+    }
+    const apiKey =
+      decoded && typeof decoded === "object" && !Array.isArray(decoded)
+        ? (decoded as Record<string, unknown>).apiKey
+        : null;
+    if (typeof apiKey !== "string" || apiKey.trim().length === 0) return null;
+    return {
+      connectionId: row.id,
+      version: row.version,
+      credentialEncrypted: row.credentialEncrypted,
+      apiKey,
+    };
+  });
 }
 
 export async function recordConnectionTokenRefresh(
@@ -24131,6 +24236,11 @@ export async function recordPendingSessionToolCallResult(
   db: Database,
   input: Omit<PendingSessionToolCallInput, "callType" | "callItem"> & {
     resultItem: Record<string, unknown>;
+    /** Commit a durable async-video acceptance fence with this exact result. */
+    videoGenerationAcceptance?: {
+      operationId: string;
+      requestDigest: string;
+    };
   },
 ): Promise<{ accepted: boolean; recorded: boolean }> {
   return await withRlsContext(
@@ -24205,6 +24315,48 @@ export async function recordPendingSessionToolCallResult(
             ),
           )
           .returning({ id: schema.sessionPendingToolCalls.id });
+        if (input.videoGenerationAcceptance) {
+          const [operation] = await tx
+            .select()
+            .from(schema.videoGenerationOperations)
+            .where(
+              and(
+                eq(schema.videoGenerationOperations.workspaceId, input.workspaceId),
+                eq(
+                  schema.videoGenerationOperations.id,
+                  input.videoGenerationAcceptance.operationId,
+                ),
+                eq(
+                  schema.videoGenerationOperations.requestDigest,
+                  input.videoGenerationAcceptance.requestDigest,
+                ),
+              ),
+            )
+            .for("update")
+            .limit(1);
+          if (!operation) throw new Error("Video generation acceptance operation disappeared");
+          await markVideoGenerationAcceptedInTransaction(tx as unknown as Database, {
+            workspaceId: input.workspaceId,
+            operation,
+            toolCallId: input.callId,
+          });
+        } else {
+          // Admission and its accepted tool result are one causal boundary. If
+          // reference preparation (or any other pre-submit work) failed, settle
+          // the still-unaccepted operation in this same result transaction so
+          // quota and managed credits cannot remain reserved.
+          await cancelUnacceptedVideoGenerationsForToolCallsInTransaction(
+            tx as unknown as Database,
+            {
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: input.turnId,
+              toolCallIds: [input.callId],
+              reason: "Video generation failed before it was accepted.",
+              now: new Date(),
+            },
+          );
+        }
         return {
           accepted: true,
           recorded: recorded.length === 1,
@@ -42165,7 +42317,7 @@ function internalUpdateEventMember(update: BoundedSystemUpdate) {
     update.sourceId,
     MAX_INTERNAL_UPDATE_EVENT_SOURCE_BYTES,
   );
-  return {
+  const preview = {
     id: update.id,
     kind: update.kind,
     classification: update.classification,
@@ -42174,6 +42326,11 @@ function internalUpdateEventMember(update: BoundedSystemUpdate) {
     summary: summary.text,
     summaryTruncated: summary.truncated,
   };
+  if (update.kind !== "media_generation_result") return preview;
+  const payload = SessionSystemUpdatePayload.safeParse(update.payload);
+  return payload.success && payload.data.type === "media_generation_result"
+    ? { ...preview, result: payload.data }
+    : preview;
 }
 
 function selectBoundedSystemUpdateBatch<T extends BoundedSystemUpdate>(
@@ -42419,6 +42576,22 @@ export async function claimSessionWorkForAttempt(
                 ),
               ),
             );
+          for (const update of deliverable) {
+            const payload = SessionSystemUpdatePayload.parse(update.payload);
+            if (payload.type !== "media_generation_result") continue;
+            const marked = await markVideoGenerationTerminalUpdateInTransaction(
+              tx as unknown as Database,
+              {
+                workspaceId,
+                operationId: payload.operationId,
+                state: "delivered",
+                updateId: update.id,
+              },
+            );
+            if (!marked) {
+              throw new Error("Video generation terminal update lost its delivery lease");
+            }
+          }
           const eventId = triggerEventId ?? crypto.randomUUID();
           let sequence = nextSequence - 1;
           const events: SessionEventInsertWithPayload[] = [];
@@ -48596,7 +48769,11 @@ export async function addSessionSystemUpdate(
 export async function addSessionSystemUpdateWithSourceMutation(
   db: Database,
   input: AddSessionSystemUpdateInput,
-  mutateSource: (tx: Database, wakeEventId: string | null) => Promise<void>,
+  mutateSource: (
+    tx: Database,
+    wakeEventId: string | null,
+    updateId: string | null,
+  ) => Promise<void>,
 ): Promise<AddSessionSystemUpdateResult> {
   if (Buffer.byteLength(JSON.stringify(input.payload)) > MAX_INTERNAL_UPDATE_BYTES) {
     throw new Error(`Internal update payload exceeds ${MAX_INTERNAL_UPDATE_BYTES} bytes`);
@@ -48623,7 +48800,7 @@ export async function addSessionSystemUpdateWithSourceMutation(
           { workspaceControl: locks.control ?? undefined },
         );
         if (session.status === "cancelled") {
-          await mutateSource(tx as unknown as Database, null);
+          await mutateSource(tx as unknown as Database, null, null);
           return { added: false, reason: "session_cancelled" } as const;
         }
 
@@ -48687,7 +48864,7 @@ export async function addSessionSystemUpdateWithSourceMutation(
             )
             .limit(1);
           if (!pendingEvent) throw new Error("System-update pending event disappeared");
-          await mutateSource(tx as unknown as Database, pendingEvent.id);
+          await mutateSource(tx as unknown as Database, pendingEvent.id, existing.id);
           return {
             added: false,
             reason: "duplicate",
@@ -48729,7 +48906,7 @@ export async function addSessionSystemUpdateWithSourceMutation(
           )
           .returning();
         if (!event) throw new Error("Failed to create system-update pending event");
-        await mutateSource(tx as unknown as Database, event.id);
+        await mutateSource(tx as unknown as Database, event.id, inserted.id);
         const realtimeActive = await sessionRealtimeIsActiveInTransaction(
           tx as unknown as Database,
           input.workspaceId,

@@ -107,7 +107,7 @@ FROM base AS worker
 # than only inside the sandbox. The daemon remains outside this image.
 USER root
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates curl gnupg python3 \
+  && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg gnupg python3 \
   && install -m 0755 -d /etc/apt/keyrings \
   && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
   && chmod a+r /etc/apt/keyrings/docker.asc \

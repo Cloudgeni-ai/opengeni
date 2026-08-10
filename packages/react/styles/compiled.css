@@ -472,6 +472,7 @@
     --ease-out: cubic-bezier(0, 0, 0.2, 1);
     --blur-sm: 8px;
     --blur-md: 12px;
+    --aspect-video: 16 / 9;
     --default-transition-duration: 150ms;
     --default-transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
     --color-og-surface-1: var(--og-color-surface-1);
@@ -837,6 +838,9 @@
 :where(.og-root).table,:where(.og-root) .table {
     display: table;
   }
+:where(.og-root).aspect-video,:where(.og-root) .aspect-video {
+    aspect-ratio: var(--aspect-video);
+  }
 :where(.og-root).size-1,:where(.og-root) .size-1 {
     width: calc(var(--spacing) * 1);
     height: calc(var(--spacing) * 1);
@@ -981,6 +985,9 @@
   }
 :where(.og-root).max-h-80,:where(.og-root) .max-h-80 {
     max-height: calc(var(--spacing) * 80);
+  }
+:where(.og-root).max-h-\[32rem\],:where(.og-root) .max-h-\[32rem\] {
+    max-height: 32rem;
   }
 :where(.og-root).max-h-\[82vh\],:where(.og-root) .max-h-\[82vh\] {
     max-height: 82vh;
@@ -1538,6 +1545,9 @@
 :where(.og-root).rounded-md,:where(.og-root) .rounded-md {
     border-radius: var(--og-radius-md);
   }
+:where(.og-root).rounded-none,:where(.og-root) .rounded-none {
+    border-radius: 0;
+  }
 :where(.og-root).rounded-og-lg,:where(.og-root) .rounded-og-lg {
     border-radius: var(--og-radius-lg);
   }
@@ -1821,6 +1831,9 @@
       border-color: color-mix(in oklab, var(--color-white) 15%, transparent);
     }
   }
+:where(.og-root).bg-black,:where(.og-root) .bg-black {
+    background-color: var(--color-black);
+  }
 :where(.og-root).bg-black\/5,:where(.og-root) .bg-black\/5 {
     background-color: color-mix(in srgb, #000 5%, transparent);
     @supports (color: color-mix(in lab, red, red)) {
@@ -1931,6 +1944,12 @@
   }
 :where(.og-root).bg-og-status-failed,:where(.og-root) .bg-og-status-failed {
     background-color: var(--og-color-status-failed);
+  }
+:where(.og-root).bg-og-status-failed\/5,:where(.og-root) .bg-og-status-failed\/5 {
+    background-color: var(--og-color-status-failed);
+    @supports (color: color-mix(in lab, red, red)) {
+      background-color: color-mix(in oklab, var(--og-color-status-failed) 5%, transparent);
+    }
   }
 :where(.og-root).bg-og-status-failed\/8,:where(.og-root) .bg-og-status-failed\/8 {
     background-color: var(--og-color-status-failed);
@@ -2720,6 +2739,10 @@
   }
 :where(.og-root).shadow-md,:where(.og-root) .shadow-md {
     --tw-shadow: 0 4px 6px -1px var(--tw-shadow-color, rgb(0 0 0 / 0.1)), 0 2px 4px -2px var(--tw-shadow-color, rgb(0 0 0 / 0.1));
+    box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
+  }
+:where(.og-root).shadow-none,:where(.og-root) .shadow-none {
+    --tw-shadow: 0 0 #0000;
     box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
   }
 :where(.og-root).shadow-og-glow,:where(.og-root) .shadow-og-glow {

@@ -93,6 +93,7 @@ export const FORCE_RLS_TABLES = [
   "file_uploads",
   "files",
   "generated_image_artifacts",
+  "generated_video_artifacts",
   "github_installation_repositories",
   "github_installations",
   "host_export_config",
@@ -188,6 +189,8 @@ export const FORCE_RLS_TABLES = [
   "transcription_recording_segments",
   "transcription_recordings",
   "usage_events",
+  "video_generation_operations",
+  "video_generation_references",
   "workspace_artifact_events",
   "workspace_artifact_versions",
   "workspace_artifacts",
@@ -209,6 +212,8 @@ export const FORCE_RLS_TABLES = [
   "workspace_session_activity_revisions",
   "workspace_variable_set_variables",
   "workspace_variable_sets",
+  "workspace_video_generation_policies",
+  "workspace_video_generation_quotas",
 ] as const;
 
 /**
@@ -268,6 +273,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "file_uploads",
   "files",
   "generated_image_artifacts",
+  "generated_video_artifacts",
   "github_installation_repositories",
   "github_installations",
   "image_generation_operations",
@@ -337,6 +343,8 @@ export const RUNTIME_FULL_DML_TABLES = [
   "transcription_recording_segments",
   "transcription_recordings",
   "usage_events",
+  "video_generation_operations",
+  "video_generation_references",
   "workspace_artifacts",
   "workspace_captures",
   "workspace_control_events",
@@ -349,6 +357,8 @@ export const RUNTIME_FULL_DML_TABLES = [
   "workspace_session_activity_revisions",
   "workspace_variable_set_variables",
   "workspace_variable_sets",
+  "workspace_video_generation_policies",
+  "workspace_video_generation_quotas",
   "workspaces",
 ] as const;
 

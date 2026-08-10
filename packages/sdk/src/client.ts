@@ -118,6 +118,11 @@ import type {
   RetainedArtifactContent,
   RetainedArtifactContentOptions,
   RetainedArtifactMetadata,
+  UpdateVideoGenerationPolicyRequest,
+  VideoArtifactPlaybackSource,
+  VideoGenerationOperationSummary,
+  VideoGenerationPolicy,
+  WorkspaceVideoGenerationSettings,
   RegisterCapabilityPackRequest,
   ResourceRef,
   ScheduledTask,
@@ -237,6 +242,7 @@ import type {
   SocialConnection,
   SocialOAuthStartRequest,
 } from "./types";
+import { GENERATED_VIDEO_MAX_BYTES } from "./types";
 import { parseRetainedGeneratedImageReference } from "./retained-artifacts";
 import type {
   ActivateWorkspaceInstructionPolicyRequest,
@@ -3314,6 +3320,69 @@ export class OpenGeniClient {
     );
   }
 
+  // --- Video generation ---------------------------------------------------------------
+
+  /** Read the effective workspace policy and executable Seedance capabilities. */
+  async getVideoGenerationSettings(
+    workspaceId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<WorkspaceVideoGenerationSettings> {
+    return await this.requestJson<WorkspaceVideoGenerationSettings>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/video-generation`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  /** Replace the enabled video models/default under optimistic policy revision control. */
+  async updateVideoGenerationPolicy(
+    workspaceId: string,
+    request: UpdateVideoGenerationPolicyRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<VideoGenerationPolicy> {
+    return await this.requestJson<VideoGenerationPolicy>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/video-generation/policy`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  /** Read durable progress for one accepted video generation operation. */
+  async getVideoGenerationOperation(
+    workspaceId: string,
+    operationId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<VideoGenerationOperationSummary> {
+    return await this.requestJson<VideoGenerationOperationSummary>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/video-generation/operations/${operationId}`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  /** Mint a short-lived zero-copy URL for native Range-based video playback. */
+  async createVideoArtifactPlaybackSource(
+    workspaceId: string,
+    artifactId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<VideoArtifactPlaybackSource> {
+    const source = await this.requestJson<VideoArtifactPlaybackSource>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/artifacts/${artifactId}/playback-source`,
+      undefined,
+      {},
+      options,
+    );
+    assertSafeVideoArtifactPlaybackSource(source, artifactId);
+    return source;
+  }
+
   // --- Documents ----------------------------------------------------------------------
 
   async createDocumentBase(
@@ -4451,6 +4520,26 @@ function assertSafeArtifactDownloadUrl(value: FileDownloadUrlResponse): void {
   if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) {
     throw new OpenGeniApiError(502, "retained artifact download URL is unsafe");
   }
+}
+
+function assertSafeVideoArtifactPlaybackSource(
+  value: VideoArtifactPlaybackSource,
+  expectedArtifactId: string,
+): void {
+  if (
+    !value ||
+    value.schemaVersion !== 1 ||
+    value.artifactId !== expectedArtifactId ||
+    value.contentType !== "video/mp4" ||
+    value.acceptRanges !== "bytes" ||
+    !Number.isSafeInteger(value.sizeBytes) ||
+    value.sizeBytes <= 0 ||
+    value.sizeBytes > GENERATED_VIDEO_MAX_BYTES ||
+    !/^[0-9a-f]{64}$/.test(value.sha256)
+  ) {
+    throw new OpenGeniApiError(502, "generated-video playback source is invalid");
+  }
+  assertSafeArtifactDownloadUrl({ url: value.url, expiresAt: value.expiresAt });
 }
 
 function parseBoundedContentLength(value: string | null): number | null {

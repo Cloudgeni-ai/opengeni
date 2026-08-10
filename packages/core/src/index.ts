@@ -68,6 +68,8 @@ export * from "./domain/memory-slack-publication";
 export * from "./domain/company-profile-durable-learning-adapter";
 export * from "./domain/slack-bot";
 export * from "./domain/workspace-members";
+export * from "./domain/video-generation";
+export * from "./domain/video-generation-capabilities";
 export * from "./application/new-session-drafts";
 export * from "./application/session-commands";
 

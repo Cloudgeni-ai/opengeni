@@ -34,6 +34,10 @@
       "types": "./src/connector-destinations.ts",
       "default": "./src/connector-destinations.ts"
     },
+    "./video-generation": {
+      "types": "./src/video-generation.ts",
+      "default": "./src/video-generation.ts"
+    },
     "./editable-artifacts": {
       "types": "./src/editable-artifacts.ts",
       "default": "./src/editable-artifacts.ts"
