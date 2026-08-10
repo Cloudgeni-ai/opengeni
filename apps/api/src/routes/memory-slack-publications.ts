@@ -5,6 +5,7 @@ import {
   MemorySlackPublicationHistoryResponse,
   SlackPublicationChannelListResponse,
   UpdateMemorySlackPublicationConfigurationRequest,
+  type MemorySlackPublication as MemorySlackPublicationRecord,
 } from "@opengeni/contracts";
 import {
   actOnMemorySlackPublication,
@@ -17,6 +18,7 @@ import {
 import {
   openGeniSlackBotMetadata,
   requireAccessGrant,
+  sanitizeSlackPublicationText,
   validateOpenGeniSlackBotConnectionSelection,
   type ApiRouteDeps,
 } from "@opengeni/core";
@@ -166,7 +168,12 @@ export function registerMemorySlackPublicationRoutes(app: Hono, deps: ApiRouteDe
     await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     const publications = await listMemorySlackPublications(deps.db, workspaceId, { limit: 50 });
     c.header("cache-control", "private, no-store");
-    return c.json(MemorySlackPublicationHistoryResponse.parse({ publications, nextCursor: null }));
+    return c.json(
+      MemorySlackPublicationHistoryResponse.parse({
+        publications: publications.map(sanitizeMemorySlackPublicationHistory),
+        nextCursor: null,
+      }),
+    );
   });
 
   app.post(`${base}/:publicationId/action`, async (c) => {
@@ -196,6 +203,14 @@ export function registerMemorySlackPublicationRoutes(app: Hono, deps: ApiRouteDe
         operationId: publication.receipts.at(-1)?.operationId ?? null,
       },
     });
-    return c.json(MemorySlackPublication.parse(publication));
+    return c.json(MemorySlackPublication.parse(sanitizeMemorySlackPublicationHistory(publication)));
   });
+}
+
+/** Defensively protects legacy rows without rewriting their durable projection. */
+export function sanitizeMemorySlackPublicationHistory(
+  publication: MemorySlackPublicationRecord,
+): MemorySlackPublicationRecord {
+  const summary = sanitizeSlackPublicationText(publication.summary);
+  return summary === publication.summary ? publication : { ...publication, summary };
 }

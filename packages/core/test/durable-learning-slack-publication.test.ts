@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   durableLearningImportance,
+  durableLearningSlackProjection,
   publishDurableLearningOutcomeToSlack,
   type DurableLearningSlackOutcome,
 } from "../src";
@@ -47,6 +48,37 @@ describe("governed-learning Slack adapter", () => {
     expect(durableLearningImportance(outcome())).toBe("major");
     expect(durableLearningImportance(outcome({ outcome: "failed" }))).toBe("major");
     expect(durableLearningImportance(outcome({ outcome: "noop" }))).toBe("minor");
+  });
+
+  test("omits credential-shaped summary and destination from the persisted projection", () => {
+    const syntheticCredential = `github_pat_${"B".repeat(32)}`;
+    const input = outcome();
+    if (input.attempt.request.operation !== "write") throw new Error("expected write fixture");
+    input.attempt.request.subject.summary = `Adopt api_key=${syntheticCredential} for the rollout.`;
+    input.receipt.decision.destination = `workspace_memory?token=${syntheticCredential}`;
+
+    const projection = durableLearningSlackProjection(input);
+    expect(projection).not.toBeNull();
+    expect(input.attempt.request.subject.summary).toContain(syntheticCredential);
+    expect(input.receipt.decision.destination).toContain(syntheticCredential);
+    expect(JSON.stringify(projection)).not.toContain(syntheticCredential);
+    expect(projection?.summary).toContain("[credential omitted]");
+    expect(projection?.destination).toContain("[credential omitted]");
+  });
+
+  test("omits credential-shaped rollback destinations from both projection fields", () => {
+    const syntheticCredential = `xoxb-${"C".repeat(32)}`;
+    const input = outcome();
+    input.attempt.request = {
+      operation: "rollback",
+      targetAttemptId: "55555555-5555-4555-8555-555555555555",
+    };
+    input.receipt.decision.destination = `governed knowledge ${syntheticCredential}`;
+
+    const projection = durableLearningSlackProjection(input);
+    expect(JSON.stringify(projection)).not.toContain(syntheticCredential);
+    expect(projection?.summary).toContain("[credential omitted]");
+    expect(projection?.destination).toContain("[credential omitted]");
   });
 
   test("fails before storage for mismatched, non-workspace, or connector-derived outcomes", async () => {

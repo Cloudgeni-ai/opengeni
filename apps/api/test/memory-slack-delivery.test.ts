@@ -102,4 +102,39 @@ describe("Memory Slack delivery projection", () => {
     expect(text).toContain("&lt;!channel&gt;");
     expect(text).toContain("&amp; owners");
   });
+
+  test("omits credential-shaped fields from final human and service Slack messages", () => {
+    const syntheticCredential = `github_pat_${"D".repeat(32)}`;
+    const cases = [
+      publication({
+        initiatorKind: "human",
+        initiatorSubjectId: "human:owner",
+        initiatingHumanSubjectId: "human:owner",
+        projection: {
+          summary: `Rotate api_key=${syntheticCredential}`,
+          changeKind: "corrected",
+          ownerLabel: `Owner access_token=${syntheticCredential}`,
+        },
+      }),
+      publication({
+        sourceType: "durable_learning",
+        initiatorKind: "service",
+        initiatorSubjectId: "goal-continuation",
+        initiatingHumanSubjectId: "human:causal-owner",
+        projection: {
+          summary: `Governed write used Bearer ${syntheticCredential}`,
+          outcome: "applied",
+          destination: `workspace_memory?token=${syntheticCredential}`,
+        },
+      }),
+    ];
+
+    for (const item of cases) {
+      const text = formatMemorySlackPublicationMessage({ settings: testSettings() }, item);
+      expect(text).not.toContain(syntheticCredential);
+      expect(text).toContain("[credential omitted]");
+      expect(text).not.toContain(item.initiatorSubjectId);
+      expect(text).not.toContain(item.initiatingHumanSubjectId ?? "never");
+    }
+  });
 });

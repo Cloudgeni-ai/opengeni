@@ -26,6 +26,15 @@ closed for connector evidence because the v1 contract cannot prove that the
 connector was not Slack. It never publishes from an authority-adapter callback
 or router claim table.
 
+Both source paths pass only their allowlisted summary/owner/destination text
+through the deterministic sink-local credential-shape boundary in
+`packages/core/src/domain/slack-publication-secret-safety.ts` before the
+projection is hashed or persisted. The final Slack formatter applies the same
+boundary again before escaping and truncation as defense in depth. Recognized
+credential forms are replaced with a fixed omission marker; canonical Memory,
+durable-learning attempts/receipts, model history, events, and other internal
+OpenGeni content remain exact and are never rewritten by this boundary.
+
 ## Immutable configuration
 
 Workspace administrators configure the feature on the Capabilities page:
@@ -94,8 +103,11 @@ and forced workspace row-level security.
 Slack copy contains only the allowlisted summary, importance, optional owner,
 occurrence time, governed destination/outcome where applicable, and a link back
 to the authoritative OpenGeni Memory or Workspace State view. It excludes raw
-Memory content, durable-learning subject content, evidence, prompts, credentials,
-and actor identifiers.
+Memory content, non-projected durable-learning subject content, evidence,
+prompts, credential-shaped values, and actor identifiers. The same sanitized
+summary is used by the persisted publication row and bounded delivery-history
+projection, so review and history surfaces cannot reveal a value removed at the
+Slack boundary.
 
 The Capabilities page exposes the recent publication state, attempt count,
 bounded error code, timestamp, and latest receipt. Workspace administrators can

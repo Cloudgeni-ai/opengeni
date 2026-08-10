@@ -4,6 +4,7 @@ import {
   type Database,
   type EnqueueMemorySlackPublicationResult,
 } from "@opengeni/db";
+import { sanitizeSlackPublicationText } from "./slack-publication-secret-safety";
 
 /**
  * Narrow post-persistence port for the immutable durable-learning v1 attempt/receipt contract.
@@ -73,6 +74,16 @@ export type DurableLearningSlackPublicationResult =
     }
   | { kind: "enqueued"; enqueue: EnqueueMemorySlackPublicationResult };
 
+export type DurableLearningSlackProjection = {
+  summary: string;
+  outcome: DurableLearningSlackOutcome["receipt"]["outcome"];
+  decisionCode: string;
+  destination: string | null;
+  authority: string | null;
+  resource: DurableLearningSlackOutcome["receipt"]["resource"];
+  occurredAt: string;
+};
+
 export async function publishDurableLearningOutcomeToSlack(
   db: Database,
   outcome: DurableLearningSlackOutcome,
@@ -93,8 +104,8 @@ export async function publishDurableLearningOutcomeToSlack(
     return { kind: "connector_evidence_untrusted", enqueue: null };
   }
 
-  const summary = durableLearningSummary(outcome);
-  if (!summary) return { kind: "summary_required", enqueue: null };
+  const projection = durableLearningSlackProjection(outcome);
+  if (!projection) return { kind: "summary_required", enqueue: null };
   const importance = durableLearningImportance(outcome);
   const configuration = await getCurrentMemorySlackPublicationConfiguration(
     db,
@@ -116,22 +127,7 @@ export async function publishDurableLearningOutcomeToSlack(
     sourceId: receipt.attemptId,
     sourceVersion: receipt.inputHash,
     sourceIdempotencyKey: `durable-learning:${receipt.attemptId}`,
-    projection: {
-      summary,
-      outcome: receipt.outcome,
-      decisionCode: receipt.decision.code,
-      destination: receipt.decision.destination,
-      authority: receipt.decision.authority,
-      resource: receipt.resource
-        ? {
-            surface: receipt.resource.surface,
-            id: receipt.resource.id,
-            version: receipt.resource.version,
-            status: receipt.resource.status,
-          }
-        : null,
-      occurredAt: receipt.createdAt,
-    },
+    projection,
     importance,
     deliveryMode,
     actor: {
@@ -165,11 +161,42 @@ export function durableLearningImportance(
   return "normal";
 }
 
+export function durableLearningSlackProjection(
+  outcome: DurableLearningSlackOutcome,
+): DurableLearningSlackProjection | null {
+  const summary = durableLearningSummary(outcome);
+  if (!summary) return null;
+  return {
+    summary,
+    outcome: outcome.receipt.outcome,
+    decisionCode: outcome.receipt.decision.code,
+    destination: boundedSlackPublicationText(outcome.receipt.decision.destination, 128),
+    authority: outcome.receipt.decision.authority,
+    resource: outcome.receipt.resource
+      ? {
+          surface: outcome.receipt.resource.surface,
+          id: outcome.receipt.resource.id,
+          version: outcome.receipt.resource.version,
+          status: outcome.receipt.resource.status,
+        }
+      : null,
+    occurredAt: outcome.receipt.createdAt,
+  };
+}
+
 function durableLearningSummary(outcome: DurableLearningSlackOutcome): string | null {
   if (outcome.attempt.request.operation === "rollback") {
-    const destination = outcome.receipt.decision.destination ?? "governed knowledge";
+    const destination =
+      boundedSlackPublicationText(outcome.receipt.decision.destination, 128) ??
+      "governed knowledge";
     return `Rolled back a durable learning change for ${destination}.`;
   }
   const summary = outcome.attempt.request.subject.summary?.replace(/\s+/g, " ").trim();
-  return summary ? summary.slice(0, 512) : null;
+  return summary ? sanitizeSlackPublicationText(summary).slice(0, 512) : null;
+}
+
+function boundedSlackPublicationText(value: string | null, maxChars: number): string | null {
+  if (!value) return null;
+  const sanitized = sanitizeSlackPublicationText(value.replace(/\s+/g, " ").trim());
+  return sanitized ? sanitized.slice(0, maxChars) : null;
 }

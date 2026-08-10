@@ -6,7 +6,7 @@ import {
   failMemorySlackPublication,
   type ClaimedMemorySlackPublication,
 } from "@opengeni/db";
-import type { ApiRouteDeps } from "@opengeni/core";
+import { sanitizeSlackPublicationText, type ApiRouteDeps } from "@opengeni/core";
 import {
   createOpenGeniSlackBotInteractionClient,
   SlackBotProviderError,
@@ -178,7 +178,9 @@ function deliveryErrorCode(error: unknown) {
 }
 
 function boundedProjectionString(value: unknown, maxChars: number) {
-  return typeof value === "string" ? escapeSlackText(value.slice(0, maxChars)) : "";
+  return typeof value === "string"
+    ? escapeSlackText(sanitizeSlackPublicationText(value).slice(0, maxChars))
+    : "";
 }
 
 function escapeSlackText(value: string) {
