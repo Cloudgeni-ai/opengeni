@@ -18,6 +18,7 @@ export function PersonalSlackAccountCard({
   canManage,
   busy,
   accountState,
+  embedded = false,
   onConnect,
   onReconnect,
   onDisconnect,
@@ -26,6 +27,7 @@ export function PersonalSlackAccountCard({
   canManage: boolean;
   busy: boolean;
   accountState: PersonalSlackAccountState;
+  embedded?: boolean;
   onConnect: () => void;
   onReconnect: () => void;
   onDisconnect: () => void;
@@ -40,77 +42,45 @@ export function PersonalSlackAccountCard({
 
   return (
     <section
-      className="rounded-xl border border-brand/25 bg-brand/[0.035] p-4"
-      aria-labelledby="personal-slack-heading"
+      className={cn(!embedded && "rounded-lg border border-border bg-bg/40 p-3")}
+      aria-label={embedded ? "Personal Slack access" : undefined}
+      aria-labelledby={embedded ? undefined : "personal-slack-heading"}
     >
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="flex min-w-0 items-start gap-3">
-          <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-brand/10 text-brand">
-            <UserRoundIcon className="size-4" />
-          </span>
+      {embedded ? (
+        <div
+          className={cn(
+            "flex items-center gap-1.5 text-xs font-medium",
+            view.attention ? "text-status-waiting" : "text-fg-muted",
+          )}
+        >
+          <view.Icon className={cn("size-4 shrink-0", !view.attention && "text-brand")} />
+          {view.label}
+        </div>
+      ) : (
+        <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2">
-              <h3 id="personal-slack-heading" className="text-sm font-semibold text-fg">
-                Your Slack account
-              </h3>
-              <span className="rounded-full border border-brand/20 bg-brand/10 px-2 py-0.5 text-2xs font-medium text-brand">
-                Personal · only you
-              </span>
-            </div>
+            <h3 id="personal-slack-heading" className="text-sm font-semibold text-fg">
+              Personal Slack access
+            </h3>
             <p className="mt-1 max-w-xl text-xs leading-5 text-fg-muted">
-              Authorize your own Slack identity for interactive tools. Messages act as you using
-              @OpenGeni; workspace bot installations and scheduled tasks never borrow this grant.
+              Let agents use Slack as you. This connection belongs only to your account.
             </p>
           </div>
-        </div>
-      </div>
-
-      <div
-        className={cn(
-          "mt-4 rounded-lg border p-3",
-          view.attention
-            ? "border-status-waiting/30 bg-status-waiting/5"
-            : "border-border bg-bg/55",
-        )}
-      >
-        <div className="flex items-start gap-3">
-          <view.Icon
+          <div
             className={cn(
-              "mt-0.5 size-5 shrink-0",
-              view.attention ? "text-status-waiting" : "text-brand",
+              "flex shrink-0 items-center gap-1.5 text-xs font-medium",
+              view.attention ? "text-status-waiting" : "text-fg-muted",
             )}
-          />
-          <div className="min-w-0">
-            <p className="text-sm font-semibold text-fg">{view.label}</p>
-            <p className="mt-0.5 text-xs leading-5 text-fg-muted">{view.description}</p>
+          >
+            <view.Icon className={cn("size-4 shrink-0", !view.attention && "text-brand")} />
+            {view.label}
           </div>
         </div>
-      </div>
+      )}
 
-      {connection ? (
-        <details className="group mt-3 border-t border-border/70 pt-3">
-          <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 text-2xs text-fg-subtle transition-colors hover:text-fg-muted">
-            <ShieldCheckIcon className="size-3" />
-            <span>Personal authorization details</span>
-          </summary>
-          <dl className="mt-3 grid gap-2 rounded-md bg-bg/50 p-3 text-2xs">
-            <ConnectionFact label="Ownership">Only your signed-in OpenGeni identity</ConnectionFact>
-            <ConnectionFact label="Granted scopes">
-              {connection.grantedScopes.length > 0
-                ? connection.grantedScopes.join(", ")
-                : "Provider-managed; none reported"}
-            </ConnectionFact>
-            <ConnectionFact label="Last used">
-              {formatConnectionDate(connection.lastUsedAt)}
-            </ConnectionFact>
-            <ConnectionFact label="Access expiry">
-              {formatConnectionDate(connection.expiresAt)}
-            </ConnectionFact>
-          </dl>
-        </details>
-      ) : null}
+      <p className="mt-2 text-xs leading-5 text-fg-muted">{view.description}</p>
 
-      <div className="mt-4 flex flex-wrap items-center gap-2">
+      <div className="mt-3 flex flex-wrap items-center gap-2">
         {accountState.state === "not_connected" ? (
           <Button type="button" disabled={!canManage || !canStartOAuth || busy} onClick={onConnect}>
             {busy ? <Loader2Icon className="animate-spin" /> : <UserRoundIcon />}
@@ -148,6 +118,29 @@ export function PersonalSlackAccountCard({
           Connection management permission is required to change this personal link.
         </p>
       ) : null}
+
+      {connection ? (
+        <details className="group mt-3 border-t border-border/70 pt-3">
+          <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 text-2xs text-fg-subtle transition-colors hover:text-fg-muted">
+            <ShieldCheckIcon className="size-3" />
+            <span>Connection details</span>
+          </summary>
+          <dl className="mt-3 grid gap-2 rounded-md bg-bg/50 p-3 text-2xs">
+            <ConnectionFact label="Owner">Your account only</ConnectionFact>
+            <ConnectionFact label="Permissions">
+              {connection.grantedScopes.length > 0
+                ? connection.grantedScopes.join(", ")
+                : "Managed by Slack"}
+            </ConnectionFact>
+            <ConnectionFact label="Last used">
+              {formatConnectionDate(connection.lastUsedAt)}
+            </ConnectionFact>
+            <ConnectionFact label="Expires">
+              {formatConnectionDate(connection.expiresAt)}
+            </ConnectionFact>
+          </dl>
+        </details>
+      ) : null}
     </section>
   );
 }
@@ -182,7 +175,7 @@ function personalSlackStateView(
     case "not_connected":
       return {
         label: "Not connected",
-        description: "Connect intentionally when you want agents to use your own Slack identity.",
+        description: "Connect only when an agent needs to work through your Slack account.",
         attention: false,
         Icon: UserRoundIcon,
       };
@@ -191,13 +184,13 @@ function personalSlackStateView(
         ? {
             label: "Connected · refresh pending",
             description:
-              "The access token reached its expiry time. OpenGeni will refresh it automatically on use; reconnect only if Slack rejects that refresh.",
+              "OpenGeni will refresh this connection automatically when it is next used.",
             attention: false,
             Icon: Clock3Icon,
           }
         : {
             label: "Connected",
-            description: "Your subject-owned Slack authorization is ready for interactive use.",
+            description: "Agents can use your Slack identity when a task needs it.",
             attention: false,
             Icon: CheckCircle2Icon,
           };
@@ -206,18 +199,17 @@ function personalSlackStateView(
         label: "Reconnect required",
         description:
           state.reason === "expired"
-            ? "The authorization expired and could not be refreshed. Reconnect your Slack account to restore access."
+            ? "The connection expired. Reconnect it to restore access."
             : state.reason === "provider_rejected"
-              ? "Slack no longer accepts this authorization. Reconnect your account to restore access."
-              : "OpenGeni could not use this authorization. Reconnect rather than reusing stale credentials.",
+              ? "Slack no longer accepts this connection. Reconnect it to restore access."
+              : "OpenGeni could not use this connection. Reconnect it to restore access.",
         attention: true,
         Icon: AlertTriangleIcon,
       };
     case "disconnected":
       return {
         label: "Disconnected",
-        description:
-          "OpenGeni no longer uses this personal grant. Reconnect to use your Slack identity again.",
+        description: "Reconnect when you want agents to use your Slack identity again.",
         attention: false,
         Icon: UnplugIcon,
       };

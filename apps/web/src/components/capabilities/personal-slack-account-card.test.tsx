@@ -86,7 +86,10 @@ describe("PersonalSlackAccountCard", () => {
       accessTokenRefreshDue: false,
     });
     try {
-      expect(rendered.container.textContent).toContain("Personal · only you");
+      expect(rendered.container.textContent).toContain("Personal Slack access");
+      expect(rendered.container.textContent).toContain(
+        "This connection belongs only to your account",
+      );
       expect(rendered.container.textContent).toContain("Connected");
       expect(rendered.container.textContent).toContain("search:read.public, chat:write");
       expect(rendered.container.textContent).not.toContain("11111111-1111-4111-8111-111111111111");
@@ -115,7 +118,9 @@ describe("PersonalSlackAccountCard", () => {
     });
     try {
       expect(refreshPending.container.textContent).toContain("Connected · refresh pending");
-      expect(refreshPending.container.textContent).toContain("refresh it automatically on use");
+      expect(refreshPending.container.textContent).toContain(
+        "refresh this connection automatically",
+      );
     } finally {
       await refreshPending.unmount();
     }
@@ -127,7 +132,7 @@ describe("PersonalSlackAccountCard", () => {
     });
     try {
       expect(reconnect.container.textContent).toContain("Reconnect required");
-      expect(reconnect.container.textContent).toContain("expired and could not be refreshed");
+      expect(reconnect.container.textContent).toContain("connection expired");
     } finally {
       await reconnect.unmount();
     }

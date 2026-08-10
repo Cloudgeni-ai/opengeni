@@ -1168,83 +1168,66 @@ export function CapabilitiesRoute({
         <section className="mt-6" aria-labelledby="slack-connections-heading">
           <div>
             <h2 id="slack-connections-heading" className="text-sm font-semibold text-fg">
-              Slack connections
+              Slack
             </h2>
-            <p className="mt-1 max-w-3xl text-xs leading-5 text-fg-muted">
-              Personal account linking and workspace bot installation are separate principals.
-              Connecting one never exposes, replaces, or reuses the other's credentials.
+            <p className="mt-1 text-xs text-fg-muted">
+              Ask OpenGeni questions and start work without leaving Slack.
             </p>
           </div>
 
-          <div className="mt-3 grid gap-4 xl:grid-cols-2">
-            <PersonalSlackAccountCard
-              available={personalSlackItem !== null}
-              canManage={canManagePersonalSlack}
-              busy={personalSlackBusy}
-              accountState={personalSlackStatus}
-              onConnect={() => void startPersonalSlackOAuth()}
-              onReconnect={() => void startPersonalSlackOAuth()}
-              onDisconnect={() => setPersonalSlackDisconnectOpen(true)}
-            />
-
-            <section
-              className="rounded-xl border border-border bg-surface p-4"
-              aria-labelledby="workspace-slack-bot-heading"
-            >
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div className="flex min-w-0 items-start gap-3">
-                  <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-fg-muted/10 text-fg-muted">
-                    <Building2Icon className="size-4" />
-                  </span>
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <h3
-                        id="workspace-slack-bot-heading"
-                        className="text-sm font-semibold text-fg"
-                      >
-                        OpenGeni workspace bot
-                      </h3>
-                      <span className="rounded-full border border-border bg-bg px-2 py-0.5 text-2xs font-medium text-fg-muted">
-                        Workspace shared · bot identity
-                      </span>
-                    </div>
-                    <p className="mt-1 max-w-xl text-xs leading-5 text-fg-muted">
-                      Install a separate bot principal for first-party Slack tools and explicitly
-                      bound scheduled tasks. Linked users can mention @OpenGeni in a member channel,
-                      run /opengeni, DM the bot, or use the Open in OpenGeni message shortcut. A
-                      shortcut from a human DM creates a private task and continues in the invoking
-                      user's bot DM; it never joins or exposes workspace output in the source DM. It
-                      never uses a person's Slack OAuth grant.
-                    </p>
-                  </div>
+          <section
+            className="mt-3 rounded-xl border border-border bg-surface p-4"
+            aria-labelledby="workspace-slack-bot-heading"
+          >
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="flex min-w-0 items-start gap-3">
+                <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-brand/10 text-brand">
+                  <Building2Icon className="size-4" />
+                </span>
+                <div className="min-w-0">
+                  <h3 id="workspace-slack-bot-heading" className="text-sm font-semibold text-fg">
+                    OpenGeni in Slack
+                  </h3>
+                  <p className="mt-1 max-w-xl text-xs leading-5 text-fg-muted">
+                    Use mentions, /opengeni, DMs and message shortcuts.
+                  </p>
                 </div>
               </div>
+            </div>
 
-              {slackBotConnection && slackBotMetadata ? (
-                <>
-                  <div className="mt-4 flex items-start gap-3 rounded-lg border border-brand/20 bg-brand/5 p-3">
-                    <CheckCircle2Icon className="mt-0.5 size-5 shrink-0 text-brand" />
-                    <div>
-                      <p className="text-sm font-semibold text-fg">
-                        {slackBotConnection.status === "active"
-                          ? `Installed in ${slackBotMetadata.slackTeamName}`
-                          : `Reinstall needed for ${slackBotMetadata.slackTeamName}`}
-                      </p>
-                      <p className="mt-0.5 text-xs text-fg-muted">
-                        {slackBotConnection.status === "active"
-                          ? "The workspace bot is ready to use in this Slack workspace."
-                          : "Reinstall the workspace bot to restore its Slack access."}
-                      </p>
-                    </div>
+            {slackBotConnection && slackBotMetadata ? (
+              <>
+                <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-brand/20 bg-brand/5 p-3">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2Icon className="size-4 shrink-0 text-brand" />
+                    <p className="text-sm font-medium text-fg">
+                      {slackBotConnection.status === "active"
+                        ? `Connected to ${slackBotMetadata.slackTeamName}`
+                        : `${slackBotMetadata.slackTeamName} needs to be reconnected`}
+                    </p>
                   </div>
+                  {slackBotConnection.status !== "active" ? (
+                    <SlackBotInstallControls
+                      canInstall={canInstallSlackBot}
+                      hasConnection
+                      busy={slackBotBusy}
+                      onInstall={(createNewConnection) => void installSlackBot(createNewConnection)}
+                    />
+                  ) : null}
+                </div>
 
-                  <div className="mt-3 rounded-lg border border-border bg-bg/40 p-3">
+                <details className="group mt-3 rounded-lg border border-border bg-bg/30 p-3">
+                  <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-xs font-medium text-fg">
+                    <span>Settings</span>
+                    <ChevronDownIcon className="size-3.5 text-fg-subtle transition-transform group-open:rotate-180" />
+                  </summary>
+                  <div className="mt-3 border-t border-border/70 pt-3">
                     <div className="flex flex-wrap items-end justify-between gap-3">
                       <div>
-                        <p className="text-xs font-semibold text-fg">Slack knowledge destination</p>
+                        <p className="text-xs font-semibold text-fg">Knowledge from Slack</p>
                         <p className="mt-1 text-2xs leading-4 text-fg-muted">
-                          Saved as {slackBotDestinationLabel(savedSlackDestinationAuthority)}. No
-                          user-created collection is required.
+                          Save imported Slack content to{" "}
+                          {slackBotDestinationLabel(savedSlackDestinationAuthority)}.
                         </p>
                       </div>
                       <div className="flex flex-wrap items-end gap-2">
@@ -1291,27 +1274,29 @@ export function CapabilitiesRoute({
                           {slackDestinationBusy ? (
                             <Loader2Icon className="size-3.5 animate-spin" />
                           ) : null}
-                          Save destination
+                          Save
                         </Button>
                       </div>
                     </div>
                   </div>
 
-                  <SlackReactionSummonCard
-                    workspaceId={workspaceId}
-                    connection={slackBotConnection}
-                    canManage={canManageSlackReaction}
-                    installBusy={slackBotBusy}
-                    onReinstall={() => void installSlackBot(false)}
-                  />
+                  <div className="mt-3">
+                    <SlackReactionSummonCard
+                      workspaceId={workspaceId}
+                      connection={slackBotConnection}
+                      canManage={canManageSlackReaction}
+                      installBusy={slackBotBusy}
+                      onReinstall={() => void installSlackBot(false)}
+                    />
+                  </div>
 
                   <details className="group mt-3 border-t border-border/70 pt-3">
                     <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 text-2xs text-fg-subtle transition-colors hover:text-fg-muted">
                       <ChevronDownIcon className="size-3 shrink-0 transition-transform group-open:rotate-180" />
-                      <span>Workspace bot permissions and installation details</span>
+                      <span>Connection details</span>
                     </summary>
                     <div className="mt-3 rounded-md bg-bg/50 p-3">
-                      <p className="text-2xs font-medium text-fg-muted">Required bot scopes</p>
+                      <p className="text-2xs font-medium text-fg-muted">Slack permissions</p>
                       <p className="mt-1 break-words font-mono text-2xs leading-relaxed text-fg-subtle">
                         {OPENGENI_SLACK_BOT_REQUIRED_SCOPES.join(", ")}
                       </p>
@@ -1344,29 +1329,58 @@ export function CapabilitiesRoute({
                       ) : null}
                     </div>
                   </details>
-                </>
-              ) : (
-                <>
-                  <p className="mt-4 max-w-2xl text-xs text-fg-muted">
-                    Install the OpenGeni bot in a Slack workspace to get started.
+                </details>
+              </>
+            ) : (
+              <>
+                <SlackBotInstallControls
+                  canInstall={canInstallSlackBot}
+                  hasConnection={false}
+                  busy={slackBotBusy}
+                  onInstall={(createNewConnection) => void installSlackBot(createNewConnection)}
+                />
+                <details className="group mt-3">
+                  <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 text-2xs text-fg-subtle transition-colors hover:text-fg-muted">
+                    <ChevronDownIcon className="size-3 shrink-0 transition-transform group-open:rotate-180" />
+                    <span>Permissions</span>
+                  </summary>
+                  <p className="mt-2 text-2xs leading-5 text-fg-muted">
+                    Slack shows these permissions before you approve the installation.
                   </p>
-                  <SlackBotInstallControls
-                    canInstall={canInstallSlackBot}
-                    hasConnection={false}
-                    busy={slackBotBusy}
-                    onInstall={(createNewConnection) => void installSlackBot(createNewConnection)}
-                  />
-                  <details className="group mt-3">
-                    <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 text-2xs text-fg-subtle transition-colors hover:text-fg-muted">
-                      <ChevronDownIcon className="size-3 shrink-0 transition-transform group-open:rotate-180" />
-                      <span>Workspace bot permissions requested</span>
-                    </summary>
-                    <WorkspaceSlackBotRequestedScopes />
-                  </details>
-                </>
-              )}
-            </section>
-          </div>
+                  <WorkspaceSlackBotRequestedScopes />
+                </details>
+              </>
+            )}
+          </section>
+
+          <details className="group mt-3 rounded-xl border border-border bg-surface px-4 py-3">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+              <div className="flex min-w-0 items-start gap-3">
+                <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-fg-muted/10 text-fg-muted">
+                  <PlugIcon className="size-4" />
+                </span>
+                <div>
+                  <p className="text-sm font-medium text-fg">Use Slack as me</p>
+                  <p className="mt-0.5 text-xs text-fg-muted">
+                    Optional. Only needed when an agent should act through your account.
+                  </p>
+                </div>
+              </div>
+              <ChevronDownIcon className="size-4 shrink-0 text-fg-subtle transition-transform group-open:rotate-180" />
+            </summary>
+            <div className="mt-3 border-t border-border/70 pt-3">
+              <PersonalSlackAccountCard
+                available={personalSlackItem !== null}
+                canManage={canManagePersonalSlack}
+                busy={personalSlackBusy}
+                accountState={personalSlackStatus}
+                embedded
+                onConnect={() => void startPersonalSlackOAuth()}
+                onReconnect={() => void startPersonalSlackOAuth()}
+                onDisconnect={() => setPersonalSlackDisconnectOpen(true)}
+              />
+            </div>
+          </details>
         </section>
 
         <ConfirmDialog
