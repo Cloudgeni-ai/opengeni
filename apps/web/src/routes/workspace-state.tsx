@@ -1194,6 +1194,7 @@ function FocusedInstructions({
   const activeHead = state.policy.activeHeads.find(
     (head) => head.kind === "policy" && head.scope === "global" && head.roleKey === null,
   );
+  const activeRevisionId = activeHead?.revisionId ?? null;
   const [content, setContent] = useState("");
   const [loadingContent, setLoadingContent] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -1206,8 +1207,8 @@ function FocusedInstructions({
     setEditorError(null);
     void (async () => {
       try {
-        const nextContent = activeHead
-          ? (await client.getWorkspaceInstructionPolicyRevision(workspaceId, activeHead.revisionId))
+        const nextContent = activeRevisionId
+          ? (await client.getWorkspaceInstructionPolicyRevision(workspaceId, activeRevisionId))
               .content
           : state.policy.legacyRuntime.workspaceOverrideConfigured
             ? ((await client.getWorkspace(workspaceId)).agentInstructions ?? "")
@@ -1225,7 +1226,7 @@ function FocusedInstructions({
       cancelled = true;
     };
   }, [
-    activeHead?.revisionId,
+    activeRevisionId,
     client,
     state.policy.legacyRuntime.workspaceOverrideConfigured,
     workspaceId,

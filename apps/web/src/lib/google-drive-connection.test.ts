@@ -75,7 +75,7 @@ describe("Google Drive connection lifecycle projection", () => {
       true,
     );
     expect(googleDriveAccountState(preview, true).state).toBe("connected");
-    expect((preview?.metadata as GoogleDriveConnectionMetadata).selectedSources).toHaveLength(2);
+    expect((preview!.metadata as GoogleDriveConnectionMetadata).selectedSources).toHaveLength(2);
   });
 
   test("reuses a disconnect operation key only for the same connection generation", () => {
