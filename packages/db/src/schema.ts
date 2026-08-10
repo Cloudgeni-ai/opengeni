@@ -2588,6 +2588,11 @@ export const documents = pgTable(
     topics: jsonb("topics").$type<string[]>().notNull().default([]),
     curationStatus: text("curation_status").notNull().default("none"),
     curation: jsonb("curation").$type<Record<string, unknown>>(),
+    // Assigned only by the database whenever indexing transitions to ready.
+    // Unlike updated_at, metadata refreshes and base moves cannot advance this
+    // checkpoint order.
+    indexSequence: bigint("index_sequence", { mode: "bigint" }),
+    indexedAt: timestamp("indexed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -2615,6 +2620,9 @@ export const documents = pgTable(
       table.workspaceId,
       table.curationStatus,
     ),
+    accountIndexSequence: index("documents_account_index_sequence_idx")
+      .on(table.accountId, table.indexSequence)
+      .where(sql`${table.status} = 'ready' and ${table.indexSequence} is not null`),
     authority: index("documents_authority_idx").on(
       table.accountId,
       table.authorityKind,
@@ -2657,6 +2665,11 @@ export const documents = pgTable(
     curationObject: check(
       "documents_curation_object_chk",
       sql`${table.curation} is null or jsonb_typeof(${table.curation}) = 'object'`,
+    ),
+    indexSequenceState: check(
+      "documents_index_sequence_chk",
+      sql`(${table.indexSequence} is null or ${table.indexSequence} > 0)
+        and (${table.status} <> 'ready' or (${table.indexSequence} is not null and ${table.indexedAt} is not null))`,
     ),
   }),
 );
