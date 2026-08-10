@@ -3,6 +3,7 @@ import type { RlsStrategy } from "./database";
 import {
   RUNTIME_FULL_DML_TABLES,
   RUNTIME_READ_INSERT_TABLES,
+  RUNTIME_READ_INSERT_UPDATE_TABLES,
   RUNTIME_READ_ONLY_TABLES,
 } from "./runtime-posture";
 import {
@@ -13,6 +14,8 @@ import {
 
 export type ProvisionResult = {
   appRole: string | null;
+  artifactOutboxDispatcherRole: string | null;
+  artifactMaterializerRole: string | null;
   hostExportRole: string | null;
   temporalRole: string | null;
   temporalDatabases: string[];
@@ -38,6 +41,12 @@ export type ProvisionRolesOptions = {
   rlsStrategy?: RlsStrategy;
   appRole?: string;
   appPassword?: string;
+  /** Global, EXECUTE-only artifact live-hint dispatcher capability. */
+  artifactOutboxDispatcherRole?: string;
+  artifactOutboxDispatcherPassword?: string;
+  /** Global, EXECUTE-only artifact materialization worker capability. */
+  artifactMaterializerRole?: string;
+  artifactMaterializerPassword?: string;
   /**
    * Optional cross-workspace projection role. It receives schema USAGE and
    * EXECUTE only on the host-export API; it receives no table privileges.
@@ -80,6 +89,24 @@ export async function provisionRoles(
     options.appRole ?? (process.env.OPENGENI_APP_DATABASE_USER?.trim() || "opengeni_app"),
   );
   const appPassword = options.appPassword ?? process.env.OPENGENI_APP_DATABASE_PASSWORD;
+  const artifactOutboxDispatcherRole = validateIdentifier(
+    "artifactOutboxDispatcherRole",
+    options.artifactOutboxDispatcherRole ??
+      (process.env.OPENGENI_ARTIFACT_OUTBOX_DATABASE_USER?.trim() ||
+        "opengeni_artifact_outbox_dispatcher"),
+  );
+  const artifactOutboxDispatcherPassword =
+    options.artifactOutboxDispatcherPassword ??
+    process.env.OPENGENI_ARTIFACT_OUTBOX_DATABASE_PASSWORD;
+  const artifactMaterializerRole = validateIdentifier(
+    "artifactMaterializerRole",
+    options.artifactMaterializerRole ??
+      (process.env.OPENGENI_ARTIFACT_MATERIALIZER_DATABASE_USER?.trim() ||
+        "opengeni_artifact_materializer"),
+  );
+  const artifactMaterializerPassword =
+    options.artifactMaterializerPassword ??
+    process.env.OPENGENI_ARTIFACT_MATERIALIZER_DATABASE_PASSWORD;
   const hostExportRole = validateIdentifier(
     "hostExportRole",
     options.hostExportRole ??
@@ -122,6 +149,40 @@ export async function provisionRoles(
       provisionedAppRole = appRole;
     }
 
+    let provisionedArtifactOutboxDispatcherRole: string | null = null;
+    if (artifactOutboxDispatcherPassword) {
+      await assertAppRoleSafeToNormalize(sql, artifactOutboxDispatcherRole);
+      await ensureRestrictedAppLoginRole(
+        sql,
+        artifactOutboxDispatcherRole,
+        artifactOutboxDispatcherPassword,
+      );
+      await grantArtifactCapabilityRoleIfSchemaExists(
+        sql,
+        artifactOutboxDispatcherRole,
+        schema,
+        "outbox",
+      );
+      provisionedArtifactOutboxDispatcherRole = artifactOutboxDispatcherRole;
+    }
+
+    let provisionedArtifactMaterializerRole: string | null = null;
+    if (artifactMaterializerPassword) {
+      await assertAppRoleSafeToNormalize(sql, artifactMaterializerRole);
+      await ensureRestrictedAppLoginRole(
+        sql,
+        artifactMaterializerRole,
+        artifactMaterializerPassword,
+      );
+      await grantArtifactCapabilityRoleIfSchemaExists(
+        sql,
+        artifactMaterializerRole,
+        schema,
+        "materializer",
+      );
+      provisionedArtifactMaterializerRole = artifactMaterializerRole;
+    }
+
     if (temporalPassword) {
       await ensureLoginRole(sql, temporalRole, temporalPassword);
       for (const database of temporalDatabases) {
@@ -141,6 +202,8 @@ export async function provisionRoles(
 
     return {
       appRole: provisionedAppRole,
+      artifactOutboxDispatcherRole: provisionedArtifactOutboxDispatcherRole,
+      artifactMaterializerRole: provisionedArtifactMaterializerRole,
       hostExportRole: hostExportPassword ? hostExportRole : null,
       temporalRole: temporalPassword ? temporalRole : null,
       temporalDatabases: temporalPassword ? temporalDatabases : [],
@@ -165,6 +228,64 @@ BEGIN
     EXECUTE format('GRANT USAGE ON SCHEMA opengeni_host_export TO %I', ${literal(role)});
     EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_host_export TO %I', ${literal(role)});
     EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA opengeni_host_export GRANT EXECUTE ON FUNCTIONS TO %I', ${literal(role)});
+  END IF;
+END $$;
+`);
+}
+
+async function grantArtifactCapabilityRoleIfSchemaExists(
+  sql: postgres.Sql,
+  role: string,
+  dataSchema: string,
+  capability: "outbox" | "materializer",
+): Promise<void> {
+  const routines =
+    capability === "outbox"
+      ? [
+          "claim_editable_artifact_live_outbox(text,integer,integer,name)",
+          "mark_editable_artifact_live_outbox_published(text,text,integer,name)",
+          "renew_editable_artifact_live_outbox(text,text,integer,integer,name)",
+          "retry_editable_artifact_live_outbox(text,text,integer,integer,text,name)",
+          "dead_letter_editable_artifact_live_outbox(text,text,integer,text,name)",
+          "release_editable_artifact_live_outbox(text,text,integer,name)",
+        ]
+      : [
+          "claim_editable_artifact_materializations(text,integer,integer,name)",
+          "renew_editable_artifact_materialization(uuid,uuid,text,text,text,integer,integer,name)",
+          "succeed_editable_artifact_materialization(uuid,uuid,text,text,text,integer,text,text,text,bigint,text,text,timestamp with time zone,name)",
+          "fail_editable_artifact_materialization(uuid,uuid,text,text,text,integer,text,name)",
+        ];
+  const routineArray = `ARRAY[${routines.map(literal).join(", ")}]`;
+  await sql.unsafe(`
+DO $$
+DECLARE routine_signature text;
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = ${literal(dataSchema)})
+    AND EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'opengeni_private')
+  THEN
+    EXECUTE format('GRANT CONNECT ON DATABASE %I TO %I', current_database(), ${literal(role)});
+    EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I', ${literal(dataSchema)}, ${literal(role)});
+    EXECUTE format('GRANT USAGE ON SCHEMA opengeni_private TO %I', ${literal(role)});
+    EXECUTE format(
+      'REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA %I FROM %I',
+      ${literal(dataSchema)}, ${literal(role)}
+    );
+    EXECUTE format(
+      'REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA %I FROM %I',
+      ${literal(dataSchema)}, ${literal(role)}
+    );
+    EXECUTE format(
+      'REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA opengeni_private FROM %I',
+      ${literal(role)}
+    );
+    FOREACH routine_signature IN ARRAY ${routineArray} LOOP
+      IF to_regprocedure('opengeni_private.' || routine_signature) IS NOT NULL THEN
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION opengeni_private.%s TO %I',
+          routine_signature, ${literal(role)}
+        );
+      END IF;
+    END LOOP;
   END IF;
 END $$;
 `);
@@ -358,6 +479,7 @@ async function grantAppRoleIfSchemaExists(
   const runtimeFullDmlTables = `ARRAY[${RUNTIME_FULL_DML_TABLES.map(literal).join(", ")}]`;
   const runtimeReadOnlyTables = `ARRAY[${RUNTIME_READ_ONLY_TABLES.map(literal).join(", ")}]`;
   const runtimeReadInsertTables = `ARRAY[${RUNTIME_READ_INSERT_TABLES.map(literal).join(", ")}]`;
+  const runtimeReadInsertUpdateTables = `ARRAY[${RUNTIME_READ_INSERT_UPDATE_TABLES.map(literal).join(", ")}]`;
   await sql.unsafe(`
 DO $$
 DECLARE
@@ -393,6 +515,16 @@ BEGIN
       IF to_regclass(format('%I.%I', ${literal(schema)}, runtime_table)) IS NOT NULL THEN
         EXECUTE format(
           'GRANT SELECT, INSERT ON TABLE %I.%I TO %I',
+          ${literal(schema)},
+          runtime_table,
+          ${literal(role)}
+        );
+      END IF;
+    END LOOP;
+    FOREACH runtime_table IN ARRAY ${runtimeReadInsertUpdateTables} LOOP
+      IF to_regclass(format('%I.%I', ${literal(schema)}, runtime_table)) IS NOT NULL THEN
+        EXECUTE format(
+          'GRANT SELECT, INSERT, UPDATE ON TABLE %I.%I TO %I',
           ${literal(schema)},
           runtime_table,
           ${literal(role)}
@@ -590,10 +722,81 @@ BEGIN
     EXECUTE format('REVOKE CREATE ON SCHEMA opengeni_private FROM %I', ${literal(role)});
     EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO %I', ${literal(role)});
     EXECUTE format(
-      'ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA opengeni_private GRANT EXECUTE ON FUNCTIONS TO %I',
+      'ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA opengeni_private REVOKE EXECUTE ON FUNCTIONS FROM %I',
       owner_role,
       ${literal(role)}
     );
+    -- Global cross-workspace artifact workers are separate capabilities. Never
+    -- let the generic tenant-scoped app role inherit them from the historical
+    -- blanket grant of already-installed helpers.
+    IF to_regprocedure('opengeni_private.claim_editable_artifact_live_outbox(text,integer,integer,name)') IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE EXECUTE ON FUNCTION opengeni_private.claim_editable_artifact_live_outbox(text, integer, integer, name) FROM %I',
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE EXECUTE ON FUNCTION opengeni_private.mark_editable_artifact_live_outbox_published(text, text, integer, name) FROM %I',
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE EXECUTE ON FUNCTION opengeni_private.renew_editable_artifact_live_outbox(text, text, integer, integer, name) FROM %I',
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE EXECUTE ON FUNCTION opengeni_private.retry_editable_artifact_live_outbox(text, text, integer, integer, text, name) FROM %I',
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE EXECUTE ON FUNCTION opengeni_private.dead_letter_editable_artifact_live_outbox(text, text, integer, text, name) FROM %I',
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE EXECUTE ON FUNCTION opengeni_private.release_editable_artifact_live_outbox(text, text, integer, name) FROM %I',
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure('opengeni_private.claim_editable_artifact_materializations(text,integer,integer,name)') IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE EXECUTE ON FUNCTION opengeni_private.claim_editable_artifact_materializations(text, integer, integer, name) FROM %I',
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE EXECUTE ON FUNCTION opengeni_private.renew_editable_artifact_materialization(uuid, uuid, text, text, text, integer, integer, name) FROM %I',
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE EXECUTE ON FUNCTION opengeni_private.succeed_editable_artifact_materialization(uuid, uuid, text, text, text, integer, text, text, text, bigint, text, text, timestamptz, name) FROM %I',
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE EXECUTE ON FUNCTION opengeni_private.fail_editable_artifact_materialization(uuid, uuid, text, text, text, integer, text, name) FROM %I',
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure('opengeni_private.consume_editable_artifact_live_ticket(text,name)') IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE EXECUTE ON FUNCTION opengeni_private.resolve_editable_artifact_ticket_data_schema(name) FROM %I',
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION opengeni_private.put_editable_artifact_live_ticket(text, uuid, uuid, text, text, text, text, text, text, text, text, integer, text, boolean, integer, timestamptz, timestamptz, name) TO %I',
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION opengeni_private.consume_editable_artifact_live_ticket(text, name) TO %I',
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION opengeni_private.cleanup_expired_editable_artifact_live_tickets(integer, name) TO %I',
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure('opengeni_private.authorize_editable_artifact_actor(uuid,uuid,text,text,text,text,text,text,integer,text,text,name)') IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION opengeni_private.authorize_editable_artifact_actor(uuid, uuid, text, text, text, text, text, text, integer, text, text, name) TO %I',
+        ${literal(role)}
+      );
+    END IF;
   END IF;
 END $$;
 `);

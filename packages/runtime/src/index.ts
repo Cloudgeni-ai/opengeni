@@ -47,6 +47,10 @@ import {
   type ToolRef,
 } from "@opengeni/contracts";
 import {
+  PublishEditableArtifactToolInput,
+  type PublishEditableArtifactReceipt,
+} from "@opengeni/contracts/editable-artifact-publication";
+import {
   MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
   MCP_MAX_TOOL_RESULT_BYTES,
   McpAggregateToolListBudget,
@@ -1982,6 +1986,13 @@ export type BuildAgentOptions = {
         kind: "provider_adapter";
         execute: (input: { prompt: string }, context: { toolCallId: string }) => Promise<unknown>;
       };
+  /** Host-owned durable promotion of one final, verified Office artifact. */
+  editableArtifactPublication?: {
+    execute: (
+      input: PublishEditableArtifactToolInput,
+      context: { toolCallId: string },
+    ) => Promise<PublishEditableArtifactReceipt>;
+  };
   encryptedReasoning?: boolean;
   structuredToolTransport?: boolean;
   /** Explicit provider-contained progressive tool-disclosure strategy. */
@@ -2018,6 +2029,13 @@ export type BuildAgentOptions = {
   // unset to avoid unknown-parameter 400s.
   promptCacheKey?: string;
   sandboxEnvironment?: Record<string, string>;
+  /**
+   * Host assertion that the selected sandbox/machine passed the exact artifact
+   * runtime manifest, integrity, target, and capability preflight. The runtime
+   * also requires absolute manifest/facade paths in `sandboxEnvironment` before
+   * advertising artifact skills. Omitted/false keeps those skills absent.
+   */
+  artifactRuntimeAvailable?: boolean;
   // The EFFECTIVE/active compute backend for this turn. `settings.sandboxBackend`
   // is the session's HOME backend (the default cloud group box it was created
   // with); when a session has swapped its active sandbox to a connected machine
@@ -2420,6 +2438,7 @@ export function appendGenesisTitleDirective(
 
 const agentFileDownloads = new WeakMap<object, SandboxFileDownload[]>();
 const agentRepositoryCloneHooks = new WeakMap<object, SandboxLifecycleHook[]>();
+const agentArtifactRuntimeHooks = new WeakMap<object, SandboxLifecycleHook[]>();
 // TOKEN-BROKER (B1): the per-turn provider git token seeds, stashed alongside
 // the agent's repository-clone hooks (a parallel map keyed by the agent). Kept
 // OFF the manifest/defaultManifest so rotating values never ride the SDK's
@@ -2496,6 +2515,22 @@ export function mcpToolErrorOutput(error: unknown): {
 const mcpToolErrorFunction: MCPToolErrorFunction = ({ error }) =>
   mcpToolErrorOutput(error) as unknown as string;
 
+const ARTIFACT_RUNTIME_MANIFEST_ENV = "OPENGENI_ARTIFACT_RUNTIME_MANIFEST";
+const ARTIFACT_TOOL_ENTRY_ENV = "OPENGENI_ARTIFACT_TOOL_ENTRY";
+
+function artifactRuntimeSkillsAvailable(options: BuildAgentOptions): boolean {
+  if (options.artifactRuntimeAvailable !== true) return false;
+  const environment = options.sandboxEnvironment;
+  const manifest = environment?.[ARTIFACT_RUNTIME_MANIFEST_ENV];
+  const entrypoint = environment?.[ARTIFACT_TOOL_ENTRY_ENV];
+  if (!manifest || !entrypoint || !isAbsolute(manifest) || !isAbsolute(entrypoint)) {
+    throw new Error(
+      "artifactRuntimeAvailable requires absolute OPENGENI_ARTIFACT_RUNTIME_MANIFEST and OPENGENI_ARTIFACT_TOOL_ENTRY paths",
+    );
+  }
+  return true;
+}
+
 export function buildOpenGeniAgent(
   settings: Settings,
   resources: ResourceRef[],
@@ -2503,6 +2538,10 @@ export function buildOpenGeniAgent(
 ): Agent<any, any> {
   if (Boolean(options.toolspaceTokenSeed) !== Boolean(options.toolspaceTokenSessionId)) {
     throw new Error("toolspaceTokenSeed and toolspaceTokenSessionId must be supplied together");
+  }
+  const artifactRuntimeAvailable = artifactRuntimeSkillsAvailable(options);
+  if (options.editableArtifactPublication && !artifactRuntimeAvailable) {
+    throw new Error("editableArtifactPublication requires a verified artifact runtime");
   }
   // Resolved per-turn gating. Each override defaults to today's settings-derived
   // behaviour, so the legacy global-client callers (no resolved model) build the
@@ -2551,6 +2590,26 @@ export function buildOpenGeniAgent(
           },
         })
       : null;
+  const editableArtifactPublicationTool = options.editableArtifactPublication
+    ? agentTool({
+        name: "publish_editable_artifact",
+        description:
+          "Promote one final, validated Office file into the durable collaborative editor. Call exactly once only after exporting, re-importing, and visually verifying the final .docx, .xlsx, or .pptx. Do not call for scratch files, previews, read-only work, or before validation. A successful receipt is authoritative; never repeat it.",
+        parameters: PublishEditableArtifactToolInput,
+        errorFunction: null,
+        execute: async (input, _context, details) => {
+          const toolCallId = details?.toolCall?.callId;
+          if (!toolCallId) {
+            throw new Error("Editable-artifact publication tool call has no durable identity");
+          }
+          const adapter = options.editableArtifactPublication;
+          if (!adapter) {
+            throw new Error("Editable-artifact publication adapter changed during execution");
+          }
+          return await adapter.execute(input, { toolCallId });
+        },
+      })
+    : null;
   const humanInputTool =
     options.humanInputEnabled === false
       ? null
@@ -2581,6 +2640,7 @@ export function buildOpenGeniAgent(
   const agentTools = [
     ...hostedTools,
     ...(providerImageGenerationTool ? [providerImageGenerationTool] : []),
+    ...(editableArtifactPublicationTool ? [editableArtifactPublicationTool] : []),
     ...(humanInputTool ? [humanInputTool] : []),
   ];
   const baseConfig = {
@@ -2675,6 +2735,7 @@ export function buildOpenGeniAgent(
         ? { skillLibrarySkills: options.skillLibrarySkills }
         : {}),
       ...(options.sessionSkills?.length ? { sessionSkills: options.sessionSkills } : {}),
+      ...(artifactRuntimeAvailable ? { artifactRuntimeAvailable: true } : {}),
       ...repositoryWorkspaceSkillPathsOption(resources),
       ...(options.structuredToolTransport !== undefined
         ? { structuredToolTransport: options.structuredToolTransport }
@@ -2702,6 +2763,7 @@ export function buildOpenGeniAgent(
         options.skillLibrarySkills ?? [],
         options.packSkills ?? [],
         options.sessionSkills ?? [],
+        artifactRuntimeAvailable,
       ).map((selection) => Object.freeze(selection)),
     ),
   );
@@ -2722,6 +2784,12 @@ export function buildOpenGeniAgent(
     agent,
     sandboxRepositoryCloneHooks(settings, resources, options.activeSandboxBackend),
   );
+  if (artifactRuntimeAvailable) {
+    agentArtifactRuntimeHooks.set(
+      agent,
+      sandboxArtifactRuntimeDoctorHooks(options.sandboxEnvironment!),
+    );
+  }
   // Stash the EFFECTIVE backend so runStream's owned branch can skip the direct
   // beforeAgentStart hook run on a connected machine: the box there is the user's
   // REAL computer — the platform must not run setup (az login) against it. The
@@ -3177,6 +3245,7 @@ export function buildAgentCapabilities(
   options: {
     skillLibrarySkills?: PackSkill[];
     sessionSkills?: PackSkill[];
+    artifactRuntimeAvailable?: boolean;
     workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
     structuredToolTransport?: boolean;
     supportsImageInput?: boolean;
@@ -3227,12 +3296,14 @@ export function buildAgentCapabilities(
     packSkills,
     options.skillLibrarySkills ?? [],
     options.sessionSkills ?? [],
+    options.artifactRuntimeAvailable === true,
   );
   caps.push(
     skills({
       lazyFrom: lazySkillSourceWithPackSkills(
         [...packSkills, ...sessionSkills],
         options.skillLibrarySkills ?? [],
+        options.artifactRuntimeAvailable === true,
       ),
     }),
   );
@@ -3240,6 +3311,9 @@ export function buildAgentCapabilities(
     caps.push(
       workspaceSkills(options.workspaceSkillPaths, [
         ...bundledSkillDirNames(bundledSkillsDir()),
+        ...(options.artifactRuntimeAvailable
+          ? bundledSkillDirNames(bundledArtifactSkillsDir())
+          : []),
         ...(options.skillLibrarySkills ?? []).map((skill) => skill.name),
         ...packSkills.map((skill) => skill.name),
         ...sessionSkills.map((skill) => skill.name),
@@ -5401,6 +5475,7 @@ export async function runAgentStream(
       // credential / repository-clone hooks below. The rig's credential hooks are
       // unioned into the deployment preparation-profile hooks (deduped by id).
       ...sandboxRigSetupHooksForAgent(agent),
+      ...sandboxArtifactRuntimeHooksForAgent(agent),
       ...unionCredentialHooks(
         sandboxLifecycleHooksForIds(sandboxLifecycleHookIds(settings)),
         rigCredentialHooksForAgent(agent),
@@ -5526,6 +5601,7 @@ export async function runAgentStream(
           // path (this legacy create/resume decoration path is byte-for-byte today
           // for a rig-less turn — the rig hooks are empty then).
           ...sandboxRigSetupHooksForAgent(agent),
+          ...sandboxArtifactRuntimeHooksForAgent(agent),
           ...unionCredentialHooks(
             sandboxLifecycleHooksForIds(sandboxLifecycleHookIds(settings)),
             rigCredentialHooksForAgent(agent),
@@ -6027,6 +6103,7 @@ export async function runOwnedSandboxSetup(
     // client create/resume decoration), so the rig hooks MUST be here or a
     // rig-bound turn would start without ever running the frozen setup script.
     ...sandboxRigSetupHooksForAgent(agent),
+    ...sandboxArtifactRuntimeHooksForAgent(agent),
     ...unionCredentialHooks(
       sandboxLifecycleHooksForIds(sandboxLifecycleHookIds(settings)),
       rigCredentialHooksForAgent(agent),
@@ -6722,16 +6799,17 @@ async function runSandboxLifecycleCommand(
 }
 
 // M3: everything the rig-setup hook needs to run the frozen rig version's setup
-// script exactly once per box. `versionId` keys the idempotence marker
-// (/var/opengeni/rig-setup-<versionId>.done); `timeoutMs` is the rig-specific
-// budget (settings.rigSetupTimeoutMs), NOT the 120s lifecycle default; `rigName`
-// is for human-readable events/errors only.
+// script exactly once per box. `versionId` retains the legacy idempotence marker
+// while `contentHash` lets a verified provider image prove setup for the future
+// promoted version before its UUID exists. `timeoutMs` is the rig-specific
+// budget (settings.rigSetupTimeoutMs), NOT the 120s lifecycle default.
 export type RigSetupDescriptor = {
   rigId: string;
   versionId: string;
   rigName: string;
   script: string;
   timeoutMs: number;
+  contentHash?: string;
 };
 
 export type SandboxLifecycleHook = {
@@ -6861,6 +6939,38 @@ export function withSandboxLifecycleHooks(
 
 function sandboxRepositoryCloneHooksForAgent(agent: Agent<any, any>): SandboxLifecycleHook[] {
   return agentRepositoryCloneHooks.get(agent) ?? [];
+}
+
+function sandboxArtifactRuntimeHooksForAgent(agent: Agent<any, any>): SandboxLifecycleHook[] {
+  return agentArtifactRuntimeHooks.get(agent) ?? [];
+}
+
+export function sandboxArtifactRuntimeDoctorHooks(
+  environment: Readonly<Record<string, string>>,
+): SandboxLifecycleHook[] {
+  const facade = environment[ARTIFACT_TOOL_ENTRY_ENV];
+  if (!facade || !isAbsolute(facade)) return [];
+  const runtimeCli = join(dirname(facade), "opengeni-artifact-runtime.mjs");
+  return [
+    {
+      id: "artifact-runtime-doctor",
+      phase: "beforeAgentStart",
+      run: async (session, context) => {
+        const result = await runSandboxLifecycleCommand(
+          session,
+          {
+            cmd: `${shellQuote(runtimeCli)} doctor --json`,
+            workdir: "/workspace",
+            ...(context.runAs ? { runAs: context.runAs } : {}),
+            yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+            maxOutputTokens: 2_000,
+          },
+          context.commandRunner,
+        );
+        assertSandboxCommandSucceeded(result, "Artifact runtime doctor");
+      },
+    },
+  ];
 }
 
 // TOKEN-BROKER (B1): the per-turn git token seed stashed for this agent (undefined
@@ -8044,9 +8154,9 @@ const RIG_SETUP_SKIPPED_SENTINEL = "__OPENGENI_RIG_SETUP_SKIPPED__";
 
 /**
  * The rig-setup command (M3). One idempotent bash program:
- *   1. `mkdir -p /var/opengeni` and, if the per-version marker already exists,
- *      print the SKIP sentinel and exit 0 (a warm box re-running the hook).
- *   2. otherwise atomically claim a per-version lock directory. A loser waits
+ *   1. `mkdir -p /var/opengeni` and, if the per-version or exact content marker
+ *      already exists, print the SKIP sentinel and exit 0.
+ *   2. otherwise atomically claim the exact marker lock directory. A loser waits
  *      for the winner's marker, then skips; if the winner fails and releases the
  *      lock, the loser retries the claim.
  *   3. the winner writes the rig's setup script to a temp file and runs it under
@@ -8061,22 +8171,35 @@ export function rigSetupScriptCommand(
   versionId: string,
   timeoutMs = 600_000,
   markerRoot = "/var/opengeni",
+  contentHash?: string,
 ): string {
+  if (contentHash !== undefined && !/^sha256:[0-9a-f]{64}$/u.test(contentHash)) {
+    throw new Error("Rig setup content hash must be a canonical SHA-256 value");
+  }
   const timeoutSecs = Math.max(1, Math.ceil(timeoutMs / 1000));
   const lockWaitSecs = timeoutSecs + 6;
-  const marker = `${markerRoot.replace(/\/+$/, "")}/rig-setup-${versionId}.done`;
+  const normalizedMarkerRoot = markerRoot.replace(/\/+$/, "");
+  const versionMarker = `${normalizedMarkerRoot}/rig-setup-${versionId}.done`;
+  const contentMarker = contentHash
+    ? `${normalizedMarkerRoot}/rig-setup-content-${contentHash.slice("sha256:".length)}.done`
+    : null;
+  const markerReady = contentMarker
+    ? '[ -f "$__OG_RIG_VERSION_MARKER" ] || [ -f "$__OG_RIG_CONTENT_MARKER" ]'
+    : '[ -f "$__OG_RIG_VERSION_MARKER" ]';
   return [
     "set -u",
     `mkdir -p ${shellQuote(markerRoot)}`,
-    `__OG_RIG_MARKER=${shellQuote(marker)}`,
+    `__OG_RIG_VERSION_MARKER=${shellQuote(versionMarker)}`,
+    `__OG_RIG_CONTENT_MARKER=${shellQuote(contentMarker ?? "")}`,
+    `__OG_RIG_MARKER=${shellQuote(contentMarker ?? versionMarker)}`,
     '__OG_RIG_LOCK="$__OG_RIG_MARKER.lock"',
     `__OG_RIG_TIMEOUT_SECS=${timeoutSecs}`,
     `__OG_RIG_LOCK_WAIT_SECS=${lockWaitSecs}`,
-    `if [ -f "$__OG_RIG_MARKER" ]; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
+    `if ${markerReady}; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
     "while :; do",
     '  if mkdir "$__OG_RIG_LOCK" 2>/dev/null; then',
     "    trap 'rm -rf \"$__OG_RIG_LOCK\"' EXIT",
-    `    if [ -f "$__OG_RIG_MARKER" ]; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
+    `    if ${markerReady}; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
     '__OG_RIG_SCRIPT="$(mktemp)"',
     "cat > \"$__OG_RIG_SCRIPT\" <<'__OPENGENI_RIG_SETUP_SCRIPT_EOF__'",
     script,
@@ -8084,17 +8207,20 @@ export function rigSetupScriptCommand(
     '    timeout -k 5s "${__OG_RIG_TIMEOUT_SECS}s" bash "$__OG_RIG_SCRIPT"',
     "__OG_RIG_RC=$?",
     '    rm -f "$__OG_RIG_SCRIPT"',
-    '    if [ "$__OG_RIG_RC" -eq 0 ]; then touch "$__OG_RIG_MARKER"; fi',
+    '    if [ "$__OG_RIG_RC" -eq 0 ]; then',
+    '      touch "$__OG_RIG_VERSION_MARKER"',
+    '      if [ -n "$__OG_RIG_CONTENT_MARKER" ]; then touch "$__OG_RIG_CONTENT_MARKER"; fi',
+    "    fi",
     '    exit "$__OG_RIG_RC"',
     "  fi",
     "  __OG_RIG_WAITED=0",
     '  while [ "$__OG_RIG_WAITED" -lt "$__OG_RIG_LOCK_WAIT_SECS" ]; do',
-    `    if [ -f "$__OG_RIG_MARKER" ]; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
+    `    if ${markerReady}; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
     '    if [ ! -d "$__OG_RIG_LOCK" ]; then break; fi',
     "    sleep 1",
     "    __OG_RIG_WAITED=$((__OG_RIG_WAITED + 1))",
     "  done",
-    `  if [ -f "$__OG_RIG_MARKER" ]; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
+    `  if ${markerReady}; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
     '  if [ ! -d "$__OG_RIG_LOCK" ]; then continue; fi',
     '  rmdir "$__OG_RIG_LOCK" 2>/dev/null || true',
     "done",
@@ -8126,7 +8252,13 @@ export async function runRigSetupHook(
     rigName: rigSetup.rigName,
   };
   await context.onRuntimeEvent?.({ type: "rig.setup.started", payload });
-  const command = rigSetupScriptCommand(rigSetup.script, rigSetup.versionId, rigSetup.timeoutMs);
+  const command = rigSetupScriptCommand(
+    rigSetup.script,
+    rigSetup.versionId,
+    rigSetup.timeoutMs,
+    "/var/opengeni",
+    rigSetup.contentHash,
+  );
   const execArgs = {
     cmd: command,
     workdir: "/workspace",
@@ -8370,6 +8502,7 @@ export function azureOpenAIDefaultQuery(
 // in production — so stage a copy under the working directory once per
 // process instead of granting the packaged path.
 let stagedBundledSkillsDir: string | null = null;
+let stagedBundledArtifactSkillsDir: string | null = null;
 
 function bundledSkillsDir(): string {
   const moduleDir = dirname(fileURLToPath(import.meta.url));
@@ -8390,6 +8523,23 @@ function bundledSkillsDir(): string {
     );
   }
   return stagedBundledSkillsDir;
+}
+
+function bundledArtifactSkillsDir(): string {
+  const moduleDir = dirname(fileURLToPath(import.meta.url));
+  const packaged =
+    [
+      join(moduleDir, "bundled_artifact_skills"),
+      join(moduleDir, "..", "src", "bundled_artifact_skills"),
+    ].find((candidate) => existsSync(candidate)) ?? join(moduleDir, "bundled_artifact_skills");
+  if (isPathWithin(process.cwd(), packaged)) return packaged;
+  if (!stagedBundledArtifactSkillsDir) {
+    stagedBundledArtifactSkillsDir = stageBundledSkills(
+      packaged,
+      join(process.cwd(), ".opengeni", "bundled_artifact_skills"),
+    );
+  }
+  return stagedBundledArtifactSkillsDir;
 }
 
 function stageBundledSkills(packaged: string, target: string): string {
@@ -8428,15 +8578,24 @@ function isPathWithin(root: string, candidate: string): boolean {
 export function lazySkillSourceWithPackSkills(
   packSkills: PackSkill[],
   skillLibrarySkills: PackSkill[] = [],
+  artifactRuntimeAvailable = false,
 ): LocalDirLazySkillSource {
   const bundledDir = bundledSkillsDir();
   const bundled = localDirLazySkillSource({ src: bundledDir });
-  if (packSkills.length === 0 && skillLibrarySkills.length === 0) {
+  if (packSkills.length === 0 && skillLibrarySkills.length === 0 && !artifactRuntimeAvailable) {
     return bundled;
   }
   const children: Record<string, Entry> = {};
   for (const name of bundledSkillDirNames(bundledDir)) {
     children[name] = localDir({ src: join(bundledDir, name) });
+  }
+  let artifactBundled: LocalDirLazySkillSource | null = null;
+  if (artifactRuntimeAvailable) {
+    const artifactDir = bundledArtifactSkillsDir();
+    artifactBundled = localDirLazySkillSource({ src: artifactDir });
+    for (const name of bundledSkillDirNames(artifactDir)) {
+      children[name] = localDir({ src: join(artifactDir, name) });
+    }
   }
   const libraryIndex: SkillIndexEntry[] = [];
   const libraryNameKeys = new Set<string>();
@@ -8479,6 +8638,11 @@ export function lazySkillSourceWithPackSkills(
           !packNameKeys.has((entry.path ?? entry.name).toLowerCase()) &&
           !libraryNameKeys.has((entry.path ?? entry.name).toLowerCase()),
       ),
+      ...(artifactBundled?.getIndex?.(manifest, skillsPath) ?? []).filter(
+        (entry) =>
+          !packNameKeys.has((entry.path ?? entry.name).toLowerCase()) &&
+          !libraryNameKeys.has((entry.path ?? entry.name).toLowerCase()),
+      ),
       ...libraryIndex.filter(
         (entry) => !packNameKeys.has((entry.path ?? entry.name).toLowerCase()),
       ),
@@ -8492,8 +8656,13 @@ function effectiveSkillSelections(
   librarySkills: readonly PackSkill[],
   packSkills: readonly PackSkill[],
   sessionSkills: readonly PackSkill[],
+  artifactRuntimeAvailable = false,
 ): readonly EffectiveSkillSelection[] {
-  const defaultSelections = bundledSkillDirNames(bundledSkillsDir()).map((name) => ({
+  const defaultSkillNames = [
+    ...bundledSkillDirNames(bundledSkillsDir()),
+    ...(artifactRuntimeAvailable ? bundledSkillDirNames(bundledArtifactSkillsDir()) : []),
+  ];
+  const defaultSelections = defaultSkillNames.map((name) => ({
     id: `bundled:${name}`,
     name,
     source: "bundled" as const,
@@ -8507,6 +8676,7 @@ function effectiveSkillSelections(
     packSkills,
     librarySkills,
     sessionSkills,
+    artifactRuntimeAvailable,
   );
   const sessionNameKeys = new Set(effectiveSessionSkills.map((skill) => skill.name.toLowerCase()));
   const selected = librarySelections.filter((selection) =>
@@ -8547,13 +8717,17 @@ function sessionSkillsForMaterialization(
   packSkills: readonly PackSkill[],
   librarySkills: readonly PackSkill[],
   sessionSkills: readonly PackSkill[],
+  artifactRuntimeAvailable = false,
 ): PackSkill[] {
   const configured = new Map<string, PackSkill>();
   for (const skill of [...librarySkills, ...packSkills]) {
     configured.set(skill.name.toLowerCase(), skill);
   }
   const bundledNames = new Set(
-    bundledSkillDirNames(bundledSkillsDir()).map((name) => name.toLowerCase()),
+    [
+      ...bundledSkillDirNames(bundledSkillsDir()),
+      ...(artifactRuntimeAvailable ? bundledSkillDirNames(bundledArtifactSkillsDir()) : []),
+    ].map((name) => name.toLowerCase()),
   );
   const selected = new Map<string, PackSkill>();
   for (const skill of sessionSkills) {

@@ -1,6 +1,7 @@
 import type { GitFileDiff } from "@opengeni/sdk";
 import { ArrowUpRightIcon, FileWarningIcon, HistoryIcon } from "lucide-react";
 import {
+  Component,
   type ReactNode,
   useCallback,
   useEffect,
@@ -10,7 +11,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { VList } from "virtua";
+import { VList, type VListHandle } from "virtua";
 import { cn } from "../lib/cn";
 import { useUnicodeFallbackFonts } from "../lib/use-unicode-fonts";
 import { useThemeType } from "../lib/use-theme-type";
@@ -95,6 +96,153 @@ export type WorkbenchChangesProps = {
 type RailRow =
   | { kind: "group"; label: string; count: number }
   | { kind: "file"; file: SandboxGitFileDiff; index: number };
+
+type ChangesRailVListProps = {
+  children: ReactNode;
+  className: string;
+  coarsePointer: boolean;
+  files: readonly SandboxGitFileDiff[];
+  rowCount: number;
+};
+
+type ChangesRailVListState = {
+  renderedRowCount: number;
+  resetVersion: number;
+};
+
+type ChangesRailSnapshot = {
+  focusedPath: string | null;
+  scrollOffset: number;
+};
+
+/** Virtua must reset its cached range when the rail shrinks. Keep that remount
+ * scoped to shrink transitions and preserve the reader's focus/scroll context. */
+class ChangesRailVList extends Component<
+  ChangesRailVListProps,
+  ChangesRailVListState,
+  ChangesRailSnapshot | null
+> {
+  state: ChangesRailVListState = {
+    renderedRowCount: this.props.rowCount,
+    resetVersion: 0,
+  };
+
+  private host: HTMLDivElement | null = null;
+  private listHandle: VListHandle | null = null;
+  private pendingFocusedPath: string | null = null;
+  private restoreFrame: number | null = null;
+
+  static getDerivedStateFromProps(
+    props: ChangesRailVListProps,
+    state: ChangesRailVListState,
+  ): ChangesRailVListState | null {
+    if (props.rowCount === state.renderedRowCount) return null;
+    return {
+      renderedRowCount: props.rowCount,
+      resetVersion:
+        props.rowCount < state.renderedRowCount ? state.resetVersion + 1 : state.resetVersion,
+    };
+  }
+
+  getSnapshotBeforeUpdate(
+    _previousProps: ChangesRailVListProps,
+    previousState: ChangesRailVListState,
+  ): ChangesRailSnapshot | null {
+    if (previousState.resetVersion === this.state.resetVersion) return null;
+    const scroller = this.host?.firstElementChild;
+    if (!(scroller instanceof HTMLElement)) return null;
+    const active = document.activeElement;
+    const focusedRow =
+      active instanceof HTMLElement && scroller.contains(active)
+        ? active.closest<HTMLElement>("[data-rail-file-path]")
+        : null;
+    return {
+      focusedPath: focusedRow?.dataset.railFilePath ?? this.pendingFocusedPath,
+      scrollOffset: scroller.scrollTop,
+    };
+  }
+
+  componentDidUpdate(
+    _previousProps: ChangesRailVListProps,
+    _previousState: ChangesRailVListState,
+    snapshot: ChangesRailSnapshot | null,
+  ): void {
+    if (!snapshot || !this.listHandle) return;
+    this.cancelRestoreFrame();
+    const maxOffset = Math.max(0, this.listHandle.scrollSize - this.listHandle.viewportSize);
+    this.listHandle.scrollTo(Math.min(Math.max(snapshot.scrollOffset, 0), maxOffset));
+    const focusedPath = snapshot.focusedPath;
+    if (!focusedPath) return;
+    this.pendingFocusedPath = focusedPath;
+    this.continueFocusRestore();
+  }
+
+  componentWillUnmount(): void {
+    this.cancelRestoreFrame();
+    this.pendingFocusedPath = null;
+  }
+
+  private cancelRestoreFrame(): void {
+    if (this.restoreFrame === null) return;
+    if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(this.restoreFrame);
+    this.restoreFrame = null;
+  }
+
+  private continueFocusRestore = (): void => {
+    const path = this.pendingFocusedPath;
+    if (!path) return;
+    if (this.restoreFocusedPath(path)) {
+      this.pendingFocusedPath = null;
+      return;
+    }
+    if (this.restoreFrame === null && typeof requestAnimationFrame === "function") {
+      this.restoreFrame = requestAnimationFrame(() => {
+        this.restoreFrame = null;
+        this.continueFocusRestore();
+      });
+    }
+  };
+
+  private restoreFocusedPath(path: string): boolean {
+    const host = this.host;
+    if (!host) return true;
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && active.isConnected && active !== document.body) {
+      return true;
+    }
+    if (!this.props.files.some((file) => file.path === path)) return true;
+    const row = Array.from(host.querySelectorAll<HTMLButtonElement>("[data-rail-file-path]")).find(
+      (candidate) => candidate.dataset.railFilePath === path,
+    );
+    if (!row) return false;
+    row.focus({ preventScroll: true });
+    return true;
+  }
+
+  private setHost = (host: HTMLDivElement | null): void => {
+    this.host = host;
+  };
+
+  private setListHandle = (handle: VListHandle | null): void => {
+    this.listHandle = handle;
+  };
+
+  render() {
+    return (
+      <div ref={this.setHost} data-opengeni-changes-rail className={this.props.className}>
+        <VList
+          key={this.state.resetVersion}
+          ref={this.setListHandle}
+          className="h-full"
+          itemSize={this.props.coarsePointer ? 44 : 28}
+          ssrCount={Math.min(30, this.props.rowCount)}
+        >
+          {this.props.children}
+        </VList>
+      </div>
+    );
+  }
+}
 
 /** Order the files and build the rail rows (grouped past the threshold). The
  *  returned `orderedFiles` drives BOTH the rail and the diff pane so a rail row's
@@ -330,7 +478,13 @@ export function WorkbenchChanges({
               ))}
             </select>
           </div>
-          <div className="min-h-0 min-w-0 flex-1 overflow-auto" data-opengeni-changes-pane>
+          <div
+            aria-label="Changed file diff"
+            className="min-h-0 min-w-0 flex-1 overflow-auto outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent"
+            data-opengeni-changes-pane
+            role="region"
+            tabIndex={0}
+          >
             {activeFile ? (
               <DiffSection
                 file={activeFile}
@@ -344,42 +498,44 @@ export function WorkbenchChanges({
       ) : (
         <div className="flex min-h-0 flex-1">
           {/* File rail — virtualized (virtua): a dense change set is fine. */}
-          <div className="w-[clamp(12rem,28%,15rem)] shrink-0 border-r border-og-border bg-og-surface-1/35">
-            <VList
-              className="h-full"
-              itemSize={coarsePointer ? 44 : 28}
-              ssrCount={Math.min(30, rows.length)}
-            >
-              {rows.map((row) =>
-                row.kind === "group" ? (
-                  <div
-                    key={`g:${row.label}`}
-                    data-rail-group
-                    className="flex items-center gap-1.5 px-2 pb-0.5 pt-2 text-og-xs font-medium uppercase tracking-wide text-og-fg-subtle"
-                  >
-                    <span className="min-w-0 truncate">{row.label}</span>
-                    <span className="shrink-0">{row.count}</span>
-                  </div>
-                ) : (
-                  <RailFileRow
-                    key={row.file.path}
-                    file={row.file}
-                    grouped={grouped}
-                    active={row.index === activeIndex}
-                    onClick={() => jumpTo(row.index)}
-                  />
-                ),
-              )}
-            </VList>
-          </div>
+          <ChangesRailVList
+            rowCount={rows.length}
+            coarsePointer={coarsePointer}
+            files={orderedFiles}
+            className="w-[clamp(12rem,28%,15rem)] shrink-0 border-r border-og-border bg-og-surface-1/35"
+          >
+            {rows.map((row) =>
+              row.kind === "group" ? (
+                <div
+                  key={`g:${row.label}`}
+                  data-rail-group
+                  className="flex items-center gap-1.5 px-2 pb-0.5 pt-2 text-og-xs font-medium uppercase tracking-wide text-og-fg-subtle"
+                >
+                  <span className="min-w-0 truncate">{row.label}</span>
+                  <span className="shrink-0">{row.count}</span>
+                </div>
+              ) : (
+                <RailFileRow
+                  key={row.file.path}
+                  file={row.file}
+                  grouped={grouped}
+                  active={row.index === activeIndex}
+                  onClick={() => jumpTo(row.index)}
+                />
+              ),
+            )}
+          </ChangesRailVList>
 
           {/* Diff pane — windowed file sections. Only the sections inside the
             visible window ± overscan are in the DOM; the container reserves the
             full scroll height so scrolling + the rail-jump stay accurate. */}
           <div
             ref={windowed.scrollRef}
-            className="min-h-0 min-w-0 flex-1 overflow-auto"
+            aria-label="Changed files diff"
+            className="min-h-0 min-w-0 flex-1 overflow-auto outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent"
             data-opengeni-changes-pane
+            role="region"
+            tabIndex={0}
           >
             <div style={{ position: "relative", height: windowed.totalHeight }}>
               {orderedFiles.map((file, index) => {
@@ -479,6 +635,7 @@ function RailFileRow({
       onClick={onClick}
       title={file.path}
       data-rail-file
+      data-rail-file-path={file.path}
       className={cn(
         "relative flex min-h-7 w-full items-center gap-1.5 truncate px-2 py-0.5 text-left text-og-sm transition-colors hover:bg-og-surface-2 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent pointer-coarse:min-h-11",
         grouped && "pl-3",

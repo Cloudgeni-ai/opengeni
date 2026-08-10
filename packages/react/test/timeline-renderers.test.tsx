@@ -518,6 +518,43 @@ function authNeededItem(overrides: Partial<AuthNeededItem> = {}): AuthNeededItem
 }
 
 describe("TimelineRow — connection recovery", () => {
+  test("renders a capability recommendation as ungranted access with one review action", async () => {
+    let selected = "";
+    const r = await renderComponent(
+      <TimelineRow
+        item={authNeededItem({
+          source: "capability",
+          providerDomain: "github.com",
+          capability: {
+            id: "api:github-app",
+            name: "GitHub App",
+            kind: "api",
+            source: "built_in",
+            action: "connect",
+            rationale: "Use the repositories selected for this workspace.",
+            requiredVariables: [],
+          },
+        })}
+        onReconnect={(item) => {
+          selected = item.capability?.id ?? "";
+        }}
+      />,
+    );
+    await flush();
+
+    expect(r.container.textContent).toContain("Connect GitHub App");
+    expect(r.container.textContent).toContain("Provider: github.com");
+    expect(r.container.textContent).toContain("No access has been granted");
+    expect(r.container.textContent).not.toContain("wasn't replayed");
+    await act(async () => {
+      r.container
+        .querySelector("button")
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(selected).toBe("api:github-app");
+    await r.unmount();
+  });
+
   test("says a missing connection starts a new-message retry rather than replaying the call", async () => {
     const r = await renderComponent(<TimelineRow item={authNeededItem()} />);
     await flush();
@@ -662,6 +699,70 @@ describe("MessageTimeline — settled turn folding", () => {
     expect(expand).not.toBeNull();
     expect(r.container.querySelector('button[aria-label="Expand screenshot"]')).toBeNull();
 
+    await r.unmount();
+  });
+
+  test("renders a published editable artifact as a compact, exact editor handoff", async () => {
+    const artifactId = "a".repeat(32);
+    const editorPath = `/workspaces/22222222-2222-4222-8222-222222222222/artifacts/editable/${artifactId}`;
+    const item = toolItem({
+      name: "publish_editable_artifact",
+      arguments: {
+        path: "/workspace/launch.pptx",
+        title: "Launch deck",
+        modality: "presentation",
+      },
+      output: {
+        type: "editable_artifact",
+        schemaVersion: 1,
+        artifact: { id: artifactId, modality: "presentation", title: "Launch deck" },
+        sourceFile: {
+          id: "11111111-1111-4111-8111-111111111111",
+          filename: "launch.pptx",
+          contentType: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+          sizeBytes: 8192,
+          sha256: "b".repeat(64),
+        },
+        editorPath,
+      },
+      status: "complete",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    expect(Renderer.name).toBe("EditableArtifactPublicationRenderer");
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    expect(r.container.textContent).toContain("Published editable presentation");
+    expect(r.container.textContent).toContain("Launch deck · launch.pptx");
+    const trigger = r.container.querySelector('[role="button"]') as HTMLElement | null;
+    await act(async () => trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    await flush();
+
+    const openEditor = r.container.querySelector("a[href]") as HTMLAnchorElement | null;
+    expect(openEditor?.textContent).toContain("Open editor");
+    expect(openEditor?.getAttribute("href")).toBe(editorPath);
+    expect(r.container.textContent).toContain("8.0 KB");
+    await r.unmount();
+  });
+
+  test("keeps editable-artifact publication visibly in flight without a false receipt", async () => {
+    const item = toolItem({
+      name: "publish_editable_artifact",
+      arguments: {
+        path: "/workspace/report.docx",
+        title: "Annual report",
+        modality: "document",
+      },
+      status: "running",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    expect(r.container.textContent).toContain("Publishing editable document");
+    expect(r.container.textContent).toContain("Annual report");
+    expect(r.container.querySelector(".og-shimmer-text")).not.toBeNull();
+    expect(r.container.querySelector("a[href]")).toBeNull();
     await r.unmount();
   });
 

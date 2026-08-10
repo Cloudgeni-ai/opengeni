@@ -339,6 +339,10 @@ export type SteerMessageResult = {
   accepted: SessionEvent;
   /** The exact turn created for this message in the same server transaction. */
   turn: SessionTurn;
+  /** Number of live attempts durably asked to stop by this atomic Steer. */
+  interruptionCount?: number;
+  /** True when this response came from the command's immutable idempotency receipt. */
+  replay?: boolean;
 };
 
 export type TranscribeAudioInput = {
@@ -3673,8 +3677,16 @@ export class OpenGeniClient {
   // --- GitHub ----------------------------------------------------------------------------------
 
   /** GitHub App server configuration plus truthful workspace binding status. */
-  async getGitHubApp(workspaceId: string): Promise<GitHubAppInfo> {
-    return await this.requestJson<GitHubAppInfo>("GET", `/v1/workspaces/${workspaceId}/github/app`);
+  async getGitHubApp(
+    workspaceId: string,
+    options: { returnPath?: string } = {},
+  ): Promise<GitHubAppInfo> {
+    return await this.requestJson<GitHubAppInfo>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/github/app`,
+      undefined,
+      options.returnPath ? { returnPath: options.returnPath } : undefined,
+    );
   }
 
   /** Build the GitHub owner-consent entry URL for fresh workspace-bound state. */
@@ -4033,6 +4045,35 @@ export class OpenGeniClient {
       }
       throw error;
     }
+  }
+
+  /** Authenticated, contract-checked response for bounded streaming downloads. */
+  protected async requestResponse(
+    method: string,
+    path: string,
+    query: Record<string, string> = {},
+    options: OpenGeniRequestOptions = {},
+  ): Promise<Response> {
+    const correlationId = crypto.randomUUID();
+    let response: Response;
+    try {
+      response = await this.fetchImpl(this.url(path, query), {
+        method,
+        headers: {
+          ...this.headers(correlationId),
+          Accept: "application/octet-stream",
+        },
+        ...(options.signal ? { signal: options.signal } : {}),
+      });
+    } catch (error) {
+      if (isMutationMethod(method)) throw mutationTransportError(correlationId);
+      throw error;
+    }
+    assertApiContractResponse(response);
+    if (!response.ok) {
+      throw await apiErrorFromResponse(response, { method, correlationId });
+    }
+    return response;
   }
 
   /** Like `requestJson` for endpoints that respond with no body (204). */

@@ -1,0 +1,91 @@
+{
+  "schemaVersion": 1,
+  "source": "docs/artifact-engine.md#11-performance-budgets",
+  "units": {
+    "latency": "milliseconds",
+    "memory": "bytes",
+    "bundle": "bytes"
+  },
+  "release": {
+    "measurement": "p95 on pinned representative hardware, warm unless stated otherwise",
+    "gateEnvironment": "OPENGENI_ARTIFACT_BENCH_PINNED=1",
+    "operations": {
+      "create_workbook_and_sheet": { "p95Ms": 5, "workUnits": 1 },
+      "bulk_write_primitive_cells": { "p95Ms": 100, "workUnits": 100000 },
+      "recalculate_simple_dependents": { "p95Ms": 50, "workUnits": 100000 },
+      "dense_tile_random_edit": { "p95Ms": 1, "workUnits": 10000 },
+      "collaboration_random_edit_on_million_cells": { "p95Ms": 5, "workUnits": 200 },
+      "binding_stateful_edit": { "p95Ms": 0.1, "workUnits": 20000 },
+      "binding_session_fork_million_cells": { "p95Ms": 10, "workUnits": 1000000 },
+      "binding_state_hash_million_cells": { "p95Ms": 50, "workUnits": 1000000 },
+      "wasm_session_fork_million_cells": { "p95Ms": 10, "workUnits": 1000000 },
+      "wasm_state_hash_million_cells": { "p95Ms": 50, "workUnits": 1000000 },
+      "wasm_dense_random_edit_on_million_cells": { "p95Ms": 1, "workUnits": 1000 },
+      "warm_editor_frame": { "p95Ms": 16.7, "workUnits": 1 },
+      "apply_and_display_remote_operation": { "p95Ms": 50, "workUnits": 1 },
+      "import_ordinary_office_file": {
+        "p95Ms": 2000,
+        "workUnits": 26214400,
+        "implemented": false
+      },
+      "render_ordinary_surface_2x": { "p95Ms": 100, "workUnits": 1 },
+      "render_spreadsheet_png": { "p95Ms": 100, "workUnits": 300 },
+      "render_presentation_svg": { "p95Ms": 100, "workUnits": 1 },
+      "export_unchanged_import": {
+        "p95Ms": 2000,
+        "workUnits": 26214400,
+        "implemented": false
+      }
+    }
+  },
+  "ci": {
+    "measurement": "single-process smoke guard; ceilings intentionally tolerate shared runners",
+    "operations": {
+      "create_workbook_and_sheet": { "maxMs": 100, "workUnits": 1 },
+      "bulk_write_primitive_cells": { "maxMs": 2500, "workUnits": 20000 },
+      "recalculate_simple_dependents": { "maxMs": 4000, "workUnits": 5000 },
+      "json_snapshot_round_trip": { "maxMs": 3000, "workUnits": 20000 },
+      "render_spreadsheet_svg": { "maxMs": 2000, "workUnits": 2000 },
+      "render_spreadsheet_numeric_svg": { "maxMs": 1500, "workUnits": 99960 },
+      "render_spreadsheet_merged_cells": { "maxMs": 2000, "workUnits": 20000 },
+      "render_spreadsheet_png": { "maxMs": 4000, "workUnits": 300 },
+      "layout_presentation": { "maxMs": 2000, "workUnits": 500 },
+      "render_presentation_svg": { "maxMs": 2000, "workUnits": 1 }
+    },
+    "structural": {
+      "sparse_million_row_serializedMaxBytes": 1048576,
+      "sparse_million_row_heapDeltaMaxBytes": 268435456,
+      "browserFacadeBundleMaxBytes": 320000,
+      "browserFacadeGzipMaxBytes": 100000,
+      "browserFacadeOutputMaxCount": 16,
+      "browserInstallClosureMaxBytes": 917504,
+      "browserInstallClosureGzipMaxBytes": 286720,
+      "browserInstallClosureOutputMaxCount": 24,
+      "rustSparseAllocatedMaxBytes": 33554432,
+      "rustSparsePeakLiveDeltaMaxBytes": 16777216,
+      "rustDenseMillionModelAllocatedMaxBytes": 201326592,
+      "rustDenseMillionModelPeakLiveDeltaMaxBytes": 201326592,
+      "rustCollaborationMillionModelAllocatedMaxBytes": 1342177280,
+      "rustCollaborationMillionModelPeakLiveDeltaMaxBytes": 1073741824,
+      "rustCollaborationMillionModelRssDeltaMaxBytes": 1073741824,
+      "rustCollaborationMillionEditAllocatedPerUnitMaxBytes": 16384,
+      "rustCollaborationMillionEditPeakLiveDeltaMaxBytes": 8388608,
+      "bindingStatefulMinimumSpeedupRatio": 100,
+      "wasmMillionCellHeapMaxBytes": 134217728,
+      "wasmFullKernelBinaryMaxBytes": 2097152,
+      "wasmFullKernelGzipMaxBytes": 700000,
+      "wasmSpreadsheetKernelBinaryMaxBytes": 700000,
+      "wasmSpreadsheetKernelGzipMaxBytes": 230000,
+      "wasmDocumentPresentationKernelBinaryMaxBytes": 350000,
+      "wasmDocumentPresentationKernelGzipMaxBytes": 120000,
+      "nonArtifactEntrypointArtifactImportMaxCount": 0
+    }
+  },
+  "deepFixtures": {
+    "sparseSheetRows": 1000000,
+    "primitiveCells": 100000,
+    "dependentFormulas": 100000,
+    "presentationSlides": 500,
+    "documentPages": 1000
+  }
+}

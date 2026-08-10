@@ -1384,6 +1384,14 @@ describe("backend-gated sandbox required-credential validation", () => {
     ).toThrow();
   });
 
+  test("keeps sandbox artifact-runtime admission explicit and disabled by default", () => {
+    expect(withEnv({}, () => getSettings()).sandboxArtifactRuntimeEnabled).toBe(false);
+    expect(
+      withEnv({ OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED: "true" }, () => getSettings())
+        .sandboxArtifactRuntimeEnabled,
+    ).toBe(true);
+  });
+
   test("daytona requires its api key only when active", () => {
     expect(() => withEnv({ OPENGENI_SANDBOX_BACKEND: "daytona" }, () => getSettings())).toThrow(
       "OPENGENI_DAYTONA_API_KEY is required when OPENGENI_SANDBOX_BACKEND=daytona",

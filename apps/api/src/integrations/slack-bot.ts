@@ -407,13 +407,21 @@ export class OpenGeniSlackBotClient {
     return await this.requireMemberChannel(headers, channelId);
   }
 
-  async channelHistory(input: { channelId: string; limit?: number; cursor?: string }) {
+  async channelHistory(input: {
+    channelId: string;
+    limit?: number;
+    cursor?: string;
+    latest?: string;
+    inclusive?: boolean;
+  }) {
     return await this.withAudit("channel_history.read", async (headers) => {
       const info = await this.requireMemberChannel(headers, input.channelId);
       const payload = await this.call(headers, "conversations.history", {
         channel: input.channelId,
         limit: String(boundedInt(input.limit, MAX_HISTORY_PAGE, 50)),
         ...(input.cursor ? { cursor: input.cursor } : {}),
+        ...(input.latest ? { latest: input.latest } : {}),
+        ...(input.latest && input.inclusive ? { inclusive: "true" } : {}),
       });
       return {
         channel: info,

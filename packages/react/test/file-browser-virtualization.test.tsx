@@ -43,6 +43,28 @@ function filesResult(
 }
 
 describe("FileBrowser virtualization", () => {
+  test("a large tree can shrink below the virtualization threshold", async () => {
+    const largeTree: FileTreeNode[] = Array.from({ length: 600 }, (_, index) => ({
+      path: `file-${index}.ts`,
+      name: `file-${index}.ts`,
+      kind: "file" as const,
+    }));
+    const smallTree: FileTreeNode[] = [
+      { path: "README.md", name: "README.md", kind: "file" as const },
+    ];
+    const r = await renderComponent(
+      <FileBrowser result={filesResult(largeTree)} editable={false} />,
+    );
+    await flush();
+
+    await r.rerender(<FileBrowser result={filesResult(smallTree)} editable={false} />);
+    await flush();
+
+    expect(r.container.textContent).toContain("README.md");
+    expect(r.container.querySelectorAll('[role="treeitem"]')).toHaveLength(1);
+    await r.unmount();
+  });
+
   test("the composite tree exposes its active descendant and complete boundary navigation", async () => {
     const tree: FileTreeNode[] = Array.from({ length: 20 }, (_, index) => ({
       path: `file-${String(index).padStart(2, "0")}.ts`,

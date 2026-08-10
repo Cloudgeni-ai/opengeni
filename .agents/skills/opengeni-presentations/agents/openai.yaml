@@ -1,0 +1,4 @@
+interface:
+  display_name: "OpenGeni Presentations"
+  short_description: "Create and edit verified presentation decks"
+  default_prompt: "Use $opengeni-presentations to create a polished, editable presentation."

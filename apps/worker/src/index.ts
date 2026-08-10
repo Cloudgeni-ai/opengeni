@@ -59,6 +59,7 @@ import {
   SESSION_WORKFLOW_WAKE_DISPATCHER_PERIOD_MS,
   SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID,
   SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_TYPE,
+  TURN_ACTIVITY_CANCELLATION_HEARTBEAT_INTERVAL_MS,
 } from "@opengeni/core";
 import {
   CONTROL_WORKER_MAX_CACHED_WORKFLOWS,
@@ -190,6 +191,13 @@ export function resolveOpenGeniWorkflowDefinition(
   return { workflowBundle: { codePath } };
 }
 
+export function turnCancellationHeartbeatThrottleOptions() {
+  return {
+    maxHeartbeatThrottleInterval: TURN_ACTIVITY_CANCELLATION_HEARTBEAT_INTERVAL_MS,
+    defaultHeartbeatThrottleInterval: TURN_ACTIVITY_CANCELLATION_HEARTBEAT_INTERVAL_MS,
+  } as const;
+}
+
 export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
   worker: WorkerRunTarget;
   connection: NativeConnection;
@@ -256,13 +264,11 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
         connection,
         namespace: settings.temporalNamespace,
         activities,
-        // Cancellation is delivered through an activity heartbeat. The SDK would
-        // otherwise throttle a two-minute heartbeat timeout to its 60-second cap,
-        // making Pause/Steer take roughly a minute even though runAgentTurn emits a
-        // heartbeat every ten seconds. Keep delivery bounded independently of the
-        // heartbeat timeout and local timer cadence.
-        maxHeartbeatThrottleInterval: "5s",
-        defaultHeartbeatThrottleInterval: "5s",
+        // Cancellation is delivered through an activity heartbeat. Keep the SDK
+        // throttle aligned with runAgentTurn's local heartbeat cadence so the
+        // four-second control contract still has time for physical writer drain
+        // and exact receipt-gated replacement admission.
+        ...turnCancellationHeartbeatThrottleOptions(),
         // GRACEFUL DEPLOY SHUTDOWN (with the SIGTERM handler in startWorker):
         // after shutdown() stops polling, in-flight activities get this long to
         // finish naturally; the rest are then CANCELLED with WORKER_SHUTDOWN.

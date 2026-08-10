@@ -365,6 +365,32 @@ describe("observability", () => {
     expect(JSON.parse(observed[1]!)).not.toHaveProperty("sandboxLeaseKey");
   });
 
+  test("physical cancellation logs retain duration and safe sandbox correlation", () => {
+    const observed: string[] = [];
+    const originalLog = console.log;
+    console.log = (message?: unknown) => observed.push(String(message));
+    try {
+      const obs = createObservability(settings, { component: "worker", now: () => 1 });
+      obs.info("agent turn physical cancellation completed", {
+        durationMs: 1_487,
+        sandboxLeaseKey: "slk_0123456789abcdef0123456789abcdef",
+        "opengeni.session_id": "session-must-not-leak",
+        "opengeni.turn_id": "turn-must-not-leak",
+        "opengeni.attempt_id": "attempt-must-not-leak",
+      });
+    } finally {
+      console.log = originalLog;
+    }
+
+    expect(observed).toHaveLength(1);
+    expect(JSON.parse(observed[0]!)).toMatchObject({
+      message: "agent turn physical cancellation completed",
+      durationMs: 1_487,
+      sandboxLeaseKey: "slk_0123456789abcdef0123456789abcdef",
+    });
+    expect(observed[0]).not.toContain("must-not-leak");
+  });
+
   test("public diagnostics retain safe operation fields and validated lease correlation", () => {
     const sentinel = "DIAGNOSTIC_PRIVATE_SENTINEL_6a44f8";
     const observed: string[] = [];

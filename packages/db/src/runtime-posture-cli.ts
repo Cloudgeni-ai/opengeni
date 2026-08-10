@@ -6,6 +6,7 @@ import {
   PROTECTED_NO_DIRECT_DML_TABLES,
   RUNTIME_FULL_DML_TABLES,
   RUNTIME_READ_INSERT_TABLES,
+  RUNTIME_READ_INSERT_UPDATE_TABLES,
   RUNTIME_READ_ONLY_TABLES,
 } from "./index";
 
@@ -49,6 +50,7 @@ try {
       ).length,
       declaredReadOnlyTables: RUNTIME_READ_ONLY_TABLES.length,
       declaredReadInsertTables: RUNTIME_READ_INSERT_TABLES.length,
+      declaredReadInsertUpdateTables: RUNTIME_READ_INSERT_UPDATE_TABLES.length,
       declaredProtectedNoDirectDmlTables: PROTECTED_NO_DIRECT_DML_TABLES.length,
     }),
   );

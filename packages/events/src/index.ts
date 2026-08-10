@@ -210,6 +210,8 @@ export interface RequestConnection {
 export interface OpStreamConnection {
   subscribe(subject: string): AsyncIterable<{ data: Uint8Array }> & { unsubscribe(): void };
   publish(subject: string, payload: Uint8Array): void;
+  /** Subscription/publish barrier used before reading durable authority. */
+  flush?(): Promise<void>;
 }
 
 /**
@@ -326,6 +328,7 @@ export async function createNatsEventBus(
     publish: (subject, payload) => {
       nc.publish(subject, payload);
     },
+    flush: () => nc.flush(),
   };
   return {
     publish: async (workspaceId, sessionId, events) => {
@@ -769,7 +772,9 @@ export function formatSse<T extends { sequence: number; type: string }>(event: T
 
 /** Canonical one-event NATS payload with an exact broker byte assertion. */
 export function workspaceControlEventNatsPayload(event: WorkspaceControlEvent): Uint8Array {
-  const bounded = boundWorkspaceControlEvent(event, { surface: "nats_legacy_guard" });
+  const bounded = boundWorkspaceControlEvent(event, {
+    surface: "nats_legacy_guard",
+  });
   const encoded = codec.encode(bounded);
   if (encoded.byteLength > WORKSPACE_CONTROL_NATS_MESSAGE_MAX_BYTES) {
     throw new RangeError(
@@ -781,7 +786,9 @@ export function workspaceControlEventNatsPayload(event: WorkspaceControlEvent): 
 
 /** Defensively bounds current and historical workspace invalidations per frame. */
 export function formatWorkspaceControlEventSse(event: WorkspaceControlEvent): string {
-  const bounded = boundWorkspaceControlEvent(event, { surface: "sse_legacy_guard" });
+  const bounded = boundWorkspaceControlEvent(event, {
+    surface: "sse_legacy_guard",
+  });
   const formatted = formatSse(bounded);
   const bytes = new TextEncoder().encode(formatted).byteLength;
   if (bytes > SESSION_EVENT_SSE_FRAME_MAX_BYTES) {

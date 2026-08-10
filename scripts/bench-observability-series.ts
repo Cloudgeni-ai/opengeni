@@ -15,60 +15,90 @@ interface RelabelRule {
   sourceLabels?: string[];
 }
 
-const args = parseArgs(process.argv.slice(2));
-const stackValues = Bun.YAML.parse(await Bun.file("deploy/observability/values.yaml").text())[
-  "kube-prometheus-stack"
-] as Record<string, any>;
-const rows = await prometheusQuery(
-  args.prometheusUrl,
-  'count by (job, metrics_path, __name__) ({__name__!=""})',
-);
-const headRows = await prometheusQuery(args.prometheusUrl, "prometheus_tsdb_head_series");
-const headSeries = sumRows(headRows);
+// Prometheus adds these after scraping. Metric relabeling cannot remove them,
+// so a projection that runs relabel rules against them understates the retained
+// series count. Keep this list aligned with Prometheus' automatic scrape-series
+// contract rather than exporter implementations.
+export const AUTOMATIC_SCRAPE_METRICS = new Set([
+  "up",
+  "scrape_duration_seconds",
+  "scrape_samples_post_metric_relabeling",
+  "scrape_samples_scraped",
+  "scrape_series_added",
+]);
 
-const categoryTotals = new Map<string, { current: number; projected: number }>();
-for (const row of rows) {
-  const labels = row.metric;
-  const name = labels.__name__ ?? "";
-  const count = Number(row.value[1]);
-  const category = categoryFor(labels.job ?? "", name);
-  const retained = retainedByProfile(category, labels, stackValues);
-  const totals = categoryTotals.get(category) ?? { current: 0, projected: 0 };
-  totals.current += count;
-  if (retained) totals.projected += count;
-  categoryTotals.set(category, totals);
-}
+// The matching target exists for one OpenGeni alert: logical turn-queue age.
+// Count is retained alongside age for diagnosis; the generic Temporal server
+// telemetry is intentionally outside this narrowly owned ServiceMonitor.
+export const TEMPORAL_MATCHING_METRICS = new Set([
+  "approximate_backlog_age_seconds",
+  "approximate_backlog_count",
+]);
+export const MIN_INSTANT_SERIES_REDUCTION = 4;
 
-const currentSamples = [...categoryTotals.values()].reduce((sum, row) => sum + row.current, 0);
-const projectedSamples = [...categoryTotals.values()].reduce((sum, row) => sum + row.projected, 0);
-const headReduction = projectedSamples > 0 ? headSeries / projectedSamples : 0;
-const currentReduction = projectedSamples > 0 ? currentSamples / projectedSamples : 0;
-const result = {
-  measurement: "instant-vector upper bound; secondary label drops can reduce it further",
-  headSeries,
-  currentSamples,
-  projectedSamples,
-  headReduction: Number(headReduction.toFixed(2)),
-  currentReduction: Number(currentReduction.toFixed(2)),
-  categories: Object.fromEntries(
-    [...categoryTotals]
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([name, totals]) => [name, totals]),
-  ),
-};
-console.log(JSON.stringify(result, null, 2));
-
-if (args.check && headReduction < 3.5) {
-  throw new Error(
-    `projected head-series reduction ${headReduction.toFixed(2)}x is below the 3.5x safety floor`,
+async function main(): Promise<void> {
+  const args = parseArgs(process.argv.slice(2));
+  const stackValues = Bun.YAML.parse(await Bun.file("deploy/observability/values.yaml").text())[
+    "kube-prometheus-stack"
+  ] as Record<string, any>;
+  const rows = await prometheusQuery(
+    args.prometheusUrl,
+    'count by (job, metrics_path, __name__, le, interface, id, pod, reason) ({__name__!=""})',
   );
+  const headRows = await prometheusQuery(args.prometheusUrl, "prometheus_tsdb_head_series");
+  const headSeries = sumRows(headRows);
+
+  const categoryTotals = new Map<string, { current: number; projected: number }>();
+  for (const row of rows) {
+    const labels = row.metric;
+    const name = labels.__name__ ?? "";
+    const count = Number(row.value[1]);
+    const category = categoryFor(labels.job ?? "", name);
+    const retained = retainedByProfile(category, labels, stackValues);
+    const totals = categoryTotals.get(category) ?? { current: 0, projected: 0 };
+    totals.current += count;
+    if (retained) totals.projected += count;
+    categoryTotals.set(category, totals);
+  }
+
+  const currentSamples = [...categoryTotals.values()].reduce((sum, row) => sum + row.current, 0);
+  const projectedSamples = [...categoryTotals.values()].reduce(
+    (sum, row) => sum + row.projected,
+    0,
+  );
+  const instantReduction = reductionRatio(currentSamples, projectedSamples);
+  const headToProjectedRatio = reductionRatio(headSeries, projectedSamples);
+  const result = {
+    measurement:
+      "instant-vector projection; head-to-projected ratio is diagnostic because head includes stale series",
+    headSeries,
+    currentSamples,
+    projectedSamples,
+    instantReduction: Number(instantReduction.toFixed(2)),
+    headToProjectedRatio: Number(headToProjectedRatio.toFixed(2)),
+    categories: Object.fromEntries(
+      [...categoryTotals]
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([name, totals]) => [name, totals]),
+    ),
+  };
+  console.log(JSON.stringify(result, null, 2));
+
+  if (args.check && instantReduction < MIN_INSTANT_SERIES_REDUCTION) {
+    throw new Error(
+      `projected instantaneous series reduction ${instantReduction.toFixed(2)}x is below the ${MIN_INSTANT_SERIES_REDUCTION.toFixed(1)}x safety floor`,
+    );
+  }
 }
 
-function retainedByProfile(
+if (import.meta.main) await main();
+
+export function retainedByProfile(
   category: string,
   labels: Record<string, string>,
   values: Record<string, any>,
 ): boolean {
+  if (AUTOMATIC_SCRAPE_METRICS.has(labels.__name__ ?? "")) return true;
   switch (category) {
     case "kubernetes-api":
       return applyRelabelRules(labels, values.kubeApiServer.serviceMonitor.metricRelabelings);
@@ -83,14 +113,17 @@ function retainedByProfile(
       return applyRelabelRules(labels, rules);
     }
     case "kube-state-metrics":
-      return new Set(values["kube-state-metrics"].metricAllowlist).has(labels.__name__);
+      return (
+        new Set(values["kube-state-metrics"].metricAllowlist).has(labels.__name__) &&
+        applyRelabelRules(labels, values["kube-state-metrics"].prometheus.monitor.metricRelabelings)
+      );
     case "node-exporter":
       return applyRelabelRules(
         labels,
         values["prometheus-node-exporter"].prometheus.monitor.metricRelabelings,
       );
     case "temporal":
-      return !/.*latency.*_bucket/.test(labels.__name__ ?? "");
+      return TEMPORAL_MATCHING_METRICS.has(labels.__name__ ?? "");
     case "grafana":
       return applyRelabelRules(labels, values.grafana.serviceMonitor.metricRelabelings);
     case "alertmanager":
@@ -102,6 +135,10 @@ function retainedByProfile(
     default:
       return true;
   }
+}
+
+export function reductionRatio(current: number, projected: number): number {
+  return projected > 0 ? current / projected : 0;
 }
 
 function applyRelabelRules(labels: Record<string, string>, rules: RelabelRule[]): boolean {

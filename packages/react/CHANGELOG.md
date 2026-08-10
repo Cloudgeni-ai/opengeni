@@ -1,5 +1,38 @@
 # @opengeni/react
 
+## 0.50.1
+
+### Patch Changes
+
+- 98b94e8: Project physical cancellation immediately from atomic Steer and Pause receipts, then reconcile it against durable queue truth.
+- Updated dependencies [98b94e8]
+- Updated dependencies [2cd6dce]
+  - @opengeni/sdk@0.50.1
+
+## 0.50.0
+
+### Minor Changes
+
+- 7b2d5ff: Add trust-gated in-session capability recommendations, human-owned authorization
+  requests, and a GitHub owner-consent flow that returns to the initiating session.
+- d1189ba: Add the OpenGeni-owned document, spreadsheet, and presentation authoring engine,
+  its durable API/domain/live-sync surfaces, first-party React workbench, and
+  editable-artifact client SDK. Publish independently lazy, identity-pinned browser
+  WASM runtimes for each editor modality.
+
+### Patch Changes
+
+- Updated dependencies [7b2d5ff]
+- Updated dependencies [d1189ba]
+  - @opengeni/sdk@0.50.0
+
+## 0.49.9
+
+### Patch Changes
+
+- 727b186: Keep the session timeline entry compatible with React Native Metro and Hermes bundles.
+- 245baf7: Preserve Changes rail focus and scroll while safely resetting virtualization after diff shrinks.
+
 ## 0.49.8
 
 ### Patch Changes

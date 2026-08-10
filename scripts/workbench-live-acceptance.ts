@@ -49,6 +49,7 @@ const TERMINAL_SELECTOR = "[data-opengeni-terminal]";
 const INTERACTIVE_TERMINAL_SELECTOR =
   '[data-opengeni-terminal][data-opengeni-terminal-status="open"]' +
   '[data-opengeni-terminal-interactive="true"]';
+const SESSION_CHROME_STEERING_TEST_ID = "session-chrome-steering";
 const CAPTURE_API_P95_MS = maximumMillisecondBudget("performance.capture-api-response", "p95");
 const CAPTURE_USABLE_WORKBENCH_P95_MS = maximumMillisecondBudget(
   "performance.capture-usable-workbench",
@@ -1401,7 +1402,7 @@ async function runLiveWorkspaceFlow(input: {
     pass(
       checks,
       "performance.control-cancellation",
-      `Steer/Pause physical cancellation worst=${round(controlSummary.worst)}ms, p95=${round(controlSummary.p95)}ms across ${controlSummary.sampleCount} controls (hard budget ${CONTROL_CANCELLATION_WORST_MS}ms).`,
+      `Steer replacement/Pause quiescence worst=${round(controlSummary.worst)}ms, p95=${round(controlSummary.p95)}ms across ${controlSummary.sampleCount} controls (shared hard budget ${CONTROL_CANCELLATION_WORST_MS}ms).`,
     );
 
     assertNoProblems(problems, false);
@@ -1450,6 +1451,45 @@ type ControlCancellationAudit = {
   >;
 };
 
+export function classifyControlCommandMarkerEvent(
+  event: Pick<SessionEvent, "type" | "payload">,
+  marker: string,
+): "running" | "completed" | "malformed" | null {
+  if (event.type !== "agent.toolCall.output" || !isRecord(event.payload)) return null;
+  const output = event.payload.output;
+  if (typeof output !== "string" || !output.includes(marker)) return null;
+  const running = /^Process running with session ID [1-9][0-9]*$/mu.test(output);
+  const completed = /^Process exited with code -?[0-9]+$/mu.test(output);
+  if (running && !completed) return "running";
+  if (completed && !running) return "completed";
+  return "malformed";
+}
+
+function isRunningControlCommandMarkerEvent(event: SessionEvent, marker: string): boolean {
+  const state = classifyControlCommandMarkerEvent(event, marker);
+  if (state === "completed") {
+    throw new Error("the cancellation fixture command completed before control was requested");
+  }
+  if (state === "malformed") {
+    throw new Error("the cancellation fixture command marker had no running-process receipt");
+  }
+  return state === "running";
+}
+
+/**
+ * The production session route renders control state in SessionChrome. Match
+ * both its stable test id and the exact authoritative stopping projection so
+ * the optimistic "Changing direction" state cannot satisfy this proof.
+ */
+export function liveStoppingStateLocator(
+  page: Pick<Page, "getByTestId">,
+  control: "steer" | "pause",
+): Locator {
+  return page.getByTestId(SESSION_CHROME_STEERING_TEST_ID).filter({
+    hasText: control === "steer" ? "Stopping previous work" : "Stopping current work",
+  });
+}
+
 async function proveLiveSteerCancellation(input: {
   client: OpenGeniClient;
   page: Page;
@@ -1477,8 +1517,8 @@ async function proveLiveSteerCancellation(input: {
   const zombiePath = `steer-stress/zombie-${iteration}.txt`;
   const terminalCommand =
     iteration === 0
-      ? `rm -rf steer-stress; mkdir -p steer-stress; for d in $(seq 1 150); do mkdir -p "steer-stress/d$d"; for f in $(seq 1 29); do : > "steer-stress/d$d/f$f.ts"; done; done; printf '${controlMarker}\\n'; trap '' INT TERM; sleep 5; printf zombie > '${zombiePath}'`
-      : `rm -f '${zombiePath}'; test "$(find steer-stress -type f | wc -l)" -ge 4350; printf '${controlMarker}\\n'; trap '' INT TERM; sleep 5; printf zombie > '${zombiePath}'`;
+      ? `rm -rf steer-stress; mkdir -p steer-stress; for d in $(seq 1 150); do mkdir -p "steer-stress/d$d"; for f in $(seq 1 29); do : > "steer-stress/d$d/f$f.ts"; done; done; printf '${controlMarker}\\n'; trap '' INT TERM; sleep 30; printf zombie > '${zombiePath}'`
+      : `rm -f '${zombiePath}'; test "$(find steer-stress -type f | wc -l)" -ge 4350; printf '${controlMarker}\\n'; trap '' INT TERM; sleep 30; printf zombie > '${zombiePath}'`;
   const queue = await client.getQueue(workspaceId, sessionId);
   const initialAccepted = await client.sendMessage(workspaceId, sessionId, {
     text: [
@@ -1497,10 +1537,8 @@ async function proveLiveSteerCancellation(input: {
     sessionId,
     afterSequence,
     sessionTimeoutMs,
-    (event) =>
-      event.type === "sandbox.command.output.delta" &&
-      JSON.stringify(event.payload).includes(controlMarker),
-    "the live cancellation fixture command marker",
+    (event) => isRunningControlCommandMarkerEvent(event, controlMarker),
+    "the running live cancellation fixture command marker",
   );
   if (!ready.turnId || !ready.turnAttemptId) {
     throw new Error("control fixture output was not bound to its owning turn attempt");
@@ -1532,8 +1570,8 @@ async function proveLiveSteerCancellation(input: {
   const composer = page.getByLabel("Message the agent");
   await composer.waitFor({ timeout: 20_000 });
   await composer.fill(`Reply exactly REPLACED_${marker}. Do not run a tool.`);
-  const stoppingVisible = page
-    .getByTestId("stopping-previous-attempt")
+  const stoppingState = liveStoppingStateLocator(page, "steer");
+  const stoppingVisible = stoppingState
     .waitFor({ state: "visible", timeout: 1_000 })
     .then(() => true)
     .catch(() => false);
@@ -1562,31 +1600,62 @@ async function proveLiveSteerCancellation(input: {
   if (typeof replacementTurnId !== "string" || !Number.isFinite(committedAt)) {
     throw new Error("live Steer receipt omitted its turn identity or commit time");
   }
-  const replacementStarted = await waitForSessionEvent(
+  const observationDeadline = performance.now() + CONTROL_CANCELLATION_WORST_MS;
+  const remainingBudgetMs = (label: string): number => {
+    const remaining = Math.ceil(observationDeadline - performance.now());
+    if (remaining <= 0) {
+      throw new Error(
+        `Steer ${label} exhausted the shared ${CONTROL_CANCELLATION_WORST_MS}ms control budget`,
+      );
+    }
+    return remaining;
+  };
+  const quiesced = await waitForSessionEvent(
     client,
     workspaceId,
     sessionId,
     ready.sequence,
-    CONTROL_CANCELLATION_WORST_MS,
-    (event) => event.type === "turn.started" && event.turnId === replacementTurnId,
-    "replacement turn start inside the physical-cancellation budget",
+    remainingBudgetMs("physical quiescence"),
+    (event) =>
+      event.type === "session.queue.changed" &&
+      event.turnId === predecessorTurnId &&
+      event.turnAttemptId === predecessorAttemptId &&
+      isRecord(event.payload) &&
+      event.payload.operation === "attempt_quiesced" &&
+      event.payload.attemptId === predecessorAttemptId,
+    "predecessor physical quiescence inside the shared control budget",
   );
-  const controlCancellationMs = controlCancellationDurationMs(
+  const replacementStarted = await waitForSessionEvent(
+    client,
+    workspaceId,
+    sessionId,
+    quiesced.sequence,
+    remainingBudgetMs("replacement admission"),
+    (event) => event.type === "turn.started" && event.turnId === replacementTurnId,
+    "replacement turn start inside the shared control budget",
+  );
+  const cancellationTimeline = controlCancellationTimelineMs(
     committedAt,
+    Date.parse(quiesced.occurredAt),
     Date.parse(replacementStarted.occurredAt),
   );
-  if (controlCancellationMs > CONTROL_CANCELLATION_WORST_MS) {
+  if (cancellationTimeline.physicalQuiescenceMs > CONTROL_CANCELLATION_WORST_MS) {
     throw new Error(
-      `Steer replacement took ${controlCancellationMs}ms; budget is ${CONTROL_CANCELLATION_WORST_MS}ms`,
+      `Steer physical cancellation took ${cancellationTimeline.physicalQuiescenceMs}ms; budget is ${CONTROL_CANCELLATION_WORST_MS}ms`,
+    );
+  }
+  if (cancellationTimeline.replacementStartedMs > CONTROL_CANCELLATION_WORST_MS) {
+    throw new Error(
+      `Steer replacement took ${cancellationTimeline.replacementStartedMs}ms; budget is ${CONTROL_CANCELLATION_WORST_MS}ms`,
     );
   }
   const renderedStoppingState = await stoppingVisible;
-  if (controlCancellationMs > 100 && !renderedStoppingState) {
+  if (cancellationTimeline.physicalQuiescenceMs > 100 && !renderedStoppingState) {
     throw new Error(
-      `Steer spent ${controlCancellationMs}ms behind the physical fence without rendering its stopping state`,
+      `Steer spent ${cancellationTimeline.physicalQuiescenceMs}ms behind the physical fence without rendering its stopping state`,
     );
   }
-  await page.getByTestId("stopping-previous-attempt").waitFor({ state: "hidden", timeout: 5_000 });
+  await stoppingState.waitFor({ state: "hidden", timeout: 5_000 });
 
   const settled = await waitForSettled(client, workspaceId, sessionId, sessionTimeoutMs);
   if (settled.status !== "idle") {
@@ -1616,16 +1685,6 @@ async function proveLiveSteerCancellation(input: {
   if (!steerRequested) {
     throw new Error("Steer receipt had no matching durable control-request event");
   }
-  const quiesced = finalEvents.find(
-    (event) =>
-      event.type === "session.queue.changed" &&
-      event.turnId === predecessorTurnId &&
-      isRecord(event.payload) &&
-      event.payload.operation === "attempt_quiesced",
-  );
-  if (!quiesced) {
-    throw new Error("Steer predecessor had no durable quiescence receipt");
-  }
   if (
     quiesced.sequence <= steerRequested.sequence ||
     quiesced.sequence >= replacementStarted.sequence
@@ -1635,7 +1694,7 @@ async function proveLiveSteerCancellation(input: {
   audit.fences.set(predecessorAttemptId, {
     control: "Steer",
     controlRequestedSequence: steerRequested.sequence,
-    physicallyStoppedSequence: replacementStarted.sequence,
+    physicallyStoppedSequence: quiesced.sequence,
   });
   await auditCancelledPredecessorEvents(client, workspaceId, sessionId, audit);
   if (verifyReplacementCapture) {
@@ -1657,7 +1716,7 @@ async function proveLiveSteerCancellation(input: {
       );
     }
   }
-  return controlCancellationMs;
+  return cancellationTimeline.replacementStartedMs;
 }
 
 async function proveLivePauseCancellation(input: {
@@ -1686,7 +1745,7 @@ async function proveLivePauseCancellation(input: {
   // safe branch and cannot manufacture a false zombie after Resume.
   const terminalCommand =
     `if mkdir pause-stress/claimed 2>/dev/null; then printf '${controlMarker}\\n'; ` +
-    `trap '' INT TERM; sleep 5; printf zombie > '${zombiePath}'; ` +
+    `trap '' INT TERM; sleep 30; printf zombie > '${zombiePath}'; ` +
     `else printf 'PAUSE_RESUMED_SAFE_${marker}\\n'; fi`;
   await client.sendMessage(workspaceId, sessionId, {
     text: [
@@ -1705,10 +1764,8 @@ async function proveLivePauseCancellation(input: {
     sessionId,
     afterSequence,
     sessionTimeoutMs,
-    (event) =>
-      event.type === "sandbox.command.output.delta" &&
-      JSON.stringify(event.payload).includes(controlMarker),
-    "the live Pause fixture command marker",
+    (event) => isRunningControlCommandMarkerEvent(event, controlMarker),
+    "the running live Pause fixture command marker",
   );
   if (!ready.turnId || !ready.turnAttemptId) {
     throw new Error("Pause fixture output was not bound to its owning turn attempt");
@@ -1716,12 +1773,12 @@ async function proveLivePauseCancellation(input: {
   const predecessorTurnId = ready.turnId;
   const predecessorAttemptId = ready.turnAttemptId;
 
-  const stoppingState = page
-    .getByTestId("stopping-previous-attempt")
+  const stoppingState = liveStoppingStateLocator(page, "pause");
+  const stoppingObservation = stoppingState
     .waitFor({ state: "visible", timeout: 1_000 })
     .then(async () => ({
       visible: true,
-      text: (await page.getByTestId("stopping-previous-attempt").textContent()) ?? "",
+      text: (await stoppingState.textContent()) ?? "",
     }))
     .catch(() => ({ visible: false, text: "" }));
   const pauseResponsePromise = page.waitForResponse(
@@ -1789,22 +1846,19 @@ async function proveLivePauseCancellation(input: {
       `Pause physical cancellation took ${controlCancellationMs}ms; budget is ${CONTROL_CANCELLATION_WORST_MS}ms`,
     );
   }
-  const renderedStoppingState = await stoppingState;
-  if (controlCancellationMs > 100 && !renderedStoppingState.visible) {
+  const observedStoppingState = await stoppingObservation;
+  if (controlCancellationMs > 100 && !observedStoppingState.visible) {
     throw new Error(
       `Pause spent ${controlCancellationMs}ms behind the physical fence without rendering its stopping state`,
     );
   }
   if (
-    renderedStoppingState.visible &&
-    (!renderedStoppingState.text.includes("Stopping current attempt") ||
-      !renderedStoppingState.text.includes("until you resume"))
+    observedStoppingState.visible &&
+    !observedStoppingState.text.includes("Stopping current work")
   ) {
-    throw new Error(
-      "Pause rendered misleading Steer queue copy while physical cancellation settled",
-    );
+    throw new Error("Pause rendered misleading control-state copy while cancellation settled");
   }
-  await page.getByTestId("stopping-previous-attempt").waitFor({ state: "hidden", timeout: 5_000 });
+  await stoppingState.waitFor({ state: "hidden", timeout: 5_000 });
   await page.getByText("Paused here", { exact: true }).waitFor({ timeout: 5_000 });
 
   audit.fences.set(predecessorAttemptId, {
@@ -1927,6 +1981,19 @@ export function controlCancellationDurationMs(committedAt: number, replacementSt
     throw new Error("physical cancellation completed before its control commit timestamp");
   }
   return replacementStartedAt - committedAt;
+}
+
+export function controlCancellationTimelineMs(
+  committedAt: number,
+  quiescedAt: number,
+  replacementStartedAt: number,
+): { physicalQuiescenceMs: number; replacementStartedMs: number } {
+  const physicalQuiescenceMs = controlCancellationDurationMs(committedAt, quiescedAt);
+  const replacementStartedMs = controlCancellationDurationMs(committedAt, replacementStartedAt);
+  if (replacementStartedAt < quiescedAt) {
+    throw new Error("replacement turn started before physical quiescence");
+  }
+  return { physicalQuiescenceMs, replacementStartedMs };
 }
 
 async function waitForSessionEvent(

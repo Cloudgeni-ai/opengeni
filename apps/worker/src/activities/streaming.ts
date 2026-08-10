@@ -1,4 +1,5 @@
 import type { SessionEventType } from "@opengeni/contracts";
+import { TURN_ACTIVITY_CANCELLATION_HEARTBEAT_INTERVAL_MS } from "@opengeni/core";
 import type { AppendEventInput } from "@opengeni/db";
 import { Context } from "@temporalio/activity";
 
@@ -176,13 +177,14 @@ export function currentActivityContext(): Context | null {
 export function startActivityHeartbeat(
   context: Context | null,
   details: Record<string, unknown>,
+  schedule: typeof setInterval = setInterval,
 ): ReturnType<typeof setInterval> | null {
   if (!context) {
     return null;
   }
-  const timer = setInterval(() => {
+  const timer = schedule(() => {
     context.heartbeat({ ...details, at: new Date().toISOString() });
-  }, 10_000);
+  }, TURN_ACTIVITY_CANCELLATION_HEARTBEAT_INTERVAL_MS);
   if ("unref" in timer && typeof timer.unref === "function") {
     timer.unref();
   }

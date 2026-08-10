@@ -1,5 +1,29 @@
 # @opengeni/runtime
 
+## 0.18.39
+
+### Patch Changes
+
+- 2cd6dce: Build and reuse version-bound immutable provider images after clean rig verification, with content-hash invalidation and runtime-setup fallback for missing or unsupported providers.
+- Updated dependencies [2cd6dce]
+  - @opengeni/contracts@0.42.1
+  - @opengeni/config@0.12.10
+
+## 0.18.38
+
+### Patch Changes
+
+- Updated dependencies [7b2d5ff]
+- Updated dependencies [d1189ba]
+  - @opengeni/contracts@0.42.0
+  - @opengeni/config@0.12.9
+
+## 0.18.37
+
+### Patch Changes
+
+- bea1e89: Resolve lazy sandbox command cancellation against the physical backend before execution.
+
 ## 0.18.36
 
 ### Patch Changes

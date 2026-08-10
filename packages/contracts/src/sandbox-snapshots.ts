@@ -190,6 +190,24 @@ export function decodeNativeSnapshotRef(bytes: Uint8Array): NativeSnapshotRef | 
   return null;
 }
 
+export function encodeNativeSnapshotRef(ref: NativeSnapshotRef): Uint8Array {
+  const prefix = NATIVE_SNAPSHOT_PREFIXES.find((entry) => entry.provider === ref.provider)?.prefix;
+  if (!prefix || typeof ref.snapshotId !== "string" || ref.snapshotId.length === 0) {
+    throw new TypeError("Native snapshot reference requires a supported provider and snapshot id");
+  }
+  if (ref.workspacePersistence !== undefined && typeof ref.workspacePersistence !== "string") {
+    throw new TypeError("Native snapshot workspace persistence must be a string");
+  }
+  return new TextEncoder().encode(
+    `${prefix}${JSON.stringify({
+      snapshot_id: ref.snapshotId,
+      ...(ref.workspacePersistence === undefined
+        ? {}
+        : { workspace_persistence: ref.workspacePersistence }),
+    })}`,
+  );
+}
+
 export function backendForNativeSnapshotProvider(provider: NativeSnapshotProvider): string {
   return provider === "modal_snapshot_directory" || provider === "modal_snapshot_filesystem"
     ? "modal"

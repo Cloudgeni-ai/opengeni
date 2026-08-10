@@ -339,6 +339,166 @@ worker:
     type: ClusterIP
     port: 8001
 
+# Native, isolated Office-file materialization. This is a distinct workload,
+# database identity, executable, and image; it never runs inside turn/control
+# workers. Its selected credentials Secret must provide
+# OPENGENI_ARTIFACT_MATERIALIZER_DATABASE_URL for the dedicated
+# opengeni_artifact_materializer login. Only that URL and the selected optional
+# object-storage credential keys are projected; ordinary application secrets are
+# never inherited. Disabled until an immutable per-platform artifact runtime
+# bundle has been built into the materializer image.
+artifactMaterializer:
+  enabled: false
+  replicaCount: 1
+  # Defaults to secret.existingSecret for backward-compatible secret ownership,
+  # while still projecting only these dedicated keys into the workload.
+  credentialsSecret: ""
+  databaseUrlSecretKey: OPENGENI_ARTIFACT_MATERIALIZER_DATABASE_URL
+  objectStorageAccessKeyIdSecretKey: OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID
+  objectStorageSecretAccessKeySecretKey: OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY
+  objectStorageAzureConnectionStringSecretKey: OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING
+  objectStorageAzureAccountNameSecretKey: OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_NAME
+  objectStorageAzureAccountKeySecretKey: OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_KEY
+  objectStorageGcsCredentialsJsonSecretKey: OPENGENI_OBJECT_STORAGE_GCS_CREDENTIALS_JSON
+  image:
+    repository: opengeni-artifact-materializer
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+  containerPort: 9465
+  batchSize: 8
+  concurrency: 2
+  leaseMs: 120000
+  renewMs: 30000
+  pollMs: 1000
+  maxAttempts: 20
+  childMemoryBytes: 536870912
+  childCpuMs: 60000
+  childOpenFiles: 64
+  childProcesses: 64
+  childFileBytes: 536870912
+  wallMs: 120000
+  maxSourceBytes: 536870912
+  maxOutputBytes: 536870912
+  resources:
+    requests:
+      cpu: 500m
+      memory: 2Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+  podAnnotations: {}
+  priorityClassName: ""
+  terminationGracePeriodSeconds: 150
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  probes:
+    readiness:
+      enabled: true
+      path: /readyz
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      timeoutSeconds: 3
+      failureThreshold: 3
+    liveness:
+      enabled: true
+      path: /healthz
+      initialDelaySeconds: 20
+      periodSeconds: 20
+      timeoutSeconds: 3
+      failureThreshold: 3
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
+  service:
+    type: ClusterIP
+    port: 9465
+
+# Durable transaction/snapshot live-hint delivery. This is a distinct process,
+# image, and database identity. Its selected credentials Secret must provide
+# OPENGENI_ARTIFACT_OUTBOX_DATABASE_URL for the dedicated
+# opengeni_artifact_outbox_dispatcher login.
+artifactOutboxDispatcher:
+  enabled: false
+  replicaCount: 1
+  # Defaults to secret.existingSecret. Only the dedicated database URL and the
+  # optional NATS control password are projected into this process.
+  credentialsSecret: ""
+  databaseUrlSecretKey: OPENGENI_ARTIFACT_OUTBOX_DATABASE_URL
+  natsControlPasswordSecretKey: OPENGENI_SELFHOSTED_NATS_CONTROL_PASSWORD
+  image:
+    repository: opengeni-artifact-outbox-dispatcher
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+  containerPort: 9466
+  databasePoolSize: 4
+  batchSize: 32
+  concurrency: 8
+  leaseMs: 30000
+  renewMs: 10000
+  pollMs: 500
+  publishTimeoutMs: 5000
+  retryBaseMs: 500
+  retryMaxMs: 60000
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+  podAnnotations: {}
+  priorityClassName: ""
+  terminationGracePeriodSeconds: 60
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  probes:
+    readiness:
+      enabled: true
+      path: /readyz
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      timeoutSeconds: 2
+      failureThreshold: 3
+    liveness:
+      enabled: true
+      path: /healthz
+      initialDelaySeconds: 20
+      periodSeconds: 20
+      timeoutSeconds: 2
+      failureThreshold: 3
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
+  service:
+    type: ClusterIP
+    port: 9466
+
 web:
   enabled: true
   # Server-side target for the public React reference demo's same-origin

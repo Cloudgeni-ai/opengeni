@@ -23,6 +23,7 @@ import {
   bootstrapWorkspace,
   beginConnectorActionExecution,
   claimSessionWorkForAttempt,
+  commitSessionAttemptQuiescence,
   clearDurablePendingSessionToolCalls,
   completeConnectorActionExecution,
   createDb,
@@ -3689,7 +3690,7 @@ describe("clean session control plane", () => {
       { attemptId, workflowRunId, dispatchId },
     );
     expect(predecessor).not.toBeNull();
-    await send(grant, session.id, "replace it", "steer");
+    const steered = await send(grant, session.id, "replace it", "steer");
 
     await expect(
       markSessionAttemptQuiesced(client.db, {
@@ -3708,7 +3709,7 @@ describe("clean session control plane", () => {
         ?.stoppingPreviousAttempt,
     ).toBe(true);
 
-    const events = await markSessionAttemptQuiesced(client.db, {
+    const committed = await commitSessionAttemptQuiescence(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
       sessionId: session.id,
@@ -3718,7 +3719,7 @@ describe("clean session control plane", () => {
       temporalActivityId: dispatchId,
       allowUninterrupted: true,
     });
-    expect(events).toEqual([
+    expect(committed.events).toEqual([
       expect.objectContaining({
         type: "session.queue.changed",
         turnId: predecessor!.id,
@@ -3726,8 +3727,16 @@ describe("clean session control plane", () => {
         payload: expect.objectContaining({ operation: "attempt_quiesced", attemptId }),
       }),
     ]);
+    expect(committed.workflowWake).toMatchObject({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      temporalWorkflowId: workflowId,
+      interruptionRequested: true,
+    });
+    expect(committed.workflowWake!.wakeRevision).toBeGreaterThan(steered.wakeRevision);
     expect(
-      await markSessionAttemptQuiesced(client.db, {
+      await commitSessionAttemptQuiescence(client.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId!,
         sessionId: session.id,
@@ -3737,7 +3746,7 @@ describe("clean session control plane", () => {
         temporalActivityId: dispatchId,
         allowUninterrupted: true,
       }),
-    ).toEqual(events);
+    ).toEqual(committed);
   });
 
   test("a closed interrupted attempt converges from its fully settled durable writer set", async () => {

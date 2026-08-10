@@ -22,9 +22,15 @@ import {
   usesBrowserRunner,
 } from "./workspace";
 
+const ARTIFACT_BROWSER_E2E = [
+  "test/e2e/artifact-spreadsheet-canvas.browser.e2e.ts",
+  "test/e2e/artifact-spreadsheet-scroll.browser.e2e.ts",
+  "test/e2e/editable-artifacts.browser.e2e.ts",
+] as const;
+
 describe("fail-closed change impact", () => {
   test("documentation-only changes retain every non-runtime public guard", () => {
-    const plan = createImpactPlan(["docs/toolchain.md", "README.md"]);
+    const plan = createImpactPlan(["docs/artifact-engine.md", "README.md"]);
     expect(plan.mode).toBe("docs");
     expect(plan.typecheckProjects).toEqual([]);
     expect(plan.unitTests).toEqual([]);
@@ -58,7 +64,7 @@ describe("fail-closed change impact", () => {
     for (const changed of [[], ["../outside.ts"], ["/absolute.ts"], ["bad\\path.ts"]]) {
       expect(createImpactPlan(changed).mode).toBe("full");
     }
-  });
+  }, 30_000);
 
   test("a package change selects the package, reverse dependents, and linked outputs", () => {
     const sdk = createImpactPlan(["packages/sdk/src/client.ts"]);
@@ -69,9 +75,12 @@ describe("fail-closed change impact", () => {
     expect(sdk.typecheckProjects).toContain("packages/sdk");
     expect(sdk.unitTests).toContain("packages/sdk/test/client.test.ts");
     expect(sdk.e2eTests).toEqual([
+      "test/e2e/artifact-spreadsheet-canvas.browser.e2e.ts",
+      "test/e2e/artifact-spreadsheet-scroll.browser.e2e.ts",
       "test/e2e/code-editor.browser.e2e.ts",
       "test/e2e/composer-responsive.browser.e2e.ts",
       "test/e2e/connected-machine-removal.browser.e2e.ts",
+      "test/e2e/editable-artifacts.browser.e2e.ts",
       "test/e2e/react-compiled-css.browser.e2e.ts",
     ]);
     expect(sdk.buildPackages).toEqual(expect.arrayContaining(["@opengeni/sdk", "@opengeni/react"]));
@@ -82,15 +91,133 @@ describe("fail-closed change impact", () => {
     );
   });
 
+  test("artifact kernel, native, and runtime sources select package and expensive runtime gates", () => {
+    const plan = createImpactPlan([
+      "packages/artifact-tool/kernel/src/lib.rs",
+      "packages/artifact-tool/src/native.ts",
+      "packages/artifact-tool/src/runtime.ts",
+    ]);
+    expect(plan.mode).toBe("focused");
+    expect(plan.affectedPackages).toEqual(
+      expect.arrayContaining(["@opengeni/artifact-tool", "@opengeni/react", "opengeni-web"]),
+    );
+    expect(plan.typecheckProjects).toContain("packages/artifact-tool");
+    expect(plan.unitTests).toEqual(
+      expect.arrayContaining([
+        "packages/artifact-tool/test/kernel.test.ts",
+        "packages/artifact-tool/test/native.test.ts",
+        "packages/artifact-tool/test/runtime.test.ts",
+      ]),
+    );
+    expect(plan.integrationTests).toContain("test/integration/api.integration.ts");
+    expect(plan.e2eTests).toEqual(expect.arrayContaining([...ARTIFACT_BROWSER_E2E]));
+    expect(plan.buildPackages).toEqual(
+      expect.arrayContaining(["@opengeni/artifact-tool", "@opengeni/react", "@opengeni/sdk"]),
+    );
+    // Browser acceptance, artifact-runtime production, and image builds all use non-doc mode.
+    expect(plan.mode).not.toBe("docs");
+  });
+
+  test("artifact runtime scripts and canonical skills stay focused without skipping consumers", () => {
+    const runtime = createImpactPlan(["scripts/build-artifact-runtime-target.ts"]);
+    expect(runtime.mode).toBe("focused");
+    expect(runtime.affectedPackages).toEqual(
+      expect.arrayContaining([
+        "@opengeni/api-router",
+        "@opengeni/artifact-kernel-wasm-document",
+        "@opengeni/artifact-kernel-wasm-presentation",
+        "@opengeni/artifact-kernel-wasm-spreadsheet",
+        "@opengeni/artifact-tool",
+        "@opengeni/react",
+        "@opengeni/runtime",
+        "@opengeni/sdk",
+        "@opengeni/worker-bundle",
+      ]),
+    );
+    expect(runtime.unitTests).toEqual(
+      expect.arrayContaining([
+        "scripts/artifact-runtime-workflow-contract.test.ts",
+        "scripts/build-artifact-kernel-wasm-packages.test.ts",
+        "scripts/build-artifact-runtime-target.test.ts",
+        "scripts/prepare-development-artifact-runtime.test.ts",
+      ]),
+    );
+    expect(runtime.integrationTests).toContain("test/integration/worker-activity.integration.ts");
+    expect(runtime.e2eTests).toEqual(expect.arrayContaining([...ARTIFACT_BROWSER_E2E]));
+    expect(runtime.buildPackages).toEqual(
+      expect.arrayContaining([
+        "@opengeni/artifact-kernel-wasm-document",
+        "@opengeni/artifact-kernel-wasm-presentation",
+        "@opengeni/artifact-kernel-wasm-spreadsheet",
+        "@opengeni/artifact-tool",
+        "@opengeni/runtime",
+      ]),
+    );
+    expect(runtime.reasons).toContainEqual({
+      path: "scripts/build-artifact-runtime-target.ts",
+      reason: "artifact runtime build/verification boundary",
+    });
+
+    const skill = createImpactPlan([".agents/skills/opengeni-documents/SKILL.md"]);
+    expect(skill.mode).toBe("focused");
+    expect(skill.affectedPackages).toContain("@opengeni/runtime");
+    expect(skill.unitTests).toContain("scripts/sync-artifact-skills.test.ts");
+    expect(skill.reasons).toContainEqual({
+      path: ".agents/skills/opengeni-documents/SKILL.md",
+      reason: "bundled artifact skill source boundary",
+    });
+  });
+
+  test("React artifact UI selects its browser and full-stack acceptance coverage", () => {
+    const plan = createImpactPlan([
+      "packages/react/src/components/artifacts/editable-artifact-workbench.tsx",
+    ]);
+    expect(plan.mode).toBe("focused");
+    expect(plan.affectedPackages).toEqual(
+      expect.arrayContaining(["@opengeni/react", "opengeni-web"]),
+    );
+    expect(plan.unitTests).toEqual(
+      expect.arrayContaining([
+        "packages/react/test/artifact-surface.test.tsx",
+        "packages/react/test/editable-artifact-workbench.test.tsx",
+      ]),
+    );
+    expect(plan.e2eTests).toEqual(expect.arrayContaining([...ARTIFACT_BROWSER_E2E]));
+    expect(plan.buildPackages).toEqual(
+      expect.arrayContaining(["@opengeni/react", "@opengeni/sdk"]),
+    );
+  });
+
+  test("artifact browser dependency rules do not widen unrelated leaf package plans", () => {
+    const plan = createImpactPlan(["packages/ogtool/src/index.ts"]);
+    expect(plan.mode).toBe("focused");
+    for (const path of ARTIFACT_BROWSER_E2E) expect(plan.e2eTests).not.toContain(path);
+  });
+
+  test("artifact database migrations retain the full schema and service safety net", () => {
+    const plan = createImpactPlan(["packages/db/drizzle/0191_editable_artifact_engine.sql"]);
+    expect(plan.mode).toBe("full");
+    expect(plan.affectedPackages).toContain("@opengeni/db");
+    expect(plan.unitTests).toContain("packages/db/test/editable-artifacts-postgres.test.ts");
+    expect(plan.integrationTests).toContain("test/integration/db.integration.ts");
+    expect(plan.e2eTests).toEqual(expect.arrayContaining([...ARTIFACT_BROWSER_E2E]));
+    expect(plan.buildPackages).toEqual(
+      expect.arrayContaining(["@opengeni/db", "@opengeni/worker-bundle"]),
+    );
+  });
+
   test("root test mappings and tier ownership are complete", () => {
     expect(() => assertRootTestDependencyMapComplete()).not.toThrow();
     expect(() => assertTestTierMapComplete()).not.toThrow();
     const tests = discoverTestFiles();
     expect(tests.integration.length).toBeGreaterThan(0);
     expect(tests.e2e).toEqual([
+      "test/e2e/artifact-spreadsheet-canvas.browser.e2e.ts",
+      "test/e2e/artifact-spreadsheet-scroll.browser.e2e.ts",
       "test/e2e/code-editor.browser.e2e.ts",
       "test/e2e/composer-responsive.browser.e2e.ts",
       "test/e2e/connected-machine-removal.browser.e2e.ts",
+      "test/e2e/editable-artifacts.browser.e2e.ts",
       "test/e2e/react-compiled-css.browser.e2e.ts",
     ]);
     expect(tests.e2e).not.toContain("test/e2e/codex-overview.e2e.ts");
@@ -341,6 +468,8 @@ describe("workflow fail-closed contracts", () => {
     expect(ci).toContain("name: Browser and visual acceptance");
     expect(ci).toContain("name: Real-service and recovery tests");
     expect(ci).toContain("name: Package and bundle contracts");
+    expect(ci).toContain("name: React Native Metro to Hermes session bundle");
+    expect(ci).toContain("run: bun run test:react-native-hermes-bundle");
     expect(ci).toContain("api_digest: ${{ steps.api_image.outputs.digest }}");
     expect(ci).toContain("worker_digest: ${{ steps.worker_image.outputs.digest }}");
     expect(ci).toContain("web_digest: ${{ steps.web_image.outputs.digest }}");

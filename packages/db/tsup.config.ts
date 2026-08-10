@@ -1,11 +1,14 @@
 import { defineConfig } from "tsup";
 
-// @opengeni/db ships ESM + .d.ts with four entry points mirroring the committed
+// @opengeni/db ships ESM + .d.ts with explicit entry points mirroring the committed
 // src subpaths the workspace already uses:
 //   .                 -> src/index.ts          (the full db surface; re-exports migrate + provisionRoles)
 //   ./schema          -> src/schema.ts         (drizzle table defs; @opengeni/documents imports this)
 //   ./migrate         -> src/migrate.ts        (the SQL migration runner; tests + db:migrate use it)
 //   ./provision-roles -> src/provision-roles.ts (the role/grant provisioner SDK entry + CLI)
+//   ./editable-artifacts -> src/editable-artifacts.ts (artifact persistence adapter)
+//   ./editable-artifact-durable-export -> src/editable-artifact-durable-export.ts
+//      (durable artifact export persistence adapter)
 //
 // Every subpath in package.json `exports` must have a matching entry here:
 // rewrite-entry-points.ts swaps every committed `./src/<name>.ts` export target
@@ -27,6 +30,8 @@ export default defineConfig({
     schema: "src/schema.ts",
     migrate: "src/migrate.ts",
     "provision-roles": "src/provision-roles.ts",
+    "editable-artifacts": "src/editable-artifacts.ts",
+    "editable-artifact-durable-export": "src/editable-artifact-durable-export.ts",
   },
   format: ["esm"],
   target: "es2022",

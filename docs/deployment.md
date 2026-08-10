@@ -513,9 +513,31 @@ Current profiles:
 
 ## Local Docker Compose
 
-`bun run dev` is the primary local Docker Compose path. It starts Postgres, NATS, Temporal, MinIO, migrations, imports the fingerprinted reviewed integrations catalog, builds the sandbox image, and starts the API, both workers (control and turn), and web. Set `OPENGENI_CATALOG_IMPORT_ENABLED=false` to omit the catalog import.
+`bun run dev` is the primary local Docker Compose path. It starts Postgres,
+NATS, Temporal, MinIO, migrations, imports the fingerprinted reviewed
+integrations catalog, builds the sandbox image, and starts the API, control and
+turn workers, artifact materializer, artifact outbox dispatcher, and web. The
+two artifact roles receive distinct generated least-privilege database logins
+and independently selected health ports (defaults `9465` and `9466`). Their
+ignored local values are written to `.env.runtime`, not `.env`. Set
+`OPENGENI_CATALOG_IMPORT_ENABLED=false` to omit the catalog import.
 
-When a common host port is already occupied, `bun run dev` auto-selects a nearby free port for Docker Compose and rewrites the in-memory runtime URLs for that run. Set `OPENGENI_POSTGRES_HOST_PORT`, `OPENGENI_NATS_HOST_PORT`, `OPENGENI_NATS_MONITOR_HOST_PORT`, `OPENGENI_TEMPORAL_HOST_PORT`, `OPENGENI_MINIO_HOST_PORT`, or `OPENGENI_MINIO_CONSOLE_HOST_PORT` in `.env` if you need fixed local port choices.
+The script prepares one canonical current-host development artifact bundle only
+when its exact source/toolchain fingerprint or native receipt is absent or
+stale. On macOS the materializer runs as an explicitly opted-in unsandboxed
+development subprocess, restricted to loopback PostgreSQL, object storage, and
+HTTP health authority. Its health response advertises
+`sandboxEnforced: false`. This mode is rejected under `NODE_ENV=production` and
+cannot coexist with `OPENGENI_ARTIFACT_RUNTIME_MANIFEST`. Production artifact
+materialization currently requires Linux with enforced `bwrap` + `prlimit`
+isolation and fails closed on other hosts. The sandbox starts from an empty
+filesystem namespace, mounts only the verified artifact runtime/executable and
+system loader libraries, and proves CPU, memory, open-file, process-count, and
+per-file-size ceilings before readiness. Helm projects only the selected
+`artifactMaterializer` database/object-storage credential keys; it never imports
+the shared runtime Secret wholesale.
+
+When a common host port is already occupied, `bun run dev` auto-selects a nearby free port for Docker Compose and rewrites the in-memory runtime URLs for that run. Set `OPENGENI_POSTGRES_HOST_PORT`, `OPENGENI_NATS_HOST_PORT`, `OPENGENI_NATS_MONITOR_HOST_PORT`, `OPENGENI_TEMPORAL_HOST_PORT`, `OPENGENI_MINIO_HOST_PORT`, `OPENGENI_MINIO_CONSOLE_HOST_PORT`, `OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT`, or `OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT` in `.env` if you need fixed local port choices.
 
 When the turn worker itself runs in a container and controls the host Docker
 daemon through its socket, configure
@@ -793,7 +815,7 @@ Federated credentials must bind the exact `public-release`,
 workload identity must have the narrow push role on the selected registry.
 
 Whichever registry is selected must permit anonymous pulls. Candidate creation
-logs out before it writes a receipt and proves all five image digests through
+logs out before it writes a receipt and proves all seven image digests through
 the unauthenticated path. Embedded and final promotion repeat that proof for
 the published image aliases and chart bytes. A private or inconsistently
 configured registry therefore fails closed before becoming distribution
@@ -923,12 +945,25 @@ byte for byte and fails instead of overwriting them. No moving BOM alias is
 created. Ordinary pushes to `main` can open/update the Version PR but cannot
 publish.
 
-The stock sandbox remains a separate workload image, but the public release publishes it and
-binds its immutable digest in the same BOM:
+The stock sandbox remains a separate workload image. The public release binds
+its immutable digest and its exact native artifact-runtime inputs to the same
+source SHA. Build it only with the verified `.release/artifact-runtime` bundle:
 
 ```bash
-docker build -f docker/sandbox.Dockerfile -t opengeni-sandbox:local .
+docker build \
+  --build-arg OPENGENI_SOURCE_SHA="$(git rev-parse HEAD)" \
+  -f docker/sandbox.Dockerfile \
+  -t opengeni-sandbox:local-"$(git rev-parse --short=12 HEAD)" \
+  .
 ```
+
+Set `OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED=true` only with that stock image.
+Production Docker/Modal references must be digest-pinned; pack, rig, mutable,
+self-hosted, and mismatched images fail closed. The worker runs the absolute
+runtime doctor inside the actual box before the model starts. `bun run dev`
+automatically caches an exact clean-HEAD CI runtime when available, source-tags
+the local image, and otherwise leaves native agent artifact skills disabled
+unless `OPENGENI_REQUIRE_SANDBOX_ARTIFACT_RUNTIME=1` requests a hard failure.
 
 The Connected Machine stream relay is a separate deployed component built from
 the `agent/` Cargo workspace. It is only needed when Connected Machines are
@@ -1491,7 +1526,7 @@ Minimum production dashboards should cover:
 - API traffic: request rate, error rate, and p50/p95/p99 latency by `route`, `method`, `status`, `variable set`, and `component`.
 - Worker execution: activity run rate, failure rate, and p50/p95/p99 `runAgentTurn` duration by `activity`, `status`, `variable set`, and `component`.
 - Turn lifecycle: `opengeni_turns_total{outcome}`, `opengeni_turn_duration_seconds`, `opengeni_turns_inflight`, and `opengeni_turn_oldest_inflight_age_seconds`.
-- Model, Codex, and sandbox SLIs: `opengeni_model_calls_total{provider,outcome}`, `opengeni_model_call_duration_seconds{provider}`, `opengeni_codex_credential_selections_total{strategy,reason}`, `opengeni_codex_credential_failures_total{kind,outcome}`, `opengeni_codex_pool_observations_total{depth}`, `opengeni_codex_pool_low_total{depth}`, `opengeni_sandbox_creates_total{backend,outcome}`, `opengeni_sandbox_create_duration_seconds{backend}`, `opengeni_sandbox_operations_total{backend,op,outcome}` (`ok`, expected path `not_found`, or actual `failed`), `opengeni_sandbox_operation_duration_seconds{backend,op}`, `opengeni_sandbox_inventory_refresh_timestamp_seconds{domain}`, the chart's freshness-filtered `opengeni:*:fresh_max` inventory recording rules, `opengeni_sandbox_warming_timeouts_total`, and `opengeni_sandbox_orphans_terminated_total`.
+- Model, Codex, and sandbox SLIs: `opengeni_model_calls_total{provider,outcome}`, `opengeni_model_call_duration_seconds{provider}`, `opengeni_codex_credential_selections_total{strategy,reason}`, `opengeni_codex_credential_failures_total{kind,outcome}`, `opengeni_codex_pool_observations_total{depth}`, `opengeni_codex_pool_low_total{depth}`, `opengeni_sandbox_creates_total{backend,image_source,outcome}`, `opengeni_sandbox_create_duration_seconds{backend,image_source}`, `opengeni_sandbox_operations_total{backend,op,outcome}` (`ok`, expected path `not_found`, or actual `failed`), `opengeni_sandbox_operation_duration_seconds{backend,op}`, `opengeni_sandbox_inventory_refresh_timestamp_seconds{domain}`, the chart's freshness-filtered `opengeni:*:fresh_max` inventory recording rules, `opengeni_sandbox_warming_timeouts_total`, and `opengeni_sandbox_orphans_terminated_total`.
 - Queue, admission, and billing: `opengeni_turns_queued`, `opengeni_turn_eligible_backlog`, `opengeni_turn_eligible_backlog_oldest_age_seconds`, `opengeni_turn_slot_saturation_ratio`, `opengeni_credit_balance_micros{account_id}`, `opengeni_credit_micros_total{kind}`, and `opengeni_build_info{version,revision}`.
 - Dependency health: Postgres connection health, Temporal worker poll health, NATS connectivity, object-storage write/read conformance, and sandbox backend readiness.
 - Runtime health: API/worker restarts, continuous turn-worker host/cgroup utilization and RSS reserve consumption, node memory/I/O PSI, swap-out activity, kubelet runtime errors, node readiness, pod pending time, collector scrape/export errors, and OTLP export failures.

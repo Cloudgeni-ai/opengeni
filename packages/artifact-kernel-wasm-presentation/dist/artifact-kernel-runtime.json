@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "runtimeIdentity": {
+    "schemaVersion": 1,
+    "target": "wasm-web",
+    "modality": "presentation",
+    "packageName": "@opengeni/artifact-kernel-wasm-presentation",
+    "packageVersion": "0.1.1",
+    "artifactToolVersion": "0.1.1",
+    "buildIdentity": "opengeni-artifact-kernel/0.1.0;abi=1;command=1;query=1;snapshot=1;document-snapshot=1;document-command=1;document-query=1;presentation-snapshot=1;presentation-command=1;presentation-query=1;text-layout-fonts=1;text-layout-request=1;text-layout-response=1;render-tile=1;render-patch=1;source=a9194d659991a0910e6f9f47510670b2857b927c2a1b818b13cf480521a986dd;toolchain=1367261bf04dd2fc4b2c6aa0ef397c21659ee1c973a9d98dcb8d84b46d68b06f",
+    "kernelVersion": "opengeni-artifact-kernel/0.1.0;abi=1;command=1;query=1;snapshot=1;document-snapshot=1;document-command=1;document-query=1;presentation-snapshot=1;presentation-command=1;presentation-query=1;text-layout-fonts=1;text-layout-request=1;text-layout-response=1;render-tile=1;render-patch=1;source=a9194d659991a0910e6f9f47510670b2857b927c2a1b818b13cf480521a986dd;toolchain=1367261bf04dd2fc4b2c6aa0ef397c21659ee1c973a9d98dcb8d84b46d68b06f",
+    "abiVersion": 1,
+    "protocolVersion": 1,
+    "modelSchemaVersion": 1,
+    "commandVersion": 1
+  },
+  "capabilities": {
+    "bytes": 1860,
+    "sha256": "sha256:f56b1f32090988039df0c31ba054172aa89174ba8bdfa6419afe5c0d7a921421"
+  },
+  "sizeBudget": {
+    "wasmBytes": 393216,
+    "wasmGzipBytes": 131072,
+    "glueBytes": 32768
+  },
+  "files": [
+    {
+      "path": "artifact_kernel_presentation_bg.wasm",
+      "bytes": 296525,
+      "sha256": "sha256:0ffb017b4af39dafa0dc4d1660576202dfd64fc638bce5f891cd8e3d7e33e605",
+      "gzipBytes": 94594
+    },
+    {
+      "path": "artifact_kernel_presentation_bg.wasm.d.ts",
+      "bytes": 1781,
+      "sha256": "sha256:c41a44659297ad907afc0dad2f859a1c40aa202106a7546346b42555966f202e"
+    },
+    {
+      "path": "artifact_kernel_presentation.d.ts",
+      "bytes": 5421,
+      "sha256": "sha256:05058c5d78fe3b2d5714bab44d2be38aa8d3b34447369cacda9f62dd47dab398"
+    },
+    {
+      "path": "artifact_kernel_presentation.js",
+      "bytes": 20754,
+      "sha256": "sha256:c17ea97373307a5693f36bb01aa2f77818d09a2b5ae32b7776ebbf194b09b38f",
+      "gzipBytes": 3532
+    },
+    {
+      "path": "index.d.ts",
+      "bytes": 2309,
+      "sha256": "sha256:0491c14daca674bddeab63ee2c53a93dd20c99ebd2c14a0bf6608b3d39dd8bd7"
+    },
+    {
+      "path": "index.js",
+      "bytes": 2266,
+      "sha256": "sha256:5a5bd63a1e22b8cbda701b688f53e8ae6517be18def68d38ac664cecc52a21e9"
+    }
+  ]
+}

@@ -5,6 +5,17 @@ import { resolveOptionalOciManifest } from "./resolve-optional-oci-manifest";
 const digest = `sha256:${"a".repeat(64)}`;
 
 describe("optional OCI manifest resolution", () => {
+  test("fails closed when the registry lookup times out", async () => {
+    await expect(
+      resolveOptionalOciManifest("registry.example/image:1.0.0", async () => ({
+        exitCode: 143,
+        stdout: "",
+        stderr: "",
+        timedOut: true,
+      })),
+    ).rejects.toThrow("OCI manifest lookup timed out");
+  });
+
   test("returns only an exact immutable digest", async () => {
     await expect(
       resolveOptionalOciManifest("registry.example/image:1.0.0", async () => ({

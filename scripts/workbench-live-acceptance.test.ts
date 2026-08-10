@@ -16,9 +16,12 @@ import {
   assertChangesDefaultVisible,
   assertRepositoryChangesVisible,
   captureApiRegionalProbeEnvironment,
+  classifyControlCommandMarkerEvent,
   controlCancellationDurationMs,
+  controlCancellationTimelineMs,
   fixturePrompt,
   isExpectedBrowserCancellation,
+  liveStoppingStateLocator,
   maskKnownPublicEvidenceValues,
   openWorkspaceIfCollapsed,
   parseCookieHeader,
@@ -37,6 +40,63 @@ import {
 } from "./workbench-live-acceptance";
 
 describe("workbench live acceptance preflight", () => {
+  test("accepts only a marker from a still-running agent command", () => {
+    const marker = "CONTROL_READY_EXACT";
+    const event = (output: string, type = "agent.toolCall.output") =>
+      ({ type, payload: { output } }) as never;
+
+    expect(
+      classifyControlCommandMarkerEvent(
+        event(`Chunk ID: abc\nProcess running with session ID 7\nOutput:\n${marker}`),
+        marker,
+      ),
+    ).toBe("running");
+    expect(
+      classifyControlCommandMarkerEvent(
+        event(`Chunk ID: abc\nProcess exited with code 0\nOutput:\n${marker}`),
+        marker,
+      ),
+    ).toBe("completed");
+    expect(
+      classifyControlCommandMarkerEvent(
+        event(
+          `Chunk ID: abc\nProcess exited with code 0\nOutput:\nProcess running with session ID 7\n${marker}`,
+        ),
+        marker,
+      ),
+    ).toBe("malformed");
+    expect(classifyControlCommandMarkerEvent(event(marker), marker)).toBe("malformed");
+    expect(
+      classifyControlCommandMarkerEvent(event(marker, "sandbox.command.output.delta"), marker),
+    ).toBeNull();
+    expect(classifyControlCommandMarkerEvent(event("different"), marker)).toBeNull();
+  });
+
+  test("matches authoritative SessionChrome stopping copy, not optimistic Steer copy", () => {
+    const filters: unknown[] = [];
+    const steering = {
+      filter: (options: unknown) => {
+        filters.push(options);
+        return steering;
+      },
+    };
+    const testIds: string[] = [];
+    const page = {
+      getByTestId: (testId: string) => {
+        testIds.push(testId);
+        return steering;
+      },
+    } as never;
+
+    expect(liveStoppingStateLocator(page, "steer")).toBe(steering as never);
+    expect(liveStoppingStateLocator(page, "pause")).toBe(steering as never);
+    expect(testIds).toEqual(["session-chrome-steering", "session-chrome-steering"]);
+    expect(filters).toEqual([
+      { hasText: "Stopping previous work" },
+      { hasText: "Stopping current work" },
+    ]);
+  });
+
   test("observes split binary terminal output without depending on xterm DOM rows", async () => {
     let onSocket: ((socket: unknown) => void) | undefined;
     let onFrame: ((frame: { payload: string | Buffer }) => void) | undefined;
@@ -823,7 +883,14 @@ describe("workbench live acceptance preflight", () => {
 
   test("control cancellation timing fails closed on invalid or impossible event order", () => {
     expect(controlCancellationDurationMs(1_000, 1_125)).toBe(125);
+    expect(controlCancellationTimelineMs(1_000, 1_125, 1_180)).toEqual({
+      physicalQuiescenceMs: 125,
+      replacementStartedMs: 180,
+    });
     expect(() => controlCancellationDurationMs(1_000, 999)).toThrow("before its control commit");
+    expect(() => controlCancellationTimelineMs(1_000, 1_200, 1_150)).toThrow(
+      "started before physical quiescence",
+    );
     expect(() => controlCancellationDurationMs(Number.NaN, 1_000)).toThrow("must be finite");
   });
 

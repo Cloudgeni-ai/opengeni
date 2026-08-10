@@ -81,6 +81,10 @@ const LazyWorkspaceStateRoute = lazyRouteComponent(
   "WorkspaceStateRoute",
 );
 const LazyArtifactsRoute = lazyRouteComponent(() => import("@/routes/artifacts"), "ArtifactsRoute");
+const LazyEditableArtifactRoute = lazyRouteComponent(
+  () => import("@/routes/editable-artifact"),
+  "EditableArtifactRoute",
+);
 const LazyWorkspaceShellRoute = lazyRouteComponent(
   () => import("@/routes/workspace"),
   "WorkspaceShellRoute",
@@ -275,6 +279,11 @@ const workspaceArtifactDetailRoute = createRoute({
   path: "artifacts/$artifactId",
   component: ArtifactDetail,
 });
+const workspaceEditableArtifactRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "artifacts/editable/$artifactId",
+  component: EditableArtifact,
+});
 const workspaceOrganizationRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "organization",
@@ -323,6 +332,7 @@ const routeTree = rootRoute.addChildren([
     workspaceStateRoute,
     workspaceArtifactsRoute,
     workspaceArtifactDetailRoute,
+    workspaceEditableArtifactRoute,
     workspaceSettingsRoute,
     workspaceOrganizationRoute,
     workspaceAccountRoute,
@@ -488,6 +498,10 @@ function Artifacts() {
 
 function ArtifactDetail() {
   return <LazyArtifactsRoute {...workspaceArtifactDetailRoute.useParams()} />;
+}
+
+function EditableArtifact() {
+  return <LazyEditableArtifactRoute {...workspaceEditableArtifactRoute.useParams()} />;
 }
 
 function Organization() {

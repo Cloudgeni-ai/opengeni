@@ -157,6 +157,28 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/sdk",
     "@opengeni/api-router",
   ],
+  "test/e2e/artifact-spreadsheet-canvas.browser.e2e.ts": [
+    "@opengeni/artifact-tool",
+    "@opengeni/react",
+    "@opengeni/testing",
+  ],
+  "test/e2e/artifact-spreadsheet-scroll.browser.e2e.ts": [
+    "@opengeni/artifact-tool",
+    "@opengeni/react",
+    "@opengeni/testing",
+  ],
+  "test/e2e/editable-artifacts.browser.e2e.ts": [
+    "@opengeni/api-router",
+    "@opengeni/artifact-kernel-wasm-document",
+    "@opengeni/artifact-kernel-wasm-presentation",
+    "@opengeni/artifact-kernel-wasm-spreadsheet",
+    "@opengeni/artifact-tool",
+    "@opengeni/react",
+    "@opengeni/runtime",
+    "@opengeni/sdk",
+    "@opengeni/testing",
+    "@opengeni/worker-bundle",
+  ],
   "test/e2e/session-pins.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/react",
@@ -183,6 +205,48 @@ for (const path of TEMPORAL_WORKFLOW_INTEGRATION_TESTS) {
 }
 
 const ROOT_TEST_HELPER_DEPENDENTS: Record<string, readonly string[]> = {};
+
+const ARTIFACT_RUNTIME_WORKSPACES = [
+  "@opengeni/api-router",
+  "@opengeni/artifact-kernel-wasm-document",
+  "@opengeni/artifact-kernel-wasm-presentation",
+  "@opengeni/artifact-kernel-wasm-spreadsheet",
+  "@opengeni/artifact-tool",
+  "@opengeni/react",
+  "@opengeni/runtime",
+  "@opengeni/sdk",
+  "@opengeni/worker-bundle",
+] as const;
+const ARTIFACT_RUNTIME_SCRIPT_PATTERN = /^scripts\/[^/]*artifact[^/]*\.ts$/;
+const ARTIFACT_RUNTIME_SCRIPT_TEST_PATTERN = /^scripts\/[^/]*artifact[^/]*\.test\.ts$/;
+const ARTIFACT_SKILL_PATTERN =
+  /^\.agents\/skills\/opengeni-(?:documents|presentations|spreadsheets)\//;
+
+type RootPathImpact = Readonly<{
+  packages: readonly string[];
+  unitTests: readonly string[];
+  reason: string;
+}>;
+
+function rootPathImpact(path: string, unitTests: readonly string[]): RootPathImpact | null {
+  if (ARTIFACT_RUNTIME_SCRIPT_PATTERN.test(path)) {
+    return {
+      packages: ARTIFACT_RUNTIME_WORKSPACES,
+      unitTests: unitTests.filter((candidate) =>
+        ARTIFACT_RUNTIME_SCRIPT_TEST_PATTERN.test(candidate),
+      ),
+      reason: "artifact runtime build/verification boundary",
+    };
+  }
+  if (ARTIFACT_SKILL_PATTERN.test(path)) {
+    return {
+      packages: ["@opengeni/runtime"],
+      unitTests: ["scripts/sync-artifact-skills.test.ts"],
+      reason: "bundled artifact skill source boundary",
+    };
+  }
+  return null;
+}
 
 function importedWorkspaceDependencies(graph: WorkspaceGraph, path: string): Set<string> {
   const source = readFileSync(path, "utf8");
@@ -342,6 +406,7 @@ export function createImpactPlan(
     };
   }
 
+  const tests = discoverTestFiles();
   const direct = new Set<string>();
   const changedTests = new Set<string>();
   for (const path of changedFiles) {
@@ -356,6 +421,22 @@ export function createImpactPlan(
     if (path === "test/source-hygiene.test.ts") {
       changedTests.add(path);
       reasons.push({ path, reason: "root source-hygiene test" });
+      continue;
+    }
+    const rootImpact = rootPathImpact(path, tests.unit);
+    if (rootImpact) {
+      const stalePackage = rootImpact.packages.find((name) => !graph.byName.has(name));
+      const staleTest = rootImpact.unitTests.find((testPath) => !existsSync(testPath));
+      if (stalePackage || staleTest) {
+        reasons.push({
+          path,
+          reason: `${rootImpact.reason} mapping is stale; failing closed`,
+        });
+        return fullPlan(graph, changedFiles, reasons, base, head);
+      }
+      for (const name of rootImpact.packages) direct.add(name);
+      for (const testPath of rootImpact.unitTests) changedTests.add(testPath);
+      reasons.push({ path, reason: rootImpact.reason });
       continue;
     }
     const helperDependents = ROOT_TEST_HELPER_DEPENDENTS[path];
@@ -390,7 +471,6 @@ export function createImpactPlan(
   }
 
   const affected = transitiveDependents(graph, direct);
-  const tests = discoverTestFiles();
   const unit = new Set(changedTests);
   for (const path of tests.unit) {
     const pkg = workspaceForPath(graph, path);

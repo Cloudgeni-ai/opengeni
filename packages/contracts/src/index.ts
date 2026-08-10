@@ -11,6 +11,9 @@ import { ClientResumableVoiceInputConfig } from "./transcription-recordings";
 export * from "./slack-bot-scopes";
 export * from "./connector-destinations";
 export * from "./image-generation";
+export * from "./editable-artifacts";
+export * from "./editable-artifact-committed-transaction";
+export * from "./editable-artifact-serialized-commit";
 
 export {
   CreateWorkspaceArtifactRequest,
@@ -105,6 +108,7 @@ export {
   WORKSPACE_ARCHIVE_DESCRIPTOR_VERSION,
   backendForNativeSnapshotProvider,
   decodeNativeSnapshotRef,
+  encodeNativeSnapshotRef,
   parseWorkspaceArchiveDescriptor,
   type NativeSnapshotDescriptor,
   type NativeSnapshotProvider,
@@ -813,6 +817,8 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "variable_set_get_variable",
   "variable_set_set_variable",
   "environment_set_variable",
+  "capability_catalog_search",
+  "capability_authorization_request",
   "github_connect_link",
   "github_repositories_list",
   "social_connections_list",
@@ -5612,6 +5618,110 @@ export const RigCheck = z.object({
 });
 export type RigCheck = z.infer<typeof RigCheck>;
 
+export const RigProviderImageBuildStatus = z.enum(["building", "ready", "failed", "unsupported"]);
+export type RigProviderImageBuildStatus = z.infer<typeof RigProviderImageBuildStatus>;
+
+export const RigProviderImage = z
+  .object({
+    backend: SandboxBackend,
+    provider: z.string().min(1).max(64),
+    status: RigProviderImageBuildStatus,
+    // Exact immutable rig-definition/setup identity used to reject stale image
+    // reuse when a version or its effective base image changes.
+    contentHash: z.string().regex(/^sha256:[0-9a-f]{64}$/u),
+    setupHash: z.string().regex(/^sha256:[0-9a-f]{64}$/u),
+    sourceImage: z.string().max(2048).nullable(),
+    buildRequestId: z.string().uuid(),
+    imageId: z.string().min(1).max(512).nullable(),
+    imageDigest: z.string().min(1).max(512).nullable(),
+    artifactId: z.string().uuid().nullable(),
+    providerBindingKeyHash: z
+      .string()
+      .regex(/^sha256:[0-9a-f]{64}$/u)
+      .nullable(),
+    provenance: z.object({
+      kind: z.literal("rig_verification"),
+      targetKind: z.enum(["change", "version"]),
+      targetId: z.string().uuid(),
+    }),
+    startedAt: z.string().datetime(),
+    finishedAt: z.string().datetime().nullable(),
+    error: z
+      .object({
+        code: z.string().min(1).max(120),
+        message: z.string().min(1).max(2000),
+        retryable: z.boolean(),
+      })
+      .nullable(),
+  })
+  .superRefine((value, ctx) => {
+    if (value.status === "ready" && !value.imageId && !value.imageDigest) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["imageId"],
+        message: "ready provider images require an immutable image id or digest",
+      });
+    }
+    if (
+      value.status === "ready" &&
+      value.backend === "modal" &&
+      (value.artifactId === null || value.providerBindingKeyHash === null)
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: [value.artifactId === null ? "artifactId" : "providerBindingKeyHash"],
+        message: "ready Modal provider images require durable artifact ownership and binding",
+      });
+    }
+    if (value.status !== "ready" && value.artifactId !== null) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["artifactId"],
+        message: "only ready provider images may retain a durable artifact",
+      });
+    }
+    if (value.status === "building") {
+      if (value.finishedAt !== null) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["finishedAt"],
+          message: "building provider images cannot be finished",
+        });
+      }
+      if (value.error !== null) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["error"],
+          message: "building provider images cannot have a terminal error",
+        });
+      }
+    } else if (value.finishedAt === null) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["finishedAt"],
+        message: "terminal provider images require a finish timestamp",
+      });
+    }
+    if ((value.status === "failed" || value.status === "unsupported") && value.error === null) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["error"],
+        message: `${value.status} provider images require failure truth`,
+      });
+    }
+    if (value.status === "ready" && value.error !== null) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["error"],
+        message: "ready provider images cannot retain an error",
+      });
+    }
+  });
+export type RigProviderImage = z.infer<typeof RigProviderImage>;
+
+export const RigProviderImages = z.partialRecord(SandboxBackend, RigProviderImage);
+export type RigProviderImages = z.infer<typeof RigProviderImages>;
+
 export const RigVersion = z.object({
   id: z.string().uuid(),
   rigId: z.string().uuid(),
@@ -5622,6 +5732,9 @@ export const RigVersion = z.object({
   credentialHooks: z.array(z.string()),
   defaultVariableSetIds: z.array(z.string().uuid()),
   changelog: z.string().nullable(),
+  // Operational build metadata is version-bound but not part of the immutable
+  // rig definition. Each backend records its own truthful build state.
+  providerImages: RigProviderImages.default({}),
   // Attribution: 'user:<subject>' | 'session:<id>' | 'system'.
   createdBy: z.string().nullable(),
   active: z.boolean(),
@@ -7306,6 +7419,21 @@ export const ToolAuthNeededPayload = z.object({
   selectedResources: McpConnectionResourceScopes.optional(),
   authorizationUrl: z.string().url().optional(),
   subjectId: z.string().min(1).nullable().optional(),
+  // A catalog recommendation is still a tool-level authorization condition:
+  // the agent may describe and request it, but only the authenticated host UI
+  // can start setup. Keeping this nested and optional preserves the established
+  // auth-needed event for ordinary failed MCP calls.
+  capability: z
+    .object({
+      id: z.string().min(1).max(512),
+      name: z.string().min(1).max(256),
+      kind: CapabilityKind,
+      source: CapabilitySource,
+      action: z.enum(["connect", "add_credentials", "enable"]),
+      rationale: z.string().min(1).max(2000),
+      requiredVariables: z.array(VariableSetVariableName).max(64).default([]),
+    })
+    .optional(),
 });
 export type ToolAuthNeededPayload = z.infer<typeof ToolAuthNeededPayload>;
 

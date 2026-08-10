@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 import { randomUUID } from "node:crypto";
-import { mkdir, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { existsSync } from "node:fs";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 type TsupOptions = Record<string, unknown> & { dts?: unknown };
@@ -66,7 +67,7 @@ await writeFile(
 try {
   const tscPath = join(import.meta.dir, "../node_modules/typescript/bin/tsc");
   const child = Bun.spawn({
-    cmd: ["node", tscPath, "--project", declarationConfigPath],
+    cmd: ["bun", tscPath, "--project", declarationConfigPath],
     cwd: packageDirectory,
     stdin: "ignore",
     stdout: "inherit",
@@ -76,6 +77,45 @@ try {
   if (status !== 0) {
     throw new Error(`TypeScript declaration emit failed with exit code ${status}`);
   }
+  await rewriteDeclarationModuleSpecifiers(join(packageDirectory, "dist"));
 } finally {
   await rm(declarationConfigPath, { force: true });
+}
+
+/**
+ * TypeScript preserves extensionless source specifiers in emitted declarations,
+ * but strict NodeNext consumers require relative ESM specifiers to name the
+ * runtime `.js` path. Resolve each declaration edge before rewriting it so
+ * string-literal types and already-qualified assets remain untouched.
+ */
+async function rewriteDeclarationModuleSpecifiers(directory: string): Promise<void> {
+  for (const path of await declarationFiles(directory)) {
+    const source = await readFile(path, "utf8");
+    const rewritten = source.replace(
+      /(["'])(\.\.?(?:\/[^"'?#]+)?)\1/gu,
+      (literal, quote: string, specifier: string, offset: number) => {
+        const prefix = source.slice(Math.max(0, offset - 48), offset);
+        if (!/(?:\bfrom\s*|\bimport\s*(?:\(\s*)?|\bmodule\s*)$/u.test(prefix)) {
+          return literal;
+        }
+        const target = resolve(dirname(path), specifier);
+        if (existsSync(`${target}.d.ts`)) return `${quote}${specifier}.js${quote}`;
+        if (existsSync(join(target, "index.d.ts"))) {
+          return `${quote}${specifier}/index.js${quote}`;
+        }
+        return literal;
+      },
+    );
+    if (rewritten !== source) await writeFile(path, rewritten, "utf8");
+  }
+}
+
+async function declarationFiles(directory: string): Promise<string[]> {
+  const paths: string[] = [];
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) paths.push(...(await declarationFiles(path)));
+    else if (entry.isFile() && entry.name.endsWith(".d.ts")) paths.push(path);
+  }
+  return paths;
 }

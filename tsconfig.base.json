@@ -17,19 +17,61 @@
     "types": ["bun"],
     "paths": {
       "@opengeni/contracts": ["./packages/contracts/src/index.ts"],
+      "@opengeni/contracts/editable-artifacts": ["./packages/contracts/src/editable-artifacts.ts"],
       "@opengeni/agent-proto": ["./packages/agent-proto/src/index.ts"],
+      "@opengeni/artifact-tool": ["./packages/artifact-tool/src/index.ts"],
+      "@opengeni/artifact-tool/reference": ["./packages/artifact-tool/src/reference.ts"],
+      "@opengeni/artifact-tool/native": ["./packages/artifact-tool/src/native.ts"],
+      "@opengeni/artifact-tool/runtime": ["./packages/artifact-tool/src/runtime.ts"],
+      "@opengeni/artifact-tool/runtime/locator": ["./packages/artifact-tool/src/runtime-cli.ts"],
+      "@opengeni/artifact-tool/document": ["./packages/artifact-tool/src/production-document.ts"],
+      "@opengeni/artifact-tool/document/render": [
+        "./packages/artifact-tool/src/document-render.ts"
+      ],
+      "@opengeni/artifact-tool/document/docx": [
+        "./packages/artifact-tool/src/document-docx-codec.ts"
+      ],
+      "@opengeni/artifact-tool/presentation": [
+        "./packages/artifact-tool/src/production-presentation.ts"
+      ],
+      "@opengeni/artifact-tool/presentation/render": [
+        "./packages/artifact-tool/src/presentation-render.ts"
+      ],
+      "@opengeni/artifact-tool/presentation/pptx": [
+        "./packages/artifact-tool/src/presentation-pptx.ts"
+      ],
+      "@opengeni/artifact-tool/spreadsheet": [
+        "./packages/artifact-tool/src/production-spreadsheet.ts"
+      ],
+      "@opengeni/artifact-tool/spreadsheet/render": [
+        "./packages/artifact-tool/src/spreadsheet-render.ts"
+      ],
+      "@opengeni/artifact-tool/spreadsheet/xlsx": [
+        "./packages/artifact-tool/src/spreadsheet-xlsx-codec.ts"
+      ],
       "@opengeni/codex": ["./packages/codex/src/index.ts"],
       "@opengeni/codex/realtime-v3": ["./packages/codex/src/realtime-v3.ts"],
       "@opengeni/config": ["./packages/config/src/index.ts"],
       "@opengeni/core": ["./packages/core/src/index.ts"],
+      "@opengeni/core/editable-artifacts": ["./packages/core/src/editable-artifacts.ts"],
+      "@opengeni/core/editable-artifact-live": ["./packages/core/src/editable-artifact-live.ts"],
       "@opengeni/db": ["./packages/db/src/index.ts"],
       "@opengeni/db/schema": ["./packages/db/src/schema.ts"],
       "@opengeni/db/migrate": ["./packages/db/src/migrate.ts"],
+      "@opengeni/db/editable-artifacts": ["./packages/db/src/editable-artifacts.ts"],
       "@opengeni/events": ["./packages/events/src/index.ts"],
       "@opengeni/github": ["./packages/github/src/index.ts"],
       "@opengeni/documents": ["./packages/documents/src/index.ts"],
       "@opengeni/runtime": ["./packages/runtime/src/index.ts"],
+      "@opengeni/react/artifacts": ["./packages/react/src/artifacts.ts"],
+      "@opengeni/react/artifacts/document": ["./packages/react/src/artifacts-document.ts"],
+      "@opengeni/react/artifacts/presentation": ["./packages/react/src/artifacts-presentation.ts"],
+      "@opengeni/react/artifacts/spreadsheet": ["./packages/react/src/artifacts-spreadsheet.ts"],
       "@opengeni/sdk": ["./packages/sdk/src/index.ts"],
+      "@opengeni/sdk/editable-artifacts": ["./packages/sdk/src/editable-artifacts.ts"],
+      "@opengeni/sdk/editable-artifacts/worker": [
+        "./packages/sdk/src/editable-artifacts-worker.ts"
+      ],
       "@opengeni/storage": ["./packages/storage/src/index.ts"],
       "@opengeni/testing": ["./packages/testing/src/index.ts"],
       "@opengeni/api-router": ["./apps/api/src/index.ts"],

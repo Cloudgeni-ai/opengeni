@@ -190,6 +190,33 @@ describe("first-party MCP tool visibility policy", () => {
     }
   });
 
+  test("capability discovery is default-visible but separates search from human authorization", async () => {
+    const server = buildOpenGeniMcpServer(
+      deps(),
+      grant(["workspace:read"], ["capability_catalog_search", "capability_authorization_request"]),
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "capability-discovery-schema-test", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const tools = (await client.listTools()).tools;
+      const search = tools.find((tool) => tool.name === "capability_catalog_search");
+      const request = tools.find((tool) => tool.name === "capability_authorization_request");
+      expect(search?.description).toContain("never installs, connects, or authorizes");
+      expect(search?.inputSchema).toMatchObject({
+        required: ["query"],
+        properties: { query: { type: "string" }, limit: { type: "integer" } },
+      });
+      expect(request?.description).toContain("never grants access");
+      expect(request?.inputSchema).toMatchObject({
+        required: expect.arrayContaining(["capabilityId", "rationale"]),
+      });
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+  });
+
   test("sandbox inventory describes idle home sandboxes as wakeable", async () => {
     const server = buildOpenGeniMcpServer(deps(), grant(["sessions:read"], ["sandboxes_list"]));
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();

@@ -7,6 +7,7 @@ import {
   RUNTIME_DML_TABLES,
   RUNTIME_FULL_DML_TABLES,
   RUNTIME_READ_INSERT_TABLES,
+  RUNTIME_READ_INSERT_UPDATE_TABLES,
   RUNTIME_READ_ONLY_TABLES,
   RUNTIME_TABLE_PRIVILEGES,
   type RuntimeDatabasePosture,
@@ -66,6 +67,8 @@ function safePosture(): RuntimeDatabasePosture {
         rlsForced: true,
         rlsActive: true,
         policyCount: 1,
+        artifactOutboxDispatcherPolicy: false,
+        artifactMaterializerPolicy: false,
         select: true,
         insert: true,
         update: true,
@@ -80,6 +83,7 @@ function safePosture(): RuntimeDatabasePosture {
         name: "workspace_rls_visible(uuid, uuid)",
         owner: "opengeni_migrator",
         execute: true,
+        securityDefiner: false,
       },
     ],
   };
@@ -88,13 +92,14 @@ function safePosture(): RuntimeDatabasePosture {
 describe("runtime database posture evaluator", () => {
   test("freezes the unique, sorted current-ledger table privilege classes", () => {
     const contracts = [
-      [FORCE_RLS_TABLES, 137],
+      [FORCE_RLS_TABLES, 152],
       [NON_RLS_RUNTIME_TABLES, 11],
-      [RUNTIME_FULL_DML_TABLES, 108],
+      [RUNTIME_FULL_DML_TABLES, 109],
       [RUNTIME_READ_ONLY_TABLES, 10],
-      [RUNTIME_READ_INSERT_TABLES, 25],
-      [PROTECTED_NO_DIRECT_DML_TABLES, 5],
-      [RUNTIME_DML_TABLES, 143],
+      [RUNTIME_READ_INSERT_TABLES, 36],
+      [RUNTIME_READ_INSERT_UPDATE_TABLES, 1],
+      [PROTECTED_NO_DIRECT_DML_TABLES, 7],
+      [RUNTIME_DML_TABLES, 156],
     ] as const;
     for (const [tables, length] of contracts) {
       expect(tables).toHaveLength(length);
@@ -103,8 +108,8 @@ describe("runtime database posture evaluator", () => {
     }
 
     expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(148);
-    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(148);
+    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(163);
+    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(163);
     expect(
       FORCE_RLS_TABLES.every(
         (table) =>
@@ -230,6 +235,131 @@ describe("runtime database posture evaluator", () => {
         tablePrivileges: {},
       }),
     ).toContain("protected tables lack an explicit privilege class: tenant_rows");
+  });
+
+  test("requires a same-owner SECURITY DEFINER artifact outbox dispatcher path", () => {
+    const posture = safePosture();
+    posture.tables.push({
+      ...posture.tables[0]!,
+      name: "editable_artifact_live_outbox",
+      artifactOutboxDispatcherPolicy: true,
+      update: false,
+      delete: false,
+    });
+    for (const name of [
+      "claim_editable_artifact_live_outbox(text, integer, integer, name)",
+      "mark_editable_artifact_live_outbox_published(text, text, integer, name)",
+      "renew_editable_artifact_live_outbox(text, text, integer, integer, name)",
+      "retry_editable_artifact_live_outbox(text, text, integer, integer, text, name)",
+      "dead_letter_editable_artifact_live_outbox(text, text, integer, text, name)",
+      "release_editable_artifact_live_outbox(text, text, integer, name)",
+      "resolve_editable_artifact_data_schema(name)",
+    ]) {
+      posture.privateRoutines.push({
+        name,
+        owner: "opengeni_migrator",
+        execute: name.startsWith("resolve_"),
+        securityDefiner: true,
+      });
+    }
+    const artifactOptions: RuntimeDatabasePostureOptions = {
+      ...options,
+      protectedTables: ["editable_artifact_live_outbox", "tenant_rows"],
+      tablePrivileges: {
+        editable_artifact_live_outbox: ["SELECT", "INSERT"],
+        tenant_rows: ["SELECT", "INSERT", "UPDATE", "DELETE"],
+      },
+    };
+    expect(evaluateRuntimeDatabasePosture(posture, artifactOptions)).toEqual([]);
+
+    posture.tables[1]!.artifactOutboxDispatcherPolicy = false;
+    posture.privateRoutines[1]!.securityDefiner = false;
+    posture.privateRoutines[2]!.owner = "another_owner";
+    expect(evaluateRuntimeDatabasePosture(posture, artifactOptions)).toEqual(
+      expect.arrayContaining([
+        "table editable_artifact_live_outbox lacks its owner dispatcher RLS policy",
+        expect.stringContaining("is not SECURITY DEFINER"),
+        expect.stringContaining("does not match table owner"),
+      ]),
+    );
+  });
+
+  test("requires a same-owner artifact authorization revision capability", () => {
+    const posture = safePosture();
+    posture.tables[0]!.name = "editable_artifacts";
+    posture.privateRoutines.push({
+      name: "advance_editable_artifact_authorization_revision(uuid, uuid, text, bigint, bigint, name)",
+      owner: "opengeni_migrator",
+      execute: true,
+      securityDefiner: true,
+    });
+    posture.privateRoutines.push({
+      name: "authorize_editable_artifact_actor(uuid, uuid, text, text, text, text, text, text, integer, text, text, name)",
+      owner: "opengeni_migrator",
+      execute: true,
+      securityDefiner: true,
+    });
+    const artifactOptions: RuntimeDatabasePostureOptions = {
+      ...options,
+      protectedTables: ["editable_artifacts"],
+      tablePrivileges: {
+        editable_artifacts: ["SELECT", "INSERT", "UPDATE", "DELETE"],
+      },
+    };
+    expect(evaluateRuntimeDatabasePosture(posture, artifactOptions)).toEqual([]);
+    posture.privateRoutines[1]!.owner = "another_owner";
+    expect(evaluateRuntimeDatabasePosture(posture, artifactOptions)).toEqual(
+      expect.arrayContaining([expect.stringContaining("does not match table owner")]),
+    );
+  });
+
+  test("requires the exact owner-fenced global artifact materializer path", () => {
+    const posture = safePosture();
+    const materializerTables = [
+      "editable_artifact_materialization_jobs",
+      "editable_artifact_materialization_results",
+      "editable_artifact_blob_refs",
+      "editable_artifact_sequence_checkpoints",
+      "editable_artifact_versions",
+      "editable_artifact_idempotency_receipts",
+    ];
+    posture.tables = materializerTables.map((name) => ({
+      ...posture.tables[0]!,
+      name,
+      artifactMaterializerPolicy: true,
+    }));
+    for (const name of [
+      "claim_editable_artifact_materializations(text, integer, integer, name)",
+      "renew_editable_artifact_materialization(uuid, uuid, text, text, text, integer, integer, name)",
+      "succeed_editable_artifact_materialization(uuid, uuid, text, text, text, integer, text, text, text, bigint, text, text, timestamp with time zone, name)",
+      "fail_editable_artifact_materialization(uuid, uuid, text, text, text, integer, text, name)",
+    ]) {
+      posture.privateRoutines.push({
+        name,
+        owner: "opengeni_migrator",
+        execute: false,
+        securityDefiner: true,
+      });
+    }
+    const artifactOptions: RuntimeDatabasePostureOptions = {
+      ...options,
+      protectedTables: materializerTables,
+      tablePrivileges: Object.fromEntries(
+        materializerTables.map((name) => [name, ["SELECT", "INSERT", "UPDATE", "DELETE"]]),
+      ),
+    };
+    expect(evaluateRuntimeDatabasePosture(posture, artifactOptions)).toEqual([]);
+
+    posture.tables[0]!.artifactMaterializerPolicy = false;
+    posture.privateRoutines[1]!.execute = true;
+    posture.privateRoutines[2]!.owner = "another_owner";
+    expect(evaluateRuntimeDatabasePosture(posture, artifactOptions)).toEqual(
+      expect.arrayContaining([
+        "table editable_artifact_materialization_jobs lacks its owner materializer RLS policy",
+        expect.stringContaining("forbidden global artifact materializer capability"),
+        expect.stringContaining("does not match table owner"),
+      ]),
+    );
   });
 
   test("scoped topology checks connection coherence without imposing standalone ownership", () => {

@@ -6,6 +6,7 @@ export type RuntimeMetricsHooks = {
   }) => void;
   onSandboxCreate?: (input: {
     backend: string;
+    imageSource: "logical" | "provider_immutable";
     outcome: "completed" | "failed";
     durationSeconds: number;
   }) => void;

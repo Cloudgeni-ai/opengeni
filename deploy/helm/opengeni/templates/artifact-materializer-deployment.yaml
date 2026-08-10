@@ -1,0 +1,207 @@
+{{- if .Values.artifactMaterializer.enabled }}
+{{- $materializer := .Values.artifactMaterializer }}
+{{- $priorityClassName := include "opengeni.priorityClassName" (dict "root" . "explicit" $materializer.priorityClassName "tier" "execution") }}
+{{- $credentialsSecret := default (include "opengeni.secretName" .) $materializer.credentialsSecret }}
+{{- $storageBackend := default "s3-compatible" (index .Values.config "OPENGENI_OBJECT_STORAGE_BACKEND") }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "opengeni.fullname" . }}-artifact-materializer
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: artifact-materializer
+spec:
+  replicas: {{ $materializer.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "opengeni.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: artifact-materializer
+  template:
+    metadata:
+      labels:
+        {{- include "opengeni.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: artifact-materializer
+        opengeni.ai/worker-role: artifact-materializer
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if and .Values.secret.create (not $materializer.credentialsSecret) }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with $materializer.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "opengeni.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      terminationGracePeriodSeconds: {{ $materializer.terminationGracePeriodSeconds }}
+      {{- if $priorityClassName }}
+      priorityClassName: {{ $priorityClassName | quote }}
+      {{- end }}
+      securityContext:
+        {{- toYaml $materializer.podSecurityContext | nindent 8 }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: artifact-materializer
+          image: {{ include "opengeni.image" (dict "root" . "image" $materializer.image) | quote }}
+          imagePullPolicy: {{ $materializer.image.pullPolicy }}
+          securityContext:
+            {{- toYaml $materializer.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ $materializer.containerPort }}
+          env:
+            - name: OPENGENI_ARTIFACT_MATERIALIZER_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $credentialsSecret }}
+                  key: {{ required "artifactMaterializer.databaseUrlSecretKey is required" $materializer.databaseUrlSecretKey }}
+            {{- if and (not .Values.minio.enabled) (or (eq $storageBackend "s3-compatible") (eq $storageBackend "aws-s3")) }}
+            - name: OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $credentialsSecret }}
+                  key: {{ required "artifactMaterializer.objectStorageAccessKeyIdSecretKey is required" $materializer.objectStorageAccessKeyIdSecretKey }}
+                  optional: true
+            - name: OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $credentialsSecret }}
+                  key: {{ required "artifactMaterializer.objectStorageSecretAccessKeySecretKey is required" $materializer.objectStorageSecretAccessKeySecretKey }}
+                  optional: true
+            {{- end }}
+            {{- if eq $storageBackend "azure-blob" }}
+            - name: OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $credentialsSecret }}
+                  key: {{ required "artifactMaterializer.objectStorageAzureConnectionStringSecretKey is required" $materializer.objectStorageAzureConnectionStringSecretKey }}
+                  optional: true
+            - name: OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $credentialsSecret }}
+                  key: {{ required "artifactMaterializer.objectStorageAzureAccountNameSecretKey is required" $materializer.objectStorageAzureAccountNameSecretKey }}
+                  optional: true
+            - name: OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $credentialsSecret }}
+                  key: {{ required "artifactMaterializer.objectStorageAzureAccountKeySecretKey is required" $materializer.objectStorageAzureAccountKeySecretKey }}
+                  optional: true
+            {{- end }}
+            {{- if eq $storageBackend "gcs" }}
+            - name: OPENGENI_OBJECT_STORAGE_GCS_CREDENTIALS_JSON
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $credentialsSecret }}
+                  key: {{ required "artifactMaterializer.objectStorageGcsCredentialsJsonSecretKey is required" $materializer.objectStorageGcsCredentialsJsonSecretKey }}
+                  optional: true
+            {{- end }}
+            {{- range $name := list "OPENGENI_SERVICE_NAME" "OPENGENI_ENVIRONMENT" "OPENGENI_DEPLOYMENT_REVISION" "OPENGENI_DB_SCHEMA" "OPENGENI_RLS_STRATEGY" "OPENGENI_OBSERVABILITY_STRUCTURED_LOGS" "OPENGENI_OBSERVABILITY_METRICS_ENABLED" "OPENGENI_OTEL_EXPORTER_OTLP_ENDPOINT" }}
+            {{- $value := index $.Values.config $name }}
+            {{- if $value }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if not .Values.minio.enabled }}
+            {{- range $name := list "OPENGENI_OBJECT_STORAGE_BACKEND" "OPENGENI_OBJECT_STORAGE_BUCKET" }}
+            - name: {{ $name }}
+              value: {{ index $.Values.config $name | quote }}
+            {{- end }}
+            {{- if or (eq $storageBackend "s3-compatible") (eq $storageBackend "aws-s3") }}
+            {{- range $name := list "OPENGENI_OBJECT_STORAGE_ENDPOINT" "OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT" "OPENGENI_OBJECT_STORAGE_REGION" "OPENGENI_OBJECT_STORAGE_S3_PROVIDER" "OPENGENI_OBJECT_STORAGE_FORCE_PATH_STYLE" }}
+            {{- $value := index $.Values.config $name }}
+            {{- if $value }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+            {{- end }}
+            {{- end }}
+            {{- else if eq $storageBackend "azure-blob" }}
+            {{- range $name := list "OPENGENI_OBJECT_STORAGE_AZURE_ENDPOINT" }}
+            {{- $value := index $.Values.config $name }}
+            {{- if $value }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+            {{- end }}
+            {{- end }}
+            {{- else if eq $storageBackend "gcs" }}
+            {{- range $name := list "OPENGENI_OBJECT_STORAGE_GCS_PROJECT_ID" "OPENGENI_OBJECT_STORAGE_GCS_KEY_FILENAME" "OPENGENI_OBJECT_STORAGE_GCS_API_ENDPOINT" }}
+            {{- $value := index $.Values.config $name }}
+            {{- if $value }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
+            - name: OPENGENI_ARTIFACT_MATERIALIZER_ENABLED
+              value: "true"
+            - name: OPENGENI_ARTIFACT_MATERIALIZER_DATABASE_ROLE
+              value: opengeni_artifact_materializer
+            - name: OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT
+              value: {{ $materializer.containerPort | quote }}
+            - name: OPENGENI_ARTIFACT_MATERIALIZER_BATCH_SIZE
+              value: {{ $materializer.batchSize | quote }}
+            - name: OPENGENI_ARTIFACT_MATERIALIZER_CONCURRENCY
+              value: {{ $materializer.concurrency | quote }}
+            - name: OPENGENI_ARTIFACT_MATERIALIZER_LEASE_MS
+              value: {{ $materializer.leaseMs | quote }}
+            - name: OPENGENI_ARTIFACT_MATERIALIZER_RENEW_MS
+              value: {{ $materializer.renewMs | quote }}
+            - name: OPENGENI_ARTIFACT_MATERIALIZER_POLL_MS
+              value: {{ $materializer.pollMs | quote }}
+            - name: OPENGENI_ARTIFACT_MATERIALIZER_MAX_ATTEMPTS
+              value: {{ $materializer.maxAttempts | quote }}
+            - name: OPENGENI_ARTIFACT_MATERIALIZER_MEMORY_BYTES
+              value: {{ $materializer.childMemoryBytes | quote }}
+            - name: OPENGENI_ARTIFACT_MATERIALIZER_CPU_MS
+              value: {{ $materializer.childCpuMs | quote }}
+            - name: OPENGENI_ARTIFACT_MATERIALIZER_OPEN_FILES
+              value: {{ $materializer.childOpenFiles | quote }}
+            - name: OPENGENI_ARTIFACT_MATERIALIZER_PROCESSES
+              value: {{ $materializer.childProcesses | quote }}
+            - name: OPENGENI_ARTIFACT_MATERIALIZER_FILE_BYTES
+              value: {{ $materializer.childFileBytes | quote }}
+            - name: OPENGENI_ARTIFACT_MATERIALIZER_WALL_MS
+              value: {{ $materializer.wallMs | quote }}
+            - name: OPENGENI_ARTIFACT_MATERIALIZER_MAX_SOURCE_BYTES
+              value: {{ $materializer.maxSourceBytes | quote }}
+            - name: OPENGENI_ARTIFACT_MATERIALIZER_MAX_OUTPUT_BYTES
+              value: {{ $materializer.maxOutputBytes | quote }}
+            {{- if .Values.minio.enabled }}
+            {{- include "opengeni.generatedRuntimeEnv" (dict "root" . "objectStorageEndpoint" (include "opengeni.minioInternalEndpoint" .) "includeDatabaseUrl" false) | nindent 12 }}
+            {{- end }}
+          {{- if $materializer.probes.readiness.enabled }}
+          readinessProbe:
+            {{- include "opengeni.httpProbe" (dict "probe" $materializer.probes.readiness) | nindent 12 }}
+          {{- end }}
+          {{- if $materializer.probes.liveness.enabled }}
+          livenessProbe:
+            {{- include "opengeni.httpProbe" (dict "probe" $materializer.probes.liveness) | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml $materializer.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 1Gi
+      {{- with $materializer.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $materializer.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $materializer.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

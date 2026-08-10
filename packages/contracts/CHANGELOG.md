@@ -1,5 +1,22 @@
 # @opengeni/contracts
 
+## 0.42.1
+
+### Patch Changes
+
+- 2cd6dce: Build and reuse version-bound immutable provider images after clean rig verification, with content-hash invalidation and runtime-setup fallback for missing or unsupported providers.
+
+## 0.42.0
+
+### Minor Changes
+
+- 7b2d5ff: Add trust-gated in-session capability recommendations, human-owned authorization
+  requests, and a GitHub owner-consent flow that returns to the initiating session.
+- d1189ba: Add the OpenGeni-owned document, spreadsheet, and presentation authoring engine,
+  its durable API/domain/live-sync surfaces, first-party React workbench, and
+  editable-artifact client SDK. Publish independently lazy, identity-pinned browser
+  WASM runtimes for each editor modality.
+
 ## 0.41.4
 
 ### Patch Changes

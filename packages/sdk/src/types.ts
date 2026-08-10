@@ -1,9 +1,9 @@
 import type { WorkspaceTranscriptionPolicy } from "./transcription";
 
 // Hand-written mirrors of the public wire shapes in `@opengeni/contracts`.
-// The SDK keeps zero runtime dependencies so it stays framework-agnostic and
-// publishable on its own; `test/contract-parity.test.ts` pins these types to
-// the contracts package so drift fails the gate instead of shipping.
+// Ordinary SDK entries stay framework-agnostic and do not import the contracts
+// runtime; `test/contract-parity.test.ts` pins these types to the contracts
+// package so drift fails the gate instead of shipping.
 
 export type CodexRealtimeWebrtcVersion = "v3";
 export type CodexRealtimeVoice =
@@ -344,8 +344,8 @@ export type ComputerUseCapability = SessionCapabilities["ComputerUse"];
 // the capability-gated client (`@opengeni/react`) drives. The desktop pixel
 // plane rides Channel B (direct-to-provider noVNC); the structured terminal/
 // files/git surfaces ride Channel A (the existing event spine + the synchronous
-// fs/git/terminal point queries above). These are TYPES only (the SDK keeps zero
-// runtime deps); the contract-parity test pins them.
+// fs/git/terminal point queries above). These are TYPES only, so ordinary SDK
+// entries do not reach the contracts runtime; the contract-parity test pins them.
 
 // Mirror of `@opengeni/contracts` StreamUrlRotatedPayload — the Channel-A event
 // the client folds in to hot-swap its noVNC socket on a box rollover, fenced on
@@ -465,7 +465,7 @@ export type RepositoryResourceRef = {
   githubRepositoryId?: number | undefined;
 };
 
-/** Value mirror of `@opengeni/contracts`; parity-tested without adding an SDK runtime dependency. */
+/** Value mirror of `@opengeni/contracts`; parity-tested without importing it from ordinary SDK entries. */
 export const DEFAULT_FILE_RESOURCE_MOUNT_ROOT = ".opengeni/files" as const;
 
 export type FileResourceRef = {
@@ -1411,6 +1411,17 @@ export type ToolAuthNeededPayload = {
   selectedResources?: Array<{ id: string; kind: "repository" }> | undefined;
   authorizationUrl?: string | undefined;
   subjectId?: string | null | undefined;
+  capability?:
+    | {
+        id: string;
+        name: string;
+        kind: CapabilityKind;
+        source: CapabilitySource;
+        action: "connect" | "add_credentials" | "enable";
+        rationale: string;
+        requiredVariables: string[];
+      }
+    | undefined;
 };
 
 // Payload shapes for the high-traffic event types. `SessionEvent.payload` is
@@ -1509,9 +1520,10 @@ export type CodexFleetDecisionEventPayload = {
   } & Record<string, unknown>;
 };
 
-// Recording payloads (P4.3 — plain TS mirror of the contracts Zod schemas; the
-// SDK is zero-runtime-dep so these are TYPES, not Zod, F15). The contract-parity
-// test asserts the event-type literals; these shapes document the wire payloads.
+// Recording payloads (P4.3 — plain TS mirror of the contracts Zod schemas).
+// These are TYPES, not Zod (F15), so ordinary SDK entries remain runtime-clean.
+// The contract-parity test asserts the event-type literals; these shapes
+// document the wire payloads.
 export type RecordingMode = "manual" | "on-turn" | "on-verify";
 export type RecordingCodec = "h264-mp4" | "vp9-webm";
 export type RecordingContentType = "video/mp4" | "video/webm";
@@ -2156,6 +2168,8 @@ export type FirstPartyMcpToolName =
   | "variable_set_get_variable"
   | "variable_set_set_variable"
   | "environment_set_variable"
+  | "capability_catalog_search"
+  | "capability_authorization_request"
   | "github_connect_link"
   | "github_repositories_list"
   | "social_connections_list"
@@ -3363,6 +3377,34 @@ export type RigCheck = {
   command: string;
 };
 
+export type RigProviderImageBuildStatus = "building" | "ready" | "failed" | "unsupported";
+
+export type RigProviderImage = {
+  backend: SandboxBackend;
+  provider: string;
+  status: RigProviderImageBuildStatus;
+  contentHash: string;
+  setupHash: string;
+  sourceImage: string | null;
+  buildRequestId: string;
+  imageId: string | null;
+  imageDigest: string | null;
+  artifactId: string | null;
+  providerBindingKeyHash: string | null;
+  provenance: {
+    kind: "rig_verification";
+    targetKind: "change" | "version";
+    targetId: string;
+  };
+  startedAt: string;
+  finishedAt: string | null;
+  error: {
+    code: string;
+    message: string;
+    retryable: boolean;
+  } | null;
+};
+
 export type RigVersion = {
   id: string;
   rigId: string;
@@ -3373,6 +3415,7 @@ export type RigVersion = {
   credentialHooks: string[];
   defaultVariableSetIds: string[];
   changelog: string | null;
+  providerImages: Partial<Record<SandboxBackend, RigProviderImage>>;
   createdBy: string | null;
   active: boolean;
   createdAt: string;
@@ -4699,8 +4742,9 @@ export type SwapActiveSandboxResponse = {
 
 // ── Self-hosted enrollment UX (design 11) ────────────────────────────────────
 // Hand-written mirrors of the `@opengeni/contracts` enrollment-UX request/response
-// shapes (the SDK keeps zero runtime deps). The click-Grant approve-page
-// lookup/deny + the headless enroll-token mint/exchange.
+// shapes. They remain type-only so ordinary SDK entries do not reach the contracts
+// runtime. The click-Grant approve-page lookup/deny + the headless enroll-token
+// mint/exchange.
 
 /** Mirror of `@opengeni/contracts` EnrollmentOs. */
 export type EnrollmentOs = "linux" | "macos" | "windows";

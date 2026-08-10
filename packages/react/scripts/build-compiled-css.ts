@@ -255,6 +255,33 @@ function rewriteDerivedTokenConsumers(
   });
 }
 
+function preserveInheritedDerivedOverrides(
+  root: ReturnType<typeof parse>,
+  defaults: ReadonlyMap<string, string>,
+): void {
+  const derived = new Set(
+    [...defaults].filter(([, value]) => isDerivedToken(value)).map(([token]) => token),
+  );
+  root.walkRules((rule) => {
+    if (!parentsOf(rule).some((parent) => parent.type === "atrule" && parent.name === "supports")) {
+      return;
+    }
+    const selectors = selectorParser().astSync(rule.selector);
+    if (
+      selectors.nodes.length === 0 ||
+      !selectors.nodes.every((selector) => isDocumentRoot(selector))
+    ) {
+      return;
+    }
+    rule.walkDecls(/^--og-/u, (declaration) => {
+      const token = declaration.prop;
+      if (!derived.has(token)) return;
+      declaration.prop = effectiveToken(token);
+      declaration.value = `var(${token}, ${effectiveDerivedDefault(declaration.value, defaults)})`;
+    });
+  });
+}
+
 function preserveColorSchemeInheritance(root: ReturnType<typeof parse>): void {
   root.walkRules((rule) => {
     const selectors = selectorParser().astSync(rule.selector);
@@ -320,6 +347,7 @@ function removeEmptyContainers(root: ReturnType<typeof parse>): void {
 export function scopeSelectors(css: string): string {
   const root = parse(css);
   const tokenDefaults = collectTokenDefaults(root);
+  preserveInheritedDerivedOverrides(root, tokenDefaults);
   hydrateEffectiveTokenFallbacks(root, tokenDefaults);
   const tailwindInitializers = extractTailwindInitializers(root);
   rewriteDerivedTokenConsumers(root, tokenDefaults);

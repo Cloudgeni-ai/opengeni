@@ -139,6 +139,24 @@ function isExcludedInputFile(path: string): boolean {
   return INPUT_EXCLUDED_FILE_PATTERNS.some((pattern) => pattern.test(name));
 }
 
+function isExcludedInputDirectory(path: string): boolean {
+  const name = basename(path);
+  if (INPUT_EXCLUDED_DIRECTORY_NAMES.has(name)) return true;
+  // `target` can be a legitimate domain/source directory. Exclude it only in
+  // its standard Cargo meaning: immediately beside the owning Cargo.toml.
+  return name === "target" && existsSync(join(dirname(path), "Cargo.toml"));
+}
+
+function isWithinExcludedInputDirectory(path: string): boolean {
+  let candidate = path;
+  while (isPathWithin(repoRoot, candidate)) {
+    if (isExcludedInputDirectory(candidate)) return true;
+    if (candidate === repoRoot) break;
+    candidate = dirname(candidate);
+  }
+  return false;
+}
+
 function isSqliteBusy(error: unknown): boolean {
   return (error as { code?: string }).code === "SQLITE_BUSY";
 }
@@ -739,7 +757,7 @@ function inputEntry(path: string): BuildInput {
 }
 
 function inputChildStats(entry: Dirent, path: string): Stats | null {
-  const isExcludedDirectory = entry.isDirectory() && INPUT_EXCLUDED_DIRECTORY_NAMES.has(entry.name);
+  const isExcludedDirectory = entry.isDirectory() && isExcludedInputDirectory(path);
   if (isExcludedDirectory) {
     pauseForFailureInjection("OPENGENI_BUILD_CACHE_PAUSE_BEFORE_EXCLUDED_ENTRY_STAT");
   }
@@ -785,7 +803,7 @@ function inputEntriesUnder(directory: string): BuildInput[] {
       if (!stats) {
         continue;
       }
-      if (stats.isDirectory() && INPUT_EXCLUDED_DIRECTORY_NAMES.has(entry.name)) {
+      if (stats.isDirectory() && isExcludedInputDirectory(path)) {
         continue;
       }
       if (!stats.isDirectory() && isExcludedInputFile(path)) {
@@ -866,7 +884,7 @@ function inputGenerationEntriesUnder(directory: string): BuildInputGeneration[] 
       if (!stats) {
         continue;
       }
-      if (stats.isDirectory() && INPUT_EXCLUDED_DIRECTORY_NAMES.has(entry.name)) {
+      if (stats.isDirectory() && isExcludedInputDirectory(path)) {
         continue;
       }
       if (!stats.isDirectory() && isExcludedInputFile(path)) {
@@ -1088,11 +1106,7 @@ function startInputMutationMonitor(
             return;
           }
           const changedRelativePath = relative(repoRoot, changedPath);
-          if (
-            changedRelativePath
-              .split(/[\\/]+/u)
-              .some((part) => INPUT_EXCLUDED_DIRECTORY_NAMES.has(part))
-          ) {
+          if (isWithinExcludedInputDirectory(changedPath)) {
             return;
           }
           if (!isBuildInputPath(pkg, changedPath)) {

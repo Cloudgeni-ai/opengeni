@@ -95,6 +95,8 @@ type SlackCall = {
   method: string;
   channel: string | null;
   timestamp: string | null;
+  latest?: string | null;
+  inclusive?: string | null;
 };
 
 type SlackReactionContextPage = {
@@ -124,6 +126,7 @@ function fakeSlack(
   const posts: SlackPost[] = [];
   const calls: SlackCall[] = [];
   const reactionContexts = new Map<string, SlackReactionContext>();
+  const channelHistories = new Map<string, SlackReactionContextPage>();
   const reactionContextHits: string[] = [];
   const failuresByText = new Map<
     string,
@@ -173,6 +176,8 @@ function fakeSlack(
       method,
       channel: form.get("channel"),
       timestamp: form.get("ts"),
+      ...(form.has("latest") ? { latest: form.get("latest") } : {}),
+      ...(form.has("inclusive") ? { inclusive: form.get("inclusive") } : {}),
     });
     if (method === "conversations.info") {
       const channel = form.get("channel") ?? "";
@@ -213,6 +218,24 @@ function fakeSlack(
       const context = cursor ? rootContext?.pages?.[cursor] : rootContext;
       if (!context) return Response.json({ ok: false, error: "message_not_found" });
       reactionContextHits.push(cursor ? `${key}:${cursor}` : key);
+      const status = context.status ?? 200;
+      if (status !== 200 || context.error) {
+        return Response.json(status === 200 ? { ok: false, error: context.error } : { ok: false }, {
+          status,
+          headers: context.retryAfterSeconds
+            ? { "retry-after": String(context.retryAfterSeconds) }
+            : undefined,
+        });
+      }
+      return Response.json({
+        ok: true,
+        messages: context.messages,
+        response_metadata: { next_cursor: context.nextCursor ?? "" },
+      });
+    }
+    if (method === "conversations.history") {
+      const channel = form.get("channel") ?? "";
+      const context = channelHistories.get(channel) ?? { messages: [] };
       const status = context.status ?? 200;
       if (status !== 200 || context.error) {
         return Response.json(status === 200 ? { ok: false, error: context.error } : { ok: false }, {
@@ -293,6 +316,7 @@ function fakeSlack(
     posts,
     calls,
     reactionContexts,
+    channelHistories,
     reactionContextHits,
     failuresByText,
     postFailuresByChannel,
@@ -797,6 +821,31 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       threadTimestamp: rootTimestamp,
     });
     expect(value.slack.posts[0]!.text).toContain("started from the :genie: reaction");
+    expect(value.slack.posts[0]!.text).toContain("Open in OpenGeni:");
+
+    const postsBeforeCompletion = value.slack.posts.length;
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      {
+        type: "agent.message.completed",
+        payload: { text: "The requested Slack check is complete." },
+      },
+      {
+        type: "agent.message.completed",
+        payload: { text: "The requested Slack check is complete." },
+      },
+      {
+        type: "turn.completed",
+        payload: { output: "The requested Slack check is complete." },
+      },
+    ]);
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(false);
+    const completionPosts = value.slack.posts.slice(postsBeforeCompletion);
+    expect(completionPosts).toHaveLength(1);
+    expect(completionPosts[0]!.text).toBe(
+      "The requested Slack check is complete.\n\nReply in this thread to continue.",
+    );
+    expect(completionPosts[0]!.text).not.toContain("Open in OpenGeni:");
 
     const [session] = await shared!.admin<
       {
@@ -2731,18 +2780,35 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
   test("channel mentions adopt existing threads and any linked workspace participant can continue", async () => {
     if (!available) return;
     const value = await fixture({ linkOther: true });
+    const rootTimestamp = "1720000000.000001";
+    const mentionTimestamp = "1720000000.000002";
+    value.slack.reactionContexts.set(`C_TEAM:${rootTimestamp}`, {
+      messages: [
+        {
+          ts: rootTimestamp,
+          user: value.ownerSlackUserId,
+          text: "Do we support Google Drive integration in OpenGeni currently?",
+        },
+        {
+          ts: mentionTimestamp,
+          thread_ts: rootTimestamp,
+          user: value.ownerSlackUserId,
+          text: `<@${value.botUserId}> Can check this out?`,
+        },
+      ],
+    });
     expect(
       (
         await postEvent(value.app, {
           teamId: value.teamId,
           eventId: `E_MENTION_${crypto.randomUUID()}`,
           event: {
-            type: "app_mention",
+            type: "message",
             user: value.ownerSlackUserId,
             channel: "C_TEAM",
-            ts: "1720000000.000002",
-            thread_ts: "1720000000.000001",
-            text: `<@${value.botUserId}> take over this thread`,
+            ts: mentionTimestamp,
+            thread_ts: rootTimestamp,
+            text: `<@${value.botUserId}> Can check this out?`,
           },
         })
       ).status,
@@ -2754,6 +2820,18 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       visibility: "workspace",
       slack_thread_ts: "1720000000.000001",
     });
+    const [initialMessage] = await shared!.admin<{ text: string }[]>`
+      select event.payload ->> 'text' as text
+      from session_events event
+      where event.workspace_id = ${value.owner.workspaceId}
+        and event.session_id = ${route!.session_id}
+        and event.type = 'user.message'
+      order by event.sequence asc
+      limit 1`;
+    expect(initialMessage!.text).toContain(
+      "Do we support Google Drive integration in OpenGeni currently?",
+    );
+    expect(initialMessage!.text).toContain("Can check this out?");
 
     expect(
       (
@@ -2780,6 +2858,62 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         and session_id = ${route!.session_id}
         and type = 'user.message'`;
     expect(messages!.count).toBe(2);
+  });
+
+  test("top-level mentions receive bounded preceding channel context", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const mentionTimestamp = "1721000000.000002";
+    value.slack.channelHistories.set("C_TEAM", {
+      messages: [
+        {
+          ts: mentionTimestamp,
+          user: value.ownerSlackUserId,
+          text: `<@${value.botUserId}> Can you answer this question?`,
+        },
+        {
+          ts: "1721000000.000001",
+          user: value.ownerSlackUserId,
+          text: "What deployment is currently running in production?",
+        },
+      ],
+    });
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_TOP_LEVEL_CONTEXT_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: value.ownerSlackUserId,
+            channel: "C_TEAM",
+            ts: mentionTimestamp,
+            text: `<@${value.botUserId}> Can you answer this question?`,
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+
+    const [initialMessage] = await shared!.admin<{ text: string }[]>`
+      select event.payload ->> 'text' as text
+      from session_events event
+      join slack_interactions interaction
+        on interaction.workspace_id = event.workspace_id
+        and interaction.session_id = event.session_id
+      where event.workspace_id = ${value.owner.workspaceId}
+        and event.type = 'user.message'
+      order by event.sequence asc
+      limit 1`;
+    expect(initialMessage!.text).toContain("What deployment is currently running in production?");
+    expect(value.slack.calls).toContainEqual(
+      expect.objectContaining({
+        method: "conversations.history",
+        channel: "C_TEAM",
+        latest: mentionTimestamp,
+        inclusive: "true",
+      }),
+    );
   });
 
   test("slash commands and explicit message shortcuts each create one durable session surface", async () => {
@@ -3791,7 +3925,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(delivered.filter((post) => post.text.startsWith("Progress"))).toHaveLength(3);
     expect(delivered.some((post) => post.text === "Progress 4")).toBe(false);
     expect(delivered.at(-1)?.text).toContain("Final bounded result");
-    expect(delivered.at(-1)?.text).toContain("Open in OpenGeni:");
+    expect(delivered.at(-1)?.text).not.toContain("Open in OpenGeni:");
     expect(delivered.every((post) => post.threadTimestamp === "1740000000.000001")).toBe(true);
     const progressLedger = await shared!.admin<
       { session_event_sequence: number; slot: number; operation_id: string }[]
@@ -3807,6 +3941,79 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     );
     expect((await interactions(value.owner.workspaceId))[0]).toMatchObject({
       progress_count: 3,
+      terminal_delivery_state: "completed",
+    });
+  }, 60_000);
+
+  test("reconciles production-shaped final output across pages and replica claims", async () => {
+    if (!available) return;
+    const value = await fixture();
+    await postEvent(value.app, {
+      teamId: value.teamId,
+      eventId: `E_PAGED_FINAL_${crypto.randomUUID()}`,
+      event: {
+        type: "message",
+        channel_type: "im",
+        user: value.ownerSlackUserId,
+        channel: "D_PAGED_FINAL",
+        ts: "1745000000.000001",
+        text: "Run a task whose final output crosses a delivery page",
+      },
+    });
+    await drainAll(value.deps);
+    const [route] = await interactions(value.owner.workspaceId);
+    const postsBeforeResult = value.slack.posts.length;
+
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      ...Array.from({ length: 101 }, (_, index) => ({
+        type: "session.status.changed",
+        payload: { status: "running", pageFixture: index },
+      })),
+      {
+        type: "agent.message.completed",
+        payload: { text: "Production-shaped final result" },
+      },
+    ]);
+
+    // Delivery pages are chronological. The first page advances across only
+    // the oldest status events; the streamed assistant result is on page two.
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+    expect(value.slack.posts).toHaveLength(postsBeforeResult);
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+    expect(value.slack.posts.slice(postsBeforeResult).map((post) => post.text)).toEqual([
+      "Production-shaped final result",
+    ]);
+
+    // The terminal settlement writes a second identical assistant event plus
+    // turn.completed atomically. Two replicas converge on the already-used
+    // progress operation instead of posting a second result.
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      {
+        type: "agent.message.completed",
+        payload: { text: "Production-shaped final result" },
+      },
+      {
+        type: "turn.completed",
+        payload: { output: "Production-shaped final result" },
+      },
+    ]);
+    const replicaDeps = {
+      ...value.deps,
+      bus: new MemoryEventBus(),
+    } as ApiRouteDeps;
+    expect(
+      (
+        await Promise.all([
+          drainSlackInteractionsOnce(value.deps),
+          drainSlackInteractionsOnce(replicaDeps),
+        ])
+      ).sort(),
+    ).toEqual([false, true]);
+    const resultPosts = value.slack.posts.slice(postsBeforeResult);
+    expect(resultPosts).toHaveLength(1);
+    expect(resultPosts[0]!.text).toBe("Production-shaped final result");
+    expect(resultPosts[0]!.text).not.toContain("Open in OpenGeni:");
+    expect((await interactions(value.owner.workspaceId))[0]).toMatchObject({
       terminal_delivery_state: "completed",
     });
   }, 60_000);

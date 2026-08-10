@@ -20,7 +20,7 @@ import { migrate } from "../src/migrate";
 import { nestedPostgresSqlState } from "../src/persistence-errors";
 import { provisionRoles } from "../src/provision-roles";
 
-const migrationUrl = new URL("../drizzle/0192_workspace_learning_policy.sql", import.meta.url);
+const migrationUrl = new URL("../drizzle/0199_workspace_learning_policy.sql", import.meta.url);
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
 let available = true;
@@ -147,13 +147,13 @@ beforeAll(async () => {
       },
     };
   } else {
-    shared = await acquireSharedTestDatabase("migration-0192-workspace-learning-policy");
+    shared = await acquireSharedTestDatabase("migration-0199-workspace-learning-policy");
   }
   if (!shared) {
     if (requireRealDatabase)
-      throw new Error("real PostgreSQL is required for migration 0192 proof");
+      throw new Error("real PostgreSQL is required for migration 0199 proof");
     available = false;
-    console.warn("[migration-0192] PostgreSQL unavailable, skipping FORCE-RLS assertions");
+    console.warn("[migration-0199] PostgreSQL unavailable, skipping FORCE-RLS assertions");
     return;
   }
   client = createDb(shared.appUrl, { max: 8 });
@@ -185,7 +185,7 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-describe("migration 0192 workspace learning policy", () => {
+describe("migration 0199 workspace learning policy", () => {
   test("enforces immutable versioning, lifecycle-only activation, RLS, CAS, rollback, and frozen effective modes", async () => {
     if (!available) return;
     const actor = "user:learning-admin";

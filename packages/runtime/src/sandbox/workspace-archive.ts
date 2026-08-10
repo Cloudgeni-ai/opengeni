@@ -17,6 +17,7 @@ import { withSandboxProviderCapture } from "./provider-operation-gate";
 export {
   WORKSPACE_ARCHIVE_DESCRIPTOR_VERSION,
   decodeNativeSnapshotRef,
+  encodeNativeSnapshotRef,
   parseWorkspaceArchiveDescriptor,
   type NativeSnapshotDescriptor,
   type NativeSnapshotProvider,

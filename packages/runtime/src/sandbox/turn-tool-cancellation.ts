@@ -12,6 +12,9 @@ const SHELL_HELPER_YIELD_MS = 1_000;
 const SHELL_GRACEFUL_POLLS = 2;
 const SHELL_POLL_MS = 100;
 const SHELL_MARKER_DIR = "/tmp/opengeni-turn-shell";
+const RETAINED_SHELL_MARKER_PENDING_EXIT_CODE = 74;
+const RETAINED_SHELL_GROUP_LIVE_EXIT_CODE = 75;
+const RETAINED_SHELL_PROOF_INCONCLUSIVE_EXIT_CODE = 76;
 
 type ToolCallDetails = {
   toolCall?: {
@@ -70,6 +73,10 @@ type ActiveShellSession = {
 };
 
 type CommandCancellationSession = {
+  /** Resolve the physical cancellation primitive for the current route. A
+   * routing proxy must answer from its resolved backend, not from the proxy's
+   * always-present method surface or a pre-resolution PTY default. */
+  commandCancellationTransport?(): Promise<"remote_operation" | "shell_session">;
   cancelExecCommand?(opId: string): Promise<boolean>;
   /** Abort a provider exec-start transport before it returns a session id. */
   cancelPendingExecCommand?(): Promise<void>;
@@ -92,6 +99,19 @@ type CommandCancellationSession = {
     args: TurnSandboxCommandArgs,
   ): Promise<string>;
 };
+
+async function usesRemoteOperationCancellation(
+  session: CommandCancellationSession | undefined,
+): Promise<boolean> {
+  const resolved = await session?.commandCancellationTransport?.();
+  if (resolved !== undefined) {
+    if (resolved !== "remote_operation" && resolved !== "shell_session") {
+      throw new Error(`Unsupported sandbox command cancellation transport: ${String(resolved)}`);
+    }
+    return resolved === "remote_operation";
+  }
+  return Boolean(session?.cancelExecCommand) && session?.supportsPty?.() === false;
+}
 
 export type TurnSandboxCommandArgs = {
   cmd: string;
@@ -450,6 +470,64 @@ function pendingShellCancellationCommand(state: PendingShellStart): string {
   ].join("\n");
 }
 
+/**
+ * Cancel a yielded, durably retained POSIX command in one provider control
+ * operation. The older path performed a separate provider round trip for the
+ * marker read, identity check, TERM, each grace poll, KILL, and each absence
+ * poll. Modal commonly spends close to a second on each control operation, so
+ * that correct-but-chatty sequence could miss the workflow's physical-
+ * cancellation budget even though the in-box work itself takes milliseconds.
+ *
+ * This helper keeps the same authority boundary inside the sandbox: publish the
+ * invocation tombstone, read the exact randomized marker, validate PID = PGID,
+ * require the token in that PID's command line, re-read the live PGID, then
+ * signal only that isolated group. It gives TERM a short in-box grace period,
+ * escalates to KILL, and returns success only after group absence. If the group
+ * remains live, the entire token/identity guard is re-run before retrying;
+ * malformed, mismatched, or unavailable identity never opens the fence.
+ */
+function retainedShellCancellationCommand(state: ActiveShellSession): string {
+  const marker = singleQuote(state.markerPath!);
+  const cancellation = singleQuote(shellCancellationPath(state.markerPath!));
+  const markerDir = singleQuote(SHELL_MARKER_DIR);
+  const token = singleQuote(state.token!);
+  return [
+    ...processInspectionCommandLines(),
+    "umask 077",
+    `command mkdir -p ${markerDir} || exit ${RETAINED_SHELL_PROOF_INCONCLUSIVE_EXIT_CODE}`,
+    `: > ${cancellation} || exit ${RETAINED_SHELL_PROOF_INCONCLUSIVE_EXIT_CODE}`,
+    `__opengeni_marker=${marker}`,
+    `__opengeni_token=${token}`,
+    `[ -r "$__opengeni_marker" ] || exit ${RETAINED_SHELL_MARKER_PENDING_EXIT_CODE}`,
+    `IFS=" " read -r __opengeni_pid __opengeni_pgid < "$__opengeni_marker" || exit ${RETAINED_SHELL_PROOF_INCONCLUSIVE_EXIT_CODE}`,
+    `case "$__opengeni_pid:$__opengeni_pgid" in *[!0-9:]*|*:|:*) exit ${RETAINED_SHELL_PROOF_INCONCLUSIVE_EXIT_CODE} ;; esac`,
+    `[ "$__opengeni_pid" -gt 1 ] && [ "$__opengeni_pgid" -gt 1 ] || exit ${RETAINED_SHELL_PROOF_INCONCLUSIVE_EXIT_CODE}`,
+    // The wrapper admits user code only after proving it is the isolated group
+    // leader. Requiring the same fact here prevents a corrupt marker from ever
+    // naming a container/provider-wide process group.
+    `[ "$__opengeni_pid" = "$__opengeni_pgid" ] || exit ${RETAINED_SHELL_PROOF_INCONCLUSIVE_EXIT_CODE}`,
+    `__opengeni_args="$(__opengeni_process_args "$__opengeni_pid")" || { command kill -0 "-$__opengeni_pgid" 2>/dev/null && exit ${RETAINED_SHELL_PROOF_INCONCLUSIVE_EXIT_CODE}; command rm -f "$__opengeni_marker"; exit 0; }`,
+    `case "$__opengeni_args" in *"$__opengeni_token"*) ;; *) command kill -0 "-$__opengeni_pgid" 2>/dev/null && exit ${RETAINED_SHELL_PROOF_INCONCLUSIVE_EXIT_CODE}; command rm -f "$__opengeni_marker"; exit 0 ;; esac`,
+    `__opengeni_live_pgid="$(__opengeni_process_group_id "$__opengeni_pid")" || { command kill -0 "-$__opengeni_pgid" 2>/dev/null && exit ${RETAINED_SHELL_PROOF_INCONCLUSIVE_EXIT_CODE}; command rm -f "$__opengeni_marker"; exit 0; }`,
+    `[ "$__opengeni_live_pgid" = "$__opengeni_pgid" ] || { command kill -0 "-$__opengeni_pgid" 2>/dev/null && exit ${RETAINED_SHELL_PROOF_INCONCLUSIVE_EXIT_CODE}; command rm -f "$__opengeni_marker"; exit 0; }`,
+    'command kill -TERM "-$__opengeni_pgid" 2>/dev/null || true',
+    "__opengeni_poll=0",
+    'while command kill -0 "-$__opengeni_pgid" 2>/dev/null && [ "$__opengeni_poll" -lt 4 ]; do',
+    "  command sleep 0.025 2>/dev/null || true",
+    "  __opengeni_poll=$((__opengeni_poll + 1))",
+    "done",
+    'command kill -0 "-$__opengeni_pgid" 2>/dev/null || { command rm -f "$__opengeni_marker"; exit 0; }',
+    "__opengeni_poll=0",
+    'while command kill -0 "-$__opengeni_pgid" 2>/dev/null && [ "$__opengeni_poll" -lt 12 ]; do',
+    '  command kill -KILL "-$__opengeni_pgid" 2>/dev/null || true',
+    "  command sleep 0.025 2>/dev/null || true",
+    "  __opengeni_poll=$((__opengeni_poll + 1))",
+    "done",
+    'command kill -0 "-$__opengeni_pgid" 2>/dev/null || { command rm -f "$__opengeni_marker"; exit 0; }',
+    `exit ${RETAINED_SHELL_GROUP_LIVE_EXIT_CODE}`,
+  ].join("\n");
+}
+
 function shellHelperInput(command: string): string {
   const args = shellHelperArgs(command);
   return JSON.stringify({
@@ -674,8 +752,8 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
             }
           : null;
       const correlationId = `turn_lifecycle_${crypto.randomUUID()}`;
-      const useRemoteOpCancellation =
-        Boolean(session.cancelExecCommand) && session.supportsPty?.() === false;
+      const useRemoteOpCancellation = await usesRemoteOperationCancellation(session);
+      if (this.cancelled) throw cancellationError(this.reason);
       const interactive = args.tty ?? true;
       const remoteExec =
         session.cancelExecCommand && useRemoteOpCancellation
@@ -888,7 +966,8 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
             // wrapper and preserves the user's command byte-for-byte. PTY-backed
             // cloud/local sessions use the portable SDK session + POSIX marker.
             const useRemoteOpCancellation =
-              Boolean(cancelExecCommand) && cancellationSession?.supportsPty?.() === false;
+              await usesRemoteOperationCancellation(cancellationSession);
+            if (this.cancelled) throw cancellationError(this.reason);
             const interactive = parsed.tty !== false;
             const remoteExec =
               cancelExecCommand && useRemoteOpCancellation
@@ -1339,6 +1418,38 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         }
         await delay(SHELL_POLL_MS);
       }
+    }
+
+    // Retained processes have an exact backend-pinned control surface and a
+    // durable provider-session settlement. Collapse the marker read, token/PGID
+    // validation, TERM/KILL escalation, and group-absence proof into one in-box
+    // helper; then perform the one mandatory provider-session settlement poll.
+    // This is the normal Modal path and avoids serial control-plane latency
+    // without weakening either proof.
+    if (
+      state.token &&
+      state.processSession?.execCommandForProcessControl &&
+      state.processSession.writeStdinForProcessControl
+    ) {
+      while (state.processSession.hasRetainedProcess?.(state.sessionId) === true) {
+        try {
+          const output = await state.processSession.execCommandForProcessControl(
+            state.sessionId,
+            shellHelperArgs(retainedShellCancellationCommand(state)),
+          );
+          const exitCode = parseExecBannerExitCode(output);
+          if (exitCode === 0 || exitCode === RETAINED_SHELL_MARKER_PENDING_EXIT_CODE) {
+            await this.forgetShellSessionAfterExactSettlement(state);
+            return;
+          }
+        } catch {
+          // Transport, inspection, or signalling ambiguity is never absence
+          // proof. Keep the exact retained route and retry idempotently.
+        }
+        await delay(SHELL_POLL_MS);
+      }
+      this.shellSessions.delete(state.sessionId);
+      return;
     }
 
     // Capture PID/PGID BEFORE Ctrl-C. A foreground child may ignore INT/TERM

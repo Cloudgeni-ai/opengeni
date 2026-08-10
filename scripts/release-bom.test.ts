@@ -5,6 +5,14 @@ const sourceSha = "a".repeat(40);
 const integrity = `sha512-${Buffer.from("release-integrity").toString("base64")}`;
 const images = [
   { name: "ghcr.io/cloudgeni-ai/opengeni-api", digest: `sha256:${"1".repeat(64)}` },
+  {
+    name: "ghcr.io/cloudgeni-ai/opengeni-artifact-materializer",
+    digest: `sha256:${"6".repeat(64)}`,
+  },
+  {
+    name: "ghcr.io/cloudgeni-ai/opengeni-artifact-outbox-dispatcher",
+    digest: `sha256:${"7".repeat(64)}`,
+  },
   { name: "ghcr.io/cloudgeni-ai/opengeni-relay", digest: `sha256:${"2".repeat(64)}` },
   { name: "ghcr.io/cloudgeni-ai/opengeni-sandbox", digest: `sha256:${"3".repeat(64)}` },
   { name: "ghcr.io/cloudgeni-ai/opengeni-web", digest: `sha256:${"4".repeat(64)}` },
@@ -63,6 +71,14 @@ describe("release BOM", () => {
       ],
       images: [
         { name: "ghcr.io/cloudgeni-ai/opengeni-api", digest: `sha256:${"1".repeat(64)}` },
+        {
+          name: "ghcr.io/cloudgeni-ai/opengeni-artifact-materializer",
+          digest: `sha256:${"6".repeat(64)}`,
+        },
+        {
+          name: "ghcr.io/cloudgeni-ai/opengeni-artifact-outbox-dispatcher",
+          digest: `sha256:${"7".repeat(64)}`,
+        },
         { name: "ghcr.io/cloudgeni-ai/opengeni-relay", digest: `sha256:${"2".repeat(64)}` },
         { name: "ghcr.io/cloudgeni-ai/opengeni-sandbox", digest: `sha256:${"3".repeat(64)}` },
         { name: "ghcr.io/cloudgeni-ai/opengeni-web", digest: `sha256:${"4".repeat(64)}` },
@@ -200,5 +216,49 @@ describe("release BOM", () => {
         chart: { ...chart, version: "0.17.0" },
       }),
     ).toThrow("chart version must equal");
+  });
+
+  test("requires one exact artifact-tool and modality WASM package closure", () => {
+    const artifactClosure = [
+      "@opengeni/artifact-tool",
+      "@opengeni/artifact-kernel-wasm-document",
+      "@opengeni/artifact-kernel-wasm-presentation",
+      "@opengeni/artifact-kernel-wasm-spreadsheet",
+    ].map((name) => ({
+      name,
+      version: "0.16.0",
+      gitHead: sourceSha,
+      integrity,
+      state: "published" as const,
+    }));
+    expect(() =>
+      buildReleaseBom({
+        sourceSha,
+        releaseVersion: "0.16.0",
+        packages: artifactClosure,
+        images,
+        chart,
+      }),
+    ).not.toThrow();
+    expect(() =>
+      buildReleaseBom({
+        sourceSha,
+        releaseVersion: "0.16.0",
+        packages: artifactClosure.slice(0, -1),
+        images,
+        chart,
+      }),
+    ).toThrow("artifact kernel closure");
+    expect(() =>
+      buildReleaseBom({
+        sourceSha,
+        releaseVersion: "0.16.0",
+        packages: artifactClosure.map((pkg, index) =>
+          index === 1 ? { ...pkg, version: "0.16.1" } : pkg,
+        ),
+        images,
+        chart,
+      }),
+    ).toThrow("one exact version/source identity");
   });
 });

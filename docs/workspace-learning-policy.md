@@ -16,7 +16,7 @@ Source references are provider-neutral `{kind,id}` identities. They may identify
 
 ## Durable lifecycle
 
-Migration `0192_workspace_learning_policy.sql` adds four FORCE-RLS tables:
+Migration `0199_workspace_learning_policy.sql` adds four FORCE-RLS tables:
 
 - `workspace_learning_policy_revisions`: immutable workspace mode plus sparse source overrides and a canonical policy hash.
 - `workspace_learning_policy_heads`: one current revision per workspace. The ordinary runtime role has read-only access; a trigger rejects inserts, updates, and deletes outside the lifecycle function.
@@ -56,4 +56,4 @@ This slice does not implement:
 - Workspace State/API/SDK/UI administration;
 - Slack notification delivery.
 
-Canonical code: `packages/contracts/src/workspace-learning-policy.ts`, `packages/db/src/workspace-learning-policy.ts`, `packages/db/src/workspace-learning-policy-schema.ts`, and migration `0192_workspace_learning_policy.sql`.
+Canonical code: `packages/contracts/src/workspace-learning-policy.ts`, `packages/db/src/workspace-learning-policy.ts`, `packages/db/src/workspace-learning-policy-schema.ts`, and migration `0199_workspace_learning_policy.sql`.

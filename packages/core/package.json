@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/core",
-  "version": "0.21.26",
+  "version": "0.22.2",
   "description": "OpenGeni framework-agnostic core: the domain, access, and billing layers (neutral access, off-HTTP V2 surface). Behavior-preserving extraction from apps/api — keeps Hono's HTTPException for error throwing (typed-errors cleanup deferred).",
   "license": "Apache-2.0",
   "repository": {
@@ -21,6 +21,14 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./editable-artifacts": {
+      "types": "./src/editable-artifacts.ts",
+      "default": "./src/editable-artifacts.ts"
+    },
+    "./editable-artifact-live": {
+      "types": "./src/editable-artifact-live.ts",
+      "default": "./src/editable-artifact-live.ts"
     }
   },
   "publishConfig": {

@@ -3,9 +3,23 @@ import tailwindcss from "@tailwindcss/vite";
 import viteReact from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
+const demoApiTarget = process.env.OPENGENI_REACT_DEMO_API_TARGET ?? "http://127.0.0.1:8000";
+
 export default defineConfig({
   base: process.env.OPENGENI_REACT_DEMO_BASE ?? "/",
   plugins: [viteReact(), tailwindcss()],
+  server: {
+    // Same-origin HTTP + WebSocket path used by the live reference consumers.
+    // Override the target when a worktree stack selected a non-default API port.
+    proxy: {
+      "/demo-api": {
+        target: demoApiTarget,
+        changeOrigin: false,
+        ws: true,
+        rewrite: (path) => path.slice("/demo-api".length) || "/",
+      },
+    },
+  },
   build: {
     outDir: process.env.OPENGENI_REACT_DEMO_OUT_DIR ?? "../demo-dist",
     // The harness deliberately exposes the full lazy language/theme catalog.
@@ -30,6 +44,7 @@ export default defineConfig({
         terminal: resolve(__dirname, "terminal.html"),
         transcription: resolve(__dirname, "transcription.html"),
         realtime: resolve(__dirname, "realtime.html"),
+        editableArtifacts: resolve(__dirname, "editable-artifacts.html"),
         composerResponsive: resolve(__dirname, "composer-responsive.html"),
       },
     },

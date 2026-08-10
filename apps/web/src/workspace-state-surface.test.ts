@@ -4,7 +4,7 @@ async function source(path: string): Promise<string> {
   return Bun.file(`${import.meta.dir}/${path}`).text();
 }
 
-describe("Workspace State authority surface", () => {
+describe("Agent Brain authority surface", () => {
   test("registers a first-class workspace route and rail destination", async () => {
     const [app, navigation] = await Promise.all([
       source("App.tsx"),
@@ -13,18 +13,40 @@ describe("Workspace State authority surface", () => {
     expect(app).toContain('path: "state"');
     expect(app).toContain('import("@/routes/workspace-state")');
     expect(navigation).toContain('to: "/workspaces/$workspaceId/state"');
-    expect(navigation).toContain('label: "Workspace State"');
+    expect(navigation).toContain('label: "Agent Brain"');
+    expect(navigation).toContain('description: "What agents always know and retrieve"');
   });
 
-  test("keeps inventory bounded while using canonical governance APIs", async () => {
-    const [route, loader, preferences] = await Promise.all([
+  test("makes four bounded authorities plain while preserving canonical governance APIs", async () => {
+    const [route, overview, loader, preferences] = await Promise.all([
       source("routes/workspace-state.tsx"),
+      source("routes/agent-brain-overview.tsx"),
       source("routes/workspace-state-loader.ts"),
       source("routes/preference-registry-admin.tsx"),
     ]);
     for (const required of [
-      "Loading workspace state",
-      "Couldn't load workspace state",
+      "Loading Agent Brain",
+      "Couldn't load Agent Brain",
+      "Four authorities, two ways agents use them",
+      "Always known",
+      "Retrieved when relevant",
+      "Charter & policy",
+      "Preference Registry",
+      "Documents / RAG",
+      "Memory",
+      "Bounded descriptor metadata plus exact retrieval handle",
+      "On demand; never loaded by this overview",
+      "Not projected; no combined effective source is inferred",
+      "No structured active heads",
+      "Partial ·",
+      "Unavailable · permission",
+      "Empty sample",
+      "Partial sample ·",
+      "Searchable evidence",
+      "Learned facts and decisions",
+      "Pending changes",
+      "History & rollback",
+      "Advanced & diagnostics",
       "No instruction-policy revisions exist yet.",
       "Preference authority inventory",
       "PreferenceRegistryAdministration",
@@ -46,8 +68,18 @@ describe("Workspace State authority surface", () => {
       "Proposals never activate themselves",
       "Inactive proposal",
     ]) {
-      expect(route).toContain(required);
+      expect(`${route}\n${overview}`).toContain(required);
     }
+    expect(route.indexOf("<BrainOverview")).toBeLessThan(route.indexOf('id="brain-diagnostics"'));
+    expect(overview).toContain("it is not another knowledge store and never merges or");
+    expect(overview).toContain("the Brain never performs a cross-authority rollback");
+    expect(overview).toContain("organization profile is not projected here");
+    expect(overview).toContain("onOpenDiagnostics");
+    expect(route).toContain("open={diagnosticsOpen}");
+    expect(route.indexOf("<PreferenceRegistryAdministration")).toBeGreaterThan(
+      route.indexOf('id="brain-diagnostics"'),
+    );
+    expect(overview).not.toMatch(/getPreferenceRegistry|preference_registry_get/);
     expect(loader).toContain("getWorkspaceState");
     expect(loader).toContain("listWorkspaceInstructionPolicyOnboardingProposals");
     expect(loader).toContain("listPreferenceRegistry");
@@ -85,7 +117,7 @@ describe("Workspace State authority surface", () => {
     ]) {
       expect(preferences).toContain(operation);
     }
-    expect(`${route}\n${loader}\n${preferences}`).not.toMatch(
+    expect(`${route}\n${overview}\n${loader}\n${preferences}`).not.toMatch(
       /activateWorkspaceInstruction|updateKnowledgeMemory|createKnowledgeMemory/,
     );
     expect(route).not.toMatch(/method:\s*["'](?:POST|PATCH|PUT|DELETE)/);

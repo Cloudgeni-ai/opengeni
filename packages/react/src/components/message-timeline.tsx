@@ -2804,14 +2804,32 @@ function AuthNeededRow({
   const enter = useEntranceAnimation();
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
+  const recommendation = item.capability ?? null;
   const provider =
-    item.serverId === "codex_apps" ? "Codex Apps" : providerLabel(item.providerDomain);
+    recommendation?.name ??
+    (item.serverId === "codex_apps" ? "Codex Apps" : providerLabel(item.providerDomain));
   const unavailable =
     item.reason === "personal_authority_unavailable" ||
     item.reason === "unsupported_auth" ||
     item.reason === "resource_scope_unavailable";
   const missing = item.reason === "missing_connection";
-  const actionLabel = missing ? "Connect" : "Reconnect";
+  const actionLabel = recommendation
+    ? recommendation.action === "connect"
+      ? "Connect"
+      : "Review"
+    : missing
+      ? "Connect"
+      : "Reconnect";
+  const title = recommendation
+    ? recommendation.action === "connect"
+      ? `Connect ${provider}`
+      : recommendation.action === "add_credentials"
+        ? `Set up ${provider}`
+        : `Enable ${provider}`
+    : unavailable
+      ? `${provider} tools unavailable`
+      : `${actionLabel} ${provider}`;
+  const reasonLine = recommendation?.rationale ?? authReasonLine(item.reason);
 
   const start = async () => {
     if (!onReconnect || busy) {
@@ -2840,10 +2858,18 @@ function AuthNeededRow({
             label={provider}
           />
           <div className="min-w-0">
-            <p className="truncate text-og-md font-medium text-og-fg">
-              {unavailable ? `${provider} tools unavailable` : `${actionLabel} ${provider}`}
-            </p>
-            <p className="truncate text-og-sm text-og-fg-subtle">{authReasonLine(item.reason)}</p>
+            <p className="truncate text-og-md font-medium text-og-fg">{title}</p>
+            <p className="line-clamp-2 text-og-sm text-og-fg-subtle">{reasonLine}</p>
+            {recommendation ? (
+              <p className="mt-1 truncate text-og-xs text-og-fg-muted">
+                Provider: {item.providerDomain}
+              </p>
+            ) : null}
+            {recommendation && recommendation.requiredVariables.length > 0 ? (
+              <p className="mt-1 truncate text-og-xs text-og-fg-muted">
+                Needs variables: {recommendation.requiredVariables.join(", ")}
+              </p>
+            ) : null}
           </div>
         </div>
         {!unavailable && onReconnect ? (
@@ -2876,8 +2902,9 @@ function AuthNeededRow({
       </div>
       {!unavailable ? (
         <p className="px-1 text-og-xs text-og-fg-subtle">
-          This tool call wasn't replayed. After {missing ? "connecting" : "reconnecting"}, send a
-          new message to try again.
+          {recommendation
+            ? "No access has been granted. Review and confirm the provider before continuing."
+            : `This tool call wasn't replayed. After ${missing ? "connecting" : "reconnecting"}, send a new message to try again.`}
         </p>
       ) : null}
       {failed ? (

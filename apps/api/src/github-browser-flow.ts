@@ -31,13 +31,42 @@ export function githubBrowserGrantClaims(
 export function continuedGitHubBrowserGrantClaims(
   payload: GitHubSignedStatePayload,
 ): Record<string, unknown> {
-  return typeof payload.browserGrantSubjectId === "string" &&
+  const browserGrant =
+    typeof payload.browserGrantSubjectId === "string" &&
     typeof payload.browserGrantExpiresAt === "number"
-    ? {
-        browserGrantSubjectId: payload.browserGrantSubjectId,
-        browserGrantExpiresAt: payload.browserGrantExpiresAt,
-      }
-    : {};
+      ? {
+          browserGrantSubjectId: payload.browserGrantSubjectId,
+          browserGrantExpiresAt: payload.browserGrantExpiresAt,
+        }
+      : {};
+  return {
+    ...browserGrant,
+    ...(typeof payload.returnPath === "string" ? { returnPath: payload.returnPath } : {}),
+  };
+}
+
+/**
+ * GitHub may return only to the session that initiated setup. This rejects
+ * absolute/protocol-relative URLs and paths for another workspace before the
+ * value is signed into provider state.
+ */
+export function githubSessionReturnPath(
+  value: string | undefined | null,
+  workspaceId: string,
+): string | null {
+  if (!value || value.length > 2048 || !value.startsWith("/") || value.startsWith("//")) {
+    return null;
+  }
+  const parsed = new URL(value, "https://opengeni.local");
+  const sessionPrefix = `/workspaces/${encodeURIComponent(workspaceId)}/sessions/`;
+  if (
+    parsed.origin !== "https://opengeni.local" ||
+    parsed.pathname.startsWith("//") ||
+    !parsed.pathname.startsWith(sessionPrefix)
+  ) {
+    return null;
+  }
+  return `${parsed.pathname}${parsed.search}${parsed.hash}`;
 }
 
 export function githubBrowserGrantFromState(

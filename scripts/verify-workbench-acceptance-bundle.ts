@@ -23,7 +23,16 @@ import {
 const shaPattern = /^[0-9a-f]{40}$/;
 const digestPattern = /^sha256:[0-9a-f]{64}$/;
 const hashPattern = /^[0-9a-f]{64}$/;
-const requiredImages = ["api", "migration", "worker", "web", "relay", "sandbox"] as const;
+const requiredImages = [
+  "api",
+  "migration",
+  "worker",
+  "web",
+  "relay",
+  "sandbox",
+  "artifact-materializer",
+  "artifact-outbox-dispatcher",
+] as const;
 const forbiddenKeyPattern =
   /^(authorization|cookie|password|secret|api[_-]?key|access[_-]?token|signed[_-]?url)$/i;
 const forbiddenValuePatterns = [

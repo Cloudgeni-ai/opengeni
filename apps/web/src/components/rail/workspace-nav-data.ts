@@ -99,8 +99,8 @@ export const WORKSPACE_CONFIG_GROUPS: WorkspaceConfigGroup[] = [
       {
         to: "/workspaces/$workspaceId/state",
         icon: "map",
-        label: "Workspace State",
-        description: "Read-only policy and knowledge inventory",
+        label: "Agent Brain",
+        description: "What agents always know and retrieve",
       },
     ],
   },
