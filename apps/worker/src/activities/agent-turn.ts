@@ -401,6 +401,7 @@ import {
   type TurnExecutionPolicyV1,
 } from "@opengeni/contracts";
 import { createHash, randomUUID } from "node:crypto";
+import { createModelCheckpointMemoryCollector } from "../model-checkpoint-memory-collector";
 
 // Retryable provider connectivity/5xx failures start quickly and back off to
 // this ceiling. Explicit rate limits retain the minute-granular fallback.
@@ -2651,6 +2652,7 @@ export async function finalizeDurableTurnOpStreams(
 }
 
 export function createRunAgentTurnActivity(services: () => Promise<ActivityServices>) {
+  const modelCheckpointMemoryCollector = createModelCheckpointMemoryCollector();
   return async function runAgentTurn(input: RunAgentTurnInput): Promise<RunAgentTurnResult> {
     const {
       settings,
@@ -7494,6 +7496,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               currentToolBatchCallIds = new Set<string>();
               currentToolBatchCompletedCallIds = new Set<string>();
               await reconcileConversationTruth();
+              modelCheckpointMemoryCollector.schedule(observability);
               try {
                 await ensureRunAllowed(
                   settings,
