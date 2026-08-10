@@ -9,6 +9,7 @@ import {
   createDb,
   deleteWorkspace,
   getApiIntegrationUninstallPreview,
+  getConnectionMetadata,
   installApiIntegration,
   listInstalledApiIntegrations,
   uninstallApiIntegration,
@@ -156,7 +157,11 @@ describe("API Integration persistence", () => {
     expect(await listInstalledApiIntegrations(client.db, first.workspaceId)).toEqual([
       expect.objectContaining({
         capabilityId: input.capabilityId,
-        serverId: input.serverId,
+        serverId: installed.serverId,
+        instanceId: installed.instanceId,
+        instanceKey: "default",
+        displayName: input.name,
+        instanceVersion: 1,
         connectionRef: null,
         allowedTools: ["list_items", "update_item"],
         requireApproval: ["update_item"],
@@ -169,33 +174,44 @@ describe("API Integration persistence", () => {
       client.db,
       first.workspaceId,
       input.capabilityId,
+      installed.instanceKey,
     );
     expect(preview).toMatchObject({
       installed: true,
       installationVersion: 1,
+      instanceVersion: 1,
       directOwner: { kind: "direct", id: input.capabilityId },
       remainingOwners: [],
       removesRuntimeIntegration: true,
+      removesDefinition: true,
     });
     await expect(
       uninstallApiIntegration(client.db, {
         accountId: first.accountId,
         workspaceId: first.workspaceId,
+        subjectId: first.subjectId,
         capabilityId: input.capabilityId,
+        instanceKey: installed.instanceKey,
         expectedInstallationVersion: 2,
+        expectedInstanceVersion: installed.instanceVersion,
       }),
     ).rejects.toBeInstanceOf(ApiIntegrationInstallationVersionConflictError);
     expect(
       await uninstallApiIntegration(client.db, {
         accountId: first.accountId,
         workspaceId: first.workspaceId,
+        subjectId: first.subjectId,
         capabilityId: input.capabilityId,
+        instanceKey: installed.instanceKey,
         expectedInstallationVersion: 1,
+        expectedInstanceVersion: installed.instanceVersion,
       }),
     ).toEqual({
       capabilityId: input.capabilityId,
+      instanceKey: installed.instanceKey,
       status: "uninstalled",
       remainingOwners: [],
+      definitionStatus: "disabled",
     });
     expect(await listInstalledApiIntegrations(client.db, first.workspaceId)).toEqual([]);
   }, 60_000);
@@ -228,16 +244,27 @@ describe("API Integration persistence", () => {
       insert into capability_component_owners
         (account_id, workspace_id, facet_installation_id, owner_kind, owner_id, removable)
       values
+        (${first.accountId}, ${first.workspaceId}, ${installed.integrationFacetInstallationId},
+         'pack', 'pack:inventory-operations', false),
         (${first.accountId}, ${first.workspaceId}, ${installed.apiFacetInstallationId},
+         'pack', 'pack:inventory-operations', false)
+    `;
+    await shared.admin`
+      insert into integration_feature_binding_owners
+        (account_id, workspace_id, binding_id, owner_kind, owner_id, removable)
+      values
+        (${first.accountId}, ${first.workspaceId}, ${installed.instanceId},
          'pack', 'pack:inventory-operations', false)
     `;
     const preview = await getApiIntegrationUninstallPreview(
       client.db,
       first.workspaceId,
       input.capabilityId,
+      installed.instanceKey,
     );
     expect(preview).toMatchObject({
       removesRuntimeIntegration: false,
+      removesDefinition: false,
       remainingOwners: [
         { kind: "pack", id: "pack:inventory-operations", removable: false },
       ],
@@ -246,16 +273,196 @@ describe("API Integration persistence", () => {
       await uninstallApiIntegration(client.db, {
         accountId: first.accountId,
         workspaceId: first.workspaceId,
+        subjectId: first.subjectId,
         capabilityId: input.capabilityId,
+        instanceKey: installed.instanceKey,
         expectedInstallationVersion: 1,
+        expectedInstanceVersion: installed.instanceVersion,
       }),
     ).toEqual({
       capabilityId: input.capabilityId,
+      instanceKey: installed.instanceKey,
       status: "retained_by_other_owners",
       remainingOwners: [
         { kind: "pack", id: "pack:inventory-operations", removable: false },
       ],
+      definitionStatus: "retained",
     });
     expect(await listInstalledApiIntegrations(client.db, first.workspaceId)).toHaveLength(1);
+  }, 60_000);
+
+  test("keeps two Connections for one Integration definition independently callable and removable", async () => {
+    if (!available || !client) return;
+    const financeConnection = await createConnection(client.db, {
+      accountId: first.accountId,
+      workspaceId: first.workspaceId,
+      providerDomain: "inventory.example.com",
+      kind: "oauth2",
+      credentialEncrypted: "finance-encrypted-bundle",
+      grantedScopes: ["inventory.read", "inventory.write"],
+      createdBySubjectId: first.subjectId,
+    });
+    const salesConnection = await createConnection(client.db, {
+      accountId: first.accountId,
+      workspaceId: first.workspaceId,
+      providerDomain: "inventory.example.com",
+      kind: "oauth2",
+      credentialEncrypted: "sales-encrypted-bundle",
+      grantedScopes: ["inventory.read", "inventory.write"],
+      createdBySubjectId: first.subjectId,
+    });
+    const base = integrationInput(financeConnection.id, "inventory-multi");
+    const finance = await installApiIntegration(client.db, {
+      ...base,
+      instanceKey: "finance",
+      displayName: "Inventory — Finance",
+    });
+    const sales = await installApiIntegration(client.db, {
+      ...base,
+      connectionId: salesConnection.id,
+      instanceKey: "sales",
+      displayName: "Inventory — Sales",
+    });
+    expect(finance.instanceId).not.toBe(sales.instanceId);
+    expect(finance.serverId).not.toBe(sales.serverId);
+    expect(sales.installationVersion).toBe(finance.installationVersion + 1);
+
+    const both = (await listInstalledApiIntegrations(client.db, first.workspaceId)).filter(
+      (integration) => integration.capabilityId === base.capabilityId,
+    );
+    expect(both).toHaveLength(2);
+    expect(
+      both.map((integration) => ({
+        instanceKey: integration.instanceKey,
+        serverId: integration.serverId,
+        connectionId: integration.connectionRef?.connectionId,
+      })),
+    ).toEqual([
+      {
+        instanceKey: "finance",
+        serverId: finance.serverId,
+        connectionId: financeConnection.id,
+      },
+      {
+        instanceKey: "sales",
+        serverId: sales.serverId,
+        connectionId: salesConnection.id,
+      },
+    ]);
+
+    const upgradedSales = await installApiIntegration(client.db, {
+      ...base,
+      connectionId: salesConnection.id,
+      instanceKey: "sales",
+      displayName: "Inventory — Sales",
+      expectedInstanceVersion: sales.instanceVersion,
+      revision: {
+        ...base.revision,
+        id: "openapi:222222222222222222222222",
+        contentSha256: "2".repeat(64),
+      },
+    });
+    expect(upgradedSales).toMatchObject({
+      instanceId: sales.instanceId,
+      serverId: sales.serverId,
+      instanceVersion: sales.instanceVersion + 1,
+      installationVersion: sales.installationVersion + 1,
+      revisionId: "openapi:222222222222222222222222",
+    });
+    const afterUpgrade = (
+      await listInstalledApiIntegrations(client.db, first.workspaceId)
+    ).filter((integration) => integration.capabilityId === base.capabilityId);
+    expect(afterUpgrade).toHaveLength(2);
+    expect(
+      afterUpgrade.map((integration) => ({
+        instanceId: integration.instanceId,
+        instanceKey: integration.instanceKey,
+        instanceVersion: integration.instanceVersion,
+        serverId: integration.serverId,
+        connectionId: integration.connectionRef?.connectionId,
+        revisionId: integration.revision.id,
+      })),
+    ).toEqual([
+      {
+        instanceId: finance.instanceId,
+        instanceKey: "finance",
+        instanceVersion: finance.instanceVersion + 1,
+        serverId: finance.serverId,
+        connectionId: financeConnection.id,
+        revisionId: upgradedSales.revisionId,
+      },
+      {
+        instanceId: sales.instanceId,
+        instanceKey: "sales",
+        instanceVersion: sales.instanceVersion + 1,
+        serverId: sales.serverId,
+        connectionId: salesConnection.id,
+        revisionId: upgradedSales.revisionId,
+      },
+    ]);
+
+    const financePreview = await getApiIntegrationUninstallPreview(
+      client.db,
+      first.workspaceId,
+      base.capabilityId,
+      finance.instanceKey,
+    );
+    expect(financePreview).toMatchObject({
+      instanceVersion: finance.instanceVersion + 1,
+      removesRuntimeIntegration: true,
+      removesDefinition: false,
+    });
+    expect(
+      await uninstallApiIntegration(client.db, {
+        accountId: first.accountId,
+        workspaceId: first.workspaceId,
+        subjectId: first.subjectId,
+        capabilityId: base.capabilityId,
+        instanceKey: finance.instanceKey,
+        expectedInstallationVersion: upgradedSales.installationVersion,
+        expectedInstanceVersion: finance.instanceVersion + 1,
+      }),
+    ).toEqual({
+      capabilityId: base.capabilityId,
+      instanceKey: "finance",
+      status: "uninstalled",
+      remainingOwners: [],
+      definitionStatus: "retained",
+    });
+
+    const [remaining] = (await listInstalledApiIntegrations(client.db, first.workspaceId)).filter(
+      (integration) => integration.capabilityId === base.capabilityId,
+    );
+    expect(remaining).toMatchObject({
+      instanceId: sales.instanceId,
+      instanceKey: "sales",
+      serverId: sales.serverId,
+      connectionRef: { connectionId: salesConnection.id },
+    });
+    const renamed = await installApiIntegration(client.db, {
+      ...base,
+      connectionId: salesConnection.id,
+      instanceKey: "sales",
+      displayName: "Inventory — Sales primary",
+      expectedInstanceVersion: upgradedSales.instanceVersion,
+      revision: {
+        ...base.revision,
+        id: upgradedSales.revisionId,
+        contentSha256: "2".repeat(64),
+      },
+    });
+    expect(renamed).toMatchObject({
+      instanceId: sales.instanceId,
+      instanceKey: "sales",
+      displayName: "Inventory — Sales primary",
+      instanceVersion: upgradedSales.instanceVersion + 1,
+      serverId: sales.serverId,
+    });
+    expect(
+      await Promise.all([
+        getConnectionMetadata(client.db, first.workspaceId, financeConnection.id),
+        getConnectionMetadata(client.db, first.workspaceId, salesConnection.id),
+      ]),
+    ).toEqual([expect.objectContaining({ status: "active" }), expect.objectContaining({ status: "active" })]);
   }, 60_000);
 });

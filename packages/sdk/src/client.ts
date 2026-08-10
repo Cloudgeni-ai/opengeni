@@ -50,6 +50,13 @@ import type {
   PreviewApiIntegrationRequest,
   UninstallApiIntegrationRequest,
   UninstallApiIntegrationResult,
+  PreviewPluginRequest,
+  PluginPreview,
+  InstallPluginRequest,
+  InstalledPlugin,
+  PluginUninstallPreview,
+  UninstallPluginRequest,
+  UninstallPluginResult,
   AddDocumentRequest,
   CreateKnowledgeDropRequest,
   MoveDocumentRequest,
@@ -3670,22 +3677,65 @@ export class OpenGeniClient {
   async previewApiIntegrationUninstall(
     workspaceId: string,
     capabilityId: string,
+    instanceKey: string,
   ): Promise<ApiIntegrationUninstallPreview> {
     return await this.requestJson<ApiIntegrationUninstallPreview>(
       "GET",
-      `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(capabilityId)}/uninstall-preview`,
+      `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(capabilityId)}/instances/${encodeURIComponent(instanceKey)}/uninstall-preview`,
     );
   }
 
-  /** Remove the direct Integration owner under an optimistic version fence. */
+  /** Remove one Integration instance without deleting its Connection or sibling instances. */
   async uninstallApiIntegration(
     workspaceId: string,
     capabilityId: string,
+    instanceKey: string,
     request: UninstallApiIntegrationRequest,
   ): Promise<UninstallApiIntegrationResult> {
     return await this.requestJson<UninstallApiIntegrationResult>(
       "DELETE",
-      `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(capabilityId)}`,
+      `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(capabilityId)}/instances/${encodeURIComponent(instanceKey)}`,
+      request,
+    );
+  }
+
+  async previewPlugin(workspaceId: string, request: PreviewPluginRequest): Promise<PluginPreview> {
+    return await this.requestJson<PluginPreview>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/plugins/preview`,
+      request,
+    );
+  }
+
+  async installPlugin(
+    workspaceId: string,
+    request: InstallPluginRequest,
+  ): Promise<InstalledPlugin> {
+    return await this.requestJson<InstalledPlugin>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/plugins/install`,
+      request,
+    );
+  }
+
+  async previewPluginUninstall(
+    workspaceId: string,
+    pluginKey: string,
+  ): Promise<PluginUninstallPreview> {
+    return await this.requestJson<PluginUninstallPreview>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/plugins/${encodeURIComponent(pluginKey)}/uninstall-preview`,
+    );
+  }
+
+  async uninstallPlugin(
+    workspaceId: string,
+    pluginKey: string,
+    request: UninstallPluginRequest,
+  ): Promise<UninstallPluginResult> {
+    return await this.requestJson<UninstallPluginResult>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/plugins/${encodeURIComponent(pluginKey)}`,
       request,
     );
   }

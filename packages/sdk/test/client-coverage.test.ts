@@ -1237,9 +1237,10 @@ describe("OpenGeniClient capabilities", () => {
       allowedTools: ["list_items"],
     });
     await client.listApiIntegrations(WORKSPACE_ID);
-    await client.previewApiIntegrationUninstall(WORKSPACE_ID, capabilityId);
-    await client.uninstallApiIntegration(WORKSPACE_ID, capabilityId, {
+    await client.previewApiIntegrationUninstall(WORKSPACE_ID, capabilityId, "finance");
+    await client.uninstallApiIntegration(WORKSPACE_ID, capabilityId, "finance", {
       expectedInstallationVersion: 4,
+      expectedInstanceVersion: 2,
     });
 
     expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
@@ -1247,8 +1248,8 @@ describe("OpenGeniClient capabilities", () => {
         `POST /v1/workspaces/${WORKSPACE_ID}/integrations/preview`,
         `POST /v1/workspaces/${WORKSPACE_ID}/integrations/install`,
         `GET /v1/workspaces/${WORKSPACE_ID}/integrations`,
-        `GET /v1/workspaces/${WORKSPACE_ID}/integrations/api%3Aopenapi%3Aexample-deadbeef1234/uninstall-preview`,
-        `DELETE /v1/workspaces/${WORKSPACE_ID}/integrations/api%3Aopenapi%3Aexample-deadbeef1234`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/integrations/api%3Aopenapi%3Aexample-deadbeef1234/instances/finance/uninstall-preview`,
+        `DELETE /v1/workspaces/${WORKSPACE_ID}/integrations/api%3Aopenapi%3Aexample-deadbeef1234/instances/finance`,
       ],
     );
     expect(JSON.parse(requests[0]!.body!)).toEqual({ source });
@@ -1258,7 +1259,48 @@ describe("OpenGeniClient capabilities", () => {
       expectedContentSha256: "b".repeat(64),
       allowedTools: ["list_items"],
     });
-    expect(JSON.parse(requests[4]!.body!)).toEqual({ expectedInstallationVersion: 4 });
+    expect(JSON.parse(requests[4]!.body!)).toEqual({
+      expectedInstallationVersion: 4,
+      expectedInstanceVersion: 2,
+    });
+  });
+
+  test("previews, installs, impact-checks, and uninstalls Plugin packages", async () => {
+    const { client, requests } = makeClient(() => jsonResponse({}));
+    const sourceUrl = "https://plugins.example.test/research.json";
+    const pluginKey = "example/research-plugin";
+    await client.previewPlugin(WORKSPACE_ID, { url: sourceUrl });
+    await client.installPlugin(WORKSPACE_ID, {
+      url: sourceUrl,
+      expectedManifestDigest: "a".repeat(64),
+      expectedComponents: [{ key: "research", digest: "b".repeat(64) }],
+      idempotencyKey: "00000000-0000-4000-8000-000000000100",
+    });
+    await client.previewPluginUninstall(WORKSPACE_ID, pluginKey);
+    await client.uninstallPlugin(WORKSPACE_ID, pluginKey, {
+      expectedInstallationVersion: 5,
+      idempotencyKey: "00000000-0000-4000-8000-000000000101",
+    });
+
+    expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
+      [
+        `POST /v1/workspaces/${WORKSPACE_ID}/plugins/preview`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/plugins/install`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/plugins/example%2Fresearch-plugin/uninstall-preview`,
+        `DELETE /v1/workspaces/${WORKSPACE_ID}/plugins/example%2Fresearch-plugin`,
+      ],
+    );
+    expect(JSON.parse(requests[0]!.body!)).toEqual({ url: sourceUrl });
+    expect(JSON.parse(requests[1]!.body!)).toEqual({
+      url: sourceUrl,
+      expectedManifestDigest: "a".repeat(64),
+      expectedComponents: [{ key: "research", digest: "b".repeat(64) }],
+      idempotencyKey: "00000000-0000-4000-8000-000000000100",
+    });
+    expect(JSON.parse(requests[3]!.body!)).toEqual({
+      expectedInstallationVersion: 5,
+      idempotencyKey: "00000000-0000-4000-8000-000000000101",
+    });
   });
 });
 

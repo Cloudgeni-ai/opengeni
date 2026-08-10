@@ -6997,6 +6997,13 @@ export type UninstallSkillResult = z.infer<typeof UninstallSkillResult>;
 export const ApiIntegrationProtocol = z.enum(["openapi", "graphql"]);
 export type ApiIntegrationProtocol = z.infer<typeof ApiIntegrationProtocol>;
 
+export const IntegrationInstanceKey = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/);
+export type IntegrationInstanceKey = z.infer<typeof IntegrationInstanceKey>;
+
 export const ApiIntegrationSource = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("preset"), presetId: z.string().min(1).max(128) }).strict(),
   z
@@ -7132,6 +7139,9 @@ export const InstallApiIntegrationRequest = z
     expectedContentSha256: z.string().regex(/^[0-9a-f]{64}$/),
     connectionId: z.string().uuid().optional(),
     ownership: ConnectionOwnership.optional(),
+    instanceKey: IntegrationInstanceKey.optional(),
+    displayName: z.string().min(1).max(200).optional(),
+    expectedInstanceVersion: z.number().int().positive().optional(),
     allowedTools: z.array(z.string().min(1).max(200)).max(2000).optional(),
   })
   .strict();
@@ -7148,6 +7158,10 @@ export const InstalledApiIntegration = z
     integrationFacetInstallationId: z.string().uuid(),
     apiFacetInstallationId: z.string().uuid(),
     installationVersion: z.number().int().positive(),
+    instanceId: z.string().uuid(),
+    instanceKey: IntegrationInstanceKey,
+    displayName: z.string().min(1).max(200),
+    instanceVersion: z.number().int().positive(),
     revisionId: z.string().min(1),
     serverId: SessionMcpServerId,
     status: z.literal("installed"),
@@ -7160,6 +7174,10 @@ export const ApiIntegrationInstallationSummary = z
     capabilityId: z.string().min(1),
     pluginKey: z.string().min(1),
     installationVersion: z.number().int().positive(),
+    instanceId: z.string().uuid(),
+    instanceKey: IntegrationInstanceKey,
+    displayName: z.string().min(1).max(200),
+    instanceVersion: z.number().int().positive(),
     serverId: SessionMcpServerId,
     name: z.string().min(1),
     description: z.string().nullable(),
@@ -7185,28 +7203,220 @@ export type ListApiIntegrationsResponse = z.infer<typeof ListApiIntegrationsResp
 export const ApiIntegrationUninstallPreview = z
   .object({
     capabilityId: z.string().min(1),
+    instanceKey: IntegrationInstanceKey,
+    displayName: z.string().min(1).max(200).nullable(),
     installed: z.boolean(),
     installationVersion: z.number().int().positive().nullable(),
+    instanceVersion: z.number().int().positive().nullable(),
     directOwner: CapabilityComponentOwner.nullable(),
     remainingOwners: z.array(CapabilityComponentOwner),
     removesRuntimeIntegration: z.boolean(),
+    removesDefinition: z.boolean(),
   })
   .strict();
 export type ApiIntegrationUninstallPreview = z.infer<typeof ApiIntegrationUninstallPreview>;
 
 export const UninstallApiIntegrationRequest = z
-  .object({ expectedInstallationVersion: z.number().int().positive() })
+  .object({
+    expectedInstallationVersion: z.number().int().positive(),
+    expectedInstanceVersion: z.number().int().positive(),
+  })
   .strict();
 export type UninstallApiIntegrationRequest = z.infer<typeof UninstallApiIntegrationRequest>;
 
 export const UninstallApiIntegrationResult = z
   .object({
     capabilityId: z.string().min(1),
+    instanceKey: IntegrationInstanceKey,
     status: z.enum(["not_installed", "uninstalled", "retained_by_other_owners"]),
     remainingOwners: z.array(CapabilityComponentOwner),
+    definitionStatus: z.enum(["retained", "disabled"]),
   })
   .strict();
 export type UninstallApiIntegrationResult = z.infer<typeof UninstallApiIntegrationResult>;
+
+const PluginComponentKey = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/);
+
+export const PluginManifest = z
+  .object({
+    schemaVersion: z.literal(1),
+    pluginKey: z
+      .string()
+      .min(1)
+      .max(200)
+      .regex(/^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/),
+    version: z.string().min(1).max(128),
+    name: z.string().min(1).max(200),
+    description: z.string().max(4000).default(""),
+    category: z.string().min(1).max(100).default("plugins"),
+    tags: z.array(z.string().min(1).max(100)).max(64).default([]),
+    components: z
+      .array(
+        z.discriminatedUnion("kind", [
+          z
+            .object({ key: PluginComponentKey, kind: z.literal("skill"), url: z.string().url() })
+            .strict(),
+          z
+            .object({
+              key: PluginComponentKey,
+              kind: z.literal("integration"),
+              source: ApiIntegrationSource,
+            })
+            .strict(),
+          z
+            .object({
+              key: PluginComponentKey,
+              kind: z.literal("mcp"),
+              serverId: SessionMcpServerId,
+            })
+            .strict(),
+        ]),
+      )
+      .min(1)
+      .max(64),
+  })
+  .strict()
+  .superRefine((manifest, context) => {
+    const seen = new Set<string>();
+    for (const [index, component] of manifest.components.entries()) {
+      if (seen.has(component.key)) {
+        context.addIssue({
+          code: "custom",
+          message: "Plugin component keys must be unique",
+          path: ["components", index, "key"],
+        });
+      }
+      seen.add(component.key);
+    }
+  });
+export type PluginManifest = z.infer<typeof PluginManifest>;
+
+export const PluginComponentBinding = z
+  .object({
+    connectionId: z.string().uuid().optional(),
+    instanceKey: IntegrationInstanceKey.optional(),
+    displayName: z.string().min(1).max(200).optional(),
+  })
+  .strict();
+export type PluginComponentBinding = z.infer<typeof PluginComponentBinding>;
+
+export const PreviewPluginRequest = z
+  .object({
+    url: z.string().url().max(2048),
+    bindings: z.record(PluginComponentKey, PluginComponentBinding).default({}),
+  })
+  .strict();
+export type PreviewPluginRequest = z.infer<typeof PreviewPluginRequest>;
+
+export const PluginComponentPreview = z
+  .object({
+    key: PluginComponentKey,
+    kind: z.enum(["skill", "integration", "mcp"]),
+    name: z.string().min(1).max(200),
+    capabilityId: z.string().min(1).max(512),
+    digest: z.string().regex(/^[0-9a-f]{64}$/),
+    connectionRequired: z.boolean(),
+    connectionId: z.string().uuid().nullable(),
+    instanceKey: IntegrationInstanceKey.nullable(),
+    displayName: z.string().min(1).max(200).nullable(),
+    facts: z.record(z.string(), z.unknown()),
+  })
+  .strict();
+export type PluginComponentPreview = z.infer<typeof PluginComponentPreview>;
+
+export const PluginUpdateDiff = z
+  .object({
+    fromVersion: z.string().nullable(),
+    toVersion: z.string().min(1),
+    added: z.array(PluginComponentKey),
+    removed: z.array(PluginComponentKey),
+    changed: z.array(PluginComponentKey),
+    unchanged: z.array(PluginComponentKey),
+  })
+  .strict();
+export type PluginUpdateDiff = z.infer<typeof PluginUpdateDiff>;
+
+export const PluginPreview = z
+  .object({
+    sourceUrl: z.string().url(),
+    manifest: PluginManifest,
+    manifestDigest: z.string().regex(/^[0-9a-f]{64}$/),
+    installed: z.boolean(),
+    installationVersion: z.number().int().positive().nullable(),
+    components: z.array(PluginComponentPreview).min(1).max(64),
+    diff: PluginUpdateDiff,
+  })
+  .strict();
+export type PluginPreview = z.infer<typeof PluginPreview>;
+
+export const InstallPluginRequest = z
+  .object({
+    url: z.string().url().max(2048),
+    expectedManifestDigest: z.string().regex(/^[0-9a-f]{64}$/),
+    expectedComponents: z
+      .array(
+        z.object({ key: PluginComponentKey, digest: z.string().regex(/^[0-9a-f]{64}$/) }).strict(),
+      )
+      .min(1)
+      .max(64),
+    bindings: z.record(PluginComponentKey, PluginComponentBinding).default({}),
+    idempotencyKey: z.string().uuid(),
+    expectedInstallationVersion: z.number().int().positive().optional(),
+  })
+  .strict();
+export type InstallPluginRequest = z.infer<typeof InstallPluginRequest>;
+
+export const InstalledPlugin = z
+  .object({
+    pluginKey: z.string().min(1),
+    version: z.string().min(1),
+    pluginId: z.string().uuid(),
+    pluginVersionId: z.string().uuid(),
+    pluginInstallationId: z.string().uuid(),
+    installationVersion: z.number().int().positive(),
+    componentCount: z.number().int().positive(),
+    status: z.literal("installed"),
+  })
+  .strict();
+export type InstalledPlugin = z.infer<typeof InstalledPlugin>;
+
+export const PluginUninstallPreview = z
+  .object({
+    pluginKey: z.string().min(1),
+    installed: z.boolean(),
+    version: z.string().nullable(),
+    installationVersion: z.number().int().positive().nullable(),
+    components: z.array(
+      z.object({
+        capabilityId: z.string().min(1),
+        kind: z.enum(["skill", "integration", "mcp"]),
+        retainedByOtherOwners: z.boolean(),
+      }),
+    ),
+  })
+  .strict();
+export type PluginUninstallPreview = z.infer<typeof PluginUninstallPreview>;
+
+export const UninstallPluginRequest = z
+  .object({
+    expectedInstallationVersion: z.number().int().positive(),
+    idempotencyKey: z.string().uuid(),
+  })
+  .strict();
+export type UninstallPluginRequest = z.infer<typeof UninstallPluginRequest>;
+
+export const UninstallPluginResult = z
+  .object({
+    pluginKey: z.string().min(1),
+    status: z.enum(["not_installed", "uninstalled"]),
+    retainedComponents: z.array(z.string().min(1)),
+  })
+  .strict();
+export type UninstallPluginResult = z.infer<typeof UninstallPluginResult>;
 
 export const Session = z.object({
   id: z.string().uuid(),

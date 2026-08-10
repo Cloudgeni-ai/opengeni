@@ -477,9 +477,19 @@ Every public endpoint group has typed methods:
 | Documents | `createDocumentBase`, `listDocumentBases`, `getDocumentBase`, `addDocument`, `listDocuments`, `reindexDocument`, `searchDocuments`, `searchKnowledge` (effective organization + workspace + immutable initiating-user personal scope) |
 | Packs | `listPacks`, `registerPack`, `getPack`, `enablePack`, `deletePack`, `listPackInstallations` |
 | Capabilities | `listCapabilities`, `createCapability`, `enableCapability`, `disableCapability`, `discoverMcpCapabilities` |
+| Plugin packages | `previewPlugin`, `installPlugin`, `previewPluginUninstall`, `uninstallPlugin` |
+| API Integrations | `listApiIntegrations`, `previewApiIntegration`, `startApiIntegrationOAuth`, `installApiIntegration`, `previewApiIntegrationUninstall`, `uninstallApiIntegration` |
+| Remote Skills | `previewSkillImport`, `installSkill`, `previewSkillUninstall`, `uninstallSkill` |
 | GitHub | `getGitHubApp`, `githubConnectUrl`, `listGitHubRepositories`, `syncGitHubRepositories`, `createGitHubAppManifest` |
 | API keys | `listApiKeys`, `createApiKey`, `deleteApiKey` |
 | Billing | `getBilling`, `getBillingUsage`, `getBillingEntitlements`, `createBillingCheckout` |
+
+API Integrations are multi-instance: `installApiIntegration` may supply a
+stable `instanceKey`, display name, and exact Connection. The returned
+`serverId` is instance-specific, so two Gmail or Linear accounts can be
+selected in one session without tool-name collision. Uninstall preview and
+uninstall both require the exact `instanceKey` and instance version; neither
+operation disconnects the underlying Connection.
 
 ### Protocol routes (deliberately not in the SDK)
 

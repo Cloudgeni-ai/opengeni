@@ -6742,6 +6742,12 @@ export const integrationFeatureBindings = pgTable(
     featureFacetId: uuid("feature_facet_id")
       .notNull()
       .references(() => integrationFeatureFacets.id, { onDelete: "restrict" }),
+    integrationFacetInstallationId: uuid("integration_facet_installation_id")
+      .notNull()
+      .references(() => capabilityFacetInstallations.id, { onDelete: "cascade" }),
+    bindingKey: text("binding_key").notNull(),
+    displayName: text("display_name").notNull(),
+    runtimeKey: text("runtime_key"),
     connectionId: uuid("connection_id").references(() => connections.id, {
       onDelete: "restrict",
     }),
@@ -6751,17 +6757,57 @@ export const integrationFeatureBindings = pgTable(
     version: integer("version").notNull().default(1),
     lastSuccessAt: timestamp("last_success_at", { withTimezone: true }),
     lastErrorCode: text("last_error_code"),
+    createdBySubjectId: text("created_by_subject_id").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    workspaceFeature: uniqueIndex("integration_feature_bindings_workspace_feature_idx").on(
+    installationFeatureKey: uniqueIndex(
+      "integration_feature_bindings_installation_feature_key_idx",
+    ).on(
       table.workspaceId,
+      table.integrationFacetInstallationId,
       table.featureFacetId,
+      table.bindingKey,
     ),
+    workspaceRuntime: uniqueIndex("integration_feature_bindings_workspace_runtime_idx")
+      .on(table.workspaceId, table.runtimeKey)
+      .where(sql`${table.runtimeKey} is not null`),
     workspaceStatus: index("integration_feature_bindings_workspace_status_idx").on(
       table.workspaceId,
       table.status,
+    ),
+  }),
+);
+
+export const integrationFeatureBindingOwners = pgTable(
+  "integration_feature_binding_owners",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    bindingId: uuid("binding_id")
+      .notNull()
+      .references(() => integrationFeatureBindings.id, { onDelete: "cascade" }),
+    ownerKind: text("owner_kind").notNull(),
+    ownerId: text("owner_id").notNull(),
+    removable: boolean("removable").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    uniqueOwner: uniqueIndex("integration_feature_binding_owners_unique_idx").on(
+      table.bindingId,
+      table.ownerKind,
+      table.ownerId,
+    ),
+    workspaceOwner: index("integration_feature_binding_owners_workspace_owner_idx").on(
+      table.workspaceId,
+      table.ownerKind,
+      table.ownerId,
     ),
   }),
 );

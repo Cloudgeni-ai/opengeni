@@ -37,6 +37,19 @@ import {
   MetricSample as ContractMetricSample,
   MachineMetricsSeriesResponse as ContractMachineMetricsSeriesResponse,
   NewSessionDraft as ContractNewSessionDraft,
+  InstallApiIntegrationRequest as ContractInstallApiIntegrationRequest,
+  InstalledApiIntegration as ContractInstalledApiIntegration,
+  ApiIntegrationUninstallPreview as ContractApiIntegrationUninstallPreview,
+  UninstallApiIntegrationRequest as ContractUninstallApiIntegrationRequest,
+  UninstallApiIntegrationResult as ContractUninstallApiIntegrationResult,
+  InstallPluginRequest as ContractInstallPluginRequest,
+  InstalledPlugin as ContractInstalledPlugin,
+  PluginManifest as ContractPluginManifest,
+  PluginPreview as ContractPluginPreview,
+  PluginUninstallPreview as ContractPluginUninstallPreview,
+  PreviewPluginRequest as ContractPreviewPluginRequest,
+  UninstallPluginRequest as ContractUninstallPluginRequest,
+  UninstallPluginResult as ContractUninstallPluginResult,
   SaveNewSessionDraftRequest as ContractSaveNewSessionDraftRequest,
   OPENGENI_CORRELATION_HEADER as CONTRACT_CORRELATION_HEADER,
   SandboxBackend as ContractSandboxBackend,
@@ -121,6 +134,17 @@ import type {
   MachineMetricsSeriesResponse,
   NewSessionDraft,
   NewSessionDraftOptions,
+  InstallApiIntegrationRequest,
+  InstalledApiIntegration,
+  ApiIntegrationUninstallPreview,
+  UninstallApiIntegrationRequest,
+  UninstallApiIntegrationResult,
+  InstallPluginRequest,
+  InstalledPlugin,
+  PluginManifest,
+  PluginPreview,
+  PluginUninstallPreview,
+  PreviewPluginRequest,
   ReasoningEffort,
   SaveNewSessionDraftRequest,
   SandboxBackend,
@@ -155,6 +179,8 @@ import type {
   SubmitHumanInputResponseRequest,
   UpdateSessionMcpApprovalPolicyRequest,
   UpdateSessionMcpApprovalPolicyResponse,
+  UninstallPluginRequest,
+  UninstallPluginResult,
   StreamUrlRotatedPayload,
   UpdateWorkspaceMemberRequest,
   ViewerHeartbeatRequest,
@@ -692,6 +718,78 @@ describe("SDK / contracts parity", () => {
     const parsed = ContractMachinesResponse.parse(response);
     const asSdk: MachinesResponse = parsed;
     expect(asSdk.machines[0]!.kind).toBe("selfhosted");
+  });
+
+  test("Plugin package request and response shapes match the contracts", () => {
+    const acceptManifest = (value: z.infer<typeof ContractPluginManifest>): PluginManifest => value;
+    const acceptPreview = (value: z.infer<typeof ContractPluginPreview>): PluginPreview => value;
+    const acceptInstalled = (value: z.infer<typeof ContractInstalledPlugin>): InstalledPlugin =>
+      value;
+    const acceptUninstallPreview = (
+      value: z.infer<typeof ContractPluginUninstallPreview>,
+    ): PluginUninstallPreview => value;
+    const acceptUninstallResult = (
+      value: z.infer<typeof ContractUninstallPluginResult>,
+    ): UninstallPluginResult => value;
+    expect(
+      [
+        acceptManifest,
+        acceptPreview,
+        acceptInstalled,
+        acceptUninstallPreview,
+        acceptUninstallResult,
+      ].every((fn) => typeof fn === "function"),
+    ).toBe(true);
+
+    const previewRequest: PreviewPluginRequest = {
+      url: "https://plugins.example.test/research.json",
+    };
+    const installRequest: InstallPluginRequest = {
+      url: previewRequest.url,
+      expectedManifestDigest: "a".repeat(64),
+      expectedComponents: [{ key: "research", digest: "b".repeat(64) }],
+      idempotencyKey: "00000000-0000-4000-8000-000000000100",
+    };
+    const uninstallRequest: UninstallPluginRequest = {
+      expectedInstallationVersion: 2,
+      idempotencyKey: "00000000-0000-4000-8000-000000000101",
+    };
+    expect(ContractPreviewPluginRequest.safeParse(previewRequest).success).toBe(true);
+    expect(ContractInstallPluginRequest.safeParse(installRequest).success).toBe(true);
+    expect(ContractUninstallPluginRequest.safeParse(uninstallRequest).success).toBe(true);
+  });
+
+  test("multi-instance API Integration shapes match the contracts", () => {
+    const acceptInstalled = (
+      value: z.infer<typeof ContractInstalledApiIntegration>,
+    ): InstalledApiIntegration => value;
+    const acceptUninstallPreview = (
+      value: z.infer<typeof ContractApiIntegrationUninstallPreview>,
+    ): ApiIntegrationUninstallPreview => value;
+    const acceptUninstallResult = (
+      value: z.infer<typeof ContractUninstallApiIntegrationResult>,
+    ): UninstallApiIntegrationResult => value;
+    expect(
+      [acceptInstalled, acceptUninstallPreview, acceptUninstallResult].every(
+        (fn) => typeof fn === "function",
+      ),
+    ).toBe(true);
+
+    const installRequest: InstallApiIntegrationRequest = {
+      source: { kind: "preset", presetId: "google-gmail" },
+      expectedRevisionId: "openapi:aaaaaaaaaaaaaaaaaaaaaaaa",
+      expectedContentSha256: "b".repeat(64),
+      connectionId: "00000000-0000-4000-8000-000000000200",
+      instanceKey: "finance",
+      displayName: "Gmail — Finance",
+      expectedInstanceVersion: 2,
+    };
+    const uninstallRequest: UninstallApiIntegrationRequest = {
+      expectedInstallationVersion: 4,
+      expectedInstanceVersion: 2,
+    };
+    expect(ContractInstallApiIntegrationRequest.safeParse(installRequest).success).toBe(true);
+    expect(ContractUninstallApiIntegrationRequest.safeParse(uninstallRequest).success).toBe(true);
   });
 
   test("SDK-built create-session requests parse under the contracts schema", () => {

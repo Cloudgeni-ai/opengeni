@@ -449,6 +449,11 @@ CREATE TABLE "integration_feature_bindings" (
   "workspace_id" uuid NOT NULL REFERENCES "workspaces"("id") ON DELETE CASCADE,
   "feature_facet_id" uuid NOT NULL REFERENCES "integration_feature_facets"("id")
     ON DELETE RESTRICT,
+  "integration_facet_installation_id" uuid NOT NULL
+    REFERENCES "capability_facet_installations"("id") ON DELETE CASCADE,
+  "binding_key" text NOT NULL,
+  "display_name" text NOT NULL,
+  "runtime_key" text,
   "connection_id" uuid REFERENCES "connections"("id") ON DELETE RESTRICT,
   "status" text NOT NULL DEFAULT 'active',
   "config" jsonb NOT NULL DEFAULT '{}'::jsonb,
@@ -456,8 +461,22 @@ CREATE TABLE "integration_feature_bindings" (
   "version" integer NOT NULL DEFAULT 1,
   "last_success_at" timestamptz,
   "last_error_code" text,
+  "created_by_subject_id" text NOT NULL,
   "created_at" timestamptz NOT NULL DEFAULT now(),
   "updated_at" timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT "integration_feature_bindings_identity_chk" CHECK (
+    length("binding_key") BETWEEN 1 AND 128
+    AND "binding_key" = lower(btrim("binding_key"))
+    AND "binding_key" ~ '^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$'
+    AND length(btrim("display_name")) BETWEEN 1 AND 200
+    AND length(btrim("created_by_subject_id")) BETWEEN 1 AND 1024
+  ),
+  CONSTRAINT "integration_feature_bindings_runtime_chk" CHECK (
+    "runtime_key" IS NULL OR (
+      length("runtime_key") BETWEEN 1 AND 128
+      AND "runtime_key" ~ '^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$'
+    )
+  ),
   CONSTRAINT "integration_feature_bindings_status_chk" CHECK (
     "status" IN ('active', 'paused', 'needs_attention', 'disabled')
   ),
@@ -469,12 +488,40 @@ CREATE TABLE "integration_feature_bindings" (
     AND "version" > 0
     AND ("last_error_code" IS NULL OR length("last_error_code") BETWEEN 1 AND 120)
   ),
-  CONSTRAINT "integration_feature_bindings_workspace_feature_uq"
-    UNIQUE ("workspace_id", "feature_facet_id")
+  CONSTRAINT "integration_feature_bindings_installation_feature_key_uq"
+    UNIQUE (
+      "workspace_id", "integration_facet_installation_id", "feature_facet_id", "binding_key"
+    )
 );
 
 CREATE INDEX "integration_feature_bindings_workspace_status_idx"
   ON "integration_feature_bindings" ("workspace_id", "status");
+CREATE UNIQUE INDEX "integration_feature_bindings_workspace_runtime_uq"
+  ON "integration_feature_bindings" ("workspace_id", "runtime_key")
+  WHERE "runtime_key" IS NOT NULL;
+
+CREATE TABLE "integration_feature_binding_owners" (
+  "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  "account_id" uuid NOT NULL REFERENCES "managed_accounts"("id") ON DELETE CASCADE,
+  "workspace_id" uuid NOT NULL REFERENCES "workspaces"("id") ON DELETE CASCADE,
+  "binding_id" uuid NOT NULL REFERENCES "integration_feature_bindings"("id")
+    ON DELETE CASCADE,
+  "owner_kind" text NOT NULL,
+  "owner_id" text NOT NULL,
+  "removable" boolean NOT NULL DEFAULT true,
+  "created_at" timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT "integration_feature_binding_owners_kind_chk" CHECK (
+    "owner_kind" IN ('direct', 'plugin', 'pack', 'migration')
+  ),
+  CONSTRAINT "integration_feature_binding_owners_id_chk" CHECK (
+    length("owner_id") BETWEEN 1 AND 512 AND "owner_id" !~ '[[:cntrl:]]'
+  ),
+  CONSTRAINT "integration_feature_binding_owners_unique_uq"
+    UNIQUE ("binding_id", "owner_kind", "owner_id")
+);
+
+CREATE INDEX "integration_feature_binding_owners_workspace_owner_idx"
+  ON "integration_feature_binding_owners" ("workspace_id", "owner_kind", "owner_id");
 
 CREATE TABLE "capability_operations" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -672,10 +719,16 @@ LANGUAGE plpgsql
 AS $$
 BEGIN
   IF NOT EXISTS (
-    SELECT 1 FROM "integration_feature_facets" f
+    SELECT 1
+    FROM "integration_feature_facets" f
+    JOIN "capability_facet_installations" i
+      ON i."id" = NEW."integration_facet_installation_id"
+     AND i."facet_id" = f."integration_facet_id"
     WHERE f."id" = NEW."feature_facet_id"
+      AND i."account_id" = NEW."account_id"
+      AND i."workspace_id" = NEW."workspace_id"
   ) THEN
-    RAISE EXCEPTION 'feature binding references an unavailable integration facet'
+    RAISE EXCEPTION 'feature binding does not match its integration installation or tenant'
       USING ERRCODE = '23514';
   END IF;
   IF NEW."connection_id" IS NOT NULL AND NOT EXISTS (
@@ -694,6 +747,28 @@ $$;
 CREATE TRIGGER integration_feature_bindings_validate
   BEFORE INSERT OR UPDATE ON "integration_feature_bindings"
   FOR EACH ROW EXECUTE FUNCTION capability_v2_validate_feature_binding();
+
+CREATE OR REPLACE FUNCTION capability_v2_validate_feature_binding_owner()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM "integration_feature_bindings" b
+    WHERE b."id" = NEW."binding_id"
+      AND b."account_id" = NEW."account_id"
+      AND b."workspace_id" = NEW."workspace_id"
+  ) THEN
+    RAISE EXCEPTION 'feature binding owner does not match its binding tenant'
+      USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER integration_feature_binding_owners_validate
+  BEFORE INSERT OR UPDATE ON "integration_feature_binding_owners"
+  FOR EACH ROW EXECUTE FUNCTION capability_v2_validate_feature_binding_owner();
 
 ALTER TABLE "capability_plugins" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "capability_plugins" FORCE ROW LEVEL SECURITY;
@@ -725,6 +800,8 @@ ALTER TABLE "integration_feature_facets" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "integration_feature_facets" FORCE ROW LEVEL SECURITY;
 ALTER TABLE "integration_feature_bindings" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "integration_feature_bindings" FORCE ROW LEVEL SECURITY;
+ALTER TABLE "integration_feature_binding_owners" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "integration_feature_binding_owners" FORCE ROW LEVEL SECURITY;
 ALTER TABLE "capability_operations" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "capability_operations" FORCE ROW LEVEL SECURITY;
 
@@ -870,6 +947,9 @@ CREATE POLICY workspace_isolation ON "capability_component_owners"
 CREATE POLICY workspace_isolation ON "integration_feature_bindings"
   USING (opengeni_private.workspace_rls_visible("account_id", "workspace_id"))
   WITH CHECK (opengeni_private.workspace_rls_visible("account_id", "workspace_id"));
+CREATE POLICY workspace_isolation ON "integration_feature_binding_owners"
+  USING (opengeni_private.workspace_rls_visible("account_id", "workspace_id"))
+  WITH CHECK (opengeni_private.workspace_rls_visible("account_id", "workspace_id"));
 CREATE POLICY workspace_isolation ON "capability_operations"
   USING (opengeni_private.workspace_rls_visible("account_id", "workspace_id"))
   WITH CHECK (opengeni_private.workspace_rls_visible("account_id", "workspace_id"));
@@ -893,6 +973,7 @@ BEGIN
       "integration_tools",
       "integration_feature_facets",
       "integration_feature_bindings",
+      "integration_feature_binding_owners",
       "capability_operations"
     TO opengeni_app;
   END IF;

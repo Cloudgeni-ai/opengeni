@@ -1,9 +1,29 @@
 import { createHash } from "node:crypto";
 
 import { stableJson, type McpServerConnectionRef } from "@opengeni/contracts";
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, ne, or, sql } from "drizzle-orm";
 
-import { setSubjectRlsContext, withRlsContext, withWorkspaceRls, type Database } from "./database";
+import {
+  assertCapabilityComponentVersionCanChange,
+  lockCapabilityComponentIdentity,
+} from "./capability-components";
+import {
+  setSubjectRlsContext,
+  withRlsContext,
+  withWorkspaceRls,
+  withWorkspaceSubjectRls,
+  type Database,
+} from "./database";
+import {
+  ensureIntegrationFeatureFacet,
+  integrationBindingKey,
+  integrationDefinitionHasBindingOwner,
+  integrationRuntimeKey,
+  listIntegrationFeatureBindingOwners,
+  removeIntegrationFeatureBindingOwner,
+  upsertIntegrationFeatureBinding,
+  type IntegrationFeatureBindingOwner,
+} from "./integration-bindings";
 import * as schema from "./schema";
 
 export type ApiIntegrationProtocol = "openapi" | "graphql";
@@ -26,7 +46,11 @@ type StoredApiIntegrationRevisionBase = {
   readonly id: string;
   readonly integrationId: string;
   readonly contentSha256: string;
-  readonly source: { readonly url?: string; readonly provider?: string; readonly fetchedAt?: string };
+  readonly source: {
+    readonly url?: string;
+    readonly provider?: string;
+    readonly fetchedAt?: string;
+  };
   readonly title: string;
   readonly description?: string;
   readonly version?: string;
@@ -91,10 +115,14 @@ export type InstallApiIntegrationInput = {
   sourceUrl?: string | null;
   authScheme?: Record<string, unknown>;
   connectionId?: string | null;
+  instanceKey?: string;
+  displayName?: string;
+  expectedInstanceVersion?: number;
   requiredScopes?: string[];
   ownership?: "workspace" | "subject" | "either";
   allowedTools?: string[];
   revision: StoredApiIntegrationRevision;
+  owner?: ApiIntegrationOwner;
 };
 
 export type InstalledApiIntegration = {
@@ -107,6 +135,10 @@ export type InstalledApiIntegration = {
   integrationFacetInstallationId: string;
   apiFacetInstallationId: string;
   installationVersion: number;
+  instanceId: string;
+  instanceKey: string;
+  displayName: string;
+  instanceVersion: number;
   revisionId: string;
   serverId: string;
   status: "installed";
@@ -117,6 +149,10 @@ export type ApiIntegrationRuntime = {
   pluginKey: string;
   pluginInstallationId: string;
   installationVersion: number;
+  instanceId: string;
+  instanceKey: string;
+  displayName: string;
+  instanceVersion: number;
   serverId: string;
   name: string;
   description: string | null;
@@ -138,17 +174,23 @@ export type ApiIntegrationOwner = {
 
 export type ApiIntegrationUninstallPreview = {
   capabilityId: string;
+  instanceKey: string;
+  displayName: string | null;
   installed: boolean;
   installationVersion: number | null;
+  instanceVersion: number | null;
   directOwner: ApiIntegrationOwner | null;
   remainingOwners: ApiIntegrationOwner[];
   removesRuntimeIntegration: boolean;
+  removesDefinition: boolean;
 };
 
 export type UninstallApiIntegrationResult = {
   capabilityId: string;
+  instanceKey: string;
   status: "not_installed" | "uninstalled" | "retained_by_other_owners";
   remainingOwners: ApiIntegrationOwner[];
+  definitionStatus: "retained" | "disabled";
 };
 
 export class ApiIntegrationInstallationVersionConflictError extends Error {
@@ -177,6 +219,11 @@ export async function installApiIntegration(
       await setSubjectRlsContext(scopedDb, input.subjectId);
       return await scopedDb.transaction(async (tx) => {
         const now = new Date();
+        await lockCapabilityComponentIdentity(
+          tx as unknown as Database,
+          input.workspaceId,
+          input.pluginKey,
+        );
         const connection = input.connectionId
           ? await loadInstallConnection(tx as unknown as Database, input)
           : null;
@@ -253,7 +300,9 @@ export async function installApiIntegration(
           .for("update")
           .limit(1);
         if (pluginVersion && pluginVersion.manifestDigest !== manifestDigest) {
-          throw new Error(`API Integration revision ${input.revision.id} conflicts with stored content`);
+          throw new Error(
+            `API Integration revision ${input.revision.id} conflicts with stored content`,
+          );
         }
         if (!pluginVersion) {
           [pluginVersion] = await tx
@@ -329,6 +378,31 @@ export async function installApiIntegration(
           )
           .onConflictDoNothing();
 
+        const owner: IntegrationFeatureBindingOwner = input.owner ?? {
+          kind: "direct",
+          id: input.capabilityId,
+          removable: true,
+        };
+        const instanceKey = integrationBindingKey(input.connectionId, input.instanceKey);
+        const runtimeServerId = integrationRuntimeKey(input.serverId, instanceKey);
+        const displayName =
+          input.displayName?.trim() ||
+          (instanceKey === "default" ? input.name : `${input.name} — connected account`);
+        const toolsFeature = await ensureIntegrationFeatureFacet(tx as unknown as Database, {
+          integrationFacetId: integrationFacet.id,
+          featureKey: "tools",
+          kind: "tools",
+          configSchema: {
+            type: "object",
+            properties: {
+              allowedTools: { type: "array", items: { type: "string" } },
+              requireApproval: { type: "array", items: { type: "string" } },
+            },
+            additionalProperties: false,
+          },
+          capabilities: { protocol: input.protocol, runtime: "mcp" },
+        });
+
         let [pluginInstallation] = await tx
           .select()
           .from(schema.capabilityPluginInstallations)
@@ -341,7 +415,21 @@ export async function installApiIntegration(
           .for("update")
           .limit(1);
         const existingPluginInstallation = pluginInstallation;
+        const oldFacetInstallations = pluginInstallation
+          ? await installedFacetRows(tx as unknown as Database, pluginInstallation.id)
+          : [];
         let pluginInstallationGenerationAdvanced = false;
+        if (pluginInstallation && pluginInstallation.pluginVersionId !== pluginVersion.id) {
+          await assertCapabilityComponentVersionCanChange(tx as unknown as Database, {
+            workspaceId: input.workspaceId,
+            pluginKey: input.pluginKey,
+            pluginInstallationId: pluginInstallation.id,
+            owner: {
+              kind: owner.kind,
+              id: owner.id,
+            },
+          });
+        }
         if (!pluginInstallation) {
           [pluginInstallation] = await tx
             .insert(schema.capabilityPluginInstallations)
@@ -358,11 +446,6 @@ export async function installApiIntegration(
           pluginInstallation.pluginVersionId !== pluginVersion.id ||
           pluginInstallation.status !== "active"
         ) {
-          await tx
-            .delete(schema.capabilityFacetInstallations)
-            .where(
-              eq(schema.capabilityFacetInstallations.pluginInstallationId, pluginInstallation.id),
-            );
           [pluginInstallation] = await tx
             .update(schema.capabilityPluginInstallations)
             .set({
@@ -386,31 +469,71 @@ export async function installApiIntegration(
             workspaceId: input.workspaceId,
             pluginInstallationId: pluginInstallation.id,
             facetId: integrationFacet.id,
-            connectionId: input.connectionId ?? null,
+            connectionId: null,
             config: {},
           },
         );
         const integrationFacetInstallation = integrationFacetInstallationResult.row;
         const selectedTools = selectedToolIds(input);
-        const apiFacetInstallationResult = await ensureFacetInstallation(tx as unknown as Database, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          pluginInstallationId: pluginInstallation.id,
-          facetId: apiFacet.id,
-          connectionId: input.connectionId ?? null,
-          config: {
-            serverId: input.serverId,
-            allowedTools: selectedTools,
-            requireApproval: input.revision.tools
-              .filter((tool) => selectedTools.includes(tool.id) && tool.approvalMode === "ask")
-              .map((tool) => tool.id),
+        const apiFacetInstallationResult = await ensureFacetInstallation(
+          tx as unknown as Database,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            pluginInstallationId: pluginInstallation.id,
+            facetId: apiFacet.id,
+            connectionId: null,
+            config: {
+              baseServerId: input.serverId,
+            },
           },
-        });
+        );
         const apiFacetInstallation = apiFacetInstallationResult.row;
+        if (pluginInstallationGenerationAdvanced) {
+          await migrateApiIntegrationFacetInstallations(tx as unknown as Database, {
+            workspaceId: input.workspaceId,
+            oldFacetInstallations,
+            integrationFacetInstallationId: integrationFacetInstallation.id,
+            apiFacetInstallationId: apiFacetInstallation.id,
+            featureFacetId: toolsFeature.id,
+            excludedRuntimeKey: runtimeServerId,
+            revision: input.revision,
+          });
+        }
+        const approvalRequiredTools = input.revision.tools
+          .filter((tool) => selectedTools.includes(tool.id) && tool.approvalMode === "ask")
+          .map((tool) => tool.id);
+        const bindingResult = await upsertIntegrationFeatureBinding(
+          tx as unknown as Database,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            integrationFacetInstallationId: integrationFacetInstallation.id,
+            featureFacetId: toolsFeature.id,
+            bindingKey: instanceKey,
+            displayName,
+            runtimeKey: runtimeServerId,
+            connectionId: input.connectionId ?? null,
+            config: {
+              baseServerId: input.serverId,
+              allowedTools: selectedTools,
+              requireApproval: approvalRequiredTools,
+              connectionKind: connection?.kind ?? null,
+              subjectScope: connection?.subjectId ? "subject" : connection ? "workspace" : "none",
+            },
+            createdBySubjectId: input.subjectId,
+            owner,
+            ...(input.expectedInstanceVersion !== undefined
+              ? { expectedVersion: input.expectedInstanceVersion }
+              : {}),
+          },
+        );
         if (
           existingPluginInstallation &&
           !pluginInstallationGenerationAdvanced &&
-          (integrationFacetInstallationResult.changed || apiFacetInstallationResult.changed)
+          (integrationFacetInstallationResult.changed ||
+            apiFacetInstallationResult.changed ||
+            bindingResult.changed)
         ) {
           [pluginInstallation] = await tx
             .update(schema.capabilityPluginInstallations)
@@ -431,11 +554,21 @@ export async function installApiIntegration(
               accountId: input.accountId,
               workspaceId: input.workspaceId,
               facetInstallationId: facetInstallation.id,
-              ownerKind: "direct",
-              ownerId: input.capabilityId,
-              removable: true,
+              ownerKind: owner.kind,
+              ownerId: owner.id,
+              removable: owner.removable,
             })
             .onConflictDoNothing();
+        }
+        if (pluginInstallationGenerationAdvanced && oldFacetInstallations.length > 0) {
+          await tx
+            .delete(schema.capabilityFacetInstallations)
+            .where(
+              inArray(
+                schema.capabilityFacetInstallations.id,
+                oldFacetInstallations.map((row) => row.id),
+              ),
+            );
         }
 
         const compatibilityMetadata = {
@@ -449,11 +582,9 @@ export async function installApiIntegration(
           apiFacetId: apiFacet.id,
           revisionId: input.revision.id,
           contentSha256: input.revision.contentSha256,
-          serverId: input.serverId,
+          baseServerId: input.serverId,
+          multiInstance: true,
           provenance: "workspace_import",
-          connectionBound: connection !== null,
-          connectionKind: connection?.kind ?? null,
-          connectionOwnership: connection?.subjectId ? "subject" : connection ? "workspace" : "none",
         };
         await tx
           .insert(schema.capabilityCatalogItems)
@@ -469,7 +600,9 @@ export async function installApiIntegration(
             tags: normalizedStrings(input.tags ?? ["integration", input.protocol], 64),
             homepageUrl: input.sourceUrl ?? input.baseUrl,
             endpointUrl: input.baseUrl,
-            authModel: connection ? connection.kind : null,
+            authModel: objectValue(input.authScheme ?? {}).kind
+              ? String(objectValue(input.authScheme ?? {}).kind)
+              : null,
             providerDomain: input.providerDomain,
             surfaceType: "api",
             authKind: connection ? connection.kind : "none",
@@ -486,7 +619,9 @@ export async function installApiIntegration(
               tags: normalizedStrings(input.tags ?? ["integration", input.protocol], 64),
               homepageUrl: input.sourceUrl ?? input.baseUrl,
               endpointUrl: input.baseUrl,
-              authModel: connection ? connection.kind : null,
+              authModel: objectValue(input.authScheme ?? {}).kind
+                ? String(objectValue(input.authScheme ?? {}).kind)
+                : null,
               providerDomain: input.providerDomain,
               surfaceType: "api",
               authKind: connection ? connection.kind : "none",
@@ -502,7 +637,7 @@ export async function installApiIntegration(
             capabilityId: input.capabilityId,
             kind: "api",
             status: "active",
-            config: { serverId: input.serverId, allowedTools: selectedTools },
+            config: { baseServerId: input.serverId, multiInstance: true },
             metadata: {
               ...compatibilityMetadata,
               pluginInstallationId: pluginInstallation.id,
@@ -519,7 +654,7 @@ export async function installApiIntegration(
             ],
             set: {
               status: "active",
-              config: { serverId: input.serverId, allowedTools: selectedTools },
+              config: { baseServerId: input.serverId, multiInstance: true },
               metadata: {
                 ...compatibilityMetadata,
                 pluginInstallationId: pluginInstallation.id,
@@ -541,8 +676,12 @@ export async function installApiIntegration(
           integrationFacetInstallationId: integrationFacetInstallation.id,
           apiFacetInstallationId: apiFacetInstallation.id,
           installationVersion: pluginInstallation.version,
+          instanceId: bindingResult.row.id,
+          instanceKey: bindingResult.row.bindingKey,
+          displayName: bindingResult.row.displayName,
+          instanceVersion: bindingResult.row.version,
           revisionId: input.revision.id,
-          serverId: input.serverId,
+          serverId: runtimeServerId,
           status: "installed",
         };
       });
@@ -553,8 +692,9 @@ export async function installApiIntegration(
 export async function listInstalledApiIntegrations(
   db: Database,
   workspaceId: string,
+  subjectId?: string,
 ): Promise<ApiIntegrationRuntime[]> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  const load = async (scopedDb: Database): Promise<ApiIntegrationRuntime[]> => {
     const rows = await scopedDb
       .select({
         pluginKey: schema.capabilityPlugins.pluginKey,
@@ -569,37 +709,60 @@ export async function listInstalledApiIntegrations(
         sourceUrl: schema.capabilityApiFacets.specSourceUrl,
         providerDomain: schema.capabilityIntegrationFacets.providerDomain,
         requiredScopes: schema.capabilityIntegrationFacets.requiredScopes,
-        apiConfig: schema.capabilityFacetInstallations.config,
-        connectionId: schema.capabilityFacetInstallations.connectionId,
-        connectionKinds: schema.capabilityIntegrationFacets.connectionKinds,
-        ownership: schema.capabilityIntegrationFacets.ownership,
+        instanceId: schema.integrationFeatureBindings.id,
+        instanceKey: schema.integrationFeatureBindings.bindingKey,
+        displayName: schema.integrationFeatureBindings.displayName,
+        instanceVersion: schema.integrationFeatureBindings.version,
+        runtimeKey: schema.integrationFeatureBindings.runtimeKey,
+        bindingConfig: schema.integrationFeatureBindings.config,
+        connectionId: schema.integrationFeatureBindings.connectionId,
         revision: schema.integrationSpecRevisions.spec,
       })
-      .from(schema.capabilityPluginInstallations)
+      .from(schema.integrationFeatureBindings)
+      .innerJoin(
+        schema.integrationFeatureFacets,
+        eq(
+          schema.integrationFeatureFacets.id,
+          schema.integrationFeatureBindings.featureFacetId,
+        ),
+      )
+      .innerJoin(
+        schema.capabilityIntegrationFacets,
+        eq(
+          schema.capabilityIntegrationFacets.facetId,
+          schema.integrationFeatureFacets.integrationFacetId,
+        ),
+      )
+      .innerJoin(
+        schema.capabilityFacetInstallations,
+        eq(
+          schema.capabilityFacetInstallations.id,
+          schema.integrationFeatureBindings.integrationFacetInstallationId,
+        ),
+      )
+      .innerJoin(
+        schema.capabilityPluginInstallations,
+        eq(
+          schema.capabilityPluginInstallations.id,
+          schema.capabilityFacetInstallations.pluginInstallationId,
+        ),
+      )
       .innerJoin(
         schema.capabilityPlugins,
         eq(schema.capabilityPlugins.id, schema.capabilityPluginInstallations.pluginId),
       )
       .innerJoin(
         schema.capabilityPluginVersions,
-        eq(schema.capabilityPluginVersions.id, schema.capabilityPluginInstallations.pluginVersionId),
-      )
-      .innerJoin(
-        schema.capabilityFacetInstallations,
         eq(
-          schema.capabilityFacetInstallations.pluginInstallationId,
-          schema.capabilityPluginInstallations.id,
+          schema.capabilityPluginVersions.id,
+          schema.capabilityPluginInstallations.pluginVersionId,
         ),
       )
       .innerJoin(
         schema.capabilityApiFacets,
-        eq(schema.capabilityApiFacets.facetId, schema.capabilityFacetInstallations.facetId),
-      )
-      .innerJoin(
-        schema.capabilityIntegrationFacets,
         eq(
-          schema.capabilityIntegrationFacets.facetId,
           schema.capabilityApiFacets.integrationFacetId,
+          schema.capabilityIntegrationFacets.facetId,
         ),
       )
       .innerJoin(
@@ -614,39 +777,94 @@ export async function listInstalledApiIntegrations(
           eq(schema.capabilityPluginInstallations.workspaceId, workspaceId),
           eq(schema.capabilityPluginInstallations.status, "active"),
           eq(schema.capabilityFacetInstallations.status, "active"),
+          eq(schema.integrationFeatureFacets.kind, "tools"),
+          eq(schema.integrationFeatureBindings.status, "active"),
+          sql`${schema.integrationFeatureBindings.runtimeKey} is not null`,
           sql`exists (
             select 1 from ${schema.capabilityComponentOwners} owner
             where owner.facet_installation_id = ${schema.capabilityFacetInstallations.id}
+              and (
+                owner.owner_kind <> 'plugin'
+                or exists (
+                  select 1 from ${schema.capabilityPluginInstallations} owning_plugin
+                  where owning_plugin.id::text = owner.owner_id
+                    and owning_plugin.workspace_id = ${workspaceId}
+                    and owning_plugin.status = 'active'
+                )
+              )
           )`,
+          sql`exists (
+            select 1 from ${schema.integrationFeatureBindingOwners} owner
+            where owner.binding_id = ${schema.integrationFeatureBindings.id}
+              and (
+                owner.owner_kind <> 'plugin'
+                or exists (
+                  select 1 from ${schema.capabilityPluginInstallations} owning_plugin
+                  where owning_plugin.id::text = owner.owner_id
+                    and owning_plugin.workspace_id = ${workspaceId}
+                    and owning_plugin.status = 'active'
+                )
+              )
+          )`,
+          sql`exists (
+            select 1 from ${schema.capabilityFacetInstallations} api_installation
+            where api_installation.plugin_installation_id = ${schema.capabilityPluginInstallations.id}
+              and api_installation.facet_id = ${schema.capabilityApiFacets.facetId}
+              and api_installation.status = 'active'
+          )`,
+          ...(subjectId
+            ? [
+                sql`(
+                  ${schema.integrationFeatureBindings.connectionId} is null
+                  or exists (
+                    select 1 from ${schema.connections} connection
+                    where connection.id = ${schema.integrationFeatureBindings.connectionId}
+                      and (connection.subject_id is null or connection.subject_id = ${subjectId})
+                  )
+                )`,
+              ]
+            : []),
         ),
       )
-      .orderBy(asc(schema.capabilityPlugins.name), asc(schema.capabilityPlugins.pluginKey));
+      .orderBy(
+        asc(schema.capabilityPlugins.name),
+        asc(schema.integrationFeatureBindings.displayName),
+        asc(schema.integrationFeatureBindings.bindingKey),
+      );
 
     return rows.flatMap((row): ApiIntegrationRuntime[] => {
       const revision = storedRevision(row.revision);
-      const config = objectValue(row.apiConfig);
+      const config = objectValue(row.bindingConfig);
       const manifest = objectValue(row.manifest);
       const capabilityId = stringValue(manifest.capabilityId);
-      const serverId = stringValue(config.serverId) ?? stringValue(manifest.serverId);
+      const serverId = row.runtimeKey;
       if (!capabilityId || !serverId || row.protocol !== revision.protocol) {
-        throw new Error(`Installed API Integration ${row.pluginKey} has invalid immutable metadata`);
+        throw new Error(
+          `Installed API Integration ${row.pluginKey} has invalid immutable metadata`,
+        );
       }
-      const allowedTools = stringArray(config.allowedTools) ?? revision.tools.map((tool) => tool.id);
-      const requireApproval = stringArray(config.requireApproval) ??
+      const allowedTools =
+        stringArray(config.allowedTools) ?? revision.tools.map((tool) => tool.id);
+      const requireApproval =
+        stringArray(config.requireApproval) ??
         revision.tools.filter((tool) => tool.approvalMode === "ask").map((tool) => tool.id);
+      const connectionKind = stringValue(config.connectionKind);
+      const subjectScope = stringValue(config.subjectScope);
       const connectionRef: McpServerConnectionRef | null = row.connectionId
         ? {
             connectionId: row.connectionId,
             providerDomain: row.providerDomain,
-            ...(stringValue(manifest.provider) ? { provider: stringValue(manifest.provider)! } : {}),
-            ...(row.connectionKinds[0] === "oauth2" ||
-            row.connectionKinds[0] === "api_key" ||
-            row.connectionKinds[0] === "app_install" ||
-            row.connectionKinds[0] === "delegated"
-              ? { kind: row.connectionKinds[0] }
+            ...(stringValue(manifest.provider)
+              ? { provider: stringValue(manifest.provider)! }
+              : {}),
+            ...(connectionKind === "oauth2" ||
+            connectionKind === "api_key" ||
+            connectionKind === "app_install" ||
+            connectionKind === "delegated"
+              ? { kind: connectionKind }
               : {}),
             ...(row.requiredScopes.length > 0 ? { scopes: [...row.requiredScopes] } : {}),
-            subjectScope: row.ownership === "subject" ? "subject" : "workspace",
+            subjectScope: subjectScope === "subject" ? "subject" : "workspace",
           }
         : null;
       return [
@@ -655,8 +873,12 @@ export async function listInstalledApiIntegrations(
           pluginKey: row.pluginKey,
           pluginInstallationId: row.pluginInstallationId,
           installationVersion: row.installationVersion,
+          instanceId: row.instanceId,
+          instanceKey: row.instanceKey,
+          displayName: row.displayName,
+          instanceVersion: row.instanceVersion,
           serverId,
-          name: row.pluginName,
+          name: row.displayName,
           description: row.pluginDescription,
           protocol: revision.protocol,
           baseUrl: row.baseUrl,
@@ -669,38 +891,70 @@ export async function listInstalledApiIntegrations(
         },
       ];
     });
-  });
+  };
+  return subjectId
+    ? await withWorkspaceSubjectRls(db, workspaceId, subjectId, load)
+    : await withWorkspaceRls(db, workspaceId, load);
 }
 
 export async function getApiIntegrationUninstallPreview(
   db: Database,
   workspaceId: string,
   capabilityId: string,
+  instanceKey: string,
 ): Promise<ApiIntegrationUninstallPreview> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const context = await integrationOwnerContext(scopedDb, workspaceId, capabilityId);
+    const context = await integrationInstanceContext(
+      scopedDb,
+      workspaceId,
+      capabilityId,
+      instanceKey,
+    );
     if (!context) {
       return {
         capabilityId,
+        instanceKey,
+        displayName: null,
         installed: false,
         installationVersion: null,
+        instanceVersion: null,
         directOwner: null,
         remainingOwners: [],
         removesRuntimeIntegration: false,
+        removesDefinition: false,
       };
     }
-    const owners = await integrationOwners(scopedDb, context.pluginInstallationId);
-    const directOwner = owners.find((owner) => owner.kind === "direct" && owner.id === capabilityId);
+    const owners = await listIntegrationFeatureBindingOwners(scopedDb, context.instanceId);
+    const directOwner = owners.find(
+      (owner) => owner.kind === "direct" && owner.id === capabilityId,
+    );
     const remainingOwners = owners.filter(
       (owner) => !(owner.kind === "direct" && owner.id === capabilityId),
     );
+    const definitionOwners = await integrationOwners(scopedDb, context.pluginInstallationId);
+    const remainingDefinitionOwners = definitionOwners.filter(
+      (owner) => !(owner.kind === "direct" && owner.id === capabilityId),
+    );
+    const hasOtherDirectInstance = await integrationDefinitionHasOtherBindingOwner(scopedDb, {
+      workspaceId,
+      pluginInstallationId: context.pluginInstallationId,
+      excludedBindingId: context.instanceId,
+      owner: { kind: "direct", id: capabilityId },
+    });
     return {
       capabilityId,
+      instanceKey,
+      displayName: context.displayName,
       installed: true,
       installationVersion: context.installationVersion,
+      instanceVersion: context.instanceVersion,
       directOwner: directOwner ?? null,
       remainingOwners,
       removesRuntimeIntegration: remainingOwners.length === 0,
+      removesDefinition:
+        remainingOwners.length === 0 &&
+        !hasOtherDirectInstance &&
+        remainingDefinitionOwners.length === 0,
     };
   });
 }
@@ -710,23 +964,34 @@ export async function uninstallApiIntegration(
   input: {
     accountId: string;
     workspaceId: string;
+    subjectId: string;
     capabilityId: string;
+    instanceKey: string;
     expectedInstallationVersion: number;
+    expectedInstanceVersion: number;
   },
 ): Promise<UninstallApiIntegrationResult> {
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        const context = await integrationOwnerContext(
+    async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, input.subjectId);
+      return await scopedDb.transaction(async (tx) => {
+        const context = await integrationInstanceContext(
           tx as unknown as Database,
           input.workspaceId,
           input.capabilityId,
+          input.instanceKey,
           true,
         );
         if (!context) {
-          return { capabilityId: input.capabilityId, status: "not_installed", remainingOwners: [] };
+          return {
+            capabilityId: input.capabilityId,
+            instanceKey: input.instanceKey,
+            status: "not_installed",
+            remainingOwners: [],
+            definitionStatus: "retained",
+          };
         }
         if (context.installationVersion !== input.expectedInstallationVersion) {
           throw new ApiIntegrationInstallationVersionConflictError(
@@ -735,39 +1000,78 @@ export async function uninstallApiIntegration(
             context.installationVersion,
           );
         }
-        await tx
-          .delete(schema.capabilityComponentOwners)
-          .where(
+        const bindingOwners = await listIntegrationFeatureBindingOwners(
+          tx as unknown as Database,
+          context.instanceId,
+        );
+        if (
+          !bindingOwners.some(
+            (owner) => owner.kind === "direct" && owner.id === input.capabilityId,
+          )
+        ) {
+          return {
+            capabilityId: input.capabilityId,
+            instanceKey: input.instanceKey,
+            status: "not_installed",
+            remainingOwners: bindingOwners,
+            definitionStatus: "retained",
+          };
+        }
+        const removed = await removeIntegrationFeatureBindingOwner(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          bindingId: context.instanceId,
+          owner: { kind: "direct", id: input.capabilityId },
+          expectedVersion: input.expectedInstanceVersion,
+        });
+        const hasAnotherDirectInstance = await integrationDefinitionHasBindingOwner(
+          tx as unknown as Database,
+          {
+            workspaceId: input.workspaceId,
+            pluginInstallationId: context.pluginInstallationId,
+            owner: { kind: "direct", id: input.capabilityId },
+          },
+        );
+        if (!hasAnotherDirectInstance) {
+          await tx.delete(schema.capabilityComponentOwners).where(
             and(
               eq(schema.capabilityComponentOwners.workspaceId, input.workspaceId),
               eq(schema.capabilityComponentOwners.ownerKind, "direct"),
               eq(schema.capabilityComponentOwners.ownerId, input.capabilityId),
               sql`${schema.capabilityComponentOwners.facetInstallationId} in (
-                select id from ${schema.capabilityFacetInstallations}
-                where plugin_installation_id = ${context.pluginInstallationId}
-              )`,
+                  select id from ${schema.capabilityFacetInstallations}
+                  where plugin_installation_id = ${context.pluginInstallationId}
+                )`,
             ),
           );
-        const remainingOwners = await integrationOwners(
+        }
+        const remainingDefinitionOwners = await integrationOwners(
           tx as unknown as Database,
           context.pluginInstallationId,
         );
         const now = new Date();
-        if (remainingOwners.length > 0) {
+        if (remainingDefinitionOwners.length > 0 || hasAnotherDirectInstance) {
           await tx
             .update(schema.capabilityPluginInstallations)
             .set({ version: context.installationVersion + 1, updatedAt: now })
             .where(eq(schema.capabilityPluginInstallations.id, context.pluginInstallationId));
           return {
             capabilityId: input.capabilityId,
-            status: "retained_by_other_owners",
-            remainingOwners,
+            instanceKey: input.instanceKey,
+            status:
+              removed.remainingOwners.length > 0
+                ? "retained_by_other_owners"
+                : "uninstalled",
+            remainingOwners: removed.remainingOwners,
+            definitionStatus: "retained",
           };
         }
         await tx
           .delete(schema.capabilityFacetInstallations)
           .where(
-            eq(schema.capabilityFacetInstallations.pluginInstallationId, context.pluginInstallationId),
+            eq(
+              schema.capabilityFacetInstallations.pluginInstallationId,
+              context.pluginInstallationId,
+            ),
           );
         await tx
           .update(schema.capabilityPluginInstallations)
@@ -786,9 +1090,126 @@ export async function uninstallApiIntegration(
               eq(schema.capabilityInstallations.capabilityId, input.capabilityId),
             ),
           );
-        return { capabilityId: input.capabilityId, status: "uninstalled", remainingOwners: [] };
-      }),
+        return {
+          capabilityId: input.capabilityId,
+          instanceKey: input.instanceKey,
+          status:
+            removed.remainingOwners.length > 0 ? "retained_by_other_owners" : "uninstalled",
+          remainingOwners: removed.remainingOwners,
+          definitionStatus: "disabled",
+        };
+      });
+    },
   );
+}
+
+type InstalledFacetRow = {
+  id: string;
+  kind: string;
+};
+
+async function installedFacetRows(
+  db: Database,
+  pluginInstallationId: string,
+): Promise<InstalledFacetRow[]> {
+  return await db
+    .select({
+      id: schema.capabilityFacetInstallations.id,
+      kind: schema.capabilityFacets.kind,
+    })
+    .from(schema.capabilityFacetInstallations)
+    .innerJoin(
+      schema.capabilityFacets,
+      eq(schema.capabilityFacets.id, schema.capabilityFacetInstallations.facetId),
+    )
+    .where(
+      eq(schema.capabilityFacetInstallations.pluginInstallationId, pluginInstallationId),
+    );
+}
+
+async function migrateApiIntegrationFacetInstallations(
+  db: Database,
+  input: {
+    workspaceId: string;
+    oldFacetInstallations: InstalledFacetRow[];
+    integrationFacetInstallationId: string;
+    apiFacetInstallationId: string;
+    featureFacetId: string;
+    excludedRuntimeKey: string;
+    revision: StoredApiIntegrationRevision;
+  },
+): Promise<void> {
+  if (input.oldFacetInstallations.length === 0) return;
+  const oldIntegration = input.oldFacetInstallations.find((row) => row.kind === "integration");
+  const targetByKind = new Map<string, string>([
+    ["integration", input.integrationFacetInstallationId],
+    ["api", input.apiFacetInstallationId],
+  ]);
+  const oldIds = input.oldFacetInstallations.map((row) => row.id);
+  const owners = await db
+    .select({
+      facetInstallationId: schema.capabilityComponentOwners.facetInstallationId,
+      accountId: schema.capabilityComponentOwners.accountId,
+      workspaceId: schema.capabilityComponentOwners.workspaceId,
+      ownerKind: schema.capabilityComponentOwners.ownerKind,
+      ownerId: schema.capabilityComponentOwners.ownerId,
+      removable: schema.capabilityComponentOwners.removable,
+    })
+    .from(schema.capabilityComponentOwners)
+    .where(inArray(schema.capabilityComponentOwners.facetInstallationId, oldIds));
+  const kindByOldId = new Map(input.oldFacetInstallations.map((row) => [row.id, row.kind]));
+  for (const owner of owners) {
+    const targetId = targetByKind.get(kindByOldId.get(owner.facetInstallationId) ?? "");
+    if (!targetId) continue;
+    await db
+      .insert(schema.capabilityComponentOwners)
+      .values({
+        accountId: owner.accountId,
+        workspaceId: owner.workspaceId,
+        facetInstallationId: targetId,
+        ownerKind: owner.ownerKind,
+        ownerId: owner.ownerId,
+        removable: owner.removable,
+      })
+      .onConflictDoNothing();
+  }
+  if (!oldIntegration) return;
+  const bindings = await db
+    .select()
+    .from(schema.integrationFeatureBindings)
+    .where(
+      and(
+        eq(schema.integrationFeatureBindings.workspaceId, input.workspaceId),
+        eq(
+          schema.integrationFeatureBindings.integrationFacetInstallationId,
+          oldIntegration.id,
+        ),
+        ne(schema.integrationFeatureBindings.runtimeKey, input.excludedRuntimeKey),
+      ),
+    )
+    .for("update");
+  const available = new Set(input.revision.tools.map((tool) => tool.id));
+  for (const binding of bindings) {
+    const config = objectValue(binding.config);
+    const selected = (stringArray(config.allowedTools) ?? []).filter((tool) =>
+      available.has(tool),
+    );
+    const requireApproval = input.revision.tools
+      .filter((tool) => selected.includes(tool.id) && tool.approvalMode === "ask")
+      .map((tool) => tool.id);
+    await db
+      .update(schema.integrationFeatureBindings)
+      .set({
+        integrationFacetInstallationId: input.integrationFacetInstallationId,
+        featureFacetId: input.featureFacetId,
+        config: { ...config, allowedTools: selected, requireApproval },
+        status: selected.length > 0 ? binding.status : "needs_attention",
+        lastErrorCode: selected.length > 0 ? null : "selected_tools_removed",
+        version: binding.version + 1,
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.integrationFeatureBindings.id, binding.id));
+  }
 }
 
 async function loadInstallConnection(
@@ -841,7 +1262,8 @@ async function ensureFacet(
     )
     .limit(1);
   if (existing) {
-    if (existing.kind !== input.kind) throw new Error(`Capability facet ${input.facetKey} changed kind`);
+    if (existing.kind !== input.kind)
+      throw new Error(`Capability facet ${input.facetKey} changed kind`);
     return existing;
   }
   const [created] = await db
@@ -918,40 +1340,111 @@ async function ensureFacetInstallation(
   return { row: updated, changed: true };
 }
 
-async function integrationOwnerContext(
+type IntegrationInstanceContext = {
+  instanceId: string;
+  instanceVersion: number;
+  displayName: string;
+  pluginInstallationId: string;
+  installationVersion: number;
+};
+
+async function integrationInstanceContext(
   db: Database,
   workspaceId: string,
   capabilityId: string,
+  instanceKey: string,
   lock = false,
-): Promise<{ pluginInstallationId: string; installationVersion: number } | null> {
+): Promise<IntegrationInstanceContext | null> {
   let query = db
     .select({
+      instanceId: schema.integrationFeatureBindings.id,
+      instanceVersion: schema.integrationFeatureBindings.version,
+      displayName: schema.integrationFeatureBindings.displayName,
       pluginInstallationId: schema.capabilityPluginInstallations.id,
       installationVersion: schema.capabilityPluginInstallations.version,
     })
-    .from(schema.capabilityComponentOwners)
+    .from(schema.integrationFeatureBindings)
     .innerJoin(
       schema.capabilityFacetInstallations,
-      eq(schema.capabilityFacetInstallations.id, schema.capabilityComponentOwners.facetInstallationId),
+      eq(
+        schema.capabilityFacetInstallations.id,
+        schema.integrationFeatureBindings.integrationFacetInstallationId,
+      ),
     )
     .innerJoin(
       schema.capabilityPluginInstallations,
-      eq(schema.capabilityPluginInstallations.id, schema.capabilityFacetInstallations.pluginInstallationId),
+      eq(
+        schema.capabilityPluginInstallations.id,
+        schema.capabilityFacetInstallations.pluginInstallationId,
+      ),
+    )
+    .innerJoin(
+      schema.capabilityPluginVersions,
+      eq(
+        schema.capabilityPluginVersions.id,
+        schema.capabilityPluginInstallations.pluginVersionId,
+      ),
     )
     .where(
       and(
-        eq(schema.capabilityComponentOwners.workspaceId, workspaceId),
-        eq(schema.capabilityComponentOwners.ownerKind, "direct"),
-        eq(schema.capabilityComponentOwners.ownerId, capabilityId),
+        eq(schema.integrationFeatureBindings.workspaceId, workspaceId),
+        eq(schema.integrationFeatureBindings.bindingKey, instanceKey),
+        sql`${schema.capabilityPluginVersions.manifest} ->> 'capabilityId' = ${capabilityId}`,
       ),
     )
-    .limit(3);
+    .limit(2);
   if (lock) query = query.for("update") as typeof query;
   const rows = await query;
   if (rows.length === 0) return null;
-  const installationIds = new Set(rows.map((row) => row.pluginInstallationId));
-  if (installationIds.size !== 1) throw new Error(`API Integration ${capabilityId} has split owners`);
+  if (rows.length !== 1) throw new Error(`API Integration ${capabilityId} instance is ambiguous`);
   return rows[0]!;
+}
+
+async function integrationDefinitionHasOtherBindingOwner(
+  db: Database,
+  input: {
+    workspaceId: string;
+    pluginInstallationId: string;
+    excludedBindingId: string;
+    owner: Pick<IntegrationFeatureBindingOwner, "kind" | "id">;
+  },
+): Promise<boolean> {
+  const [row] = await db
+    .select({ id: schema.integrationFeatureBindingOwners.id })
+    .from(schema.integrationFeatureBindingOwners)
+    .innerJoin(
+      schema.integrationFeatureBindings,
+      eq(
+        schema.integrationFeatureBindings.id,
+        schema.integrationFeatureBindingOwners.bindingId,
+      ),
+    )
+    .innerJoin(
+      schema.capabilityFacetInstallations,
+      eq(
+        schema.capabilityFacetInstallations.id,
+        schema.integrationFeatureBindings.integrationFacetInstallationId,
+      ),
+    )
+    .where(
+      and(
+        eq(schema.integrationFeatureBindingOwners.workspaceId, input.workspaceId),
+        eq(schema.integrationFeatureBindingOwners.ownerKind, input.owner.kind),
+        eq(schema.integrationFeatureBindingOwners.ownerId, input.owner.id),
+        ne(schema.integrationFeatureBindingOwners.bindingId, input.excludedBindingId),
+        eq(
+          schema.capabilityFacetInstallations.pluginInstallationId,
+          input.pluginInstallationId,
+        ),
+        or(
+          eq(schema.integrationFeatureBindings.status, "active"),
+          eq(schema.integrationFeatureBindings.status, "needs_attention"),
+          eq(schema.integrationFeatureBindings.status, "paused"),
+        ),
+      ),
+    )
+    .limit(1);
+  return Boolean(row);
 }
 
 async function integrationOwners(
@@ -967,13 +1460,36 @@ async function integrationOwners(
     .from(schema.capabilityComponentOwners)
     .innerJoin(
       schema.capabilityFacetInstallations,
-      eq(schema.capabilityFacetInstallations.id, schema.capabilityComponentOwners.facetInstallationId),
+      eq(
+        schema.capabilityFacetInstallations.id,
+        schema.capabilityComponentOwners.facetInstallationId,
+      ),
     )
-    .where(eq(schema.capabilityFacetInstallations.pluginInstallationId, pluginInstallationId))
-    .orderBy(asc(schema.capabilityComponentOwners.ownerKind), asc(schema.capabilityComponentOwners.ownerId));
+    .where(
+      and(
+        eq(schema.capabilityFacetInstallations.pluginInstallationId, pluginInstallationId),
+        sql`(
+          ${schema.capabilityComponentOwners.ownerKind} <> 'plugin'
+          or exists (
+            select 1 from ${schema.capabilityPluginInstallations} owning_plugin
+            where owning_plugin.id::text = ${schema.capabilityComponentOwners.ownerId}
+              and owning_plugin.status = 'active'
+          )
+        )`,
+      ),
+    )
+    .orderBy(
+      asc(schema.capabilityComponentOwners.ownerKind),
+      asc(schema.capabilityComponentOwners.ownerId),
+    );
   const owners = new Map<string, ApiIntegrationOwner>();
   for (const row of rows) {
-    if (row.kind !== "direct" && row.kind !== "plugin" && row.kind !== "pack" && row.kind !== "migration") {
+    if (
+      row.kind !== "direct" &&
+      row.kind !== "plugin" &&
+      row.kind !== "pack" &&
+      row.kind !== "migration"
+    ) {
       throw new Error(`Unknown API Integration owner kind: ${row.kind}`);
     }
     const key = `${row.kind}\0${row.id}`;
@@ -988,8 +1504,12 @@ async function integrationOwners(
 }
 
 function assertInstallInput(input: InstallApiIntegrationInput): void {
-  if (input.revision.protocol !== input.protocol) throw new Error("API Integration protocol mismatch");
-  if (input.revision.contentSha256.length !== 64 || !/^[0-9a-f]+$/.test(input.revision.contentSha256)) {
+  if (input.revision.protocol !== input.protocol)
+    throw new Error("API Integration protocol mismatch");
+  if (
+    input.revision.contentSha256.length !== 64 ||
+    !/^[0-9a-f]+$/.test(input.revision.contentSha256)
+  ) {
     throw new Error("API Integration revision digest is invalid");
   }
   if (input.revision.tools.length === 0 || input.revision.tools.length > 2_000) {
@@ -1002,7 +1522,10 @@ function assertInstallInput(input: InstallApiIntegrationInput): void {
   if (base.protocol !== "https:" || base.username || base.password || base.hash) {
     throw new Error("API Integration baseUrl must be a credential-free HTTPS URL");
   }
-  if (base.hostname !== input.providerDomain && !base.hostname.endsWith(`.${input.providerDomain}`)) {
+  if (
+    base.hostname !== input.providerDomain &&
+    !base.hostname.endsWith(`.${input.providerDomain}`)
+  ) {
     throw new Error("API Integration providerDomain does not match baseUrl");
   }
   const authKind = objectValue(input.authScheme).kind;
@@ -1050,7 +1573,10 @@ function normalizedStrings(values: string[], limit: number): string[] {
 
 function stringArray(value: unknown): string[] | undefined {
   return Array.isArray(value)
-    ? normalizedStrings(value.filter((entry): entry is string => typeof entry === "string"), 2_000)
+    ? normalizedStrings(
+        value.filter((entry): entry is string => typeof entry === "string"),
+        2_000,
+      )
     : undefined;
 }
 

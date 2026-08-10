@@ -4402,6 +4402,9 @@ export type InstallApiIntegrationRequest = {
   expectedContentSha256: string;
   connectionId?: string | undefined;
   ownership?: ConnectionOwnership | undefined;
+  instanceKey?: string | undefined;
+  displayName?: string | undefined;
+  expectedInstanceVersion?: number | undefined;
   allowedTools?: string[] | undefined;
 };
 
@@ -4415,6 +4418,10 @@ export type InstalledApiIntegration = {
   integrationFacetInstallationId: string;
   apiFacetInstallationId: string;
   installationVersion: number;
+  instanceId: string;
+  instanceKey: string;
+  displayName: string;
+  instanceVersion: number;
   revisionId: string;
   serverId: string;
   status: "installed";
@@ -4424,6 +4431,10 @@ export type ApiIntegrationInstallationSummary = {
   capabilityId: string;
   pluginKey: string;
   installationVersion: number;
+  instanceId: string;
+  instanceKey: string;
+  displayName: string;
+  instanceVersion: number;
   serverId: string;
   name: string;
   description: string | null;
@@ -4445,21 +4456,130 @@ export type ListApiIntegrationsResponse = {
 
 export type ApiIntegrationUninstallPreview = {
   capabilityId: string;
+  instanceKey: string;
+  displayName: string | null;
   installed: boolean;
   installationVersion: number | null;
+  instanceVersion: number | null;
   directOwner: CapabilityComponentOwner | null;
   remainingOwners: CapabilityComponentOwner[];
   removesRuntimeIntegration: boolean;
+  removesDefinition: boolean;
 };
 
 export type UninstallApiIntegrationRequest = {
   expectedInstallationVersion: number;
+  expectedInstanceVersion: number;
 };
 
 export type UninstallApiIntegrationResult = {
   capabilityId: string;
+  instanceKey: string;
   status: "not_installed" | "uninstalled" | "retained_by_other_owners";
   remainingOwners: CapabilityComponentOwner[];
+  definitionStatus: "retained" | "disabled";
+};
+
+export type PluginManifestComponent =
+  | { key: string; kind: "skill"; url: string }
+  | { key: string; kind: "integration"; source: ApiIntegrationSource }
+  | { key: string; kind: "mcp"; serverId: string };
+
+export type PluginManifest = {
+  schemaVersion: 1;
+  pluginKey: string;
+  version: string;
+  name: string;
+  description: string;
+  category: string;
+  tags: string[];
+  components: PluginManifestComponent[];
+};
+
+export type PluginComponentBinding = {
+  connectionId?: string | undefined;
+  instanceKey?: string | undefined;
+  displayName?: string | undefined;
+};
+
+export type PreviewPluginRequest = {
+  url: string;
+  bindings?: Record<string, PluginComponentBinding> | undefined;
+};
+
+export type PluginComponentPreview = {
+  key: string;
+  kind: "skill" | "integration" | "mcp";
+  name: string;
+  capabilityId: string;
+  digest: string;
+  connectionRequired: boolean;
+  connectionId: string | null;
+  instanceKey: string | null;
+  displayName: string | null;
+  facts: Record<string, unknown>;
+};
+
+export type PluginUpdateDiff = {
+  fromVersion: string | null;
+  toVersion: string;
+  added: string[];
+  removed: string[];
+  changed: string[];
+  unchanged: string[];
+};
+
+export type PluginPreview = {
+  sourceUrl: string;
+  manifest: PluginManifest;
+  manifestDigest: string;
+  installed: boolean;
+  installationVersion: number | null;
+  components: PluginComponentPreview[];
+  diff: PluginUpdateDiff;
+};
+
+export type InstallPluginRequest = {
+  url: string;
+  expectedManifestDigest: string;
+  expectedComponents: Array<{ key: string; digest: string }>;
+  bindings?: Record<string, PluginComponentBinding> | undefined;
+  idempotencyKey: string;
+  expectedInstallationVersion?: number | undefined;
+};
+
+export type InstalledPlugin = {
+  pluginKey: string;
+  version: string;
+  pluginId: string;
+  pluginVersionId: string;
+  pluginInstallationId: string;
+  installationVersion: number;
+  componentCount: number;
+  status: "installed";
+};
+
+export type PluginUninstallPreview = {
+  pluginKey: string;
+  installed: boolean;
+  version: string | null;
+  installationVersion: number | null;
+  components: Array<{
+    capabilityId: string;
+    kind: "skill" | "integration" | "mcp";
+    retainedByOtherOwners: boolean;
+  }>;
+};
+
+export type UninstallPluginRequest = {
+  expectedInstallationVersion: number;
+  idempotencyKey: string;
+};
+
+export type UninstallPluginResult = {
+  pluginKey: string;
+  status: "not_installed" | "uninstalled";
+  retainedComponents: string[];
 };
 
 // --- GitHub ---------------------------------------------------------------------

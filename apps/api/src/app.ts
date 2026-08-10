@@ -66,6 +66,7 @@ import { registerGitHubRoutes } from "./routes/github";
 import { registerInstallRoutes } from "./routes/install";
 import { registerApiIntegrationRoutes } from "./routes/api-integrations";
 import { registerPackRoutes } from "./routes/packs";
+import { registerPluginRoutes } from "./routes/plugins";
 import { registerSkillRoutes } from "./routes/skills";
 import { registerRigRoutes } from "./routes/rigs";
 import { registerScheduledTaskRoutes } from "./routes/scheduled-tasks";
@@ -590,6 +591,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerEnvironmentRoutes(app, routeDeps);
   registerRigRoutes(app, routeDeps);
   registerPackRoutes(app, routeDeps);
+  registerPluginRoutes(app, routeDeps);
   registerSkillRoutes(app, routeDeps);
   registerSessionRoutes(app, routeDeps);
   registerScheduledTaskRoutes(app, routeDeps);
@@ -1181,12 +1183,14 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
     label: "/v1/workspaces/:workspaceId/integrations/install",
   },
   {
-    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/uninstall-preview$/,
-    label: "/v1/workspaces/:workspaceId/integrations/:id/uninstall-preview",
+    pattern:
+      /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/uninstall-preview$/,
+    label:
+      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/uninstall-preview",
   },
   {
-    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+$/,
-    label: "/v1/workspaces/:workspaceId/integrations/:id",
+    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/integrations$/,
@@ -1239,6 +1243,22 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/packs\/[^/]+$/,
     label: "/v1/workspaces/:workspaceId/packs/:id",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/plugins\/preview$/,
+    label: "/v1/workspaces/:workspaceId/plugins/preview",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/plugins\/install$/,
+    label: "/v1/workspaces/:workspaceId/plugins/install",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/plugins\/[^/]+\/uninstall-preview$/,
+    label: "/v1/workspaces/:workspaceId/plugins/:pluginKey/uninstall-preview",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/plugins\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/plugins/:pluginKey",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/social\/connections$/,

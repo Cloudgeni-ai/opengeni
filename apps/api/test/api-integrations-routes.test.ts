@@ -131,14 +131,14 @@ beforeAll(async () => {
       }),
     } as ApiRouteDeps,
     {
-      fetchImpl: async (request) => {
-        if (String(request) === "https://127.0.0.1/secured-openapi.json") {
+      fetchImpl: async (sourceRequest) => {
+        if (String(sourceRequest) === "https://127.0.0.1/secured-openapi.json") {
           return new Response(JSON.stringify(apiKeyOpenApiDocument()), {
             status: 200,
             headers: { "content-type": "application/json" },
           });
         }
-        if (String(request) !== "https://127.0.0.1/openapi.json") {
+        if (String(sourceRequest) !== "https://127.0.0.1/openapi.json") {
           return new Response(null, { status: 404 });
         }
         return new Response(JSON.stringify(openApiDocument()), {
@@ -224,10 +224,13 @@ describe("API Integration routes", () => {
     expect(installed).toMatchObject({
       capabilityId: preview.capabilityId,
       revisionId: preview.revisionId,
-      serverId: preview.serverId,
+      instanceKey: "default",
+      displayName: "Inventory API",
       status: "installed",
       installationVersion: 1,
+      instanceVersion: 1,
     });
+    expect(installed.serverId).not.toBe(preview.serverId);
 
     const listedResponse = await request("/integrations");
     expect(listedResponse.status).toBe(200);
@@ -235,7 +238,10 @@ describe("API Integration routes", () => {
       integrations: [
         expect.objectContaining({
           capabilityId: preview.capabilityId,
-          serverId: preview.serverId,
+          serverId: installed.serverId,
+          instanceId: installed.instanceId,
+          instanceKey: installed.instanceKey,
+          instanceVersion: installed.instanceVersion,
           connected: false,
           ownership: "none",
           toolCount: 2,
@@ -245,34 +251,49 @@ describe("API Integration routes", () => {
     });
 
     const encodedCapabilityId = encodeURIComponent(preview.capabilityId);
+    const encodedInstanceKey = encodeURIComponent(installed.instanceKey);
     const uninstallPreviewResponse = await request(
-      `/integrations/${encodedCapabilityId}/uninstall-preview`,
+      `/integrations/${encodedCapabilityId}/instances/${encodedInstanceKey}/uninstall-preview`,
     );
     expect(uninstallPreviewResponse.status).toBe(200);
     const uninstallPreview = await uninstallPreviewResponse.json();
     expect(uninstallPreview).toMatchObject({
       installed: true,
       installationVersion: 1,
+      instanceVersion: 1,
       removesRuntimeIntegration: true,
+      removesDefinition: true,
     });
 
-    const stale = await request(`/integrations/${encodedCapabilityId}`, {
+    const stale = await request(
+      `/integrations/${encodedCapabilityId}/instances/${encodedInstanceKey}`,
+      {
       method: "DELETE",
-      body: JSON.stringify({ expectedInstallationVersion: 2 }),
-    });
+        body: JSON.stringify({
+          expectedInstallationVersion: 2,
+          expectedInstanceVersion: installed.instanceVersion,
+        }),
+      },
+    );
     expect(stale.status).toBe(409);
 
-    const removed = await request(`/integrations/${encodedCapabilityId}`, {
-      method: "DELETE",
-      body: JSON.stringify({
-        expectedInstallationVersion: uninstallPreview.installationVersion,
-      }),
-    });
+    const removed = await request(
+      `/integrations/${encodedCapabilityId}/instances/${encodedInstanceKey}`,
+      {
+        method: "DELETE",
+        body: JSON.stringify({
+          expectedInstallationVersion: uninstallPreview.installationVersion,
+          expectedInstanceVersion: uninstallPreview.instanceVersion,
+        }),
+      },
+    );
     expect(removed.status).toBe(200);
     expect(await removed.json()).toEqual({
       capabilityId: preview.capabilityId,
+      instanceKey: installed.instanceKey,
       status: "uninstalled",
       remainingOwners: [],
+      definitionStatus: "disabled",
     });
   }, 60_000);
 
@@ -342,10 +363,13 @@ describe("API Integration routes", () => {
     });
 
     const removed = await request(
-      `/integrations/${encodeURIComponent(installed.capabilityId)}`,
+      `/integrations/${encodeURIComponent(installed.capabilityId)}/instances/${encodeURIComponent(installed.instanceKey)}`,
       {
         method: "DELETE",
-        body: JSON.stringify({ expectedInstallationVersion: installed.installationVersion }),
+        body: JSON.stringify({
+          expectedInstallationVersion: installed.installationVersion,
+          expectedInstanceVersion: installed.instanceVersion,
+        }),
       },
     );
     expect(removed.status).toBe(200);

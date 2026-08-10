@@ -19,6 +19,9 @@ import {
   getApiIntegrationUninstallPreview,
   getConnectionMetadata,
   installApiIntegration,
+  IntegrationFeatureBindingOwnershipConflictError,
+  IntegrationFeatureBindingVersionConflictError,
+  IntegrationFeatureBindingVersionRequiredError,
   listInstalledApiIntegrations,
   uninstallApiIntegration,
   type ConnectionMetadataWithVerification,
@@ -46,14 +49,22 @@ export function registerApiIntegrationRoutes(
 
   app.get("/v1/workspaces/:workspaceId/integrations", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    const integrations = await listInstalledApiIntegrations(deps.db, workspaceId);
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const integrations = await listInstalledApiIntegrations(
+      deps.db,
+      workspaceId,
+      grant.subjectId,
+    );
     return c.json(
       ListApiIntegrationsResponse.parse({
         integrations: integrations.map((integration) => ({
           capabilityId: integration.capabilityId,
           pluginKey: integration.pluginKey,
           installationVersion: integration.installationVersion,
+          instanceId: integration.instanceId,
+          instanceKey: integration.instanceKey,
+          displayName: integration.displayName,
+          instanceVersion: integration.instanceVersion,
           serverId: integration.serverId,
           name: integration.name,
           description: integration.description,
@@ -133,9 +144,10 @@ export function registerApiIntegrationRoutes(
         message: "Choose a Personal Connection before installing for yourself.",
       });
     }
-    return c.json(
-      InstalledApiIntegration.parse(
-        await installApiIntegration(deps.db, {
+    try {
+      return c.json(
+        InstalledApiIntegration.parse(
+          await installApiIntegration(deps.db, {
           accountId: grant.accountId,
           workspaceId,
           subjectId: grant.subjectId,
@@ -152,56 +164,90 @@ export function registerApiIntegrationRoutes(
           baseUrl: resolved.preview.baseUrl,
           sourceUrl: resolved.preview.sourceUrl,
           authScheme: resolved.authScheme,
-          ...(payload.connectionId ? { connectionId: payload.connectionId } : {}),
-          requiredScopes: resolved.requiredScopes,
-          ownership: resolved.preview.connectionOwnership === "personal" ? "subject" : "workspace",
-          ...(payload.allowedTools ? { allowedTools: payload.allowedTools } : {}),
-          revision: resolved.revision,
-        }),
-      ),
-      201,
-    );
-  });
-
-  app.get("/v1/workspaces/:workspaceId/integrations/:capabilityId/uninstall-preview", async (c) => {
-    const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    return c.json(
-      ApiIntegrationUninstallPreview.parse(
-        await getApiIntegrationUninstallPreview(
-          deps.db,
-          workspaceId,
-          decodeURIComponent(c.req.param("capabilityId")),
-        ),
-      ),
-    );
-  });
-
-  app.delete("/v1/workspaces/:workspaceId/integrations/:capabilityId", async (c) => {
-    const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
-    const capabilityId = decodeURIComponent(c.req.param("capabilityId"));
-    const payload = UninstallApiIntegrationRequest.parse(await c.req.json());
-    try {
-      return c.json(
-        UninstallApiIntegrationResult.parse(
-          await uninstallApiIntegration(deps.db, {
-            accountId: grant.accountId,
-            workspaceId,
-            capabilityId,
-            expectedInstallationVersion: payload.expectedInstallationVersion,
+            ...(payload.connectionId ? { connectionId: payload.connectionId } : {}),
+            ...(payload.instanceKey ? { instanceKey: payload.instanceKey } : {}),
+            ...(payload.displayName ? { displayName: payload.displayName } : {}),
+            ...(payload.expectedInstanceVersion !== undefined
+              ? { expectedInstanceVersion: payload.expectedInstanceVersion }
+              : {}),
+            requiredScopes: resolved.requiredScopes,
+            ownership:
+              resolved.preview.connectionOwnership === "personal" ? "subject" : "workspace",
+            ...(payload.allowedTools ? { allowedTools: payload.allowedTools } : {}),
+            revision: resolved.revision,
           }),
         ),
+        payload.expectedInstanceVersion === undefined ? 201 : 200,
       );
     } catch (error) {
-      if (error instanceof ApiIntegrationInstallationVersionConflictError) {
+      if (
+        error instanceof IntegrationFeatureBindingVersionConflictError ||
+        error instanceof IntegrationFeatureBindingVersionRequiredError ||
+        error instanceof IntegrationFeatureBindingOwnershipConflictError
+      ) {
         throw new HTTPException(409, {
-          message: "The Integration changed after preview. Review uninstall impact again.",
+          message:
+            "The Integration instance changed or is shared by another owner. Refresh its details before updating it.",
         });
       }
       throw error;
     }
   });
+
+  app.get(
+    "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/uninstall-preview",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+      return c.json(
+        ApiIntegrationUninstallPreview.parse(
+          await getApiIntegrationUninstallPreview(
+            deps.db,
+            workspaceId,
+            decodeURIComponent(c.req.param("capabilityId")),
+            decodeURIComponent(c.req.param("instanceKey")),
+          ),
+        ),
+      );
+    },
+  );
+
+  app.delete(
+    "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+      const capabilityId = decodeURIComponent(c.req.param("capabilityId"));
+      const instanceKey = decodeURIComponent(c.req.param("instanceKey"));
+      const payload = UninstallApiIntegrationRequest.parse(await c.req.json());
+      try {
+        return c.json(
+          UninstallApiIntegrationResult.parse(
+            await uninstallApiIntegration(deps.db, {
+              accountId: grant.accountId,
+              workspaceId,
+              subjectId: grant.subjectId,
+              capabilityId,
+              instanceKey,
+              expectedInstallationVersion: payload.expectedInstallationVersion,
+              expectedInstanceVersion: payload.expectedInstanceVersion,
+            }),
+          ),
+        );
+      } catch (error) {
+        if (
+          error instanceof ApiIntegrationInstallationVersionConflictError ||
+          error instanceof IntegrationFeatureBindingVersionConflictError
+        ) {
+          throw new HTTPException(409, {
+            message:
+              "The Integration instance changed after preview. Review uninstall impact again.",
+          });
+        }
+        throw error;
+      }
+    },
+  );
 }
 
 async function resolveForRoute(input: {

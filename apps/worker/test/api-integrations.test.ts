@@ -11,6 +11,10 @@ function integration(): ApiIntegrationRuntime {
     pluginKey: "integration/inventory",
     pluginInstallationId: "11111111-2222-4333-8444-555555555555",
     installationVersion: 1,
+    instanceId: "22222222-3333-4444-8555-666666666666",
+    instanceKey: "default",
+    displayName: "Inventory API",
+    instanceVersion: 1,
     serverId: "inventory_api",
     name: "Inventory API",
     description: "Inventory operations.",
@@ -207,6 +211,83 @@ describe("installed API Integration worker adapters", () => {
           reason: "expired",
           providerDomain: "127.0.0.1",
         }),
+      ]);
+    } finally {
+      await prepared.close();
+    }
+  });
+
+  test("routes two instances of one definition through distinct tool namespaces and Connections", async () => {
+    const finance = integration();
+    const sales: ApiIntegrationRuntime = {
+      ...finance,
+      instanceId: "33333333-4444-4555-8666-777777777777",
+      instanceKey: "sales",
+      displayName: "Inventory — Sales",
+      serverId: "inventory_sales_api",
+      connectionRef: {
+        ...finance.connectionRef!,
+        connectionId: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+      },
+    };
+    const settings = testSettings({
+      mcpServers: [finance, sales].map((item) => ({
+        id: item.serverId,
+        name: item.name,
+        url: item.baseUrl,
+        allowedTools: item.allowedTools,
+        connectionRef: item.connectionRef!,
+      })),
+    });
+    const resolutions: Array<{ serverId: string; connectionId: string | undefined }> = [];
+    const localMcpServers = buildApiIntegrationServersForTurn({
+      settings,
+      integrations: [finance, sales],
+      authority,
+      resolveCredential: async (request): Promise<ResolveConnectionCredentialResult> => {
+        resolutions.push({
+          serverId: request.serverId,
+          connectionId: request.connectionRef.connectionId,
+        });
+        return {
+          status: "ok",
+          connectionId: request.connectionRef.connectionId!,
+          headers: { Authorization: `Bearer ${request.connectionRef.connectionId}` },
+        };
+      },
+      fetchImpl: async () =>
+        new Response(JSON.stringify({ items: ["one"] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    });
+    const prepared = await prepareAgentTools(
+      settings,
+      [
+        { kind: "mcp", id: finance.serverId },
+        { kind: "mcp", id: sales.serverId },
+      ],
+      { localMcpServers },
+    );
+    try {
+      expect(
+        await Promise.all(
+          prepared.mcpServers.map(async (server) =>
+            (await server.listTools()).map((tool) => tool.name),
+          ),
+        ),
+      ).toEqual([
+        [`${finance.serverId}__list_items`],
+        [`${sales.serverId}__list_items`],
+      ]);
+      await prepared.mcpServers[0]!.callTool(`${finance.serverId}__list_items`, {});
+      await prepared.mcpServers[1]!.callTool(`${sales.serverId}__list_items`, {});
+      expect(resolutions).toEqual([
+        {
+          serverId: finance.serverId,
+          connectionId: finance.connectionRef!.connectionId,
+        },
+        { serverId: sales.serverId, connectionId: sales.connectionRef!.connectionId },
       ]);
     } finally {
       await prepared.close();

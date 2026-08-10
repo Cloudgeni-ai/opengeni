@@ -20,6 +20,7 @@ const tables = [
   "integration_tools",
   "integration_feature_facets",
   "integration_feature_bindings",
+  "integration_feature_binding_owners",
   "capability_operations",
 ] as const;
 
@@ -48,8 +49,19 @@ describe("capabilities platform expand migration", () => {
     expect(migration).toContain("capability_facet_installations_validate");
     expect(migration).toContain("capability_component_owners_validate");
     expect(migration).toContain("integration_feature_bindings_validate");
+    expect(migration).toContain("integration_feature_binding_owners_validate");
     expect(migration).toContain('p."workspace_id" IS NOT NULL');
     expect(migration).toContain('"capability_id" text NOT NULL');
+  });
+
+  test("supports many independently owned Integration instances per definition", () => {
+    expect(migration).toContain('"binding_key" text NOT NULL');
+    expect(migration).toContain('"display_name" text NOT NULL');
+    expect(migration).toContain('"runtime_key" text');
+    expect(migration).toContain('"integration_facet_installation_id" uuid NOT NULL');
+    expect(migration).toContain("integration_feature_bindings_installation_feature_key_uq");
+    expect(migration).toContain("integration_feature_bindings_workspace_runtime_uq");
+    expect(migration).not.toContain("integration_feature_bindings_workspace_feature_uq");
   });
 
   test("represents every universal Integration facet without provider-specific tables", () => {

@@ -130,8 +130,68 @@ The owning endpoints are:
 - `GET /v1/workspaces/:workspaceId/integrations`
 - `POST /v1/workspaces/:workspaceId/integrations/preview`
 - `POST /v1/workspaces/:workspaceId/integrations/install`
-- `GET /v1/workspaces/:workspaceId/integrations/:capabilityId/uninstall-preview`
-- `DELETE /v1/workspaces/:workspaceId/integrations/:capabilityId`
+- `GET /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/uninstall-preview`
+- `DELETE /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey`
+
+One immutable Integration definition may have many active instances. Each
+instance has a stable `instanceKey`, human-editable display name, collision-free
+runtime MCP id, exact Connection/configuration, optimistic version, and owner
+ledger. This supports two Gmail accounts, two Linear workspaces, or several
+resource-scoped configurations without copying the schema or overwriting a
+sibling. Reconnect and uninstall operate on the exact instance; the underlying
+Connection and shared definition survive unless separately removed.
+
+### Plugin packages
+
+A Plugin is a bounded JSON manifest that groups existing safe component
+lifecycles. Schema version `1` accepts at most 64 uniquely keyed components:
+
+- a public `skills.sh` or GitHub Skill URL;
+- a protocol-neutral API Integration source; or
+- the id of an MCP server already configured by the deployment.
+
+Plugins never embed arbitrary MCP endpoints, deployment header credentials, or
+Personal Connection identifiers. A configured MCP with static headers or a
+subject-scoped Connection cannot be auto-activated through a Plugin. An
+authenticated API Integration instead names a normal active Connection through
+the request's per-component `bindings`; the Connection remains independently
+owned and is never deleted by Plugin uninstall.
+
+Preview fetches the manifest and every referenced source through the existing
+bounded pinned transports, resolves Skills to immutable commits, compiles API
+Integrations to immutable revisions, and returns an exact component bill of
+materials. Each BOM digest includes the component's immutable source facts, not
+only its display metadata. Install repeats resolution and rejects manifest or
+component drift with `409`, so a stale preview cannot authorize changed code,
+tools, scopes, or deployment MCP configuration.
+
+Install and update use a caller-supplied idempotency key plus an optimistic
+installation-version fence. The durable operation journal checkpoints each
+completed component. Until every component is present, the top-level Plugin is
+`needs_attention` and none of its otherwise unowned child components enter the
+runtime. Retrying the exact request with the same idempotency key resumes the
+operation; reusing the key for a different request is rejected. Workspace-local
+component advisory locks make concurrent Plugins converge on one child
+identity. Multiple owners may share the same exact version, but a divergent
+version is rejected while another direct, Plugin, Pack, or migration owner is
+still pinned to the current version.
+
+An update records a new immutable Plugin version, computes added/removed/
+changed/unchanged component keys, and removes stale ownership edges only after
+the replacement BOM completes. Uninstall preview reports whether each child is
+retained by another owner. Uninstall removes only this Plugin's edges, disables
+orphaned child installations, and never removes a shared component or a
+Connection.
+
+The owning endpoints are:
+
+- `POST /v1/workspaces/:workspaceId/plugins/preview`
+- `POST /v1/workspaces/:workspaceId/plugins/install`
+- `GET /v1/workspaces/:workspaceId/plugins/:pluginKey/uninstall-preview`
+- `DELETE /v1/workspaces/:workspaceId/plugins/:pluginKey`
+
+The SDK mirrors these as `previewPlugin`, `installPlugin`,
+`previewPluginUninstall`, and `uninstallPlugin`.
 
 ## Curated skill library
 

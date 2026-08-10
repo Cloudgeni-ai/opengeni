@@ -215,6 +215,10 @@ export { LOSSLESS_TEXT_PREFIX } from "./lossless-json";
 import { seedNewSessionDraftInTransaction } from "./new-session-drafts";
 import { runIdempotentPersistenceTransaction } from "./persistence-errors";
 import {
+  assertCapabilityComponentVersionCanChange,
+  lockCapabilityComponentIdentity,
+} from "./capability-components";
+import {
   closePendingSessionToolCallsInTransaction,
   historyCallId,
   historyItemType,
@@ -306,6 +310,7 @@ export {
 export * from "./persistence-errors";
 export * from "./runtime-posture";
 export * from "./capability-integrations";
+export * from "./integration-bindings";
 export * from "./insights";
 export { memoryTextForStorage } from "./memory-domain";
 // Re-exported so external consumers can `import { migrate } from "@opengeni/db"`.
@@ -3914,6 +3919,7 @@ export type InstallPortableSkillInput = {
     byteSize: number;
     contentSha256: string;
   }>;
+  owner?: PortableSkillOwner;
 };
 
 export type InstalledPortableSkill = {
@@ -5998,6 +6004,11 @@ export async function installPortableSkill(
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
         const now = new Date();
+        await lockCapabilityComponentIdentity(
+          tx as unknown as Database,
+          input.workspaceId,
+          input.pluginKey,
+        );
         let [plugin] = await tx
           .select()
           .from(schema.capabilityPlugins)
@@ -6154,6 +6165,17 @@ export async function installPortableSkill(
           )
           .for("update")
           .limit(1);
+        if (pluginInstallation && pluginInstallation.pluginVersionId !== pluginVersion.id) {
+          await assertCapabilityComponentVersionCanChange(tx as unknown as Database, {
+            workspaceId: input.workspaceId,
+            pluginKey: input.pluginKey,
+            pluginInstallationId: pluginInstallation.id,
+            owner: {
+              kind: input.owner?.kind ?? "direct",
+              id: input.owner?.id ?? input.capabilityId,
+            },
+          });
+        }
         if (!pluginInstallation) {
           [pluginInstallation] = await tx
             .insert(schema.capabilityPluginInstallations)
@@ -6222,9 +6244,9 @@ export async function installPortableSkill(
             accountId: input.accountId,
             workspaceId: input.workspaceId,
             facetInstallationId: facetInstallation.id,
-            ownerKind: "direct",
-            ownerId: input.capabilityId,
-            removable: true,
+            ownerKind: input.owner?.kind ?? "direct",
+            ownerId: input.owner?.id ?? input.capabilityId,
+            removable: input.owner?.removable ?? true,
           })
           .onConflictDoNothing();
 
@@ -6367,6 +6389,15 @@ export async function listInstalledPortableSkills(
             select 1
             from ${schema.capabilityComponentOwners} owner
             where owner.facet_installation_id = ${schema.capabilityFacetInstallations.id}
+              and (
+                owner.owner_kind <> 'plugin'
+                or exists (
+                  select 1 from ${schema.capabilityPluginInstallations} owning_plugin
+                  where owning_plugin.id::text = owner.owner_id
+                    and owning_plugin.workspace_id = ${workspaceId}
+                    and owning_plugin.status = 'active'
+                )
+              )
           )`,
         ),
       )
@@ -6592,7 +6623,19 @@ async function portableSkillOwners(
       removable: schema.capabilityComponentOwners.removable,
     })
     .from(schema.capabilityComponentOwners)
-    .where(eq(schema.capabilityComponentOwners.facetInstallationId, facetInstallationId))
+    .where(
+      and(
+        eq(schema.capabilityComponentOwners.facetInstallationId, facetInstallationId),
+        sql`(
+          ${schema.capabilityComponentOwners.ownerKind} <> 'plugin'
+          or exists (
+            select 1 from ${schema.capabilityPluginInstallations} owning_plugin
+            where owning_plugin.id::text = ${schema.capabilityComponentOwners.ownerId}
+              and owning_plugin.status = 'active'
+          )
+        )`,
+      ),
+    )
     .orderBy(
       asc(schema.capabilityComponentOwners.ownerKind),
       asc(schema.capabilityComponentOwners.ownerId),
@@ -6767,6 +6810,24 @@ export async function listEnabledMcpCapabilityServers(
             eq(schema.capabilityInstallations.kind, "mcp"),
             eq(schema.capabilityInstallations.status, "active"),
             eq(schema.capabilityCatalogItems.stale, false),
+            sql`(
+              ${schema.capabilityInstallations.metadata} ->> 'facetInstallationId' is null
+              or exists (
+                select 1
+                from ${schema.capabilityComponentOwners} owner
+                left join ${schema.capabilityPluginInstallations} owning_plugin
+                  on owning_plugin.id::text = owner.owner_id
+                 and owner.owner_kind = 'plugin'
+                where owner.facet_installation_id::text = ${schema.capabilityInstallations.metadata} ->> 'facetInstallationId'
+                  and (
+                    owner.owner_kind <> 'plugin'
+                    or (
+                      owning_plugin.workspace_id = ${workspaceId}
+                      and owning_plugin.status = 'active'
+                    )
+                  )
+              )
+            )`,
           ),
         )
         .orderBy(asc(schema.capabilityCatalogItems.name)),
@@ -51331,6 +51392,26 @@ export {
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
 } from "./connection-token-resolver";
+export {
+  CapabilityComponentVersionConflictError,
+  type CapabilityComponentOwnerIdentity,
+} from "./capability-components";
+export {
+  checkpointPluginPackageOperation,
+  deferPluginPackageOperation,
+  finalizePluginPackageInstall,
+  getInstalledPluginPackage,
+  getPluginPackageUninstallPreview,
+  installPluginMcpReference,
+  PluginInstallationVersionConflictError,
+  PluginInstallationVersionRequiredError,
+  PluginOperationIdempotencyError,
+  preparePluginPackageInstall,
+  uninstallPluginPackage,
+  type InstalledPluginPackage,
+  type PluginBomComponent,
+  type PreparedPluginPackage,
+} from "./plugin-packages";
 
 export * from "./workspace-artifacts";
 export * from "./transcription-recordings";
