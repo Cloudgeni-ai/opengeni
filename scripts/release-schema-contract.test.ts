@@ -213,12 +213,13 @@ describe("release schema contract", () => {
         (migrations.has("0193_editable_artifact_authorization.sql") ? 1 : 0) +
         (migrations.has("0194_editable_artifact_durable_exports.sql") ? 1 : 0) +
         (migrations.has("0195_editable_artifact_import_authorization.sql") ? 1 : 0) +
-        (migrations.has("0196_rig_provider_images.sql") ? 1 : 0),
+        (migrations.has("0196_rig_provider_images.sql") ? 1 : 0) +
+        (migrations.has("0199_workspace_learning_policy.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "8b6af65542e7f94eda48c83448456ceb9d54a57083bb3cb866b886415838ca9f",
+      "5e77d3ce6f45639d80f05a4cb3e971186c9ff90a53f34b177e9e2816e3665d05",
     );
-    expect(contract.latestMigration).toBe("0196_rig_provider_images.sql");
+    expect(contract.latestMigration).toBe("0199_workspace_learning_policy.sql");
     expect(migrations.get("0065_enrollment_credential_generation.sql")).toMatchObject({
       sha256: "2e25fa2dfb8a95a7a9ba1ef5aa9bd219755af998b3317bcdf4d7acc4f67264fe",
       deploymentMode: "rolling",
@@ -229,6 +230,10 @@ describe("release schema contract", () => {
     });
     expect(migrations.get("0182_connected_machine_remove_session_default.sql")).toMatchObject({
       sha256: "c15bd3b6d71f15be9e163481c3cb698d8f46620d655a72a5e56d193bc16310cd",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0199_workspace_learning_policy.sql")).toMatchObject({
+      sha256: "92286a9bbe8982fde66780bbe03fd92c0e5dbf1c9ff1fbf08a1d17fd2f8d595f",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0183_model_call_provider_cost_estimates.sql")).toMatchObject({
