@@ -2,7 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ARTIFACT_SKILL_NAMES, checkArtifactSkillBundle } from "./sync-artifact-skills";
+import {
+  ARTIFACT_SKILL_NAMES,
+  VIDEO_SKILL_NAMES,
+  checkArtifactSkillBundle,
+} from "./sync-artifact-skills";
 
 const repoRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 
@@ -23,6 +27,18 @@ describe("bundled editable-artifact skills", () => {
       expect(api).toContain("pathToFileURL(artifactEntry).href");
       expect(api).not.toMatch(/from ["']@opengeni\/artifact-tool/u);
       expect(api).not.toContain("@opengeni/artifact-tool@latest");
+    }
+  });
+
+  test("keeps video guidance provider-neutral and independent from Office runtime", async () => {
+    for (const name of VIDEO_SKILL_NAMES) {
+      const skill = await readFile(join(repoRoot, ".agents", "skills", name, "SKILL.md"), "utf8");
+      expect(skill).toStartWith("---\nname:");
+      expect(skill).toContain("get_video_generation_capabilities");
+      expect(skill).toContain("generate_video");
+      expect(skill).not.toContain("Seedance");
+      expect(skill).not.toContain("apiKey");
+      expect(skill).not.toContain("opengeni-artifact-runtime");
     }
   });
 });

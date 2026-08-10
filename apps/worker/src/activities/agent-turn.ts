@@ -61,6 +61,10 @@ import {
   accrueWarmSeconds,
   getMaterializedSandboxFileResources,
   markSandboxFileResourcesMaterialized,
+  getGeneratedVideoArtifact,
+  listSessionSystemUpdatesForTurn,
+  getWorkspaceVideoGenerationPolicy,
+  loadWorkspaceVercelAiGatewayCredentialLease,
   areGitHubRepositoriesAllowedForWorkspace,
   SandboxLeaseRecoveryBlockedError,
   SandboxLeaseSupersededError,
@@ -239,9 +243,11 @@ import {
   resolveCodexAppsCredentialIdForRun,
   withFrozenPersonalConnectionDelegations,
   resolveSessionToolPolicy,
+  videoGenerationCapabilitiesForPolicy,
 } from "@opengeni/core";
 import { maybeCompactContext, settleFailedContextCompactionLandmark } from "./context-compaction";
 import { TurnAttemptFencedError } from "./turn-attempt-fenced";
+import { admitVideoGenerationRequest } from "./video-generation-admission";
 import {
   assertGitCredentialRenewalTransportUnchanged,
   gitCredentialAuthorityForTurn,
@@ -397,6 +403,7 @@ import {
   type LatencyMode,
   type ResourceRef,
   type RetainedArtifactMetadata,
+  type MediaGenerationResult,
   type SessionEvent,
   type SessionEventType,
   type SessionStatus,
@@ -2671,6 +2678,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       signalCodexCapacityWorkflow,
       entitlements,
       connectionCredentials,
+      startVideoGenerationWorkflow,
     } = await services();
     const activityContext = currentActivityContext();
     const cancellationSignal = activityContext?.cancellationSignal;
@@ -3431,6 +3439,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     let modelCanReceiveRetainedSessionImages = true;
     const generatedImageReceiptsByProviderItemId = new Map<string, GeneratedImageReceipt>();
     const generatedImageReceiptsByArtifactId = new Map<string, GeneratedImageReceipt>();
+    const videoGenerationAcceptancesByCallId = new Map<
+      string,
+      { operationId: string; requestDigest: string }
+    >();
+    const requiredGeneratedVideoFiles: Array<{
+      operationId: string;
+      artifactId: string;
+      fileId: string;
+      objectKey: string;
+      sizeBytes: number;
+      sha256: string;
+      filename: string;
+    }> = [];
     let generatedImageMaterializationCache: {
       instanceId: string;
       fileIds: Set<string>;
@@ -4937,6 +4958,44 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           }
         }
       }
+      // A recovered asynchronous video completion is model-visible only after
+      // its durable File is present at the exact sandbox path carried by the
+      // receipt. Resolve and verify the claimed update before sandbox policy is
+      // chosen so this turn cannot remain lazy and expose an absent path.
+      for (const update of await listSessionSystemUpdatesForTurn(
+        db,
+        input.workspaceId,
+        input.sessionId,
+        turn.id,
+      )) {
+        const payload = update.payload as MediaGenerationResult;
+        if (payload.type !== "media_generation_result" || payload.status !== "ready") continue;
+        const retained = await getGeneratedVideoArtifact(
+          db,
+          input.workspaceId,
+          payload.receipt.artifact.artifactId,
+        );
+        if (
+          !retained ||
+          retained.artifact.deletedAt ||
+          retained.file.status !== "ready" ||
+          retained.file.contentType !== "video/mp4" ||
+          retained.file.sizeBytes !== payload.receipt.artifact.originalBytes ||
+          retained.file.sha256 !== payload.receipt.artifact.sha256 ||
+          retained.artifact.sandboxFilename !== `generated-video-${retained.artifact.id}.mp4`
+        ) {
+          throw new Error("Generated video completion does not match its retained File");
+        }
+        requiredGeneratedVideoFiles.push({
+          operationId: payload.operationId,
+          artifactId: retained.artifact.id,
+          fileId: retained.file.id,
+          objectKey: retained.file.objectKey,
+          sizeBytes: retained.file.sizeBytes,
+          sha256: retained.file.sha256,
+          filename: retained.artifact.sandboxFilename,
+        });
+      }
       // A codex-subscription turn resolves the bearer for THIS turn's effective
       // codex account (effectiveCodexCredentialId; pin > workspace-active) at
       // model-call time — multi-account P1 means a workspace can hold N accounts,
@@ -5505,7 +5564,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // Resolved run credentials must be written to one exact leased sandbox
         // before agent execution. A warm active pointer can bypass the lazy
         // provisioner entirely, which previously skipped materialization.
-        !initialRunCredentialMaterial
+        !initialRunCredentialMaterial &&
+        requiredGeneratedVideoFiles.length === 0
           ? "on-demand"
           : "eager";
       // Computed exactly ONCE per turn and reused for BOTH the box manifest
@@ -6169,7 +6229,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
       }
 
-      const fileResourceDownloads = await waitForTurnOperation(
+      const ordinaryFileResourceDownloads = await waitForTurnOperation(
         sandboxFileDownloadsForRun(
           runSettings,
           db,
@@ -6181,6 +6241,33 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         cancellationSignal,
         undefined,
       );
+      if (requiredGeneratedVideoFiles.length > 0 && !objectStorage) {
+        throw new Error("Generated video materialization requires object storage");
+      }
+      const generatedVideoDownloads: SandboxFileDownload[] = [];
+      if (objectStorage && requiredGeneratedVideoFiles.length > 0) {
+        const downloadStorage = objectStorageForSandboxDownloads(modelRunSettings, objectStorage);
+        for (const file of requiredGeneratedVideoFiles) {
+          const signed = await downloadStorage.createGetUrl({ key: file.objectKey });
+          generatedVideoDownloads.push({
+            fileId: file.fileId,
+            mountPath: "generated-videos",
+            filename: file.filename,
+            url: signed.url,
+            expiresAt: signed.expiresAt,
+            sizeBytes: file.sizeBytes,
+            sha256: file.sha256,
+          });
+        }
+      }
+      const fileResourceDownloads = [
+        ...new Map(
+          [...ordinaryFileResourceDownloads, ...generatedVideoDownloads].map((download) => [
+            download.fileId,
+            download,
+          ]),
+        ).values(),
+      ];
       throwIfWorkerShuttingDown();
       throwIfTurnCancelled();
       const mcpCredentialRootSessionId =
@@ -6403,6 +6490,71 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           },
         };
       })();
+      const videoGenerationPolicy = await getWorkspaceVideoGenerationPolicy(db, input.workspaceId);
+      const videoGenerationCredential = objectStorage
+        ? await loadWorkspaceVercelAiGatewayCredentialLease(db, modelRunSettings, input.workspaceId)
+        : null;
+      const videoGenerationOption: Pick<BuildAgentOptions, "videoGeneration"> = (() => {
+        if (
+          !objectStorage ||
+          modelRunSettings.sandboxBackend === "none" ||
+          !videoGenerationCredential ||
+          videoGenerationPolicy.defaultModelId === null ||
+          videoGenerationPolicy.enabledModelIds.length === 0
+        ) {
+          return {};
+        }
+        // Parse the frozen capability snapshot before advertising either tool.
+        // Invalid or unsupported workspace policy therefore fails closed before
+        // it can perturb the model's tool list.
+        const capabilities = videoGenerationCapabilitiesForPolicy({
+          policy: videoGenerationPolicy,
+          credentialVersion: videoGenerationCredential.version,
+        });
+        return {
+          videoGeneration: {
+            capabilities: async () => capabilities,
+            execute: async (toolInput, { toolCallId }) => {
+              const sessionForReference =
+                resolvedSandbox?.established.session ?? sdkOwnedSandboxSession;
+              const fence = toolCancellationFenceRef.current;
+              const runAs = sandboxRunAs(modelRunSettings);
+              const accepted = await admitVideoGenerationRequest({
+                db,
+                storage: objectStorage,
+                settings: modelRunSettings,
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: turn.id,
+                attemptId: input.attemptId,
+                toolCallId,
+                toolInput,
+                policy: videoGenerationPolicy,
+                credential: videoGenerationCredential,
+                ...(sessionForReference && fence
+                  ? {
+                      runCommand: async (command) =>
+                        await fence.runSandboxCommandStructured(
+                          sessionForReference as import("@opengeni/runtime").TurnSandboxCommandSession,
+                          {
+                            ...command,
+                            ...(runAs ? { runAs } : {}),
+                          },
+                        ),
+                    }
+                  : {}),
+                ...(runtimeCancellationSignal ? { signal: runtimeCancellationSignal } : {}),
+              });
+              videoGenerationAcceptancesByCallId.set(toolCallId, {
+                operationId: accepted.operationId,
+                requestDigest: accepted.requestDigest,
+              });
+              return accepted.receipt;
+            },
+          },
+        };
+      })();
       const editableArtifactPublicationOption: Pick<
         BuildAgentOptions,
         "editableArtifactPublication"
@@ -6558,6 +6710,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // compaction threshold.
         hostedWebSearch,
         ...imageGenerationOption,
+        ...videoGenerationOption,
         ...editableArtifactPublicationOption,
         lazyToolTransport,
         supportsImageInput,
@@ -7198,6 +7351,37 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
         fileDownloadsMaterializedForRun = true;
       }
+      const requiredVideoFileIds = new Set(requiredGeneratedVideoFiles.map((file) => file.fileId));
+      const failedRequiredVideo = fileMaterializationFailures.find((failure) =>
+        requiredVideoFileIds.has(failure.fileId),
+      );
+      if (failedRequiredVideo) {
+        const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+          sessionId: input.sessionId,
+          turnId: turn.id,
+          triggerEventId: triggerEventId!,
+          attemptId: input.attemptId,
+          reason: "generated_video_materialization_failed",
+          detail: {
+            retryable: true,
+            operationIds: requiredGeneratedVideoFiles.map((file) => file.operationId),
+          },
+        });
+        if (recovery.action === "stale") {
+          acknowledgeLostAttemptOwnership();
+          activityStatus = "cancelled";
+          turnMetricOutcome = "cancelled";
+          return claimedResult({ status: "cancelled" });
+        }
+        if (recovery.action !== "recovering") {
+          throw new Error("Generated video materialization could not enter recovery");
+        }
+        acknowledgeRecoveryQuiescence();
+        await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
+        activityStatus = "recovering";
+        turnMetricOutcome = "recovering";
+        return claimedResult({ status: "recovering", continueDelayMs: 1_000 });
+      }
       const unavailableSandboxFilesNote = sandboxFileDownloadFailureNote(
         fileMaterializationFailures,
       );
@@ -7691,11 +7875,37 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 callId: completedToolCall.callId,
                 modelToolOutputTruncationTokens: modelRunSettings.modelToolOutputTruncationTokens,
                 resultItem: durableResultItem as Record<string, unknown>,
+                ...(videoGenerationAcceptancesByCallId.has(completedToolCall.callId)
+                  ? {
+                      videoGenerationAcceptance: videoGenerationAcceptancesByCallId.get(
+                        completedToolCall.callId,
+                      )!,
+                    }
+                  : {}),
               });
               if (!recorded.accepted) {
                 throw new TurnAttemptFencedError(
                   "turn attempt ended while recording a tool-call result",
                 );
+              }
+              const videoAcceptance = videoGenerationAcceptancesByCallId.get(
+                completedToolCall.callId,
+              );
+              if (videoAcceptance && startVideoGenerationWorkflow) {
+                try {
+                  await startVideoGenerationWorkflow({
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    operationId: videoAcceptance.operationId,
+                  });
+                } catch (error) {
+                  // The accepted operation is durable. The recovery sweep starts
+                  // the same deterministic workflow ID if this nudge fails.
+                  observability.warn("Video generation workflow start deferred", {
+                    operationId: videoAcceptance.operationId,
+                    errorClass: error instanceof Error ? error.name : "UnknownError",
+                  });
+                }
               }
               const belongsToCurrentBatch = currentToolBatchCallIds.has(completedToolCall.callId);
               if (belongsToCurrentBatch) {

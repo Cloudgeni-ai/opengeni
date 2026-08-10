@@ -8,10 +8,12 @@ import {
 } from "./event-preview";
 import { WorkspaceInstructionPolicyRoleKeyInput } from "./workspace-instruction-policies";
 import { ClientResumableVoiceInputConfig } from "./transcription-recordings";
+import { MediaGenerationResult } from "./video-generation";
 
 export * from "./slack-bot-scopes";
 export * from "./connector-destinations";
 export * from "./image-generation";
+export * from "./video-generation";
 export * from "./editable-artifacts";
 export * from "./editable-artifact-committed-transaction";
 export * from "./editable-artifact-serialized-commit";
@@ -77,6 +79,7 @@ export {
   COMPUTER_SCREENSHOT_RETENTION_MS,
   COMPUTER_SCREENSHOT_WORKSPACE_QUOTA_BYTES,
   GENERATED_IMAGE_MAX_BYTES,
+  GENERATED_VIDEO_MAX_BYTES,
   RETAINED_OUTPUT_DEFAULT_PAGE_BYTES,
   RETAINED_OUTPUT_MAX_PAGE_BYTES,
   RETAINED_OUTPUT_RECEIPT_MAX_BYTES,
@@ -88,6 +91,7 @@ export {
   RetainedOutputUnavailableReason,
   retainedArtifactReferenceFromFile,
   retainedGeneratedImageReferenceFromFile,
+  retainedGeneratedVideoReferenceFromFile,
   retainedScreenshotReferenceFromFile,
   retainedOutputUnavailable,
   resolveRetainedOutputRange,
@@ -96,6 +100,7 @@ export {
   type RetainedArtifactMetadata,
   type RetainedArtifactReference,
   type RetainedGeneratedImageArtifactInput,
+  type RetainedGeneratedVideoArtifactInput,
   type RetainedScreenshotArtifactInput,
   type RetainedArtifactUnavailable,
   type RetainedOutputAvailableEvidence,
@@ -5393,6 +5398,7 @@ export const SessionSystemUpdateKind = z.enum([
   "agent_message",
   "agent_steer_instruction",
   "child_terminal_result",
+  "media_generation_result",
 ]);
 export type SessionSystemUpdateKind = z.infer<typeof SessionSystemUpdateKind>;
 
@@ -5437,6 +5443,7 @@ export const SessionSystemUpdatePayload = z.discriminatedUnion("type", [
       status: z.enum(["idle", "failed", "cancelled"]),
     })
     .passthrough(),
+  MediaGenerationResult,
 ]);
 export type SessionSystemUpdatePayload = z.infer<typeof SessionSystemUpdatePayload>;
 

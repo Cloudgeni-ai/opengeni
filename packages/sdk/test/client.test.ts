@@ -13,6 +13,8 @@ import {
   OPENGENI_CORRELATION_HEADER,
   type ComposerDraft,
   type SaveComposerDraftRequest,
+  type VideoGenerationModelCapability,
+  type WorkspaceVideoGenerationSettings,
 } from "../src/types";
 import { collect, makeEvent, SESSION_ID, sseBlock, WORKSPACE_ID } from "./helpers";
 
@@ -1188,6 +1190,89 @@ describe("OpenGeniClient", () => {
     await expect(client.openEventStream(WORKSPACE_ID, SESSION_ID)).rejects.toMatchObject({
       status: 403,
     });
+  });
+
+  test("video generation uses typed control endpoints and mints playback without fetching bytes", async () => {
+    const artifactId = "55555555-5555-4555-8555-555555555555";
+    const operationId = "66666666-6666-4666-8666-666666666666";
+    const policy = {
+      schemaVersion: 1 as const,
+      revision: 2,
+      enabledModelIds: ["bytedance/seedance-2.5"],
+      defaultModelId: "bytedance/seedance-2.5",
+    };
+    const model = {
+      modelId: "bytedance/seedance-2.5",
+      label: "Seedance 2.5",
+      providerLabel: "ByteDance",
+      sourceModes: ["text"],
+      resolutions: ["480p", "720p"],
+      aspectRatios: ["16:9"],
+      duration: { minSeconds: 4, maxSeconds: 12, stepSeconds: 1 },
+      supportsAudio: true,
+    } satisfies VideoGenerationModelCapability;
+    const settings = {
+      schemaVersion: 1 as const,
+      policy,
+      providerConfigured: true,
+      availableModels: [model],
+      capabilities: {
+        schemaVersion: 1 as const,
+        capabilityRevision: "revision-1",
+        defaultModelId: model.modelId,
+        models: [model],
+      },
+    } satisfies WorkspaceVideoGenerationSettings;
+    const operation = {
+      schemaVersion: 1 as const,
+      operationId,
+      modelId: model.modelId,
+      status: "accepted" as const,
+      createdAt: "2026-08-10T10:00:00.000Z",
+      updatedAt: "2026-08-10T10:00:01.000Z",
+      terminal: null,
+    };
+    const playback = {
+      schemaVersion: 1 as const,
+      artifactId,
+      url: "https://storage.example.test/video.mp4?signature=opaque",
+      expiresAt: "2026-08-10T10:05:00.000Z",
+      contentType: "video/mp4" as const,
+      sizeBytes: 2_000_000,
+      sha256: "a".repeat(64),
+      acceptRanges: "bytes" as const,
+    };
+    const { client, requests } = makeClient((request) => {
+      if (request.url.endsWith("/video-generation")) return jsonResponse(settings);
+      if (request.url.endsWith("/video-generation/policy")) return jsonResponse(policy);
+      if (request.url.endsWith(`/video-generation/operations/${operationId}`)) {
+        return jsonResponse(operation);
+      }
+      if (request.url.endsWith(`/artifacts/${artifactId}/playback-source`)) {
+        return jsonResponse(playback);
+      }
+      throw new Error(`unexpected request: ${request.url}`);
+    });
+
+    expect(await client.getVideoGenerationSettings(WORKSPACE_ID)).toEqual(settings);
+    expect(
+      await client.updateVideoGenerationPolicy(WORKSPACE_ID, {
+        expectedRevision: 1,
+        enabledModelIds: [model.modelId],
+        defaultModelId: model.modelId,
+      }),
+    ).toEqual(policy);
+    expect(await client.getVideoGenerationOperation(WORKSPACE_ID, operationId)).toEqual(operation);
+    expect(await client.createVideoArtifactPlaybackSource(WORKSPACE_ID, artifactId)).toEqual(
+      playback,
+    );
+    expect(requests.map((request) => request.method)).toEqual(["GET", "PUT", "GET", "POST"]);
+    expect(JSON.parse(requests[1]!.body!)).toEqual({
+      expectedRevision: 1,
+      enabledModelIds: [model.modelId],
+      defaultModelId: model.modelId,
+    });
+    expect(requests).toHaveLength(4);
   });
 
   test("both raw SSE transports reject contract skew without entering reconnect loops", async () => {

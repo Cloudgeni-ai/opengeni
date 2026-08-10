@@ -25,6 +25,8 @@ import {
   resourceMountPath,
   signDelegatedAccessToken,
   GenerateImageToolInput,
+  GenerateVideoToolInput,
+  GetVideoGenerationCapabilitiesToolInput,
   RequestHumanInputToolInput,
   type GitCredentialProvider,
   type GitCredentialTransport,
@@ -37,6 +39,8 @@ import {
   type ResourceRef,
   type ToolAuthNeededPayload,
   type ToolRef,
+  type VideoGenerationAcceptedReceipt,
+  type VideoGenerationCapabilities,
 } from "@opengeni/contracts";
 import {
   PublishEditableArtifactToolInput,
@@ -1333,6 +1337,14 @@ export type BuildAgentOptions = {
         kind: "provider_adapter";
         execute: (input: { prompt: string }, context: { toolCallId: string }) => Promise<unknown>;
       };
+  /** Host-owned durable asynchronous video-generation boundary for this turn. */
+  videoGeneration?: {
+    capabilities: () => Promise<VideoGenerationCapabilities>;
+    execute: (
+      input: import("@opengeni/contracts").GenerateVideoToolInput,
+      context: { toolCallId: string },
+    ) => Promise<VideoGenerationAcceptedReceipt>;
+  };
   /** Host-owned durable promotion of one final, verified Office artifact. */
   editableArtifactPublication?: {
     execute: (
@@ -1939,6 +1951,36 @@ export function buildOpenGeniAgent(
           },
         })
       : null;
+  const videoGenerationCapabilityTool = options.videoGeneration
+    ? agentTool({
+        name: "get_video_generation_capabilities",
+        description:
+          "Return the video-generation models and exact source, duration, resolution, aspect-ratio, and audio capabilities currently enabled for this workspace. Call when choosing a model or reference mode; availability is runtime state and is never encoded in the generate_video schema.",
+        parameters: GetVideoGenerationCapabilitiesToolInput,
+        errorFunction: null,
+        execute: async () => {
+          const adapter = options.videoGeneration;
+          if (!adapter) throw new Error("Video-generation capability changed during execution");
+          return await adapter.capabilities();
+        },
+      })
+    : null;
+  const videoGenerationTool = options.videoGeneration
+    ? agentTool({
+        name: "generate_video",
+        description:
+          "Start one durable asynchronous video generation. Use exact /workspace paths for any references and call once per intentionally distinct result. The accepted receipt means work continues independently; a later platform update provides the terminal result. Never retry automatically after failure or uncertainty.",
+        parameters: GenerateVideoToolInput,
+        errorFunction: null,
+        execute: async (input, _context, details) => {
+          const toolCallId = details?.toolCall?.callId;
+          if (!toolCallId) throw new Error("Video-generation tool call has no durable identity");
+          const adapter = options.videoGeneration;
+          if (!adapter) throw new Error("Video-generation adapter changed during execution");
+          return await adapter.execute(input, { toolCallId });
+        },
+      })
+    : null;
   const editableArtifactPublicationTool = options.editableArtifactPublication
     ? agentTool({
         name: "publish_editable_artifact",
@@ -1989,6 +2031,8 @@ export function buildOpenGeniAgent(
   const agentTools = [
     ...hostedTools,
     ...(providerImageGenerationTool ? [providerImageGenerationTool] : []),
+    ...(videoGenerationCapabilityTool ? [videoGenerationCapabilityTool] : []),
+    ...(videoGenerationTool ? [videoGenerationTool] : []),
     ...(editableArtifactPublicationTool ? [editableArtifactPublicationTool] : []),
     ...(humanInputTool ? [humanInputTool] : []),
   ];
@@ -2085,6 +2129,7 @@ export function buildOpenGeniAgent(
         : {}),
       ...(options.sessionSkills?.length ? { sessionSkills: options.sessionSkills } : {}),
       ...(artifactRuntimeAvailable ? { artifactRuntimeAvailable: true } : {}),
+      ...(options.videoGeneration ? { videoGenerationAvailable: true } : {}),
       ...repositoryWorkspaceSkillPathsOption(resources),
       ...(options.structuredToolTransport !== undefined
         ? { structuredToolTransport: options.structuredToolTransport }
@@ -2116,6 +2161,7 @@ export function buildOpenGeniAgent(
         options.packSkills ?? [],
         options.sessionSkills ?? [],
         artifactRuntimeAvailable,
+        Boolean(options.videoGeneration),
       ).map((selection) => Object.freeze(selection)),
     ),
   );
@@ -2598,6 +2644,7 @@ export function buildAgentCapabilities(
     skillLibrarySkills?: PackSkill[];
     sessionSkills?: PackSkill[];
     artifactRuntimeAvailable?: boolean;
+    videoGenerationAvailable?: boolean;
     workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
     structuredToolTransport?: boolean;
     supportsImageInput?: boolean;
@@ -2657,6 +2704,7 @@ export function buildAgentCapabilities(
     options.skillLibrarySkills ?? [],
     options.sessionSkills ?? [],
     options.artifactRuntimeAvailable === true,
+    options.videoGenerationAvailable === true,
   );
   caps.push(
     skills({
@@ -2664,6 +2712,7 @@ export function buildAgentCapabilities(
         [...packSkills, ...sessionSkills],
         options.skillLibrarySkills ?? [],
         options.artifactRuntimeAvailable === true,
+        options.videoGenerationAvailable === true,
       ),
     }),
   );
@@ -2674,6 +2723,7 @@ export function buildAgentCapabilities(
         ...(options.artifactRuntimeAvailable
           ? bundledSkillDirNames(bundledArtifactSkillsDir())
           : []),
+        ...(options.videoGenerationAvailable ? bundledSkillDirNames(bundledVideoSkillsDir()) : []),
         ...(options.skillLibrarySkills ?? []).map((skill) => skill.name),
         ...packSkills.map((skill) => skill.name),
         ...sessionSkills.map((skill) => skill.name),
@@ -7846,6 +7896,7 @@ export async function runAzureCliLoginHook(
 // process instead of granting the packaged path.
 let stagedBundledSkillsDir: string | null = null;
 let stagedBundledArtifactSkillsDir: string | null = null;
+let stagedBundledVideoSkillsDir: string | null = null;
 
 function bundledSkillsDir(): string {
   const moduleDir = dirname(fileURLToPath(import.meta.url));
@@ -7885,6 +7936,23 @@ function bundledArtifactSkillsDir(): string {
   return stagedBundledArtifactSkillsDir;
 }
 
+function bundledVideoSkillsDir(): string {
+  const moduleDir = dirname(fileURLToPath(import.meta.url));
+  const packaged =
+    [
+      join(moduleDir, "bundled_video_skills"),
+      join(moduleDir, "..", "src", "bundled_video_skills"),
+    ].find((candidate) => existsSync(candidate)) ?? join(moduleDir, "bundled_video_skills");
+  if (isPathWithin(process.cwd(), packaged)) return packaged;
+  if (!stagedBundledVideoSkillsDir) {
+    stagedBundledVideoSkillsDir = stageBundledSkills(
+      packaged,
+      join(process.cwd(), ".opengeni", "bundled_video_skills"),
+    );
+  }
+  return stagedBundledVideoSkillsDir;
+}
+
 function stageBundledSkills(packaged: string, target: string): string {
   const tmp = `${target}.tmp-${process.pid}`;
   rmSync(tmp, { recursive: true, force: true });
@@ -7922,10 +7990,16 @@ export function lazySkillSourceWithPackSkills(
   packSkills: PackSkill[],
   skillLibrarySkills: PackSkill[] = [],
   artifactRuntimeAvailable = false,
+  videoGenerationAvailable = false,
 ): LocalDirLazySkillSource {
   const bundledDir = bundledSkillsDir();
   const bundled = localDirLazySkillSource({ src: bundledDir });
-  if (packSkills.length === 0 && skillLibrarySkills.length === 0 && !artifactRuntimeAvailable) {
+  if (
+    packSkills.length === 0 &&
+    skillLibrarySkills.length === 0 &&
+    !artifactRuntimeAvailable &&
+    !videoGenerationAvailable
+  ) {
     return bundled;
   }
   const children: Record<string, Entry> = {};
@@ -7938,6 +8012,14 @@ export function lazySkillSourceWithPackSkills(
     artifactBundled = localDirLazySkillSource({ src: artifactDir });
     for (const name of bundledSkillDirNames(artifactDir)) {
       children[name] = localDir({ src: join(artifactDir, name) });
+    }
+  }
+  let videoBundled: LocalDirLazySkillSource | null = null;
+  if (videoGenerationAvailable) {
+    const videoDir = bundledVideoSkillsDir();
+    videoBundled = localDirLazySkillSource({ src: videoDir });
+    for (const name of bundledSkillDirNames(videoDir)) {
+      children[name] = localDir({ src: join(videoDir, name) });
     }
   }
   const libraryIndex: SkillIndexEntry[] = [];
@@ -7986,6 +8068,11 @@ export function lazySkillSourceWithPackSkills(
           !packNameKeys.has((entry.path ?? entry.name).toLowerCase()) &&
           !libraryNameKeys.has((entry.path ?? entry.name).toLowerCase()),
       ),
+      ...(videoBundled?.getIndex?.(manifest, skillsPath) ?? []).filter(
+        (entry) =>
+          !packNameKeys.has((entry.path ?? entry.name).toLowerCase()) &&
+          !libraryNameKeys.has((entry.path ?? entry.name).toLowerCase()),
+      ),
       ...libraryIndex.filter(
         (entry) => !packNameKeys.has((entry.path ?? entry.name).toLowerCase()),
       ),
@@ -8000,10 +8087,12 @@ function effectiveSkillSelections(
   packSkills: readonly PackSkill[],
   sessionSkills: readonly PackSkill[],
   artifactRuntimeAvailable = false,
+  videoGenerationAvailable = false,
 ): readonly EffectiveSkillSelection[] {
   const defaultSkillNames = [
     ...bundledSkillDirNames(bundledSkillsDir()),
     ...(artifactRuntimeAvailable ? bundledSkillDirNames(bundledArtifactSkillsDir()) : []),
+    ...(videoGenerationAvailable ? bundledSkillDirNames(bundledVideoSkillsDir()) : []),
   ];
   const defaultSelections = defaultSkillNames.map((name) => ({
     id: `bundled:${name}`,
@@ -8020,6 +8109,7 @@ function effectiveSkillSelections(
     librarySkills,
     sessionSkills,
     artifactRuntimeAvailable,
+    videoGenerationAvailable,
   );
   const sessionNameKeys = new Set(effectiveSessionSkills.map((skill) => skill.name.toLowerCase()));
   const selected = librarySelections.filter((selection) =>
@@ -8061,6 +8151,7 @@ function sessionSkillsForMaterialization(
   librarySkills: readonly PackSkill[],
   sessionSkills: readonly PackSkill[],
   artifactRuntimeAvailable = false,
+  videoGenerationAvailable = false,
 ): PackSkill[] {
   const configured = new Map<string, PackSkill>();
   for (const skill of [...librarySkills, ...packSkills]) {
@@ -8070,6 +8161,7 @@ function sessionSkillsForMaterialization(
     [
       ...bundledSkillDirNames(bundledSkillsDir()),
       ...(artifactRuntimeAvailable ? bundledSkillDirNames(bundledArtifactSkillsDir()) : []),
+      ...(videoGenerationAvailable ? bundledSkillDirNames(bundledVideoSkillsDir()) : []),
     ].map((name) => name.toLowerCase()),
   );
   const selected = new Map<string, PackSkill>();

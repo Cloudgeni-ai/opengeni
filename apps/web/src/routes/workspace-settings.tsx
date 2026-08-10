@@ -24,6 +24,7 @@ import { toast } from "sonner";
 
 import { CodexSubscriptionsCard } from "@/components/codex-connection";
 import { AiGatewayConnectionCard } from "@/components/ai-gateway-connection";
+import { VideoGenerationPreferenceRow } from "@/components/video-generation-settings";
 import { LoadErrorState } from "@/components/common";
 import { WorkspaceConfigLink } from "@/components/rail/workspace-config-link";
 import {
@@ -126,6 +127,7 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
   const [busy, setBusy] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const [apiKeysOpen, setApiKeysOpen] = useState(false);
+  const [gatewayRevision, setGatewayRevision] = useState(0);
   const canManageApiKeys = hasWorkspacePermission(
     context.accessContext,
     workspaceId,
@@ -366,6 +368,11 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
           <div className="divide-y divide-border/70 rounded-lg border border-border px-3">
             <MemoryPreferenceRow workspaceId={workspaceId} canManage={canRename} />
             <VoiceInputPreferenceRow workspaceId={workspaceId} canManage={canRename} />
+            <VideoGenerationPreferenceRow
+              workspaceId={workspaceId}
+              canManage={canDeleteWorkspace}
+              refreshKey={gatewayRevision}
+            />
             <CodexCompactionPreferenceRow workspaceId={workspaceId} canManage={canRename} />
           </div>
         </section>
@@ -377,7 +384,11 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
           canManage={canDeleteWorkspace}
         />
 
-        <AiGatewayConnectionCard workspaceId={workspaceId} canManage={canDeleteWorkspace} />
+        <AiGatewayConnectionCard
+          workspaceId={workspaceId}
+          canManage={canDeleteWorkspace}
+          onConnectionChange={() => setGatewayRevision((revision) => revision + 1)}
+        />
 
         <details
           className="rounded-lg border border-border"

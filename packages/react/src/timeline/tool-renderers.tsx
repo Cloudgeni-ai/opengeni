@@ -31,6 +31,7 @@ import {
   TargetIcon,
   Table2Icon,
   TerminalIcon,
+  VideoIcon,
   WrenchIcon,
 } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
@@ -969,6 +970,40 @@ function GeneratedImageRenderer({ item, loadRetainedArtifact }: ToolRendererProp
       failed={item.status === "failed"}
       cancelled={item.status === "cancelled"}
     />
+  );
+}
+
+function GeneratedVideoRenderer({ item }: ToolRendererProps) {
+  const args = parseToolArgs(item.arguments);
+  const prompt = typeof args.prompt === "string" ? args.prompt : "";
+  const parsedOutput = typeof item.output === "string" ? tryParseJson(item.output) : item.output;
+  const accepted =
+    parsedOutput &&
+    typeof parsedOutput === "object" &&
+    !Array.isArray(parsedOutput) &&
+    (parsedOutput as Record<string, unknown>).status === "accepted";
+  const failed = item.status === "failed";
+  const cancelled = item.status === "cancelled";
+  const running = item.status === "running";
+  return (
+    <ActivityDisclosure
+      icon={<VideoIcon className={ICON_SIZE} />}
+      iconTone={failed ? "failed" : running ? "running" : accepted ? "accent" : "muted"}
+      title={
+        running ? "Starting video generation" : accepted ? "Generating video" : "Generate video"
+      }
+      running={running}
+      failed={failed}
+      cancelled={cancelled}
+      preview={truncatePreview(prompt, 88) || (accepted ? "request accepted" : undefined)}
+    >
+      {prompt ? <BodyNote>{prompt}</BodyNote> : null}
+      {accepted ? (
+        <BodyNote>The video will appear here when it is ready.</BodyNote>
+      ) : item.output !== undefined ? (
+        <PayloadBlock label="Output" value={item.output} />
+      ) : null}
+    </ActivityDisclosure>
   );
 }
 
@@ -2255,6 +2290,7 @@ const BASE_ENTRIES: ToolRegistryEntry[] = [
   { match: "name", name: "web_search_call", render: WebSearchRenderer },
   { match: "name", name: "image_generation_call", render: GeneratedImageRenderer },
   { match: "name", name: "generate_image", render: GeneratedImageRenderer },
+  { match: "name", name: "generate_video", render: GeneratedVideoRenderer },
   {
     match: "name",
     name: "publish_editable_artifact",

@@ -391,6 +391,29 @@ const SettingsSchema = z.object({
   vercelAiGatewayApiKey: z.string().optional(),
   /** Image adapter route; native hosted providers ignore this model. */
   imageGenerationModel: z.string().trim().min(1).max(256).default("openai/gpt-image-2"),
+  /** Durable video generation uses the workspace-owned Gateway credential. */
+  videoGenerationPollIntervalMs: z.coerce.number().int().min(1_000).max(60_000).default(5_000),
+  videoGenerationRecoveryDeadlineMs: z.coerce
+    .number()
+    .int()
+    .min(60_000)
+    .max(24 * 60 * 60_000)
+    .default(2 * 60 * 60_000),
+  videoGenerationReferenceUrlTtlSeconds: z.coerce
+    .number()
+    .int()
+    .min(300)
+    .max(6 * 60 * 60)
+    .default(60 * 60),
+  videoGenerationMaxConcurrentPerWorkspace: z.coerce.number().int().min(1).max(16).default(2),
+  videoGenerationWorkspaceQuotaBytes: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(Number.MAX_SAFE_INTEGER)
+    .default(20 * 1024 * 1024 * 1024),
+  videoGenerationTempDirectory: z.string().trim().min(1).max(1_024).default("/tmp/opengeni-video"),
+  videoGenerationFfprobePath: z.string().trim().min(1).max(1_024).default("ffprobe"),
   // Native composer voice input (browser MediaRecorder → API transcription).
   // Provider credentials stay server-side; ClientConfig only projects availability
   // and hard ceilings. Selection happens once before audio is sent — never retry
@@ -1866,6 +1889,17 @@ export function getSettings(): Settings {
     openaiAllowedModels: optional("OPENGENI_OPENAI_ALLOWED_MODELS"),
     vercelAiGatewayApiKey: optional("OPENGENI_VERCEL_AI_GATEWAY_API_KEY"),
     imageGenerationModel: optional("OPENGENI_IMAGE_GENERATION_MODEL"),
+    videoGenerationPollIntervalMs: optional("OPENGENI_VIDEO_GENERATION_POLL_INTERVAL_MS"),
+    videoGenerationRecoveryDeadlineMs: optional("OPENGENI_VIDEO_GENERATION_RECOVERY_DEADLINE_MS"),
+    videoGenerationReferenceUrlTtlSeconds: optional(
+      "OPENGENI_VIDEO_GENERATION_REFERENCE_URL_TTL_SECONDS",
+    ),
+    videoGenerationMaxConcurrentPerWorkspace: optional(
+      "OPENGENI_VIDEO_GENERATION_MAX_CONCURRENT_PER_WORKSPACE",
+    ),
+    videoGenerationWorkspaceQuotaBytes: optional("OPENGENI_VIDEO_GENERATION_WORKSPACE_QUOTA_BYTES"),
+    videoGenerationTempDirectory: optional("OPENGENI_VIDEO_GENERATION_TEMP_DIRECTORY"),
+    videoGenerationFfprobePath: optional("OPENGENI_VIDEO_GENERATION_FFPROBE_PATH"),
     voiceInputMaxDurationSeconds: optional("OPENGENI_VOICE_INPUT_MAX_DURATION_SECONDS"),
     voiceInputMaxSizeBytes: optional("OPENGENI_VOICE_INPUT_MAX_SIZE_BYTES"),
     voiceInputResumableEnabled: optional("OPENGENI_VOICE_INPUT_RESUMABLE_ENABLED"),
