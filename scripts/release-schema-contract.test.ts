@@ -221,7 +221,7 @@ describe("release schema contract", () => {
         (migrations.has("0205_durable_learning_router_ledger.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "2cccb084d47128eccf2af040eff5ce652cb284e727287c36d9631974bacbfd86",
+      "56a66e7fd7e5452fd6a104b84138935cbccb175aefca35753b220bc09628ee82",
     );
     expect(contract.latestMigration).toBe("0205_durable_learning_router_ledger.sql");
     expect(migrations.get("0197_knowledge_source_sync_schedules.sql")).toMatchObject({
@@ -249,7 +249,7 @@ describe("release schema contract", () => {
       deploymentMode: "rolling",
     });
     expect(migrations.get("0205_durable_learning_router_ledger.sql")).toMatchObject({
-      sha256: "1e5aad43da980135fd8ecb39b63ee289f79af73b35fccf670e133896bf026a52",
+      sha256: "97ffa2047a9c6b5324e1dd47deb2730e62176d61014c59f5ad0f4b4682976de4",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0183_model_call_provider_cost_estimates.sql")).toMatchObject({

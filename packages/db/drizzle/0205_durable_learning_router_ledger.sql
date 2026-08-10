@@ -131,6 +131,7 @@ BEGIN
       authority record;
       existing durable_learning_attempts%%ROWTYPE;
       stored_receipt jsonb;
+      replay_human_subject_id text;
       required_permission text;
       required_role text;
       decision_scope text;
@@ -179,6 +180,76 @@ BEGIN
       THEN
         RAISE EXCEPTION 'durable-learning request and route decision do not match'
           USING ERRCODE = '22023';
+      END IF;
+
+      -- Completed replay is immutable evidence retrieval, not a new authority
+      -- mutation. Match the complete stored operation tuple and its durable turn
+      -- provenance before consulting any mutable live-attempt or membership state.
+      SELECT attempt.* INTO existing
+      FROM durable_learning_attempts attempt
+      WHERE attempt.id = p_id
+        AND attempt.account_id = p_account_id
+        AND attempt.workspace_id = p_workspace_id;
+      IF FOUND THEN
+        IF existing.session_id IS DISTINCT FROM p_session_id
+          OR existing.turn_id IS DISTINCT FROM p_turn_id
+          OR existing.execution_attempt_id IS DISTINCT FROM p_execution_attempt_id
+          OR existing.execution_generation IS DISTINCT FROM p_execution_generation
+          OR existing.operation IS DISTINCT FROM p_operation
+          OR existing.target_surface IS DISTINCT FROM p_target_surface
+          OR existing.input_hash IS DISTINCT FROM p_input_hash
+          OR existing.canonical_input IS DISTINCT FROM p_canonical_input
+          OR existing.request IS DISTINCT FROM p_request
+          OR existing.decision IS DISTINCT FROM p_decision
+        THEN
+          RAISE EXCEPTION 'durable-learning attempt id already identifies different immutable input'
+            USING ERRCODE = '23505';
+        END IF;
+
+        SELECT coalesce(
+          turn.initiating_human_subject_id,
+          CASE WHEN turn.initiator_kind = 'subject' THEN turn.initiator_subject_id END
+        ) INTO replay_human_subject_id
+        FROM sessions session
+        JOIN session_turns turn
+          ON turn.account_id = session.account_id
+         AND turn.workspace_id = session.workspace_id
+         AND turn.session_id = session.id
+        JOIN session_turn_attempts execution_attempt
+          ON execution_attempt.account_id = turn.account_id
+         AND execution_attempt.workspace_id = turn.workspace_id
+         AND execution_attempt.session_id = turn.session_id
+         AND execution_attempt.turn_id = turn.id
+        WHERE session.account_id = p_account_id
+          AND session.workspace_id = p_workspace_id
+          AND session.id = p_session_id
+          AND turn.id = p_turn_id
+          AND execution_attempt.id = p_execution_attempt_id
+          AND execution_attempt.execution_generation = p_execution_generation
+          AND length(btrim(coalesce(
+            turn.initiating_human_subject_id,
+            CASE WHEN turn.initiator_kind = 'subject' THEN turn.initiator_subject_id END
+          ))) BETWEEN 1 AND 1024
+        FOR SHARE OF session, turn, execution_attempt;
+        IF NOT FOUND
+          OR replay_human_subject_id IS DISTINCT FROM existing.initiating_human_subject_id
+        THEN
+          RAISE EXCEPTION 'durable-learning attempt id has mismatched initiating-human provenance'
+            USING ERRCODE = '23505';
+        END IF;
+
+        SELECT receipt.receipt INTO stored_receipt
+        FROM durable_learning_attempt_receipts receipt
+        WHERE receipt.attempt_id = p_id
+          AND receipt.account_id = p_account_id
+          AND receipt.workspace_id = p_workspace_id
+          AND receipt.input_hash = p_input_hash;
+        IF stored_receipt IS NOT NULL THEN
+          initiating_human_subject_id := existing.initiating_human_subject_id;
+          existing_receipt := stored_receipt;
+          RETURN NEXT;
+          RETURN;
+        END IF;
       END IF;
 
       SELECT

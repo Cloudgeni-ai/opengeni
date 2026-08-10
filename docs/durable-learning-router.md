@@ -4,9 +4,9 @@ The durable-learning router is the single domain boundary for a confirmed agent
 attempt to write one of the governed durable authorities it supports. It does
 not decide whether evidence deserves a change. A caller must first produce an
 explicit, bounded request with `confirmation.state = "confirmed"`; the router
-then validates the exact running attempt, chooses one authority from the typed
-subject, records immutable input and outcome evidence, and applies the authority
-mutation atomically with its receipt.
+then validates the exact running attempt for a new mutation, chooses one
+authority from the typed subject, records immutable input and outcome evidence,
+and applies the authority mutation atomically with its receipt.
 
 Migration `0205_durable_learning_router_ledger.sql` adds the immutable attempt
 and receipt ledger. The public contracts live in
@@ -16,7 +16,7 @@ adapters live under `packages/core/src/domain/`.
 
 ## Accepted request authority
 
-Every write and rollback request carries the exact:
+Every new write and rollback request carries the exact:
 
 - account and workspace;
 - session and active turn;
@@ -24,14 +24,14 @@ Every write and rollback request carries the exact:
 - operation UUID;
 - explicit confirmed state.
 
-PostgreSQL admits the operation only while that session, turn, and execution
-attempt are still the exact active accepted attempt, the turn remains in an
-admissible nonterminal state, the execution attempt is claimed or running, and
-no pending, delivered, or acknowledged interruption exists. It derives the
-immutable initiating human from the turn and locks that human's current
-workspace membership. Session creation metadata, a caller-supplied actor, an
-agent identity, or provenance text is never substituted for initiating-human
-authority.
+PostgreSQL admits a new or still-unreceipted operation only while that session,
+turn, and execution attempt are still the exact active accepted attempt, the
+turn remains in an admissible nonterminal state, the execution attempt is
+claimed or running, and no pending, delivered, or acknowledged interruption
+exists. It derives the immutable initiating human from the turn and locks that
+human's current workspace membership. Session creation metadata, a
+caller-supplied actor, an agent identity, or provenance text is never
+substituted for initiating-human authority.
 
 The authority requirements are:
 
@@ -48,6 +48,17 @@ until the destination authority mutation and immutable receipt commit together.
 A stale generation, replaced attempt, interrupted attempt, missing initiating
 human, mismatched tenant, or insufficient authority fails closed before any
 destination write.
+
+A completed byte-identical replay is evidence retrieval rather than a new
+admission. Before consulting mutable live-attempt or membership state,
+PostgreSQL matches the exact tenant, session, turn, execution attempt and
+generation, operation, surface, input hash, canonical input, request, decision,
+and the initiating-human provenance still recorded on the durable turn. If the
+matching immutable receipt exists, it is returned even after the originating
+execution attempt becomes terminal, and the destination callback is not run.
+Changed input, another tenant, guessed authority identifiers, or altered turn
+provenance fails closed. A missing receipt always falls through to the full live
+authority checks above.
 
 Preference Registry writes retain `agent_attempt` as their execution principal;
 they never spoof `human_session`. Its canonical lifecycle admits that principal
@@ -93,11 +104,13 @@ only; mutation triggers reject updates and deletes. The target-schema-local
 `SECURITY DEFINER` begin and complete functions are the only runtime ledger
 writers.
 
-An exact retry of the same operation and canonical input returns the existing
-receipt without another authority mutation. Reusing an operation UUID for any
-changed tenant, execution authority, subject, route, or other input is rejected.
-Concurrent identical attempts serialize on the exact execution attempt and
-converge on one authority mutation and one receipt.
+An exact retry of the same completed operation and canonical input returns the
+existing receipt without another authority mutation or a requirement that the
+originating execution attempt remain live. Reusing an operation UUID for any
+changed tenant, execution authority, subject, route, initiating-human
+provenance, or other input is rejected. Concurrent identical attempts serialize
+on the exact execution attempt and converge on one authority mutation and one
+receipt.
 
 The begin function marks only its surrounding transaction as admitted. Receipt
 completion requires that transaction-local marker plus the exact operation and

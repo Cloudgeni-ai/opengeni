@@ -331,6 +331,13 @@ describe("migration 0205 durable-learning router ledger", () => {
     expect(migration).toContain("context_principal_kind IS DISTINCT FROM 'agent_attempt'");
     expect(migration).toContain("admitted.operation = 'rollback'");
     expect(migration).toContain("GRANT SELECT ON TABLE durable_learning_attempts");
+    const completedReplayLookup = migration.indexOf(
+      "WHERE attempt.id = p_id\n        AND attempt.account_id = p_account_id",
+    );
+    const liveAuthorityLookup = migration.indexOf("FROM workspaces workspace");
+    expect(completedReplayLookup).toBeGreaterThan(-1);
+    expect(completedReplayLookup).toBeLessThan(liveAuthorityLookup);
+    expect(migration).toContain("IF stored_receipt IS NOT NULL THEN");
     expect(migration).not.toMatch(
       /\b(?:INSERT INTO|UPDATE|DELETE FROM)\s+"?(?:documents|knowledge_memories)"?/iu,
     );
@@ -340,35 +347,104 @@ describe("migration 0205 durable-learning router ledger", () => {
     );
   });
 
-  test("replays exact input, rejects changed reuse, isolates tenants, and keeps evidence immutable", async () => {
+  test("replays completed exact input after terminal authority and rejects every mismatched reuse", async () => {
     if (!shared || !client) return;
     const first = await fixture("replay");
     const foreign = await fixture("foreign");
     const operationId = crypto.randomUUID();
-    let applies = 0;
+    let initialApplies = 0;
     const original = await runDurableLearningAttempt(
       client.db,
       companyAttempt(first, operationId),
       async () => {
-        applies += 1;
+        initialApplies += 1;
         return appliedCompanyResult();
       },
     );
+    await shared.admin`
+      update session_turn_attempts
+      set state = 'closed', outcome = 'completed', closed_at = now()
+      where id = ${first.attemptId}`;
+    await shared.admin`
+      update workspace_memberships
+      set role = 'member', permissions = '[]'::jsonb
+      where workspace_id = ${first.workspaceId}
+        and subject_id = ${first.subjectId}`;
+    let replayApplies = 0;
     const replay = await runDurableLearningAttempt(
       client.db,
       companyAttempt(first, operationId),
       async () => {
-        applies += 1;
+        replayApplies += 1;
         return appliedCompanyResult();
       },
     );
     expect(replay).toEqual(original);
-    expect(applies).toBe(1);
+    expect(initialApplies).toBe(1);
+    expect(replayApplies).toBe(0);
+    const [completedCounts] = await shared.admin<{ attempts: number; receipts: number }[]>`
+      select
+        (select count(*)::int from durable_learning_attempts where id = ${operationId}) as attempts,
+        (select count(*)::int from durable_learning_attempt_receipts where attempt_id = ${operationId}) as receipts`;
+    expect(completedCounts).toMatchObject({ attempts: 1, receipts: 1 });
+
     await expect(
       runDurableLearningAttempt(
         client.db,
         companyAttempt(first, operationId, "Changed immutable input."),
         async () => appliedCompanyResult(),
+      ),
+    ).rejects.toBeInstanceOf(DurableLearningAttemptReuseError);
+    const guessedAuthority = companyAttempt(first, operationId);
+    await expect(
+      runDurableLearningAttempt(
+        client.db,
+        {
+          ...guessedAuthority,
+          authority: {
+            ...guessedAuthority.authority,
+            sessionId: crypto.randomUUID(),
+            turnId: crypto.randomUUID(),
+            attemptId: crypto.randomUUID(),
+          },
+        },
+        async () => appliedCompanyResult(),
+      ),
+    ).rejects.toBeInstanceOf(DurableLearningAttemptReuseError);
+    await expect(
+      runDurableLearningAttempt(
+        client.db,
+        workspaceInstructionAttempt(first, operationId),
+        async () => appliedCompanyResult(),
+      ),
+    ).rejects.toBeInstanceOf(DurableLearningAttemptReuseError);
+    const changedScope = companyAttempt(first, operationId);
+    await expect(
+      runDurableLearningAttempt(
+        client.db,
+        {
+          ...changedScope,
+          decision: { ...changedScope.decision, scope: { kind: "workspace" as const } },
+        },
+        async () => appliedCompanyResult(),
+      ),
+    ).rejects.toBeInstanceOf(DurableLearningAttemptReuseError);
+    await expect(
+      runDurableLearningAttempt(client.db, companyAttempt(foreign, operationId), async () =>
+        appliedCompanyResult(),
+      ),
+    ).rejects.toBeInstanceOf(DurableLearningAttemptReuseError);
+
+    await shared.admin.begin(async (admin) => {
+      await admin`set local session_replication_role = replica`;
+      await admin`
+        update session_turns
+        set initiating_human_subject_id = ${`human:changed-${crypto.randomUUID()}`}
+        where id = ${first.turnId}`;
+    });
+    await expect(
+      runDurableLearningAttempt(client.db, companyAttempt(first, operationId), async () =>
+        appliedCompanyResult(),
       ),
     ).rejects.toBeInstanceOf(DurableLearningAttemptReuseError);
 
