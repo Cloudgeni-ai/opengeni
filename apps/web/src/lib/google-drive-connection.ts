@@ -41,7 +41,7 @@ export function localConnectedGoogleDrivePreview(
     version: 1,
     metadata: {
       credentialRole: "google_drive_metadata",
-      credentialLabel: "Google Drive metadata browser",
+      credentialLabel: "Google Drive read-only source sync",
       googlePermissionId: "preview-permission",
       googleEmail: "bendik@cloudgeni.ai",
       googleDisplayName: "Bendik Nyheim",

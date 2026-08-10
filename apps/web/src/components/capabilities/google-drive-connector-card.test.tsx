@@ -45,7 +45,7 @@ describe("Google Drive connector document destination UI", () => {
     expect(
       configuredGoogleDriveSources({
         credentialRole: "google_drive_metadata",
-        credentialLabel: "Google Drive metadata browser",
+        credentialLabel: "Google Drive read-only source sync",
         googlePermissionId: "permission",
         googleEmail: "owner@example.com",
         googleDisplayName: null,

@@ -325,16 +325,20 @@ demo video, privacy policy, user help, and security-assessment evidence:
 7. OAuth access/refresh tokens, the client secret, and PKCE verifier stay
    encrypted on the server. Browser projections expose connection metadata but
    not credentials.
-8. Reconnect is bound to Google's immutable `permissionId`; a different account
+8. After token resolution or refresh, both the browser and scheduled-sync worker
+   reload the exact persisted connection generation and revalidate recursive
+   read scope before the first Drive provider request. A refreshed scope
+   downgrade therefore fails closed without exposing provider data.
+9. Reconnect is bound to Google's immutable `permissionId`; a different account
    is rejected. Selected source identity and destination authority are frozen
    into the sync authority and revalidated before provider access and durable
    writes.
-9. Pause, disconnect, revoked grants, app removal, re-consent requirements, and
+10. Pause, disconnect, revoked grants, app removal, re-consent requirements, and
    permission loss stop effective delivery and advance deny-side retrieval
    authority. Disconnect is local and intentionally does not call Google's
    project-wide token-revocation endpoint; users must remove CloudGeni access in
    their Google Account when they also want provider-side revocation.
-10. Imported Drive Documents remain `agentAccess=false` until a separate fresh,
+11. Imported Drive Documents remain `agentAccess=false` until a separate fresh,
     generation-fenced ACL evidence operation authorizes retrieval. Google ACL
     projection and citation-time reauthorization are not part of this package.
 
@@ -418,8 +422,9 @@ model context, sandboxes, logs, or browser storage. The package should include:
   development/review controls;
 - the OAuth isolation proof covering signed-state expiry/tampering/replay,
   exact redirect/reconnect shape, PKCE binding, grant revalidation, permission
-  identity, token rotation, subject/workspace/account isolation, disconnect
-  idempotency, and secret-sink absence;
+  identity, token rotation, refreshed-scope downgrade before provider access,
+  subject/workspace/account isolation, disconnect idempotency, and secret-sink
+  absence;
 - independent assessment/Letter of Validation owner, assessor, submission date,
   approval date, expiry/renewal date, findings, remediation receipts, and final
   Google disposition.
