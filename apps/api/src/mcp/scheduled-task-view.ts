@@ -25,6 +25,14 @@ export type ScheduledTaskUtf8ProjectionFact = Omit<Utf8Projection, "value">;
 
 type ScheduledTaskScheduleProjection =
   | {
+      schedule: Extract<ScheduledTaskScheduleSpec, { type: "manual" }>;
+      projection: {
+        type: "manual";
+        truncated: false;
+        fields: Record<string, never>;
+      };
+    }
+  | {
       schedule: Extract<ScheduledTaskScheduleSpec, { type: "once" }>;
       projection: {
         type: "once";
@@ -171,6 +179,11 @@ export function projectScheduledTaskSchedule(
   schedule: ScheduledTaskScheduleSpec,
 ): ScheduledTaskScheduleProjection {
   switch (schedule.type) {
+    case "manual":
+      return {
+        schedule: { type: "manual" },
+        projection: { type: "manual", truncated: false, fields: {} },
+      };
     case "once": {
       const runAt = projectScheduledTaskUtf8(
         schedule.runAt,
@@ -294,6 +307,7 @@ function toolIdentity(
 }
 
 export function scheduledTaskMcpSummary(task: ScheduledTask) {
+  const action = task.action ?? ({ kind: "agent_turn" } as const);
   const name = projectScheduledTaskUtf8(task.name, SCHEDULED_TASK_NAME_MAX_BYTES);
   const schedule = projectScheduledTaskSchedule(task.schedule);
   const model = task.agentConfig.model
@@ -308,6 +322,26 @@ export function scheduledTaskMcpSummary(task: ScheduledTask) {
     schedule: schedule.schedule,
     runMode: task.runMode,
     overlapPolicy: task.overlapPolicy,
+    action:
+      action.kind === "agent_turn"
+        ? { kind: "agent_turn" as const }
+        : {
+            kind: action.kind,
+            sourceId: action.sourceId,
+            sourceGeneration: action.sourceGeneration,
+            sourceLifecycleGeneration: action.sourceLifecycleGeneration,
+            destination: action.destination,
+            initiatingSubjectId: action.initiatingSubjectId,
+            allDescendants: action.allDescendants,
+            connection: {
+              connectionId: action.connection.connectionId,
+              connectionVersion: action.connection.connectionVersion,
+              providerDomain: action.connection.providerDomain,
+              kind: action.connection.kind,
+              ownerSubjectId: action.connection.ownerSubjectId,
+            },
+            limits: action.limits,
+          },
     targetSessionId: task.targetSessionId,
     reusableSessionId: task.reusableSessionId,
     variableSetId: task.variableSetId,

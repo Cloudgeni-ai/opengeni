@@ -30,6 +30,7 @@ import {
   validatedScheduledTaskUpdate,
 } from "@opengeni/core";
 import { boundedLimit } from "../http/common";
+import { revokeKnowledgeSourceScheduleAuthorization } from "../integrations/google-drive";
 
 export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { settings, db, workflowClient, objectStorage } = deps;
@@ -139,35 +140,36 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     // Load the task before the gate so a codex-model scheduled task can be
     // recognised as codex-billed and skip the credit/cost gates at the edge.
     const task = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
-    await validateScheduledTaskTarget({
-      db,
-      sessionAuthorization: deps.sessionAuthorization,
-      authorizationSurface: "http",
-      grant,
-      targetSessionId: task.targetSessionId,
-      runMode: task.runMode,
-      variableSetId: task.variableSetId,
-      rigId: task.rigId,
-      agentConfig: task.agentConfig,
-      missingTargetStatus: 404,
-    });
-    await requireLimit(deps, {
-      accountId: grant.accountId,
-      workspaceId,
-      action: "agent_run:create",
-      quantity: 1,
-      model: task.agentConfig.model ?? deps.settings.openaiModel,
-    });
+    if (task.action.kind === "agent_turn") {
+      await validateScheduledTaskTarget({
+        db,
+        sessionAuthorization: deps.sessionAuthorization,
+        authorizationSurface: "http",
+        grant,
+        targetSessionId: task.targetSessionId,
+        runMode: task.runMode,
+        variableSetId: task.variableSetId,
+        rigId: task.rigId,
+        agentConfig: task.agentConfig,
+        missingTargetStatus: 404,
+      });
+      await requireLimit(deps, {
+        accountId: grant.accountId,
+        workspaceId,
+        action: "agent_run:create",
+        quantity: 1,
+        model: task.agentConfig.model ?? deps.settings.openaiModel,
+      });
+    }
     // Body is optional (a bare POST is still a valid trigger); only a present,
     // non-empty body must parse against the contract.
     const body = await c.req.json().catch(() => ({}));
     const { triggerId } = TriggerScheduledTaskRequest.parse(body ?? {});
     const triggerToken = scheduledTaskTriggerToken(triggerId);
-    const agentRunUsageIdempotencyKey = manualScheduledTaskTriggerUsageKey(
-      workspaceId,
-      task.id,
-      triggerToken,
-    );
+    const agentRunUsageIdempotencyKey =
+      task.action.kind === "agent_turn"
+        ? manualScheduledTaskTriggerUsageKey(workspaceId, task.id, triggerToken)
+        : `knowledge-source-sync:manual:${workspaceId}:${task.id}:${triggerToken}`;
     const triggerWorkflowId = manualScheduledTaskTriggerWorkflowId(task.id, triggerToken);
     await workflowClient.triggerScheduledTask({
       task,
@@ -175,24 +177,30 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       triggerWorkflowId,
       initiator: { kind: "subject", subjectId: grant.subjectId },
     });
-    await recordWorkspaceUsage(deps, {
-      accountId: grant.accountId,
-      workspaceId,
-      subjectId: grant.subjectId,
-      eventType: "agent_run.created",
-      quantity: 1,
-      unit: "run",
-      sourceResourceType: "scheduled_task",
-      sourceResourceId: task.id,
-      idempotencyKey: agentRunUsageIdempotencyKey,
-    });
+    if (task.action.kind === "agent_turn") {
+      await recordWorkspaceUsage(deps, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+        eventType: "agent_run.created",
+        quantity: 1,
+        unit: "run",
+        sourceResourceType: "scheduled_task",
+        sourceResourceId: task.id,
+        idempotencyKey: agentRunUsageIdempotencyKey,
+      });
+    }
     return c.json(scheduledTaskForGrant(task, grant), 202);
   });
 
   app.delete("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:manage");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:manage");
     const task = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
+    await revokeKnowledgeSourceScheduleAuthorization(deps, {
+      task,
+      subjectId: grant.subjectId,
+    });
     await workflowClient.deleteScheduledTaskSchedule({
       temporalScheduleId: task.temporalScheduleId,
     });

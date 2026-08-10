@@ -104,7 +104,7 @@ describe("Google Drive scoped source identity", () => {
       }),
     ).toEqual({
       providerKey: "google-drive",
-      externalTenantId: "permission-123",
+      externalTenantId: "google-consumer",
       externalSourceId: "folder-root",
       sourceKind: "google-drive-folder",
       sourceUri: "https://drive.google.com/drive/folders/folder-root",
@@ -368,7 +368,7 @@ describe("bounded Google Drive inventory", () => {
     expect(first.checkpoint).toMatchObject({
       version: 2,
       googlePermissionId: "permission-123",
-      externalTenantId: "permission-123",
+      externalTenantId: "google-consumer",
       sourceId: "folder-root",
       sourceDriveId: "shared-drive",
     });

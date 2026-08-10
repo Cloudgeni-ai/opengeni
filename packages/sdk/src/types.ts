@@ -684,6 +684,8 @@ export type GoogleDriveSelectedSource = {
   /** @deprecated Missing destinations resolve to the current workspace boundary. */
   targetScope?: GoogleDriveTargetScope | undefined;
   syncCadence: GoogleDriveSyncCadence;
+  syncEnabled: boolean;
+  configGeneration: number;
   readPolicy: GoogleDriveReadPolicy;
   selectedAt: string;
 };
@@ -749,6 +751,7 @@ export type SaveGoogleDriveSourceRequest = {
   /** @deprecated Legacy requests resolve to workspace authority. */
   targetScope?: GoogleDriveTargetScope | undefined;
   syncCadence: GoogleDriveSyncCadence;
+  syncEnabled: boolean;
   readPolicy: GoogleDriveReadPolicy;
 };
 
@@ -1954,6 +1957,7 @@ export type ScheduledTaskDayOfWeek =
   | "SATURDAY";
 
 export type ScheduledTaskScheduleSpec =
+  | { type: "manual" }
   | { type: "once"; runAt: string; timeZone: string }
   | {
       type: "interval";
@@ -1982,6 +1986,44 @@ export type ScheduledTaskAgentConfig = {
   maxNestedAgentDepth?: number | undefined;
 };
 
+export type ScopedKnowledgeScope =
+  | { kind: "organization"; workspaceId: null; subjectId: null }
+  | { kind: "workspace"; workspaceId: string; subjectId: null }
+  | { kind: "personal"; workspaceId: string | null; subjectId: string };
+
+export type KnowledgeSourceSyncLimits = {
+  maxItems: number;
+  maxBytes: number;
+  maxFileBytes: number;
+  maxProviderRequests: number;
+  maxElapsedSeconds: number;
+  maxConcurrency: number;
+  maxFailureDetails: number;
+};
+
+export type ScheduledTaskAction =
+  | { kind: "agent_turn" }
+  | {
+      kind: "knowledge_source_sync";
+      sourceId: string;
+      sourceGeneration: number;
+      sourceLifecycleGeneration: number;
+      sourceConfigGeneration: number;
+      controlWorkspaceId: string;
+      providerCoordinationKey: string;
+      connection: {
+        connectionId: string;
+        connectionVersion: number;
+        providerDomain: string;
+        kind: ConnectionKind;
+        ownerSubjectId: string;
+      };
+      destination: ScopedKnowledgeScope;
+      initiatingSubjectId: string;
+      allDescendants: boolean;
+      limits: KnowledgeSourceSyncLimits;
+    };
+
 export type ScheduledTask = {
   id: string;
   accountId: string;
@@ -1992,6 +2034,7 @@ export type ScheduledTask = {
   temporalScheduleId: string;
   runMode: ScheduledTaskRunMode;
   overlapPolicy: ScheduledTaskOverlapPolicy;
+  action: ScheduledTaskAction;
   agentConfig: ScheduledTaskAgentConfig;
   createdBy?: TurnInitiator | undefined;
   createdByContext?: TurnInitiatorContext | undefined;
@@ -3256,9 +3299,10 @@ export type ScheduledTaskAgentConfigInput = {
   maxNestedAgentDepth?: number | undefined;
 };
 
-export type CreateScheduledTaskRequest = {
+export type CreateAgentScheduledTaskRequest = {
   name: string;
   schedule: ScheduledTaskScheduleSpec;
+  action?: { kind: "agent_turn" } | undefined;
   runMode?: ScheduledTaskRunMode | undefined;
   targetSessionId?: string | null | undefined;
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
@@ -3272,12 +3316,26 @@ export type CreateScheduledTaskRequest = {
   metadata?: Record<string, unknown> | undefined;
 };
 
+export type CreateKnowledgeSourceSyncScheduledTaskRequest = {
+  name: string;
+  schedule: ScheduledTaskScheduleSpec;
+  action: Extract<ScheduledTaskAction, { kind: "knowledge_source_sync" }>;
+  overlapPolicy?: "skip" | "buffer_one" | undefined;
+  status?: ScheduledTaskStatus | undefined;
+  metadata?: Record<string, unknown> | undefined;
+};
+
+export type CreateScheduledTaskRequest =
+  | CreateAgentScheduledTaskRequest
+  | CreateKnowledgeSourceSyncScheduledTaskRequest;
+
 export type UpdateScheduledTaskRequest = {
   name?: string | undefined;
   schedule?: ScheduledTaskScheduleSpec | undefined;
   runMode?: ScheduledTaskRunMode | undefined;
   targetSessionId?: string | null | undefined;
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
+  action?: ScheduledTaskAction | undefined;
   agentConfig?: ScheduledTaskAgentConfigInput | undefined;
   status?: ScheduledTaskStatus | undefined;
   variableSetId?: string | null | undefined;
@@ -3288,9 +3346,50 @@ export type UpdateScheduledTaskRequest = {
   metadata?: Record<string, unknown> | undefined;
 };
 
-export type ScheduledTaskRunStatus = "queued" | "dispatched" | "failed";
+export type ScheduledTaskRunStatus = "queued" | "dispatched" | "succeeded" | "skipped" | "failed";
 
-export type ScheduledTaskTriggerType = "scheduled" | "manual";
+export type KnowledgeSourceSyncRunSummary = {
+  phase: "queued" | "inventory" | "transfer" | "index" | "checkpoint" | "completed" | "failed";
+  scanned: number;
+  imported: number;
+  unchanged: number;
+  skipped: number;
+  failed: number;
+  bytes: number;
+  providerRequests: number;
+  elapsedMs: number;
+  indexed: number;
+  aclPending: number;
+  retryable: boolean;
+  limitReached: "items" | "bytes" | "file_bytes" | "provider_requests" | "elapsed_time" | null;
+  checkpointed: boolean;
+  reconnectRequired: boolean;
+  failures: Array<{
+    externalObjectId: string;
+    code:
+      | "authority_changed"
+      | "connection_reconnect_required"
+      | "provider_unavailable"
+      | "provider_rejected"
+      | "provider_payload_invalid"
+      | "content_unsupported"
+      | "content_too_large"
+      | "resource_limit"
+      | "item_processing_failed"
+      | "indexing_failed"
+      | "internal_failure";
+    retryable: boolean;
+    message: string;
+  }>;
+};
+
+export type ScheduledTaskTriggerType =
+  | "scheduled"
+  | "manual"
+  | "initial"
+  | "provider_event"
+  | "retry"
+  | "repair";
 
 export type ScheduledTaskRun = {
   id: string;
@@ -3303,6 +3402,10 @@ export type ScheduledTaskRun = {
   firedAt: string;
   sessionId: string | null;
   triggerEventId: string | null;
+  actionKind: "agent_turn" | "knowledge_source_sync";
+  knowledgeSyncRunId: string | null;
+  knowledgeSummary: KnowledgeSourceSyncRunSummary | null;
+  completedAt: string | null;
   error: string | null;
   createdAt: string;
   updatedAt: string;
@@ -4321,6 +4424,10 @@ export const KNOWN_USAGE_EVENT_TYPES = [
   "file.deleted",
   "document.indexed",
   "scheduled_task.fired",
+  "knowledge_source_sync.fired",
+  "knowledge_source_sync.completed",
+  "knowledge_source_sync.items",
+  "knowledge_source_sync.bytes",
   "api_key.request",
   // sandbox warm-time metering (P2.1) — mirrors contracts UsageEventType.
   "sandbox.warm_seconds",

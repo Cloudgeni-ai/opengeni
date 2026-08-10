@@ -3,6 +3,7 @@ import { createCodexCapacityActivities } from "./activities/codex-capacity";
 import { createDocumentActivities } from "./activities/documents";
 import { createFileUploadReaperActivities } from "./activities/file-upload-reaper";
 import { createGoalActivities } from "./activities/goals";
+import { createKnowledgeSourceSyncActivities } from "./activities/knowledge-source-sync";
 import { createRetainedScreenshotMaintenanceActivities } from "./activities/retained-screenshot-reaper";
 import { createRigVerificationActivities } from "./activities/rig-verification";
 import { createSandboxLeaseActivities } from "./activities/sandbox-lease";
@@ -24,6 +25,7 @@ export function createControlActivitiesFromServices(
 ) {
   return {
     ...createDocumentActivities(services, resolveDocumentServices),
+    ...createKnowledgeSourceSyncActivities(services, resolveDocumentServices),
     ...createSessionStateActivities(services),
     ...createScheduledTaskActivities(services),
     ...createGoalActivities(services),

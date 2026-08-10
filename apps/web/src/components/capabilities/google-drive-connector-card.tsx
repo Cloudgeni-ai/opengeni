@@ -42,6 +42,7 @@ type FolderCrumb = { id: string; name: string };
 type ConfiguredGoogleDriveSource = GoogleDriveBrowseItem & {
   authorityKind: ConnectorDocumentDestinationAuthority;
   syncCadence: GoogleDriveSyncCadence;
+  syncEnabled: boolean;
   readPolicy: GoogleDriveReadPolicy;
 };
 
@@ -80,6 +81,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
     useState<ConnectorDocumentDestinationAuthority>("workspace");
   const [folderIdDraft, setFolderIdDraft] = useState("");
   const [syncCadence, setSyncCadence] = useState<GoogleDriveSyncCadence>("hourly");
+  const [syncEnabled, setSyncEnabled] = useState(false);
   const [readPolicy, setReadPolicy] = useState<GoogleDriveReadPolicy>("allow");
 
   const connection = useMemo(() => preferredGoogleDriveConnection(connections), [connections]);
@@ -263,6 +265,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
       metadata?.documentDestination?.authorityKind ?? existingSource?.authorityKind ?? "workspace",
     );
     setSyncCadence(existingSource?.syncCadence ?? "hourly");
+    setSyncEnabled(existingSource?.syncEnabled ?? false);
     setReadPolicy(existingSource?.readPolicy ?? "allow");
     setBrowseOpen(true);
     void loadFolder({ id: "root", name: "My Drive" });
@@ -343,6 +346,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
             })),
             destination: { authorityKind, collectionId: null },
             syncCadence,
+            syncEnabled,
             readPolicy,
           }),
         },
@@ -350,7 +354,9 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
       setConnections((current) => current.map((item) => (item.id === updated.id ? updated : item)));
       setBrowseOpen(false);
       toast.success("Google Drive folders saved", {
-        description: `${selectedSources.length} location${selectedSources.length === 1 ? "" : "s"} connected. Document ingestion is not running yet.`,
+        description: syncEnabled
+          ? `${selectedSources.length} location${selectedSources.length === 1 ? "" : "s"} enabled. Manage cadence and pause state in Schedules.`
+          : `${selectedSources.length} location${selectedSources.length === 1 ? "" : "s"} selected. Synchronization remains disabled.`,
       });
     } catch (error) {
       toast.error("Google Drive sync could not be saved", {
@@ -486,7 +492,7 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
                 {savedDefaults
                   ? `${scopeLabel(savedDefaults.authorityKind)} · ${cadenceLabel(
                       savedDefaults.syncCadence,
-                    )} · ${readPolicyLabel(savedDefaults.readPolicy)}`
+                    )} · ${googleDriveReadPolicyLabel(savedDefaults.readPolicy)}`
                   : "Not configured"}
               </div>
             </div>
@@ -699,6 +705,19 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
           </div>
 
           <div className="grid gap-2 sm:grid-cols-3">
+            <label className="flex items-start gap-2 rounded-md border border-border-subtle p-3 text-xs text-fg-muted sm:col-span-3">
+              <input
+                type="checkbox"
+                checked={syncEnabled}
+                onChange={(event) => setSyncEnabled(event.target.checked)}
+                className="mt-0.5"
+              />
+              <span>
+                <span className="block font-medium text-fg">Enable synchronization</span>
+                Selection alone never starts ingestion. Once enabled, cadence and user pause are
+                managed from Schedules.
+              </span>
+            </label>
             <label className="grid gap-1 text-xs text-fg-muted">
               Save to
               <Select
@@ -742,15 +761,19 @@ export function GoogleDriveConnectorCard({ workspaceId }: { workspaceId: string 
               </Select>
             </label>
             <label className="grid gap-1 text-xs text-fg-muted">
-              Access
+              Interactive actions
               <Select
                 value={readPolicy}
                 onChange={(event) => setReadPolicy(event.target.value as GoogleDriveReadPolicy)}
               >
-                <option value="allow">Allow automatically</option>
-                <option value="ask">Ask before each run</option>
-                <option value="block">Block</option>
+                <option value="allow">Allow connector actions</option>
+                <option value="ask">Ask before interactive actions</option>
+                <option value="block">Block connector actions</option>
               </Select>
+              <span>
+                Background synchronization is authorized only by Enable synchronization; this
+                interactive policy does not gate scheduled runs.
+              </span>
             </label>
           </div>
 
@@ -781,10 +804,10 @@ function cadenceLabel(cadence: GoogleDriveSyncCadence): string {
   return "Hourly";
 }
 
-function readPolicyLabel(policy: GoogleDriveReadPolicy): string {
-  if (policy === "ask") return "Ask";
-  if (policy === "block") return "Blocked";
-  return "Automatic";
+export function googleDriveReadPolicyLabel(policy: GoogleDriveReadPolicy): string {
+  if (policy === "ask") return "Ask for actions";
+  if (policy === "block") return "Actions blocked";
+  return "Actions allowed";
 }
 
 function googleDriveBoundaryLabel(source: {
@@ -817,6 +840,7 @@ export function configuredGoogleDriveSources(
       metadata?.documentDestination?.authorityKind ??
       "workspace",
     syncCadence: source.syncCadence,
+    syncEnabled: source.syncEnabled,
     readPolicy: source.readPolicy,
   }));
 }

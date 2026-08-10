@@ -14,6 +14,12 @@ export {
   type ScheduledTaskFireWorkflowInput,
 } from "./workflows/scheduled-tasks";
 export {
+  knowledgeSourceSyncWake,
+  knowledgeSourceSyncWorkflow,
+  knowledgeSourceSyncWorkflowId,
+  type KnowledgeSourceSyncWorkflowInput,
+} from "./workflows/knowledge-source-sync";
+export {
   sandboxDrainWorkflow,
   sandboxReaperMaintenanceWorkflow,
   sandboxReaperWorkflow,

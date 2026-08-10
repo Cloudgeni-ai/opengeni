@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   configuredGoogleDriveSources,
   googleDriveDestinationOptionDisabled,
+  googleDriveReadPolicyLabel,
 } from "./google-drive-connector-card";
 
 describe("Google Drive connector document destination UI", () => {
@@ -32,11 +33,19 @@ describe("Google Drive connector document destination UI", () => {
             driveId: null,
             targetScope: "organization",
             syncCadence: "hourly",
+            syncEnabled: false,
+            configGeneration: 1,
             readPolicy: "allow",
             selectedAt: "2026-08-04T00:00:00.000Z",
           },
         ],
       })[0]?.authorityKind,
     ).toBe("workspace");
+  });
+
+  test("scopes read policy wording to interactive connector actions", () => {
+    expect(googleDriveReadPolicyLabel("allow")).toBe("Actions allowed");
+    expect(googleDriveReadPolicyLabel("ask")).toBe("Ask for actions");
+    expect(googleDriveReadPolicyLabel("block")).toBe("Actions blocked");
   });
 });

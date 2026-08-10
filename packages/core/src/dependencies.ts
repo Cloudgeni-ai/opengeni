@@ -5,6 +5,7 @@ import type {
   DocumentAuthorityKind,
   GitHubAppApiPort,
   ScheduledTask,
+  ScheduledTaskTriggerType,
   SessionAuthorizationPort,
   TurnInitiator,
 } from "@opengeni/contracts";
@@ -61,6 +62,7 @@ export type SessionWorkflowClient = {
     agentRunUsageIdempotencyKey: string;
     triggerWorkflowId: string;
     initiator: TurnInitiator;
+    triggerType?: Extract<ScheduledTaskTriggerType, "manual" | "initial" | "retry" | "repair">;
   }) => Promise<void>;
   startRigVerification: (input: {
     workspaceId: string;

@@ -42,6 +42,9 @@ import type {
   SandboxBackend,
   SandboxOs,
   ScheduledTask,
+  ScheduledTaskAction,
+  ScheduledTaskActionKind,
+  KnowledgeSourceSyncAction,
   ScheduledTaskAgentConfig,
   ScheduledTaskOverlapPolicy,
   ScheduledTaskRun,
@@ -294,6 +297,7 @@ export * from "./workspace-instruction-policies";
 export * from "./preference-registry";
 export * from "./memory-governance";
 export * from "./scoped-knowledge";
+export * from "./knowledge-source-sync";
 export * from "./generated-images";
 export { interruptedToolCallResult } from "./session-tool-call-settlement";
 export { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
@@ -3467,6 +3471,7 @@ export type CreateScheduledTaskInput = {
   temporalScheduleId: string;
   runMode: ScheduledTaskRunMode;
   overlapPolicy: ScheduledTaskOverlapPolicy;
+  action?: ScheduledTaskAction;
   agentConfig: ScheduledTaskAgentConfig;
   createdBy?: TurnInitiator;
   createdByContext?: TurnInitiatorContext;
@@ -3485,6 +3490,7 @@ export type UpdateScheduledTaskInput = Partial<{
   schedule: ScheduledTaskScheduleSpec;
   runMode: ScheduledTaskRunMode;
   overlapPolicy: ScheduledTaskOverlapPolicy;
+  action: ScheduledTaskAction;
   agentConfig: ScheduledTaskAgentConfig;
   personalConnectionDelegations: McpPersonalConnectionDelegation[];
   reusableSessionId: string | null;
@@ -10667,6 +10673,7 @@ export async function createScheduledTask(
           temporalScheduleId: input.temporalScheduleId,
           runMode: input.runMode,
           overlapPolicy: input.overlapPolicy,
+          action: input.action ?? { kind: "agent_turn" },
           agentConfig: input.agentConfig,
           ...creatorColumns(frozenCreator),
           personalConnectionDelegations: input.personalConnectionDelegations ?? [],
@@ -10699,6 +10706,7 @@ export async function updateScheduledTask(
         ...(input.schedule !== undefined ? { schedule: input.schedule } : {}),
         ...(input.runMode !== undefined ? { runMode: input.runMode } : {}),
         ...(input.overlapPolicy !== undefined ? { overlapPolicy: input.overlapPolicy } : {}),
+        ...(input.action !== undefined ? { action: input.action } : {}),
         ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
         ...(input.personalConnectionDelegations !== undefined
           ? {
@@ -10850,6 +10858,74 @@ export async function listScheduledTasks(
   });
 }
 
+/**
+ * Internal connector-control traversal. Keep the whole keyset walk on one
+ * repeatable-read snapshot so task creation/update performed after discovery
+ * cannot make an older row move between offset pages or hide a matching task.
+ */
+export async function listKnowledgeSourceSyncTasksForConnection(
+  db: Database,
+  workspaceId: string,
+  connectionId: string,
+  pageSize = 500,
+): Promise<Array<ScheduledTask & { action: KnowledgeSourceSyncAction }>> {
+  const boundedPageSize = Math.max(1, Math.min(1_000, Math.trunc(pageSize)));
+  return await withWorkspaceRls(
+    db,
+    workspaceId,
+    async (scopedDb) => {
+      const tasks: Array<ScheduledTask & { action: KnowledgeSourceSyncAction }> = [];
+      let cursor: { createdAt: Date; id: string } | null = null;
+      for (;;) {
+        const rows: Array<typeof schema.scheduledTasks.$inferSelect> = await scopedDb
+          .select()
+          .from(schema.scheduledTasks)
+          .where(
+            and(
+              eq(schema.scheduledTasks.workspaceId, workspaceId),
+              sql`${schema.scheduledTasks.action}->>'kind' = 'knowledge_source_sync'`,
+              sql`${schema.scheduledTasks.action}->'connection'->>'connectionId' = ${connectionId}`,
+              cursor
+                ? or(
+                    gt(schema.scheduledTasks.createdAt, cursor.createdAt),
+                    and(
+                      eq(schema.scheduledTasks.createdAt, cursor.createdAt),
+                      gt(schema.scheduledTasks.id, cursor.id),
+                    ),
+                  )
+                : undefined,
+            ),
+          )
+          .orderBy(asc(schema.scheduledTasks.createdAt), asc(schema.scheduledTasks.id))
+          .limit(boundedPageSize);
+        for (const row of rows) {
+          const task = mapScheduledTask(row);
+          if (task.action.kind !== "knowledge_source_sync") {
+            throw new Error("Knowledge source task query returned a non-sync action");
+          }
+          tasks.push(task as ScheduledTask & { action: KnowledgeSourceSyncAction });
+        }
+        const last: typeof schema.scheduledTasks.$inferSelect | undefined = rows.at(-1);
+        if (!last || rows.length < boundedPageSize) return tasks;
+        const nextCursor: { createdAt: Date; id: string } = {
+          createdAt: last.createdAt,
+          id: last.id,
+        };
+        if (
+          cursor &&
+          (nextCursor.createdAt < cursor.createdAt ||
+            (nextCursor.createdAt.getTime() === cursor.createdAt.getTime() &&
+              nextCursor.id <= cursor.id))
+        ) {
+          throw new Error("Knowledge source scheduled-task keyset did not advance");
+        }
+        cursor = nextCursor;
+      }
+    },
+    { isolationLevel: "repeatable read", accessMode: "read only" },
+  );
+}
+
 export async function deleteScheduledTask(
   db: Database,
   workspaceId: string,
@@ -10902,6 +10978,8 @@ export async function createScheduledTaskRun(
       scheduledAt: input.scheduledAt ?? null,
       firedAt: input.firedAt ?? new Date(),
       status: "queued" as const,
+      actionKind: ((taskRow.action as ScheduledTaskAction | null)?.kind ??
+        "agent_turn") satisfies ScheduledTaskActionKind,
     };
     const [inserted] = input.producerKey
       ? await scopedDb
@@ -10961,6 +11039,10 @@ export async function updateScheduledTaskRun(
     status: ScheduledTaskRunStatus;
     sessionId: string | null;
     triggerEventId: string | null;
+    actionKind: ScheduledTaskActionKind;
+    knowledgeSyncRunId: string | null;
+    knowledgeSummary: Record<string, unknown> | null;
+    completedAt: Date | null;
     error: string | null;
   }>,
 ): Promise<ScheduledTaskRun> {
@@ -10971,6 +11053,14 @@ export async function updateScheduledTaskRun(
         ...(input.status !== undefined ? { status: input.status } : {}),
         ...(input.sessionId !== undefined ? { sessionId: input.sessionId } : {}),
         ...(input.triggerEventId !== undefined ? { triggerEventId: input.triggerEventId } : {}),
+        ...(input.actionKind !== undefined ? { actionKind: input.actionKind } : {}),
+        ...(input.knowledgeSyncRunId !== undefined
+          ? { knowledgeSyncRunId: input.knowledgeSyncRunId }
+          : {}),
+        ...(input.knowledgeSummary !== undefined
+          ? { knowledgeSummary: input.knowledgeSummary }
+          : {}),
+        ...(input.completedAt !== undefined ? { completedAt: input.completedAt } : {}),
         ...(input.error !== undefined ? { error: input.error } : {}),
         updatedAt: new Date(),
       })
@@ -49604,6 +49694,7 @@ function mapScheduledTask(row: typeof schema.scheduledTasks.$inferSelect): Sched
     temporalScheduleId: row.temporalScheduleId,
     runMode: row.runMode as ScheduledTaskRunMode,
     overlapPolicy: row.overlapPolicy as ScheduledTaskOverlapPolicy,
+    action: (row.action ?? { kind: "agent_turn" }) as ScheduledTaskAction,
     agentConfig: row.agentConfig as ScheduledTaskAgentConfig,
     createdBy: initiatorFromStorage(
       row.createdByKind,
@@ -49638,6 +49729,10 @@ function mapScheduledTaskRun(row: typeof schema.scheduledTaskRuns.$inferSelect):
     firedAt: row.firedAt.toISOString(),
     sessionId: row.sessionId,
     triggerEventId: row.triggerEventId,
+    actionKind: row.actionKind as ScheduledTaskActionKind,
+    knowledgeSyncRunId: row.knowledgeSyncRunId,
+    knowledgeSummary: row.knowledgeSummary as ScheduledTaskRun["knowledgeSummary"],
+    completedAt: row.completedAt?.toISOString() ?? null,
     error: row.error,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),

@@ -1,5 +1,5 @@
-// Scheduled tasks: recurring or one-shot agent runs, with honest run history
-// (trigger type, dispatch status, errors, and the session each run produced).
+// Shared schedules for agent turns and deterministic knowledge-source syncs,
+// with honest per-run outcomes and no implied agent session for connector work.
 import { useNavigate } from "@tanstack/react-router";
 import {
   BotIcon,
@@ -44,6 +44,7 @@ import {
   newScheduledTaskFormState,
   scheduleFromFormState,
   scheduleLabel,
+  scheduledTaskStateLabel,
   summarizeLastRun,
   type ScheduledTaskFormState,
 } from "@/lib/scheduled-tasks";
@@ -211,6 +212,33 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
     }
   }
 
+  async function saveKnowledgeTask(
+    task: ScheduledTask,
+    input: { name: string; cadence: "manual" | "hourly" | "daily" },
+  ) {
+    setBusyTaskId(task.id);
+    try {
+      await client.updateScheduledTask(workspaceId, task.id, {
+        name: input.name.trim() || task.name,
+        schedule:
+          input.cadence === "manual"
+            ? { type: "manual" }
+            : input.cadence === "hourly"
+              ? { type: "interval", everySeconds: 3_600 }
+              : { type: "calendar", timeZone: "UTC", hour: 0, minute: 0 },
+      });
+      setEditingTaskId(null);
+      await refresh();
+      toast.success("Knowledge sync schedule updated");
+    } catch (error) {
+      toast.error("Failed to update knowledge sync schedule", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setBusyTaskId(null);
+    }
+  }
+
   const ACTION_ERROR: Record<"pause" | "resume" | "trigger" | "delete", string> = {
     pause: "Couldn't pause the task",
     resume: "Couldn't resume the task",
@@ -252,8 +280,8 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
     <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col px-4 py-5 sm:px-6 lg:px-8">
       <PageHeader
         icon={<CalendarClockIcon className="size-4" />}
-        title="Scheduled tasks"
-        description="Recurring or one-shot agent runs with run history per task."
+        title="Schedules"
+        description="Agent runs and deterministic knowledge-source syncs with per-run history."
         actions={
           <>
             <Button
@@ -313,8 +341,8 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
         ) : tasksView === "empty" ? (
           <EmptyState
             icon={<CalendarClockIcon className="size-4" />}
-            title="No scheduled tasks yet"
-            description="Create one to run the agent on a schedule — recurring or one-shot."
+            title="No schedules yet"
+            description="Create an agent schedule or select a connector source to synchronize."
             action={
               <Button
                 type="button"
@@ -333,20 +361,34 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
           tasks.map((task) => {
             const taskRuns = runs[task.id] ?? [];
             const lastRun = summarizeLastRun(taskRuns);
+            const state = scheduledTaskStateLabel(task);
             return (
               <div key={task.id} className="rounded-lg border border-border bg-surface p-3">
                 <div className="flex min-w-0 items-start justify-between gap-3">
                   <div className="min-w-0">
                     <div className="flex min-w-0 items-center gap-2">
                       <span className="truncate text-sm font-medium">{task.name}</span>
-                      <MetaChip dot={task.status === "active" ? "idle" : "waiting"} rounded="full">
-                        {task.status === "active" ? "Active" : "Paused"}
+                      <MetaChip dot={state.active ? "idle" : "waiting"} rounded="full">
+                        {state.label}
                       </MetaChip>
                     </div>
                     <div className="mt-1 text-xs text-fg-subtle">
-                      {scheduleLabel(task.schedule)} · {task.runMode.replaceAll("_", " ")}
+                      {scheduleLabel(task.schedule)} ·{" "}
+                      {task.action.kind === "knowledge_source_sync"
+                        ? "knowledge source sync"
+                        : task.runMode.replaceAll("_", " ")}
                     </div>
-                    <SchedulePersonalConnectionDisclosure connections={task.personalConnections} />
+                    {task.action.kind === "knowledge_source_sync" ? (
+                      <div className="mt-1 text-2xs text-fg-subtle">
+                        {task.action.destination.kind} scope · source{" "}
+                        {task.action.sourceId.slice(0, 8)} ·{" "}
+                        {task.action.allDescendants ? "all descendants" : "selected object only"}
+                      </div>
+                    ) : (
+                      <SchedulePersonalConnectionDisclosure
+                        connections={task.personalConnections}
+                      />
+                    )}
                     {lastRun ? (
                       <div
                         className={cn(
@@ -368,7 +410,7 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
                       variant="secondary"
                       size="sm"
                       className="h-8"
-                      disabled={busyTaskId === task.id}
+                      disabled={busyTaskId === task.id || !state.active}
                       onClick={() => void taskAction(task, "trigger")}
                       title="Fire a manual run now"
                     >
@@ -426,31 +468,42 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
                 </div>
 
                 {editingTaskId === task.id ? (
-                  <ScheduledTaskForm
-                    key={task.id}
-                    workspaceId={workspaceId}
-                    initialState={formStateFromScheduledTask(task)}
-                    submitLabel="Save changes"
-                    busy={busyTaskId === task.id}
-                    canAttachOpenGeniTool={canAttachOpenGeniTool}
-                    canTargetSessions={canTargetSessions}
-                    sessions={sessions}
-                    slackBotConnections={slackBotConnections}
-                    onSubmit={(form) => void saveTask(task, form)}
-                    onCancel={() => setEditingTaskId(null)}
-                    secondaryActions={
-                      <Button
-                        type="button"
-                        variant="destructive"
-                        size="sm"
-                        disabled={busyTaskId === task.id}
-                        onClick={() => setConfirmDelete(task)}
-                      >
-                        <Trash2Icon className="size-3.5" />
-                        Delete
-                      </Button>
-                    }
-                  />
+                  task.action.kind === "knowledge_source_sync" ? (
+                    <KnowledgeSyncTaskEditor
+                      key={task.id}
+                      task={task}
+                      busy={busyTaskId === task.id}
+                      onSubmit={(input) => void saveKnowledgeTask(task, input)}
+                      onCancel={() => setEditingTaskId(null)}
+                      onDelete={() => setConfirmDelete(task)}
+                    />
+                  ) : (
+                    <ScheduledTaskForm
+                      key={task.id}
+                      workspaceId={workspaceId}
+                      initialState={formStateFromScheduledTask(task)}
+                      submitLabel="Save changes"
+                      busy={busyTaskId === task.id}
+                      canAttachOpenGeniTool={canAttachOpenGeniTool}
+                      canTargetSessions={canTargetSessions}
+                      sessions={sessions}
+                      slackBotConnections={slackBotConnections}
+                      onSubmit={(form) => void saveTask(task, form)}
+                      onCancel={() => setEditingTaskId(null)}
+                      secondaryActions={
+                        <Button
+                          type="button"
+                          variant="destructive"
+                          size="sm"
+                          disabled={busyTaskId === task.id}
+                          onClick={() => setConfirmDelete(task)}
+                        >
+                          <Trash2Icon className="size-3.5" />
+                          Delete
+                        </Button>
+                      }
+                    />
+                  )
                 ) : null}
 
                 {historyTaskId === task.id ? (
@@ -510,6 +563,20 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
                                     {run.sessionId}
                                   </span>
                                 ) : null}
+                                {run.knowledgeSummary ? (
+                                  <span className="min-w-0 truncate text-fg-subtle">
+                                    {run.knowledgeSummary.imported} imported ·{" "}
+                                    {run.knowledgeSummary.unchanged} unchanged ·{" "}
+                                    {run.knowledgeSummary.skipped} skipped ·{" "}
+                                    {run.knowledgeSummary.failed} failed
+                                    {run.knowledgeSummary.aclPending
+                                      ? ` · ${run.knowledgeSummary.aclPending} ACL pending`
+                                      : ""}
+                                    {run.knowledgeSummary.reconnectRequired
+                                      ? " · reconnect required"
+                                      : ""}
+                                  </span>
+                                ) : null}
                               </span>
                               <span className="shrink-0">{formatTimestamp(run.firedAt)}</span>
                             </button>
@@ -529,7 +596,11 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
         open={confirmDelete !== null}
         onOpenChange={(next) => (next ? undefined : setConfirmDelete(null))}
         title={confirmDelete ? `Delete “${confirmDelete.name}”?` : "Delete scheduled task?"}
-        description="This deletes the schedule and stops future runs. Sessions it already created are kept."
+        description={
+          confirmDelete?.action.kind === "knowledge_source_sync"
+            ? "This deletes the schedule and disables synchronization for this source. Re-enable it explicitly from the connector to create a new schedule."
+            : "This deletes the schedule and stops future runs. Sessions it already created are kept."
+        }
         confirmLabel="Delete task"
         onConfirm={() => (confirmDelete ? taskAction(confirmDelete, "delete") : false)}
       />
@@ -538,9 +609,75 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
 }
 
 function runStatusTone(status: ScheduledTaskRun["status"]): StatusTone {
-  if (status === "dispatched") return "idle";
+  if (status === "dispatched" || status === "succeeded") return "idle";
   if (status === "failed") return "failed";
   return "waiting";
+}
+
+function KnowledgeSyncTaskEditor(props: {
+  task: ScheduledTask;
+  busy: boolean;
+  onSubmit: (input: { name: string; cadence: "manual" | "hourly" | "daily" }) => void;
+  onCancel: () => void;
+  onDelete: () => void;
+}) {
+  const [name, setName] = useState(props.task.name);
+  const [cadence, setCadence] = useState<"manual" | "hourly" | "daily">(
+    props.task.schedule.type === "manual"
+      ? "manual"
+      : props.task.schedule.type === "interval"
+        ? "hourly"
+        : "daily",
+  );
+  return (
+    <div className="mt-4 grid gap-3 rounded-lg border border-border bg-surface p-3">
+      <div className="grid gap-2 sm:grid-cols-2">
+        <Label className="grid gap-1">
+          <span>Name</span>
+          <Input value={name} onChange={(event) => setName(event.target.value)} />
+        </Label>
+        <Label className="grid gap-1">
+          <span>Cadence</span>
+          <Select
+            value={cadence}
+            onChange={(event) => setCadence(event.target.value as typeof cadence)}
+          >
+            <option value="manual">On demand</option>
+            <option value="hourly">Hourly</option>
+            <option value="daily">Daily at 00:00 UTC</option>
+          </Select>
+        </Label>
+      </div>
+      <Notice>
+        This schedule runs deterministic connector inventory and indexing. It never starts an agent
+        session or incurs an agent-run charge.
+      </Notice>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <Button
+          type="button"
+          variant="destructive"
+          size="sm"
+          disabled={props.busy}
+          onClick={props.onDelete}
+        >
+          <Trash2Icon className="size-3.5" /> Delete
+        </Button>
+        <div className="flex gap-2">
+          <Button type="button" variant="ghost" size="sm" onClick={props.onCancel}>
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            disabled={props.busy}
+            onClick={() => props.onSubmit({ name, cadence })}
+          >
+            Save changes
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function ScheduledTaskForm(props: {

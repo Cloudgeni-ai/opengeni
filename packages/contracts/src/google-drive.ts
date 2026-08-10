@@ -139,6 +139,8 @@ export const GoogleDriveSelectedSource = z.object({
   /** @deprecated Missing destinations resolve to the current workspace boundary. */
   targetScope: GoogleDriveTargetScope.optional(),
   syncCadence: GoogleDriveSyncCadence.default("hourly"),
+  syncEnabled: z.boolean().default(false),
+  configGeneration: z.number().int().positive().default(1),
   readPolicy: GoogleDriveReadPolicy.default("allow"),
   selectedAt: z.string().datetime({ offset: true }),
 });
@@ -226,6 +228,7 @@ export const SaveGoogleDriveSourceRequest = z
     /** @deprecated Legacy requests are accepted but resolve to workspace authority. */
     targetScope: GoogleDriveTargetScope.optional(),
     syncCadence: GoogleDriveSyncCadence.default("hourly"),
+    syncEnabled: z.boolean().default(false),
     readPolicy: GoogleDriveReadPolicy.default("allow"),
   })
   .refine((request) => request.destination !== undefined || request.targetScope !== undefined, {

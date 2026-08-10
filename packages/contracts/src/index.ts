@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ScopedKnowledgeScope } from "./scoped-knowledge";
 import {
   boundSessionEventPayload,
   measureSessionEventJson,
@@ -2153,6 +2154,10 @@ export const UsageEventType = z.enum([
   "file.deleted",
   "document.indexed",
   "scheduled_task.fired",
+  "knowledge_source_sync.fired",
+  "knowledge_source_sync.completed",
+  "knowledge_source_sync.items",
+  "knowledge_source_sync.bytes",
   "api_key.request",
   // --- sandbox warm-time metering (P2.1) ---
   // Wall-clock seconds a box was warm — the billable warm-time meter. Accrued on
@@ -5858,7 +5863,13 @@ export type ProposeRigChangeRequest = z.infer<typeof ProposeRigChangeRequest>;
 export const ScheduledTaskStatus = z.enum(["active", "paused"]);
 export type ScheduledTaskStatus = z.infer<typeof ScheduledTaskStatus>;
 
-export const ScheduledTaskRunStatus = z.enum(["queued", "dispatched", "failed"]);
+export const ScheduledTaskRunStatus = z.enum([
+  "queued",
+  "dispatched",
+  "succeeded",
+  "skipped",
+  "failed",
+]);
 export type ScheduledTaskRunStatus = z.infer<typeof ScheduledTaskRunStatus>;
 
 export const ScheduledTaskRunMode = z.enum([
@@ -5871,10 +5882,75 @@ export type ScheduledTaskRunMode = z.infer<typeof ScheduledTaskRunMode>;
 export const ScheduledTaskOverlapPolicy = z.enum(["allow_concurrent", "skip", "buffer_one"]);
 export type ScheduledTaskOverlapPolicy = z.infer<typeof ScheduledTaskOverlapPolicy>;
 
-export const ScheduledTaskTriggerType = z.enum(["scheduled", "manual"]);
+export const ScheduledTaskTriggerType = z.enum([
+  "scheduled",
+  "manual",
+  "initial",
+  "provider_event",
+  "retry",
+  "repair",
+]);
 export type ScheduledTaskTriggerType = z.infer<typeof ScheduledTaskTriggerType>;
 
+export const ScheduledTaskActionKind = z.enum(["agent_turn", "knowledge_source_sync"]);
+export type ScheduledTaskActionKind = z.infer<typeof ScheduledTaskActionKind>;
+
+export const KnowledgeSourceSyncLimits = z.object({
+  maxItems: z.number().int().positive().max(10_000).default(500),
+  maxBytes: z.number().int().positive().max(5_000_000_000).default(500_000_000),
+  maxFileBytes: z.number().int().positive().max(5_000_000_000).default(100_000_000),
+  maxProviderRequests: z.number().int().positive().max(10_000).default(1_000),
+  maxElapsedSeconds: z.number().int().positive().max(3_600).default(300),
+  maxConcurrency: z.number().int().positive().max(32).default(4),
+  maxFailureDetails: z.number().int().positive().max(100).default(25),
+});
+export type KnowledgeSourceSyncLimits = z.infer<typeof KnowledgeSourceSyncLimits>;
+
+export const KnowledgeSourceSyncConnectionAuthority = z.object({
+  connectionId: z.string().uuid(),
+  connectionVersion: z.number().int().positive(),
+  providerDomain: z.string().min(1).max(2048),
+  kind: z.enum(["oauth2", "api_key", "app_install", "delegated"]),
+  ownerSubjectId: z.string().min(1).max(1024),
+});
+export type KnowledgeSourceSyncConnectionAuthority = z.infer<
+  typeof KnowledgeSourceSyncConnectionAuthority
+>;
+
+export const KnowledgeSourceSyncAction = z
+  .object({
+    kind: z.literal("knowledge_source_sync"),
+    sourceId: z.string().uuid(),
+    sourceGeneration: z.number().int().nonnegative(),
+    sourceLifecycleGeneration: z.number().int().positive(),
+    sourceConfigGeneration: z.number().int().positive(),
+    controlWorkspaceId: z.string().uuid(),
+    providerCoordinationKey: z.string().trim().min(1).max(1024),
+    connection: KnowledgeSourceSyncConnectionAuthority,
+    destination: ScopedKnowledgeScope,
+    initiatingSubjectId: z.string().min(1).max(1024),
+    allDescendants: z.boolean().default(true),
+    limits: KnowledgeSourceSyncLimits.prefault({}),
+  })
+  .strict();
+export type KnowledgeSourceSyncAction = z.infer<typeof KnowledgeSourceSyncAction>;
+
+export const KnowledgeSourceSyncScheduleControl = z
+  .object({
+    sourceEnabled: z.boolean().default(true),
+    connectionPaused: z.boolean().default(false),
+  })
+  .strict();
+export type KnowledgeSourceSyncScheduleControl = z.infer<typeof KnowledgeSourceSyncScheduleControl>;
+
+export const ScheduledTaskAction = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("agent_turn") }).strict(),
+  KnowledgeSourceSyncAction,
+]);
+export type ScheduledTaskAction = z.infer<typeof ScheduledTaskAction>;
+
 export const ScheduledTaskScheduleSpec = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("manual") }).strict(),
   z.object({
     type: z.literal("once"),
     runAt: z.string().datetime({ offset: true }),
@@ -5928,6 +6004,7 @@ export const ScheduledTask = z.object({
   temporalScheduleId: z.string(),
   runMode: ScheduledTaskRunMode,
   overlapPolicy: ScheduledTaskOverlapPolicy,
+  action: ScheduledTaskAction.default({ kind: "agent_turn" }),
   agentConfig: ScheduledTaskAgentConfig,
   createdBy: TurnInitiator.default({
     kind: "service",
@@ -5950,6 +6027,51 @@ export const ScheduledTask = z.object({
 });
 export type ScheduledTask = z.infer<typeof ScheduledTask>;
 
+export const KnowledgeSourceSyncFailure = z.object({
+  externalObjectId: z.string().min(1).max(1024),
+  code: z.enum([
+    "authority_changed",
+    "connection_reconnect_required",
+    "provider_unavailable",
+    "provider_rejected",
+    "provider_payload_invalid",
+    "content_unsupported",
+    "content_too_large",
+    "resource_limit",
+    "item_processing_failed",
+    "indexing_failed",
+    "internal_failure",
+  ]),
+  retryable: z.boolean(),
+  message: z.string().min(1).max(1000),
+});
+export type KnowledgeSourceSyncFailure = z.infer<typeof KnowledgeSourceSyncFailure>;
+
+export const KnowledgeSourceSyncRunSummary = z.object({
+  phase: z
+    .enum(["queued", "inventory", "transfer", "index", "checkpoint", "completed", "failed"])
+    .default("queued"),
+  scanned: z.number().int().nonnegative().default(0),
+  imported: z.number().int().nonnegative().default(0),
+  unchanged: z.number().int().nonnegative().default(0),
+  skipped: z.number().int().nonnegative().default(0),
+  failed: z.number().int().nonnegative().default(0),
+  bytes: z.number().int().nonnegative().default(0),
+  providerRequests: z.number().int().nonnegative().default(0),
+  elapsedMs: z.number().int().nonnegative().default(0),
+  indexed: z.number().int().nonnegative().default(0),
+  aclPending: z.number().int().nonnegative().default(0),
+  retryable: z.boolean().default(false),
+  limitReached: z
+    .enum(["items", "bytes", "file_bytes", "provider_requests", "elapsed_time"])
+    .nullable()
+    .default(null),
+  checkpointed: z.boolean().default(false),
+  reconnectRequired: z.boolean().default(false),
+  failures: z.array(KnowledgeSourceSyncFailure).max(100).default([]),
+});
+export type KnowledgeSourceSyncRunSummary = z.infer<typeof KnowledgeSourceSyncRunSummary>;
+
 export const ScheduledTaskRun = z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
@@ -5961,15 +6083,23 @@ export const ScheduledTaskRun = z.object({
   firedAt: z.string(),
   sessionId: z.string().uuid().nullable(),
   triggerEventId: z.string().uuid().nullable(),
+  actionKind: ScheduledTaskActionKind.default("agent_turn"),
+  knowledgeSyncRunId: z.string().uuid().nullable().default(null),
+  knowledgeSummary: KnowledgeSourceSyncRunSummary.nullable().default(null),
+  completedAt: z.string().nullable().default(null),
   error: z.string().nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
 export type ScheduledTaskRun = z.infer<typeof ScheduledTaskRun>;
 
-export const CreateScheduledTaskRequest = withVariableSetIdAlias({
+const CreateAgentScheduledTaskRequest = withVariableSetIdAlias({
   name: z.string().min(1),
   schedule: ScheduledTaskScheduleSpec,
+  action: z
+    .object({ kind: z.literal("agent_turn") })
+    .strict()
+    .default({ kind: "agent_turn" }),
   runMode: ScheduledTaskRunMode.default("new_session_per_run"),
   overlapPolicy: ScheduledTaskOverlapPolicy.default("allow_concurrent"),
   targetSessionId: z.string().uuid().nullable().optional(),
@@ -6003,6 +6133,36 @@ export const CreateScheduledTaskRequest = withVariableSetIdAlias({
     });
   }
 });
+
+const CreateKnowledgeSourceSyncScheduledTaskRequest = z
+  .object({
+    name: z.string().min(1),
+    schedule: ScheduledTaskScheduleSpec,
+    action: KnowledgeSourceSyncAction,
+    overlapPolicy: z.enum(["skip", "buffer_one"]).default("buffer_one"),
+    status: ScheduledTaskStatus.default("active"),
+    metadata: z.record(z.string(), z.unknown()).default({}),
+  })
+  .strict()
+  .transform((value) => ({
+    ...value,
+    runMode: "new_session_per_run" as const,
+    targetSessionId: null,
+    agentConfig: {
+      prompt: "Knowledge source synchronization",
+      resources: [],
+      tools: [],
+      metadata: {},
+    },
+    variableSetId: null,
+    environmentId: null,
+    rigId: null,
+  }));
+
+export const CreateScheduledTaskRequest = z.union([
+  CreateKnowledgeSourceSyncScheduledTaskRequest,
+  CreateAgentScheduledTaskRequest,
+]);
 export type CreateScheduledTaskRequest = z.infer<typeof CreateScheduledTaskRequest>;
 
 export const UpdateScheduledTaskRequest = withVariableSetIdAlias({
@@ -6010,6 +6170,7 @@ export const UpdateScheduledTaskRequest = withVariableSetIdAlias({
   schedule: ScheduledTaskScheduleSpec.optional(),
   runMode: ScheduledTaskRunMode.optional(),
   overlapPolicy: ScheduledTaskOverlapPolicy.optional(),
+  action: ScheduledTaskAction.optional(),
   targetSessionId: z.string().uuid().nullable().optional(),
   agentConfig: ScheduledTaskAgentConfig.optional(),
   status: ScheduledTaskStatus.optional(),

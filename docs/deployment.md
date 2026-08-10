@@ -336,6 +336,25 @@ lease-lifecycle table locks, so a missed live application fails with SQLSTATE
 `55000` and leaves the prior schema intact. After 0138 commits, rollback to an
 older application image is forbidden; stop admission and fix forward.
 
+Migration `0197_knowledge_source_sync_schedules.sql` is likewise a
+maintenance-only application and index cutover. A pre-0197 control worker does
+not understand the scheduled-task action discriminator and can route a newly
+created `knowledge_source_sync` task through session/model/billing dispatch.
+The migration also replaces the live Document file-identity index. Therefore:
+
+1. stop the API plus every control and turn worker before running 0197;
+2. prove there are no other `opengeni_app` sessions in `pg_stat_activity`;
+3. run the migration from the exact new image and require 0197 in
+   `schema_migrations`;
+4. start only that same image generation and complete readiness checks before
+   reopening admission.
+
+The migration repeats the application-session guard around exclusive locks on
+the schedule and Document identity tables. A live application rejects the
+cutover with SQLSTATE `55000`; a lock timeout or guard failure rolls back the
+whole migration. After commit, never restart a pre-0197 image or attempt a
+mixed-version rolling rollback—remain in maintenance and fix forward.
+
 For Azure managed Blob storage, the artifact generator can consume the
 sensitive Terraform output `object_storage_azure_connection_string` into the
 private `runtime.env` file. Keep the Terraform output JSON under `.agent/` or

@@ -2567,6 +2567,10 @@ export const documents = pgTable(
     sourceCreatedAt: timestamp("source_created_at", { withTimezone: true }),
     sourceUpdatedAt: timestamp("source_updated_at", { withTimezone: true }),
     sourceVersion: text("source_version"),
+    // Connector imports keep immutable source-object/version identity separate
+    // from the content-addressed file row so equal bytes never collapse two
+    // independently authorized provider objects into one Document.
+    knowledgeSourceIdentity: text("knowledge_source_identity"),
     aclTags: jsonb("acl_tags").$type<string[]>().notNull().default([]),
     // Durable authorization tuple. The workspace_id above remains ingestion
     // provenance; organization authority deliberately has no workspace owner.
@@ -2588,11 +2592,12 @@ export const documents = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    baseFile: uniqueIndex("documents_workspace_base_file_idx").on(
-      table.workspaceId,
-      table.baseId,
-      table.fileId,
-    ),
+    baseFile: uniqueIndex("documents_workspace_base_file_idx")
+      .on(table.workspaceId, table.baseId, table.fileId)
+      .where(sql`${table.knowledgeSourceIdentity} is null`),
+    knowledgeSourceIdentity: uniqueIndex("documents_workspace_knowledge_source_identity_uq")
+      .on(table.workspaceId, table.knowledgeSourceIdentity)
+      .where(sql`${table.knowledgeSourceIdentity} is not null`),
     baseStatus: index("documents_workspace_base_status_idx").on(
       table.workspaceId,
       table.baseId,
@@ -2643,6 +2648,10 @@ export const documents = pgTable(
     privateCreator: check(
       "documents_private_creator_chk",
       sql`${table.visibility} <> 'private' or nullif(btrim(${table.createdBy}), '') is not null`,
+    ),
+    knowledgeSourceIdentityBounds: check(
+      "documents_knowledge_source_identity_chk",
+      sql`${table.knowledgeSourceIdentity} is null or length(btrim(${table.knowledgeSourceIdentity})) between 1 and 512`,
     ),
     topicsArray: check("documents_topics_array_chk", sql`jsonb_typeof(${table.topics}) = 'array'`),
     curationObject: check(
@@ -5489,6 +5498,7 @@ export const scheduledTasks = pgTable(
     temporalScheduleId: text("temporal_schedule_id").notNull(),
     runMode: text("run_mode").notNull().default("new_session_per_run"),
     overlapPolicy: text("overlap_policy").notNull().default("allow_concurrent"),
+    action: jsonb("action").$type<unknown>().notNull().default({ kind: "agent_turn" }),
     agentConfig: jsonb("agent_config").$type<unknown>().notNull(),
     createdByKind: text("created_by_kind").notNull().default("service"),
     createdBySubjectId: text("created_by_subject_id").notNull().default("unattributed-legacy"),
@@ -5591,6 +5601,10 @@ export const scheduledTaskRuns = pgTable(
       onDelete: "set null",
     }),
     triggerEventId: uuid("trigger_event_id"),
+    actionKind: text("action_kind").notNull().default("agent_turn"),
+    knowledgeSyncRunId: uuid("knowledge_sync_run_id"),
+    knowledgeSummary: jsonb("knowledge_summary").$type<Record<string, unknown>>(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
     // Stable Temporal producer identity. Activity replay/re-dispatch returns
     // the exact run instead of allocating a second schedule source row.
     producerKey: text("producer_key"),
@@ -6589,4 +6603,5 @@ export * from "./workspace-instruction-policies-schema";
 export * from "./preference-registry-schema";
 export * from "./memory-governance-schema";
 export * from "./scoped-knowledge-schema";
+export * from "./knowledge-source-sync-schema";
 export * from "./transcription-recordings-schema";
