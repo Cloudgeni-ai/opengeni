@@ -1,5 +1,24 @@
 # @opengeni/worker-bundle
 
+## 0.16.50
+
+### Patch Changes
+
+- eade67f: Allow Modal cold filesystem-snapshot restores up to 60 seconds to become command-ready before failing lease warm-up.
+- Updated dependencies [7954468]
+- Updated dependencies [eade67f]
+- Updated dependencies [31666e2]
+  - @opengeni/db@0.30.0
+  - @opengeni/runtime@0.18.40
+  - @opengeni/contracts@0.43.0
+  - @opengeni/core@0.22.3
+  - @opengeni/documents@0.5.30
+  - @opengeni/events@0.3.101
+  - @opengeni/config@0.12.11
+  - @opengeni/github@0.4.48
+  - @opengeni/observability@0.5.17
+  - @opengeni/storage@0.2.85
+
 ## 0.16.49
 
 ### Patch Changes

@@ -1,5 +1,11 @@
 # @opengeni/contracts
 
+## 0.43.0
+
+### Minor Changes
+
+- 31666e2: Add immutable workspace learning-policy revisions, lifecycle-only activation and rollback, accepted-attempt snapshots, and deterministic effective-mode resolution for `off`, `suggest`, and `automatic`.
+
 ## 0.42.1
 
 ### Patch Changes
