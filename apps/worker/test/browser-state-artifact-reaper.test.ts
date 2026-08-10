@@ -1,5 +1,8 @@
 import { describe, expect, mock, test } from "bun:test";
-import type { BrowserStateArtifactCleanupClaim } from "@opengeni/db";
+import type {
+  BrowserStateArtifactCleanupClaim,
+  BrowserStateUploadCleanupClaim,
+} from "@opengeni/db";
 import type { ObjectStorage } from "@opengeni/storage";
 import { createBrowserStateArtifactMaintenanceActivities } from "../src/activities/browser-state-artifact-reaper";
 import type { ActivityServices } from "../src/activities/types";
@@ -19,6 +22,14 @@ const second: BrowserStateArtifactCleanupClaim = {
   objectKey: "workspaces/44444444-4444-4444-8444-444444444444/browser-state/checkpoints/b.ogbp",
 };
 
+const upload: BrowserStateUploadCleanupClaim = {
+  claimId: "77777777-7777-4777-8777-777777777777",
+  uploadId: "88888888-8888-4888-8888-888888888888",
+  accountId: first.accountId,
+  workspaceId: first.workspaceId,
+  objectKey: "workspaces/44444444-4444-4444-8444-444444444444/browser-state/uploads/c.ogbp",
+};
+
 function services(warn = mock(() => undefined)): () => Promise<ActivityServices> {
   return async () =>
     ({
@@ -35,25 +46,30 @@ describe("browser state artifact maintenance", () => {
     const activity = createBrowserStateArtifactMaintenanceActivities(services(), {
       claimTimeoutMs: 123,
       batchSize: 2,
-      claim: async (_db, input) => {
+      claimArtifacts: async (_db, input) => {
         expect(input).toEqual({ claimTimeoutMs: 123, limit: 2 });
         return [first, second];
       },
+      claimUploads: async () => [upload],
       deleteObject: async (_storage, key) => {
         deleted.push(key);
       },
-      complete: async (_db, claim) => {
+      completeArtifact: async (_db, claim) => {
         completed.push(claim);
+        return true;
+      },
+      completeUpload: async (_db, claim) => {
+        expect(claim).toEqual(upload);
         return true;
       },
     });
 
     expect(await activity.maintainBrowserStateArtifacts()).toEqual({
-      claimed: 2,
-      deleted: 2,
+      claimed: 3,
+      deleted: 3,
       retryable: 0,
     });
-    expect(deleted).toEqual([first.objectKey, second.objectKey]);
+    expect(deleted).toEqual([first.objectKey, second.objectKey, upload.objectKey]);
     expect(completed).toEqual([first, second]);
   });
 
@@ -61,7 +77,8 @@ describe("browser state artifact maintenance", () => {
     const warn = mock(() => undefined);
     const complete = mock(async () => true);
     const activity = createBrowserStateArtifactMaintenanceActivities(services(warn), {
-      claim: async () => [first, second],
+      claimArtifacts: async () => [first, second],
+      claimUploads: async () => [],
       deleteObject: async (_storage, key) => {
         if (key === first.objectKey) {
           throw Object.assign(new Error(`private ${key}`), {
@@ -69,7 +86,8 @@ describe("browser state artifact maintenance", () => {
           });
         }
       },
-      complete,
+      completeArtifact: complete,
+      completeUpload: async () => true,
     });
 
     expect(await activity.maintainBrowserStateArtifacts()).toEqual({
@@ -91,9 +109,11 @@ describe("browser state artifact maintenance", () => {
   test("treats lost DB settlement as retryable after provider deletion", async () => {
     const warn = mock(() => undefined);
     const activity = createBrowserStateArtifactMaintenanceActivities(services(warn), {
-      claim: async () => [first],
+      claimArtifacts: async () => [first],
+      claimUploads: async () => [],
       deleteObject: async () => undefined,
-      complete: async () => false,
+      completeArtifact: async () => false,
+      completeUpload: async () => true,
     });
     expect(await activity.maintainBrowserStateArtifacts()).toEqual({
       claimed: 1,

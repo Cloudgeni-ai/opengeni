@@ -14,6 +14,7 @@ describe("migration 0207 browser identities", () => {
     expect(source).toContain('CREATE TABLE "browser_identities"');
     expect(source).toContain('CREATE TABLE "browser_revisions"');
     expect(source).toContain('CREATE TABLE "browser_state_artifacts"');
+    expect(source).toContain('CREATE TABLE "browser_state_uploads"');
     expect(source).toContain('CREATE TABLE "browser_revision_components"');
     expect(source).toContain('"browser_revisions_parent_fk"');
     expect(source).toContain('"browser_identities_default_revision_fk"');
@@ -21,7 +22,9 @@ describe("migration 0207 browser identities", () => {
     expect(source).toContain("FORCE ROW LEVEL SECURITY");
     expect(source).toContain('CREATE TRIGGER "browser_identities_update_guard_trg"');
     expect(source).toContain('CREATE TRIGGER "browser_state_artifacts_update_guard_trg"');
+    expect(source).toContain('CREATE TRIGGER "browser_state_uploads_update_guard_trg"');
     expect(source).toContain("claim_browser_state_artifact_cleanup");
+    expect(source).toContain("claim_browser_state_upload_cleanup");
     expect(source).toContain("FOR UPDATE SKIP LOCKED");
     expect(source).toContain(
       "REVOKE ALL ON FUNCTION opengeni_private.browser_state_artifacts_update_guard()",
@@ -40,10 +43,11 @@ describe("migration 0207 browser identities", () => {
         where n.nspname = current_schema()
           and c.relname in (
             'browser_identities', 'browser_revisions',
-            'browser_state_artifacts', 'browser_revision_components'
+            'browser_state_artifacts', 'browser_state_uploads',
+            'browser_revision_components'
           )
         order by c.relname`;
-      expect(tables).toHaveLength(4);
+      expect(tables).toHaveLength(5);
       for (const table of tables) {
         expect(table).toMatchObject({ rlsEnabled: true, rlsForced: true });
       }
@@ -64,7 +68,8 @@ describe("migration 0207 browser identities", () => {
           has_table_privilege('opengeni_app', name, 'delete') as delete
         from unnest(array[
           'browser_identities', 'browser_revisions',
-          'browser_state_artifacts', 'browser_revision_components'
+          'browser_state_artifacts', 'browser_state_uploads',
+          'browser_revision_components'
         ]) as name
         order by name`;
       expect([...grants]).toEqual([
@@ -96,6 +101,13 @@ describe("migration 0207 browser identities", () => {
           update: true,
           delete: false,
         },
+        {
+          name: "browser_state_uploads",
+          select: true,
+          insert: true,
+          update: true,
+          delete: false,
+        },
       ]);
 
       const constraints = await sql<Array<{ name: string; definition: string }>>`
@@ -109,10 +121,12 @@ describe("migration 0207 browser identities", () => {
           'browser_identities_default_revision_fk',
           'browser_sessions_base_revision_fk',
           'browser_sessions_private_checkpoint_fk',
+          'browser_state_uploads_operation_fk',
+          'browser_state_uploads_committed_artifact_fk',
           'interaction_operations_kind_check'
         )
         order by conname`;
-      expect(constraints).toHaveLength(8);
+      expect(constraints).toHaveLength(10);
       expect(
         constraints.find((constraint) => constraint.name === "browser_revisions_parent_fk")
           ?.definition,
@@ -140,6 +154,13 @@ describe("migration 0207 browser identities", () => {
           (constraint) => constraint.name === "browser_revisions_publication_operation_fk",
         )?.definition,
       ).toContain("FOREIGN KEY (workspace_id, publication_operation_id)");
+      expect(
+        constraints.find(
+          (constraint) => constraint.name === "browser_state_uploads_committed_artifact_fk",
+        )?.definition,
+      ).toContain(
+        "FOREIGN KEY (workspace_id, committed_artifact_id, purpose, source_browser_session_id)",
+      );
 
       const triggers = await sql<Array<{ name: string }>>`
         select tgname as name
@@ -147,30 +168,46 @@ describe("migration 0207 browser identities", () => {
         where not tgisinternal
           and tgname in (
             'browser_identities_update_guard_trg',
-            'browser_state_artifacts_update_guard_trg'
+            'browser_state_artifacts_update_guard_trg',
+            'browser_state_uploads_update_guard_trg'
           )
         order by tgname`;
       expect(triggers.map((trigger) => trigger.name)).toEqual([
         "browser_identities_update_guard_trg",
         "browser_state_artifacts_update_guard_trg",
+        "browser_state_uploads_update_guard_trg",
       ]);
 
-      const [cleanupFunction] = await sql<
-        Array<{ securityDefiner: boolean; config: string[] | null; publicExecute: boolean }>
+      const cleanupFunctions = await sql<
+        Array<{
+          name: string;
+          securityDefiner: boolean;
+          config: string[] | null;
+          publicExecute: boolean;
+        }>
       >`
-        select p.prosecdef as "securityDefiner", p.proconfig as config,
+        select p.proname as name, p.prosecdef as "securityDefiner", p.proconfig as config,
           has_function_privilege(
             'public', p.oid, 'execute'
           ) as "publicExecute"
         from pg_proc p
         join pg_namespace n on n.oid = p.pronamespace
         where n.nspname = 'opengeni_private'
-          and p.proname = 'claim_browser_state_artifact_cleanup'`;
-      expect(cleanupFunction).toMatchObject({
-        securityDefiner: true,
-        publicExecute: false,
-      });
-      expect(cleanupFunction?.config).toContain("search_path=pg_catalog");
+          and p.proname in (
+            'claim_browser_state_artifact_cleanup',
+            'claim_browser_state_upload_cleanup'
+          ) order by p.proname`;
+      expect(cleanupFunctions.map((entry) => entry.name)).toEqual([
+        "claim_browser_state_artifact_cleanup",
+        "claim_browser_state_upload_cleanup",
+      ]);
+      for (const cleanupFunction of cleanupFunctions) {
+        expect(cleanupFunction).toMatchObject({
+          securityDefiner: true,
+          publicExecute: false,
+        });
+        expect(cleanupFunction.config).toContain("search_path=pg_catalog");
+      }
     } finally {
       await sql.end();
       await blank.release();

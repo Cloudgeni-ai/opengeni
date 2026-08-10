@@ -176,12 +176,11 @@ describe("BrowserSession route discipline", () => {
     expect(route.indexOf('prepared.kind === "completed"')).toBeLessThan(
       route.indexOf("const objectStorage = deps.objectStorage"),
     );
-    expect(route.indexOf("createPutUrl")).toBeLessThan(
-      route.indexOf("dispatchBrowserRevisionPublication"),
-    );
     expect(route.indexOf("dispatchBrowserRevisionPublication")).toBeLessThan(
-      route.indexOf("client.captureState"),
+      route.indexOf("stateUpload"),
     );
+    expect(route.indexOf("stateUpload")).toBeLessThan(route.indexOf("createPutUrl"));
+    expect(route.indexOf("createPutUrl")).toBeLessThan(route.indexOf("client.captureState"));
     expect(route.indexOf("client.captureState")).toBeLessThan(
       route.indexOf("commitBrowserRevisionPublication"),
     );
@@ -207,8 +206,10 @@ describe("BrowserSession route discipline", () => {
     expect(suspend).toContain("if (isTerminalOperation(prepared.operation.state))");
     expect(resume).toContain("if (isTerminalOperation(prepared.operation.state))");
     expect(suspend.indexOf("dispatchBrowserSessionOperation")).toBeLessThan(
-      suspend.indexOf("client.captureState"),
+      suspend.indexOf("stateUpload"),
     );
+    expect(suspend.indexOf("stateUpload")).toBeLessThan(suspend.indexOf("createPutUrl"));
+    expect(suspend.indexOf("createPutUrl")).toBeLessThan(suspend.indexOf("client.captureState"));
     expect(suspend).toContain('afterCapture: "stop"');
     expect(suspend.indexOf("client.captureState")).toBeLessThan(
       suspend.indexOf("commitBrowserSessionSuspension"),

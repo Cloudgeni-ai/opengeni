@@ -235,6 +235,12 @@ export const browserStateArtifacts = pgTable(
       table.workspaceId,
       table.id,
     ),
+    commitAuthority: uniqueIndex("browser_state_artifacts_commit_authority_uq").on(
+      table.workspaceId,
+      table.id,
+      table.purpose,
+      table.sourceBrowserSessionId,
+    ),
     objectKey: uniqueIndex("browser_state_artifacts_object_key_uq").on(table.objectKey),
     source: index("browser_state_artifacts_source_idx").on(
       table.workspaceId,
@@ -305,6 +311,99 @@ export const browserStateArtifacts = pgTable(
           and ${table.deleteClaimedAt} is null
           and ${table.deletedAt} is not null
           and ${table.encryptedDataKey} is null
+        )`,
+    ),
+  }),
+);
+
+/** Pre-publication object authority. This row exists before a controller can
+ * upload bytes, then becomes either a committed artifact root or reclaimable
+ * cleanup authority. It never carries encryption keys or signed URLs. */
+export const browserStateUploads = pgTable(
+  "browser_state_uploads",
+  {
+    id: uuid("id").primaryKey(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    operationId: uuid("operation_id").notNull(),
+    sourceBrowserSessionId: uuid("source_browser_session_id").notNull(),
+    purpose: text("purpose", {
+      enum: ["revision_component", "private_checkpoint"],
+    }).notNull(),
+    objectKey: text("object_key").notNull(),
+    state: text("state", {
+      enum: ["prepared", "delete_pending", "deleting", "committed", "deleted"],
+    })
+      .notNull()
+      .default("prepared"),
+    cleanupAfter: timestamp("cleanup_after", { withTimezone: true }),
+    committedArtifactId: uuid("committed_artifact_id"),
+    deleteClaimId: uuid("delete_claim_id"),
+    deleteClaimedAt: timestamp("delete_claimed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+  },
+  (table) => ({
+    workspaceUpload: uniqueIndex("browser_state_uploads_workspace_id_uq").on(
+      table.workspaceId,
+      table.id,
+    ),
+    operationObject: uniqueIndex("browser_state_uploads_operation_object_uq").on(
+      table.workspaceId,
+      table.operationId,
+      table.objectKey,
+    ),
+    objectKey: uniqueIndex("browser_state_uploads_object_key_uq").on(table.objectKey),
+    gc: index("browser_state_uploads_gc_idx").on(
+      table.state,
+      table.cleanupAfter,
+      table.deleteClaimedAt,
+      table.createdAt,
+    ),
+    valuesValid: check(
+      "browser_state_uploads_values_check",
+      sql`octet_length(${table.objectKey}) between 1 and 2048
+        and ${table.objectKey} ~ ('^workspaces/' || ${table.workspaceId}::text || '/browser-state/[A-Za-z0-9._=-]+(/[A-Za-z0-9._=-]+)*$')
+        and ${table.updatedAt} >= ${table.createdAt}`,
+    ),
+    lifecycleValid: check(
+      "browser_state_uploads_lifecycle_check",
+      sql`(
+          ${table.state} = 'prepared'
+          and ${table.cleanupAfter} is not null
+          and ${table.committedArtifactId} is null
+          and ${table.deleteClaimId} is null
+          and ${table.deleteClaimedAt} is null
+          and ${table.deletedAt} is null
+        ) or (
+          ${table.state} = 'delete_pending'
+          and ${table.cleanupAfter} is not null
+          and ${table.committedArtifactId} is null
+          and ${table.deleteClaimId} is null
+          and ${table.deleteClaimedAt} is null
+          and ${table.deletedAt} is null
+        ) or (
+          ${table.state} = 'deleting'
+          and ${table.cleanupAfter} is not null
+          and ${table.committedArtifactId} is null
+          and ${table.deleteClaimId} is not null
+          and ${table.deleteClaimedAt} is not null
+          and ${table.deletedAt} is null
+        ) or (
+          ${table.state} = 'committed'
+          and ${table.cleanupAfter} is null
+          and ${table.committedArtifactId} is not null
+          and ${table.deleteClaimId} is null
+          and ${table.deleteClaimedAt} is null
+          and ${table.deletedAt} is null
+        ) or (
+          ${table.state} = 'deleted'
+          and ${table.cleanupAfter} is not null
+          and ${table.committedArtifactId} is null
+          and ${table.deleteClaimId} is null
+          and ${table.deleteClaimedAt} is null
+          and ${table.deletedAt} is not null
         )`,
     ),
   }),

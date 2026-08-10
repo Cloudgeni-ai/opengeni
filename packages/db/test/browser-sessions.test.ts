@@ -640,6 +640,10 @@ describe("durable BrowserSession lifecycle", () => {
       operationId: suspendOperationId,
       browserSessionId: active.session.id,
       controllerGeneration: active.controllerGeneration,
+      stateUpload: {
+        objectKey: checkpointArtifact(scope, suspendOperationId).objectKey,
+        cleanupAfter: new Date(Date.now() + 60_000),
+      },
     });
     const suspended = await commitBrowserSessionSuspension(client.db, {
       ...scope,

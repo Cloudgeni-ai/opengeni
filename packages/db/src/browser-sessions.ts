@@ -29,6 +29,9 @@ import {
 } from "./interaction-revisions";
 import { safeDatabaseErrorFacts } from "./persistence-errors";
 import {
+  commitBrowserStateUploadInTransaction,
+  markBrowserStateUploadsDeletePendingInTransaction,
+  prepareBrowserStateUploadInTransaction,
   validateBrowserStateArtifactCommitInput,
   type BrowserStateArtifactCommitInput,
 } from "./browser-state-artifacts";
@@ -1107,6 +1110,7 @@ export async function dispatchBrowserSessionOperation(
     browserSessionId: string;
     controllerGeneration: string;
     controller?: InteractionControllerBinding;
+    stateUpload?: { objectKey: string; cleanupAfter: Date };
   },
 ): Promise<InteractionLifecycleOperationReceiptValue> {
   const controller = input.controller ? InteractionControllerBinding.parse(input.controller) : null;
@@ -1125,6 +1129,16 @@ export async function dispatchBrowserSessionOperation(
         const operation = await loadOperation(tx, input.workspaceId, input.operationId);
         assertOperationResource(operation, input.browserSessionId);
         if (operation!.state === "prepared") {
+          if (input.stateUpload) {
+            await prepareBrowserStateUploadInTransaction(tx, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              operationId: input.operationId,
+              sourceBrowserSessionId: input.browserSessionId,
+              purpose: "private_checkpoint",
+              ...input.stateUpload,
+            });
+          }
           if (controller) {
             await lockBrowserSession(tx, input.workspaceId, input.browserSessionId);
             const now = new Date();
@@ -1194,6 +1208,16 @@ export async function dispatchBrowserSessionOperation(
               "BrowserSession dispatch belongs to another controller binding",
             );
           }
+        }
+        if (input.stateUpload && operation!.state === "dispatched") {
+          await prepareBrowserStateUploadInTransaction(tx, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            operationId: input.operationId,
+            sourceBrowserSessionId: input.browserSessionId,
+            purpose: "private_checkpoint",
+            ...input.stateUpload,
+          });
         }
         return operationReceipt(operation!, true);
       }),
@@ -1619,6 +1643,14 @@ export async function commitBrowserSessionSuspension(
           })
           .returning({ id: schema.browserStateArtifacts.id });
         if (!artifactRow) throw new Error("Browser checkpoint artifact insert was lost");
+        await commitBrowserStateUploadInTransaction(tx, {
+          workspaceId: input.workspaceId,
+          operationId: input.operationId,
+          sourceBrowserSessionId: input.browserSessionId,
+          purpose: "private_checkpoint",
+          objectKey: artifact.objectKey,
+          artifactId,
+        });
 
         if (current.privateCheckpointArtifactId) {
           const [retired] = await tx
@@ -1889,6 +1921,9 @@ async function failBrowserSessionTransition(
           .returning();
         if (!sessionRow || !operationRow) {
           throw new Error("BrowserSession lifecycle failure settlement was lost");
+        }
+        if (input.kind === "suspend") {
+          await markBrowserStateUploadsDeletePendingInTransaction(tx, input);
         }
         const associations = await loadAssociations(tx, input.workspaceId, [
           input.browserSessionId,

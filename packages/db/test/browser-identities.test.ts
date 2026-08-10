@@ -178,12 +178,18 @@ async function dispatchAndCommit(
     kind: "pending",
     operationState: "prepared",
   });
-  const dispatched = await dispatchBrowserRevisionPublication(client.db, input);
-  expect(dispatched).toMatchObject({ kind: "dispatched", replayed: false });
-  expect(await dispatchBrowserRevisionPublication(client.db, input)).toMatchObject({
-    kind: "dispatched",
-    replayed: true,
+  const stateUpload = {
+    objectKey: artifact(scope, input.operationId).objectKey,
+    cleanupAfter: new Date(Date.now() + 60_000),
+  };
+  const dispatched = await dispatchBrowserRevisionPublication(client.db, {
+    ...input,
+    stateUpload,
   });
+  expect(dispatched).toMatchObject({ kind: "dispatched", replayed: false });
+  expect(
+    await dispatchBrowserRevisionPublication(client.db, { ...input, stateUpload }),
+  ).toMatchObject({ kind: "dispatched", replayed: true });
   return await commitBrowserRevisionPublication(client.db, {
     ...input,
     manifestDigest: "c".repeat(64),
@@ -376,8 +382,20 @@ describe("immutable BrowserIdentity lineage", () => {
       prepareBrowserRevisionPublication(client.db, rightInput),
     ]);
     await Promise.all([
-      dispatchBrowserRevisionPublication(client.db, leftInput),
-      dispatchBrowserRevisionPublication(client.db, rightInput),
+      dispatchBrowserRevisionPublication(client.db, {
+        ...leftInput,
+        stateUpload: {
+          objectKey: artifact(scope, leftInput.operationId).objectKey,
+          cleanupAfter: new Date(Date.now() + 60_000),
+        },
+      }),
+      dispatchBrowserRevisionPublication(client.db, {
+        ...rightInput,
+        stateUpload: {
+          objectKey: artifact(scope, rightInput.operationId).objectKey,
+          cleanupAfter: new Date(Date.now() + 60_000),
+        },
+      }),
     ]);
     const [left, right] = await Promise.all([
       commitBrowserRevisionPublication(client.db, {

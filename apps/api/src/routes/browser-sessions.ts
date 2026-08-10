@@ -60,6 +60,7 @@ import {
   BrowserIdentityConflictError,
   BrowserIdentityNotFoundError,
   BrowserIdentityStateError,
+  BrowserStateUploadStateError,
   clearSuspendedBrowserSessionController,
   BrowserSessionNotFoundError,
   BrowserSessionOperationConflictError,
@@ -182,6 +183,7 @@ import { sanitizeFilename } from "./files";
 
 const BROWSER_DRIVER_ID = "opengeni.cdp.v1";
 const BROWSER_WORKSPACE_FILE_AUTHORITY_TTL_SECONDS = 20 * 60;
+const BROWSER_STATE_UPLOAD_CLEANUP_GRACE_MS = 24 * 60 * 60 * 1_000;
 
 type BrowserPlacement = {
   placement: InteractionPlacement;
@@ -1579,15 +1581,19 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
               objectKey,
             });
             try {
+              const dispatched = await dispatchBrowserRevisionPublication(deps.db, {
+                ...publicationInput,
+                controllerGeneration: binding.controllerGeneration,
+                stateUpload: {
+                  objectKey,
+                  cleanupAfter: new Date(Date.now() + BROWSER_STATE_UPLOAD_CLEANUP_GRACE_MS),
+                },
+              });
+              if (dispatched.kind === "completed") return dispatched.response;
               const signed = await objectStorage.createPutUrl({
                 key: objectKey,
                 contentType: BROWSER_STATE_ARTIFACT_CONTENT_TYPE,
               });
-              const dispatched = await dispatchBrowserRevisionPublication(deps.db, {
-                ...publicationInput,
-                controllerGeneration: binding.controllerGeneration,
-              });
-              if (dispatched.kind === "completed") return dispatched.response;
 
               let receipt;
               try {
@@ -1755,16 +1761,20 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
               objectKey,
             });
             try {
-              const signed = await objectStorage.createPutUrl({
-                key: objectKey,
-                contentType: BROWSER_STATE_ARTIFACT_CONTENT_TYPE,
-              });
               await dispatchBrowserSessionOperation(deps.db, {
                 accountId: grant.accountId,
                 workspaceId,
                 operationId: request.operationId,
                 browserSessionId,
                 controllerGeneration: binding.controllerGeneration,
+                stateUpload: {
+                  objectKey,
+                  cleanupAfter: new Date(Date.now() + BROWSER_STATE_UPLOAD_CLEANUP_GRACE_MS),
+                },
+              });
+              const signed = await objectStorage.createPutUrl({
+                key: objectKey,
+                contentType: BROWSER_STATE_ARTIFACT_CONTENT_TYPE,
               });
               const client = await provisionController(deps, grant, record, placement, origin);
               let receipt: PlacementBrowserStateCaptureReceipt;
@@ -3694,6 +3704,7 @@ function browserRouteError(error: unknown): HTTPException {
     error instanceof BrowserSessionStateError ||
     error instanceof BrowserIdentityConflictError ||
     error instanceof BrowserIdentityStateError ||
+    error instanceof BrowserStateUploadStateError ||
     error instanceof InteractionResourceConflictError ||
     error instanceof InteractionResourceStateError ||
     error instanceof BrowserAuthCredentialError
