@@ -1,5 +1,16 @@
 # @opengeni/api-router
 
+## 0.24.3
+
+### Patch Changes
+
+- 7954468: Recognize threaded Slack mentions delivered as message events, include bounded invocation context, and avoid duplicate final replies or repeated session links.
+- Updated dependencies [7954468]
+  - @opengeni/db@0.29.2
+  - @opengeni/core@0.22.3
+  - @opengeni/documents@0.5.30
+  - @opengeni/events@0.3.101
+
 ## 0.24.2
 
 ### Patch Changes

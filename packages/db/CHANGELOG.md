@@ -1,5 +1,11 @@
 # @opengeni/db
 
+## 0.29.2
+
+### Patch Changes
+
+- 7954468: Recognize threaded Slack mentions delivered as message events, include bounded invocation context, and avoid duplicate final replies or repeated session links.
+
 ## 0.29.1
 
 ### Patch Changes
