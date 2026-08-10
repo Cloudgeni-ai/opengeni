@@ -15,13 +15,24 @@ import {
   CheckCircle2Icon,
   ChevronDownIcon,
   GlobeIcon,
+  HardDriveIcon,
   Loader2Icon,
+  MessagesSquareIcon,
   PlugIcon,
   PlusIcon,
   RefreshCwIcon,
   SearchIcon,
 } from "lucide-react";
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { toast } from "sonner";
 
 import { AddCustomDialog } from "@/components/capabilities/add-custom-dialog";
@@ -43,6 +54,13 @@ import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
 import {
@@ -70,6 +88,10 @@ import {
   type SheetSelection,
 } from "@/lib/capabilities";
 import { listViewState } from "@/lib/load-state";
+import {
+  googleDriveAccountState,
+  preferredGoogleDriveConnection,
+} from "@/lib/google-drive-connection";
 import { mcpOAuthCallbackFailureMessage, startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import {
@@ -327,6 +349,7 @@ export function CapabilitiesRoute({
   const capabilityFocusFallbackRef = useRef<HTMLDivElement | null>(null);
   const [sheetError, setSheetError] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
+  const [managedApp, setManagedApp] = useState<"google-drive" | "slack" | null>(null);
 
   // Public MCP registry search (only offered when the catalog has no matches).
   const [registryBusy, setRegistryBusy] = useState(false);
@@ -378,12 +401,23 @@ export function CapabilitiesRoute({
     [client],
   );
   const connectionsLoaded = connections !== null;
+  const googleDriveConnection = preferredGoogleDriveConnection(connections ?? []);
+  const googleDriveState = googleDriveAccountState(googleDriveConnection, connectionsLoaded);
   const personalSlackItem = personalSlackCapability(items);
   const personalSlackConnection = preferredPersonalSlackConnection(connections ?? []);
   const personalSlackStatus = personalSlackAccountState(personalSlackConnection, connectionsLoaded);
   const visiblePersonalSlackStatus = slackPreview?.personal ?? personalSlackStatus;
   const personalSlackAvailable = personalSlackItem !== null || slackPreview !== null;
   const canManagePersonalSlack = canWriteWorkspaceConnections(context.accessContext, workspaceId);
+  const slackAppStatus = visibleSlackBotConnection
+    ? visibleSlackBotConnection.status === "active"
+      ? "Connected"
+      : "Needs attention"
+    : visiblePersonalSlackStatus.state === "connected"
+      ? "Connected"
+      : connectionsLoaded
+        ? "Not connected"
+        : "Loading";
 
   useEffect(() => {
     const authority = slackBotDocumentDestinationAuthority(slackBotConnection?.metadata);
@@ -1228,236 +1262,276 @@ export function CapabilitiesRoute({
           }
         />
 
-        <Suspense fallback={<Skeleton className="mt-6 h-40 w-full rounded-xl" />}>
-          <GoogleDriveConnectorCard workspaceId={workspaceId} />
-        </Suspense>
-
-        <section className="mt-6" aria-labelledby="slack-connections-heading">
+        <section className="mt-6 space-y-3" aria-labelledby="apps-heading">
           <div>
-            <h2 id="slack-connections-heading" className="text-sm font-semibold text-fg">
-              Slack
+            <h2 id="apps-heading" className="text-sm font-semibold text-fg">
+              Apps
             </h2>
-            <p className="mt-1 text-xs text-fg-muted">
-              Ask OpenGeni questions and start work without leaving Slack.
-            </p>
+            <p className="mt-1 text-xs text-fg-muted">Connect services your agents can use.</p>
           </div>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <ManagedAppTile
+              icon={<HardDriveIcon className="size-5" />}
+              name="Google Drive"
+              description="Search, sync, and create files in Drive."
+              status={googleDriveStatusLabel(googleDriveState.state)}
+              onOpen={() => setManagedApp("google-drive")}
+            />
+            <ManagedAppTile
+              icon={<MessagesSquareIcon className="size-5" />}
+              name="Slack"
+              description="Chat with OpenGeni and start work from Slack."
+              status={slackAppStatus}
+              onOpen={() => setManagedApp("slack")}
+            />
+          </div>
+        </section>
 
-          <section
-            className="mt-3 rounded-xl border border-border bg-surface p-4"
-            aria-labelledby="workspace-slack-bot-heading"
-          >
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div className="flex min-w-0 items-start gap-3">
-                <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-brand/10 text-brand">
-                  <Building2Icon className="size-4" />
-                </span>
-                <div className="min-w-0">
-                  <h3 id="workspace-slack-bot-heading" className="text-sm font-semibold text-fg">
-                    OpenGeni in Slack
-                  </h3>
-                  <p className="mt-1 max-w-xl text-xs leading-5 text-fg-muted">
-                    Use mentions, /opengeni, DMs and message shortcuts.
-                  </p>
-                </div>
-              </div>
-            </div>
+        <Sheet
+          open={managedApp === "google-drive"}
+          onOpenChange={(open) => !open && setManagedApp(null)}
+        >
+          <SheetContent className="w-full overflow-y-auto sm:max-w-xl">
+            <SheetHeader className="sr-only">
+              <SheetTitle>Google Drive</SheetTitle>
+              <SheetDescription>Google Drive connection settings.</SheetDescription>
+            </SheetHeader>
+            <Suspense fallback={<Skeleton className="m-5 h-40 rounded-xl" />}>
+              <GoogleDriveConnectorCard workspaceId={workspaceId} />
+            </Suspense>
+          </SheetContent>
+        </Sheet>
 
-            {visibleSlackBotConnection && visibleSlackBotMetadata ? (
-              <>
-                <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-brand/20 bg-brand/5 p-3">
-                  <div className="flex items-center gap-2">
-                    <CheckCircle2Icon className="size-4 shrink-0 text-brand" />
-                    <p className="text-sm font-medium text-fg">
-                      {visibleSlackBotConnection.status === "active"
-                        ? `Connected to ${visibleSlackBotMetadata.slackTeamName}`
-                        : `${visibleSlackBotMetadata.slackTeamName} needs to be reconnected`}
-                    </p>
+        <Sheet open={managedApp === "slack"} onOpenChange={(open) => !open && setManagedApp(null)}>
+          <SheetContent className="w-full overflow-y-auto sm:max-w-xl">
+            <SheetHeader className="border-b border-border px-5 py-4 pr-12">
+              <SheetTitle>Slack</SheetTitle>
+              <SheetDescription>Chat with OpenGeni and start work from Slack.</SheetDescription>
+            </SheetHeader>
+            <section className="space-y-3 px-5 pb-6" aria-label="Slack settings">
+              <section
+                className="mt-3 rounded-xl border border-border bg-surface p-4"
+                aria-labelledby="workspace-slack-bot-heading"
+              >
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="flex min-w-0 items-start gap-3">
+                    <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-brand/10 text-brand">
+                      <Building2Icon className="size-4" />
+                    </span>
+                    <div className="min-w-0">
+                      <h3
+                        id="workspace-slack-bot-heading"
+                        className="text-sm font-semibold text-fg"
+                      >
+                        OpenGeni in Slack
+                      </h3>
+                      <p className="mt-1 max-w-xl text-xs leading-5 text-fg-muted">
+                        Use mentions, /opengeni, DMs and message shortcuts.
+                      </p>
+                    </div>
                   </div>
-                  {visibleSlackBotConnection.status !== "active" ? (
+                </div>
+
+                {visibleSlackBotConnection && visibleSlackBotMetadata ? (
+                  <>
+                    <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-brand/20 bg-brand/5 p-3">
+                      <div className="flex items-center gap-2">
+                        <CheckCircle2Icon className="size-4 shrink-0 text-brand" />
+                        <p className="text-sm font-medium text-fg">
+                          {visibleSlackBotConnection.status === "active"
+                            ? `Connected to ${visibleSlackBotMetadata.slackTeamName}`
+                            : `${visibleSlackBotMetadata.slackTeamName} needs to be reconnected`}
+                        </p>
+                      </div>
+                      {visibleSlackBotConnection.status !== "active" ? (
+                        <SlackBotInstallControls
+                          canInstall={canInstallSlackBot}
+                          hasConnection
+                          busy={slackBotBusy}
+                          onInstall={(createNewConnection) =>
+                            void installSlackBot(createNewConnection)
+                          }
+                        />
+                      ) : null}
+                    </div>
+
+                    <details className="group mt-3 rounded-lg border border-border bg-bg/30 p-3">
+                      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-xs font-medium text-fg">
+                        <span>Settings</span>
+                        <ChevronDownIcon className="size-3.5 text-fg-subtle transition-transform group-open:rotate-180" />
+                      </summary>
+                      <div className="mt-3 border-t border-border/70 pt-3">
+                        <div className="flex flex-wrap items-end justify-between gap-3">
+                          <div>
+                            <p className="text-xs font-semibold text-fg">Knowledge from Slack</p>
+                            <p className="mt-1 text-2xs leading-4 text-fg-muted">
+                              Save imported Slack content to{" "}
+                              {slackBotDestinationLabel(savedSlackDestinationAuthority)}.
+                            </p>
+                          </div>
+                          <div className="flex flex-wrap items-end gap-2">
+                            <label className="grid gap-1 text-2xs font-medium text-fg-muted">
+                              Destination
+                              <Select
+                                aria-label="Slack knowledge destination"
+                                value={slackDestinationAuthority}
+                                disabled={!canInstallSlackBot || slackDestinationBusy}
+                                onChange={(event) =>
+                                  setSlackDestinationAuthority(
+                                    event.target.value as ConnectorDocumentDestinationAuthority,
+                                  )
+                                }
+                              >
+                                <option value="personal">My knowledge</option>
+                                <option
+                                  value="workspace"
+                                  disabled={!canManageSlackWorkspaceDestination}
+                                >
+                                  Workspace knowledge
+                                </option>
+                                <option
+                                  value="organization"
+                                  disabled={!canManageSlackOrganizationDestination}
+                                >
+                                  Organization knowledge
+                                </option>
+                              </Select>
+                            </label>
+                            <Button
+                              type="button"
+                              size="sm"
+                              disabled={
+                                !canInstallSlackBot ||
+                                slackDestinationBusy ||
+                                (slackDestinationAuthority === "workspace" &&
+                                  !canManageSlackWorkspaceDestination) ||
+                                (slackDestinationAuthority === "organization" &&
+                                  !canManageSlackOrganizationDestination)
+                              }
+                              onClick={() => void saveSlackBotDestination()}
+                            >
+                              {slackDestinationBusy ? (
+                                <Loader2Icon className="size-3.5 animate-spin" />
+                              ) : null}
+                              Save
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="mt-3">
+                        <SlackReactionSummonCard
+                          workspaceId={workspaceId}
+                          connection={visibleSlackBotConnection}
+                          canManage={canManageSlackReaction}
+                          installBusy={slackBotBusy}
+                          onReinstall={() => void installSlackBot(false)}
+                        />
+                      </div>
+
+                      <details className="group mt-3 border-t border-border/70 pt-3">
+                        <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 text-2xs text-fg-subtle transition-colors hover:text-fg-muted">
+                          <ChevronDownIcon className="size-3 shrink-0 transition-transform group-open:rotate-180" />
+                          <span>Connection details</span>
+                        </summary>
+                        <div className="mt-3 rounded-md bg-bg/50 p-3">
+                          <p className="text-2xs font-medium text-fg-muted">Slack permissions</p>
+                          <p className="mt-1 break-words font-mono text-2xs leading-relaxed text-fg-subtle">
+                            {OPENGENI_SLACK_BOT_REQUIRED_SCOPES.join(", ")}
+                          </p>
+                          <p className="mt-2 text-2xs text-fg-subtle">
+                            Bot connection ID:{" "}
+                            <span className="font-mono">{visibleSlackBotConnection.id}</span>
+                            {(slackPreview ? 1 : slackBotConnections.length) > 1
+                              ? ` · ${slackBotConnections.length} Slack installations`
+                              : ""}
+                          </p>
+                          <SlackBotInstallControls
+                            canInstall={canInstallSlackBot}
+                            hasConnection
+                            busy={slackBotBusy}
+                            onInstall={(createNewConnection) =>
+                              void installSlackBot(createNewConnection)
+                            }
+                          />
+                          {visibleSlackBotConnection.status === "active" ? (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="mt-1"
+                              disabled={slackBotBusy}
+                              onClick={() => void disconnectSlackBot()}
+                            >
+                              Disconnect workspace bot
+                            </Button>
+                          ) : null}
+                        </div>
+                      </details>
+                    </details>
+                  </>
+                ) : (
+                  <>
                     <SlackBotInstallControls
                       canInstall={canInstallSlackBot}
-                      hasConnection
+                      hasConnection={false}
                       busy={slackBotBusy}
                       onInstall={(createNewConnection) => void installSlackBot(createNewConnection)}
                     />
-                  ) : null}
-                </div>
+                    <details className="group mt-3">
+                      <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 text-2xs text-fg-subtle transition-colors hover:text-fg-muted">
+                        <ChevronDownIcon className="size-3 shrink-0 transition-transform group-open:rotate-180" />
+                        <span>Permissions</span>
+                      </summary>
+                      <p className="mt-2 text-2xs leading-5 text-fg-muted">
+                        Slack shows these permissions before you approve the installation.
+                      </p>
+                      <WorkspaceSlackBotRequestedScopes />
+                    </details>
+                  </>
+                )}
+              </section>
 
-                <details className="group mt-3 rounded-lg border border-border bg-bg/30 p-3">
-                  <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-xs font-medium text-fg">
-                    <span>Settings</span>
-                    <ChevronDownIcon className="size-3.5 text-fg-subtle transition-transform group-open:rotate-180" />
-                  </summary>
-                  <div className="mt-3 border-t border-border/70 pt-3">
-                    <div className="flex flex-wrap items-end justify-between gap-3">
-                      <div>
-                        <p className="text-xs font-semibold text-fg">Knowledge from Slack</p>
-                        <p className="mt-1 text-2xs leading-4 text-fg-muted">
-                          Save imported Slack content to{" "}
-                          {slackBotDestinationLabel(savedSlackDestinationAuthority)}.
-                        </p>
-                      </div>
-                      <div className="flex flex-wrap items-end gap-2">
-                        <label className="grid gap-1 text-2xs font-medium text-fg-muted">
-                          Destination
-                          <Select
-                            aria-label="Slack knowledge destination"
-                            value={slackDestinationAuthority}
-                            disabled={!canInstallSlackBot || slackDestinationBusy}
-                            onChange={(event) =>
-                              setSlackDestinationAuthority(
-                                event.target.value as ConnectorDocumentDestinationAuthority,
-                              )
-                            }
-                          >
-                            <option value="personal">My knowledge</option>
-                            <option
-                              value="workspace"
-                              disabled={!canManageSlackWorkspaceDestination}
-                            >
-                              Workspace knowledge
-                            </option>
-                            <option
-                              value="organization"
-                              disabled={!canManageSlackOrganizationDestination}
-                            >
-                              Organization knowledge
-                            </option>
-                          </Select>
-                        </label>
-                        <Button
-                          type="button"
-                          size="sm"
-                          disabled={
-                            !canInstallSlackBot ||
-                            slackDestinationBusy ||
-                            (slackDestinationAuthority === "workspace" &&
-                              !canManageSlackWorkspaceDestination) ||
-                            (slackDestinationAuthority === "organization" &&
-                              !canManageSlackOrganizationDestination)
-                          }
-                          onClick={() => void saveSlackBotDestination()}
-                        >
-                          {slackDestinationBusy ? (
-                            <Loader2Icon className="size-3.5 animate-spin" />
-                          ) : null}
-                          Save
-                        </Button>
-                      </div>
+              <details className="group mt-3 rounded-xl border border-border bg-surface px-4 py-3">
+                <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+                  <div className="flex min-w-0 items-start gap-3">
+                    <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-fg-muted/10 text-fg-muted">
+                      <PlugIcon className="size-4" />
+                    </span>
+                    <div>
+                      <p className="text-sm font-medium text-fg">Personal Slack</p>
+                      <p className="mt-0.5 text-xs text-fg-muted">
+                        Let agents act through your Slack account.
+                      </p>
                     </div>
                   </div>
-
-                  <div className="mt-3">
-                    <SlackReactionSummonCard
-                      workspaceId={workspaceId}
-                      connection={visibleSlackBotConnection}
-                      canManage={canManageSlackReaction}
-                      installBusy={slackBotBusy}
-                      onReinstall={() => void installSlackBot(false)}
-                    />
+                  <div className="flex shrink-0 items-center gap-2 text-xs text-fg-muted">
+                    <span>
+                      {personalSlackAccountStatusLabel(
+                        visiblePersonalSlackStatus,
+                        personalSlackAvailable,
+                      )}
+                    </span>
+                    <ChevronDownIcon className="size-4 text-fg-subtle transition-transform group-open:rotate-180" />
                   </div>
-
-                  <details className="group mt-3 border-t border-border/70 pt-3">
-                    <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 text-2xs text-fg-subtle transition-colors hover:text-fg-muted">
-                      <ChevronDownIcon className="size-3 shrink-0 transition-transform group-open:rotate-180" />
-                      <span>Connection details</span>
-                    </summary>
-                    <div className="mt-3 rounded-md bg-bg/50 p-3">
-                      <p className="text-2xs font-medium text-fg-muted">Slack permissions</p>
-                      <p className="mt-1 break-words font-mono text-2xs leading-relaxed text-fg-subtle">
-                        {OPENGENI_SLACK_BOT_REQUIRED_SCOPES.join(", ")}
-                      </p>
-                      <p className="mt-2 text-2xs text-fg-subtle">
-                        Bot connection ID:{" "}
-                        <span className="font-mono">{visibleSlackBotConnection.id}</span>
-                        {(slackPreview ? 1 : slackBotConnections.length) > 1
-                          ? ` · ${slackBotConnections.length} Slack installations`
-                          : ""}
-                      </p>
-                      <SlackBotInstallControls
-                        canInstall={canInstallSlackBot}
-                        hasConnection
-                        busy={slackBotBusy}
-                        onInstall={(createNewConnection) =>
-                          void installSlackBot(createNewConnection)
-                        }
-                      />
-                      {visibleSlackBotConnection.status === "active" ? (
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          className="mt-1"
-                          disabled={slackBotBusy}
-                          onClick={() => void disconnectSlackBot()}
-                        >
-                          Disconnect workspace bot
-                        </Button>
-                      ) : null}
-                    </div>
-                  </details>
-                </details>
-              </>
-            ) : (
-              <>
-                <SlackBotInstallControls
-                  canInstall={canInstallSlackBot}
-                  hasConnection={false}
-                  busy={slackBotBusy}
-                  onInstall={(createNewConnection) => void installSlackBot(createNewConnection)}
-                />
-                <details className="group mt-3">
-                  <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 text-2xs text-fg-subtle transition-colors hover:text-fg-muted">
-                    <ChevronDownIcon className="size-3 shrink-0 transition-transform group-open:rotate-180" />
-                    <span>Permissions</span>
-                  </summary>
-                  <p className="mt-2 text-2xs leading-5 text-fg-muted">
-                    Slack shows these permissions before you approve the installation.
-                  </p>
-                  <WorkspaceSlackBotRequestedScopes />
-                </details>
-              </>
-            )}
-          </section>
-
-          <details className="group mt-3 rounded-xl border border-border bg-surface px-4 py-3">
-            <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
-              <div className="flex min-w-0 items-start gap-3">
-                <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-fg-muted/10 text-fg-muted">
-                  <PlugIcon className="size-4" />
-                </span>
-                <div>
-                  <p className="text-sm font-medium text-fg">Personal Slack</p>
-                  <p className="mt-0.5 text-xs text-fg-muted">
-                    Let agents act through your Slack account.
-                  </p>
+                </summary>
+                <div className="mt-3 border-t border-border/70 pt-3">
+                  <PersonalSlackAccountCard
+                    available={personalSlackAvailable}
+                    canManage={canManagePersonalSlack}
+                    busy={personalSlackBusy}
+                    accountState={visiblePersonalSlackStatus}
+                    embedded
+                    readOnly={slackPreview !== null}
+                    onConnect={() => void startPersonalSlackOAuth()}
+                    onReconnect={() => void startPersonalSlackOAuth()}
+                    onDisconnect={() => setPersonalSlackDisconnectOpen(true)}
+                  />
                 </div>
-              </div>
-              <div className="flex shrink-0 items-center gap-2 text-xs text-fg-muted">
-                <span>
-                  {personalSlackAccountStatusLabel(
-                    visiblePersonalSlackStatus,
-                    personalSlackAvailable,
-                  )}
-                </span>
-                <ChevronDownIcon className="size-4 text-fg-subtle transition-transform group-open:rotate-180" />
-              </div>
-            </summary>
-            <div className="mt-3 border-t border-border/70 pt-3">
-              <PersonalSlackAccountCard
-                available={personalSlackAvailable}
-                canManage={canManagePersonalSlack}
-                busy={personalSlackBusy}
-                accountState={visiblePersonalSlackStatus}
-                embedded
-                readOnly={slackPreview !== null}
-                onConnect={() => void startPersonalSlackOAuth()}
-                onReconnect={() => void startPersonalSlackOAuth()}
-                onDisconnect={() => setPersonalSlackDisconnectOpen(true)}
-              />
-            </div>
-          </details>
-        </section>
+              </details>
+            </section>
+          </SheetContent>
+        </Sheet>
 
         <ConfirmDialog
           open={personalSlackDisconnectOpen}
@@ -1550,7 +1624,7 @@ export function CapabilitiesRoute({
               ) : null}
 
               {catalogView === "loading" ? (
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                   {[
                     "catalog-skeleton-1",
                     "catalog-skeleton-2",
@@ -1561,11 +1635,15 @@ export function CapabilitiesRoute({
                     "catalog-skeleton-7",
                     "catalog-skeleton-8",
                   ].map((rowKey) => (
-                    <div key={rowKey} className="rounded-xl border border-border bg-surface/50 p-4">
-                      <Skeleton className="size-10 rounded-lg" />
-                      <Skeleton className="mt-3 h-4 w-24" />
-                      <Skeleton className="mt-2 h-3 w-full" />
-                      <Skeleton className="mt-1.5 h-3 w-2/3" />
+                    <div
+                      key={rowKey}
+                      className="flex items-center gap-3 rounded-xl border border-border bg-surface/50 p-3"
+                    >
+                      <Skeleton className="size-8 shrink-0 rounded-lg" />
+                      <div className="min-w-0 flex-1">
+                        <Skeleton className="h-4 w-24" />
+                        <Skeleton className="mt-2 h-3 w-2/3" />
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -1588,7 +1666,7 @@ export function CapabilitiesRoute({
                 />
               ) : (
                 <>
-                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                     {visibleBrowse.map((item) => (
                       <CapabilityTile
                         key={item.id}
@@ -1639,6 +1717,63 @@ export function CapabilitiesRoute({
         onSubmit={submitAddCustom}
       />
     </div>
+  );
+}
+
+export function googleDriveStatusLabel(
+  state: ReturnType<typeof googleDriveAccountState>["state"],
+): string {
+  if (state === "connected") return "Connected";
+  if (state === "paused") return "Paused";
+  if (state === "not_connected" || state === "disconnected") return "Not connected";
+  if (state === "unverified") return "Loading";
+  return "Needs attention";
+}
+
+function ManagedAppTile({
+  icon,
+  name,
+  description,
+  status,
+  onOpen,
+}: {
+  icon: ReactNode;
+  name: string;
+  description: string;
+  status: string;
+  onOpen: () => void;
+}) {
+  const connected = status === "Connected";
+  const attention = status === "Needs attention";
+
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className="group flex min-w-0 items-center gap-3 rounded-xl border border-border bg-surface/50 p-3 text-left transition-colors hover:border-border-strong hover:bg-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg"
+    >
+      <span className="grid size-10 shrink-0 place-items-center rounded-lg border border-border bg-bg text-fg-muted">
+        {icon}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-sm font-medium text-fg">{name}</span>
+        <span className="mt-0.5 block truncate text-xs text-fg-muted">{description}</span>
+      </span>
+      <span
+        className={cn(
+          "flex shrink-0 items-center gap-1.5 text-2xs",
+          attention ? "text-status-waiting" : "text-fg-subtle",
+        )}
+      >
+        <span
+          className={cn(
+            "size-1.5 rounded-full",
+            connected ? "bg-status-idle" : attention ? "bg-status-waiting" : "bg-fg-subtle/50",
+          )}
+        />
+        {status}
+      </span>
+    </button>
   );
 }
 
@@ -1743,7 +1878,7 @@ function RegistryFallback({
     return (
       <div className="space-y-3">
         <p className="text-xs text-fg-subtle">From the public MCP registry</p>
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
           {results.map((item) => (
             <CapabilityTile
               key={item.id}

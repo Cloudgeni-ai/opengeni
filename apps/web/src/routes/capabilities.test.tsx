@@ -9,6 +9,7 @@ import {
   canInstallOpenGeniSlackBot,
   canManageSlackReactionSummon,
   canWriteWorkspaceConnections,
+  googleDriveStatusLabel,
   localConnectedSlackPreview,
   SlackBotInstallControls,
   WorkspaceSlackBotRequestedScopes,
@@ -74,6 +75,15 @@ function accessContext(
 }
 
 describe("OpenGeni Slack bot install controls", () => {
+  test("summarizes Google Drive state for the compact app catalog", () => {
+    expect(googleDriveStatusLabel("connected")).toBe("Connected");
+    expect(googleDriveStatusLabel("paused")).toBe("Paused");
+    expect(googleDriveStatusLabel("not_connected")).toBe("Not connected");
+    expect(googleDriveStatusLabel("disconnected")).toBe("Not connected");
+    expect(googleDriveStatusLabel("reconsent_required")).toBe("Needs attention");
+    expect(googleDriveStatusLabel("unverified")).toBe("Loading");
+  });
+
   test("offers a local-only connected Slack preview without changing persisted connections", () => {
     expect(localConnectedSlackPreview("?previewSlack=connected", "workspace-a", false)).toBeNull();
 
