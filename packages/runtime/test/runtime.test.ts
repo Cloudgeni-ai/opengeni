@@ -114,7 +114,7 @@ import { TurnSandboxCommandCancelledError } from "../src/sandbox/turn-tool-cance
 import { CompactionNeededError } from "../src/context-compaction";
 import { readSkillLibraryArtifact, verifySkillLibraryArtifact } from "../src/skill-library";
 import { MCP_MAX_CONCURRENT_SERVER_OPERATIONS } from "../src/mcp-network";
-import { ScriptedModel, startTestMcpServer, testSettings } from "@opengeni/testing";
+import { ScriptedModel, functionCall, startTestMcpServer, testSettings } from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
 import {
   boundModelToolOutputItem,
@@ -464,6 +464,68 @@ describe("structured human-input runtime boundary", () => {
       outcome: "answered",
       answers: [{ questionId: "q", values: ["Because"] }],
     });
+  });
+
+  test("returns malformed human-input arguments to the model instead of interrupting the turn", async () => {
+    const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
+    const validQuestions = [
+      {
+        id: "choice",
+        kind: "single_select",
+        prompt: "Choose one",
+        options: [{ id: "a", label: "A" }],
+      },
+    ];
+    const model = new ScriptedModel([
+      {
+        output: [
+          functionCall(
+            HUMAN_INPUT_TOOL_NAME,
+            { questions: JSON.stringify(validQuestions), allowSkip: false },
+            "human-call-invalid",
+          ),
+        ],
+      },
+      {
+        output: [
+          functionCall(
+            HUMAN_INPUT_TOOL_NAME,
+            { questions: validQuestions, allowSkip: false },
+            "human-call-valid",
+          ),
+        ],
+      },
+    ]);
+    const agent = buildOpenGeniAgent(settings, [], { model, hostedWebSearch: false });
+
+    const result = await runAgentStream(agent, "Ask me to choose", settings);
+    for await (const event of result.toStream()) void event;
+    await result.completed;
+
+    expect(model.calls).toBe(2);
+    expect(result.interruptions).toHaveLength(1);
+    expect(result.interruptions[0]?.rawItem).toMatchObject({
+      callId: "human-call-valid",
+      name: HUMAN_INPUT_TOOL_NAME,
+    });
+    expect(serializeHumanInputRequests(result.interruptions)).toEqual([
+      {
+        toolCallId: "human-call-valid",
+        input: {
+          questions: [
+            {
+              ...validQuestions[0],
+              required: true,
+              allowOther: false,
+            },
+          ],
+          allowSkip: false,
+        },
+      },
+    ]);
+    const retryInput = JSON.stringify(model.requests[1]?.input);
+    expect(retryInput).toContain("Tool execution failed. Error details are redacted.");
+    expect(retryInput).toContain("human-call-invalid");
   });
 
   test("rejects malformed interruption arguments instead of exposing an unvalidated form", () => {

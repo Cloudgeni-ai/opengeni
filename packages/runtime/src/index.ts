@@ -93,6 +93,7 @@ import {
   // apply file edits over its NATS fs ops using the SDK's exact diff semantics.
   applyDiff,
   RunContext,
+  ToolGuardrailFunctionOutputFactory,
   type AgentInputItem,
   type CallModelInputFilter,
   type MCPServer,
@@ -2010,6 +2011,27 @@ export function buildOpenGeniAgent(
             "Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, an optional Other value, multiple questions, explicit skip policy, and an optional expiry.",
           parameters: RequestHumanInputToolInput,
           needsApproval: true,
+          inputGuardrails: [
+            {
+              name: "validate_human_input_request",
+              run: async ({ toolCall }) => {
+                let input: unknown;
+                try {
+                  input = JSON.parse(toolCall.arguments);
+                } catch {
+                  return ToolGuardrailFunctionOutputFactory.rejectContent(
+                    "Invalid request_human_input arguments. Call the tool again with valid JSON matching its schema.",
+                  );
+                }
+                if (!RequestHumanInputToolInput.safeParse(input).success) {
+                  return ToolGuardrailFunctionOutputFactory.rejectContent(
+                    "Invalid request_human_input arguments. Call the tool again with an object matching its schema; questions must be an array, not JSON text.",
+                  );
+                }
+                return ToolGuardrailFunctionOutputFactory.allow();
+              },
+            },
+          ],
           // A missing/mismatched durable response is a protocol integrity failure,
           // not model-visible tool output the agent may reason past.
           errorFunction: null,
@@ -4958,6 +4980,7 @@ export async function runAgentStream(
       maxTurns: settings.agentMaxModelCallsPerTurn,
       historyOwnership: "external",
       modelResponseRetention: "last",
+      toolExecution: { preApprovalInputGuardrails: true },
       callModelInputFilter: ownedFilter,
       ...(overrides.signal ? { signal: overrides.signal } : {}),
     };
@@ -5074,6 +5097,7 @@ export async function runAgentStream(
     maxTurns: settings.agentMaxModelCallsPerTurn,
     historyOwnership: "external",
     modelResponseRetention: "last",
+    toolExecution: { preApprovalInputGuardrails: true },
     // Built-in per-call guard chain: normalize computer calls, optionally strip
     // provider ids, trim to the input budget on the client-compaction path, and
     // raise the proactive compaction signal. This runs for turn-start replay AND
