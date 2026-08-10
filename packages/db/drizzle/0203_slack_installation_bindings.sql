@@ -213,7 +213,10 @@ BEGIN
       FROM %1$I.slack_installation_bindings B
       WHERE B.connection_id = NEW.id;
 
-      IF existing_binding IS NOT NULL THEN
+      -- Composite `IS NOT NULL` is false when any nullable field is null. Use
+      -- the SELECT result flag so active bindings with a null quarantine reason
+      -- still take the existing-binding path on reinstall and safe updates.
+      IF FOUND THEN
         IF team_id IS DISTINCT FROM existing_binding.slack_team_id
           OR bot_id_value IS DISTINCT FROM existing_binding.bot_id
           OR bot_user_id_value IS DISTINCT FROM existing_binding.bot_user_id

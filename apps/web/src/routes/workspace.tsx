@@ -39,7 +39,6 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
     refreshWorkspaceMcpServers,
   } = context;
   const previousWorkspaceId = useRef<string | null>(null);
-  const handledSlackToken = useRef<string | null>(null);
   const [slackAccessRequest, setSlackAccessRequest] = useState<SlackUserLinkAccessRequest | null>(
     null,
   );
@@ -47,8 +46,7 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
   const [slackAccessBusy, setSlackAccessBusy] = useState(false);
   useGitHubHistoryRefresh(workspaceId, activeWorkspaceId !== null, refreshGitHub);
 
-  const pendingSlackLink =
-    context.pendingSlackLink?.workspaceId === workspaceId ? context.pendingSlackLink : null;
+  const hasSlackLinkContinuation = context.slackLinkContinuationWorkspaceId === workspaceId;
 
   const refreshSlackAccess = useCallback(
     async (request: SlackUserLinkAccessRequest) => {
@@ -67,15 +65,14 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
   );
 
   useEffect(() => {
-    if (!pendingSlackLink || handledSlackToken.current === pendingSlackLink.token) return;
-    handledSlackToken.current = pendingSlackLink.token;
-    const token = pendingSlackLink.token;
+    if (!hasSlackLinkContinuation) return;
+    let disposed = false;
     setSlackAccessError(null);
-    void context.client
-      .prepareSlackUserLinkAccess(workspaceId, { linkToken: token })
+    void context
+      .preparePendingSlackLink(workspaceId)
       .then(async (request) => {
+        if (disposed || !request) return;
         setSlackAccessRequest(request);
-        context.clearPendingSlackLink();
         if (request.status === "completed") {
           toast.success("Slack identity linked", {
             description: "You can return to Slack and invoke OpenGeni again.",
@@ -85,10 +82,13 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
         }
       })
       .catch((error) => {
-        context.clearPendingSlackLink();
+        if (disposed) return;
         setSlackAccessError(error instanceof Error ? error.message : String(error));
       });
-  }, [context, pendingSlackLink, workspaceId]);
+    return () => {
+      disposed = true;
+    };
+  }, [context, hasSlackLinkContinuation, workspaceId]);
 
   useEffect(() => {
     if (slackAccessRequest?.status !== "pending") return;
@@ -176,7 +176,7 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
   ]);
 
   if (!activeWorkspace) {
-    if (pendingSlackLink || slackAccessRequest || slackAccessError) {
+    if (hasSlackLinkContinuation || slackAccessRequest || slackAccessError) {
       const workspaceName = slackAccessRequest?.workspaceDisplayName ?? "this workspace";
       const activePendingState =
         slackAccessRequest?.status === "prepared" || slackAccessRequest?.status === "pending";

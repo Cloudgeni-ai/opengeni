@@ -222,7 +222,7 @@ describe("release schema contract", () => {
         (migrations.has("0204_slack_user_link_access_requests.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "940c249ab1b197f7aed07e4a7799b23b8ca98d4937f72816a8254e32537849b2",
+      "6dea5d32229ecfeb3f14542aab10875e1fb2373a400dac49dc208963d9032813",
     );
     expect(contract.latestMigration).toBe("0204_slack_user_link_access_requests.sql");
     expect(migrations.get("0197_knowledge_source_sync_schedules.sql")).toMatchObject({
@@ -250,7 +250,7 @@ describe("release schema contract", () => {
       deploymentMode: "rolling",
     });
     expect(migrations.get("0203_slack_installation_bindings.sql")).toMatchObject({
-      sha256: "6edc75b6bf6163989c63b2d074c3cee8932f2d3198669a1eed6652957d928d8f",
+      sha256: "aba5b603fc88237a2446fc66803f3c940f2f50e111fbe882abf4420307374b34",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0183_model_call_provider_cost_estimates.sql")).toMatchObject({

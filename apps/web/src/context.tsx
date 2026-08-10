@@ -81,6 +81,7 @@ import type {
   LatencyMode,
   ResourceRef,
   Session,
+  SlackUserLinkAccessRequest,
   ToolRef,
   TurnSubmission,
   UpdateWorkspaceSettingsRequest,
@@ -108,9 +109,10 @@ export type AppContextValue = {
   authSession: AuthSession | null;
   accessContext: AccessContext;
   workspaces: Workspace[];
-  /** Raw signed Slack bearer held in memory only until its server-side exchange. */
-  pendingSlackLink: PendingSlackLink | null;
-  clearPendingSlackLink: () => void;
+  /** Token-free continuation identity retained across Root/provider remounts. */
+  slackLinkContinuationWorkspaceId: string | null;
+  /** Creates or joins the one server-side prepare request for the bootstrapped bearer. */
+  preparePendingSlackLink: (workspaceId: string) => Promise<SlackUserLinkAccessRequest | null>;
   clearSlackLinkContinuation: () => void;
   accessKeyVersion: number;
   keyAuthRequired: boolean;
@@ -237,22 +239,87 @@ export type PendingSlackLink = {
   token: string;
 };
 
-export function createOneShotPendingSlackLink(value: PendingSlackLink | null) {
-  let pending = value;
-  return () => {
-    const current = pending;
-    pending = null;
-    return current;
+export type SlackLinkPreparePhase = "none" | "raw" | "in_flight" | "prepared" | "failed";
+
+export function createSlackLinkPrepareController<Request>(value: PendingSlackLink | null) {
+  let workspaceId = value?.workspaceId ?? null;
+  let bearer = value?.token ?? null;
+  let inFlight: Promise<Request> | null = null;
+  let prepared: Request | null = null;
+  let failure: unknown;
+  let hasFailure = false;
+  let generation = 0;
+
+  return {
+    workspaceId: () => workspaceId,
+    phase: (): SlackLinkPreparePhase => {
+      if (!workspaceId) return "none";
+      if (bearer !== null) return "raw";
+      if (inFlight) return "in_flight";
+      if (prepared !== null) return "prepared";
+      return hasFailure ? "failed" : "none";
+    },
+    prepare: (
+      requestedWorkspaceId: string,
+      exchange: (token: string) => Promise<Request>,
+    ): Promise<Request | null> => {
+      if (!workspaceId || requestedWorkspaceId !== workspaceId) return Promise.resolve(null);
+      if (prepared !== null) return Promise.resolve(prepared);
+      if (hasFailure) return Promise.reject(failure);
+      if (inFlight) return inFlight;
+      if (bearer === null) return Promise.resolve(null);
+
+      const token = bearer;
+      const claimedGeneration = generation;
+      let exchangePromise: Promise<Request>;
+      try {
+        exchangePromise = exchange(token);
+      } catch (error) {
+        exchangePromise = Promise.reject(error);
+      }
+      // The exchange request now owns the only live bearer reference. Module,
+      // React, URL, history, and storage state retain only token-free facts.
+      bearer = null;
+      let flight: Promise<Request>;
+      flight = exchangePromise
+        .then(
+          (request) => {
+            if (generation === claimedGeneration) prepared = request;
+            return request;
+          },
+          (error: unknown) => {
+            if (generation === claimedGeneration) {
+              failure = error;
+              hasFailure = true;
+            }
+            throw error;
+          },
+        )
+        .finally(() => {
+          if (generation === claimedGeneration && inFlight === flight) inFlight = null;
+        });
+      inFlight = flight;
+      return flight;
+    },
+    clear: () => {
+      generation += 1;
+      workspaceId = null;
+      bearer = null;
+      inFlight = null;
+      prepared = null;
+      failure = undefined;
+      hasFailure = false;
+    },
   };
 }
 
 // Capture and scrub the signed fragment while this module is loading, before
-// TanStack Router canonicalizes the initial location. The consumable slot is
-// intentionally one-shot: a later Root/provider remount cannot resurrect an
-// already exchanged, cancelled, or completed bearer.
+// TanStack Router canonicalizes the initial location. The module-scoped
+// controller survives Root/provider remounts, but releases the raw bearer as
+// soon as exactly one prepare request has been created.
 const bootstrappedPendingSlackLink = pendingSlackLinkFromBrowserLocation();
 stripSlackLinkFromBrowserLocation();
-const takeBootstrappedPendingSlackLink = createOneShotPendingSlackLink(
+const slackLinkPrepareController = createSlackLinkPrepareController<SlackUserLinkAccessRequest>(
   bootstrappedPendingSlackLink,
 );
 
@@ -313,21 +380,15 @@ export function workspaceLabel(workspace: Workspace, workspaces: Workspace[]): s
 }
 
 export function RootRouteComponent() {
-  const [initialPendingSlackLink] = useState<PendingSlackLink | null>(
-    takeBootstrappedPendingSlackLink,
-  );
   const [session, setSessionState] = useState<Session | null>(null);
   const [clientConfig, setClientConfig] = useState<ClientConfig | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
   const [authSession, setAuthSession] = useState<AuthSession | null | undefined>(undefined);
   const [accessContext, setAccessContext] = useState<AccessContext | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
-  const [pendingSlackLink, setPendingSlackLink] = useState<PendingSlackLink | null>(
-    initialPendingSlackLink,
-  );
   const [slackLinkContinuationWorkspaceId, setSlackLinkContinuationWorkspaceId] = useState<
     string | null
-  >(initialPendingSlackLink?.workspaceId ?? null);
+  >(slackLinkPrepareController.workspaceId);
   const [accessLoading, setAccessLoading] = useState(false);
   const [accessError, setAccessError] = useState<string | null>(null);
   const [model, setModel] = useState("gpt-5.6-sol");
@@ -1157,9 +1218,16 @@ export function RootRouteComponent() {
   const contextDisconnectGitHubInstallation = useLatestCallback(disconnectGitHubInstallation);
   const contextToggleGitHubRepository = useLatestCallback(toggleGitHubRepository);
   const contextStartSession = useLatestCallback(startSession);
-  const clearPendingSlackLink = useCallback(() => setPendingSlackLink(null), []);
+  const preparePendingSlackLink = useCallback(
+    async (workspaceId: string) =>
+      await slackLinkPrepareController.prepare(
+        workspaceId,
+        async (token) => await client.prepareSlackUserLinkAccess(workspaceId, { linkToken: token }),
+      ),
+    [client],
+  );
   const clearSlackLinkContinuation = useCallback(() => {
-    setPendingSlackLink(null);
+    slackLinkPrepareController.clear();
     setSlackLinkContinuationWorkspaceId(null);
   }, []);
 
@@ -1171,8 +1239,8 @@ export function RootRouteComponent() {
           authSession: authSession ?? null,
           accessContext,
           workspaces,
-          pendingSlackLink,
-          clearPendingSlackLink,
+          slackLinkContinuationWorkspaceId,
+          preparePendingSlackLink,
           clearSlackLinkContinuation,
           accessKeyVersion,
           keyAuthRequired: keyAuthRequired === true,
@@ -1249,7 +1317,6 @@ export function RootRouteComponent() {
     accessKeyVersion,
     authSession,
     busy,
-    clearPendingSlackLink,
     clearSlackLinkContinuation,
     client,
     clientConfig,
@@ -1281,7 +1348,8 @@ export function RootRouteComponent() {
     manualRepos,
     manualReposOpen,
     model,
-    pendingSlackLink,
+    preparePendingSlackLink,
+    slackLinkContinuationWorkspaceId,
     modelForSession,
     ensureModelForSession,
     latencyMode,

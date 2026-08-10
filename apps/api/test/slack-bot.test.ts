@@ -1325,7 +1325,7 @@ describe("OpenGeni Slack bot connection", () => {
     );
   });
 
-  test("deterministically collapses equal-timestamp legacy duplicates only for one bot principal", async () => {
+  test("rejects post-cutover duplicate installations and preserves the canonical route", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const connected = await connectBot(workspace, fakeSlack().fetch);
@@ -1336,33 +1336,27 @@ describe("OpenGeni Slack bot connection", () => {
       null,
     );
     if (!original) throw new Error("expected connected Slack bot fixture");
-    const duplicate = await createConnection(client.db, {
-      accountId: workspace.accountId,
-      workspaceId: workspace.workspaceId,
-      subjectId: null,
-      providerDomain: "slack.com",
-      kind: "app_install",
-      credentialEncrypted: "legacy-duplicate-fixture",
-      grantedScopes: [...original.grantedScopes],
-      verifiedInstallAt: new Date(original.verifiedInstallAt!),
-      verifiedInstallVersion: 1,
-      metadata: { ...original.metadata },
-      createdBySubjectId: "subject-a",
-    });
-    const equalCreatedAt = new Date("2026-07-31T12:00:00.000Z");
-    await shared!.admin`
-      update connections
-      set created_at = ${equalCreatedAt}
-      where workspace_id = ${workspace.workspaceId}
-        and id in (${original.id}, ${duplicate.id})`;
-
-    const ordered = (await listConnectionsMetadata(client.db, workspace.workspaceId, null)).filter(
-      (connection) => connection.id === original.id || connection.id === duplicate.id,
-    );
-    const expectedId = [original.id, duplicate.id].sort().reverse()[0]!;
-    expect(ordered.map((connection) => connection.id)).toEqual(
-      [original.id, duplicate.id].sort().reverse(),
-    );
+    let duplicateError: unknown;
+    try {
+      await createConnection(client.db, {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        subjectId: null,
+        providerDomain: "slack.com",
+        kind: "app_install",
+        credentialEncrypted: "post-cutover-duplicate-fixture",
+        grantedScopes: [...original.grantedScopes],
+        verifiedInstallAt: new Date(original.verifiedInstallAt!),
+        verifiedInstallVersion: 1,
+        metadata: { ...original.metadata },
+        createdBySubjectId: "subject-a",
+      });
+    } catch (error) {
+      duplicateError = error;
+    }
+    expect(
+      String((duplicateError as { cause?: { message?: string } } | undefined)?.cause?.message),
+    ).toContain("OPENGENI_SLACK_BINDING_CONFLICT");
     expect(
       await resolveSlackBotConnectionForTool({
         db: client.db,
@@ -1374,57 +1368,42 @@ describe("OpenGeni Slack bot connection", () => {
         },
         sessionId: null,
       }),
-    ).toMatchObject({ connection: { id: expectedId } });
+    ).toMatchObject({ connection: { id: original.id } });
 
     const otherWorkspace = await freshWorkspace();
-    const crossTenant = await createConnection(client.db, {
-      accountId: otherWorkspace.accountId,
-      workspaceId: otherWorkspace.workspaceId,
-      subjectId: null,
-      providerDomain: "slack.com",
-      kind: "app_install",
-      credentialEncrypted: "cross-tenant-duplicate-fixture",
-      grantedScopes: [...original.grantedScopes],
-      verifiedInstallAt: new Date(original.verifiedInstallAt!),
-      verifiedInstallVersion: 1,
-      metadata: { ...original.metadata },
-      createdBySubjectId: "subject-a",
-    });
-    expect(
-      (await listConnectionsMetadata(client.db, workspace.workspaceId, null)).some(
-        (connection) => connection.id === crossTenant.id,
-      ),
-    ).toBe(false);
-
-    await createConnection(client.db, {
-      accountId: workspace.accountId,
-      workspaceId: workspace.workspaceId,
-      subjectId: null,
-      providerDomain: "slack.com",
-      kind: "app_install",
-      credentialEncrypted: "different-principal-fixture",
-      grantedScopes: [...original.grantedScopes],
-      verifiedInstallAt: new Date(original.verifiedInstallAt!),
-      verifiedInstallVersion: 1,
-      metadata: {
-        ...original.metadata,
-        botId: "B_OTHER",
-        botUserId: "U_OTHER",
-      },
-      createdBySubjectId: "subject-a",
-    });
     await expect(
-      resolveSlackBotConnectionForTool({
-        db: client.db,
-        grant: {
-          ...workspace,
-          subjectId: "subject-a",
-          permissions: ["connections:read"],
-          metadata: {},
-        },
-        sessionId: null,
+      createConnection(client.db, {
+        accountId: otherWorkspace.accountId,
+        workspaceId: otherWorkspace.workspaceId,
+        subjectId: null,
+        providerDomain: "slack.com",
+        kind: "app_install",
+        credentialEncrypted: "cross-tenant-duplicate-fixture",
+        grantedScopes: [...original.grantedScopes],
+        verifiedInstallAt: new Date(original.verifiedInstallAt!),
+        verifiedInstallVersion: 1,
+        metadata: { ...original.metadata },
+        createdBySubjectId: "subject-a",
       }),
-    ).rejects.toThrow("multiple active OpenGeni Slack bot connections");
+    ).rejects.toThrow();
+    await expect(
+      createConnection(client.db, {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        subjectId: null,
+        providerDomain: "slack.com",
+        kind: "app_install",
+        credentialEncrypted: "different-principal-fixture",
+        grantedScopes: [...original.grantedScopes],
+        verifiedInstallAt: new Date(original.verifiedInstallAt!),
+        verifiedInstallVersion: 1,
+        metadata: { ...original.metadata, botId: "B_OTHER", botUserId: "U_OTHER" },
+        createdBySubjectId: "subject-a",
+      }),
+    ).rejects.toThrow();
+    expect(await listSlackInstallationBindings(client.db, workspace)).toEqual([
+      expect.objectContaining({ connectionId: original.id, state: "active" }),
+    ]);
   });
 
   test("revalidates callback membership before consuming state and rejects replay", async () => {
@@ -1868,7 +1847,7 @@ describe("OpenGeni Slack bot connection", () => {
     ];
     for (const code of rejectedCodes) {
       const workspace = await freshWorkspace();
-      const slack = fakeSlack();
+      const slack = fakeSlack({ teamId: `T_REJECT_${code.toUpperCase()}` });
       const connected = await connectBot(workspace, slack.fetch);
       const resolved = await resolveSlackBotConnectionForTool({
         db: client.db,
@@ -1915,9 +1894,9 @@ describe("OpenGeni Slack bot connection", () => {
       { kind: "http", status: 500 },
       { kind: "transport" },
     ];
-    for (const failure of cases) {
+    for (const [index, failure] of cases.entries()) {
       const workspace = await freshWorkspace();
-      const slack = fakeSlack();
+      const slack = fakeSlack({ teamId: `T_NON_CREDENTIAL_${index}` });
       const connected = await connectBot(workspace, slack.fetch);
       const resolved = await resolveSlackBotConnectionForTool({
         db: client.db,
@@ -2682,7 +2661,10 @@ describe("OpenGeni Slack bot connection", () => {
     if (!available) return;
     for (const failure of ["headers", "member"] as const) {
       const workspace = await freshWorkspace();
-      const slack = fakeSlack({ loseFirstDeleteResponse: true });
+      const slack = fakeSlack({
+        teamId: `T_RECONCILE_${failure.toUpperCase()}`,
+        loseFirstDeleteResponse: true,
+      });
       const connected = await connectBot(workspace, slack.fetch);
       const resolved = await resolveSlackBotConnectionForTool({
         db: client.db,
@@ -2871,8 +2853,13 @@ describe("OpenGeni Slack bot connection", () => {
     const connected = await connectBot(workspace, fakeSlack().fetch);
     const otherConnection = await connectBot(
       workspace,
-      fakeSlack({ botId: "B_OTHER", botUserId: "U_OTHER" }).fetch,
+      fakeSlack({
+        teamId: `T_OTHER_${crypto.randomUUID().slice(0, 8)}`,
+        botId: "B_OTHER",
+        botUserId: "U_OTHER",
+      }).fetch,
     );
+    expect(otherConnection.response.headers.get("location")).toContain("slack=connected");
     const operationId = crypto.randomUUID();
     const firstHolder = crypto.randomUUID();
     const baseClaim = {

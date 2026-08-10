@@ -40,6 +40,7 @@ describe("migration 0203 Slack installation bindings", () => {
     expect(source).toContain("pg_advisory_xact_lock");
     expect(source).toContain("legacy_conflicting_installations");
     expect(source).toContain("OPENGENI_SLACK_BINDING_CONFLICT");
+    expect(source).toContain("IF FOUND THEN");
     expect(source).toContain("REVOKE ALL ON FUNCTION");
     expect(source).not.toMatch(/credential_encrypted\s*=|access_token|authorization header/iu);
     expect(FORCE_RLS_TABLES).toContain("slack_installation_bindings");
