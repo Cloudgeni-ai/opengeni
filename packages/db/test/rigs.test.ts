@@ -1,7 +1,9 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import type { RigProviderImage } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
   activateRigVersion,
+  claimRigVersionProviderImageBuild,
   countRigs,
   countSessionsUsingRig,
   createDb,
@@ -11,10 +13,12 @@ import {
   createRigVersionForChangePromotion,
   deleteRig,
   deleteRigIfNoActiveSessions,
+  finalizeRigVersionProviderImageBuild,
   getRig,
   getRigByName,
   getRigChange,
   getRigVersion,
+  getRigVersionById,
   listRigChanges,
   listRigVersions,
   listRigs,
@@ -30,6 +34,7 @@ let available = true;
 let shared: SharedTestDatabase | null = null;
 let client: DbClient;
 let db: Database;
+const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
 // This file verifies serialized rig invariants against real PostgreSQL. Parallel
 // repository runs can queue those transactions behind other database suites, so
@@ -79,9 +84,44 @@ async function insertSessionForRig(
   return row!.id;
 }
 
+function rigProviderImage(overrides: Partial<RigProviderImage> = {}): RigProviderImage {
+  const status = overrides.status ?? "building";
+  return {
+    backend: "modal",
+    provider: "modal",
+    status,
+    contentHash: `sha256:${"a".repeat(64)}`,
+    setupHash: `sha256:${"b".repeat(64)}`,
+    sourceImage: "ubuntu:24.04",
+    buildRequestId: "77777777-7777-4777-8777-777777777777",
+    imageId: status === "ready" ? "im-rig-version" : null,
+    imageDigest: null,
+    providerBindingKeyHash: status === "ready" ? `sha256:${"c".repeat(64)}` : null,
+    provenance: {
+      kind: "rig_verification",
+      targetKind: "version",
+      targetId: "88888888-8888-4888-8888-888888888888",
+    },
+    startedAt: new Date().toISOString(),
+    finishedAt: status === "building" ? null : new Date().toISOString(),
+    error:
+      status === "failed" || status === "unsupported"
+        ? {
+            code: `provider_image_build_${status}`,
+            message: `provider image ${status}`,
+            retryable: status === "failed",
+          }
+        : null,
+    ...overrides,
+  };
+}
+
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("rigs");
   if (!shared) {
+    if (requireRealDatabase) {
+      throw new Error("OPENGENI_REQUIRE_REAL_DB=1 but the rig PostgreSQL harness is unavailable");
+    }
     available = false;
     // eslint-disable-next-line no-console
     console.warn("[rigs] docker unavailable, skipping");
@@ -264,6 +304,158 @@ describe("rig version invariants", () => {
     await shared!.admin`update rig_versions set setup_script = 'tampered' where id = ${v1Id}`;
     const tampered = await getRigVersion(db, ws.workspaceId, rig.id, v1Id);
     expect(tampered?.setupScript).toBe("tampered");
+  });
+});
+
+describe("rig provider image build ledger", () => {
+  test("claims one build, reuses one finalized image, and rejects planted content drift", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const rig = await createRig(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      name: "provider-image-ledger",
+      initialVersion: { image: "ubuntu:24.04", setupScript: "echo ready" },
+    });
+    const versionId = rig.activeVersion!.id;
+    const building = rigProviderImage({
+      provenance: {
+        kind: "rig_verification",
+        targetKind: "version",
+        targetId: versionId,
+      },
+    });
+
+    const first = await claimRigVersionProviderImageBuild(db, {
+      workspaceId: ws.workspaceId,
+      versionId,
+      image: building,
+      staleAfterMs: 60_000,
+    });
+    expect(first.status).toBe("claimed");
+    const duplicate = await claimRigVersionProviderImageBuild(db, {
+      workspaceId: ws.workspaceId,
+      versionId,
+      image: building,
+      staleAfterMs: 60_000,
+    });
+    expect(duplicate.status).toBe("in_progress");
+
+    const ready = rigProviderImage({
+      ...first.image,
+      status: "ready",
+      imageId: "im-rig-version",
+      providerBindingKeyHash: `sha256:${"c".repeat(64)}`,
+      finishedAt: new Date().toISOString(),
+      error: null,
+    });
+    expect(
+      await finalizeRigVersionProviderImageBuild(db, {
+        workspaceId: ws.workspaceId,
+        versionId,
+        image: ready,
+      }),
+    ).toBe(true);
+
+    const stored = await getRigVersionById(db, ws.workspaceId, versionId);
+    expect(stored?.providerImages.modal).toEqual(ready);
+    const reuse = await claimRigVersionProviderImageBuild(db, {
+      workspaceId: ws.workspaceId,
+      versionId,
+      image: building,
+      staleAfterMs: 60_000,
+    });
+    expect(reuse).toEqual({ status: "ready", image: ready });
+
+    const plantedDrift = rigProviderImage({
+      ...building,
+      contentHash: `sha256:${"d".repeat(64)}`,
+      setupHash: `sha256:${"e".repeat(64)}`,
+      buildRequestId: "99999999-9999-4999-8999-999999999999",
+    });
+    const conflict = await claimRigVersionProviderImageBuild(db, {
+      workspaceId: ws.workspaceId,
+      versionId,
+      image: plantedDrift,
+      staleAfterMs: 60_000,
+    });
+    expect(conflict).toEqual({ status: "conflict", image: ready });
+    expect(
+      await finalizeRigVersionProviderImageBuild(db, {
+        workspaceId: ws.workspaceId,
+        versionId,
+        image: rigProviderImage({
+          ...plantedDrift,
+          status: "ready",
+          imageId: "im-planted",
+          finishedAt: new Date().toISOString(),
+          error: null,
+        }),
+      }),
+    ).toBe(false);
+    expect((await getRigVersionById(db, ws.workspaceId, versionId))?.providerImages.modal).toEqual(
+      ready,
+    );
+  });
+
+  test("an unsupported record retries only after the caller proves provider support", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const rig = await createRig(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      name: "provider-image-capability-upgrade",
+    });
+    const versionId = rig.activeVersion!.id;
+    const building = rigProviderImage({
+      provenance: {
+        kind: "rig_verification",
+        targetKind: "version",
+        targetId: versionId,
+      },
+    });
+    const claim = await claimRigVersionProviderImageBuild(db, {
+      workspaceId: ws.workspaceId,
+      versionId,
+      image: building,
+      staleAfterMs: 60_000,
+    });
+    expect(claim.status).toBe("claimed");
+    const unsupported = rigProviderImage({
+      ...claim.image,
+      status: "unsupported",
+      finishedAt: new Date().toISOString(),
+      error: {
+        code: "provider_image_build_unsupported",
+        message: "not supported yet",
+        retryable: false,
+      },
+    });
+    expect(
+      await finalizeRigVersionProviderImageBuild(db, {
+        workspaceId: ws.workspaceId,
+        versionId,
+        image: unsupported,
+      }),
+    ).toBe(true);
+
+    const stillUnsupported = await claimRigVersionProviderImageBuild(db, {
+      workspaceId: ws.workspaceId,
+      versionId,
+      image: building,
+      staleAfterMs: 60_000,
+    });
+    expect(stillUnsupported).toEqual({ status: "unsupported", image: unsupported });
+
+    const upgraded = await claimRigVersionProviderImageBuild(db, {
+      workspaceId: ws.workspaceId,
+      versionId,
+      image: { ...building, startedAt: new Date().toISOString() },
+      staleAfterMs: 60_000,
+      retryUnsupported: true,
+    });
+    expect(upgraded.status).toBe("claimed");
+    expect(upgraded.image.buildRequestId).toBe(unsupported.buildRequestId);
   });
 });
 

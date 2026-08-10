@@ -86,11 +86,52 @@ describe("rig contracts", () => {
       credentialHooks: ["azure-cli-login"],
       defaultVariableSetIds: [],
       changelog: "Initial version",
+      providerImages: {},
       createdBy: "user:alice",
       active: true,
       createdAt: "2026-07-08T00:00:00.000Z",
     };
     expect(RigVersion.safeParse(version).success).toBe(true);
+
+    const providerImage = {
+      backend: "modal",
+      provider: "modal",
+      status: "ready",
+      contentHash: `sha256:${"1".repeat(64)}`,
+      setupHash: `sha256:${"2".repeat(64)}`,
+      sourceImage: "ubuntu:24.04",
+      buildRequestId: "66666666-6666-4666-8666-666666666666",
+      imageId: "im-rig-v1",
+      imageDigest: null,
+      providerBindingKeyHash: `sha256:${"3".repeat(64)}`,
+      provenance: {
+        kind: "rig_verification",
+        targetKind: "version",
+        targetId: version.id,
+      },
+      startedAt: "2026-07-08T00:00:00.000Z",
+      finishedAt: "2026-07-08T00:00:01.000Z",
+      error: null,
+    };
+    expect(
+      RigVersion.safeParse({ ...version, providerImages: { modal: providerImage } }).success,
+    ).toBe(true);
+    expect(
+      RigVersion.safeParse({
+        ...version,
+        providerImages: {
+          modal: { ...providerImage, imageId: null, imageDigest: null },
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      RigVersion.safeParse({
+        ...version,
+        providerImages: {
+          modal: { ...providerImage, status: "failed", error: null },
+        },
+      }).success,
+    ).toBe(false);
 
     const rig = {
       id: "22222222-2222-4222-8222-222222222222",

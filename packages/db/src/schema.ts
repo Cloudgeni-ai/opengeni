@@ -3,6 +3,7 @@ import type {
   FirstPartyMcpToolName,
   McpPersonalConnectionDelegation,
   McpServerConnectionRef,
+  RigProviderImages,
   SessionMcpApprovalPolicy,
   TimelineAnnotation,
 } from "@opengeni/contracts";
@@ -6489,9 +6490,9 @@ export const rigs = pgTable(
   }),
 );
 
-// Append-only, content-immutable rig versions. Exactly one active per rig
-// (partial unique index). The domain layer never UPDATEs a content column; only
-// the `active` flag flips (activateRigVersion).
+// Append-only, definition-content-immutable rig versions. Exactly one active
+// per rig (partial unique index). Definition columns never UPDATE; only the
+// `active` flag and provider-image build metadata are operationally mutable.
 export const rigVersions = pgTable(
   "rig_versions",
   {
@@ -6518,6 +6519,11 @@ export const rigVersions = pgTable(
       .notNull()
       .default([]),
     changelog: text("changelog"),
+    // Build-once provider-native image state, keyed by sandbox backend. This is
+    // operational metadata bound to the exact immutable version definition;
+    // it never contains credentials, variable values, repositories, archives,
+    // session state, or process state.
+    providerImages: jsonb("provider_images").$type<RigProviderImages>().notNull().default({}),
     createdBy: text("created_by"),
     active: boolean("active").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

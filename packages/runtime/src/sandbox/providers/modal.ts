@@ -521,6 +521,44 @@ export const modalProvider: ProviderRegistration = {
     }
     return REPEATABLE_CONFIGURED_WORKSPACE_CAPTURE;
   },
+  async buildImmutableImage({ settings, session, requestId, timeoutMs }) {
+    const mutable = session as MutableModalSandboxSession;
+    const sandboxId = mutable.state?.sandboxId;
+    const sandboxes = mutable.modal?.sandboxes;
+    if (!sandboxId || typeof sandboxes?.fromId !== "function") {
+      throw new Error("Modal provider image build requires an exact live sandbox identity");
+    }
+    const snapshotHandle = await sandboxes.fromId(sandboxId);
+    try {
+      if (typeof snapshotHandle.snapshotFilesystem !== "function") {
+        throw new Error("Modal provider image build requires snapshotFilesystem support");
+      }
+      const image = (await snapshotHandle.snapshotFilesystem({
+        snapshotId: requestId,
+        timeoutMs,
+        ttlMs: null,
+      })) as { imageId?: unknown; objectId?: unknown };
+      const imageId =
+        typeof image.imageId === "string"
+          ? image.imageId
+          : typeof image.objectId === "string"
+            ? image.objectId
+            : null;
+      if (!imageId) {
+        throw new Error("Modal provider image snapshot returned no immutable image id");
+      }
+      const binding = await resolveModalCheckpointProviderBindingForSession(settings, session);
+      return {
+        provider: "modal",
+        backend: "modal",
+        imageId,
+        imageDigest: null,
+        providerBindingKey: binding.key,
+      };
+    } finally {
+      snapshotHandle.detach?.();
+    }
+  },
   descriptor: CAPABILITY_DESCRIPTORS.modal,
   validateCredentials(settings) {
     // both-or-neither (preserves existing validation at config validateSettings).
@@ -532,12 +570,6 @@ export const modalProvider: ProviderRegistration = {
     }
     if (!settings.modalAppName) {
       throw new SandboxConfigError("modal", "OPENGENI_MODAL_APP_NAME is required");
-    }
-    if (settings.modalImageId && !settings.modalImageRef) {
-      throw new SandboxConfigError(
-        "modal",
-        "OPENGENI_MODAL_IMAGE_ID requires OPENGENI_MODAL_IMAGE_REF for logical image provenance",
-      );
     }
   },
   build({ settings, environment, exposedPorts }) {

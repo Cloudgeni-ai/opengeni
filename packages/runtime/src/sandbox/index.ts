@@ -94,11 +94,15 @@ export {
 export {
   PROVIDER_REGISTRY,
   assertProviderRegistryInvariants,
+  buildImmutableProviderImage,
   prepareProviderForTeardownAfterCapture,
+  providerSupportsImmutableImageBuild,
   providerWorkspaceCapturePolicy,
   type ProviderRegistration,
   type ProviderConstructionContext,
   type ProviderExactResumeMode,
+  type ProviderImmutableImageBuildInput,
+  type ProviderImmutableImageBuildResult,
   type ProviderWorkspaceCapturePolicy,
   type ProviderWorkspaceCaptureTakeover,
 } from "./providers";
@@ -1485,6 +1489,8 @@ export async function establishSandboxSessionFromEnvelope(
     typeof envelope?.backendId === "string" ? (envelope.backendId as SandboxBackend) : undefined;
   const backend =
     opts.backendOverride ?? envelopeBackend ?? (settings.sandboxBackend as SandboxBackend);
+  const createImageSource =
+    backend === "modal" && settings.modalImageId ? "provider_immutable" : "logical";
   const environment = opts.environment ?? collectSandboxEnvironment(settings);
   const client = (opts.clientFactory ?? createSandboxClientForBackend)(
     backend,
@@ -1561,9 +1567,21 @@ export async function establishSandboxSessionFromEnvelope(
     let restored: Awaited<ReturnType<NonNullable<typeof client.create>>>;
     try {
       restored = await client.create!({ manifest: createManifest });
-      recordSandboxCreateMetric(opts.metrics, client.backendId, "completed", createStarted);
+      recordSandboxCreateMetric(
+        opts.metrics,
+        client.backendId,
+        createImageSource,
+        "completed",
+        createStarted,
+      );
     } catch (error) {
-      recordSandboxCreateMetric(opts.metrics, client.backendId, "failed", createStarted);
+      recordSandboxCreateMetric(
+        opts.metrics,
+        client.backendId,
+        createImageSource,
+        "failed",
+        createStarted,
+      );
       throw error;
     }
     let restoredState = (restored as { state?: unknown }).state;
@@ -1821,12 +1839,14 @@ export async function establishSandboxSessionFromEnvelope(
 function recordSandboxCreateMetric(
   metrics: RuntimeMetricsHooks | undefined,
   backend: string,
+  imageSource: "logical" | "provider_immutable",
   outcome: "completed" | "failed",
   startedMs: number,
 ): void {
   try {
     metrics?.onSandboxCreate?.({
       backend,
+      imageSource,
       outcome,
       durationSeconds: Math.max(0, (Date.now() - startedMs) / 1000),
     });

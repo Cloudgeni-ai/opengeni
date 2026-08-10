@@ -169,15 +169,16 @@ describe("modalProvider.build with a resolved registry image", () => {
     expect(client).toBeDefined();
   });
 
-  test("provider-native image ID fails closed without a logical image ref", () => {
+  test("provider-native image ID is self-contained without a logical image ref", () => {
     const settings = testSettings({
       sandboxBackend: "modal",
       modalImageRef: undefined,
       modalImageId: IMAGE_ID,
     });
-    expect(() => modalProvider.validateCredentials(settings)).toThrow(
-      "OPENGENI_MODAL_IMAGE_ID requires OPENGENI_MODAL_IMAGE_REF",
-    );
+    expect(() => modalProvider.validateCredentials(settings)).not.toThrow();
+    const selector = resolveModalImageSelector(settings);
+    expect(selector?.kind).toBe("id");
+    expect(selector?.value).toBe(IMAGE_ID);
   });
 
   test("build attaches the pulled image (no throw) once resolved", async () => {
@@ -194,5 +195,61 @@ describe("modalProvider.build with a resolved registry image", () => {
     // resolved-image branch (asserted via resolveModalImageSelector above).
     const client = modalProvider.build({ settings, environment: {}, exposedPorts: [] });
     expect(client).toBeDefined();
+  });
+});
+
+describe("modalProvider immutable rig image build", () => {
+  test("snapshots the exact live sandbox once with the durable request UUID", async () => {
+    const requestId = "77777777-7777-4777-8777-777777777777";
+    const snapshotFilesystem = mock(async (_input: unknown) => ({ imageId: IMAGE_ID }));
+    const detach = mock(() => undefined);
+    const snapshotHandle = { snapshotFilesystem, detach };
+    const sandboxes = {
+      fromId: mock(function (this: unknown, sandboxId: string) {
+        expect(this).toBe(sandboxes);
+        expect(sandboxId).toBe("sb-rig-verifier");
+        return Promise.resolve(snapshotHandle);
+      }),
+    };
+    const session = {
+      state: { sandboxId: "sb-rig-verifier" },
+      modal: {
+        sandboxes,
+        cpClient: {
+          workspaceNameLookup: mock(async () => ({ workspaceName: "workspace-a" })),
+        },
+        profile: { serverUrl: "https://api.modal.com" },
+        environmentName: mock(() => "main"),
+      },
+    };
+    const settings = testSettings({ sandboxBackend: "modal", modalEnvironment: "main" });
+
+    const built = await modalProvider.buildImmutableImage!({
+      settings,
+      session,
+      requestId,
+      timeoutMs: 123_456,
+    });
+
+    expect(sandboxes.fromId).toHaveBeenCalledTimes(1);
+    expect(snapshotFilesystem).toHaveBeenCalledTimes(1);
+    expect(snapshotFilesystem.mock.calls[0]?.[0]).toEqual({
+      snapshotId: requestId,
+      timeoutMs: 123_456,
+      ttlMs: null,
+    });
+    expect(detach).toHaveBeenCalledTimes(1);
+    expect(built).toEqual({
+      provider: "modal",
+      backend: "modal",
+      imageId: IMAGE_ID,
+      imageDigest: null,
+      providerBindingKey: JSON.stringify({
+        version: 1,
+        serverUrl: "https://api.modal.com",
+        workspaceName: "workspace-a",
+        environment: "main",
+      }),
+    });
   });
 });

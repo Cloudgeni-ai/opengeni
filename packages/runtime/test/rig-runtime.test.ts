@@ -84,7 +84,8 @@ describe("rigSetupScriptCommand (M3)", () => {
     // The script is hard-killed by coreutils timeout (NOT bash -e), and the
     // marker is touched only on rc 0.
     expect(command).toContain('timeout -k 5s "${__OG_RIG_TIMEOUT_SECS}s" bash "$__OG_RIG_SCRIPT"');
-    expect(command).toContain('if [ "$__OG_RIG_RC" -eq 0 ]; then touch "$__OG_RIG_MARKER"; fi');
+    expect(command).toContain('if [ "$__OG_RIG_RC" -eq 0 ]; then');
+    expect(command).toContain('touch "$__OG_RIG_VERSION_MARKER"');
     // First attach is atomically claimed with a mkdir lockdir.
     expect(command).toContain('if mkdir "$__OG_RIG_LOCK" 2>/dev/null; then');
     // The user script rides a quoted heredoc so it is executed verbatim.
