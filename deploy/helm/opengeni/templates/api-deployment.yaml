@@ -53,10 +53,12 @@ spec:
             - name: http
               containerPort: {{ .Values.api.containerPort }}
           envFrom:
-            - secretRef:
-                name: {{ include "opengeni.secretName" . }}
             - configMapRef:
                 name: {{ include "opengeni.fullname" . }}-config
+            # Later envFrom sources win duplicate keys. Keep the runtime Secret
+            # authoritative for protected provider/model overrides.
+            - secretRef:
+                name: {{ include "opengeni.secretName" . }}
           {{- if or .Values.postgres.enabled .Values.temporal.enabled .Values.minio.enabled }}
           env:
             {{- include "opengeni.generatedRuntimeEnv" . | nindent 12 }}
