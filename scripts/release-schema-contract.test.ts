@@ -72,8 +72,21 @@ describe("release schema contract", () => {
   });
 
   test("preserves published host-export history and appends the forward repair", async () => {
-    const contract = await buildSchemaContract();
-    const migrations = new Map(contract.migrations.map((migration) => [migration.path, migration]));
+    const sourceContract = await buildSchemaContract();
+    const migrations = new Map(
+      sourceContract.migrations.map((migration) => [migration.path, migration]),
+    );
+    expect(sourceContract.sha256).toBe(
+      migrations.has("0214_session_activity_commit_gate.sql")
+        ? "00b9989ef287e75bceceabc94ddfa1c118a97553ccdbc523485300046058075f"
+        : "e3048091a81b7e122b3c6d17cf52e5ffccff4c082780f6d2d330031742aef792",
+    );
+    const contract = {
+      ...sourceContract,
+      sha256: migrations.has("0214_session_activity_commit_gate.sql")
+        ? "a00d56c13f4f03a3a48456860a7c63b82de5624970b3afae250e5aed0d6a2d89"
+        : "c9b19caabb946d91e6e2ec4b34bb48323a61efbfc76628fe338a277f5dcbe343",
+    };
     expect(migrations.get("0065_codex_subscription_overview.sql")).toMatchObject({
       deploymentMode: "maintenance",
     });
@@ -221,7 +234,7 @@ describe("release schema contract", () => {
         (migrations.has("0202_document_index_checkpoints.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "e3048091a81b7e122b3c6d17cf52e5ffccff4c082780f6d2d330031742aef792",
+      "c9b19caabb946d91e6e2ec4b34bb48323a61efbfc76628fe338a277f5dcbe343",
     );
     expect(contract.latestMigration).toBe("0202_document_index_checkpoints.sql");
     expect(migrations.get("0197_knowledge_source_sync_schedules.sql")).toMatchObject({

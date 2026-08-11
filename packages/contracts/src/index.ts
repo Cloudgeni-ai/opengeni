@@ -6,17 +6,17 @@ import {
   sessionEventJsonBytes,
   type SessionEventBoundarySurface,
 } from "./event-preview";
+import { MemorySlackPublicationDistribution } from "./memory-slack-delivery";
 import { WorkspaceInstructionPolicyRoleKeyInput } from "./workspace-instruction-policies";
 import { ClientResumableVoiceInputConfig } from "./transcription-recordings";
-import { MemorySlackPublicationDistribution } from "./memory-slack-delivery";
 
 export * from "./slack-bot-scopes";
 export * from "./connector-destinations";
+export * from "./memory-slack-delivery";
 export * from "./image-generation";
 export * from "./editable-artifacts";
 export * from "./editable-artifact-committed-transaction";
 export * from "./editable-artifact-serialized-commit";
-export * from "./memory-slack-delivery";
 
 export {
   CreateWorkspaceArtifactRequest,
