@@ -1,28 +1,44 @@
+import type { ApiRouteDeps } from "@opengeni/core";
 import type { Settings } from "@opengeni/config";
 import {
   FIKEN_CREDENTIAL_LABEL,
   FIKEN_CREDENTIAL_ROLE,
   FIKEN_PROVIDER_DOMAIN,
+  FikenOAuthStartResponse,
   type AccessGrant,
   type ConnectionMetadata,
   type FikenCompanySummary,
   type FikenConnectionMetadata,
+  type FikenOAuthStartRequest,
 } from "@opengeni/contracts";
 import {
   fikenConnectionMetadata,
+  hasPermission,
   isFikenConnection,
   preferredFikenConnection,
+  requireEnvironmentEncryption,
 } from "@opengeni/core";
 import {
   buildConnectionTokenResolver,
+  consumeIntegrationOAuthStateNonce,
+  createConnection,
+  encryptEnvironmentValue,
   getConnectionMetadata,
+  getWorkspaceGrant,
   listConnectionsMetadata,
   recordAuditEvent,
   setConnectionStatus,
+  updateConnection,
   type Database,
 } from "@opengeni/db";
+import { createSignedState, readSignedState } from "@opengeni/github";
 import { readResponseJsonBounded, type FetchLike } from "@opengeni/network";
 import { HTTPException } from "hono/http-exception";
+import {
+  integrationBaseUrl,
+  oauthStateTtlMs,
+  requireIntegrationsStateSecret,
+} from "./oauth-client";
 
 const FIKEN_API_BASE = "https://api.fiken.no/api/v2";
 const FIKEN_TIMEOUT_MS = 15_000;
@@ -116,35 +132,72 @@ export async function verifyFikenApiToken(
   token: string,
   fetchImpl: FetchLike = fetch,
 ): Promise<{ companies: FikenCompanySummary[] }> {
+  const result = await fetchFikenCompanies(token, fetchImpl);
+  switch (result.outcome) {
+    case "ok":
+      return { companies: result.companies };
+    case "unreachable":
+      throw new FikenCredentialVerificationError("Fiken could not be reached to verify the token");
+    case "rejected":
+      throw new FikenCredentialVerificationError(
+        "Fiken rejected the API token. Create a personal API token under Rediger konto -> API in Fiken and make sure API module access is active.",
+      );
+    case "http_error":
+      throw new FikenCredentialVerificationError(
+        `Fiken token verification failed with HTTP ${result.status}`,
+      );
+    case "invalid_response":
+      throw new FikenCredentialVerificationError("Fiken returned an unexpected companies response");
+    case "no_companies":
+      throw new FikenCredentialVerificationError(
+        "The Fiken token is valid but has API access to no company. Order API module access in Fiken first.",
+      );
+  }
+}
+
+type FikenCompaniesResult =
+  | { outcome: "ok"; companies: FikenCompanySummary[] }
+  | { outcome: "unreachable" }
+  | { outcome: "rejected" }
+  | { outcome: "http_error"; status: number }
+  | { outcome: "invalid_response" }
+  | { outcome: "no_companies" };
+
+/** Bounded discovery of the companies a bearer credential can act on. */
+async function fetchFikenCompanies(
+  bearerToken: string,
+  fetchImpl: FetchLike,
+): Promise<FikenCompaniesResult> {
   let response: Response;
   try {
     response = await fetchImpl(`${FIKEN_API_BASE}/companies?pageSize=${MAX_PAGE_SIZE}`, {
       method: "GET",
-      headers: { authorization: `Bearer ${token}`, accept: "application/json" },
+      headers: { authorization: `Bearer ${bearerToken}`, accept: "application/json" },
       signal: AbortSignal.timeout(FIKEN_TIMEOUT_MS),
     });
   } catch {
-    throw new FikenCredentialVerificationError("Fiken could not be reached to verify the token");
+    return { outcome: "unreachable" };
   }
   if (response.status === 401 || response.status === 403) {
     await response.body?.cancel().catch(() => undefined);
-    throw new FikenCredentialVerificationError(
-      "Fiken rejected the API token. Create a personal API token under Rediger konto -> API in Fiken and make sure API module access is active.",
-    );
+    return { outcome: "rejected" };
   }
   if (!response.ok) {
     await response.body?.cancel().catch(() => undefined);
-    throw new FikenCredentialVerificationError(
-      `Fiken token verification failed with HTTP ${response.status}`,
-    );
+    return { outcome: "http_error", status: response.status };
   }
-  const payload = await readResponseJsonBounded<unknown>(
-    response,
-    FIKEN_RESPONSE_MAX_BYTES,
-    "Fiken companies response",
-  );
+  let payload: unknown;
+  try {
+    payload = await readResponseJsonBounded<unknown>(
+      response,
+      FIKEN_RESPONSE_MAX_BYTES,
+      "Fiken companies response",
+    );
+  } catch {
+    return { outcome: "invalid_response" };
+  }
   if (!Array.isArray(payload)) {
-    throw new FikenCredentialVerificationError("Fiken returned an unexpected companies response");
+    return { outcome: "invalid_response" };
   }
   const companies: FikenCompanySummary[] = [];
   for (const entry of payload.slice(0, MAX_VERIFIED_COMPANIES)) {
@@ -160,11 +213,9 @@ export async function verifyFikenApiToken(
     });
   }
   if (companies.length === 0) {
-    throw new FikenCredentialVerificationError(
-      "The Fiken token is valid but has API access to no company. Order API module access in Fiken first.",
-    );
+    return { outcome: "no_companies" };
   }
-  return { companies };
+  return { outcome: "ok", companies };
 }
 
 export function fikenCredentialBundle(token: string): Record<string, unknown> {
@@ -237,7 +288,11 @@ export class FikenClient {
     private readonly context: FikenContext,
     private readonly fetchImpl: FetchLike = fetch,
   ) {
-    this.resolveCredential = buildConnectionTokenResolver(db, settings);
+    // OAuth-kind connections refresh through the generic broker; route that
+    // token-endpoint transport through the same injectable Fiken fetch.
+    this.resolveCredential = buildConnectionTokenResolver(db, settings, undefined, {
+      refreshTransport: { fetchImpl },
+    });
   }
 
   async listCompanies(input: { page?: number; pageSize?: number } = {}) {
@@ -622,13 +677,13 @@ export class FikenClient {
       connectionRef: {
         connectionId: this.connection.id,
         providerDomain: FIKEN_PROVIDER_DOMAIN,
-        kind: "api_key",
+        kind: this.connection.kind === "oauth2" ? "oauth2" : "api_key",
         subjectScope: "workspace",
       },
       destinationUrl,
     });
     if (result.status !== "ok" || result.connectionId !== this.connection.id) {
-      throw new Error("the Fiken connection needs to be reconnected with a fresh API token");
+      throw new Error("the Fiken connection needs to be reconnected");
     }
     return result.headers;
   }
@@ -771,4 +826,350 @@ async function providerErrorMessage(response: Response): Promise<string | null> 
 function safeFailureCode(error: unknown): string {
   if (error instanceof FikenProviderError) return error.code;
   return "unexpected_error";
+}
+
+// --- OAuth (registered Fiken app) -----------------------------------------------------------
+//
+// Fiken's authorization-code flow: no PKCE and no scopes, `state` required, a
+// Basic-authenticated token endpoint, ~24h access tokens, and a refresh token
+// that may rotate on every refresh. The stored bundle carries the token
+// endpoint plus client credentials in `client_secret_basic` shape so the
+// generic connection broker owns all later refreshes.
+
+const FIKEN_AUTHORIZE_URL = "https://fiken.no/oauth/authorize";
+const FIKEN_TOKEN_URL = "https://fiken.no/oauth/token";
+const FIKEN_OAUTH_MAX_RESPONSE_BYTES = 256 * 1024;
+
+export class FikenOAuthCallbackError extends Error {
+  constructor(readonly reason: string) {
+    super(`Fiken OAuth callback failed: ${reason}`);
+    this.name = "FikenOAuthCallbackError";
+  }
+}
+
+type FikenOAuthState = {
+  accountId: string;
+  workspaceId: string;
+  subjectId: string;
+  returnPath: string;
+  connectionId?: string;
+  connectionVersion?: number;
+  nonce: string;
+  iat: number;
+};
+
+function requireFikenOAuthSettings(settings: Settings): {
+  clientId: string;
+  clientSecret: string;
+} {
+  const clientId = settings.fikenClientId?.trim();
+  const clientSecret = settings.fikenClientSecret?.trim();
+  if (!clientId || !clientSecret) {
+    throw new HTTPException(503, {
+      message:
+        "Fiken OAuth requires OPENGENI_FIKEN_OAUTH_CLIENT_ID and OPENGENI_FIKEN_OAUTH_CLIENT_SECRET",
+    });
+  }
+  return { clientId, clientSecret };
+}
+
+export async function startFikenOAuth(
+  deps: ApiRouteDeps,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    requestUrl: string;
+    payload: FikenOAuthStartRequest;
+  },
+): Promise<FikenOAuthStartResponse> {
+  const fiken = requireFikenOAuthSettings(deps.settings);
+  requireIntegrationsStateSecret(deps.settings);
+  const existing = input.payload.connectionId
+    ? await getConnectionMetadata(deps.db, input.workspaceId, input.payload.connectionId, null)
+    : null;
+  if (input.payload.connectionId && !existing) {
+    throw new HTTPException(404, { message: "connection not found" });
+  }
+  if (existing && !isFikenConnection(existing)) {
+    throw new HTTPException(422, { message: "connectionId is not a Fiken connection" });
+  }
+  const baseUrl = integrationBaseUrl(deps.settings.publicBaseUrl, input.requestUrl);
+  const state = createSignedState(requireIntegrationsStateSecret(deps.settings), {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    subjectId: input.subjectId,
+    returnPath: `/workspaces/${input.workspaceId}/capabilities`,
+    ...(existing ? { connectionId: existing.id, connectionVersion: existing.version } : {}),
+  });
+  const authorizationUrl = new URL(FIKEN_AUTHORIZE_URL);
+  authorizationUrl.searchParams.set("response_type", "code");
+  authorizationUrl.searchParams.set("client_id", fiken.clientId);
+  authorizationUrl.searchParams.set("redirect_uri", `${baseUrl}/v1/integrations/fiken/callback`);
+  authorizationUrl.searchParams.set("state", state);
+  return FikenOAuthStartResponse.parse({
+    authorizationUrl: authorizationUrl.toString(),
+    expiresAt: new Date(Date.now() + oauthStateTtlMs).toISOString(),
+  });
+}
+
+export async function completeFikenOAuthCallback(
+  deps: ApiRouteDeps,
+  input: {
+    code?: string | undefined;
+    state?: string | undefined;
+    error?: string | undefined;
+    requestUrl: string;
+  },
+): Promise<{ redirectTo: string }> {
+  const baseUrl = integrationBaseUrl(deps.settings.publicBaseUrl, input.requestUrl);
+  const returnBaseUrl = deps.settings.webBaseUrl?.replace(/\/+$/, "") ?? baseUrl;
+  let state: FikenOAuthState | null = null;
+  try {
+    state = readFikenOAuthState(input.state, deps.settings);
+    await requireFikenCallbackGrant(deps.db, state);
+    const consumed = await consumeIntegrationOAuthStateNonce(deps.db, {
+      accountId: state.accountId,
+      workspaceId: state.workspaceId,
+      subjectId: state.subjectId,
+      nonce: state.nonce,
+      expiresAt: new Date(state.iat * 1000 + oauthStateTtlMs),
+      now: new Date(),
+    });
+    if (!consumed) {
+      throw new FikenOAuthCallbackError("state_replayed");
+    }
+    if (input.error) {
+      throw new FikenOAuthCallbackError(
+        input.error === "access_denied" ? "provider_denied" : "provider_error",
+      );
+    }
+    if (!input.code) {
+      throw new FikenOAuthCallbackError("missing_code");
+    }
+    const fiken = requireFikenOAuthSettings(deps.settings);
+    const key = requireEnvironmentEncryption(deps.settings);
+    const fetchImpl = deps.fikenFetch ?? fetch;
+    const token = await exchangeFikenAuthorizationCode(
+      {
+        code: input.code,
+        clientId: fiken.clientId,
+        clientSecret: fiken.clientSecret,
+        redirectUri: `${baseUrl}/v1/integrations/fiken/callback`,
+        state: input.state!,
+      },
+      fetchImpl,
+    );
+    const companies = await fetchFikenCompanies(token.accessToken, fetchImpl);
+    if (companies.outcome !== "ok") {
+      throw new FikenOAuthCallbackError(
+        companies.outcome === "no_companies" ? "no_api_company" : "company_discovery_failed",
+      );
+    }
+    // Re-check authorization after the slow provider round-trips.
+    await requireFikenCallbackGrant(deps.db, state);
+    const existing = state.connectionId
+      ? await getConnectionMetadata(deps.db, state.workspaceId, state.connectionId, null)
+      : null;
+    if (state.connectionId && (!existing || !isFikenConnection(existing))) {
+      throw new FikenOAuthCallbackError("connection_conflict");
+    }
+    if (existing && existing.version !== state.connectionVersion) {
+      throw new FikenOAuthCallbackError("connection_conflict");
+    }
+    const previousMetadata = existing ? fikenConnectionMetadata(existing.metadata) : null;
+    const previousDefault = previousMetadata?.defaultCompanySlug ?? null;
+    const defaultCompanySlug =
+      previousDefault && companies.companies.some((company) => company.slug === previousDefault)
+        ? previousDefault
+        : companies.companies.length === 1
+          ? companies.companies[0]!.slug
+          : null;
+    const credentialEncrypted = encryptEnvironmentValue(
+      key,
+      JSON.stringify({
+        access_token: token.accessToken,
+        refresh_token: token.refreshToken,
+        token_type: token.tokenType,
+        ...(token.expiresAt ? { expires_at: token.expiresAt.toISOString() } : {}),
+        token_endpoint: FIKEN_TOKEN_URL,
+        client_id: fiken.clientId,
+        client_secret: fiken.clientSecret,
+        token_endpoint_auth_method: "client_secret_basic",
+      }),
+    );
+    const metadata = {
+      credentialRole: FIKEN_CREDENTIAL_ROLE,
+      credentialLabel: FIKEN_CREDENTIAL_LABEL,
+      companies: companies.companies,
+      defaultCompanySlug,
+      verifiedAt: new Date().toISOString(),
+    };
+    const connection = existing
+      ? await updateConnection(deps.db, {
+          workspaceId: state.workspaceId,
+          connectionId: existing.id,
+          visibleToSubjectId: null,
+          expectedVersion: existing.version,
+          kind: "oauth2",
+          status: "active",
+          credentialEncrypted,
+          expiresAt: token.expiresAt,
+          metadata,
+          updatedBySubjectId: state.subjectId,
+        })
+      : await createConnection(deps.db, {
+          accountId: state.accountId,
+          workspaceId: state.workspaceId,
+          // Workspace-owned by design, like the pasted-token install: the
+          // first-party fiken tools resolve only workspace connections until
+          // the delegation-snapshot lane exists for personal ownership.
+          subjectId: null,
+          providerDomain: FIKEN_PROVIDER_DOMAIN,
+          kind: "oauth2",
+          credentialEncrypted,
+          grantedScopes: [],
+          expiresAt: token.expiresAt,
+          metadata,
+          createdBySubjectId: state.subjectId,
+        });
+    if (!connection) {
+      throw new FikenOAuthCallbackError("connection_conflict");
+    }
+    return {
+      redirectTo: fikenReturnUrl(returnBaseUrl, state.returnPath, "connected", connection.id),
+    };
+  } catch (error) {
+    return {
+      redirectTo: fikenReturnUrl(
+        returnBaseUrl,
+        state?.returnPath ?? "/integrations",
+        "error",
+        error instanceof FikenOAuthCallbackError ? error.reason : "callback_failed",
+      ),
+    };
+  }
+}
+
+async function exchangeFikenAuthorizationCode(
+  input: {
+    code: string;
+    clientId: string;
+    clientSecret: string;
+    redirectUri: string;
+    state: string;
+  },
+  fetchImpl: FetchLike,
+): Promise<{
+  accessToken: string;
+  refreshToken: string;
+  tokenType: string;
+  expiresAt: Date | null;
+}> {
+  let response: Response;
+  try {
+    response = await fetchImpl(FIKEN_TOKEN_URL, {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/x-www-form-urlencoded",
+        authorization: `Basic ${Buffer.from(`${input.clientId}:${input.clientSecret}`).toString("base64")}`,
+      },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        code: input.code,
+        redirect_uri: input.redirectUri,
+        state: input.state,
+      }),
+      signal: AbortSignal.timeout(FIKEN_TIMEOUT_MS),
+    });
+  } catch {
+    throw new FikenOAuthCallbackError("token_exchange_unreachable");
+  }
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new FikenOAuthCallbackError("token_exchange_failed");
+  }
+  let payload: Record<string, unknown>;
+  try {
+    payload = await readResponseJsonBounded<Record<string, unknown>>(
+      response,
+      FIKEN_OAUTH_MAX_RESPONSE_BYTES,
+      "Fiken OAuth token response",
+    );
+  } catch {
+    throw new FikenOAuthCallbackError("token_exchange_failed");
+  }
+  const accessToken = typeof payload.access_token === "string" ? payload.access_token : null;
+  const refreshToken = typeof payload.refresh_token === "string" ? payload.refresh_token : null;
+  if (!accessToken || !refreshToken) {
+    throw new FikenOAuthCallbackError("token_exchange_failed");
+  }
+  const expiresIn = typeof payload.expires_in === "number" ? payload.expires_in : null;
+  return {
+    accessToken,
+    refreshToken,
+    tokenType: typeof payload.token_type === "string" ? payload.token_type : "Bearer",
+    expiresAt:
+      expiresIn && Number.isFinite(expiresIn) ? new Date(Date.now() + expiresIn * 1000) : null,
+  };
+}
+
+function readFikenOAuthState(raw: string | undefined, settings: Settings): FikenOAuthState {
+  if (!raw) {
+    throw new FikenOAuthCallbackError("missing_state");
+  }
+  const payload = readSignedState(raw, requireIntegrationsStateSecret(settings)) as Record<
+    string,
+    unknown
+  > | null;
+  if (!payload) {
+    throw new FikenOAuthCallbackError("invalid_state");
+  }
+  const iat = typeof payload.iat === "number" ? payload.iat : undefined;
+  const now = Math.floor(Date.now() / 1000);
+  if (iat === undefined || now < iat || now - iat > oauthStateTtlMs / 1000) {
+    throw new FikenOAuthCallbackError("invalid_state");
+  }
+  const required = (value: unknown): string => {
+    if (typeof value !== "string" || value.length === 0) {
+      throw new FikenOAuthCallbackError("invalid_state");
+    }
+    return value;
+  };
+  return {
+    accountId: required(payload.accountId),
+    workspaceId: required(payload.workspaceId),
+    subjectId: required(payload.subjectId),
+    returnPath: required(payload.returnPath),
+    ...(typeof payload.connectionId === "string" ? { connectionId: payload.connectionId } : {}),
+    ...(typeof payload.connectionVersion === "number"
+      ? { connectionVersion: payload.connectionVersion }
+      : {}),
+    nonce: required(payload.nonce),
+    iat,
+  };
+}
+
+async function requireFikenCallbackGrant(db: Database, state: FikenOAuthState): Promise<void> {
+  const grant = await getWorkspaceGrant(db, state.subjectId, state.workspaceId);
+  if (
+    !grant ||
+    grant.accountId !== state.accountId ||
+    !hasPermission(grant.permissions, "connections:write")
+  ) {
+    throw new FikenOAuthCallbackError("permission_lost");
+  }
+}
+
+function fikenReturnUrl(
+  returnBaseUrl: string,
+  returnPath: string,
+  status: "connected" | "error",
+  value: string,
+): string {
+  const url = new URL(returnPath, returnBaseUrl);
+  url.searchParams.set("fiken", status);
+  url.searchParams.set(status === "connected" ? "connectionId" : "reason", value);
+  return url.toString();
 }

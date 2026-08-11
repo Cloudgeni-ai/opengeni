@@ -6728,6 +6728,18 @@ export const FikenInstallRequest = z.object({
 });
 export type FikenInstallRequest = z.infer<typeof FikenInstallRequest>;
 
+export const FikenOAuthStartRequest = z.object({
+  /** Existing Fiken connection to re-authorize in place (reconnect). */
+  connectionId: z.string().uuid().optional(),
+});
+export type FikenOAuthStartRequest = z.infer<typeof FikenOAuthStartRequest>;
+
+export const FikenOAuthStartResponse = z.object({
+  authorizationUrl: z.string().url(),
+  expiresAt: z.string().datetime({ offset: true }),
+});
+export type FikenOAuthStartResponse = z.infer<typeof FikenOAuthStartResponse>;
+
 export const ConnectionMetadata = z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),

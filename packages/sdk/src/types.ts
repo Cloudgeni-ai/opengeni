@@ -647,6 +647,16 @@ export type FikenInstallRequest = {
   connectionId?: string | undefined;
 };
 
+export type FikenOAuthStartRequest = {
+  /** Existing Fiken connection to re-authorize in place (reconnect). */
+  connectionId?: string | undefined;
+};
+
+export type FikenOAuthStartResponse = {
+  authorizationUrl: string;
+  expiresAt: string;
+};
+
 export type OpenGeniSlackBotInstallStart = {
   authorizationUrl: string;
   expiresAt: string;

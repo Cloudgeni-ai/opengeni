@@ -15,6 +15,7 @@ import {
   decryptEnvironmentValue,
   encryptEnvironmentValue,
   getConnectionMetadata,
+  refreshOAuthConnectionCredential,
   type DbClient,
 } from "@opengeni/db";
 import {
@@ -37,6 +38,7 @@ let available = true;
 let shared: SharedTestDatabase | null = null;
 let client: DbClient;
 let settings: Settings;
+let oauthSettings: Settings;
 
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("api-fiken");
@@ -51,6 +53,15 @@ beforeAll(async () => {
     delegationSecret: DELEGATION_SECRET,
     environmentsEncryptionKey: ENCRYPTION_KEY,
     publicBaseUrl: "https://app.example.test",
+  }) as Settings;
+  oauthSettings = testSettings({
+    productAccessMode: "managed",
+    delegationSecret: DELEGATION_SECRET,
+    environmentsEncryptionKey: ENCRYPTION_KEY,
+    publicBaseUrl: "https://app.example.test",
+    integrationsStateSecret: "fiken-oauth-state-secret-for-tests",
+    fikenClientId: "fiken-client-id",
+    fikenClientSecret: "fiken-client-secret",
   }) as Settings;
 }, 180_000);
 
@@ -68,7 +79,7 @@ function fixtureCompanies(): Array<Record<string, unknown>> {
   ];
 }
 
-type FikenCall = { method: string; url: URL; body: unknown };
+type FikenCall = { method: string; url: URL; body: unknown; headers: Headers };
 
 /**
  * A deterministic Fiken API double. Routes are keyed by pathname suffix; every
@@ -83,12 +94,29 @@ function fakeFiken(options: { companies?: Array<Record<string, unknown>> } = {})
   const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
     const method = init?.method ?? "GET";
-    const body = init?.body ? JSON.parse(String(init.body)) : null;
-    calls.push({ method, url, body });
+    const rawBody = init?.body ? String(init.body) : null;
+    let body: unknown = null;
+    if (rawBody) {
+      try {
+        body = JSON.parse(rawBody);
+      } catch {
+        body = rawBody;
+      }
+    }
+    const headers = new Headers(init?.headers);
+    calls.push({ method, url, body, headers });
     inFlight += 1;
     maxInFlight = Math.max(maxInFlight, inFlight);
     await new Promise((resolve) => setTimeout(resolve, 5));
     inFlight -= 1;
+    if (url.hostname === "fiken.no" && url.pathname === "/oauth/token") {
+      return Response.json({
+        access_token: "fixture-oauth-access-token",
+        refresh_token: "fixture-oauth-refresh-token",
+        token_type: "bearer",
+        expires_in: 86_400,
+      });
+    }
     if (url.pathname.endsWith("/companies")) {
       return Response.json(options.companies ?? fixtureCompanies());
     }
@@ -615,6 +643,306 @@ describe("FikenClient", () => {
         outcome: "succeeded",
         credentialRole: FIKEN_CREDENTIAL_ROLE,
       }),
+    });
+  });
+});
+
+function oauthApp(fikenFetch: typeof globalThis.fetch) {
+  return createApp({
+    settings: oauthSettings,
+    db: client.db,
+    bus: {} as never,
+    workflowClient: {} as never,
+    managedAuth: null,
+    fikenFetch,
+  } as never);
+}
+
+async function startOAuth(
+  workspace: { accountId: string; workspaceId: string },
+  fikenFetch: typeof globalThis.fetch,
+  payload: Record<string, unknown> = {},
+): Promise<{ status: number; authorizationUrl: URL | null; state: string | null }> {
+  const response = await oauthApp(fikenFetch).request(
+    `/v1/workspaces/${workspace.workspaceId}/connections/fiken/oauth/start`,
+    {
+      method: "POST",
+      headers: {
+        authorization: await bearer(workspace, "subject-a", [
+          "connections:read",
+          "connections:write",
+        ]),
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    },
+  );
+  if (response.status !== 200) {
+    return { status: response.status, authorizationUrl: null, state: null };
+  }
+  const body = (await response.json()) as { authorizationUrl: string };
+  const authorizationUrl = new URL(body.authorizationUrl);
+  return {
+    status: response.status,
+    authorizationUrl,
+    state: authorizationUrl.searchParams.get("state"),
+  };
+}
+
+async function completeOAuth(
+  fikenFetch: typeof globalThis.fetch,
+  query: Record<string, string>,
+): Promise<URL> {
+  const params = new URLSearchParams(query);
+  const response = await oauthApp(fikenFetch).request(`/v1/integrations/fiken/callback?${params}`, {
+    method: "GET",
+  });
+  expect(response.status).toBe(302);
+  return new URL(response.headers.get("location")!);
+}
+
+describe("fiken OAuth", () => {
+  test("start requires configured client credentials", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const response = await app(fakeFiken().fetch).request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/fiken/oauth/start`,
+      {
+        method: "POST",
+        headers: {
+          authorization: await bearer(workspace, "subject-a", [
+            "connections:read",
+            "connections:write",
+          ]),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({}),
+      },
+    );
+    expect(response.status).toBe(503);
+  });
+
+  test("start builds the Fiken authorize URL with signed state", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const started = await startOAuth(workspace, fakeFiken().fetch);
+    expect(started.status).toBe(200);
+    const url = started.authorizationUrl!;
+    expect(url.origin + url.pathname).toBe("https://fiken.no/oauth/authorize");
+    expect(url.searchParams.get("response_type")).toBe("code");
+    expect(url.searchParams.get("client_id")).toBe("fiken-client-id");
+    expect(url.searchParams.get("redirect_uri")).toBe(
+      "https://app.example.test/v1/integrations/fiken/callback",
+    );
+    expect(started.state).toBeTruthy();
+  });
+
+  test("callback exchanges the code with Basic auth and stores a workspace oauth2 connection", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const provider = fakeFiken({ companies: [fixtureCompanies()[0]!] });
+    const started = await startOAuth(workspace, provider.fetch);
+    const redirected = await completeOAuth(provider.fetch, {
+      code: "fixture-auth-code",
+      state: started.state!,
+    });
+    expect(redirected.searchParams.get("fiken")).toBe("connected");
+    const connectionId = redirected.searchParams.get("connectionId")!;
+    expect(redirected.pathname).toBe(`/workspaces/${workspace.workspaceId}/capabilities`);
+
+    const tokenCall = provider.calls.find((entry) => entry.url.pathname === "/oauth/token")!;
+    expect(tokenCall.headers.get("authorization")).toBe(
+      `Basic ${Buffer.from("fiken-client-id:fiken-client-secret").toString("base64")}`,
+    );
+    const form = new URLSearchParams(String(tokenCall.body));
+    expect(form.get("grant_type")).toBe("authorization_code");
+    expect(form.get("code")).toBe("fixture-auth-code");
+    expect(form.get("redirect_uri")).toBe(
+      "https://app.example.test/v1/integrations/fiken/callback",
+    );
+    expect(form.get("state")).toBe(started.state);
+    // Company discovery ran with the fresh access token, not a stored one.
+    const companiesCall = provider.calls.find((entry) =>
+      entry.url.pathname.endsWith("/companies"),
+    )!;
+    expect(companiesCall.headers.get("authorization")).toBe("Bearer fixture-oauth-access-token");
+
+    const connection = await getConnectionMetadata(
+      client.db,
+      workspace.workspaceId,
+      connectionId,
+      null,
+    );
+    expect(connection).toMatchObject({
+      subjectId: null,
+      providerDomain: FIKEN_PROVIDER_DOMAIN,
+      kind: "oauth2",
+      status: "active",
+      metadata: expect.objectContaining({
+        credentialRole: FIKEN_CREDENTIAL_ROLE,
+        defaultCompanySlug: "demo-as",
+      }),
+    });
+    expect(connection?.expiresAt).toBeTruthy();
+    const [row] = await shared!.admin<Array<{ credential_encrypted: string }>>`
+      select credential_encrypted from connections where id = ${connectionId}`;
+    const bundle = JSON.parse(
+      decryptEnvironmentValue(Buffer.from(ENCRYPTION_KEY, "base64"), row!.credential_encrypted),
+    );
+    expect(bundle).toMatchObject({
+      access_token: "fixture-oauth-access-token",
+      refresh_token: "fixture-oauth-refresh-token",
+      token_endpoint: "https://fiken.no/oauth/token",
+      client_id: "fiken-client-id",
+      client_secret: "fiken-client-secret",
+      token_endpoint_auth_method: "client_secret_basic",
+    });
+
+    // The first-party tools resolve the oauth2 row and send its bearer.
+    const resolved = await resolveFikenConnectionForTool({
+      db: client.db,
+      grant: grantFor(workspace),
+      sessionId: null,
+    });
+    expect(resolved.connection.id).toBe(connectionId);
+    const toolProvider = fakeFiken();
+    const fiken = createFikenClient(
+      { db: client.db, settings: oauthSettings, fikenFetch: toolProvider.fetch },
+      resolved,
+    );
+    const contacts = await fiken.listContacts({});
+    expect(contacts.contacts).toHaveLength(1);
+    const contactsCall = toolProvider.calls.find((entry) =>
+      entry.url.pathname.endsWith("/contacts"),
+    )!;
+    expect(contactsCall.headers.get("authorization")).toBe("Bearer fixture-oauth-access-token");
+  });
+
+  test("callback rejects a replayed state", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const provider = fakeFiken();
+    const started = await startOAuth(workspace, provider.fetch);
+    const first = await completeOAuth(provider.fetch, {
+      code: "fixture-auth-code",
+      state: started.state!,
+    });
+    expect(first.searchParams.get("fiken")).toBe("connected");
+    const replay = await completeOAuth(provider.fetch, {
+      code: "fixture-auth-code",
+      state: started.state!,
+    });
+    expect(replay.searchParams.get("fiken")).toBe("error");
+    expect(replay.searchParams.get("reason")).toBe("state_replayed");
+  });
+
+  test("callback surfaces provider denial without exchanging a code", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const provider = fakeFiken();
+    const started = await startOAuth(workspace, provider.fetch);
+    const redirected = await completeOAuth(provider.fetch, {
+      error: "access_denied",
+      state: started.state!,
+    });
+    expect(redirected.searchParams.get("fiken")).toBe("error");
+    expect(redirected.searchParams.get("reason")).toBe("provider_denied");
+    expect(provider.calls.some((entry) => entry.url.pathname === "/oauth/token")).toBe(false);
+  });
+
+  test("callback rejects tampered state", async () => {
+    if (!available) return;
+    const provider = fakeFiken();
+    const redirected = await completeOAuth(provider.fetch, {
+      code: "fixture-auth-code",
+      state: "not-a-valid-state",
+    });
+    expect(redirected.searchParams.get("fiken")).toBe("error");
+    expect(redirected.searchParams.get("reason")).toBe("invalid_state");
+  });
+
+  test("re-authorizes an existing token connection in place, preserving its default company", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    // Existing pasted-token connection with an explicit default company.
+    const installed = await installFiken(workspace, fakeFiken().fetch, {
+      defaultCompanySlug: "second-as",
+    });
+    const provider = fakeFiken();
+    const started = await startOAuth(workspace, provider.fetch, {
+      connectionId: installed.body.connection!.id,
+    });
+    const redirected = await completeOAuth(provider.fetch, {
+      code: "fixture-auth-code",
+      state: started.state!,
+    });
+    expect(redirected.searchParams.get("fiken")).toBe("connected");
+    expect(redirected.searchParams.get("connectionId")).toBe(installed.body.connection!.id);
+    const connection = await getConnectionMetadata(
+      client.db,
+      workspace.workspaceId,
+      installed.body.connection!.id,
+      null,
+    );
+    expect(connection).toMatchObject({
+      kind: "oauth2",
+      status: "active",
+      version: installed.body.connection!.version + 1,
+      metadata: expect.objectContaining({ defaultCompanySlug: "second-as" }),
+    });
+  });
+
+  test("the broker refreshes the stored bundle with Basic auth and keeps the rotated refresh token", async () => {
+    const captured: { headers?: Headers; body?: string } = {};
+    const fetchImpl = (async (_input: string | URL | Request, init?: RequestInit) => {
+      captured.headers = new Headers(init?.headers);
+      captured.body = String(init?.body);
+      return Response.json({
+        access_token: "rotated-access",
+        refresh_token: "rotated-refresh",
+        token_type: "bearer",
+        expires_in: 86_400,
+      });
+    }) as typeof globalThis.fetch;
+    const refreshed = await refreshOAuthConnectionCredential(
+      {
+        id: "conn-fiken",
+        kind: "oauth2",
+        credential: {
+          access_token: "old-access",
+          refresh_token: "old-refresh",
+          token_type: "Bearer",
+          token_endpoint: "https://fiken.no/oauth/token",
+          client_id: "fiken-client-id",
+          client_secret: "fiken-client-secret",
+          token_endpoint_auth_method: "client_secret_basic",
+        },
+        metadata: {},
+        grantedScopes: [],
+        expiresAt: new Date(Date.now() - 1_000),
+        status: "active",
+        subjectId: null,
+        providerDomain: FIKEN_PROVIDER_DOMAIN,
+        version: 1,
+      } as never,
+      { providerDomain: FIKEN_PROVIDER_DOMAIN, kind: "oauth2" },
+      settings,
+      {
+        fetchImpl,
+        dnsLookup: async () => [{ address: "93.184.216.34", family: 4 }],
+      },
+    );
+    expect(captured.headers?.get("authorization")).toBe(
+      `Basic ${Buffer.from("fiken-client-id:fiken-client-secret").toString("base64")}`,
+    );
+    const form = new URLSearchParams(captured.body);
+    expect(form.get("grant_type")).toBe("refresh_token");
+    expect(form.get("refresh_token")).toBe("old-refresh");
+    expect(refreshed.credential).toMatchObject({
+      access_token: "rotated-access",
+      refresh_token: "rotated-refresh",
+      client_secret: "fiken-client-secret",
+      token_endpoint_auth_method: "client_secret_basic",
     });
   });
 });

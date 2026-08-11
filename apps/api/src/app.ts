@@ -1225,6 +1225,14 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
     label: "/v1/workspaces/:workspaceId/connections/fiken/install",
   },
   {
+    pattern: /^\/v1\/workspaces\/[^/]+\/connections\/fiken\/oauth\/start$/,
+    label: "/v1/workspaces/:workspaceId/connections/fiken/oauth/start",
+  },
+  {
+    pattern: /^\/v1\/integrations\/fiken\/callback$/,
+    label: "/v1/integrations/fiken/callback",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/connections\/[^/]+$/,
     label: "/v1/workspaces/:workspaceId/connections/:connectionId",
   },

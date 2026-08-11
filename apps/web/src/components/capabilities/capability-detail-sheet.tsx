@@ -54,6 +54,9 @@ export type ConnectAction =
       connectionId: string | null;
     }
   | { type: "fiken_disconnect"; item: CapabilityCatalogItem; connectionId: string }
+  // OAuth against the registered Fiken app; connectionId re-authorizes an
+  // existing row in place.
+  | { type: "fiken_oauth"; item: CapabilityCatalogItem; connectionId: string | null }
   | { type: "oauth"; item: CapabilityCatalogItem; ownership: ConnectionOwnership }
   | {
       type: "api_key";
@@ -545,7 +548,11 @@ export function FikenConnectorControls({
   onAction: (action: ConnectAction) => void;
 }) {
   const [replacing, setReplacing] = useState(false);
-  useEffect(() => setReplacing(false), [item.id]);
+  const [usingToken, setUsingToken] = useState(false);
+  useEffect(() => {
+    setReplacing(false);
+    setUsingToken(false);
+  }, [item.id]);
   const connection =
     health.state === "connected" || health.state === "attention" ? health.connection : null;
 
@@ -568,12 +575,37 @@ export function FikenConnectorControls({
     />
   );
 
+  const oauthButton = (label: string, icon: ReactNode) => (
+    <Button
+      type="button"
+      className="w-full"
+      disabled={busy}
+      onClick={() => onAction({ type: "fiken_oauth", item, connectionId: connection?.id ?? null })}
+    >
+      {busy ? <Loader2Icon className="animate-spin" /> : icon}
+      {label}
+    </Button>
+  );
+
+  const tokenFallbackToggle = (
+    <button
+      type="button"
+      className="mx-auto block text-xs font-medium text-brand hover:underline"
+      onClick={() => setUsingToken(true)}
+    >
+      Use a personal API token instead
+    </button>
+  );
+
   if (health.state === "connected" && connection) {
     return (
       <div className="space-y-3">
         <ConnectionStatus item={item} health={health} />
         {replacing ? (
-          tokenForm("Replace API token", <RefreshCwIcon />)
+          <div className="space-y-3">
+            {oauthButton("Re-authorize with Fiken", <RefreshCwIcon />)}
+            {tokenForm("Replace API token", <RefreshCwIcon />)}
+          </div>
         ) : (
           <Button
             type="button"
@@ -583,7 +615,7 @@ export function FikenConnectorControls({
             onClick={() => setReplacing(true)}
           >
             <RefreshCwIcon />
-            Replace API token
+            Replace credential
           </Button>
         )}
         <Button
@@ -597,8 +629,7 @@ export function FikenConnectorControls({
           Disconnect
         </Button>
         <p className="text-center text-xs text-fg-subtle">
-          Create personal API tokens in Fiken under Rediger konto → API. The token is stored
-          encrypted and used only for this workspace's Fiken tools.
+          Credentials are stored encrypted and used only for this workspace's Fiken tools.
         </p>
       </div>
     );
@@ -608,18 +639,32 @@ export function FikenConnectorControls({
     return (
       <div className="space-y-3">
         <ConnectionStatus item={item} health={health} />
-        {tokenForm(`Reconnect ${item.name}`, <RefreshCwIcon />)}
+        {oauthButton(`Reconnect ${item.name}`, <RefreshCwIcon />)}
+        {usingToken
+          ? tokenForm("Reconnect with API token", <RefreshCwIcon />)
+          : tokenFallbackToggle}
       </div>
     );
   }
 
   return (
     <div className="space-y-3">
-      {tokenForm("Connect for workspace", <PlugIcon />)}
+      {oauthButton("Connect with Fiken", <PlugIcon />)}
       <p className="text-center text-xs text-fg-subtle">
-        Create a personal API token in Fiken under Rediger konto → API. Everyone in this workspace
-        can then use the Fiken tools through this connection.
+        You'll sign in at Fiken and approve access once for this workspace. Everyone in the
+        workspace can then use the Fiken tools through this connection.
       </p>
+      {usingToken ? (
+        <div className="space-y-3">
+          {tokenForm("Connect for workspace", <PlugIcon />)}
+          <p className="text-center text-xs text-fg-subtle">
+            Create a personal API token in Fiken under Rediger konto → API. Fiken's terms allow
+            personal tokens only for integrating your own company.
+          </p>
+        </div>
+      ) : (
+        tokenFallbackToggle
+      )}
     </div>
   );
 }

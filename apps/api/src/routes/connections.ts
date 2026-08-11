@@ -6,6 +6,8 @@ import {
   FIKEN_CREDENTIAL_ROLE,
   FIKEN_PROVIDER_DOMAIN,
   FikenInstallRequest,
+  FikenOAuthStartRequest,
+  FikenOAuthStartResponse,
   IntegrationClientMetadata,
   ListConnectionsResponse,
   OpenGeniSlackBotInstallRequest,
@@ -76,7 +78,12 @@ import {
   SlackBotCredentialVerificationError,
   verifyOpenGeniSlackBotCredential,
 } from "../integrations/slack-bot";
-import { fikenCredentialBundle, verifyFikenApiToken } from "../integrations/fiken";
+import {
+  completeFikenOAuthCallback,
+  fikenCredentialBundle,
+  startFikenOAuth,
+  verifyFikenApiToken,
+} from "../integrations/fiken";
 import {
   OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
@@ -343,6 +350,36 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       createdBySubjectId: grant.subjectId,
     });
     return c.json(ConnectionResponse.parse({ connection }), 201);
+  });
+
+  // Fiken OAuth (registered app) start. Both Fiken lanes produce the same
+  // workspace-owned connection shape; this one refreshes through the broker.
+  app.post("/v1/workspaces/:workspaceId/connections/fiken/oauth/start", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
+    const payload = FikenOAuthStartRequest.parse(await c.req.json());
+    requireEnvironmentEncryption(settings);
+    return c.json(
+      FikenOAuthStartResponse.parse(
+        await startFikenOAuth(deps, {
+          accountId: grant.accountId,
+          workspaceId,
+          subjectId: grant.subjectId,
+          requestUrl: c.req.url,
+          payload,
+        }),
+      ),
+    );
+  });
+
+  app.get("/v1/integrations/fiken/callback", async (c) => {
+    const result = await completeFikenOAuthCallback(deps, {
+      ...(c.req.query("code") ? { code: c.req.query("code") } : {}),
+      ...(c.req.query("state") ? { state: c.req.query("state") } : {}),
+      ...(c.req.query("error") ? { error: c.req.query("error") } : {}),
+      requestUrl: c.req.url,
+    });
+    return c.redirect(result.redirectTo, 302);
   });
 
   app.post("/v1/workspaces/:workspaceId/connections/google-drive/install", async (c) => {

@@ -12,15 +12,17 @@ export function fikenConnectionMetadata(metadata: Record<string, unknown>): Fike
 }
 
 /**
- * A workspace-shared Fiken connection created through the verified install
- * route. Phase 1 deliberately supports only workspace ownership; personal
- * ownership arrives with the OAuth connector and its delegation snapshots.
+ * A workspace-shared Fiken connection created through one of the verified
+ * install paths: the pasted personal API token (`api_key`) or the Fiken OAuth
+ * app flow (`oauth2`). Both are deliberately workspace-owned; personal
+ * ("Connect only for me") ownership needs the delegation-snapshot lane and is
+ * not yet wired for the first-party fiken tools.
  */
 export function isFikenConnection(connection: ConnectionMetadata): boolean {
   return (
     connection.subjectId === null &&
     connection.providerDomain === FIKEN_PROVIDER_DOMAIN &&
-    connection.kind === "api_key" &&
+    (connection.kind === "api_key" || connection.kind === "oauth2") &&
     fikenConnectionMetadata(connection.metadata)?.credentialRole === FIKEN_CREDENTIAL_ROLE
   );
 }

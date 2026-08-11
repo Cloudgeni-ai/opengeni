@@ -1,38 +1,61 @@
 # Fiken connector (first-party)
 
 OpenGeni's first-party connector for [Fiken](https://fiken.no), the Norwegian
-small-business accounting service. Phase 1 is the **verified personal-API-token
-connector**: a workspace admin pastes a Fiken personal API token, OpenGeni
-verifies it against Fiken and stores it encrypted, and the agent reaches Fiken
-through host-side `fiken_*` tools on the first-party MCP surface. No Fiken data
-or credential ever enters the sandbox.
+small-business accounting service. A workspace connects Fiken either through
+the **registered-app OAuth flow** (the default in the UI) or by pasting a
+**personal API token**; both produce the same workspace-shared connection, and
+the agent reaches Fiken through host-side `fiken_*` tools on the first-party
+MCP surface. No Fiken data or credential ever enters the sandbox.
 
-## What phase 1 is
+## The two connect lanes
 
-- **One workspace-shared connection.** `POST /v1/workspaces/:id/connections/fiken/install`
+Both lanes verify against Fiken before anything enters encrypted storage, and
+both store one workspace-owned row in the generic `connections` table
+(`providerDomain: "fiken.no"`, metadata `credentialRole: "fiken_api_token"`
+plus the bounded verified company list and `defaultCompanySlug`). Personal
+("Connect only for me") ownership is deliberately **not** supported yet — the
+first-party fiken tools resolve only workspace rows until the
+delegation-snapshot lane exists for them.
+
+- **OAuth (registered Fiken app).** `POST /v1/workspaces/:id/connections/fiken/oauth/start`
+  (SDK `startFikenOAuth`) returns the `https://fiken.no/oauth/authorize` URL
+  with signed single-use state; the public callback
+  `GET /v1/integrations/fiken/callback` re-checks the subject's
+  `connections:write` grant, consumes the state nonce, exchanges the code at
+  Fiken's Basic-authenticated token endpoint, discovers the grant's companies,
+  and stores a `kind: "oauth2"` connection whose bundle carries
+  `token_endpoint` + client credentials in `client_secret_basic` shape — so the
+  generic connection broker owns every later refresh, including Fiken's
+  rotating refresh tokens (~24 h access-token lifetime). Passing
+  `connectionId` re-authorizes an existing Fiken row in place (this also
+  upgrades a pasted-token row to OAuth, preserving its default company).
+  Requires `OPENGENI_FIKEN_OAUTH_CLIENT_ID` / `OPENGENI_FIKEN_OAUTH_CLIENT_SECRET`
+  (register the app in Fiken under *Rediger konto → API* with redirect URL
+  `${OPENGENI_PUBLIC_BASE_URL}/v1/integrations/fiken/callback`) plus
+  `OPENGENI_INTEGRATIONS_STATE_SECRET`; unconfigured deployments 503 the start
+  route and the UI still offers the token lane.
+- **Personal API token.** `POST /v1/workspaces/:id/connections/fiken/install`
   (SDK `installFikenConnection`) takes `{ apiToken, defaultCompanySlug?, connectionId? }`,
   verifies the token by listing its accessible companies, and stores a
-  workspace-owned row in the generic `connections` table
-  (`providerDomain: "fiken.no"`, `kind: "api_key"`, credential bundle
-  `{ headers: { authorization: "Bearer …" } }`, metadata
-  `credentialRole: "fiken_api_token"` plus the bounded verified company list).
-  Passing `connectionId` rewrites an existing Fiken row in place (reconnect /
-  token replacement). Personal ("Connect only for me") ownership is deliberately
-  **not** part of phase 1 — it arrives with the OAuth connector and its
-  delegation snapshots.
-- **Verified at paste time.** A bad token fails the install route with a
-  specific 422 instead of failing at first tool use. Tokens are created in
-  Fiken under *Rediger konto → API*; they never expire, so there is no refresh
+  `kind: "api_key"` row with credential bundle
+  `{ headers: { authorization: "Bearer …" } }`. Tokens are created in Fiken
+  under *Rediger konto → API* and never expire, so there is no refresh
   machinery — a Fiken 401 marks the connection `needs_reauth` and the fix is a
-  fresh pasted token.
+  fresh credential. A bad paste fails the install route with a specific 422
+  instead of failing at first tool use.
+
+## Runtime behavior shared by both lanes
+
 - **Company scoping.** Fiken URLs are per-company (`/companies/{slug}/…`). Every
   tool takes an optional `companySlug`; the connection's `defaultCompanySlug`
-  (auto-set when the token sees exactly one company) fills it in, and ambiguity
-  is an error that lists the available slugs.
+  (auto-set when the credential sees exactly one company) fills it in, and
+  ambiguity is an error that lists the available slugs.
 - **Catalog tile.** `api:fiken` (`surfaceType: "first_party_fiken"`) in the
-  capabilities catalog; enablement is derived from the workspace connection row,
-  and the web connect sheet uses the verified paste-a-token flow
-  (`capabilityConnectPlan` mode `fiken_api_token`).
+  capabilities catalog; enablement is derived from the workspace connection row.
+  The web connect sheet (`capabilityConnectPlan` mode `fiken_api_token`) leads
+  with "Connect with Fiken" (OAuth) and folds the paste-a-token form behind an
+  explicit toggle; the callback returns to the Capabilities page with a `fiken`
+  query outcome.
 
 ## Tools
 
@@ -55,8 +78,8 @@ the session's tool policy, and they are independently permission-gated.
 | `fiken_contact_create` | `connections:write` | No provider idempotency; the tool description warns about retry duplicates |
 | `fiken_invoice_draft_create` | `connections:write` | **Draft only** — never sends an invoice. Caller-supplied `operationId` UUID doubles as the Fiken draft `uuid`, so a retry finds and returns the existing draft instead of duplicating it |
 
-There is deliberately no invoice *send* tool in phase 1: sending a real invoice
-to a real customer stays a human action inside Fiken.
+There is deliberately no invoice *send* tool: sending a real invoice to a real
+customer stays a human action inside Fiken.
 
 ## Provider constraints that shape the client
 
@@ -78,20 +101,22 @@ to a real customer stays a human action inside Fiken.
 ## Fiken's terms
 
 Fiken's API docs state that third parties integrating on behalf of their
-customers must use OAuth2; personal API tokens are for Fiken customers
-integrating their own accounting. Phase 1's paste-a-token flow targets exactly
-that self-integration case (a workspace connecting its own Fiken). A hosted
-multi-tenant offering should move to the phase 2 OAuth connector (registered
-Fiken app, authorization-code flow, refresh tokens, per-user consent, and
-personal ownership via delegation snapshots), which also lifts the 5-user
-development-app limit through Fiken production approval (api@fiken.no).
-API module access is a paid Fiken feature (ordered inside Fiken); a valid
-token with no API-enabled company fails verification with a pointed message.
+customers must use OAuth2; personal API tokens are only for Fiken customers
+integrating their own accounting, and using them in third-party applications
+violates Fiken's terms. That is why the UI leads with the OAuth lane and folds
+the token form behind an explicit toggle. A newly registered Fiken app is
+limited to 5 users until Fiken grants production status (api@fiken.no; Fiken
+asks for 2–3 real onboarded users first). API module access is a paid Fiken
+feature (ordered inside Fiken); a valid credential with API access to no
+company fails verification with a pointed message.
 
 ## Testing
 
-`apps/api/test/fiken.test.ts` covers token verification, the install route
-(create/reconnect/422s/credential-bundle shape), tool connection resolution,
+`apps/api/test/fiken.test.ts` covers token verification, the token install
+route (create/reconnect/422s/credential-bundle shape), the OAuth start and
+callback routes (authorize-URL shape, Basic-auth code exchange, state replay
+and tampering, provider denial, in-place re-authorization, broker refresh with
+rotating refresh tokens), tool connection resolution across both kinds,
 company-slug resolution and validation, request serialization, 401→
 `needs_reauth` vs 429/500 non-poisoning, Location-id parsing, draft
 idempotency, and audit rows — all against an injected Fiken fetch double.
