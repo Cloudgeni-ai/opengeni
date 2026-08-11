@@ -64,7 +64,7 @@ import {
   settleRetainedProcess,
   touchLeaseHolder,
   verifyWorkspaceMutationSettlement,
-  withWorkspaceRls,
+  withWorkspaceSessionActivityRls,
   type Database,
   type DbClient,
 } from "@opengeni/db";
@@ -1213,18 +1213,16 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       resumeBackendId: "modal",
       resumeState: { backendId: "modal", sessionState: { workspaceReady: true } },
     });
-    const paused = await withWorkspaceRls(db, ids.workspaceId, (scopedDb) =>
-      scopedDb.transaction((tx) =>
-        mutateSessionControlInTransaction(tx as typeof scopedDb, {
-          accountId: ids.accountId,
-          workspaceId: ids.workspaceId,
-          sessionId: attempt.sessionId,
-          actor: { type: "human", subjectId: "snapshot-control-test" },
-          operationKey: crypto.randomUUID(),
-          action: "pause",
-          reason: "prove warm snapshot control fence",
-        }),
-      ),
+    const paused = await withWorkspaceSessionActivityRls(db, ids.workspaceId, (scopedDb) =>
+      mutateSessionControlInTransaction(scopedDb, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: attempt.sessionId,
+        actor: { type: "human", subjectId: "snapshot-control-test" },
+        operationKey: crypto.randomUUID(),
+        action: "pause",
+        reason: "prove warm snapshot control fence",
+      }),
     );
     expect(paused.interruptionCount).toBe(1);
 

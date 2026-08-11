@@ -1,90 +1,138 @@
-# Workspace Memory Slack publication contract
+# Durable workspace decision publication to Slack
 
-This document is the canonical contract for the first independently reviewable
-Workspace Memory Slack publication slice. The slice defines a pure,
-deterministic security and projection
-boundary in `packages/core/src/domain/memory-slack-publication.ts`. It does not
-persist configuration or deliveries and does not call Slack.
+OpenGeni can publish bounded summaries of important Workspace Memory changes
+and completed governed-learning outcomes to one verified workspace Slack bot
+channel. Slack is a notification surface only. Workspace Memory, the durable
+learning attempt/receipt ledger, and their authoritative application views
+remain the source of truth.
 
-## Source and authority boundary
+## Authority and eligibility
 
-The evaluator accepts only an explicit `sourceType=workspace_memory` snapshot.
-It never accepts a Document, document chunk, scoped-knowledge claim, collection,
-prompt, session log, tool result, or connector payload. Organization, workspace,
-and immutable initiating-user personal Documents remain governed RAG evidence
-under `scoped-knowledge.md`; collections remain optional organization only and
-are never an authority or publication boundary.
+The original pure evaluator remains the security boundary for Workspace Memory
+in `packages/core/src/domain/memory-slack-publication.ts`. It requires exact
+account/workspace equality, `scopeType=workspace`, workspace audience, an active
+or approved decision, valid correction/supersession lineage, a live validity
+window, and a non-Slack-derived origin. It never accepts raw Memory text,
+Documents, scoped-knowledge claims, collection content, prompts, logs, or
+connector payloads.
 
-Within Workspace Memory, publication additionally requires exact account and
-workspace equality plus typed `scopeType=workspace` and `audience=workspace`.
-User, role, session, ephemeral, legacy, and restricted records fail closed. A
-service identity, connection owner, session creator, collection id, label, or
-source reference cannot widen that decision.
+The governed-learning adapter in
+`packages/core/src/domain/durable-learning-slack-publication.ts` is a narrow
+post-persistence consumer. The canonical router still owns learning policy,
+scope resolution, authority, routing, rollback, and its immutable attempt and
+receipt. The adapter verifies matching attempt id/input hash, accepts only an
+exact workspace scope, requires a bounded subject summary for writes, and fails
+closed for connector evidence because the v1 contract cannot prove that the
+connector was not Slack. It never publishes from an authority-adapter callback
+or router claim table.
 
-## Eligibility and noise policy
+Both source paths pass only their allowlisted summary/owner/destination text
+through the deterministic sink-local credential-shape boundary in
+`packages/core/src/domain/slack-publication-secret-safety.ts` before the
+projection is hashed or persisted. The final Slack formatter applies the same
+boundary again before escaping and truncation as defense in depth. Recognized
+credential forms are replaced with a fixed omission marker; canonical Memory,
+durable-learning attempts/receipts, model history, events, and other internal
+OpenGeni content remain exact and are never rewritten by this boundary.
 
-Nothing publishes by default. A later admin configuration must explicitly set
-`enabled=true`. The safe enabled policy is:
+## Immutable configuration
 
-- `major` changes requested as `auto` may publish automatically;
-- `normal` changes requested as `auto` are downgraded to `review`;
-- explicit `review` remains review for enabled major/normal importance;
-- `minor` is quiet unless a later admin policy explicitly includes it;
-- `never` is always ineligible.
+Workspace administrators configure the feature on the Capabilities page:
 
-Ordinary create/correct projections require an `active` or `approved`
-`kind=decision` memory inside its validity window. Supersession projections
-require the old row to be `superseded` and to name the exact replacement. A
-correction requires the replacement row to name the exact retired memory. These
-rules preserve history rather than silently presenting stale text as current. A
-correction or supersession that points to the same memory row fails closed.
+- choose an active, verified OpenGeni workspace-bot installation;
+- choose an active bot-member channel;
+- shared/Slack Connect and archived channels are excluded;
+- choose `automatic`, `review`, or `quiet` independently for major, normal, and
+  minor importance;
+- enable or disable publication.
 
-Governed-learning notifications remain later scope. They must enter through
-their own durable immutable receipts; they cannot be synthesized from a
-Document, proposal, prompt, or mutable UI state and are not implemented by this
-slice.
+Every save appends an immutable configuration revision. It contains Slack team,
+channel, and connection identifiers, but no bot credential. Enabling requires a
+complete destination. Automatic and review importance sets cannot overlap.
 
-## Bounded allowlist projection
+The safe UI default is major automatic, normal review, and minor quiet. A
+disabled or missing configuration publishes nothing.
 
-The evaluator does not receive raw Memory text. The caller must supply an
-explicit bounded share summary plus distribution metadata. The returned
-projection contains only:
+## Atomic publication outbox
 
-- workspace id, memory id, and positive memory version;
-- created/corrected/superseded change identity and one related memory id;
-- occurrence timestamp, importance, and effective `auto|review` mode;
-- canonical exact summary with an explicit truncation fact;
-- normalized namespace and a sorted, de-duplicated bounded label subset;
-- an optional exact bounded owner label;
-- immutable workspace/memory identifiers for a later UI link.
+Workspace Memory mutation and publication enqueue run in one workspace-RLS
+transaction. The outbox row freezes:
 
-Memory bodies, metadata, source references/excerpts, embeddings, hidden prompts,
-connection ids, channel ids, credentials, and raw actor subject ids are not in
-the projection type. Token-shaped namespace, label, summary, and owner text is
-ordinary content and is never classified or rewritten. Malformed namespace or
-labels input still denies instead of throwing. The final stable JSON projection
-is independently bounded to 4 KiB.
+- exact configuration revision, connection, team, and channel;
+- source type/id/version and source idempotency key;
+- a stable hash of the bounded projection;
+- importance and automatic/review mode;
+- immutable operation id;
+- frozen initiator kind/subject, initiating human, session, turn, and attempt
+  identifiers when available.
 
-## Loop prevention and idempotency
+Idempotency is unique per workspace, configuration revision, and source key. A
+retry with the same input replays the existing row. Reusing a key with a
+different source or projection is rejected. Configuration changes never retarget
+already-queued work: the delivery worker cancels it if the current revision no
+longer exactly matches.
 
-A `slack_derived` origin is always ineligible, preventing a future Slack-derived
-knowledge record from recursively publishing its own notification. Eligible
-projections receive `memory-slack:v1:<sha256>` over canonical stable JSON. Exact
-retries converge; a new memory version, summary, correction target, timestamp,
-importance, or effective mode produces a different key.
+## Attempts, receipts, and delivery
 
-The key and projection are not themselves an outbox. A later persistence slice
-must atomically bind them to workspace-admin configuration, the exact verified
-OpenGeni Slack bot connection/channel, prospective enablement generation,
-delivery attempts, terminal state, and audit receipts. That later work must
-reuse the existing Slack post operation and may not weaken this evaluator.
+The API process runs a bounded outbox pump. It claims one eligible row through a
+security-definer `FOR UPDATE SKIP LOCKED` function, increments the attempt count,
+and appends an immutable `delivery_claimed` receipt. Expired claims are safely
+reclaimed after process failure.
 
-## Explicitly later slices
+Delivery revalidates the exact verified workspace bot and uses the existing
+Slack post-operation idempotency fence. After claiming that post identity and
+immediately before `chat.postMessage`, it re-reads the exact channel and requires
+the bot still to be a member, the channel still to be active, and all Slack
+Connect/shared flags still to be false. Membership, archive, deletion, or shared
+channel drift makes no provider post and enters terminal cancellation with an
+explicit immutable error receipt. Provider success records only the Slack
+channel id and message timestamp. Transient errors enter exponential or
+provider-directed retry wait; permanent errors and the eighth failed attempt
+enter terminal failure. Exact configuration drift also enters terminal
+cancellation.
 
-- workspace-admin configuration persistence and API;
-- immutable publication snapshots/outbox and retry/terminal receipts;
-- Slack worker delivery through the verified bot operation;
-- review queue, responsive configuration/preview UI, and authoritative links;
-- governed-learning receipt integration;
-- connector/channel membership handling, release, deployment, and production
-  confirmation.
+Receipts are append-only and sequence every state transition:
+
+- enqueue and optional review approval/rejection;
+- delivery claim;
+- scheduled retry;
+- delivered, failed, or cancelled terminal state;
+- an administrator-requested retry of a failed publication.
+
+Configuration revisions and receipts reject updates/deletes. Publication source,
+projection, destination, operation, and initiator identity reject mutation while
+the bounded delivery state remains transitionable. All three tables use enabled
+and forced workspace row-level security.
+
+## Bounded Slack and history projections
+
+Slack copy contains only the allowlisted summary, importance, optional owner,
+occurrence time, governed destination/outcome where applicable, and a link back
+to the authoritative OpenGeni Memory or Workspace State view. It excludes raw
+Memory content, non-projected durable-learning subject content, evidence,
+prompts, credential-shaped values, and actor identifiers. The same sanitized
+summary is used by the persisted publication row and bounded delivery-history
+projection, so review and history surfaces cannot reveal a value removed at the
+Slack boundary.
+
+The Capabilities page exposes the recent publication state, attempt count,
+bounded error code, timestamp, and latest receipt. Workspace administrators can
+approve/reject review-pending rows and retry failed rows. Cancelled rows cannot
+be rebound to a new configuration; a new authoritative outcome must enqueue
+under the new revision.
+
+## API and SDK
+
+The authenticated workspace routes are under
+`/v1/workspaces/:workspaceId/memory-slack-publications`:
+
+- `GET|PUT /configuration` for immutable configuration history/current revision;
+- `GET /channels?connectionId=...` for eligible verified bot-member channels;
+- `GET /` for bounded delivery/receipt history;
+- `POST /:publicationId/action` for revision-fenced approve, reject, or retry.
+
+The public SDK exposes matching typed methods. Workspace reads require
+`workspace:read`; configuration and actions require `workspace:admin`.
+
+Release, deployment, and production Slack acceptance are separate operational
+steps and are not claimed by this source change.

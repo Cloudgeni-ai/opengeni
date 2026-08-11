@@ -278,6 +278,10 @@ advisory-lock winner becomes durable and retries return that winner.
 
 ## 9. Import, edit, and export flows
 
+The human/agent product contract and exact tool/file boundaries are defined in
+[`artifact-collaboration.md`](artifact-collaboration.md). The flows below are
+the kernel and persistence mechanics underneath that single-client model.
+
 ### Create
 
 1. The authenticated caller submits only canonical client semantics (modality,
@@ -309,24 +313,23 @@ advisory-lock winner becomes durable and retries return that winner.
    snapshot reference. Neither the agent nor an API client chooses a bucket or
    arbitrary object key.
 4. `POST /v1/workspaces/:workspaceId/editable-artifacts/imports` accepts only
-   the ready source-file id and closed snapshot facts. It rechecks
-   `artifacts:publish` plus `files:read`, modality/MIME/hash/size, the exact
-   active agent attempt when agent-authored, and independently decodes/verifies
-   the snapshot before publication.
+   the ready source-file id, modality, title, writer replica, and idempotency
+   key. It rechecks artifact-edit plus file-read authority and the exact active
+   agent attempt when agent-authored. Snapshot facts never cross the public
+   request boundary; the trusted importer derives and verifies them.
 5. One transaction resolves idempotency and publishes the artifact, original
    import reference, sequence-zero checkpoint/snapshot, receipt, and live
    outbox. Retries return that exact winner.
-6. `OpenGeniClient.importEditableArtifact` exposes this trusted import boundary.
-   Agent runs instead receive `publish_editable_artifact` only when the verified
-   artifact runtime and host promotion adapter are both present. The tool is
-   called once after final export, re-import, and visual verification; its
-   closed receipt opens the durable collaborative editor in the stock timeline.
+6. `OpenGeniClient.importEditableArtifact` and the first-party
+   `editable_artifact_import` tool expose this same trusted boundary. Both accept a ready
+   workspace file id; neither accepts a sandbox path or caller-chosen snapshot.
 
 ### Edit
 
-1. Browser/agent validates commands locally and submits a stable replica id,
+1. An SDK or agent client validates commands and submits a stable replica id,
    transaction id, request hash, causal base, and typed commands—not trusted
-   canonical operation bytes.
+   committed operation bytes. Agent calls use the exact same application
+   service and native kernel as browser live sessions.
 2. Server derives principal or exact live session/turn/attempt/generation
    authority and reads a consistent detached basis: head sequence, causal
    frontier, state hash, snapshot/tail references, and authorization revision.
@@ -365,9 +368,9 @@ methods rather than whole-buffer reads.
   permission invalidation.
 - Browsers connect with an HTTP-minted, short-lived, artifact-scoped ticket;
   durable bearer tokens and object keys never enter query strings.
-- The public SDK parses `publish_editable_artifact` output with
-  `parseEditableArtifactPublicationReceipt`; malformed, cross-modality, or
-  mismatched editor receipts are not rendered as durable editor links.
+- The public SDK and React editor open artifacts by their durable identity and
+  current authorized head. Session artifact discovery uses persisted
+  associations, never model text or tool-receipt parsing.
 - Native parsing/rendering runs in isolated, no-network subprocesses with CPU,
   memory, output, and crash boundaries. N-API faults cannot kill API/turn
   workers.

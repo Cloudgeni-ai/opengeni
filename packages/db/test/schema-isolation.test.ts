@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import postgres from "postgres";
+import { createDb, createSession } from "../src/index";
 import { migrate, runMigrations } from "../src/migrate";
 
 // Schema-isolation reconfirmation. Proves the embedded dedicated-schema path through the REAL
@@ -182,16 +183,27 @@ describe("embedded dedicated-schema isolation", () => {
       await sql`
         INSERT INTO opengeni.workspace_inference_controls (workspace_id, account_id)
         VALUES (${workspace!.id}, ${account!.id})`;
-      const [session] = await sql<{ id: string }[]>`
-        WITH ids AS (SELECT gen_random_uuid() AS id)
-        INSERT INTO opengeni.sessions (
-          id, account_id, workspace_id, initial_message, model, sandbox_backend,
-          sandbox_group_id, tool_policy
-        )
-        SELECT id, ${account!.id}, ${workspace!.id}, 'hello', 'gpt-4.1', 'none', id,
-          jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
-        FROM ids
-        RETURNING id`;
+      const sessionClient = createDb(APP_URL, {
+        max: 1,
+        searchPath: "opengeni,opengeni_private,public",
+        rlsStrategy: "force",
+      });
+      let sessionId: string;
+      try {
+        sessionId = (
+          await createSession(sessionClient.db, {
+            accountId: account!.id,
+            workspaceId: workspace!.id,
+            initialMessage: "hello",
+            resources: [],
+            metadata: {},
+            model: "gpt-4.1",
+            sandboxBackend: "none",
+          })
+        ).id;
+      } finally {
+        await sessionClient.close();
+      }
       await sql.unsafe(`
         CREATE TABLE opengeni.default_privilege_probe (
           id bigserial PRIMARY KEY,
@@ -209,7 +221,7 @@ describe("embedded dedicated-schema isolation", () => {
             account_id, workspace_id, session_id, server_id, name, url, headers_encrypted
           )
           VALUES (
-            ${account!.id}, ${workspace!.id}, ${session!.id}, 'grant-test', 'Grant test',
+            ${account!.id}, ${workspace!.id}, ${sessionId}, 'grant-test', 'Grant test',
             'https://mcp.example.test', '{}'::jsonb
           )
           RETURNING id`;

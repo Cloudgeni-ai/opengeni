@@ -106,6 +106,24 @@ describe("image generation operation identity", () => {
     expect(changedPrompt.artifactId).toBe(original.artifactId);
     expect(changedPrompt.requestDigest).not.toBe(original.requestDigest);
 
+    const withReferences = imageGenerationOperationIdentity({
+      ...base,
+      referenceDigests: [
+        { mediaType: "image/png", sha256: "a".repeat(64) },
+        { mediaType: "image/jpeg", sha256: "b".repeat(64) },
+      ],
+    });
+    const reversedReferences = imageGenerationOperationIdentity({
+      ...base,
+      referenceDigests: [
+        { mediaType: "image/jpeg", sha256: "b".repeat(64) },
+        { mediaType: "image/png", sha256: "a".repeat(64) },
+      ],
+    });
+    expect(withReferences.operationKey).toBe(original.operationKey);
+    expect(withReferences.requestDigest).not.toBe(original.requestDigest);
+    expect(reversedReferences.requestDigest).not.toBe(withReferences.requestDigest);
+
     const changedCall = imageGenerationOperationIdentity({
       ...base,
       toolCallId: "call_generate_2",

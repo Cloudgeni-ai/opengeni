@@ -981,7 +981,7 @@ describe("buildHostConnectionTokenResolver", () => {
         scopes: ["api"],
         authorizationUrl: "https://host.example/reconnect/gitlab-connection",
       }),
-      { ...context, surface: "toolspace" },
+      { ...context, surface: "codemode" },
     );
 
     const result = await resolver({

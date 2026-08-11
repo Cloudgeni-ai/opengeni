@@ -222,6 +222,12 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/db",
     "@opengeni/testing",
   ],
+  "test/e2e/slack-access-link.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/slack-installation-binding.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/contracts",
+    "@opengeni/testing",
+  ],
   "test/e2e/knowledge-surfaces.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/api-router",
@@ -286,7 +292,7 @@ const ARTIFACT_RUNTIME_SOURCE_WORKSPACES = new Set([
 const ARTIFACT_RUNTIME_SCRIPT_PATTERN = /^scripts\/[^/]*artifact[^/]*\.ts$/;
 const ARTIFACT_RUNTIME_SCRIPT_TEST_PATTERN = /^scripts\/[^/]*artifact[^/]*\.test\.ts$/;
 const ARTIFACT_SKILL_PATTERN =
-  /^\.agents\/skills\/opengeni-(?:documents|presentations|spreadsheets)\//;
+  /^\.agents\/skills\/opengeni-(?:documents|presentations|spreadsheets|video-generation)\//;
 
 type RootPathImpact = Readonly<{
   packages: readonly string[];

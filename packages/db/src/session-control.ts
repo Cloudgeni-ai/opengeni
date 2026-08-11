@@ -7,7 +7,7 @@ import {
   type TurnInitiatorContext,
 } from "@opengeni/contracts";
 import { and, eq, inArray, sql } from "drizzle-orm";
-import type { Database } from "./database";
+import type { Database, SessionActivityDatabase } from "./database";
 import { withLosslessContentWriteVersion } from "./lossless-json";
 import * as schema from "./schema";
 import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-settlement";
@@ -1163,7 +1163,10 @@ export async function evaluateSessionDiscoveryControls(
     );
   }
 
-  const workspace = await lockWorkspaceInferenceControl(db, workspaceId, "share");
+  // Discovery owns one read-only repeatable-read snapshot, so this projection
+  // must not join the writer lock graph merely to keep workspace/session facts
+  // coherent. The snapshot is the consistency boundary.
+  const workspace = await lockWorkspaceInferenceControl(db, workspaceId, "none");
   const workspacePauseRevision = asSafeRevision(
     workspace.workspacePauseRevision,
     "workspace pause revision",
@@ -2050,7 +2053,7 @@ async function assertSessionBranchIsNotCancelled(
 }
 
 async function cancelSessionSubtreeInTransaction(
-  db: Database,
+  db: SessionActivityDatabase,
   input: {
     accountId: string;
     workspaceId: string;
@@ -2375,7 +2378,7 @@ async function cancelSessionSubtreeInTransaction(
 }
 
 export async function mutateSessionControlInTransaction(
-  db: Database,
+  db: SessionActivityDatabase,
   input: {
     accountId: string;
     workspaceId: string;
@@ -2694,7 +2697,7 @@ export async function mutateSessionControlInTransaction(
 }
 
 export async function autoResumeSessionBranchInTransaction(
-  db: Database,
+  db: SessionActivityDatabase,
   input: {
     workspaceId: string;
     sessionId: string;

@@ -28,7 +28,11 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { OpenGeniApiError } from "@opengeni/sdk";
+import {
+  OpenGeniApiError,
+  type RemoveEnrollmentResponse,
+  type SwapActiveSandboxResponse,
+} from "@opengeni/sdk";
 
 import { apiBaseUrl } from "@/api";
 import { PageHeader } from "@/components/common";
@@ -61,10 +65,13 @@ async function copyToClipboard(text: string, successMessage: string) {
 }
 
 export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
+  const { client } = useAppContext();
   const machines = useMachines({ pollIntervalMs: 5000 });
   const pageLive = usePageLiveActivity();
   const [enrollOpen, setEnrollOpen] = useState(false);
   const [removeTarget, setRemoveTarget] = useState<MachineView | null>(null);
+  const [removeBlocked, setRemoveBlocked] = useState<RemoveEnrollmentResponse | null>(null);
+  const [removeMoveError, setRemoveMoveError] = useState<Error | null>(null);
 
   // The machine whose telemetry detail is open (by sandboxId), and its history.
   const [detailId, setDetailId] = useState<string | null>(null);
@@ -220,7 +227,14 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
             loadingSeries={detailLoading}
             onBack={() => setDetailId(null)}
             {...(machines.canRemove
-              ? { onRemove: (machine: MachineView) => setRemoveTarget(machine) }
+              ? {
+                  onRemove: (machine: MachineView) => {
+                    machines.clearMutationError();
+                    setRemoveBlocked(null);
+                    setRemoveMoveError(null);
+                    setRemoveTarget(machine);
+                  },
+                }
               : {})}
             now={now}
           />
@@ -264,51 +278,150 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
       <ConfirmDialog
         open={removeTarget !== null}
         onOpenChange={(open) => {
-          if (!open) setRemoveTarget(null);
+          if (!open) {
+            setRemoveTarget(null);
+            setRemoveBlocked(null);
+            setRemoveMoveError(null);
+            machines.clearMutationError();
+          }
         }}
         title={removeTarget ? `Remove machine “${removeTarget.name}”?` : "Remove machine?"}
         description="Access will be revoked immediately while the machine is offline. Its session, route, lease, archive, and audit history will be kept; reconnecting later requires a fresh human-approved enrollment."
-        confirmLabel="Remove machine"
+        confirmLabel={
+          removeBlocked?.code === "active_route"
+            ? "Move sessions and remove machine"
+            : "Remove machine"
+        }
         onConfirm={async () => {
           const target = removeTarget;
           if (!target?.enrollmentId) return false;
+          const sessionsToMove =
+            removeBlocked?.code === "active_route" ? removeBlocked.dependentSessions : [];
+          if (sessionsToMove.length > 0) {
+            try {
+              setRemoveMoveError(null);
+              await moveDependentSessionsToDefault(client, workspaceId, sessionsToMove);
+            } catch (error) {
+              setRemoveMoveError(
+                error instanceof Error ? error : new Error("A session could not be moved."),
+              );
+              return false;
+            }
+          }
           const result = await machines.remove(target.enrollmentId);
           if (!result) {
-            toast.error("Machine removal is unavailable", {
-              description: "Refresh the page and try again.",
-            });
             return false;
           }
           if (result.outcome === "blocked") {
-            toast.error(result.message, { description: result.action });
+            setRemoveBlocked(result);
             return false;
           }
           toast.success(
             result.outcome === "already_removed"
               ? `${target.name} was already removed`
               : `${target.name} removed`,
-            { description: "It will disappear from the active machine list." },
+            {
+              description:
+                sessionsToMove.length > 0
+                  ? `${sessionsToMove.length} ${sessionsToMove.length === 1 ? "session now uses its" : "sessions now use their"} verified default managed sandbox.`
+                  : "It will disappear from the active machine list.",
+            },
           );
           setRemoveTarget(null);
           setDetailId(null);
+          setRemoveBlocked(null);
+          setRemoveMoveError(null);
           return true;
         }}
       >
         {removeTarget ? (
-          <div className="space-y-2 rounded-og-md border border-og-border bg-og-surface-2/40 px-3 py-2 text-og-sm text-og-fg-muted">
-            <p>
-              <span className="font-medium text-og-fg">Machine:</span> {removeTarget.name}
-            </p>
-            <p>
-              <span className="font-medium text-og-fg">Last seen:</span>{" "}
-              {removeTarget.lastSeenAt
-                ? new Date(removeTarget.lastSeenAt).toLocaleString()
-                : "Never connected"}
-            </p>
+          <div className="space-y-3">
+            <div className="space-y-2 rounded-og-md border border-og-border bg-og-surface-2/40 px-3 py-2 text-og-sm text-og-fg-muted">
+              <p>
+                <span className="font-medium text-og-fg">Machine:</span> {removeTarget.name}
+              </p>
+              <p>
+                <span className="font-medium text-og-fg">Last seen:</span>{" "}
+                {removeTarget.lastSeenAt
+                  ? new Date(removeTarget.lastSeenAt).toLocaleString()
+                  : "Never connected"}
+              </p>
+            </div>
+            {removeMoveError ? (
+              <Notice tone="failed" title="Couldn't move every session">
+                {removeMoveError.message}
+              </Notice>
+            ) : null}
+            {removeBlocked ? (
+              <MachineRemovalBlockNotice workspaceId={workspaceId} result={removeBlocked} />
+            ) : machines.mutationError ? (
+              <Notice tone="failed" title="Removal failed">
+                {machines.mutationError.message}
+              </Notice>
+            ) : null}
           </div>
         ) : null}
       </ConfirmDialog>
     </ContentPage>
+  );
+}
+
+type DefaultSandboxClient = {
+  swapActiveSandbox: (
+    workspaceId: string,
+    sessionId: string,
+    request: { target: string },
+  ) => Promise<SwapActiveSandboxResponse>;
+};
+
+export async function moveDependentSessionsToDefault(
+  client: DefaultSandboxClient,
+  workspaceId: string,
+  sessions: Array<{ id: string; title: string | null }>,
+): Promise<void> {
+  for (const session of sessions) {
+    const result = await client.swapActiveSandbox(workspaceId, session.id, {
+      target: "default",
+    });
+    if (!result.swapped) {
+      const sessionName = session.title?.trim() || session.id;
+      throw new Error(
+        result.reason?.trim() ||
+          `Session ${sessionName} could not reach a verified default managed sandbox${result.code ? ` (${result.code})` : ""}.`,
+      );
+    }
+  }
+}
+
+export function MachineRemovalBlockNotice({
+  workspaceId,
+  result,
+}: {
+  workspaceId: string;
+  result: RemoveEnrollmentResponse;
+}) {
+  return (
+    <Notice
+      tone="waiting"
+      title={result.code === "active_route" ? "Sessions still use this machine" : "Not safe yet"}
+    >
+      <p>{result.message}</p>
+      {result.dependentSessions.length > 0 ? (
+        <ul className="mt-2 space-y-1">
+          {result.dependentSessions.map((session) => (
+            <li key={session.id}>
+              <a
+                href={`/workspaces/${workspaceId}/sessions/${session.id}`}
+                className="font-medium text-fg underline decoration-border-strong underline-offset-2 hover:text-brand"
+              >
+                {session.title?.trim() || session.id}
+              </a>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      <p className="mt-2">{result.action}</p>
+    </Notice>
   );
 }
 

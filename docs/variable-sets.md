@@ -141,7 +141,7 @@ the configured-secret read boundary:
 The first-party MCP server exposes variable set tools, gated by the same permissions as the REST routes and **registered only for grants that hold them**:
 
 - `variable_set_list` (`variable-sets:list` + `secrets:list`) — variable-sets with variable names and metadata, never values.
-- `variable_set_get_variable` (`variable-sets:read` + literal `secrets:read`) — return one exact plaintext value. It is available only on a session-bound first-party MCP server, never toolspace, and additionally requires a current signed workspace/session/turn/attempt/generation claim plus the `session.secret.read` host authorization operation. The database rechecks that the exact attempt is live before atomically committing the read and metadata-only audit.
+- `variable_set_get_variable` (`variable-sets:read` + literal `secrets:read`) — return one exact plaintext value. It is available only on a session-bound first-party MCP server, never codemode, and additionally requires a current signed workspace/session/turn/attempt/generation claim plus the `session.secret.read` host authorization operation. The database rechecks that the exact attempt is live before atomically committing the read and metadata-only audit.
 - `variable_set_set_variable` (`variable-sets:write` + `secrets:write`) — set or rotate one variable, targeted by `variableSetId` or by `variableSetName` (created on first use). The value arrives in plain tool arguments by design; responses return metadata, never values.
 - `session_create` (`sessions:create`) accepts `variableSetId`; attachment requires `variable-sets:use` like the REST route. There is deliberately no attach-after-create tool because attachment is fixed at session creation (see above).
 

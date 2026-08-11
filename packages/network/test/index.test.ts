@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { createServer } from "node:net";
 import {
   DestinationPolicyError,
   isNonPublicAddress,
@@ -330,6 +331,46 @@ describe("DNS-pinned outbound transport", () => {
       });
     } finally {
       server.stop(true);
+    }
+  });
+
+  test("omits a non-Fetch-compatible extension header without losing the response", async () => {
+    const server = createServer((socket) => {
+      socket.end(
+        Buffer.from(
+          "HTTP/1.1 200 OK\r\n" +
+            "Content-Type: video/mp4\r\n" +
+            "Content-Length: 4\r\n" +
+            'X-Tos-Expiration: expiry-date="Sat, 06 Feb 2027 16:00:00 GMT", rule-id="180day\u81ea\u52a8\u6e05\u7406"\r\n' +
+            "Connection: close\r\n\r\n" +
+            "test",
+          "utf8",
+        ),
+      );
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test server did not bind");
+    try {
+      const response = await pinnedFetch(
+        `http://video-output.example.test:${address.port}/video.mp4`,
+        undefined,
+        testEscape,
+        {
+          dnsLookup: async () => [{ address: "127.0.0.1", family: 4 }],
+        },
+      );
+      expect(response.headers.get("content-type")).toBe("video/mp4");
+      expect(response.headers.get("content-length")).toBe("4");
+      expect(response.headers.get("x-tos-expiration")).toBeNull();
+      expect(await response.text()).toBe("test");
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
     }
   });
 

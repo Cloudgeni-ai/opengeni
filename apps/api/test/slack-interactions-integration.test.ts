@@ -18,6 +18,7 @@ import {
   encryptVariableSetValue,
   getLatestSessionModelForSubject,
   getOrCreateSlackInteraction,
+  getSlackBotUserLink,
   getSessionForSubject,
   getWorkspaceGrant,
   grantWorkspaceAccess,
@@ -639,6 +640,219 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(verifySlackUserLinkToken(signingMaterial, token, now)).toMatchObject(input);
     expect(verifySlackUserLinkToken(signingMaterial, `${token}x`, now)).toBeNull();
     expect(verifySlackUserLinkToken(signingMaterial, token, now + 16 * 60_000)).toBeNull();
+  });
+
+  test("managed signed-link access requests remain token-free and complete only after admin approval", async () => {
+    if (!available) return;
+    const value = await fixture({
+      ownerPermissions: ["workspace:admin", "members:manage", "sessions:create"],
+    });
+    const requesterId = `slack-access-requester-${crypto.randomUUID()}`;
+    const otherId = `slack-access-other-${crypto.randomUUID()}`;
+    const ownerId = value.owner.subjectId.replace(/^user:/, "");
+    Reflect.set(value.deps, "managedAuth", {
+      api: {
+        getSession: async ({ headers }: { headers: Headers }) => {
+          const userId = headers.get("x-test-managed-user");
+          return {
+            headers: new Headers(),
+            response: userId
+              ? {
+                  session: {
+                    id: `session-${userId}`,
+                    userId,
+                    expiresAt: new Date(Date.now() + 60_000),
+                  },
+                  user: {
+                    id: userId,
+                    email: `${userId}@example.test`,
+                    name: userId === ownerId ? "Slack access admin" : "Slack access requester",
+                  },
+                }
+              : null,
+          };
+        },
+      },
+    });
+
+    const slackUserId = `U_ACCESS_${crypto.randomUUID()}`;
+    const linkToken = createSlackUserLinkToken(signingMaterial, {
+      workspaceId: value.owner.workspaceId,
+      connectionId: value.connectionId,
+      slackTeamId: value.teamId,
+      slackUserId,
+    });
+    const basePath = `/v1/workspaces/${value.owner.workspaceId}/integrations/slack/user-link-intents`;
+    const requesterHeaders = {
+      "content-type": "application/json",
+      "x-test-managed-user": requesterId,
+    };
+    const ownerHeaders = {
+      "content-type": "application/json",
+      "x-test-managed-user": ownerId,
+    };
+
+    const bearerRejected = await value.app.request(basePath, {
+      method: "POST",
+      headers: {
+        ...requesterHeaders,
+        authorization: "Bearer must-not-authorize-browser-linking",
+      },
+      body: JSON.stringify({ linkToken }),
+    });
+    expect(bearerRejected.status).toBe(401);
+
+    for (const invalidToken of [
+      `${linkToken}x`,
+      createSlackUserLinkToken(
+        signingMaterial,
+        {
+          workspaceId: value.owner.workspaceId,
+          connectionId: value.connectionId,
+          slackTeamId: value.teamId,
+          slackUserId,
+        },
+        Date.now() - 16 * 60_000,
+      ),
+    ]) {
+      const invalid = await value.app.request(basePath, {
+        method: "POST",
+        headers: requesterHeaders,
+        body: JSON.stringify({ linkToken: invalidToken }),
+      });
+      expect(invalid.status).toBe(400);
+      const body = await invalid.text();
+      expect(body).toContain("Request a fresh link from Slack");
+      expect(body).not.toContain("Slack interactions");
+      expect(body).not.toContain(invalidToken);
+    }
+
+    const prepareResponse = await value.app.request(basePath, {
+      method: "POST",
+      headers: requesterHeaders,
+      body: JSON.stringify({ linkToken }),
+    });
+    expect(prepareResponse.status).toBe(201);
+    const prepared = (await prepareResponse.json()) as {
+      id: string;
+      status: string;
+      version: number;
+      workspaceDisplayName: string | null;
+    };
+    expect(prepared).toMatchObject({
+      status: "prepared",
+      version: 1,
+      workspaceDisplayName: "Slack interactions",
+    });
+    expect(JSON.stringify(prepared)).not.toContain(linkToken);
+    expect(JSON.stringify(prepared)).not.toContain("tokenDigest");
+    const replayResponse = await value.app.request(basePath, {
+      method: "POST",
+      headers: requesterHeaders,
+      body: JSON.stringify({ linkToken }),
+    });
+    expect(replayResponse.status).toBe(201);
+    expect(await replayResponse.json()).toMatchObject({
+      id: prepared.id,
+      status: "prepared",
+      version: 1,
+    });
+
+    const crossUser = await value.app.request(`${basePath}/${prepared.id}`, {
+      headers: { "x-test-managed-user": otherId },
+    });
+    expect(crossUser.status).toBe(400);
+    const crossUserBody = await crossUser.text();
+    expect(crossUserBody).toContain("Request a fresh link from Slack");
+    expect(crossUserBody).not.toContain("Slack interactions");
+
+    const requestedResponse = await value.app.request(`${basePath}/${prepared.id}/request-access`, {
+      method: "POST",
+      headers: requesterHeaders,
+      body: JSON.stringify({ expectedVersion: 1, idempotencyKey: crypto.randomUUID() }),
+    });
+    expect(requestedResponse.status).toBe(200);
+    const requested = (await requestedResponse.json()) as { status: string; version: number };
+    expect(requested).toMatchObject({ status: "pending", version: 2 });
+
+    const listResponse = await value.app.request(
+      `/v1/workspaces/${value.owner.workspaceId}/members/access-requests/slack`,
+      { headers: { "x-test-managed-user": ownerId } },
+    );
+    expect(listResponse.status).toBe(200);
+    const listed = (await listResponse.json()) as { requests: Array<{ id: string }> };
+    expect(listed.requests.map((request) => request.id)).toContain(prepared.id);
+
+    const approveResponse = await value.app.request(
+      `/v1/workspaces/${value.owner.workspaceId}/members/access-requests/slack/${prepared.id}/approve`,
+      {
+        method: "POST",
+        headers: ownerHeaders,
+        body: JSON.stringify({
+          expectedVersion: 2,
+          idempotencyKey: crypto.randomUUID(),
+          role: "member",
+          permissions: ["sessions:create", "sessions:read"],
+        }),
+      },
+    );
+    expect(approveResponse.status).toBe(200);
+    expect(await approveResponse.json()).toMatchObject({ status: "completed", version: 3 });
+
+    const requesterSubjectId = `user:${requesterId}`;
+    expect(
+      await getWorkspaceGrant(client.db, requesterSubjectId, value.owner.workspaceId),
+    ).toMatchObject({
+      subjectId: requesterSubjectId,
+      permissions: ["sessions:create", "sessions:read"],
+    });
+    expect(
+      await getSlackBotUserLink(
+        client.db,
+        value.owner.workspaceId,
+        value.connectionId,
+        slackUserId,
+      ),
+    ).toMatchObject({ subjectId: requesterSubjectId });
+
+    const completedResponse = await value.app.request(`${basePath}/${prepared.id}`, {
+      headers: { "x-test-managed-user": requesterId },
+    });
+    expect(completedResponse.status).toBe(200);
+    expect(await completedResponse.json()).toMatchObject({ status: "completed", version: 3 });
+
+    const cancelSlackUserId = `U_CANCEL_${crypto.randomUUID()}`;
+    const cancelToken = createSlackUserLinkToken(signingMaterial, {
+      workspaceId: value.owner.workspaceId,
+      connectionId: value.connectionId,
+      slackTeamId: value.teamId,
+      slackUserId: cancelSlackUserId,
+    });
+    const cancelPrepare = await value.app.request(basePath, {
+      method: "POST",
+      headers: { ...requesterHeaders, "x-test-managed-user": otherId },
+      body: JSON.stringify({ linkToken: cancelToken }),
+    });
+    expect(cancelPrepare.status).toBe(201);
+    const cancelPrepared = (await cancelPrepare.json()) as { id: string; version: number };
+    const cancelResponse = await value.app.request(`${basePath}/${cancelPrepared.id}/cancel`, {
+      method: "POST",
+      headers: { ...requesterHeaders, "x-test-managed-user": otherId },
+      body: JSON.stringify({
+        expectedVersion: cancelPrepared.version,
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+    expect(cancelResponse.status).toBe(200);
+    expect(await cancelResponse.json()).toMatchObject({ status: "cancelled", version: 2 });
+    expect(
+      await getSlackBotUserLink(
+        client.db,
+        value.owner.workspaceId,
+        value.connectionId,
+        cancelSlackUserId,
+      ),
+    ).toBeNull();
   });
 
   test("reaction ingress filters disabled, legacy-scope, wrong-emoji, and disallowed-channel events before content fetch", async () => {
@@ -3769,6 +3983,8 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     await drainAll(value.deps);
     expect(value.slack.posts.at(-1)?.text).toContain("Link your Slack identity");
     expect(value.slack.posts.at(-1)?.text).toContain("No session was created");
+    expect(value.slack.posts.at(-1)?.text).toContain("/capabilities#slack_link=");
+    expect(value.slack.posts.at(-1)?.text).not.toContain("/capabilities?slack_link=");
     expect(value.slack.posts.at(-1)?.channel).toBe("D_U_UNMAPPED");
 
     expect(

@@ -3,9 +3,17 @@ import {
   AGENT_EVENTS_SUBJECT,
   handleAgentEventPayload,
   parseAgentEventSubject,
+  wireAttachedBrowserInventoryToContract,
   wireSampleToDbSample,
 } from "../src/sandbox/metrics-ingestion";
-import { AgentEvent, GoingOfflineReason, type MetricsSample } from "@opengeni/agent-proto";
+import {
+  AgentEvent,
+  Arch,
+  GoingOfflineReason,
+  Os,
+  type AttachedBrowserInventorySnapshot,
+  type MetricsSample,
+} from "@opengeni/agent-proto";
 
 // M10 — the PURE metrics-ingestion helpers (subject parse + wire→DB sample
 // projection). No DB / broker — the round-trip ingestion through createApp + a
@@ -133,5 +141,80 @@ describe("wireSampleToDbSample", () => {
     const before = Date.now();
     const db = wireSampleToDbSample(wire({ sampledAtMs: "0" }));
     expect(db.sampledAt.getTime()).toBeGreaterThanOrEqual(before);
+  });
+});
+
+describe("wireAttachedBrowserInventoryToContract", () => {
+  function inventory(
+    overrides: Partial<AttachedBrowserInventorySnapshot> = {},
+  ): AttachedBrowserInventorySnapshot {
+    return {
+      bridgeGeneration: "bridge-generation-1",
+      revision: "12",
+      devices: [
+        {
+          id: "11111111-1111-4111-8111-111111111111",
+          name: "Primary Chrome",
+          profileLabel: "cloudgeni.ai",
+          browserName: "Chrome",
+          browserVersion: "151.0.0.0",
+          extensionVersion: "1.0.0",
+          platform: Os.OS_MACOS,
+          arch: Arch.ARCH_AARCH64,
+          connectionGeneration: "extension-connection-1",
+          inventoryRevision: "9",
+          tabCount: 3,
+          capabilities: {
+            tabInventory: true,
+            debuggerAttachment: true,
+            semanticObservation: true,
+            screenshots: true,
+            liveFrames: true,
+            humanInput: true,
+            diagnostics: true,
+            rawCdp: false,
+            linkedComputer: true,
+          },
+        },
+      ],
+      ...overrides,
+    };
+  }
+
+  test("projects one complete browser bridge snapshot without conflating its identity", () => {
+    expect(wireAttachedBrowserInventoryToContract(inventory())).toEqual({
+      bridgeGeneration: "bridge-generation-1",
+      revision: 12,
+      devices: [
+        {
+          id: "11111111-1111-4111-8111-111111111111",
+          name: "Primary Chrome",
+          profileLabel: "cloudgeni.ai",
+          browserName: "Chrome",
+          browserVersion: "151.0.0.0",
+          extensionVersion: "1.0.0",
+          platform: "macos",
+          architecture: "arm64",
+          connectionGeneration: "extension-connection-1",
+          inventoryRevision: 9,
+          tabCount: 3,
+          capabilities: expect.objectContaining({ debuggerAttachment: true }),
+        },
+      ],
+    });
+  });
+
+  test("rejects an unsafe uint64 before an authoritative snapshot can disconnect peers", () => {
+    expect(() =>
+      wireAttachedBrowserInventoryToContract(
+        inventory({ revision: String(BigInt(Number.MAX_SAFE_INTEGER) + 1n) }),
+      ),
+    ).toThrow("safe integer range");
+  });
+
+  test("rejects unspecified platform and architecture rather than guessing", () => {
+    const wire = inventory();
+    wire.devices[0]!.platform = Os.OS_UNSPECIFIED;
+    expect(() => wireAttachedBrowserInventoryToContract(wire)).toThrow("platform is unspecified");
   });
 });

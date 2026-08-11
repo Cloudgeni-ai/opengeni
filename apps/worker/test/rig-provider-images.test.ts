@@ -136,9 +136,7 @@ describe("build-once rig provider image runtime", () => {
         const command = rigSetupScriptCommand(
           `printf setup-ran > ${JSON.stringify(proof)}`,
           verified.id,
-          10_000,
-          root,
-          image.contentHash,
+          { timeoutMs: 10_000, markerRoot: root, contentHash: image.contentHash },
         );
         const result = await execute(command);
         expect(result.exitCode).toBe(0);
@@ -180,9 +178,7 @@ describe("build-once rig provider image runtime", () => {
       const command = rigSetupScriptCommand(
         `printf changed > ${JSON.stringify(proof)}`,
         changedVersion.id,
-        10_000,
-        root,
-        selected.contentHash!,
+        { timeoutMs: 10_000, markerRoot: root, contentHash: selected.contentHash! },
       );
       const result = await execute(command);
       expect(result.exitCode).toBe(0);

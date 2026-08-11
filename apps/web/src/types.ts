@@ -91,6 +91,8 @@ export type {
   SessionStatus,
   SessionTurn,
   SocialConnection,
+  SlackInstallationBinding,
+  SlackUserLinkAccessRequest,
   ToolRef,
   UpdateKnowledgeMemoryRequest,
   UpdateWorkspaceMemberRequest,

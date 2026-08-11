@@ -66,6 +66,93 @@ describe("context compaction rendering", () => {
   });
 });
 
+describe("durable generated-video timeline", () => {
+  test("renders the terminal system update with native zero-copy playback", async () => {
+    const artifactId = "55555555-5555-4555-8555-555555555555";
+    const operationId = "66666666-6666-4666-8666-666666666666";
+    let loads = 0;
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("system.update.delivered", {
+            members: [
+              {
+                id: "video-update-1",
+                kind: "media_generation_result",
+                classification: "success",
+                sourceId: operationId,
+                summary: "The requested video is ready.",
+                result: {
+                  type: "media_generation_result",
+                  schemaVersion: 1,
+                  status: "ready",
+                  operationId,
+                  receipt: {
+                    type: "generated_video",
+                    schemaVersion: 1,
+                    operationId,
+                    artifact: {
+                      available: true,
+                      artifactId,
+                      kind: "generated_video",
+                      contentType: "video/mp4",
+                      originalBytes: 2_000_000,
+                      sha256: "a".repeat(64),
+                      retainedAt: "2026-08-10T10:00:00.000Z",
+                      dimensions: { width: 1280, height: 720 },
+                      retention: { policy: "workspace_file", expiresAt: null },
+                      retrieval: {
+                        method: "GET",
+                        path: `/v1/workspaces/11111111-1111-4111-8111-111111111111/artifacts/${artifactId}/content`,
+                        acceptRanges: "bytes",
+                        maxRangeBytes: 1024 * 1024,
+                      },
+                    },
+                    video: {
+                      durationSeconds: 5,
+                      width: 1280,
+                      height: 720,
+                      fps: 24,
+                      hasAudio: true,
+                      videoCodec: "h264",
+                      audioCodec: "aac",
+                    },
+                    sandboxPath: `/workspace/generated-videos/generated-video-${artifactId}.mp4`,
+                  },
+                },
+              },
+            ],
+          }),
+        ]}
+        loadVideoArtifactPlayback={async (receivedArtifactId) => {
+          loads += 1;
+          expect(receivedArtifactId).toBe(artifactId);
+          return {
+            schemaVersion: 1,
+            artifactId,
+            url: "https://storage.example.test/generated.mp4?signature=opaque",
+            expiresAt: "2026-08-10T10:05:00.000Z",
+            contentType: "video/mp4",
+            sizeBytes: 2_000_000,
+            sha256: "a".repeat(64),
+            acceptRanges: "bytes",
+          };
+        }}
+      />,
+    );
+    await flush();
+    const video = r.container.querySelector("video");
+    expect(loads).toBe(1);
+    expect(video).not.toBeNull();
+    expect(video?.getAttribute("preload")).toBe("metadata");
+    expect(video?.hasAttribute("controls")).toBe(true);
+    expect(video?.hasAttribute("playsinline")).toBe(true);
+    expect(video?.hasAttribute("autoplay")).toBe(false);
+    expect(r.container.textContent).toContain("1280×720 · 5s · Audio");
+    await r.unmount();
+  });
+});
+
 describe("provider MCP unavailable rendering", () => {
   test("labels Codex Apps auth failures as Codex Apps rather than ChatGPT domain text", async () => {
     const r = await renderComponent(
@@ -699,70 +786,6 @@ describe("MessageTimeline — settled turn folding", () => {
     expect(expand).not.toBeNull();
     expect(r.container.querySelector('button[aria-label="Expand screenshot"]')).toBeNull();
 
-    await r.unmount();
-  });
-
-  test("renders a published editable artifact as a compact, exact editor handoff", async () => {
-    const artifactId = "a".repeat(32);
-    const editorPath = `/workspaces/22222222-2222-4222-8222-222222222222/artifacts/editable/${artifactId}`;
-    const item = toolItem({
-      name: "publish_editable_artifact",
-      arguments: {
-        path: "/workspace/launch.pptx",
-        title: "Launch deck",
-        modality: "presentation",
-      },
-      output: {
-        type: "editable_artifact",
-        schemaVersion: 1,
-        artifact: { id: artifactId, modality: "presentation", title: "Launch deck" },
-        sourceFile: {
-          id: "11111111-1111-4111-8111-111111111111",
-          filename: "launch.pptx",
-          contentType: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-          sizeBytes: 8192,
-          sha256: "b".repeat(64),
-        },
-        editorPath,
-      },
-      status: "complete",
-    });
-    const Renderer = defaultToolRegistry.resolve(item);
-    expect(Renderer.name).toBe("EditableArtifactPublicationRenderer");
-    const r = await renderComponent(<Renderer item={item} />);
-    await flush();
-
-    expect(r.container.textContent).toContain("Published editable presentation");
-    expect(r.container.textContent).toContain("Launch deck · launch.pptx");
-    const trigger = r.container.querySelector('[role="button"]') as HTMLElement | null;
-    await act(async () => trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
-    await flush();
-
-    const openEditor = r.container.querySelector("a[href]") as HTMLAnchorElement | null;
-    expect(openEditor?.textContent).toContain("Open editor");
-    expect(openEditor?.getAttribute("href")).toBe(editorPath);
-    expect(r.container.textContent).toContain("8.0 KB");
-    await r.unmount();
-  });
-
-  test("keeps editable-artifact publication visibly in flight without a false receipt", async () => {
-    const item = toolItem({
-      name: "publish_editable_artifact",
-      arguments: {
-        path: "/workspace/report.docx",
-        title: "Annual report",
-        modality: "document",
-      },
-      status: "running",
-    });
-    const Renderer = defaultToolRegistry.resolve(item);
-    const r = await renderComponent(<Renderer item={item} />);
-    await flush();
-
-    expect(r.container.textContent).toContain("Publishing editable document");
-    expect(r.container.textContent).toContain("Annual report");
-    expect(r.container.querySelector(".og-shimmer-text")).not.toBeNull();
-    expect(r.container.querySelector("a[href]")).toBeNull();
     await r.unmount();
   });
 

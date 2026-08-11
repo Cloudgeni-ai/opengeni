@@ -425,7 +425,7 @@ without mutating the SDK object, while undefined array entries and every other
 non-JSON graph fail with the exact offending path. The lossless database codec
 stays strict rather than silently changing arbitrary input.
 
-Before a personal MCP is attached, the worker/Toolspace boundary revalidates the
+Before a personal MCP is attached, the worker/Codemode boundary revalidates the
 delegation's exact workspace membership, connection id, provider domain, kind,
 owner subject, and active status. A missing, revoked, transferred, or otherwise
 invalid row is never replaced with another subject's connection. Only that MCP
@@ -544,10 +544,15 @@ process or parallel tool operation stopped. The turn activity heartbeat timer
 and worker SDK throttle share a 500 ms bound, leaving the unchanged four-second
 live control budget for physical writer drain and receipt-gated replacement
 admission independently of the two-minute heartbeat timeout.
+Each streamed SDK event read uses Temporal's activity cancellation signal with
+one listener that is removed when the iterator advances. Never race every event
+against `Context.cancelled`: that promise intentionally never settles on normal
+completion and would retain one losing promise reaction per token/event for the
+activity lifetime.
 
 The dying `runAgentTurn` activity owns physical proof. It cancels the exact
 turn's tool/sandbox controller, waits for all controller-owned operations to
-quiesce, stops and drains attempt-owned Git, Toolspace, and generic
+quiesce, stops and drains attempt-owned Git, Codemode, and generic
 run-credential renewal/materialization writes, and immediately writes
 `session_turn_attempts.quiesced_at` before
 attempt-qualified credential deletion, cache, recording, provider, lease, or
@@ -777,8 +782,9 @@ envelope, closes the exact attempt as recoverable, and leaves the same logical
 turn in `recovering`. It never creates a human queue row or synthetic user
 message. Any in-flight side-effecting tool call is durably closed with an
 explicit `interrupted / outcome unknown` result before the next attempt can
-run; this includes Toolspace calls, whose pending receipt is written before the
-remote request. A late result is retained only as rejected evidence. The workflow then
+run; this includes Codemode calls, whose operation is journaled before dispatch
+and whose execution-start marker prevents replay after the side-effect boundary.
+A late result is retained only as rejected evidence. The workflow then
 creates a fresh attempt for that same turn on a healthy worker and reconstructs
 model input from durable model history and tool-call lineage. At most the
 single in-flight model step is lost, the same bound as a crash. This is an
@@ -1017,20 +1023,31 @@ full session rows. `sessions_list` defaults to deterministic descending
 display/keyset suffix, not the snapshot clock. Revision zero is the untouched
 legacy bucket and still traverses by exact PostgreSQL timestamp/UUID suffix.
 Both paths use opaque, versioned, snapshot-bound keyset cursors and matching
-workspace-prefixed indexes. For updated order the first-page transaction takes
-workspace inference-control `FOR SHARE`, then the workspace activity counter
-`FOR SHARE`, and reads session rows with ordinary MVCC. Control-aware semantic
-writers use workspace control → UUID-sorted session rows → counter; inserts and
-direct writers may omit the control/session prefix but never acquire those
-locks after the counter. Holding the counter fence makes every later activity
-receive a strictly greater transactional revision. The page returns that
-decimal revision as `updatedThrough`; the next incremental scan passes it as
+workspace-prefixed indexes. The workspace activity counter is created with the
+workspace, so an updated-order page reads its complete multi-query projection
+through one short read-only repeatable-read MVCC snapshot and never takes a
+counter or workspace-control lock. The page returns that decimal snapshot as
+`updatedThrough`; the next incremental scan passes it as
 `updatedAfter`, so application-clock timestamps, equal timestamps, inserts,
-and repeated updates cannot create a handoff gap. The one-row counter is touched
-only for semantic monitoring activity, not raw deltas. Known targets should be
-read with exact-ID `session_get`, whose model-facing projection independently
-bounds every aggregate and the complete pretty-printed response to 64 KiB; the
-REST session detail contract remains unchanged.
+and repeated updates cannot create a handoff gap. Semantic writers acquire only
+their domain locks while doing work. Their outermost database wrapper opens one
+workspace-scoped activity gate, lets row triggers tag the changed session set
+with the current full transaction id, settles every deferred constraint, and
+then finalizes exactly once: one counter increment and one shared revision
+stamped onto exactly that transaction's pending sessions. Low-level session
+writers accept only the branded gate handle, while the SQL trigger catches raw
+or stale callers at runtime. The finalizer clears the pending set in the same
+transaction. A zero-change
+transaction leaves the counter untouched; a semantic writer outside a matching
+gate, a conflicting nested workspace, a manual revision write, or an open gate
+without its finalizer fails closed and rolls back. A new gate must begin at the
+outer transaction boundary; same-workspace nested scopes reuse that owner, while
+an unrelated outer transaction is rejected. The counter therefore enters
+the lock graph only after other transaction work is complete, while discovery
+never enters that graph at all. Raw deltas do not mark a session pending. Known
+targets should be read with exact-ID `session_get`, whose model-facing
+projection independently bounds every aggregate and the complete pretty-printed
+response to 64 KiB; the REST session detail contract remains unchanged.
 
 `sessions.updated_at` records semantic monitoring activity time, while
 `sessions.activity_revision` is its transactional monotonic ordering fact; raw
@@ -1038,11 +1055,20 @@ stream volume advances neither. A batch containing only raw message, reasoning,
 sandbox-command-output, or PTY
 deltas advances `last_sequence` but does not advance `updated_at` or
 `activity_revision`. A semantic event or explicit session mutation advances
-the timestamp and transactionally allocates the workspace's next activity
-revision as applicable. This keeps
+the timestamp, marks that session pending inside the activity gate, and shares
+the transaction's single finalized workspace revision with every other changed
+session. This keeps
 updated-order discovery useful even while a productive session emits a large
 raw token or terminal stream; `session_events` remains the exact sequenced
 audit path for those retained previews.
+
+Operation-keyed session commands retry only their rolled-back database
+transaction on PostgreSQL deadlock or serialization SQLSTATEs, with a bounded
+attempt count. Durable operation receipts make those retries idempotent;
+publication and workflow wake delivery remain strictly after commit and are
+never replayed by the database retry loop. Terminal persistence errors expose a
+fixed safe message plus structured diagnostics while retaining the exact driver
+failure only as the internal cause.
 
 Those durable stores are still not the realtime or browser representation.
 NATS chunks bounded encoded messages; each session/workspace-control SSE body

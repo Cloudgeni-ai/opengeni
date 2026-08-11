@@ -21,7 +21,14 @@ import {
   type UserMessageItem,
 } from "@opengeni/react/session";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { CheckIcon, Loader2Icon, MenuIcon, MessagesSquareIcon, XIcon } from "lucide-react";
+import {
+  CheckIcon,
+  Loader2Icon,
+  MenuIcon,
+  MessagesSquareIcon,
+  PanelsTopLeftIcon,
+  XIcon,
+} from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -49,7 +56,12 @@ import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Notice } from "@/components/ui/notice";
 import type { WorkspaceTab } from "@opengeni/react";
+import type { EditableArtifactResource } from "@opengeni/sdk/artifacts";
 import { useAppContext } from "@/context";
+import type {
+  SessionEditableArtifactSummary,
+  SessionEditableArtifactsStatus,
+} from "@/components/session/editable-artifacts-workspace";
 import {
   normalizeProviderDomain,
   oauthConnectionOwnership,
@@ -73,6 +85,7 @@ import { resolveSessionComposerModel } from "@/lib/session-model";
 import { mergeSessionContextProjection } from "@/lib/session-pins";
 import { createWorkspaceRetainedArtifactLoader } from "@/lib/retained-artifact-loader";
 import { createSessionRetainedScreenshotLoader } from "@/lib/retained-screenshot-loader";
+import { createWorkspaceRetainedVideoLoader } from "@/lib/retained-video-loader";
 import {
   firstPartySessionToolOptions,
   isIntelligenceEffort,
@@ -88,6 +101,14 @@ const LazySessionInspector = lazy(() =>
   import("@/components/session/inspector").then(({ SessionInspector }) => ({
     default: SessionInspector,
   })),
+);
+
+const LazySessionEditableArtifactsWorkspace = lazy(() =>
+  import("@/components/session/editable-artifacts-workspace").then(
+    ({ SessionEditableArtifactsWorkspace }) => ({
+      default: SessionEditableArtifactsWorkspace,
+    }),
+  ),
 );
 
 const LazyCodexRealtimeControl = lazy(() =>
@@ -597,25 +618,74 @@ function SessionDock(props: {
   onOpenNavigation: () => void;
 }) {
   // The workbench (Changes | Files | Terminal | Desktop + machine chip) lives in
-  // the package now; the app injects Debug around it. Agents remain in the one
-  // compact composer-adjacent surface.
-  const trailingTabs: WorkspaceTab[] = props.session
-    ? [
-        {
-          id: "debug",
-          label: "Debug",
-          content: (
-            <Suspense fallback={<LoadingPanel label="Opening debug inspector" />}>
-              <LazySessionInspector
-                session={props.session}
-                events={props.events}
-                connectionState={props.connectionState}
-              />
-            </Suspense>
-          ),
-        },
-      ]
-    : [];
+  // the package now; the app injects durable artifacts and Debug around it.
+  // Heavy editor/runtime code stays lazy until the user opens the tab.
+  const artifactRefreshSequence = useMemo(() => {
+    for (let index = props.events.length - 1; index >= 0; index -= 1) {
+      const event = props.events[index];
+      if (
+        event &&
+        (event.type === "agent.toolCall.output" ||
+          event.type === "turn.completed" ||
+          event.type === "turn.failed" ||
+          event.type === "turn.cancelled")
+      ) {
+        return event.sequence;
+      }
+    }
+    return 0;
+  }, [props.events]);
+  const artifactState = useSessionEditableArtifactSummaries({
+    workspaceId: props.workspaceId,
+    sessionId: props.sessionId,
+    refreshSequence: artifactRefreshSequence,
+  });
+  const artifactSummaries = artifactState.artifacts;
+  const trailingTabs: WorkspaceTab[] = [
+    {
+      id: "artifacts",
+      label: (
+        <span className="inline-flex items-center gap-1.5">
+          <PanelsTopLeftIcon className="size-3.5" aria-hidden />
+          <span>Artifacts</span>
+        </span>
+      ),
+      ...(artifactSummaries.length > 0
+        ? {
+            badge: (
+              <span className="rounded-og-xs bg-og-accent-soft px-1 text-og-xs text-og-fg-muted">
+                {artifactSummaries.length}
+              </span>
+            ),
+          }
+        : {}),
+      content: (
+        <Suspense fallback={<LoadingPanel label="Opening artifact" />}>
+          <LazySessionEditableArtifactsWorkspace
+            workspaceId={props.workspaceId}
+            artifacts={artifactSummaries}
+            status={artifactState.status}
+            onRetry={artifactState.retry}
+          />
+        </Suspense>
+      ),
+    },
+  ];
+  if (props.session) {
+    trailingTabs.push({
+      id: "debug",
+      label: "Debug",
+      content: (
+        <Suspense fallback={<LoadingPanel label="Opening debug inspector" />}>
+          <LazySessionInspector
+            session={props.session}
+            events={props.events}
+            connectionState={props.connectionState}
+          />
+        </Suspense>
+      ),
+    });
+  }
 
   return (
     <SessionWorkspace
@@ -640,6 +710,73 @@ function SessionDock(props: {
       }
     />
   );
+}
+
+function useSessionEditableArtifactSummaries(input: {
+  workspaceId: string;
+  sessionId: string;
+  refreshSequence: number;
+}): Readonly<{
+  artifacts: readonly SessionEditableArtifactSummary[];
+  status: SessionEditableArtifactsStatus;
+  retry: () => void;
+}> {
+  const context = useAppContext();
+  const authorityKey = `${input.workspaceId}:${input.sessionId}:${context.accessKeyVersion}`;
+  const [retrySequence, setRetrySequence] = useState(0);
+  const [loaded, setLoaded] = useState<{
+    key: string;
+    status: SessionEditableArtifactsStatus;
+    artifacts: readonly EditableArtifactResource[];
+  } | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let current = true;
+    setLoaded((previous) =>
+      previous?.key === authorityKey && previous.status === "ready"
+        ? previous
+        : {
+            key: authorityKey,
+            status: "loading",
+            artifacts: previous?.key === authorityKey ? previous.artifacts : [],
+          },
+    );
+    void Promise.all([
+      import("@/lib/editable-artifact-client"),
+      import("@/lib/editable-artifact-browser"),
+    ])
+      .then(async ([{ editableArtifactClient }, { createConsoleEditableArtifactReplicaId }]) => {
+        const result = await editableArtifactClient.listSessionEditableArtifacts(
+          input.workspaceId,
+          input.sessionId,
+          {
+            replicaId: createConsoleEditableArtifactReplicaId(),
+            signal: controller.signal,
+          },
+        );
+        if (current) {
+          setLoaded({ key: authorityKey, status: "ready", artifacts: result.artifacts });
+        }
+      })
+      .catch(() => {
+        if (!current || controller.signal.aborted) return;
+        setLoaded((previous) => ({
+          key: authorityKey,
+          status: "error",
+          artifacts: previous?.key === authorityKey ? previous.artifacts : [],
+        }));
+      });
+    return () => {
+      current = false;
+      controller.abort();
+    };
+  }, [authorityKey, input.refreshSequence, input.sessionId, input.workspaceId, retrySequence]);
+
+  const retry = useCallback(() => setRetrySequence((value) => value + 1), []);
+  return loaded?.key === authorityKey
+    ? { artifacts: loaded.artifacts, status: loaded.status, retry }
+    : { artifacts: [], status: "loading", retry };
 }
 
 function SessionChatPane(props: {
@@ -695,6 +832,10 @@ function SessionChatPane(props: {
   );
   const loadRetainedArtifact = useMemo(
     () => createWorkspaceRetainedArtifactLoader(context.client, props.session.workspaceId),
+    [context.client, props.session.workspaceId],
+  );
+  const loadVideoArtifactPlayback = useMemo(
+    () => createWorkspaceRetainedVideoLoader(context.client, props.session.workspaceId),
     [context.client, props.session.workspaceId],
   );
   const terminal = isTerminalSessionStatus(props.session.status);
@@ -1124,6 +1265,7 @@ function SessionChatPane(props: {
               resolveProviderLogo={props.resolveProviderLogo}
               loadRetainedScreenshot={loadRetainedScreenshot}
               loadRetainedArtifact={loadRetainedArtifact}
+              loadVideoArtifactPlayback={loadVideoArtifactPlayback}
               hasOlder={props.hasOlder}
               loadingOlder={props.loadingOlder}
               onLoadOlder={() => void props.onLoadOlder()}

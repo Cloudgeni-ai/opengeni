@@ -159,6 +159,97 @@ describe("native composer voice-input browser acceptance", () => {
     await context.close();
   });
 
+  test("mobile recording keeps Cancel and Stop visible in a crowded composer", async () => {
+    const context = await browser.newContext({
+      viewport: { width: 390, height: 844 },
+      hasTouch: true,
+      isMobile: true,
+      reducedMotion: "reduce",
+    });
+    const page = await context.newPage();
+    await page.goto(`${baseUrl}/transcription.html?theme=dark&chrome=crowded`, {
+      waitUntil: "networkidle",
+    });
+
+    await page.getByRole("button", { name: "Start voice input" }).click();
+    const stop = page.getByRole("button", { name: "Stop and transcribe" });
+    const cancel = page.getByRole("button", { name: "Cancel recording" });
+    await stop.waitFor();
+
+    const audit = await page.locator(".og-composer-footer").evaluate((footer) => {
+      const button = (label: string) =>
+        footer.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`);
+      const stopButton = button("Stop and transcribe");
+      const cancelButton = button("Cancel recording");
+      const stopRect = stopButton?.getBoundingClientRect();
+      const cancelRect = cancelButton?.getBoundingClientRect();
+      const footerRect = footer.getBoundingClientRect();
+      const transcriptionRect = footer
+        .querySelector<HTMLElement>("[data-transcription-capturing]")
+        ?.getBoundingClientRect();
+      const visible = (label: string) => {
+        const element = footer.querySelector<HTMLElement>(`button[aria-label="${label}"]`);
+        return element?.checkVisibility() ?? null;
+      };
+      return {
+        overflow: footer.scrollWidth - footer.clientWidth,
+        stop: stopRect
+          ? {
+              width: stopButton?.offsetWidth ?? 0,
+              height: stopButton?.offsetHeight ?? 0,
+              fullyVisible:
+                stopRect.left >= footerRect.left &&
+                stopRect.right <= footerRect.right &&
+                transcriptionRect !== undefined &&
+                stopRect.left >= transcriptionRect.left &&
+                stopRect.right <= transcriptionRect.right,
+            }
+          : null,
+        cancel: cancelRect
+          ? {
+              width: cancelButton?.offsetWidth ?? 0,
+              height: cancelButton?.offsetHeight ?? 0,
+              fullyVisible:
+                cancelRect.left >= footerRect.left &&
+                cancelRect.right <= footerRect.right &&
+                transcriptionRect !== undefined &&
+                cancelRect.left >= transcriptionRect.left &&
+                cancelRect.right <= transcriptionRect.right,
+            }
+          : null,
+        toolsVisible: visible("Open composer tools"),
+        modelVisible: visible("Model and effort"),
+        realtimeVisible: visible("Start realtime voice"),
+        pauseVisible: visible("Pause this workstream"),
+        sendVisible: visible("Send message"),
+      };
+    });
+
+    expect(audit.overflow).toBeLessThanOrEqual(1);
+    expect(audit.stop?.fullyVisible).toBe(true);
+    expect(audit.cancel?.fullyVisible).toBe(true);
+    expect(Math.min(audit.stop?.width ?? 0, audit.stop?.height ?? 0)).toBeGreaterThanOrEqual(44);
+    expect(Math.min(audit.cancel?.width ?? 0, audit.cancel?.height ?? 0)).toBeGreaterThanOrEqual(
+      44,
+    );
+    expect(audit.toolsVisible).toBe(false);
+    expect(audit.modelVisible).toBe(false);
+    expect(audit.realtimeVisible).toBe(false);
+    expect(audit.pauseVisible).toBe(false);
+    expect(audit.sendVisible).toBe(false);
+
+    await cancel.click();
+    await page.getByRole("button", { name: "Start voice input" }).waitFor();
+    expect(await page.getByRole("button", { name: "Open composer tools" }).isVisible()).toBe(true);
+    expect(await page.getByRole("button", { name: "Model and effort" }).isVisible()).toBe(true);
+    expect(await page.getByRole("button", { name: "Start realtime voice" }).isVisible()).toBe(true);
+    expect(await page.getByRole("button", { name: "Pause this workstream" }).isVisible()).toBe(
+      true,
+    );
+    expect(await page.getByRole("button", { name: "Send message" }).isVisible()).toBe(true);
+    await context.close();
+  });
+
   test("reload recovers a timesliced recording without reopening the microphone", async () => {
     const context = await browser.newContext({ viewport: { width: 768, height: 960 } });
     const page = await context.newPage();

@@ -12,7 +12,7 @@ import {
 function connection(overrides: Partial<ConnectionMetadata> = {}): ConnectionMetadata {
   const metadata: GoogleDriveConnectionMetadata = {
     credentialRole: "google_drive_metadata",
-    credentialLabel: "Google Drive metadata browser",
+    credentialLabel: "Google Drive read-only source sync",
     googlePermissionId: "permission-a",
     googleEmail: "drive@example.com",
     googleDisplayName: "Drive User",

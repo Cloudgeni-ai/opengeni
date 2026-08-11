@@ -1,5 +1,9 @@
 import { useCallback, useRef, useState } from "react";
-import type { RemoveEnrollmentRequest, RemoveEnrollmentResponse } from "@opengeni/sdk";
+import type {
+  RemoveEnrollmentRequest,
+  RemoveEnrollmentResponse,
+  SwapActiveSandboxResponse,
+} from "@opengeni/sdk";
 import { useOpenGeni, type ClientOverride } from "../provider";
 import { useMutationRunner, usePolledValue } from "./internal";
 import type { MachinesResponse, MachineView, MetricSample } from "../types/machines";
@@ -46,7 +50,7 @@ export type MachinesClientLike = {
     workspaceId: string,
     sessionId: string,
     request: { target: string },
-  ) => Promise<unknown>;
+  ) => Promise<SwapActiveSandboxResponse>;
   /**
    * Host-supplied swap adapter (an escape hatch). When present it wins over the
    * default `swapActiveSandbox` path. Session-scoped, like the swap it backs.
@@ -98,6 +102,24 @@ export type UseMachinesResult = {
 };
 
 const EMPTY: MachinesResponse = { activeSandboxId: null, activeEpoch: 0, machines: [] };
+
+function swapFailureMessage(result: SwapActiveSandboxResponse): string {
+  if (result.reason?.trim()) return result.reason;
+  switch (result.code) {
+    case "recovery_in_progress":
+      return "The managed sandbox is still recovering. Try again shortly.";
+    case "recovery_degraded":
+      return "The managed sandbox recovery is degraded and needs attention.";
+    case "recovery_unrecoverable":
+      return "The managed sandbox could not be recovered.";
+    case "offline_enrollment":
+      return "The selected machine is offline.";
+    case "concurrent_swap":
+      return "The session route changed concurrently. Refresh and try again.";
+    default:
+      return "The session stayed on its current sandbox.";
+  }
+}
 
 /**
  * The workspace Machines fleet: the selfhosted enrollments + the session's Modal
@@ -171,7 +193,15 @@ export function useMachines(options: UseMachinesOptions = {}): UseMachinesResult
       const ownedIdentity = identityKey;
       setAttachState({ identity: ownedIdentity, sandboxId });
       const result = await run(async () => {
-        await runSwap();
+        const response = await runSwap();
+        if (
+          response &&
+          typeof response === "object" &&
+          "swapped" in response &&
+          response.swapped === false
+        ) {
+          throw new Error(swapFailureMessage(response as SwapActiveSandboxResponse));
+        }
         return true;
       });
       if (identityRef.current === ownedIdentity) {

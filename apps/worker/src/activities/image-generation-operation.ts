@@ -82,6 +82,7 @@ export type ExecuteImageGenerationOperationInput = {
   providerBindingHash: string;
   modelId: string;
   prompt: string;
+  referenceDigests?: readonly Readonly<{ mediaType: string; sha256: string }>[];
   generate: () => Promise<GeneratedImageOutput>;
 };
 
@@ -97,6 +98,7 @@ export async function executeImageGenerationOperation(
     providerBindingHash: input.providerBindingHash,
     modelId: input.modelId,
     prompt: input.prompt,
+    ...(input.referenceDigests ? { referenceDigests: input.referenceDigests } : {}),
     toolCallId: input.toolCallId,
   });
   const prepared = await ports.prepare(input.db, {
@@ -221,17 +223,23 @@ export function imageGenerationOperationIdentity(input: {
   providerBindingHash: string;
   modelId: string;
   prompt: string;
+  referenceDigests?: readonly Readonly<{ mediaType: string; sha256: string }>[];
 }): {
   operationId: string;
   operationKey: string;
   requestDigest: string;
   artifactId: string;
 } {
-  const requestDigest = digest(
-    "opengeni:image-generation-request:v1\0",
-    input.modelId,
-    input.prompt,
-  );
+  const referenceDigests = input.referenceDigests ?? [];
+  const requestDigest =
+    referenceDigests.length === 0
+      ? digest("opengeni:image-generation-request:v1\0", input.modelId, input.prompt)
+      : digest(
+          "opengeni:image-generation-request:v2\0",
+          input.modelId,
+          input.prompt,
+          ...referenceDigests.flatMap((reference) => [reference.mediaType, reference.sha256]),
+        );
   const operationKey = digest(
     "opengeni:image-generation-operation:v2\0",
     input.workspaceId,

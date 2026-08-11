@@ -3,10 +3,12 @@ import {
   claimExpiredFileUploadCleanup,
   completeDueTranscriptionRecordingObjectCleanup,
   completeExpiredFileUploadCleanup,
+  claimVideoGenerationOperations,
   purgeExpiredTranscriptionRecordings,
 } from "@opengeni/db";
 import type { ObjectStorage } from "@opengeni/storage";
 import type { ControlActivityServices } from "./types";
+import { randomUUID } from "node:crypto";
 
 export const FILE_UPLOAD_CLEANUP_GRACE_MS = 60 * 60 * 1_000;
 export const FILE_UPLOAD_CLEANUP_CLAIM_TIMEOUT_MS = 10 * 60 * 1_000;
@@ -176,5 +178,34 @@ export function createFileUploadReaperActivities(
     return { claimed, deleted, failed };
   }
 
-  return { reapExpiredFileUploads };
+  async function recoverVideoGenerationWorkflows(): Promise<{
+    claimed: number;
+    started: number;
+    failed: number;
+  }> {
+    const { db, startVideoGenerationWorkflow, observability } = await services();
+    if (!startVideoGenerationWorkflow) return { claimed: 0, started: 0, failed: 0 };
+    const claims = await claimVideoGenerationOperations(db, {
+      owner: `video-workflow-recovery:${randomUUID()}`,
+      leaseSeconds: 120,
+      limit: 100,
+    });
+    let started = 0;
+    let failed = 0;
+    for (const claim of claims) {
+      try {
+        await startVideoGenerationWorkflow(claim);
+        started += 1;
+      } catch (error) {
+        failed += 1;
+        observability.warn("Video generation workflow recovery start failed", {
+          operationId: claim.operationId,
+          errorClass: error instanceof Error ? error.name : "UnknownError",
+        });
+      }
+    }
+    return { claimed: claims.length, started, failed };
+  }
+
+  return { reapExpiredFileUploads, recoverVideoGenerationWorkflows };
 }

@@ -37,6 +37,7 @@ import { observabilityEventLogger } from "./observability";
 import { startAuthCalloutResponder } from "./sandbox/auth-callout";
 import { startHelloIngestion, startMetricsIngestion } from "./sandbox/metrics-ingestion";
 import { startSlackInteractionPump } from "./integrations/slack-interactions";
+import { startMemorySlackPublicationPump } from "./memory-slack-delivery";
 import { startTemporalScheduleCleanupPump } from "./temporal-schedule-cleanup";
 import {
   EDITABLE_ARTIFACT_LIVE_WEBSOCKET_MAX_MESSAGE_BYTES,
@@ -362,6 +363,8 @@ export async function startApi() {
       ? {
           editableArtifacts: editableArtifactComposition.application,
           editableArtifactExports: editableArtifactComposition.durableExports,
+          editableArtifactAgent: editableArtifactComposition.agent,
+          editableArtifactOfficeImports: editableArtifactComposition.officeImports,
         }
       : {}),
     observability,
@@ -398,6 +401,7 @@ export async function startApi() {
   const stopSlackInteractionPump = settings.slackSigningSecret
     ? startSlackInteractionPump(routeDeps)
     : undefined;
+  const stopMemorySlackPublicationPump = startMemorySlackPublicationPump(routeDeps);
   const stopTemporalScheduleCleanupPump = startTemporalScheduleCleanupPump({
     db: dbClient.db,
     deleteSchedule: async (temporalScheduleId) => {
@@ -464,6 +468,7 @@ export async function startApi() {
     close: async () => {
       server.stop(true);
       stopSlackInteractionPump?.();
+      await stopMemorySlackPublicationPump();
       stopMetricsIngestion?.();
       stopHelloIngestion?.();
       await stopTemporalScheduleCleanupPump();

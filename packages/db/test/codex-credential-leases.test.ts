@@ -5,6 +5,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import postgres from "postgres";
+import { sql } from "drizzle-orm";
 import {
   chooseRotationActive,
   type RotationDecision,
@@ -33,11 +34,13 @@ import {
   updateCodexRotationSettings,
   upsertCodexSubscriptionCredential,
   withCodexCredentialRefreshLock,
+  withSessionActivityRlsContext,
   withRlsContext,
   workspaceCodexSubscriptionActive,
   type CodexCredentialLeaseSelectionContext,
   type Database,
   type DbClient,
+  type SessionActivityDatabase,
 } from "../src/index";
 
 let available = true;
@@ -95,17 +98,21 @@ async function seedTurn(ws: Workspace, position = 1): Promise<string> {
   const sessionId = crypto.randomUUID();
   const turnId = crypto.randomUUID();
   const attemptId = crypto.randomUUID();
-  await admin`
-    insert into sessions (
-      id, account_id, workspace_id, initial_message, model,
-      sandbox_backend, sandbox_group_id, status, tool_policy
-    ) values (
-      ${sessionId}, ${ws.accountId}, ${ws.workspaceId}, 'test',
-      'codex/gpt-5.6-sol', 'modal', ${sessionId}, 'running',
-      jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
-    )`;
-  await admin.begin(async (transaction) => {
-    await transaction`
+  await withSessionActivityRlsContext(
+    dbA,
+    { accountId: ws.accountId, workspaceId: ws.workspaceId },
+    async (transaction) => {
+      await transaction.execute(sql`
+        insert into sessions (
+          id, account_id, workspace_id, initial_message, model,
+          sandbox_backend, sandbox_group_id, status, tool_policy
+        ) values (
+          ${sessionId}, ${ws.accountId}, ${ws.workspaceId}, 'test',
+          'codex/gpt-5.6-sol', 'modal', ${sessionId}, 'running',
+          jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null)
+        )
+      `);
+      await transaction.execute(sql`
       insert into session_turns (
         id, account_id, workspace_id, session_id, trigger_event_id,
         temporal_workflow_id, status, position, prompt, model,
@@ -113,19 +120,24 @@ async function seedTurn(ws: Workspace, position = 1): Promise<string> {
       ) values (
         ${turnId}, ${ws.accountId}, ${ws.workspaceId}, ${sessionId}, ${crypto.randomUUID()},
         'wf', 'running', ${position}, 'test', 'codex/gpt-5.6-sol', 'low', 'modal', ${attemptId}
-      )`;
-    await transaction`
-      insert into session_turn_attempts (
-        id, account_id, workspace_id, session_id, turn_id, execution_generation,
-        state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
-        verified_control_revision, mcp_approval_policies
-      ) values (
-        ${attemptId}, ${ws.accountId}, ${ws.workspaceId}, ${sessionId}, ${turnId}, 0,
-        'running', 'wf', ${`run:${attemptId}`}, ${`activity:${attemptId}`}, 0,
-        '{}'::jsonb
-      )`;
-    await transaction`update sessions set active_turn_id = ${turnId} where id = ${sessionId}`;
-  });
+      )
+      `);
+      await transaction.execute(sql`
+        insert into session_turn_attempts (
+          id, account_id, workspace_id, session_id, turn_id, execution_generation,
+          state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
+          verified_control_revision, mcp_approval_policies
+        ) values (
+          ${attemptId}, ${ws.accountId}, ${ws.workspaceId}, ${sessionId}, ${turnId}, 0,
+          'running', 'wf', ${`run:${attemptId}`}, ${`activity:${attemptId}`}, 0,
+          '{}'::jsonb
+        )
+      `);
+      await transaction.execute(
+        sql`update sessions set active_turn_id = ${turnId} where id = ${sessionId}`,
+      );
+    },
+  );
   return turnId;
 }
 
@@ -1130,12 +1142,12 @@ describe("credential allocator atomic Codex credential allocation", () => {
     const attemptId = await activeAttemptIdForTurn(turnId);
     const [turn] = await admin<{ session_id: string }[]>`
       select session_id from session_turns where id = ${turnId}`;
-    await withRlsContext(
+    await withSessionActivityRlsContext(
       dbA,
       { accountId: ws!.accountId, workspaceId: ws!.workspaceId },
       async (scopedDb) =>
         await scopedDb.transaction(async (tx) => {
-          await mutateSessionControlInTransaction(tx as unknown as Database, {
+          await mutateSessionControlInTransaction(tx as unknown as SessionActivityDatabase, {
             accountId: ws!.accountId,
             workspaceId: ws!.workspaceId,
             sessionId: turn!.session_id,
@@ -1253,13 +1265,21 @@ describe("credential allocator atomic Codex credential allocation", () => {
       select id from sessions where workspace_id = ${wsB!.workspaceId} limit 1`;
     let triggerError: unknown;
     try {
-      await admin`
-        update sessions set codex_pinned_credential_id = ${foreignCredential}
-        where id = ${sessionB!.id}`;
+      await withSessionActivityRlsContext(
+        dbB,
+        { accountId: wsB!.accountId, workspaceId: wsB!.workspaceId },
+        async (tx) => {
+          await tx.execute(sql`
+            update sessions set codex_pinned_credential_id = ${foreignCredential}
+            where id = ${sessionB!.id}
+          `);
+        },
+      );
     } catch (error) {
       triggerError = error;
     }
-    expect(String(triggerError)).toContain(
+    const databaseError = (triggerError as { cause?: unknown })?.cause ?? triggerError;
+    expect(String(databaseError)).toContain(
       "Codex credential reference must remain in the row workspace",
     );
 

@@ -81,6 +81,8 @@ describe("fail-closed change impact", () => {
       "test/e2e/composer-responsive.browser.e2e.ts",
       "test/e2e/connected-machine-removal.browser.e2e.ts",
       "test/e2e/react-compiled-css.browser.e2e.ts",
+      "test/e2e/slack-access-link.browser.e2e.ts",
+      "test/e2e/slack-installation-binding.browser.e2e.ts",
     ]);
     expect(sdk.browserAcceptanceLanes).toEqual(["interaction", "knowledge", "workbench"]);
     expect(sdk.artifactRuntimeRequired).toBe(false);
@@ -226,6 +228,8 @@ describe("fail-closed change impact", () => {
       "test/e2e/composer-responsive.browser.e2e.ts",
       "test/e2e/connected-machine-removal.browser.e2e.ts",
       "test/e2e/react-compiled-css.browser.e2e.ts",
+      "test/e2e/slack-access-link.browser.e2e.ts",
+      "test/e2e/slack-installation-binding.browser.e2e.ts",
     ]);
     expect(tests.e2e).not.toContain("test/e2e/codex-overview.e2e.ts");
     expect(OPT_IN_TESTS["test/e2e/codex-overview.e2e.ts"]).toContain("browser-acceptance");

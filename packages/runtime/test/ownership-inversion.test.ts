@@ -32,7 +32,7 @@ import {
   isProviderSandboxNotFoundError,
   materializeRunCredentials,
   clearRunCredentials,
-  toolspaceTokenFileForSession,
+  codemodeTokenFileForSession,
 } from "../src/index";
 
 // local backend, web search OFF (the hosted web_search tool would try the
@@ -162,12 +162,11 @@ describe("P1.2 ownership inversion — runAgentStream owned branch (unix_local, 
     await clearRunCredentials(liveSession, sessionId);
   });
 
-  test("owned setup registers Toolspace renewal only after the initial token file is seeded", async () => {
+  test("owned setup registers Codemode renewal only after the initial token file is seeded", async () => {
     const settings = testSettings({
       sandboxBackend: "local",
       webSearchEnabled: false,
-      toolspaceEnabled: true,
-      delegationSecret: "toolspace-secret",
+      delegationSecret: "codemode-secret",
     });
     const client = createSandboxClientForBackend("local", settings) as unknown as {
       backendId: string;
@@ -175,21 +174,21 @@ describe("P1.2 ownership inversion — runAgentStream owned branch (unix_local, 
     };
     const liveSession = await client.create({});
     liveSessions.push(liveSession);
-    const toolspaceSessionId = crypto.randomUUID();
-    const tokenFile = toolspaceTokenFileForSession(
-      "/workspace/.opengeni/toolspace-token",
-      toolspaceSessionId,
+    const codemodeSessionId = crypto.randomUUID();
+    const tokenFile = codemodeTokenFileForSession(
+      "/workspace/.opengeni/codemode-token",
+      codemodeSessionId,
     );
     const agent = buildOpenGeniAgent(settings, [], {
       model: new ScriptedModel([{ output: [assistantMessage("done")] }]),
-      toolspaceTokenSeed: "ogd_initial_owned",
-      toolspaceTokenSessionId: toolspaceSessionId,
+      codemodeTokenSeed: "ogd_initial_owned",
+      codemodeTokenSessionId: codemodeSessionId,
     });
     let observedToken: string | null = null;
 
     const result = await runAgentStream(agent, "answer", settings, {
       ownedSandbox: { client, session: liveSession },
-      onToolspaceTokenSessionReady: async (session) => {
+      onCodemodeTokenSessionReady: async (session) => {
         const bytes = await session.readFile?.({
           path: tokenFile,
         });
@@ -283,32 +282,31 @@ describe("P1.2 ownership inversion — runAgentStream owned branch (unix_local, 
     expect(liveSession!.closed).toBe(true);
   });
 
-  test("legacy SDK-owned creation registers Toolspace renewal after seeding", async () => {
+  test("legacy SDK-owned creation registers Codemode renewal after seeding", async () => {
     const settings = testSettings({
       sandboxBackend: "local",
       webSearchEnabled: false,
-      toolspaceEnabled: true,
-      delegationSecret: "toolspace-secret",
+      delegationSecret: "codemode-secret",
     });
     const rawClient = createSandboxClientForBackend("local", settings) as unknown as {
       backendId: string;
       create: (manifest?: unknown) => Promise<LiveLocalSession>;
     };
-    const toolspaceSessionId = crypto.randomUUID();
-    const tokenFile = toolspaceTokenFileForSession(
-      "/workspace/.opengeni/toolspace-token",
-      toolspaceSessionId,
+    const codemodeSessionId = crypto.randomUUID();
+    const tokenFile = codemodeTokenFileForSession(
+      "/workspace/.opengeni/codemode-token",
+      codemodeSessionId,
     );
     const agent = buildOpenGeniAgent(settings, [], {
       model: new ScriptedModel([{ output: [assistantMessage("done")] }]),
-      toolspaceTokenSeed: "ogd_initial_legacy",
-      toolspaceTokenSessionId: toolspaceSessionId,
+      codemodeTokenSeed: "ogd_initial_legacy",
+      codemodeTokenSessionId: codemodeSessionId,
     });
     let observedToken: string | null = null;
 
     const result = await runAgentStream(agent, "answer", settings, {
       sandboxClient: rawClient,
-      onToolspaceTokenSessionReady: async (session) => {
+      onCodemodeTokenSessionReady: async (session) => {
         const bytes = await session.readFile?.({
           path: tokenFile,
         });

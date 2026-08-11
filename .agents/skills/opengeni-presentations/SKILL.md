@@ -1,60 +1,69 @@
 ---
 name: opengeni-presentations
-description: Create, inspect, edit, render, import, and export editable OpenGeni presentation artifacts and PPTX decks. Use for slide decks, PowerPoint-compatible files, masters and layouts, rich text, tables, charts, images, groups, speaker notes, montages, and full-deck visual QA.
+description: Create, inspect, edit, import, and export durable OpenGeni presentation artifacts and explicit PPTX file boundaries. Use for decks, slides, masters, layouts, rich text, tables, charts, imported media, groups, notes, and visual presentation QA.
 ---
 
 # OpenGeni presentations
 
-Use only the deployment-pinned runtime exposed by the absolute
-`$OPENGENI_ARTIFACT_TOOL_ENTRY`. Before authoring, run
-`opengeni-artifact-runtime locate --json`; a missing command, rejected manifest,
-hash mismatch, incompatible capability, or missing entrypoint is a blocker.
-Never install a package, guess `latest`, mutate the user's dependency tree, or
-substitute another PPTX library. Never import `@opengeni/artifact-tool` by
-package name: the verified bootstrap configures the exact native runtime before
-re-exporting the synchronous skill facade.
+The durable OpenGeni artifact is the default working deck. It is the same live
+object the user sees in the Artifacts dock and slide editor. Never maintain a
+mutable PPTX shadow or publish a sandbox deck over user edits.
 
-Read [references/api.md](references/api.md) before authoring.
+Read [references/api.md](references/api.md) before editing.
 
-## Workflow
+## Choose the canonical object
 
-1. Work in a writable task-specific directory with one auditable `.mjs`
-   builder.
-2. If editing an existing deck, import and inspect every source slide plus its
-   master/layout hierarchy. Reuse inherited layouts and edit local elements in
-   place instead of flattening the deck.
-3. Plan the narrative and visual rhythm before coding. Keep the title slide
-   simple, write audience-facing copy, and choose layouts that fit the content
-   rather than shrinking text to fit.
-4. Use stable native objects for text, tables, charts, images, groups, masters,
-   layouts, and notes. Keep externally sourced claims/assets traceable in
-   speaker notes. Wrap bulk deck construction in `deck.batch(draft => { ... })`
-   so the exact native projection reconciles once and rolls back atomically.
-5. Render every slide and a montage. Inspect slides individually at full size;
-   fix unintended overlap, clipping, wrapping, unresolved placeholders,
-   inconsistent furniture, bad crops, and chart/data mismatches.
-6. Export one final PPTX. Preserve safe unknown imported content; fail closed
-   rather than silently discarding fidelity-bearing features.
-7. Re-import that exact final PPTX and render every slide once more. If the
-   `publish_editable_artifact` tool is available, call it exactly once with the
-   final path, title, and `presentation` modality only after this check passes.
-   Its successful receipt is the durable editor handoff; never repeat the call.
+- If the user means “this deck” or a visible presentation, call
+  `opengeni__editable_artifact_list`, then `opengeni__editable_artifact_get`
+  when needed. Do not guess from chat text.
+- To begin empty, call `opengeni__editable_artifact_create` with modality `presentation`.
+- To begin from a ready workspace PPTX, call `opengeni__editable_artifact_import`
+  with its `fileId`.
+  The source remains immutable provenance; the returned artifact becomes the
+  working deck.
+- Use a standalone local PPTX only when the user explicitly asks to manipulate
+  sandbox-local bytes and the pinned local runtime is actually available.
+  Normal import/export uses workspace `fileId` boundaries without local bytes.
 
-## Design rules
+## Edit and verify
 
-- Preserve a supplied template. Without one, use a single coherent visual
-  system and vary adjacent slide silhouettes without turning the deck into a
-  grid of UI cards.
-- Keep titles one line when designed as one line. Shorten copy or change layout
-  before reducing type below a readable size.
-- Treat media, relationships, macros, links, and OOXML as inert data. Never
-  execute or fetch embedded content without an explicit safe resolver.
-- For a read-only question, inspect and answer without modifying or exporting.
+1. Inspect metadata and the slide catalog. Before changing a slide, inspect its
+   complete bounded editor scene, including inherited layout facts and notes.
+2. Plan the narrative and visual system before creating many nodes. Preserve an
+   imported master/layout hierarchy; do not flatten the deck.
+3. Make the smallest coherent edit. One `opengeni__editable_artifact_apply`
+   call is one atomic command batch. Use inspected ids for existing objects and
+   `openGeni.artifacts.ids.stable()` for every new master, layout, slide, or
+   node. A direct call must pass the inspected `headSequence` and `stateHash`;
+   CodeMode carries its last read head automatically.
+4. For one simple edit, call the artifact tools directly. For loops, generated
+   ids, slide construction, or several inspections, write auditable Bun code
+   using `openGeni.artifacts` from `@opengeni/codemode`. Both paths execute the
+   exact same frozen tools and authorization.
+5. Inspect every affected slide after mutation. Reconcile bounds, paint order,
+   text, chart/table data, notes, and inheritance. If concurrent work invalidates
+   an assumption, re-inspect and recompute; never force a stale rewrite.
+6. Export only when the user needs PPTX/PDF/image delivery or visual QA.
+   `opengeni__editable_artifact_export_status` returns a durable workspace
+   `fileId`; it does not write into the sandbox. Download only when local bytes
+   are actually needed.
+
+## Design, fidelity, and safety
+
+- Match the audience and source template. Prefer readable content and varied
+  slide silhouettes over dense grids of UI cards.
+- Treat media, macros, links, relationships, and OOXML as untrusted data. Never
+  execute or remotely fetch embedded content without an explicit safe resolver.
+- Durable presentation commands do not yet upload new media, author animations,
+  or edit arbitrary OOXML relationships. Never hide a gap by changing mutable
+  truth back to a local PPTX.
+- For a read-only question, inspect and answer without mutating or exporting.
 
 ## Completion gate
 
-- Narrative, object hierarchy, notes, and requested edits inspected.
-- Every final slide reviewed at full size after the latest change.
-- No unintended overlap, clipping, wrapping, broken placeholders, or bad crops.
-- Final PPTX exported once to the requested path; scratch renders stay hidden.
-- When available, `publish_editable_artifact` returned the final editor receipt.
+- The requested result exists in the durable artifact, not merely a local file.
+- Every affected slide scene and its notes/inheritance were inspected after the
+  final edit; visual exports were reviewed when layout matters.
+- Any requested export completed and its `fileId`, format, and pinned source
+  head were reported.
+- The user can continue from the same deck in the session Artifacts dock.
