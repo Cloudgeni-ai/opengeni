@@ -5,15 +5,25 @@ import { RETAINED_OUTPUT_MAX_PAGE_BYTES, RetainedArtifactReferenceSchema } from 
 // accepts four. Keep the provider-neutral tool at the reliable shared limit.
 export const IMAGE_GENERATION_MAX_REFERENCES = 4;
 
+const WorkspaceImagePathSchema = z
+  .string()
+  .max(512)
+  // Keep the provider-visible pattern within the portable JSON Schema regex
+  // subset. Codex rejects lookaround before inference.
+  .regex(/^\/workspace\/.+$/)
+  // Path traversal remains an exact runtime validation concern. Zod does not
+  // project custom refinements into JSON Schema, so this preserves the guard
+  // without sending unsupported regex syntax to model providers.
+  .refine((path) => path.split("/").every((segment) => segment !== "." && segment !== ".."), {
+    message: "Sandbox image paths cannot contain dot segments",
+  });
+
 /** One ordered, workspace-owned input used to guide or edit an image. */
 export const ImageGenerationReferenceSchema = z.discriminatedUnion("kind", [
   z
     .object({
       kind: z.literal("sandbox_path"),
-      path: z
-        .string()
-        .max(512)
-        .regex(/^\/workspace\/(?!\.{1,2}(?:\/|$))(?!.*\/\.{1,2}(?:\/|$)).+$/),
+      path: WorkspaceImagePathSchema,
     })
     .strict(),
   z
