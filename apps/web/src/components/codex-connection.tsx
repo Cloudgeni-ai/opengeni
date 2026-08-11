@@ -628,12 +628,20 @@ function resetBadgeTone(remainingMs: number | null): "urgent" | "soon" | "ok" {
 
 const CODE_COPIED_FEEDBACK_MS = 1600;
 
+type ClipboardModule = {
+  copyTextToClipboard: (text: string) => Promise<boolean>;
+};
+
+const loadSharedClipboard = (): Promise<ClipboardModule> => import("@opengeni/react/clipboard");
+
 export function CodexDeviceCodePanel({
   userCode,
   verificationUri,
+  loadClipboard = loadSharedClipboard,
 }: {
   userCode: string;
   verificationUri: string;
+  loadClipboard?: () => Promise<ClipboardModule>;
 }) {
   const [copied, setCopied] = useState(false);
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -659,7 +667,8 @@ export function CodexDeviceCodePanel({
     }
     setCopied(false);
 
-    const { copyTextToClipboard } = await import("@opengeni/react/clipboard");
+    const { copyTextToClipboard } = await loadClipboard();
+    if (attempt !== copyAttemptRef.current) return;
     const ok = await copyTextToClipboard(userCode);
     if (attempt !== copyAttemptRef.current) return;
     if (!ok) {
@@ -678,7 +687,7 @@ export function CodexDeviceCodePanel({
       copiedTimerRef.current = null;
       setCopied(false);
     }, CODE_COPIED_FEEDBACK_MS);
-  }, [userCode]);
+  }, [loadClipboard, userCode]);
 
   return (
     <div className="grid gap-2 rounded-md border border-border bg-bg p-3">
