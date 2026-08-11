@@ -566,7 +566,11 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
 }
 
 /** "People with access": the workspace's USER members, with add/edit/remove. */
-export function MembersSection({
+export function MembersSection(props: { workspaceId: string; canManage: boolean }) {
+  return <MembersSectionContent key={props.workspaceId} {...props} />;
+}
+
+function MembersSectionContent({
   workspaceId,
   canManage,
 }: {
@@ -624,43 +628,49 @@ export function MembersSection({
     setError(null);
     setLoaded(false);
 
+    // The member roster is primary; pending Slack requests are a manager-only
+    // auxiliary surface. Start both concurrently, but settle their UI state independently.
+    const membersPromise = Promise.resolve().then(() => client.listWorkspaceMembers(workspaceId));
+    const slackAccessRequestsOutcomePromise = canManage
+      ? Promise.resolve()
+          .then(() => client.listSlackUserLinkAccessRequests(workspaceId))
+          .then(
+            (value) => ({ status: "fulfilled", value }) as const,
+            (reason) => ({ status: "rejected", reason }) as const,
+          )
+      : null;
+
+    if (slackAccessRequestsOutcomePromise) {
+      void slackAccessRequestsOutcomePromise.then((outcome) => {
+        if (!isCurrentRefresh()) {
+          return;
+        }
+        if (outcome.status === "fulfilled") {
+          setSlackAccessRequests(outcome.value);
+          setSlackAccessRequestsError(null);
+        } else {
+          setSlackAccessRequests([]);
+          setSlackAccessRequestsError(
+            outcome.reason instanceof Error ? outcome.reason : new Error(String(outcome.reason)),
+          );
+        }
+      });
+    }
+
     try {
-      // The member roster is primary; pending Slack requests are a manager-only
-      // auxiliary surface and must not turn their provider outage into a roster failure.
-      const [membersResult, slackAccessRequestsResult] = await Promise.allSettled([
-        client.listWorkspaceMembers(workspaceId),
-        canManage ? client.listSlackUserLinkAccessRequests(workspaceId) : Promise.resolve([]),
-      ]);
+      const nextMembers = await membersPromise;
       if (!isCurrentRefresh()) {
         return;
       }
-
-      if (membersResult.status === "rejected") {
-        setMembers([]);
-        setSlackAccessRequests([]);
-        setSlackAccessRequestsError(null);
-        setError(
-          membersResult.reason instanceof Error
-            ? membersResult.reason
-            : new Error(String(membersResult.reason)),
-        );
+      setMembers(nextMembers);
+      setError(null);
+    } catch (caught) {
+      if (!isCurrentRefresh()) {
         return;
       }
-
-      setMembers(membersResult.value);
-      setError(null);
-
-      if (slackAccessRequestsResult.status === "fulfilled") {
-        setSlackAccessRequests(slackAccessRequestsResult.value);
-        setSlackAccessRequestsError(null);
-      } else {
-        setSlackAccessRequests([]);
-        setSlackAccessRequestsError(
-          slackAccessRequestsResult.reason instanceof Error
-            ? slackAccessRequestsResult.reason
-            : new Error(String(slackAccessRequestsResult.reason)),
-        );
-      }
+      setMembers([]);
+      setError(caught instanceof Error ? caught : new Error(String(caught)));
+      return;
     } finally {
       if (isCurrentRefresh()) {
         setLoaded(true);

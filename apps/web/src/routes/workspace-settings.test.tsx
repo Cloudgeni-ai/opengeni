@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act, type ReactNode } from "react";
+import { act, type ReactNode, useLayoutEffect } from "react";
 import { createRoot } from "react-dom/client";
 
 import type { SlackUserLinkAccessRequest, WorkspaceMember } from "@/types";
@@ -121,7 +121,37 @@ async function renderMembers(canManage: boolean, workspaceId = workspaceA) {
   };
 }
 
+function MembersBoundaryProbe({
+  canManage,
+  onBoundaryLayout,
+  workspaceId,
+}: {
+  canManage: boolean;
+  onBoundaryLayout: () => void;
+  workspaceId: string;
+}) {
+  useLayoutEffect(() => {
+    onBoundaryLayout();
+  }, [onBoundaryLayout, workspaceId]);
+
+  return <MembersSection workspaceId={workspaceId} canManage={canManage} />;
+}
+
 describe("workspace members loading", () => {
+  test("renders the primary roster while the auxiliary Slack request is still pending", async () => {
+    const pendingSlackAccessRequests = deferred<SlackUserLinkAccessRequest[]>();
+    listSlackUserLinkAccessRequests.mockImplementation(() => pendingSlackAccessRequests.promise);
+    const rendered = await renderMembers(true);
+
+    try {
+      expect(rendered.container.textContent).toContain("Ada Member");
+      expect(rendered.container.textContent).not.toContain("Loading members");
+      expect(rendered.container.textContent).not.toContain("Couldn't load members");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
   test("keeps loaded members visible when Slack access requests fail", async () => {
     listSlackUserLinkAccessRequests.mockImplementation(async () => {
       throw new Error("Slack returned 500");
@@ -138,7 +168,7 @@ describe("workspace members loading", () => {
     }
   });
 
-  test("preserves the primary member error when members fail", async () => {
+  test("preserves the primary member error alongside independently loaded Slack requests", async () => {
     listWorkspaceMembers.mockImplementation(async () => {
       throw new Error("Members returned 500");
     });
@@ -147,10 +177,11 @@ describe("workspace members loading", () => {
     try {
       expect(rendered.container.textContent).toContain("Couldn't load members");
       expect(rendered.container.textContent).toContain("Members returned 500");
-      expect(rendered.container.textContent).not.toContain("Slack Requester");
+      expect(rendered.container.textContent).toContain("Slack Requester");
       expect(rendered.container.textContent).not.toContain(
         "Pending Slack access requests unavailable",
       );
+      expect(rendered.container.textContent).not.toContain("Loading members");
     } finally {
       await rendered.unmount();
     }
@@ -317,6 +348,73 @@ describe("workspace members loading", () => {
       expect(rendered.container.textContent).toContain("Bea Member");
     } finally {
       await rendered.unmount();
+    }
+  });
+
+  test("does not commit prior-workspace state before passive effects at the workspace boundary", async () => {
+    listSlackUserLinkAccessRequests.mockImplementation(async () => {
+      throw new Error("Workspace A Slack returned 500");
+    });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const boundaryLayouts: string[] = [];
+    const captureBoundaryLayout = () => {
+      boundaryLayouts.push(container.textContent ?? "");
+    };
+
+    try {
+      await act(async () => {
+        root.render(
+          <MembersBoundaryProbe
+            workspaceId={workspaceA}
+            canManage={true}
+            onBoundaryLayout={captureBoundaryLayout}
+          />,
+        );
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      const editButton = [...container.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Edit",
+      );
+      expect(editButton).toBeDefined();
+      await act(async () => {
+        editButton?.click();
+      });
+
+      const removeButton = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Remove Ada Member"]',
+      );
+      expect(removeButton).not.toBeNull();
+      await act(async () => {
+        removeButton?.click();
+      });
+
+      const currentMembers = deferred<WorkspaceMember[]>();
+      const currentSlackAccessRequests = deferred<SlackUserLinkAccessRequest[]>();
+      listWorkspaceMembers.mockImplementation(() => currentMembers.promise);
+      listSlackUserLinkAccessRequests.mockImplementation(() => currentSlackAccessRequests.promise);
+
+      act(() => {
+        root.render(
+          <MembersBoundaryProbe
+            workspaceId={workspaceB}
+            canManage={true}
+            onBoundaryLayout={captureBoundaryLayout}
+          />,
+        );
+      });
+
+      const workspaceBoundaryLayout = boundaryLayouts.at(-1) ?? "";
+      expect(workspaceBoundaryLayout).toContain("Loading members");
+      expect(workspaceBoundaryLayout).not.toContain("Ada Member");
+      expect(workspaceBoundaryLayout).not.toContain("Save");
+      expect(workspaceBoundaryLayout).not.toContain("Workspace A Slack returned 500");
+      expect(workspaceBoundaryLayout).not.toContain("Remove Ada Member from this workspace?");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
     }
   });
 
