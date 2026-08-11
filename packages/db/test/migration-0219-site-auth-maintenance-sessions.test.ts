@@ -4,7 +4,7 @@ import { acquireBlankTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 import { migrate } from "../src/migrate";
 
-const migrationUrl = new URL("../drizzle/0218_site_auth_maintenance_sessions.sql", import.meta.url);
+const migrationUrl = new URL("../drizzle/0219_site_auth_maintenance_sessions.sql", import.meta.url);
 
 describe("migration 0218 site auth maintenance sessions", () => {
   test("installs hidden, reclaimable maintenance authority", async () => {
@@ -13,9 +13,12 @@ describe("migration 0218 site auth maintenance sessions", () => {
     expect(source).toContain("FOR UPDATE OF C SKIP LOCKED");
     expect(source).toContain("maintenance_started_at IS NULL");
 
-    const blank = await acquireBlankTestDatabase("migration-0218-site-auth-maintenance-sessions");
+    const blank = await acquireBlankTestDatabase("migration-0219-site-auth-maintenance-sessions");
     if (!blank) return;
-    const sql = postgres(blank.databaseUrl, { max: 1, onnotice: () => undefined });
+    const sql = postgres(blank.databaseUrl, {
+      max: 1,
+      onnotice: () => undefined,
+    });
     try {
       await migrate(blank.databaseUrl);
       const columns = await sql<Array<{ tableName: string; columnName: string }>>`

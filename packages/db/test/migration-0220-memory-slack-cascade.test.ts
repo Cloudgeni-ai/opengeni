@@ -4,7 +4,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import type postgres from "postgres";
 
 const migrationUrl = new URL(
-  "../drizzle/0219_memory_slack_append_only_cascade.sql",
+  "../drizzle/0220_memory_slack_append_only_cascade.sql",
   import.meta.url,
 );
 
@@ -21,7 +21,7 @@ async function expectPostgresRejection(query: PromiseLike<unknown>): Promise<voi
 }
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("migration-0219-memory-slack-cascade");
+  shared = await acquireSharedTestDatabase("migration-0220-memory-slack-cascade");
   if (!shared) return;
   sql = await shared.admin.reserve();
   await sql`set lock_timeout = '5s'`;
@@ -33,7 +33,7 @@ afterAll(async () => {
   await shared?.release();
 });
 
-describe("migration 0219 Memory Slack append-only cascade repair", () => {
+describe("migration 0220 Memory Slack append-only cascade repair", () => {
   test("is rolling, schema-portable, and keeps ordinary mutation forbidden", async () => {
     const source = await readFile(migrationUrl, "utf8");
     expect(source.startsWith("-- deployment-mode: rolling\n")).toBe(true);
@@ -49,11 +49,11 @@ describe("migration 0219 Memory Slack append-only cascade repair", () => {
     const database = sql;
     const [account] = await database<{ id: string }[]>`
       insert into managed_accounts (name)
-      values ('migration-0219-memory-slack-account')
+      values ('migration-0220-memory-slack-account')
       returning id`;
     const [workspace] = await database<{ id: string }[]>`
       insert into workspaces (account_id, name)
-      values (${account!.id}, 'migration-0219-memory-slack-workspace')
+      values (${account!.id}, 'migration-0220-memory-slack-workspace')
       returning id`;
     const [configuration] = await database<{ id: string }[]>`
       insert into memory_slack_publication_configurations (
@@ -110,6 +110,10 @@ describe("migration 0219 Memory Slack append-only cascade repair", () => {
           where account_id = ${account!.id}) as publications,
         (select count(*)::int from memory_slack_publication_receipts
           where account_id = ${account!.id}) as receipts`;
-    expect(remaining).toEqual({ configurations: 0, publications: 0, receipts: 0 });
+    expect(remaining).toEqual({
+      configurations: 0,
+      publications: 0,
+      receipts: 0,
+    });
   }, 60_000);
 });
