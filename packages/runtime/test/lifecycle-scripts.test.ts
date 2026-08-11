@@ -29,6 +29,8 @@ describe("lifecycle scripts — real sh execution semantics", () => {
 
   function isolatedProcessEnv(): NodeJS.ProcessEnv {
     const env = { ...process.env };
+    delete env.GIT_ASKPASS;
+    delete env.SSH_ASKPASS;
     delete env.OPENGENI_GIT_TOKEN_FILE;
     delete env.OPENGENI_GIT_CREDENTIALS_DIR;
     delete env.OPENGENI_GIT_CLI_WRAPPER_DIR;

@@ -72,6 +72,7 @@ describe("connectionTokenResolverForTurn", () => {
       serverId: "gitlab",
       toolName: "merge_request_create",
       destinationUrl: "https://gitlab.example/mcp",
+      credentialTarget: "mcp",
       connectionRef: {
         provider: "gitlab",
         providerDomain: "gitlab.example",
