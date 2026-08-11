@@ -1,5 +1,13 @@
 # @opengeni/network
 
+## 0.2.2
+
+### Patch Changes
+
+- 2f4ce5e: Add durable Seedance video generation with workspace model and funding policy,
+  secure media references, retained video artifacts, sandbox materialization,
+  OpenGeni-credit and workspace-gateway funding, and SDK/React playback surfaces.
+
 ## 0.2.1
 
 ### Patch Changes
