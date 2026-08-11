@@ -1403,6 +1403,7 @@ export function CapabilitiesRoute({
     // scrolls); the centered max-width column lives inside it.
     <div
       ref={capabilityFocusFallbackRef}
+      data-workspace-scroll-owner="self-managed"
       role="region"
       aria-label="Capabilities"
       tabIndex={-1}
