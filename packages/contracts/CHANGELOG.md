@@ -1,5 +1,11 @@
 # @opengeni/contracts
 
+## 0.44.0
+
+### Minor Changes
+
+- aeb07f4: Add durable workspace decision publication to verified Slack bot channels with immutable configuration revisions, outbox attempts and receipts, bounded retries and terminal states, admin review/history UX, typed SDK methods, and a post-persistence governed-learning outcome adapter.
+
 ## 0.43.0
 
 ### Minor Changes
