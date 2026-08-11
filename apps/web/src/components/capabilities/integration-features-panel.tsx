@@ -12,7 +12,7 @@ import {
   Trash2Icon,
 } from "lucide-react";
 import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
-import { useEffect, useMemo, useState, type ComponentType, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ComponentType, type FormEvent } from "react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -115,6 +115,7 @@ export function IntegrationFeaturesPanel({
   const [googleDriveEditor, setGoogleDriveEditor] = useState<FeatureEntry | null>(null);
   const [form, setForm] = useState<FeatureFormState>({});
   const [removeTarget, setRemoveTarget] = useState<FeatureEntry | null>(null);
+  const loadSequence = useRef(0);
 
   useEffect(() => {
     setData(null);
@@ -133,20 +134,22 @@ export function IntegrationFeaturesPanel({
   if (featureCount === 0) return null;
 
   async function load(): Promise<void> {
+    const sequence = ++loadSequence.current;
     setLoading(true);
     try {
-      setData(
-        await client.listIntegrationFeatures(
-          workspaceId,
-          instance.capabilityId,
-          instance.instanceKey,
-        ),
+      const response = await client.listIntegrationFeatures(
+        workspaceId,
+        instance.capabilityId,
+        instance.instanceKey,
       );
+      if (sequence !== loadSequence.current) return;
+      setData(response);
       setError(null);
     } catch (loadError) {
+      if (sequence !== loadSequence.current) return;
       setError(loadError instanceof Error ? loadError.message : String(loadError));
     } finally {
-      setLoading(false);
+      if (sequence === loadSequence.current) setLoading(false);
     }
   }
 
@@ -164,7 +167,7 @@ export function IntegrationFeaturesPanel({
     if (!editor) return;
     setBusyFeatureKey(editor.definition.featureKey);
     try {
-      await client.configureIntegrationFeature(
+      const configured = await client.configureIntegrationFeature(
         workspaceId,
         data!.capabilityId,
         data!.instanceKey,
@@ -176,8 +179,21 @@ export function IntegrationFeaturesPanel({
           idempotencyKey: crypto.randomUUID(),
         },
       );
+      ++loadSequence.current;
+      setLoading(false);
+      setData((current) =>
+        current
+          ? {
+              ...current,
+              features: current.features.map((entry) =>
+                entry.definition.featureKey === editor.definition.featureKey
+                  ? { ...entry, binding: configured.binding }
+                  : entry,
+              ),
+            }
+          : current,
+      );
       setEditor(null);
-      await load();
       toast.success(`${featureTitle(editor.definition)} configured`, {
         description: `This setting applies only to ${instance.displayName}.`,
       });

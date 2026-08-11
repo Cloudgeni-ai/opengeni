@@ -430,7 +430,9 @@ describe("OpenGeniClient access + workspaces", () => {
         : jsonResponse(accessRequest),
     );
 
-    await client.prepareSlackUserLinkAccess(WORKSPACE_ID, { linkToken: "signed-link" });
+    await client.prepareSlackUserLinkAccess(WORKSPACE_ID, {
+      linkToken: "signed-link",
+    });
     await client.getSlackUserLinkAccess(WORKSPACE_ID, requestId);
     await client.requestSlackUserLinkWorkspaceAccess(WORKSPACE_ID, requestId, {
       expectedVersion: 1,
@@ -462,7 +464,9 @@ describe("OpenGeniClient access + workspaces", () => {
         `POST /v1/workspaces/${WORKSPACE_ID}/members/access-requests/slack/${requestId}/deny`,
       ],
     );
-    expect(JSON.parse(requests[0]!.body!)).toEqual({ linkToken: "signed-link" });
+    expect(JSON.parse(requests[0]!.body!)).toEqual({
+      linkToken: "signed-link",
+    });
     expect(requests.slice(1).every((request) => !request.url.includes("signed-link"))).toBe(true);
   });
 });
@@ -1307,12 +1311,17 @@ describe("OpenGeniClient capabilities", () => {
       expectedSourceCommit: "a".repeat(40),
       expectedContentSha256: "b".repeat(64),
     });
-    expect(JSON.parse(requests[3]!.body!)).toEqual({ expectedInstallationVersion: 3 });
+    expect(JSON.parse(requests[3]!.body!)).toEqual({
+      expectedInstallationVersion: 3,
+    });
   });
 
   test("previews, installs, lists, impact-checks, and uninstalls API Integrations", async () => {
     const { client, requests } = makeClient(() => jsonResponse({ integrations: [] }));
-    const source = { kind: "openapi" as const, url: "https://api.example.test/openapi.json" };
+    const source = {
+      kind: "openapi" as const,
+      url: "https://api.example.test/openapi.json",
+    };
     const capabilityId = "api:openapi:example-deadbeef1234";
     await client.listApiIntegrationPresets(WORKSPACE_ID);
     await client.previewApiIntegration(WORKSPACE_ID, { source });
@@ -1426,6 +1435,7 @@ describe("OpenGeniClient capabilities", () => {
       ],
       destination: { authorityKind: "workspace", collectionId: null },
       syncCadence: "hourly",
+      syncEnabled: true,
       readPolicy: "allow",
       expectedVersion: 4,
       idempotencyKey: "00000000-0000-4000-8000-000000000305",

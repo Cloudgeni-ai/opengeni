@@ -12,6 +12,7 @@ import {
   type CreateCapabilityCatalogItemRequest,
   type EnableCapabilityRequest,
   type McpServerConnectionRef,
+  type McpPersonalConnectionDelegation,
   type SocialConnection,
 } from "@opengeni/contracts";
 import {
@@ -835,12 +836,20 @@ export async function settingsWithEnabledCapabilityMcpServers(
   settings: Settings,
   options?: {
     subjectId?: string;
+    personalConnectionDelegations?: readonly McpPersonalConnectionDelegation[];
     onResolvedApiIntegrations?: (integrations: readonly ApiIntegrationRuntime[]) => void;
   },
 ): Promise<Settings> {
+  const apiIntegrationsPromise = options?.subjectId
+    ? listInstalledApiIntegrations(db, workspaceId, options.subjectId)
+    : listInstalledApiIntegrationsForDelegations(
+        db,
+        workspaceId,
+        options?.personalConnectionDelegations ?? [],
+      );
   const [enabled, apiIntegrations, codexAppsCredentialId] = await Promise.all([
     listEnabledMcpCapabilityServers(db, workspaceId),
-    listInstalledApiIntegrations(db, workspaceId, options?.subjectId),
+    apiIntegrationsPromise,
     resolveCodexAppsCredentialIdForRun(db, workspaceId),
   ]);
   options?.onResolvedApiIntegrations?.(apiIntegrations);
@@ -851,6 +860,56 @@ export async function settingsWithEnabledCapabilityMcpServers(
     ),
     codexAppsCredentialId !== null,
   );
+}
+
+export function apiIntegrationsMatchingDelegations(
+  integrations: readonly ApiIntegrationRuntime[],
+  delegations: readonly McpPersonalConnectionDelegation[],
+): ApiIntegrationRuntime[] {
+  const exact = new Set(
+    delegations.map((delegation) =>
+      [
+        delegation.serverId,
+        delegation.connectionId,
+        delegation.providerDomain.toLowerCase(),
+        delegation.kind ?? "",
+      ].join("\u0000"),
+    ),
+  );
+  return integrations.filter((integration) => {
+    const ref = integration.connectionRef;
+    if (!ref || ref.subjectScope !== "subject" || !ref.connectionId) return false;
+    return exact.has(
+      [
+        integration.serverId,
+        ref.connectionId,
+        ref.providerDomain.toLowerCase(),
+        ref.kind ?? "",
+      ].join("\u0000"),
+    );
+  });
+}
+
+async function listInstalledApiIntegrationsForDelegations(
+  db: Database,
+  workspaceId: string,
+  delegations: readonly McpPersonalConnectionDelegation[],
+): Promise<ApiIntegrationRuntime[]> {
+  const workspace = await listInstalledApiIntegrations(db, workspaceId);
+  if (delegations.length === 0) return workspace;
+  const owners = [...new Set(delegations.map((delegation) => delegation.ownerSubjectId))];
+  const delegatedByOwner = await Promise.all(
+    owners.map(async (subjectId) =>
+      apiIntegrationsMatchingDelegations(
+        await listInstalledApiIntegrations(db, workspaceId, subjectId),
+        delegations.filter((delegation) => delegation.ownerSubjectId === subjectId),
+      ),
+    ),
+  );
+  const byServerId = new Map(workspace.map((integration) => [integration.serverId, integration]));
+  for (const integration of delegatedByOwner.flat())
+    byServerId.set(integration.serverId, integration);
+  return [...byServerId.values()];
 }
 
 export function settingsWithApiIntegrationServers(

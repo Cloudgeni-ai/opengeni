@@ -4,7 +4,11 @@ import { CapabilityCatalogItem, CapabilityInstallation } from "@opengeni/contrac
 import type { ApiIntegrationRuntime } from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 
-import { applyCapabilityEnablement, settingsWithApiIntegrationServers } from "../src";
+import {
+  apiIntegrationsMatchingDelegations,
+  applyCapabilityEnablement,
+  settingsWithApiIntegrationServers,
+} from "../src";
 
 const revision: ApiIntegrationRuntime["revision"] = {
   id: "openapi:111111111111111111111111",
@@ -63,6 +67,58 @@ function runtime(overrides: Partial<ApiIntegrationRuntime> = {}): ApiIntegration
 }
 
 describe("API Integration capability projection", () => {
+  test("keeps only the exact personal API integrations frozen on an indirect turn", () => {
+    const delegated = runtime({
+      serverId: "delegated_api",
+      providerDomain: "mail.example.com",
+      connectionRef: {
+        connectionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        providerDomain: "mail.example.com",
+        kind: "oauth2",
+        subjectScope: "subject",
+      },
+    });
+    const unrelated = runtime({
+      serverId: "unrelated_api",
+      providerDomain: "mail.example.com",
+      connectionRef: {
+        connectionId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        providerDomain: "mail.example.com",
+        kind: "oauth2",
+        subjectScope: "subject",
+      },
+    });
+
+    expect(
+      apiIntegrationsMatchingDelegations(
+        [delegated, unrelated],
+        [
+          {
+            serverId: "delegated_api",
+            connectionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            ownerSubjectId: "subject-alice",
+            providerDomain: "MAIL.EXAMPLE.COM",
+            kind: "oauth2",
+          },
+        ],
+      ),
+    ).toEqual([delegated]);
+    expect(
+      apiIntegrationsMatchingDelegations(
+        [delegated],
+        [
+          {
+            serverId: "delegated_api",
+            connectionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            ownerSubjectId: "subject-alice",
+            providerDomain: "mail.example.com",
+            kind: "api_key",
+          },
+        ],
+      ),
+    ).toEqual([]);
+  });
+
   test("adds installed adapters to ordinary MCP settings without overriding deployment config", () => {
     const settings = testSettings({
       mcpServers: [

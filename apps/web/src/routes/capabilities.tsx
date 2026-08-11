@@ -137,6 +137,7 @@ import type {
   ConnectionOwnership,
   PackInstallationPreview,
   PackUninstallPreview,
+  SlackInstallationBinding,
   SocialConnection,
 } from "@/types";
 
@@ -358,6 +359,9 @@ export function CapabilitiesRoute({
   // failed load as "every connection was deleted".
   const [connections, setConnections] = useState<ConnectionMetadata[] | null>(null);
   const [socialConnections, setSocialConnections] = useState<SocialConnection[]>([]);
+  const [slackInstallationBindings, setSlackInstallationBindings] = useState<
+    SlackInstallationBinding[]
+  >([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<Error | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -470,6 +474,11 @@ export function CapabilitiesRoute({
   const visibleSlackBotConnection = slackPreview?.bot ?? slackBotConnection;
   const visibleSlackBotMetadata = visibleSlackBotConnection
     ? openGeniSlackBotUiMetadata(visibleSlackBotConnection)
+    : null;
+  const visibleSlackInstallationBinding = visibleSlackBotConnection
+    ? (slackInstallationBindings.find(
+        (binding) => binding.connectionId === visibleSlackBotConnection.id,
+      ) ?? null)
     : null;
   const canManagePersonalSlack = canWriteWorkspaceConnections(context.accessContext, workspaceId);
   const canManageApiIntegrationInstances = canManageApiIntegrations(
@@ -589,11 +598,12 @@ export function CapabilitiesRoute({
     if (!workspaceId) return;
     setLoading(true);
     try {
-      const [catalog, conns, socials] = await Promise.all([
+      const [catalog, conns, socials, slackBindings] = await Promise.all([
         client.listCapabilities(workspaceId),
         // null (not []) on failure so health can tell "didn't load" from "loaded empty".
         client.listConnections(workspaceId).catch(() => null),
         client.listSocialConnections(workspaceId).catch(() => null),
+        client.listSlackInstallationBindings(workspaceId).catch(() => null),
       ]);
       setItems(catalog.items);
       setInstallations(catalog.installations);
@@ -602,6 +612,7 @@ export function CapabilitiesRoute({
       // first-load failure leaves the prior null = "not loaded", which is correct.
       if (conns !== null) setConnections(conns);
       if (socials !== null) setSocialConnections(socials);
+      if (slackBindings !== null) setSlackInstallationBindings(slackBindings);
       setLoadError(null);
     } catch (error) {
       setLoadError(error instanceof Error ? error : new Error(String(error)));
@@ -1682,6 +1693,64 @@ export function CapabilitiesRoute({
                         onUpdatePermissions={() => void installSlackBot(false)}
                       />
 
+                      <details className="group mt-3 border-t border-border/70 pt-3">
+                        <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 text-2xs text-fg-subtle transition-colors hover:text-fg-muted">
+                          <ChevronDownIcon className="size-3 shrink-0 transition-transform group-open:rotate-180" />
+                          <span>Connection details</span>
+                        </summary>
+                        <div className="mt-3 space-y-1 rounded-md bg-bg/50 p-3 text-2xs text-fg-muted">
+                          {visibleSlackInstallationBinding ? (
+                            <>
+                              <p>
+                                {visibleSlackInstallationBinding.slackTeamName} ·{" "}
+                                {visibleSlackInstallationBinding.slackTeamId}
+                              </p>
+                              <p>
+                                bot {visibleSlackInstallationBinding.botId} · user{" "}
+                                {visibleSlackInstallationBinding.botUserId}
+                              </p>
+                              <p>
+                                {visibleSlackInstallationBinding.accountName} ·{" "}
+                                {visibleSlackInstallationBinding.accountId}
+                              </p>
+                              <p>
+                                {visibleSlackInstallationBinding.workspaceName} ·{" "}
+                                {visibleSlackInstallationBinding.workspaceId}
+                              </p>
+                              <p>
+                                {visibleSlackInstallationBinding.state} · version{" "}
+                                {visibleSlackInstallationBinding.version}
+                              </p>
+                              {visibleSlackInstallationBinding.quarantineReason ? (
+                                <p>
+                                  {visibleSlackInstallationBinding.quarantineReason ===
+                                  "legacy_conflicting_installations"
+                                    ? "legacy installations conflict; repair is blocked until the binding is reconciled."
+                                    : visibleSlackInstallationBinding.quarantineReason}
+                                </p>
+                              ) : null}
+                            </>
+                          ) : (
+                            <p>No verified installation binding is available.</p>
+                          )}
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="mt-2"
+                            disabled={
+                              slackBotBusy ||
+                              !canInstallSlackBot ||
+                              visibleSlackInstallationBinding?.state !== "active"
+                            }
+                            onClick={() => void installSlackBot(false)}
+                          >
+                            {slackBotBusy ? <Loader2Icon className="animate-spin" /> : null}
+                            Reconnect
+                          </Button>
+                        </div>
+                      </details>
+
                       <Suspense fallback={null}>
                         <MemorySlackPublicationCard
                           workspaceId={workspaceId}
@@ -1708,7 +1777,10 @@ export function CapabilitiesRoute({
                               : ""}
                           </p>
                           <SlackBotInstallControls
-                            canInstall={canInstallSlackBot}
+                            canInstall={
+                              canInstallSlackBot &&
+                              visibleSlackInstallationBinding?.state === "active"
+                            }
                             hasConnection
                             busy={slackBotBusy}
                             onInstall={(createNewConnection) =>
@@ -1930,6 +2002,7 @@ function ManagedAppTile({
   return (
     <button
       type="button"
+      aria-label={`${name} ${description}`}
       onClick={onOpen}
       className="group flex min-w-0 items-center gap-3 rounded-xl border border-border bg-surface p-3 text-left hover:border-border-strong hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg"
     >

@@ -3683,7 +3683,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (!activeTurnId) {
         throw new Error("Session image tool completed before turn initialization");
       }
-      const typedScreenshot = typedScreenshotFromToolOutput({ callId: toolCallId, output });
+      const typedScreenshot = typedScreenshotFromToolOutput({
+        callId: toolCallId,
+        output,
+      });
       retainedSessionImageCallIds.add(toolCallId);
       if (!typedScreenshot) {
         if (toolOutputContainsInlineImage(output)) {
@@ -3881,12 +3884,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       executionGeneration = turn.executionGeneration;
       providerRecoveryCount = providerRecoveryCountFromMetadata(turn.metadata);
       let installedApiIntegrations: readonly ApiIntegrationRuntime[] = [];
+      const credentialSubjectId = credentialSubjectIdForTurnInitiator(turn);
       const mcpSettings = await settingsWithEnabledCapabilityMcpServers(
         db,
         input.workspaceId,
         settings,
         {
-          ...(turn.initiator.subjectId ? { subjectId: turn.initiator.subjectId } : {}),
+          ...(credentialSubjectId
+            ? { subjectId: credentialSubjectId }
+            : {
+                personalConnectionDelegations: turn.personalConnectionDelegations,
+              }),
           onResolvedApiIntegrations: (integrations) => {
             installedApiIntegrations = integrations;
           },
@@ -6272,7 +6280,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (objectStorage && requiredGeneratedVideoFiles.length > 0) {
         const downloadStorage = objectStorageForSandboxDownloads(modelRunSettings, objectStorage);
         for (const file of requiredGeneratedVideoFiles) {
-          const signed = await downloadStorage.createGetUrl({ key: file.objectKey });
+          const signed = await downloadStorage.createGetUrl({
+            key: file.objectKey,
+          });
           generatedVideoDownloads.push({
             fileId: file.fileId,
             mountPath: "generated-videos",
@@ -6332,7 +6342,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
         return result;
       };
-      const credentialSubjectId = credentialSubjectIdForTurnInitiator(turn);
       const publishToolAuthNeeded = async (payload: ToolAuthNeededPayload): Promise<void> => {
         if (!shouldPublishToolAuthNeededForTurn(payload, trigger, turn)) {
           return;
