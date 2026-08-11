@@ -112,6 +112,15 @@ company fails verification with a pointed message.
 
 ## Testing
 
+Fiken rejects non-HTTPS redirect URLs, so testing the OAuth flow against a
+local stack needs an HTTPS tunnel. Do not tunnel the whole API (a `local`-mode
+deployment is auth-free): run
+`bun scripts/dev-fiken-callback-forwarder.ts <api-port>` and point the tunnel
+at the forwarder, which exposes only the exact callback path. Set
+`OPENGENI_PUBLIC_BASE_URL` to the tunnel URL (so start/callback build a
+consistent `redirect_uri`) and `OPENGENI_WEB_BASE_URL` to the local web app
+(so the finishing redirect returns there).
+
 `apps/api/test/fiken.test.ts` covers token verification, the token install
 route (create/reconnect/422s/credential-bundle shape), the OAuth start and
 callback routes (authorize-URL shape, Basic-auth code exchange, state replay
