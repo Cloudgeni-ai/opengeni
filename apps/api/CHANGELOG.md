@@ -1,5 +1,29 @@
 # @opengeni/api-router
 
+## 0.26.0
+
+### Minor Changes
+
+- aeb07f4: Add durable workspace decision publication to verified Slack bot channels with immutable configuration revisions, outbox attempts and receipts, bounded retries and terminal states, admin review/history UX, typed SDK methods, and a post-persistence governed-learning outcome adapter.
+
+### Patch Changes
+
+- ff7203c: Add a read-only Atlassian Jira and Confluence connector with shared OAuth setup, selected-source live agent search and reads, and optional governed knowledge synchronization.
+- Updated dependencies [aeb07f4]
+- Updated dependencies [ff7203c]
+  - @opengeni/contracts@0.44.0
+  - @opengeni/core@0.24.0
+  - @opengeni/db@0.31.0
+  - @opengeni/config@0.13.1
+  - @opengeni/documents@0.5.31
+  - @opengeni/artifact-tool@0.2.1
+  - @opengeni/codemode@0.2.1
+  - @opengeni/events@0.3.102
+  - @opengeni/github@0.4.49
+  - @opengeni/observability@0.6.1
+  - @opengeni/runtime@0.19.1
+  - @opengeni/storage@0.2.86
+
 ## 0.25.0
 
 ### Minor Changes

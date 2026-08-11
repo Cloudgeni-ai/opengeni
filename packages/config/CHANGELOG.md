@@ -1,5 +1,14 @@
 # @opengeni/config
 
+## 0.13.1
+
+### Patch Changes
+
+- ff7203c: Add a read-only Atlassian Jira and Confluence connector with shared OAuth setup, selected-source live agent search and reads, and optional governed knowledge synchronization.
+- Updated dependencies [aeb07f4]
+- Updated dependencies [ff7203c]
+  - @opengeni/contracts@0.44.0
+
 ## 0.13.0
 
 ### Minor Changes
