@@ -682,6 +682,21 @@ describe("BrowserSession SDK", () => {
             replayed: false,
           });
         }
+        if (url.endsWith(`/auth-runs/${AUTH_RUN_ID}/external-auth/interactive`)) {
+          return json({
+            authRunId: AUTH_RUN_ID,
+            url: "https://auth.example.test/hosted",
+            expiresAt: null,
+          });
+        }
+        if (url.endsWith(`/auth-runs/${AUTH_RUN_ID}/external-auth`)) {
+          return json({
+            run: { id: AUTH_RUN_ID },
+            status: "needs_human",
+            operationId: "auth-external",
+            replayed: false,
+          });
+        }
         if (url.endsWith(`/auth-runs/${AUTH_RUN_ID}/verify`)) {
           return json({ run: { id: AUTH_RUN_ID }, operationId: "auth-verify", replayed: false });
         }
@@ -763,6 +778,15 @@ describe("BrowserSession SDK", () => {
       fields: [{ fieldId: "password", locator: { kind: "ref", ref: "e2" } }],
       submit: { type: "press", key: "Enter" },
     });
+    await run.advanceExternal({
+      operationId: "auth-external",
+      expectedVersion: 3,
+      action: "start",
+    });
+    await run.openExternalFlow({
+      operationId: "auth-interactive",
+      expectedVersion: 4,
+    });
     await run.verify({ operationId: "auth-verify", expectedVersion: 3 });
 
     await client.interaction.interventions.list(WORKSPACE_ID, {
@@ -801,6 +825,8 @@ describe("BrowserSession SDK", () => {
       `POST /v1/workspaces/${WORKSPACE_ID}/browser-sessions/${BROWSER_SESSION_ID}/auth-runs`,
       `POST /v1/workspaces/${WORKSPACE_ID}/browser-sessions/${BROWSER_SESSION_ID}/auth-runs/${AUTH_RUN_ID}/report`,
       `POST /v1/workspaces/${WORKSPACE_ID}/browser-sessions/${BROWSER_SESSION_ID}/auth-runs/${AUTH_RUN_ID}/protected-fill`,
+      `POST /v1/workspaces/${WORKSPACE_ID}/browser-sessions/${BROWSER_SESSION_ID}/auth-runs/${AUTH_RUN_ID}/external-auth`,
+      `POST /v1/workspaces/${WORKSPACE_ID}/browser-sessions/${BROWSER_SESSION_ID}/auth-runs/${AUTH_RUN_ID}/external-auth/interactive`,
       `POST /v1/workspaces/${WORKSPACE_ID}/browser-sessions/${BROWSER_SESSION_ID}/auth-runs/${AUTH_RUN_ID}/verify`,
       `GET /v1/workspaces/${WORKSPACE_ID}/interaction-interventions?resourceKind=browser_session&resourceId=${BROWSER_SESSION_ID}&includeSettled=true`,
       `POST /v1/workspaces/${WORKSPACE_ID}/interaction-interventions`,

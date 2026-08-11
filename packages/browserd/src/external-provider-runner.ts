@@ -1,5 +1,10 @@
-import type { BrowserCommandRunner } from "./cdp-driver";
+import type { BrowserCommandRunner, BrowserExternalAuthDispatchResult } from "./cdp-driver";
 import { AgentBrowserCommandError, type AgentBrowserRunOptions } from "./runner";
+import {
+  BrowserExternalAuthResult,
+  type AuthRunExternalAction,
+  type BrowserExternalAuthCommand,
+} from "@opengeni/contracts";
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const MAX_REQUEST_TIMEOUT_MS = 10 * 60_000;
@@ -21,7 +26,7 @@ export type ExternalProviderCdpRunnerOptions = {
   headed: boolean;
   timeoutSeconds?: number;
   stealth?: boolean;
-  route: ExternalProviderRoute;
+  route?: ExternalProviderRoute;
   fetch?: typeof fetch;
 };
 
@@ -43,6 +48,10 @@ export class ExternalProviderCdpRunner implements BrowserCommandRunner {
   private provisionPromise: Promise<ProviderSession> | null = null;
   private releasePromise: Promise<void> | null = null;
   private closed = false;
+  private loadedProfileName: string | null = null;
+  private readonly hostedUrls = new Map<string, string>();
+  private readonly authResults = new Map<string, BrowserExternalAuthDispatchResult>();
+  private readonly authTails = new Map<string, Promise<void>>();
 
   constructor(options: ExternalProviderCdpRunnerOptions) {
     this.options = validateOptions(options);
@@ -68,7 +77,14 @@ export class ExternalProviderCdpRunner implements BrowserCommandRunner {
     if (!this.provisionPromise) {
       this.provisionPromise = this.provision(options);
     }
-    const session = await this.provisionPromise;
+    await this.provisionPromise;
+    const session = this.session;
+    if (!session) {
+      throw new AgentBrowserCommandError(
+        "driver_rejected",
+        "external browser is no longer available",
+      );
+    }
     return { cdpUrl: session.cdpUrl } as T;
   }
 
@@ -89,6 +105,50 @@ export class ExternalProviderCdpRunner implements BrowserCommandRunner {
       await this.release(session);
     })();
     return await this.releasePromise;
+  }
+
+  /** Advance one provider-managed login without exposing provider authority to
+   * the API. Calls for one connection serialize; operation-id replay is exact
+   * for this controller lifetime, while provider state remains the recovery
+   * authority after a browserd restart. */
+  async externalAuth(
+    command: BrowserExternalAuthCommand,
+    options: AgentBrowserRunOptions = {},
+  ): Promise<BrowserExternalAuthDispatchResult> {
+    if (this.options.providerId !== "kernel" || command.adapterId !== "kernel") {
+      throw new AgentBrowserCommandError(
+        "driver_rejected",
+        "this external browser provider does not support managed authentication",
+      );
+    }
+    if (this.closed) {
+      throw new AgentBrowserCommandError("driver_rejected", "external browser is closed");
+    }
+    const replay = this.authResults.get(command.operationId);
+    if (replay) return replay;
+    const previous = this.authTails.get(command.connectionId) ?? Promise.resolve();
+    let releaseTail!: () => void;
+    const current = new Promise<void>((resolve) => {
+      releaseTail = resolve;
+    });
+    const queued = previous.then(() => current);
+    this.authTails.set(command.connectionId, queued);
+    await previous;
+    try {
+      const secondReplay = this.authResults.get(command.operationId);
+      if (secondReplay) return secondReplay;
+      const result = await this.dispatchKernelAuth(command, options);
+      this.authResults.set(command.operationId, result);
+      while (this.authResults.size > 512) {
+        this.authResults.delete(this.authResults.keys().next().value as string);
+      }
+      return result;
+    } finally {
+      releaseTail();
+      if (this.authTails.get(command.connectionId) === queued) {
+        this.authTails.delete(command.connectionId);
+      }
+    }
   }
 
   private async provision(options: AgentBrowserRunOptions): Promise<ProviderSession> {
@@ -120,7 +180,7 @@ export class ExternalProviderCdpRunner implements BrowserCommandRunner {
           ...(this.options.timeoutSeconds === undefined
             ? {}
             : { timeout_seconds: this.options.timeoutSeconds }),
-          proxy_id: this.options.route.routeId,
+          ...(this.options.route ? { proxy_id: this.options.route.routeId } : {}),
         }),
       },
       timeoutMs,
@@ -134,10 +194,12 @@ export class ExternalProviderCdpRunner implements BrowserCommandRunner {
     timeoutMs: number,
     signal: AbortSignal | undefined,
   ): Promise<ProviderSession> {
-    const region = this.options.route.region;
-    const proxies = region
-      ? [{ type: "browserbase", geolocation: { country: region.toUpperCase() } }]
-      : true;
+    const region = this.options.route?.region ?? null;
+    const proxies = this.options.route
+      ? region
+        ? [{ type: "browserbase", geolocation: { country: region.toUpperCase() } }]
+        : true
+      : undefined;
     const response = await providerJsonRequest(
       this.request,
       providerUrl(this.options.endpoint ?? BROWSERBASE_ENDPOINT, "sessions"),
@@ -149,7 +211,7 @@ export class ExternalProviderCdpRunner implements BrowserCommandRunner {
         },
         body: JSON.stringify({
           keepAlive: false,
-          proxies,
+          ...(proxies === undefined ? {} : { proxies }),
           ...(this.options.timeoutSeconds === undefined
             ? {}
             : { timeout: this.options.timeoutSeconds }),
@@ -195,6 +257,240 @@ export class ExternalProviderCdpRunner implements BrowserCommandRunner {
       "Browserbase session release",
     );
   }
+
+  private async dispatchKernelAuth(
+    command: BrowserExternalAuthCommand,
+    options: AgentBrowserRunOptions,
+  ): Promise<BrowserExternalAuthDispatchResult> {
+    const timeoutMs = requestTimeout(options.timeoutMs);
+    let state = await this.kernelAuthConnection(command.connectionId, timeoutMs, options.signal);
+    if (command.action === "start" && state.status !== "AUTHENTICATED") {
+      if (state.flow_status !== "IN_PROGRESS") {
+        const started = await this.startKernelLogin(
+          command.connectionId,
+          timeoutMs,
+          options.signal,
+        );
+        const hostedUrl = boundedOptionalHttpUrl(started.hosted_url);
+        if (hostedUrl) this.hostedUrls.set(command.connectionId, hostedUrl);
+      }
+      state = await this.kernelAuthConnection(command.connectionId, timeoutMs, options.signal);
+    }
+
+    const hostedUrl =
+      boundedOptionalHttpUrl(state.hosted_url) ?? this.hostedUrls.get(command.connectionId) ?? null;
+    if (hostedUrl) this.hostedUrls.set(command.connectionId, hostedUrl);
+
+    if (state.status === "AUTHENTICATED") {
+      // Revealing the hosted flow is a human-only read. It must never replace
+      // the browser profile behind the durable AuthRun settlement path.
+      if (command.action === "interactive") {
+        return {
+          result: BrowserExternalAuthResult.parse({
+            state: "authenticated",
+            externalAction: null,
+            interactiveUrl: null,
+            failureCode: null,
+            profileLoaded: false,
+          }),
+          browserReconfigured: false,
+        };
+      }
+      const profileName = boundedProviderId(state.profile_name, "Kernel auth profile");
+      const browserRestarted = await this.loadKernelProfile(profileName, timeoutMs, options.signal);
+      return {
+        result: BrowserExternalAuthResult.parse({
+          state: "authenticated",
+          externalAction: null,
+          interactiveUrl: null,
+          failureCode: null,
+          profileLoaded: true,
+        }),
+        browserReconfigured: browserRestarted,
+      };
+    }
+
+    if (
+      state.flow_status === "FAILED" ||
+      state.flow_status === "EXPIRED" ||
+      state.flow_status === "CANCELED"
+    ) {
+      return {
+        result: BrowserExternalAuthResult.parse({
+          state: "failed",
+          externalAction: null,
+          interactiveUrl: null,
+          failureCode: kernelFailureCode(state),
+          profileLoaded: false,
+        }),
+        browserReconfigured: false,
+      };
+    }
+
+    const needsHuman = kernelAuthNeedsHuman(state);
+    if (needsHuman || command.action === "interactive") {
+      if (!hostedUrl) {
+        throw new AgentBrowserCommandError(
+          "invalid_response",
+          "Kernel managed auth requires human input but exposed no hosted flow",
+        );
+      }
+      return {
+        result: BrowserExternalAuthResult.parse({
+          state: "needs_human",
+          externalAction: {
+            kind: kernelExternalActionKind(state),
+            label: kernelExternalActionLabel(state),
+            expiresAt: boundedOptionalTimestamp(state.flow_expires_at),
+          },
+          interactiveUrl: command.action === "interactive" ? hostedUrl : null,
+          failureCode: null,
+          profileLoaded: false,
+        }),
+        browserReconfigured: false,
+      };
+    }
+
+    return {
+      result: BrowserExternalAuthResult.parse({
+        state: "in_progress",
+        externalAction: null,
+        interactiveUrl: null,
+        failureCode: null,
+        profileLoaded: false,
+      }),
+      browserReconfigured: false,
+    };
+  }
+
+  private async kernelAuthConnection(
+    connectionId: string,
+    timeoutMs: number,
+    signal: AbortSignal | undefined,
+  ): Promise<Record<string, unknown>> {
+    return await providerJsonRequest(
+      this.request,
+      providerUrl(
+        this.options.endpoint ?? KERNEL_ENDPOINT,
+        `auth/connections/${encodeURIComponent(connectionId)}`,
+      ),
+      {
+        method: "GET",
+        headers: { authorization: `Bearer ${this.options.apiKey}` },
+      },
+      timeoutMs,
+      signal,
+      "Kernel managed-auth inspection",
+    );
+  }
+
+  private async startKernelLogin(
+    connectionId: string,
+    timeoutMs: number,
+    signal: AbortSignal | undefined,
+  ): Promise<Record<string, unknown>> {
+    const response = await providerJsonRequestAllowingConflict(
+      this.request,
+      providerUrl(
+        this.options.endpoint ?? KERNEL_ENDPOINT,
+        `auth/connections/${encodeURIComponent(connectionId)}/login`,
+      ),
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${this.options.apiKey}`,
+          "content-type": "application/json",
+        },
+        body: "{}",
+      },
+      timeoutMs,
+      signal,
+      "Kernel managed-auth start",
+    );
+    return response;
+  }
+
+  private async loadKernelProfile(
+    profileName: string,
+    timeoutMs: number,
+    signal: AbortSignal | undefined,
+  ): Promise<boolean> {
+    if (this.loadedProfileName === profileName) return false;
+    if (this.loadedProfileName !== null) {
+      throw new AgentBrowserCommandError(
+        "driver_rejected",
+        "this browser already uses another managed-auth profile",
+      );
+    }
+    const session = this.session ?? (this.provisionPromise ? await this.provisionPromise : null);
+    if (!session) {
+      throw new AgentBrowserCommandError(
+        "driver_rejected",
+        "external browser is not provisioned for managed authentication",
+      );
+    }
+    const current = await providerJsonRequest(
+      this.request,
+      providerUrl(
+        this.options.endpoint ?? KERNEL_ENDPOINT,
+        `browsers/${encodeURIComponent(session.id)}`,
+      ),
+      {
+        method: "GET",
+        headers: { authorization: `Bearer ${this.options.apiKey}` },
+      },
+      timeoutMs,
+      signal,
+      "Kernel browser profile inspection",
+    );
+    const currentSession = providerSession(current, "session_id", "cdp_ws_url", "Kernel");
+    if (currentSession.id !== session.id) {
+      throw new AgentBrowserCommandError(
+        "invalid_response",
+        "Kernel profile inspection returned another browser session",
+      );
+    }
+    const currentProfile = providerProfileName(current.profile);
+    if (currentProfile) {
+      if (currentProfile !== profileName) {
+        throw new AgentBrowserCommandError(
+          "driver_rejected",
+          "this browser already uses another managed-auth profile",
+        );
+      }
+      this.session = currentSession;
+      this.loadedProfileName = profileName;
+      return true;
+    }
+    const updated = await providerJsonRequest(
+      this.request,
+      providerUrl(
+        this.options.endpoint ?? KERNEL_ENDPOINT,
+        `browsers/${encodeURIComponent(session.id)}`,
+      ),
+      {
+        method: "PATCH",
+        headers: {
+          authorization: `Bearer ${this.options.apiKey}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ profile: { name: profileName } }),
+      },
+      timeoutMs,
+      signal,
+      "Kernel managed-auth profile load",
+    );
+    const updatedSession = providerSession(updated, "session_id", "cdp_ws_url", "Kernel");
+    if (updatedSession.id !== session.id) {
+      throw new AgentBrowserCommandError(
+        "invalid_response",
+        "Kernel profile load returned another browser session",
+      );
+    }
+    this.session = updatedSession;
+    this.loadedProfileName = profileName;
+    return true;
+  }
 }
 
 function validateOptions(
@@ -225,17 +521,19 @@ function validateOptions(
     throw new Error("external browser timeout is invalid");
   }
   if (input.endpoint !== undefined) validateEndpoint(input.endpoint);
-  if (input.route.providerId !== input.providerId) {
+  if (input.route && input.route.providerId !== input.providerId) {
     throw new Error("managed network route belongs to another browser provider");
   }
   if (
-    Buffer.byteLength(input.route.routeId) < 1 ||
-    Buffer.byteLength(input.route.routeId) > 512 ||
-    /[\u0000-\u001f\u007f]/u.test(input.route.routeId)
+    input.route &&
+    (Buffer.byteLength(input.route.routeId) < 1 ||
+      Buffer.byteLength(input.route.routeId) > 512 ||
+      /[\u0000-\u001f\u007f]/u.test(input.route.routeId))
   ) {
     throw new Error("managed network route provider id is invalid");
   }
   if (
+    input.route &&
     input.route.egressClass !== "datacenter" &&
     input.route.egressClass !== "residential" &&
     input.route.egressClass !== "isp"
@@ -243,6 +541,7 @@ function validateOptions(
     throw new Error("managed network route egress class is invalid");
   }
   if (
+    input.route &&
     input.route.region !== null &&
     (Buffer.byteLength(input.route.region) < 1 ||
       Buffer.byteLength(input.route.region) > 128 ||
@@ -252,10 +551,17 @@ function validateOptions(
     throw new Error("managed network route region is invalid");
   }
   if (input.providerId === "browserbase") {
-    if (input.route.routeId !== "default" || input.route.egressClass !== "residential") {
+    if (
+      input.route &&
+      (input.route.routeId !== "default" || input.route.egressClass !== "residential")
+    ) {
       throw new Error("Browserbase supports only its default managed residential route");
     }
-    if (input.route.region !== null && !/^[A-Za-z]{2}$/u.test(input.route.region)) {
+    if (
+      input.route?.region !== null &&
+      input.route?.region !== undefined &&
+      !/^[A-Za-z]{2}$/u.test(input.route.region)
+    ) {
       throw new Error("Browserbase managed route region must be a two-letter country code");
     }
     if (
@@ -347,6 +653,39 @@ async function providerJsonRequest(
   label: string,
 ): Promise<Record<string, unknown>> {
   const response = await boundedFetch(request, url, init, timeoutMs, signal, label);
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new AgentBrowserCommandError(
+      "process_failed",
+      `${label} failed with HTTP ${response.status}`,
+    );
+  }
+  const bytes = await boundedResponse(response, label);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    throw new AgentBrowserCommandError("invalid_response", `${label} returned invalid JSON`);
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new AgentBrowserCommandError("invalid_response", `${label} returned an invalid object`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
+async function providerJsonRequestAllowingConflict(
+  request: typeof fetch,
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+  signal: AbortSignal | undefined,
+  label: string,
+): Promise<Record<string, unknown>> {
+  const response = await boundedFetch(request, url, init, timeoutMs, signal, label);
+  if (response.status === 409) {
+    await response.body?.cancel().catch(() => undefined);
+    return {};
+  }
   if (!response.ok) {
     await response.body?.cancel().catch(() => undefined);
     throw new AgentBrowserCommandError(
@@ -462,4 +801,118 @@ function requestTimeout(value: number | undefined): number {
     throw new Error("external provider request timeout is invalid");
   }
   return timeout;
+}
+
+function boundedProviderId(value: unknown, label: string): string {
+  if (
+    typeof value !== "string" ||
+    Buffer.byteLength(value) < 1 ||
+    Buffer.byteLength(value) > 512 ||
+    /[\u0000-\u001f\u007f]/u.test(value)
+  ) {
+    throw new AgentBrowserCommandError("invalid_response", `${label} is invalid`);
+  }
+  return value;
+}
+
+function providerProfileName(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new AgentBrowserCommandError(
+      "invalid_response",
+      "Kernel browser profile metadata is invalid",
+    );
+  }
+  const record = value as Record<string, unknown>;
+  if (record.name === null || record.name === undefined) return null;
+  return boundedProviderId(record.name, "Kernel browser profile");
+}
+
+function boundedOptionalHttpUrl(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "string" || Buffer.byteLength(value) > 16_384) {
+    throw new AgentBrowserCommandError(
+      "invalid_response",
+      "Kernel managed-auth hosted URL is invalid",
+    );
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new AgentBrowserCommandError(
+      "invalid_response",
+      "Kernel managed-auth hosted URL is invalid",
+    );
+  }
+  if (
+    (parsed.protocol !== "https:" && parsed.protocol !== "http:") ||
+    parsed.username ||
+    parsed.password ||
+    parsed.hash
+  ) {
+    throw new AgentBrowserCommandError(
+      "invalid_response",
+      "Kernel managed-auth hosted URL is invalid",
+    );
+  }
+  return parsed.toString();
+}
+
+function boundedOptionalTimestamp(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "string") return null;
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.valueOf()) ? parsed.toISOString() : null;
+}
+
+function kernelAuthNeedsHuman(state: Record<string, unknown>): boolean {
+  if (boundedOptionalText(state.external_action_message, 500)) return true;
+  if (state.flow_step === "AWAITING_INPUT" || state.flow_step === "AWAITING_EXTERNAL_ACTION") {
+    return true;
+  }
+  return [
+    state.discovered_fields,
+    state.choices,
+    state.mfa_options,
+    state.sign_in_options,
+    state.pending_sso_buttons,
+  ].some((value) => Array.isArray(value) && value.length > 0);
+}
+
+function kernelExternalActionKind(state: Record<string, unknown>): AuthRunExternalAction["kind"] {
+  const message = boundedOptionalText(state.external_action_message, 500)?.toLowerCase() ?? "";
+  if (message.includes("security key")) return "security_key";
+  if (message.includes("passkey")) return "passkey";
+  if (message.includes("push") || message.includes("phone")) return "push";
+  return "human";
+}
+
+function kernelExternalActionLabel(state: Record<string, unknown>): string {
+  return (
+    boundedOptionalText(state.external_action_message, 500) ??
+    "Complete sign-in in the secure provider flow."
+  );
+}
+
+function kernelFailureCode(state: Record<string, unknown>): string {
+  const raw = boundedOptionalText(state.error_code, 256) ?? String(state.flow_status ?? "failed");
+  const normalized = raw
+    .toLowerCase()
+    .replace(/[^a-z0-9._~-]+/gu, "_")
+    .replace(/^_+|_+$/gu, "")
+    .slice(0, 240);
+  return `kernel_${normalized || "managed_auth_failed"}`;
+}
+
+function boundedOptionalText(value: unknown, maxBytes: number): string | null {
+  if (
+    typeof value !== "string" ||
+    value.trim().length === 0 ||
+    Buffer.byteLength(value) > maxBytes ||
+    /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value)
+  ) {
+    return null;
+  }
+  return value.trim();
 }

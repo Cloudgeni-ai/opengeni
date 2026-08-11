@@ -257,6 +257,7 @@ export type SiteAuthAuthority =
       kind: "external_provider";
       label: string;
       adapterId: string;
+      connectionId: string;
       credential: InteractionCredentialAuthorityRef | null;
     };
 
@@ -409,6 +410,26 @@ export type ProtectedAuthFillResponse = {
   status: "submitted" | "working" | "needs_human" | "stale" | "failed";
   operationId: string;
   replayed: boolean;
+};
+export type ExternalAuthRunRequest = {
+  operationId: string;
+  expectedVersion: number;
+  action: "start" | "poll";
+};
+export type ExternalAuthRunResponse = {
+  run: AuthRun;
+  status: "working" | "needs_human" | "ready_to_verify" | "failed";
+  operationId: string;
+  replayed: boolean;
+};
+export type ExternalAuthInteractiveRequest = {
+  operationId: string;
+  expectedVersion: number;
+};
+export type ExternalAuthInteractiveResponse = {
+  authRunId: string;
+  url: string;
+  expiresAt: string | null;
 };
 export type VerifyAuthRunRequest = { operationId: string; expectedVersion: number };
 
@@ -1204,6 +1225,20 @@ export interface InteractionTransport {
     request: ProtectedAuthFillRequest,
     options?: OpenGeniRequestOptions,
   ): Promise<ProtectedAuthFillResponse>;
+  advanceExternalBrowserAuthRun(
+    workspaceId: string,
+    browserSessionId: string,
+    authRunId: string,
+    request: ExternalAuthRunRequest,
+    options?: OpenGeniRequestOptions,
+  ): Promise<ExternalAuthRunResponse>;
+  openExternalBrowserAuthFlow(
+    workspaceId: string,
+    browserSessionId: string,
+    authRunId: string,
+    request: ExternalAuthInteractiveRequest,
+    options?: OpenGeniRequestOptions,
+  ): Promise<ExternalAuthInteractiveResponse>;
   verifyBrowserAuthRun(
     workspaceId: string,
     browserSessionId: string,
@@ -1701,6 +1736,33 @@ export class AuthRunResource {
     options: OpenGeniRequestOptions = {},
   ): Promise<ProtectedAuthFillResponse> {
     return await this.transport.protectedBrowserAuthFill(
+      this.workspaceId,
+      this.browserSessionId,
+      this.id,
+      request,
+      options,
+    );
+  }
+
+  async advanceExternal(
+    request: ExternalAuthRunRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<ExternalAuthRunResponse> {
+    return await this.transport.advanceExternalBrowserAuthRun(
+      this.workspaceId,
+      this.browserSessionId,
+      this.id,
+      request,
+      options,
+    );
+  }
+
+  /** Human-session helper. Hosted provider URLs never appear in model tools. */
+  async openExternalFlow(
+    request: ExternalAuthInteractiveRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<ExternalAuthInteractiveResponse> {
+    return await this.transport.openExternalBrowserAuthFlow(
       this.workspaceId,
       this.browserSessionId,
       this.id,

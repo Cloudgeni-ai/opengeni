@@ -2,7 +2,12 @@ import { describe, expect, test } from "bun:test";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { BrowserActionCommand, BrowserObservation, BrowserTarget } from "@opengeni/contracts";
+import type {
+  BrowserActionCommand,
+  BrowserExternalAuthCommand,
+  BrowserObservation,
+  BrowserTarget,
+} from "@opengeni/contracts";
 import {
   BrowserSupervisor,
   BROWSER_STATE_ARTIFACT_CONTENT_TYPE,
@@ -59,6 +64,68 @@ describe("BrowserSupervisor", () => {
         ),
       ).toBe(true);
     });
+  });
+
+  test("serializes provider authentication and fences ordinary mutations while it reconfigures", async () => {
+    let releaseFirst!: () => void;
+    let firstStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+    const release = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let authCalls = 0;
+    await withSupervisor(
+      async ({ supervisor }) => {
+        const session = reference(41);
+        const created = await supervisor.createSession({ ...session, headed: false });
+        const base = {
+          browserSessionId: session.browserSessionId,
+          controllerGeneration: session.controllerGeneration,
+          authRunId: randomUUID(),
+          adapterId: "kernel",
+          connectionId: "managed-auth-1",
+          action: "poll" as const,
+        };
+        const first = supervisor.externalAuth({
+          ...base,
+          operationId: randomUUID(),
+        });
+        await started;
+        await expect(supervisor.action(command(created.observation))).rejects.toThrow(
+          "changing state",
+        );
+        const second = supervisor.externalAuth({
+          ...base,
+          operationId: randomUUID(),
+        });
+        expect(authCalls).toBe(1);
+        releaseFirst();
+        expect(await first).toMatchObject({ state: "in_progress" });
+        expect(await second).toMatchObject({ state: "in_progress" });
+        expect(authCalls).toBe(2);
+        expect(await supervisor.listTargets(session)).toHaveLength(1);
+      },
+      {
+        driverHooks: {
+          async externalAuth() {
+            authCalls += 1;
+            if (authCalls === 1) {
+              firstStarted();
+              await release;
+            }
+            return {
+              state: "in_progress",
+              externalAction: null,
+              interactiveUrl: null,
+              failureCode: null,
+              profileLoaded: false,
+            };
+          },
+        },
+      },
+    );
   });
 
   test("repairs a lost managed browser without replaying an ambiguous action", async () => {
@@ -682,6 +749,10 @@ async function withSupervisor(
     onFactory?: () => void;
     driverHooks?: {
       dispatch?: (instance: number) => void | Promise<void>;
+      externalAuth?: (
+        instance: number,
+        command: BrowserExternalAuthCommand,
+      ) => ReturnType<NonNullable<BrowserSupervisorDriver["externalAuth"]>>;
       engineVersion?: () => string;
       available?: (instance: number) => boolean;
     };
@@ -715,6 +786,10 @@ function fakeDriver(
   context: BrowserSupervisorDriverContext,
   hooks: {
     dispatch?: (instance: number) => void | Promise<void>;
+    externalAuth?: (
+      instance: number,
+      command: BrowserExternalAuthCommand,
+    ) => ReturnType<NonNullable<BrowserSupervisorDriver["externalAuth"]>>;
     engineVersion?: () => string;
     available?: (instance: number) => boolean;
   } = {},
@@ -796,6 +871,17 @@ function fakeDriver(
     async protectedFill() {
       requireOpen();
       return { target: { ...target }, status: "submitted" };
+    },
+    async externalAuth(authCommand) {
+      requireOpen();
+      if (hooks.externalAuth) return await hooks.externalAuth(instance, authCommand);
+      return {
+        state: "in_progress",
+        externalAction: null,
+        interactiveUrl: null,
+        failureCode: null,
+        profileLoaded: false,
+      };
     },
     async captureScreenshot() {
       requireOpen();

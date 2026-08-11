@@ -5,8 +5,10 @@ import {
   BrowserActionCommand,
   BrowserDownloadExportRequest,
   BrowserDownloadListResponse,
+  BrowserExternalAuthCommand,
   BrowserRevisionMaterialization,
   type BrowserActionCommand as BrowserActionCommandValue,
+  type BrowserExternalAuthCommand as BrowserExternalAuthCommandValue,
   BrowserProtectedAuthFillCommand,
   type BrowserProtectedAuthFillCommand as BrowserProtectedAuthFillCommandValue,
   BrowserWorkspaceFileStageRequest,
@@ -402,6 +404,20 @@ export class BrowserControlServer {
         );
       }
       return success(await this.supervisor.protectedAuthFill(command));
+    }
+    if (segments.length === 4 && segments[3] === "external-auth") {
+      if (request.method !== "POST") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      const command = parseExternalAuthCommand(await readJson(request));
+      if (command.browserSessionId !== browserSessionId) {
+        throw new ProtocolError(
+          "operation_conflict",
+          "external authentication targets another browser session",
+          409,
+        );
+      }
+      return success(await this.supervisor.externalAuth(command));
     }
     if (segments.length === 4 && segments[3] === "downloads") {
       if (request.method !== "GET") {
@@ -1450,6 +1466,7 @@ function interactionStatus(code: string): number {
 function routeNeedsControl(segments: readonly string[], request: Request): boolean {
   if (
     segments[3] === "actions" ||
+    segments[3] === "external-auth" ||
     segments[3] === "protected-auth-fills" ||
     segments[3] === "protected-auth-operations" ||
     (segments[3] === "downloads" && segments[5] === "exports") ||
@@ -1508,6 +1525,14 @@ function parseProtectedAuthFillCommand(value: unknown): BrowserProtectedAuthFill
   const result = BrowserProtectedAuthFillCommand.safeParse(value);
   if (!result.success) {
     throw new ProtocolError("invalid_action", "protected-fill command is invalid", 400);
+  }
+  return result.data;
+}
+
+function parseExternalAuthCommand(value: unknown): BrowserExternalAuthCommandValue {
+  const result = BrowserExternalAuthCommand.safeParse(value);
+  if (!result.success) {
+    throw new ProtocolError("invalid_action", "external-auth command is invalid", 400);
   }
   return result.data;
 }

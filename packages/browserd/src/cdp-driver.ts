@@ -6,6 +6,8 @@ import {
   BrowserDiagnosticBatch,
   BrowserDiagnosticEntry,
   BrowserDialog,
+  BrowserExternalAuthCommand,
+  BrowserExternalAuthResult,
   BrowserObservation,
   BrowserProtectedAuthFillCommand,
   BrowserTarget,
@@ -17,6 +19,8 @@ import {
   type BrowserClipboard as BrowserClipboardValue,
   type BrowserDiagnosticBatch as BrowserDiagnosticBatchValue,
   type BrowserDiagnosticKind,
+  type BrowserExternalAuthCommand as BrowserExternalAuthCommandValue,
+  type BrowserExternalAuthResult as BrowserExternalAuthResultValue,
   type BrowserLocator,
   type BrowserObservation as BrowserObservationValue,
   type BrowserProtectedAuthFillCommand as BrowserProtectedAuthFillCommandValue,
@@ -97,6 +101,16 @@ class DialogOpenedSignal extends Error {}
 export type BrowserCommandRunner = {
   run: AgentBrowserJsonCommand;
   terminate?: () => Promise<void>;
+  externalAuth?: (
+    command: BrowserExternalAuthCommand,
+    options?: { timeoutMs?: number; signal?: AbortSignal },
+  ) => Promise<BrowserExternalAuthDispatchResult>;
+};
+
+export type BrowserExternalAuthDispatchResult = {
+  result: BrowserExternalAuthResultValue;
+  /** The provider changed the physical browser behind its stable session. */
+  browserReconfigured: boolean;
 };
 
 export type BrowserCdpConnection = {
@@ -276,7 +290,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly createId: () => string;
   /** Private physical-process fence. Provider target/loader ids are not
    * required to be globally unique and may repeat after crash recovery. */
-  private readonly physicalGeneration: string;
+  private physicalGeneration: string;
   private readonly engine: "chromium" | "chrome" | "lightpanda";
   private readonly targetLifecycle: "runner" | "cdp";
   private readonly tabControl: boolean;
@@ -304,6 +318,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private clipboardSource: BrowserClipboardValue["source"] = "empty";
   private clipboardSourceTargetId: string | null = null;
   private clipboardUpdatedAt: string | null = null;
+  private readonly externalAuthResults = new Map<
+    string,
+    { digest: string; result: BrowserExternalAuthResultValue }
+  >();
   private started = false;
 
   constructor(options: AgentBrowserDriverOptions) {
@@ -836,6 +854,61 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     });
   }
 
+  /** Controller-private provider authentication. Provider credentials and
+   * hosted-login URLs never enter an ordinary browser action. */
+  async externalAuth(
+    commandInput: BrowserExternalAuthCommandValue,
+  ): Promise<BrowserExternalAuthResultValue> {
+    const command = BrowserExternalAuthCommand.parse(commandInput);
+    if (
+      command.browserSessionId !== this.browserSessionId ||
+      command.controllerGeneration !== this.controllerGeneration
+    ) {
+      throw new InteractionDefiniteDriverError(
+        "controller_stale",
+        "external authentication targets another browser controller",
+      );
+    }
+    if (!this.runner.externalAuth) {
+      throw new InteractionDefiniteDriverError(
+        "unsupported",
+        "this browser placement does not support provider-managed authentication",
+      );
+    }
+    const digest = createHash("sha256")
+      .update(
+        JSON.stringify({
+          browserSessionId: command.browserSessionId,
+          controllerGeneration: command.controllerGeneration,
+          authRunId: command.authRunId,
+          adapterId: command.adapterId,
+          connectionId: command.connectionId,
+          action: command.action,
+        }),
+      )
+      .digest("hex");
+    const replay = this.externalAuthResults.get(command.operationId);
+    if (replay) {
+      if (replay.digest !== digest) {
+        throw new InteractionDefiniteDriverError(
+          "operation_conflict",
+          "external-auth operation id was reused with another request",
+        );
+      }
+      return replay.result;
+    }
+    const dispatched = await this.runner.externalAuth(command);
+    const result = BrowserExternalAuthResult.parse(dispatched.result);
+    if (dispatched.browserReconfigured) {
+      await this.reconnectAfterProviderReconfiguration();
+    }
+    this.externalAuthResults.set(command.operationId, { digest, result });
+    while (this.externalAuthResults.size > 512) {
+      this.externalAuthResults.delete(this.externalAuthResults.keys().next().value as string);
+    }
+    return result;
+  }
+
   private async ensureConnection(): Promise<BrowserCdpConnection> {
     if (this.connection) return this.connection;
     if (this.connectionPromise) return await this.connectionPromise;
@@ -938,6 +1011,38 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       this.connectionPromise = null;
       throw error;
     }
+  }
+
+  private async reconnectAfterProviderReconfiguration(): Promise<void> {
+    for (const unsubscribe of this.browserUnsubscribe.splice(0)) unsubscribe();
+    for (const targetId of [...this.states.keys()]) this.removeState(targetId);
+    this.firstSeenAt.clear();
+    this.attaching.clear();
+    this.selectedTargetId = null;
+    this.userAgentMetadataPromise = null;
+    this.userAgent = "";
+    this.browserProduct = "";
+    this.physicalGeneration = randomUUID();
+    const previous = this.connection;
+    this.connection = null;
+    this.connectionPromise = null;
+    previous?.close();
+
+    const connection = await this.ensureConnection();
+    let targets = visiblePageTargets(await this.targetInfos(connection));
+    if (targets.length === 0) {
+      const created = await connection.send<{ targetId?: unknown }>("Target.createTarget", {
+        url: "about:blank",
+      });
+      if (typeof created.targetId !== "string") {
+        throw new Error("reconfigured browser did not return a target id");
+      }
+      targets = visiblePageTargets(await this.targetInfos(connection));
+    }
+    const selected = targets[0];
+    if (!selected) throw new Error("reconfigured browser has no page target");
+    await connection.send("Target.activateTarget", { targetId: selected.targetId });
+    this.selectedTargetId = selected.targetId;
   }
 
   private async withTarget<T>(

@@ -14,6 +14,8 @@ import {
   BrowserDownloadExportReceipt,
   BrowserDownloadExportRequest,
   BrowserDownloadListResponse,
+  BrowserExternalAuthCommand,
+  BrowserExternalAuthResult,
   BrowserObservation,
   BrowserProtectedAuthFillCommand,
   BrowserProtectedAuthFillReceipt,
@@ -37,6 +39,8 @@ import {
   type BrowserDownloadExportReceipt as BrowserDownloadExportReceiptValue,
   type BrowserDownloadExportRequest as BrowserDownloadExportRequestValue,
   type BrowserDownloadListResponse as BrowserDownloadListResponseValue,
+  type BrowserExternalAuthCommand as BrowserExternalAuthCommandValue,
+  type BrowserExternalAuthResult as BrowserExternalAuthResultValue,
   type BrowserDiagnosticKind,
   type BrowserObservation as BrowserObservationValue,
   type BrowserProtectedAuthFillCommand as BrowserProtectedAuthFillCommandValue,
@@ -1144,6 +1148,30 @@ export class BrowserControlSessionClient {
         method: "GET",
         path: this.path(`protected-auth-operations/${requireUuid(operationId, "operation id")}`),
         token: this.controlToken,
+      }),
+    );
+  }
+
+  /** API-broker-only provider-auth path. The interactive URL response is
+   * deliberately not exposed by any model-facing SDK or Codemode facade. */
+  async externalAuth(
+    commandInput: BrowserExternalAuthCommandValue,
+  ): Promise<BrowserExternalAuthResultValue> {
+    const command = BrowserExternalAuthCommand.parse(commandInput);
+    if (
+      command.browserSessionId !== this.reference.browserSessionId ||
+      command.controllerGeneration !== this.reference.controllerGeneration
+    ) {
+      throw new BrowserControlProtocolError(
+        "external authentication targets another browser controller binding",
+      );
+    }
+    return BrowserExternalAuthResult.parse(
+      await this.parent.requestForSession({
+        method: "POST",
+        path: this.path("external-auth"),
+        token: this.controlToken,
+        body: command,
       }),
     );
   }

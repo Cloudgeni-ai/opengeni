@@ -702,6 +702,9 @@ export const SiteAuthAuthority = z.discriminatedUnion("kind", [
       kind: z.literal("external_provider"),
       label: z.string().trim().min(1).max(200),
       adapterId: boundedOpaqueId,
+      /** Opaque provider-owned auth-connection reference. It is meaningful
+       * only to the named adapter and never treated as credential material. */
+      connectionId: boundedOpaqueId,
       credential: InteractionCredentialAuthorityRef.nullable(),
     })
     .strict(),
@@ -1117,6 +1120,101 @@ export const ProtectedAuthFillResponse = z
   })
   .strict();
 export type ProtectedAuthFillResponse = z.infer<typeof ProtectedAuthFillResponse>;
+
+/** Public request for advancing a provider-managed AuthRun. Provider secrets,
+ * profile names, browser ids, and hosted-login URLs stay behind browserd. */
+export const ExternalAuthRunRequest = z
+  .object({
+    operationId: z.string().uuid(),
+    expectedVersion: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    action: z.enum(["start", "poll"]),
+  })
+  .strict();
+export type ExternalAuthRunRequest = z.infer<typeof ExternalAuthRunRequest>;
+
+export const ExternalAuthRunResponse = z
+  .object({
+    run: AuthRun,
+    status: z.enum(["working", "needs_human", "ready_to_verify", "failed"]),
+    operationId: z.string().uuid(),
+    replayed: z.boolean(),
+  })
+  .strict();
+export type ExternalAuthRunResponse = z.infer<typeof ExternalAuthRunResponse>;
+
+/** Human-only request for opening the provider's ephemeral hosted login UI. */
+export const ExternalAuthInteractiveRequest = z
+  .object({
+    operationId: z.string().uuid(),
+    expectedVersion: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  })
+  .strict();
+export type ExternalAuthInteractiveRequest = z.infer<typeof ExternalAuthInteractiveRequest>;
+
+export const ExternalAuthInteractiveResponse = z
+  .object({
+    authRunId: z.string().uuid(),
+    url: boundedHttpUrl,
+    expiresAt: z.string().datetime({ offset: true }).nullable(),
+  })
+  .strict();
+export type ExternalAuthInteractiveResponse = z.infer<typeof ExternalAuthInteractiveResponse>;
+
+/** Controller-private Kernel/host-adapter command. This crosses only the
+ * authenticated API -> browserd control channel; it is not a model tool. */
+export const BrowserExternalAuthCommand = z
+  .object({
+    browserSessionId: z.string().uuid(),
+    controllerGeneration: opaqueGeneration,
+    operationId: z.string().uuid(),
+    authRunId: z.string().uuid(),
+    adapterId: boundedOpaqueId,
+    connectionId: boundedOpaqueId,
+    action: z.enum(["start", "poll", "interactive"]),
+  })
+  .strict();
+export type BrowserExternalAuthCommand = z.infer<typeof BrowserExternalAuthCommand>;
+
+export const BrowserExternalAuthResult = z
+  .object({
+    state: z.enum(["authenticated", "in_progress", "needs_human", "failed"]),
+    externalAction: AuthRunExternalAction.nullable(),
+    interactiveUrl: boundedHttpUrl.nullable(),
+    failureCode: boundedOpaqueId.nullable(),
+    profileLoaded: z.boolean(),
+  })
+  .strict()
+  .superRefine((result, context) => {
+    if ((result.state === "needs_human") !== (result.externalAction !== null)) {
+      context.addIssue({
+        code: "custom",
+        path: ["externalAction"],
+        message: "human external-auth state requires an action",
+      });
+    }
+    if ((result.state === "failed") !== (result.failureCode !== null)) {
+      context.addIssue({
+        code: "custom",
+        path: ["failureCode"],
+        message: "failed external-auth state requires a failure code",
+      });
+    }
+    if (result.interactiveUrl !== null && result.state !== "needs_human") {
+      context.addIssue({
+        code: "custom",
+        path: ["interactiveUrl"],
+        message: "interactive URL requires a human external-auth state",
+      });
+    }
+    if (result.profileLoaded && result.state !== "authenticated") {
+      context.addIssue({
+        code: "custom",
+        path: ["profileLoaded"],
+        message: "only authenticated external auth can load a profile",
+      });
+    }
+  });
+export type BrowserExternalAuthResult = z.infer<typeof BrowserExternalAuthResult>;
 
 export const VerifyAuthRunRequest = z
   .object({

@@ -29,6 +29,8 @@ import type {
   ComputerSessionMutationResponse,
   ComputerTarget,
   ComputerTargetListResponse,
+  ExternalAuthRunRequest,
+  ExternalAuthRunResponse,
   InteractionPlacement,
   ProtectedAuthFillRequest,
   ProtectedAuthFillResponse,
@@ -815,6 +817,27 @@ export class CodemodeAuthRun {
       PATH.browserAuth,
       {
         operation: "protected_fill",
+        browserSessionId: this.browserSessionId,
+        authRunId: this.id,
+        ...request,
+      },
+      callOptions,
+    );
+    return response.result;
+  }
+
+  async advanceExternal(
+    request: Omit<ExternalAuthRunRequest, "operationId">,
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<ExternalAuthRunResponse> {
+    const response = await callStructured<{
+      operation: "advance_external";
+      result: ExternalAuthRunResponse;
+    }>(
+      this.client,
+      PATH.browserAuth,
+      {
+        operation: "advance_external",
         browserSessionId: this.browserSessionId,
         authRunId: this.id,
         ...request,

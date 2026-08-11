@@ -1406,7 +1406,17 @@ export const interactionResourceOperations = pgTable(
     }).notNull(),
     resourceId: uuid("resource_id").notNull(),
     kind: text("kind", {
-      enum: ["create", "update", "start", "report", "protected_fill", "verify", "resolve", "save"],
+      enum: [
+        "create",
+        "update",
+        "start",
+        "report",
+        "protected_fill",
+        "external_auth",
+        "verify",
+        "resolve",
+        "save",
+      ],
     }).notNull(),
     requestDigest: text("request_digest").notNull(),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),

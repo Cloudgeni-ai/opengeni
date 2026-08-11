@@ -317,8 +317,14 @@ describe("OpenGeni Codemode interaction facade", () => {
 
   test("keeps auth and human handoff on the same typed atomic paths", async () => {
     const authRunId = "55555555-5555-4555-8555-555555555555";
-    const fake = fakeClient((path) => {
+    const fake = fakeClient((path, args) => {
       if (path === "interaction.browser.auth") {
+        if (args.operation === "advance_external") {
+          return result({
+            operation: "advance_external",
+            result: { run: { id: authRunId }, status: "needs_human" },
+          });
+        }
         return result({ operation: "start", result: { run: { id: authRunId } } });
       }
       if (path === "interaction.browser.observe") {
@@ -345,6 +351,10 @@ describe("OpenGeni Codemode interaction facade", () => {
       },
       { operationId: "77777777-7777-4777-8777-777777777777" },
     );
+    await run.advanceExternal(
+      { expectedVersion: 1, action: "start" },
+      { operationId: "88888888-8888-4888-8888-888888888888" },
+    );
     await browser.tabs.use("tab-1").requestHuman("Complete MFA.", {
       kind: "mfa",
       authRunId: run.id,
@@ -364,6 +374,17 @@ describe("OpenGeni Codemode interaction facade", () => {
           expectedDocumentGeneration: "document-1",
         },
         options: { operationId: "77777777-7777-4777-8777-777777777777" },
+      },
+      {
+        path: "interaction.browser.auth",
+        args: {
+          operation: "advance_external",
+          browserSessionId,
+          authRunId,
+          expectedVersion: 1,
+          action: "start",
+        },
+        options: { operationId: "88888888-8888-4888-8888-888888888888" },
       },
       {
         path: "interaction.browser.observe",

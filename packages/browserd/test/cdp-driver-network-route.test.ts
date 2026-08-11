@@ -209,3 +209,103 @@ test("installs route emulation on about:blank before the first external navigati
     await driver.close();
   }
 });
+
+test("rotates physical generations exactly once after a provider profile reconfiguration", async () => {
+  const browserSessionId = randomUUID();
+  const controllerGeneration = "controller-1";
+  const authRunId = randomUUID();
+  const operationId = randomUUID();
+  let reconfigured = false;
+  let authCalls = 0;
+  let oldConnectionCloses = 0;
+  const runner: BrowserCommandRunner = {
+    async run<T>(args: readonly string[]): Promise<T> {
+      if (args[0] === "get" && args[1] === "cdp-url") {
+        return {
+          cdpUrl: reconfigured ? "wss://provider.test/after" : "wss://provider.test/before",
+        } as T;
+      }
+      throw new Error(`unexpected runner command: ${args.join(" ")}`);
+    },
+    async externalAuth() {
+      authCalls += 1;
+      reconfigured = true;
+      return {
+        result: {
+          state: "authenticated",
+          externalAction: null,
+          interactiveUrl: null,
+          failureCode: null,
+          profileLoaded: true,
+        },
+        browserReconfigured: true,
+      };
+    },
+  };
+  const connection = (label: "before" | "after"): BrowserCdpConnection => ({
+    async send<T>(method: string): Promise<T> {
+      if (method === "Browser.getVersion") {
+        return { product: "Chrome/151.0.0.0", userAgent: label } as T;
+      }
+      if (method === "Target.getTargets") {
+        return {
+          targetInfos: [
+            {
+              targetId: "provider-reused-target-id",
+              type: "page",
+              title: label,
+              url: `https://${label}.example.test/`,
+              attached: false,
+            },
+          ],
+        } as T;
+      }
+      return {} as T;
+    },
+    on() {
+      return () => undefined;
+    },
+    async waitForEvent(): Promise<CdpEvent> {
+      throw new Error("unused");
+    },
+    close() {
+      if (label === "before") oldConnectionCloses += 1;
+    },
+  });
+  const driver = new AgentBrowserDriver({
+    browserSessionId,
+    controllerGeneration,
+    runner,
+    targetLifecycle: "cdp",
+    connect: async (endpoint) => connection(endpoint.endsWith("/after") ? "after" : "before"),
+  });
+  try {
+    const before = (await driver.listTargets())[0]!;
+    const command = {
+      browserSessionId,
+      controllerGeneration,
+      operationId,
+      authRunId,
+      adapterId: "kernel",
+      connectionId: "managed-auth-1",
+      action: "poll" as const,
+    };
+    expect(await driver.externalAuth(command)).toMatchObject({
+      state: "authenticated",
+      profileLoaded: true,
+    });
+    const after = (await driver.listTargets())[0]!;
+    expect(after.id).toBe(before.id);
+    expect(after.targetGeneration).not.toBe(before.targetGeneration);
+    expect(after.url).toBe("https://after.example.test/");
+    expect(oldConnectionCloses).toBe(1);
+    expect(await driver.externalAuth(command)).toMatchObject({ state: "authenticated" });
+    expect((await driver.listTargets())[0]!.targetGeneration).toBe(after.targetGeneration);
+    expect(authCalls).toBe(1);
+    await expect(driver.externalAuth({ ...command, action: "interactive" })).rejects.toThrow(
+      "operation id was reused",
+    );
+  } finally {
+    await driver.close();
+  }
+});

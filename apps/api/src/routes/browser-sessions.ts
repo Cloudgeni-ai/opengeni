@@ -19,6 +19,7 @@ import {
   BrowserDownloadSaveRequest,
   BrowserDownloadSaveResponse,
   BrowserDownloadListResponse,
+  BrowserExternalAuthCommand,
   BrowserOpenTargetRequest,
   BrowserProtectedAuthFillCommand,
   BrowserSessionAttachment,
@@ -29,6 +30,10 @@ import {
   BrowserSessionMutationResponse,
   BrowserTargetListResponse,
   CreateBrowserSessionRequest,
+  ExternalAuthInteractiveRequest,
+  ExternalAuthInteractiveResponse,
+  ExternalAuthRunRequest,
+  ExternalAuthRunResponse,
   InteractionActor,
   ProtectedAuthFillRequest,
   ProtectedAuthFillResponse,
@@ -68,6 +73,7 @@ import {
   BrowserSessionOperationConflictError,
   BrowserSessionStateError,
   completeBrowserSessionEnd,
+  completeExternalAuth,
   completeBrowserDownloadSave,
   completeFileUpload,
   completeProtectedAuthFill,
@@ -76,6 +82,7 @@ import {
   dispatchBrowserRevisionPublication,
   dispatchBrowserDownloadSave,
   dispatchBrowserSessionOperation,
+  dispatchExternalAuth,
   dispatchProtectedAuthFill,
   failBrowserSessionOperation,
   failBrowserSessionResume,
@@ -90,9 +97,11 @@ import {
   getAttachedBrowserDevice,
   getBrowserRevisionArtifactAuthority,
   getEnrollment,
+  getExternalAuthInteractiveContext,
   getFiles,
   getFileUpload,
   getAuthRun,
+  getExternalAuthPreparation,
   getProtectedAuthFillPreparation,
   getSiteAuthConnection,
   getSession,
@@ -103,6 +112,7 @@ import {
   listBrowserSessions,
   listAttachedBrowserDevices,
   prepareBrowserSessionCreate,
+  prepareExternalAuth,
   prepareBrowserDownloadSave,
   prepareBrowserSessionEnd,
   prepareBrowserSessionResume,
@@ -1294,6 +1304,209 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       const response = ProtectedAuthFillResponse.parse(result);
       observeAuthMutation(deps.observability, startedAtMs, response);
       return context.json(response);
+    },
+  );
+
+  app.post(
+    "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/external-auth",
+    async (context) => {
+      const { workspaceId, grant, browserSessionId } = await browserRoutePreamble(
+        context,
+        "sessions:control",
+      );
+      const authRunId = requireUuidParam(context, "authRunId");
+      const request = await parseJsonBody(context, ExternalAuthRunRequest);
+      const startedAtMs = performance.now();
+      try {
+        const replay = await getExternalAuthPreparation(deps.db, {
+          accountId: grant.accountId,
+          workspaceId,
+          actorSubjectId: grant.subjectId,
+          authRunId,
+          ...request,
+        });
+        if (replay?.response) {
+          const record = await getBrowserSessionControlRecord(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            browserSessionId,
+          });
+          await authorizeSourceSession(deps, grant, record.sourceSessionId, "session.control");
+          assertAuthRunBrowser(replay.run.browserSessionId, browserSessionId);
+          const response = ExternalAuthRunResponse.parse(replay.response);
+          observeAuthMutation(deps.observability, startedAtMs, response);
+          return context.json(response);
+        }
+      } catch (error) {
+        throw browserRouteError(error);
+      }
+      const result = await withActiveBrowserController(
+        context,
+        grant,
+        workspaceId,
+        browserSessionId,
+        "session.control",
+        "browser.control",
+        async ({ sessionClient, binding, record }) => {
+          const actor = interactionActorForGrant(grant);
+          const scope = {
+            accountId: grant.accountId,
+            workspaceId,
+            actorSubjectId: grant.subjectId,
+            authRunId,
+          };
+          let preparation = await getExternalAuthPreparation(deps.db, {
+            ...scope,
+            ...request,
+          });
+          preparation ??= await prepareExternalAuth(deps.db, {
+            ...scope,
+            ...request,
+          });
+          assertAuthRunBrowser(preparation.run.browserSessionId, browserSessionId);
+          if (preparation.run.controllerGeneration !== binding.controllerGeneration) {
+            throw new InteractionResourceConflictError(
+              "Auth run belongs to a stale browser controller",
+            );
+          }
+          if (preparation.response) return preparation.response;
+          if (
+            preparation.operationState === "failed" ||
+            preparation.operationState === "outcome_unknown"
+          ) {
+            throw new InteractionResourceStateError(
+              `External-auth operation is ${preparation.operationState.replace("_", " ")}`,
+            );
+          }
+          if (preparation.operationState === "prepared") {
+            await dispatchExternalAuth(deps.db, {
+              ...scope,
+              operationId: request.operationId,
+            });
+          }
+          const providerResult = await sessionClient.externalAuth(
+            BrowserExternalAuthCommand.parse({
+              browserSessionId,
+              controllerGeneration: binding.controllerGeneration,
+              operationId: request.operationId,
+              authRunId,
+              adapterId: preparation.authority.adapterId,
+              connectionId: preparation.authority.connectionId,
+              action: request.action,
+            }),
+          );
+          if (providerResult.interactiveUrl !== null) {
+            throw new BrowserControlProtocolError(
+              "provider exposed a hosted login URL outside the human-only endpoint",
+            );
+          }
+          let target:
+            | { id: string; targetGeneration: string; documentGeneration: string | null }
+            | undefined;
+          if (providerResult.state === "authenticated") {
+            const targets = await sessionClient.listTargets();
+            const selected = targets.find((candidate) => candidate.selected) ?? targets[0];
+            if (!selected) {
+              throw new BrowserControlProtocolError(
+                "authenticated provider browser returned no current target",
+              );
+            }
+            const observation = await sessionClient.observe(selected.id);
+            target = {
+              id: observation.target.id,
+              targetGeneration: observation.target.targetGeneration,
+              documentGeneration: observation.target.documentGeneration,
+            };
+          }
+          return await completeExternalAuth(deps.db, {
+            ...scope,
+            operationId: request.operationId,
+            result: providerResult,
+            ...(target ? { target } : {}),
+            ...(providerResult.state === "needs_human"
+              ? {
+                  intervention: {
+                    originatingSessionId: record.sourceSessionId,
+                    originatingTurnId: actor.kind === "agent" ? (actor.turnId ?? null) : null,
+                    originatingAttemptId: actor.kind === "agent" ? (actor.attemptId ?? null) : null,
+                    originatingToolOperationId:
+                      actor.kind === "agent" && actor.attemptId ? request.operationId : null,
+                    expiresInSeconds: 1_200,
+                  },
+                }
+              : {}),
+          });
+        },
+      );
+      const response = ExternalAuthRunResponse.parse(result);
+      observeAuthMutation(deps.observability, startedAtMs, response);
+      return context.json(response);
+    },
+  );
+
+  app.post(
+    "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/external-auth/interactive",
+    async (context) => {
+      const { workspaceId, grant, browserSessionId } = await browserRoutePreamble(
+        context,
+        "sessions:control",
+      );
+      if (grant.principalKind !== "human_session") {
+        throw new HTTPException(403, {
+          message: "hosted login flows can only be opened by an interactive user",
+        });
+      }
+      const authRunId = requireUuidParam(context, "authRunId");
+      const request = await parseJsonBody(context, ExternalAuthInteractiveRequest);
+      const result = await withActiveBrowserController(
+        context,
+        grant,
+        workspaceId,
+        browserSessionId,
+        "session.control",
+        "browser.control",
+        async ({ sessionClient, binding }) => {
+          const resolved = await getExternalAuthInteractiveContext(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            actorSubjectId: grant.subjectId,
+            authRunId,
+            ...request,
+          });
+          assertAuthRunBrowser(resolved.run.browserSessionId, browserSessionId);
+          if (resolved.run.controllerGeneration !== binding.controllerGeneration) {
+            throw new InteractionResourceConflictError(
+              "Hosted login belongs to a stale browser controller",
+            );
+          }
+          const providerResult = await sessionClient.externalAuth(
+            BrowserExternalAuthCommand.parse({
+              browserSessionId,
+              controllerGeneration: binding.controllerGeneration,
+              operationId: request.operationId,
+              authRunId,
+              adapterId: resolved.authority.adapterId,
+              connectionId: resolved.authority.connectionId,
+              action: "interactive",
+            }),
+          );
+          if (
+            providerResult.state !== "needs_human" ||
+            !providerResult.externalAction ||
+            !providerResult.interactiveUrl
+          ) {
+            throw new InteractionResourceStateError(
+              "Hosted login is no longer waiting for human input",
+            );
+          }
+          return ExternalAuthInteractiveResponse.parse({
+            authRunId,
+            url: providerResult.interactiveUrl,
+            expiresAt: providerResult.externalAction.expiresAt,
+          });
+        },
+      );
+      return context.json(ExternalAuthInteractiveResponse.parse(result));
     },
   );
 

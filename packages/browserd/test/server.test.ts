@@ -280,6 +280,36 @@ describe("BrowserControlServer", () => {
         200,
       );
 
+      const externalAuthPath = `/v1/browser-sessions/${reference.browserSessionId}/external-auth`;
+      const externalAuthCommand = {
+        browserSessionId: reference.browserSessionId,
+        controllerGeneration: reference.controllerGeneration,
+        operationId: randomUUID(),
+        authRunId: randomUUID(),
+        adapterId: "kernel",
+        connectionId: "managed-auth-1",
+        action: "start",
+      };
+      expect(
+        (
+          await request(server, externalAuthPath, {
+            method: "POST",
+            token: viewToken,
+            body: externalAuthCommand,
+          })
+        ).status,
+      ).toBe(401);
+      const externalAuth = await request(server, externalAuthPath, {
+        method: "POST",
+        token: controlToken,
+        body: externalAuthCommand,
+      });
+      expect(externalAuth.status).toBe(200);
+      expect((await json(externalAuth)).data).toMatchObject({
+        state: "needs_human",
+        interactiveUrl: null,
+      });
+
       const clipboard = await request(
         server,
         `/v1/browser-sessions/${reference.browserSessionId}/clipboard`,
@@ -989,6 +1019,19 @@ function fakeDriver(
     },
     async protectedFill() {
       return { target: { ...target }, status: "submitted" };
+    },
+    async externalAuth() {
+      return {
+        state: "needs_human",
+        externalAction: {
+          kind: "human",
+          label: "Complete sign-in securely",
+          expiresAt: null,
+        },
+        interactiveUrl: null,
+        failureCode: null,
+        profileLoaded: false,
+      };
     },
     async captureScreenshot() {
       return frame(context, target);

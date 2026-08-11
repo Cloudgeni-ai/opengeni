@@ -40,6 +40,10 @@ import {
   ComputerSessionMutationResponse as ContractComputerSessionMutationResponse,
   ComputerTargetListResponse as ContractComputerTargetListResponse,
   CreateComputerSessionRequest as ContractCreateComputerSessionRequest,
+  ExternalAuthInteractiveRequest as ContractExternalAuthInteractiveRequest,
+  ExternalAuthInteractiveResponse as ContractExternalAuthInteractiveResponse,
+  ExternalAuthRunRequest as ContractExternalAuthRunRequest,
+  ExternalAuthRunResponse as ContractExternalAuthRunResponse,
   COMPUTER_CONTROL_WEBSOCKET_PROTOCOL as CONTRACT_COMPUTER_WEBSOCKET_PROTOCOL,
   INTERACTION_PROTOCOL_VERSION as CONTRACT_INTERACTION_PROTOCOL_VERSION,
   PublishBrowserRevisionRequest as ContractPublishBrowserRevisionRequest,
@@ -90,6 +94,10 @@ import {
   type ComputerSessionMutationResponse,
   type ComputerTargetListResponse,
   type CreateComputerSessionRequest,
+  type ExternalAuthInteractiveRequest,
+  type ExternalAuthInteractiveResponse,
+  type ExternalAuthRunRequest,
+  type ExternalAuthRunResponse,
   type PublishBrowserRevisionRequest,
   type PublishBrowserRevisionResponse,
   type WorkspaceInteractionRevisionEvent,
@@ -241,6 +249,23 @@ describe("SDK interaction / contracts parity", () => {
       exact<ComputerActionRequest, z.input<typeof ContractComputerActionRequest>>(true),
     ];
     expect(checks.every(Boolean)).toBe(true);
+  });
+
+  test("pins external browser-auth public shapes bidirectionally", () => {
+    expect(
+      [
+        exact<ExternalAuthRunRequest, z.input<typeof ContractExternalAuthRunRequest>>(true),
+        exact<ExternalAuthRunResponse, z.infer<typeof ContractExternalAuthRunResponse>>(true),
+        exact<
+          ExternalAuthInteractiveRequest,
+          z.input<typeof ContractExternalAuthInteractiveRequest>
+        >(true),
+        exact<
+          ExternalAuthInteractiveResponse,
+          z.infer<typeof ContractExternalAuthInteractiveResponse>
+        >(true),
+      ].every(Boolean),
+    ).toBe(true);
   });
 });
 

@@ -119,6 +119,8 @@ describe("BrowserControlClient", () => {
     const workspaceFileOperationId = randomUUID();
     const workspaceFileId = randomUUID();
     const protectedAuthOperationId = randomUUID();
+    const externalAuthOperationId = randomUUID();
+    const authRunId = randomUUID();
     const controllerGeneration = "controller-1";
     const linkedComputerSessionId = randomUUID();
     const restoreKey = Buffer.alloc(32, 9);
@@ -204,6 +206,27 @@ describe("BrowserControlClient", () => {
             settledAt: "2026-08-10T12:00:01.000Z",
             observation: { target, status: "submitted" },
             error: null,
+          });
+        }
+        if (url.pathname.endsWith("/external-auth") && request.method === "POST") {
+          const body = (await request.json()) as {
+            operationId: string;
+            authRunId: string;
+          };
+          expect(body).toMatchObject({
+            operationId: externalAuthOperationId,
+            authRunId,
+          });
+          return success({
+            state: "needs_human",
+            externalAction: {
+              kind: "human",
+              label: "Complete sign-in securely",
+              expiresAt: null,
+            },
+            interactiveUrl: null,
+            failureCode: null,
+            profileLoaded: false,
           });
         }
         if (url.pathname.endsWith("/workspace-files") && request.method === "POST") {
@@ -428,6 +451,20 @@ describe("BrowserControlClient", () => {
         state: "completed",
       });
       expect(
+        await browserSession.externalAuth({
+          browserSessionId,
+          controllerGeneration,
+          operationId: externalAuthOperationId,
+          authRunId,
+          adapterId: "kernel",
+          connectionId: "managed-auth-1",
+          action: "start",
+        }),
+      ).toMatchObject({
+        state: "needs_human",
+        interactiveUrl: null,
+      });
+      expect(
         await client.frameStreamUrl({ browserSessionId, controllerGeneration }, target.id),
       ).toBe(
         `ws://127.0.0.1:${server.port}/v1/browser-sessions/${browserSessionId}/targets/${target.id}/frames?provider=fixture`,
@@ -470,7 +507,7 @@ describe("BrowserControlClient", () => {
       ).toBe(true);
       expect(placement.writes.some((entry) => entry.content.includes(adminToken))).toBe(true);
       expect(placement.writes.some((entry) => entry.content.includes("route-password"))).toBe(true);
-      expect(placement.finalizations).toBe(10);
+      expect(placement.finalizations).toBe(11);
       for (const path of placement.writes.map((entry) => dirname(entry.path))) {
         if (!path.includes("opengeni-browser-control-client")) continue;
         await expect(stat(path)).rejects.toThrow();

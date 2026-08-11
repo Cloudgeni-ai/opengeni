@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
 import type {
+  AuthRun,
   BrowserActionRequest,
   BrowserActionReceipt,
   BrowserObservation,
@@ -302,6 +303,63 @@ describe("interaction attempt tools", () => {
     });
   });
 
+  test("advances provider-managed auth without exposing the hosted login URL", async () => {
+    const run = externalAuthRun();
+    let received:
+      | { workspaceId: string; browserSessionId: string; authRunId: string; request: unknown }
+      | undefined;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        advanceExternalBrowserAuthRun: async (
+          receivedWorkspaceId,
+          receivedBrowserSessionId,
+          authRunId,
+          request,
+        ) => {
+          received = {
+            workspaceId: receivedWorkspaceId,
+            browserSessionId: receivedBrowserSessionId,
+            authRunId,
+            request,
+          };
+          return {
+            run,
+            status: "needs_human",
+            operationId: request.operationId,
+            replayed: false,
+          };
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_auth"],
+      permissions: ["sessions:control"],
+    });
+    const operationId = randomUUID();
+    const result = await definitions[0]!.execute(
+      {
+        operation: "advance_external",
+        browserSessionId,
+        authRunId: run.id,
+        expectedVersion: 2,
+        action: "poll",
+      },
+      { operationId, caller: { kind: "model", subjectId: "model:test" } },
+    );
+
+    expect(received).toEqual({
+      workspaceId,
+      browserSessionId,
+      authRunId: run.id,
+      request: { operationId, expectedVersion: 2, action: "poll" },
+    });
+    expect(result.structuredContent).toEqual({
+      operation: "advance_external",
+      result: { run, status: "needs_human", operationId, replayed: false },
+    });
+    expect(JSON.stringify(result.structuredContent)).not.toContain("hosted");
+  });
+
   test("resumes the exact human interaction with a fresh target observation", async () => {
     const target = browserTarget();
     const observation = browserObservation(target);
@@ -518,6 +576,36 @@ function computerReceipt(
     settledAt: now,
     observation,
     error: null,
+  };
+}
+
+function externalAuthRun(): AuthRun {
+  return {
+    id: randomUUID(),
+    accountId,
+    workspaceId,
+    siteAuthConnectionId: randomUUID(),
+    browserSessionId,
+    targetId: "tab-auth",
+    controllerGeneration: "controller-1",
+    targetGeneration: "target-auth",
+    documentGeneration: "document-auth",
+    purpose: "authenticate",
+    methodId: "kernel-managed",
+    authorityId: "kernel-managed",
+    state: "awaiting_external_action",
+    choices: [],
+    pendingFields: [],
+    externalAction: { kind: "human", label: "Finish sign-in", expiresAt: null },
+    interventionId: randomUUID(),
+    verifiedUrl: null,
+    failureCode: null,
+    version: 2,
+    operationId: randomUUID(),
+    createdBySubjectId: "model:test",
+    createdAt: now,
+    updatedAt: now,
+    settledAt: null,
   };
 }
 

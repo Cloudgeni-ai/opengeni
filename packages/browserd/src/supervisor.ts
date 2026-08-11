@@ -9,6 +9,7 @@ import type {
   BrowserDiagnosticBatch,
   BrowserDiagnosticKind,
   BrowserDownload,
+  BrowserExternalAuthCommand,
   BrowserObservation,
   BrowserProtectedAuthFillCommand,
   BrowserProtectedAuthObservation,
@@ -18,6 +19,7 @@ import type {
   BrowserWorkspaceFileStageResponse,
   BrowserDownloadExportRequest as BrowserDownloadExportRequestValue,
   BrowserDownloadExportReceipt as BrowserDownloadExportReceiptValue,
+  BrowserExternalAuthResult as BrowserExternalAuthResultValue,
 } from "@opengeni/contracts";
 import {
   BROWSER_PROFILE_ARTIFACT_FORMAT,
@@ -199,6 +201,7 @@ export type BrowserSupervisorDriver = BrowserInteractionDriver & {
   readClipboard(): BrowserClipboard;
   runtimeSnapshot(): Promise<BrowserRuntimeSnapshot>;
   protectedFill(command: BrowserProtectedAuthFillCommand): Promise<BrowserProtectedAuthObservation>;
+  externalAuth?(command: BrowserExternalAuthCommand): Promise<BrowserExternalAuthResultValue>;
   /** Provider liveness probe used only after another operation reports a
    * failure. Managed Chromium implements it; unsupported providers fail
    * honestly without implicit recovery. */
@@ -254,7 +257,8 @@ type Runtime = {
   lastSnapshot: BrowserRuntimeSnapshot;
   lastTargets: BrowserTarget[];
   recovery: Promise<void> | null;
-  lifecycle: "active" | "recovering" | "capturing" | "captured" | "ending";
+  externalAuthTail: Promise<void> | null;
+  lifecycle: "active" | "recovering" | "reconfiguring" | "capturing" | "captured" | "ending";
 };
 
 type BrowserRuntimeOptions = Omit<
@@ -496,6 +500,25 @@ export class BrowserSupervisor {
     return receipt;
   }
 
+  externalAuth(command: BrowserExternalAuthCommand): Promise<BrowserExternalAuthResultValue> {
+    this.assertOpen();
+    const runtime = this.requireBound({
+      browserSessionId: command.browserSessionId,
+      controllerGeneration: command.controllerGeneration,
+    });
+    const previous = runtime.externalAuthTail ?? Promise.resolve();
+    const operation = previous.then(async () => await this.performExternalAuth(runtime, command));
+    const tail = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    runtime.externalAuthTail = tail;
+    void tail.finally(() => {
+      if (runtime.externalAuthTail === tail) runtime.externalAuthTail = null;
+    });
+    return operation;
+  }
+
   receipt(reference: BrowserSessionReference, operationId: string): BrowserActionReceipt | null {
     return this.requireBound(reference).controller.receipt(operationId);
   }
@@ -627,6 +650,7 @@ export class BrowserSupervisor {
     const stateTransfer = this.stateTransferTails.get(reference.browserSessionId);
     if (stateTransfer) await stateTransfer.catch(() => undefined);
     const runtime = this.requireBound(reference);
+    if (runtime.externalAuthTail) await runtime.externalAuthTail;
     const existing = this.ending.get(reference.browserSessionId);
     if (existing) return await existing;
     if (runtime.recovery) await runtime.recovery.catch(() => undefined);
@@ -780,6 +804,7 @@ export class BrowserSupervisor {
         stateJournal,
         driver,
         lifecycle: "active" as const,
+        externalAuthTail: null,
         controller: null as unknown as BrowserInteractionController,
         protectedAuthController: null as unknown as BrowserProtectedAuthController,
         workspaceFileStager,
@@ -994,6 +1019,44 @@ export class BrowserSupervisor {
     } catch (error) {
       await driver.close().catch(() => undefined);
       throw error;
+    }
+  }
+
+  private async performExternalAuth(
+    runtime: Runtime,
+    command: BrowserExternalAuthCommand,
+  ): Promise<BrowserExternalAuthResultValue> {
+    if (runtime.lifecycle !== "active") {
+      throw new InteractionControllerError(
+        "resource_unavailable",
+        "browser session is changing state",
+        true,
+      );
+    }
+    if (!runtime.driver.externalAuth) {
+      throw new InteractionControllerError(
+        "unsupported",
+        "browser placement does not support provider-managed authentication",
+      );
+    }
+    runtime.lifecycle = "reconfiguring";
+    try {
+      await Promise.all([
+        runtime.controller.waitForIdle(),
+        runtime.protectedAuthController.waitForIdle(),
+      ]);
+      const result = await runtime.driver.externalAuth(command);
+      if (result.profileLoaded) {
+        const [snapshot, targets] = await Promise.all([
+          runtime.driver.runtimeSnapshot(),
+          runtime.driver.listTargets(),
+        ]);
+        this.rememberTargets(runtime, targets);
+        runtime.lastSnapshot = snapshotWithTargets(snapshot, targets);
+      }
+      return result;
+    } finally {
+      if (runtime.lifecycle === "reconfiguring") runtime.lifecycle = "active";
     }
   }
 
@@ -1393,51 +1456,25 @@ async function createBrowserDriver(
   }
   if (context.transport.kind === "external_provider") {
     const managedRoute = context.networkRoute?.providerRoute;
-    const runner = managedRoute
-      ? new ExternalProviderCdpRunner({
-          providerId: context.transport.providerId,
-          apiKey: context.transport.authority.apiKey,
-          ...(context.transport.authority.endpoint
-            ? { endpoint: context.transport.authority.endpoint }
-            : {}),
-          headed: context.headed,
-          ...(context.transport.timeoutSeconds
-            ? { timeoutSeconds: context.transport.timeoutSeconds }
-            : {}),
-          ...(context.transport.stealth === undefined
-            ? {}
-            : { stealth: context.transport.stealth }),
-          route: managedRoute,
-        })
-      : await AgentBrowserJsonRunner.create({
-          namespace: "og",
-          sessionName: `b${randomUUID().replaceAll("-", "").slice(0, 16)}`,
-          socketDirectory: context.socketDirectory,
-          profileDirectory: context.profileDirectory,
-          downloadDirectory: context.downloadDirectory,
-          screenshotDirectory: context.screenshotDirectory,
-          headed: context.headed,
-          provider: {
-            id: context.transport.providerId,
-            apiKey: context.transport.authority.apiKey,
-            ...(context.transport.authority.endpoint
-              ? { endpoint: context.transport.authority.endpoint }
-              : {}),
-            ...(context.transport.timeoutSeconds
-              ? { timeoutSeconds: context.transport.timeoutSeconds }
-              : {}),
-            ...(context.transport.stealth === undefined
-              ? {}
-              : { stealth: context.transport.stealth }),
-          },
-          ...(binary ? { binary } : {}),
-        });
+    const runner = new ExternalProviderCdpRunner({
+      providerId: context.transport.providerId,
+      apiKey: context.transport.authority.apiKey,
+      ...(context.transport.authority.endpoint
+        ? { endpoint: context.transport.authority.endpoint }
+        : {}),
+      headed: context.headed,
+      ...(context.transport.timeoutSeconds
+        ? { timeoutSeconds: context.transport.timeoutSeconds }
+        : {}),
+      ...(context.transport.stealth === undefined ? {} : { stealth: context.transport.stealth }),
+      ...(managedRoute ? { route: managedRoute } : {}),
+    });
     return new AgentBrowserDriver({
       browserSessionId: context.browserSessionId,
       controllerGeneration: context.controllerGeneration,
       runner,
       connect: async (endpoint) => await CdpConnection.connect(endpoint, { allowRemote: true }),
-      ...(managedRoute ? { targetLifecycle: "cdp" as const } : {}),
+      targetLifecycle: "cdp",
     });
   }
   const route = context.networkRoute;

@@ -7,6 +7,8 @@ import {
   BrowserActionReceipt,
   BrowserClipboard,
   BrowserDiagnosticBatch,
+  BrowserExternalAuthCommand,
+  BrowserExternalAuthResult,
   BrowserIdentity,
   BrowserObservation,
   BrowserRevision,
@@ -24,6 +26,8 @@ import {
   CreateSiteAuthConnectionRequest,
   CreateBrowserSessionRequest,
   CreateComputerSessionRequest,
+  ExternalAuthInteractiveResponse,
+  ExternalAuthRunRequest,
   InteractionActor,
   InteractionError,
   PublishBrowserRevisionRequest,
@@ -896,5 +900,43 @@ describe("interaction contracts", () => {
         choices: [{ id: "password", label: "Password", methodId: "password" }],
       }).success,
     ).toBe(true);
+  });
+
+  test("keeps provider login control private and hosted URLs human-only", () => {
+    const authRunId = "44444444-4444-4444-8444-444444444444";
+    expect(
+      ExternalAuthRunRequest.parse({
+        operationId,
+        expectedVersion: 1,
+        action: "start",
+      }),
+    ).toEqual({ operationId, expectedVersion: 1, action: "start" });
+    expect(
+      BrowserExternalAuthCommand.parse({
+        browserSessionId,
+        controllerGeneration: "controller-1",
+        operationId,
+        authRunId,
+        adapterId: "kernel",
+        connectionId: "managed-connection-1",
+        action: "interactive",
+      }).connectionId,
+    ).toBe("managed-connection-1");
+    expect(
+      BrowserExternalAuthResult.safeParse({
+        state: "in_progress",
+        externalAction: null,
+        interactiveUrl: "https://auth.example.test/hosted",
+        failureCode: null,
+        profileLoaded: false,
+      }).success,
+    ).toBe(false);
+    expect(
+      ExternalAuthInteractiveResponse.parse({
+        authRunId,
+        url: "https://auth.example.test/hosted",
+        expiresAt: null,
+      }).url,
+    ).toBe("https://auth.example.test/hosted");
   });
 });

@@ -28,6 +28,8 @@ describe("BrowserSession route discipline", () => {
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/report"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/protected-fill"',
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/external-auth"',
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/external-auth/interactive"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/verify"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/operations/:operationId"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/diagnostics"',
@@ -94,6 +96,40 @@ describe("BrowserSession route discipline", () => {
     expect(route).toContain("resolveProtectedAuthFieldValues");
     expect(route).toContain("protectedAuthReceipt");
     expect(route).not.toContain("BrowserActionCommand.parse");
+  });
+
+  test("keeps provider auth durable while gating its hosted flow to humans", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const start = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/external-auth"',
+    );
+    const interactiveStart = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/external-auth/interactive"',
+      start,
+    );
+    const durable = source.slice(start, interactiveStart);
+    const interactive = source.slice(
+      interactiveStart,
+      source.indexOf(
+        '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/verify"',
+        interactiveStart,
+      ),
+    );
+    expect(durable.indexOf("prepareExternalAuth")).toBeLessThan(
+      durable.indexOf("dispatchExternalAuth"),
+    );
+    expect(durable.indexOf("dispatchExternalAuth")).toBeLessThan(
+      durable.indexOf("sessionClient.externalAuth"),
+    );
+    expect(durable.indexOf("sessionClient.externalAuth")).toBeLessThan(
+      durable.indexOf("completeExternalAuth"),
+    );
+    expect(durable).toContain(
+      "provider exposed a hosted login URL outside the human-only endpoint",
+    );
+    expect(interactive).toContain('grant.principalKind !== "human_session"');
+    expect(interactive).toContain('action: "interactive"');
+    expect(interactive).not.toContain("completeExternalAuth");
   });
 
   test("stages upload bytes privately before the canonical browser action", async () => {

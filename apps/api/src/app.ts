@@ -1095,7 +1095,13 @@ const routeLabelPatterns: Array<{
   },
   {
     pattern:
-      /^\/v1\/workspaces\/[^/]+\/browser-sessions\/[^/]+\/auth-runs\/[^/]+\/(protected-fill|report|verify)$/,
+      /^\/v1\/workspaces\/[^/]+\/browser-sessions\/[^/]+\/auth-runs\/[^/]+\/external-auth\/interactive$/,
+    label:
+      "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/external-auth/interactive",
+  },
+  {
+    pattern:
+      /^\/v1\/workspaces\/[^/]+\/browser-sessions\/[^/]+\/auth-runs\/[^/]+\/(external-auth|protected-fill|report|verify)$/,
     label: (match) =>
       `/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId/${match[1]}`,
   },

@@ -25,6 +25,8 @@ import {
   ComputerSessionMutationResponse,
   ComputerTarget,
   ComputerTargetListResponse,
+  ExternalAuthRunRequest,
+  ExternalAuthRunResponse,
   InteractionIntervention,
   InteractionPlacement,
   ProtectedAuthFillRequest,
@@ -239,6 +241,14 @@ const BrowserAuthInput = z.discriminatedUnion("operation", [
     .strict(),
   z
     .object({
+      operation: z.literal("advance_external"),
+      browserSessionId: z.string().uuid(),
+      authRunId: z.string().uuid(),
+    })
+    .extend(ExternalAuthRunRequest.omit({ operationId: true }).shape)
+    .strict(),
+  z
+    .object({
       operation: z.literal("verify"),
       browserSessionId: z.string().uuid(),
       authRunId: z.string().uuid(),
@@ -265,6 +275,7 @@ const BrowserAuthOutput = z.discriminatedUnion("operation", [
   z.object({ operation: z.literal("start"), result: AuthRunMutationResponse }).strict(),
   z.object({ operation: z.literal("report"), result: AuthRunMutationResponse }).strict(),
   z.object({ operation: z.literal("protected_fill"), result: ProtectedAuthFillResponse }).strict(),
+  z.object({ operation: z.literal("advance_external"), result: ExternalAuthRunResponse }).strict(),
   z.object({ operation: z.literal("verify"), result: AuthRunMutationResponse }).strict(),
 ]);
 
@@ -592,7 +603,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "auth"],
     title: "Authenticate browser session",
     description:
-      "List configured site-auth connections and durable auth runs, or start, advance, protected-fill, and verify one exact BrowserSession authentication run. Protected secret values never enter tool arguments or results. If protected fill returns needs_human, call interaction_request_human with the returned intervention id.",
+      "List configured site-auth connections and durable auth runs, or start, report, provider-advance, protected-fill, and verify one exact BrowserSession authentication run. Use advance_external for an external_provider authority. Provider secrets and hosted-login URLs never enter model tool arguments or results. If an operation returns needs_human, call interaction_request_human with the returned intervention id.",
     input: BrowserAuthInput,
     output: BrowserAuthOutput,
     readOnly: false,
@@ -660,6 +671,18 @@ export function createInteractionAttemptToolDefinitions(
         return {
           operation: value.operation,
           result: await input.transport.protectedBrowserAuthFill(
+            input.workspaceId,
+            browserSessionId,
+            authRunId,
+            { operationId: context.operationId, ...request },
+          ),
+        };
+      }
+      if (value.operation === "advance_external") {
+        const { operation: _operation, browserSessionId, authRunId, ...request } = value;
+        return {
+          operation: value.operation,
+          result: await input.transport.advanceExternalBrowserAuthRun(
             input.workspaceId,
             browserSessionId,
             authRunId,

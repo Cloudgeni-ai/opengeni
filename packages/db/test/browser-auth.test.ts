@@ -12,15 +12,19 @@ import {
   createNetworkRoute,
   createSession,
   createSiteAuthConnection,
+  completeExternalAuth,
   completeProtectedAuthFill,
   dispatchBrowserSessionOperation,
   dispatchProtectedAuthFill,
+  dispatchExternalAuth,
   expireSessionInteractionIntervention,
   findBrowserSessionControlRecordByOperation,
   getAuthRun,
+  getExternalAuthInteractiveContext,
   getInteractionIntervention,
   getInteractionInterventionResumeForEvent,
   getProtectedAuthFillPreparation,
+  getExternalAuthPreparation,
   InteractionResourceConflictError,
   InteractionResourceNotFoundError,
   InteractionResourceStateError,
@@ -29,6 +33,7 @@ import {
   listSiteAuthConnections,
   peekSessionWork,
   prepareProtectedAuthFill,
+  prepareExternalAuth,
   prepareBrowserSessionCreate,
   reportAuthRun,
   resolveInteractionIntervention,
@@ -212,6 +217,30 @@ function humanSiteAuth(operationId = crypto.randomUUID()) {
       intervalSeconds: null,
       automaticRepair: false,
     },
+  };
+}
+
+function externalSiteAuth(operationId = crypto.randomUUID()) {
+  return {
+    ...humanSiteAuth(operationId),
+    authorities: [
+      {
+        id: "kernel-managed",
+        kind: "external_provider" as const,
+        label: "Kernel managed sign-in",
+        adapterId: "kernel",
+        connectionId: "kernel-connection-1",
+        credential: null,
+      },
+    ],
+    methods: [
+      {
+        id: "kernel-managed",
+        kind: "external" as const,
+        label: "Managed sign-in",
+        authorityIds: ["kernel-managed"],
+      },
+    ],
   };
 }
 
@@ -610,6 +639,217 @@ describe("browser auth and network resources", () => {
       interventionId: null,
       version: 3,
     });
+  });
+
+  test("advances external auth durably and rebinds the run after provider profile load", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const auth = await createSiteAuthConnection(client.db, {
+      ...scope,
+      ...externalSiteAuth(),
+    });
+    const browser = await activeBrowser(scope);
+    const started = await startAuthRun(client.db, {
+      ...scope,
+      ...browser,
+      operationId: crypto.randomUUID(),
+      siteAuthConnectionId: auth.connection.id,
+      targetId: "target-external-old",
+      expectedTargetGeneration: "target-generation-external-old",
+      expectedDocumentGeneration: "document-generation-external-old",
+      methodId: "kernel-managed",
+      authorityId: "kernel-managed",
+    });
+    const startOperationId = crypto.randomUUID();
+    const startRequest = {
+      operationId: startOperationId,
+      expectedVersion: started.run.version,
+      action: "start" as const,
+    };
+    expect(
+      await getExternalAuthPreparation(client.db, {
+        ...scope,
+        authRunId: started.run.id,
+        ...startRequest,
+      }),
+    ).toBeNull();
+    expect(
+      await prepareExternalAuth(client.db, {
+        ...scope,
+        authRunId: started.run.id,
+        ...startRequest,
+      }),
+    ).toMatchObject({
+      authority: {
+        kind: "external_provider",
+        adapterId: "kernel",
+        connectionId: "kernel-connection-1",
+      },
+      operationState: "prepared",
+    });
+    expect(
+      await dispatchExternalAuth(client.db, {
+        ...scope,
+        authRunId: started.run.id,
+        operationId: startOperationId,
+      }),
+    ).toBe("dispatched");
+    const waiting = await completeExternalAuth(client.db, {
+      ...scope,
+      authRunId: started.run.id,
+      operationId: startOperationId,
+      result: {
+        state: "needs_human",
+        externalAction: {
+          kind: "human",
+          label: "Finish signing in securely",
+          expiresAt: null,
+        },
+        interactiveUrl: null,
+        failureCode: null,
+        profileLoaded: false,
+      },
+      intervention: {
+        originatingSessionId: scope.sessionId,
+        expiresInSeconds: 900,
+      },
+    });
+    expect(waiting).toMatchObject({
+      status: "needs_human",
+      replayed: false,
+      run: {
+        state: "awaiting_external_action",
+        version: 2,
+      },
+    });
+    expect(
+      await getExternalAuthInteractiveContext(client.db, {
+        ...scope,
+        authRunId: started.run.id,
+        operationId: crypto.randomUUID(),
+        expectedVersion: waiting.run.version,
+      }),
+    ).toMatchObject({
+      run: { id: started.run.id, state: "awaiting_external_action" },
+      authority: { adapterId: "kernel", connectionId: "kernel-connection-1" },
+    });
+    expect(waiting.run.interventionId).toBeString();
+    expect(
+      await prepareExternalAuth(client.db, {
+        ...scope,
+        authRunId: started.run.id,
+        ...startRequest,
+      }),
+    ).toMatchObject({ response: { replayed: true, status: "needs_human" } });
+
+    const competing = await startAuthRun(client.db, {
+      ...scope,
+      ...browser,
+      operationId: crypto.randomUUID(),
+      siteAuthConnectionId: auth.connection.id,
+      targetId: "target-external-competing",
+      expectedTargetGeneration: "target-generation-external-competing",
+      expectedDocumentGeneration: "document-generation-external-competing",
+      methodId: "kernel-managed",
+      authorityId: "kernel-managed",
+    });
+    const competingOperationId = crypto.randomUUID();
+    await prepareExternalAuth(client.db, {
+      ...scope,
+      authRunId: competing.run.id,
+      operationId: competingOperationId,
+      expectedVersion: competing.run.version,
+      action: "poll",
+    });
+    await dispatchExternalAuth(client.db, {
+      ...scope,
+      authRunId: competing.run.id,
+      operationId: competingOperationId,
+    });
+
+    const pollOperationId = crypto.randomUUID();
+    const pollRequest = {
+      operationId: pollOperationId,
+      expectedVersion: waiting.run.version,
+      action: "poll" as const,
+    };
+    await prepareExternalAuth(client.db, {
+      ...scope,
+      authRunId: started.run.id,
+      ...pollRequest,
+    });
+    await dispatchExternalAuth(client.db, {
+      ...scope,
+      authRunId: started.run.id,
+      operationId: pollOperationId,
+    });
+    const authenticated = await completeExternalAuth(client.db, {
+      ...scope,
+      authRunId: started.run.id,
+      operationId: pollOperationId,
+      result: {
+        state: "authenticated",
+        externalAction: null,
+        interactiveUrl: null,
+        failureCode: null,
+        profileLoaded: true,
+      },
+      target: {
+        id: "target-external-new",
+        targetGeneration: "target-generation-external-new",
+        documentGeneration: "document-generation-external-new",
+      },
+    });
+    expect(authenticated).toMatchObject({
+      status: "ready_to_verify",
+      replayed: false,
+      run: {
+        state: "working",
+        targetId: "target-external-new",
+        targetGeneration: "target-generation-external-new",
+        documentGeneration: "document-generation-external-new",
+        interventionId: null,
+        version: 3,
+      },
+    });
+    expect(
+      await getInteractionIntervention(client.db, {
+        ...scope,
+        interventionId: waiting.run.interventionId!,
+      }),
+    ).toMatchObject({ status: "completed", version: 2 });
+    expect(
+      await prepareExternalAuth(client.db, {
+        ...scope,
+        authRunId: started.run.id,
+        ...pollRequest,
+      }),
+    ).toMatchObject({ response: { replayed: true, status: "ready_to_verify" } });
+    expect(await getAuthRun(client.db, { ...scope, authRunId: competing.run.id })).toMatchObject({
+      state: "failed",
+      failureCode: "browser_profile_reconfigured",
+      settledAt: expect.any(String),
+    });
+    const operations = await shared!.admin<
+      Array<{
+        operation_id: string;
+        metadata: unknown;
+        result: unknown;
+        state: string;
+        error_code: string | null;
+      }>
+    >`select operation_id, metadata, result, state, error_code
+      from interaction_resource_operations
+      where operation_id in (${pollOperationId}, ${competingOperationId})
+      order by operation_id`;
+    expect(
+      operations.find((operation) => operation.operation_id === competingOperationId),
+    ).toMatchObject({
+      state: "failed",
+      error_code: "browser_profile_reconfigured",
+    });
+    const operation = operations.find((entry) => entry.operation_id === pollOperationId);
+    expect(JSON.stringify(operation)).not.toContain("hosted_url");
   });
 
   test("keeps model-owned expiry attached to the exact approval across re-freeze", async () => {

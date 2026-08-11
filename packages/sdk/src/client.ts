@@ -68,6 +68,10 @@ import {
   type CreateInteractionInterventionRequest,
   type CreateNetworkRouteRequest,
   type CreateSiteAuthConnectionRequest,
+  type ExternalAuthInteractiveRequest,
+  type ExternalAuthInteractiveResponse,
+  type ExternalAuthRunRequest,
+  type ExternalAuthRunResponse,
   type InteractionIntervention,
   type InteractionInterventionListOptions,
   type InteractionInterventionListResponse,
@@ -2548,6 +2552,38 @@ export class OpenGeniClient {
     return await this.requestJson<ProtectedAuthFillResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/auth-runs/${encodeURIComponent(authRunId)}/protected-fill`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  async advanceExternalBrowserAuthRun(
+    workspaceId: string,
+    browserSessionId: string,
+    authRunId: string,
+    request: ExternalAuthRunRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<ExternalAuthRunResponse> {
+    return await this.requestJson<ExternalAuthRunResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/auth-runs/${encodeURIComponent(authRunId)}/external-auth`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  async openExternalBrowserAuthFlow(
+    workspaceId: string,
+    browserSessionId: string,
+    authRunId: string,
+    request: ExternalAuthInteractiveRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<ExternalAuthInteractiveResponse> {
+    return await this.requestJson<ExternalAuthInteractiveResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/auth-runs/${encodeURIComponent(authRunId)}/external-auth/interactive`,
       request,
       {},
       options,

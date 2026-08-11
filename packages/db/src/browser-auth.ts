@@ -3,9 +3,13 @@ import {
   AuthRun,
   AuthRunListResponse,
   AuthRunMutationResponse,
+  BrowserExternalAuthResult,
   CreateInteractionInterventionRequest,
   CreateNetworkRouteRequest,
   CreateSiteAuthConnectionRequest,
+  ExternalAuthInteractiveRequest,
+  ExternalAuthRunRequest,
+  ExternalAuthRunResponse,
   InteractionIntervention,
   InteractionInterventionListResponse,
   InteractionInterventionMutationResponse,
@@ -33,6 +37,10 @@ import {
   type CreateInteractionInterventionRequest as CreateInteractionInterventionRequestValue,
   type CreateNetworkRouteRequest as CreateNetworkRouteRequestValue,
   type CreateSiteAuthConnectionRequest as CreateSiteAuthConnectionRequestValue,
+  type BrowserExternalAuthResult as BrowserExternalAuthResultValue,
+  type ExternalAuthInteractiveRequest as ExternalAuthInteractiveRequestValue,
+  type ExternalAuthRunRequest as ExternalAuthRunRequestValue,
+  type ExternalAuthRunResponse as ExternalAuthRunResponseValue,
   type InteractionCredentialAuthorityRef,
   type InteractionIntervention as InteractionInterventionValue,
   type InteractionInterventionListResponse as InteractionInterventionListResponseValue,
@@ -1168,6 +1176,20 @@ type ProtectedAuthOperationMetadata = {
   credentialVersion: number | null;
 };
 
+type ExternalAuthOperationMetadata = {
+  schemaVersion: 1;
+  authRunVersion: number;
+  authority: Extract<SiteAuthAuthorityValue, { kind: "external_provider" }>;
+};
+
+export type ExternalAuthPreparation = {
+  run: AuthRunValue;
+  authority: ExternalAuthOperationMetadata["authority"];
+  operationState: ResourceOperationRow["state"];
+  response: ExternalAuthRunResponseValue | null;
+  replayed: boolean;
+};
+
 export type ProtectedAuthFillPreparation = {
   run: AuthRunValue;
   authority: SiteAuthAuthorityValue;
@@ -1190,6 +1212,71 @@ function protectedAuthFillDigest(
     request: digestRequest,
     actorSubjectId,
   });
+}
+
+function parseExternalAuthRunRequest(
+  input: ExternalAuthRunRequestValue,
+): ExternalAuthRunRequestValue {
+  return ExternalAuthRunRequest.parse({
+    operationId: input.operationId,
+    expectedVersion: input.expectedVersion,
+    action: input.action,
+  });
+}
+
+function externalAuthDigest(
+  authRunId: string,
+  request: ExternalAuthRunRequestValue,
+  actorSubjectId: string,
+): string {
+  const { operationId: _operationId, ...digestRequest } = request;
+  return operationDigest({
+    version: 1,
+    authRunId,
+    request: digestRequest,
+    actorSubjectId,
+  });
+}
+
+function externalAuthOperationMetadata(value: unknown): ExternalAuthOperationMetadata {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new InteractionResourceStateError("External-auth operation metadata is invalid");
+  }
+  const record = value as Record<string, unknown>;
+  const authority = SiteAuthAuthority.parse(record.authority);
+  if (
+    record.schemaVersion !== 1 ||
+    !Number.isSafeInteger(record.authRunVersion) ||
+    (record.authRunVersion as number) < 1 ||
+    authority.kind !== "external_provider"
+  ) {
+    throw new InteractionResourceStateError("External-auth operation metadata is invalid");
+  }
+  return {
+    schemaVersion: 1,
+    authRunVersion: record.authRunVersion as number,
+    authority,
+  };
+}
+
+function externalAuthPreparationFromOperation(
+  operation: ResourceOperationRow,
+  run: AuthRunRow,
+): ExternalAuthPreparation {
+  const metadata = externalAuthOperationMetadata(operation.metadata);
+  return {
+    run: authRunFromRow(run),
+    authority: metadata.authority,
+    operationState: operation.state,
+    response:
+      operation.state === "completed" && operation.result
+        ? {
+            ...ExternalAuthRunResponse.parse(operation.result),
+            replayed: true,
+          }
+        : null,
+    replayed: operation.state === "completed",
+  };
 }
 
 function parseProtectedAuthFillRequest(
@@ -1389,6 +1476,80 @@ export async function getAuthRun(
       const row = await loadAuthRunRow(scopedDb, input.workspaceId, input.authRunId);
       if (!row) throw new InteractionResourceNotFoundError("Auth run not found");
       return authRunFromRow(row);
+    },
+    CONSISTENT_READ,
+  );
+}
+
+export type ExternalAuthInteractiveContext = {
+  run: AuthRunValue;
+  authority: Extract<SiteAuthAuthorityValue, { kind: "external_provider" }>;
+};
+
+/** Resolve only the durable authority needed to reveal an external provider's
+ * hosted login UI. The hosted URL itself is deliberately never persisted. */
+export async function getExternalAuthInteractiveContext(
+  db: Database,
+  input: InteractionMutationScope & {
+    authRunId: string;
+  } & ExternalAuthInteractiveRequestValue,
+): Promise<ExternalAuthInteractiveContext> {
+  const request = ExternalAuthInteractiveRequest.parse({
+    operationId: input.operationId,
+    expectedVersion: input.expectedVersion,
+  });
+  return await withRlsContext(
+    db,
+    input,
+    async (scopedDb) => {
+      const run = await loadAuthRunRow(scopedDb, input.workspaceId, input.authRunId);
+      if (!run) throw new InteractionResourceNotFoundError("Auth run not found");
+      if (run.settledAt || run.version !== request.expectedVersion) {
+        throw new InteractionResourceConflictError(
+          "Auth run changed before its hosted login flow was opened",
+        );
+      }
+      if (run.state !== "awaiting_external_action" || !run.externalAction || !run.interventionId) {
+        throw new InteractionResourceStateError("Auth run is not waiting for a hosted login flow");
+      }
+      const [browser] = await scopedDb
+        .select({
+          lifecycle: schema.browserSessions.lifecycle,
+          controllerGeneration: schema.browserSessions.controllerGeneration,
+        })
+        .from(schema.browserSessions)
+        .where(
+          and(
+            eq(schema.browserSessions.workspaceId, input.workspaceId),
+            eq(schema.browserSessions.id, run.browserSessionId),
+          ),
+        )
+        .limit(1);
+      if (
+        !browser ||
+        browser.lifecycle !== "active" ||
+        browser.controllerGeneration !== run.controllerGeneration
+      ) {
+        throw new InteractionResourceConflictError(
+          "Hosted login belongs to a stale browser controller",
+        );
+      }
+      const connectionRow = await getSiteAuthConnectionRow(
+        scopedDb,
+        input.workspaceId,
+        run.siteAuthConnectionId,
+      );
+      if (connectionRow.status !== "active") {
+        throw new InteractionResourceStateError("Site auth connection is archived");
+      }
+      const connection = siteAuthConnectionFromRow(connectionRow);
+      const authority = connection.authorities.find(
+        (candidate) => candidate.id === run.authorityId,
+      );
+      if (!authority || authority.kind !== "external_provider") {
+        throw new InteractionResourceStateError("Auth run has no external provider authority");
+      }
+      return { run: authRunFromRow(run), authority };
     },
     CONSISTENT_READ,
   );
@@ -1639,6 +1800,516 @@ export async function reportAuthRun(
     await advanceWorkspaceInteractionRevision(scopedDb, input.accountId, input.workspaceId);
     return response;
   });
+}
+
+export async function getExternalAuthPreparation(
+  db: Database,
+  input: InteractionMutationScope & {
+    authRunId: string;
+  } & ExternalAuthRunRequestValue,
+): Promise<ExternalAuthPreparation | null> {
+  const request = parseExternalAuthRunRequest(input);
+  const digest = externalAuthDigest(input.authRunId, request, input.actorSubjectId);
+  return await withRlsContext(
+    db,
+    input,
+    async (scopedDb) => {
+      const operation = await loadOperation(scopedDb, input.workspaceId, request.operationId);
+      if (!operation) return null;
+      assertOperationIdentity(operation, {
+        resourceKind: "auth_run",
+        resourceId: input.authRunId,
+        kind: "external_auth",
+        requestDigest: digest,
+        actorSubjectId: input.actorSubjectId,
+      });
+      const run = await loadAuthRunRow(scopedDb, input.workspaceId, input.authRunId);
+      if (!run) throw new InteractionResourceNotFoundError("Auth run not found");
+      return externalAuthPreparationFromOperation(operation, run);
+    },
+    CONSISTENT_READ,
+  );
+}
+
+export async function prepareExternalAuth(
+  db: Database,
+  input: InteractionMutationScope & {
+    authRunId: string;
+  } & ExternalAuthRunRequestValue,
+): Promise<ExternalAuthPreparation> {
+  const request = parseExternalAuthRunRequest(input);
+  const digest = externalAuthDigest(input.authRunId, request, input.actorSubjectId);
+  return await withRlsContext(db, input, async (scopedDb) => {
+    await assertWorkspaceAccount(scopedDb, input.accountId, input.workspaceId);
+    await setSubjectRlsContext(scopedDb, input.actorSubjectId);
+    await lockOperation(scopedDb, request.operationId);
+    const existing = await loadOperation(scopedDb, input.workspaceId, request.operationId);
+    if (existing) {
+      assertOperationIdentity(existing, {
+        resourceKind: "auth_run",
+        resourceId: input.authRunId,
+        kind: "external_auth",
+        requestDigest: digest,
+        actorSubjectId: input.actorSubjectId,
+      });
+      const run = await loadAuthRunRow(scopedDb, input.workspaceId, input.authRunId);
+      if (!run) throw new InteractionResourceNotFoundError("Auth run not found");
+      return externalAuthPreparationFromOperation(existing, run);
+    }
+
+    const [run] = await scopedDb
+      .select()
+      .from(schema.authRuns)
+      .where(
+        and(
+          eq(schema.authRuns.workspaceId, input.workspaceId),
+          eq(schema.authRuns.id, input.authRunId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!run) throw new InteractionResourceNotFoundError("Auth run not found");
+    if (run.settledAt) throw new InteractionResourceStateError("Auth run is already settled");
+    if (run.version !== request.expectedVersion) {
+      throw new InteractionResourceConflictError("Auth run changed before external authentication");
+    }
+    const [browser] = await scopedDb
+      .select({
+        lifecycle: schema.browserSessions.lifecycle,
+        controllerGeneration: schema.browserSessions.controllerGeneration,
+      })
+      .from(schema.browserSessions)
+      .where(
+        and(
+          eq(schema.browserSessions.workspaceId, input.workspaceId),
+          eq(schema.browserSessions.id, run.browserSessionId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (
+      !browser ||
+      browser.lifecycle !== "active" ||
+      browser.controllerGeneration !== run.controllerGeneration
+    ) {
+      throw new InteractionResourceConflictError(
+        "External authentication belongs to a stale browser controller",
+      );
+    }
+    const connectionRow = await getSiteAuthConnectionRow(
+      scopedDb,
+      input.workspaceId,
+      run.siteAuthConnectionId,
+    );
+    if (connectionRow.status !== "active") {
+      throw new InteractionResourceStateError("Site auth connection is archived");
+    }
+    const connection = siteAuthConnectionFromRow(connectionRow);
+    if (!run.authorityId) {
+      throw new InteractionResourceStateError(
+        "Auth run must select an external authority before it can start",
+      );
+    }
+    assertAuthSelection(connection, {
+      methodId: run.methodId,
+      authorityId: run.authorityId,
+    });
+    const selected = connection.authorities.find((authority) => authority.id === run.authorityId);
+    if (!selected || selected.kind !== "external_provider") {
+      throw new InteractionResourceStateError(
+        "Selected auth authority is not an external provider",
+      );
+    }
+    const metadata: ExternalAuthOperationMetadata = {
+      schemaVersion: 1,
+      authRunVersion: run.version,
+      authority: selected,
+    };
+    await scopedDb.insert(schema.interactionResourceOperations).values({
+      operationId: request.operationId,
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      resourceKind: "auth_run",
+      resourceId: input.authRunId,
+      kind: "external_auth",
+      requestDigest: digest,
+      metadata,
+      state: "prepared",
+      actorSubjectId: input.actorSubjectId,
+    });
+    return {
+      run: authRunFromRow(run),
+      authority: selected,
+      operationState: "prepared",
+      response: null,
+      replayed: false,
+    };
+  });
+}
+
+export async function dispatchExternalAuth(
+  db: Database,
+  input: InteractionMutationScope & { authRunId: string; operationId: string },
+): Promise<ResourceOperationRow["state"]> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    await lockOperation(scopedDb, input.operationId);
+    const operation = await loadOperation(scopedDb, input.workspaceId, input.operationId);
+    if (!operation) throw new InteractionResourceNotFoundError("External-auth operation not found");
+    assertExternalAuthOperationBinding(operation, input);
+    if (operation.state !== "prepared") return operation.state;
+    const [dispatched] = await scopedDb
+      .update(schema.interactionResourceOperations)
+      .set({ state: "dispatched" })
+      .where(
+        and(
+          eq(schema.interactionResourceOperations.operationId, input.operationId),
+          eq(schema.interactionResourceOperations.state, "prepared"),
+        ),
+      )
+      .returning({ state: schema.interactionResourceOperations.state });
+    if (!dispatched) {
+      throw new InteractionResourceConflictError("External-auth dispatch lost its fence");
+    }
+    return dispatched.state;
+  });
+}
+
+export async function completeExternalAuth(
+  db: Database,
+  input: InteractionMutationScope & {
+    authRunId: string;
+    operationId: string;
+    result: BrowserExternalAuthResultValue;
+    target?: {
+      id: string;
+      targetGeneration: string;
+      documentGeneration: string | null;
+    };
+    intervention?: {
+      originatingSessionId: string;
+      originatingTurnId?: string | null;
+      originatingAttemptId?: string | null;
+      originatingToolOperationId?: string | null;
+      expiresInSeconds: number;
+    };
+  },
+): Promise<ExternalAuthRunResponseValue> {
+  const providerResult = BrowserExternalAuthResult.parse(input.result);
+  try {
+    return await withRlsContext(db, input, async (scopedDb) => {
+      await lockOperation(scopedDb, input.operationId);
+      const operation = await loadOperation(scopedDb, input.workspaceId, input.operationId);
+      if (!operation)
+        throw new InteractionResourceNotFoundError("External-auth operation not found");
+      assertExternalAuthOperationBinding(operation, input);
+      if (operation.state === "completed" && operation.result) {
+        return {
+          ...ExternalAuthRunResponse.parse(operation.result),
+          replayed: true,
+        };
+      }
+      if (operation.state !== "dispatched") {
+        throw new InteractionResourceStateError(
+          `External-auth operation is ${operation.state.replace("_", " ")}`,
+        );
+      }
+      const metadata = externalAuthOperationMetadata(operation.metadata);
+      const [run] = await scopedDb
+        .select()
+        .from(schema.authRuns)
+        .where(
+          and(
+            eq(schema.authRuns.workspaceId, input.workspaceId),
+            eq(schema.authRuns.id, input.authRunId),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      if (!run) throw new InteractionResourceNotFoundError("Auth run not found");
+      if (run.version !== metadata.authRunVersion || run.settledAt) {
+        throw new InteractionResourceConflictError("Auth run changed after external auth began");
+      }
+      if ((providerResult.state === "authenticated") !== Boolean(input.target)) {
+        throw new InteractionResourceStateError(
+          "Authenticated external auth requires the current browser target",
+        );
+      }
+      if ((providerResult.state === "needs_human") !== Boolean(input.intervention)) {
+        throw new InteractionResourceStateError(
+          "Human external auth requires intervention provenance",
+        );
+      }
+      const nextState =
+        providerResult.state === "needs_human"
+          ? "awaiting_external_action"
+          : providerResult.state === "failed"
+            ? "failed"
+            : "working";
+      if (!AUTH_RUN_TRANSITIONS[run.state].has(nextState)) {
+        throw new InteractionResourceStateError(
+          `Auth run cannot transition from ${run.state} to ${nextState}`,
+        );
+      }
+
+      if (providerResult.profileLoaded) {
+        const otherRuns = await scopedDb
+          .update(schema.authRuns)
+          .set({
+            state: "failed",
+            choices: [],
+            pendingFields: [],
+            externalAction: null,
+            interventionId: null,
+            verifiedUrl: null,
+            failureCode: "browser_profile_reconfigured",
+            version: sql`${schema.authRuns.version} + 1`,
+            updatedAt: sql`now()`,
+            settledAt: sql`now()`,
+          })
+          .where(
+            and(
+              eq(schema.authRuns.workspaceId, input.workspaceId),
+              eq(schema.authRuns.browserSessionId, run.browserSessionId),
+              sql`${schema.authRuns.id} <> ${run.id}`,
+              sql`${schema.authRuns.settledAt} is null`,
+            ),
+          )
+          .returning();
+        if (otherRuns.length > 0) {
+          const otherIds = otherRuns.map((entry) => entry.id);
+          await scopedDb
+            .update(schema.interactionResourceOperations)
+            .set({
+              state: "failed",
+              errorCode: "browser_profile_reconfigured",
+              settledAt: sql`now()`,
+            })
+            .where(
+              and(
+                eq(schema.interactionResourceOperations.workspaceId, input.workspaceId),
+                eq(schema.interactionResourceOperations.resourceKind, "auth_run"),
+                inArray(schema.interactionResourceOperations.resourceId, otherIds),
+                inArray(schema.interactionResourceOperations.state, ["prepared", "dispatched"]),
+              ),
+            );
+          await scopedDb
+            .update(schema.interactionInterventions)
+            .set({
+              status: "cancelled",
+              responseActorSubjectId: input.actorSubjectId,
+              version: sql`${schema.interactionInterventions.version} + 1`,
+              updatedAt: sql`now()`,
+              settledAt: sql`now()`,
+            })
+            .where(
+              and(
+                eq(schema.interactionInterventions.workspaceId, input.workspaceId),
+                inArray(schema.interactionInterventions.authRunId, otherIds),
+                eq(schema.interactionInterventions.status, "open"),
+              ),
+            );
+          for (const other of otherRuns) {
+            await projectSettledAuthRunHealth(scopedDb, {
+              run: other,
+              actorSubjectId: input.actorSubjectId,
+            });
+          }
+        }
+      }
+
+      let interventionId: string | null = null;
+      if (providerResult.state === "needs_human") {
+        const currentIntervention = run.interventionId
+          ? (
+              await scopedDb
+                .select()
+                .from(schema.interactionInterventions)
+                .where(
+                  and(
+                    eq(schema.interactionInterventions.workspaceId, input.workspaceId),
+                    eq(schema.interactionInterventions.id, run.interventionId),
+                  ),
+                )
+                .for("update")
+                .limit(1)
+            )[0]
+          : null;
+        if (currentIntervention?.status === "open" && currentIntervention.expiresAt > new Date()) {
+          interventionId = currentIntervention.id;
+        } else {
+          if (currentIntervention?.status === "open") {
+            await scopedDb
+              .update(schema.interactionInterventions)
+              .set({
+                status: "expired",
+                version: currentIntervention.version + 1,
+                updatedAt: sql`now()`,
+                settledAt: sql`now()`,
+              })
+              .where(
+                and(
+                  eq(schema.interactionInterventions.id, currentIntervention.id),
+                  eq(schema.interactionInterventions.version, currentIntervention.version),
+                  eq(schema.interactionInterventions.status, "open"),
+                ),
+              );
+          }
+          const intervention = input.intervention!;
+          if (
+            (intervention.originatingAttemptId && !intervention.originatingTurnId) ||
+            (intervention.originatingToolOperationId && !intervention.originatingAttemptId)
+          ) {
+            throw new InteractionResourceStateError(
+              "External-auth intervention provenance is incomplete",
+            );
+          }
+          interventionId = randomUUID();
+          const [created] = await scopedDb
+            .insert(schema.interactionInterventions)
+            .values({
+              id: interventionId,
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              resourceKind: "browser_session",
+              resourceId: run.browserSessionId,
+              targetId: run.targetId,
+              controllerGeneration: run.controllerGeneration,
+              targetGeneration: run.targetGeneration,
+              documentGeneration: run.documentGeneration,
+              kind: "external_action",
+              reason: providerResult.externalAction!.label,
+              authRunId: run.id,
+              originatingSessionId: intervention.originatingSessionId,
+              originatingTurnId: intervention.originatingTurnId ?? null,
+              originatingAttemptId: intervention.originatingAttemptId ?? null,
+              originatingToolOperationId: intervention.originatingToolOperationId ?? null,
+              operationId: input.operationId,
+              expiresAt: providerResult.externalAction!.expiresAt
+                ? new Date(providerResult.externalAction!.expiresAt)
+                : sql`now() + (${intervention.expiresInSeconds} * interval '1 second')`,
+            })
+            .returning({ id: schema.interactionInterventions.id });
+          if (!created) throw new Error("External-auth intervention insert returned no row");
+        }
+      } else if (run.interventionId) {
+        await scopedDb
+          .update(schema.interactionInterventions)
+          .set({
+            status: "completed",
+            responseActorSubjectId: input.actorSubjectId,
+            version: sql`${schema.interactionInterventions.version} + 1`,
+            updatedAt: sql`now()`,
+            settledAt: sql`now()`,
+          })
+          .where(
+            and(
+              eq(schema.interactionInterventions.workspaceId, input.workspaceId),
+              eq(schema.interactionInterventions.id, run.interventionId),
+              eq(schema.interactionInterventions.status, "open"),
+            ),
+          );
+      }
+
+      const [updated] = await scopedDb
+        .update(schema.authRuns)
+        .set({
+          authorityId: metadata.authority.id,
+          state: nextState,
+          targetId: input.target?.id ?? run.targetId,
+          targetGeneration: input.target?.targetGeneration ?? run.targetGeneration,
+          documentGeneration: input.target?.documentGeneration ?? run.documentGeneration,
+          choices: [],
+          pendingFields: [],
+          externalAction:
+            providerResult.state === "needs_human" ? providerResult.externalAction : null,
+          interventionId,
+          verifiedUrl: null,
+          failureCode: providerResult.state === "failed" ? providerResult.failureCode : null,
+          version: run.version + 1,
+          updatedAt: sql`now()`,
+          settledAt: providerResult.state === "failed" ? sql`now()` : null,
+        })
+        .where(
+          and(
+            eq(schema.authRuns.workspaceId, input.workspaceId),
+            eq(schema.authRuns.id, input.authRunId),
+            eq(schema.authRuns.version, metadata.authRunVersion),
+            sql`${schema.authRuns.settledAt} is null`,
+          ),
+        )
+        .returning();
+      if (!updated) {
+        throw new InteractionResourceConflictError("External-auth settlement lost its auth fence");
+      }
+      await projectSettledAuthRunHealth(scopedDb, {
+        run: updated,
+        actorSubjectId: input.actorSubjectId,
+      });
+      const status =
+        providerResult.state === "authenticated"
+          ? "ready_to_verify"
+          : providerResult.state === "needs_human"
+            ? "needs_human"
+            : providerResult.state === "failed"
+              ? "failed"
+              : "working";
+      const response = ExternalAuthRunResponse.parse({
+        run: authRunFromRow(updated),
+        status,
+        operationId: input.operationId,
+        replayed: false,
+      });
+      const [completed] = await scopedDb
+        .update(schema.interactionResourceOperations)
+        .set({
+          state: "completed",
+          resultVersion: updated.version,
+          result: response,
+          settledAt: sql`now()`,
+        })
+        .where(
+          and(
+            eq(schema.interactionResourceOperations.operationId, input.operationId),
+            eq(schema.interactionResourceOperations.state, "dispatched"),
+          ),
+        )
+        .returning({ operationId: schema.interactionResourceOperations.operationId });
+      if (!completed) {
+        throw new InteractionResourceConflictError(
+          "External-auth settlement lost its operation fence",
+        );
+      }
+      await advanceWorkspaceInteractionRevision(scopedDb, input.accountId, input.workspaceId);
+      return response;
+    });
+  } catch (error) {
+    if (
+      postgresConstraint(error) === "interaction_interventions_workspace_operation_uq" ||
+      postgresConstraint(error) === "interaction_interventions_open_target_kind_uq" ||
+      postgresConstraint(error) === "interaction_interventions_open_auth_run_uq"
+    ) {
+      throw new InteractionResourceConflictError(
+        "A matching interaction intervention is already open",
+      );
+    }
+    throw error;
+  }
+}
+
+function assertExternalAuthOperationBinding(
+  operation: ResourceOperationRow,
+  input: { authRunId: string; actorSubjectId: string },
+): void {
+  if (
+    operation.resourceKind !== "auth_run" ||
+    operation.resourceId !== input.authRunId ||
+    operation.kind !== "external_auth" ||
+    operation.actorSubjectId !== input.actorSubjectId
+  ) {
+    throw new InteractionResourceConflictError(
+      "Operation id is bound to another external-auth request",
+    );
+  }
 }
 
 export async function prepareProtectedAuthFill(
