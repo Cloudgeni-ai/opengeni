@@ -2967,6 +2967,9 @@ describe("workflow contracts", () => {
     expect(plan.steps.find((step: any) => step.id === "plan").run).toContain(
       "bun scripts/ci/impact.ts --full --output impact-plan.json",
     );
+    expect(plan.steps.find((step: any) => step.id === "plan").run).toContain(
+      "unit_matrix=$(matrix \"$(jq '.unitTests | length' impact-plan.json)\" 6)",
+    );
 
     const source = ci.jobs["source-contracts"];
     expect(source.needs).toEqual(["automation-admission", "plan"]);
