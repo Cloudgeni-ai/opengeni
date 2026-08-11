@@ -1015,8 +1015,58 @@ export type SessionTenancyVisibility = z.infer<typeof SessionTenancyVisibility>;
 export const UserResourceGrantMode = z.enum(["once", "session", "always"]);
 export type UserResourceGrantMode = z.infer<typeof UserResourceGrantMode>;
 
+/** Canonical non-wildcard action named by a personal-resource grant. */
+export const UserResourceGrantAction = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(/^[a-z0-9](?:[a-z0-9._:-]*[a-z0-9])?$/u);
+export type UserResourceGrantAction = z.infer<typeof UserResourceGrantAction>;
+
 export const UserResourceGrantStatus = z.enum(["active", "consumed", "revoked", "expired"]);
 export type UserResourceGrantStatus = z.infer<typeof UserResourceGrantStatus>;
+
+function refineUserResourceGrantFence(
+  value: {
+    mode: UserResourceGrantMode;
+    sessionId: string | null;
+    authorityEpoch: number | null;
+  },
+  context: z.RefinementCtx,
+): void {
+  const sessionBoundMode = value.mode === "once" || value.mode === "session";
+  const hasSession = value.sessionId !== null;
+  const hasAuthorityEpoch = value.authorityEpoch !== null;
+
+  if (sessionBoundMode && !hasSession) {
+    context.addIssue({
+      code: "custom",
+      path: ["sessionId"],
+      message: "once and session grants require an exact sessionId",
+    });
+  }
+  if (sessionBoundMode && !hasAuthorityEpoch) {
+    context.addIssue({
+      code: "custom",
+      path: ["authorityEpoch"],
+      message: "once and session grants require an authorityEpoch fence",
+    });
+  }
+  if (!sessionBoundMode && (hasSession || hasAuthorityEpoch)) {
+    context.addIssue({
+      code: "custom",
+      path: ["mode"],
+      message: "always grants must not carry a session or authority-epoch fence",
+    });
+  }
+  if (hasSession !== hasAuthorityEpoch) {
+    context.addIssue({
+      code: "custom",
+      path: ["authorityEpoch"],
+      message: "sessionId and authorityEpoch must be present or absent together",
+    });
+  }
+}
 
 /** Self-only organization membership projection; no subject identifier leaks. */
 export const OrganizationMembershipProjection = z.object({
@@ -1048,18 +1098,22 @@ export type UserResourceAuthorityProjection = z.infer<typeof UserResourceAuthori
  * boundary proves the organization, owner, workspace, session context, and
  * current authority epoch.
  */
-export const UserResourceGrantProjection = z.object({
-  id: z.string().uuid(),
-  authorityId: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  sessionId: z.string().uuid().nullable(),
-  mode: UserResourceGrantMode,
-  context: SessionTenancyVisibility,
-  authorityEpoch: z.number().int().positive().nullable(),
-  generation: z.number().int().positive(),
-  status: UserResourceGrantStatus,
-  expiresAt: z.string().datetime({ offset: true }).nullable(),
-});
+export const UserResourceGrantProjection = z
+  .object({
+    id: z.string().uuid(),
+    authorityId: z.string().uuid(),
+    organizationId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    sessionId: z.string().uuid().nullable(),
+    action: UserResourceGrantAction,
+    mode: UserResourceGrantMode,
+    context: SessionTenancyVisibility,
+    authorityEpoch: z.number().int().positive().nullable(),
+    generation: z.number().int().positive(),
+    status: UserResourceGrantStatus,
+    expiresAt: z.string().datetime({ offset: true }).nullable(),
+  })
+  .superRefine(refineUserResourceGrantFence);
 export type UserResourceGrantProjection = z.infer<typeof UserResourceGrantProjection>;
 
 /**
@@ -1067,18 +1121,22 @@ export type UserResourceGrantProjection = z.infer<typeof UserResourceGrantProjec
  * opaque authority/grant identity and execution fences, never owner identity
  * or credential material.
  */
-export const UserResourceDelegation = z.object({
-  authorityId: z.string().uuid(),
-  grantId: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  sessionId: z.string().uuid().nullable(),
-  mode: UserResourceGrantMode,
-  context: SessionTenancyVisibility,
-  authorityEpoch: z.number().int().positive(),
-  authorityGeneration: z.number().int().positive(),
-  grantGeneration: z.number().int().positive(),
-  resourceVersionId: z.string().uuid().nullable().optional(),
-});
+export const UserResourceDelegation = z
+  .object({
+    authorityId: z.string().uuid(),
+    grantId: z.string().uuid(),
+    organizationId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    sessionId: z.string().uuid().nullable(),
+    action: UserResourceGrantAction,
+    mode: UserResourceGrantMode,
+    context: SessionTenancyVisibility,
+    authorityEpoch: z.number().int().positive().nullable(),
+    authorityGeneration: z.number().int().positive(),
+    grantGeneration: z.number().int().positive(),
+    resourceVersionId: z.string().uuid().nullable().optional(),
+  })
+  .superRefine(refineUserResourceGrantFence);
 export type UserResourceDelegation = z.infer<typeof UserResourceDelegation>;
 
 /**

@@ -38,8 +38,10 @@ describe("organization tenancy foundation contracts", () => {
         userDelegation: {
           authorityId: ids.authority,
           grantId: ids.grant,
+          organizationId: ids.organization,
           workspaceId: ids.workspace,
           sessionId: ids.session,
+          action: "resource.use",
           mode: "session",
           context: "user_private",
           authorityEpoch: 1,
@@ -54,8 +56,10 @@ describe("organization tenancy foundation contracts", () => {
     const delegation = UserResourceDelegation.parse({
       authorityId: ids.authority,
       grantId: ids.grant,
+      organizationId: ids.organization,
       workspaceId: ids.workspace,
       sessionId: ids.session,
+      action: "resource.use",
       mode: "once",
       context: "workspace_shared",
       authorityEpoch: 3,
@@ -69,8 +73,10 @@ describe("organization tenancy foundation contracts", () => {
     expect(delegation).toEqual({
       authorityId: ids.authority,
       grantId: ids.grant,
+      organizationId: ids.organization,
       workspaceId: ids.workspace,
       sessionId: ids.session,
+      action: "resource.use",
       mode: "once",
       context: "workspace_shared",
       authorityEpoch: 3,
@@ -105,8 +111,10 @@ describe("organization tenancy foundation contracts", () => {
     const grant = UserResourceGrantProjection.parse({
       id: ids.grant,
       authorityId: ids.authority,
+      organizationId: ids.organization,
       workspaceId: ids.workspace,
       sessionId: ids.session,
+      action: "resource.use",
       mode: "session",
       context: "user_private",
       authorityEpoch: 1,
@@ -131,5 +139,68 @@ describe("organization tenancy foundation contracts", () => {
     expect(serialized).not.toContain("subjectId");
     expect(serialized).not.toContain("organizationMembershipId");
     expect(serialized).not.toContain("ownerOrganizationMembershipId");
+  });
+
+  test("rejects illegal grant fences and allows only exact standing/session forms", () => {
+    const base = {
+      authorityId: ids.authority,
+      grantId: ids.grant,
+      organizationId: ids.organization,
+      workspaceId: ids.workspace,
+      action: "resource.use",
+      context: "workspace_shared" as const,
+      authorityGeneration: 1,
+      grantGeneration: 1,
+    };
+
+    expect(
+      UserResourceDelegation.safeParse({
+        ...base,
+        sessionId: null,
+        mode: "once",
+        authorityEpoch: null,
+      }).success,
+    ).toBe(false);
+    expect(
+      UserResourceDelegation.safeParse({
+        ...base,
+        sessionId: null,
+        mode: "session",
+        authorityEpoch: null,
+      }).success,
+    ).toBe(false);
+    expect(
+      UserResourceDelegation.safeParse({
+        ...base,
+        sessionId: ids.session,
+        mode: "always",
+        authorityEpoch: 1,
+      }).success,
+    ).toBe(false);
+    expect(
+      UserResourceDelegation.safeParse({
+        ...base,
+        sessionId: ids.session,
+        mode: "session",
+        authorityEpoch: null,
+      }).success,
+    ).toBe(false);
+
+    expect(
+      UserResourceDelegation.safeParse({
+        ...base,
+        sessionId: ids.session,
+        mode: "once",
+        authorityEpoch: 1,
+      }).success,
+    ).toBe(true);
+    expect(
+      UserResourceDelegation.safeParse({
+        ...base,
+        sessionId: null,
+        mode: "always",
+        authorityEpoch: null,
+      }).success,
+    ).toBe(true);
   });
 });

@@ -107,6 +107,8 @@ CREATE TABLE "organization_user_resource_authorities" (
 
 CREATE UNIQUE INDEX "organization_user_resource_authorities_id_account_idx"
   ON "organization_user_resource_authorities" ("id", "account_id");
+CREATE UNIQUE INDEX "organization_user_resource_authorities_id_account_membership_idx"
+  ON "organization_user_resource_authorities" ("id", "account_id", "organization_membership_id");
 CREATE UNIQUE INDEX "organization_user_resource_authorities_resource_identity_idx"
   ON "organization_user_resource_authorities" (
     "account_id",
@@ -178,8 +180,10 @@ CREATE TABLE "organization_user_resource_grants" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   "account_id" uuid NOT NULL REFERENCES "managed_accounts"("id") ON DELETE CASCADE,
   "authority_id" uuid NOT NULL,
+  "owner_organization_membership_id" uuid NOT NULL,
   "workspace_id" uuid NOT NULL,
   "session_id" uuid,
+  "action" text NOT NULL,
   "mode" text NOT NULL,
   "context" text NOT NULL,
   "authority_epoch" integer,
@@ -193,12 +197,25 @@ CREATE TABLE "organization_user_resource_grants" (
     FOREIGN KEY ("authority_id", "account_id")
     REFERENCES "organization_user_resource_authorities"("id", "account_id")
     ON DELETE RESTRICT,
+  CONSTRAINT "organization_user_resource_grants_owner_membership_fk"
+    FOREIGN KEY ("owner_organization_membership_id", "account_id")
+    REFERENCES "organization_memberships"("id", "account_id") ON DELETE RESTRICT,
+  CONSTRAINT "organization_user_resource_grants_authority_owner_fk"
+    FOREIGN KEY ("authority_id", "account_id", "owner_organization_membership_id")
+    REFERENCES "organization_user_resource_authorities"(
+      "id", "account_id", "organization_membership_id"
+    ) ON DELETE RESTRICT,
   CONSTRAINT "organization_user_resource_grants_workspace_account_fk"
     FOREIGN KEY ("workspace_id", "account_id")
     REFERENCES "workspaces"("id", "account_id") ON DELETE CASCADE,
   CONSTRAINT "organization_user_resource_grants_session_workspace_fk"
     FOREIGN KEY ("workspace_id", "session_id")
     REFERENCES "sessions"("workspace_id", "id") ON DELETE RESTRICT,
+  CONSTRAINT "organization_user_resource_grants_action_check" CHECK (
+    "action" = lower(btrim("action"))
+    AND length("action") BETWEEN 1 AND 64
+    AND "action" ~ '^[a-z0-9](?:[a-z0-9._:-]*[a-z0-9])?$'
+  ),
   CONSTRAINT "organization_user_resource_grants_mode_check" CHECK (
     "mode" IN ('once', 'session', 'always')
   ),
@@ -207,10 +224,12 @@ CREATE TABLE "organization_user_resource_grants" (
   ),
   CONSTRAINT "organization_user_resource_grants_session_fence_check" CHECK (
     (
-      "session_id" IS NULL
+      "mode" = 'always'
+      AND "session_id" IS NULL
       AND "authority_epoch" IS NULL
-      AND "mode" = 'always'
     ) OR (
+      "mode" IN ('once', 'session')
+      AND
       "session_id" IS NOT NULL
       AND "authority_epoch" > 0
     )

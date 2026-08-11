@@ -19,6 +19,7 @@ const migrationPath = join(
   dirname(fileURLToPath(import.meta.url)),
   "../drizzle/0218_organization_tenancy_foundation.sql",
 );
+const schemaPath = join(dirname(fileURLToPath(import.meta.url)), "../src/schema.ts");
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -68,6 +69,27 @@ async function expectSqlState(action: () => Promise<unknown>, state: string): Pr
 }
 
 describe("migration 0218 organization tenancy foundation", () => {
+  test("pins the Drizzle grant index name and ordered columns to migration SQL", async () => {
+    const [migration, schema] = await Promise.all([
+      readFile(migrationPath, "utf8"),
+      readFile(schemaPath, "utf8"),
+    ]);
+
+    expect(migration).toMatch(
+      /CREATE UNIQUE INDEX "organization_user_resource_grants_id_account_idx"\s+ON "organization_user_resource_grants" \("id", "account_id"\);/u,
+    );
+    expect(schema).toContain(
+      'uniqueIndex("organization_user_resource_grants_id_account_idx").on(\n      table.id,\n      table.accountId,\n    )',
+    );
+
+    // Keep this negative guard deterministic: the former name/order drift must
+    // never be reintroduced while the migration remains the ledger authority.
+    expect(schema).not.toContain("organization_user_resource_grants_account_id_idx");
+    expect(schema).not.toContain(
+      'uniqueIndex("organization_user_resource_grants_id_account_idx").on(\n      table.accountId,\n      table.id,',
+    );
+  });
+
   test("is rolling, additive, legacy-safe, and intentionally runtime-inert", async () => {
     const migration = await readFile(migrationPath, "utf8");
     expect(migration.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: rolling");
@@ -135,6 +157,11 @@ describe("migration 0218 organization tenancy foundation", () => {
       ) values (
         ${personal.accountId}, 'human:org-tenancy-owner', 'active', ${personal.workspaceId}
       ) returning id
+    `;
+    const [otherMembership] = await shared.admin<{ id: string }[]>`
+      insert into organization_memberships (account_id, subject_id, status)
+      values (${personal.accountId}, 'human:other-owner', 'suspended')
+      returning id
     `;
 
     await expectSqlState(
@@ -238,24 +265,90 @@ describe("migration 0218 organization tenancy foundation", () => {
 
     await shared.admin`
       insert into organization_user_resource_grants (
-        account_id, authority_id, workspace_id, session_id, mode, context,
-        authority_epoch
+        account_id, authority_id, owner_organization_membership_id,
+        workspace_id, session_id, action, mode, context, authority_epoch
       ) values (
-        ${personal.accountId}, ${authority!.id}, ${personal.workspaceId}, ${session.id},
-        'session', 'workspace_shared', 1
+        ${personal.accountId}, ${authority!.id}, ${membership!.id},
+        ${personal.workspaceId}, ${session.id}, 'resource.use', 'session',
+        'workspace_shared', 1
+      )
+    `;
+    await shared.admin`
+      insert into organization_user_resource_grants (
+        account_id, authority_id, owner_organization_membership_id,
+        workspace_id, action, mode, context
+      ) values (
+        ${personal.accountId}, ${authority!.id}, ${membership!.id},
+        ${personal.workspaceId}, 'resource.use', 'always', 'workspace_shared'
       )
     `;
     await expectSqlState(
       async () =>
         await shared!.admin`
           insert into organization_user_resource_grants (
-            account_id, authority_id, workspace_id, mode, context
+            account_id, authority_id, owner_organization_membership_id,
+            workspace_id, session_id, action, mode, context, authority_epoch
           ) values (
-            ${personal.accountId}, ${authority!.id}, ${foreign.workspaceId},
-            'always', 'user_private'
+            ${personal.accountId}, ${authority!.id}, ${otherMembership!.id},
+            ${personal.workspaceId}, ${session.id}, 'resource.use', 'session',
+            'workspace_shared', 1
           )
         `,
       "23503",
+    );
+    await expectSqlState(
+      async () =>
+        await shared!.admin`
+          insert into organization_user_resource_grants (
+            account_id, authority_id, owner_organization_membership_id,
+            workspace_id, action, mode, context
+          ) values (
+            ${personal.accountId}, ${authority!.id}, ${membership!.id},
+            ${foreign.workspaceId}, 'resource.use', 'always', 'user_private'
+          )
+        `,
+      "23503",
+    );
+    await expectSqlState(
+      async () =>
+        await shared!.admin`
+          insert into organization_user_resource_grants (
+            account_id, authority_id, owner_organization_membership_id,
+            workspace_id, action, mode, context
+          ) values (
+            ${personal.accountId}, ${authority!.id}, ${membership!.id},
+            ${personal.workspaceId}, 'resource.use', 'once', 'workspace_shared'
+          )
+        `,
+      "23514",
+    );
+    await expectSqlState(
+      async () =>
+        await shared!.admin`
+          insert into organization_user_resource_grants (
+            account_id, authority_id, owner_organization_membership_id,
+            workspace_id, session_id, action, mode, context, authority_epoch
+          ) values (
+            ${personal.accountId}, ${authority!.id}, ${membership!.id},
+            ${personal.workspaceId}, ${session.id}, 'resource.use', 'always',
+            'workspace_shared', 1
+          )
+        `,
+      "23514",
+    );
+    await expectSqlState(
+      async () =>
+        await shared!.admin`
+          insert into organization_user_resource_grants (
+            account_id, authority_id, owner_organization_membership_id,
+            workspace_id, session_id, action, mode, context, authority_epoch
+          ) values (
+            ${personal.accountId}, ${authority!.id}, ${membership!.id},
+            ${personal.workspaceId}, ${session.id}, 'Resource.Use', 'session',
+            'workspace_shared', 1
+          )
+        `,
+      "23514",
     );
 
     const app = postgres(shared.appUrl, { max: 1 });

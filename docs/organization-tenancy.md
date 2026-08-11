@@ -16,9 +16,10 @@ It adds:
 - `organization_user_resource_authorities`: stable
   organization+membership authority ids for future user resources, with a
   non-authoritative origin-workspace provenance field;
-- `organization_user_resource_grants`: opaque once/session/always grants bound
-  to a target workspace and private/shared context, with optional exact session
-  and authority-epoch fencing; and
+- `organization_user_resource_grants`: opaque grants carrying the owning
+  membership, canonical action, target workspace, private/shared context, and
+  generation; `once` and `session` grants require an exact session plus
+  positive authority epoch, while `always` grants carry neither fence; and
 - generic session owner, `user_private|workspace_shared` visibility, authority
   epoch, and independent-fork provenance columns.
 
@@ -53,14 +54,21 @@ complete opaque delegation.
 - User-resource authority references a membership in the same organization.
 - Origin workspace is same-organization provenance. Deleting it clears only the
   provenance column; it does not delete or transfer the authority.
-- A grant references an authority and workspace in the same organization.
-- Session-bound grants reference a session in the exact target workspace.
+- A grant references an authority and owning membership in the same
+  organization, and the authority's owner must equal the grant owner.
+- Grant actions are canonical non-wildcard names. `once` and `session` grants
+  reference a session in the exact target workspace and carry its positive
+  authority epoch; `always` grants have null session and epoch. Partial or
+  mixed fences are rejected.
 - Session owner, fork actor, and fork source must belong to the same
   organization as the destination session. The source may be in another
   workspace in that organization.
 
 These constraints represent identity, not runtime permission. Later access
-paths must still prove the authenticated membership and target-workspace grant.
+paths must still prove the authenticated owner membership and target-workspace
+grant. A later activation slice must atomically consume an active `once` grant
+before accepting its use; Slice A stores the invariant but does not activate
+the access path.
 
 ## Later migration phases
 

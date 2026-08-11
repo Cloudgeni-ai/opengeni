@@ -540,6 +540,9 @@ export const organizationUserResourceAuthorities = pgTable(
       table.id,
       table.accountId,
     ),
+    accountMembershipIdentity: uniqueIndex(
+      "organization_user_resource_authorities_id_account_membership_idx",
+    ).on(table.id, table.accountId, table.organizationMembershipId),
     resourceIdentity: uniqueIndex(
       "organization_user_resource_authorities_resource_identity_idx",
     ).on(table.accountId, table.organizationMembershipId, table.resourceKind, table.resourceId),
@@ -2357,8 +2360,10 @@ export const organizationUserResourceGrants = pgTable(
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
     authorityId: uuid("authority_id").notNull(),
+    ownerOrganizationMembershipId: uuid("owner_organization_membership_id").notNull(),
     workspaceId: uuid("workspace_id").notNull(),
     sessionId: uuid("session_id"),
+    action: text("action").notNull(),
     mode: text("mode").notNull(),
     context: text("context").notNull(),
     authorityEpoch: integer("authority_epoch"),
@@ -2370,9 +2375,9 @@ export const organizationUserResourceGrants = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    accountIdentity: uniqueIndex("organization_user_resource_grants_account_id_idx").on(
-      table.accountId,
+    accountIdentity: uniqueIndex("organization_user_resource_grants_id_account_idx").on(
       table.id,
+      table.accountId,
     ),
     authorityWorkspace: index("organization_user_resource_grants_authority_workspace_idx").on(
       table.authorityId,
@@ -2387,6 +2392,20 @@ export const organizationUserResourceGrants = pgTable(
         organizationUserResourceAuthorities.accountId,
       ],
     }).onDelete("restrict"),
+    ownerMembership: foreignKey({
+      name: "organization_user_resource_grants_owner_membership_fk",
+      columns: [table.ownerOrganizationMembershipId, table.accountId],
+      foreignColumns: [organizationMemberships.id, organizationMemberships.accountId],
+    }).onDelete("restrict"),
+    authorityOwner: foreignKey({
+      name: "organization_user_resource_grants_authority_owner_fk",
+      columns: [table.authorityId, table.accountId, table.ownerOrganizationMembershipId],
+      foreignColumns: [
+        organizationUserResourceAuthorities.id,
+        organizationUserResourceAuthorities.accountId,
+        organizationUserResourceAuthorities.organizationMembershipId,
+      ],
+    }).onDelete("restrict"),
     workspaceAccount: foreignKey({
       name: "organization_user_resource_grants_workspace_account_fk",
       columns: [table.workspaceId, table.accountId],
@@ -2397,6 +2416,12 @@ export const organizationUserResourceGrants = pgTable(
       columns: [table.workspaceId, table.sessionId],
       foreignColumns: [sessions.workspaceId, sessions.id],
     }).onDelete("restrict"),
+    actionValid: check(
+      "organization_user_resource_grants_action_check",
+      sql`${table.action} = lower(btrim(${table.action}))
+        and length(${table.action}) between 1 and 64
+        and ${table.action} ~ '^[a-z0-9](?:[a-z0-9._:-]*[a-z0-9])?$'`,
+    ),
     modeValid: check(
       "organization_user_resource_grants_mode_check",
       sql`${table.mode} in ('once', 'session', 'always')`,
@@ -2408,8 +2433,12 @@ export const organizationUserResourceGrants = pgTable(
     sessionFenceValid: check(
       "organization_user_resource_grants_session_fence_check",
       sql`(
-          ${table.sessionId} is null and ${table.authorityEpoch} is null and ${table.mode} = 'always'
+          ${table.mode} = 'always'
+          and ${table.sessionId} is null
+          and ${table.authorityEpoch} is null
         ) or (
+          ${table.mode} in ('once', 'session')
+          and
           ${table.sessionId} is not null and ${table.authorityEpoch} > 0
         )`,
     ),

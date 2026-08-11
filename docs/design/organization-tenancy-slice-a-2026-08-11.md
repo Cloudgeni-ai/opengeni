@@ -126,17 +126,24 @@ provider metadata.
 
 Grant modes are:
 
-- `once`: one accepted use;
-- `session`: bounded to one session and authority epoch; and
+- `once`: one accepted use, consumed by an atomic active→consumed transition;
+- `session`: bounded to one exact session and positive authority epoch; and
 - `always`: a standing owner grant for the matching workspace and visibility
-  context, still subject to revocation and policy.
+  context, with no session or authority-epoch fence.
 
-Every grant is keyed to organization, user-resource authority, target
-workspace, `user_private` or `workspace_shared` context, generation, and—when
-session-bound—the exact session and authority epoch. A grant never transfers to
-another user. Sharing, forking, epoch change, membership revocation, workspace
-removal, or authority generation change prevents ambient reuse. Later use after
-private→shared requires a freshly accepted matching grant.
+Every grant is keyed to the organization, owning organization membership,
+user-resource authority, canonical non-wildcard action, target workspace,
+`user_private` or `workspace_shared` context, generation, and—only for
+`once`/`session`—the exact session and positive authority epoch. `always` must
+carry neither session nor epoch; partial or mixed fences are invalid. The
+immutable delegation repeats this exact action/context/workspace/generation
+tuple and the server derives the authenticated owner membership rather than
+trusting caller-supplied ownership. A `once` grant is usable only while active
+and its first accepted use must atomically consume it, so a retry or second
+use cannot reuse the row. A grant never transfers to another user. Sharing,
+forking, epoch change, membership revocation, workspace removal, or authority
+generation change prevents ambient reuse. Later use after private→shared
+requires a freshly accepted matching grant.
 
 ### User-document contextual provenance
 

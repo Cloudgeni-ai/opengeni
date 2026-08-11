@@ -216,7 +216,11 @@ physical `managed_accounts.id` remains the organization identifier; new
 organization memberships carry one personal-workspace lifecycle pointer, while
 stable user-resource authority belongs to the organization membership rather
 than that workspace. Separate deny-all FORCE-RLS tables name user-resource
-authority, once/session/always grants, and configurable personal retention.
+authority, owner-bound action grants, and configurable personal retention.
+Grant rows carry the owning membership and a canonical action; `once` and
+`session` are fenced to one exact session plus positive authority epoch, while
+`always` is a standing grant with null session and epoch. A later activation
+slice must consume `once` grants atomically before accepting use.
 Sessions gain additive owner, `user_private|workspace_shared` visibility,
 authority-epoch, and independent-fork provenance columns; every existing row
 defaults to workspace-shared epoch 1 with no owner or fork authority. This slice
