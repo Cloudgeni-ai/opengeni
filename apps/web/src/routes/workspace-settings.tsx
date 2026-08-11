@@ -566,11 +566,18 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
 }
 
 /** "People with access": the workspace's USER members, with add/edit/remove. */
-function MembersSection({ workspaceId, canManage }: { workspaceId: string; canManage: boolean }) {
+export function MembersSection({
+  workspaceId,
+  canManage,
+}: {
+  workspaceId: string;
+  canManage: boolean;
+}) {
   const context = useAppContext();
   const client = context.client;
   const [members, setMembers] = useState<WorkspaceMember[]>([]);
   const [slackAccessRequests, setSlackAccessRequests] = useState<SlackUserLinkAccessRequest[]>([]);
+  const [slackAccessRequestsError, setSlackAccessRequestsError] = useState<Error | null>(null);
   const [error, setError] = useState<Error | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [email, setEmail] = useState("");
@@ -586,17 +593,39 @@ function MembersSection({ workspaceId, canManage }: { workspaceId: string; canMa
 
   const refresh = useCallback(async () => {
     try {
-      const [nextMembers, nextSlackAccessRequests] = await Promise.all([
+      // The member roster is primary; pending Slack requests are a manager-only
+      // auxiliary surface and must not turn their provider outage into a roster failure.
+      const [membersResult, slackAccessRequestsResult] = await Promise.allSettled([
         client.listWorkspaceMembers(workspaceId),
         canManage ? client.listSlackUserLinkAccessRequests(workspaceId) : Promise.resolve([]),
       ]);
-      setMembers(nextMembers);
-      setSlackAccessRequests(nextSlackAccessRequests);
+
+      if (membersResult.status === "rejected") {
+        setMembers([]);
+        setSlackAccessRequests([]);
+        setSlackAccessRequestsError(null);
+        setError(
+          membersResult.reason instanceof Error
+            ? membersResult.reason
+            : new Error(String(membersResult.reason)),
+        );
+        return;
+      }
+
+      setMembers(membersResult.value);
       setError(null);
-    } catch (caught) {
-      setMembers([]);
-      setSlackAccessRequests([]);
-      setError(caught instanceof Error ? caught : new Error(String(caught)));
+
+      if (slackAccessRequestsResult.status === "fulfilled") {
+        setSlackAccessRequests(slackAccessRequestsResult.value);
+        setSlackAccessRequestsError(null);
+      } else {
+        setSlackAccessRequests([]);
+        setSlackAccessRequestsError(
+          slackAccessRequestsResult.reason instanceof Error
+            ? slackAccessRequestsResult.reason
+            : new Error(String(slackAccessRequestsResult.reason)),
+        );
+      }
     } finally {
       setLoaded(true);
     }
@@ -820,6 +849,19 @@ function MembersSection({ workspaceId, canManage }: { workspaceId: string; canMa
             </div>
           ))}
         </div>
+      ) : null}
+
+      {canManage && slackAccessRequestsError ? (
+        <Notice
+          title="Pending Slack access requests unavailable"
+          action={
+            <Button type="button" size="sm" variant="ghost" onClick={() => void refresh()}>
+              Retry
+            </Button>
+          }
+        >
+          {slackAccessRequestsError.message}
+        </Notice>
       ) : null}
 
       {error ? (
