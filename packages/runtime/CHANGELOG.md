@@ -1,5 +1,17 @@
 # @opengeni/runtime
 
+## 0.19.2
+
+### Patch Changes
+
+- 5c5ea4a: Add the universal capabilities platform with named API integration instances,
+  provider-specific feature bindings, and local runtime adapters.
+- Updated dependencies [5c5ea4a]
+  - @opengeni/contracts@0.44.1
+  - @opengeni/sdk@0.52.1
+  - @opengeni/codemode@0.2.2
+  - @opengeni/config@0.13.2
+
 ## 0.19.1
 
 ### Patch Changes
