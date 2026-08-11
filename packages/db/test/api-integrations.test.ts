@@ -568,10 +568,7 @@ describe("API Integration persistence", () => {
       grantedScopes: ["files.read"],
       createdBySubjectId: first.subjectId,
     });
-    const baseInput = integrationInput(
-      googleConnection.id,
-      "generic-google-drive",
-    );
+    const baseInput = integrationInput(googleConnection.id, "generic-google-drive");
     const googleInput: InstallApiIntegrationInput = {
       ...baseInput,
       name: "Generic Google Drive",
@@ -587,11 +584,23 @@ describe("API Integration persistence", () => {
           kind: "knowledge_source",
           configSchema: {
             type: "object",
-            required: ["sourceId", "sourceKind"],
+            required: ["sources"],
             properties: {
-              sourceId: { type: "string", minLength: 1, maxLength: 512 },
-              sourceKind: { type: "string", enum: ["my_drive", "folder"] },
-              includeDescendants: { type: "boolean" },
+              sources: {
+                type: "array",
+                minItems: 1,
+                maxItems: 2,
+                items: {
+                  type: "object",
+                  required: ["sourceId", "sourceKind"],
+                  properties: {
+                    sourceId: { type: "string", minLength: 1, maxLength: 512 },
+                    sourceKind: { type: "string", enum: ["my_drive", "folder"] },
+                    includeDescendants: { type: "boolean" },
+                  },
+                  additionalProperties: false,
+                },
+              },
             },
             additionalProperties: false,
           },
@@ -658,9 +667,13 @@ describe("API Integration persistence", () => {
       featureKey: "drive-content",
       displayName: "Finance source",
       config: {
-        sourceId: "folder:finance",
-        sourceKind: "folder",
-        includeDescendants: true,
+        sources: [
+          {
+            sourceId: "folder:finance",
+            sourceKind: "folder",
+            includeDescendants: true,
+          },
+        ],
       },
       idempotencyKey: configureKey,
     });
@@ -683,9 +696,13 @@ describe("API Integration persistence", () => {
         featureKey: "drive-content",
         displayName: "Finance source",
         config: {
-          sourceId: "folder:finance",
-          sourceKind: "folder",
-          includeDescendants: true,
+          sources: [
+            {
+              sourceId: "folder:finance",
+              sourceKind: "folder",
+              includeDescendants: true,
+            },
+          ],
         },
         idempotencyKey: configureKey,
       }),
@@ -699,7 +716,7 @@ describe("API Integration persistence", () => {
         instanceKey: "finance",
         featureKey: "drive-content",
         displayName: "Different source",
-        config: { sourceId: "folder:other", sourceKind: "folder" },
+        config: { sources: [{ sourceId: "folder:other", sourceKind: "folder" }] },
         idempotencyKey: configureKey,
       }),
     ).rejects.toBeInstanceOf(IntegrationFeatureOperationIdempotencyError);
@@ -712,7 +729,9 @@ describe("API Integration persistence", () => {
         instanceKey: "finance",
         featureKey: "drive-content",
         displayName: "Invalid source",
-        config: { sourceId: "folder:bad", sourceKind: "unsupported" },
+        config: {
+          sources: [{ sourceId: "folder:bad", sourceKind: "unsupported" }],
+        },
         idempotencyKey: crypto.randomUUID(),
       }),
     ).rejects.toBeInstanceOf(IntegrationFeatureConfigError);
@@ -741,9 +760,13 @@ describe("API Integration persistence", () => {
       version: configured.binding.version + 1,
       status: "active",
       config: {
-        sourceId: "folder:finance",
-        sourceKind: "folder",
-        includeDescendants: true,
+        sources: [
+          {
+            sourceId: "folder:finance",
+            sourceKind: "folder",
+            includeDescendants: true,
+          },
+        ],
       },
     });
 
@@ -815,10 +838,7 @@ describe("API Integration persistence", () => {
       grantedScopes: ["files.read"],
       createdBySubjectId: first.subjectId,
     });
-    const microsoftBase = integrationInput(
-      microsoftConnection.id,
-      "generic-onedrive",
-    );
+    const microsoftBase = integrationInput(microsoftConnection.id, "generic-onedrive");
     const microsoftInput: InstallApiIntegrationInput = {
       ...microsoftBase,
       name: "Generic OneDrive",
@@ -854,12 +874,10 @@ describe("API Integration persistence", () => {
       revision: {
         ...microsoftBase.revision,
         bindings: Object.fromEntries(
-          Object.entries(microsoftBase.revision.bindings).map(
-            ([key, binding]) => [
-              key,
-              { ...binding, serverUrl: "https://onedrive.example.test/v1/" },
-            ],
-          ),
+          Object.entries(microsoftBase.revision.bindings).map(([key, binding]) => [
+            key,
+            { ...binding, serverUrl: "https://onedrive.example.test/v1/" },
+          ]),
         ),
       },
     };
@@ -889,8 +907,6 @@ describe("API Integration persistence", () => {
         installed.instanceKey,
       ),
     ).rejects.toBeInstanceOf(IntegrationFeatureNotFoundError);
-    expect(upgraded.installationVersion).toBeGreaterThan(
-      installed.installationVersion,
-    );
+    expect(upgraded.installationVersion).toBeGreaterThan(installed.installationVersion);
   }, 60_000);
 });

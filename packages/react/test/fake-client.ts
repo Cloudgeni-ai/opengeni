@@ -23,7 +23,7 @@ export function fakeClient(partial: Partial<SessionClientLike>): SessionClientLi
     getClientConfig: async () =>
       ({
         deploymentRevision: "test",
-        apiContractRevision: "2026-08-capability-facets-v1",
+        apiContractRevision: "2026-08-drive-facet-v1",
         defaultModel: "model-x",
         allowedModels: ["model-x"],
         models: [],

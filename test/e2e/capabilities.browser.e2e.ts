@@ -12,9 +12,12 @@ const accountId = "00000000-0000-4000-8000-000000000018";
 const capabilityId = "skill:browser-focus";
 const mobbinCapabilityId = "mcp:integrations-sh:mobbin-com-browser-fixture";
 const mobbinConnectionId = "00000000-0000-4000-8000-000000000120";
+const driveCapabilityId = "api:preset:google-drive-browser-fixture";
+const driveConnectionId = "00000000-0000-4000-8000-000000000130";
+const driveInstanceId = "00000000-0000-4000-8000-000000000131";
 const evidenceDir = new URL("../../.agent/evidence/capabilities-focus/", import.meta.url).pathname;
 const mobbinEvidenceDir = new URL("../../.agent/evidence/mobbin-mcp/", import.meta.url).pathname;
-const apiContractRevision = "2026-08-capability-facets-v1";
+const apiContractRevision = "2026-08-drive-facet-v1";
 
 type CapabilityState = {
   enabled: boolean;
@@ -26,6 +29,12 @@ type MobbinUiState = {
   mode: "disconnected" | "connected" | "revoked";
   oauthStarts: number;
   oauthRequest: Record<string, unknown> | null;
+};
+
+type DriveUiState = {
+  driveSaves: number;
+  sourceRequest: Record<string, unknown> | null;
+  binding: Record<string, unknown> | null;
 };
 
 describe("capabilities browser e2e", () => {
@@ -211,6 +220,58 @@ describe("capabilities browser e2e", () => {
     }
   }, 60_000);
 
+  test("Google Drive folders configure only the exact named Integration instance", async () => {
+    const state: DriveUiState = {
+      driveSaves: 0,
+      sourceRequest: null,
+      binding: null,
+    };
+    const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    const page = await context.newPage();
+    try {
+      await installCapabilityApi(page, state);
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
+        waitUntil: "networkidle",
+      });
+
+      const instance = page.locator('[data-integration-instance="finance"]');
+      await expectVisible(instance);
+      await expectText(instance, "Google Drive — Finance");
+      await instance
+        .getByRole("button", { name: "Manage features for Google Drive — Finance" })
+        .click();
+      const feature = instance.locator('[data-integration-feature="drive-content"]');
+      await expectVisible(feature);
+      await feature.getByRole("button", { name: "Configure" }).click();
+
+      const dialog = page.getByRole("dialog");
+      await expectVisible(dialog);
+      await expectText(dialog, "Google Drive locations · Google Drive — Finance");
+      await dialog.getByRole("checkbox", { name: "Connect My Drive" }).check();
+      await assertAccessibleAndBounded(page, '[role="dialog"]');
+      await dialog.getByRole("button", { name: "Save 1 location" }).click();
+      await expectHidden(dialog);
+
+      expect(state.driveSaves).toBe(1);
+      expect(state.sourceRequest).toMatchObject({
+        sources: [
+          {
+            id: "root",
+            name: "My Drive",
+            mimeType: "application/vnd.google-apps.folder",
+            driveId: null,
+          },
+        ],
+        destination: { authorityKind: "workspace", collectionId: null },
+        syncCadence: "hourly",
+        readPolicy: "allow",
+      });
+      await expectText(feature, "Active");
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
   test("Mobbin OAuth states stay truthful, bounded, accessible, and responsive", async () => {
     const state: MobbinUiState = {
       mode: "disconnected",
@@ -264,7 +325,9 @@ describe("capabilities browser e2e", () => {
       expect(await setupLink.getAttribute("href")).toBe(
         "https://docs.mobbin.com/mcp/clients/overview",
       );
-      await expectVisible(page.getByRole("dialog").getByRole("button", { name: "Connect Mobbin" }));
+      await expectVisible(
+        page.getByRole("dialog").getByRole("button", { name: "Connect for workspace" }),
+      );
       await assertAccessibleAndBounded(page, '[role="dialog"]');
       await page.screenshot({
         path: `${mobbinEvidenceDir}disconnected-desktop-light.png`,
@@ -278,7 +341,7 @@ describe("capabilities browser e2e", () => {
       });
       await Promise.all([
         page.waitForURL(`${authorizationOrigin}/**`),
-        page.getByRole("dialog").getByRole("button", { name: "Connect Mobbin" }).click(),
+        page.getByRole("dialog").getByRole("button", { name: "Connect for workspace" }).click(),
       ]);
       await expectVisible(page.getByRole("heading", { name: "Authorize Mobbin for OpenGeni" }));
       expect(state.oauthStarts).toBe(1);
@@ -298,7 +361,7 @@ describe("capabilities browser e2e", () => {
       });
       await setTheme(page, "dark");
       await openMobbinSheet(page, true);
-      await expectText(page.getByRole("dialog"), "Connected to mobbin.com");
+      await expectText(page.getByRole("dialog"), "Personal connection to mobbin.com");
       await assertAccessibleAndBounded(page, '[role="dialog"]');
       await page.screenshot({
         path: `${mobbinEvidenceDir}connected-desktop-dark.png`,
@@ -324,7 +387,10 @@ describe("capabilities browser e2e", () => {
       await setTheme(mobilePage, "dark");
       await expectText(mobilePage.getByRole("region", { name: "Capabilities" }), "Needs attention");
       await openMobbinSheet(mobilePage, true);
-      await expectText(mobilePage.getByRole("dialog"), "Reconnect to restore access");
+      await expectText(
+        mobilePage.getByRole("dialog"),
+        "Personal connection needs to be reconnected",
+      );
       await expectVisible(
         mobilePage.getByRole("dialog").getByRole("button", { name: "Reconnect Mobbin" }),
       );
@@ -404,7 +470,7 @@ async function expectText(locator: import("playwright").Locator, expected: strin
 
 async function installCapabilityApi(
   page: Page,
-  state: CapabilityState | MobbinUiState,
+  state: CapabilityState | MobbinUiState | DriveUiState,
 ): Promise<void> {
   await page.route("http://127.0.0.1:9/**", async (route) => {
     const request = route.request();
@@ -444,7 +510,12 @@ async function installCapabilityApi(
             accountId,
             subjectId: "browser-focus-subject",
             role: "owner",
-            permissions: ["workspace:admin", "capabilities:read", "capabilities:write"],
+            permissions: [
+              "account:admin",
+              "workspace:admin",
+              "capabilities:read",
+              "capabilities:write",
+            ],
           },
         ],
         workspaceGrants: [
@@ -469,12 +540,67 @@ async function installCapabilityApi(
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities`) {
       return json({
-        items: ["mode" in state ? mobbinCapability(state.mode) : capability(state.enabled)],
+        items:
+          "driveSaves" in state
+            ? []
+            : ["mode" in state ? mobbinCapability(state.mode) : capability(state.enabled)],
         installations: [],
       });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/connections`) {
-      return json({ connections: "mode" in state ? mobbinConnections(state.mode) : [] });
+      return json({
+        connections:
+          "driveSaves" in state
+            ? [driveConnection()]
+            : "mode" in state
+              ? mobbinConnections(state.mode)
+              : [],
+      });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/integrations/presets`) {
+      return json({ presets: "driveSaves" in state ? [drivePreset()] : [] });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/integrations`) {
+      return json({ integrations: "driveSaves" in state ? [driveInstallation()] : [] });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/plugins`) {
+      return json({ plugins: [] });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/social/connections`) {
+      return json([]);
+    }
+    if (
+      "driveSaves" in state &&
+      request.method() === "GET" &&
+      url.pathname ===
+        `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(driveCapabilityId)}/instances/finance/features`
+    ) {
+      return json(driveFeatures(state.binding));
+    }
+    if (
+      "driveSaves" in state &&
+      request.method() === "GET" &&
+      url.pathname ===
+        `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(driveCapabilityId)}/instances/finance/features/drive-content/browse`
+    ) {
+      return json(driveBrowse());
+    }
+    if (
+      "driveSaves" in state &&
+      request.method() === "PUT" &&
+      url.pathname ===
+        `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(driveCapabilityId)}/instances/finance/features/drive-content/source`
+    ) {
+      state.driveSaves += 1;
+      state.sourceRequest = request.postDataJSON() as Record<string, unknown>;
+      state.binding = driveBinding(state.sourceRequest);
+      return json({
+        capabilityId: driveCapabilityId,
+        instanceKey: "finance",
+        featureKey: "drive-content",
+        status: "configured",
+        binding: state.binding,
+      });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/packs`) {
       return json({ packs: [], installations: [] });
@@ -675,4 +801,181 @@ function mobbinConnections(mode: MobbinUiState["mode"]) {
       updatedAt: new Date(0).toISOString(),
     },
   ];
+}
+
+function drivePreset() {
+  return {
+    id: "google-drive",
+    name: "Google Drive",
+    summary: "Files, folders, permissions, and shared drives.",
+    family: "google",
+    protocol: "openapi",
+    providerDomain: "www.googleapis.com",
+    scopes: ["openid", "email", "profile", "https://www.googleapis.com/auth/drive"],
+    features: [driveFeatureDefinition(), driveIdentityDefinition()],
+  };
+}
+
+function driveInstallation() {
+  return {
+    capabilityId: driveCapabilityId,
+    pluginKey: "integration/google-drive-browser-fixture",
+    installationVersion: 1,
+    instanceId: driveInstanceId,
+    instanceKey: "finance",
+    displayName: "Google Drive — Finance",
+    instanceVersion: 1,
+    serverId: "google_drive_browser_fixture",
+    name: "Google Drive",
+    description: "Files, folders, permissions, and shared drives.",
+    protocol: "openapi",
+    presetId: "google-drive",
+    providerDomain: "www.googleapis.com",
+    baseUrl: "https://www.googleapis.com/drive/v3/",
+    sourceUrl: "https://www.googleapis.com/discovery/v1/apis/drive/v3/rest",
+    connected: true,
+    requiresConnection: true,
+    connectionId: driveConnectionId,
+    ownership: "personal",
+    allowedTools: ["drive_files_list"],
+    toolCount: 1,
+    approvalRequiredToolCount: 0,
+    revisionId: "openapi:444444444444444444444444",
+    contentSha256: "4".repeat(64),
+  };
+}
+
+function driveConnection() {
+  return {
+    id: driveConnectionId,
+    accountId,
+    workspaceId,
+    subjectId: "browser-focus-subject",
+    providerDomain: "www.googleapis.com",
+    kind: "oauth2",
+    status: "active",
+    grantedScopes: ["https://www.googleapis.com/auth/drive"],
+    expiresAt: null,
+    lastRefreshAt: null,
+    lastUsedAt: null,
+    lastError: null,
+    version: 1,
+    metadata: {
+      credentialRole: "api_integration_oauth",
+      providerFamily: "google",
+      providerPrincipalId: "google-finance",
+      providerEmail: "finance@example.com",
+      providerDisplayName: "Finance",
+      authorizedPresetIds: ["google-drive"],
+      verifiedAt: new Date(0).toISOString(),
+    },
+    createdBySubjectId: "browser-focus-subject",
+    updatedBySubjectId: "browser-focus-subject",
+    createdAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+  };
+}
+
+function driveFeatures(binding: Record<string, unknown> | null) {
+  return {
+    capabilityId: driveCapabilityId,
+    instanceKey: "finance",
+    providerDomain: "www.googleapis.com",
+    connectionId: driveConnectionId,
+    features: [
+      { definition: driveIdentityDefinition(), binding: null },
+      { definition: driveFeatureDefinition(), binding },
+    ],
+  };
+}
+
+function driveFeatureDefinition() {
+  return {
+    featureKey: "drive-content",
+    kind: "knowledge_source",
+    configSchema: {
+      type: "object",
+      required: ["sources", "destination", "syncCadence", "readPolicy"],
+      properties: {
+        sources: { type: "array", minItems: 1, maxItems: 100, items: { type: "object" } },
+        destination: { type: "object" },
+        syncCadence: { type: "string", enum: ["manual", "hourly", "daily"] },
+        readPolicy: { type: "string", enum: ["allow", "ask", "block"] },
+      },
+    },
+    capabilities: { provider: "google-drive", connectionRequired: true },
+  };
+}
+
+function driveIdentityDefinition() {
+  return {
+    featureKey: "account-identity",
+    kind: "identity_link",
+    configSchema: { type: "object", properties: {}, additionalProperties: false },
+    capabilities: { provider: "google", connectionRequired: true },
+  };
+}
+
+function driveBrowse() {
+  return {
+    connection: driveConnection(),
+    parentId: "root",
+    current: {
+      id: "root",
+      name: "My Drive",
+      mimeType: "application/vnd.google-apps.folder",
+      kind: "folder",
+      driveId: null,
+      modifiedTime: null,
+      size: null,
+      webViewLink: "https://drive.google.com/drive/my-drive",
+    },
+    items: [
+      {
+        id: "folder-1",
+        name: "Product",
+        mimeType: "application/vnd.google-apps.folder",
+        kind: "folder",
+        driveId: null,
+        modifiedTime: "2026-08-11T00:00:00.000Z",
+        size: null,
+        webViewLink: "https://drive.google.com/drive/folders/folder-1",
+      },
+    ],
+    nextPageToken: null,
+    incompleteSearch: false,
+  };
+}
+
+function driveBinding(request: Record<string, unknown>) {
+  const sources = Array.isArray(request.sources) ? request.sources : [];
+  return {
+    id: "00000000-0000-4000-8000-000000000132",
+    featureKey: "drive-content",
+    kind: "knowledge_source",
+    bindingKey: "finance",
+    displayName: "Google Drive — Finance — Drive Content",
+    connectionId: driveConnectionId,
+    status: "active",
+    config: {
+      sources: sources.map((source) => ({
+        ...(source as Record<string, unknown>),
+        sourceKind: (source as Record<string, unknown>).id === "root" ? "my_drive" : "folder",
+        includeDescendants: true,
+      })),
+      destination: {
+        authorityKind: "workspace",
+        authorityAccountId: accountId,
+        authorityWorkspaceId: workspaceId,
+      },
+      syncCadence: request.syncCadence,
+      readPolicy: request.readPolicy,
+    },
+    version: 1,
+    hasCursor: false,
+    lastSuccessAt: null,
+    lastErrorCode: null,
+    createdAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+  };
 }

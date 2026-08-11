@@ -752,6 +752,35 @@ export type SaveGoogleDriveSourceRequest = {
   readPolicy: GoogleDriveReadPolicy;
 };
 
+export type GoogleDriveKnowledgeSourceItem = {
+  id: string;
+  name: string;
+  mimeType: string;
+  driveId?: string | undefined;
+  sourceKind: "my_drive" | "shared_drive" | "folder";
+  includeDescendants: boolean;
+};
+
+export type GoogleDriveKnowledgeSourceDestination = {
+  authorityKind: ConnectorDocumentDestinationAuthority;
+  authorityAccountId: string;
+  authorityWorkspaceId?: string | undefined;
+  authoritySubjectId?: string | undefined;
+  collectionId?: string | undefined;
+};
+
+export type GoogleDriveKnowledgeSourceConfig = {
+  sources: GoogleDriveKnowledgeSourceItem[];
+  destination: GoogleDriveKnowledgeSourceDestination;
+  syncCadence: GoogleDriveSyncCadence;
+  readPolicy: GoogleDriveReadPolicy;
+};
+
+export type SaveGoogleDriveIntegrationSourceRequest = SaveGoogleDriveSourceRequest & {
+  expectedVersion?: number | undefined;
+  idempotencyKey: string;
+};
+
 export type UpdateConnectionRequest = {
   providerDomain?: string | undefined;
   subjectId?: string | null | undefined;
@@ -2593,7 +2622,7 @@ export type ClientAuthConfig =
 
 // Kept value-identical to @opengeni/contracts and pinned by the SDK contract
 // parity suite. The SDK has no runtime dependency on the Zod contracts package.
-export const OPENGENI_API_CONTRACT_REVISION = "2026-08-capability-facets-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-08-drive-facet-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
@@ -4344,11 +4373,7 @@ export type IntegrationFeatureKind =
   | "delivery_destination"
   | "identity_link";
 
-export type IntegrationFeatureStatus =
-  | "active"
-  | "paused"
-  | "needs_attention"
-  | "disabled";
+export type IntegrationFeatureStatus = "active" | "paused" | "needs_attention" | "disabled";
 
 export type IntegrationFeatureDefinitionSummary = {
   featureKey: string;

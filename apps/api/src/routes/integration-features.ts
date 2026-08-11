@@ -5,7 +5,12 @@ import {
   MutateIntegrationFeatureRequest,
   UpsertIntegrationFeatureRequest,
 } from "@opengeni/contracts";
-import { requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
+import {
+  hasPermission,
+  requireAccessGrant,
+  requireAccessGrantAuthorization,
+  type ApiRouteDeps,
+} from "@opengeni/core";
 import {
   configureIntegrationFeature,
   IntegrationFeatureBindingOwnershipConflictError,
@@ -22,20 +27,77 @@ import {
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 
-export function registerIntegrationFeatureRoutes(
-  app: Hono,
-  deps: ApiRouteDeps,
-): void {
+import {
+  browseGoogleDriveIntegrationSource,
+  saveGoogleDriveIntegrationSource,
+} from "../integrations/google-drive";
+
+export function registerIntegrationFeatureRoutes(app: Hono, deps: ApiRouteDeps): void {
+  app.get(
+    "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/browse",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "connections:read");
+      try {
+        return c.json(
+          await browseGoogleDriveIntegrationSource(deps, {
+            workspaceId,
+            subjectId: grant.subjectId,
+            capabilityId: decoded(c.req.param("capabilityId")),
+            instanceKey: decoded(c.req.param("instanceKey")),
+            featureKey: decoded(c.req.param("featureKey")),
+            parentId: c.req.query("parentId") ?? "root",
+            ...(c.req.query("pageToken") ? { pageToken: c.req.query("pageToken") } : {}),
+          }),
+        );
+      } catch (error) {
+        throw featureHttpError(error);
+      }
+    },
+  );
+
+  app.put(
+    "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/source",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const authorization = await requireAccessGrantAuthorization(
+        c,
+        deps,
+        workspaceId,
+        "workspace:admin",
+      );
+      const { grant } = authorization;
+      try {
+        return c.json(
+          IntegrationFeatureMutationResult.parse(
+            await saveGoogleDriveIntegrationSource(deps, {
+              accountId: grant.accountId,
+              workspaceId,
+              subjectId: grant.subjectId,
+              capabilityId: decoded(c.req.param("capabilityId")),
+              instanceKey: decoded(c.req.param("instanceKey")),
+              featureKey: decoded(c.req.param("featureKey")),
+              payload: await c.req.json(),
+              canManageOrganizationDestination:
+                authorization.accountGrant?.permissions.includes("account:admin") === true,
+              canManageWorkspaceDestination: hasPermission(grant.permissions, "workspace:admin"),
+              canManagePersonalDestination:
+                authorization.contextIntegrity &&
+                authorization.authenticatedSubjectId === grant.subjectId,
+            }),
+          ),
+        );
+      } catch (error) {
+        throw featureHttpError(error);
+      }
+    },
+  );
+
   app.get(
     "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features",
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
-      const grant = await requireAccessGrant(
-        c,
-        deps,
-        workspaceId,
-        "workspace:read",
-      );
+      const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
       try {
         return c.json(
           IntegrationInstanceFeaturesResponse.parse(
@@ -58,23 +120,40 @@ export function registerIntegrationFeatureRoutes(
     "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey",
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
-      const grant = await requireAccessGrant(
-        c,
-        deps,
-        workspaceId,
-        "workspace:admin",
-      );
+      const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
       const payload = UpsertIntegrationFeatureRequest.parse(await c.req.json());
+      const capabilityId = decoded(c.req.param("capabilityId"));
+      const instanceKey = decoded(c.req.param("instanceKey"));
+      const featureKey = decoded(c.req.param("featureKey"));
       try {
+        const instance = await listIntegrationInstanceFeatures(
+          deps.db,
+          workspaceId,
+          grant.subjectId,
+          capabilityId,
+          instanceKey,
+        );
+        const definition = instance.features.find(
+          (feature) => feature.definition.featureKey === featureKey,
+        )?.definition;
+        if (
+          definition?.kind === "knowledge_source" &&
+          definition.capabilities.provider === "google-drive"
+        ) {
+          throw new HTTPException(422, {
+            message:
+              "Google Drive source configuration requires the provider-specific source route",
+          });
+        }
         return c.json(
           IntegrationFeatureMutationResult.parse(
             await configureIntegrationFeature(deps.db, {
               accountId: grant.accountId,
               workspaceId,
               subjectId: grant.subjectId,
-              capabilityId: decoded(c.req.param("capabilityId")),
-              instanceKey: decoded(c.req.param("instanceKey")),
-              featureKey: decoded(c.req.param("featureKey")),
+              capabilityId,
+              instanceKey,
+              featureKey,
               displayName: payload.displayName,
               config: payload.config,
               ...(payload.expectedVersion !== undefined
@@ -96,15 +175,8 @@ export function registerIntegrationFeatureRoutes(
       `/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/${action}`,
       async (c) => {
         const workspaceId = c.req.param("workspaceId");
-        const grant = await requireAccessGrant(
-          c,
-          deps,
-          workspaceId,
-          "workspace:admin",
-        );
-        const payload = MutateIntegrationFeatureRequest.parse(
-          await c.req.json(),
-        );
+        const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+        const payload = MutateIntegrationFeatureRequest.parse(await c.req.json());
         try {
           return c.json(
             IntegrationFeatureMutationResult.parse(
@@ -132,12 +204,7 @@ export function registerIntegrationFeatureRoutes(
     "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey",
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
-      const grant = await requireAccessGrant(
-        c,
-        deps,
-        workspaceId,
-        "workspace:admin",
-      );
+      const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
       const payload = MutateIntegrationFeatureRequest.parse(await c.req.json());
       try {
         return c.json(

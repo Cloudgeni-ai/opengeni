@@ -818,9 +818,9 @@ describe("SDK / contracts parity", () => {
     const acceptRemoval = (
       value: z.infer<typeof ContractIntegrationFeatureRemovalResult>,
     ): IntegrationFeatureRemovalResult => value;
-    expect([acceptList, acceptMutation, acceptRemoval].every((fn) => typeof fn === "function")).toBe(
-      true,
-    );
+    expect(
+      [acceptList, acceptMutation, acceptRemoval].every((fn) => typeof fn === "function"),
+    ).toBe(true);
 
     const upsert: UpsertIntegrationFeatureRequest = {
       displayName: "Finance inbox",

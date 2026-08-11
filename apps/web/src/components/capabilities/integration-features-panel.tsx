@@ -41,6 +41,19 @@ import type {
 type FeatureEntry = IntegrationInstanceFeaturesResponse["features"][number];
 type FormValue = string | boolean;
 type FeatureFormState = Record<string, FormValue>;
+type GoogleDriveDialogProps = {
+  client: OpenGeniCoreClient;
+  workspaceId: string;
+  instance: ApiIntegrationInstallationSummary;
+  entry: FeatureEntry | null;
+  canManage: boolean;
+  canManagePersonalDestination: boolean;
+  canManageWorkspaceDestination: boolean;
+  canManageOrganizationDestination: boolean;
+  onClose: () => void;
+  onBusyChange: (busy: boolean) => void;
+  onSaved: () => Promise<void>;
+};
 
 const KIND_DETAILS: Record<
   IntegrationFeatureDefinitionSummary["kind"],
@@ -78,12 +91,20 @@ export function IntegrationFeaturesPanel({
   instance,
   featureCount,
   canManage,
+  canManagePersonalDestination,
+  canManageWorkspaceDestination,
+  canManageOrganizationDestination,
+  GoogleDriveDialog,
 }: {
   client: OpenGeniCoreClient;
   workspaceId: string;
   instance: ApiIntegrationInstallationSummary;
   featureCount: number;
   canManage: boolean;
+  canManagePersonalDestination: boolean;
+  canManageWorkspaceDestination: boolean;
+  canManageOrganizationDestination: boolean;
+  GoogleDriveDialog: ComponentType<GoogleDriveDialogProps>;
 }) {
   const [open, setOpen] = useState(false);
   const [data, setData] = useState<IntegrationInstanceFeaturesResponse | null>(null);
@@ -91,6 +112,7 @@ export function IntegrationFeaturesPanel({
   const [error, setError] = useState<string | null>(null);
   const [busyFeatureKey, setBusyFeatureKey] = useState<string | null>(null);
   const [editor, setEditor] = useState<FeatureEntry | null>(null);
+  const [googleDriveEditor, setGoogleDriveEditor] = useState<FeatureEntry | null>(null);
   const [form, setForm] = useState<FeatureFormState>({});
   const [removeTarget, setRemoveTarget] = useState<FeatureEntry | null>(null);
 
@@ -98,6 +120,8 @@ export function IntegrationFeaturesPanel({
     setData(null);
     setError(null);
     setOpen(false);
+    setEditor(null);
+    setGoogleDriveEditor(null);
   }, [instance.capabilityId, instance.instanceKey, instance.instanceVersion]);
 
   useEffect(() => {
@@ -127,6 +151,10 @@ export function IntegrationFeaturesPanel({
   }
 
   function edit(entry: FeatureEntry): void {
+    if (isGoogleDriveKnowledgeSource(entry)) {
+      setGoogleDriveEditor(entry);
+      return;
+    }
     setEditor(entry);
     setForm(featureFormState(entry.definition, entry.binding));
   }
@@ -303,6 +331,26 @@ export function IntegrationFeaturesPanel({
         onSubmit={save}
       />
 
+      {googleDriveEditor ? (
+        <GoogleDriveDialog
+          client={client}
+          workspaceId={workspaceId}
+          instance={instance}
+          entry={googleDriveEditor}
+          canManage={canManage}
+          canManagePersonalDestination={canManagePersonalDestination}
+          canManageWorkspaceDestination={canManageWorkspaceDestination}
+          canManageOrganizationDestination={canManageOrganizationDestination}
+          onClose={() => setGoogleDriveEditor(null)}
+          onBusyChange={(busy) =>
+            setBusyFeatureKey(
+              busy && googleDriveEditor ? googleDriveEditor.definition.featureKey : null,
+            )
+          }
+          onSaved={load}
+        />
+      ) : null}
+
       <ConfirmDialog
         open={removeTarget !== null}
         onOpenChange={(next) => !next && setRemoveTarget(null)}
@@ -450,6 +498,10 @@ function FeatureEditorDialog({
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
   const fields = useMemo(() => (entry ? featureFields(entry.definition) : []), [entry]);
+  const unsupportedRequiredFields = useMemo(
+    () => (entry ? unsupportedRequiredFeatureFields(entry.definition) : []),
+    [entry],
+  );
   return (
     <Dialog open={entry !== null} onOpenChange={(next) => !next && !busy && onClose()}>
       <DialogContent className="sm:max-w-lg">
@@ -462,9 +514,17 @@ function FeatureEditorDialog({
         {entry ? (
           <form className="grid gap-4" onSubmit={onSubmit}>
             {fields.length === 0 ? (
-              <div className="rounded-lg border border-brand/20 bg-brand/5 p-4 text-sm leading-6 text-fg-muted">
-                This feature uses the connected account as-is. No additional setup is required.
-              </div>
+              unsupportedRequiredFields.length > 0 ? (
+                <div className="rounded-lg border border-warning/30 bg-warning/10 p-4 text-sm leading-6 text-fg-muted">
+                  This provider needs a dedicated setup flow for:{" "}
+                  {unsupportedRequiredFields.join(", ")}. The generic editor will not submit an
+                  incomplete configuration.
+                </div>
+              ) : (
+                <div className="rounded-lg border border-brand/20 bg-brand/5 p-4 text-sm leading-6 text-fg-muted">
+                  This feature uses the connected account as-is. No additional setup is required.
+                </div>
+              )
             ) : (
               fields.map((field) => (
                 <FeatureField
@@ -485,7 +545,11 @@ function FeatureEditorDialog({
               </Button>
               <Button
                 type="submit"
-                disabled={busy || !requiredFieldsComplete(entry.definition, form)}
+                disabled={
+                  busy ||
+                  unsupportedRequiredFields.length > 0 ||
+                  !requiredFieldsComplete(entry.definition, form)
+                }
               >
                 {busy ? <Loader2Icon className="animate-spin" /> : null}
                 {entry.binding && entry.binding.status !== "disabled"
@@ -603,6 +667,17 @@ export function featureFields(
   });
 }
 
+export function unsupportedRequiredFeatureFields(
+  definition: IntegrationFeatureDefinitionSummary,
+): string[] {
+  const schema = definition.configSchema;
+  const required = Array.isArray(schema.required)
+    ? schema.required.filter((entry): entry is string => typeof entry === "string")
+    : [];
+  const supported = new Set(featureFields(definition).map((field) => field.key));
+  return required.filter((key) => !supported.has(key));
+}
+
 export function featureFormState(
   definition: IntegrationFeatureDefinitionSummary,
   binding: IntegrationFeatureBindingSummary | null,
@@ -664,4 +739,12 @@ function objectValue(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
+}
+
+function isGoogleDriveKnowledgeSource(entry: FeatureEntry): boolean {
+  return (
+    entry.definition.featureKey === "drive-content" &&
+    entry.definition.kind === "knowledge_source" &&
+    entry.definition.capabilities.provider === "google-drive"
+  );
 }

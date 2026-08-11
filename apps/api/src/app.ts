@@ -1194,12 +1194,26 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
       "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/uninstall-preview",
   },
   {
-    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/features\/[^/]+\/pause$/,
+    pattern:
+      /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/features\/[^/]+\/browse$/,
+    label:
+      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/browse",
+  },
+  {
+    pattern:
+      /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/features\/[^/]+\/source$/,
+    label:
+      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/source",
+  },
+  {
+    pattern:
+      /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/features\/[^/]+\/pause$/,
     label:
       "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/pause",
   },
   {
-    pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/features\/[^/]+\/resume$/,
+    pattern:
+      /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/features\/[^/]+\/resume$/,
     label:
       "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/resume",
   },
@@ -1210,8 +1224,7 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+\/features$/,
-    label:
-      "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features",
+    label: "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/[^/]+\/instances\/[^/]+$/,

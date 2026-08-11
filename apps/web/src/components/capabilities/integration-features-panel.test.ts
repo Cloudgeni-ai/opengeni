@@ -9,6 +9,7 @@ import {
   featureConfigFromForm,
   featureFields,
   featureFormState,
+  unsupportedRequiredFeatureFields,
 } from "./integration-features-panel";
 
 const driveDefinition: IntegrationFeatureDefinitionSummary = {
@@ -117,5 +118,28 @@ describe("Integration feature schema forms", () => {
       lookaheadDays: "",
     });
     expect(JSON.stringify(binding)).not.toContain("page_token");
+  });
+
+  test("refuses required nested configuration that the generic editor cannot represent", () => {
+    const richDriveDefinition: IntegrationFeatureDefinitionSummary = {
+      featureKey: "drive-content",
+      kind: "knowledge_source",
+      configSchema: {
+        type: "object",
+        required: ["sources", "destination", "syncCadence", "readPolicy"],
+        properties: {
+          sources: { type: "array", items: { type: "object" } },
+          destination: { type: "object" },
+          syncCadence: { type: "string", enum: ["manual", "hourly", "daily"] },
+          readPolicy: { type: "string", enum: ["allow", "ask", "block"] },
+        },
+      },
+      capabilities: { provider: "microsoft-onedrive", connectionRequired: true },
+    };
+
+    expect(unsupportedRequiredFeatureFields(richDriveDefinition)).toEqual([
+      "sources",
+      "destination",
+    ]);
   });
 });

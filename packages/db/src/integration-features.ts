@@ -111,103 +111,89 @@ export async function listIntegrationInstanceFeatures(
   capabilityId: string,
   instanceKey: string,
 ): Promise<IntegrationInstanceFeatures> {
-  return await withWorkspaceSubjectRls(
-    db,
-    workspaceId,
-    subjectId,
-    async (scopedDb) => {
-      const context = await loadIntegrationInstanceContext(
-        scopedDb,
-        workspaceId,
-        subjectId,
-        capabilityId,
-        instanceKey,
+  return await withWorkspaceSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
+    const context = await loadIntegrationInstanceContext(
+      scopedDb,
+      workspaceId,
+      subjectId,
+      capabilityId,
+      instanceKey,
+    );
+    if (!context) throw new IntegrationFeatureNotFoundError("Integration instance not found");
+    const rows = await scopedDb
+      .select({
+        featureKey: schema.integrationFeatureFacets.featureKey,
+        kind: schema.integrationFeatureFacets.kind,
+        configSchema: schema.integrationFeatureFacets.configSchema,
+        capabilities: schema.integrationFeatureFacets.capabilities,
+        bindingId: schema.integrationFeatureBindings.id,
+        bindingKey: schema.integrationFeatureBindings.bindingKey,
+        displayName: schema.integrationFeatureBindings.displayName,
+        connectionId: schema.integrationFeatureBindings.connectionId,
+        status: schema.integrationFeatureBindings.status,
+        config: schema.integrationFeatureBindings.config,
+        cursor: schema.integrationFeatureBindings.cursor,
+        version: schema.integrationFeatureBindings.version,
+        lastSuccessAt: schema.integrationFeatureBindings.lastSuccessAt,
+        lastErrorCode: schema.integrationFeatureBindings.lastErrorCode,
+        createdAt: schema.integrationFeatureBindings.createdAt,
+        updatedAt: schema.integrationFeatureBindings.updatedAt,
+      })
+      .from(schema.integrationFeatureFacets)
+      .leftJoin(
+        schema.integrationFeatureBindings,
+        and(
+          eq(schema.integrationFeatureBindings.featureFacetId, schema.integrationFeatureFacets.id),
+          eq(
+            schema.integrationFeatureBindings.integrationFacetInstallationId,
+            context.integrationFacetInstallationId,
+          ),
+          eq(schema.integrationFeatureBindings.bindingKey, instanceKey),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.integrationFeatureFacets.integrationFacetId, context.integrationFacetId),
+          ne(schema.integrationFeatureFacets.kind, "tools"),
+        ),
+      )
+      .orderBy(
+        asc(schema.integrationFeatureFacets.kind),
+        asc(schema.integrationFeatureFacets.featureKey),
       );
-      if (!context)
-        throw new IntegrationFeatureNotFoundError(
-          "Integration instance not found",
-        );
-      const rows = await scopedDb
-        .select({
-          featureKey: schema.integrationFeatureFacets.featureKey,
-          kind: schema.integrationFeatureFacets.kind,
-          configSchema: schema.integrationFeatureFacets.configSchema,
-          capabilities: schema.integrationFeatureFacets.capabilities,
-          bindingId: schema.integrationFeatureBindings.id,
-          bindingKey: schema.integrationFeatureBindings.bindingKey,
-          displayName: schema.integrationFeatureBindings.displayName,
-          connectionId: schema.integrationFeatureBindings.connectionId,
-          status: schema.integrationFeatureBindings.status,
-          config: schema.integrationFeatureBindings.config,
-          cursor: schema.integrationFeatureBindings.cursor,
-          version: schema.integrationFeatureBindings.version,
-          lastSuccessAt: schema.integrationFeatureBindings.lastSuccessAt,
-          lastErrorCode: schema.integrationFeatureBindings.lastErrorCode,
-          createdAt: schema.integrationFeatureBindings.createdAt,
-          updatedAt: schema.integrationFeatureBindings.updatedAt,
-        })
-        .from(schema.integrationFeatureFacets)
-        .leftJoin(
-          schema.integrationFeatureBindings,
-          and(
-            eq(
-              schema.integrationFeatureBindings.featureFacetId,
-              schema.integrationFeatureFacets.id,
-            ),
-            eq(
-              schema.integrationFeatureBindings.integrationFacetInstallationId,
-              context.integrationFacetInstallationId,
-            ),
-            eq(schema.integrationFeatureBindings.bindingKey, instanceKey),
-          ),
-        )
-        .where(
-          and(
-            eq(
-              schema.integrationFeatureFacets.integrationFacetId,
-              context.integrationFacetId,
-            ),
-            ne(schema.integrationFeatureFacets.kind, "tools"),
-          ),
-        )
-        .orderBy(
-          asc(schema.integrationFeatureFacets.kind),
-          asc(schema.integrationFeatureFacets.featureKey),
-        );
-      return {
-        capabilityId,
-        instanceKey,
-        providerDomain: context.providerDomain,
-        connectionId: context.connectionId,
-        features: rows.map((row) => ({
-          definition: {
-            featureKey: row.featureKey,
-            kind: featureKind(row.kind),
-            configSchema: row.configSchema,
-            capabilities: row.capabilities,
-          },
-          binding: row.bindingId
-            ? bindingSummary({
-                id: row.bindingId,
-                featureKey: row.featureKey,
-                kind: row.kind,
-                bindingKey: row.bindingKey!,
-                displayName: row.displayName!,
-                connectionId: row.connectionId ?? null,
-                status: row.status!,
-                config: row.config!,
-                cursor: row.cursor!,
-                version: row.version!,
-                lastSuccessAt: row.lastSuccessAt ?? null,
-                lastErrorCode: row.lastErrorCode ?? null,
-                createdAt: row.createdAt!,
-                updatedAt: row.updatedAt!,
-              })
-            : null,
-        })),
-      };
-    },
-  );
+    return {
+      capabilityId,
+      instanceKey,
+      providerDomain: context.providerDomain,
+      connectionId: context.connectionId,
+      features: rows.map((row) => ({
+        definition: {
+          featureKey: row.featureKey,
+          kind: featureKind(row.kind),
+          configSchema: row.configSchema,
+          capabilities: row.capabilities,
+        },
+        binding: row.bindingId
+          ? bindingSummary({
+              id: row.bindingId,
+              featureKey: row.featureKey,
+              kind: row.kind,
+              bindingKey: row.bindingKey!,
+              displayName: row.displayName!,
+              connectionId: row.connectionId ?? null,
+              status: row.status!,
+              config: row.config!,
+              cursor: row.cursor!,
+              version: row.version!,
+              lastSuccessAt: row.lastSuccessAt ?? null,
+              lastErrorCode: row.lastErrorCode ?? null,
+              createdAt: row.createdAt!,
+              updatedAt: row.updatedAt!,
+            })
+          : null,
+      })),
+    };
+  });
 }
 
 export async function configureIntegrationFeature(
@@ -236,58 +222,37 @@ export async function configureIntegrationFeature(
       expectedVersion: input.expectedVersion ?? null,
     }),
   );
-  return await withFeatureOperation(
-    db,
-    input,
-    requestDigest,
-    "configure",
-    async (tx) => {
-      const context = await requireMutationContext(tx, input);
-      const definition = await requireFeatureDefinition(
-        tx,
-        context,
-        input.featureKey,
-      );
-      assertFeatureConfig(input.config, definition.configSchema);
-      await requireFeatureConnection(
-        tx,
-        input,
-        context,
-        definition.capabilities,
-      );
-      const result = await upsertIntegrationFeatureBinding(tx, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        integrationFacetInstallationId: context.integrationFacetInstallationId,
-        featureFacetId: definition.id,
-        bindingKey: input.instanceKey,
-        displayName: input.displayName,
-        runtimeKey: null,
-        connectionId: context.connectionId,
-        config: input.config,
-        createdBySubjectId: input.subjectId,
-        owner: featureOwner(
-          input.capabilityId,
-          input.instanceKey,
-          input.featureKey,
-        ),
-        ...(input.expectedVersion !== undefined
-          ? { expectedVersion: input.expectedVersion }
-          : {}),
-      });
-      return {
-        capabilityId: input.capabilityId,
-        instanceKey: input.instanceKey,
-        featureKey: input.featureKey,
-        status: "configured",
-        binding: bindingSummary({
-          ...result.row,
-          featureKey: definition.featureKey,
-          kind: definition.kind,
-        }),
-      };
-    },
-  );
+  return await withFeatureOperation(db, input, requestDigest, "configure", async (tx) => {
+    const context = await requireMutationContext(tx, input);
+    const definition = await requireFeatureDefinition(tx, context, input.featureKey);
+    assertFeatureConfig(input.config, definition.configSchema);
+    await requireFeatureConnection(tx, input, context, definition.capabilities);
+    const result = await upsertIntegrationFeatureBinding(tx, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      integrationFacetInstallationId: context.integrationFacetInstallationId,
+      featureFacetId: definition.id,
+      bindingKey: input.instanceKey,
+      displayName: input.displayName,
+      runtimeKey: null,
+      connectionId: context.connectionId,
+      config: input.config,
+      createdBySubjectId: input.subjectId,
+      owner: featureOwner(input.capabilityId, input.instanceKey, input.featureKey),
+      ...(input.expectedVersion !== undefined ? { expectedVersion: input.expectedVersion } : {}),
+    });
+    return {
+      capabilityId: input.capabilityId,
+      instanceKey: input.instanceKey,
+      featureKey: input.featureKey,
+      status: "configured",
+      binding: bindingSummary({
+        ...result.row,
+        featureKey: definition.featureKey,
+        kind: definition.kind,
+      }),
+    };
+  });
 }
 
 export async function setIntegrationFeatureLifecycle(
@@ -313,68 +278,49 @@ export async function setIntegrationFeatureLifecycle(
       idempotencyKey: undefined,
     }),
   );
-  return await withFeatureOperation(
-    db,
-    input,
-    requestDigest,
-    "update",
-    async (tx) => {
-      const context = await requireMutationContext(tx, input);
-      const definition = await requireFeatureDefinition(
-        tx,
-        context,
-        input.featureKey,
-      );
-      const binding = await loadFeatureBinding(
-        tx,
-        context,
+  return await withFeatureOperation(db, input, requestDigest, "update", async (tx) => {
+    const context = await requireMutationContext(tx, input);
+    const definition = await requireFeatureDefinition(tx, context, input.featureKey);
+    const binding = await loadFeatureBinding(tx, context, input.instanceKey, definition.id, true);
+    if (!binding || binding.status === "disabled") {
+      throw new IntegrationFeatureNotFoundError("Integration feature is not configured");
+    }
+    if (binding.version !== input.expectedVersion) {
+      throw new IntegrationFeatureBindingVersionConflictError(
         input.instanceKey,
-        definition.id,
-        true,
+        input.expectedVersion,
+        binding.version,
       );
-      if (!binding || binding.status === "disabled") {
-        throw new IntegrationFeatureNotFoundError(
-          "Integration feature is not configured",
-        );
-      }
-      if (binding.version !== input.expectedVersion) {
-        throw new IntegrationFeatureBindingVersionConflictError(
-          input.instanceKey,
-          input.expectedVersion,
-          binding.version,
-        );
-      }
-      await assertDirectFeatureOwnership(tx, binding.id, input);
-      const targetStatus = input.action === "pause" ? "paused" : "active";
-      let row = binding;
-      if (binding.status !== targetStatus) {
-        const [updated] = await tx
-          .update(schema.integrationFeatureBindings)
-          .set({
-            status: targetStatus,
-            version: binding.version + 1,
-            ...(input.action === "resume" ? { lastErrorCode: null } : {}),
-            updatedAt: new Date(),
-          })
-          .where(eq(schema.integrationFeatureBindings.id, binding.id))
-          .returning();
-        if (!updated)
-          throw new Error("Failed to update Integration feature lifecycle");
-        row = updated;
-      }
-      return {
-        capabilityId: input.capabilityId,
-        instanceKey: input.instanceKey,
-        featureKey: input.featureKey,
-        status: input.action === "pause" ? "paused" : "active",
-        binding: bindingSummary({
-          ...row,
-          featureKey: definition.featureKey,
-          kind: definition.kind,
-        }),
-      };
-    },
-  );
+    }
+    await assertDirectFeatureOwnership(tx, binding.id, input);
+    const targetStatus = input.action === "pause" ? "paused" : "active";
+    let row = binding;
+    if (binding.status !== targetStatus) {
+      const [updated] = await tx
+        .update(schema.integrationFeatureBindings)
+        .set({
+          status: targetStatus,
+          version: binding.version + 1,
+          ...(input.action === "resume" ? { lastErrorCode: null } : {}),
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.integrationFeatureBindings.id, binding.id))
+        .returning();
+      if (!updated) throw new Error("Failed to update Integration feature lifecycle");
+      row = updated;
+    }
+    return {
+      capabilityId: input.capabilityId,
+      instanceKey: input.instanceKey,
+      featureKey: input.featureKey,
+      status: input.action === "pause" ? "paused" : "active",
+      binding: bindingSummary({
+        ...row,
+        featureKey: definition.featureKey,
+        kind: definition.kind,
+      }),
+    };
+  });
 }
 
 export async function removeIntegrationFeature(
@@ -399,92 +345,64 @@ export async function removeIntegrationFeature(
       expectedVersion: input.expectedVersion,
     }),
   );
-  return await withFeatureOperation(
-    db,
-    input,
-    requestDigest,
-    "disconnect",
-    async (tx) => {
-      const context = await requireMutationContext(tx, input);
-      const definition = await requireFeatureDefinition(
-        tx,
-        context,
-        input.featureKey,
-      );
-      const binding = await loadFeatureBinding(
-        tx,
-        context,
-        input.instanceKey,
-        definition.id,
-        true,
-      );
-      const owner = featureOwner(
-        input.capabilityId,
-        input.instanceKey,
-        input.featureKey,
-      );
-      if (!binding) {
-        return {
-          capabilityId: input.capabilityId,
-          instanceKey: input.instanceKey,
-          featureKey: input.featureKey,
-          status: "not_configured",
-          binding: null,
-          remainingOwners: [],
-        };
-      }
-      if (binding.version !== input.expectedVersion) {
-        throw new IntegrationFeatureBindingVersionConflictError(
-          input.instanceKey,
-          input.expectedVersion,
-          binding.version,
-        );
-      }
-      const owners = await listIntegrationFeatureBindingOwners(tx, binding.id);
-      if (
-        !owners.some(
-          (candidate) =>
-            candidate.kind === owner.kind && candidate.id === owner.id,
-        )
-      ) {
-        return {
-          capabilityId: input.capabilityId,
-          instanceKey: input.instanceKey,
-          featureKey: input.featureKey,
-          status: "not_configured",
-          binding: bindingSummary({
-            ...binding,
-            featureKey: definition.featureKey,
-            kind: definition.kind,
-          }),
-          remainingOwners: owners,
-        };
-      }
-      const removed = await removeIntegrationFeatureBindingOwner(tx, {
-        workspaceId: input.workspaceId,
-        bindingId: binding.id,
-        owner,
-        expectedVersion: input.expectedVersion,
-      });
+  return await withFeatureOperation(db, input, requestDigest, "disconnect", async (tx) => {
+    const context = await requireMutationContext(tx, input);
+    const definition = await requireFeatureDefinition(tx, context, input.featureKey);
+    const binding = await loadFeatureBinding(tx, context, input.instanceKey, definition.id, true);
+    const owner = featureOwner(input.capabilityId, input.instanceKey, input.featureKey);
+    if (!binding) {
       return {
         capabilityId: input.capabilityId,
         instanceKey: input.instanceKey,
         featureKey: input.featureKey,
-        status:
-          removed.remainingOwners.length > 0
-            ? "retained_by_other_owners"
-            : "removed",
-        binding: removed.binding
-          ? bindingSummary({
-              ...removed.binding,
-              featureKey: definition.featureKey,
-              kind: definition.kind,
-            })
-          : null,
-        remainingOwners: removed.remainingOwners,
+        status: "not_configured",
+        binding: null,
+        remainingOwners: [],
       };
-    },
-  );
+    }
+    if (binding.version !== input.expectedVersion) {
+      throw new IntegrationFeatureBindingVersionConflictError(
+        input.instanceKey,
+        input.expectedVersion,
+        binding.version,
+      );
+    }
+    const owners = await listIntegrationFeatureBindingOwners(tx, binding.id);
+    if (!owners.some((candidate) => candidate.kind === owner.kind && candidate.id === owner.id)) {
+      return {
+        capabilityId: input.capabilityId,
+        instanceKey: input.instanceKey,
+        featureKey: input.featureKey,
+        status: "not_configured",
+        binding: bindingSummary({
+          ...binding,
+          featureKey: definition.featureKey,
+          kind: definition.kind,
+        }),
+        remainingOwners: owners,
+      };
+    }
+    const removed = await removeIntegrationFeatureBindingOwner(tx, {
+      workspaceId: input.workspaceId,
+      bindingId: binding.id,
+      owner,
+      expectedVersion: input.expectedVersion,
+    });
+    return {
+      capabilityId: input.capabilityId,
+      instanceKey: input.instanceKey,
+      featureKey: input.featureKey,
+      status: removed.remainingOwners.length > 0 ? "retained_by_other_owners" : "removed",
+      binding: removed.binding
+        ? bindingSummary({
+            ...removed.binding,
+            featureKey: definition.featureKey,
+            kind: definition.kind,
+          })
+        : null,
+      remainingOwners: removed.remainingOwners,
+    };
+  });
 }
 
 async function withFeatureOperation<T extends Record<string, unknown>>(
@@ -518,10 +436,7 @@ async function withFeatureOperation<T extends Record<string, unknown>>(
           .where(
             and(
               eq(schema.capabilityOperations.workspaceId, input.workspaceId),
-              eq(
-                schema.capabilityOperations.idempotencyKey,
-                input.idempotencyKey,
-              ),
+              eq(schema.capabilityOperations.idempotencyKey, input.idempotencyKey),
             ),
           )
           .for("update")
@@ -532,8 +447,7 @@ async function withFeatureOperation<T extends Record<string, unknown>>(
               "Integration feature idempotency key was reused",
             );
           }
-          if (existing.status === "completed" && existing.result)
-            return existing.result as T;
+          if (existing.status === "completed" && existing.result) return existing.result as T;
           throw new IntegrationFeatureOperationIdempotencyError(
             "Integration feature operation is already in progress",
           );
@@ -578,8 +492,7 @@ async function requireMutationContext(
     input.instanceKey,
     true,
   );
-  if (!context)
-    throw new IntegrationFeatureNotFoundError("Integration instance not found");
+  if (!context) throw new IntegrationFeatureNotFoundError("Integration instance not found");
   return context;
 }
 
@@ -603,10 +516,7 @@ async function loadIntegrationInstanceContext(
     .from(schema.integrationFeatureBindings)
     .innerJoin(
       schema.integrationFeatureFacets,
-      eq(
-        schema.integrationFeatureFacets.id,
-        schema.integrationFeatureBindings.featureFacetId,
-      ),
+      eq(schema.integrationFeatureFacets.id, schema.integrationFeatureBindings.featureFacetId),
     )
     .innerJoin(
       schema.capabilityIntegrationFacets,
@@ -631,10 +541,7 @@ async function loadIntegrationInstanceContext(
     )
     .innerJoin(
       schema.capabilityPluginVersions,
-      eq(
-        schema.capabilityPluginVersions.id,
-        schema.capabilityPluginInstallations.pluginVersionId,
-      ),
+      eq(schema.capabilityPluginVersions.id, schema.capabilityPluginInstallations.pluginVersionId),
     )
     .where(
       and(
@@ -658,8 +565,7 @@ async function loadIntegrationInstanceContext(
   if (lock) query = query.for("update") as typeof query;
   const rows = await query;
   if (rows.length === 0) return null;
-  if (rows.length !== 1)
-    throw new Error(`API Integration ${capabilityId} instance is ambiguous`);
+  if (rows.length !== 1) throw new Error(`API Integration ${capabilityId} instance is ambiguous`);
   return rows[0]!;
 }
 
@@ -673,17 +579,13 @@ async function requireFeatureDefinition(
     .from(schema.integrationFeatureFacets)
     .where(
       and(
-        eq(
-          schema.integrationFeatureFacets.integrationFacetId,
-          context.integrationFacetId,
-        ),
+        eq(schema.integrationFeatureFacets.integrationFacetId, context.integrationFacetId),
         eq(schema.integrationFeatureFacets.featureKey, featureKey),
         ne(schema.integrationFeatureFacets.kind, "tools"),
       ),
     )
     .limit(1);
-  if (!definition)
-    throw new IntegrationFeatureNotFoundError("Integration feature not found");
+  if (!definition) throw new IntegrationFeatureNotFoundError("Integration feature not found");
   featureKind(definition.kind);
   return definition;
 }
@@ -719,10 +621,8 @@ async function requireFeatureConnection(
   if (
     !connection ||
     connection.status !== "active" ||
-    (connection.subjectId !== null &&
-      connection.subjectId !== input.subjectId) ||
-    connection.providerDomain.toLowerCase() !==
-      context.providerDomain.toLowerCase()
+    (connection.subjectId !== null && connection.subjectId !== input.subjectId) ||
+    connection.providerDomain.toLowerCase() !== context.providerDomain.toLowerCase()
   ) {
     throw new IntegrationFeatureConnectionError(
       "Integration feature Connection is unavailable or does not match the provider",
@@ -761,37 +661,21 @@ async function assertDirectFeatureOwnership(
   bindingId: string,
   input: { capabilityId: string; instanceKey: string; featureKey: string },
 ): Promise<void> {
-  const expected = featureOwner(
-    input.capabilityId,
-    input.instanceKey,
-    input.featureKey,
-  );
+  const expected = featureOwner(input.capabilityId, input.instanceKey, input.featureKey);
   const owners = await listIntegrationFeatureBindingOwners(db, bindingId);
-  if (
-    !owners.some(
-      (owner) => owner.kind === expected.kind && owner.id === expected.id,
-    )
-  ) {
+  if (!owners.some((owner) => owner.kind === expected.kind && owner.id === expected.id)) {
     throw new IntegrationFeatureBindingOwnershipConflictError(
       "Integration feature is not directly owned",
     );
   }
-  if (
-    owners.some(
-      (owner) => owner.kind !== expected.kind || owner.id !== expected.id,
-    )
-  ) {
+  if (owners.some((owner) => owner.kind !== expected.kind || owner.id !== expected.id)) {
     throw new IntegrationFeatureBindingOwnershipConflictError(
       "Integration feature is shared by another owner and cannot change lifecycle in place",
     );
   }
 }
 
-function featureOwner(
-  capabilityId: string,
-  instanceKey: string,
-  featureKey: string,
-) {
+function featureOwner(capabilityId: string, instanceKey: string, featureKey: string) {
   return {
     kind: "direct" as const,
     id: `feature:${sha256(`${capabilityId}\0${instanceKey}\0${featureKey}`)}`,
@@ -818,9 +702,7 @@ type BindingSummaryRow = Pick<
   kind: string;
 };
 
-function bindingSummary(
-  row: BindingSummaryRow,
-): IntegrationFeatureBindingSummary {
+function bindingSummary(row: BindingSummaryRow): IntegrationFeatureBindingSummary {
   return {
     id: row.id,
     featureKey: row.featureKey,
@@ -851,9 +733,7 @@ function featureKind(value: string): IntegrationFeatureKind {
   return value;
 }
 
-function bindingStatus(
-  value: string,
-): "active" | "paused" | "needs_attention" | "disabled" {
+function bindingStatus(value: string): "active" | "paused" | "needs_attention" | "disabled" {
   if (
     value !== "active" &&
     value !== "paused" &&
@@ -871,9 +751,7 @@ function assertFeatureConfig(
 ): void {
   const serialized = stableJson(config);
   if (Buffer.byteLength(serialized, "utf8") > 131_072) {
-    throw new IntegrationFeatureConfigError(
-      "Integration feature config exceeds 131072 bytes",
-    );
+    throw new IntegrationFeatureConfigError("Integration feature config exceeds 131072 bytes");
   }
   validateSchemaValue(config, schemaValue, "config", 0);
 }
@@ -884,8 +762,7 @@ function validateSchemaValue(
   path: string,
   depth: number,
 ): void {
-  if (depth > 8)
-    throw new IntegrationFeatureConfigError(`${path} exceeds supported depth`);
+  if (depth > 8) throw new IntegrationFeatureConfigError(`${path} exceeds supported depth`);
   const type = schemaValue.type;
   if (
     Array.isArray(schemaValue.enum) &&
@@ -900,20 +777,14 @@ function validateSchemaValue(
     const object = value as Record<string, unknown>;
     const properties = objectValue(schemaValue.properties);
     const required = Array.isArray(schemaValue.required)
-      ? schemaValue.required.filter(
-          (entry): entry is string => typeof entry === "string",
-        )
+      ? schemaValue.required.filter((entry): entry is string => typeof entry === "string")
       : [];
     for (const key of required) {
-      if (!(key in object))
-        throw new IntegrationFeatureConfigError(`${path}.${key} is required`);
+      if (!(key in object)) throw new IntegrationFeatureConfigError(`${path}.${key} is required`);
     }
     if (schemaValue.additionalProperties === false) {
       const unknown = Object.keys(object).find((key) => !(key in properties));
-      if (unknown)
-        throw new IntegrationFeatureConfigError(
-          `${path}.${unknown} is not supported`,
-        );
+      if (unknown) throw new IntegrationFeatureConfigError(`${path}.${unknown} is not supported`);
     }
     for (const [key, child] of Object.entries(object)) {
       const childSchema = objectValue(properties[key]);
@@ -923,19 +794,31 @@ function validateSchemaValue(
     }
     return;
   }
+  if (type === "array") {
+    if (!Array.isArray(value)) {
+      throw new IntegrationFeatureConfigError(`${path} must be an array`);
+    }
+    if (typeof schemaValue.minItems === "number" && value.length < schemaValue.minItems) {
+      throw new IntegrationFeatureConfigError(`${path} has too few items`);
+    }
+    if (typeof schemaValue.maxItems === "number" && value.length > schemaValue.maxItems) {
+      throw new IntegrationFeatureConfigError(`${path} has too many items`);
+    }
+    const itemSchema = objectValue(schemaValue.items);
+    if (Object.keys(itemSchema).length > 0) {
+      value.forEach((item, index) =>
+        validateSchemaValue(item, itemSchema, `${path}[${index}]`, depth + 1),
+      );
+    }
+    return;
+  }
   if (type === "string") {
     if (typeof value !== "string")
       throw new IntegrationFeatureConfigError(`${path} must be a string`);
-    if (
-      typeof schemaValue.minLength === "number" &&
-      value.length < schemaValue.minLength
-    ) {
+    if (typeof schemaValue.minLength === "number" && value.length < schemaValue.minLength) {
       throw new IntegrationFeatureConfigError(`${path} is too short`);
     }
-    if (
-      typeof schemaValue.maxLength === "number" &&
-      value.length > schemaValue.maxLength
-    ) {
+    if (typeof schemaValue.maxLength === "number" && value.length > schemaValue.maxLength) {
       throw new IntegrationFeatureConfigError(`${path} is too long`);
     }
     return;
@@ -955,39 +838,13 @@ function validateSchemaValue(
         `${path} must be ${type === "integer" ? "an integer" : "a number"}`,
       );
     }
-    if (
-      typeof schemaValue.minimum === "number" &&
-      value < schemaValue.minimum
-    ) {
+    if (typeof schemaValue.minimum === "number" && value < schemaValue.minimum) {
       throw new IntegrationFeatureConfigError(`${path} is below the minimum`);
     }
-    if (
-      typeof schemaValue.maximum === "number" &&
-      value > schemaValue.maximum
-    ) {
+    if (typeof schemaValue.maximum === "number" && value > schemaValue.maximum) {
       throw new IntegrationFeatureConfigError(`${path} exceeds the maximum`);
     }
     return;
-  }
-  if (type === "array") {
-    if (!Array.isArray(value))
-      throw new IntegrationFeatureConfigError(`${path} must be an array`);
-    if (
-      typeof schemaValue.minItems === "number" &&
-      value.length < schemaValue.minItems
-    ) {
-      throw new IntegrationFeatureConfigError(`${path} has too few entries`);
-    }
-    if (
-      typeof schemaValue.maxItems === "number" &&
-      value.length > schemaValue.maxItems
-    ) {
-      throw new IntegrationFeatureConfigError(`${path} has too many entries`);
-    }
-    const itemSchema = objectValue(schemaValue.items);
-    for (const [index, item] of value.entries()) {
-      validateSchemaValue(item, itemSchema, `${path}[${index}]`, depth + 1);
-    }
   }
 }
 

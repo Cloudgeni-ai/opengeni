@@ -21,6 +21,7 @@ import type { ComponentType, FormEvent } from "react";
 import { CustomApiSection } from "@/components/capabilities/custom-api-section";
 import { CustomApiSetupDialog } from "@/components/capabilities/custom-api-setup-dialog";
 import type { CustomApiFlowState } from "@/components/capabilities/custom-api-flow";
+import { GoogleDriveKnowledgeSourceDialog } from "@/components/capabilities/google-drive-knowledge-source-dialog";
 import { IntegrationFeaturesPanel } from "@/components/capabilities/integration-features-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -72,6 +73,9 @@ export function IntegrationControlCenterView({
   loading,
   loadError,
   canManage,
+  canManagePersonalDestination,
+  canManageWorkspaceDestination,
+  canManageOrganizationDestination,
   busyKey,
   callbackBusy,
   setupPreset,
@@ -109,6 +113,9 @@ export function IntegrationControlCenterView({
   loading: boolean;
   loadError: string | null;
   canManage: boolean;
+  canManagePersonalDestination: boolean;
+  canManageWorkspaceDestination: boolean;
+  canManageOrganizationDestination: boolean;
   busyKey: string | null;
   callbackBusy: boolean;
   setupPreset: ApiIntegrationPresetSummary | null;
@@ -212,6 +219,9 @@ export function IntegrationControlCenterView({
                 instances={instancesByPreset.get(preset.id) ?? []}
                 connections={connections}
                 canManage={canManage}
+                canManagePersonalDestination={canManagePersonalDestination}
+                canManageWorkspaceDestination={canManageWorkspaceDestination}
+                canManageOrganizationDestination={canManageOrganizationDestination}
                 busyKey={busyKey}
                 onAdd={() => onOpenSetup(preset)}
                 onReconnect={onReconnect}
@@ -347,6 +357,9 @@ function PresetCard({
   instances,
   connections,
   canManage,
+  canManagePersonalDestination,
+  canManageWorkspaceDestination,
+  canManageOrganizationDestination,
   busyKey,
   onAdd,
   onReconnect,
@@ -358,6 +371,9 @@ function PresetCard({
   instances: ApiIntegrationInstallationSummary[];
   connections: ConnectionMetadata[] | null;
   canManage: boolean;
+  canManagePersonalDestination: boolean;
+  canManageWorkspaceDestination: boolean;
+  canManageOrganizationDestination: boolean;
   busyKey: string | null;
   onAdd: () => void;
   onReconnect: (instance: ApiIntegrationInstallationSummary) => void;
@@ -458,6 +474,10 @@ function PresetCard({
                 instance={instance}
                 featureCount={preset.features.length}
                 canManage={canManage}
+                canManagePersonalDestination={canManagePersonalDestination}
+                canManageWorkspaceDestination={canManageWorkspaceDestination}
+                canManageOrganizationDestination={canManageOrganizationDestination}
+                GoogleDriveDialog={GoogleDriveKnowledgeSourceDialog}
               />
             </div>
           );

@@ -32,11 +32,7 @@ export type ApiIntegrationApprovalMode = "never" | "ask";
 
 export type ApiIntegrationFeatureDefinition = {
   readonly featureKey: string;
-  readonly kind:
-    | "knowledge_source"
-    | "inbound_trigger"
-    | "delivery_destination"
-    | "identity_link";
+  readonly kind: "knowledge_source" | "inbound_trigger" | "delivery_destination" | "identity_link";
   readonly configSchema: Readonly<Record<string, unknown>>;
   readonly capabilities: Readonly<Record<string, unknown>>;
 };
@@ -418,10 +414,9 @@ export async function installApiIntegration(
           },
           capabilities: { protocol: input.protocol, runtime: "mcp" },
         });
-        const featureFacets = new Map<
-          string,
-          typeof schema.integrationFeatureFacets.$inferSelect
-        >([[toolsFeature.featureKey, toolsFeature]]);
+        const featureFacets = new Map<string, typeof schema.integrationFeatureFacets.$inferSelect>([
+          [toolsFeature.featureKey, toolsFeature],
+        ]);
         for (const feature of input.featureDefinitions ?? []) {
           const facet = await ensureIntegrationFeatureFacet(tx as unknown as Database, {
             integrationFacetId: integrationFacet.id,
@@ -1239,9 +1234,7 @@ async function migrateApiIntegrationFacetInstallations(
         config: toolsConfig ? { ...config, allowedTools: selected, requireApproval } : config,
         status: toolsConfig && selected.length === 0 ? "needs_attention" : binding.status,
         lastErrorCode:
-          toolsConfig && selected.length === 0
-            ? "selected_tools_removed"
-            : binding.lastErrorCode,
+          toolsConfig && selected.length === 0 ? "selected_tools_removed" : binding.lastErrorCode,
         version: binding.version + 1,
         updatedAt: new Date(),
       })
@@ -1578,7 +1571,10 @@ function assertInstallInput(input: InstallApiIntegrationInput): void {
   if (featureDefinitions.length > 128) {
     throw new Error("API Integration exposes too many feature definitions");
   }
-  if (new Set(featureDefinitions.map((feature) => feature.featureKey)).size !== featureDefinitions.length) {
+  if (
+    new Set(featureDefinitions.map((feature) => feature.featureKey)).size !==
+    featureDefinitions.length
+  ) {
     throw new Error("API Integration has duplicate feature keys");
   }
   const base = new URL(input.baseUrl);

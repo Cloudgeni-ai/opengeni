@@ -1,7 +1,15 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { Buffer } from "node:buffer";
 import { randomBytes } from "node:crypto";
+import {
+  GOOGLE_DRIVE_PRESET,
+  integrationFeaturesForPreset,
+  providerDomainForPreset,
+} from "@opengeni/capabilities";
 import type { Settings } from "@opengeni/config";
 import {
+  API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
+  ApiIntegrationOAuthConnectionMetadata,
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
   signDelegatedAccessToken,
@@ -15,17 +23,24 @@ import {
   GOOGLE_DRIVE_READONLY_SCOPE,
 } from "@opengeni/contracts/google-drive";
 import {
+  createConnection,
   createDb,
+  encryptEnvironmentValue,
   getConnectionMetadata,
+  installApiIntegration,
+  listIntegrationInstanceFeatures,
   listConnectionsMetadata,
   loadConnectionCredentialForBroker,
   type DbClient,
 } from "@opengeni/db";
+import { migrate } from "@opengeni/db/migrate";
 import {
   acquireSharedTestDatabase,
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
+import postgres from "postgres";
+
 import { createApp } from "../src/app";
 
 const DELEGATION_SECRET = "google-drive-delegation-secret";
@@ -39,7 +54,25 @@ let client: DbClient;
 let settings: Settings;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("api_google_drive");
+  const adminUrl = process.env.OPENGENI_GOOGLE_DRIVE_TEST_POSTGRES_ADMIN_URL;
+  const appUrl = process.env.OPENGENI_GOOGLE_DRIVE_TEST_POSTGRES_APP_URL;
+  if ((adminUrl && !appUrl) || (!adminUrl && appUrl)) {
+    throw new Error(
+      "OPENGENI_GOOGLE_DRIVE_TEST_POSTGRES_ADMIN_URL and OPENGENI_GOOGLE_DRIVE_TEST_POSTGRES_APP_URL must be set together",
+    );
+  }
+  if (adminUrl && appUrl) {
+    await migrate(adminUrl);
+    const admin = postgres(adminUrl, { max: 4 });
+    shared = {
+      admin,
+      adminUrl,
+      appUrl,
+      release: async () => await admin.end().catch(() => undefined),
+    };
+  } else {
+    shared = await acquireSharedTestDatabase("api_google_drive");
+  }
   if (!shared) {
     available = false;
     // eslint-disable-next-line no-console
@@ -498,6 +531,306 @@ describe("Google Drive local source preview", () => {
     `,
     ).toHaveLength(0);
   });
+
+  test("binds sources to the exact named Google Drive Integration instance", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const google = googleFixture();
+    const providerDomain = providerDomainForPreset(GOOGLE_DRIVE_PRESET);
+    const encryptionKey = Buffer.from(settings.environmentsEncryptionKey!, "base64");
+    const createProviderConnection = async (suffix: string) =>
+      await createConnection(client.db, {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        subjectId: "subject-a",
+        providerDomain,
+        kind: "oauth2",
+        credentialEncrypted: encryptEnvironmentValue(
+          encryptionKey,
+          JSON.stringify({
+            access_token: `integration-access-${suffix}`,
+            refresh_token: `integration-refresh-${suffix}`,
+            token_type: "Bearer",
+            expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+            token_endpoint: GOOGLE_DRIVE_PRESET.oauth.tokenUrl,
+            client_id: CLIENT_ID,
+            client_secret: CLIENT_SECRET,
+            token_endpoint_auth_method: "client_secret_post",
+            scope: GOOGLE_DRIVE_PRESET.oauth.scopes.join(" "),
+          }),
+        ),
+        grantedScopes: [...GOOGLE_DRIVE_PRESET.oauth.scopes],
+        expiresAt: new Date(Date.now() + 3_600_000),
+        metadata: ApiIntegrationOAuthConnectionMetadata.parse({
+          credentialRole: API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
+          providerFamily: "google",
+          providerPrincipalId: `google-principal-${suffix}`,
+          providerEmail: `${suffix}@example.com`,
+          providerDisplayName: `Drive ${suffix.toUpperCase()}`,
+          authorizedPresetIds: [GOOGLE_DRIVE_PRESET.id],
+          verifiedAt: new Date().toISOString(),
+        }),
+        createdBySubjectId: "subject-a",
+      });
+    const financeConnection = await createProviderConnection("finance");
+    const salesConnection = await createProviderConnection("sales");
+    const capabilityId = "api:preset:google-drive-source-test";
+    const installInstance = async (instanceKey: string, connectionId: string) =>
+      await installApiIntegration(client.db, {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        subjectId: "subject-a",
+        capabilityId,
+        pluginKey: "integration/google-drive-source-test",
+        serverId: "google_drive_source_test",
+        name: GOOGLE_DRIVE_PRESET.name,
+        description: GOOGLE_DRIVE_PRESET.summary,
+        presetId: GOOGLE_DRIVE_PRESET.id,
+        provider: GOOGLE_DRIVE_PRESET.family,
+        providerDomain,
+        protocol: "openapi",
+        baseUrl: GOOGLE_DRIVE_PRESET.baseUrl,
+        sourceUrl: GOOGLE_DRIVE_PRESET.sourceUrl,
+        authScheme: { kind: "oauth2" },
+        connectionId,
+        instanceKey,
+        displayName: `${GOOGLE_DRIVE_PRESET.name} — ${instanceKey}`,
+        requiredScopes: [...GOOGLE_DRIVE_PRESET.oauth.scopes],
+        ownership: "subject",
+        allowedTools: ["drive_files_list"],
+        featureDefinitions: integrationFeaturesForPreset(GOOGLE_DRIVE_PRESET.id),
+        revision: {
+          id: "openapi:444444444444444444444444",
+          protocol: "openapi",
+          integrationId: "google-drive-source-test",
+          contentSha256: "4".repeat(64),
+          source: { url: GOOGLE_DRIVE_PRESET.sourceUrl },
+          title: GOOGLE_DRIVE_PRESET.name,
+          tools: [
+            {
+              id: "drive_files_list",
+              operationKey: "drive.files.list",
+              name: "List Drive files",
+              description: "List files in Google Drive.",
+              inputSchema: { type: "object", properties: {} },
+              safety: "read",
+              approvalMode: "never",
+              deprecated: false,
+            },
+          ],
+          bindings: {
+            drive_files_list: {
+              method: "get",
+              pathTemplate: "/files",
+              serverUrl: GOOGLE_DRIVE_PRESET.baseUrl,
+              parameters: [],
+            },
+          },
+        },
+      });
+    await installInstance("finance", financeConnection.id);
+    await installInstance("sales", salesConnection.id);
+    const authorization = await bearer(workspace, "subject-a", [
+      "connections:read",
+      "connections:write",
+      "workspace:read",
+      "workspace:admin",
+    ]);
+    const featurePath = (instanceKey: string, suffix: string) =>
+      `/v1/workspaces/${workspace.workspaceId}/integrations/${encodeURIComponent(capabilityId)}` +
+      `/instances/${instanceKey}/features/drive-content/${suffix}`;
+    const browse = async (instanceKey: string) =>
+      await app(google.fetch).request(`${featurePath(instanceKey, "browse")}?parentId=root`, {
+        headers: {
+          authorization,
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+        },
+      });
+    expect((await browse("finance")).status).toBe(200);
+    expect((await browse("sales")).status).toBe(200);
+    expect(google.apiAuthorizationHeaders).toEqual([
+      "Bearer integration-access-finance",
+      "Bearer integration-access-sales",
+    ]);
+
+    const providerReadsBeforeGenericBypass = google.apiAuthorizationHeaders.length;
+    const genericBypass = await app(google.fetch).request(
+      featurePath("finance", "source").replace(/\/source$/, ""),
+      {
+        method: "PUT",
+        headers: {
+          authorization,
+          "content-type": "application/json",
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+        },
+        body: JSON.stringify({
+          displayName: "Forged Finance source",
+          config: {
+            sources: [
+              {
+                id: "folder-1",
+                name: "Product",
+                mimeType: "application/vnd.google-apps.folder",
+                sourceKind: "folder",
+                includeDescendants: true,
+              },
+            ],
+            destination: {
+              authorityKind: "organization",
+              authorityAccountId: "forged-account",
+            },
+            syncCadence: "hourly",
+            readPolicy: "allow",
+          },
+          idempotencyKey: crypto.randomUUID(),
+        }),
+      },
+    );
+    expect(genericBypass.status).toBe(422);
+    expect(google.apiAuthorizationHeaders).toHaveLength(providerReadsBeforeGenericBypass);
+    expect(
+      (
+        await listIntegrationInstanceFeatures(
+          client.db,
+          workspace.workspaceId,
+          "subject-a",
+          capabilityId,
+          "finance",
+        )
+      ).features.find((feature) => feature.definition.featureKey === "drive-content")?.binding,
+    ).toBeNull();
+
+    const sourcePayload = {
+      sources: [
+        {
+          id: "folder-1",
+          name: "Product",
+          mimeType: "application/vnd.google-apps.folder",
+          driveId: null,
+        },
+      ],
+      destination: { authorityKind: "workspace", collectionId: null },
+      syncCadence: "hourly",
+      readPolicy: "allow",
+      idempotencyKey: crypto.randomUUID(),
+    };
+    const save = await app(google.fetch).request(featurePath("finance", "source"), {
+      method: "PUT",
+      headers: {
+        authorization,
+        "content-type": "application/json",
+        [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+      },
+      body: JSON.stringify(sourcePayload),
+    });
+    const saveBody = (await save.json()) as {
+      binding: { id: string; version: number; config: Record<string, unknown> };
+      error?: { message?: string };
+    };
+    expect({ status: save.status, body: saveBody }).toMatchObject({ status: 200 });
+    const configured = saveBody;
+    expect(configured.binding).toMatchObject({
+      version: 1,
+      config: {
+        sources: [
+          {
+            id: "folder-1",
+            name: "Product",
+            mimeType: "application/vnd.google-apps.folder",
+            sourceKind: "folder",
+            includeDescendants: true,
+          },
+        ],
+        destination: {
+          authorityKind: "workspace",
+          authorityAccountId: workspace.accountId,
+          authorityWorkspaceId: workspace.workspaceId,
+        },
+        syncCadence: "hourly",
+        readPolicy: "allow",
+      },
+    });
+    expect(google.apiAuthorizationHeaders.at(-1)).toBe("Bearer integration-access-finance");
+
+    const [financeFeatures, salesFeatures] = await Promise.all([
+      listIntegrationInstanceFeatures(
+        client.db,
+        workspace.workspaceId,
+        "subject-a",
+        capabilityId,
+        "finance",
+      ),
+      listIntegrationInstanceFeatures(
+        client.db,
+        workspace.workspaceId,
+        "subject-a",
+        capabilityId,
+        "sales",
+      ),
+    ]);
+    expect(
+      financeFeatures.features.find((feature) => feature.definition.featureKey === "drive-content")
+        ?.binding,
+    ).toMatchObject({ id: configured.binding.id, version: 1 });
+    expect(
+      salesFeatures.features.find((feature) => feature.definition.featureKey === "drive-content")
+        ?.binding,
+    ).toBeNull();
+    expect(
+      (
+        await getConnectionMetadata(
+          client.db,
+          workspace.workspaceId,
+          financeConnection.id,
+          "subject-a",
+        )
+      )?.metadata,
+    ).not.toHaveProperty("selectedSources");
+    expect(
+      (
+        await getConnectionMetadata(
+          client.db,
+          workspace.workspaceId,
+          salesConnection.id,
+          "subject-a",
+        )
+      )?.metadata,
+    ).not.toHaveProperty("documentDestination");
+
+    const stale = await app(google.fetch).request(featurePath("finance", "source"), {
+      method: "PUT",
+      headers: {
+        authorization,
+        "content-type": "application/json",
+        [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+      },
+      body: JSON.stringify({
+        ...sourcePayload,
+        syncCadence: "daily",
+        expectedVersion: 2,
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+    expect(stale.status).toBe(409);
+
+    const providerReadsBeforeDeniedSave = google.apiAuthorizationHeaders.length;
+    const deniedOrganization = await app(google.fetch).request(featurePath("finance", "source"), {
+      method: "PUT",
+      headers: {
+        authorization,
+        "content-type": "application/json",
+        [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+      },
+      body: JSON.stringify({
+        ...sourcePayload,
+        destination: { authorityKind: "organization", collectionId: null },
+        expectedVersion: 1,
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+    expect(deniedOrganization.status).toBe(403);
+    expect(google.apiAuthorizationHeaders).toHaveLength(providerReadsBeforeDeniedSave);
+  }, 60_000);
 
   test("authorizes all connector destinations and keeps legacy config workspace-bound", async () => {
     if (!available) return;

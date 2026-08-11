@@ -14,7 +14,7 @@ const subjectId = "user:ope-16-browser";
 const financeConnectionId = "00000000-0000-4000-8000-000000000619";
 const salesConnectionId = "00000000-0000-4000-8000-000000000620";
 const gmailConnectionId = "00000000-0000-4000-8000-000000000621";
-const apiContractRevision = "2026-08-capability-facets-v1";
+const apiContractRevision = "2026-08-drive-facet-v1";
 let webBaseUrl = "";
 
 type UiState = {

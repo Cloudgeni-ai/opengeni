@@ -155,6 +155,8 @@ The owning endpoints are:
 - `GET /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/uninstall-preview`
 - `DELETE /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey`
 - `GET /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features`
+- `GET /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/browse`
+- `PUT /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/source`
 - `PUT /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey`
 - `POST /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/pause`
 - `POST /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/resume`
@@ -182,6 +184,21 @@ links, and other cursor contents remain private durable state. Integration
 definition upgrades migrate same-key facets without losing configuration,
 cursor, lifecycle status, evidence timestamps, or owner edges, and reject an
 upgrade that would silently remove a configured facet.
+
+Google Drive's `drive-content` facet uses a provider-specific editor because
+its required schema contains a bounded array of verified folders/Shared Drives
+plus a bound document destination. Browse and save resolve the exact named
+Integration instance before loading its Connection. Save re-reads every source
+from Google, rejects stale client labels/types/drive identities, binds the
+organization/workspace/personal destination authority, and writes only the
+feature binding. The generic feature `PUT` rejects this provider-owned facet;
+only the provider-specific `/source` route may persist its config, so a
+schema-valid payload cannot bypass Google metadata checks or forge destination
+authority. A sibling Google Drive instance—whether it uses another Google
+account or another ownership scope—is never selected by provider/domain
+fallback and is not mutated. Generic browser editing refuses required object or
+array fields unless a provider-specific flow owns them, so OneDrive and future
+rich schemas cannot be submitted as silently incomplete primitive config.
 
 The preset inventory returns only safe public metadata (id, label, provider
 family/domain, protocol, summary, requested scope names, and immutable feature

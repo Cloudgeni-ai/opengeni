@@ -31,7 +31,6 @@ import {
 } from "@/components/capabilities/capability-detail-sheet";
 import { CapabilityLogo } from "@/components/capabilities/capability-logo";
 import { CapabilityTile } from "@/components/capabilities/capability-tile";
-import { IntegrationControlCenter } from "@/components/capabilities/integration-control-center";
 import { PacksSection } from "@/components/capabilities/packs-section";
 import { PersonalSlackAccountCard } from "@/components/capabilities/personal-slack-account-card";
 import { SlackReactionSummonCard } from "@/components/capabilities/slack-reaction-summon-card";
@@ -87,9 +86,9 @@ import {
 import { cn } from "@/lib/utils";
 import { request } from "@/api";
 
-const GoogleDriveConnectorCard = lazy(async () => {
-  const module = await import("@/components/capabilities/google-drive-connector-card");
-  return { default: module.GoogleDriveConnectorCard };
+const IntegrationControlCenter = lazy(async () => {
+  const module = await import("@/components/capabilities/integration-control-center");
+  return { default: module.IntegrationControlCenter };
 });
 
 import type {
@@ -1216,18 +1215,16 @@ export function CapabilitiesRoute({
           }
         />
 
-        <IntegrationControlCenter
-          workspaceId={workspaceId}
-          connections={connections}
-          canManage={canManageApiIntegrationInstances}
-          onChanged={async () => {
-            await refresh();
-            onRuntimeChanged();
-          }}
-        />
-
-        <Suspense fallback={<Skeleton className="mt-6 h-40 w-full rounded-xl" />}>
-          <GoogleDriveConnectorCard workspaceId={workspaceId} />
+        <Suspense fallback={<Skeleton className="mt-6 h-72 w-full rounded-2xl" />}>
+          <IntegrationControlCenter
+            workspaceId={workspaceId}
+            connections={connections}
+            canManage={canManageApiIntegrationInstances}
+            onChanged={async () => {
+              await refresh();
+              onRuntimeChanged();
+            }}
+          />
         </Suspense>
 
         <section className="mt-6" aria-labelledby="slack-connections-heading">

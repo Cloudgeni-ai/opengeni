@@ -28,11 +28,7 @@ export interface OpenApiProviderPreset {
 
 export interface IntegrationFeatureDefinition {
   readonly featureKey: string;
-  readonly kind:
-    | "knowledge_source"
-    | "inbound_trigger"
-    | "delivery_destination"
-    | "identity_link";
+  readonly kind: "knowledge_source" | "inbound_trigger" | "delivery_destination" | "identity_link";
   readonly configSchema: Readonly<Record<string, unknown>>;
   readonly capabilities: Readonly<Record<string, unknown>>;
 }
@@ -57,17 +53,49 @@ const driveKnowledgeFeature = (
   kind: "knowledge_source",
   configSchema: {
     type: "object",
-    required: ["sourceId", "sourceKind"],
+    required: ["sources", "destination", "syncCadence", "readPolicy"],
     properties: {
-      sourceId: { type: "string", minLength: 1, maxLength: 512 },
-      sourceKind: {
-        type: "string",
-        enum:
-          provider === "google-drive"
-            ? ["my_drive", "shared_drive", "folder"]
-            : ["my_drive", "shared_library", "folder"],
+      sources: {
+        type: "array",
+        minItems: 1,
+        maxItems: 100,
+        items: {
+          type: "object",
+          required: ["id", "name", "mimeType", "sourceKind", "includeDescendants"],
+          properties: {
+            id: { type: "string", minLength: 1, maxLength: 512 },
+            name: { type: "string", minLength: 1, maxLength: 1024 },
+            mimeType: { type: "string", minLength: 1, maxLength: 256 },
+            driveId: { type: "string", minLength: 1, maxLength: 512 },
+            sourceKind: {
+              type: "string",
+              enum:
+                provider === "google-drive"
+                  ? ["my_drive", "shared_drive", "folder"]
+                  : ["my_drive", "shared_library", "folder"],
+            },
+            includeDescendants: { type: "boolean" },
+          },
+          additionalProperties: false,
+        },
       },
-      includeDescendants: { type: "boolean" },
+      destination: {
+        type: "object",
+        required: ["authorityKind", "authorityAccountId"],
+        properties: {
+          authorityKind: {
+            type: "string",
+            enum: ["organization", "workspace", "personal"],
+          },
+          authorityAccountId: { type: "string", minLength: 1, maxLength: 128 },
+          authorityWorkspaceId: { type: "string", minLength: 1, maxLength: 128 },
+          authoritySubjectId: { type: "string", minLength: 1, maxLength: 512 },
+          collectionId: { type: "string", minLength: 1, maxLength: 512 },
+        },
+        additionalProperties: false,
+      },
+      syncCadence: { type: "string", enum: ["manual", "hourly", "daily"] },
+      readPolicy: { type: "string", enum: ["allow", "ask", "block"] },
     },
     additionalProperties: false,
   },

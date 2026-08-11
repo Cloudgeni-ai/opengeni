@@ -116,7 +116,9 @@ import type {
   GetPackResponse,
   GitHubAppInfo,
   GitHubRepositoriesResponse,
+  GoogleDriveBrowseResponse,
   GoogleDriveDisconnectRequest,
+  SaveGoogleDriveIntegrationSourceRequest,
   GoogleDriveLifecycleActionRequest,
   KnowledgeMemory,
   KnowledgeMemorySearchRequest,
@@ -3737,6 +3739,39 @@ export class OpenGeniClient {
     return await this.requestJson<IntegrationFeatureMutationResult>(
       "PUT",
       `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(capabilityId)}/instances/${encodeURIComponent(instanceKey)}/features/${encodeURIComponent(featureKey)}`,
+      request,
+    );
+  }
+
+  /** Browse source metadata through one exact Google Drive Integration instance. */
+  async browseGoogleDriveIntegrationSource(
+    workspaceId: string,
+    capabilityId: string,
+    instanceKey: string,
+    featureKey: string,
+    options: { parentId?: string | undefined; pageToken?: string | undefined } = {},
+  ): Promise<GoogleDriveBrowseResponse> {
+    const query = new URLSearchParams();
+    if (options.parentId) query.set("parentId", options.parentId);
+    if (options.pageToken) query.set("pageToken", options.pageToken);
+    const suffix = query.size > 0 ? `?${query}` : "";
+    return await this.requestJson<GoogleDriveBrowseResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(capabilityId)}/instances/${encodeURIComponent(instanceKey)}/features/${encodeURIComponent(featureKey)}/browse${suffix}`,
+    );
+  }
+
+  /** Verify and bind document sources to one exact Google Drive Integration instance. */
+  async saveGoogleDriveIntegrationSource(
+    workspaceId: string,
+    capabilityId: string,
+    instanceKey: string,
+    featureKey: string,
+    request: SaveGoogleDriveIntegrationSourceRequest,
+  ): Promise<IntegrationFeatureMutationResult> {
+    return await this.requestJson<IntegrationFeatureMutationResult>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(capabilityId)}/instances/${encodeURIComponent(instanceKey)}/features/${encodeURIComponent(featureKey)}/source`,
       request,
     );
   }

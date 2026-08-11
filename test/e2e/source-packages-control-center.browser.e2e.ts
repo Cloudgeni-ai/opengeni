@@ -18,7 +18,7 @@ const skillCapabilityId = "skill:release-operator-browser";
 const pluginKey = "example/research";
 const skillUrl = "https://github.com/acme/skills/tree/main/release-operator";
 const pluginUrl = "https://plugins.example.test/research.json";
-const apiContractRevision = "2026-08-capability-facets-v1";
+const apiContractRevision = "2026-08-drive-facet-v1";
 let webBaseUrl = "";
 
 type UiState = {

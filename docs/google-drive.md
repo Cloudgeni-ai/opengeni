@@ -1,187 +1,155 @@
-# Google Drive connection and sync preview
+# Google Drive named knowledge sources
 
-OpenGeni can connect a Google account once, choose multiple Shared Drives or
-folder boundaries, and configure recurring incremental sync from the Capabilities
-page. This first slice is intentionally a connector preview:
+Google Drive is a built-in API Integration preset. A workspace may install the
+same immutable Drive definition many times, with a separate account label,
+Connection, ownership, tool namespace, health state, and feature configuration
+for each instance. For example, `Google Drive — Finance` and `Google Drive —
+Sales` can coexist without provider-domain fallback or singleton overwrite.
 
-- OAuth and refresh tokens are server-side only and encrypted in the existing
-  connection vault.
-- OpenGeni requests
-  `https://www.googleapis.com/auth/drive.readonly` so it can resolve Shared
-  Drive names and later read documents for ingestion.
-- Selecting folders or Shared Drives stores their boundaries, future knowledge
-  scope, sync cadence, and read policy on the connection.
-- The saved schedule and policy do not yet create a knowledge source, download
-  files, run a backfill, or update workspace memory. A reusable server-side
-  inventory/export planner now defines the first execution boundary, but no API
-  or worker dispatches it yet.
+The current shipped source slice provides:
 
-Google currently classifies `drive.readonly` as a restricted scope.
-Keep the OAuth app in Testing with explicit test users for local development.
-Production use requires Google's applicable verification and security review.
+- signed PKCE OAuth through the normal provider-preset flow;
+- encrypted server-side credentials on a Personal or workspace Connection;
+- exact-instance browsing of My Drive, folders, shared folders, and Shared
+  Drives;
+- provider re-verification of every selected boundary at save time;
+- a versioned `drive-content` Knowledge Source binding containing 1–100
+  sources, bound destination authority, cadence, and read policy;
+- generic pause, resume, and removal for that one feature; and
+- multiple named Drive instances using separate Connections without crossing
+  credentials or configuration.
 
-## Launch OAuth scope decision
+This slice **does not** dispatch a recurring import, download file bytes,
+create Documents/chunks, run embeddings, process a durable Drive change cursor,
+project Drive ACLs, or update workspace memory. The inventory/export planner is
+implemented as a provider-neutral execution boundary, but no API route,
+scheduler, or worker invokes it yet. The UI therefore reports saved source
+configuration, not completed or running ingestion.
 
-The current connector configures a continuously readable folder, My Drive, or
-Shared Drive boundary. That product mode requires
-`https://www.googleapis.com/auth/drive.readonly`:
+## OAuth and local setup
 
-- `drive.file` grants per-file access to files created by the app or explicitly
-  opened/shared with it. It does not prove that OpenGeni can continuously
-  discover every present or future descendant of a selected folder or Shared
-  Drive, so it never satisfies the recursive-source-sync capability.
-- `drive.metadata.readonly` can describe Drive items but cannot read document
-  content. Legacy metadata-only connections must reconnect before source
-  browsing/configuration because every saved boundary promises later recursive
-  content synchronization.
-- `drive.readonly` satisfies metadata discovery, content reads, and recursive
-  source synchronization. A previously granted full `drive` scope is
-  semantically sufficient but OpenGeni does not request that broader scope.
-- A future narrow Google Picker mode may use `drive.file` only when its source
-  contract is explicitly limited to the individually selected files. It must
-  not be represented as a recursively synchronized folder.
+The provider preset is configured in `packages/capabilities/src/providers.ts`.
+Its generic API surface includes Drive tools and currently requests the full
+`https://www.googleapis.com/auth/drive` scope. That scope satisfies recursive
+metadata/content reads and also authorizes the preset's reviewed write tools;
+tool approval/action policy remains independent of source configuration.
 
-OAuth start continues to use Google's incremental-authorization flag. A future
-Drive publishing feature may request `drive.file` as a separate write capability
-without replacing the read-only source grant. The callback and every active
-source-browser admission evaluate the exact returned/stored scope set through
-one deterministic capability decision. Unknown, partial, write-only, or malformed
-grants fail before Google identity lookup, credential persistence, or
-source-provider reads.
+The retained legacy connector at
+`/v1/workspaces/:workspaceId/connections/google-drive/*` requests the narrower
+`drive.readonly` scope and remains only for rollback/migration compatibility.
+New Capabilities UI setup uses the provider-preset callback:
 
-## Local setup
+```text
+http://127.0.0.1:8000/v1/integrations/provider-oauth/callback
+```
 
-1. In Google Cloud, enable the Google Drive API.
-2. Configure the OAuth consent screen, add
-   `https://www.googleapis.com/auth/drive.readonly`, and add your
-   Google account as a test user.
-3. Create an OAuth client of type **Web application**.
-4. Add this exact authorized redirect URI:
+Local configuration requires:
 
-   ```text
-   http://127.0.0.1:8000/v1/integrations/google-drive/callback
-   ```
+```bash
+OPENGENI_INTEGRATIONS_ENABLED=true
+OPENGENI_PUBLIC_BASE_URL=http://127.0.0.1:8000
+OPENGENI_WEB_BASE_URL=http://127.0.0.1:3000
+OPENGENI_INTEGRATIONS_STATE_SECRET=replace-with-random-state-secret
+OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY=replace-with-base64-32-byte-key
+OPENGENI_GOOGLE_DRIVE_CLIENT_ID=your-client-id.apps.googleusercontent.com
+OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET=your-client-secret
+```
 
-5. Add the following to `.env`:
+The generic Google client may alternatively be supplied through
+`OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON`. Generate the encryption key with
+`openssl rand -base64 32` and the state secret with `openssl rand -hex 32`.
+Enable the Google Drive API, configure the requested scopes and exact callback
+URI on the Google OAuth client, then run `bun run dev`. Google classifies broad
+Drive grants as sensitive/restricted; production use must complete Google's
+applicable verification and security-review requirements.
 
-   ```bash
-   OPENGENI_INTEGRATIONS_ENABLED=true
-   OPENGENI_PUBLIC_BASE_URL=http://127.0.0.1:8000
-   OPENGENI_WEB_BASE_URL=http://127.0.0.1:3000
-   OPENGENI_INTEGRATIONS_STATE_SECRET=replace-with-random-state-secret
-   OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY=replace-with-base64-32-byte-key
-   OPENGENI_GOOGLE_DRIVE_CLIENT_ID=your-client-id.apps.googleusercontent.com
-   OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET=your-client-secret
-   ```
+In **Capabilities → Connected services**, choose **Connect Google Drive**, give
+the account a human-readable label, choose Personal or workspace ownership, and
+complete Google consent. **Add another account** creates another Connection and
+Integration instance instead of replacing the first one.
 
-   Generate the encryption key with `openssl rand -base64 32` and the state
-   secret with `openssl rand -hex 32`.
+## Exact-instance source configuration
 
-6. Run `bun run dev`, open `http://127.0.0.1:3000`, go to **Capabilities**, and
-   choose **Connect Google Drive**.
+Each account row has a **Features** drawer. Configuring **Drive content** opens
+the provider-specific browser for that exact `capabilityId`, `instanceKey`, and
+`featureKey`:
 
-The dev stack can select another API or web port if the defaults are occupied.
-If that happens, update both base URLs and the Google authorized redirect URI
-to the exact ports printed by the dev stack.
+- `GET /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/browse`
+- `PUT /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/features/:featureKey/source`
 
-## Connection lifecycle and recovery
+The browser starts at My Drive, lists folders only, supports pagination, and
+accepts a pasted Google Drive folder/Shared Drive URL or ID. Selecting a parent
+includes descendants; the UI suppresses redundant visible child selections.
+At least one and at most 100 sources are required.
 
-The Capabilities card projects one explicit, durable state for the current
-subject-owned Google Drive connection:
+Browse first resolves the exact installed Integration, verifies that the facet
+is the adapter-owned Google Drive Knowledge Source, loads only that instance's
+Connection, and sends its exact token to Google. Personal Connections require
+the current subject; workspace Connections are visible under workspace
+authority. Provider-domain equality alone never selects a credential.
 
-- **Connected** permits source browsing and configuration.
-- **Paused** is a local reversible stop. OpenGeni does not browse or use saved
-  Drive locations until the same connection is resumed.
-- **Token revoked** means Google rejected the refresh grant. Reconnect with the
-  same Google account to preserve the connection and configured locations.
-- **App removed** is terminal for the current deployment configuration. An
-  administrator must restore the Google OAuth app before reconnect can work.
-- **Reconnect required** covers other permanent credential failures that do not
-  prove a narrower cause.
-- **Re-consent required** means the grant no longer proves the selected-source
-  read capability, including known Google permission failures and legacy
-  metadata-only grants.
-- **Disconnected** keeps the row and its configuration as inactive audit truth.
-  A new account may be connected only after this local disconnect.
+Save validates a UUID idempotency key and optional binding version, authorizes
+the requested destination, and re-reads every source from Google. A changed
+name, MIME type, or Shared Drive identity returns `409` so stale UI state cannot
+bind a different provider object. The persisted config contains:
 
-Pause, resume, source changes, refresh transitions, disconnect, and reconnect
-all share the connection's `(id, version)` compare-and-set fence. A disconnect
-also carries a stable idempotency key bound durably to the expected and result
-versions. Exact retries converge only while that result generation remains
-current; reconnect or any later transition permanently fences a delayed old
-DELETE. A stale conflicting action returns a retryable conflict instead of
-overwriting newer credential or lifecycle truth.
+- provider-verified source id, name, MIME type, optional drive id, source kind,
+  and `includeDescendants`;
+- an exact organization, current-workspace, or initiating-user personal
+  destination authority;
+- `manual`, `hourly`, or `daily` cadence; and
+- `allow`, `ask`, or `block` read policy.
 
-Only bounded OAuth error codes are used to classify permanent refresh failures.
-Google response descriptions, response bodies, tokens, and client secrets are
-never written to connection metadata or `lastError`, and the browser renders
-state-owned guidance rather than provider text.
+The generic feature-configuration `PUT` rejects this provider-owned Knowledge
+Source. Callers must use the `/source` route so Google metadata verification and
+destination-authority binding cannot be bypassed.
 
-## Sync configuration behavior
+The config is stored on `integration_feature_bindings`. It is not copied onto
+Connection metadata. Provider credentials and page/change cursors remain
+private. Updating requires the current binding version when the request would
+change state; an unchanged semantic replay converges without manufacturing a
+new version. Pause, resume, and removal use the generic feature lifecycle and
+never disconnect the account or remove sibling features/instances.
 
-The browser starts at **My Drive**. Checkboxes connect the current location or
-any visible subfolder; selecting a parent includes every nested folder. Multiple
-locations can be connected in one setup. A Shared Drive or shared folder can be
-added by pasting its full `https://drive.google.com/.../folders/...` URL or ID.
+## Connection and failure behavior
 
-The intended first successful run recursively imports all existing supported
-documents inside the selected boundary. Subsequent scheduled runs use a durable
-cursor to process only new, changed, moved, or deleted documents since the last
-successful run; they do not re-ingest every unchanged document each hour.
+The generic provider Connection uses normal statuses:
+
+- `active` permits exact-instance browse and save;
+- `needs_reauth` requires reconnect/re-consent; and
+- `revoked` is locally disconnected.
+
+The Drive adapter requires a stored grant that proves recursive source reads.
+Known permanent refresh or provider permission failures transition only the
+exact Connection generation to `needs_reauth`; stale provider responses cannot
+mutate a reconnected generation. Provider descriptions, response bodies,
+tokens, and client secrets are not written to Connection metadata or
+`lastError`.
+
+The legacy dedicated connector retains its richer active/paused/token-revoked/
+app-removed/disconnected/reconnect/re-consent metadata state and local
+disconnect receipt. Those routes remain tested for compatibility, but the
+Capabilities page no longer renders the singleton legacy card.
 
 ## Bounded inventory and export planning
 
-`@opengeni/documents/google-drive` owns the provider-neutral execution plan for
-the first backfill slice:
+`@opengeni/documents/google-drive` owns the execution plan for a future
+backfill:
 
-- The selected destination is frozen to exactly one organization, current
-  workspace, or initiating-user personal authority. Personal Drive knowledge
-  keeps the current workspace anchor rather than silently widening across
-  workspaces.
-- Google permission, source-boundary, and file IDs remain stable provenance
-  identities. Folder names, locations, and deep links are metadata rather than
-  authority.
-- Inventory is paginated and breadth-first, with a versioned serializable
-  checkpoint bound to the normalized Google permission, external tenant,
-  source drive/boundary, and destination authority identities. Legacy,
-  unversioned, or incompatible checkpoints fail closed before buffered items or
-  provider access. Explicit cumulative item, known-byte, Drive-request/cost,
-  folder, per-file, and per-invocation time limits still apply.
-- A fetched page is buffered in the checkpoint before its items are consumed,
-  so a crash or bounded pause resumes without refetching or skipping the
-  remainder of that page.
-- Google Docs, Sheets, Slides, and Drawings all use PDF as one deterministic,
-  dependency-free ingestible export format for the parser shipped in OpenGeni's
-  workload images. Ordinary PDF and text-like files use authenticated download
-  planning. Office and image conversion formats stay unsupported until their
-  system converters are part of the workload contract. Export and unknown
-  download sizes must be bounded again while streaming bytes.
-- Unsupported native types, shortcuts, ordinary file types, oversized files,
-  duplicate/looped folders, and folder-limit overflows are isolated as skipped
-  items so healthy siblings continue.
-- An incomplete Drive search or failed provider page does not consume the page
-  or advance its checkpoint. The caller receives a typed stop reason and may
-  retry the same page.
+- destination authority is frozen to exactly one organization, workspace, or
+  initiating-user personal scope;
+- pagination is breadth-first with a versioned serializable checkpoint bound to
+  provider permission, tenant, source boundary, and destination identities;
+- a page is buffered before its items are consumed, preventing crash recovery
+  from skipping the remainder of a fetched page;
+- explicit item, byte, request/cost, folder, per-file, and invocation-time
+  bounds apply;
+- Google Docs, Sheets, Slides, and Drawings plan deterministic PDF export;
+  ordinary PDF/text-like files plan authenticated download; unsupported or
+  oversized siblings are isolated as skipped items; and
+- incomplete search or provider-page failure does not advance the checkpoint.
 
-This planner does not fetch bytes, persist provider/source/object/version rows,
-create Documents or chunks, run embeddings, dispatch a schedule, or expose a
-public API/UI. Those remain later inventory/backfill slices. Durable change
-cursors and event reconciliation are a separate incremental-sync boundary;
-Drive ACL intersection, revocation, and citation reauthorization are a separate
-authorization boundary.
-
-The **Only me**, **This workspace**, and **Company** options record the intended
-future knowledge scope. **Hourly**, **Daily**, and **On demand** record the
-intended cadence, while **Allow**, **Ask**, and **Block** record the connector
-read policy. The common MCP runtime can now enforce persisted connector-action
-policies with durable approval and secret-free audit, but this Google Drive setup
-slice does not yet publish its selections into that backend policy table.
-They remain configuration only in this slice. Durable scheduler dispatch, source
-rows, content fetching and indexing, cursor processing, ACL projection,
-policy-UI wiring, and memory updates are not activated by the inventory planner.
-
-Disconnecting revokes the OpenGeni connection locally. The confirmation dialog
-states that this deliberately does not call Google's project-wide token
-revocation endpoint, which can invalidate other grants for the same Google OAuth
-project. Reconnect replaces the credential in place and refuses a different
-Google account; disconnect first to switch accounts.
+The planner does not fetch bytes or persist source/object/version rows. Durable
+change reconciliation, scheduling, indexing, ACL intersection/revocation, and
+citation reauthorization remain separate future boundaries and must not be
+claimed from successful source configuration alone.

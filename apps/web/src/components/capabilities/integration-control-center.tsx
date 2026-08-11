@@ -21,6 +21,7 @@ import {
 } from "@/components/capabilities/custom-api-flow";
 import type { IntegrationRemoveTarget } from "@/components/capabilities/integration-control-center-view";
 import { useAppContext } from "@/context";
+import { hasAccountPermission } from "@/lib/permissions";
 import type {
   ApiIntegrationInstallationSummary,
   ApiIntegrationPresetSummary,
@@ -122,7 +123,19 @@ export function IntegrationControlCenter({
   canManage: boolean;
   onChanged: () => void | Promise<void>;
 }) {
-  const client = useAppContext().client;
+  const context = useAppContext();
+  const client = context.client;
+  const workspaceGrant = context.accessContext?.workspaceGrants.find(
+    (grant) => grant.workspaceId === workspaceId,
+  );
+  const canManagePersonalDestination = Boolean(
+    workspaceGrant && context.accessContext?.subjectId === workspaceGrant.subjectId,
+  );
+  const canManageWorkspaceDestination = canManage;
+  const canManageOrganizationDestination = Boolean(
+    workspaceGrant &&
+    hasAccountPermission(context.accessContext, workspaceGrant.accountId, "account:admin"),
+  );
   const [presets, setPresets] = useState<ApiIntegrationPresetSummary[]>([]);
   const [instances, setInstances] = useState<ApiIntegrationInstallationSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -512,6 +525,9 @@ export function IntegrationControlCenter({
         loading={loading}
         loadError={loadError}
         canManage={canManage}
+        canManagePersonalDestination={canManagePersonalDestination}
+        canManageWorkspaceDestination={canManageWorkspaceDestination}
+        canManageOrganizationDestination={canManageOrganizationDestination}
         busyKey={busyKey}
         callbackBusy={callbackBusy}
         setupPreset={setupPreset}

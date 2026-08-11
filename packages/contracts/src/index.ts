@@ -7017,28 +7017,21 @@ export const IntegrationFeatureKind = z.enum([
 ]);
 export type IntegrationFeatureKind = z.infer<typeof IntegrationFeatureKind>;
 
-export const IntegrationFeatureStatus = z.enum([
-  "active",
-  "paused",
-  "needs_attention",
-  "disabled",
-]);
+export const IntegrationFeatureStatus = z.enum(["active", "paused", "needs_attention", "disabled"]);
 export type IntegrationFeatureStatus = z.infer<typeof IntegrationFeatureStatus>;
 
-const IntegrationFeatureJsonObject = z
-  .record(z.string(), z.unknown())
-  .superRefine((value, ctx) => {
-    let serialized: string;
-    try {
-      serialized = JSON.stringify(value);
-    } catch {
-      ctx.addIssue({ code: "custom", message: "must be JSON serializable" });
-      return;
-    }
-    if (new TextEncoder().encode(serialized).byteLength > 131_072) {
-      ctx.addIssue({ code: "custom", message: "must not exceed 131072 UTF-8 bytes" });
-    }
-  });
+const IntegrationFeatureJsonObject = z.record(z.string(), z.unknown()).superRefine((value, ctx) => {
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(value);
+  } catch {
+    ctx.addIssue({ code: "custom", message: "must be JSON serializable" });
+    return;
+  }
+  if (new TextEncoder().encode(serialized).byteLength > 131_072) {
+    ctx.addIssue({ code: "custom", message: "must not exceed 131072 UTF-8 bytes" });
+  }
+});
 
 export const IntegrationFeatureDefinitionSummary = z
   .object({
@@ -7096,9 +7089,7 @@ export const IntegrationFeatureBindingSummary = z
     updatedAt: z.string().datetime({ offset: true }),
   })
   .strict();
-export type IntegrationFeatureBindingSummary = z.infer<
-  typeof IntegrationFeatureBindingSummary
->;
+export type IntegrationFeatureBindingSummary = z.infer<typeof IntegrationFeatureBindingSummary>;
 
 export const IntegrationInstanceFeaturesResponse = z
   .object({
@@ -7149,9 +7140,7 @@ export const IntegrationFeatureMutationResult = z
     binding: IntegrationFeatureBindingSummary,
   })
   .strict();
-export type IntegrationFeatureMutationResult = z.infer<
-  typeof IntegrationFeatureMutationResult
->;
+export type IntegrationFeatureMutationResult = z.infer<typeof IntegrationFeatureMutationResult>;
 
 export const IntegrationFeatureRemovalResult = z
   .object({
@@ -11460,7 +11449,7 @@ export type WorkspaceModelCatalogResponse = z.infer<typeof WorkspaceModelCatalog
  * that rollout boundary. Mutating clients send this value in
  * `x-opengeni-api-contract`; the API rejects any other value before routing.
  */
-export const OPENGENI_API_CONTRACT_REVISION = "2026-08-capability-facets-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-08-drive-facet-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
