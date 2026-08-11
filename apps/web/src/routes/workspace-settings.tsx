@@ -19,7 +19,7 @@ import {
   UserPlusIcon,
   UsersIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { CodexSubscriptionsCard } from "@/components/codex-connection";
@@ -586,12 +586,44 @@ export function MembersSection({
   const [editPermissions, setEditPermissions] = useState<Set<string>>(() => new Set());
   const [removingMember, setRemovingMember] = useState<WorkspaceMember | null>(null);
   const callerSubjectId = context.accessContext.subjectId;
+  const refreshGenerationRef = useRef(0);
+  const currentRefreshScopeRef = useRef<{
+    canManage: boolean;
+    client: typeof client;
+    workspaceId: string;
+  }>({ canManage, client, workspaceId });
+  currentRefreshScopeRef.current = { canManage, client, workspaceId };
 
   // Only USER subjects are people; api_key subjects belong to the API keys
   // section above and are excluded here.
   const userMembers = members.filter((member) => member.subjectId.startsWith("user:"));
 
   const refresh = useCallback(async () => {
+    const currentScope = currentRefreshScopeRef.current;
+    if (
+      !currentScope ||
+      currentScope.workspaceId !== workspaceId ||
+      currentScope.canManage !== canManage ||
+      currentScope.client !== client
+    ) {
+      return;
+    }
+    const generation = ++refreshGenerationRef.current;
+    const isCurrentRefresh = () => {
+      const nextScope = currentRefreshScopeRef.current;
+      return (
+        refreshGenerationRef.current === generation &&
+        nextScope?.workspaceId === workspaceId &&
+        nextScope.canManage === canManage &&
+        nextScope.client === client
+      );
+    };
+    setMembers([]);
+    setSlackAccessRequests([]);
+    setSlackAccessRequestsError(null);
+    setError(null);
+    setLoaded(false);
+
     try {
       // The member roster is primary; pending Slack requests are a manager-only
       // auxiliary surface and must not turn their provider outage into a roster failure.
@@ -599,6 +631,9 @@ export function MembersSection({
         client.listWorkspaceMembers(workspaceId),
         canManage ? client.listSlackUserLinkAccessRequests(workspaceId) : Promise.resolve([]),
       ]);
+      if (!isCurrentRefresh()) {
+        return;
+      }
 
       if (membersResult.status === "rejected") {
         setMembers([]);
@@ -627,12 +662,26 @@ export function MembersSection({
         );
       }
     } finally {
-      setLoaded(true);
+      if (isCurrentRefresh()) {
+        setLoaded(true);
+      }
     }
   }, [canManage, client, workspaceId]);
 
   useEffect(() => {
+    refreshGenerationRef.current += 1;
+    setMembers([]);
+    setSlackAccessRequests([]);
+    setSlackAccessRequestsError(null);
+    setError(null);
+    setLoaded(false);
+    setEditing(null);
+    setEditPermissions(new Set());
+    setRemovingMember(null);
     void refresh();
+    return () => {
+      refreshGenerationRef.current += 1;
+    };
   }, [refresh]);
 
   async function addMember() {
