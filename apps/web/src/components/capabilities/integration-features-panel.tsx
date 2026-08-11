@@ -228,24 +228,37 @@ export function IntegrationFeaturesPanel({
         expectedVersion: entry.binding.version,
         idempotencyKey: crypto.randomUUID(),
       };
-      if (action === "pause") {
-        await client.pauseIntegrationFeature(
-          workspaceId,
-          data!.capabilityId,
-          data!.instanceKey,
-          entry.definition.featureKey,
-          request,
-        );
-      } else {
-        await client.resumeIntegrationFeature(
-          workspaceId,
-          data!.capabilityId,
-          data!.instanceKey,
-          entry.definition.featureKey,
-          request,
-        );
-      }
-      await load();
+      const result =
+        action === "pause"
+          ? await client.pauseIntegrationFeature(
+              workspaceId,
+              data!.capabilityId,
+              data!.instanceKey,
+              entry.definition.featureKey,
+              request,
+            )
+          : await client.resumeIntegrationFeature(
+              workspaceId,
+              data!.capabilityId,
+              data!.instanceKey,
+              entry.definition.featureKey,
+              request,
+            );
+      ++loadSequence.current;
+      loadPromise.current = null;
+      setLoading(false);
+      setData((current) =>
+        current
+          ? {
+              ...current,
+              features: current.features.map((feature) =>
+                feature.definition.featureKey === entry.definition.featureKey
+                  ? { ...feature, binding: result.binding }
+                  : feature,
+              ),
+            }
+          : current,
+      );
       toast.success(
         `${featureTitle(entry.definition)} ${action === "pause" ? "paused" : "resumed"}`,
       );
