@@ -5,6 +5,7 @@ import { defineConfig } from "tsup";
 export default defineConfig({
   entry: [
     "src/index.ts",
+    "src/atlassian.ts",
     "src/connector-destinations.ts",
     "src/google-drive.ts",
     "src/slack-bot-scopes.ts",

@@ -23,6 +23,10 @@
     "./google-drive": {
       "types": "./src/google-drive.ts",
       "default": "./src/google-drive.ts"
+    },
+    "./atlassian": {
+      "types": "./src/atlassian.ts",
+      "default": "./src/atlassian.ts"
     }
   },
   "publishConfig": {
