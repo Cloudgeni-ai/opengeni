@@ -144,7 +144,7 @@ impl StreamRegistry for RelayHub {
     async fn register_pty(&self, process: PtyProcess) -> PlatformResult<PtyOpenResponse> {
         let descriptor = self.descriptor(v1::StreamKind::Pty, PTY_STREAM_PORT);
         let config = self.channel_config(descriptor.clone());
-        let channel = RelayChannel::register(config.clone())
+        let channel = RelayChannel::register(config)
             .await
             .map_err(stream_to_platform)?;
         let pty_id = descriptor.channel_id.clone();
@@ -194,7 +194,7 @@ impl StreamRegistry for RelayHub {
     ) -> PlatformResult<StreamChannel> {
         let descriptor = self.descriptor(v1::StreamKind::Desktop, DESKTOP_STREAM_PORT);
         let config = self.channel_config(descriptor.clone());
-        let channel = RelayChannel::register(config.clone())
+        let channel = RelayChannel::register(config)
             .await
             .map_err(stream_to_platform)?;
 
@@ -205,7 +205,7 @@ impl StreamRegistry for RelayHub {
         // real frame (retrying a transient first-capture against Xvfb readiness), so
         // a consumer dialing the minted URL immediately replays a frame.
         let (ready_tx, ready_rx) = oneshot::channel();
-        spawn_desktop_pump(desktop, channel, config, policy, ready_tx);
+        spawn_desktop_pump(desktop, channel, policy, ready_tx);
         await_pump_ready(ready_rx, "desktop").await?;
 
         Ok(descriptor)
@@ -413,7 +413,6 @@ fn spawn_pty_pump(
 fn spawn_desktop_pump(
     desktop: Arc<dyn DesktopBackend>,
     mut channel: RelayChannel,
-    _config: ChannelConfig,
     policy: InputPolicy,
     ready: oneshot::Sender<()>,
 ) {

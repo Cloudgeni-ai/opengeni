@@ -48,8 +48,9 @@ pub fn spawn_grouped(
     let log = std::fs::File::create(log_path)?;
     let log_err = log.try_clone()?;
 
-    let mut cmd = std::process::Command::new(program);
-    cmd.args(args)
+    let mut command = std::process::Command::new(program);
+    command
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err))
@@ -57,16 +58,16 @@ pub fn spawn_grouped(
         // controlling-terminal signal group and makes the whole subtree killable.
         .process_group(0);
     if clear_env {
-        cmd.env_clear();
+        command.env_clear();
     }
     for (k, v) in envs {
-        cmd.env(k, v);
+        command.env(k, v);
     }
     if let Some(dir) = cwd {
-        cmd.current_dir(dir);
+        command.current_dir(dir);
     }
 
-    let mut tokio_cmd = tokio::process::Command::from(cmd);
+    let mut tokio_cmd = tokio::process::Command::from(command);
     let child = tokio_cmd.spawn()?;
     let raw = child
         .id()

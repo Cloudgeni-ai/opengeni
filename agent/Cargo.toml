@@ -46,8 +46,9 @@ async-trait = "0.1"
 command-group = { version = "5.0.1", features = ["with-tokio"] }
 
 # Control-plane transport. async-nats is the official Rust NATS client; the agent
-# subscribes to `agent.<ws>.<id>.rpc` and answers ControlRequests.
-async-nats = "0.49"
+# subscribes to `agent.<ws>.<id>.rpc` and answers ControlRequests. 0.47+ requires
+# Rust 1.88, so keep the newest lineage compatible with our declared 1.82 floor.
+async-nats = "=0.46.0"
 
 # Structured logging; never log secret values.
 tracing = "0.1"
@@ -121,7 +122,9 @@ minisign-verify = "0.2"
 # discovery/verify/rollback; we delegate ONLY the atomic replace.
 self-replace = "1"
 # Deterministic staged-rollout cohorting: blake3(agentId + cohort_salt) % 100.
-blake3 = "1"
+# 1.8.3+ moved to edition 2024 without declaring an MSRV, bypassing Cargo's
+# compatibility-aware resolver; 1.8.2 is the newest Rust 1.82-compatible release.
+blake3 = "=1.8.2"
 # Semantic-version comparison for version-monotonicity + min_supported gating.
 semver = "1"
 # Hex encode/decode for the sha256 compare.
