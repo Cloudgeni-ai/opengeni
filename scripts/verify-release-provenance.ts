@@ -45,12 +45,58 @@ type GitHubArtifact = {
   workflow_run?: { id?: unknown; run_id?: unknown };
 };
 
+type GitHubRef = {
+  ref?: unknown;
+  object?: { type?: unknown; sha?: unknown };
+};
+
+type GitHubRelease = {
+  id?: unknown;
+  tag_name?: unknown;
+  name?: unknown;
+  draft?: unknown;
+  prerelease?: unknown;
+  immutable?: unknown;
+  author?: { id?: unknown; login?: unknown; type?: unknown };
+  published_at?: unknown;
+  html_url?: unknown;
+};
+
+type GitHubJob = {
+  id?: unknown;
+  name?: unknown;
+  status?: unknown;
+  conclusion?: unknown;
+  html_url?: unknown;
+};
+
 const sourceShaPattern = /^[0-9a-f]{40}$/;
+const releaseControllerTagPrefix = "opengeni-release-head-";
+const releaseControllerReleaseNamePrefix = "Retained OpenGeni release head ";
+const candidateAdmissionJobName =
+  "Admit exact reviewed release tree / Verify exact reviewed release tree";
+const githubActionsBot = { id: 41898282, login: "github-actions[bot]", type: "Bot" } as const;
 
 export type VerifiedReleaseProvenance = {
   controller: {
-    headBranch: "main";
+    headBranch: string;
     headSha: string;
+    retainedRef?: {
+      name: string;
+      sha: string;
+    };
+    immutableRelease?: {
+      id: number;
+      tagName: string;
+      name: string;
+      publishedAt: string;
+      url: string;
+    };
+    admissionJob?: {
+      id: number;
+      name: string;
+      url: string;
+    };
   };
   producer: ReleaseProducerMetadata;
   artifact: TrustedReleaseArtifact;
@@ -63,6 +109,7 @@ export type ReleaseProvenanceApi = {
 export async function verifyReleaseProvenance(input: {
   kind: ReleaseProducerKind;
   sourceSha: string;
+  controllerSha?: string;
   runId: number | string;
   api: ReleaseProvenanceApi;
   now?: number;
@@ -82,24 +129,52 @@ export async function verifyReleaseProvenance(input: {
   if (headRepository !== RELEASE_REPOSITORY) {
     throw new Error("release producer head repository is not the trusted repository");
   }
-  if (run.head_branch !== "main") {
-    throw new Error("release producer workflow must run from main");
-  }
+  const headBranch = string(run.head_branch, "workflow controller ref");
   const runHeadSha = string(run.head_sha, "workflow run head SHA");
   if (!sourceShaPattern.test(runHeadSha)) {
     throw new Error("workflow run head SHA must be a full lowercase SHA");
   }
-  if (input.kind !== "package" && runHeadSha !== input.sourceSha) {
-    throw new Error(`release producer source SHA ${runHeadSha} does not match ${input.sourceSha}`);
+  let retainedController:
+    | Pick<
+        VerifiedReleaseProvenance["controller"],
+        "retainedRef" | "immutableRelease" | "admissionJob"
+      >
+    | undefined;
+  if (input.kind === "candidate" || input.kind === "acceptance") {
+    const controllerSha = input.controllerSha;
+    if (typeof controllerSha !== "string" || !sourceShaPattern.test(controllerSha)) {
+      throw new Error("expected release controller SHA must be a full lowercase SHA");
+    }
+    if (runHeadSha !== controllerSha) {
+      throw new Error("release workflow head does not match the expected controller SHA");
+    }
+    const retainedControllerRef = `${releaseControllerTagPrefix}${controllerSha}`;
+    if (headBranch !== retainedControllerRef) {
+      throw new Error("release workflow must run from its retained controller ref");
+    }
+    retainedController = await verifyRetainedController(
+      input.api,
+      controllerSha,
+      input.kind === "candidate"
+        ? {
+            runId,
+            runAttempt: positiveInteger(run.run_attempt, "workflow run attempt"),
+          }
+        : undefined,
+    );
+  } else if (headBranch !== "main") {
+    throw new Error("release producer workflow must run from main");
   }
-  const comparison = asRecord<GitHubComparison>(
-    await input.api.get(`/repos/${RELEASE_REPOSITORY}/compare/${runHeadSha}...main`),
-  );
-  if (
-    (comparison.status !== "ahead" && comparison.status !== "identical") ||
-    comparison.merge_base_commit?.sha !== runHeadSha
-  ) {
-    throw new Error("release producer workflow head is no longer an ancestor of main");
+  if (input.kind === "package") {
+    const comparison = asRecord<GitHubComparison>(
+      await input.api.get(`/repos/${RELEASE_REPOSITORY}/compare/${runHeadSha}...main`),
+    );
+    if (
+      (comparison.status !== "ahead" && comparison.status !== "identical") ||
+      comparison.merge_base_commit?.sha !== runHeadSha
+    ) {
+      throw new Error("release producer workflow head is no longer an ancestor of main");
+    }
   }
   const sourceCommit = asRecord<GitHubCommit>(
     await input.api.get(`/repos/${RELEASE_REPOSITORY}/commits/${input.sourceSha}`),
@@ -107,7 +182,7 @@ export async function verifyReleaseProvenance(input: {
   const sourceTreeSha = string(sourceCommit.commit?.tree?.sha, "source tree SHA");
   const commitSha = string(sourceCommit.sha, "source commit SHA");
   if (commitSha !== input.sourceSha)
-    throw new Error("source commit response does not match workflow head SHA");
+    throw new Error("source commit response does not match the requested source SHA");
 
   const producer = buildReleaseProducerMetadata({
     kind: input.kind,
@@ -152,8 +227,9 @@ export async function verifyReleaseProvenance(input: {
   }
   return {
     controller: {
-      headBranch: "main",
+      headBranch,
       headSha: runHeadSha,
+      ...retainedController,
     },
     producer,
     artifact: buildTrustedReleaseArtifact({
@@ -180,6 +256,7 @@ async function main(): Promise<void> {
   const verified = await verifyReleaseProvenance({
     kind: args.kind,
     sourceSha: args.sourceSha,
+    ...(args.controllerSha ? { controllerSha: args.controllerSha } : {}),
     runId: args.runId,
     api,
   });
@@ -230,6 +307,7 @@ function githubApi(token: string, baseUrl: string): ReleaseProvenanceApi {
 function parseArgs(values: string[]): {
   kind: ReleaseProducerKind;
   sourceSha: string;
+  controllerSha: string;
   runId: string;
   output: string;
   outputPrefix: string;
@@ -237,6 +315,7 @@ function parseArgs(values: string[]): {
   const output = {
     kind: "candidate" as ReleaseProducerKind,
     sourceSha: "",
+    controllerSha: "",
     runId: "",
     output: "",
     outputPrefix: "",
@@ -255,6 +334,7 @@ function parseArgs(values: string[]): {
       }
       output.kind = kind;
     } else if (flag === "--source-sha") output.sourceSha = next();
+    else if (flag === "--controller-sha") output.controllerSha = next();
     else if (flag === "--run-id") output.runId = next();
     else if (flag === "--output") output.output = next();
     else if (flag === "--output-prefix") output.outputPrefix = next();
@@ -265,6 +345,15 @@ function parseArgs(values: string[]): {
   if (!output.output) throw new Error("--output is required");
   if (!/^[0-9a-f]{40}$/.test(output.sourceSha)) {
     throw new Error("--source-sha must be 40 lowercase hexadecimal characters");
+  }
+  if (
+    (output.kind === "candidate" || output.kind === "acceptance") &&
+    !/^[0-9a-f]{40}$/.test(output.controllerSha)
+  ) {
+    throw new Error("--controller-sha is required for candidate and acceptance provenance");
+  }
+  if (output.kind === "package" && output.controllerSha) {
+    throw new Error("--controller-sha is not valid for package provenance");
   }
   if (!/^[1-9][0-9]{0,19}$/.test(output.runId))
     throw new Error("--run-id must be a positive integer");
@@ -289,6 +378,98 @@ function positiveInteger(value: unknown, label: string): number {
   const number = typeof value === "number" ? value : Number(value);
   if (!Number.isSafeInteger(number) || number <= 0) throw new Error(`${label} is invalid`);
   return number;
+}
+
+async function verifyRetainedController(
+  api: ReleaseProvenanceApi,
+  controllerSha: string,
+  admission?: { runId: number; runAttempt: number },
+): Promise<
+  Pick<VerifiedReleaseProvenance["controller"], "retainedRef" | "immutableRelease" | "admissionJob">
+> {
+  const tagName = `${releaseControllerTagPrefix}${controllerSha}`;
+  const [refValue, releaseValue] = await Promise.all([
+    api.get(`/repos/${RELEASE_REPOSITORY}/git/ref/tags/${tagName}`),
+    api.get(`/repos/${RELEASE_REPOSITORY}/releases/tags/${tagName}`),
+  ]);
+
+  const ref = asRecord<GitHubRef>(refValue);
+  if (
+    ref.ref !== `refs/tags/${tagName}` ||
+    ref.object?.type !== "commit" ||
+    ref.object.sha !== controllerSha
+  ) {
+    throw new Error("release candidate controller tag is not an exact immutable commit ref");
+  }
+
+  const release = asRecord<GitHubRelease>(releaseValue);
+  const releaseId = positiveInteger(release.id, "controller immutable release id");
+  const expectedReleaseName = `${releaseControllerReleaseNamePrefix}${controllerSha}`;
+  const expectedReleaseUrl = `https://github.com/${RELEASE_REPOSITORY}/releases/tag/${tagName}`;
+  const publishedAt = string(release.published_at, "controller immutable release publication time");
+  if (!Number.isFinite(Date.parse(publishedAt))) {
+    throw new Error("controller immutable release publication time is invalid");
+  }
+  if (
+    release.tag_name !== tagName ||
+    release.name !== expectedReleaseName ||
+    release.draft !== false ||
+    release.prerelease !== true ||
+    release.immutable !== true ||
+    release.author?.id !== githubActionsBot.id ||
+    release.author.login !== githubActionsBot.login ||
+    release.author.type !== githubActionsBot.type ||
+    release.html_url !== expectedReleaseUrl
+  ) {
+    throw new Error(
+      "release candidate controller does not have canonical immutable release evidence",
+    );
+  }
+
+  let admissionJob: VerifiedReleaseProvenance["controller"]["admissionJob"];
+  if (admission) {
+    const jobsValue = await api.get(
+      `/repos/${RELEASE_REPOSITORY}/actions/runs/${admission.runId}/attempts/${admission.runAttempt}/jobs?per_page=100`,
+    );
+    const jobs = asRecord<{ total_count?: unknown; jobs?: unknown }>(jobsValue);
+    const records = Array.isArray(jobs.jobs)
+      ? jobs.jobs.map((value) => asRecord<GitHubJob>(value))
+      : [];
+    if (positiveInteger(jobs.total_count, "candidate workflow job count") !== records.length) {
+      throw new Error("candidate workflow job listing is incomplete");
+    }
+    const admissionJobs = records.filter((job) => job.name === candidateAdmissionJobName);
+    if (admissionJobs.length !== 1) {
+      throw new Error("candidate workflow does not contain exactly one controller admission job");
+    }
+    const record = admissionJobs[0]!;
+    const admissionId = positiveInteger(record.id, "candidate controller admission job id");
+    const expectedJobUrl = `https://github.com/${RELEASE_REPOSITORY}/actions/runs/${admission.runId}/job/${admissionId}`;
+    if (
+      record.status !== "completed" ||
+      record.conclusion !== "success" ||
+      record.html_url !== expectedJobUrl
+    ) {
+      throw new Error("candidate controller admission job did not complete successfully");
+    }
+    admissionJob = {
+      id: admissionId,
+      name: candidateAdmissionJobName,
+      url: expectedJobUrl,
+    };
+  }
+
+  return {
+    retainedRef: { name: tagName, sha: controllerSha },
+    immutableRelease: {
+      id: releaseId,
+      tagName,
+      name: expectedReleaseName,
+      publishedAt: new Date(Date.parse(publishedAt)).toISOString(),
+      url: expectedReleaseUrl,
+    },
+    ...(admissionJob ? { admissionJob } : {}),
+  };
 }
 
 if (import.meta.main) await main();

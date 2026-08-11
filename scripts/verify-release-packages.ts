@@ -323,7 +323,7 @@ async function readRegistryPackage(
 }
 
 async function main(): Promise<void> {
-  const root = resolve(import.meta.dir, "..");
+  const root = resolve(process.env.OPENGENI_RELEASE_SOURCE_ROOT ?? process.cwd());
   const sourceSha = process.env.OPENGENI_RELEASE_SOURCE_SHA ?? "";
   const phaseValue = process.env.OPENGENI_RELEASE_PACKAGE_PHASE ?? "";
   if (phaseValue !== "plan" && phaseValue !== "verify") {
@@ -332,7 +332,7 @@ async function main(): Promise<void> {
 
   const packageClosureRoot = process.env.OPENGENI_RELEASE_PACKAGE_CLOSURE_ROOT;
   const localPublishable = loadPublishablePackages(
-    packageClosureRoot ? resolve(packageClosureRoot) : undefined,
+    packageClosureRoot ? resolve(root, packageClosureRoot) : root,
   );
   const declaredExpected = parseExpectedPackages(process.env.OPENGENI_EXPECTED_PACKAGES ?? "");
   const deriveExpectedValue = process.env.OPENGENI_RELEASE_PACKAGE_DERIVE_EXPECTED ?? "";

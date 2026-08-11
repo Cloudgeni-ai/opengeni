@@ -11,6 +11,7 @@ import {
 
 const sourceSha = "a".repeat(40);
 const treeSha = "b".repeat(40);
+const controllerSha = "e".repeat(40);
 const run = {
   id: 123,
   run_attempt: 2,
@@ -18,8 +19,8 @@ const run = {
   event: "workflow_dispatch",
   status: "completed",
   conclusion: "success",
-  head_branch: "main",
-  head_sha: sourceSha,
+  head_branch: `opengeni-release-head-${controllerSha}`,
+  head_sha: controllerSha,
   repository: { full_name: RELEASE_REPOSITORY },
   head_repository: { full_name: RELEASE_REPOSITORY },
   html_url: `https://github.com/${RELEASE_REPOSITORY}/actions/runs/123`,
@@ -32,17 +33,55 @@ const artifact = {
   expires_at: "2099-01-01T00:00:00Z",
   workflow_run: { id: 123 },
 };
+const controllerTag = `opengeni-release-head-${controllerSha}`;
+const controllerRef = {
+  ref: `refs/tags/${controllerTag}`,
+  object: { type: "commit", sha: controllerSha },
+};
+const controllerRelease = {
+  id: 456,
+  tag_name: controllerTag,
+  name: `Retained OpenGeni release head ${controllerSha}`,
+  draft: false,
+  prerelease: true,
+  immutable: true,
+  author: { id: 41898282, login: "github-actions[bot]", type: "Bot" },
+  published_at: "2026-01-01T00:00:00Z",
+  html_url: `https://github.com/${RELEASE_REPOSITORY}/releases/tag/${controllerTag}`,
+};
+const admissionJob = {
+  id: 4567,
+  name: "Admit exact reviewed release tree / Verify exact reviewed release tree",
+  status: "completed",
+  conclusion: "success",
+  html_url: `https://github.com/${RELEASE_REPOSITORY}/actions/runs/123/job/4567`,
+};
 
 function api(
   overrides: {
     run?: Record<string, unknown>;
     comparison?: Record<string, unknown>;
     artifact?: Record<string, unknown>;
+    controllerRef?: Record<string, unknown>;
+    controllerRelease?: Record<string, unknown>;
+    admissionJob?: Record<string, unknown>;
   } = {},
 ) {
   return {
     async get(path: string): Promise<unknown> {
       if (path.endsWith("/actions/runs/123")) return { ...run, ...overrides.run };
+      if (path.endsWith(`/git/ref/tags/${controllerTag}`)) {
+        return { ...controllerRef, ...overrides.controllerRef };
+      }
+      if (path.endsWith(`/releases/tags/${controllerTag}`)) {
+        return { ...controllerRelease, ...overrides.controllerRelease };
+      }
+      if (path.includes("/actions/runs/123/attempts/2/jobs")) {
+        return {
+          total_count: 1,
+          jobs: [{ ...admissionJob, ...overrides.admissionJob }],
+        };
+      }
       if (path.includes("/compare/")) {
         const headSha = path.split("/compare/")[1]?.split("...")[0];
         return {
@@ -67,6 +106,7 @@ describe("release producer provenance", () => {
     const result = await verifyReleaseProvenance({
       kind: "candidate",
       sourceSha,
+      controllerSha,
       runId: 123,
       api: api(),
       now: Date.parse("2026-01-01T00:00:00Z"),
@@ -80,7 +120,23 @@ describe("release producer provenance", () => {
         sourceTreeSha: treeSha,
       }),
     );
-    expect(result.controller).toEqual({ headBranch: "main", headSha: sourceSha });
+    expect(result.controller).toEqual({
+      headBranch: `opengeni-release-head-${controllerSha}`,
+      headSha: controllerSha,
+      retainedRef: { name: controllerTag, sha: controllerSha },
+      immutableRelease: {
+        id: 456,
+        tagName: controllerTag,
+        name: `Retained OpenGeni release head ${controllerSha}`,
+        publishedAt: "2026-01-01T00:00:00.000Z",
+        url: `https://github.com/${RELEASE_REPOSITORY}/releases/tag/${controllerTag}`,
+      },
+      admissionJob: {
+        id: 4567,
+        name: "Admit exact reviewed release tree / Verify exact reviewed release tree",
+        url: `https://github.com/${RELEASE_REPOSITORY}/actions/runs/123/job/4567`,
+      },
+    });
     expect(result.artifact).toEqual(
       buildTrustedReleaseArtifact({
         kind: "candidate",
@@ -106,6 +162,7 @@ describe("release producer provenance", () => {
       api: api({
         run: {
           path: ".github/workflows/publish-packages.yml",
+          head_branch: "main",
           head_sha: packageRunHeadSha,
         },
         artifact: packageArtifact,
@@ -155,7 +212,7 @@ describe("release producer provenance", () => {
         sourceSha: packageSourceSha,
         runId: 123,
         api: api({
-          run: { path: ".github/workflows/publish-packages.yml" },
+          run: { path: ".github/workflows/publish-packages.yml", head_branch: "main" },
           artifact: {
             name: `package-publication-verified-${packageSourceSha}-123-1`,
           },
@@ -173,7 +230,7 @@ describe("release producer provenance", () => {
           run: { path: ".github/workflows/publish-packages.yml", head_branch: undefined },
         }),
       }),
-    ).rejects.toThrow("run from main");
+    ).rejects.toThrow("workflow controller ref is missing");
     await expect(
       verifyReleaseProvenance({
         ...input,
@@ -187,6 +244,103 @@ describe("release producer provenance", () => {
     ).rejects.toThrow("run from main");
   });
 
+  test("rejects a candidate run outside its exact retained controller ref", async () => {
+    await expect(
+      verifyReleaseProvenance({
+        kind: "candidate",
+        sourceSha,
+        controllerSha,
+        runId: 123,
+        api: api({ run: { head_branch: "main" } }),
+      }),
+    ).rejects.toThrow("retained controller ref");
+  });
+
+  test("binds candidate runs to exact retained controller and admission evidence", async () => {
+    await expect(
+      verifyReleaseProvenance({
+        kind: "candidate",
+        sourceSha,
+        runId: 123,
+        api: api(),
+      }),
+    ).rejects.toThrow("expected release controller SHA");
+    await expect(
+      verifyReleaseProvenance({
+        kind: "candidate",
+        sourceSha,
+        controllerSha: "d".repeat(40),
+        runId: 123,
+        api: api(),
+      }),
+    ).rejects.toThrow("expected controller SHA");
+    await expect(
+      verifyReleaseProvenance({
+        kind: "candidate",
+        sourceSha,
+        controllerSha,
+        runId: 123,
+        api: api({ controllerRef: { object: { type: "commit", sha: "d".repeat(40) } } }),
+      }),
+    ).rejects.toThrow("exact immutable commit ref");
+    await expect(
+      verifyReleaseProvenance({
+        kind: "candidate",
+        sourceSha,
+        controllerSha,
+        runId: 123,
+        api: api({ controllerRelease: { immutable: false } }),
+      }),
+    ).rejects.toThrow("canonical immutable release evidence");
+    await expect(
+      verifyReleaseProvenance({
+        kind: "candidate",
+        sourceSha,
+        controllerSha,
+        runId: 123,
+        api: api({ admissionJob: { conclusion: "failure" } }),
+      }),
+    ).rejects.toThrow("did not complete successfully");
+  });
+
+  test("binds acceptance runs to the same retained controller without inventing an admission job", async () => {
+    const result = await verifyReleaseProvenance({
+      kind: "acceptance",
+      sourceSha,
+      controllerSha,
+      runId: 123,
+      api: api({
+        run: { path: ".github/workflows/release-acceptance.yml" },
+        artifact: { name: `release-acceptance-${sourceSha}` },
+      }),
+      now: Date.parse("2026-01-01T00:00:00Z"),
+    });
+
+    expect(result.controller).toEqual({
+      headBranch: controllerTag,
+      headSha: controllerSha,
+      retainedRef: { name: controllerTag, sha: controllerSha },
+      immutableRelease: expect.objectContaining({
+        tagName: controllerTag,
+        name: `Retained OpenGeni release head ${controllerSha}`,
+      }),
+    });
+    expect(result.controller).not.toHaveProperty("admissionJob");
+    expect(result.artifact.name).toBe(`release-acceptance-${sourceSha}`);
+
+    await expect(
+      verifyReleaseProvenance({
+        kind: "acceptance",
+        sourceSha,
+        runId: 123,
+        api: api({
+          run: { path: ".github/workflows/release-acceptance.yml" },
+          artifact: { name: `release-acceptance-${sourceSha}` },
+        }),
+      }),
+    ).rejects.toThrow("expected release controller SHA");
+  });
+
   test("rejects a workflow controller head that is not an ancestor of current main", async () => {
     await expect(
       verifyReleaseProvenance({
@@ -194,7 +348,7 @@ describe("release producer provenance", () => {
         sourceSha: "d".repeat(40),
         runId: 123,
         api: api({
-          run: { path: ".github/workflows/publish-packages.yml" },
+          run: { path: ".github/workflows/publish-packages.yml", head_branch: "main" },
           comparison: { status: "diverged" },
         }),
       }),
@@ -206,6 +360,7 @@ describe("release producer provenance", () => {
       verifyReleaseProvenance({
         kind: "candidate",
         sourceSha,
+        controllerSha,
         runId: 123,
         api: api({ run: { repository: { full_name: "attacker/example" } } }),
       }),
@@ -214,14 +369,16 @@ describe("release producer provenance", () => {
       verifyReleaseProvenance({
         kind: "candidate",
         sourceSha,
+        controllerSha,
         runId: 123,
         api: api({ run: { head_sha: "d".repeat(40) } }),
       }),
-    ).rejects.toThrow("does not match");
+    ).rejects.toThrow("expected controller SHA");
     await expect(
       verifyReleaseProvenance({
         kind: "candidate",
         sourceSha,
+        controllerSha,
         runId: 123,
         api: api({ run: { path: ".github/workflows/release.yml" } }),
       }),
@@ -230,6 +387,7 @@ describe("release producer provenance", () => {
       verifyReleaseProvenance({
         kind: "candidate",
         sourceSha,
+        controllerSha,
         runId: 123,
         api: api({ run: { id: 999 } }),
       }),
@@ -238,6 +396,7 @@ describe("release producer provenance", () => {
       verifyReleaseProvenance({
         kind: "candidate",
         sourceSha,
+        controllerSha,
         runId: 123,
         api: api({ run: { head_repository: undefined } }),
       }),
@@ -318,6 +477,7 @@ describe("release producer provenance", () => {
       verifyReleaseProvenance({
         kind: "candidate",
         sourceSha,
+        controllerSha,
         runId: 123,
         api: api({ artifact: { digest: "sha256:" + "d".repeat(64) } }),
       }),
@@ -326,6 +486,7 @@ describe("release producer provenance", () => {
       verifyReleaseProvenance({
         kind: "candidate",
         sourceSha,
+        controllerSha,
         runId: 123,
         api: api({ artifact: { expires_at: "2020-01-01T00:00:00Z" } }),
       }),
@@ -334,6 +495,7 @@ describe("release producer provenance", () => {
       verifyReleaseProvenance({
         kind: "candidate",
         sourceSha,
+        controllerSha,
         runId: 123,
         api: api({ artifact: { workflow_run: { id: 999 } } }),
       }),
@@ -342,6 +504,7 @@ describe("release producer provenance", () => {
       verifyReleaseProvenance({
         kind: "candidate",
         sourceSha,
+        controllerSha,
         runId: 123,
         api: api({ artifact: { expired: undefined } }),
       }),

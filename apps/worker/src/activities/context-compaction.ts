@@ -16,6 +16,7 @@ import {
   estimateTokens,
   latestCompactionReplacementFingerprint,
   prepareCompactionPromptInput,
+  projectRemoteCompactionOverflowRetryInput,
   sanitizeHistoryItemsForModel,
   summarizeForCompaction,
   type CompactionItem,
@@ -327,7 +328,19 @@ async function compactContextRemoteV2(
   // Codex remote_v2: on a valid compaction item, install and recompute usage.
   // No local "must shrink / must differ" gate — that is portable-only.
   // Fail closed on provider/extract failure — no portable fallback.
-  const compactionItem = await options.requestRemoteCompactionV2(settings, items);
+  let providerCalls = 1;
+  let rewrittenToolOutputs = 0;
+  let compactionItem: CompactionItem;
+  try {
+    compactionItem = await options.requestRemoteCompactionV2(settings, items);
+  } catch (error) {
+    if (!isExactContextLengthExceeded(error)) throw error;
+    const retry = projectRemoteCompactionOverflowRetryInput(items);
+    if (retry.rewrittenToolOutputs === 0) throw error;
+    providerCalls = 2;
+    rewrittenToolOutputs = retry.rewrittenToolOutputs;
+    compactionItem = await options.requestRemoteCompactionV2(settings, retry.input);
+  }
   const replacementHistory = buildRemoteV2ReplacementHistory(canonicalItems, compactionItem);
   const estimatedTokensAfter = estimateTokens(await projectForWire(replacementHistory));
   const replacementFingerprint = compactionReplacementFingerprint(replacementHistory);
@@ -353,6 +366,8 @@ async function compactContextRemoteV2(
       implementation: REMOTE_COMPACTION_V2_IMPLEMENTATION,
       estimatedTokensBefore,
       estimatedTokensAfter,
+      compactionInputToolOutputsRewritten: rewrittenToolOutputs,
+      compactionInputProviderCalls: providerCalls,
     },
   });
   if (!applied.applied) {
@@ -523,5 +538,23 @@ export function isContextWindowExceeded(error: unknown, seen = new WeakSet<objec
     isContextWindowExceeded(record.cause, seen) ||
     isContextWindowExceeded(record.error, seen) ||
     isContextWindowExceeded(record.diagnostics, seen)
+  );
+}
+
+export function isExactContextLengthExceeded(
+  error: unknown,
+  seen = new WeakSet<object>(),
+): boolean {
+  if (!error || typeof error !== "object") return false;
+  if (seen.has(error)) return false;
+  seen.add(error);
+  const record = error as Record<string, unknown>;
+  if (record.code === "context_length_exceeded") {
+    return true;
+  }
+  return (
+    isExactContextLengthExceeded(record.cause, seen) ||
+    isExactContextLengthExceeded(record.error, seen) ||
+    isExactContextLengthExceeded(record.diagnostics, seen)
   );
 }

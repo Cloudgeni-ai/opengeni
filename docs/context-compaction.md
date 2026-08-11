@@ -8,10 +8,11 @@ OpenGeni freezes a per-session compaction mode at create time
 | `portable` | All non-Codex sessions; existing sessions (backfill); new Codex sessions when the workspace sets `codexCompactionDefault: "portable"` | Durable plaintext checkpoint (Codex CLI local path). Free mid-session provider switching. |
 | `remote_v2` | New Codex sessions by default (`codexCompactionDefault` absent or `"remote_v2"`) | Codex remote compaction v2 (wire `compaction_trigger` → opaque `{ type: "compaction", encrypted_content }`). On a valid compaction item, install and recompute usage — same as Codex CLI (no local “must shrink / must differ” gate). The compact request **must** reuse the ordinary turn prompt-cache prefix: model-visible tool schemas + the exact agent `instructions` + active history + `compaction_trigger` (CLI `base_instructions` / `model_visible_specs` parity). Empty instructions are rejected. Operator `/compact` on `remote_v2` builds the agent first so that prefix matches (portable `/compact` still skips prepareTools/sandbox). Retained cleartext keeps recent user/developer messages **including images** within the 64k budget. The Agents SDK rejects a bare trigger item, so OpenGeni emits `{ type: "unknown", providerData: { type: "compaction_trigger" } }` through `CompactionResponsesModel` and the Codex fetch normalizer restores the wire shape. Session is **Codex-only** for its lifetime (HTTP + worker admission). |
 
-There is no off switch, compatibility ladder, request-local history trim, or
+There is no off switch, compatibility ladder, ordinary-turn history trim, or
 deterministic non-model fallback. A `remote_v2` session never silently falls
-back to portable on remote failure (avoids mixed history shapes). Azure /
-OpenAI platform remote compact APIs are out of scope.
+back to portable on remote failure (avoids mixed history shapes). Its single
+overflow retry is described below. Azure / OpenAI platform remote compact APIs
+are out of scope.
 
 Workspace setting `codexCompactionDefault` only affects **new** Codex sessions;
 later setting changes never move an already-frozen session.
@@ -26,7 +27,7 @@ The implementation lives in:
   remote v2 retain/rebuild helpers, and the typed compaction signal.
 - `packages/runtime/src/index.ts`: portable summarizer + `requestRemoteCompactionV2`.
 - `apps/worker/src/activities/context-compaction.ts`: mode branch, summarizer
-  retry, remote fail-closed path, fenced durable replacement.
+  bounded remote overflow retry, remote fail-closed path, fenced durable replacement.
 - `apps/worker/src/activities/agent-turn.ts`: pre-call and same-turn recovery;
   Codex ALS beta/turn-metadata headers for remote v2.
 - `packages/db/src/index.ts`: the atomic history replacement and token signal.
@@ -148,6 +149,15 @@ headroom. If the provider still reports context overflow, OpenGeni performs one
 half-size refit and one final request. The 50% retry covers the greater-than-2×
 provider/byte-estimator skew measured in the production incident. It never
 issues one failing provider call per history item.
+
+Remote v2 keeps its normal first request unchanged. Only an exact provider
+`context_length_exceeded` code permits one retry to the same remote-compaction
+endpoint. That retry uses a temporary copy in which strictly smaller,
+protocol-valid placeholders replace tool-result bodies. Messages, reasoning,
+tool calls, call/result identities and statuses, compaction checkpoints, and
+item ordering are unchanged; no history unit is dropped. If there is nothing
+to shrink, or if the retry fails, compaction stops. It does not fold chunks,
+retry repeatedly, or cross over to portable compaction.
 
 These reductions belong only to the explicit compaction transition and their
 rewrite/drop counts are recorded on `session.context.compacted`. The unmodified

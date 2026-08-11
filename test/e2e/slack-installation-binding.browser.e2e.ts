@@ -209,6 +209,15 @@ async function installApiFixture(page: Page, state: FixtureState): Promise<void>
         bindings: state.bindingState ? [slackBinding(state.bindingState)] : [],
       });
     }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/memory-slack-publications/configuration`) {
+      return json({ current: null, history: [] });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/memory-slack-publications/channels`) {
+      return json({ channels: [], nextCursor: null });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/memory-slack-publications`) {
+      return json({ publications: [], nextCursor: null });
+    }
     if (
       request.method() === "POST" &&
       url.pathname === `/v1/workspaces/${workspaceId}/connections/slack-bot/install`

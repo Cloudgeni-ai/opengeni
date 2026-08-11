@@ -43,7 +43,8 @@ runs:
         AZURE_SUBSCRIPTION_ID: ${{ inputs.azure-subscription-id }}
       run: |
         set -euo pipefail
-        identity="$(bun scripts/release-registry.ts)"
+        controller_root="$(cd "$GITHUB_ACTION_PATH/../../.." && pwd)"
+        identity="$(cd "$controller_root" && bun scripts/release-registry.ts)"
         registry="$(jq -er .registry <<<"$identity")"
         case "$OPENGENI_RELEASE_REGISTRY_AUTH" in
           github)
