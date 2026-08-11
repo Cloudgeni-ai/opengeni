@@ -42,8 +42,15 @@ const DEDICATED_ARTIFACT_CAPABILITY_ROUTINES = new Set<string>([
   ...ARTIFACT_LIVE_TICKET_INTERNAL_ROUTINES,
 ]);
 
+const KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE =
+  "knowledge_source_sync_lock_authority(uuid, uuid, uuid)";
+const KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_TABLES = [
+  "knowledge_sources",
+  "knowledge_source_objects",
+] as const;
+
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
-  "knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
+  KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE,
 ] as const;
 
 /**
@@ -1011,7 +1018,30 @@ export function evaluateRuntimeDatabasePosture(
     if (!routine.securityDefiner) {
       violations.push(`target-schema runtime capability ${routine.name} is not SECURITY DEFINER`);
     }
-    if (targetSchemaOwner && routine.owner !== targetSchemaOwner) {
+    if (routine.name === KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE) {
+      const missingAuthorityTables = KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_TABLES.filter(
+        (tableName) => !tableByName.has(tableName),
+      );
+      if (missingAuthorityTables.length > 0) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
+        );
+      } else {
+        const authorityTables = KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_TABLES.map(
+          (tableName) => tableByName.get(tableName)!,
+        );
+        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+        if (authorityOwners.size !== 1) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
+          );
+        } else if (routine.owner !== authorityTables[0]!.owner) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
+          );
+        }
+      }
+    } else if (targetSchemaOwner && routine.owner !== targetSchemaOwner) {
       violations.push(
         `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match schema owner ${targetSchemaOwner}`,
       );

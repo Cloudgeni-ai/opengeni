@@ -12,6 +12,7 @@ import {
   RUNTIME_TABLE_PRIVILEGES,
   type RuntimeDatabasePosture,
   type RuntimeDatabasePostureOptions,
+  type RuntimeTablePosture,
 } from "../src/runtime-posture";
 
 const options: RuntimeDatabasePostureOptions = {
@@ -24,6 +25,26 @@ const options: RuntimeDatabasePostureOptions = {
   },
   protectedNoDirectDmlTables: [],
 };
+
+function knowledgeAuthorityTables(): RuntimeTablePosture[] {
+  return ["knowledge_sources", "knowledge_source_objects"].map((name) => ({
+    name,
+    owner: "opengeni_migrator",
+    rlsEnabled: false,
+    rlsForced: false,
+    rlsActive: false,
+    policyCount: 0,
+    artifactOutboxDispatcherPolicy: false,
+    artifactMaterializerPolicy: false,
+    select: false,
+    insert: false,
+    update: false,
+    delete: false,
+    truncate: false,
+    references: false,
+    trigger: false,
+  }));
+}
 
 function safePosture(): RuntimeDatabasePosture {
   return {
@@ -77,6 +98,7 @@ function safePosture(): RuntimeDatabasePosture {
         references: false,
         trigger: false,
       },
+      ...knowledgeAuthorityTables(),
     ],
     targetRoutines: [
       {
@@ -130,6 +152,49 @@ describe("runtime database posture evaluator", () => {
 
   test("accepts the exact least-privilege FORCE-RLS contract", () => {
     expect(evaluateRuntimeDatabasePosture(safePosture(), options)).toEqual([]);
+  });
+
+  test("accepts public-schema authority owned by the two protected tables", () => {
+    const posture = safePosture();
+    posture.schemas[0]!.owner = "pg_database_owner";
+
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+  });
+
+  test("keeps dedicated-schema same-owner authority accepted", () => {
+    const posture = safePosture();
+    posture.schemas[0]!.name = "tenantx";
+
+    expect(
+      evaluateRuntimeDatabasePosture(posture, {
+        ...options,
+        targetSchema: "tenantx",
+      }),
+    ).toEqual([]);
+  });
+
+  test("fails closed on missing or split knowledge authority table ownership", () => {
+    const missing = safePosture();
+    missing.tables = missing.tables.filter((table) => table.name !== "knowledge_source_objects");
+    expect(evaluateRuntimeDatabasePosture(missing, options)).toContain(
+      "target-schema runtime capability knowledge_source_sync_lock_authority(uuid, uuid, uuid) authority tables are missing: knowledge_source_objects",
+    );
+
+    const split = safePosture();
+    split.tables.find((table) => table.name === "knowledge_source_objects")!.owner =
+      "another_owner";
+    expect(evaluateRuntimeDatabasePosture(split, options)).toContain(
+      "target-schema runtime capability knowledge_source_sync_lock_authority(uuid, uuid, uuid) authority table owners do not match: knowledge_sources=opengeni_migrator, knowledge_source_objects=another_owner",
+    );
+  });
+
+  test("rejects knowledge authority routine and table owner mismatch", () => {
+    const posture = safePosture();
+
+    posture.targetRoutines[0]!.owner = "another_owner";
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "target-schema runtime capability knowledge_source_sync_lock_authority(uuid, uuid, uuid) owner another_owner does not match authority table owner opengeni_migrator",
+    );
   });
 
   test("rejects bypass, inheritance, ownership, memberships, and inactive RLS", () => {
@@ -264,7 +329,7 @@ describe("runtime database posture evaluator", () => {
     expect(evaluateRuntimeDatabasePosture(invalid, options)).toEqual(
       expect.arrayContaining([
         "target-schema runtime capability knowledge_source_sync_lock_authority(uuid, uuid, uuid) is not SECURITY DEFINER",
-        "target-schema runtime capability knowledge_source_sync_lock_authority(uuid, uuid, uuid) owner another_owner does not match schema owner opengeni_migrator",
+        "target-schema runtime capability knowledge_source_sync_lock_authority(uuid, uuid, uuid) owner another_owner does not match authority table owner opengeni_migrator",
         "runtime role lacks target-schema capability knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
         "PUBLIC has forbidden target-schema capability knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
       ]),
@@ -306,7 +371,9 @@ describe("runtime database posture evaluator", () => {
     };
     expect(evaluateRuntimeDatabasePosture(posture, artifactOptions)).toEqual([]);
 
-    posture.tables[1]!.artifactOutboxDispatcherPolicy = false;
+    posture.tables.find(
+      (table) => table.name === "editable_artifact_live_outbox",
+    )!.artifactOutboxDispatcherPolicy = false;
     posture.privateRoutines[1]!.securityDefiner = false;
     posture.privateRoutines[2]!.owner = "another_owner";
     expect(evaluateRuntimeDatabasePosture(posture, artifactOptions)).toEqual(
@@ -357,11 +424,14 @@ describe("runtime database posture evaluator", () => {
       "editable_artifact_versions",
       "editable_artifact_idempotency_receipts",
     ];
-    posture.tables = materializerTables.map((name) => ({
-      ...posture.tables[0]!,
-      name,
-      artifactMaterializerPolicy: true,
-    }));
+    posture.tables = [
+      ...materializerTables.map((name) => ({
+        ...posture.tables[0]!,
+        name,
+        artifactMaterializerPolicy: true,
+      })),
+      ...knowledgeAuthorityTables(),
+    ];
     for (const name of [
       "claim_editable_artifact_materializations(text, integer, integer, name)",
       "renew_editable_artifact_materialization(uuid, uuid, text, text, text, integer, integer, name)",
