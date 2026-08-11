@@ -117,7 +117,7 @@ describe("browser e2e", () => {
       );
     }
     browserObservation.stop();
-    await pageA.getByRole("menuitem", { name: /^High$/ }).waitFor({ timeout: 10_000 });
+    await pageA.getByTestId("model-picker-content").waitFor({ timeout: 10_000 });
     await pageA.keyboard.press("Escape");
     await pageA
       .getByPlaceholder("Describe a task for the agent…")
@@ -183,10 +183,14 @@ describe("browser e2e", () => {
     );
     await page.goto(`http://127.0.0.1:${webPort}`);
 
-    // Coarse-touch picker + remove first: the hidden input is driven by the
-    // actual button, and removing a completed draft attachment never makes the
-    // compact composer overflow or leaves a dead chip.
-    const attach = page.getByRole("button", { name: "Attach files" });
+    // Coarse-touch picker + remove first: mobile attachment entry lives under
+    // the compact overflow, drives the same hidden input, and removing a
+    // completed draft attachment never overflows the composer or leaves a dead chip.
+    const more = page.getByRole("button", { name: "More composer actions" });
+    await more.waitFor();
+    await expectCoarseTarget(more);
+    await more.tap();
+    const attach = page.getByRole("menuitem", { name: "Add photos & files" });
     await attach.waitFor();
     await expectCoarseTarget(attach);
     const chooserPromise = page.waitForEvent("filechooser");
@@ -223,8 +227,8 @@ describe("browser e2e", () => {
       timeoutMs: 10_000,
       describe: () => `observed provider methods: ${providerMethods.join(", ") || "none"}`,
     });
-    await attach.focus();
-    expect(await attach.evaluate((element) => element === document.activeElement)).toBe(true);
+    await more.focus();
+    expect(await more.evaluate((element) => element === document.activeElement)).toBe(true);
 
     await page.getByPlaceholder("Describe a task for the agent…").fill("inspect the screenshot");
     await page.getByRole("button", { name: "Send message" }).click();

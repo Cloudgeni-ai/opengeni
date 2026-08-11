@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test";
 import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  FIRST_PARTY_IN_PROCESS_TOOL_NAMES,
   FIRST_PARTY_MCP_TOOL_NAMES,
+  FIRST_PARTY_REMOTE_MCP_TOOL_NAMES,
   Permission,
   type AccessGrant,
   type FirstPartyMcpToolName,
@@ -89,7 +91,10 @@ describe("first-party MCP tool visibility policy", () => {
       workspaceMemoryEnabled: true,
     });
 
-    expect(registeredToolNames(server)).toEqual([...DEFAULT_FIRST_PARTY_MCP_TOOLS].sort());
+    const inProcess = new Set(FIRST_PARTY_IN_PROCESS_TOOL_NAMES);
+    expect(registeredToolNames(server)).toEqual(
+      DEFAULT_FIRST_PARTY_MCP_TOOLS.filter((name) => !inProcess.has(name)).sort(),
+    );
   });
 
   test("an explicit title-only selection does not widen to other authorized tools", () => {
@@ -136,7 +141,7 @@ describe("first-party MCP tool visibility policy", () => {
       { workspaceMemoryEnabled: true },
     );
 
-    expect(registeredToolNames(server)).toEqual([...FIRST_PARTY_MCP_TOOL_NAMES].sort());
+    expect(registeredToolNames(server)).toEqual([...FIRST_PARTY_REMOTE_MCP_TOOL_NAMES].sort());
     expect(registeredToolNames(server)).not.toContain("files_get_download_url");
     expect(registeredToolNames(server)).not.toContain("github_token");
   });

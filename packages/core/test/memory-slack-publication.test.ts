@@ -83,8 +83,8 @@ describe("Memory Slack publication security contract", () => {
     ).toEqual({ eligible: false, reason: "disabled" });
   });
 
-  test("preserves token-shaped projection content while ignoring raw source fields", () => {
-    const syntheticValue = "A".repeat(24);
+  test("omits credential-shaped summary and owner text only from the Slack projection", () => {
+    const syntheticValue = `github_pat_${"A".repeat(32)}`;
     const input = candidate({
       memory: {
         labels: [
@@ -100,11 +100,9 @@ describe("Memory Slack publication security contract", () => {
           "alpha",
         ],
       },
-      change: { ownerLabel: ["pass", "word=", syntheticValue].join("") },
+      change: { ownerLabel: `Owner access_token=${syntheticValue}` },
       distribution: {
-        shareSummary: ["Decision summary api", "_key=", syntheticValue, " ", "😀".repeat(300)].join(
-          "",
-        ),
+        shareSummary: `Decision summary api_key=${syntheticValue} ${"😀".repeat(300)}`,
       },
     });
     Object.assign(input.memory as object, {
@@ -120,12 +118,16 @@ describe("Memory Slack publication security contract", () => {
 
     expect(decision.deliveryMode).toBe("auto");
     expect(decision.idempotencyKey).toMatch(/^memory-slack:v1:[0-9a-f]{64}$/);
-    expect(decision.projection.summary).toContain(syntheticValue);
+    expect(input.distribution.shareSummary).toContain(syntheticValue);
+    expect(input.change.ownerLabel).toContain(syntheticValue);
+    expect(decision.projection.summary).toContain("[credential omitted]");
+    expect(decision.projection.summary).not.toContain(syntheticValue);
     expect(decision.projection.summaryTruncated).toBe(true);
     expect(new TextEncoder().encode(decision.projection.summary).byteLength).toBeLessThanOrEqual(
       MEMORY_SLACK_SUMMARY_MAX_UTF8_BYTES,
     );
-    expect(decision.projection.ownerLabel).toContain(syntheticValue);
+    expect(decision.projection.ownerLabel).toContain("[credential omitted]");
+    expect(decision.projection.ownerLabel).not.toContain(syntheticValue);
     expect(decision.projection.labels).toEqual([
       "alpha",
       "beta",
@@ -139,7 +141,7 @@ describe("Memory Slack publication security contract", () => {
     expect(decision.projection.labelsTruncated).toBe(true);
 
     const serialized = JSON.stringify(decision.projection);
-    expect(serialized).toContain(syntheticValue);
+    expect(serialized).not.toContain(syntheticValue);
     expect(serialized).not.toContain("raw memory body");
     expect(serialized).not.toContain("hiddenPrompt");
     expect(serialized).not.toContain("raw-source");

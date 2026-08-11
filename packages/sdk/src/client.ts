@@ -12,6 +12,48 @@ import {
   streamWorkspaceControlEvents,
   type WorkspaceControlStreamTransport,
 } from "./workspace-control-stream";
+import {
+  OpenGeniInteractionClient,
+  type AttachedBrowserDevice,
+  type AttachedBrowserDeviceListOptions,
+  type AttachedBrowserDeviceListResponse,
+  type BrowserActionReceipt,
+  type BrowserActionRequest,
+  type BrowserDiagnosticBatch,
+  type BrowserDiagnosticsOptions,
+  type BrowserIdentity,
+  type BrowserIdentityListOptions,
+  type BrowserIdentityListResponse,
+  type BrowserIdentityMutationResponse,
+  type BrowserObservation,
+  type BrowserOpenTargetRequest,
+  type BrowserSession,
+  type BrowserSessionAttachment,
+  type BrowserSessionAttachmentRequest,
+  type BrowserSessionHeartbeatResponse,
+  type BrowserSessionLifecycleRequest,
+  type BrowserSessionListResponse,
+  type BrowserSessionMutationResponse,
+  type BrowserTarget,
+  type BrowserTargetListResponse,
+  type BrowserRevisionListResponse,
+  type ComputerActionReceipt,
+  type ComputerActionRequest,
+  type ComputerObservation,
+  type ComputerSession,
+  type ComputerSessionAttachment,
+  type ComputerSessionAttachmentRequest,
+  type ComputerSessionHeartbeatResponse,
+  type ComputerSessionLifecycleRequest,
+  type ComputerSessionListResponse,
+  type ComputerSessionMutationResponse,
+  type ComputerTargetListResponse,
+  type CreateBrowserIdentityRequest,
+  type CreateBrowserSessionRequest,
+  type CreateComputerSessionRequest,
+  type PublishBrowserRevisionRequest,
+  type PublishBrowserRevisionResponse,
+} from "./interaction";
 import type {
   AccessContext,
   ActivateCodexRealtimeConnectionRequest,
@@ -110,6 +152,11 @@ import type {
   SwapActiveSandboxRequest,
   SwapActiveSandboxResponse,
   ListWorkspaceMembersResponse,
+  ListSlackUserLinkAccessRequestsResponse,
+  PrepareSlackUserLinkAccessRequest,
+  SlackUserLinkAccessMutationRequest,
+  SlackUserLinkAccessRequest,
+  ApproveSlackUserLinkAccessRequest,
   PackInstallation,
   LatencyMode,
   ReasoningEffort,
@@ -121,12 +168,18 @@ import type {
   RetainedArtifactContent,
   RetainedArtifactContentOptions,
   RetainedArtifactMetadata,
+  UpdateVideoGenerationPolicyRequest,
+  VideoArtifactPlaybackSource,
+  VideoGenerationOperationSummary,
+  VideoGenerationPolicy,
+  WorkspaceVideoGenerationSettings,
   RegisterCapabilityPackRequest,
   ResourceRef,
   ScheduledTask,
   ScheduledTaskRun,
   Session,
   SessionListResponse,
+  AgentTopologyPageResponse,
   UpdateSessionPinRequest,
   SessionEvent,
   SessionEventCompactResult,
@@ -233,12 +286,15 @@ import type {
   WorkspaceRegisteredPack,
   Workspace,
   ListConnectionsResponse,
+  ListSlackInstallationBindingsResponse,
+  SlackInstallationBinding,
   ConnectionResponse,
   OAuthStartRequest,
   OAuthStartResponse,
   SocialConnection,
   SocialOAuthStartRequest,
 } from "./types";
+import { GENERATED_VIDEO_MAX_BYTES } from "./types";
 import { parseRetainedGeneratedImageReference } from "./retained-artifacts";
 import type {
   ActivateWorkspaceInstructionPolicyRequest,
@@ -272,6 +328,15 @@ import type {
   WorkspaceStateGetOptions,
   WorkspaceStateResponse,
 } from "./workspace-state";
+import type {
+  MemorySlackPublication,
+  MemorySlackPublicationActionRequest,
+  MemorySlackPublicationConfiguration,
+  MemorySlackPublicationConfigurationResponse,
+  MemorySlackPublicationHistoryResponse,
+  SlackPublicationChannelListResponse,
+  UpdateMemorySlackPublicationConfigurationRequest,
+} from "./memory-slack-delivery";
 import type {
   ActivatePreferenceRegistryRevisionRequest,
   ChangePreferenceRegistryScopeRequest,
@@ -399,12 +464,15 @@ export class OpenGeniClient {
   private readonly fetchImpl: FetchLike;
   private readonly readInFlight = new Map<string, Promise<unknown>>();
   private readonly readTrailing = new Map<string, Promise<unknown>>();
+  /** Resource-oriented Browser/Computer facade over this exact authenticated client. */
+  readonly interaction: OpenGeniInteractionClient;
 
   constructor(options: OpenGeniClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.options = options;
     // Bind lazily so variable sets that polyfill fetch after module load work.
     this.fetchImpl = options.fetch ?? ((input, init) => fetch(input, init));
+    this.interaction = new OpenGeniInteractionClient(this);
   }
 
   // --- Session lifecycle ---------------------------------------------------
@@ -791,6 +859,32 @@ export class OpenGeniClient {
       return { pinned: [], sessions: response, nextCursor: null };
     }
     return response;
+  }
+
+  /** Compact, bounded workspace agent hierarchy page. */
+  async listAgentTopology(
+    workspaceId: string,
+    options: {
+      limit?: number;
+      parentSessionId?: string | null;
+      cursor?: string;
+      search?: string;
+    } = {},
+  ): Promise<AgentTopologyPageResponse> {
+    const search = options.search?.trim();
+    return await this.requestJson<AgentTopologyPageResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/agent-topology`,
+      undefined,
+      {
+        ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+        ...(options.parentSessionId === undefined
+          ? {}
+          : { parentSessionId: options.parentSessionId ?? "null" }),
+        ...(options.cursor ? { cursor: options.cursor } : {}),
+        ...(search ? { search } : {}),
+      },
+    );
   }
 
   /** Set this authenticated member's personal workspace pin for a session. */
@@ -2152,6 +2246,491 @@ export class OpenGeniClient {
     );
   }
 
+  // --- Browser / Computer interaction resources --------------------------------
+
+  async listAttachedBrowsers(
+    workspaceId: string,
+    options: AttachedBrowserDeviceListOptions = {},
+  ): Promise<AttachedBrowserDeviceListResponse> {
+    return await this.requestJson<AttachedBrowserDeviceListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/attached-browsers`,
+      undefined,
+      options.includeDisconnected ? { includeDisconnected: "true" } : {},
+      options,
+    );
+  }
+
+  async getAttachedBrowser(
+    workspaceId: string,
+    deviceId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<AttachedBrowserDevice> {
+    return await this.requestJson<AttachedBrowserDevice>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/attached-browsers/${encodeURIComponent(deviceId)}`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  async listBrowserIdentities(
+    workspaceId: string,
+    options: BrowserIdentityListOptions = {},
+  ): Promise<BrowserIdentityListResponse> {
+    return await this.requestJson<BrowserIdentityListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/browser-identities`,
+      undefined,
+      options.includeArchived ? { includeArchived: "true" } : {},
+      options,
+    );
+  }
+
+  async getBrowserIdentity(
+    workspaceId: string,
+    identityId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserIdentity> {
+    return await this.requestJson<BrowserIdentity>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/browser-identities/${encodeURIComponent(identityId)}`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  async createBrowserIdentity(
+    workspaceId: string,
+    request: CreateBrowserIdentityRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserIdentityMutationResponse> {
+    return await this.requestJson<BrowserIdentityMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/browser-identities`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  async listBrowserRevisions(
+    workspaceId: string,
+    identityId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserRevisionListResponse> {
+    return await this.requestJson<BrowserRevisionListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/browser-identities/${encodeURIComponent(identityId)}/revisions`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  /** Workspace-wide BrowserSession inventory. Associations express relevance,
+   *  not access: peers and child agents intentionally remain discoverable. */
+  async listBrowserSessions(
+    workspaceId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserSessionListResponse> {
+    return await this.requestJson<BrowserSessionListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/browser-sessions`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  async getBrowserSession(
+    workspaceId: string,
+    browserSessionId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserSession> {
+    return await this.requestJson<BrowserSession>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  async createBrowserSession(
+    workspaceId: string,
+    request: CreateBrowserSessionRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserSessionMutationResponse> {
+    return await this.requestJson<BrowserSessionMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/browser-sessions`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  async listBrowserTargets(
+    workspaceId: string,
+    browserSessionId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserTargetListResponse> {
+    return await this.requestJson<BrowserTargetListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/targets`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  async openBrowserTarget(
+    workspaceId: string,
+    browserSessionId: string,
+    request: BrowserOpenTargetRequest = {},
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserTarget> {
+    return await this.requestJson<BrowserTarget>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/targets`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  async selectBrowserTarget(
+    workspaceId: string,
+    browserSessionId: string,
+    targetId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserTarget> {
+    return await this.requestJson<BrowserTarget>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/targets/${encodeURIComponent(targetId)}/select`,
+      {},
+      {},
+      options,
+    );
+  }
+
+  async closeBrowserTarget(
+    workspaceId: string,
+    browserSessionId: string,
+    targetId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserTargetListResponse> {
+    return await this.requestJson<BrowserTargetListResponse>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/targets/${encodeURIComponent(targetId)}`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  async observeBrowserTarget(
+    workspaceId: string,
+    browserSessionId: string,
+    targetId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserObservation> {
+    return await this.requestJson<BrowserObservation>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/targets/${encodeURIComponent(targetId)}/observation`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  async actInBrowser(
+    workspaceId: string,
+    browserSessionId: string,
+    request: BrowserActionRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserActionReceipt> {
+    return await this.requestJson<BrowserActionReceipt>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/actions`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  async getBrowserActionReceipt(
+    workspaceId: string,
+    browserSessionId: string,
+    operationId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserActionReceipt> {
+    return await this.requestJson<BrowserActionReceipt>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/operations/${encodeURIComponent(operationId)}`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  async listBrowserDiagnostics(
+    workspaceId: string,
+    browserSessionId: string,
+    targetId: string,
+    options: BrowserDiagnosticsOptions = {},
+  ): Promise<BrowserDiagnosticBatch> {
+    return await this.requestJson<BrowserDiagnosticBatch>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/targets/${encodeURIComponent(targetId)}/diagnostics`,
+      undefined,
+      {
+        ...(options.kinds?.length ? { kinds: options.kinds.join(",") } : {}),
+        ...(options.after !== undefined ? { after: String(options.after) } : {}),
+        ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+      },
+      options.signal ? { signal: options.signal } : {},
+    );
+  }
+
+  async attachBrowserSession(
+    workspaceId: string,
+    browserSessionId: string,
+    request: BrowserSessionAttachmentRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserSessionAttachment> {
+    return await this.requestJson<BrowserSessionAttachment>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/attachments`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  async heartbeatBrowserSession(
+    workspaceId: string,
+    browserSessionId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserSessionHeartbeatResponse> {
+    return await this.requestJson<BrowserSessionHeartbeatResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/heartbeat`,
+      {},
+      {},
+      options,
+    );
+  }
+
+  async publishBrowserRevision(
+    workspaceId: string,
+    browserSessionId: string,
+    request: PublishBrowserRevisionRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<PublishBrowserRevisionResponse> {
+    return await this.requestJson<PublishBrowserRevisionResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/revisions`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  async suspendBrowserSession(
+    workspaceId: string,
+    browserSessionId: string,
+    request: BrowserSessionLifecycleRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserSessionMutationResponse> {
+    return await this.requestJson<BrowserSessionMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/suspend`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  async resumeBrowserSession(
+    workspaceId: string,
+    browserSessionId: string,
+    request: BrowserSessionLifecycleRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserSessionMutationResponse> {
+    return await this.requestJson<BrowserSessionMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/resume`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  async endBrowserSession(
+    workspaceId: string,
+    browserSessionId: string,
+    request: BrowserSessionLifecycleRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserSessionMutationResponse> {
+    return await this.requestJson<BrowserSessionMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/end`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  /** Workspace-wide ComputerSession inventory. Associations express
+   * relevance, not access; peer sessions intentionally remain discoverable. */
+  async listComputerSessions(
+    workspaceId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<ComputerSessionListResponse> {
+    return await this.requestJson<ComputerSessionListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/computer-sessions`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  async getComputerSession(
+    workspaceId: string,
+    computerSessionId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<ComputerSession> {
+    return await this.requestJson<ComputerSession>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/computer-sessions/${encodeURIComponent(computerSessionId)}`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  async createComputerSession(
+    workspaceId: string,
+    request: CreateComputerSessionRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<ComputerSessionMutationResponse> {
+    return await this.requestJson<ComputerSessionMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/computer-sessions`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  async listComputerTargets(
+    workspaceId: string,
+    computerSessionId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<ComputerTargetListResponse> {
+    return await this.requestJson<ComputerTargetListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/computer-sessions/${encodeURIComponent(computerSessionId)}/targets`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  async observeComputerTarget(
+    workspaceId: string,
+    computerSessionId: string,
+    targetId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<ComputerObservation> {
+    return await this.requestJson<ComputerObservation>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/computer-sessions/${encodeURIComponent(computerSessionId)}/targets/${encodeURIComponent(targetId)}/observation`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  async actInComputer(
+    workspaceId: string,
+    computerSessionId: string,
+    request: ComputerActionRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<ComputerActionReceipt> {
+    return await this.requestJson<ComputerActionReceipt>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/computer-sessions/${encodeURIComponent(computerSessionId)}/actions`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  async getComputerActionReceipt(
+    workspaceId: string,
+    computerSessionId: string,
+    operationId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<ComputerActionReceipt> {
+    return await this.requestJson<ComputerActionReceipt>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/computer-sessions/${encodeURIComponent(computerSessionId)}/operations/${encodeURIComponent(operationId)}`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  async attachComputerSession(
+    workspaceId: string,
+    computerSessionId: string,
+    request: ComputerSessionAttachmentRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<ComputerSessionAttachment> {
+    return await this.requestJson<ComputerSessionAttachment>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/computer-sessions/${encodeURIComponent(computerSessionId)}/attachments`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  async heartbeatComputerSession(
+    workspaceId: string,
+    computerSessionId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<ComputerSessionHeartbeatResponse> {
+    return await this.requestJson<ComputerSessionHeartbeatResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/computer-sessions/${encodeURIComponent(computerSessionId)}/heartbeat`,
+      {},
+      {},
+      options,
+    );
+  }
+
+  async endComputerSession(
+    workspaceId: string,
+    computerSessionId: string,
+    request: ComputerSessionLifecycleRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<ComputerSessionMutationResponse> {
+    return await this.requestJson<ComputerSessionMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/computer-sessions/${encodeURIComponent(computerSessionId)}/end`,
+      request,
+      {},
+      options,
+    );
+  }
+
   // --- Access + workspaces -----------------------------------------------------
 
   /**
@@ -2606,6 +3185,86 @@ export class OpenGeniClient {
     await this.requestVoid(
       "DELETE",
       `/v1/workspaces/${workspaceId}/members/${encodeURIComponent(subjectId)}`,
+    );
+  }
+
+  /** Exchange one signed Slack bearer for durable, token-free continuation state. */
+  async prepareSlackUserLinkAccess(
+    workspaceId: string,
+    request: PrepareSlackUserLinkAccessRequest,
+  ): Promise<SlackUserLinkAccessRequest> {
+    return await this.requestJson<SlackUserLinkAccessRequest>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/integrations/slack/user-link-intents`,
+      request,
+    );
+  }
+
+  async getSlackUserLinkAccess(
+    workspaceId: string,
+    requestId: string,
+  ): Promise<SlackUserLinkAccessRequest> {
+    return await this.requestJson<SlackUserLinkAccessRequest>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/integrations/slack/user-link-intents/${requestId}`,
+    );
+  }
+
+  async requestSlackUserLinkWorkspaceAccess(
+    workspaceId: string,
+    requestId: string,
+    request: SlackUserLinkAccessMutationRequest,
+  ): Promise<SlackUserLinkAccessRequest> {
+    return await this.requestJson<SlackUserLinkAccessRequest>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/integrations/slack/user-link-intents/${requestId}/request-access`,
+      request,
+    );
+  }
+
+  async cancelSlackUserLinkAccess(
+    workspaceId: string,
+    requestId: string,
+    request: SlackUserLinkAccessMutationRequest,
+  ): Promise<SlackUserLinkAccessRequest> {
+    return await this.requestJson<SlackUserLinkAccessRequest>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/integrations/slack/user-link-intents/${requestId}/cancel`,
+      request,
+    );
+  }
+
+  async listSlackUserLinkAccessRequests(
+    workspaceId: string,
+  ): Promise<SlackUserLinkAccessRequest[]> {
+    const response = await this.requestJson<ListSlackUserLinkAccessRequestsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/members/access-requests/slack`,
+    );
+    return response.requests;
+  }
+
+  async approveSlackUserLinkAccessRequest(
+    workspaceId: string,
+    requestId: string,
+    request: ApproveSlackUserLinkAccessRequest,
+  ): Promise<SlackUserLinkAccessRequest> {
+    return await this.requestJson<SlackUserLinkAccessRequest>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/members/access-requests/slack/${requestId}/approve`,
+      request,
+    );
+  }
+
+  async denySlackUserLinkAccessRequest(
+    workspaceId: string,
+    requestId: string,
+    request: SlackUserLinkAccessMutationRequest,
+  ): Promise<SlackUserLinkAccessRequest> {
+    return await this.requestJson<SlackUserLinkAccessRequest>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/members/access-requests/slack/${requestId}/deny`,
+      request,
     );
   }
 
@@ -3290,6 +3949,69 @@ export class OpenGeniClient {
     );
   }
 
+  // --- Video generation ---------------------------------------------------------------
+
+  /** Read the effective workspace policy and executable Seedance capabilities. */
+  async getVideoGenerationSettings(
+    workspaceId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<WorkspaceVideoGenerationSettings> {
+    return await this.requestJson<WorkspaceVideoGenerationSettings>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/video-generation`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  /** Replace the enabled video models/default under optimistic policy revision control. */
+  async updateVideoGenerationPolicy(
+    workspaceId: string,
+    request: UpdateVideoGenerationPolicyRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<VideoGenerationPolicy> {
+    return await this.requestJson<VideoGenerationPolicy>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/video-generation/policy`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  /** Read durable progress for one accepted video generation operation. */
+  async getVideoGenerationOperation(
+    workspaceId: string,
+    operationId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<VideoGenerationOperationSummary> {
+    return await this.requestJson<VideoGenerationOperationSummary>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/video-generation/operations/${operationId}`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  /** Mint a short-lived zero-copy URL for native Range-based video playback. */
+  async createVideoArtifactPlaybackSource(
+    workspaceId: string,
+    artifactId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<VideoArtifactPlaybackSource> {
+    const source = await this.requestJson<VideoArtifactPlaybackSource>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/artifacts/${artifactId}/playback-source`,
+      undefined,
+      {},
+      options,
+    );
+    assertSafeVideoArtifactPlaybackSource(source, artifactId);
+    return source;
+  }
+
   // --- Documents ----------------------------------------------------------------------
 
   async createDocumentBase(
@@ -3620,6 +4342,15 @@ export class OpenGeniClient {
     return response.connections;
   }
 
+  /** List the secret-free Slack team -> OpenGeni tenant routing authority. */
+  async listSlackInstallationBindings(workspaceId: string): Promise<SlackInstallationBinding[]> {
+    const response = await this.requestJson<ListSlackInstallationBindingsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/connections/slack-bot/bindings`,
+    );
+    return response.bindings;
+  }
+
   async createConnection(
     workspaceId: string,
     request: CreateConnectionRequest,
@@ -3682,6 +4413,60 @@ export class OpenGeniClient {
     return await this.requestJson<SlackReactionChannelListResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/integrations/slack/reaction-channels?${query}`,
+    );
+  }
+
+  async getMemorySlackPublicationConfiguration(
+    workspaceId: string,
+  ): Promise<MemorySlackPublicationConfigurationResponse> {
+    return await this.requestJson<MemorySlackPublicationConfigurationResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/memory-slack-publications/configuration`,
+    );
+  }
+
+  async updateMemorySlackPublicationConfiguration(
+    workspaceId: string,
+    request: UpdateMemorySlackPublicationConfigurationRequest,
+  ): Promise<MemorySlackPublicationConfiguration> {
+    return await this.requestJson<MemorySlackPublicationConfiguration>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/memory-slack-publications/configuration`,
+      request,
+    );
+  }
+
+  async listMemorySlackPublicationChannels(
+    workspaceId: string,
+    connectionId: string,
+    cursor?: string,
+  ): Promise<SlackPublicationChannelListResponse> {
+    const query = new URLSearchParams({ connectionId });
+    if (cursor) query.set("cursor", cursor);
+    return await this.requestJson<SlackPublicationChannelListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/memory-slack-publications/channels?${query}`,
+    );
+  }
+
+  async listMemorySlackPublications(
+    workspaceId: string,
+  ): Promise<MemorySlackPublicationHistoryResponse> {
+    return await this.requestJson<MemorySlackPublicationHistoryResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/memory-slack-publications`,
+    );
+  }
+
+  async actOnMemorySlackPublication(
+    workspaceId: string,
+    publicationId: string,
+    request: MemorySlackPublicationActionRequest,
+  ): Promise<MemorySlackPublication> {
+    return await this.requestJson<MemorySlackPublication>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/memory-slack-publications/${encodeURIComponent(publicationId)}/action`,
+      request,
     );
   }
 
@@ -4455,6 +5240,26 @@ function assertSafeArtifactDownloadUrl(value: FileDownloadUrlResponse): void {
   if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) {
     throw new OpenGeniApiError(502, "retained artifact download URL is unsafe");
   }
+}
+
+function assertSafeVideoArtifactPlaybackSource(
+  value: VideoArtifactPlaybackSource,
+  expectedArtifactId: string,
+): void {
+  if (
+    !value ||
+    value.schemaVersion !== 1 ||
+    value.artifactId !== expectedArtifactId ||
+    value.contentType !== "video/mp4" ||
+    value.acceptRanges !== "bytes" ||
+    !Number.isSafeInteger(value.sizeBytes) ||
+    value.sizeBytes <= 0 ||
+    value.sizeBytes > GENERATED_VIDEO_MAX_BYTES ||
+    !/^[0-9a-f]{64}$/.test(value.sha256)
+  ) {
+    throw new OpenGeniApiError(502, "generated-video playback source is invalid");
+  }
+  assertSafeArtifactDownloadUrl({ url: value.url, expiresAt: value.expiresAt });
 }
 
 function parseBoundedContentLength(value: string | null): number | null {

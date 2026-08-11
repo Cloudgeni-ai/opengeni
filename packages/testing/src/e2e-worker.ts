@@ -135,6 +135,9 @@ function sandboxStepForRequest(request: ModelRequest): ScriptedModelStep {
       ],
     };
   }
+  if (body.includes("verify mounted file")) {
+    return mountedFileShellStep();
+  }
   return sandboxShellStep();
 }
 
@@ -191,13 +194,29 @@ function sandboxShellStep(): ScriptedModelStep {
             "git --version",
             "jq --version",
             "curl --version",
-            "if [ -d files ]; then find files -maxdepth 3 -type f -print -exec cat {} \\; ; fi",
+            'for root in /workspace/.opengeni/files /workspace/files; do if [ -d "$root" ]; then find "$root" -maxdepth 3 -type f -print -exec cat {} \\; ; fi; done',
             "mkdir -p repos/e2e/repo && echo sandbox-ok > repos/e2e/repo/agent-output.txt && cat repos/e2e/repo/agent-output.txt",
           ].join("\n"),
           yield_time_ms: 10_000,
           max_output_tokens: 20_000,
         },
         "sandbox-shell",
+      ),
+    ],
+  };
+}
+
+function mountedFileShellStep(): ScriptedModelStep {
+  return {
+    output: [
+      functionCall(
+        "exec_command",
+        {
+          cmd: "set -e\ntest -d /workspace/.opengeni/files\nfind /workspace/.opengeni/files -maxdepth 3 -type f -print -exec cat {} \\;",
+          yield_time_ms: 10_000,
+          max_output_tokens: 20_000,
+        },
+        "sandbox-file-shell",
       ),
     ],
   };

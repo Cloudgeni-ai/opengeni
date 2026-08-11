@@ -25,10 +25,9 @@ import {
   saveRunState,
   submitHumanPromptInTransaction,
   withWorkspaceRls,
-  withWorkspaceSubjectRls,
+  withWorkspaceSubjectSessionActivityRls,
 } from "@opengeni/db";
 import * as schema from "@opengeni/db/schema";
-import type { EventBus } from "@opengeni/events";
 import {
   CompactionNeededError,
   CompactionProviderResponseError,
@@ -39,6 +38,7 @@ import {
 } from "@opengeni/runtime";
 import {
   acquireSharedTestDatabase,
+  MemoryEventBus,
   ScriptedModel,
   testSettings,
   type SharedTestDatabase,
@@ -397,11 +397,7 @@ describe("standalone context compaction execution", () => {
       runStream: forbid,
       serializeApprovals: forbid,
     } as unknown as OpenGeniRuntime;
-    const bus = {
-      publish: async () => undefined,
-      subscribe: async function* () {},
-      close: async () => undefined,
-    } as unknown as EventBus;
+    const bus = new MemoryEventBus();
     const activities = createActivityTestHarness({
       settings: testSettings({
         databaseUrl: shared.appUrl,
@@ -532,11 +528,7 @@ describe("standalone context compaction execution", () => {
       runStream: forbid,
       serializeApprovals: forbid,
     } as unknown as OpenGeniRuntime;
-    const bus = {
-      publish: async () => undefined,
-      subscribe: async function* () {},
-      close: async () => undefined,
-    } as unknown as EventBus;
+    const bus = new MemoryEventBus();
     const activities = createActivityTestHarness({
       settings: testSettings({
         databaseUrl: shared.appUrl,
@@ -864,11 +856,7 @@ describe("standalone context compaction execution", () => {
         throw new Error("failed standalone compaction serialized approvals");
       },
     } as unknown as OpenGeniRuntime;
-    const bus = {
-      publish: async () => undefined,
-      subscribe: async function* () {},
-      close: async () => undefined,
-    } as unknown as EventBus;
+    const bus = new MemoryEventBus();
     const activities = createActivityTestHarness({
       settings: testSettings({
         databaseUrl: shared.appUrl,
@@ -1023,11 +1011,7 @@ describe("standalone context compaction execution", () => {
         throw new Error("transient standalone compaction serialized approvals");
       },
     } as unknown as OpenGeniRuntime;
-    const bus = {
-      publish: async () => undefined,
-      subscribe: async function* () {},
-      close: async () => undefined,
-    } as unknown as EventBus;
+    const bus = new MemoryEventBus();
     const activities = createActivityTestHarness({
       settings: testSettings({
         databaseUrl: shared.appUrl,
@@ -1167,11 +1151,7 @@ describe("standalone context compaction execution", () => {
         throw new Error("transient in-turn compaction serialized approvals");
       },
     } as unknown as OpenGeniRuntime;
-    const bus = {
-      publish: async () => undefined,
-      subscribe: async function* () {},
-      close: async () => undefined,
-    } as unknown as EventBus;
+    const bus = new MemoryEventBus();
     const activities = createActivityTestHarness({
       settings: testSettings({
         databaseUrl: shared.appUrl,
@@ -1366,11 +1346,7 @@ describe("standalone context compaction execution", () => {
         },
       }),
     };
-    const bus = {
-      publish: async () => undefined,
-      subscribe: async function* () {},
-      close: async () => undefined,
-    } as unknown as EventBus;
+    const bus = new MemoryEventBus();
     const activities = createActivityTestHarness({
       settings: testSettings({
         databaseUrl: shared.appUrl,
@@ -1477,28 +1453,25 @@ describe("standalone context compaction execution", () => {
       ),
     ).toEqual([newUpdate.update.id]);
 
-    await withWorkspaceSubjectRls(
+    await withWorkspaceSubjectSessionActivityRls(
       client.db,
       grant.workspaceId!,
       grant.subjectId,
       async (db) =>
-        await db.transaction(
-          async (tx) =>
-            await submitHumanPromptInTransaction(tx as typeof db, {
-              accountId: grant.accountId,
-              workspaceId: grant.workspaceId!,
-              sessionId: session.id,
-              subjectId: grant.subjectId,
-              actor: { type: "human", subjectId: grant.subjectId },
-              operationKey: crypto.randomUUID(),
-              delivery: "send",
-              text: "Retry after the compaction failure with new human input",
-              resources: [],
-              tools: [],
-              reasoningEffortFallback: "low",
-              source: "user",
-            }),
-        ),
+        await submitHumanPromptInTransaction(db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          subjectId: grant.subjectId,
+          actor: { type: "human", subjectId: grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "Retry after the compaction failure with new human input",
+          resources: [],
+          tools: [],
+          reasoningEffortFallback: "low",
+          source: "user",
+        }),
     );
     const retryClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
       sessionId: session.id,

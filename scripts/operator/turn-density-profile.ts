@@ -2358,7 +2358,6 @@ function densityProfileSettings(productionSettings: Settings, densityMcpUrl: str
     recordingEnabled: false,
     workspaceCaptureEnabled: false,
     integrationsEnabled: false,
-    toolspaceEnabled: false,
   };
 }
 

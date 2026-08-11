@@ -2967,6 +2967,9 @@ describe("workflow contracts", () => {
     expect(plan.steps.find((step: any) => step.id === "plan").run).toContain(
       "bun scripts/ci/impact.ts --full --output impact-plan.json",
     );
+    expect(plan.steps.find((step: any) => step.id === "plan").run).toContain(
+      "unit_matrix=$(matrix \"$(jq '.unitTests | length' impact-plan.json)\" 6)",
+    );
 
     const source = ci.jobs["source-contracts"];
     expect(source.needs).toEqual(["automation-admission", "plan"]);
@@ -3023,6 +3026,9 @@ describe("workflow contracts", () => {
     expect(safetyStep.env).toEqual({ OPENGENI_REQUIRE_REAL_DB: "1" });
     expect(safetyStep.run).toContain("scripts/ci/run-unit-shard.ts --plan impact-plan.json");
     expect(safetyStep.run).toContain("--shard 0 --shards 1");
+    const safetyTimeoutSeconds = Number(safetyStep.run.match(/--timeout-seconds\s+(\d+)/)?.[1]);
+    expect(safetyTimeoutSeconds).toBe(2100);
+    expect(safety["timeout-minutes"] * 60 - safetyTimeoutSeconds).toBeGreaterThanOrEqual(300);
 
     const integration = ci.jobs["integration-shards"];
     expect(integration.strategy.matrix.include).toBe(

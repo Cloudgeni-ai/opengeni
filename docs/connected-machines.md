@@ -34,8 +34,8 @@ its own ssh / `gh` / credential helper), repos are **not cloned onto it**, and
 the agent runs under a **per-session working directory** (making its own
 worktrees under that path as it needs them).
 
-OpenGeni does not mint, seed, renew, or advertise Toolspace credentials on a
-Connected Machine. It sends no Toolspace URL, token-file pointer, package hint,
+OpenGeni does not mint, seed, renew, or advertise Codemode credentials on a
+Connected Machine. It sends no Codemode URL, token-file pointer, package hint,
 or other manifest environment to machine commands. If an operator wants a
 machine-local integration, they may provision and store an ordinary API
 credential themselves; that credential remains machine-owned and outside the

@@ -1101,6 +1101,7 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
     const { svc } = await makeRepoWithStagedChange();
     const status = await svc.gitStatus({ path: "" });
     expect(status.isRepo).toBe(true);
+    expect(status.headOid).toMatch(/^[0-9a-f]{40,64}$/);
     expect(status.files.length).toBeGreaterThanOrEqual(1);
     const file = status.files.find((f) => f.path === "file.txt");
     expect(file).toBeDefined();
@@ -1863,6 +1864,7 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
     const svc = new SandboxChannelAService({ session });
     const status = await svc.gitStatus({ path: "" });
     expect(status.isRepo).toBe(false);
+    expect(status.headOid).toBeNull();
     expect(status.files).toEqual([]);
   });
 
@@ -2383,6 +2385,7 @@ describe("P4.4 parsers — porcelain/numstat/unified-diff", () => {
   test("parsePorcelainV2 reads branch + file XY codes", () => {
     const z =
       [
+        "# branch.oid 0123456789abcdef0123456789abcdef01234567",
         "# branch.head main",
         "# branch.upstream origin/main",
         "# branch.ab +2 -1",
@@ -2393,6 +2396,7 @@ describe("P4.4 parsers — porcelain/numstat/unified-diff", () => {
     const out = parsePorcelainV2(z);
     expect(out.isRepo).toBe(true);
     expect(out.head).toBe("main");
+    expect(out.headOid).toBe("0123456789abcdef0123456789abcdef01234567");
     expect(out.upstream).toBe("origin/main");
     expect(out.ahead).toBe(2);
     expect(out.behind).toBe(1);
@@ -2403,6 +2407,10 @@ describe("P4.4 parsers — porcelain/numstat/unified-diff", () => {
     expect(dirty?.worktree).toBe("modified");
     const untracked = out.files.find((f) => f.path === "untracked.txt");
     expect(untracked?.worktree).toBe("untracked");
+
+    expect(
+      parsePorcelainV2(["# branch.oid (initial)", "# branch.head main"].join(NUL) + NUL).headOid,
+    ).toBeNull();
   });
 
   test("parseNumstatZ reads additions/deletions + binary + rename", () => {

@@ -34,6 +34,9 @@ const EXPLICIT_ONLY_CONNECTOR_TOOLS = [
   "fiken_bank_accounts_list",
   "fiken_purchases_list",
   "fiken_sales_list",
+  "atlassian_sources_list",
+  "atlassian_search",
+  "atlassian_get",
 ] as const;
 
 describe("first-party MCP tool-name contract", () => {

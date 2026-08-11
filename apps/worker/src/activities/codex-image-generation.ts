@@ -10,6 +10,7 @@ import {
   executeImageGenerationOperation,
   imageProviderBindingHash,
 } from "./image-generation-operation";
+import type { ResolvedImageGenerationReference } from "./image-generation-references";
 
 const CODEX_IMAGE_MODEL = "gpt-image-2";
 
@@ -24,6 +25,7 @@ export async function executeCodexImageGeneration(input: {
   attemptId: string;
   toolCallId: string;
   prompt: string;
+  references?: readonly ResolvedImageGenerationReference[];
   credentialId: string;
   codexContext: Pick<CodexRequestContext, "clientVersion" | "getToken" | "refresh">;
   abortSignal?: AbortSignal;
@@ -34,9 +36,11 @@ export async function executeCodexImageGeneration(input: {
     providerId: CODEX_PROVIDER_ID,
     providerBindingHash,
     modelId: CODEX_IMAGE_MODEL,
+    ...(input.references ? { referenceDigests: input.references } : {}),
     generate: async () => {
       const generated = await generateCodexSubscriptionImage({
         prompt: input.prompt,
+        ...(input.references ? { references: input.references } : {}),
         turnId: input.turnId,
         context: input.codexContext,
         ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),

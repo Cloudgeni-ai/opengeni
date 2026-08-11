@@ -7,7 +7,7 @@ page exists so you pick the right one in one read.
 | Surface | Who configures it | Scope / lifecycle | Credentials | Use it when |
 | --- | --- | --- | --- | --- |
 | **First-party OpenGeni MCP** (`/v1/workspaces/:id/mcp`) | Embedding host selects tool names per session | Always attached; the model sees the session's exact catalog selection intersected with its authorization grant | The caller's own bearer; internally delegated `ogd_` tokens carry permissions and the separate tool-name selection | An agent should use selected OpenGeni-native orchestration or self-management tools |
-| **Toolspace MCP** (`/v1/workspaces/:id/mcp` with `toolspace:call` + `sessionId`) | OpenGeni worker for managed sandboxes, when `OPENGENI_TOOLSPACE_ENABLED=true` | One running managed-sandbox session turn; session-selected safe first-party tools plus selected capability/per-session MCP tools, minus approval-required tools. Connected Machines are excluded. | Narrow `ogd_` token written to a managed-sandbox file; upstream credentials resolve server-side through the same standalone/host broker as normal MCP | Managed-sandbox code needs to list/call the session's tools programmatically without a model round-trip |
+| **Codemode** (`/v1/workspaces/:id/codemode`) | OpenGeni worker, from the exact tools prepared for one attempt | Immutable attempt-frozen projection of every admitted model tool; approval-required entries remain visible but cannot execute programmatically. Connected Machines are not yet transported. | Exact `agent_attempt` bearer stored in a managed-sandbox file; execution stays in the owning worker and reuses the same resolved credentials/executor as model MCP | Attempt code needs typed, idempotent tool calls without a model round trip |
 | **Docs MCP** (`/mcp/docs`) | Nobody — built in | Built in; selected through the `docs` server ref | Caller's bearer | An agent should search the workspace's documents store |
 | **Files MCP** (`/mcp/files`) | Nobody — built in | Default-on download-materialization surface selected through the `files` server ref; an explicit API policy may omit it | Caller's bearer with `files:read` | An agent needs a short-lived download URL for a ready file, including an original file identified by document search |
 | **Capability MCP servers** | Workspace admin (capabilities settings) | Workspace-wide; on for every session while enabled | Workspace-owned OAuth or admin-supplied headers, authenticated-encrypted at rest; ordinary projections are metadata-only. Dedicated permissioned plaintext reads are an approved release-held follow-up | A third-party tool (e.g. Slack's hosted MCP) should be available to *all* sessions and schedules in a workspace |
@@ -27,7 +27,7 @@ the setting is off.
 
 `CreateSessionRequest.firstPartyMcpTools` is an exact allowlist over the exported
 `FIRST_PARTY_MCP_TOOL_NAMES` catalog. Omission selects the safe default catalog,
-which excludes connector-wide `social_*`, `slack_bot_*`, and `fiken_*` tools; those require
+which excludes connector-wide `social_*`, `slack_bot_*`, `fiken_*`, and `atlassian_*` tools; those require
 explicit selection plus their normal connection permission. Explicit `[]` means
 no tools from the broad server. Unknown names fail validation. This field does
 not grant authority: every catalog entry also has an explicit registration-time
@@ -37,7 +37,7 @@ Child omission inherits the parent's exact effective selection.
 GitHub App installation credentials are deliberately absent from this catalog.
 Repository discovery and browser connect status remain model-visible, but token
 minting and credential-file renewal stay host-side in the worker/runtime. No
-first-party MCP, Toolspace, API, SDK, event, or audit projection returns a live
+first-party MCP, Codemode, API, SDK, event, or audit projection returns a live
 installation token to the model or sandbox command surface.
 
 File and document resources are independent from this broad-server selection.
@@ -75,9 +75,11 @@ Apps request rechecks the exact designation, connection status, owner membership
 and owner permission immediately before resolving/sending credentials. Reconnect
 never changes a credential's owner; disconnect clears the designation and audit
 event atomically. Visibility still obeys the session tool policy independently.
-Codex Apps is not proxied into Toolspace: its per-request designated-owner check
-and connector-wire protocol compatibility layer remain on the direct model MCP path, so sandbox code
-cannot accidentally receive a static or weaker version of the same authority.
+Codex Apps tools admitted to an attempt are projected into Codemode from the
+same frozen catalog. Codemode does not proxy or reconstruct them: execution
+returns to the same prepared MCP instance, so the per-request designated-owner
+check and connector-wire compatibility layer remain authoritative and no static
+or weaker credential copy reaches sandbox code.
 
 ### Codex Apps designation parity verdict
 
@@ -112,9 +114,9 @@ Rules of thumb:
   your integration point for host tools; the first-party MCP is your agents'
   steering wheel.
 - Giving **every** session in a workspace a tool? Capability MCP.
-- Do not proxy one MCP surface through another, except the Toolspace path above:
-  it is a deliberate server-side proxy through the first-party gate for a
-  session-bound `toolspace:call` bearer.
+- Do not proxy one MCP surface through another. Codemode is not an exception:
+  it projects the worker's already-prepared attempt catalog and dispatches back
+  into those same executor closures.
 - A broker may refresh credentials after an upstream 401 for future requests,
   but it retries the current request only for the explicit replay-safe JSON-RPC
   allowlist: `initialize`, `notifications/initialized`, and `tools/list`.
@@ -131,5 +133,5 @@ first-party mutation receipts and read/action response classes in
 [mcp-response-contracts.md](mcp-response-contracts.md),
 per-session servers in [session-mcp-servers.md](session-mcp-servers.md),
 workspace capabilities in [capabilities.md](capabilities.md), credential
-handling in [credentials.md](credentials.md), and the full Toolspace design in
-[design/toolspace.md](design/toolspace.md).
+handling in [credentials.md](credentials.md), and the full Codemode design in
+[design/codemode.md](design/codemode.md).

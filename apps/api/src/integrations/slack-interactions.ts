@@ -1,9 +1,14 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import {
+  ApproveSlackUserLinkAccessRequest,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   hasOpenGeniSlackReactionScope,
+  ListSlackUserLinkAccessRequestsResponse,
+  PrepareSlackUserLinkAccessRequest,
   resolveWorkspaceSlackReactionSummonSettings,
   SlackReactionChannelListResponse,
+  SlackUserLinkAccessMutationRequest,
+  SlackUserLinkAccessRequest,
   type AccessGrant,
   type FirstPartyMcpToolName,
   type HumanInputQuestion,
@@ -13,12 +18,15 @@ import {
 } from "@opengeni/contracts";
 import {
   acceptSessionHumanInputResponse,
+  approveSlackUserLinkAccessRequest,
   advanceSlackInteractionDelivery,
   bindSlackInteractionSession,
+  cancelSlackUserLinkAccessRequest,
   claimSlackInteractionDelivery,
   claimSlackInteractionProgressDelivery,
   claimSlackInteractionInbox,
   closeSlackInteractionDelivery,
+  completeSlackUserLinkAccessIfGranted,
   deferSlackInteractionDelivery,
   deleteSlackBotUserLink,
   enqueueSlackInteractionInbox,
@@ -34,14 +42,18 @@ import {
   listSlackInteractionProgressDeliveryEvidence,
   listSessionEventPage,
   listSessionHumanInputRequests,
+  listPendingSlackUserLinkAccessRequests,
   rekeySlackInteractionRoute,
   reopenSlackInteractionDelivery,
   releaseSlackInteractionDelivery,
   releaseSlackInteractionInbox,
+  requestSlackUserLinkWorkspaceAccess,
   resolveSlackInstallationRoute,
-  saveSlackBotUserLink,
   saveSlackInteractionInboxReactionCheckpoint,
   settleSlackInteractionInbox,
+  denySlackUserLinkAccessRequest,
+  prepareSlackUserLinkAccessRequest,
+  SlackUserLinkAccessPersistenceError,
   type SlackInstallationRoute,
   type SlackInteraction,
   type SlackInteractionInboxEntry,
@@ -52,6 +64,7 @@ import {
   controlHumanSessionWorkstream,
   createSessionForRequest,
   hasPermission,
+  requireAccessContext,
   requireAccessGrant,
   type ApiRouteDeps,
 } from "@opengeni/core";
@@ -397,14 +410,218 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
     return c.json({ ok: true });
   });
 
+  app.post("/v1/workspaces/:workspaceId/integrations/slack/user-link-intents", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const context = await requireManagedSlackLinkHuman(c, deps);
+    const payload = PrepareSlackUserLinkAccessRequest.parse(await c.req.json());
+    const signingSecret = deps.settings.slackSigningSecret;
+    const link = signingSecret ? verifySlackUserLinkToken(signingSecret, payload.linkToken) : null;
+    if (!link || link.workspaceId !== workspaceId) {
+      throw freshSlackLinkRequired();
+    }
+    const route = await resolveSlackInstallationRoute(deps.db, link.slackTeamId);
+    if (
+      !route ||
+      route.workspaceId !== workspaceId ||
+      route.connectionId !== link.connectionId ||
+      route.accountId.length === 0
+    ) {
+      throw freshSlackLinkRequired();
+    }
+    const workspace = await getWorkspace(deps.db, workspaceId);
+    if (!workspace || workspace.accountId !== route.accountId) {
+      throw freshSlackLinkRequired();
+    }
+    try {
+      const prepared = await prepareSlackUserLinkAccessRequest(deps.db, {
+        accountId: route.accountId,
+        workspaceId,
+        tokenDigest: createHash("sha256").update(payload.linkToken).digest("hex"),
+        connectionId: link.connectionId,
+        slackTeamId: link.slackTeamId,
+        slackUserId: link.slackUserId,
+        subjectId: context.subjectId,
+        subjectLabel: boundedString(context.subjectLabel, 512),
+        expiresAt: new Date(link.expiresAt),
+      });
+      const completed = await completeSlackUserLinkAccessIfGranted(deps.db, {
+        workspaceId,
+        requestId: prepared.id,
+        subjectId: context.subjectId,
+      });
+      if (!completed) throw freshSlackLinkRequired();
+      return c.json(
+        SlackUserLinkAccessRequest.parse({
+          ...completed,
+          workspaceDisplayName: workspace.name,
+        }),
+        201,
+      );
+    } catch (error) {
+      throw slackLinkAccessHttpError(error);
+    }
+  });
+
+  app.get(
+    "/v1/workspaces/:workspaceId/integrations/slack/user-link-intents/:requestId",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const context = await requireManagedSlackLinkHuman(c, deps);
+      const requestId = c.req.param("requestId");
+      try {
+        const current = await completeSlackUserLinkAccessIfGranted(deps.db, {
+          workspaceId,
+          requestId,
+          subjectId: context.subjectId,
+        });
+        if (!current) throw freshSlackLinkRequired();
+        const workspace = await getWorkspace(deps.db, workspaceId);
+        return c.json(
+          SlackUserLinkAccessRequest.parse({
+            ...current,
+            workspaceDisplayName: workspace?.name ?? null,
+          }),
+        );
+      } catch (error) {
+        throw slackLinkAccessHttpError(error);
+      }
+    },
+  );
+
+  app.post(
+    "/v1/workspaces/:workspaceId/integrations/slack/user-link-intents/:requestId/request-access",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const context = await requireManagedSlackLinkHuman(c, deps);
+      const payload = SlackUserLinkAccessMutationRequest.parse(await c.req.json());
+      try {
+        const request = await requestSlackUserLinkWorkspaceAccess(deps.db, {
+          workspaceId,
+          requestId: c.req.param("requestId"),
+          actorSubjectId: context.subjectId,
+          ...payload,
+        });
+        const workspace = await getWorkspace(deps.db, workspaceId);
+        return c.json(
+          SlackUserLinkAccessRequest.parse({
+            ...request,
+            workspaceDisplayName: workspace?.name ?? null,
+          }),
+        );
+      } catch (error) {
+        throw slackLinkAccessHttpError(error);
+      }
+    },
+  );
+
+  app.post(
+    "/v1/workspaces/:workspaceId/integrations/slack/user-link-intents/:requestId/cancel",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const context = await requireManagedSlackLinkHuman(c, deps);
+      const payload = SlackUserLinkAccessMutationRequest.parse(await c.req.json());
+      try {
+        const request = await cancelSlackUserLinkAccessRequest(deps.db, {
+          workspaceId,
+          requestId: c.req.param("requestId"),
+          actorSubjectId: context.subjectId,
+          ...payload,
+        });
+        const workspace = await getWorkspace(deps.db, workspaceId);
+        return c.json(
+          SlackUserLinkAccessRequest.parse({
+            ...request,
+            workspaceDisplayName: workspace?.name ?? null,
+          }),
+        );
+      } catch (error) {
+        throw slackLinkAccessHttpError(error);
+      }
+    },
+  );
+
+  app.get("/v1/workspaces/:workspaceId/members/access-requests/slack", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "members:manage");
+    const workspace = await getWorkspace(deps.db, workspaceId);
+    const requests = await listPendingSlackUserLinkAccessRequests(deps.db, workspaceId);
+    return c.json(
+      ListSlackUserLinkAccessRequestsResponse.parse({
+        requests: requests.map((request) => ({
+          ...request,
+          workspaceDisplayName: workspace?.name ?? null,
+        })),
+      }),
+    );
+  });
+
+  app.post(
+    "/v1/workspaces/:workspaceId/members/access-requests/slack/:requestId/approve",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "members:manage");
+      const payload = ApproveSlackUserLinkAccessRequest.parse(await c.req.json());
+      try {
+        const request = await approveSlackUserLinkAccessRequest(deps.db, {
+          workspaceId,
+          requestId: c.req.param("requestId"),
+          actorSubjectId: grant.subjectId,
+          expectedVersion: payload.expectedVersion,
+          idempotencyKey: payload.idempotencyKey,
+          permissions: payload.permissions,
+          ...(payload.role !== undefined ? { role: payload.role } : {}),
+        });
+        const workspace = await getWorkspace(deps.db, workspaceId);
+        return c.json(
+          SlackUserLinkAccessRequest.parse({
+            ...request,
+            workspaceDisplayName: workspace?.name ?? null,
+          }),
+        );
+      } catch (error) {
+        throw slackLinkAccessHttpError(error);
+      }
+    },
+  );
+
+  app.post(
+    "/v1/workspaces/:workspaceId/members/access-requests/slack/:requestId/deny",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "members:manage");
+      const payload = SlackUserLinkAccessMutationRequest.parse(await c.req.json());
+      try {
+        const request = await denySlackUserLinkAccessRequest(deps.db, {
+          workspaceId,
+          requestId: c.req.param("requestId"),
+          actorSubjectId: grant.subjectId,
+          ...payload,
+        });
+        const workspace = await getWorkspace(deps.db, workspaceId);
+        return c.json(
+          SlackUserLinkAccessRequest.parse({
+            ...request,
+            workspaceDisplayName: workspace?.name ?? null,
+          }),
+        );
+      } catch (error) {
+        throw slackLinkAccessHttpError(error);
+      }
+    },
+  );
+
   app.post("/v1/workspaces/:workspaceId/integrations/slack/user-links", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:create");
     const body = record(await c.req.json().catch(() => null));
     const linkToken = boundedString(body?.linkToken, 2_048);
     const signingSecret = deps.settings.slackSigningSecret;
-    const link =
-      linkToken && signingSecret ? verifySlackUserLinkToken(signingSecret, linkToken) : null;
+    if (!linkToken || !signingSecret) {
+      throw new HTTPException(400, {
+        message: "invalid or expired Slack identity link",
+      });
+    }
+    const link = verifySlackUserLinkToken(signingSecret, linkToken);
     if (!link || link.workspaceId !== workspaceId) {
       throw new HTTPException(400, {
         message: "invalid or expired Slack identity link",
@@ -416,18 +633,35 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
         message: "Slack installation not found",
       });
     }
-    return c.json(
-      await saveSlackBotUserLink(deps.db, {
+    try {
+      const prepared = await prepareSlackUserLinkAccessRequest(deps.db, {
         accountId: grant.accountId,
         workspaceId,
+        tokenDigest: createHash("sha256").update(linkToken).digest("hex"),
         connectionId: link.connectionId,
         slackTeamId: link.slackTeamId,
         slackUserId: link.slackUserId,
         subjectId: grant.subjectId,
-        linkedBySubjectId: grant.subjectId,
-      }),
-      201,
-    );
+        subjectLabel: boundedString(grant.subjectLabel, 512),
+        expiresAt: new Date(link.expiresAt),
+      });
+      const completed = await completeSlackUserLinkAccessIfGranted(deps.db, {
+        workspaceId,
+        requestId: prepared.id,
+        subjectId: grant.subjectId,
+      });
+      if (completed?.status !== "completed") throw freshSlackLinkRequired();
+      const saved = await getSlackBotUserLink(
+        deps.db,
+        workspaceId,
+        link.connectionId,
+        link.slackUserId,
+      );
+      if (!saved || saved.subjectId !== grant.subjectId) throw freshSlackLinkRequired();
+      return c.json(saved, 201);
+    } catch (error) {
+      throw slackLinkAccessHttpError(error);
+    }
   });
 
   app.delete(
@@ -1621,8 +1855,45 @@ function linkUrl(deps: ApiRouteDeps, entry: SlackInteractionInboxEntry) {
   const signingSecret = deps.settings.slackSigningSecret;
   if (!base || !signingSecret) return "OpenGeni Settings → Integrations → Slack";
   const url = new URL(`/workspaces/${entry.workspaceId}/capabilities`, base);
-  url.searchParams.set("slack_link", createSlackUserLinkToken(signingSecret, entry));
+  // Fragments stay out of HTTP request lines, reverse-proxy logs, Referer
+  // headers, and managed-auth callback URLs. Query-form bearers are rejected.
+  url.hash = new URLSearchParams({
+    slack_link: createSlackUserLinkToken(signingSecret, entry),
+  }).toString();
   return url.toString();
+}
+
+async function requireManagedSlackLinkHuman(c: Context, deps: ApiRouteDeps) {
+  if (c.req.header("authorization")) {
+    throw new HTTPException(401, { message: "managed browser sign-in required" });
+  }
+  const context = await requireAccessContext(c, deps);
+  if (context.mode !== "managed" || !context.subjectId.startsWith("user:")) {
+    throw new HTTPException(403, { message: "managed browser sign-in required" });
+  }
+  return context;
+}
+
+function freshSlackLinkRequired() {
+  return new HTTPException(400, {
+    message: "This Slack link is invalid or expired. Request a fresh link from Slack.",
+  });
+}
+
+function slackLinkAccessHttpError(error: unknown): HTTPException {
+  if (error instanceof HTTPException) return error;
+  if (!(error instanceof SlackUserLinkAccessPersistenceError)) throw error;
+  if (error.code === "version_conflict" || error.code === "idempotency_conflict") {
+    return new HTTPException(409, {
+      message: "The Slack access request changed. Refresh and try again.",
+    });
+  }
+  if (error.code === "state_conflict") {
+    return new HTTPException(409, {
+      message: "This Slack link is no longer pending. Request a fresh link from Slack.",
+    });
+  }
+  return freshSlackLinkRequired();
 }
 
 type SlackUserLinkToken = {

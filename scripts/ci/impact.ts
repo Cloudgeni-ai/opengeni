@@ -220,7 +220,7 @@ const ARTIFACT_RUNTIME_WORKSPACES = [
 const ARTIFACT_RUNTIME_SCRIPT_PATTERN = /^scripts\/[^/]*artifact[^/]*\.ts$/;
 const ARTIFACT_RUNTIME_SCRIPT_TEST_PATTERN = /^scripts\/[^/]*artifact[^/]*\.test\.ts$/;
 const ARTIFACT_SKILL_PATTERN =
-  /^\.agents\/skills\/opengeni-(?:documents|presentations|spreadsheets)\//;
+  /^\.agents\/skills\/opengeni-(?:documents|presentations|spreadsheets|video-generation)\//;
 
 type RootPathImpact = Readonly<{
   packages: readonly string[];

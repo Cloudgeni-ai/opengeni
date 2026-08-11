@@ -18,6 +18,8 @@ export type ComposerSendExtras = Omit<SendMessageInput, "text" | "clientEventId"
 
 export type UseComposerOptions = EmbeddedSessionClientOverride &
   SessionEventFeedOptions & {
+    /** Called synchronously after an ordinary Send is accepted by the local UI. */
+    onSubmitted?: ((text: string, input: SendMessageInput) => void) | undefined;
     /** Called with the exact accepted wire input after a successful send. */
     onSent?: ((text: string, input: SendMessageInput) => void) | undefined;
     /**
@@ -64,13 +66,39 @@ type StoredPendingComposerOperation = Omit<PendingComposerOperation, "input" | "
   hasMcpCredentialUpdates: boolean;
 };
 
+export type ComposerOptimisticMessage = {
+  clientEventId: string;
+  text: string;
+  annotations: DraftTimelineAnnotation[];
+  resources: ResourceRef[];
+  occurredAt: string;
+  state: "sending" | "queued" | "failed";
+  error?: string | undefined;
+  outcomeUnknown?: boolean | undefined;
+};
+
+type OptimisticSendOperation = ComposerOptimisticMessage & {
+  input: SendMessageInput;
+  draftPayload: SaveComposerDraftRequest | null;
+  /** Latest unsent local draft that must survive this operation and remounts. */
+  newerShadow: ComposerDraftShadow;
+  canRetry: boolean;
+};
+
+type StoredOptimisticSendOperation = Omit<OptimisticSendOperation, "input" | "canRetry"> & {
+  input: Omit<SendMessageInput, "mcpCredentialUpdates">;
+  hasMcpCredentialUpdates: boolean;
+};
+
 const PENDING_COMPOSER_STORAGE_PREFIX = "opengeni.pending-composer.v1:";
+const OPTIMISTIC_SEND_STORAGE_PREFIX = "opengeni.optimistic-sends.v1:";
 
 // A remount must not manufacture a new operation while the previous mutation
 // is still outcome-unknown. Keep only non-credential request fields here; the
 // mounted hook retains the exact input, including any credential updates. The
 // safe shadow is also session-scoped so a refresh cannot lose newer edits.
 const pendingComposerOperations = new Map<string, StoredPendingComposerOperation>();
+const optimisticSendOperations = new Map<string, StoredOptimisticSendOperation[]>();
 
 function pendingComposerOperationKey(
   workspaceId: string,
@@ -89,6 +117,78 @@ function pendingComposerStorage(): Storage | null {
 
 function pendingComposerStorageKey(key: string): string {
   return `${PENDING_COMPOSER_STORAGE_PREFIX}${encodeURIComponent(key)}`;
+}
+
+function optimisticSendStorageKey(key: string): string {
+  return `${OPTIMISTIC_SEND_STORAGE_PREFIX}${encodeURIComponent(key)}`;
+}
+
+function restoreOptimisticSendOperations(key: string | null): OptimisticSendOperation[] {
+  if (!key) return [];
+  let stored = optimisticSendOperations.get(key);
+  if (!stored) {
+    const storage = pendingComposerStorage();
+    try {
+      const parsed: unknown = JSON.parse(storage?.getItem(optimisticSendStorageKey(key)) ?? "[]");
+      stored = Array.isArray(parsed)
+        ? (parsed.filter(
+            (candidate): candidate is StoredOptimisticSendOperation =>
+              typeof candidate === "object" &&
+              candidate !== null &&
+              typeof candidate.clientEventId === "string" &&
+              typeof candidate.text === "string" &&
+              typeof candidate.occurredAt === "string" &&
+              (candidate.state === "sending" || candidate.state === "failed") &&
+              typeof candidate.input === "object" &&
+              candidate.input !== null &&
+              typeof candidate.input.text === "string" &&
+              typeof candidate.hasMcpCredentialUpdates === "boolean",
+          ) as StoredOptimisticSendOperation[])
+        : [];
+    } catch {
+      stored = [];
+    }
+  }
+  return stored.map(({ hasMcpCredentialUpdates, ...operation }) => ({
+    ...operation,
+    newerShadow: operation.newerShadow ?? { text: "", resources: [], annotations: [] },
+    state:
+      operation.state === "sending" || operation.state === "queued" ? "sending" : operation.state,
+    outcomeUnknown:
+      operation.state === "sending" || operation.state === "queued"
+        ? true
+        : operation.outcomeUnknown,
+    error:
+      operation.state === "sending"
+        ? "Delivery was interrupted; retry to reconcile this message."
+        : operation.error,
+    input: operation.input,
+    canRetry: !hasMcpCredentialUpdates,
+  }));
+}
+
+function rememberOptimisticSendOperations(
+  key: string | null,
+  operations: OptimisticSendOperation[],
+): void {
+  if (!key) return;
+  const stored = operations
+    .filter((operation) => operation.state !== "queued")
+    .map((operation) => {
+      const { canRetry: _canRetry, input, ...rest } = operation;
+      const { mcpCredentialUpdates: _credentials, ...safeInput } = input;
+      return {
+        ...rest,
+        input: safeInput,
+        hasMcpCredentialUpdates: input.mcpCredentialUpdates !== undefined,
+      } satisfies StoredOptimisticSendOperation;
+    });
+  optimisticSendOperations.set(key, stored);
+  try {
+    pendingComposerStorage()?.setItem(optimisticSendStorageKey(key), JSON.stringify(stored));
+  } catch {
+    // Best effort; the in-memory queue still owns this mount.
+  }
 }
 
 function resourceList(value: unknown): value is ResourceRef[] {
@@ -294,6 +394,10 @@ export type ComposerState = {
   hasDraftContent: () => boolean;
   /** Append the draft behind prompts already visible in the queue. */
   send: (text?: string) => Promise<boolean>;
+  /** Locally acknowledged ordinary sends awaiting durable timeline reconciliation. */
+  optimisticMessages?: ComposerOptimisticMessage[] | undefined;
+  retryOptimisticMessage?: ((clientEventId: string) => void) | undefined;
+  removeOptimisticMessage?: ((clientEventId: string) => void) | undefined;
   /** Supersede current direction with the draft. */
   steer: (text?: string) => Promise<boolean>;
   /** Optimistic-to-durable projection for a Steer that has not started yet. */
@@ -400,7 +504,9 @@ export function useComposer(
   const targetKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${durableDrafts ? "durable" : "disabled"}`;
   const pendingOperationKey = pendingComposerOperationKey(workspaceId, sessionId);
   const initialPendingOperation = restorePendingComposerOperation(pendingOperationKey);
-  const initialShadow = initialPendingOperation?.newerShadow;
+  const initialOptimisticSends = restoreOptimisticSendOperations(pendingOperationKey);
+  const initialShadow =
+    initialPendingOperation?.newerShadow ?? initialOptimisticSends.at(-1)?.newerShadow;
   const [value, setValue] = useState(() => initialShadow?.text ?? "");
   const [annotations, setAnnotations] = useState<DraftTimelineAnnotation[]>(
     () => initialShadow?.annotations ?? [],
@@ -410,6 +516,8 @@ export function useComposer(
   // a parent may switch sessionId without remounting this public hook.
   const [stateTargetKey, setStateTargetKey] = useState(targetKey);
   const [sending, setSending] = useState(false);
+  const [optimisticSends, setOptimisticSends] =
+    useState<OptimisticSendOperation[]>(initialOptimisticSends);
   const [steering, setSteering] = useState<ComposerSteeringState | null>(() =>
     initialPendingOperation?.delivery === "steer"
       ? {
@@ -433,6 +541,9 @@ export function useComposer(
     () => initialShadow?.resources ?? [],
   );
   const pendingOperationRef = useRef<PendingComposerOperation | null>(initialPendingOperation);
+  const optimisticSendsRef = useRef<OptimisticSendOperation[]>(initialOptimisticSends);
+  const optimisticProcessorBusyRef = useRef(false);
+  const optimisticCallbackIdsRef = useRef(new Set<string>());
   const steeringSettlementEventsRef = useRef<SessionEvent[]>([]);
   const steeringRef = useRef(steering);
   const pendingClientEventId = useRef<string | null>(
@@ -448,6 +559,7 @@ export function useComposer(
   const lastSavedSignature = useRef<string | null>(null);
   const saveChain = useRef<Promise<void>>(Promise.resolve());
   const onSent = options.onSent;
+  const onSubmitted = options.onSubmitted;
   const onDraftApplied = options.onDraftApplied;
   // Read through a ref so live session/policy projections can replace their
   // apply callback without invalidating the draft loader and re-running its
@@ -477,9 +589,14 @@ export function useComposer(
     targetGeneration.current += 1;
     draftReadGeneration.current += 1;
     pendingOperationRef.current = restorePendingComposerOperation(pendingOperationKey);
+    const restoredOptimisticSends = restoreOptimisticSendOperations(pendingOperationKey);
+    optimisticSendsRef.current = restoredOptimisticSends;
+    optimisticProcessorBusyRef.current = false;
+    optimisticCallbackIdsRef.current = new Set();
     steeringSettlementEventsRef.current = [];
     pendingClientEventId.current = pendingOperationRef.current?.input.clientEventId ?? null;
-    const shadow = pendingOperationRef.current?.newerShadow;
+    const shadow =
+      pendingOperationRef.current?.newerShadow ?? restoredOptimisticSends.at(-1)?.newerShadow;
     localEditRevision.current = shadow ? 1 : 0;
     valueRef.current = shadow?.text ?? "";
     annotationsRef.current = shadow?.annotations ?? [];
@@ -494,6 +611,7 @@ export function useComposer(
     setAnnotations(shadow?.annotations ?? []);
     setAnnotationReviewTargetId(null);
     setSending(false);
+    setOptimisticSends(restoredOptimisticSends);
     setSteering(
       pendingOperationRef.current?.delivery === "steer"
         ? {
@@ -515,6 +633,24 @@ export function useComposer(
     setDraftConflict(null);
     setRestoredResources(shadow?.resources ?? []);
   }, [durableDrafts, pendingOperationKey, sessionId, targetKey]);
+
+  const setOptimisticDraftShadow = useCallback(
+    (shadow: ComposerDraftShadow): void => {
+      if (optimisticSendsRef.current.length === 0) return;
+      const next = optimisticSendsRef.current.map((operation) => ({
+        ...operation,
+        newerShadow: {
+          text: shadow.text,
+          resources: [...shadow.resources],
+          annotations: cloneAnnotations(shadow.annotations),
+        },
+      }));
+      optimisticSendsRef.current = next;
+      rememberOptimisticSendOperations(pendingOperationKey, next);
+      setOptimisticSends(next);
+    },
+    [pendingOperationKey],
+  );
 
   const applyDraft = useCallback(
     (next: ComposerDraft): void => {
@@ -542,6 +678,14 @@ export function useComposer(
             annotations: next.annotations ?? [],
           },
         );
+        setOptimisticDraftShadow({
+          text: next.text,
+          resources: mergeResources(
+            next.resources,
+            resolveSendExtras(sendExtrasRef.current).resources ?? [],
+          ),
+          annotations: next.annotations ?? [],
+        });
         setDraftConflict(null);
         return;
       }
@@ -567,10 +711,18 @@ export function useComposer(
           annotations: next.annotations ?? [],
         },
       );
+      setOptimisticDraftShadow({
+        text: next.text,
+        resources: mergeResources(
+          next.resources,
+          resolveSendExtras(sendExtrasRef.current).resources ?? [],
+        ),
+        annotations: next.annotations ?? [],
+      });
       setDraftConflict(null);
       onDraftAppliedRef.current?.(next);
     },
-    [durableDrafts, pendingOperationKey, targetKey],
+    [durableDrafts, pendingOperationKey, setOptimisticDraftShadow, targetKey],
   );
 
   const loadDraft = useCallback(
@@ -621,7 +773,9 @@ export function useComposer(
           draftRef.current = fetched;
           setDraft(fetched);
           setDraftConflict(null);
-          const shadow = pendingOperationRef.current?.newerShadow;
+          const shadow =
+            pendingOperationRef.current?.newerShadow ??
+            optimisticSendsRef.current.at(-1)?.newerShadow;
           if (shadow) {
             // The server can only know the original operation. Never replace
             // newer local edits while that operation is still uncertain.
@@ -877,6 +1031,177 @@ export function useComposer(
     [client, durableDrafts, sessionId, targetKey, workspaceId],
   );
 
+  const replaceOptimisticSends = useCallback(
+    (
+      update: (current: OptimisticSendOperation[]) => OptimisticSendOperation[],
+    ): OptimisticSendOperation[] => {
+      const next = update(optimisticSendsRef.current);
+      optimisticSendsRef.current = next;
+      rememberOptimisticSendOperations(pendingOperationKey, next);
+      setOptimisticSends(next);
+      return next;
+    },
+    [pendingOperationKey],
+  );
+
+  const markOptimisticAccepted = useCallback(
+    (operation: OptimisticSendOperation): void => {
+      if (!optimisticCallbackIdsRef.current.has(operation.clientEventId)) {
+        optimisticCallbackIdsRef.current.add(operation.clientEventId);
+        onSent?.(operation.input.text, operation.input);
+      }
+      replaceOptimisticSends((current) =>
+        current.filter((candidate) => candidate.clientEventId !== operation.clientEventId),
+      );
+    },
+    [onSent, replaceOptimisticSends],
+  );
+
+  useEffect(() => {
+    const acceptedIds = new Set(
+      (options.events ?? [])
+        .filter((event) => event.type === "user.message" && event.clientEventId)
+        .map((event) => event.clientEventId as string),
+    );
+    if (acceptedIds.size === 0) return;
+    const accepted = optimisticSendsRef.current.filter((operation) =>
+      acceptedIds.has(operation.clientEventId),
+    );
+    for (const operation of accepted) markOptimisticAccepted(operation);
+  }, [markOptimisticAccepted, options.events]);
+
+  const processOptimisticSends = useCallback((): void => {
+    if (!sessionId || optimisticProcessorBusyRef.current) return;
+    const currentOperations = optimisticSendsRef.current;
+    const operationIndex = currentOperations.findIndex(
+      (candidate) => candidate.state === "sending",
+    );
+    const operation = operationIndex < 0 ? undefined : currentOperations[operationIndex];
+    if (!operation) return;
+    const ownedTargetKey = targetKey;
+    const ownedGeneration = targetGeneration.current;
+    optimisticProcessorBusyRef.current = true;
+    void (async () => {
+      try {
+        if (operation.outcomeUnknown) {
+          const events = await client.listEvents(workspaceId, sessionId, {
+            includeTypes: ["user.message"],
+            limit: 100,
+            payloadMode: "none",
+          });
+          if (
+            events.some(
+              (event) =>
+                event.type === "user.message" && event.clientEventId === operation.clientEventId,
+            )
+          ) {
+            markOptimisticAccepted(operation);
+            return;
+          }
+          if (!operation.canRetry) {
+            throw new Error(
+              "OpenGeni cannot safely retry this uncertain request after remount; reconcile the session before sending again.",
+            );
+          }
+        }
+        let expectedDraftRevision: number | undefined;
+        if (durableDrafts && operation.draftPayload) {
+          if (!(await persistPayload(operation.draftPayload))) {
+            throw new Error("The message draft could not be saved before delivery.");
+          }
+          expectedDraftRevision = draftRef.current?.revision;
+        }
+        if (
+          targetKeyRef.current !== ownedTargetKey ||
+          targetGeneration.current !== ownedGeneration
+        ) {
+          return;
+        }
+        const wireInput = {
+          ...operation.input,
+          ...(expectedDraftRevision !== undefined ? { expectedDraftRevision } : {}),
+        };
+        await client.sendMessage(workspaceId, sessionId, wireInput);
+        if (
+          targetKeyRef.current !== ownedTargetKey ||
+          targetGeneration.current !== ownedGeneration
+        ) {
+          return;
+        }
+        if (options.events === undefined) {
+          markOptimisticAccepted({ ...operation, input: wireInput });
+        } else {
+          replaceOptimisticSends((current) =>
+            current.map((candidate) =>
+              candidate.clientEventId === operation.clientEventId
+                ? { ...candidate, input: wireInput, state: "queued", error: undefined }
+                : candidate,
+            ),
+          );
+        }
+        if (!optimisticCallbackIdsRef.current.has(operation.clientEventId)) {
+          optimisticCallbackIdsRef.current.add(operation.clientEventId);
+          onSent?.(wireInput.text, wireInput);
+        }
+        if (durableDrafts && draftRef.current) {
+          const cleared = {
+            ...draftRef.current,
+            revision: 0,
+            text: "",
+            resources: [],
+            annotations: [],
+            sourceTurnId: null,
+            sourceTurnVersion: null,
+            updatedAt: null,
+          };
+          draftRef.current = cleared;
+          setDraft(cleared);
+          lastSavedSignature.current = draftSignature(draftPayload(cleared));
+        }
+      } catch (cause) {
+        const problem = asError(cause);
+        const outcomeUnknown = isOutcomeUnknownError(cause) || operation.outcomeUnknown === true;
+        if (
+          targetKeyRef.current === ownedTargetKey &&
+          targetGeneration.current === ownedGeneration
+        ) {
+          replaceOptimisticSends((current) =>
+            current.map((candidate) =>
+              candidate.clientEventId === operation.clientEventId
+                ? {
+                    ...candidate,
+                    state: "failed",
+                    error: problem.message,
+                    outcomeUnknown,
+                  }
+                : candidate,
+            ),
+          );
+        }
+      } finally {
+        optimisticProcessorBusyRef.current = false;
+        if (targetKeyRef.current === ownedTargetKey) {
+          setOptimisticSends([...optimisticSendsRef.current]);
+        }
+      }
+    })();
+  }, [
+    client,
+    durableDrafts,
+    markOptimisticAccepted,
+    onSent,
+    options.events,
+    persistPayload,
+    replaceOptimisticSends,
+    sessionId,
+    targetKey,
+    workspaceId,
+  ]);
+
+  useEffect(() => {
+    processOptimisticSends();
+  }, [optimisticSends, processOptimisticSends]);
+
   // Private durable autosave. A newer local edit is never replaced by an older
   // response; saves serialize and each reads the latest acknowledged revision.
   useEffect(() => {
@@ -903,6 +1228,27 @@ export function useComposer(
       }
       return;
     }
+    const optimistic = optimisticSendsRef.current.at(-1);
+    if (optimistic) {
+      const shadow = {
+        text: valueRef.current,
+        resources: mergeResources(
+          restoredResourcesRef.current,
+          resolveSendExtras(sendExtrasRef.current).resources ?? [],
+        ),
+        annotations: annotationsRef.current,
+      };
+      if (
+        optimistic.newerShadow.text !== shadow.text ||
+        JSON.stringify(optimistic.newerShadow.resources) !== JSON.stringify(shadow.resources) ||
+        JSON.stringify(optimistic.newerShadow.annotations) !== JSON.stringify(shadow.annotations)
+      ) {
+        setOptimisticDraftShadow(shadow);
+      }
+    }
+    if (optimisticSendsRef.current.some((operation) => operation.state === "sending")) {
+      return;
+    }
     if (
       !durableDrafts ||
       !sessionId ||
@@ -924,6 +1270,7 @@ export function useComposer(
     liveExtrasVersion,
     pendingOperationKey,
     persistPayload,
+    setOptimisticDraftShadow,
     sending,
     sessionId,
   ]);
@@ -1229,8 +1576,139 @@ export function useComposer(
     ],
   );
 
-  const send = useCallback(async (text?: string) => await dispatch("send", text), [dispatch]);
+  const send = useCallback(
+    async (explicit?: string): Promise<boolean> => {
+      if (pendingOperationRef.current?.delivery === "send") {
+        return await dispatch("send", explicit);
+      }
+      const rawText = explicit ?? valueRef.current;
+      const annotationsAtSend = cloneAnnotations(annotationsRef.current);
+      const hasText = rawText.trim().length > 0;
+      const hasAnnotations = annotationsAtSend.length > 0;
+      const annotationsComplete = annotationsAtSend.every(
+        (annotation) => annotation.note.trim().length > 0,
+      );
+      const extras = resolveSendExtras(sendExtrasRef.current);
+      const resources = mergeResources(restoredResourcesRef.current, extras.resources ?? []);
+      if (
+        !sessionId ||
+        sending ||
+        !annotationsComplete ||
+        (!hasText && !hasAnnotations && resources.length === 0) ||
+        sendBlockedRef.current?.() === true ||
+        targetKeyRef.current !== targetKey
+      ) {
+        return false;
+      }
+      const sendText = hasText ? rawText : hasAnnotations ? "" : FILE_ONLY_MESSAGE_TEXT;
+      const clientEventId = generateClientEventId();
+      const input = composeSendInput(sendText, clientEventId, extras, {
+        ...(options.effectiveControl?.controlEtag
+          ? { controlEtag: options.effectiveControl.controlEtag }
+          : {}),
+        resources,
+        annotations: annotationsAtSend,
+      });
+      const currentPayload = currentDraftPayload();
+      const operation: OptimisticSendOperation = {
+        clientEventId,
+        text: sendText,
+        annotations: annotationsAtSend,
+        resources,
+        occurredAt: new Date().toISOString(),
+        state: "sending",
+        input,
+        draftPayload: currentPayload ? { ...currentPayload, text: sendText } : null,
+        newerShadow: {
+          text: explicit === undefined ? "" : valueRef.current,
+          resources: explicit === undefined ? [] : [...restoredResourcesRef.current],
+          annotations: explicit === undefined ? [] : cloneAnnotations(annotationsRef.current),
+        },
+        canRetry: true,
+      };
+      replaceOptimisticSends((current) => [...current, operation]);
+      queueMicrotask(processOptimisticSends);
+      setError(null);
+      onSubmitted?.(sendText, input);
+      if (explicit === undefined) {
+        valueRef.current = "";
+        annotationsRef.current = [];
+        restoredResourcesRef.current = [];
+        localEditRevision.current += 1;
+        setValue("");
+        setAnnotations([]);
+        setAnnotationReviewTargetId(null);
+        setRestoredResources([]);
+      }
+      return true;
+    },
+    [
+      currentDraftPayload,
+      dispatch,
+      onSubmitted,
+      options.effectiveControl?.controlEtag,
+      processOptimisticSends,
+      replaceOptimisticSends,
+      sending,
+      sessionId,
+      targetKey,
+    ],
+  );
   const steer = useCallback(async (text?: string) => await dispatch("steer", text), [dispatch]);
+
+  const retryOptimisticMessage = useCallback(
+    (clientEventId: string): void => {
+      replaceOptimisticSends((current) =>
+        current.map((operation) => {
+          if (operation.clientEventId !== clientEventId || operation.state !== "failed") {
+            return operation;
+          }
+          if (operation.outcomeUnknown) {
+            return { ...operation, state: "sending", error: undefined };
+          }
+          const nextClientEventId = generateClientEventId();
+          const retryExtras = resolveSendExtras(sendExtrasRef.current);
+          const retryInput = composeSendInput(operation.text, nextClientEventId, retryExtras, {
+            ...(options.effectiveControl?.controlEtag
+              ? { controlEtag: options.effectiveControl.controlEtag }
+              : {}),
+            resources: operation.resources,
+            annotations: operation.annotations,
+          });
+          return {
+            ...operation,
+            clientEventId: nextClientEventId,
+            input: retryInput,
+            draftPayload: operation.draftPayload
+              ? {
+                  ...operation.draftPayload,
+                  model: retryExtras.model ?? operation.draftPayload.model,
+                  reasoningEffort:
+                    retryExtras.reasoningEffort ?? operation.draftPayload.reasoningEffort,
+                  latencyMode: retryExtras.latencyMode ?? operation.draftPayload.latencyMode,
+                }
+              : null,
+            occurredAt: new Date().toISOString(),
+            state: "sending",
+            error: undefined,
+            outcomeUnknown: false,
+            canRetry: true,
+          };
+        }),
+      );
+      queueMicrotask(processOptimisticSends);
+    },
+    [options.effectiveControl?.controlEtag, processOptimisticSends, replaceOptimisticSends],
+  );
+
+  const removeOptimisticMessage = useCallback(
+    (clientEventId: string): void => {
+      replaceOptimisticSends((current) =>
+        current.filter((operation) => operation.clientEventId !== clientEventId),
+      );
+    },
+    [replaceOptimisticSends],
+  );
 
   // A send is possible with non-empty text OR with ≥1 attached resource (a
   // file-only message). Resources ride in `sendExtras`, so we resolve them here
@@ -1402,9 +1880,17 @@ export function useComposer(
           annotations: annotationsRef.current,
         },
       );
+      setOptimisticDraftShadow({
+        text: next,
+        resources: mergeResources(
+          restoredResourcesRef.current,
+          resolveSendExtras(sendExtrasRef.current).resources ?? [],
+        ),
+        annotations: annotationsRef.current,
+      });
       setValue(next);
     },
-    [pendingOperationKey, targetKey],
+    [pendingOperationKey, setOptimisticDraftShadow, targetKey],
   );
 
   const updateAnnotations = useCallback(
@@ -1424,10 +1910,18 @@ export function useComposer(
           annotations: next,
         },
       );
+      setOptimisticDraftShadow({
+        text: valueRef.current,
+        resources: mergeResources(
+          restoredResourcesRef.current,
+          resolveSendExtras(sendExtrasRef.current).resources ?? [],
+        ),
+        annotations: next,
+      });
       setAnnotations(next);
       setAnnotationReviewTargetId(reviewTargetId);
     },
-    [pendingOperationKey, targetKey],
+    [pendingOperationKey, setOptimisticDraftShadow, targetKey],
   );
 
   const addAnnotation = useCallback(
@@ -1479,9 +1973,14 @@ export function useComposer(
           annotations: annotationsRef.current,
         },
       );
+      setOptimisticDraftShadow({
+        text: valueRef.current,
+        resources: mergeResources(next, resolveSendExtras(sendExtrasRef.current).resources ?? []),
+        annotations: annotationsRef.current,
+      });
       setRestoredResources(next);
     },
-    [pendingOperationKey, targetKey],
+    [pendingOperationKey, setOptimisticDraftShadow, targetKey],
   );
 
   const hasDraftContent = useCallback((): boolean => {
@@ -1549,6 +2048,13 @@ export function useComposer(
     clearAnnotationReviewTarget,
     hasDraftContent,
     send,
+    optimisticMessages: identityMatches
+      ? optimisticSends.map(
+          ({ input: _input, draftPayload: _payload, canRetry: _retry, ...item }) => item,
+        )
+      : [],
+    retryOptimisticMessage,
+    removeOptimisticMessage,
     steer,
     steering: visibleSteering,
     stoppingAttempt: identityMatches
@@ -1596,12 +2102,12 @@ export function isComposerDraftEvent(event: Pick<SessionEvent, "type">): boolean
 }
 
 /**
- * Default text for a file-only message (attachment(s) present, no typed draft).
- * Kept non-empty so the wire contract (`text: z.string().min(1)`) and the
- * worker's non-whitespace guard accept it; the attached files still ride in
- * `resources`. Exported for tests.
+ * Default text for a resource-only message (attachments present, no typed
+ * draft). Kept non-empty so the wire contract (`text: z.string().min(1)`) and
+ * the worker's non-whitespace guard accept it. The export name is retained for
+ * compatibility now that repositories can ride beside files in `resources`.
  */
-export const FILE_ONLY_MESSAGE_TEXT = "(see attached files)";
+export const FILE_ONLY_MESSAGE_TEXT = "(see attached context)";
 
 /** Resolve possibly-deferred extras to a concrete bag (function evaluated now). */
 export function resolveSendExtras(

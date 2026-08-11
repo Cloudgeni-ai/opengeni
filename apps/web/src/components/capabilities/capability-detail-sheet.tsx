@@ -26,6 +26,7 @@ import {
   capabilityConnectPlan,
   capabilityKindLabel,
   capabilityReconnectPlan,
+  capabilityRequiresPersonalConnection,
   capabilitySourceLabel,
   curatedSkillProvenance,
   preferredSocialConnection,
@@ -44,7 +45,11 @@ export type ConnectAction =
       provider: "x" | "reddit";
       ownership: ConnectionOwnership;
     }
-  | { type: "disconnect_social"; item: CapabilityCatalogItem; connectionId: string }
+  | {
+      type: "disconnect_social";
+      item: CapabilityCatalogItem;
+      connectionId: string;
+    }
   // connectionId is the existing Fiken row to rewrite in place (reconnect /
   // replace token), or null for a first connect.
   | {
@@ -57,7 +62,11 @@ export type ConnectAction =
   // OAuth against the registered Fiken app; connectionId re-authorizes an
   // existing row in place.
   | { type: "fiken_oauth"; item: CapabilityCatalogItem; connectionId: string | null }
-  | { type: "oauth"; item: CapabilityCatalogItem; ownership: ConnectionOwnership }
+  | {
+      type: "oauth";
+      item: CapabilityCatalogItem;
+      ownership: ConnectionOwnership;
+    }
   | {
       type: "api_key";
       item: CapabilityCatalogItem;
@@ -181,7 +190,7 @@ export function CapabilityDetailSheet({
   );
 }
 
-function DetailBody({
+export function DetailBody({
   item,
   health,
   logoSrc,
@@ -201,13 +210,17 @@ function DetailBody({
   onAction: (action: ConnectAction) => void;
 }) {
   const plan = useMemo(() => capabilityConnectPlan(item), [item]);
+  const personalOnly = capabilityRequiresPersonalConnection(item);
   // API-key reconnect reveals the credential form in place of the button.
   const [reconnecting, setReconnecting] = useState(false);
   useEffect(() => setReconnecting(false), [item.id]);
   const [connectionOwnership, setConnectionOwnership] = useState<ConnectionOwnership>(
-    DEFAULT_CONNECTION_OWNERSHIP,
+    personalOnly ? "personal" : DEFAULT_CONNECTION_OWNERSHIP,
   );
-  useEffect(() => setConnectionOwnership(DEFAULT_CONNECTION_OWNERSHIP), [item.id]);
+  useEffect(
+    () => setConnectionOwnership(personalOnly ? "personal" : DEFAULT_CONNECTION_OWNERSHIP),
+    [item.id, personalOnly],
+  );
 
   const canDisable = item.enabled && item.source !== "built_in" && item.source !== "configured";
   const keyPageUrl = item.installUrl ?? item.homepageUrl;
@@ -386,7 +399,11 @@ function DetailBody({
             </div>
           ) : plan.mode === "api_key" ? (
             <div className="space-y-3">
-              <OwnershipSelector value={connectionOwnership} onChange={setConnectionOwnership} />
+              {personalOnly ? (
+                <PersonalOnlyConnectionNotice />
+              ) : (
+                <OwnershipSelector value={connectionOwnership} onChange={setConnectionOwnership} />
+              )}
               <CredentialForm
                 fields={plan.fields}
                 itemName={item.name}
@@ -410,12 +427,22 @@ function DetailBody({
             </div>
           ) : plan.mode === "oauth" ? (
             <div className="space-y-3">
-              <OwnershipSelector value={connectionOwnership} onChange={setConnectionOwnership} />
+              {personalOnly ? (
+                <PersonalOnlyConnectionNotice />
+              ) : (
+                <OwnershipSelector value={connectionOwnership} onChange={setConnectionOwnership} />
+              )}
               <Button
                 type="button"
                 className="w-full"
                 disabled={busy}
-                onClick={() => onAction({ type: "oauth", item, ownership: connectionOwnership })}
+                onClick={() =>
+                  onAction({
+                    type: "oauth",
+                    item,
+                    ownership: connectionOwnership,
+                  })
+                }
               >
                 {busy ? <Loader2Icon className="animate-spin" /> : <PlugIcon />}
                 {connectionOwnership === "workspace"
@@ -447,6 +474,16 @@ function DetailBody({
         </div>
       </div>
     </div>
+  );
+}
+
+function PersonalOnlyConnectionNotice() {
+  return (
+    <Notice tone="info">
+      <span className="font-medium">Personal connection.</span> Other workspace members cannot
+      discover or use this account. Each member connects their own. Gmail content added to a session
+      follows that session's visibility.
+    </Notice>
   );
 }
 
@@ -512,7 +549,13 @@ export function SocialConnectorControls({
           variant="outline"
           className="w-full"
           disabled={busy || !canConnect}
-          onClick={() => onAction({ type: "disconnect_social", item, connectionId: connection.id })}
+          onClick={() =>
+            onAction({
+              type: "disconnect_social",
+              item,
+              connectionId: connection.id,
+            })
+          }
         >
           <TrashIcon />
           Disconnect
@@ -842,7 +885,10 @@ function CredentialForm({
             autoComplete="off"
             value={headers[field.name] ?? ""}
             onChange={(event) =>
-              setHeaders((current) => ({ ...current, [field.name]: event.target.value }))
+              setHeaders((current) => ({
+                ...current,
+                [field.name]: event.target.value,
+              }))
             }
             placeholder={`Paste your ${field.label}`}
           />

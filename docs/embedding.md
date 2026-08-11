@@ -139,20 +139,20 @@ display label belongs on `serviceInitiator`, not in its context. Identity fields
 and context are bounded; OpenGeni-owned lineage/backfill keys and the
 `unattributed-legacy` migration sentinel are reserved.
 
-Ordinary delegated and first-party/Toolspace credentials remain `ogd_`. The
+Ordinary delegated and first-party/Codemode credentials remain `ogd_`. The
 `ogd2_` prefix is included in its HMAC input so a service-provenance token fails
 closed on an older verifier during rolling deployment and cannot be downgraded
 by changing its prefix.
 
-The normal first-party orchestration MCP and Toolspace use deliberately
-different bearer scopes. The worker re-signs the normal first-party bearer for
-every request with the exact current turn, attempt, and execution generation;
-an agent-created child is accepted only while that attempt still owns the turn,
-and the ownership proof and child-session insert share one database
-transaction. The sandbox Toolspace bearer is renewable and session-bound so
-long-running work does not lose Code Mode after one hour, but Toolspace excludes
-the first-party OpenGeni orchestration server and cannot use that broader
-lifetime to call `session_create` or other first-party tools recursively.
+The normal first-party orchestration MCP and Codemode use distinct bearer
+purposes but the same exact attempt authority. The worker re-signs first-party
+requests with the current turn, attempt, and execution generation; an
+agent-created child is accepted only while that attempt owns the turn, and the
+ownership proof plus child insert share one transaction. The renewable sandbox
+Codemode bearer carries that same attempt fence and can invoke every tool in the
+frozen catalog—including admitted first-party tools—through the same executor.
+It cannot widen the catalog, attach servers, mint authority, or survive a
+successor attempt.
 
 ### Session Authorization
 
@@ -198,7 +198,7 @@ rows and continues scanning to fill the next authorized page.
 Once the port is bound, unknown session-addressed HTTP routes fail closed. The
 same policy is enforced by shared core mutation entrypoints, cross-session
 first-party MCP tools, every session-bound first-party MCP transport request,
-and Toolspace. SSE performs an initial decision and reauthorizes even while
+and Codemode. SSE performs an initial decision and reauthorizes even while
 idle; hosts may request a 1–60 second interval and the default is 15 seconds.
 Denied targets are externally indistinguishable from missing sessions; invalid
 responses or an unavailable host return a retryable unavailable failure. All
@@ -239,8 +239,9 @@ When bound on the worker through `ActivityDependencies.entitlements`, `admitRun`
 ### Connection Credentials
 
 Canonical sources: `ConnectionCredentialsPort` in `packages/contracts/src/index.ts`,
-the worker consumers in `apps/worker/src/activities/`, and the API Toolspace
-consumer in `apps/api/src/mcp/toolspace.ts`.
+the worker consumers in `apps/worker/src/activities/`, and the exact attempt
+catalog/dispatcher in `packages/runtime` and
+`apps/worker/src/activities/codemode-dispatcher.ts`.
 
 The port can bind any combination of its four legs:
 
@@ -433,7 +434,7 @@ example native Windows without a compatible shell/toolset) must return
 `mcpCredentials` is the request-time credential seam for connection-backed MCP
 servers. Bind the same port through `activityDependencies` on the worker service
 and `createApp(deps)`. The worker uses it for ordinary model-visible MCP calls;
-the API router uses it for Toolspace/Code Mode. When the leg is absent, both
+the API router uses it for Codemode/Code Mode. When the leg is absent, both
 surfaces use OpenGeni's standalone encrypted connection store and refresh broker.
 When it is present, the host is the sole credential source: OpenGeni does not
 create or require a duplicate provider connection.
@@ -443,7 +444,7 @@ workspace-scoped `rootSessionId`, the exact durable turn and execution
 generation, the immutable `TurnInitiator`, the non-authoritative technical
 caller, the MCP server/tool, the opaque `connectionRef`, and whether a 401
 forced a refresh. The same lineage is resolved for ordinary model tools and
-Toolspace, so a host can authorize a child through one durable root binding
+Codemode, so a host can authorize a child through one durable root binding
 without mirroring every child row. The frozen initiator—not `sandbox:<runId>`,
 the session creator, or a synthetic worker subject—is the authorization
 principal.
@@ -477,7 +478,7 @@ The port is provider-neutral. A host can resolve its existing GitHub, GitLab,
 Azure DevOps, or other connection from the opaque reference, and can return a
 provider-supported token or a short-lived capability bearer for a compatible
 host-owned adapter. OpenGeni does not imply that one provider's bearer works at
-another provider's hosted MCP endpoint. Normal MCP and Toolspace deliberately
+another provider's hosted MCP endpoint. Normal MCP and Codemode deliberately
 share this resolver, so Code Mode is additive rather than a second connection or
 authorization system.
 
@@ -500,7 +501,7 @@ creation; later deployment-default changes do not rewrite existing sessions.
 Model-visible first-party tool selection is a separate field:
 `CreateSessionRequest.firstPartyMcpTools`. It accepts only names from
 `FIRST_PARTY_MCP_TOOL_NAMES`; omission uses the safe default catalog and excludes
-connector-wide `social_*`, `slack_bot_*`, and `fiken_*` tools, while explicit `[]` remains
+connector-wide `social_*`, `slack_bot_*`, `fiken_*`, and `atlassian_*` tools, while explicit `[]` remains
 empty. Connector tools require an explicit selection and their independent
 connection permission. A child omission snapshots its parent's exact effective
 selection. Tool selection never grants a permission, and permissions never
@@ -549,7 +550,7 @@ or replacing MCP servers still requires `mcp_servers:attach`; omission can copy
 the parent's already-authorized servers without granting the child authority to
 invent a new endpoint. Header-based credentials are snapshot values, so later
 rotations on parent and child are independent. A `connectionRef` remains the
-preferred host integration because normal model MCP and Toolspace resolve fresh
+preferred host integration because normal model MCP and Codemode resolve fresh
 transport credentials at request time.
 
 ### Credential-bearing outbound transport
@@ -799,15 +800,14 @@ workspace boundary while avoiding a full browser byte copy. A custom timeline
 may instead call `downloadRetainedArtifact`, which verifies bounded ranges and
 SHA-256. See [`image-generation.md`](image-generation.md).
 
-Editable Office publication is likewise package-owned rather than web-owned.
-`OpenGeniClient.importEditableArtifact` submits a trusted ready source-file id
-and canonical sequence-zero snapshot to the durable import boundary, while
-`parseEditableArtifactPublicationReceipt` validates the closed result emitted
-by the agent's `publish_editable_artifact` tool. The styled `MessageTimeline`
-recognizes that receipt and renders the same internal editor link used by the
-stock console; a custom timeline can parse the receipt and route to its own
-composition around `@opengeni/react/artifacts`. The host never receives a
-bucket, object key, signed snapshot URL, or mutable kernel state. See
+Editable Office artifacts are likewise package-owned rather than web-owned.
+The SDK exposes the durable artifact API and live protocol; React composes the
+same editor used by the stock console. Agent tools and Codemode mutate that
+same authorized head, and a persisted session association drives the Artifacts
+dock. Import consumes a trusted ready workspace-file id; export returns a
+verified workspace-file id. A host never receives a bucket, object key, signed
+snapshot URL, or mutable kernel state. See
+[`artifact-collaboration.md`](artifact-collaboration.md) and
 [`artifact-engine.md`](artifact-engine.md).
 
 Repository selection is also host-composable. `CreateSessionRequest.resources`

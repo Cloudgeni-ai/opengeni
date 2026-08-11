@@ -32,6 +32,7 @@ export default defineConfig({
     "provision-roles": "src/provision-roles.ts",
     "editable-artifacts": "src/editable-artifacts.ts",
     "editable-artifact-durable-export": "src/editable-artifact-durable-export.ts",
+    "video-generation": "src/video-generation.ts",
   },
   format: ["esm"],
   target: "es2022",

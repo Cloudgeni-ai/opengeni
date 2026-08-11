@@ -45,8 +45,16 @@ import { canonicalProviderDomain } from "./provider-domain";
 
 export const oauthStateTtlMs = 10 * 60 * 1000;
 export const OFFICIAL_SLACK_MCP_URL = OPENGENI_PERSONAL_SLACK_MCP_URL;
+export const OFFICIAL_GMAIL_MCP_URL = "https://gmailmcp.googleapis.com/mcp/v1";
+export const OFFICIAL_GMAIL_MCP_SCOPES = [
+  "https://www.googleapis.com/auth/gmail.readonly",
+  "https://www.googleapis.com/auth/gmail.compose",
+  "https://www.googleapis.com/auth/gmail.modify",
+] as const;
 const SLACK_OAUTH_ORIGIN = "https://slack.com";
 const SLACK_MCP_ORIGIN = "https://mcp.slack.com";
+const GOOGLE_OAUTH_ISSUER_ORIGIN = "https://accounts.google.com";
+const GOOGLE_TOKEN_ORIGIN = "https://oauth2.googleapis.com";
 export { OAUTH_MAX_RESPONSE_BYTES } from "@opengeni/network";
 
 type OAuthClientDeps = {
@@ -120,6 +128,7 @@ type OAuthStatePayload = {
   issuer: string;
   clientRegistrationMethod: OAuthClientRegistration["method"];
   tokenEndpointAuthMethod: OAuthClientRegistration["tokenEndpointAuthMethod"];
+  resourceParameterSupported: boolean;
   encryptedClientSecret?: string;
   returnPath: string;
   connectionId?: string;
@@ -296,6 +305,7 @@ async function startMcpOAuthWithinDeadline(
 ): Promise<OAuthStartResponse> {
   const { db, settings } = deps;
   const mcpUrl = canonicalMcpResource(context.payload.mcpUrl ?? context.payload.resource);
+  const officialGmailResource = mcpUrl === OFFICIAL_GMAIL_MCP_URL;
   const officialSlackResource = mcpUrl === OFFICIAL_SLACK_MCP_URL;
   const providerDomain = officialSlackResource
     ? "slack.com"
@@ -303,6 +313,7 @@ async function startMcpOAuthWithinDeadline(
   const hostedSlackMcp = officialSlackResource || providerDomain === "slack.com";
   assertHostedSlackMcpOAuthStart(settings, context.payload, mcpUrl, hostedSlackMcp);
   const requestedOwnership: ConnectionOwnership = context.payload.ownership ?? "workspace";
+  assertOfficialGmailPersonalOwnership(mcpUrl, requestedOwnership);
   const returnPath = safeReturnPath(context.payload.returnPath ?? "/integrations");
   const baseUrl = integrationBaseUrl(settings.publicBaseUrl, context.requestUrl);
   const redirectUri = `${baseUrl}/v1/integrations/oauth/callback`;
@@ -314,6 +325,7 @@ async function startMcpOAuthWithinDeadline(
       providerDomain,
       mcpUrl,
       hostedSlackMcp,
+      exactMcpBinding: hostedSlackMcp || officialGmailResource,
       connectionId: context.payload.connectionId,
       requestedOwnership: context.payload.ownership,
       newConnectionOwnership: requestedOwnership,
@@ -330,13 +342,26 @@ async function startMcpOAuthWithinDeadline(
   if (hostedSlackMcp && !isLocalTestEnvironment(settings.environment)) {
     assertSlackAuthorizationServer(discovery.as);
   }
+  const googleAuthorizationServer = hasGoogleAuthorizationServerIdentity(discovery.as);
+  if (officialGmailResource || googleAuthorizationServer) {
+    if (!officialGmailResource || providerDomain !== "gmailmcp.googleapis.com") {
+      throw new HTTPException(422, {
+        message: `Google OAuth is allowed only for ${OFFICIAL_GMAIL_MCP_URL}`,
+      });
+    }
+    assertGoogleAuthorizationServer(discovery.as);
+  }
+  const resourceParameterSupported = !officialGmailResource;
   const resource = discovery.prm.resource ? canonicalOAuthResource(discovery.prm.resource) : mcpUrl;
   const verifier = randomPkceVerifier();
-  const authorizeScopes = chooseAuthorizeScopes(
-    context.payload.requestedScopes,
-    discovery.challenge.scope,
-    discovery.prm.scopesSupported,
-  );
+  // The Gmail PRM advertises broader grants, including full-mail access. The
+  // reviewed connector never lets a caller widen the capability contract.
+  const authorizeScopes = chooseMcpAuthorizeScopes({
+    mcpUrl,
+    requested: context.payload.requestedScopes,
+    challenged: discovery.challenge.scope,
+    supported: discovery.prm.scopesSupported,
+  });
   const client = await deadline.run("client_registration", (signal) =>
     registerOAuthClient(
       db,
@@ -358,7 +383,9 @@ async function startMcpOAuthWithinDeadline(
     providerDomain,
     mcpUrl,
     resource,
-    requestedScopes: uniqueStrings(context.payload.requestedScopes ?? []),
+    requestedScopes: officialGmailResource
+      ? [...OFFICIAL_GMAIL_MCP_SCOPES]
+      : uniqueStrings(context.payload.requestedScopes ?? []),
     authorizeScopes,
     encryptedPkceVerifier: encryptEnvironmentValue(key, verifier),
     clientId: client.clientId,
@@ -367,6 +394,7 @@ async function startMcpOAuthWithinDeadline(
     issuer: client.issuer,
     clientRegistrationMethod: client.method,
     tokenEndpointAuthMethod: client.tokenEndpointAuthMethod,
+    resourceParameterSupported,
     ...(client.method === "manual" && client.clientSecret
       ? {
           encryptedClientSecret: encryptEnvironmentValue(key, client.clientSecret),
@@ -384,12 +412,25 @@ async function startMcpOAuthWithinDeadline(
     resource,
     verifier,
     scopes: authorizeScopes,
+    resourceParameterSupported,
   });
   return OAuthStartResponse.parse({
     state,
     authorizationUrl,
     expiresAt: new Date(Date.now() + oauthStateTtlMs).toISOString(),
   });
+}
+
+export function assertOfficialGmailPersonalOwnership(
+  mcpUrl: string,
+  ownership: ConnectionOwnership,
+): void {
+  if (mcpUrl === OFFICIAL_GMAIL_MCP_URL && ownership !== "personal") {
+    throw new HTTPException(422, {
+      message:
+        "Gmail connections are personal only; each workspace member must connect their own mailbox",
+    });
+  }
 }
 
 export async function completeMcpOAuthCallback(
@@ -437,6 +478,9 @@ async function completeMcpOAuthCallbackWithinDeadline(
   }
   try {
     state = readOAuthState(input.state, settings);
+    // Fence state minted by an older deployment too: a rolling update must not
+    // let a still-valid workspace-owned Gmail callback persist shared authority.
+    assertOfficialGmailPersonalOwnership(state.mcpUrl, state.ownership);
     if (!input.code) {
       return {
         redirectTo: callbackReturnPath(state.returnPath, "error", {
@@ -497,6 +541,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
         resource: state.resource,
         tokenEndpoint: state.tokenEndpoint,
         client,
+        resourceParameterSupported: state.resourceParameterSupported,
         signal,
       }),
     );
@@ -651,6 +696,27 @@ export function assertSlackAuthorizationServer(as: AuthorizationServerMetadata):
   ) {
     throw new HTTPException(422, {
       message: "Slack MCP authorization metadata did not remain bound to slack.com",
+    });
+  }
+}
+
+function hasGoogleAuthorizationServerIdentity(as: AuthorizationServerMetadata): boolean {
+  return [as.issuer, as.authorizationServer].some(
+    (value) => new URL(value).origin === GOOGLE_OAUTH_ISSUER_ORIGIN,
+  );
+}
+
+export function assertGoogleAuthorizationServer(as: AuthorizationServerMetadata): void {
+  const issuerOrigins = [as.issuer, as.authorizationServer].map((value) => new URL(value).origin);
+  const authorizationOrigin = new URL(as.authorizationEndpoint).origin;
+  const tokenOrigin = new URL(as.tokenEndpoint).origin;
+  if (
+    issuerOrigins.some((origin) => origin !== GOOGLE_OAUTH_ISSUER_ORIGIN) ||
+    authorizationOrigin !== GOOGLE_OAUTH_ISSUER_ORIGIN ||
+    tokenOrigin !== GOOGLE_TOKEN_ORIGIN
+  ) {
+    throw new HTTPException(422, {
+      message: "Gmail MCP authorization metadata did not remain bound to Google",
     });
   }
 }
@@ -1145,6 +1211,7 @@ async function existingOAuthConnectionForStart(
     providerDomain: string;
     mcpUrl: string;
     hostedSlackMcp: boolean;
+    exactMcpBinding: boolean;
     connectionId?: string | undefined;
     requestedOwnership?: ConnectionOwnership | undefined;
     newConnectionOwnership: ConnectionOwnership;
@@ -1167,7 +1234,7 @@ async function existingOAuthConnectionForStart(
       });
     }
     return connection.providerDomain === input.providerDomain &&
-      (!input.hostedSlackMcp || connection.metadata.mcpUrl === input.mcpUrl)
+      (!input.exactMcpBinding || connection.metadata.mcpUrl === input.mcpUrl)
       ? connection
       : null;
   }
@@ -1178,7 +1245,7 @@ async function existingOAuthConnectionForStart(
       connection.subjectId === ownerSubjectId &&
       connection.kind === "oauth2" &&
       connection.providerDomain === input.providerDomain &&
-      (!input.hostedSlackMcp || connection.metadata.mcpUrl === input.mcpUrl),
+      (!input.exactMcpBinding || connection.metadata.mcpUrl === input.mcpUrl),
   );
   if (input.hostedSlackMcp && input.newConnectionOwnership === "personal") {
     return selectCanonicalPersonalSlackConnection(matching);
@@ -1195,7 +1262,7 @@ function ownershipForConnection(
   throw new HTTPException(404, { message: "connection not found" });
 }
 
-function buildAuthorizationUrl(input: {
+export function buildAuthorizationUrl(input: {
   endpoint: string;
   settings: Settings;
   clientId: string;
@@ -1204,6 +1271,7 @@ function buildAuthorizationUrl(input: {
   resource: string;
   verifier: string;
   scopes: string[];
+  resourceParameterSupported: boolean;
 }): string {
   const endpoint = oauthEndpointUrl(input.endpoint, input.settings, "OAuth authorization endpoint");
   const url = new URL(endpoint);
@@ -1211,7 +1279,16 @@ function buildAuthorizationUrl(input: {
   url.searchParams.set("client_id", input.clientId);
   url.searchParams.set("redirect_uri", input.redirectUri);
   url.searchParams.set("state", input.state);
-  url.searchParams.set("resource", input.resource);
+  if (input.resourceParameterSupported) {
+    url.searchParams.set("resource", input.resource);
+  } else {
+    // Google's OAuth endpoints do not implement RFC 8707's `resource`
+    // parameter. Explicit offline consent is required to obtain the refresh
+    // token used by the durable connection broker.
+    url.searchParams.set("access_type", "offline");
+    url.searchParams.set("include_granted_scopes", "true");
+    url.searchParams.set("prompt", "consent");
+  }
   url.searchParams.set("code_challenge_method", "S256");
   url.searchParams.set("code_challenge", pkceChallenge(input.verifier));
   if (input.scopes.length > 0) {
@@ -1268,6 +1345,9 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
     ),
     clientRegistrationMethod: registrationMethod(payload.clientRegistrationMethod),
     tokenEndpointAuthMethod: tokenAuthMethod(stringValue(payload.tokenEndpointAuthMethod), false),
+    // States minted before provider-specific compatibility was introduced used
+    // the RFC 8707 resource parameter.
+    resourceParameterSupported: payload.resourceParameterSupported !== false,
     ...(stringValue(payload.encryptedClientSecret)
       ? { encryptedClientSecret: stringValue(payload.encryptedClientSecret)! }
       : {}),
@@ -1370,6 +1450,7 @@ async function exchangeAuthorizationCode(
     verifier: string;
     redirectUri: string;
     resource: string;
+    resourceParameterSupported: boolean;
     tokenEndpoint: string;
     client: OAuthClientRegistration;
     signal: AbortSignal;
@@ -1380,7 +1461,9 @@ async function exchangeAuthorizationCode(
   body.set("code", input.code);
   body.set("redirect_uri", input.redirectUri);
   body.set("code_verifier", input.verifier);
-  body.set("resource", input.resource);
+  if (input.resourceParameterSupported) {
+    body.set("resource", input.resource);
+  }
   const headers: Record<string, string> = {
     "content-type": "application/x-www-form-urlencoded",
     accept: "application/json",
@@ -1503,7 +1586,11 @@ function oauthCallbackFailureReason(stage: OAuthCallbackStage, error: unknown): 
 function isDatabaseStatementTimeout(error: unknown): boolean {
   let current = error;
   for (let depth = 0; depth < 4 && current && typeof current === "object"; depth += 1) {
-    const candidate = current as { code?: unknown; message?: unknown; cause?: unknown };
+    const candidate = current as {
+      code?: unknown;
+      message?: unknown;
+      cause?: unknown;
+    };
     if (
       candidate.code === "57014" ||
       (typeof candidate.message === "string" &&
@@ -1718,6 +1805,7 @@ function credentialBundle(
     token_type: token.tokenType,
     ...(token.expiresAt ? { expires_at: token.expiresAt.toISOString() } : {}),
     resource: state.resource,
+    resource_parameter_supported: state.resourceParameterSupported,
     mcp_url: state.mcpUrl,
     ...(token.scopeText
       ? { scope: token.scopeText }
@@ -1965,6 +2053,17 @@ function chooseAuthorizeScopes(
     return uniqueStrings(challenged);
   }
   return uniqueStrings(supported);
+}
+
+export function chooseMcpAuthorizeScopes(input: {
+  mcpUrl: string;
+  requested: string[] | undefined;
+  challenged: string[] | undefined;
+  supported: string[];
+}): string[] {
+  return input.mcpUrl === OFFICIAL_GMAIL_MCP_URL
+    ? [...OFFICIAL_GMAIL_MCP_SCOPES]
+    : chooseAuthorizeScopes(input.requested, input.challenged, input.supported);
 }
 
 function grantedScopes(scopeText: string | undefined, fallback: string[]): string[] {

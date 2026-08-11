@@ -94,6 +94,74 @@ type GoogleDriveOAuthState = {
   iat: number;
 };
 
+export async function wakeGoogleDriveSourcesFromWorkspaceEvent(
+  deps: ApiRouteDeps,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    connectionId: string;
+    connectionOwnerSubjectId: string;
+    eventId: string;
+    driveId: string | null;
+  },
+): Promise<{ enabled: boolean; triggered: number }> {
+  if (deps.settings.googleDriveWorkspaceEventsEnabled !== true) {
+    return { enabled: false, triggered: 0 };
+  }
+  const eventId = input.eventId.trim();
+  if (eventId.length < 1 || eventId.length > 1024) {
+    throw new Error("google_drive_workspace_event_id_invalid");
+  }
+  const connection = await getConnectionMetadata(
+    deps.db,
+    input.workspaceId,
+    input.connectionId,
+    input.connectionOwnerSubjectId,
+  );
+  if (!connection || connection.accountId !== input.accountId) {
+    throw new Error("google_drive_workspace_event_connection_not_found");
+  }
+  const metadata = requireGoogleDriveConnection(connection, input.connectionOwnerSubjectId);
+  if (effectiveGoogleDriveLifecycle(connection, metadata).state !== "active") {
+    return { enabled: true, triggered: 0 };
+  }
+  const selectedSources =
+    metadata.selectedSources ?? (metadata.selectedSource ? [metadata.selectedSource] : []);
+  const selectedById = new Map(selectedSources.map((source) => [source.id, source]));
+  const tasks = await listKnowledgeSourceSyncTasksForConnection(
+    deps.db,
+    input.workspaceId,
+    input.connectionId,
+  );
+  let triggered = 0;
+  for (const task of tasks) {
+    if (task.action.kind !== "knowledge_source_sync" || task.status !== "active") continue;
+    const externalSourceId =
+      typeof task.metadata.externalSourceId === "string" ? task.metadata.externalSourceId : null;
+    const selectedSource = externalSourceId ? selectedById.get(externalSourceId) : null;
+    if (
+      !selectedSource ||
+      !selectedSource.syncEnabled ||
+      selectedSource.driveId !== input.driveId
+    ) {
+      continue;
+    }
+    const token = createHash("sha256")
+      .update(`google-drive-workspace-event:${task.id}:${eventId}`)
+      .digest("hex")
+      .slice(0, 48);
+    await deps.workflowClient.triggerScheduledTask({
+      task,
+      agentRunUsageIdempotencyKey: `knowledge-source-sync:provider-event:${task.id}:${token}`,
+      triggerWorkflowId: manualScheduledTaskTriggerWorkflowId(task.id, `provider-event-${token}`),
+      initiator: { kind: "service", subjectId: "google-drive-workspace-events" },
+      triggerType: "provider_event",
+    });
+    triggered += 1;
+  }
+  return { enabled: true, triggered };
+}
+
 type GoogleTokenResponse = {
   accessToken: string;
   refreshToken?: string;
@@ -1374,21 +1442,31 @@ function readGoogleDriveOAuthState(
   if (iat === undefined || now < iat || now - iat > oauthStateTtlMs / 1000) {
     throw new HTTPException(400, { message: "invalid or expired Google Drive OAuth state" });
   }
+  const accountId = requiredString(payload.accountId, "state.accountId");
+  const workspaceId = requiredString(payload.workspaceId, "state.workspaceId");
+  const subjectId = requiredString(payload.subjectId, "state.subjectId");
+  const returnPath = requiredString(payload.returnPath, "state.returnPath");
+  if (returnPath !== GOOGLE_DRIVE_RETURN_PATH(workspaceId)) {
+    throw new HTTPException(400, { message: "invalid Google Drive OAuth return path" });
+  }
+  const connectionId = optionalString(payload.connectionId) ?? undefined;
+  const connectionVersion = numberValue(payload.connectionVersion);
+  if (
+    (connectionVersion !== undefined && !Number.isInteger(connectionVersion)) ||
+    Boolean(connectionId) !== Boolean(connectionVersion)
+  ) {
+    throw new HTTPException(400, { message: "invalid Google Drive reconnect state" });
+  }
   return {
-    accountId: requiredString(payload.accountId, "state.accountId"),
-    workspaceId: requiredString(payload.workspaceId, "state.workspaceId"),
-    subjectId: requiredString(payload.subjectId, "state.subjectId"),
-    returnPath: requiredString(payload.returnPath, "state.returnPath"),
+    accountId,
+    workspaceId,
+    subjectId,
+    returnPath,
     encryptedPkceVerifier: requiredString(
       payload.encryptedPkceVerifier,
       "state.encryptedPkceVerifier",
     ),
-    ...(optionalString(payload.connectionId)
-      ? { connectionId: optionalString(payload.connectionId)! }
-      : {}),
-    ...(numberValue(payload.connectionVersion) !== undefined
-      ? { connectionVersion: numberValue(payload.connectionVersion)! }
-      : {}),
+    ...(connectionId ? { connectionId, connectionVersion: connectionVersion! } : {}),
     nonce: requiredString(payload.nonce, "state.nonce"),
     iat,
   };
@@ -1626,6 +1704,18 @@ async function googleDriveApiRequest(
       destinationUrl: input.url.toString(),
       forceRefresh,
     });
+  const requireResolvedConnection = async (connectionVersion: number) => {
+    const resolved = await getConnectionMetadata(
+      deps.db,
+      input.workspaceId,
+      input.connectionId,
+      input.subjectId,
+    );
+    if (!resolved || resolved.version !== connectionVersion) {
+      throw new HTTPException(409, { message: "Google Drive connection changed; try again" });
+    }
+    await requireGoogleDriveSourceConnection(deps, resolved, input.subjectId);
+  };
   let credential = await resolve(false);
   if (credential.status !== "ok") {
     throw new HTTPException(401, { message: "Google Drive needs to be reconnected" });
@@ -1634,6 +1724,7 @@ async function googleDriveApiRequest(
   if (providerConnectionVersion === undefined) {
     throw new Error("Google Drive credential resolver omitted the connection version");
   }
+  await requireResolvedConnection(providerConnectionVersion);
   const fetchImpl = deps.googleDriveFetch ?? fetch;
   let response = await providerFetch(fetchImpl, input.url, {
     headers: { ...credential.headers, accept: "application/json" },
@@ -1648,6 +1739,7 @@ async function googleDriveApiRequest(
     if (providerConnectionVersion === undefined) {
       throw new Error("Google Drive credential resolver omitted the connection version");
     }
+    await requireResolvedConnection(providerConnectionVersion);
     response = await providerFetch(fetchImpl, input.url, {
       headers: { ...credential.headers, accept: "application/json" },
     });

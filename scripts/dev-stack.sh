@@ -345,7 +345,7 @@ if [ "${OPENGENI_SANDBOX_BACKEND:-docker}" = "docker" ]; then
       echo "Exact-head sandbox artifact runtime is required but unavailable." >&2
       exit 1
     fi
-    echo "Exact-head sandbox artifact runtime unavailable; native artifact skills are disabled." >&2
+    echo "Exact-head sandbox artifact runtime unavailable; standalone local Office file operations are disabled." >&2
   fi
   OPENGENI_DOCKER_IMAGE="opengeni-sandbox:local-${sandbox_source_tag}"
   export OPENGENI_DOCKER_IMAGE OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED

@@ -52,6 +52,7 @@ export function createSharedActivityServices(
         inspectSessionAttemptActivity: dependencies.inspectSessionAttemptActivity ?? null,
         signalCodexCapacityWorkflow: dependencies.signalCodexCapacityWorkflow ?? null,
         startSandboxReaperWorkflow: dependencies.startSandboxReaperWorkflow ?? null,
+        startVideoGenerationWorkflow: dependencies.startVideoGenerationWorkflow ?? null,
         entitlements: dependencies.entitlements ?? null,
         connectionCredentials: dependencies.connectionCredentials ?? null,
       };

@@ -60,6 +60,7 @@ import {
   type SandboxBackend,
   type LineageNode,
   type Session,
+  type AgentTopologyPageResponse,
   type ErrorCode,
   type SessionAuthorizationOperation,
   type SessionQueueSnapshot,
@@ -88,6 +89,8 @@ import {
   listSessionEventPage,
   listSessionHumanInputRequests,
   listSessionIdsInGroup,
+  listSessionDiscoverySummaries,
+  listSessionDiscoveryAncestorPaths,
   listSessionsForSubject,
   getLatestStartedSessionTurn,
   listSessionTurns,
@@ -95,8 +98,8 @@ import {
   projectSessionForRelatedAccess,
   recordStreamAcknowledgment,
   requestSessionCompaction,
-  setSessionCodexPin,
-  withCodexCapacityMutation,
+  setSessionCodexPinInTransaction,
+  withSessionCodexCapacityMutation,
   setSessionPin,
   SessionPinVersionConflictError,
   SessionPinAccessError,
@@ -126,6 +129,7 @@ import {
   sessionLatestWorkspaceCapture,
   renewSessionRealtimeInTransaction,
   syncSessionRealtimeLedgerInTransaction,
+  withWorkspaceSessionActivityRls,
   withWorkspaceRls,
   workspaceCaptureAtRevision,
   type AppendEventInput,
@@ -133,6 +137,8 @@ import {
   type SandboxPtyProcessIdentity,
   type SandboxRetainedProcess,
   type Database,
+  type SessionDiscoveryCursor,
+  type SessionDiscoveryAncestor,
 } from "@opengeni/db";
 import {
   appendAndPublishEvents,
@@ -556,6 +562,83 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     return c.json([...page.pinned, ...page.sessions].map(decorate));
   });
 
+  app.get("/v1/workspaces/:workspaceId/agent-topology", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    let authorizationScope;
+    try {
+      authorizationScope = await requireSessionAuthorizationListScope(deps, grant, "http");
+    } catch (error) {
+      throw sessionAuthorizationHttpError(error);
+    }
+    const query = agentTopologyQuery(c.req.query());
+    const page = await listSessionDiscoverySummaries(db, workspaceId, {
+      limit: query.limit,
+      orderBy: "updatedAt",
+      subjectId: grant.subjectId,
+      ...(query.cursor ? { cursor: query.cursor } : {}),
+      ...(query.search ? { search: query.search } : { parentSessionId: query.parentSessionId }),
+      ...(authorizationScope ? { authorizationScope } : {}),
+    });
+    const ancestorPaths = query.search
+      ? await listSessionDiscoveryAncestorPaths(
+          db,
+          workspaceId,
+          page.sessions.map((session) => session.id),
+          authorizationScope ?? undefined,
+        )
+      : new Map<string, SessionDiscoveryAncestor[]>();
+    const sessions: AgentTopologyPageResponse["sessions"] = page.sessions.map((session) => {
+      const blocker = session.effectiveControl.primaryBlocker;
+      return {
+        id: session.id,
+        title: session.title,
+        titleTruncated:
+          session.titleOriginalChars !== null &&
+          session.titleOriginalChars > Array.from(session.title ?? "").length,
+        parentSessionId: session.parentSessionId,
+        rootSessionId: session.rootSessionId,
+        nestedAgentDepth: session.nestedAgentDepth,
+        ancestorPath: (ancestorPaths.get(session.id) ?? []).map((ancestor) => ({
+          id: ancestor.id,
+          title: ancestor.title,
+          titleTruncated:
+            ancestor.titleOriginalChars !== null &&
+            ancestor.titleOriginalChars > Array.from(ancestor.title ?? "").length,
+        })),
+        status: session.status,
+        pause: {
+          state: session.effectiveControl.state,
+          additionalBlockerCount: session.effectiveControl.additionalBlockerCount,
+          source: blocker
+            ? {
+                kind: blocker.kind,
+                ...(blocker.sessionId ? { sessionId: blocker.sessionId } : {}),
+                displayName: blocker.displayName,
+                displayNameTruncated:
+                  blocker.displayNameOriginalChars > Array.from(blocker.displayName).length,
+              }
+            : null,
+        },
+        children: session.treeStats,
+        createdAt: session.createdAt,
+        updatedAt: session.updatedAt,
+      };
+    });
+    return c.json({
+      sessions,
+      total: page.total,
+      hasMore: page.hasMore,
+      nextCursor: page.nextCursor
+        ? encodeAgentTopologyCursor({
+            cursor: page.nextCursor,
+            parentSessionId: query.parentSessionId,
+            search: query.search ?? null,
+          })
+        : null,
+    } satisfies AgentTopologyPageResponse);
+  });
+
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
@@ -612,16 +695,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       throw new HTTPException(400, { message: "invalid session realtime request" });
     }
     try {
-      const result = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
-        scopedDb.transaction(async (tx) =>
-          beginSessionRealtimeInTransaction(tx as unknown as Database, {
-            accountId: grant.accountId,
-            workspaceId,
-            sessionId,
-            ownerSubjectId: grant.subjectId,
-            ...parsed.data,
-          }),
-        ),
+      const result = await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) =>
+        beginSessionRealtimeInTransaction(scopedDb, {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          ownerSubjectId: grant.subjectId,
+          ...parsed.data,
+        }),
       );
       await publishRealtimeMutation(grant.accountId, workspaceId, sessionId, result);
       c.header("cache-control", "private, no-store");
@@ -649,16 +730,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         throw new HTTPException(400, { message: "invalid realtime heartbeat request" });
       }
       try {
-        const result = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
-          scopedDb.transaction(async (tx) =>
-            renewSessionRealtimeInTransaction(tx as unknown as Database, {
-              workspaceId,
-              sessionId,
-              realtimeId,
-              ownerSubjectId: grant.subjectId,
-              ...parsed.data,
-            }),
-          ),
+        const result = await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) =>
+          renewSessionRealtimeInTransaction(scopedDb, {
+            workspaceId,
+            sessionId,
+            realtimeId,
+            ownerSubjectId: grant.subjectId,
+            ...parsed.data,
+          }),
         );
         await publishRealtimeMutation(grant.accountId, workspaceId, sessionId, result);
         c.header("cache-control", "private, no-store");
@@ -685,16 +764,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       throw new HTTPException(400, { message: "invalid realtime end request" });
     }
     try {
-      const result = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
-        scopedDb.transaction(async (tx) =>
-          endSessionRealtimeInTransaction(tx as unknown as Database, {
-            workspaceId,
-            sessionId,
-            realtimeId,
-            ownerSubjectId: grant.subjectId,
-            ...parsed.data,
-          }),
-        ),
+      const result = await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) =>
+        endSessionRealtimeInTransaction(scopedDb, {
+          workspaceId,
+          sessionId,
+          realtimeId,
+          ownerSubjectId: grant.subjectId,
+          ...parsed.data,
+        }),
       );
       await publishRealtimeMutation(grant.accountId, workspaceId, sessionId, result);
       c.header("cache-control", "private, no-store");
@@ -1057,16 +1134,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         throw new HTTPException(422, { message: "invalid realtime ledger sync request" });
       }
       try {
-        const result = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
-          scopedDb.transaction(async (tx) =>
-            syncSessionRealtimeLedgerInTransaction(tx as unknown as Database, {
-              workspaceId,
-              sessionId,
-              realtimeId,
-              ownerSubjectId: grant.subjectId,
-              ...parsed.data,
-            }),
-          ),
+        const result = await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) =>
+          syncSessionRealtimeLedgerInTransaction(scopedDb, {
+            workspaceId,
+            sessionId,
+            realtimeId,
+            ownerSubjectId: grant.subjectId,
+            ...parsed.data,
+          }),
         );
         await publishRealtimeMutation(grant.accountId, workspaceId, sessionId, result);
         c.header("cache-control", "private, no-store");
@@ -1171,11 +1246,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       }
     }
     const pinned = target === "auto" ? null : target;
-    const mutation = await withCodexCapacityMutation(
+    const mutation = await withSessionCodexCapacityMutation(
       db,
       { workspaceId, reason: "codex_manual_session_pin_changed" },
       async (tx) => {
-        const changed = await setSessionCodexPin(tx, workspaceId, sessionId, pinned);
+        const changed = await setSessionCodexPinInTransaction(tx, workspaceId, sessionId, pinned);
         return { result: changed, changed };
       },
     );
@@ -3297,6 +3372,99 @@ function sessionListQuery(
     cursor,
     search: search || undefined,
     pinsOnly,
+  };
+}
+
+export type AgentTopologyCursorEnvelope = {
+  cursor: SessionDiscoveryCursor;
+  parentSessionId: string | null;
+  search: string | null;
+};
+
+export function encodeAgentTopologyCursor(value: AgentTopologyCursorEnvelope): string {
+  return Buffer.from(JSON.stringify({ v: 1, ...value }), "utf8").toString("base64url");
+}
+
+function decodeAgentTopologyCursor(value: string): AgentTopologyCursorEnvelope {
+  if (value.length > 2_048) {
+    throw new HTTPException(400, { message: "agent topology cursor is invalid" });
+  }
+  try {
+    const parsed = z
+      .object({
+        v: z.literal(1),
+        parentSessionId: z.string().uuid().nullable(),
+        search: z.string().max(200).nullable(),
+        cursor: z.object({
+          orderBy: z.enum(["createdAt", "updatedAt"]),
+          sortRevision: z.string().max(64),
+          sortAt: z.string().max(64),
+          id: z.string().uuid(),
+          snapshotAt: z.string().max(64),
+          snapshotRevision: z.string().max(64),
+          updatedAfter: z.string().max(64).nullable(),
+        }),
+      })
+      .parse(JSON.parse(Buffer.from(value, "base64url").toString("utf8")));
+    if (
+      parsed.cursor.orderBy !== "updatedAt" ||
+      parsed.cursor.updatedAfter !== null ||
+      !/^(?:0|[1-9]\d*)$/.test(parsed.cursor.sortRevision) ||
+      !/^(?:0|[1-9]\d*)$/.test(parsed.cursor.snapshotRevision) ||
+      BigInt(parsed.cursor.sortRevision) > 9_223_372_036_854_775_807n ||
+      BigInt(parsed.cursor.snapshotRevision) > 9_223_372_036_854_775_807n ||
+      Number.isNaN(Date.parse(parsed.cursor.sortAt)) ||
+      Number.isNaN(Date.parse(parsed.cursor.snapshotAt))
+    ) {
+      throw new Error("invalid topology cursor fields");
+    }
+    return parsed;
+  } catch {
+    throw new HTTPException(400, { message: "agent topology cursor is invalid" });
+  }
+}
+
+export function agentTopologyQuery(query: Record<string, string>): {
+  limit: number;
+  parentSessionId: string | null;
+  search: string | undefined;
+  cursor: SessionDiscoveryCursor | undefined;
+} {
+  const rawLimit = query.limit;
+  const limit = rawLimit === undefined ? 25 : Number(rawLimit);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+    throw new HTTPException(400, { message: "limit must be an integer between 1 and 100" });
+  }
+  const rawParent = query.parentSessionId;
+  if (
+    rawParent !== undefined &&
+    rawParent !== "null" &&
+    !z.string().uuid().safeParse(rawParent).success
+  ) {
+    throw new HTTPException(400, {
+      message: 'parentSessionId must be a session id or the literal "null"',
+    });
+  }
+  const parentSessionId = rawParent === undefined || rawParent === "null" ? null : rawParent;
+  const search = query.search?.trim();
+  if (search && search.length > 200) {
+    throw new HTTPException(400, { message: "search must be at most 200 characters" });
+  }
+  if (search && rawParent !== undefined) {
+    throw new HTTPException(400, { message: "search cannot be combined with parentSessionId" });
+  }
+  const envelope = query.cursor ? decodeAgentTopologyCursor(query.cursor) : undefined;
+  if (
+    envelope &&
+    (envelope.parentSessionId !== parentSessionId || envelope.search !== (search || null))
+  ) {
+    throw new HTTPException(400, { message: "agent topology cursor does not match its filters" });
+  }
+  return {
+    limit,
+    parentSessionId,
+    search: search || undefined,
+    cursor: envelope?.cursor,
   };
 }
 

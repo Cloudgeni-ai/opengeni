@@ -5,6 +5,7 @@ import {
 } from "@opengeni/artifact-tool/runtime/materializer";
 import {
   EditableArtifactDurableExportService,
+  EditableArtifactAgentApplication,
   EDITABLE_ARTIFACT_EXPORT_MAX_DOWNLOAD_BYTES,
   EditableArtifactCompactionPipeline,
   EditableArtifactGenesisPipeline,
@@ -17,6 +18,7 @@ import {
   editableArtifactStorePortFromPostgres,
   editableArtifactDurableExportStorePortFromPostgres,
   ogatxEditableArtifactMutationIntentCodec,
+  editableArtifactId,
   type EditableArtifactAuthorizationDecision,
   type EditableArtifactAuthorizationPort,
   type EditableArtifactAuthorizationRequest,
@@ -24,6 +26,7 @@ import {
   type EditableArtifactStableIdKind,
   type EditableArtifactDurableExportIdFactoryPort,
   type EditableArtifactExactSnapshotPort,
+  type EditableArtifactAgentAssociationPort,
   type EditableArtifactMaterializationProfilePort,
 } from "@opengeni/core/editable-artifacts";
 import {
@@ -42,6 +45,8 @@ import {
   PostgresEditableArtifactLiveReadStore,
   PostgresEditableArtifactLiveTicketStore,
   PostgresEditableArtifactStore,
+  listEditableArtifactIdsForSession,
+  touchEditableArtifactSessionLink,
   dbSql,
   withRlsContext,
   type Database,
@@ -61,6 +66,8 @@ import {
   NativeEditableArtifactKernelAdapter,
   loadVerifiedNativeArtifactRuntimeBinding,
 } from "./editable-artifact-native-kernel";
+import { EditableArtifactOfficeImportAdapter } from "./editable-artifact-office-import";
+import { EditableArtifactWorkspaceFileAdapter } from "./editable-artifact-workspace-files";
 
 const INVALIDATION_POLL_MS = 1_000;
 const TICKET_CLEANUP_MS = 30_000;
@@ -68,6 +75,8 @@ const TICKET_CLEANUP_MS = 30_000;
 export type StandaloneEditableArtifactApplication = Readonly<{
   application: EditableArtifactApplicationPort;
   durableExports: EditableArtifactDurableExportService;
+  agent: EditableArtifactAgentApplication;
+  officeImports: EditableArtifactOfficeImportAdapter;
   kernelVersion: string;
   close(): void;
 }>;
@@ -85,6 +94,9 @@ export async function createStandaloneEditableArtifactApplication(input: {
   const boundedObjects = createObjectStorageBoundedPorts(input.objectStorage);
   const materializationObjects = createObjectStorageBoundedPorts(input.objectStorage, {
     keyPrefix: "editable-artifacts/materializations/v1/sha256/",
+  });
+  const importSourceObjects = createObjectStorageBoundedPorts(input.objectStorage, {
+    keyPrefix: "editable-artifacts/imports/v1/sha256/",
   });
   const runtimeBinding = await loadVerifiedNativeArtifactRuntimeBinding();
   const runtime = runtimeBinding.runtime;
@@ -136,6 +148,32 @@ export async function createStandaloneEditableArtifactApplication(input: {
     profiles: materializationProfiles(materializerCapabilities),
     materializationObjects: materializationObjects.read,
   });
+  const officeImports = new EditableArtifactOfficeImportAdapter({
+    db: input.db,
+    objectStorage: input.objectStorage,
+    runtime: runtimeBinding,
+    sourceObjects: importSourceObjects.write,
+    snapshotObjects: boundedObjects.write,
+  });
+  const agent = new EditableArtifactAgentApplication({
+    domain,
+    exports: durableExports,
+    associations: Object.freeze({
+      listArtifactIds: async ({ scope, sessionId, limit }) =>
+        (await listEditableArtifactIdsForSession(input.db, scope, sessionId, limit)).map(
+          editableArtifactId,
+        ),
+      touch: async ({ scope, sessionId, artifactId }) =>
+        await touchEditableArtifactSessionLink(input.db, scope, sessionId, artifactId),
+    } satisfies EditableArtifactAgentAssociationPort),
+    inspector: kernel,
+    officeImports,
+    workspaceFiles: new EditableArtifactWorkspaceFileAdapter({
+      db: input.db,
+      objectStorage: input.objectStorage,
+      durableExports,
+    }),
+  });
   const ticketStore = new PostgresEditableArtifactLiveTicketStore(input.db);
   const liveRead = new PostgresEditableArtifactLiveReadStore(input.db, {
     snapshotBytes: snapshotBytesPort(boundedObjects.read),
@@ -177,6 +215,8 @@ export async function createStandaloneEditableArtifactApplication(input: {
   return Object.freeze({
     application,
     durableExports,
+    agent,
+    officeImports,
     kernelVersion: runtime.buildIdentity,
     close() {
       clearInterval(cleanup);

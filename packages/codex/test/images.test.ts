@@ -50,6 +50,40 @@ describe("generateCodexSubscriptionImage", () => {
     });
   });
 
+  test("uses the subscription edit endpoint with ordered reference images", async () => {
+    let captured: { url: string; init: RequestInit | undefined } | undefined;
+    await generateCodexSubscriptionImage({
+      prompt: "Use the first image's subject and the second image's style",
+      references: [
+        { mediaType: "image/png", bytes: Uint8Array.from([1, 2, 3]) },
+        { mediaType: "image/jpeg", bytes: Uint8Array.from([4, 5, 6]) },
+      ],
+      turnId: "turn-edit-1",
+      context: {
+        clientVersion: "0.145.0",
+        getToken: async () => token("access-1"),
+        refresh: async () => token("access-2"),
+      },
+      fetch: async (input, init) => {
+        captured = { url: String(input), init };
+        return Response.json({ data: [{ b64_json: "aW1hZ2U=" }] });
+      },
+    });
+
+    expect(captured?.url).toBe(`${CODEX_RESPONSES_BASE}/images/edits`);
+    expect(JSON.parse(String(captured?.init?.body))).toEqual({
+      images: [
+        { image_url: "data:image/png;base64,AQID" },
+        { image_url: "data:image/jpeg;base64,BAUG" },
+      ],
+      prompt: "Use the first image's subject and the second image's style",
+      background: "auto",
+      model: "gpt-image-2",
+      quality: "auto",
+      size: "auto",
+    });
+  });
+
   test("refreshes only after a definitive 401", async () => {
     const authorizations: string[] = [];
     let refreshes = 0;

@@ -13,6 +13,10 @@ const allowedHosts = process.env.OPENGENI_WEB_ALLOWED_HOSTS?.split(",")
 
 export default defineConfig({
   build: {
+    // The canonical post-build budget below computes gzip sizes for the exact
+    // initial/session graphs and every chunk. Avoid Vite recomputing compressed
+    // sizes for hundreds of lazy syntax assets before that bounded gate runs.
+    reportCompressedSize: false,
     // Vite's default 500 kB raw threshold misclassifies deliberately lazy
     // syntax/WASM assets. The post-build budget gate measures the recursive
     // initial graph and every chunk by gzip size; 800 kB remains a hard raw cap.
@@ -32,6 +36,15 @@ export default defineConfig({
               priority: 15,
             },
             {
+              // These tiny, always-loaded navigation and status primitives are
+              // one app-shell unit. Keeping them together avoids an extra
+              // request without pulling any route implementation into startup.
+              name: "app-shell",
+              test: /(?:apps[\\/]web[\\/]src[\\/](?:lib[\\/]routes\.ts|components[\\/]ui[\\/](?:empty-state|meta-chip|status-dot)\.tsx)|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:chevron-down|circle-alert)\.mjs)$/,
+              includeDependenciesRecursively: false,
+              priority: 4,
+            },
+            {
               // The session workbench is the primary interactive route. Keep
               // its static graph route-aware, but coalesce tiny shared groups
               // so a cold navigation does not fan out into dozens of requests.
@@ -39,7 +52,7 @@ export default defineConfig({
               test: /src[\\/]routes[\\/]session\.tsx$/,
               includeDependenciesRecursively: true,
               entriesAware: true,
-              entriesAwareMergeThreshold: 128 * 1024,
+              entriesAwareMergeThreshold: 92 * 1024,
               priority: 2,
             },
             {

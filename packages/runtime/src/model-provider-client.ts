@@ -1,0 +1,178 @@
+import type { ResolvedModelProvider, Settings } from "@opengeni/config";
+import OpenAI from "openai";
+import { CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS, codexSubscriptionFetch } from "@opengeni/codex";
+
+import type { RuntimeMetricsHooks } from "./metrics";
+import { WorkspaceGatewayUnavailableError } from "./model-provider-errors";
+import {
+  azureModelRequestPolicy,
+  modelRequestPolicyForProvider,
+} from "./model-provider-request-policy";
+import { isModelCallFetch, vercelGatewayRoutingFetch } from "./model-provider-transport";
+import { ReplayableJsonOpenAI } from "./replayable-json-body";
+
+let runtimeMetricsHooks: RuntimeMetricsHooks | null = null;
+
+export function configureRuntimeMetricsHooks(hooks: RuntimeMetricsHooks | null | undefined): void {
+  runtimeMetricsHooks = hooks ?? null;
+}
+
+/**
+ * Build an OpenAI client from settings for the configured provider. Mirrors the
+ * client construction in configureOpenAI so a direct API call (the compaction
+ * summarizer) uses the same Azure/OpenAI auth and base URL. Returns null when
+ * the OpenAI-platform path has only a key (the SDK default client is used via
+ * setDefaultOpenAIKey there); the caller then constructs a key-only client.
+ */
+export function buildOpenAIClientFromSettings(
+  settings: Settings,
+  providerId: string = settings.openaiProvider,
+): OpenAI {
+  if (settings.openaiProvider === "azure") {
+    const baseURL = settings.azureOpenaiBaseUrl ?? azureDeploymentBaseUrl(settings);
+    const apiKey = settings.azureOpenaiApiKey ?? settings.azureOpenaiAdToken ?? "azure-ad-token";
+    return new ReplayableJsonOpenAI(
+      {
+        apiKey,
+        baseURL,
+        maxRetries: settings.openaiMaxRetries,
+        defaultQuery: azureOpenAIDefaultQuery(settings, baseURL),
+        defaultHeaders:
+          settings.azureOpenaiAdToken && !settings.azureOpenaiApiKey
+            ? { Authorization: `Bearer ${settings.azureOpenaiAdToken}` }
+            : undefined,
+        fetch: instrumentedModelFetch(providerId, globalThis.fetch),
+      },
+      { modelRequestPolicy: azureModelRequestPolicy },
+    );
+  }
+  return new ReplayableJsonOpenAI({
+    apiKey: settings.openaiApiKey ?? process.env.OPENAI_API_KEY,
+    ...(settings.openaiBaseUrl ? { baseURL: settings.openaiBaseUrl } : {}),
+    maxRetries: settings.openaiMaxRetries,
+    fetch: instrumentedModelFetch(providerId, globalThis.fetch),
+  });
+}
+
+/**
+ * One OpenAI client per resolved provider id, built lazily and cached for the
+ * process. The built-in openai/azure provider reuses
+ * buildOpenAIClientFromSettings verbatim (so its Azure AD/api-version/base-URL
+ * construction stays byte-for-byte identical to configureOpenAI); a registry
+ * provider gets a plain client pointed at its base URL with its resolved key,
+ * the shared maxRetries budget, and its declared defaultQuery/defaultHeaders.
+ * Caching by provider.id keeps concurrent multi-provider turns sharing one
+ * connection pool per provider rather than reconstructing a client per turn.
+ */
+const providerClientCache = new Map<string, OpenAI>();
+
+export function buildProviderClient(provider: ResolvedModelProvider, settings: Settings): OpenAI {
+  const workspaceGateway = provider.kind === "vercel-gateway-workspace";
+  const gatewayProvider = workspaceGateway || provider.kind === "vercel-gateway-managed";
+  const cached = workspaceGateway ? undefined : providerClientCache.get(provider.id);
+  if (cached) {
+    return cached;
+  }
+  if (workspaceGateway && !provider.apiKey) {
+    throw new WorkspaceGatewayUnavailableError();
+  }
+  const client = provider.builtin
+    ? buildOpenAIClientFromSettings(settings, provider.id)
+    : provider.kind === "codex-subscription"
+      ? // Codex subscription: the static apiKey is a placeholder — the real per-request
+        // bearer + ChatGPT-Account-ID, the /responses->/codex/responses rewrite, and the
+        // body normalization are all injected by codexSubscriptionFetch, which reads the
+        // per-workspace token from the Codex request context at call time.
+        // The provider id is constant ("codex-subscription"), so one cached client serves
+        // every workspace without baking a token into it.
+        new ReplayableJsonOpenAI(
+          {
+            apiKey: provider.apiKey ?? "codex-subscription",
+            ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
+            // Codex transport owns exactly one explicit 401 refresh/retry. Blind
+            // SDK retries on network/5xx/partial streams can replay provider work
+            // or external tool side effects without a durable checkpoint.
+            maxRetries: 0,
+            // Codex transport owns finer headers/idle/whole deadlines and emits
+            // typed durable evidence. Keep the SDK envelope beyond that budget.
+            timeout: CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS,
+            fetch: codexSubscriptionFetch(instrumentedModelFetch(provider.id, globalThis.fetch)),
+          },
+          { modelRequestPolicy: modelRequestPolicyForProvider(provider) },
+        )
+      : // ResolvedModelProvider.apiKey is already the resolved key (configuredProviders
+        // ran resolveProviderApiKey at config time, collapsing apiKey/apiKeyEnv), so it
+        // is passed straight through here rather than re-resolved.
+        new ReplayableJsonOpenAI(
+          {
+            ...(provider.apiKey ? { apiKey: provider.apiKey } : {}),
+            ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
+            // Gateway routing is deliberately fail-closed. Avoid SDK replay after
+            // a request may have reached the one pinned endpoint.
+            maxRetries: gatewayProvider ? 0 : settings.openaiMaxRetries,
+            ...(provider.defaultQuery ? { defaultQuery: provider.defaultQuery } : {}),
+            ...(provider.defaultHeaders ? { defaultHeaders: provider.defaultHeaders } : {}),
+            fetch: gatewayProvider
+              ? vercelGatewayRoutingFetch(
+                  provider.kind as "vercel-gateway-managed" | "vercel-gateway-workspace",
+                  instrumentedModelFetch(provider.id, globalThis.fetch),
+                )
+              : instrumentedModelFetch(provider.id, globalThis.fetch),
+          },
+          { modelRequestPolicy: modelRequestPolicyForProvider(provider) },
+        );
+  if (!workspaceGateway) {
+    providerClientCache.set(provider.id, client);
+  }
+  return client;
+}
+
+function instrumentedModelFetch(provider: string, inner: typeof fetch): typeof fetch {
+  return (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    if (!isModelCallFetch(input)) {
+      return await inner(input, init);
+    }
+    const started = performance.now();
+    try {
+      const response = await inner(input, init);
+      recordModelCallMetric(provider, response.ok ? "completed" : "failed", started);
+      return response;
+    } catch (error) {
+      recordModelCallMetric(provider, "failed", started);
+      throw error;
+    }
+  }) as typeof fetch;
+}
+
+function recordModelCallMetric(
+  provider: string,
+  outcome: "completed" | "failed",
+  started: number,
+): void {
+  const durationSeconds = Math.max(0, (performance.now() - started) / 1000);
+  try {
+    runtimeMetricsHooks?.onModelCall?.({ provider, outcome, durationSeconds });
+  } catch {
+    // Metrics emission must never affect a model call.
+  }
+}
+
+function azureDeploymentBaseUrl(settings: Settings): string {
+  const endpoint = settings.azureOpenaiEndpoint?.replace(/\/+$/, "");
+  if (!endpoint || !settings.azureOpenaiDeployment) {
+    throw new Error("Azure OpenAI endpoint/deployment settings are incomplete");
+  }
+  return `${endpoint}/openai/deployments/${settings.azureOpenaiDeployment}`;
+}
+
+export function azureOpenAIDefaultQuery(
+  settings: Pick<Settings, "azureOpenaiApiVersion">,
+  baseURL: string,
+): Record<string, string> | undefined {
+  if (!settings.azureOpenaiApiVersion) return undefined;
+  const normalized = baseURL.replace(/\/+$/, "").toLowerCase();
+  if (normalized.endsWith("/openai/v1")) {
+    return undefined;
+  }
+  return { "api-version": settings.azureOpenaiApiVersion };
+}

@@ -2,7 +2,10 @@ import { describe, expect, test } from "bun:test";
 import {
   generatedImageSandboxPathMatches,
   parseGeneratedImageReceipt,
+  parseGeneratedVideoReceipt,
+  parseMediaGenerationResult,
   parseRetainedGeneratedImageReference,
+  parseRetainedGeneratedVideoReference,
 } from "../src/retained-artifacts";
 import type { RetainedArtifactReference } from "../src/types";
 
@@ -82,5 +85,72 @@ describe("retained generated image wire validation", () => {
         },
       }),
     ).toBeNull();
+  });
+});
+
+describe("retained generated video wire validation", () => {
+  const videoReference = {
+    ...reference,
+    kind: "generated_video" as const,
+    contentType: "video/mp4",
+    originalBytes: 2_000_000,
+    dimensions: { width: 1280, height: 720 },
+  } satisfies RetainedArtifactReference;
+  const operationId = "66666666-6666-4666-8666-666666666666";
+  const receipt = {
+    type: "generated_video" as const,
+    schemaVersion: 1 as const,
+    operationId,
+    artifact: videoReference,
+    video: {
+      durationSeconds: 5,
+      width: 1280,
+      height: 720,
+      fps: 24,
+      hasAudio: true,
+      videoCodec: "h264" as const,
+      audioCodec: "aac" as const,
+    },
+    sandboxPath: `/workspace/generated-videos/generated-video-${artifactId}.mp4`,
+  };
+
+  test("keeps artifact identity separate while binding receipt facts and sandbox path", () => {
+    expect(parseRetainedGeneratedVideoReference(videoReference, workspaceId)).toEqual(
+      videoReference,
+    );
+    expect(parseGeneratedVideoReceipt(receipt, workspaceId)).toEqual(receipt);
+    expect(
+      parseGeneratedVideoReceipt({
+        ...receipt,
+        video: { ...receipt.video, width: 1920 },
+      }),
+    ).toBeNull();
+    expect(
+      parseGeneratedVideoReceipt({
+        ...receipt,
+        sandboxPath: `/workspace/generated-videos/${artifactId}.mp4`,
+      }),
+    ).toBeNull();
+  });
+
+  test("parses one closed terminal success or failure without provider details", () => {
+    const ready = {
+      type: "media_generation_result" as const,
+      schemaVersion: 1 as const,
+      status: "ready" as const,
+      operationId,
+      receipt,
+    };
+    expect(parseMediaGenerationResult(ready, workspaceId)).toEqual(ready);
+    expect(
+      parseMediaGenerationResult({
+        type: "media_generation_result",
+        schemaVersion: 1,
+        status: "provider_failed",
+        operationId,
+        boundedPublicReason: "The provider rejected the request.",
+      }),
+    ).not.toBeNull();
+    expect(parseMediaGenerationResult({ ...ready, providerJobId: "private" })).toBeNull();
   });
 });

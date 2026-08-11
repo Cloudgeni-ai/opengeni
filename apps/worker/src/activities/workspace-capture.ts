@@ -540,6 +540,7 @@ async function runCapture(
     repos.push({
       root,
       head: status.head,
+      headOid: status.headOid ?? null,
       detached: status.detached,
       upstream: status.upstream,
       ahead: status.ahead,
@@ -1036,7 +1037,8 @@ function statusCodeOf(f: GitFileStatus): GitFileStatusCode {
 
 /**
  * sha256 over the CHANGE SURFACE only — per-file (path, status, hash, deleted,
- * tooLarge), the working diff summary, and exact committed branch changes.
+ * tooLarge), exact HEAD identity, the working diff summary, and exact committed
+ * branch changes.
  * Deliberately excludes the tree index and file mtimes (which drift without a
  * real change) so two turns that leave the workspace in the same state produce
  * the same fingerprint (the empty-turn gate). Order-independent (sorted).
@@ -1077,7 +1079,14 @@ export function changeFingerprint(
         .sort();
       const branchDiff =
         repo.branchDiff === undefined ? null : repo.branchDiff.map(branchDiffPart).sort();
-      return JSON.stringify([repo.root, repo.head, repo.ahead, workingDiff, branchDiff]);
+      return JSON.stringify([
+        repo.root,
+        repo.head,
+        repo.headOid ?? null,
+        repo.ahead,
+        workingDiff,
+        branchDiff,
+      ]);
     })
     .sort();
   return sha256(utf8(JSON.stringify({ files: fileParts, repos: repoParts })));

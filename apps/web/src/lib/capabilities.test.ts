@@ -9,6 +9,7 @@ import {
   capabilityKindLabel,
   capabilityMonogram,
   capabilityReconnectPlan,
+  capabilityRequiresPersonalConnection,
   capabilitySourceLabel,
   connectionHealth,
   connectionToReuseForApiKey,
@@ -118,7 +119,13 @@ function socialConnection(overrides: Partial<SocialConnection> = {}): SocialConn
 describe("filterCapabilityCatalogItems", () => {
   const items = [
     item({ id: "a", kind: "mcp", name: "Linear", tags: ["issues"] }),
-    item({ id: "b", kind: "api", name: "Stripe", description: "Payments", tags: [] }),
+    item({
+      id: "b",
+      kind: "api",
+      name: "Stripe",
+      description: "Payments",
+      tags: [],
+    }),
     item({ id: "c", kind: "skill", name: "Summarize", tags: ["text"] }),
   ];
 
@@ -217,12 +224,17 @@ describe("capabilityConnectPlan", () => {
       surfaceType: "first_party_social",
       metadata: { provider: "x" },
     });
-    expect(capabilityConnectPlan(x)).toEqual({ mode: "social_oauth", provider: "x" });
+    expect(capabilityConnectPlan(x)).toEqual({
+      mode: "social_oauth",
+      provider: "x",
+    });
     expect(capabilityAuthHint(x)).toBe("OAuth");
   });
 
   test("non-MCP kinds just enable", () => {
-    expect(capabilityConnectPlan(item({ kind: "skill" }))).toEqual({ mode: "enable" });
+    expect(capabilityConnectPlan(item({ kind: "skill" }))).toEqual({
+      mode: "enable",
+    });
     expect(capabilityConnectPlan(item({ kind: "api", authKind: "api_key" }))).toEqual({
       mode: "enable",
     });
@@ -253,7 +265,47 @@ describe("capabilityConnectPlan", () => {
       mode: "oauth",
       providerDomain: "linear.app",
       mcpUrl: "https://mcp.linear.app/sse",
+      requestedScopes: [],
     });
+  });
+
+  test("OAuth-capable MCP carries its reviewed least-privilege scopes", () => {
+    const requestedScopes = [
+      "https://www.googleapis.com/auth/gmail.readonly",
+      "https://www.googleapis.com/auth/gmail.compose",
+      "https://www.googleapis.com/auth/gmail.modify",
+    ];
+    expect(
+      capabilityConnectPlan(
+        item({
+          authKind: "oauth2",
+          providerDomain: "gmailmcp.googleapis.com",
+          mcpUrl: "https://gmailmcp.googleapis.com/mcp/v1",
+          metadata: { scopesHint: requestedScopes },
+        }),
+      ),
+    ).toEqual({
+      mode: "oauth",
+      providerDomain: "gmailmcp.googleapis.com",
+      mcpUrl: "https://gmailmcp.googleapis.com/mcp/v1",
+      requestedScopes,
+    });
+  });
+
+  test("official Gmail is personal-only even before refreshed catalog metadata arrives", () => {
+    expect(
+      capabilityRequiresPersonalConnection(
+        item({
+          mcpUrl: "https://gmailmcp.googleapis.com/mcp/v1",
+          metadata: {},
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      capabilityRequiresPersonalConnection(
+        item({ metadata: { connectionOwnership: "personal_only" } }),
+      ),
+    ).toBe(true);
   });
 
   test("MCP with required headers collects an api_key with humanized labels", () => {
@@ -301,7 +353,11 @@ describe("capabilityConnectPlan", () => {
     // Imported rows carry authKind api_key but no requiredHeaders in metadata; they
     // must NOT dead-end on Enable → 422, they get the generic single-field form.
     const byKind = capabilityConnectPlan(
-      item({ kind: "mcp", authKind: "api_key", providerDomain: "supabase.com" }),
+      item({
+        kind: "mcp",
+        authKind: "api_key",
+        providerDomain: "supabase.com",
+      }),
     );
     expect(byKind).toEqual({
       mode: "api_key",
@@ -322,7 +378,11 @@ describe("capabilityConnectPlan", () => {
 
   test("provider domain falls back to the mcp url host", () => {
     const plan = capabilityConnectPlan(
-      item({ kind: "mcp", authKind: "oauth2", mcpUrl: "https://mcp.notion.com/mcp" }),
+      item({
+        kind: "mcp",
+        authKind: "oauth2",
+        mcpUrl: "https://mcp.notion.com/mcp",
+      }),
     );
     if (plan.mode !== "oauth") throw new Error("expected oauth");
     expect(plan.providerDomain).toBe("mcp.notion.com");
@@ -400,7 +460,9 @@ describe("first-party social capability state", () => {
       status: "disabled",
       updatedAt: "2026-08-03T00:00:00.000Z",
     });
-    const connected = socialConnection({ updatedAt: "2026-08-02T00:00:00.000Z" });
+    const connected = socialConnection({
+      updatedAt: "2026-08-02T00:00:00.000Z",
+    });
     expect(preferredSocialConnection([disabled, connected], "x")?.status).toBe("connected");
   });
 });
@@ -410,7 +472,11 @@ describe("capabilityAuthHint", () => {
     expect(capabilityAuthHint(item({ kind: "mcp", authKind: "oauth2" }))).toBe("OAuth");
     expect(
       capabilityAuthHint(
-        item({ kind: "mcp", authKind: "api_key", metadata: { requiredHeaders: ["X-API-Key"] } }),
+        item({
+          kind: "mcp",
+          authKind: "api_key",
+          metadata: { requiredHeaders: ["X-API-Key"] },
+        }),
       ),
     ).toBe("API key");
     expect(capabilityAuthHint(item({ kind: "skill" }))).toBeNull();
@@ -437,7 +503,12 @@ describe("capabilityFormError", () => {
 
   test("only MCP servers require an endpoint URL", () => {
     expect(
-      capabilityFormError({ ...emptyCapabilityForm(), kind: "mcp", name: "X", endpointUrl: "" }),
+      capabilityFormError({
+        ...emptyCapabilityForm(),
+        kind: "mcp",
+        name: "X",
+        endpointUrl: "",
+      }),
     ).toBe("Enter the MCP server URL.");
     expect(
       capabilityFormError({
@@ -490,7 +561,11 @@ describe("oauthResumeAction", () => {
   test("an enabled item whose returned connection matches its ref is a reconnect", () => {
     const enabled = item({
       enabled: true,
-      connectionRef: { connectionId: "conn-1", providerDomain: "linear.app", kind: "oauth2" },
+      connectionRef: {
+        connectionId: "conn-1",
+        providerDomain: "linear.app",
+        kind: "oauth2",
+      },
     });
     expect(oauthResumeAction(enabled, "conn-1")).toBe("reconnect");
   });
@@ -499,7 +574,11 @@ describe("oauthResumeAction", () => {
     // The stored ref points at a deleted connection; OAuth minted "conn-2".
     const enabled = item({
       enabled: true,
-      connectionRef: { connectionId: "conn-1", providerDomain: "linear.app", kind: "oauth2" },
+      connectionRef: {
+        connectionId: "conn-1",
+        providerDomain: "linear.app",
+        kind: "oauth2",
+      },
     });
     expect(oauthResumeAction(enabled, "conn-2")).toBe("enable");
   });
@@ -532,7 +611,11 @@ describe("normalizeProviderDomain", () => {
 });
 
 describe("connectionHealth", () => {
-  const ref = { connectionId: "conn-1", providerDomain: "linear.app", kind: "oauth2" };
+  const ref = {
+    connectionId: "conn-1",
+    providerDomain: "linear.app",
+    kind: "oauth2",
+  };
 
   test("no connection ref (headers-enabled or credential-free) is healthy 'none'", () => {
     // Headers-enabled and credential-free installations carry connectionRef null;
@@ -612,7 +695,13 @@ describe("connectionHealth", () => {
   });
 
   test("workspace bindings continue to match only their exact UUID", () => {
-    const conns = [connection({ id: "other", providerDomain: "linear.app", status: "active" })];
+    const conns = [
+      connection({
+        id: "other",
+        providerDomain: "linear.app",
+        status: "active",
+      }),
+    ];
     expect(connectionHealth(item({ enabled: true, connectionRef: ref }), conns, true)).toEqual({
       state: "attention",
       connection: null,
@@ -651,7 +740,11 @@ describe("capabilityReconnectPlan", () => {
   test("oauth2 ref → oauth reconnect; a deleted row carries a null connectionId", () => {
     const oauthItem = item({
       enabled: true,
-      connectionRef: { connectionId: "conn-1", providerDomain: "linear.app", kind: "oauth2" },
+      connectionRef: {
+        connectionId: "conn-1",
+        providerDomain: "linear.app",
+        kind: "oauth2",
+      },
     });
     expect(capabilityReconnectPlan(oauthItem, deleted)).toEqual({
       kind: "oauth",
@@ -680,7 +773,11 @@ describe("capabilityReconnectPlan", () => {
   test("nothing to repair when healthy, unverified, or without a ref", () => {
     const withRef = item({
       enabled: true,
-      connectionRef: { connectionId: "conn-1", providerDomain: "linear.app", kind: "api_key" },
+      connectionRef: {
+        connectionId: "conn-1",
+        providerDomain: "linear.app",
+        kind: "api_key",
+      },
     });
     expect(
       capabilityReconnectPlan(withRef, {
@@ -705,7 +802,11 @@ describe("resolveSheetItem (sheet binds to the live catalog row, never a snapsho
       kind: "mcp",
       authKind: "oauth2",
       enabled: true,
-      connectionRef: { connectionId: "conn-1", providerDomain: "linear.app", kind: "oauth2" },
+      connectionRef: {
+        connectionId: "conn-1",
+        providerDomain: "linear.app",
+        kind: "oauth2",
+      },
     });
     const selected = {
       id: "cap-1",
@@ -745,7 +846,12 @@ describe("resolveSheetItem (sheet binds to the live catalog row, never a snapsho
     const snap = item({ id: "new-1" });
     expect(
       resolveSheetItem(
-        { id: "new-1", registry: false, snapshotFallback: true, snapshot: snap },
+        {
+          id: "new-1",
+          registry: false,
+          snapshotFallback: true,
+          snapshot: snap,
+        },
         [],
       ),
     ).toBe(snap);
@@ -755,7 +861,12 @@ describe("resolveSheetItem (sheet binds to the live catalog row, never a snapsho
     const snap = item({ id: "gone", enabled: true });
     expect(
       resolveSheetItem(
-        { id: "gone", registry: false, snapshotFallback: false, snapshot: snap },
+        {
+          id: "gone",
+          registry: false,
+          snapshotFallback: false,
+          snapshot: snap,
+        },
         [],
       ),
     ).toBeNull();
@@ -828,7 +939,13 @@ describe("workspaceConnectionForDomain", () => {
   });
 
   test("ignores subject-scoped connections (only workspace-shared)", () => {
-    const conns = [connection({ id: "c1", providerDomain: "linear.app", subjectId: "user-1" })];
+    const conns = [
+      connection({
+        id: "c1",
+        providerDomain: "linear.app",
+        subjectId: "user-1",
+      }),
+    ];
     expect(workspaceConnectionForDomain(conns, "linear.app")).toBeNull();
   });
 
@@ -849,7 +966,11 @@ describe("connectionToReuseForApiKey", () => {
       },
     });
     const conns = [
-      connection({ id: "other", providerDomain: "api.supabase.com", subjectId: null }),
+      connection({
+        id: "other",
+        providerDomain: "api.supabase.com",
+        subjectId: null,
+      }),
     ];
     expect(connectionToReuseForApiKey(cap, conns, "api.supabase.com")).toBe("ref-conn");
   });

@@ -143,6 +143,7 @@ export function ComposerTranscriptionControl({
   });
   const { status } = transcription;
   const retrying = status === "retrying";
+  const capturing = status === "requesting-permission" || status === "recording";
 
   const cancelTranscription = transcription.cancel;
   useEffect(() => {
@@ -151,11 +152,7 @@ export function ComposerTranscriptionControl({
       cancelTranscription();
     }
   }, [cancelTranscription, status, suppressed]);
-  const active =
-    status === "requesting-permission" ||
-    status === "recording" ||
-    status === "saving" ||
-    status === "transcribing";
+  const active = capturing || status === "saving" || status === "transcribing";
   const recoverable =
     transcription.hasRecoverableRecording &&
     (retrying || status === "recovered" || status === "transcript-ready" || status === "error");
@@ -207,8 +204,15 @@ export function ComposerTranscriptionControl({
           animate={{ opacity: 1, width: "auto" }}
           exit={{ opacity: 0, width: 0 }}
           transition={{ duration: 0.36, ease: [0.22, 1, 0.36, 1] }}
-          className={cn("inline-flex min-w-0 overflow-hidden", className)}
+          className={cn(
+            "inline-flex min-w-0 overflow-hidden",
+            // Mobile capture mode reserves the footer for this control. Keep the
+            // shell itself from shrinking and clipping its trailing actions.
+            capturing && "shrink-0",
+            className,
+          )}
           data-transcription-status={status}
+          data-transcription-capturing={capturing ? "" : undefined}
         >
           <span className="inline-flex min-w-0 items-center gap-1.5">
             <AnimatePresence mode="popLayout" initial={false}>

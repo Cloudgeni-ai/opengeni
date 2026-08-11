@@ -46,7 +46,8 @@ Then open the smallest source files that answer the question:
 - Event bus/SSE: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`.
 - Worker/orchestration: `apps/worker/src/workflows/`, `apps/worker/src/activities/`.
 - Runtime/sandbox/tools: `packages/runtime/src/index.ts` is the public agent-loop facade;
-  `packages/runtime/src/model-provider.ts` owns provider clients, request policy, and model routing;
+  `packages/runtime/src/model-provider.ts` is the package-private model-provider facade over
+  cohesive client, error, request-policy, routing, and transport leaves beside it;
   `packages/runtime/src/model-input.ts` owns final model-wire shaping and context guards;
   `packages/runtime/src/run-events.ts` owns SDK stream/usage/interruption normalization.
 - Files/object storage: `apps/api/src/routes/files.ts`, `packages/storage/src/index.ts`.
@@ -134,6 +135,38 @@ Before editing, identify which layer owns the behavior:
 - MCP tools: config parsing, runtime tool preparation, API MCP servers.
 - Scheduling: scheduled task contracts/routes/core domain helpers, Temporal schedule mapping, dispatch activity.
 - UI: `apps/web` API helpers/types/components.
+
+For pull-request delivery, preserve immutable candidates across a moving base:
+
+- Before any push or exact-head rotation, inspect the leaf failed jobs and
+  steps; aggregate or dependent gates are consequences, not independent root
+  causes. Classify each leaf as candidate-caused, base-caused, transient
+  runner/dependency, or superseded/cancelled.
+- For an identical-head transient install, extraction, dependency, or runner
+  failure, rerun failed jobs only. Do not edit source or rotate the head to
+  manufacture new evidence.
+- Start from current `main`, but do not merge or rebase `main` again merely
+  because it advances while CI or review runs.
+- “Current-main compatible” requires a fresh mergeability/merge-tree and
+  material-overlap check against current `main`; prove it with a disposable
+  current-main merge and inspect the integrated tree. It does not require
+  current `main` to be present in the candidate's ancestry.
+- Base drift alone does not create a new candidate version or invalidate a
+  head-bound review. Refresh base-bound evidence on the same head when a
+  release contract requires it.
+- Change the source head only for a source defect, actual conflict, or material
+  semantic incompatibility. Create a commit only to repair that real defect or
+  conflict; never create an empty or evidence-only head rotation. After two
+  substantive repair revisions, stop for an incident/scope review instead of
+  continuing an unbounded repair loop.
+- Watcher and continuation prompts must explicitly say “verify compatibility
+  without source mutation”; never tell a source owner to “reconcile again” for
+  ordinary protected-branch movement.
+
+The executable contract is `.github/workflows/source-admission.yml` plus
+`scripts/check-source-admission.mjs`: immutable stale-event heads remain
+admissible while protected `main` advances. `AGENTS.md` owns the full repository
+delivery invariant.
 
 After edits, run the smallest relevant verification first, then broader checks if behavior crosses boundaries. Common checks are:
 
