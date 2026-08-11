@@ -362,6 +362,15 @@ describe("embedded worker lifecycle contract", () => {
       [],
       [
         {
+          name: "knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
+          owner: "opengeni_migrator",
+          can_execute: true,
+          public_execute: false,
+          security_definer: true,
+        },
+      ],
+      [
+        {
           name: "workspace_rls_visible(uuid, uuid)",
           owner: "opengeni_migrator",
           can_execute: true,
