@@ -1321,7 +1321,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (!session) {
       throw new HTTPException(404, { message: "session not found" });
     }
-    return c.json(await withEffectivePolicy(deps, workspaceId, session));
+    return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
   });
 
   // Manual rename. A user-set title is permanent: the db write is

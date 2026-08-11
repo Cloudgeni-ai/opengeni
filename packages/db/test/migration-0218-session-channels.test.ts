@@ -8,11 +8,11 @@ import { migrate } from "../src/migrate";
 
 const migrationPath = join(
   dirname(fileURLToPath(import.meta.url)),
-  "../drizzle/0215_session_channels.sql",
+  "../drizzle/0218_session_channels.sql",
 );
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
-describe("migration 0215 session channels", () => {
+describe("migration 0218 session channels", () => {
   test("creates the FORCE-RLS channels table and the detachable session filing column", async () => {
     const migration = await readFile(migrationPath, "utf8");
     expect(migration.split(/\r?\n/, 1)[0]).toBe("-- deployment-mode: rolling");
@@ -29,11 +29,11 @@ describe("migration 0215 session channels", () => {
     // Rolling safety: the sessions DDL is guarded by a bounded lock wait.
     expect(migration).toContain("SET LOCAL lock_timeout");
 
-    const blank = await acquireBlankTestDatabase("migration-0215");
+    const blank = await acquireBlankTestDatabase("migration-0218");
     if (!blank) {
       if (requireRealDatabase) {
         throw new Error(
-          "OPENGENI_REQUIRE_REAL_DB=1 but the migration 0215 PostgreSQL harness is unavailable",
+          "OPENGENI_REQUIRE_REAL_DB=1 but the migration 0218 PostgreSQL harness is unavailable",
         );
       }
       return;
