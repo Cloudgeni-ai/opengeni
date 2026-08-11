@@ -14,7 +14,9 @@ use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream,
 };
 
-use crate::{backoff::ChannelBackoff, channel::RelayChannel, error::StreamError};
+use crate::{
+    backoff::ChannelBackoff, channel::RelayChannel, codec::RelayMessage, error::StreamError,
+};
 
 const BROWSER_PROTOCOL: &str = "opengeni.browser.v1";
 const COMPUTER_PROTOCOL: &str = "opengeni.computer.v1";
@@ -102,10 +104,36 @@ pub async fn run(
     mut ready: Option<oneshot::Sender<()>>,
 ) -> Result<(), StreamError> {
     let mut backoff = ChannelBackoff::standard();
-    while let Some(message) = socket.next().await {
-        match message
-            .map_err(|error| StreamError::Transport(format!("browser frame socket: {error}")))?
-        {
+    let mut receive_relay = true;
+    loop {
+        enum Event {
+            Source(Option<Result<Message, tokio_tungstenite::tungstenite::Error>>),
+            Relay(Result<Option<RelayMessage>, StreamError>),
+        }
+        let event = if receive_relay {
+            tokio::select! {
+                source = socket.next() => Event::Source(source),
+                relay = channel.recv() => Event::Relay(relay),
+            }
+        } else {
+            Event::Source(socket.next().await)
+        };
+        let message = match event {
+            Event::Relay(Ok(Some(RelayMessage::Close(_)))) => return Ok(()),
+            Event::Relay(Ok(Some(_))) => continue,
+            // A transport drop is still recovered by the established outbound
+            // reconnect path on the next local frame. Avoid polling the dead
+            // inbound half until that send succeeds.
+            Event::Relay(Ok(None) | Err(_)) => {
+                receive_relay = false;
+                continue;
+            }
+            Event::Source(Some(message)) => message.map_err(|error| {
+                StreamError::Transport(format!("browser frame socket: {error}"))
+            })?,
+            Event::Source(None) => return Ok(()),
+        };
+        match message {
             Message::Binary(frame) => {
                 if frame.is_empty() || frame.len() > MAX_BROWSER_FRAME_BYTES {
                     return Err(StreamError::Protocol(
@@ -113,6 +141,7 @@ pub async fn run(
                     ));
                 }
                 send_with_reconnect(channel, Bytes::from(frame), &mut backoff).await?;
+                receive_relay = true;
                 if let Some(sender) = ready.take() {
                     let _ = sender.send(());
                 }
@@ -121,7 +150,17 @@ pub async fn run(
                 .send(Message::Pong(payload))
                 .await
                 .map_err(|error| StreamError::Transport(format!("browser frame pong: {error}")))?,
-            Message::Close(_) => return Ok(()),
+            Message::Close(frame) => {
+                if ready.is_some() {
+                    let reason = frame
+                        .as_ref()
+                        .map_or("without a reason", |frame| frame.reason.as_ref());
+                    return Err(StreamError::Protocol(format!(
+                        "browserd frame source closed before its first frame: {reason}"
+                    )));
+                }
+                return Ok(());
+            }
             Message::Pong(_) => {}
             Message::Text(_) | Message::Frame(_) => {
                 return Err(StreamError::Protocol(
@@ -130,7 +169,6 @@ pub async fn run(
             }
         }
     }
-    Ok(())
 }
 
 async fn send_with_reconnect(

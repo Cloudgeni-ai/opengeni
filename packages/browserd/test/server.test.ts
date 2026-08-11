@@ -189,6 +189,51 @@ describe("BrowserControlServer", () => {
     );
   });
 
+  test("binds attached Chrome to its exact ComputerSession without launching another desktop", async () => {
+    const computerSessionId = randomUUID();
+    let browserContext: BrowserSupervisorDriverContext | null = null;
+    await withServer(
+      async ({ server, reference }) => {
+        const created = await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference, {
+            headed: true,
+            transport: {
+              kind: "attached_chrome",
+              deviceId: randomUUID(),
+              connectionGeneration: "chrome-generation:1",
+              browserName: "Google Chrome",
+              browserVersion: "151.0.7922.108",
+            },
+            linkedComputer: {
+              computerSessionId,
+              controllerGeneration: "computer-controller-1",
+            },
+          }),
+        });
+        expect(created.status).toBe(201);
+        expect(browserContext?.launchEnvironment).toBeUndefined();
+        expect(browserContext?.linkedComputer).toEqual({
+          computerSessionId,
+          controllerGeneration: "computer-controller-1",
+        });
+      },
+      {
+        linkedComputer: {
+          computerSessionId,
+          controllerGeneration: "computer-controller-1",
+          environment: {
+            DISPLAY: ":101",
+          },
+        },
+        onBrowserContext: (context) => {
+          browserContext = context;
+        },
+      },
+    );
+  });
+
   test("enforces admin/control/view authority, origin policy, and monotonic rotation", async () => {
     await withServer(async ({ server, reference }) => {
       expect(
@@ -1111,6 +1156,13 @@ function createBody(
     networkRoute: ReturnType<typeof proxyRoute> | ReturnType<typeof managedRoute>;
     transport:
       | { kind: "managed"; engine: "chromium" | "lightpanda" }
+      | {
+          kind: "attached_chrome";
+          deviceId: string;
+          connectionGeneration: string;
+          browserName: string;
+          browserVersion: string;
+        }
       | {
           kind: "external_provider";
           providerId: "browserbase" | "kernel";

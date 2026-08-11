@@ -60,6 +60,9 @@ import { OpStreamUnavailableError, type OpStreamTransport } from "./op-transport
 
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
+// Keep one RPC reply comfortably below the agent's negotiated 1 MiB payload
+// ceiling. `fsRead` is ranged, so larger logical reads are assembled here.
+const SELFHOSTED_FS_READ_CHUNK_BYTES = 512 * 1024;
 
 /**
  * The SDK's VIRTUAL sandbox root. The `@openai/agents` agent loop presents the
@@ -903,18 +906,38 @@ export class SelfhostedSession {
 
   /** Channel-A `readFile`: read a file off the machine (binary-safe). */
   async readFile(args: { path: string; runAs?: string; maxBytes?: number }): Promise<Uint8Array> {
-    const result = await this.call({
-      $case: "fsRead",
-      fsRead: {
-        path: toMachinePath(args.path, this.workingDir),
-        offset: "0",
-        length: args.maxBytes ? String(args.maxBytes) : "0",
-      },
-    });
-    if (result.$case !== "fsRead") {
-      throw new Error(`selfhosted readFile: unexpected result ${result.$case}`);
+    const path = toMachinePath(args.path, this.workingDir);
+    const requestedBytes = args.maxBytes ?? Number.POSITIVE_INFINITY;
+    const chunks: Uint8Array[] = [];
+    let offset = 0;
+    let totalSize = Number.POSITIVE_INFINITY;
+
+    while (offset < requestedBytes && offset < totalSize) {
+      const remaining = Math.min(requestedBytes - offset, SELFHOSTED_FS_READ_CHUNK_BYTES);
+      const result = await this.call({
+        $case: "fsRead",
+        fsRead: {
+          path,
+          offset: String(offset),
+          length: String(remaining),
+        },
+      });
+      if (result.$case !== "fsRead") {
+        throw new Error(`selfhosted readFile: unexpected result ${result.$case}`);
+      }
+      totalSize = safeWireSize(result.fsRead.totalSize, "selfhosted file size");
+      if (result.fsRead.content.byteLength === 0) break;
+      chunks.push(result.fsRead.content);
+      offset += result.fsRead.content.byteLength;
     }
-    return result.fsRead.content;
+
+    const content = new Uint8Array(offset);
+    let cursor = 0;
+    for (const chunk of chunks) {
+      content.set(chunk, cursor);
+      cursor += chunk.byteLength;
+    }
+    return content;
   }
 
   /** Write a file onto the machine (the fs surface the descriptor advertises). */
@@ -1424,6 +1447,14 @@ function readAgentId(state: unknown): string | undefined {
     }
   }
   return undefined;
+}
+
+function safeWireSize(value: string, label: string): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new Error(`${label} is outside the supported range`);
+  }
+  return parsed;
 }
 
 function execResultToChannelA(res: ExecResponse, execDeadlineMs: number): SelfhostedExecResult {

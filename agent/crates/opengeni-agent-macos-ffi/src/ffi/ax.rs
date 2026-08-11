@@ -1501,7 +1501,7 @@ fn correlate_shareable_window<'a>(
     windows: &[&'a ShareableWindow],
     used: &HashSet<u32>,
 ) -> Option<&'a ShareableWindow> {
-    let mut candidates: Vec<&ShareableWindow> = windows
+    let candidates: Vec<&ShareableWindow> = windows
         .iter()
         .copied()
         .filter(|window| {
@@ -1510,12 +1510,65 @@ fn correlate_shareable_window<'a>(
                 && rects_match(fingerprint.bounds, Some(window.bounds), 2.0)
         })
         .collect();
-    if candidates.len() > 1 {
-        if let Some(title) = fingerprint.title.as_deref() {
-            candidates.retain(|window| window.title == title);
-        }
+    if candidates.len() == 1 {
+        return Some(candidates[0]);
     }
-    (candidates.len() == 1).then(|| candidates[0])
+    let title = fingerprint.title.as_deref()?.trim();
+    let best_score = candidates
+        .iter()
+        .map(|window| window_title_match_score(title, &window.title))
+        .max()?;
+    if best_score == 0 {
+        return None;
+    }
+    let mut best = candidates
+        .into_iter()
+        .filter(|window| window_title_match_score(title, &window.title) == best_score);
+    let matched = best.next()?;
+    best.next().is_none().then_some(matched)
+}
+
+/// AX and ScreenCaptureKit do not promise identical window titles. Chrome, for
+/// example, exposes `Page - Google Chrome - Profile` through AX while SCK
+/// commonly exposes only `Page`. Correlate that documented shape without ever
+/// picking arbitrarily when PID + geometry still leave a tie.
+fn window_title_match_score(ax_title: &str, capture_title: &str) -> u8 {
+    let ax_title = ax_title.trim();
+    let capture_title = capture_title.trim();
+    if ax_title.is_empty() || capture_title.is_empty() {
+        return 0;
+    }
+    if ax_title == capture_title {
+        return 4;
+    }
+    if title_has_app_suffix(ax_title, capture_title)
+        || title_has_app_suffix(capture_title, ax_title)
+    {
+        return 3;
+    }
+    if ax_title.eq_ignore_ascii_case(capture_title) {
+        return 2;
+    }
+    // ScreenCaptureKit truncates some Chrome titles in the middle. A long,
+    // unique leading run still safely distinguishes same-sized windows; the
+    // caller rejects equal-score ties rather than guessing.
+    u8::from(
+        ax_title
+            .chars()
+            .zip(capture_title.chars())
+            .take_while(|(left, right)| left == right)
+            .count()
+            >= 16,
+    )
+}
+
+fn title_has_app_suffix(longer: &str, shorter: &str) -> bool {
+    let Some(suffix) = longer.strip_prefix(shorter) else {
+        return false;
+    };
+    [" - ", " — ", " · "]
+        .iter()
+        .any(|separator| suffix.starts_with(separator))
 }
 
 fn validate_running_application(target: &MacTargetInfo) -> Result<(), MacFfiError> {

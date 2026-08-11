@@ -359,6 +359,33 @@ else
   export VITE_API_BASE_URL="$(rewrite_loopback_port "$VITE_API_BASE_URL" "$OPENGENI_API_PORT")"
 fi
 
+# Connected-machine terminal/desktop/browser streams need the separate relay
+# data plane. Production runs it as its own workload; local development must do
+# the same whenever the configured relay URL points back at this machine. Until
+# now dev-stack started the control plane but silently omitted the relay, so an
+# enrolled machine looked online while every live surface failed at :8280.
+start_local_relay=0
+if [ "${OPENGENI_SANDBOX_SELFHOSTED_ENABLED:-false}" = "true" ] &&
+  [ -n "${OPENGENI_SELFHOSTED_RELAY_URL:-}" ]; then
+  IFS=$'\t' read -r relay_hostname relay_port < <(
+    OPENGENI_LOCAL_RELAY_URL="$OPENGENI_SELFHOSTED_RELAY_URL" bun -e '
+      const url = new URL(Bun.env.OPENGENI_LOCAL_RELAY_URL);
+      const port = url.port || (url.protocol === "wss:" ? "443" : "80");
+      process.stdout.write(`${url.hostname}\t${port}\n`);
+    '
+  )
+  if [ "$relay_hostname" = "127.0.0.1" ] || [ "$relay_hostname" = "localhost" ]; then
+    OPENGENI_RELAY_BIND="127.0.0.1:${relay_port}"
+    OPENGENI_RELAY_TOKEN_SECRET="${OPENGENI_SELFHOSTED_RELAY_TOKEN_SECRET:-${OPENGENI_STREAM_TOKEN_SECRET:-}}"
+    if [ -z "$OPENGENI_RELAY_TOKEN_SECRET" ]; then
+      echo "Connected-machine local relay requires OPENGENI_SELFHOSTED_RELAY_TOKEN_SECRET or OPENGENI_STREAM_TOKEN_SECRET." >&2
+      exit 1
+    fi
+    export OPENGENI_RELAY_BIND OPENGENI_RELAY_TOKEN_SECRET
+    start_local_relay=1
+  fi
+fi
+
 # A clean checkout must establish the canonical workspace package links before
 # the generated facade is verified. The facade never searches alternate roots.
 bun install --frozen-lockfile
@@ -429,6 +456,9 @@ fi
   printf 'OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT=%s\n' "${OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT}"
   printf 'OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT=%s\n' "${OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT}"
   printf 'OPENGENI_WEB_PORT=%s\n' "${OPENGENI_WEB_PORT}"
+  if [ "$start_local_relay" = "1" ]; then
+    printf 'OPENGENI_RELAY_BIND=%s\n' "${OPENGENI_RELAY_BIND}"
+  fi
   printf 'OPENGENI_DATABASE_URL=%s\n' "${OPENGENI_DATABASE_URL}"
   printf 'OPENGENI_MIGRATIONS_DATABASE_URL=%s\n' "${OPENGENI_MIGRATIONS_DATABASE_URL}"
   printf 'OPENGENI_NATS_URL=%s\n' "${OPENGENI_NATS_URL}"
@@ -490,6 +520,11 @@ cleanup() {
   fi
 }
 trap cleanup EXIT INT TERM
+
+if [ "$start_local_relay" = "1" ]; then
+  (cd agent && cargo run --quiet -p opengeni-relay) &
+  pids+=("$!")
+fi
 
 (cd apps/api && bun run dev) &
 pids+=("$!")

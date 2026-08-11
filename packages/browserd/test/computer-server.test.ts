@@ -347,6 +347,7 @@ function fixtureEnvironmentAllocator(): ComputerEnvironmentAllocator {
       return {
         seatId: "seat-1",
         displayId: ":101",
+        rfbPort: null,
         environment: { PATH: process.env.PATH ?? "/usr/bin" },
         async close() {},
       };

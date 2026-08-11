@@ -230,6 +230,151 @@ test("installs route emulation on about:blank before the first external navigati
   }
 });
 
+test("settles a headed background target before returning its first observation", async () => {
+  const browserSessionId = randomUUID();
+  const controllerGeneration = "controller-background";
+  let created = false;
+  let createdTargetReads = 0;
+  let createdFrameReads = 0;
+  const jpeg = Uint8Array.from([
+    0xff, 0xd8, 0xff, 0xc0, 0, 11, 8, 0, 2, 0, 3, 1, 1, 0x11, 0, 0xff, 0xd9,
+  ]);
+  const calls: Array<{ method: string; params?: Readonly<Record<string, unknown>> }> = [];
+  const runner: BrowserCommandRunner = {
+    async run<T>(args: readonly string[]): Promise<T> {
+      if (args[0] === "open") return { targetId: "target-1", url: args[1] } as T;
+      if (args[0] === "get" && args[1] === "cdp-url") {
+        return { cdpUrl: "ws://127.0.0.1:9222/devtools/browser/test" } as T;
+      }
+      if (args[0] === "close") return { closed: true } as T;
+      throw new Error(`unexpected runner command: ${args.join(" ")}`);
+    },
+  };
+  const connection: BrowserCdpConnection = {
+    async send<T>(
+      method: string,
+      params?: Readonly<Record<string, unknown>>,
+      options?: { sessionId?: string },
+    ): Promise<T> {
+      calls.push({ method, ...(params ? { params } : {}) });
+      if (method === "Browser.getVersion") {
+        return { product: "Chrome/151.0.0.0", userAgent: "fixture" } as T;
+      }
+      if (method === "Target.createTarget") {
+        expect(params).toEqual({ url: "https://second.example.test/", background: true });
+        created = true;
+        return { targetId: "target-2" } as T;
+      }
+      if (method === "Target.getTargets") {
+        if (created) createdTargetReads += 1;
+        return {
+          targetInfos: [
+            {
+              targetId: "target-1",
+              type: "page",
+              title: "First",
+              url: "https://first.example.test/",
+              attached: true,
+            },
+            ...(created
+              ? [
+                  {
+                    targetId: "target-2",
+                    type: "page",
+                    title: createdTargetReads >= 2 ? "Second" : "",
+                    url: createdTargetReads >= 2 ? "https://second.example.test/" : "",
+                    attached: createdTargetReads >= 2,
+                  },
+                ]
+              : []),
+          ],
+        } as T;
+      }
+      if (method === "Target.attachToTarget") {
+        return {
+          sessionId: params?.targetId === "target-2" ? "session-2" : "session-1",
+        } as T;
+      }
+      if (method === "Page.getFrameTree") {
+        const second = options?.sessionId === "session-2";
+        if (second) createdFrameReads += 1;
+        return {
+          frameTree: {
+            frame: {
+              id: second ? "frame-2" : "frame-1",
+              loaderId: second ? "loader-2" : "loader-1",
+              url: second
+                ? createdFrameReads >= 3
+                  ? "https://second.example.test/"
+                  : ""
+                : "https://first.example.test/",
+            },
+          },
+        } as T;
+      }
+      if (method === "Runtime.evaluate") {
+        return { result: { value: "complete" } } as T;
+      }
+      if (method === "Page.getLayoutMetrics") {
+        return {
+          cssVisualViewport: { pageX: 0, pageY: 0, clientWidth: 3, clientHeight: 2 },
+          cssContentSize: { x: 0, y: 0, width: 3, height: 2 },
+        } as T;
+      }
+      if (method === "Page.captureScreenshot") {
+        return { data: Buffer.from(jpeg).toString("base64") } as T;
+      }
+      if (method === "Accessibility.getFullAXTree") return { nodes: [] } as T;
+      return {} as T;
+    },
+    on() {
+      return () => undefined;
+    },
+    async waitForEvent(): Promise<CdpEvent> {
+      return { method: "Page.loadEventFired", params: {}, sessionId: "session-2" };
+    },
+    close() {},
+  };
+  const driver = new AgentBrowserDriver({
+    browserSessionId,
+    controllerGeneration,
+    runner,
+    connect: async () => connection,
+  });
+  try {
+    await driver.start("https://first.example.test/");
+    const opened = await driver.openTarget("https://second.example.test/");
+    expect(opened.target).toMatchObject({
+      id: "target-2",
+      title: "Second",
+      url: "https://second.example.test/",
+      selected: true,
+    });
+    expect(createdTargetReads).toBeGreaterThanOrEqual(2);
+    expect(createdFrameReads).toBeGreaterThanOrEqual(3);
+    expect(calls.some((call) => call.method === "Target.activateTarget")).toBe(false);
+    const frames = await driver.subscribeFrames(opened.target.id, {
+      format: "jpeg",
+      maxWidth: 640,
+      maxHeight: 480,
+    });
+    const streamed = await frames[Symbol.asyncIterator]().next();
+    expect(streamed).toMatchObject({
+      done: false,
+      value: {
+        targetId: "target-2",
+        sequence: 1,
+        width: 3,
+        height: 2,
+      },
+    });
+    expect(calls.some((call) => call.method === "Page.captureScreenshot")).toBe(true);
+    await frames.close();
+  } finally {
+    await driver.close();
+  }
+});
+
 test("rotates physical generations exactly once after a provider profile reconfiguration", async () => {
   const browserSessionId = randomUUID();
   const controllerGeneration = "controller-1";

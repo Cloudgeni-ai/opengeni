@@ -2130,7 +2130,7 @@ export class MockOpenGeniClient implements SessionClientLike {
     _workspaceId: string,
     browserSessionId: string,
     request: BrowserOpenTargetRequest = {},
-  ): Promise<BrowserTarget> {
+  ): Promise<BrowserObservation> {
     const targets = (this.browserTargets.get(browserSessionId) ?? []).map((target) => ({
       ...target,
       selected: false,
@@ -2142,23 +2142,21 @@ export class MockOpenGeniClient implements SessionClientLike {
     });
     targets.push(target);
     this.browserTargets.set(browserSessionId, targets);
-    return target;
+    return await this.observeBrowserTarget(WORKSPACE_ID, browserSessionId, target.id);
   }
 
   async selectBrowserTarget(
     _workspaceId: string,
     browserSessionId: string,
     targetId: string,
-  ): Promise<BrowserTarget> {
-    let selected: BrowserTarget | null = null;
+  ): Promise<BrowserObservation> {
     const targets = (this.browserTargets.get(browserSessionId) ?? []).map((target) => {
-      const next = { ...target, selected: target.id === targetId };
-      if (next.selected) selected = next;
-      return next;
+      return { ...target, selected: target.id === targetId };
     });
+    const selected = targets.find((target) => target.selected);
     if (!selected) throw new Error("Browser target not found");
     this.browserTargets.set(browserSessionId, targets);
-    return selected;
+    return await this.observeBrowserTarget(WORKSPACE_ID, browserSessionId, selected.id);
   }
 
   async closeBrowserTarget(

@@ -42,7 +42,7 @@ export type BrowserInteractionDriver = {
   target(targetId: string): Promise<BrowserTargetValue | null>;
   observe(targetId: string): Promise<BrowserObservationValue>;
   validate?(command: BrowserActionCommandValue, target: BrowserTargetValue): Promise<void> | void;
-  dispatch(command: BrowserActionCommandValue): Promise<BrowserObservationValue>;
+  dispatch(command: BrowserActionCommandValue): Promise<BrowserObservationValue | null>;
 };
 
 export type BrowserInteractionAuthority = {

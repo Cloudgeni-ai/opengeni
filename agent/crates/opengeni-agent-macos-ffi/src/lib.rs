@@ -97,6 +97,46 @@ pub struct MacWindowFrame {
     pub frame: RgbaFrame,
 }
 
+/// One retained, bounded ScreenCaptureKit live-frame producer.
+///
+/// The native stream owns a dedicated thread and latest-frame slot. Dropping it
+/// synchronously stops ScreenCaptureKit and joins that owner thread.
+#[cfg(target_os = "macos")]
+pub struct MacFrameStream {
+    inner: ffi::CaptureStream,
+}
+
+/// Non-macOS placeholder preserving the cross-platform public API.
+#[cfg(not(target_os = "macos"))]
+pub struct MacFrameStream;
+
+impl MacFrameStream {
+    /// Waits for and returns the next fresh bounded RGBA frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed capture failure when the stream stops or produces no
+    /// fresh frame within its bounded deadline.
+    pub fn next_frame(&self) -> Result<RgbaFrame, MacFfiError> {
+        #[cfg(target_os = "macos")]
+        {
+            self.inner.next_frame()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(MacFfiError::Unsupported(
+                "live display capture is only available on macOS".to_string(),
+            ))
+        }
+    }
+
+    /// Stops the native producer. Idempotent.
+    pub fn stop(&self) {
+        #[cfg(target_os = "macos")]
+        self.inner.stop();
+    }
+}
+
 /// A macOS Accessibility target class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MacTargetKind {
@@ -573,6 +613,66 @@ pub fn capture_display_rgba(display_id: &str) -> Result<RgbaFrame, MacFfiError> 
     }
 }
 
+/// Captures one display while asking ScreenCaptureKit to scale directly into a
+/// bounded live-view surface instead of copying a full Retina framebuffer.
+///
+/// # Errors
+///
+/// Returns the same typed failures as [`capture_display_rgba`].
+pub fn capture_display_rgba_sized(
+    display_id: &str,
+    max_width: u32,
+    max_height: u32,
+) -> Result<RgbaFrame, MacFfiError> {
+    #[cfg(target_os = "macos")]
+    {
+        let display_id = display_id.parse::<u32>().map_err(|_| {
+            MacFfiError::Invalid("macOS display id is not a CGDirectDisplayID".to_string())
+        })?;
+        ffi::capture_display_rgba_sized(display_id, Some((max_width, max_height)))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (display_id, max_width, max_height);
+        Err(MacFfiError::Unsupported(
+            "display capture is only available on macOS".to_string(),
+        ))
+    }
+}
+
+/// Starts one retained ScreenCaptureKit stream for an exact display.
+///
+/// # Errors
+///
+/// Returns permission denied, target stale, timeout, or a native stream failure.
+pub fn start_display_frame_stream(
+    display_id: &str,
+    max_width: u32,
+    max_height: u32,
+) -> Result<MacFrameStream, MacFfiError> {
+    #[cfg(target_os = "macos")]
+    {
+        let display_id = display_id.parse::<u32>().map_err(|_| {
+            MacFfiError::Invalid("macOS display id is not a CGDirectDisplayID".to_string())
+        })?;
+        if !ffi::screen_capture_granted() {
+            return Err(MacFfiError::PermissionDenied(
+                "Screen Recording permission is required for live display capture".to_string(),
+            ));
+        }
+        Ok(MacFrameStream {
+            inner: ffi::CaptureStream::start_display(display_id, (max_width, max_height))?,
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (display_id, max_width, max_height);
+        Err(MacFfiError::Unsupported(
+            "live display capture is only available on macOS".to_string(),
+        ))
+    }
+}
+
 /// Enumerates running GUI applications and their AX/SCK windows without
 /// retaining native handles.
 ///
@@ -611,6 +711,69 @@ pub fn capture_window_rgba(
         let _ = (window_id, expected_process_id);
         Err(MacFfiError::Unsupported(
             "macOS window capture is only available on macOS".to_string(),
+        ))
+    }
+}
+
+/// Captures one exact window into a bounded live-view surface.
+///
+/// # Errors
+///
+/// Returns the same typed failures as [`capture_window_rgba`].
+pub fn capture_window_rgba_sized(
+    window_id: u32,
+    expected_process_id: u32,
+    max_width: u32,
+    max_height: u32,
+) -> Result<MacWindowFrame, MacFfiError> {
+    #[cfg(target_os = "macos")]
+    {
+        ffi::capture_window_rgba_sized(
+            window_id,
+            expected_process_id,
+            Some((max_width, max_height)),
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (window_id, expected_process_id, max_width, max_height);
+        Err(MacFfiError::Unsupported(
+            "macOS window capture is only available on macOS".to_string(),
+        ))
+    }
+}
+
+/// Starts one retained ScreenCaptureKit stream for an exact window.
+///
+/// # Errors
+///
+/// Returns permission denied, target stale, timeout, or a native stream failure.
+pub fn start_window_frame_stream(
+    window_id: u32,
+    expected_process_id: u32,
+    max_width: u32,
+    max_height: u32,
+) -> Result<MacFrameStream, MacFfiError> {
+    #[cfg(target_os = "macos")]
+    {
+        if !ffi::screen_capture_granted() {
+            return Err(MacFfiError::PermissionDenied(
+                "Screen Recording permission is required for live window capture".to_string(),
+            ));
+        }
+        Ok(MacFrameStream {
+            inner: ffi::CaptureStream::start_window(
+                window_id,
+                expected_process_id,
+                (max_width, max_height),
+            )?,
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (window_id, expected_process_id, max_width, max_height);
+        Err(MacFfiError::Unsupported(
+            "live window capture is only available on macOS".to_string(),
         ))
     }
 }
@@ -743,6 +906,31 @@ pub fn inject_window(
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (input, logical_bounds, frame_width, frame_height);
+        Err(MacFfiError::Unsupported(
+            "macOS window input is only available on macOS".to_string(),
+        ))
+    }
+}
+
+/// Injects one atomic batch of frame-local events into an already-frontmost
+/// window. This function never activates or focuses an application.
+///
+/// # Errors
+///
+/// Returns [`MacFfiError`] if geometry is invalid or the batch cannot be posted.
+pub fn inject_window_batch(
+    inputs: &[InputEvent],
+    logical_bounds: MacRect,
+    frame_width: u32,
+    frame_height: u32,
+) -> Result<(), MacFfiError> {
+    #[cfg(target_os = "macos")]
+    {
+        ffi::inject_window_batch(inputs, logical_bounds, frame_width, frame_height)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (inputs, logical_bounds, frame_width, frame_height);
         Err(MacFfiError::Unsupported(
             "macOS window input is only available on macOS".to_string(),
         ))

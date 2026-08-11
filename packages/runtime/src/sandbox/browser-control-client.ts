@@ -81,6 +81,13 @@ const BROWSER_STATE_TRANSFER_TIMEOUT_MS = 20 * 60_000;
 const PRIVATE_READ_CHUNK_BYTES = 512 * 1024;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 
+// Connected-machine browserd binds an OS-assigned loopback port. The agent
+// owns that endpoint, so the API must never fall back to the image port merely
+// because a fresh request constructed a fresh client. Cache the negotiated
+// endpoint by its physical authority fence; a transport failure invalidates it
+// and performs one idempotent ensure/retry below.
+const nativeControllerPorts = new Map<string, number>();
+
 type ExecResultLike = {
   output?: string;
   stdout?: string;
@@ -343,6 +350,7 @@ export async function provisionBrowserControlClient(
       allowedOrigins: [...(input.allowedOrigins ?? [])],
     });
     const port = boundedPort(ensured.port);
+    nativeControllerPorts.set(nativeControllerKey(input.nativeAuthority), port);
     return {
       client: new BrowserControlClient(session, {
         adminToken,
@@ -723,6 +731,26 @@ export class BrowserControlClient {
     return buildStreamUrl({ ...endpoint, path });
   }
 
+  async computerRfbStreamUrl(
+    reference: PlacementComputerSessionReference,
+    targetId: string,
+  ): Promise<string> {
+    const binding = parseComputerReference(reference);
+    if (!this.session.resolveExposedPort) {
+      throw new BrowserControlUnsupportedError(
+        "computer placement cannot expose its live RFB port",
+      );
+    }
+    const endpoint = await this.session.resolveExposedPort(this.port);
+    if ((endpoint.path ?? "/") !== "/") {
+      throw new BrowserControlUnsupportedError(
+        "computer placement requires a native HTTP/WebSocket relay",
+      );
+    }
+    const path = `/v1/computer-sessions/${binding.computerSessionId}/targets/${encodeURIComponent(requireOpaqueId(targetId, "computer target id"))}/rfb`;
+    return buildStreamUrl({ ...endpoint, path });
+  }
+
   /** Open the browser frame source through the connected-machine relay adapter.
    * Returns null on image-backed placements, which expose browserd directly. */
   async openRelayedFrameStream(input: {
@@ -814,8 +842,8 @@ export class BrowserControlClient {
       expiresAtMs: String(expiresAtMs),
       format: stream.format ?? "jpeg",
       quality: boundedInteger(stream.quality ?? 70, 1, 100, "computer frame quality"),
-      maxWidth: boundedInteger(stream.maxWidth ?? 1_440, 1, 4_096, "computer frame width"),
-      maxHeight: boundedInteger(stream.maxHeight ?? 900, 1, 4_096, "computer frame height"),
+      maxWidth: boundedInteger(stream.maxWidth ?? 4_096, 1, 4_096, "computer frame width"),
+      maxHeight: boundedInteger(stream.maxHeight ?? 4_096, 1, 4_096, "computer frame height"),
       everyNthFrame: boundedInteger(
         stream.everyNthFrame ?? 1,
         1,
@@ -841,7 +869,32 @@ export class BrowserControlClient {
     token: string;
     body?: unknown;
     timeoutMs?: number;
-  }): Promise<unknown> {
+  }, retryNativeEndpoint = true): Promise<unknown> {
+    // Image-backed placements expose browserd through the provider tunnel. Use
+    // that actual data plane for control too: one authenticated HTTP request,
+    // instead of materializing files and starting curl through the sandbox exec
+    // API for every click or key. Connected machines keep their agent transport.
+    if (this.session.resolveExposedPort && !this.session.ensureBrowserControl) {
+      try {
+        const endpoint = await this.session.resolveExposedPort(this.port);
+        if ((endpoint.path ?? "/") === "/") {
+          return await requestExposedController(endpoint, input, this.timeoutMs);
+        }
+      } catch (error) {
+        if (
+          error instanceof BrowserControlRequestError ||
+          error instanceof BrowserControlProtocolError ||
+          error instanceof RangeError
+        ) {
+          throw error;
+        }
+        // Port discovery or its transport can fail transiently. The existing
+        // idempotent operation journal makes the private exec fallback safe even
+        // if a mutation reached browserd before its response connection failed.
+      }
+    }
+
+    const controllerPort = await this.controllerPort();
     const directory = `${CLIENT_ROOT}/${randomUUID()}`;
     const configPath = `${directory}/curl.conf`;
     const requestPath = `${directory}/request.json`;
@@ -850,7 +903,7 @@ export class BrowserControlClient {
     const exitPath = `${directory}/curl-exit`;
     const token = requireToken(input.token, "browser controller token");
     const timeoutMs = boundedTimeout(input.timeoutMs ?? this.timeoutMs);
-    const url = localControllerUrl(this.port, input.path);
+    const url = localControllerUrl(controllerPort, input.path);
     const body = input.body === undefined ? undefined : JSON.stringify(input.body);
     try {
       await runChecked(
@@ -913,9 +966,20 @@ export class BrowserControlClient {
       if (
         error instanceof BrowserControlRequestError ||
         error instanceof BrowserControlProtocolError ||
-        error instanceof BrowserControlTransportError ||
         error instanceof RangeError
       ) {
+        throw error;
+      }
+      if (error instanceof BrowserControlTransportError) {
+        if (
+          retryNativeEndpoint &&
+          this.nativeAuthority &&
+          this.session.ensureBrowserControl
+        ) {
+          nativeControllerPorts.delete(nativeControllerKey(this.nativeAuthority));
+          await this.controllerPort();
+          return await this.requestJson(input, false);
+        }
         throw error;
       }
       throw new BrowserControlTransportError("browser controller request transport failed", {
@@ -926,6 +990,29 @@ export class BrowserControlClient {
       await this.session.finalizeOpStreamOps?.().catch(() => undefined);
     }
   }
+
+  private async controllerPort(): Promise<number> {
+    if (!this.nativeAuthority || !this.session.ensureBrowserControl) return this.port;
+    const key = nativeControllerKey(this.nativeAuthority);
+    const cached = nativeControllerPorts.get(key);
+    if (cached !== undefined) return cached;
+    const ensured = await this.session.ensureBrowserControl({
+      scopeId: this.nativeAuthority.scopeId,
+      scopeGeneration: this.nativeAuthority.scopeGeneration,
+      adminToken: this.adminToken,
+      allowedOrigins: [],
+    });
+    const port = boundedPort(ensured.port);
+    nativeControllerPorts.set(key, port);
+    return port;
+  }
+}
+
+function nativeControllerKey(authority: {
+  scopeId: string;
+  scopeGeneration: string;
+}): string {
+  return `${authority.scopeId}\u0000${authority.scopeGeneration}`;
 }
 
 export class BrowserControlSessionClient {
@@ -1353,6 +1440,42 @@ function curlConfig(input: {
     `write-out = ${curlConfigQuote("%{http_code}")}`,
     "",
   ].join("\n");
+}
+
+async function requestExposedController(
+  endpoint: ExposedPortEndpoint,
+  input: {
+    method: "GET" | "POST" | "PUT" | "DELETE";
+    path: string;
+    token: string;
+    body?: unknown;
+    timeoutMs?: number;
+  },
+  defaultTimeoutMs: number,
+): Promise<unknown> {
+  const token = requireToken(input.token, "browser controller token");
+  const timeoutMs = boundedTimeout(input.timeoutMs ?? defaultTimeoutMs);
+  const streamUrl = new URL(buildStreamUrl({ ...endpoint, path: input.path }));
+  streamUrl.protocol = streamUrl.protocol === "wss:" ? "https:" : "http:";
+  const body = input.body === undefined ? undefined : JSON.stringify(input.body);
+  if (body !== undefined && Buffer.byteLength(body) > BROWSER_CONTROL_MAX_JSON_BYTES) {
+    throw new RangeError("browser controller request body is too large");
+  }
+  const response = await fetch(streamUrl, {
+    method: input.method,
+    headers: {
+      authorization: `Bearer ${token}`,
+      ...(body === undefined ? {} : { "content-type": "application/json" }),
+    },
+    ...(body === undefined ? {} : { body }),
+    redirect: "manual",
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  const responseText = await response.text();
+  if (Buffer.byteLength(responseText) > BROWSER_CONTROL_MAX_JSON_BYTES) {
+    throw new BrowserControlProtocolError("browser controller response is too large");
+  }
+  return parseEnvelope(responseText, response.status);
 }
 
 function parseEnvelope(body: string, status: number): unknown {

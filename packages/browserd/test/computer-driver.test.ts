@@ -108,7 +108,7 @@ describe("NativeComputerDriver", () => {
 
 class FixtureNativeTransport implements ComputerNativeTransport {
   readonly handshake: NativeComputerHandshake = {
-    protocolVersion: 1,
+    protocolVersion: 2,
     helperVersion: "fixture",
     platform: "linux",
     capabilities: capabilities(),
@@ -142,6 +142,10 @@ class FixtureNativeTransport implements ComputerNativeTransport {
       data: new Uint8Array([1, 2, 3]),
     };
   }
+
+  async startCapture(): Promise<void> {}
+
+  async stopCapture(): Promise<void> {}
 
   async clipboard() {
     return { text: "fixture clipboard", truncated: false };

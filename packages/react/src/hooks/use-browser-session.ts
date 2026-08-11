@@ -246,8 +246,8 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
         let target: BrowserTarget;
         let observation: BrowserObservation;
         try {
-          target = await client.selectBrowserTarget(workspaceId, browserSessionId, targetId);
-          observation = await client.observeBrowserTarget(workspaceId, browserSessionId, target.id);
+          observation = await client.selectBrowserTarget(workspaceId, browserSessionId, targetId);
+          target = observation.target;
         } catch (cause) {
           if (!isMissingBrowserTarget(cause)) throw cause;
           // A physical/attached tab may disappear between inventory and click.
@@ -272,8 +272,12 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
             );
             throw cause;
           }
-          target = await client.selectBrowserTarget(workspaceId, browserSessionId, fallback.id);
-          observation = await client.observeBrowserTarget(workspaceId, browserSessionId, target.id);
+          observation = await client.selectBrowserTarget(
+            workspaceId,
+            browserSessionId,
+            fallback.id,
+          );
+          target = observation.target;
         }
         selectedTargetIdRef.current = target.id;
         observationRef.current = { browserSessionId, observation };
@@ -300,16 +304,12 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
     async (url?: string): Promise<BrowserTarget> => {
       if (!browserSessionId) throw new Error("No BrowserSession is selected.");
       return await runMutation(browserSessionId, async () => {
-        const target = await client.openBrowserTarget(
+        const observation = await client.openBrowserTarget(
           workspaceId,
           browserSessionId,
           url === undefined ? {} : { url },
         );
-        const observation = await client.observeBrowserTarget(
-          workspaceId,
-          browserSessionId,
-          target.id,
-        );
+        const target = observation.target;
         selectedTargetIdRef.current = target.id;
         observationRef.current = { browserSessionId, observation };
         setState((current) =>
@@ -396,6 +396,7 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
         const receipt = await client.actInBrowser(workspaceId, browserSessionId, {
           operationId,
           ...fence,
+          observationMode: "none",
           action,
         });
         if (receipt.observation) {
@@ -412,13 +413,11 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
                 }
               : current,
           );
-        } else {
-          void refresh();
         }
         return receipt;
       });
     },
-    [browserSessionId, client, refresh, runMutation, workspaceId],
+    [browserSessionId, client, runMutation, workspaceId],
   );
 
   const act = useCallback(

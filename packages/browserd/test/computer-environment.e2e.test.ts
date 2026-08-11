@@ -308,6 +308,24 @@ test.skipIf(!enabled)(
           name.includes("OpenGeni linked Chromium proof changed"),
         ),
       ).toBe(true);
+      const nativePage = await waitForNativeNode(
+        computer,
+        computerReference,
+        "Linked input",
+      );
+      expect(nativePage.node.role).toBe("entry");
+      const nativeButton = findNode(nativePage.observation, "Native change");
+      const nativeClicked = await computer.action(
+        semanticActionCommand(nativePage.observation, nativeButton.ref, "invoke"),
+      );
+      expect(nativeClicked.state).toBe("completed");
+      expect(
+        browserNames(
+          await browser.selectTarget(browserReference, created.observation.target.id),
+        ),
+      ).toContain(
+        "Changed through ComputerSession",
+      );
 
       await browser.endSession(browserReference, { removeState: true });
       await computer.endSession(computerReference, { removeState: true });
@@ -448,10 +466,40 @@ async function waitForTargetContaining(
   throw new Error(`linked ComputerSession never observed ${title}`);
 }
 
+async function waitForNativeNode(
+  supervisor: ComputerSupervisor,
+  reference: { computerSessionId: string; controllerGeneration: string },
+  name: string,
+): Promise<{ observation: ComputerObservation; node: InteractionSemanticNodeValue }> {
+  const deadline = Date.now() + 15_000;
+  let observed: Array<{ title: string; kind: string; names: string[] }> = [];
+  do {
+    observed = [];
+    for (const target of await supervisor.listTargets(reference)) {
+      if (target.kind === "screen") continue;
+      const observation = await supervisor.observe(reference, target.id);
+      const nodes = flattenSemantic(
+        observation.semantic?.kind === "snapshot" ? observation.semantic.roots : [],
+      );
+      const node = nodes.find((candidate) => candidate.name === name);
+      if (node) return { observation, node };
+      observed.push({
+        title: target.title,
+        kind: target.kind,
+        names: nodes.flatMap((candidate) => candidate.name ? [candidate.name] : []).slice(0, 24),
+      });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  } while (Date.now() < deadline);
+  throw new Error(`native ComputerSession never observed ${name}: ${JSON.stringify(observed)}`);
+}
+
 function browserFixture(): string {
   return `data:text/html,${encodeURIComponent(`<!doctype html>
     <html><head><title>OpenGeni linked Chromium proof</title></head><body>
       <button onclick="document.title='OpenGeni linked Chromium proof changed'; document.body.style.background='#36c'; this.textContent='Changed through BrowserSession'">Change page</button>
+      <label>Linked input <input aria-label="Linked input" /></label>
+      <button aria-label="Native change" onclick="this.textContent='Changed through ComputerSession'; this.setAttribute('aria-label', 'Changed through ComputerSession')">Native change</button>
     </body></html>`)}`;
 }
 
@@ -524,7 +572,16 @@ function findNode(observation: ComputerObservation, name: string): InteractionSe
     if (node.name === name) return node;
     pending.unshift(...(node.children ?? []));
   }
-  throw new Error(`semantic node ${name} is missing`);
+  throw new Error(
+    `semantic node ${name} is missing; available nodes: ${JSON.stringify(
+      flattenSemantic(observation.semantic.roots).map((node) => ({
+        role: node.role,
+        name: node.name,
+        value: node.value,
+        actions: node.actions,
+      })),
+    )}`,
+  );
 }
 
 function hasValue(observation: ComputerObservation, value: string): boolean {
@@ -566,6 +623,25 @@ function semanticCommand(
   observation: ComputerObservation,
   ref: string,
   action: "focus",
+): ComputerActionCommand {
+  return {
+    protocolVersion: 1,
+    operationId: randomUUID(),
+    computerSessionId: observation.computerSessionId,
+    controllerGeneration: observation.target.controllerGeneration,
+    targetId: observation.target.id,
+    expectedTargetGeneration: observation.target.targetGeneration,
+    expectedObservationId: observation.observationId,
+    expectedFrameId: null,
+    actor: { kind: "agent", subjectId: "agent:linux-e2e" },
+    action: { type: "semantic", locator: { kind: "ref", ref }, action },
+  };
+}
+
+function semanticActionCommand(
+  observation: ComputerObservation,
+  ref: string,
+  action: "invoke",
 ): ComputerActionCommand {
   return {
     protocolVersion: 1,

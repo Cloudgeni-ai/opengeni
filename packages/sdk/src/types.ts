@@ -282,7 +282,7 @@ export type SessionCapabilities = {
     reason: CapabilityUnavailableReason | null;
   };
   Terminal: {
-    transport: "sse-events" | "pty-ws" | null;
+    transport: "sse-events" | "pty-ws" | "relay-pty" | null;
     ptyCapable: boolean;
     shell: string;
     url: string | null;
@@ -416,7 +416,7 @@ export type AttachViewerResponse = ViewerHolder & {
   terminalUrl: string | null;
   terminalToken: string | null;
   terminalExpiresAt: string | null;
-  terminalTransport: "pty-ws" | null;
+  terminalTransport: "pty-ws" | "relay-pty" | null;
 };
 
 // Mirror of `@opengeni/contracts` AcknowledgeStreamRequest/Response — the

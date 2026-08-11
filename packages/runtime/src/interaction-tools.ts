@@ -914,7 +914,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "computer", "act"],
     title: "Act in app or window",
     description:
-      "Perform one semantic, keyboard, clipboard, pointer, focus, or launch action in an exact ComputerSession target. Omit fences to use a fresh observation automatically. Returns the durable causal receipt.",
+      "Perform one action in an exact ComputerSession target. Prefer semantic actions from computer_observe: on macOS they can invoke controls and set values without foregrounding the app. Pointer, keyboard, target focus, screen actions, and clipboard paste use the physical graphical seat and may change the user's foreground app; use them only when foreground control is explicitly intended. Omit fences to use a fresh observation automatically. Returns the durable causal receipt.",
     input: ComputerActInput,
     output: ComputerActionReceipt,
     readOnly: false,

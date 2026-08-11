@@ -177,6 +177,7 @@ RUN set -eux; \
         util-linux \
         wget \
         xvfb \
+        x11vnc \
         xauth \
         x11-utils \
         x11-xserver-utils \

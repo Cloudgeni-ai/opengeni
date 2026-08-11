@@ -245,7 +245,7 @@ export type CapabilityDescriptor = {
     FileSystem: { available: boolean; readOnly: boolean };
     Terminal: {
       available: boolean;
-      transport: "sse-events" | "pty-ws" | null;
+      transport: "sse-events" | "pty-ws" | "relay-pty" | null;
       pty: boolean;
     };
     Git: { available: boolean };
@@ -567,7 +567,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     os: { supported: ["linux", "macos", "windows"], default: "linux" },
     capabilities: {
       FileSystem: { available: true, readOnly: false },
-      Terminal: { available: true, transport: "pty-ws", pty: true }, // real PTY over the relay
+      Terminal: { available: true, transport: "relay-pty", pty: true }, // real PTY over the relay
       Git: { available: true },
       DesktopStream: { available: true, transport: "vnc-ws" }, // proclaimed; consent-gated at enroll
       Recording: { available: true }, // boot invariant: == DesktopStream.available
@@ -11381,7 +11381,7 @@ export const SessionCapabilities = z.object({
     reason: CapabilityUnavailableReason.nullable(),
   }),
   Terminal: z.object({
-    transport: z.enum(["sse-events", "pty-ws"]).nullable(),
+    transport: z.enum(["sse-events", "pty-ws", "relay-pty"]).nullable(),
     ptyCapable: z.boolean(),
     shell: z.string(),
     // The direct-to-provider ttyd PTY-over-websocket URL (pty-ws) resolved on the
@@ -11498,7 +11498,7 @@ export const AttachViewerResponse = /* @__PURE__ */ ViewerHolder.extend({
   terminalUrl: z.string().nullable(),
   terminalToken: z.string().nullable(),
   terminalExpiresAt: z.string().nullable(),
-  terminalTransport: z.literal("pty-ws").nullable(),
+  terminalTransport: z.enum(["pty-ws", "relay-pty"]).nullable(),
 });
 export type AttachViewerResponse = z.infer<typeof AttachViewerResponse>;
 

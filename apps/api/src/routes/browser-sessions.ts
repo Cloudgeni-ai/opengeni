@@ -21,6 +21,7 @@ import {
   BrowserDownloadListResponse,
   BrowserExternalAuthCommand,
   BrowserOpenTargetRequest,
+  BrowserObservation,
   BrowserProtectedAuthFillCommand,
   BrowserSessionAttachment,
   BrowserSessionAttachmentRequest,
@@ -144,6 +145,7 @@ import {
 } from "@opengeni/core";
 import {
   BrowserControlProtocolError,
+  BrowserControlClient,
   BrowserControlRequestError,
   BrowserControlServerError,
   BrowserControlServerUnsupportedError,
@@ -155,7 +157,6 @@ import {
   NatsControlRpc,
   NatsOpStreamTransport,
   provisionBrowserControlClient,
-  type BrowserControlClient,
   type BrowserControlPlacementSession,
   type PlacementBrowserStateCaptureReceipt,
   type PlacementBrowserNetworkRoute,
@@ -523,7 +524,8 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         browserSessionId,
         "session.control",
         "browser.control",
-        async ({ sessionClient }) => await sessionClient.openTarget(request.url),
+        async ({ sessionClient }) =>
+          BrowserObservation.parse(await sessionClient.openTarget(request.url)),
       );
       return context.json(result, 201);
     },
@@ -545,7 +547,8 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         browserSessionId,
         "session.control",
         "browser.control",
-        async ({ sessionClient }) => await sessionClient.selectTarget(targetId),
+        async ({ sessionClient }) =>
+          BrowserObservation.parse(await sessionClient.selectTarget(targetId)),
       );
       return context.json(result);
     },
@@ -890,6 +893,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
             expectedDocumentGeneration: request.expectedDocumentGeneration,
             expectedFrameId: request.expectedFrameId,
             actor: interactionActorForGrant(grant),
+            observationMode: request.observationMode,
             action: request.action,
           });
           if (workspaceFileIds.length > 0) {
@@ -1614,6 +1618,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         context,
         "stream:view",
       );
+      const origin = requestOrigin(context, deps.settings.corsAllowOriginRegex);
       const request = await parseJsonBody(context, BrowserSessionAttachmentRequest);
       const result = await withActiveBrowserController(
         context,
@@ -1623,6 +1628,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         "session.viewer.read",
         "browser.attach",
         async ({ client, sessionClient, record, binding, placement }) => {
+          if (origin) await client.addAllowedOrigins([origin]);
           await sessionClient.observe(request.targetId);
           const grantId = randomUUID();
           const expiresAt = new Date(Date.now() + request.expiresInSeconds * 1_000).toISOString();
@@ -1730,6 +1736,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
             alive: true,
           });
         },
+        false,
       );
       return context.json(result);
     },
@@ -2655,6 +2662,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       binding: NonNullable<BrowserSessionControlRecord["session"]["controller"]>;
       placement: BrowserPlacement;
     }) => Promise<T>,
+    recoverMissing = true,
   ): Promise<T> {
     try {
       const record = await getBrowserSessionControlRecord(deps.db, {
@@ -2685,13 +2693,9 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         channelOperation,
         context.req.raw.signal,
         async (placement) => {
-          const client = await provisionController(
-            deps,
-            grant,
-            record,
-            placement,
-            requestOrigin(context, deps.settings.corsAllowOriginRegex),
-          );
+          // An active binding already proves browserd was provisioned. Reusing
+          // it avoids restarting/checking the sidecar on every live input.
+          const client = connectController(deps, grant, record, placement);
           const tokens = deriveBrowserSessionControllerTokens({
             rootSecret: browserAuthorityRoot(deps),
             accountId: grant.accountId,
@@ -2702,7 +2706,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
             controllerGeneration: binding.controllerGeneration,
             tokenGeneration: record.tokenGeneration,
           });
-          const result = await callback({
+          const controller = {
             client,
             sessionClient: client.sessionClient({
               reference: {
@@ -2714,7 +2718,23 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
             record,
             binding,
             placement,
-          });
+          };
+          let result: T;
+          try {
+            result = await callback(controller);
+          } catch (error) {
+            if (!recoverMissing || !isMissingBrowserControllerSession(error)) throw error;
+            await recoverActiveBrowserController(
+              deps,
+              grant,
+              record,
+              binding,
+              placement,
+              client,
+              tokens,
+            );
+            result = await callback(controller);
+          }
           await touchBrowserSessionController(deps.db, {
             accountId: grant.accountId,
             workspaceId,
@@ -2726,6 +2746,48 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       );
     } catch (error) {
       throw browserRouteError(error);
+    }
+  }
+
+  async function recoverActiveBrowserController(
+    routeDeps: ApiRouteDeps,
+    grant: AccessGrant,
+    record: BrowserSessionControlRecord,
+    binding: NonNullable<BrowserSessionControlRecord["session"]["controller"]>,
+    placement: BrowserPlacement,
+    client: BrowserControlClient,
+    tokens: ReturnType<typeof deriveBrowserSessionControllerTokens>,
+  ): Promise<void> {
+    const linkedComputer = await requireLinkedComputerBinding(
+      routeDeps,
+      grant,
+      record.session,
+      placement,
+    );
+    const networkRoute = await resolveActiveBrowserNetworkRouteLaunch({
+      deps: routeDeps,
+      grant,
+      record,
+      placement: placement.placement,
+    });
+    try {
+      await client.createSession({
+        browserSessionId: record.session.id,
+        controllerGeneration: binding.controllerGeneration,
+        tokenGeneration: record.tokenGeneration,
+        ...tokens,
+        headed: !record.session.headless,
+        transport: browserRuntimeTransport(record.session, placement.transport),
+        ...(linkedComputer ? { linkedComputer } : {}),
+        ...(networkRoute ? { networkRoute } : {}),
+      });
+    } catch (error) {
+      console.error("browser controller recovery failed", {
+        browserSessionId: record.session.id,
+        controllerGeneration: binding.controllerGeneration,
+        failure: interactionFailure(error),
+      });
+      throw error;
     }
   }
 
@@ -3288,6 +3350,24 @@ async function provisionController(
   ).client;
 }
 
+function connectController(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  record: BrowserSessionControlRecord,
+  placement: BrowserPlacement,
+): BrowserControlClient {
+  return new BrowserControlClient(placement.session, {
+    adminToken: deriveBrowserControllerAdminToken({
+      rootSecret: browserAuthorityRoot(deps),
+      accountId: grant.accountId,
+      workspaceId: record.session.workspaceId,
+      placement: record.session.placement,
+      placementInstanceId: placement.placementInstanceId,
+    }),
+    nativeAuthority: nativeBrowserControllerAuthority(record.session.workspaceId, placement),
+  });
+}
+
 function nativeBrowserControllerAuthority(
   workspaceId: string,
   placement: BrowserPlacement,
@@ -3399,6 +3479,16 @@ function isDefiniteBrowserControllerFailure(error: unknown): boolean {
     error instanceof BrowserControlRequestError &&
     !error.error.retryable &&
     error.error.code !== "outcome_unknown"
+  );
+}
+
+function isMissingBrowserControllerSession(error: unknown): boolean {
+  if (!(error instanceof BrowserControlRequestError)) return false;
+  if (error.status === 401 && error.error.code === "permission_denied") return true;
+  return (
+    error.status === 404 &&
+    error.error.code === "resource_not_found" &&
+    ["browser session not found", "browser session is not active"].includes(error.error.message)
   );
 }
 
@@ -3753,6 +3843,58 @@ async function resolveBrowserNetworkRouteLaunch(input: {
     routeId: route.routeId,
     routeVersion: route.routeVersion,
     authorityDigest,
+    kind,
+    consistency: route.consistency,
+    ...(proxyUrl === undefined ? {} : { proxyUrl }),
+    ...(providerRoute === undefined ? {} : { providerRoute }),
+  };
+}
+
+async function resolveActiveBrowserNetworkRouteLaunch(input: {
+  deps: ApiRouteDeps;
+  grant: AccessGrant;
+  record: BrowserSessionControlRecord;
+  placement: InteractionPlacement;
+}): Promise<PlacementBrowserNetworkRoute | null> {
+  const route = input.record.networkRouteAuthority;
+  if (!route) return null;
+  if (!route.authorityDigest) {
+    throw new BrowserSessionStateError("BrowserSession route authority is not bound");
+  }
+  const kind = route.configuration.kind;
+  const providerRoute =
+    kind === "managed"
+      ? managedNetworkRouteForPlacement(route.configuration, route.consistency, input.placement)
+      : undefined;
+  if (kind !== "managed" && input.placement.kind === "external_provider") {
+    throw new BrowserSessionStateError(
+      "External browser providers require a provider-managed NetworkRoute",
+    );
+  }
+  let proxyUrl: string | undefined;
+  if (kind === "proxy") {
+    const reference = route.configuration.credential;
+    let proxyCredential: { username: string; password: string } | null = null;
+    if (reference) {
+      const credential = await loadExactInteractionCredential(
+        input.deps,
+        input.grant,
+        input.record.session.workspaceId,
+        reference,
+      );
+      if (credential.version !== route.credentialVersion) {
+        throw new BrowserSessionStateError(
+          "BrowserSession proxy credential changed; resume the browser to reconnect safely",
+        );
+      }
+      proxyCredential = proxyCredentialFromBundle(credential.credential);
+    }
+    proxyUrl = browserProxyUrl(route.configuration, proxyCredential);
+  }
+  return {
+    routeId: route.routeId,
+    routeVersion: route.routeVersion,
+    authorityDigest: route.authorityDigest,
     kind,
     consistency: route.consistency,
     ...(proxyUrl === undefined ? {} : { proxyUrl }),

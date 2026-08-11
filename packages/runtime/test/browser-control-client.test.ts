@@ -505,9 +505,11 @@ describe("BrowserControlClient", () => {
       expect(
         placement.commands.every((command) => !command.includes(restoreAad.toString("base64"))),
       ).toBe(true);
-      expect(placement.writes.some((entry) => entry.content.includes(adminToken))).toBe(true);
-      expect(placement.writes.some((entry) => entry.content.includes("route-password"))).toBe(true);
-      expect(placement.finalizations).toBe(11);
+      expect(placement.writes.every((entry) => !entry.content.includes(adminToken))).toBe(true);
+      expect(placement.writes.every((entry) => !entry.content.includes("route-password"))).toBe(
+        true,
+      );
+      expect(placement.finalizations).toBe(0);
       for (const path of placement.writes.map((entry) => dirname(entry.path))) {
         if (!path.includes("opengeni-browser-control-client")) continue;
         await expect(stat(path)).rejects.toThrow();
@@ -692,7 +694,7 @@ describe("BrowserControlClient", () => {
         true,
       );
       expect(placement.commands.every((command) => !command.includes(adminToken))).toBe(true);
-      expect(placement.finalizations).toBe(2);
+      expect(placement.finalizations).toBe(1);
     } finally {
       server.stop(true);
     }
@@ -726,16 +728,13 @@ describe("BrowserControlClient", () => {
       expect(placement.session.writeFile).toBeUndefined();
       expect((await readFile(tokenFile, "utf8")).trim()).toBe(adminToken);
       expect((await stat(tokenFile)).mode & 0o777).toBe(0o600);
-      expect(placement.stdinWrites.length).toBeGreaterThanOrEqual(2);
+      expect(placement.stdinWrites).toHaveLength(1);
       expect(
         placement.stdinWrites.some((value) =>
           Buffer.from(value, "base64").toString("utf8").includes(adminToken),
         ),
       ).toBe(true);
       expect(placement.commands.every((command) => !command.includes(adminToken))).toBe(true);
-      expect(
-        placement.commands.some((command) => command.includes("OPENGENI_BROWSER_PRIVATE_CHUNK_")),
-      ).toBe(true);
     } finally {
       server.stop(true);
     }
@@ -774,7 +773,7 @@ describe("BrowserControlClient", () => {
 
       expect(placement.session.exec).toBeUndefined();
       expect((await readFile(tokenFile, "utf8")).trim()).toBe(adminToken);
-      expect(placement.stdinWrites.length).toBeGreaterThanOrEqual(2);
+      expect(placement.stdinWrites).toHaveLength(1);
       expect(placement.commands.every((command) => !command.includes(adminToken))).toBe(true);
     } finally {
       server.stop(true);
@@ -895,7 +894,7 @@ describe("BrowserControlClient", () => {
         format: "png",
         quality: 70,
         maxWidth: 1_200,
-        maxHeight: 900,
+        maxHeight: 4_096,
         everyNthFrame: 1,
       }),
     ]);

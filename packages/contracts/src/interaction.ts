@@ -5,6 +5,7 @@ export const INTERACTION_PROTOCOL_VERSION = 1 as const;
 export const BROWSER_CONTROL_PROTOCOL_VERSION = INTERACTION_PROTOCOL_VERSION;
 export const BROWSER_CONTROL_WEBSOCKET_PROTOCOL = "opengeni.browser.v1" as const;
 export const COMPUTER_CONTROL_WEBSOCKET_PROTOCOL = "opengeni.computer.v1" as const;
+export const COMPUTER_RFB_WEBSOCKET_PROTOCOL = "opengeni.computer.rfb.v1" as const;
 export const BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX = "opengeni.auth." as const;
 export const BROWSER_CONTROL_MAX_JSON_BYTES = 40 * 1024 * 1024;
 export const BROWSER_CONTROL_MAX_FRAME_HEADER_BYTES = 64 * 1024;
@@ -2177,6 +2178,9 @@ export const BrowserActionCommand = z
     expectedDocumentGeneration: opaqueGeneration.nullable(),
     expectedFrameId: opaqueGeneration.nullable(),
     actor: InteractionActor,
+    /** Human live-control surfaces already receive the resulting pixels. They
+     * may omit the expensive semantic snapshot; agent actions keep it. */
+    observationMode: z.enum(["full", "none"]).optional(),
     action: z.union([BrowserAction, BrowserActionBatch]),
   })
   .strict();
@@ -2367,13 +2371,6 @@ export const CreateBrowserSessionRequest = z
           message: "attached browser placement uses the selected Chrome engine",
         });
       }
-      if (value.linkedComputerSessionId) {
-        context.addIssue({
-          code: "custom",
-          path: ["linkedComputerSessionId"],
-          message: "attached Chrome does not expose an exact linked computer yet",
-        });
-      }
       if (value.headless) {
         context.addIssue({
           code: "custom",
@@ -2479,6 +2476,14 @@ const DirectInteractionFrameStreamAttachment = z
   })
   .strict();
 
+const DirectComputerRfbAttachment = z
+  .object({
+    kind: z.literal("direct_rfb"),
+    url: boundedUrl,
+    protocols: z.array(z.string().min(1).max(2_048)).length(3),
+  })
+  .strict();
+
 function relayInteractionFrameStreamAttachment<const Kind extends 3 | 4>(kind: Kind) {
   return z
     .object({
@@ -2506,6 +2511,7 @@ export type BrowserFrameStreamAttachment = z.infer<typeof BrowserFrameStreamAtta
 
 export const ComputerFrameStreamAttachment = z.discriminatedUnion("kind", [
   DirectInteractionFrameStreamAttachment,
+  DirectComputerRfbAttachment,
   relayInteractionFrameStreamAttachment(4),
 ]);
 export type ComputerFrameStreamAttachment = z.infer<typeof ComputerFrameStreamAttachment>;
@@ -2546,6 +2552,7 @@ export const BrowserActionRequest = z
     expectedTargetGeneration: opaqueGeneration,
     expectedDocumentGeneration: opaqueGeneration.nullable(),
     expectedFrameId: opaqueGeneration.nullable(),
+    observationMode: z.enum(["full", "none"]).default("full"),
     action: z.union([BrowserAction, BrowserActionBatch]),
   })
   .strict();

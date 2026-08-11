@@ -218,6 +218,7 @@ export type BrowserSupervisorDriverContext = BrowserSessionReference & {
   headed: boolean;
   transport: BrowserSupervisorTransport;
   browserExecutablePath?: string;
+  linkedComputer?: { computerSessionId: string; controllerGeneration: string };
   launchEnvironment?: NodeJS.ProcessEnv;
   networkRoute?: BrowserSupervisorNetworkRoute;
   resolveWorkspaceFiles: (
@@ -787,6 +788,7 @@ export class BrowserSupervisor {
       ...(options.browserExecutablePath
         ? { browserExecutablePath: options.browserExecutablePath }
         : {}),
+      ...(options.linkedComputer ? { linkedComputer: options.linkedComputer } : {}),
       ...(options.launchEnvironment ? { launchEnvironment: options.launchEnvironment } : {}),
       ...(options.networkRoute ? { networkRoute: options.networkRoute } : {}),
     };
@@ -1485,6 +1487,12 @@ async function createBrowserDriver(
   if (route?.consistency.webRtc !== "default") {
     launchArguments.push("--force-webrtc-ip-handling-policy=disable_non_proxied_udp");
   }
+  // A linked headed browser is also a native ComputerSession application.
+  // Chromium otherwise exposes only its outer window to Linux AT-SPI, making
+  // background semantic interaction with the page impossible.
+  if (context.linkedComputer) {
+    launchArguments.push("--force-renderer-accessibility=complete");
+  }
   const runner = await AgentBrowserJsonRunner.create({
     namespace: "og",
     // A close followed immediately by another daemon using the same socket
@@ -1547,10 +1555,13 @@ function validateSessionOptions(
     ? validateBrowserNetworkRoute(options.networkRoute, transport)
     : undefined;
   if (options.linkedComputer) {
-    if (transport.kind !== "managed" || transport.engine === "lightpanda" || !options.headed) {
+    const managedHeaded =
+      transport.kind === "managed" && transport.engine !== "lightpanda" && options.headed;
+    const attachedChrome = transport.kind === "attached_chrome" && options.headed;
+    if (!managedHeaded && !attachedChrome) {
       throw new InteractionControllerError(
         "unsupported",
-        "linked ComputerSessions require a managed headed browser",
+        "linked ComputerSessions require a headed managed or attached browser",
       );
     }
     if (!isUuid(options.linkedComputer.computerSessionId)) {
@@ -1559,8 +1570,11 @@ function validateSessionOptions(
     if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(options.linkedComputer.controllerGeneration)) {
       throw new Error("linked ComputerSession controller generation is invalid");
     }
-    if (!options.launchEnvironment) {
+    if (managedHeaded && !options.launchEnvironment) {
       throw new Error("linked ComputerSession launch environment is absent");
+    }
+    if (attachedChrome && options.launchEnvironment) {
+      throw new Error("attached Chrome does not consume a browser launch environment");
     }
   } else if (options.launchEnvironment) {
     throw new Error("browser launch environment requires a linked ComputerSession");

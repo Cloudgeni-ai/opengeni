@@ -67,7 +67,7 @@ type InteractionDriver<
   target(targetId: string): Promise<TTarget | null>;
   observe(targetId: string): Promise<TObservation>;
   validate?(command: TCommand, target: TTarget): Promise<void> | void;
-  dispatch(command: TCommand): Promise<TObservation>;
+  dispatch(command: TCommand): Promise<TObservation | null>;
 };
 
 type InteractionCoreAdapter<
@@ -282,8 +282,12 @@ export class InteractionControllerCore<
     }
 
     try {
-      const observation = this.adapter.parseObservation(await this.driver.dispatch(command));
-      this.adapter.assertObservationAuthority(observation, command.targetId);
+      const dispatchedObservation = await this.driver.dispatch(command);
+      const observation =
+        dispatchedObservation === null
+          ? null
+          : this.adapter.parseObservation(dispatchedObservation);
+      if (observation) this.adapter.assertObservationAuthority(observation, command.targetId);
       const completed = this.makeReceipt(
         command,
         "completed",

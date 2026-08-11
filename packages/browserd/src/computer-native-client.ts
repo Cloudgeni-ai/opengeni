@@ -8,7 +8,7 @@ import type {
   InteractionSemanticNodeValue,
 } from "@opengeni/contracts";
 
-export const COMPUTER_NATIVE_PROTOCOL_VERSION = 1 as const;
+export const COMPUTER_NATIVE_PROTOCOL_VERSION = 2 as const;
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
 const MAX_ATTACHMENT_BYTES = 64 * 1024 * 1024;
@@ -56,6 +56,13 @@ export type NativeComputerFrame = {
   mimeType: "image/png" | "image/jpeg";
   sha256: string;
   data: Uint8Array;
+};
+
+export type NativeComputerCaptureOptions = {
+  format: "png" | "jpeg";
+  quality: number;
+  maxWidth: number;
+  maxHeight: number;
 };
 
 export type NativeComputerClipboard = Pick<ComputerClipboard, "text" | "truncated">;
@@ -109,7 +116,12 @@ export interface ComputerNativeTransport {
   capabilities(): Promise<ComputerSessionCapabilities>;
   targets(): Promise<NativeComputerTarget[]>;
   observe(targetId: string): Promise<NativeComputerObservation>;
-  capture(targetId: string): Promise<NativeComputerFrame>;
+  capture(
+    targetId: string,
+    options?: NativeComputerCaptureOptions,
+  ): Promise<NativeComputerFrame>;
+  startCapture(targetId: string, options: NativeComputerCaptureOptions): Promise<void>;
+  stopCapture(targetId: string): Promise<void>;
   clipboard(): Promise<NativeComputerClipboard>;
   validate(command: NativeComputerActionCommand): Promise<void>;
   dispatch(command: NativeComputerActionCommand): Promise<NativeComputerObservation>;
@@ -207,12 +219,39 @@ export class ComputerNativeClient implements ComputerNativeTransport {
     );
   }
 
-  async capture(targetId: string): Promise<NativeComputerFrame> {
+  async capture(
+    targetId: string,
+    options?: NativeComputerCaptureOptions,
+  ): Promise<NativeComputerFrame> {
     return await this.request(
       "capture",
-      { targetId: boundedString(targetId, "targetId", 512) },
+      {
+        targetId: boundedString(targetId, "targetId", 512),
+        ...(options ? { options } : {}),
+      },
       parseFrame,
       this.captureTimeoutMs,
+    );
+  }
+
+  async startCapture(
+    targetId: string,
+    options: NativeComputerCaptureOptions,
+  ): Promise<void> {
+    await this.request(
+      "start_capture",
+      { targetId: boundedString(targetId, "targetId", 512), options },
+      parseNull,
+      this.captureTimeoutMs,
+    );
+  }
+
+  async stopCapture(targetId: string): Promise<void> {
+    await this.request(
+      "stop_capture",
+      { targetId: boundedString(targetId, "targetId", 512) },
+      parseNull,
+      this.requestTimeoutMs,
     );
   }
 
@@ -519,6 +558,10 @@ function parseClipboard(value: unknown): NativeComputerClipboard {
     throw new Error("native clipboard text exceeds its byte envelope");
   }
   return { text: input.text, truncated: input.truncated };
+}
+
+function parseNull(value: unknown): void {
+  if (value !== null) throw new Error("native computer operation returned a non-null result");
 }
 
 function parseTargets(value: unknown): NativeComputerTarget[] {

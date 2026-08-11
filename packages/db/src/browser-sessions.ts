@@ -973,11 +973,6 @@ async function assertLinkedComputerAvailable(
   if (input.headless) {
     throw new BrowserSessionStateError("A linked ComputerSession requires a headed browser");
   }
-  if (input.placement.kind === "attached_device") {
-    throw new BrowserSessionStateError(
-      "Attached Chrome does not expose an exact linked ComputerSession yet",
-    );
-  }
   const [computer] = await db
     .select()
     .from(schema.computerSessions)

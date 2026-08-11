@@ -94,7 +94,11 @@ function reportUnexpectedControllerError(
           message: boundedDiagnostic(error.message, 4_096),
           stack: boundedDiagnostic(error.stack ?? "", 16_384),
         }
-      : { name: "UnknownError", message: "non-Error controller failure", stack: "" };
+      : {
+          name: "UnknownError",
+          message: boundedDiagnostic(nonErrorDiagnostic(error), 4_096),
+          stack: "",
+        };
   process.stderr.write(
     `${JSON.stringify({
       service: "opengeni-browserd",
@@ -104,6 +108,15 @@ function reportUnexpectedControllerError(
       error: value,
     })}\n`,
   );
+}
+
+function nonErrorDiagnostic(value: unknown): string {
+  try {
+    const serialized = JSON.stringify(value);
+    return serialized === undefined ? String(value) : serialized;
+  } catch {
+    return String(value);
+  }
 }
 
 function boundedDiagnostic(value: string, maxBytes: number): string {

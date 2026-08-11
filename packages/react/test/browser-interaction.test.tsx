@@ -14,10 +14,11 @@ import type {
   BrowserSessionAttachment,
   BrowserSessionMutationResponse,
   BrowserTarget,
+  InteractionPlacement,
   InteractionIntervention,
 } from "@opengeni/sdk/interaction";
 import { act } from "react";
-import { BrowserViewer } from "../src/components/browser-viewer";
+import { browserKey, BrowserViewer } from "../src/components/browser-viewer";
 import { useAttachedBrowsers } from "../src/hooks/use-attached-browsers";
 import type {
   BrowserFrameWebSocket,
@@ -705,7 +706,7 @@ describe("BrowserSession React resources", () => {
             }),
           );
         }
-        return live;
+        return observation(BROWSER_SESSION_ID, live);
       },
     });
     const hook = await renderHook(
@@ -886,6 +887,22 @@ describe("BrowserSession frame stream", () => {
 });
 
 describe("BrowserViewer", () => {
+  test("ignores standalone modifier keydowns before a browser shortcut", () => {
+    const event = (key: string, overrides: Partial<Parameters<typeof browserKey>[0]> = {}) => ({
+      altKey: false,
+      ctrlKey: false,
+      key,
+      metaKey: false,
+      shiftKey: false,
+      ...overrides,
+    });
+
+    expect(browserKey(event("Meta", { metaKey: true }))).toBeNull();
+    expect(browserKey(event("Control", { ctrlKey: true }))).toBeNull();
+    expect(browserKey(event("Alt", { altKey: true }))).toBeNull();
+    expect(browserKey(event("a", { metaKey: true }))).toBe("Meta+a");
+  });
+
   test("opens actionable runtime and page diagnostics without leaving the browser", async () => {
     const current = browserSession();
     const currentTarget = target();
@@ -1756,15 +1773,21 @@ describe("BrowserViewer", () => {
       placement: { kind: "attached_device", deviceId: device.id },
       engine: "chrome",
       headless: false,
+      linkedComputerSessionId: COMPUTER_SESSION_ID,
       capabilities: {
         ...browserSession().capabilities,
         downloads: false,
         uploads: false,
         privateCheckpoint: false,
         identityPublication: false,
+        linkedComputer: true,
       },
     };
     const createRequests: unknown[] = [];
+    const linkedComputerCreates: Array<{
+      name: string;
+      placement: InteractionPlacement | undefined;
+    }> = [];
     const client = fakeClient({
       listAttachedBrowsers: async () => ({ revision: 4, devices: [device] }),
       listBrowserSessions: async () => ({ revision: 1, sessions: [] }),
@@ -1781,7 +1804,18 @@ describe("BrowserViewer", () => {
       }),
     });
     const rendered = await renderComponent(
-      <BrowserViewer client={client} workspaceId={WORKSPACE_ID} sessionId={SESSION_ID} />,
+      <BrowserViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        createLinkedComputer={async (name, placement) => {
+          linkedComputerCreates.push({ name, placement });
+          return {
+            id: COMPUTER_SESSION_ID,
+            placement: created.placement,
+          };
+        }}
+      />,
     );
     await flush(30);
 
@@ -1803,8 +1837,15 @@ describe("BrowserViewer", () => {
       sessionId: SESSION_ID,
       name: "cloudgeni.ai",
       headless: false,
+      linkedComputerSessionId: COMPUTER_SESSION_ID,
       placement: { kind: "attached_device", deviceId: device.id },
     });
+    expect(linkedComputerCreates).toEqual([
+      {
+        name: "cloudgeni.ai computer",
+        placement: { kind: "attached_device", deviceId: device.id },
+      },
+    ]);
     expect(rendered.container.textContent).toContain("Your browser");
     expect(rendered.container.textContent).toContain("live");
     await rendered.unmount();

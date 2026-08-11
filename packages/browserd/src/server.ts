@@ -1,4 +1,5 @@
 import { createHash, timingSafeEqual } from "node:crypto";
+import { connect, type Socket } from "node:net";
 import {
   BROWSER_CONTROL_PORT,
   BROWSER_PROFILE_ARTIFACT_FORMAT,
@@ -13,6 +14,7 @@ import {
   type BrowserProtectedAuthFillCommand as BrowserProtectedAuthFillCommandValue,
   BrowserWorkspaceFileStageRequest,
   ComputerActionCommand,
+  COMPUTER_RFB_WEBSOCKET_PROTOCOL,
   type ComputerActionCommand as ComputerActionCommandValue,
   NetworkRouteConsistency,
   type InteractionError,
@@ -107,7 +109,22 @@ type ComputerSocketData = {
   closed: boolean;
 };
 
-type InteractionSocketData = BrowserSocketData | ComputerSocketData;
+type ComputerRfbSocketData = {
+  kind: "computer_rfb";
+  reference: ComputerSessionReference;
+  authorization:
+    | { kind: "session"; tokenGeneration: number }
+    | { kind: "grant"; grantId: string; expiresAtMs: number };
+  targetId: string;
+  rfbPort: number;
+  upstream: Socket | null;
+  pending: Uint8Array[];
+  pendingBytes: number;
+  expiryTimer: ReturnType<typeof setTimeout> | null;
+  closed: boolean;
+};
+
+type InteractionSocketData = BrowserSocketData | ComputerSocketData | ComputerRfbSocketData;
 type BrowserServer = ReturnType<typeof Bun.serve<InteractionSocketData>>;
 type BrowserSocket = Bun.ServerWebSocket<InteractionSocketData>;
 
@@ -163,15 +180,18 @@ export class BrowserControlServer {
       maxRequestBodySize: BROWSER_CONTROL_MAX_JSON_BYTES,
       fetch: async (request, server) => await this.handleFetch(request, server),
       websocket: {
-        maxPayloadLength: 1_024,
+        // Frame sockets are server-only, but RFB carries keyboard, pointer and
+        // clipboard messages from noVNC. Keep a bounded envelope large enough
+        // for an ordinary clipboard without permitting unbounded buffering.
+        maxPayloadLength: 1024 * 1024,
         backpressureLimit: 32 * 1024 * 1024,
         closeOnBackpressureLimit: true,
         perMessageDeflate: false,
         open: (socket) => {
           this.onSocketOpen(socket);
         },
-        message: (socket) => {
-          socket.close(1003, "frame stream is server-only");
+        message: (socket, message) => {
+          this.onSocketMessage(socket, message);
         },
         close: (socket) => {
           this.onSocketClose(socket);
@@ -206,7 +226,9 @@ export class BrowserControlServer {
       socket.terminate();
     }
     const subscriptionResults = await Promise.allSettled(
-      sockets.map(async (socket) => await socket.data.subscription?.close()),
+      sockets.map(async (socket) => {
+        if (socket.data.kind !== "computer_rfb") await socket.data.subscription?.close();
+      }),
     );
     for (const result of subscriptionResults) {
       if (result.status === "rejected") failures.push(result.reason);
@@ -588,6 +610,17 @@ export class BrowserControlServer {
       }
       return this.upgradeComputerFrames(request, server, computerSessionId, segments[4]!, url);
     }
+    if (segments.length === 6 && segments[3] === "targets" && segments[5] === "rfb") {
+      if (request.method !== "GET") {
+        throw new ProtocolError("invalid_action", "method not allowed", 405);
+      }
+      return await this.upgradeComputerRfb(
+        request,
+        server,
+        computerSessionId,
+        segments[4]!,
+      );
+    }
 
     const authority = this.requireComputerSession(
       request,
@@ -692,9 +725,9 @@ export class BrowserControlServer {
           ...(body.restore ? { restore: body.restore } : {}),
           ...(body.transport ? { transport: body.transport } : {}),
           ...(body.networkRoute ? { networkRoute: body.networkRoute } : {}),
-          ...(body.linkedComputer
+          ...(body.linkedComputer ? { linkedComputer: body.linkedComputer } : {}),
+          ...(body.linkedComputer && body.transport?.kind !== "attached_chrome"
             ? {
-                linkedComputer: body.linkedComputer,
                 launchEnvironment: this.requireComputerSupervisor().launchEnvironment(
                   body.linkedComputer,
                 ),
@@ -1107,6 +1140,68 @@ export class BrowserControlServer {
     return undefined;
   }
 
+  private async upgradeComputerRfb(
+    request: Request,
+    server: BrowserServer,
+    computerSessionId: string,
+    targetId: string,
+  ): Promise<Response | undefined> {
+    const protocols = (request.headers.get("sec-websocket-protocol") ?? "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean);
+    if (!protocols.includes("binary") || !protocols.includes(COMPUTER_RFB_WEBSOCKET_PROTOCOL)) {
+      throw new ProtocolError("invalid_action", "computer RFB protocol is required", 426);
+    }
+    const bearerProtocols = protocols.filter((value) =>
+      value.startsWith(BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX),
+    );
+    if (bearerProtocols.length !== 1) {
+      throw new ProtocolError("permission_denied", "RFB authorization is required", 401);
+    }
+    const token = requireToken(
+      bearerProtocols[0]!.slice(BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX.length),
+      "RFB stream token",
+    );
+    const authorization = this.authorizeComputerToken(computerSessionId, token, false, true);
+    const authority = authorization.authority;
+    const reference = computerBinding(authority);
+    const boundedTargetId = requireOpaqueId(targetId, "computer target id");
+    const supervisor = this.computerSupervisor;
+    if (!supervisor) {
+      throw new ProtocolError("unsupported", "computer controller is unavailable", 422);
+    }
+    const rfbPort = await supervisor.rfbPort(reference, boundedTargetId);
+    const upgraded = server.upgrade(request, {
+      data: {
+        kind: "computer_rfb",
+        reference,
+        authorization:
+          authorization.kind === "session"
+            ? { kind: "session", tokenGeneration: authority.tokenGeneration }
+            : {
+                kind: "grant",
+                grantId: authorization.grant.id,
+                expiresAtMs: authorization.grant.expiresAtMs,
+              },
+        targetId: boundedTargetId,
+        rfbPort,
+        upstream: null,
+        pending: [],
+        pendingBytes: 0,
+        expiryTimer: null,
+        closed: false,
+      },
+      // noVNC's Websock requires the conventional `binary` selection. The
+      // additional requested protocols carry our version and scoped grant.
+      headers: { "sec-websocket-protocol": "binary" },
+    });
+    if (!upgraded) {
+      throw new ProtocolError("resource_unavailable", "RFB stream upgrade failed", 503, true);
+    }
+    return undefined;
+  }
+
   private onSocketOpen(socket: BrowserSocket): void {
     this.sockets.add(socket);
     const authority =
@@ -1141,7 +1236,64 @@ export class BrowserControlServer {
         if (!socket.data.closed) socket.close(1008, "authorization expired");
       }, remainingMs);
     }
-    void this.pumpFrames(socket);
+    if (socket.data.kind === "computer_rfb") {
+      this.openComputerRfb(socket);
+    } else {
+      void this.pumpFrames(socket);
+    }
+  }
+
+  private onSocketMessage(socket: BrowserSocket, message: string | Buffer): void {
+    const data = socket.data;
+    if (data.kind !== "computer_rfb") {
+      socket.close(1003, "frame stream is server-only");
+      return;
+    }
+    if (typeof message === "string") {
+      socket.close(1003, "RFB requires binary messages");
+      return;
+    }
+    const bytes = new Uint8Array(message.buffer, message.byteOffset, message.byteLength);
+    if (data.upstream && !data.upstream.destroyed) {
+      data.upstream.write(bytes);
+      return;
+    }
+    if (data.pendingBytes + bytes.byteLength > 1024 * 1024) {
+      socket.close(1009, "RFB input buffer exceeded");
+      return;
+    }
+    const copy = bytes.slice();
+    data.pending.push(copy);
+    data.pendingBytes += copy.byteLength;
+  }
+
+  private openComputerRfb(socket: BrowserSocket): void {
+    const data = socket.data;
+    if (data.kind !== "computer_rfb") return;
+    const upstream = connect({ host: "127.0.0.1", port: data.rfbPort });
+    data.upstream = upstream;
+    upstream.setNoDelay(true);
+    upstream.once("connect", () => {
+      if (data.closed) {
+        upstream.destroy();
+        return;
+      }
+      for (const pending of data.pending) upstream.write(pending);
+      data.pending = [];
+      data.pendingBytes = 0;
+    });
+    upstream.on("data", (chunk) => {
+      if (data.closed) return;
+      if (socket.send(chunk, false) < 0) {
+        socket.close(1013, "RFB consumer is too slow");
+      }
+    });
+    upstream.once("error", () => {
+      if (!data.closed) socket.close(1011, "RFB stream unavailable");
+    });
+    upstream.once("close", () => {
+      if (!data.closed) socket.close(1000, "RFB stream closed");
+    });
   }
 
   private onSocketClose(socket: BrowserSocket): void {
@@ -1150,7 +1302,14 @@ export class BrowserControlServer {
     if (socket.data.expiryTimer) clearTimeout(socket.data.expiryTimer);
     socket.data.expiryTimer = null;
     this.sockets.delete(socket);
-    void socket.data.subscription?.close();
+    if (socket.data.kind === "computer_rfb") {
+      socket.data.upstream?.destroy();
+      socket.data.upstream = null;
+      socket.data.pending = [];
+      socket.data.pendingBytes = 0;
+    } else {
+      void socket.data.subscription?.close();
+    }
   }
 
   private async pumpFrames(socket: BrowserSocket): Promise<void> {
@@ -1182,8 +1341,8 @@ export class BrowserControlServer {
           break;
         }
       }
-    } catch {
-      if (!data.closed) socket.close(1011, "frame stream unavailable");
+    } catch (error) {
+      if (!data.closed) socket.close(1011, frameStreamCloseReason(error));
     } finally {
       await data.subscription?.close();
       data.subscription = null;
@@ -1216,8 +1375,8 @@ export class BrowserControlServer {
           break;
         }
       }
-    } catch {
-      if (!data.closed) socket.close(1011, "frame stream unavailable");
+    } catch (error) {
+      if (!data.closed) socket.close(1011, frameStreamCloseReason(error));
     } finally {
       await data.subscription?.close();
       data.subscription = null;
@@ -1379,6 +1538,14 @@ export class BrowserControlServer {
     }
     return response;
   }
+}
+
+function frameStreamCloseReason(error: unknown): string {
+  const detail = error instanceof Error ? error.message : "unknown failure";
+  // WebSocket control frames allow at most 123 UTF-8 bytes. Keep diagnostics
+  // useful and transport-safe without placing page/application text in logs.
+  const ascii = detail.replace(/[^\x20-\x7e]/g, "?").replace(/\s+/g, " ").trim();
+  return `frame stream unavailable: ${ascii || "unknown failure"}`.slice(0, 120);
 }
 
 class ProtocolError extends Error {

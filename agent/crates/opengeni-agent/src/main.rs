@@ -345,7 +345,9 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
         platform = platform.with_oom_isolation(cgroups);
     }
     let config_dir = config::config_dir().ok();
-    platform = attach_browser_controller(platform, config_dir.as_deref());
+    let (next_platform, browser_sidecars) =
+        attach_browser_controller(platform, config_dir.as_deref());
+    platform = next_platform;
     // Clone connection platforms only after browser control is attached. Existing
     // links and links added by the watcher must expose the identical controller.
     let links = supervisor_links(&connections, &platform);
@@ -405,6 +407,9 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
             warn!(%error, "attached browser bridge did not shut down cleanly");
         }
     }
+    if let Some(sidecars) = browser_sidecars {
+        sidecars.shutdown().await;
+    }
     supervisor_result.map_err(to_boxed)?;
     info!("agent stopped");
     Ok(())
@@ -413,15 +418,21 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
 fn attach_browser_controller(
     platform: NativePlatform,
     config_dir: Option<&Path>,
-) -> NativePlatform {
+) -> (NativePlatform, Option<Arc<BrowserSidecarManager>>) {
     let Some(directory) = config_dir else {
-        return platform;
+        return (platform, None);
     };
     match BrowserSidecarManager::discover(directory) {
-        Ok(manager) => platform.with_browser_control(Arc::new(manager)),
+        Ok(manager) => {
+            let manager = Arc::new(manager);
+            (
+                platform.with_browser_control(manager.clone()),
+                Some(manager),
+            )
+        }
         Err(error) => {
             warn!(%error, "browser controller sidecar unavailable; browser-native control is disabled");
-            platform
+            (platform, None)
         }
     }
 }

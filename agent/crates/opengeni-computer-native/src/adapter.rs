@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use serde::Serialize;
 
 use crate::{
-    NativeActionCommand, NativeCapabilities, NativeCapturedFrame, NativeClipboard,
-    NativeObservation, NativeTarget,
+    NativeActionCommand, NativeCapabilities, NativeCaptureOptions, NativeCapturedFrame,
+    NativeClipboard, NativeObservation, NativeTarget,
 };
 
 /// Stable native-adapter failure classes mapped by computerd into the public
@@ -125,6 +125,32 @@ pub trait ComputerAdapter: Send + Sync {
 
     /// Captures one exact target and establishes a new pointer frame fence.
     async fn capture(&self, target_id: &str) -> NativeAdapterResult<NativeCapturedFrame>;
+
+    /// Starts placement-local resources for a bounded live-frame stream.
+    /// Stateless platforms may leave this as a no-op and implement
+    /// [`capture_stream`](Self::capture_stream) as one-shot capture.
+    async fn start_capture_stream(
+        &self,
+        _target_id: &str,
+        _options: NativeCaptureOptions,
+    ) -> NativeAdapterResult<()> {
+        Ok(())
+    }
+
+    /// Captures a bounded, optionally lossy frame for an interactive live view.
+    /// Platforms without a specialized encoder retain their exact screenshot path.
+    async fn capture_stream(
+        &self,
+        target_id: &str,
+        _options: NativeCaptureOptions,
+    ) -> NativeAdapterResult<NativeCapturedFrame> {
+        self.capture(target_id).await
+    }
+
+    /// Stops placement-local resources for a live-frame stream. Idempotent.
+    async fn stop_capture_stream(&self, _target_id: &str) -> NativeAdapterResult<()> {
+        Ok(())
+    }
 
     /// Reads the graphical seat's bounded native text clipboard.
     async fn clipboard(&self) -> NativeAdapterResult<NativeClipboard>;

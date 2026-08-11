@@ -2494,7 +2494,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       terminalUrl: terminal?.url ?? null,
       terminalToken: terminal?.token ?? null,
       terminalExpiresAt: terminal?.expiresAt ?? null,
-      terminalTransport: terminal ? ("pty-ws" as const) : null,
+      terminalTransport: terminal?.transport ?? null,
     } satisfies AttachViewerResponse;
     return c.json(response, 201);
   });

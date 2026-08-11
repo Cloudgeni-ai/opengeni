@@ -28,6 +28,7 @@ uuid = { workspace = true }
 atspi = { workspace = true }
 async-lock = { workspace = true }
 async-signal = { workspace = true }
+image = { workspace = true }
 indexmap = { workspace = true }
 opengeni-agent-platform = { path = "../opengeni-agent-platform" }
 opengeni-agent-proto = { path = "../opengeni-agent-proto" }

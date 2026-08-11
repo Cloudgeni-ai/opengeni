@@ -16,6 +16,7 @@ import {
   commitWarmingToWarm,
   completeBrowserSessionEnd,
   createDb,
+  createEnrollment,
   createNetworkRoute,
   createSession,
   dispatchBrowserSessionOperation,
@@ -35,6 +36,7 @@ import {
   prepareBrowserSessionSuspend,
   prepareComputerSessionCreate,
   prepareComputerSessionEnd,
+  reconcileAttachedBrowserInventory,
   reapStaleLeaseHolders,
   touchBrowserSessionController,
 } from "../src";
@@ -286,6 +288,126 @@ describe("durable BrowserSession lifecycle", () => {
         ...createInput(scope),
         placement: { kind: "connected_machine", sandboxId: crypto.randomUUID() },
         headless: false,
+        linkedComputerSessionId: computer.session.id,
+      }),
+    ).rejects.toBeInstanceOf(BrowserSessionStateError);
+  });
+
+  test("binds attached Chrome to the exact active device ComputerSession", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const deviceId = crypto.randomUUID();
+    const enrollment = await createEnrollment(client.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      pubkey: `ed25519:${crypto.randomUUID()}`,
+      os: "macos",
+      arch: "arm64",
+    });
+    await reconcileAttachedBrowserInventory(client.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      enrollmentId: enrollment.id,
+      snapshot: {
+        bridgeGeneration: "bridge:test",
+        revision: 1,
+        devices: [
+          {
+            id: deviceId,
+            name: "Attached Chrome",
+            profileLabel: "Work",
+            browserName: "Google Chrome",
+            browserVersion: "151.0.7922.108",
+            extensionVersion: "1.0.0",
+            platform: "macos",
+            architecture: "arm64",
+            connectionGeneration: "chrome-generation:test",
+            inventoryRevision: 1,
+            tabCount: 1,
+            capabilities: {
+              tabInventory: true,
+              debuggerAttachment: true,
+              semanticObservation: true,
+              screenshots: true,
+              liveFrames: true,
+              humanInput: true,
+              diagnostics: true,
+              rawCdp: false,
+              linkedComputer: true,
+            },
+          },
+        ],
+      },
+    });
+    const computerOperationId = crypto.randomUUID();
+    const computer = await prepareComputerSessionCreate(client.db, {
+      ...scope,
+      operationId: computerOperationId,
+      associatedSessionId: scope.sessionId,
+      actorSubjectId: scope.subjectId,
+      name: "Attached Chrome computer",
+      placement: { kind: "attached_device", deviceId },
+    });
+    const controller = {
+      controllerId: "browserd:attached-test",
+      controllerGeneration: crypto.randomUUID(),
+      placementInstanceId: "chrome-generation:test",
+    };
+    await dispatchComputerSessionOperation(client.db, {
+      ...scope,
+      operationId: computerOperationId,
+      computerSessionId: computer.session.id,
+      controllerGeneration: controller.controllerGeneration,
+      controller,
+    });
+    await activateComputerSession(client.db, {
+      ...scope,
+      operationId: computerOperationId,
+      computerSessionId: computer.session.id,
+      controller,
+      platform: "macos",
+      adapter: "opengeni.ax.v1",
+      seatId: "console",
+      displayId: "main",
+      capabilities: {
+        semanticObservation: true,
+        appDiscovery: true,
+        appLaunch: true,
+        windowCapture: true,
+        screenCapture: true,
+        semanticActions: true,
+        pointerInput: true,
+        keyboardInput: true,
+        clipboard: true,
+        backgroundActions: true,
+        parallelApps: true,
+      },
+    });
+
+    const browser = await prepareBrowserSessionCreate(client.db, {
+      ...createInput(scope),
+      placement: { kind: "attached_device", deviceId },
+      driverId: "opengeni.attached-chrome.v1",
+      engine: "chrome",
+      headless: false,
+      capabilities: ATTACHED_BROWSER_SESSION_CAPABILITIES,
+      linkedComputerSessionId: computer.session.id,
+    });
+    expect(browser.session).toMatchObject({
+      placement: { kind: "attached_device", deviceId },
+      headless: false,
+      linkedComputerSessionId: computer.session.id,
+      capabilities: { linkedComputer: true },
+    });
+
+    await expect(
+      prepareBrowserSessionCreate(client.db, {
+        ...createInput(scope),
+        placement: { kind: "attached_device", deviceId: crypto.randomUUID() },
+        driverId: "opengeni.attached-chrome.v1",
+        engine: "chrome",
+        headless: false,
+        capabilities: ATTACHED_BROWSER_SESSION_CAPABILITIES,
         linkedComputerSessionId: computer.session.id,
       }),
     ).rejects.toBeInstanceOf(BrowserSessionStateError);

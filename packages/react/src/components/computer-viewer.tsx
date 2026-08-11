@@ -7,6 +7,7 @@ import type {
   InteractionIntervention,
   InteractionSemanticNode,
 } from "@opengeni/sdk/interaction";
+import type { DesktopStreamCapability } from "@opengeni/sdk";
 import {
   ChevronDownIcon,
   CircleAlertIcon,
@@ -21,6 +22,7 @@ import {
   RotateCcwIcon,
 } from "lucide-react";
 import {
+  type ClipboardEvent,
   type KeyboardEvent,
   type MouseEvent,
   type PointerEvent,
@@ -40,8 +42,10 @@ import { useComputerSession } from "../hooks/use-computer-session";
 import { useComputerSessions } from "../hooks/use-computer-sessions";
 import { useInteractionInterventions } from "../hooks/use-interaction-interventions";
 import { cn } from "../lib/cn";
+import { copyTextToClipboard } from "../lib/clipboard";
 import type { EmbeddedComputerInteractionClientOverride } from "../session-context";
 import { InteractionInterventionBanner } from "./interaction-intervention-banner";
+import { DesktopViewer } from "./desktop-viewer";
 
 export type ComputerViewerNotification = { kind: "error" | "info"; message: string };
 
@@ -78,13 +82,26 @@ export function ComputerViewer({
   const registry = useComputerSessions({ ...override, sessionId, enabled });
   const createSession = registry.create;
   const refreshRegistry = registry.refresh;
-  const liveSessions = useMemo(
-    () => registry.sessions.filter((session) => isLiveComputer(session)),
-    [registry.sessions],
-  );
-  const relevant = useMemo(
+  const liveRelevant = useMemo(
     () => registry.relevantSessions.filter((session) => isLiveComputer(session)),
     [registry.relevantSessions],
+  );
+  const recentRelevantFailure = useMemo(
+    () =>
+      liveRelevant.length === 0
+        ? (registry.relevantSessions.find((session) =>
+            ["failed", "lost"].includes(session.lifecycle),
+          ) ?? null)
+        : null,
+    [liveRelevant.length, registry.relevantSessions],
+  );
+  const liveSessions = useMemo(() => {
+    const sessions = registry.sessions.filter((session) => isLiveComputer(session));
+    return recentRelevantFailure ? [...sessions, recentRelevantFailure] : sessions;
+  }, [recentRelevantFailure, registry.sessions]);
+  const relevant = useMemo(
+    () => liveRelevant.length > 0 ? liveRelevant : recentRelevantFailure ? [recentRelevantFailure] : [],
+    [liveRelevant, recentRelevantFailure],
   );
   const [selection, setSelection] = useState<ComputerSelection>(null);
   const interventions = useInteractionInterventions({
@@ -129,17 +146,19 @@ export function ComputerViewer({
     }
 
     const selectedStillLive = liveSessions.some((session) => session.id === selection?.sessionId);
-    const preferred = relevant[0] ?? liveSessions[0] ?? null;
+    // Peer computers remain one click away, but never become the implicit
+    // computer for another agent. Otherwise opening a sandbox's Computer tab
+    // can silently select—and send input to—a connected user's Mac.
+    if (selection?.pinned && selectedStillLive) return;
+    const preferred = relevant[0] ?? null;
     if (!preferred) {
       if (selection) setSelection(null);
       return;
     }
-    if (!selectedStillLive || !selection) {
-      setSelection({ sessionId: preferred.id, pinned: false });
-      return;
-    }
-    if (!selection.pinned && relevant[0] && selection.sessionId !== relevant[0].id) {
-      setSelection({ sessionId: relevant[0].id, pinned: false });
+    if (!selectedStillLive || !selection?.pinned) {
+      if (selection?.sessionId !== preferred.id || selection.pinned) {
+        setSelection({ sessionId: preferred.id, pinned: false });
+      }
     }
   }, [liveSessions, relevant, requestedComputerRequestId, requestedComputerSessionId, selection]);
 
@@ -172,7 +191,13 @@ export function ComputerViewer({
     computerSessionId: selection?.sessionId ?? null,
     targetId: computer.selectedTarget?.id ?? null,
     enabled: enabled && selection !== null && controllerReady && computer.selectedTarget !== null,
-    stream: { format: "jpeg", quality: 82, maxWidth: 1_920, maxHeight: 1_200 },
+    stream: {
+      format: "jpeg",
+      quality: 78,
+      maxWidth: 1_920,
+      maxHeight: 1_200,
+      everyNthFrame: 1,
+    },
     ...(webSocketFactory ? { webSocketFactory } : {}),
   });
   const displayedFrame =
@@ -181,6 +206,27 @@ export function ComputerViewer({
     frames.frame.targetId === computer.selectedTarget?.id
       ? frames.frame
       : null;
+  const rfbStream =
+    frames.attachment?.stream.kind === "direct_rfb" ? frames.attachment.stream : null;
+  const rfbCapability = useMemo<DesktopStreamCapability | null>(() => {
+    if (!rfbStream || !frames.attachment) return null;
+    const bounds = computer.selectedTarget?.bounds;
+    return {
+      transport: "vnc-ws",
+      client: "novnc",
+      mode: "interactive",
+      url: rfbStream.url,
+      token: null,
+      expiresAt: frames.attachment.expiresAt,
+      resolution: [bounds?.width ?? 1_440, bounds?.height ?? 900],
+      unredacted: true,
+      requiresAcknowledgment: false,
+      acknowledged: true,
+      shared: false,
+      sharedSessionIds: [],
+      reason: null,
+    };
+  }, [computer.selectedTarget?.bounds, frames.attachment, rfbStream]);
   const machineLocked = selectedRegistrySession?.failureCode === "machine_locked";
   const currentIds = useMemo(() => new Set(relevant.map((session) => session.id)), [relevant]);
 
@@ -235,6 +281,37 @@ export function ComputerViewer({
       }
     },
     [act, actFromFrame],
+  );
+
+  const pasteIntoRfb = useCallback(
+    (event: ClipboardEvent<HTMLDivElement>) => {
+      if (!rfbStream || computer.session?.capabilities?.clipboard !== true) return;
+      const text = event.clipboardData.getData("text/plain");
+      if (!text && !event.clipboardData.types.includes("text/plain")) return;
+      event.preventDefault();
+      event.stopPropagation();
+      void perform({ type: "clipboard", operation: "write", text }, null)
+        .then(() => perform({ type: "clipboard", operation: "paste" }, null))
+        .catch((cause) => notifyError(cause, "Could not paste into the computer."));
+    },
+    [computer.session?.capabilities?.clipboard, notifyError, perform, rfbStream],
+  );
+
+  const copyFromRfb = useCallback(
+    (event: ClipboardEvent<HTMLDivElement>) => {
+      if (!rfbStream || computer.session?.capabilities?.clipboard !== true) return;
+      event.preventDefault();
+      event.stopPropagation();
+      void perform({ type: "clipboard", operation: "copy" }, null)
+        .then(() => computer.readClipboard())
+        .then(async (clipboard) => {
+          if (clipboard.text && !(await copyTextToClipboard(clipboard.text))) {
+            throw new Error("Computer text could not be copied to the local clipboard");
+          }
+        })
+        .catch((cause) => notifyError(cause, "Could not copy from the computer."));
+    },
+    [computer, notifyError, perform, rfbStream],
   );
 
   if (!enabled) return null;
@@ -309,8 +386,19 @@ export function ComputerViewer({
         }
         onResolve={resolveIntervention}
       />
-      {selectedRegistrySession && !controllerReady ? (
-        <ComputerLifecyclePanel session={selectedRegistrySession} onRefresh={registry.refresh} />
+      {!selectedRegistrySession ? (
+        <ComputerUnselectedPanel
+          peerCount={liveSessions.length}
+          creating={creating}
+          onCreate={createComputer}
+        />
+      ) : !controllerReady ? (
+        <ComputerLifecyclePanel
+          session={selectedRegistrySession}
+          creating={creating}
+          onRefresh={registry.refresh}
+          onRetry={createComputer}
+        />
       ) : (
         <>
           <ComputerTargetRail
@@ -324,18 +412,37 @@ export function ComputerViewer({
             }
           />
           <div className="flex min-h-0 flex-1">
-            <ComputerViewport
-              frame={machineLocked ? null : displayedFrame}
-              observation={computer.observation}
-              target={computer.selectedTarget}
-              machineLocked={machineLocked}
-              connectionState={frames.state}
-              connectionError={frames.error ?? computer.error}
-              mutating={computer.mutating}
-              onAction={perform}
-              onReconnect={frames.reconnect}
-              onError={(cause) => notifyError(cause, "Computer input failed.")}
-            />
+            {rfbStream ? (
+              <div
+                className="relative min-h-0 flex-1 bg-black"
+                onPasteCapture={pasteIntoRfb}
+                onCopyCapture={copyFromRfb}
+              >
+                <DesktopViewer
+                  capability={rfbCapability}
+                  interactive
+                  showControlToggle={false}
+                  webSocketProtocols={rfbStream.protocols}
+                  className="h-full"
+                />
+              </div>
+            ) : (
+              <ComputerViewport
+                frame={machineLocked ? null : displayedFrame}
+                observation={computer.observation}
+                target={computer.selectedTarget}
+                machineLocked={machineLocked}
+                connectionState={frames.state}
+                connectionError={frames.error ?? computer.error}
+                mutating={computer.mutating}
+                backgroundActions={computer.session?.capabilities?.backgroundActions === true}
+                clipboardEnabled={computer.session?.capabilities?.clipboard === true}
+                onAction={perform}
+                onReadClipboard={computer.readClipboard}
+                onReconnect={frames.reconnect}
+                onError={(cause) => notifyError(cause, "Computer input failed.")}
+              />
+            )}
             {showControls ? (
               <ComputerSemanticPanel
                 observation={computer.observation}
@@ -359,6 +466,41 @@ export function ComputerViewer({
           />
         </>
       )}
+    </div>
+  );
+}
+
+function ComputerUnselectedPanel(props: {
+  peerCount: number;
+  creating: boolean;
+  onCreate: () => void;
+}) {
+  return (
+    <div className="grid min-h-0 flex-1 place-items-center bg-og-bg p-6 text-center">
+      <div className="max-w-sm">
+        <span className="mx-auto grid size-10 place-items-center rounded-og-md border border-og-border bg-og-surface-1 text-og-muted">
+          <MonitorIcon className="size-4.5" />
+        </span>
+        <p className="mt-3 text-og-menu font-medium text-og-fg">No computer for this agent</p>
+        <p className="mt-1 text-og-control leading-5 text-og-muted">
+          {props.peerCount === 1
+            ? "One workspace computer is available from the computer menu."
+            : `${props.peerCount} workspace computers are available from the computer menu.`}
+        </p>
+        <button
+          type="button"
+          disabled={props.creating}
+          onClick={props.onCreate}
+          className="mt-4 inline-flex h-8 items-center gap-1.5 rounded-og-sm border border-og-border bg-og-surface-1 px-3 text-og-control font-medium text-og-fg transition hover:bg-og-surface-2 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {props.creating ? (
+            <LoaderCircleIcon className="size-3.5 animate-spin" />
+          ) : (
+            <PlusIcon className="size-3.5" />
+          )}
+          {props.creating ? "Opening…" : "New computer"}
+        </button>
+      </div>
     </div>
   );
 }
@@ -515,12 +657,13 @@ function ComputerTargetRail(props: {
   loading: boolean;
   onSelect: (id: string) => void;
 }) {
+  const visualTargets = props.targets.filter(isRenderableComputerView);
   return (
     <div
       className="flex h-10 shrink-0 items-center gap-1 overflow-x-auto border-b border-og-border bg-og-surface-0 px-2"
       aria-label="Computer views"
     >
-      {props.targets.map((target) => (
+      {visualTargets.map((target) => (
         <button
           key={target.id}
           type="button"
@@ -550,18 +693,30 @@ function ComputerTargetRail(props: {
       {props.loading ? (
         <LoaderCircleIcon className="ml-1 size-3.5 animate-spin text-og-muted" />
       ) : null}
-      {!props.loading && props.targets.length === 0 ? (
+      {!props.loading && visualTargets.length === 0 ? (
         <span className="text-og-xs text-og-subtle">Waiting for apps and screens…</span>
       ) : null}
     </div>
   );
 }
 
+function isRenderableComputerView(target: ComputerTarget): boolean {
+  if (target.kind === "screen") return true;
+  if (target.kind !== "window" || !target.bounds) return false;
+  // AX exposes applications and tiny utility/menu windows as valid semantic
+  // targets. Keep those available to tools, but do not present them as visual
+  // desktop tabs when they cannot form a useful live view.
+  return target.bounds.width >= 160 && target.bounds.height >= 90;
+}
+
 function ComputerLifecyclePanel(props: {
   session: ComputerSession;
+  creating: boolean;
   onRefresh: () => Promise<void>;
+  onRetry: () => void;
 }) {
   const failed = ["failed", "lost", "repair_required"].includes(props.session.lifecycle);
+  const retryCreatesSession = ["failed", "lost"].includes(props.session.lifecycle);
   return (
     <div className="grid min-h-0 flex-1 place-items-center bg-og-bg p-6">
       <div className="max-w-sm text-center">
@@ -574,16 +729,24 @@ function ComputerLifecyclePanel(props: {
           {failed ? "Computer needs attention" : lifecycleLabel(props.session.lifecycle)}
         </p>
         <p className="mt-1 text-og-control leading-5 text-og-muted">
-          {props.session.failureCode ??
+          {computerFailureMessage(props.session) ??
             "The computer is being prepared on its placement. It will appear here when ready."}
         </p>
         {failed ? (
           <button
             type="button"
-            onClick={() => void props.onRefresh()}
+            onClick={() =>
+              retryCreatesSession ? props.onRetry() : void props.onRefresh()
+            }
+            disabled={props.creating}
             className="mt-4 inline-flex h-8 items-center gap-1.5 rounded-og-sm border border-og-border bg-og-surface-1 px-3 text-og-control font-medium text-og-fg transition hover:bg-og-surface-2"
           >
-            <RotateCcwIcon className="size-3.5" /> Check again
+            {props.creating ? (
+              <LoaderCircleIcon className="size-3.5 animate-spin" />
+            ) : (
+              <RotateCcwIcon className="size-3.5" />
+            )}
+            {retryCreatesSession ? "Try again" : "Check again"}
           </button>
         ) : null}
       </div>
@@ -599,7 +762,10 @@ function ComputerViewport(props: {
   connectionState: string;
   connectionError: Error | null;
   mutating: boolean;
+  backgroundActions: boolean;
+  clipboardEnabled: boolean;
   onAction: (action: ComputerAction, frame: ComputerFrame | null) => Promise<void>;
+  onReadClipboard: () => Promise<{ text: string | null }>;
   onReconnect: () => void;
   onError: (cause: unknown) => void;
 }) {
@@ -621,11 +787,19 @@ function ComputerViewport(props: {
     frame: ComputerFrame;
     timer: ReturnType<typeof setTimeout> | null;
   } | null>(null);
+  const pendingTextRef = useRef<{
+    text: string;
+    timer: ReturnType<typeof setTimeout>;
+  } | null>(null);
   const actionRef = useRef(props.onAction);
+  const readClipboardRef = useRef(props.onReadClipboard);
   const errorRef = useRef(props.onError);
   const actionTailRef = useRef<Promise<void>>(Promise.resolve());
   actionRef.current = props.onAction;
+  readClipboardRef.current = props.onReadClipboard;
   errorRef.current = props.onError;
+  const rawInputEnabled =
+    !props.backgroundActions || props.target?.kind === "screen" || props.target?.focused === true;
 
   useEffect(() => {
     const frame = props.frame;
@@ -663,16 +837,23 @@ function ComputerViewport(props: {
     () => () => {
       if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
       if (wheelRef.current?.timer) clearTimeout(wheelRef.current.timer);
+      if (pendingTextRef.current?.timer) clearTimeout(pendingTextRef.current.timer);
     },
     [],
   );
 
-  const enqueue = useCallback((action: ComputerAction, frame: ComputerFrame | null) => {
+  const enqueue = useCallback(
+    (action: ComputerAction, frame: ComputerFrame | null, after?: () => Promise<void>) => {
     actionTailRef.current = actionTailRef.current
       .catch(() => undefined)
-      .then(async () => await actionRef.current(action, frame))
+      .then(async () => {
+        await actionRef.current(action, frame);
+        await after?.();
+      })
       .catch((cause) => errorRef.current(cause));
-  }, []);
+    },
+    [],
+  );
 
   const point = useCallback(
     (frame: ComputerFrame, clientX: number, clientY: number) =>
@@ -680,8 +861,35 @@ function ComputerViewport(props: {
     [],
   );
 
+  const flushPendingText = useCallback(() => {
+    const pending = pendingTextRef.current;
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    pendingTextRef.current = null;
+    enqueue({ type: "keyboard", action: "type", value: pending.text }, null);
+  }, [enqueue]);
+
+  const flushPendingClick = useCallback(() => {
+    const pending = lastClickRef.current;
+    if (!pending) return;
+    if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
+    clickTimerRef.current = null;
+    lastClickRef.current = null;
+    enqueue(
+      {
+        type: "pointer",
+        frameId: pending.frame.frameId,
+        action: "click",
+        x: pending.x,
+        y: pending.y,
+      },
+      pending.frame,
+    );
+  }, [enqueue]);
+
   const pointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
-    if (!props.frame || props.mutating) return;
+    if (!props.frame || props.mutating || !rawInputEnabled || event.button !== 0) return;
+    flushPendingText();
     pointerStartRef.current = {
       x: event.clientX,
       y: event.clientY,
@@ -693,6 +901,7 @@ function ComputerViewport(props: {
   };
 
   const pointerUp = (event: PointerEvent<HTMLCanvasElement>) => {
+    if (!rawInputEnabled) return;
     const start = pointerStartRef.current;
     pointerStartRef.current = null;
     if (!start || start.pointerId !== event.pointerId) return;
@@ -700,6 +909,7 @@ function ComputerViewport(props: {
     const to = point(start.frame, event.clientX, event.clientY);
     if (!from || !to) return;
     if (Math.hypot(event.clientX - start.x, event.clientY - start.y) > 5) {
+      flushPendingClick();
       enqueue(
         {
           type: "pointer",
@@ -756,8 +966,11 @@ function ComputerViewport(props: {
 
   const contextMenu = (event: MouseEvent<HTMLCanvasElement>) => {
     event.preventDefault();
+    if (!rawInputEnabled) return;
     const frame = props.frame;
     if (!frame) return;
+    flushPendingText();
+    flushPendingClick();
     const at = point(frame, event.clientX, event.clientY);
     if (at) {
       enqueue(
@@ -775,10 +988,13 @@ function ComputerViewport(props: {
   };
 
   const wheel = (event: WheelEvent<HTMLCanvasElement>) => {
+    if (!rawInputEnabled) return;
     const frame = props.frame;
     if (!frame) return;
     const at = point(frame, event.clientX, event.clientY);
     if (!at) return;
+    flushPendingText();
+    flushPendingClick();
     event.preventDefault();
     const pending = wheelRef.current;
     if (pending?.timer) clearTimeout(pending.timer);
@@ -810,15 +1026,64 @@ function ComputerViewport(props: {
   };
 
   const keyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (!rawInputEnabled) return;
+    const command = event.metaKey || event.ctrlKey;
+    if (
+      props.clipboardEnabled &&
+      command &&
+      !event.altKey &&
+      ["c", "v"].includes(event.key.toLowerCase())
+    ) {
+      flushPendingText();
+      return;
+    }
     const key = computerKey(event);
     if (!key) return;
     event.preventDefault();
+    flushPendingText();
+    flushPendingClick();
     enqueue({ type: "keyboard", action: "press", value: key }, null);
   };
 
+  const copy = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    if (!props.clipboardEnabled || !rawInputEnabled) return;
+    event.preventDefault();
+    flushPendingText();
+    flushPendingClick();
+    enqueue({ type: "clipboard", operation: "copy" }, null, async () => {
+      const clipboard = await readClipboardRef.current();
+      if (!clipboard.text) return;
+      if (!(await copyTextToClipboard(clipboard.text))) {
+        throw new Error("Computer text could not be copied to the local clipboard");
+      }
+    });
+  };
+
+  const paste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    if (!props.clipboardEnabled || !rawInputEnabled) return;
+    event.preventDefault();
+    flushPendingText();
+    flushPendingClick();
+    const text = event.clipboardData.getData("text/plain");
+    enqueue({ type: "clipboard", operation: "write", text }, null, async () => {
+      await actionRef.current({ type: "clipboard", operation: "paste" }, null);
+    });
+  };
+
   const input = (value: string) => {
-    if (!value) return;
-    enqueue({ type: "keyboard", action: "type", value }, null);
+    if (!value || !rawInputEnabled) return;
+    flushPendingClick();
+    const pending = pendingTextRef.current;
+    if (pending) {
+      clearTimeout(pending.timer);
+      pending.text += value;
+      pending.timer = setTimeout(flushPendingText, 16);
+    } else {
+      pendingTextRef.current = {
+        text: value,
+        timer: setTimeout(flushPendingText, 16),
+      };
+    }
     if (inputRef.current) inputRef.current.value = "";
   };
 
@@ -830,6 +1095,7 @@ function ComputerViewport(props: {
         className={cn(
           "absolute inset-0 m-auto max-h-full max-w-full touch-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent",
           !showCanvas && "invisible",
+          !rawInputEnabled && "cursor-default",
         )}
         onPointerDown={pointerDown}
         onPointerUp={pointerUp}
@@ -845,11 +1111,14 @@ function ComputerViewport(props: {
         defaultValue=""
         onInput={(event) => input(event.currentTarget.value)}
         onKeyDown={keyDown}
+        onCopy={copy}
+        onPaste={paste}
         className="pointer-events-none absolute left-1/2 top-1/2 size-px resize-none overflow-hidden opacity-0"
         aria-label="Computer keyboard input"
         autoCapitalize="off"
         autoCorrect="off"
         spellCheck={false}
+        disabled={!rawInputEnabled}
       />
       {!showCanvas ? (
         <ComputerViewportFallback
@@ -864,6 +1133,23 @@ function ComputerViewport(props: {
       {props.mutating ? (
         <div className="pointer-events-none absolute right-3 top-3 flex items-center gap-1.5 rounded-full border border-white/10 bg-black/65 px-2.5 py-1 text-[11px] text-white/80 backdrop-blur">
           <LoaderCircleIcon className="size-3 animate-spin" /> Acting
+        </div>
+      ) : null}
+      {showCanvas && !rawInputEnabled ? (
+        <div className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-2 rounded-full border border-white/10 bg-black/70 py-1 pl-3 pr-1 text-[11px] text-white/80 backdrop-blur">
+          <span>Background view · use native controls</span>
+          {props.target ? (
+            <button
+              type="button"
+              disabled={props.mutating}
+              onClick={() =>
+                enqueue({ type: "focus", targetId: props.target!.id }, null)
+              }
+              className="rounded-full bg-white/10 px-2 py-0.5 font-medium text-white transition hover:bg-white/20 disabled:opacity-50"
+            >
+              Control directly
+            </button>
+          ) : null}
         </div>
       ) : null}
     </div>
@@ -960,28 +1246,85 @@ function ComputerSemanticPanel(props: {
         </p>
       ) : (
         <div className="space-y-0.5">
-          {nodes.map((node) => {
-            const action = semanticAction(node);
-            return (
-              <button
-                key={node.ref}
-                type="button"
-                disabled={!action || props.mutating}
-                onClick={() => {
-                  if (action) props.onAction(action);
-                }}
-                className="flex w-full items-start gap-2 rounded-og-sm px-2 py-1.5 text-left transition hover:bg-og-surface-2 disabled:cursor-default disabled:hover:bg-transparent"
-              >
-                <span className="mt-0.5 text-[10px] uppercase text-og-subtle">{node.role}</span>
-                <span className="min-w-0 flex-1 truncate text-og-control text-og-fg">
-                  {node.name || semanticValue(node) || node.identifier || "Unnamed control"}
-                </span>
-              </button>
-            );
-          })}
+          {nodes.map((node) => (
+            <ComputerSemanticControl
+              key={node.ref}
+              node={node}
+              mutating={props.mutating}
+              onAction={props.onAction}
+            />
+          ))}
         </div>
       )}
     </aside>
+  );
+}
+
+function ComputerSemanticControl(props: {
+  node: InteractionSemanticNode;
+  mutating: boolean;
+  onAction: (action: ComputerAction) => void;
+}) {
+  const { node } = props;
+  const editable = node.actions.includes("set_value");
+  const action = semanticAction(node);
+  const [value, setValue] = useState(() => semanticValue(node) ?? "");
+
+  useEffect(() => {
+    setValue(semanticValue(node) ?? "");
+  }, [node.ref, node.value]);
+
+  if (editable) {
+    return (
+      <form
+        className="rounded-og-sm px-2 py-1.5 hover:bg-og-surface-2"
+        onSubmit={(event) => {
+          event.preventDefault();
+          props.onAction({
+            type: "semantic",
+            locator: { kind: "ref", ref: node.ref },
+            action: "set_value",
+            value,
+          });
+        }}
+      >
+        <label className="block truncate text-[10px] uppercase text-og-subtle">
+          {node.name || node.identifier || node.role}
+        </label>
+        <div className="mt-1 flex gap-1">
+          <input
+            value={value}
+            disabled={props.mutating}
+            onChange={(event) => setValue(event.currentTarget.value)}
+            className="min-w-0 flex-1 rounded-og-sm border border-og-border bg-og-surface-1 px-1.5 py-1 text-og-control text-og-fg outline-none focus:border-og-accent"
+            aria-label={`Set ${node.name || node.identifier || node.role}`}
+          />
+          <button
+            type="submit"
+            disabled={props.mutating}
+            className="rounded-og-sm border border-og-border bg-og-surface-1 px-2 text-og-control font-medium text-og-fg transition hover:bg-og-surface-2 disabled:opacity-50"
+          >
+            Set
+          </button>
+        </div>
+      </form>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      disabled={!action || props.mutating}
+      onClick={() => {
+        if (action) props.onAction(action);
+      }}
+      className="flex w-full items-start gap-2 rounded-og-sm px-2 py-1.5 text-left transition hover:bg-og-surface-2 disabled:cursor-default disabled:hover:bg-transparent"
+    >
+      <span className="mt-0.5 text-[10px] uppercase text-og-subtle">{node.role}</span>
+      <span className="min-w-0 flex-1 truncate text-og-control text-og-fg">
+        {node.name || semanticValue(node) || node.identifier || "Unnamed control"}
+      </span>
+    </button>
   );
 }
 
@@ -1010,7 +1353,7 @@ function ComputerStatusBar(props: {
         {screen
           ? "Full screen · input may move pointer and focus"
           : props.session?.capabilities?.backgroundActions
-            ? "Window · native actions can stay in the background"
+            ? "Window · semantic controls stay in the background"
             : (props.target?.kind ?? "Computer")}
       </span>
       {screen ? <MousePointer2Icon className="size-3" aria-hidden /> : null}
@@ -1066,13 +1409,9 @@ function semanticAction(node: InteractionSemanticNode): ComputerAction | null {
       action: "invoke",
     };
   }
-  if (node.actions.includes("focus")) {
-    return {
-      type: "semantic",
-      locator: { kind: "ref", ref: node.ref },
-      action: "focus",
-    };
-  }
+  // A row in the background-native controls panel must never become an
+  // implicit foregrounding gesture. Focus remains available through the typed
+  // SDK/tool action when the caller explicitly intends to take the shared seat.
   return null;
 }
 
@@ -1117,7 +1456,13 @@ function computerPoint(
   };
 }
 
-function computerKey(event: KeyboardEvent<HTMLTextAreaElement>): string | null {
+export function computerKey(
+  event: Pick<
+    KeyboardEvent<HTMLTextAreaElement>,
+    "altKey" | "ctrlKey" | "key" | "metaKey" | "shiftKey"
+  >,
+): string | null {
+  if (["Alt", "AltGraph", "Control", "Meta", "Shift"].includes(event.key)) return null;
   const special = new Set([
     "Enter",
     "Tab",
@@ -1155,6 +1500,19 @@ function sameFrameFence(left: ComputerFrame, right: ComputerFrame): boolean {
 
 function isLiveComputer(session: ComputerSession): boolean {
   return !["ending", "ended", "failed", "lost"].includes(session.lifecycle);
+}
+
+function computerFailureMessage(session: ComputerSession): string | null {
+  switch (session.failureCode) {
+    case "machine_locked":
+      return "Unlock the connected Mac, then try again.";
+    case "controller_heartbeat_expired":
+      return "The computer connection was lost. Try opening it again.";
+    case null:
+      return null;
+    default:
+      return "The computer could not be opened. Try again.";
+  }
 }
 
 function countInterventions(

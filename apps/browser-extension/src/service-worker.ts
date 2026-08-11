@@ -267,7 +267,10 @@ async function executeBridgeCommand(command: BridgeCommand): Promise<unknown> {
       return { tabs: await tabs() };
     case "tabs.create": {
       const created = await chrome.tabs.create({
-        active: true,
+        // OpenGeni renders and controls attached tabs in its own Browser panel.
+        // Creating a target must not steal focus or raise Chrome on the user's
+        // desktop; an explicit user action can still activate a tab separately.
+        active: false,
         ...(command.url ? { url: command.url } : {}),
       });
       const tab = attachedTab(created);

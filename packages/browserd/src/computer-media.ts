@@ -42,8 +42,8 @@ export function normalizeComputerFrameStreamOptions(
   options: ComputerFrameStreamOptions = {},
 ): NormalizedComputerFrameStreamOptions {
   return {
-    format: options.format ?? "png",
-    quality: boundedInteger(options.quality ?? 90, 1, 100, "frame quality"),
+    format: options.format ?? "jpeg",
+    quality: boundedInteger(options.quality ?? 70, 1, 100, "frame quality"),
     maxWidth: boundedInteger(options.maxWidth ?? 4_096, 1, 4_096, "frame width"),
     maxHeight: boundedInteger(options.maxHeight ?? 4_096, 1, 4_096, "frame height"),
     everyNthFrame: boundedInteger(options.everyNthFrame ?? 1, 1, 60, "frame sampling interval"),

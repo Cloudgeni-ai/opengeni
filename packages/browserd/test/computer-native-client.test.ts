@@ -10,7 +10,7 @@ describe("ComputerNativeClient", () => {
     });
     try {
       expect(client.handshake).toMatchObject({
-        protocolVersion: 1,
+        protocolVersion: 2,
         helperVersion: "fixture-1",
         platform: "linux",
       });

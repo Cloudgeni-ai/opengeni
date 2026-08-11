@@ -27,6 +27,8 @@ import {
 import {
   NativeComputerError,
   type NativeComputerActionCommand,
+  type NativeComputerCaptureOptions,
+  type NativeComputerFrame,
   type NativeComputerObservation,
   type NativeComputerTarget,
   type ComputerNativeTransport,
@@ -73,7 +75,11 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
 
   async listTargets(): Promise<ComputerTargetValue[]> {
     this.assertOpen();
-    return (await this.client.targets()).map((target) => this.projectTarget(target));
+    try {
+      return (await this.client.targets()).map((target) => this.projectTarget(target));
+    } catch (error) {
+      throw predispatchError(error);
+    }
   }
 
   async target(targetId: string): Promise<ComputerTargetValue | null> {
@@ -117,20 +123,7 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
   async capture(targetId: string): Promise<ComputerImageFrame> {
     this.assertOpen();
     try {
-      const frame = await this.client.capture(targetId);
-      return {
-        frameId: frame.frameId,
-        computerSessionId: this.computerSessionId,
-        controllerGeneration: this.controllerGeneration,
-        targetId: frame.targetId,
-        targetGeneration: frame.targetGeneration,
-        sequence: 0,
-        mediaType: frame.mimeType,
-        width: frame.width,
-        height: frame.height,
-        data: frame.data,
-        capturedAt: this.now().toISOString(),
-      };
+      return this.projectFrame(await this.client.capture(targetId), 0);
     } catch (error) {
       throw predispatchError(error);
     }
@@ -156,12 +149,6 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
   ): Promise<ComputerFrameSubscription> {
     this.assertOpen();
     const normalized = normalizeComputerFrameStreamOptions(options);
-    if (normalized.format !== "png") {
-      throw new InteractionControllerError(
-        "unsupported",
-        "native computer frames currently use lossless PNG",
-      );
-    }
     let stream = this.frameStreams.get(targetId);
     let created = false;
     if (stream && !sameComputerFrameOptions(stream.options, normalized)) {
@@ -229,26 +216,40 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
   }
 
   private async runFrameStream(targetId: string, stream: TargetFrameStream): Promise<void> {
+    let started = false;
     try {
+      const captureOptions: NativeComputerCaptureOptions = {
+        format: stream.options.format,
+        quality: stream.options.quality,
+        maxWidth: stream.options.maxWidth,
+        maxHeight: stream.options.maxHeight,
+      };
+      await this.client.startCapture(targetId, captureOptions);
+      started = true;
       while (!this.closed && !stream.stopped && stream.subscriptions.size > 0) {
-        const frame = await this.capture(targetId);
+        const native = await this.client.capture(targetId, captureOptions);
         stream.sequence += 1;
-        if (frame.width > stream.options.maxWidth || frame.height > stream.options.maxHeight) {
+        if (native.width > stream.options.maxWidth || native.height > stream.options.maxHeight) {
           throw new InteractionControllerError(
-            "unsupported",
-            "native frame exceeds the requested stream dimensions",
+            "driver_failed",
+            "native frame did not honor the requested stream dimensions",
           );
         }
-        if (stream.sequence % stream.options.everyNthFrame === 0) {
-          const sequenced = { ...frame, sequence: stream.sequence };
-          for (const subscription of stream.subscriptions.values()) subscription.push(sequenced);
-        }
-        await delay(FRAME_INTERVAL_MS);
+        const sequenced = this.projectFrame(native, stream.sequence);
+        for (const subscription of stream.subscriptions.values()) subscription.push(sequenced);
+        await delay(FRAME_INTERVAL_MS * stream.options.everyNthFrame);
       }
     } catch (error) {
       const failure = error instanceof Error ? error : new Error(String(error));
       for (const subscription of stream.subscriptions.values()) subscription.fail(failure);
     } finally {
+      if (started) {
+        try {
+          await this.client.stopCapture(targetId);
+        } catch {
+          // Closing the helper/controller is an equivalent teardown fence.
+        }
+      }
       if (this.frameStreams.get(targetId) === stream) this.frameStreams.delete(targetId);
       stream.stopped = true;
     }
@@ -259,6 +260,22 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
     if (!stream) return;
     stream.subscriptions.delete(subscriptionId);
     if (stream.subscriptions.size === 0) stream.stopped = true;
+  }
+
+  private projectFrame(frame: NativeComputerFrame, sequence: number): ComputerImageFrame {
+    return {
+      frameId: frame.frameId,
+      computerSessionId: this.computerSessionId,
+      controllerGeneration: this.controllerGeneration,
+      targetId: frame.targetId,
+      targetGeneration: frame.targetGeneration,
+      sequence,
+      mediaType: frame.mimeType,
+      width: frame.width,
+      height: frame.height,
+      data: frame.data,
+      capturedAt: this.now().toISOString(),
+    };
   }
 
   private assertOpen(): void {

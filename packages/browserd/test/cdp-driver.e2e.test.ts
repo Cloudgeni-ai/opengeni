@@ -91,9 +91,9 @@ e2e(
         targetId: initial.target.id,
         documentGeneration: initial.target.documentGeneration,
         frameId: initial.frameId,
-        sequence: 1,
         mediaType: "image/jpeg",
       });
+      expect(streamed.sequence).toBeGreaterThan(0);
       expect([...streamed.data.slice(0, 2)]).toEqual([0xff, 0xd8]);
       expect(imageDimensions(streamed.data, "jpeg")).toEqual({
         width: streamed.width,

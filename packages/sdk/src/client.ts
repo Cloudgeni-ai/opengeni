@@ -47,7 +47,6 @@ import {
   type BrowserSessionLifecycleRequest,
   type BrowserSessionListResponse,
   type BrowserSessionMutationResponse,
-  type BrowserTarget,
   type BrowserTargetListResponse,
   type BrowserRevisionListResponse,
   type ComputerActionReceipt,
@@ -2869,8 +2868,8 @@ export class OpenGeniClient {
     browserSessionId: string,
     request: BrowserOpenTargetRequest = {},
     options: OpenGeniRequestOptions = {},
-  ): Promise<BrowserTarget> {
-    return await this.requestJson<BrowserTarget>(
+  ): Promise<BrowserObservation> {
+    return await this.requestJson<BrowserObservation>(
       "POST",
       `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/targets`,
       request,
@@ -2884,8 +2883,8 @@ export class OpenGeniClient {
     browserSessionId: string,
     targetId: string,
     options: OpenGeniRequestOptions = {},
-  ): Promise<BrowserTarget> {
-    return await this.requestJson<BrowserTarget>(
+  ): Promise<BrowserObservation> {
+    return await this.requestJson<BrowserObservation>(
       "POST",
       `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/targets/${encodeURIComponent(targetId)}/select`,
       {},

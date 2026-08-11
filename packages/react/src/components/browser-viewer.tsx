@@ -11,6 +11,7 @@ import type {
   BrowserSession,
   BrowserTarget,
   ComputerSession,
+  InteractionPlacement,
   InteractionIntervention,
   InteractionSemanticNode,
 } from "@opengeni/sdk/interaction";
@@ -79,7 +80,10 @@ export type BrowserViewerProps = EmbeddedBrowserInteractionClientOverride & {
   /** Optional host capability for a headed managed browser. Browser-only
    * embedders remain valid and create headless sessions instead. */
   createLinkedComputer?:
-    | ((name: string) => Promise<Pick<ComputerSession, "id" | "placement">>)
+    | ((
+        name: string,
+        placement?: InteractionPlacement,
+      ) => Promise<Pick<ComputerSession, "id" | "placement">>)
     | undefined;
   /** Navigate to the exact linked ComputerSession; never a lookalike desktop. */
   onOpenComputer?: ((computerSessionId: string) => void) | undefined;
@@ -451,8 +455,11 @@ export function BrowserViewer({
       setCreating(true);
       void (async () => {
         const linkedComputer =
-          !device && !fast && createLinkedComputer
-            ? await createLinkedComputer(`${browserName} computer`)
+          !fast && createLinkedComputer
+            ? await createLinkedComputer(
+                `${browserName} computer`,
+                device ? { kind: "attached_device", deviceId: device.id } : undefined,
+              )
             : null;
         const response = await createRegistryBrowser({
           sessionId,
@@ -1359,6 +1366,11 @@ function BrowserViewport(props: {
     frame: BrowserFrame;
     timer: ReturnType<typeof setTimeout> | null;
   } | null>(null);
+  const pendingTextRef = useRef<{
+    text: string;
+    frame: BrowserFrame | null;
+    timer: ReturnType<typeof setTimeout>;
+  } | null>(null);
   const actionRef = useRef(props.onAction);
   const readClipboardRef = useRef(props.onReadClipboard);
   const errorRef = useRef(props.onError);
@@ -1405,6 +1417,7 @@ function BrowserViewport(props: {
     () => () => {
       if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
       if (wheelRef.current?.timer) clearTimeout(wheelRef.current.timer);
+      if (pendingTextRef.current?.timer) clearTimeout(pendingTextRef.current.timer);
     },
     [],
   );
@@ -1432,8 +1445,29 @@ function BrowserViewport(props: {
     [],
   );
 
+  const flushPendingText = useCallback(() => {
+    const pending = pendingTextRef.current;
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    pendingTextRef.current = null;
+    enqueue({ type: "type", text: pending.text }, pending.frame);
+  }, [enqueue]);
+
+  const flushPendingClick = useCallback(() => {
+    const pending = lastClickRef.current;
+    if (!pending) return;
+    if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
+    clickTimerRef.current = null;
+    lastClickRef.current = null;
+    enqueue(
+      { type: "pointer", action: "click", x: pending.x, y: pending.y },
+      pending.frame,
+    );
+  }, [enqueue]);
+
   const pointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
-    if (!props.frame || props.mutating) return;
+    if (!props.frame || props.mutating || event.button !== 0) return;
+    flushPendingText();
     pointerStartRef.current = {
       x: event.clientX,
       y: event.clientY,
@@ -1452,6 +1486,7 @@ function BrowserViewport(props: {
     const to = point(start.frame, event.clientX, event.clientY);
     if (!from || !to) return;
     if (Math.hypot(event.clientX - start.x, event.clientY - start.y) > 5) {
+      flushPendingClick();
       enqueue(
         {
           type: "pointer",
@@ -1491,6 +1526,8 @@ function BrowserViewport(props: {
     event.preventDefault();
     const frame = props.frame;
     if (!frame) return;
+    flushPendingText();
+    flushPendingClick();
     const at = point(frame, event.clientX, event.clientY);
     if (at) enqueue({ type: "pointer", action: "click", x: at.x, y: at.y, button: "right" }, frame);
   };
@@ -1500,6 +1537,8 @@ function BrowserViewport(props: {
     if (!frame) return;
     const at = point(frame, event.clientX, event.clientY);
     if (!at) return;
+    flushPendingText();
+    flushPendingClick();
     event.preventDefault();
     const pending = wheelRef.current;
     if (pending?.timer) clearTimeout(pending.timer);
@@ -1536,17 +1575,22 @@ function BrowserViewport(props: {
       !event.altKey &&
       ["c", "v"].includes(event.key.toLowerCase())
     ) {
+      flushPendingText();
       return;
     }
     const key = browserKey(event);
     if (!key) return;
     event.preventDefault();
+    flushPendingText();
+    flushPendingClick();
     enqueue({ type: "press", key }, props.frame);
   };
 
   const copy = (event: ClipboardEvent<HTMLTextAreaElement>) => {
     if (!props.clipboardEnabled) return;
     event.preventDefault();
+    flushPendingText();
+    flushPendingClick();
     enqueue({ type: "clipboard", operation: "copy" }, props.frame, async () => {
       const clipboard = await readClipboardRef.current();
       if (clipboard.text.length === 0) return;
@@ -1559,6 +1603,8 @@ function BrowserViewport(props: {
   const paste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
     if (!props.clipboardEnabled) return;
     event.preventDefault();
+    flushPendingText();
+    flushPendingClick();
     enqueue(
       {
         type: "clipboard",
@@ -1572,7 +1618,20 @@ function BrowserViewport(props: {
   const input = (value: string, nativeComposing = false) => {
     if (composingRef.current || nativeComposing) return;
     if (!value) return;
-    enqueue({ type: "type", text: value }, props.frame);
+    flushPendingClick();
+    const pending = pendingTextRef.current;
+    if (pending && sameOptionalBrowserFrame(pending.frame, props.frame)) {
+      clearTimeout(pending.timer);
+      pending.text += value;
+      pending.timer = setTimeout(flushPendingText, 16);
+    } else {
+      flushPendingText();
+      pendingTextRef.current = {
+        text: value,
+        frame: props.frame,
+        timer: setTimeout(flushPendingText, 16),
+      };
+    }
     if (inputRef.current) inputRef.current.value = "";
   };
 
@@ -2285,7 +2344,15 @@ function browserPoint(
   };
 }
 
-function browserKey(event: KeyboardEvent<HTMLTextAreaElement>): string | null {
+export function browserKey(
+  event: Pick<
+    KeyboardEvent<HTMLTextAreaElement>,
+    "altKey" | "ctrlKey" | "key" | "metaKey" | "shiftKey"
+  >,
+): string | null {
+  // Modifier keydowns precede the actual chord key. They are not executable
+  // browser actions by themselves (for example Meta+Meta is invalid CDP input).
+  if (["Alt", "AltGraph", "Control", "Meta", "Shift"].includes(event.key)) return null;
   const special = new Set([
     "Enter",
     "Tab",
@@ -2356,6 +2423,13 @@ function sameFrameFence(left: BrowserFrame, right: BrowserFrame): boolean {
     left.documentGeneration === right.documentGeneration &&
     left.frameId === right.frameId
   );
+}
+
+function sameOptionalBrowserFrame(
+  left: BrowserFrame | null,
+  right: BrowserFrame | null,
+): boolean {
+  return left === null || right === null ? left === right : sameFrameFence(left, right);
 }
 
 function isLiveBrowser(session: BrowserSession): boolean {

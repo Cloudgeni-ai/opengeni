@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdtemp,
+  mkdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import {
   AgentBrowserJsonRunner,
@@ -12,10 +19,65 @@ describe("managed browser profile cryptography", () => {
     expect(browserProfileCryptoPolicy("linux")).toBe("chromium_basic");
     expect(browserProfileCryptoPolicy("darwin")).toBe("chromium_mock_keychain");
     expect(browserProfileCryptoPolicy("win32")).toBe("platform_bound");
-    expect(browserLaunchArguments("linux")).toBe("--restore-last-session,--password-store=basic");
-    expect(browserLaunchArguments("darwin")).toBe("--restore-last-session,--use-mock-keychain");
-    expect(browserLaunchArguments("win32")).toBe("--restore-last-session");
+    expect(browserLaunchArguments("linux")).toBe(
+      "--restore-last-session,--disable-background-timer-throttling,--disable-renderer-backgrounding,--password-store=basic",
+    );
+    expect(browserLaunchArguments("darwin")).toBe(
+      "--restore-last-session,--disable-background-timer-throttling,--disable-renderer-backgrounding,--use-mock-keychain",
+    );
+    expect(browserLaunchArguments("win32")).toBe(
+      "--restore-last-session,--disable-background-timer-throttling,--disable-renderer-backgrounding",
+    );
   });
+
+  test.skipIf(process.platform !== "darwin")(
+    "preserves the managed browser executable startup handshake",
+    async () => {
+      const root = await mkdtemp("/tmp/og-runner-background-");
+      const browserPath = join(
+        root,
+        "Fixture Browser.app",
+        "Contents",
+        "MacOS",
+        "Fixture Browser",
+      );
+      const binaryPath = join(root, "fixture-agent-browser");
+      await mkdir(join(root, "Fixture Browser.app", "Contents", "MacOS"), {
+        recursive: true,
+      });
+      await writeFile(browserPath, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+      await writeFile(
+        binaryPath,
+        `#!/usr/bin/env bun\nconsole.log(JSON.stringify({ success: true, data: { executable: process.env.AGENT_BROWSER_EXECUTABLE_PATH }, error: null }));\n`,
+        { mode: 0o700 },
+      );
+      const runner = await AgentBrowserJsonRunner.create({
+        namespace: "og",
+        sessionName: "background",
+        socketDirectory: join(root, "socket"),
+        profileDirectory: join(root, "profile"),
+        downloadDirectory: join(root, "downloads"),
+        screenshotDirectory: join(root, "screenshots"),
+        headed: true,
+        browserExecutablePath: browserPath,
+        binary: {
+          path: binaryPath,
+          name: "agent-browser-darwin-arm64",
+          version: "0.33.2",
+          sha256: "fixture",
+        },
+      });
+      try {
+        const result = await runner.run<{ executable: string }>([
+          "open",
+          "about:blank",
+        ]);
+        expect(result.executable).toBe(browserPath);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   test("terminates only the daemon named by its private PID sidecar", async () => {
     const root = await mkdtemp("/tmp/og-runner-stop-");
@@ -35,14 +97,19 @@ describe("managed browser profile cryptography", () => {
         sha256: "fixture",
       },
     });
-    const daemon = Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 60_000)"], {
-      stdin: "ignore",
-      stdout: "ignore",
-      stderr: "ignore",
-    });
+    const daemon = Bun.spawn(
+      [process.execPath, "-e", "setInterval(() => {}, 60_000)"],
+      {
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "ignore",
+      },
+    );
     const runDirectory = join(socketDirectory, "namespaces", "og", "run");
     await mkdir(runDirectory, { recursive: true });
-    await writeFile(join(runDirectory, "cleanup.pid"), String(daemon.pid), { mode: 0o600 });
+    await writeFile(join(runDirectory, "cleanup.pid"), String(daemon.pid), {
+      mode: 0o600,
+    });
     try {
       await runner.terminate();
       expect(await daemon.exited).not.toBe(0);
@@ -196,7 +263,9 @@ console.log(JSON.stringify({ success: true, data: { argv: process.argv.slice(2),
       });
       const startedAt = Date.now();
       try {
-        await expect(runner.run(["open"], { timeoutMs: 100 })).rejects.toMatchObject({
+        await expect(
+          runner.run(["open"], { timeoutMs: 100 }),
+        ).rejects.toMatchObject({
           code: "timeout",
         });
         expect(Date.now() - startedAt).toBeLessThan(2_000);

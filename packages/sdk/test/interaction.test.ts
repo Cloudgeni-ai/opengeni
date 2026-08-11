@@ -312,7 +312,7 @@ describe("BrowserSession SDK", () => {
           return json({ revision: 4, sessions: [session] });
         }
         if (url.endsWith(`/browser-sessions/${BROWSER_SESSION_ID}/targets`) && method === "POST") {
-          return json({
+          const target = {
             id: "target-1",
             browserSessionId: BROWSER_SESSION_ID,
             controllerGeneration: "controller-1",
@@ -324,6 +324,25 @@ describe("BrowserSession SDK", () => {
             selected: true,
             attached: true,
             createdAt: "2026-08-09T10:00:00.000Z",
+          };
+          return json({
+            protocolVersion: 1,
+            observationId: "observation-1",
+            browserSessionId: BROWSER_SESSION_ID,
+            target,
+            frameId: "frame-1",
+            semantic: { kind: "snapshot", roots: [], nodeCount: 0 },
+            screenshot: null,
+            focusedRef: null,
+            changedRegions: [],
+            diagnostics: {
+              consoleErrorCount: 0,
+              failedRequestCount: 0,
+              downloadCount: 0,
+              pageErrorCount: 0,
+            },
+            dialog: null,
+            observedAt: "2026-08-09T10:00:00.000Z",
           });
         }
         throw new Error(`unexpected request ${method} ${url}`);
@@ -334,10 +353,10 @@ describe("BrowserSession SDK", () => {
       workspaceId: WORKSPACE_ID,
       associationSessionId: SOURCE_SESSION_ID,
     });
-    const target = await resource.tabs.open("https://opengeni.ai/");
+    const observation = await resource.tabs.open("https://opengeni.ai/");
 
     expect(resource.id).toBe(BROWSER_SESSION_ID);
-    expect(target.id).toBe("target-1");
+    expect(observation.target.id).toBe("target-1");
     expect(calls).toEqual([
       {
         url: `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/browser-sessions`,

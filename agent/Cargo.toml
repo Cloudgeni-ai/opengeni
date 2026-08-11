@@ -86,7 +86,7 @@ xattr = "1.6.1"
 portable-pty = "0.9"
 # Desktop frame encoding (capture → PNG chunk over a StreamFrame).
 # 0.25.7+ raised the MSRV; 0.25.6 retains the PNG API and Rust 1.82 support.
-image = { version = "=0.25.6", default-features = false, features = ["png"] }
+image = { version = "=0.25.6", default-features = false, features = ["jpeg", "png"] }
 # Linux X11 capture + XTEST input + RANDR geometry via the SAFE pure-Rust binding
 # (keeps unsafe_code = forbid; no FFI of our own).
 x11rb = { version = "0.13", features = ["xtest", "randr", "composite", "damage", "image"] }

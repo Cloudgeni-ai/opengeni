@@ -141,7 +141,7 @@ describe("interaction contracts", () => {
           deviceId: "66666666-6666-4666-8666-666666666666",
         },
       }).success,
-    ).toBe(false);
+    ).toBe(true);
     expect(
       CreateBrowserSessionRequest.safeParse({
         operationId,

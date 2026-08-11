@@ -221,6 +221,30 @@ pub struct NativeCapturedFrame {
     pub bytes: Vec<u8>,
 }
 
+/// Encoding and output bounds requested only for a live-view frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeCaptureOptions {
+    /// Encoded image format.
+    pub format: NativeFrameFormat,
+    /// Lossy encoder quality in `1..=100`; ignored for PNG.
+    pub quality: u8,
+    /// Maximum encoded width.
+    pub max_width: u32,
+    /// Maximum encoded height.
+    pub max_height: u32,
+}
+
+/// Native live-frame encoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeFrameFormat {
+    /// Lossy JPEG for interactive live viewing.
+    Jpeg,
+    /// Lossless PNG for exact screenshots and fixtures.
+    Png,
+}
+
 /// Provider-neutral native locator.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

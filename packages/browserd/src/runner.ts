@@ -1,7 +1,20 @@
 import { spawn } from "node:child_process";
-import { chmod, lstat, mkdir, readFile, readlink, realpath, rm } from "node:fs/promises";
+import { constants } from "node:fs";
+import {
+  access,
+  chmod,
+  lstat,
+  mkdir,
+  readFile,
+  readlink,
+  realpath,
+  rm,
+} from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
-import { resolvePinnedAgentBrowserBinary, type ResolvedAgentBrowserBinary } from "./binary";
+import {
+  resolvePinnedAgentBrowserBinary,
+  type ResolvedAgentBrowserBinary,
+} from "./binary";
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
 const MAX_COMMAND_TIMEOUT_MS = 10 * 60_000;
@@ -72,11 +85,11 @@ export type AgentBrowserRunnerOptions = {
 };
 
 export type BrowserProfileCryptoPolicy =
-  | "chromium_basic"
-  | "chromium_mock_keychain"
-  | "platform_bound";
+  "chromium_basic" | "chromium_mock_keychain" | "platform_bound";
 
-export function browserProfileCryptoPolicy(platform: NodeJS.Platform): BrowserProfileCryptoPolicy {
+export function browserProfileCryptoPolicy(
+  platform: NodeJS.Platform,
+): BrowserProfileCryptoPolicy {
   if (platform === "linux") return "chromium_basic";
   if (platform === "darwin") return "chromium_mock_keychain";
   return "platform_bound";
@@ -89,10 +102,15 @@ export class AgentBrowserJsonRunner {
   private readonly workingDirectory: string;
   private readonly daemonPidFile: string;
 
-  private constructor(binary: ResolvedAgentBrowserBinary, options: AgentBrowserRunnerOptions) {
+  private constructor(
+    binary: ResolvedAgentBrowserBinary,
+    options: AgentBrowserRunnerOptions,
+  ) {
     this.binary = binary;
     this.workingDirectory = resolve(options.workingDirectory ?? process.cwd());
-    const proxy = options.proxyUrl ? privateProxyAuthority(options.proxyUrl) : null;
+    const proxy = options.proxyUrl
+      ? privateProxyAuthority(options.proxyUrl)
+      : null;
     this.environment = isolatedEnvironment(options, proxy);
     this.globalArguments = [
       ...(proxy ? ["--proxy", proxy.server] : []),
@@ -107,7 +125,9 @@ export class AgentBrowserJsonRunner {
     );
   }
 
-  static async create(options: AgentBrowserRunnerOptions): Promise<AgentBrowserJsonRunner> {
+  static async create(
+    options: AgentBrowserRunnerOptions,
+  ): Promise<AgentBrowserJsonRunner> {
     validateSegment(options.namespace, "namespace");
     validateSegment(options.sessionName, "session name");
     assertAgentBrowserSocketPath(options);
@@ -120,8 +140,12 @@ export class AgentBrowserJsonRunner {
       await mkdir(directory, { recursive: true, mode: 0o700 });
       await chmod(directory, 0o700);
     }
+    const browserExecutablePath = await managedBrowserExecutablePath(options);
     const binary = options.binary ?? (await resolvePinnedAgentBrowserBinary());
-    return new AgentBrowserJsonRunner(binary, options);
+    return new AgentBrowserJsonRunner(binary, {
+      ...options,
+      ...(browserExecutablePath ? { browserExecutablePath } : {}),
+    });
   }
 
   async run<T = unknown>(
@@ -131,15 +155,22 @@ export class AgentBrowserJsonRunner {
     validateArguments(args);
     const timeoutMs = boundedTimeout(options.timeoutMs);
     if (options.signal?.aborted) {
-      throw new AgentBrowserCommandError("aborted", "agent-browser command was aborted");
+      throw new AgentBrowserCommandError(
+        "aborted",
+        "agent-browser command was aborted",
+      );
     }
-    const child = spawn(this.binary.path, ["--json", ...this.globalArguments, ...args], {
-      cwd: this.workingDirectory,
-      env: this.environment,
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
-      detached: false,
-    });
+    const child = spawn(
+      this.binary.path,
+      ["--json", ...this.globalArguments, ...args],
+      {
+        cwd: this.workingDirectory,
+        env: this.environment,
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+        detached: false,
+      },
+    );
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     let stdoutBytes = 0;
@@ -184,12 +215,23 @@ export class AgentBrowserJsonRunner {
       };
     });
     const timer = setTimeout(
-      () => interrupt?.(new AgentBrowserCommandError("timeout", "agent-browser command timed out")),
+      () =>
+        interrupt?.(
+          new AgentBrowserCommandError(
+            "timeout",
+            "agent-browser command timed out",
+          ),
+        ),
       timeoutMs,
     );
     timer.unref?.();
     const abort = () => {
-      interrupt?.(new AgentBrowserCommandError("aborted", "agent-browser command was aborted"));
+      interrupt?.(
+        new AgentBrowserCommandError(
+          "aborted",
+          "agent-browser command was aborted",
+        ),
+      );
     };
     options.signal?.addEventListener("abort", abort, { once: true });
     const exit = await Promise.race([
@@ -226,7 +268,10 @@ export class AgentBrowserJsonRunner {
       envelope = parseEnvelope<T>(output);
     } catch (error) {
       if (exit.code !== 0 || exit.signal !== null) {
-        throw new AgentBrowserCommandError("process_failed", "agent-browser process failed");
+        throw new AgentBrowserCommandError(
+          "process_failed",
+          "agent-browser process failed",
+        );
       }
       throw error;
     }
@@ -238,7 +283,10 @@ export class AgentBrowserJsonRunner {
       );
     }
     if (exit.code !== 0 || exit.signal !== null) {
-      throw new AgentBrowserCommandError("process_failed", "agent-browser process failed");
+      throw new AgentBrowserCommandError(
+        "process_failed",
+        "agent-browser process failed",
+      );
     }
     return envelope.data as T;
   }
@@ -246,8 +294,27 @@ export class AgentBrowserJsonRunner {
   /** Stop only the daemon whose private PID sidecar resolves to this exact
    * pinned executable. Used when upstream `close` cannot reconcile a failed
    * browser launch; never scans or kills by name. */
-  async terminate(): Promise<void> {
+  async daemonPid(): Promise<number | null> {
     const pid = await readDaemonPid(this.daemonPidFile);
+    if (pid === null || !(await processRunning(pid))) return null;
+    if (!(await sameExecutable(pid, this.binary.path))) {
+      throw new AgentBrowserCommandError(
+        "process_failed",
+        "agent-browser daemon PID does not identify the pinned executable",
+      );
+    }
+    return pid;
+  }
+
+  async terminate(expectedPid?: number | null): Promise<void> {
+    const recordedPid = await readDaemonPid(this.daemonPidFile);
+    if (recordedPid !== null && expectedPid != null && recordedPid !== expectedPid) {
+      throw new AgentBrowserCommandError(
+        "process_failed",
+        "agent-browser daemon identity changed during shutdown",
+      );
+    }
+    const pid = recordedPid ?? expectedPid ?? null;
     if (pid === null || !(await processRunning(pid))) {
       await rm(this.daemonPidFile, { force: true });
       return;
@@ -278,6 +345,44 @@ export class AgentBrowserJsonRunner {
   }
 }
 
+const MACOS_BROWSER_EXECUTABLES = [
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+  "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+  "/Applications/Chromium.app/Contents/MacOS/Chromium",
+] as const;
+
+async function managedBrowserExecutablePath(
+  options: AgentBrowserRunnerOptions,
+): Promise<string | undefined> {
+  const configured = options.browserExecutablePath
+    ? resolve(options.browserExecutablePath)
+    : undefined;
+  if (process.platform !== "darwin" || !options.headed || options.provider)
+    return configured;
+
+  const executable =
+    configured ?? (await firstExecutable(MACOS_BROWSER_EXECUTABLES));
+  // Keep the process and DevTools startup handshake visible to agent-browser.
+  // Wrapping Chrome in `open -g -n` hides that handshake, so the driver retries
+  // while every retry creates another empty window. CDP target creation itself
+  // remains backgrounded.
+  return executable ?? configured;
+}
+
+async function firstExecutable(
+  candidates: readonly string[],
+): Promise<string | undefined> {
+  for (const candidate of candidates) {
+    try {
+      await access(candidate, constants.X_OK);
+      return resolve(candidate);
+    } catch {
+      // Continue to the next known Chrome/Chromium application.
+    }
+  }
+  return undefined;
+}
+
 async function readDaemonPid(path: string): Promise<number | null> {
   let metadata;
   try {
@@ -286,7 +391,12 @@ async function readDaemonPid(path: string): Promise<number | null> {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw error;
   }
-  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size < 1 || metadata.size > 16) {
+  if (
+    !metadata.isFile() ||
+    metadata.isSymbolicLink() ||
+    metadata.size < 1 ||
+    metadata.size > 16
+  ) {
     throw new AgentBrowserCommandError(
       "process_failed",
       "agent-browser daemon PID file is invalid",
@@ -294,16 +404,25 @@ async function readDaemonPid(path: string): Promise<number | null> {
   }
   const raw = (await readFile(path, "utf8")).trim();
   if (!/^[1-9][0-9]{0,9}$/u.test(raw)) {
-    throw new AgentBrowserCommandError("process_failed", "agent-browser daemon PID is invalid");
+    throw new AgentBrowserCommandError(
+      "process_failed",
+      "agent-browser daemon PID is invalid",
+    );
   }
   const pid = Number(raw);
   if (!Number.isSafeInteger(pid) || pid < 2 || pid > 2_147_483_647) {
-    throw new AgentBrowserCommandError("process_failed", "agent-browser daemon PID is invalid");
+    throw new AgentBrowserCommandError(
+      "process_failed",
+      "agent-browser daemon PID is invalid",
+    );
   }
   return pid;
 }
 
-async function sameExecutable(pid: number, expectedPath: string): Promise<boolean> {
+async function sameExecutable(
+  pid: number,
+  expectedPath: string,
+): Promise<boolean> {
   const expected = await realpath(expectedPath);
   if (process.platform === "linux") {
     try {
@@ -344,7 +463,9 @@ async function processRunning(pid: number): Promise<boolean> {
     try {
       const stat = await readFile(`/proc/${pid}/stat`, "utf8");
       const commandEnd = stat.lastIndexOf(")");
-      return commandEnd >= 0 && stat.slice(commandEnd + 2, commandEnd + 3) !== "Z";
+      return (
+        commandEnd >= 0 && stat.slice(commandEnd + 2, commandEnd + 3) !== "Z"
+      );
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
       throw error;
@@ -367,7 +488,10 @@ function signalProcess(pid: number, signal: NodeJS.Signals): void {
   }
 }
 
-async function waitForProcessStop(pid: number, timeoutMs: number): Promise<boolean> {
+async function waitForProcessStop(
+  pid: number,
+  timeoutMs: number,
+): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   do {
     if (!(await processRunning(pid))) return true;
@@ -376,7 +500,10 @@ async function waitForProcessStop(pid: number, timeoutMs: number): Promise<boole
   return !(await processRunning(pid));
 }
 
-async function boundedProcessOutput(command: string, args: readonly string[]): Promise<string> {
+async function boundedProcessOutput(
+  command: string,
+  args: readonly string[],
+): Promise<string> {
   const child = spawn(command, args, {
     stdio: ["ignore", "pipe", "ignore"],
     windowsHide: true,
@@ -392,7 +519,10 @@ async function boundedProcessOutput(command: string, args: readonly string[]): P
       child.kill("SIGKILL");
     }
   });
-  const timer = setTimeout(() => child.kill("SIGKILL"), PROCESS_QUERY_TIMEOUT_MS);
+  const timer = setTimeout(
+    () => child.kill("SIGKILL"),
+    PROCESS_QUERY_TIMEOUT_MS,
+  );
   timer.unref?.();
   const code = await new Promise<number | null>((resolveExit, reject) => {
     child.once("error", reject);
@@ -434,7 +564,10 @@ function isolatedEnvironment(
     AGENT_BROWSER_SCREENSHOT_DIR: resolve(options.screenshotDirectory),
     AGENT_BROWSER_IDLE_TIMEOUT_MS: "0",
     AGENT_BROWSER_HEADED: options.headed ? "1" : "0",
-    AGENT_BROWSER_ARGS: browserLaunchArguments(process.platform, options.launchArguments),
+    AGENT_BROWSER_ARGS: browserLaunchArguments(
+      process.platform,
+      options.launchArguments,
+    ),
     NO_COLOR: "1",
   });
   if (proxy) {
@@ -446,11 +579,14 @@ function isolatedEnvironment(
   }
   if (options.timezone) environment.TZ = supportedTimezone(options.timezone);
   if (options.provider?.id === "browserbase") {
-    environment.BROWSERBASE_API_KEY = providerCredential(options.provider.apiKey);
+    environment.BROWSERBASE_API_KEY = providerCredential(
+      options.provider.apiKey,
+    );
   } else if (options.provider?.id === "kernel") {
     environment.KERNEL_API_KEY = providerCredential(options.provider.apiKey);
     environment.KERNEL_HEADLESS = options.headed ? "false" : "true";
-    environment.KERNEL_STEALTH = options.provider.stealth === true ? "true" : "false";
+    environment.KERNEL_STEALTH =
+      options.provider.stealth === true ? "true" : "false";
     if (options.provider.timeoutSeconds !== undefined) {
       if (
         !Number.isSafeInteger(options.provider.timeoutSeconds) ||
@@ -459,14 +595,18 @@ function isolatedEnvironment(
       ) {
         throw new Error("Kernel browser timeout is invalid");
       }
-      environment.KERNEL_TIMEOUT_SECONDS = String(options.provider.timeoutSeconds);
+      environment.KERNEL_TIMEOUT_SECONDS = String(
+        options.provider.timeoutSeconds,
+      );
     }
     if (options.provider.endpoint) {
       environment.KERNEL_ENDPOINT = providerEndpoint(options.provider.endpoint);
     }
   }
   if (options.browserExecutablePath) {
-    environment.AGENT_BROWSER_EXECUTABLE_PATH = resolve(options.browserExecutablePath);
+    environment.AGENT_BROWSER_EXECUTABLE_PATH = resolve(
+      options.browserExecutablePath,
+    );
   }
   return environment;
 }
@@ -510,7 +650,8 @@ type PrivateProxyAuthority = {
 };
 
 function privateProxyAuthority(value: string): PrivateProxyAuthority {
-  if (Buffer.byteLength(value) > 16_384) throw new Error("proxy authority exceeds its envelope");
+  if (Buffer.byteLength(value) > 16_384)
+    throw new Error("proxy authority exceeds its envelope");
   let url: URL;
   try {
     url = new URL(value);
@@ -573,7 +714,11 @@ export function browserLaunchArguments(
         ? "--use-mock-keychain"
         : null;
   const validatedAdditional = additional.map((argument) => {
-    if (!argument.startsWith("--") || argument.length > 512 || /[,\r\n\0]/u.test(argument)) {
+    if (
+      !argument.startsWith("--") ||
+      argument.length > 512 ||
+      /[,\r\n\0]/u.test(argument)
+    ) {
       throw new Error("browser launch argument is invalid");
     }
     return argument;
@@ -581,7 +726,13 @@ export function browserLaunchArguments(
   if (validatedAdditional.length > 32) {
     throw new Error("too many browser launch arguments");
   }
-  return ["--restore-last-session", profileCryptoArgument, ...validatedAdditional]
+  return [
+    "--restore-last-session",
+    "--disable-background-timer-throttling",
+    "--disable-renderer-backgrounding",
+    profileCryptoArgument,
+    ...validatedAdditional,
+  ]
     .filter((value): value is string => value !== null)
     .join(",");
 }
@@ -609,7 +760,10 @@ const PASSTHROUGH_ENVIRONMENT_KEYS = [
 ] as const;
 
 export function assertAgentBrowserSocketPath(
-  options: Pick<AgentBrowserRunnerOptions, "namespace" | "sessionName" | "socketDirectory">,
+  options: Pick<
+    AgentBrowserRunnerOptions,
+    "namespace" | "sessionName" | "socketDirectory"
+  >,
 ): void {
   if (process.platform === "win32") return;
   const projected = join(
@@ -620,7 +774,9 @@ export function assertAgentBrowserSocketPath(
     `agent-browser-${options.sessionName}.sock`,
   );
   if (Buffer.byteLength(projected) > 100) {
-    throw new Error("agent-browser socket directory and identifiers exceed the Unix socket limit");
+    throw new Error(
+      "agent-browser socket directory and identifiers exceed the Unix socket limit",
+    );
   }
 }
 
@@ -631,12 +787,18 @@ function parseEnvelope<T>(output: string): AgentBrowserEnvelope<T> {
     .filter(Boolean)
     .at(-1);
   if (!line)
-    throw new AgentBrowserCommandError("invalid_response", "agent-browser returned no JSON");
+    throw new AgentBrowserCommandError(
+      "invalid_response",
+      "agent-browser returned no JSON",
+    );
   let value: unknown;
   try {
     value = JSON.parse(line);
   } catch {
-    throw new AgentBrowserCommandError("invalid_response", "agent-browser returned invalid JSON");
+    throw new AgentBrowserCommandError(
+      "invalid_response",
+      "agent-browser returned invalid JSON",
+    );
   }
   if (
     typeof value !== "object" ||
@@ -670,15 +832,27 @@ function validateArguments(args: readonly string[]): void {
   if (args.length === 0 || args.length > MAX_ARGUMENTS) {
     throw new Error("agent-browser command has an invalid argument count");
   }
-  const bytes = args.reduce((total, argument) => total + Buffer.byteLength(argument), 0);
-  if (bytes > MAX_ARGUMENT_BYTES || args.some((argument) => argument.includes("\0"))) {
-    throw new Error("agent-browser command exceeds its bounded argument envelope");
+  const bytes = args.reduce(
+    (total, argument) => total + Buffer.byteLength(argument),
+    0,
+  );
+  if (
+    bytes > MAX_ARGUMENT_BYTES ||
+    args.some((argument) => argument.includes("\0"))
+  ) {
+    throw new Error(
+      "agent-browser command exceeds its bounded argument envelope",
+    );
   }
 }
 
 function boundedTimeout(value: number | undefined): number {
   const timeout = value ?? DEFAULT_COMMAND_TIMEOUT_MS;
-  if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > MAX_COMMAND_TIMEOUT_MS) {
+  if (
+    !Number.isSafeInteger(timeout) ||
+    timeout < 1 ||
+    timeout > MAX_COMMAND_TIMEOUT_MS
+  ) {
     throw new Error("agent-browser timeout must be a positive bounded integer");
   }
   return timeout;

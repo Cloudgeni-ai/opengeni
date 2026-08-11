@@ -918,6 +918,10 @@ export type InteractionFrameStreamAttachment<RelayKind extends 3 | 4 = 3 | 4> =
       };
     };
 
+export type ComputerFrameStreamAttachment =
+  | InteractionFrameStreamAttachment<4>
+  | { kind: "direct_rfb"; url: string; protocols: string[] };
+
 export type BrowserSessionAttachment = {
   browserSessionId: string;
   controllerGeneration: string;
@@ -938,6 +942,7 @@ export type BrowserActionRequest = {
   expectedTargetGeneration: string;
   expectedDocumentGeneration: string | null;
   expectedFrameId: string | null;
+  observationMode?: "full" | "none" | undefined;
   action: BrowserAction | BrowserActionBatch;
 };
 
@@ -1118,7 +1123,7 @@ export type ComputerSessionAttachment = {
   computerSessionId: string;
   controllerGeneration: string;
   targetId: string;
-  stream: InteractionFrameStreamAttachment<4>;
+  stream: ComputerFrameStreamAttachment;
   expiresAt: string;
 };
 
@@ -1347,13 +1352,13 @@ export interface InteractionTransport {
     browserSessionId: string,
     request?: BrowserOpenTargetRequest,
     options?: OpenGeniRequestOptions,
-  ): Promise<BrowserTarget>;
+  ): Promise<BrowserObservation>;
   selectBrowserTarget(
     workspaceId: string,
     browserSessionId: string,
     targetId: string,
     options?: OpenGeniRequestOptions,
-  ): Promise<BrowserTarget>;
+  ): Promise<BrowserObservation>;
   closeBrowserTarget(
     workspaceId: string,
     browserSessionId: string,
@@ -2182,7 +2187,7 @@ export class BrowserTargetCollection {
     );
   }
 
-  async open(url?: string, options: OpenGeniRequestOptions = {}): Promise<BrowserTarget> {
+  async open(url?: string, options: OpenGeniRequestOptions = {}): Promise<BrowserObservation> {
     return await this.transport.openBrowserTarget(
       this.workspaceId,
       this.browserSessionId,
@@ -2191,7 +2196,7 @@ export class BrowserTargetCollection {
     );
   }
 
-  async select(targetId: string, options: OpenGeniRequestOptions = {}): Promise<BrowserTarget> {
+  async select(targetId: string, options: OpenGeniRequestOptions = {}): Promise<BrowserObservation> {
     return await this.transport.selectBrowserTarget(
       this.workspaceId,
       this.browserSessionId,

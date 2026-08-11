@@ -10,7 +10,10 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 
@@ -21,9 +24,10 @@ use opengeni_agent_platform::{
 use opengeni_agent_proto::v1;
 use serde::Deserialize;
 use tokio::{
-    io::{AsyncBufReadExt as _, BufReader},
-    process::{Child, Command},
+    io::{AsyncBufReadExt as _, AsyncReadExt as _, BufReader},
+    process::{Child, ChildStderr, Command},
     sync::Mutex,
+    task::JoinHandle,
 };
 
 const BROWSERD_BINARY_ENV: &str = "OPENGENI_BROWSERD_BINARY";
@@ -32,6 +36,7 @@ const LIGHTPANDA_BINARY_ENV: &str = "OPENGENI_BROWSERD_LIGHTPANDA_BINARY";
 const COMPUTER_NATIVE_BINARY_ENV: &str = "OPENGENI_BROWSERD_COMPUTER_NATIVE_BINARY";
 const READY_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_READY_LINE_BYTES: usize = 4_096;
+const MAX_STARTUP_DIAGNOSTIC_BYTES: usize = 4_096;
 const MAX_SCOPES: usize = 1_000;
 const MAX_SCOPE_BYTES: usize = 512;
 const MAX_GENERATION_BYTES: usize = 512;
@@ -43,6 +48,7 @@ const MAX_TOKEN_BYTES: usize = 2_048;
 #[derive(Debug)]
 struct Sidecar {
     child: Child,
+    stderr_task: JoinHandle<()>,
     endpoint: BrowserControlEndpoint,
     scope_generation: String,
     token_digest: blake3::Hash,
@@ -85,6 +91,18 @@ impl BrowserSidecarManager {
         })
     }
 
+    /// Gracefully stops every scoped browser controller so it can terminate
+    /// its browser daemons and release profile locks before the agent exits.
+    pub async fn shutdown(&self) {
+        let sidecars = {
+            let mut sidecars = self.sidecars.lock().await;
+            sidecars.drain().map(|(_, sidecar)| sidecar).collect::<Vec<_>>()
+        };
+        for sidecar in sidecars {
+            stop_sidecar(sidecar).await;
+        }
+    }
+
     async fn start(
         &self,
         scope_id: &str,
@@ -107,7 +125,7 @@ impl BrowserSidecarManager {
             .kill_on_drop(true)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .env("OPENGENI_BROWSERD_ROOT", root.join("state"))
             .env("OPENGENI_BROWSERD_ADMIN_TOKEN_FILE", &token_file)
             .env("OPENGENI_BROWSERD_HOSTNAME", "127.0.0.1")
@@ -119,6 +137,13 @@ impl BrowserSidecarManager {
             // The attached bridge resolves its authority from the same exact
             // config directory as the parent agent, including custom/XDG roots.
             .env("OPENGENI_CONFIG_DIR", &self.config_dir);
+        #[cfg(unix)]
+        // Keep terminal Ctrl-C/SIGHUP propagation from racing the manager's
+        // single cooperative shutdown signal. Without a private process group,
+        // browserd receives the terminal SIGINT first, unregisters that one-shot
+        // handler, then the manager's second SIGINT kills it mid-cleanup and
+        // leaves its browser daemon/profile lock behind.
+        command.process_group(0);
         for (environment, name) in [
             (AGENT_BROWSER_BINARY_ENV, companion_name("agent-browser")),
             (LIGHTPANDA_BINARY_ENV, companion_name("lightpanda")),
@@ -142,6 +167,12 @@ impl BrowserSidecarManager {
         let stdout = child.stdout.take().ok_or_else(|| {
             PlatformError::os("browser controller sidecar stdout was not captured")
         })?;
+        let stderr = child.stderr.take().ok_or_else(|| {
+            PlatformError::os("browser controller sidecar stderr was not captured")
+        })?;
+        let stderr_diagnostic = Arc::new(Mutex::new(Vec::new()));
+        let stderr_task =
+            tokio::spawn(drain_bounded_stderr(stderr, Arc::clone(&stderr_diagnostic)));
         let ready = match tokio::time::timeout(READY_TIMEOUT, read_ready_line(stdout)).await {
             Ok(result) => result,
             Err(_) => Err(PlatformError::Timeout(
@@ -151,9 +182,14 @@ impl BrowserSidecarManager {
         let ready = match ready {
             Ok(ready) => ready,
             Err(error) => {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                return Err(error);
+                return Err(stop_with_startup_diagnostic(
+                    child,
+                    stderr_task,
+                    stderr_diagnostic,
+                    admin_token,
+                    error,
+                )
+                .await);
             }
         };
         if ready.service != "opengeni-browserd"
@@ -162,14 +198,20 @@ impl BrowserSidecarManager {
             || ready.hostname != "127.0.0.1"
             || ready.port == 0
         {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            return Err(PlatformError::os(
-                "browser controller sidecar returned an incompatible ready document",
-            ));
+            return Err(stop_with_startup_diagnostic(
+                child,
+                stderr_task,
+                stderr_diagnostic,
+                admin_token,
+                PlatformError::os(
+                    "browser controller sidecar returned an incompatible ready document",
+                ),
+            )
+            .await);
         }
         Ok(Sidecar {
             child,
+            stderr_task,
             endpoint: BrowserControlEndpoint {
                 port: ready.port,
                 sidecar_generation: uuid::Uuid::new_v4().to_string(),
@@ -257,9 +299,8 @@ impl BrowserControlBackend for BrowserSidecarManager {
                 "browser controller sidecar scope bound was reached",
             ));
         }
-        if let Some(mut stale) = sidecars.remove(scope_id) {
-            let _ = stale.child.kill().await;
-            let _ = stale.child.wait().await;
+        if let Some(stale) = sidecars.remove(scope_id) {
+            stop_sidecar(stale).await;
         }
         let sidecar = self
             .start(scope_id, scope_generation, admin_token, &allowed_origins)
@@ -295,6 +336,7 @@ impl BrowserControlBackend for BrowserSidecarManager {
             .map_err(|error| PlatformError::from_io("inspect browser controller sidecar", &error))?
             .is_some()
         {
+            sidecar.stderr_task.abort();
             sidecars.remove(scope_id);
             return Err(PlatformError::NotFound(
                 "browser controller sidecar is no longer running".to_string(),
@@ -302,6 +344,44 @@ impl BrowserControlBackend for BrowserSidecarManager {
         }
         Ok(sidecar.endpoint.clone())
     }
+}
+
+async fn stop_sidecar(mut sidecar: Sidecar) {
+    signal_sidecar_termination(&mut sidecar.child);
+    if tokio::time::timeout(Duration::from_secs(10), sidecar.child.wait())
+        .await
+        .is_err()
+    {
+        let _ = sidecar.child.kill().await;
+        let _ = sidecar.child.wait().await;
+    }
+    if tokio::time::timeout(Duration::from_secs(1), &mut sidecar.stderr_task)
+        .await
+        .is_err()
+    {
+        sidecar.stderr_task.abort();
+    }
+}
+
+#[cfg(unix)]
+fn signal_sidecar_termination(child: &mut Child) {
+    use nix::sys::signal::{kill, Signal};
+    use nix::unistd::Pid;
+
+    if let Some(id) = child.id().and_then(|id| i32::try_from(id).ok()) {
+        // browserd's Bun standalone reliably runs its registered graceful
+        // shutdown path for SIGINT. On macOS a SIGTERM exits the standalone at
+        // the native launcher boundary before Bun dispatches the JS signal
+        // listener, orphaning its private agent-browser/Chromium daemon. SIGINT
+        // is still a cooperative termination request; the bounded wait + exact
+        // child kill below remains the hard-stop fallback.
+        let _ = kill(Pid::from_raw(id), Signal::SIGINT);
+    }
+}
+
+#[cfg(windows)]
+fn signal_sidecar_termination(child: &mut Child) {
+    let _ = child.start_kill();
 }
 
 #[derive(Debug, Deserialize)]
@@ -330,6 +410,81 @@ async fn read_ready_line(stdout: tokio::process::ChildStdout) -> PlatformResult<
     }
     serde_json::from_str(&line)
         .map_err(|_| PlatformError::os("browser controller sidecar ready document is invalid"))
+}
+
+async fn drain_bounded_stderr(mut stderr: ChildStderr, diagnostic: Arc<Mutex<Vec<u8>>>) {
+    let mut chunk = [0_u8; 1_024];
+    loop {
+        let count = match stderr.read(&mut chunk).await {
+            Ok(0) | Err(_) => return,
+            Ok(count) => count,
+        };
+        let mut diagnostic = diagnostic.lock().await;
+        let remaining = MAX_STARTUP_DIAGNOSTIC_BYTES.saturating_sub(diagnostic.len());
+        diagnostic.extend_from_slice(&chunk[..count.min(remaining)]);
+    }
+}
+
+async fn stop_with_startup_diagnostic(
+    mut child: Child,
+    mut stderr_task: JoinHandle<()>,
+    diagnostic: Arc<Mutex<Vec<u8>>>,
+    admin_token: &str,
+    error: PlatformError,
+) -> PlatformError {
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+    if tokio::time::timeout(Duration::from_secs(1), &mut stderr_task)
+        .await
+        .is_err()
+    {
+        stderr_task.abort();
+    }
+    let diagnostic = diagnostic.lock().await;
+    let rendered = String::from_utf8_lossy(&diagnostic)
+        .replace(admin_token, "[redacted]")
+        .chars()
+        .map(|character| {
+            if character.is_control() && !matches!(character, '\n' | '\r' | '\t') {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    let rendered = rendered.trim();
+    if rendered.is_empty() {
+        error
+    } else {
+        append_platform_error(error, format!("browserd: {rendered}"))
+    }
+}
+
+fn append_platform_error(error: PlatformError, diagnostic: String) -> PlatformError {
+    match error {
+        PlatformError::Unsupported(message) => {
+            PlatformError::Unsupported(format!("{message}; {diagnostic}"))
+        }
+        PlatformError::NotFound(message) => {
+            PlatformError::NotFound(format!("{message}; {diagnostic}"))
+        }
+        PlatformError::ConsentRequired(message) => {
+            PlatformError::ConsentRequired(format!("{message}; {diagnostic}"))
+        }
+        PlatformError::Timeout(message) => {
+            PlatformError::Timeout(format!("{message}; {diagnostic}"))
+        }
+        PlatformError::Os {
+            message,
+            mut detail,
+        } => {
+            detail.insert("browserd_stderr".to_string(), diagnostic.clone());
+            PlatformError::Os {
+                message: format!("{message}; {diagnostic}"),
+                detail,
+            }
+        }
+    }
 }
 
 fn discover_browserd_binary() -> PlatformResult<PathBuf> {
@@ -369,13 +524,19 @@ fn companion_name(base: &str) -> String {
 }
 
 fn discover_companion_binary(browserd: &Path, name: &str) -> Option<PathBuf> {
-    let parent = browserd.parent().unwrap_or_else(|| Path::new("."));
+    let browserd_parent = browserd.parent().unwrap_or_else(|| Path::new("."));
+    let agent = std::env::current_exe().ok();
+    let agent_parent = agent.as_deref().and_then(Path::parent);
     [
-        parent.join(name),
-        parent.join("../Helpers").join(name),
-        parent.join("../Resources").join(name),
+        Some(browserd_parent.join(name)),
+        Some(browserd_parent.join("../Helpers").join(name)),
+        Some(browserd_parent.join("../Resources").join(name)),
+        agent_parent.map(|parent| parent.join(name)),
+        agent_parent.map(|parent| parent.join("../Helpers").join(name)),
+        agent_parent.map(|parent| parent.join("../Resources").join(name)),
     ]
     .into_iter()
+    .flatten()
     .find(|candidate| candidate.is_file())
 }
 
@@ -527,6 +688,43 @@ mod tests {
         .unwrap();
         assert_eq!(origins, ["https://a.example", "https://b.example"]);
         assert!(canonical_origins(&["https://a.example,https://b.example".to_string()]).is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sidecar_startup_failure_includes_bounded_redacted_stderr() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temporary = tempfile::tempdir().expect("temporary sidecar root");
+        let binary = temporary.path().join("failing-browserd");
+        std::fs::write(
+            &binary,
+            concat!(
+                "#!/bin/sh\n",
+                "IFS= read -r token < \"$OPENGENI_BROWSERD_ADMIN_TOKEN_FILE\"\n",
+                "printf '%s pinned helper digest mismatch\\n' \"$token\" >&2\n",
+                "exit 17\n",
+            ),
+        )
+        .expect("write failing browserd double");
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700))
+            .expect("make failing browserd double executable");
+        let manager = BrowserSidecarManager::with_binary(temporary.path().join("config"), &binary)
+            .expect("construct sidecar manager");
+        let token = "private-token-that-must-not-escape-1234";
+        let error = manager
+            .ensure(&v1::BrowserControlEnsureRequest {
+                scope_id: "workspace:diagnostic".to_string(),
+                scope_generation: "generation-1".to_string(),
+                admin_token: token.to_string(),
+                allowed_origins: vec!["https://app.opengeni.test".to_string()],
+            })
+            .await
+            .expect_err("failing sidecar must not become ready");
+        let rendered = error.to_string();
+        assert!(rendered.contains("pinned helper digest mismatch"));
+        assert!(rendered.contains("[redacted]"));
+        assert!(!rendered.contains(token));
     }
 
     #[cfg(unix)]

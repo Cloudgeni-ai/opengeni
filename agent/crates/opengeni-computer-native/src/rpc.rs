@@ -11,11 +11,11 @@ use tokio::task::JoinSet;
 
 use crate::{
     open_native_adapter, ComputerAdapter, NativeActionCommand, NativeAdapterError,
-    NativeAdapterErrorCode, NativeCapturedFrame,
+    NativeAdapterErrorCode, NativeCaptureOptions, NativeCapturedFrame,
 };
 
 /// Current native-helper wire protocol.
-pub const NATIVE_RPC_PROTOCOL_VERSION: u16 = 1;
+pub const NATIVE_RPC_PROTOCOL_VERSION: u16 = 2;
 
 const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
@@ -58,11 +58,27 @@ enum NativeOperation {
     Handshake,
     Capabilities,
     Targets,
-    Observe { target_id: String },
-    Capture { target_id: String },
+    Observe {
+        target_id: String,
+    },
+    Capture {
+        target_id: String,
+        options: Option<NativeCaptureOptions>,
+    },
+    StartCapture {
+        target_id: String,
+        options: NativeCaptureOptions,
+    },
+    StopCapture {
+        target_id: String,
+    },
     Clipboard,
-    Validate { command: NativeActionCommand },
-    Dispatch { command: NativeActionCommand },
+    Validate {
+        command: NativeActionCommand,
+    },
+    Dispatch {
+        command: NativeActionCommand,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -176,7 +192,10 @@ where
                 let request_capture_permits = Arc::clone(&capture_permits);
                 tasks.spawn(async move {
                     let _permit = permit;
-                    let _capture_permit = if matches!(&request.operation, NativeOperation::Capture { .. }) {
+                    let _capture_permit = if matches!(
+                        &request.operation,
+                        NativeOperation::Capture { .. } | NativeOperation::StartCapture { .. }
+                    ) {
                         Some(request_capture_permits.acquire_owned().await.map_err(|_| {
                             NativeRpcServerError::Protocol(
                                 "native capture concurrency gate closed".to_string(),
@@ -259,9 +278,29 @@ async fn handle_request(
             Ok(observation) => serialize_result(observation).map(payload),
             Err(error) => Err(error),
         },
-        NativeOperation::Capture { target_id } => {
-            adapter.capture(&target_id).await.and_then(frame_payload)
+        NativeOperation::Capture { target_id, options } => match options {
+            Some(options) => match validate_capture_options(options) {
+                Ok(options) => adapter
+                    .capture_stream(&target_id, options)
+                    .await
+                    .and_then(frame_payload),
+                Err(error) => Err(error),
+            },
+            None => adapter.capture(&target_id).await.and_then(frame_payload),
+        },
+        NativeOperation::StartCapture { target_id, options } => {
+            match validate_capture_options(options) {
+                Ok(options) => adapter
+                    .start_capture_stream(&target_id, options)
+                    .await
+                    .map(|()| payload(Value::Null)),
+                Err(error) => Err(error),
+            }
         }
+        NativeOperation::StopCapture { target_id } => adapter
+            .stop_capture_stream(&target_id)
+            .await
+            .map(|()| payload(Value::Null)),
         NativeOperation::Clipboard => match adapter.clipboard().await {
             Ok(clipboard) => serialize_result(clipboard).map(payload),
             Err(error) => Err(error),
@@ -292,6 +331,25 @@ async fn handle_request(
             attachment: None,
         },
     }
+}
+
+fn validate_capture_options(
+    options: NativeCaptureOptions,
+) -> Result<NativeCaptureOptions, NativeAdapterError> {
+    if options.quality == 0
+        || options.quality > 100
+        || options.max_width == 0
+        || options.max_width > 4_096
+        || options.max_height == 0
+        || options.max_height > 4_096
+    {
+        return Err(NativeAdapterError::definite(
+            NativeAdapterErrorCode::InvalidAction,
+            "native capture options are outside their supported bounds",
+            false,
+        ));
+    }
+    Ok(options)
 }
 
 fn payload(result: Value) -> NativeResponsePayload {

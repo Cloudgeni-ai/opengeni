@@ -60,6 +60,12 @@ describe("BrowserSession route discipline", () => {
     expect(source).toContain('kind: "relay"');
     expect(source).toContain("BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX");
     expect(source).not.toMatch(/url[^\n]*relayToken/u);
+    const attachment = source.slice(
+      source.indexOf('"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/attachments"'),
+      source.indexOf('"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/heartbeat"'),
+    );
+    expect(attachment).toContain("requestOrigin(context, deps.settings.corsAllowOriginRegex)");
+    expect(attachment).toContain("client.addAllowedOrigins([origin])");
   });
 
   test("admits every controller call through the durable generation fence", async () => {

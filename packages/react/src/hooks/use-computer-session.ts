@@ -114,7 +114,7 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
       ]);
       if (!mountedRef.current || requestRef.current.id !== id) return;
       const targets = sortComputerTargets(targetResponse.targets);
-      const selected = chooseTarget(targets, selectedTargetIdRef.current);
+      const selected = chooseTarget(targets, selectedTargetIdRef.current, session.platform);
       const observation = selected
         ? await client.observeComputerTarget(workspaceId, computerSessionId, selected.id, {
             signal: controller.signal,
@@ -415,9 +415,21 @@ function emptyState(computerSessionId: string | null, loading: boolean): Compute
 function chooseTarget(
   targets: readonly ComputerTarget[],
   preferredId: string | null,
+  platform: ComputerSession["platform"],
 ): ComputerTarget | null {
+  const preferred = targets.find((target) => target.id === preferredId);
+  if (preferred) return preferred;
+  if (platform === "linux") {
+    return (
+      targets.find((target) => target.focused && target.kind === "screen") ??
+      targets.find((target) => target.kind === "screen") ??
+      targets.find((target) => target.focused && target.kind === "window") ??
+      targets.find((target) => target.kind === "window") ??
+      targets[0] ??
+      null
+    );
+  }
   return (
-    targets.find((target) => target.id === preferredId) ??
     targets.find((target) => target.focused && target.kind === "window") ??
     targets.find((target) => target.kind === "window") ??
     targets.find((target) => target.focused && target.kind === "app") ??
