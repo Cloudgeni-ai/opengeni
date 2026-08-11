@@ -1,5 +1,11 @@
 # @opengeni/runtime
 
+## 0.19.3
+
+### Patch Changes
+
+- 314c7ba: Let bundled OpenGeni skills deterministically shadow same-name workspace copies while preserving fail-closed conflicts for user-configured skills.
+
 ## 0.19.2
 
 ### Patch Changes
