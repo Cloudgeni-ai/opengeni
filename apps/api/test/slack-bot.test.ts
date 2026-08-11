@@ -145,6 +145,8 @@ type SlackCall = {
   clientMessageId: string | null;
   parentTimestamp: string | null;
   threadTimestamp: string | null;
+  unfurlLinks: string | null;
+  unfurlMedia: string | null;
   hasText: boolean;
   query: string;
 };
@@ -260,6 +262,8 @@ function fakeSlack(
       clientMessageId: params.get("client_msg_id"),
       parentTimestamp: params.get("ts"),
       threadTimestamp: params.get("thread_ts"),
+      unfurlLinks: params.get("unfurl_links"),
+      unfurlMedia: params.get("unfurl_media"),
       hasText: params.has("text"),
       query: url.search,
     });
@@ -2555,6 +2559,8 @@ describe("OpenGeni Slack bot connection", () => {
     expect(slack.calls.find((call) => call.method === "chat.postMessage")).toMatchObject({
       hasText: true,
       clientMessageId: operationId,
+      unfurlLinks: "false",
+      unfurlMedia: "false",
       query: "",
     });
     const threadedOperationId = crypto.randomUUID();

@@ -42,6 +42,7 @@ import { HTTPException } from "hono/http-exception";
 const SLACK_API_BASE = "https://slack.com/api/";
 const SLACK_RESPONSE_MAX_BYTES = 2 * 1024 * 1024;
 const SLACK_FILE_RESPONSE_MAX_BYTES = 4 * 1024 * 1024;
+export const SLACK_REACTION_IMAGE_MAX_BYTES = 4 * 1024 * 1024;
 const SLACK_FILE_CONTENT_PAGE_CHARS = 50_000;
 const SLACK_TIMEOUT_MS = 10_000;
 const MAX_CHANNEL_PAGE = 200;
@@ -67,6 +68,8 @@ const MAX_PROJECTED_TEXT = 4_000;
 const SLACK_POST_CLAIM_LEASE_MS = 30_000;
 const MAX_SLACK_POST_RECONCILIATION_PAGES = 8;
 const SLACK_DELETE_CLAIM_LEASE_MS = 30_000;
+const SLACK_PRIVATE_FILE_HOSTS = new Set(["files.slack.com", "slack.com"]);
+const SLACK_REACTION_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
 
 type SlackPayload = Record<string, unknown> & { ok?: unknown; error?: unknown };
 
@@ -81,6 +84,21 @@ export type VerifiedOpenGeniSlackBot = {
   grantedScopes: string[];
   metadata: OpenGeniSlackBotConnectionMetadata;
 };
+
+export type PreparedSlackReactionImage = Readonly<{
+  fileId: string;
+  filename: string;
+  declaredMimeType: string;
+  declaredSizeBytes: number | null;
+  downloadUrl: URL | null;
+}>;
+
+export type DownloadedSlackReactionImage = Readonly<{
+  fileId: string;
+  filename: string;
+  contentType: "image/png" | "image/jpeg" | "image/webp";
+  bytes: Uint8Array;
+}>;
 
 export async function exchangeOpenGeniSlackAuthorizationCode(
   input: {
@@ -567,6 +585,99 @@ export class OpenGeniSlackBotClient {
     });
   }
 
+  /**
+   * Re-fetch and authorize the exact reacted-message files before any byte or
+   * workspace-storage mutation. The returned private URLs are process-local
+   * capabilities only and must never be persisted, logged, or projected into
+   * session input.
+   */
+  async prepareReactionImageDownloads(input: {
+    channelId: string;
+    files: readonly { id: string; name: string; title: string }[];
+  }): Promise<PreparedSlackReactionImage[]> {
+    const result = await this.withAudit("file.content.read", async (headers) => {
+      await this.requireActiveNonSharedMemberChannel(headers, input.channelId);
+      const prepared: PreparedSlackReactionImage[] = [];
+      for (const candidate of input.files) {
+        const payload = await this.call(headers, "files.info", { file: candidate.id });
+        const fileRecord = slackRecord(payload.file);
+        const file = projectFile(fileRecord);
+        if (!fileRecord || !file || file.id !== candidate.id) {
+          throw new SlackBotProviderError("file_not_found");
+        }
+        if (!fileIsSharedToChannel(fileRecord, input.channelId)) {
+          throw new SlackBotProviderError("file_not_shared_to_channel");
+        }
+        let downloadUrl: URL | null = null;
+        try {
+          downloadUrl = privateSlackFileUrl(fileRecord);
+        } catch {
+          // A malformed provider URL is a per-file omission, not permission to
+          // send a credential to a different destination.
+        }
+        prepared.push(
+          Object.freeze({
+            fileId: file.id,
+            filename: file.name || file.title || candidate.name || candidate.title || file.id,
+            declaredMimeType: normalizedContentType(file.mimetype),
+            declaredSizeBytes: file.size,
+            downloadUrl,
+          }),
+        );
+      }
+      return { files: prepared };
+    });
+    return result.files;
+  }
+
+  /** Download and fully validate one previously authorized Slack image. */
+  async downloadReactionImage(
+    input: PreparedSlackReactionImage,
+  ): Promise<DownloadedSlackReactionImage> {
+    return await this.withAudit("file.content.read", async () => {
+      if (!SLACK_REACTION_IMAGE_MIME_TYPES.has(input.declaredMimeType)) {
+        throw new SlackBotProviderError("unsupported_file_type");
+      }
+      if (!input.downloadUrl) throw new SlackBotProviderError("file_content_unavailable");
+      if (
+        input.declaredSizeBytes !== null &&
+        (input.declaredSizeBytes < 1 || input.declaredSizeBytes > SLACK_REACTION_IMAGE_MAX_BYTES)
+      ) {
+        throw new SlackBotProviderError("invalid_file_size");
+      }
+      const response = await this.fetchPrivateFile(input.downloadUrl, "file.content.read");
+      const responseContentType = normalizedContentType(response.headers.get("content-type"));
+      if (!SLACK_REACTION_IMAGE_MIME_TYPES.has(responseContentType)) {
+        await response.body?.cancel().catch(() => undefined);
+        throw new SlackBotProviderError("unsupported_file_type");
+      }
+      let bytes: Uint8Array;
+      try {
+        bytes = await readResponseBodyBounded(
+          response,
+          SLACK_REACTION_IMAGE_MAX_BYTES,
+          "Slack image content",
+        );
+      } catch {
+        throw new SlackBotProviderError("invalid_file_content");
+      }
+      const sniffed = sniffSlackReactionImageMime(bytes);
+      if (!sniffed) throw new SlackBotProviderError("invalid_file_content");
+      if (input.declaredMimeType !== sniffed || responseContentType !== sniffed) {
+        throw new SlackBotProviderError("file_content_type_mismatch");
+      }
+      if (input.declaredSizeBytes !== null && input.declaredSizeBytes !== bytes.byteLength) {
+        throw new SlackBotProviderError("file_size_mismatch");
+      }
+      return Object.freeze({
+        fileId: input.fileId,
+        filename: input.filename,
+        contentType: sniffed,
+        bytes,
+      });
+    });
+  }
+
   async listUsers(input: { limit?: number; cursor?: string } = {}) {
     return await this.withAudit("users.list", async (headers) => {
       const payload = await this.call(headers, "users.list", {
@@ -770,6 +881,8 @@ export class OpenGeniSlackBotClient {
         channel: channelId,
         text: input.text,
         client_msg_id: input.operationId,
+        unfurl_links: "false",
+        unfurl_media: "false",
         ...(input.threadTimestamp ? { thread_ts: input.threadTimestamp } : {}),
       });
       const slackChannelId = requiredSlackString(posted.channel, "channel");
@@ -1197,12 +1310,16 @@ export class OpenGeniSlackBotClient {
     let redirected: URL;
     try {
       redirected = new URL(location, url);
-      assertPrivateSlackFileUrl(redirected);
     } catch {
       throw new SlackBotProviderError("invalid_file_redirect");
     }
-    if (isSlackInteractiveFileRedirect(redirected)) {
+    if (isSlackOwnedInteractiveFileRedirect(redirected)) {
       throw new SlackBotProviderError("file_requires_user_access");
+    }
+    try {
+      assertPrivateSlackFileUrl(redirected);
+    } catch {
+      throw new SlackBotProviderError("invalid_file_redirect");
     }
     return await this.fetchPrivateFileOnce(redirected, operation);
   }
@@ -1211,6 +1328,11 @@ export class OpenGeniSlackBotClient {
     url: URL,
     operation: "file.info" | "file.content.read",
   ): Promise<Response> {
+    try {
+      assertPrivateSlackFileUrl(url);
+    } catch {
+      throw new SlackBotProviderError("invalid_file_url");
+    }
     const headers = await this.headersForDestination(operation, url.toString());
     let response: Response;
     try {
@@ -2017,8 +2139,8 @@ function privateSlackFileUrl(file: Record<string, unknown>): URL | null {
 
 function assertPrivateSlackFileUrl(url: URL): void {
   const hostname = url.hostname.toLowerCase();
-  if (url.protocol !== "https:" || (hostname !== "slack.com" && !hostname.endsWith(".slack.com"))) {
-    throw new Error("Slack file URL must use HTTPS on slack.com");
+  if (url.protocol !== "https:" || !SLACK_PRIVATE_FILE_HOSTS.has(hostname) || url.port) {
+    throw new Error("Slack file URL must use an allowed HTTPS Slack host");
   }
   if (url.username || url.password) {
     throw new Error("Slack file URL must not contain credentials");
@@ -2029,8 +2151,170 @@ function isSlackInteractiveFileRedirect(url: URL): boolean {
   return url.pathname === "/" && url.searchParams.has("redir");
 }
 
+function isSlackOwnedInteractiveFileRedirect(url: URL): boolean {
+  const hostname = url.hostname.toLowerCase();
+  return (
+    url.protocol === "https:" &&
+    !url.port &&
+    !url.username &&
+    !url.password &&
+    (hostname === "slack.com" || hostname.endsWith(".slack.com")) &&
+    isSlackInteractiveFileRedirect(url)
+  );
+}
+
 function normalizedContentType(value: string | null): string {
   return (value ?? "application/octet-stream").split(";", 1)[0]!.trim().toLowerCase();
+}
+
+export function sniffSlackReactionImageMime(
+  bytes: Uint8Array,
+): "image/png" | "image/jpeg" | "image/webp" | null {
+  if (bytes.byteLength < 12 || hasMarkupPrefix(bytes)) return null;
+  if (isCompletePng(bytes)) return "image/png";
+  if (isCompleteJpeg(bytes)) return "image/jpeg";
+  if (isCompleteWebp(bytes)) return "image/webp";
+  return null;
+}
+
+function hasMarkupPrefix(bytes: Uint8Array): boolean {
+  const prefix = new TextDecoder("utf-8", { fatal: false })
+    .decode(bytes.subarray(0, Math.min(bytes.byteLength, 256)))
+    .replace(/^\uFEFF/u, "")
+    .trimStart()
+    .toLowerCase();
+  return (
+    prefix.startsWith("<svg") ||
+    prefix.startsWith("<html") ||
+    prefix.startsWith("<!doctype") ||
+    prefix.startsWith("<?xml")
+  );
+}
+
+function isCompletePng(bytes: Uint8Array): boolean {
+  const signature = [137, 80, 78, 71, 13, 10, 26, 10];
+  if (!signature.every((value, index) => bytes[index] === value)) return false;
+  let offset = 8;
+  let sawHeader = false;
+  while (offset + 12 <= bytes.byteLength) {
+    const length = readUint32Be(bytes, offset);
+    const typeOffset = offset + 4;
+    const dataOffset = offset + 8;
+    const next = dataOffset + length + 4;
+    if (!Number.isSafeInteger(next) || next > bytes.byteLength) return false;
+    const type = String.fromCharCode(
+      bytes[typeOffset]!,
+      bytes[typeOffset + 1]!,
+      bytes[typeOffset + 2]!,
+      bytes[typeOffset + 3]!,
+    );
+    if (!sawHeader) {
+      if (type !== "IHDR" || length !== 13) return false;
+      sawHeader = true;
+    }
+    if (type === "IEND") return length === 0 && next === bytes.byteLength;
+    offset = next;
+  }
+  return false;
+}
+
+function isCompleteJpeg(bytes: Uint8Array): boolean {
+  if (bytes[0] !== 0xff || bytes[1] !== 0xd8) return false;
+  let offset = 2;
+  let sawFrame = false;
+  let inScan = false;
+  while (offset < bytes.byteLength) {
+    if (inScan) {
+      if (bytes[offset] !== 0xff) {
+        offset += 1;
+        continue;
+      }
+      while (bytes[offset] === 0xff) offset += 1;
+      const marker = bytes[offset];
+      if (marker === undefined) return false;
+      if (marker === 0x00 || (marker >= 0xd0 && marker <= 0xd7)) {
+        offset += 1;
+        continue;
+      }
+      if (marker === 0xd9) return sawFrame && offset + 1 === bytes.byteLength;
+      inScan = false;
+      offset -= 1;
+      continue;
+    }
+    if (bytes[offset] !== 0xff) return false;
+    while (bytes[offset] === 0xff) offset += 1;
+    const marker = bytes[offset++];
+    if (marker === undefined || marker === 0x00) return false;
+    if (marker === 0xd9) return sawFrame && offset === bytes.byteLength;
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+    if (offset + 2 > bytes.byteLength) return false;
+    const length = (bytes[offset]! << 8) | bytes[offset + 1]!;
+    if (length < 2 || offset + length > bytes.byteLength) return false;
+    if (
+      marker === 0xc0 ||
+      marker === 0xc1 ||
+      marker === 0xc2 ||
+      marker === 0xc3 ||
+      marker === 0xc5 ||
+      marker === 0xc6 ||
+      marker === 0xc7 ||
+      marker === 0xc9 ||
+      marker === 0xca ||
+      marker === 0xcb ||
+      marker === 0xcd ||
+      marker === 0xce ||
+      marker === 0xcf
+    ) {
+      sawFrame = true;
+    }
+    if (marker === 0xda) inScan = true;
+    offset += length;
+  }
+  return false;
+}
+
+function isCompleteWebp(bytes: Uint8Array): boolean {
+  if (
+    ascii(bytes, 0, 4) !== "RIFF" ||
+    ascii(bytes, 8, 12) !== "WEBP" ||
+    readUint32Le(bytes, 4) + 8 !== bytes.byteLength
+  ) {
+    return false;
+  }
+  let offset = 12;
+  let sawImageChunk = false;
+  while (offset + 8 <= bytes.byteLength) {
+    const type = ascii(bytes, offset, offset + 4);
+    const length = readUint32Le(bytes, offset + 4);
+    const paddedLength = length + (length % 2);
+    const next = offset + 8 + paddedLength;
+    if (!Number.isSafeInteger(next) || next > bytes.byteLength) return false;
+    if (type === "VP8 " || type === "VP8L" || type === "VP8X") sawImageChunk = true;
+    offset = next;
+  }
+  return sawImageChunk && offset === bytes.byteLength;
+}
+
+function readUint32Be(bytes: Uint8Array, offset: number): number {
+  return (
+    bytes[offset]! * 0x1_000000 +
+    bytes[offset + 1]! * 0x1_0000 +
+    bytes[offset + 2]! * 0x100 +
+    bytes[offset + 3]!
+  );
+}
+
+function readUint32Le(bytes: Uint8Array, offset: number): number {
+  return (
+    bytes[offset]! +
+    bytes[offset + 1]! * 0x100 +
+    bytes[offset + 2]! * 0x1_0000 +
+    bytes[offset + 3]! * 0x1_000000
+  );
+}
+
+function ascii(bytes: Uint8Array, start: number, end: number): string {
+  return String.fromCharCode(...bytes.subarray(start, end));
 }
 
 function isSupportedSlackTextContentType(value: string): boolean {
