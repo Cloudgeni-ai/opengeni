@@ -493,12 +493,22 @@ describe("source admission", () => {
 
   test("repository skill requires leaf-cause triage and immutable-head delivery", () => {
     const skill = readFileSync(skillPath, "utf8");
+    const normalizedSkill = skill.replace(/\s+/g, " ").trim();
     expect(skill).toContain("Before any push or exact-head rotation");
     expect(skill).toContain("aggregate or dependent gates are consequences");
     expect(skill).toContain(
       "candidate-caused, base-caused, transient\n  runner/dependency, or superseded/cancelled",
     );
     expect(skill).toContain("rerun failed jobs only");
+    expect(normalizedSkill).toContain(
+      "Before any push or exact-head rotation, inspect the leaf failed jobs and steps;",
+    );
+    expect(normalizedSkill).toContain(
+      "aggregate or dependent gates are consequences, not independent root causes.",
+    );
+    expect(normalizedSkill).toContain(
+      "For an identical-head transient install, extraction, dependency, or runner failure, rerun failed jobs only.",
+    );
     expect(skill).toContain("Do not edit source or rotate the head");
     expect(skill).toContain("disposable\n  current-main merge and inspect the integrated tree");
     expect(skill).toContain("do not merge or rebase `main` again merely");
