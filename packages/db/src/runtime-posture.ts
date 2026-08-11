@@ -42,6 +42,10 @@ const DEDICATED_ARTIFACT_CAPABILITY_ROUTINES = new Set<string>([
   ...ARTIFACT_LIVE_TICKET_INTERNAL_ROUTINES,
 ]);
 
+export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
+  "knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
+] as const;
+
 /**
  * The complete standalone tenant-table contract. Adding or removing a
  * FORCE-RLS table is an architectural change: update this list in the same
@@ -511,6 +515,10 @@ export type RuntimeRoutinePosture = {
   securityDefiner: boolean;
 };
 
+export type RuntimeTargetRoutinePosture = RuntimeRoutinePosture & {
+  publicExecute: boolean;
+};
+
 export type RuntimeDatabasePosture = {
   identity: RuntimeDatabaseIdentity;
   /** Privilege-bearing role relationships; exact PG16+ management-only grants are excluded. */
@@ -519,6 +527,7 @@ export type RuntimeDatabasePosture = {
   ownedSchemas: string[];
   ownedRelations: string[];
   tables: RuntimeTablePosture[];
+  targetRoutines: RuntimeTargetRoutinePosture[];
   privateRoutines: RuntimeRoutinePosture[];
 };
 
@@ -629,6 +638,7 @@ export async function inspectRuntimeDatabasePosture(
           ownedSchemas: [],
           ownedRelations: [],
           tables: [],
+          targetRoutines: [],
           privateRoutines: [],
         };
       }
@@ -748,6 +758,44 @@ export async function inspectRuntimeDatabasePosture(
         trigger: row.can_trigger,
       }));
 
+      const targetRoutines = resultRows<{
+        name: string;
+        owner: string;
+        can_execute: boolean;
+        public_execute: boolean;
+        security_definer: boolean;
+      }>(
+        await tx.execute(sql`
+          select
+            (p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')')::text as name,
+            pg_get_userbyid(p.proowner)::text as owner,
+            has_function_privilege(current_user, p.oid, 'EXECUTE') as can_execute,
+            exists (
+              select 1
+              from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
+              where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
+            ) as public_execute,
+            p.prosecdef as security_definer
+          from pg_proc p
+          join pg_namespace n on n.oid = p.pronamespace
+          where p.oid = to_regprocedure(
+            format(
+              '%I.knowledge_source_sync_lock_authority(uuid,uuid,uuid)',
+              ${targetSchema}::text
+            )
+          )
+            and n.nspname = ${targetSchema}
+            and p.prokind in ('f', 'p')
+          order by p.proname, pg_catalog.oidvectortypes(p.proargtypes)
+        `),
+      ).map((row) => ({
+        name: row.name,
+        owner: row.owner,
+        execute: row.can_execute,
+        publicExecute: row.public_execute,
+        securityDefiner: row.security_definer,
+      }));
+
       const privateRoutines = resultRows<{
         name: string;
         owner: string;
@@ -780,6 +828,7 @@ export async function inspectRuntimeDatabasePosture(
         ownedSchemas,
         ownedRelations,
         tables,
+        targetRoutines,
         privateRoutines,
       };
     },
@@ -947,6 +996,32 @@ export function evaluateRuntimeDatabasePosture(
     if (!table.rlsForced) violations.push(`table ${tableName} does not FORCE RLS`);
     if (!table.rlsActive) violations.push(`table ${tableName} has inactive RLS for runtime role`);
     if (table.policyCount < 1) violations.push(`table ${tableName} has no RLS policy`);
+  }
+
+  const targetSchemaOwner = posture.schemas.find((schema) => schema.name === targetSchema)?.owner;
+  for (const expectedRoutine of RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES) {
+    const matches = posture.targetRoutines.filter((routine) => routine.name === expectedRoutine);
+    if (matches.length !== 1) {
+      violations.push(
+        `target-schema runtime capability ${expectedRoutine} is missing or ambiguous`,
+      );
+      continue;
+    }
+    const routine = matches[0]!;
+    if (!routine.securityDefiner) {
+      violations.push(`target-schema runtime capability ${routine.name} is not SECURITY DEFINER`);
+    }
+    if (targetSchemaOwner && routine.owner !== targetSchemaOwner) {
+      violations.push(
+        `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match schema owner ${targetSchemaOwner}`,
+      );
+    }
+    if (!routine.execute) {
+      violations.push(`runtime role lacks target-schema capability ${routine.name}`);
+    }
+    if (routine.publicExecute) {
+      violations.push(`PUBLIC has forbidden target-schema capability ${routine.name}`);
+    }
   }
 
   const artifactOutbox = tableByName.get("editable_artifact_live_outbox");

@@ -78,6 +78,15 @@ function safePosture(): RuntimeDatabasePosture {
         trigger: false,
       },
     ],
+    targetRoutines: [
+      {
+        name: "knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      },
+    ],
     privateRoutines: [
       {
         name: "workspace_rls_visible(uuid, uuid)",
@@ -235,6 +244,31 @@ describe("runtime database posture evaluator", () => {
         tablePrivileges: {},
       }),
     ).toContain("protected tables lack an explicit privilege class: tenant_rows");
+  });
+
+  test("requires the exact least-privilege target-schema knowledge authority lock", () => {
+    const missing = safePosture();
+    missing.targetRoutines = [];
+    expect(evaluateRuntimeDatabasePosture(missing, options)).toContain(
+      "target-schema runtime capability knowledge_source_sync_lock_authority(uuid, uuid, uuid) is missing or ambiguous",
+    );
+
+    const invalid = safePosture();
+    invalid.targetRoutines[0] = {
+      ...invalid.targetRoutines[0]!,
+      owner: "another_owner",
+      execute: false,
+      publicExecute: true,
+      securityDefiner: false,
+    };
+    expect(evaluateRuntimeDatabasePosture(invalid, options)).toEqual(
+      expect.arrayContaining([
+        "target-schema runtime capability knowledge_source_sync_lock_authority(uuid, uuid, uuid) is not SECURITY DEFINER",
+        "target-schema runtime capability knowledge_source_sync_lock_authority(uuid, uuid, uuid) owner another_owner does not match schema owner opengeni_migrator",
+        "runtime role lacks target-schema capability knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
+        "PUBLIC has forbidden target-schema capability knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
+      ]),
+    );
   });
 
   test("requires a same-owner SECURITY DEFINER artifact outbox dispatcher path", () => {

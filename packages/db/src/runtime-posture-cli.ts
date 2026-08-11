@@ -8,6 +8,7 @@ import {
   RUNTIME_READ_INSERT_TABLES,
   RUNTIME_READ_INSERT_UPDATE_TABLES,
   RUNTIME_READ_ONLY_TABLES,
+  RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
 } from "./index";
 
 const settings = getSettings();
@@ -52,6 +53,10 @@ try {
       declaredReadInsertTables: RUNTIME_READ_INSERT_TABLES.length,
       declaredReadInsertUpdateTables: RUNTIME_READ_INSERT_UPDATE_TABLES.length,
       declaredProtectedNoDirectDmlTables: PROTECTED_NO_DIRECT_DML_TABLES.length,
+      declaredTargetSchemaCapabilities: RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.length,
+      executableTargetSchemaCapabilities: posture.targetRoutines.filter(
+        (routine) => routine.execute && !routine.publicExecute && routine.securityDefiner,
+      ).length,
     }),
   );
 } finally {
