@@ -20,7 +20,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use crate::cgroup::OpCgroups;
 use crate::desktop::{resolve_desktop, DesktopBackend};
 use crate::error::{PlatformError, PlatformResult};
-use crate::{HostIdentity, Platform, StreamRegistry};
+use crate::{BrowserControlBackend, HostIdentity, Platform, StreamRegistry};
 
 /// The host-native platform: exec/fs/git against the machine the agent runs on,
 /// plus the desktop backend (capture + computer-use input) and the optional relay
@@ -41,6 +41,8 @@ pub struct NativePlatform {
     /// agent supervisor once it has a relay connection. `None` until then (and in
     /// unit contexts), in which case the stream ops report a clean `Unsupported`.
     stream_registry: Option<Arc<dyn StreamRegistry>>,
+    /// Agent-owned browserd lifecycle shared by every workspace link on this host.
+    browser_control: Option<Arc<dyn BrowserControlBackend>>,
     /// The per-op OOM cgroup manager, wired by the supervisor at startup on a
     /// delegated Linux cgroup v2 host (issue #345). `None` until then (and on every
     /// non-Linux / non-delegated host), in which case exec runs with no per-op
@@ -55,6 +57,7 @@ impl std::fmt::Debug for NativePlatform {
             .field("home_dir", &self.home_dir)
             .field("has_display", &self.desktop.probe().is_some())
             .field("has_stream_registry", &self.stream_registry.is_some())
+            .field("has_browser_control", &self.browser_control.is_some())
             .field("has_oom_isolation", &self.cgroups.is_some())
             .finish()
     }
@@ -78,6 +81,7 @@ impl NativePlatform {
             home_dir: user_home_dir(),
             desktop: Arc::from(resolve_desktop()),
             stream_registry: None,
+            browser_control: None,
             cgroups: None,
         }
     }
@@ -91,6 +95,7 @@ impl NativePlatform {
             home_dir: user_home_dir(),
             desktop: Arc::from(resolve_desktop()),
             stream_registry: None,
+            browser_control: None,
             cgroups: None,
         }
     }
@@ -101,6 +106,13 @@ impl NativePlatform {
     #[must_use]
     pub fn with_stream_registry(mut self, registry: Arc<dyn StreamRegistry>) -> Self {
         self.stream_registry = Some(registry);
+        self
+    }
+
+    /// Wires the agent-owned browser controller lifecycle into this platform.
+    #[must_use]
+    pub fn with_browser_control(mut self, backend: Arc<dyn BrowserControlBackend>) -> Self {
+        self.browser_control = Some(backend);
         self
     }
 
@@ -595,6 +607,10 @@ impl Platform for NativePlatform {
 
     fn stream_registry(&self) -> Option<Arc<dyn StreamRegistry>> {
         self.stream_registry.clone()
+    }
+
+    fn browser_control_backend(&self) -> Option<Arc<dyn BrowserControlBackend>> {
+        self.browser_control.clone()
     }
 
     async fn pty_open(&self, req: &v1::PtyOpenRequest) -> PlatformResult<v1::PtyOpenResponse> {

@@ -1,0 +1,24 @@
+:root {
+  color-scheme: light dark;
+  font: 13px/1.45 Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #0d1117;
+  color: #f2f5f8;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; width: 320px; }
+main { padding: 18px; }
+header { display: flex; align-items: center; gap: 11px; }
+h1 { margin: 0; font-size: 14px; font-weight: 620; letter-spacing: -0.01em; }
+header p { margin: 1px 0 0; color: #9ba7b4; font-size: 12px; }
+.signal { width: 9px; height: 9px; border-radius: 999px; background: #f59e0b; box-shadow: 0 0 0 4px rgb(245 158 11 / 12%); }
+body[data-connected="true"] .signal { background: #34d399; box-shadow: 0 0 0 4px rgb(52 211 153 / 12%); }
+.detail { margin: 16px 0; color: #bcc5cf; }
+form { padding-top: 15px; border-top: 1px solid #242b34; }
+label { display: block; margin-bottom: 7px; color: #d7dde4; font-size: 12px; }
+.field { display: flex; gap: 7px; }
+input { min-width: 0; flex: 1; border: 1px solid #303844; border-radius: 8px; background: #151a21; color: inherit; padding: 8px 9px; outline: none; }
+input:focus { border-color: #6da7ff; box-shadow: 0 0 0 2px rgb(109 167 255 / 15%); }
+button { border: 0; border-radius: 8px; padding: 0 12px; background: #e7edf4; color: #11161c; font-weight: 600; cursor: pointer; }
+button:disabled { opacity: 0.5; cursor: default; }
+small { display: block; margin-top: 7px; color: #778391; font-size: 11px; }

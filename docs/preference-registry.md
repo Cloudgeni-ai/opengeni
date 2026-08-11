@@ -206,7 +206,7 @@ The summary and full-content routes require exact attempt authority. The same
 restriction applies to the first-party MCP tools
 `preference_registry_summary` and `preference_registry_get`. They are registered
 only when complete signed attempt metadata exists and are not registered on the
-Toolspace surface. `@opengeni/sdk` exposes the corresponding governance and
+Codemode surface. `@opengeni/sdk` exposes the corresponding governance and
 retrieval contracts without introducing a second content system. Browser
 governance detail returns descriptor/revision/audit metadata but not stored full
 content or an attempt retrieval handle. A correction therefore supplies a

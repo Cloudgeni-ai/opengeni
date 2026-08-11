@@ -42,6 +42,10 @@
     "./editable-artifact-durable-export": {
       "types": "./src/editable-artifact-durable-export.ts",
       "default": "./src/editable-artifact-durable-export.ts"
+    },
+    "./video-generation": {
+      "types": "./src/video-generation.ts",
+      "default": "./src/video-generation.ts"
     }
   },
   "publishConfig": {
@@ -58,6 +62,7 @@
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
+    "@opengeni/codemode": "workspace:*",
     "@opengeni/codex": "workspace:*",
     "@opengeni/config": "workspace:*",
     "@opengeni/contracts": "workspace:*",

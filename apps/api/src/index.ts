@@ -362,6 +362,8 @@ export async function startApi() {
       ? {
           editableArtifacts: editableArtifactComposition.application,
           editableArtifactExports: editableArtifactComposition.durableExports,
+          editableArtifactAgent: editableArtifactComposition.agent,
+          editableArtifactOfficeImports: editableArtifactComposition.officeImports,
         }
       : {}),
     observability,

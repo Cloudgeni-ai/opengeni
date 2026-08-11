@@ -7,6 +7,7 @@ import {
 } from "@opengeni/config";
 import {
   ClientConfig,
+  CodemodeCallRequest,
   ErrorEnvelope,
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
@@ -23,7 +24,17 @@ import {
   indexDocumentNow,
   type DocumentServices,
 } from "@opengeni/documents";
-import { dbSql, getWorkspace, rlsContextForWorkspace } from "@opengeni/db";
+import {
+  CodemodeCallBudgetExceededError,
+  CodemodeOperationConflictError,
+  CodemodeOperationNotExecutableError,
+  CodemodePayloadTooLargeError,
+  CodemodeToolApprovalRequiredError,
+  CodemodeToolNotInCatalogError,
+  dbSql,
+  getWorkspace,
+  rlsContextForWorkspace,
+} from "@opengeni/db";
 import { createObservability } from "@opengeni/observability";
 import { createObjectStorage } from "@opengeni/storage";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
@@ -48,9 +59,16 @@ import { createManagedAuth } from "./auth/managed-auth";
 import { createApiSandboxClient, makeResumeBoxById } from "./sandbox/access";
 import { requireLimit } from "@opengeni/core";
 import { buildOpenGeniMcpServer } from "./mcp/server";
-import { isToolspaceGrant, prepareToolspaceMcpSurface } from "./mcp/toolspace";
+import {
+  CodemodeAuthorityError,
+  isCodemodeGrant,
+  readCodemodeOperation,
+  requireActiveCodemodeCatalog,
+  submitAndDispatchCodemodeCall,
+} from "./codemode";
 import { boundedMcpRequest, McpPayloadTooLargeError } from "@opengeni/runtime/mcp-network";
 import { requireAccessKey } from "./http/auth";
+import { allowedCorsOrigin } from "./http/cors";
 import { registerCapabilityRoutes } from "./routes/capabilities";
 import { registerCatalogAssetRoutes } from "./routes/catalog-assets";
 import { registerCodexRoutes } from "./routes/codex";
@@ -62,6 +80,9 @@ import { registerEnvironmentRoutes } from "./routes/environments";
 import { registerFileRoutes } from "./routes/files";
 import { registerApiKeyRoutes } from "./routes/api-keys";
 import { registerBillingRoutes } from "./routes/billing";
+import { registerBrowserIdentityRoutes } from "./routes/browser-identities";
+import { registerBrowserSessionRoutes } from "./routes/browser-sessions";
+import { registerComputerSessionRoutes } from "./routes/computer-sessions";
 import { registerGitHubRoutes } from "./routes/github";
 import { registerInstallRoutes } from "./routes/install";
 import { registerPackRoutes } from "./routes/packs";
@@ -78,10 +99,13 @@ import { registerPreferenceRegistryRoutes } from "./routes/preference-registry";
 import { registerInsightsRoutes } from "./routes/insights";
 import { registerTranscriptionRoutes } from "./routes/transcriptions";
 import { registerEditableArtifactRoutes } from "./routes/editable-artifacts";
+import { registerVideoGenerationRoutes } from "./routes/video-generation";
 import { projectClientModel } from "./model-catalog";
 import { createTranscriptionService } from "./transcription/service";
 import { createFfmpegTranscriptionSegmenter } from "./transcription/segmenter";
 import { registerSlackInteractionRoutes } from "./integrations/slack-interactions";
+
+export { allowedCorsOrigin } from "./http/cors";
 
 export type {
   ApiRouteDeps,
@@ -507,17 +531,13 @@ export function createAppComposition(deps: AppDependencies): {
       throw error;
     }
     const grant = await requireMcpAccessGrant(c, routeDeps, workspaceId);
-    const toolspaceGrant = isToolspaceGrant(routeDeps.settings, grant);
     const boundSessionId = grant.metadata?.sessionId;
-    if (toolspaceGrant || typeof boundSessionId === "string") {
-      if (typeof boundSessionId !== "string") {
-        throw new HTTPException(404, { message: "session not found" });
-      }
+    if (typeof boundSessionId === "string") {
       try {
         await requireSessionAuthorization(routeDeps, grant, {
           sessionId: boundSessionId,
-          operation: toolspaceGrant ? "session.toolspace.call" : "session.first_party_mcp.call",
-          surface: toolspaceGrant ? "toolspace" : "first_party_mcp",
+          operation: "session.first_party_mcp.call",
+          surface: "first_party_mcp",
         });
       } catch (error) {
         if (error instanceof SessionAuthorizationDeniedError) {
@@ -531,22 +551,6 @@ export function createAppComposition(deps: AppDependencies): {
         throw error;
       }
     }
-    let toolspace: Awaited<ReturnType<typeof prepareToolspaceMcpSurface>> = null;
-    if (toolspaceGrant) {
-      try {
-        toolspace = await prepareToolspaceMcpSurface({
-          deps: routeDeps,
-          grant,
-        });
-      } catch (error) {
-        if (error instanceof McpPayloadTooLargeError) {
-          throw new HTTPException(413, {
-            message: "MCP tool list exceeds the safety limit",
-          });
-        }
-        throw error;
-      }
-    }
     const workspace = await getWorkspace(routeDeps.db, workspaceId);
     const workspaceMemoryEnabled = resolveWorkspaceMemoryEnabled(workspace?.settings);
     const transport = new WebStandardStreamableHTTPServerTransport({
@@ -554,20 +558,71 @@ export function createAppComposition(deps: AppDependencies): {
     });
     const mcp = buildOpenGeniMcpServer(routeDeps, grant, {
       requestOrigin: new URL(c.req.url).origin,
-      toolspace,
       workspaceMemoryEnabled,
     });
+    await mcp.connect(transport);
+    return await transport.handleRequest(boundedRequest);
+  });
+
+  app.get("/v1/workspaces/:workspaceId/codemode/catalog", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, routeDeps, workspaceId);
+    if (!isCodemodeGrant(grant)) {
+      throw new HTTPException(403, { message: "Codemode access denied" });
+    }
     try {
-      await mcp.connect(transport);
-      return await transport.handleRequest(boundedRequest);
-    } finally {
-      await toolspace?.close().catch(() => undefined);
+      return c.json((await requireActiveCodemodeCatalog(routeDeps, grant)).catalog);
+    } catch (error) {
+      throw codemodeHttpError(error);
+    }
+  });
+
+  app.post("/v1/workspaces/:workspaceId/codemode/calls", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, routeDeps, workspaceId);
+    if (!isCodemodeGrant(grant)) {
+      throw new HTTPException(403, { message: "Codemode access denied" });
+    }
+    const parsed = CodemodeCallRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "Invalid Codemode call" });
+    }
+    try {
+      const submission = await submitAndDispatchCodemodeCall(routeDeps, grant, parsed.data);
+      const terminal = ["completed", "failed", "outcome_unknown", "cancelled"].includes(
+        submission.operation.state,
+      );
+      return c.json(submission, terminal ? 200 : 202);
+    } catch (error) {
+      throw codemodeHttpError(error);
+    }
+  });
+
+  app.get("/v1/workspaces/:workspaceId/codemode/calls/:operationId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, routeDeps, workspaceId);
+    if (!isCodemodeGrant(grant)) {
+      throw new HTTPException(403, { message: "Codemode access denied" });
+    }
+    try {
+      const operation = await readCodemodeOperation(routeDeps, grant, c.req.param("operationId"));
+      if (!operation)
+        throw new HTTPException(404, {
+          message: "Codemode operation not found",
+        });
+      return c.json(operation);
+    } catch (error) {
+      if (error instanceof HTTPException) throw error;
+      throw codemodeHttpError(error);
     }
   });
 
   registerFileRoutes(app, routeDeps);
   registerApiKeyRoutes(app, routeDeps);
   registerBillingRoutes(app, routeDeps);
+  registerBrowserIdentityRoutes(app, routeDeps);
+  registerBrowserSessionRoutes(app, routeDeps);
+  registerComputerSessionRoutes(app, routeDeps);
   registerDocumentRoutes(app, routeDeps);
   registerGitHubRoutes(app, routeDeps);
   registerInstallRoutes(app, routeDeps);
@@ -592,6 +647,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerCodexRoutes(app, routeDeps);
   registerTranscriptionRoutes(app, routeDeps);
   registerEditableArtifactRoutes(app, routeDeps);
+  registerVideoGenerationRoutes(app, routeDeps);
   registerSlackInteractionRoutes(app, routeDeps);
 
   app.notFound((c) => {
@@ -663,8 +719,8 @@ async function requireMcpAccessGrant(
   if (hasPermission(grant.permissions, "workspace:read")) {
     return grant;
   }
-  if (isToolspaceGrant(deps.settings, grant)) {
-    return grant;
+  if (isCodemodeGrant(grant)) {
+    requirePermission(grant, "workspace:read");
   }
   // A worker-signed session-bound grant is allowed to reach the transport
   // without inheriting broad workspace read access. The exact session
@@ -695,6 +751,48 @@ function clientAuthConfig(settings: AppDependencies["settings"]) {
     };
   }
   return { mode: "none" as const };
+}
+
+function codemodeHttpError(error: unknown): HTTPException {
+  if (error instanceof SessionAuthorizationDeniedError) {
+    return new HTTPException(404, {
+      message: "session not found",
+      cause: error,
+    });
+  }
+  if (error instanceof SessionAuthorizationUnavailableError) {
+    return new HTTPException(503, {
+      message: "session authorization is unavailable",
+      cause: error,
+    });
+  }
+  if (
+    error instanceof CodemodeAuthorityError ||
+    error instanceof CodemodeOperationNotExecutableError
+  ) {
+    return new HTTPException(409, { message: error.message, cause: error });
+  }
+  if (error instanceof CodemodeOperationConflictError) {
+    return new HTTPException(409, { message: error.message, cause: error });
+  }
+  if (error instanceof CodemodeCallBudgetExceededError) {
+    return new HTTPException(429, { message: error.message, cause: error });
+  }
+  if (error instanceof CodemodeToolNotInCatalogError) {
+    return new HTTPException(404, { message: error.message, cause: error });
+  }
+  if (error instanceof CodemodeToolApprovalRequiredError) {
+    return new HTTPException(409, { message: error.message, cause: error });
+  }
+  if (error instanceof CodemodePayloadTooLargeError) {
+    return new HTTPException(413, { message: error.message, cause: error });
+  }
+  return error instanceof HTTPException
+    ? error
+    : new HTTPException(500, {
+        message: "Codemode request failed",
+        cause: error,
+      });
 }
 
 function clientAnalyticsConfig(settings: AppDependencies["settings"]) {
@@ -729,10 +827,6 @@ function structuredServicesHint(backend: string): {
 } {
   const hasBox = backend !== "none";
   return { fileSystem: hasBox, git: hasBox, terminalEvents: hasBox };
-}
-
-export function allowedCorsOrigin(pattern: string, origin: string): boolean {
-  return new RegExp(`^(?:${pattern})$`).test(origin);
 }
 
 function codexCompactionV2ProviderLockedError(

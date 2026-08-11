@@ -207,7 +207,7 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
-  "packages/db/src/index.ts#appendSessionEventsForTurnAttempt": {
+  "packages/db/src/index.ts#mutateAndAppendSessionEventsForTurnAttempt": {
     inserts: 1,
     contract: "turn_attempt_fence",
   },

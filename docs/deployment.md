@@ -608,8 +608,12 @@ review state, reviewed head, and submission time:
   single-maintainer PR whose author, exact-head reviewer, and merge actor are
   that same human; it is never a substitute for approving a bot-authored
   Version PR;
-- any base/head update invalidates the prior verdict, and a review submitted
-  after merge is not release evidence.
+- a candidate-head update invalidates a head-bound verdict. For the structured
+  admin-PASS form, changing the explicitly selected `reviewedBaseSha` also
+  requires replacement evidence on the same candidate head. Ordinary protected
+  `main` movement is not itself a candidate update and must not trigger a source
+  merge/rebase; and
+- a review submitted after merge is not release evidence.
 
 Candidate or operator admission must fail closed when those provider identities
 do not match; do not weaken the provenance check or recreate approval from a
@@ -628,23 +632,33 @@ body continue to bind the exact base/head verdict.
 For a single-maintainer source PR, generate the exact structured review body
 before merging. Submit the result as a native `COMMENTED` pull-request review;
 the formatter can also print the canonical SHA-256 needed by an external
-operator to bind the same artifact:
+operator to bind the same artifact. Use the exact provider-retained PR base SHA
+from the pull-request detail (`pull.base.sha`) as `--base`; this is the
+reviewed-base identity that the release verifier reconstructs, not the latest
+SHA currently at the tip of protected `main`:
 
 ```bash
 bun scripts/release-review.ts \
-  --base <exact-current-main-sha> \
+  --base <exact-provider-retained-pull.base.sha> \
   --head <exact-reviewed-pr-head-sha> \
   --reviewer <trusted-maintainer-login>
 
 bun scripts/release-review.ts \
-  --base <exact-current-main-sha> \
+  --base <exact-provider-retained-pull.base.sha> \
   --head <exact-reviewed-pr-head-sha> \
   --reviewer <trusted-maintainer-login> \
   --digest
 ```
 
-Regenerate the body and verdict after every head or base movement. Do not edit a
-submitted review after merge to manufacture evidence retroactively.
+Regenerate the body and verdict when the candidate head or its provider-retained
+`pull.base.sha` (the verifier's exact accepted reviewed-base identity) changes.
+An ordinary protected-`main` advance does not itself change that base-bound
+review artifact. Separately, let the merge authority refresh latest-current-main
+mergeability and material-compatibility evidence on the same candidate head;
+that evidence is not `reviewedBaseSha` and does not require replacing the review
+or mutating the candidate. Do not merge or rebase `main` into the source branch solely to refresh
+evidence, and do not edit a submitted review after merge to manufacture
+evidence retroactively.
 
 GitHub check lookup is ref-sensitive: a checked head can become undiscoverable
 after its source branch is deleted or rewritten even though the check itself
@@ -988,8 +1002,10 @@ Production Docker/Modal references must be digest-pinned; pack, rig, mutable,
 self-hosted, and mismatched images fail closed. The worker runs the absolute
 runtime doctor inside the actual box before the model starts. `bun run dev`
 automatically caches an exact clean-HEAD CI runtime when available, source-tags
-the local image, and otherwise leaves native agent artifact skills disabled
-unless `OPENGENI_REQUIRE_SANDBOX_ARTIFACT_RUNTIME=1` requests a hard failure.
+the local image, and otherwise leaves only standalone sandbox-local Office file
+operations disabled unless `OPENGENI_REQUIRE_SANDBOX_ARTIFACT_RUNTIME=1`
+requests a hard failure. Collaborative artifact skills are independent: the
+worker admits them from the exact frozen first-party tool catalog.
 
 The Connected Machine stream relay is a separate deployed component built from
 the `agent/` Cargo workspace. It is only needed when Connected Machines are

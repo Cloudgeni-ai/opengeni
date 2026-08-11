@@ -311,9 +311,9 @@ const pinnedRequestFetch: FetchLike = async (input, init) => {
   const responseHeaders = new Headers();
   for (const [name, value] of Object.entries(result.headers)) {
     if (Array.isArray(value)) {
-      for (const entry of value) responseHeaders.append(name, entry);
+      for (const entry of value) appendWebCompatibleResponseHeader(responseHeaders, name, entry);
     } else if (value !== undefined) {
-      responseHeaders.set(name, value);
+      appendWebCompatibleResponseHeader(responseHeaders, name, value, true);
     }
   }
   const response = new Response(responseBody, {
@@ -323,6 +323,27 @@ const pinnedRequestFetch: FetchLike = async (input, init) => {
   Object.defineProperty(response, "url", { value: url });
   return response;
 };
+
+/**
+ * Undici's low-level request API preserves response-header values that the
+ * Fetch `Headers` implementation may reject (for example, UTF-8 object-store
+ * lifecycle metadata). Such an unrelated extension header must not discard a
+ * valid response body. Omit only the unrepresentable field; security and
+ * framing headers remain subject to the same strict Fetch validation.
+ */
+function appendWebCompatibleResponseHeader(
+  headers: Headers,
+  name: string,
+  value: string,
+  replace = false,
+): void {
+  try {
+    if (replace) headers.set(name, value);
+    else headers.append(name, value);
+  } catch (error) {
+    if (!(error instanceof TypeError)) throw error;
+  }
+}
 
 /**
  * Preserve Fetch BodyInit semantics for values that Undici request() does not

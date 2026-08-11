@@ -31,6 +31,7 @@ import {
   type AuthoritativeEditableArtifactGenesisKernelPort,
   type AuthoritativeEditableArtifactGenesisKernelResult,
   type AuthoritativeEditableArtifactKernelPort,
+  type EditableArtifactAgentInspectionKernelPort,
   type EditableArtifactKernelState,
   type EditableArtifactSnapshotReplayPlan,
   type IsolatedEditableArtifactSnapshotKernelPort,
@@ -45,11 +46,13 @@ const SNAPSHOT_CHUNK_BYTES = 1024 * 1024;
 
 type RuntimeFacadeModule = Readonly<{
   getConfiguredArtifactRuntime?: () => unknown;
-}>;
+}> &
+  Readonly<Record<string, unknown>>;
 
 export type VerifiedNativeArtifactRuntimeBinding = Readonly<{
   runtime: ArtifactKernelRuntime;
   location: ConfiguredArtifactRuntimeLocation;
+  facade: RuntimeFacadeModule;
 }>;
 
 /** Loads only the manifest-pinned, byte-verified native runtime. */
@@ -65,7 +68,7 @@ export async function loadVerifiedNativeArtifactRuntimeBinding(): Promise<Verifi
   )) as RuntimeFacadeModule;
   const candidate = module.getConfiguredArtifactRuntime?.();
   assertRuntime(candidate, location);
-  return Object.freeze({ runtime: candidate, location });
+  return Object.freeze({ runtime: candidate, location, facade: module });
 }
 
 /** Exact native authority shared by mutation, genesis, and snapshot verification. */
@@ -74,7 +77,8 @@ export class NativeEditableArtifactKernelAdapter
     AuthoritativeEditableArtifactKernelPort,
     AuthoritativeEditableArtifactGenesisKernelPort,
     AuthoritativeEditableArtifactCompactionKernelPort,
-    IsolatedEditableArtifactSnapshotKernelPort
+    IsolatedEditableArtifactSnapshotKernelPort,
+    EditableArtifactAgentInspectionKernelPort
 {
   constructor(
     readonly runtime: ArtifactKernelRuntime,
@@ -88,17 +92,8 @@ export class NativeEditableArtifactKernelAdapter
   async applyTransaction(
     request: ApplyAuthoritativeEditableArtifactKernelRequest,
   ): Promise<ApplyAuthoritativeEditableArtifactKernelResult> {
-    const snapshot = request.state.snapshot;
-    if (!snapshot) throw new Error("Editable artifact has no verified replay snapshot");
-    const snapshotBytes = await readVerifiedSnapshot(this.objects, snapshot);
-    const session = openNativeArtifactSession(this.runtime, {
-      modality: request.modality,
-      snapshot: snapshotBytes,
-    });
+    const session = await this.openCurrentState(request.state);
     try {
-      verifySnapshotBoundary(session, request.state);
-      replayKernelTail(session, request.state);
-      verifyDurableHead(session, request.state);
       if (request.modality === "spreadsheet") {
         if (session.modality !== "spreadsheet") throw new Error("Native modality mismatch");
         const committedTransactionBytes = session.authorTransaction(
@@ -125,6 +120,38 @@ export class NativeEditableArtifactKernelAdapter
       });
     } finally {
       session.dispose();
+    }
+  }
+
+  async query(
+    input: Parameters<EditableArtifactAgentInspectionKernelPort["query"]>[0],
+  ): ReturnType<EditableArtifactAgentInspectionKernelPort["query"]> {
+    const session = await this.openCurrentState(input.state);
+    try {
+      return Uint8Array.from(session.query(input.queryBytes));
+    } finally {
+      session.dispose();
+    }
+  }
+
+  private async openCurrentState(
+    state: EditableArtifactKernelState,
+  ): Promise<NativeArtifactSession> {
+    const snapshot = state.snapshot;
+    if (!snapshot) throw new Error("Editable artifact has no verified replay snapshot");
+    const snapshotBytes = await readVerifiedSnapshot(this.objects, snapshot);
+    const session = openNativeArtifactSession(this.runtime, {
+      modality: state.modality,
+      snapshot: snapshotBytes,
+    });
+    try {
+      verifySnapshotBoundary(session, state);
+      replayKernelTail(session, state);
+      verifyDurableHead(session, state);
+      return session;
+    } catch (error) {
+      session.dispose();
+      throw error;
     }
   }
 

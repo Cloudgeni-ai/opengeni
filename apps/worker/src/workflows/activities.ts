@@ -91,6 +91,19 @@ export function turnActivityForTaskQueue(baseTaskQueue: string, receiptGatedCanc
   });
 }
 
+export function videoGenerationActivityForTaskQueue(baseTaskQueue: string) {
+  return proxyActivities<Pick<typeof activities, "reconcileVideoGenerationOperation">>({
+    taskQueue: turnTaskQueue(baseTaskQueue),
+    startToCloseTimeout: "20 minutes",
+    retry: {
+      initialInterval: "1 second",
+      backoffCoefficient: 2,
+      maximumInterval: "30 seconds",
+      maximumAttempts: 3,
+    },
+  });
+}
+
 export const documentActivity = proxyActivities<Pick<typeof activities, "indexDocument">>({
   startToCloseTimeout: "30 minutes",
   retry: { maximumAttempts: 1 },

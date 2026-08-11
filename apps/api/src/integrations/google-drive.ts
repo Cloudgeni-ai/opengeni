@@ -1636,6 +1636,18 @@ async function googleDriveApiRequest(
       destinationUrl: input.url.toString(),
       forceRefresh,
     });
+  const requireResolvedConnection = async (connectionVersion: number) => {
+    const resolved = await getConnectionMetadata(
+      deps.db,
+      input.workspaceId,
+      input.connectionId,
+      input.subjectId,
+    );
+    if (!resolved || resolved.version !== connectionVersion) {
+      throw new HTTPException(409, { message: "Google Drive connection changed; try again" });
+    }
+    await requireGoogleDriveSourceConnection(deps, resolved, input.subjectId);
+  };
   let credential = await resolve(false);
   if (credential.status !== "ok") {
     throw new HTTPException(401, { message: "Google Drive needs to be reconnected" });
@@ -1644,6 +1656,7 @@ async function googleDriveApiRequest(
   if (providerConnectionVersion === undefined) {
     throw new Error("Google Drive credential resolver omitted the connection version");
   }
+  await requireResolvedConnection(providerConnectionVersion);
   const fetchImpl = deps.googleDriveFetch ?? fetch;
   let response = await providerFetch(fetchImpl, input.url, {
     headers: { ...credential.headers, accept: "application/json" },
@@ -1658,6 +1671,7 @@ async function googleDriveApiRequest(
     if (providerConnectionVersion === undefined) {
       throw new Error("Google Drive credential resolver omitted the connection version");
     }
+    await requireResolvedConnection(providerConnectionVersion);
     response = await providerFetch(fetchImpl, input.url, {
       headers: { ...credential.headers, accept: "application/json" },
     });

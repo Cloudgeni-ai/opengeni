@@ -9,7 +9,9 @@ import {
   RetainedArtifactMetadataSchema,
   retainedArtifactReferenceFromFile,
   retainedGeneratedImageReferenceFromFile,
+  retainedGeneratedVideoReferenceFromFile,
   retainedScreenshotReferenceFromFile,
+  VideoArtifactPlaybackSource,
   resolveRetainedOutputRange,
   type RetainedArtifactMetadata,
   type RetainedOutputUnavailableReason,
@@ -21,11 +23,13 @@ import {
   createFileUpload,
   getFileUpload,
   getGeneratedImageArtifact,
+  getGeneratedVideoArtifact,
   getRetainedFileArtifact,
   getRetainedScreenshotArtifact,
   requireFile,
   type RetainedFileArtifact,
   type GeneratedImageArtifact,
+  type GeneratedVideoArtifact,
   type RetainedScreenshotArtifact,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
@@ -298,6 +302,39 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
   });
 
+  app.post("/v1/workspaces/:workspaceId/artifacts/:artifactId/playback-source", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "files:read");
+    if (!objectStorage) {
+      throw new HTTPException(503, { message: "object storage is not configured" });
+    }
+    const artifactId = retainedArtifactId(c.req.param("artifactId"));
+    const retained = await getGeneratedVideoArtifact(db, workspaceId, artifactId);
+    if (!retained || retained.artifact.deletedAt) {
+      throw new HTTPException(404, { message: "generated video not found" });
+    }
+    if (retained.file.status !== "ready") {
+      throw new HTTPException(409, { message: `generated video is ${retained.file.status}` });
+    }
+    const file = generatedVideoFileAsset(retained.file);
+    if (!(await objectStorage.fileExists(file))) {
+      throw new HTTPException(410, { message: "generated video bytes are unavailable" });
+    }
+    const signed = await objectStorage.createGetUrl({ key: file.objectKey });
+    return c.json(
+      VideoArtifactPlaybackSource.parse({
+        schemaVersion: 1,
+        artifactId,
+        url: signed.url,
+        expiresAt: signed.expiresAt.toISOString(),
+        contentType: "video/mp4",
+        sizeBytes: file.sizeBytes,
+        sha256: file.sha256,
+        acceptRanges: "bytes",
+      }),
+    );
+  });
+
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/artifacts/:artifactId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "files:read");
@@ -507,8 +544,43 @@ async function getWorkspaceArtifact(
   if (generated) {
     return { file: generated.file, metadata: retainedGeneratedImageMetadata(generated) };
   }
+  const generatedVideo = await getGeneratedVideoArtifact(db, workspaceId, artifactId);
+  if (generatedVideo && !generatedVideo.artifact.deletedAt) {
+    const file = generatedVideoFileAsset(generatedVideo.file);
+    return {
+      file,
+      metadata: retainedGeneratedVideoMetadata({
+        artifact: generatedVideo.artifact,
+        file,
+      }),
+    };
+  }
   const artifact = await getRetainedFileArtifact(db, workspaceId, artifactId);
   return artifact ? { file: artifact.file, metadata: retainedArtifactMetadata(artifact) } : null;
+}
+
+function generatedVideoFileAsset(
+  file: NonNullable<Awaited<ReturnType<typeof getGeneratedVideoArtifact>>>["file"],
+): RetainedFileArtifact["file"] {
+  return FileAsset.parse({
+    ...file,
+    createdAt: file.createdAt.toISOString(),
+    updatedAt: file.updatedAt.toISOString(),
+  });
+}
+
+function retainedGeneratedVideoMetadata(artifact: {
+  artifact: GeneratedVideoArtifact;
+  file: RetainedFileArtifact["file"];
+}): RetainedArtifactMetadata {
+  const reference = retainedGeneratedVideoReferenceFromFile({
+    ...artifact.file,
+    id: artifact.artifact.id,
+    width: artifact.artifact.width,
+    height: artifact.artifact.height,
+    updatedAt: artifact.artifact.readyAt.toISOString(),
+  });
+  return reference ?? retainedArtifactUnavailable(artifact.artifact.id, "failed");
 }
 
 function retainedGeneratedImageMetadata(

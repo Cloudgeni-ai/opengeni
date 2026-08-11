@@ -50,9 +50,13 @@
       "types": "./src/materializer-cli.ts",
       "default": "./src/materializer-cli.ts"
     },
-    "./publication": {
-      "types": "./src/publication.ts",
-      "default": "./src/publication.ts"
+    "./office-import": {
+      "types": "./src/office-import.ts",
+      "default": "./src/office-import.ts"
+    },
+    "./snapshot": {
+      "types": "./src/snapshot.ts",
+      "default": "./src/snapshot.ts"
     },
     "./spreadsheet": {
       "types": "./src/production-spreadsheet.ts",

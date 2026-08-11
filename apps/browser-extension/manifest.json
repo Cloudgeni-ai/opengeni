@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "OpenGeni Browser",
+  "short_name": "OpenGeni",
+  "description": "Let your OpenGeni agents work in the Chrome profile and tabs you choose.",
+  "version": "0.1.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqHyOtEIcm4b+dQN+JnANfsB/QP1uHCpFFfxs1xdCo+eXk3zVXbENZJzN6EKoke2zd2B6xNtRgD5ljaUZR3omIOalY8ZvY1G4riv5/S3vt6REGX+R4MKPjSe3kbzf5XkLFuVDsQ6GMTvJGcsVCJAWkuvWS4q4BR7yPA+hVnBkxthD/6RuW+YMjax1FxPorW1si+SPHGJPJX0HfICWrOUfB+B7dAHFXZCXc3dtPXYX4oKCwANykxCmSYYnbuhPiRnm/GRUx0n23H48HX+43TX3c9aPPGAxEfKdjk1NR++jAvRFvBhc95JZ72HcnO19CpmF4xeKGK9drHz1KKUn8OxYBQIDAQAB",
+  "permissions": ["debugger", "nativeMessaging", "storage", "tabs"],
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "OpenGeni Browser",
+    "default_popup": "popup.html"
+  }
+}

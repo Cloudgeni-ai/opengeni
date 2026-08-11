@@ -238,6 +238,59 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     expect(mock.requests.at(-1)?.req.op?.$case).toBe("desktopEnsure");
   });
 
+  test("interaction sidecar and Browser/Computer frame relays use typed control ops", async () => {
+    const mock = new MockAgentResponder();
+    const session = sessionWith(mock);
+    const ensured = await session.ensureBrowserControl({
+      scopeId: `${WS}:attached:device-1`,
+      scopeGeneration: "connection-1",
+      adminToken: "a".repeat(32),
+      allowedOrigins: ["https://app.example"],
+    });
+    expect(ensured).toEqual({ port: 17_321, sidecarGeneration: "mock-sidecar-1" });
+    const opened = await session.openBrowserFrames({
+      scopeId: `${WS}:attached:device-1`,
+      scopeGeneration: "connection-1",
+      browserSessionId: "22222222-2222-2222-2222-222222222222",
+      controllerGeneration: "controller-1",
+      targetId: "target-1",
+      viewToken: "b".repeat(32),
+      expiresAtMs: String(Date.now() + 60_000),
+      format: "jpeg",
+      quality: 70,
+      maxWidth: 1_440,
+      maxHeight: 900,
+      everyNthFrame: 1,
+    });
+    expect(mock.requests.map((request) => request.req.op?.$case).slice(-2)).toEqual([
+      "browserControlEnsure",
+      "browserFramesOpen",
+    ]);
+    expect(opened.channel).toMatchObject({ kind: 3, port: 20_000 });
+    expect(opened.endpoint).toMatchObject({ host: "relay.test", path: "/stream" });
+    expect(opened.endpoint.query).toContain("port=20000");
+    expect(opened.endpoint.query).toContain("channel=mock-browser-target-1");
+
+    const openedComputer = await session.openComputerFrames({
+      scopeId: `${WS}:connected_machine:machine-1`,
+      scopeGeneration: "connection-1",
+      computerSessionId: "33333333-3333-4333-8333-333333333333",
+      controllerGeneration: "controller-2",
+      targetId: "window-1",
+      viewToken: "c".repeat(32),
+      expiresAtMs: String(Date.now() + 60_000),
+      format: "png",
+      quality: 80,
+      maxWidth: 1_200,
+      maxHeight: 800,
+      everyNthFrame: 2,
+    });
+    expect(mock.requests.at(-1)?.req.op?.$case).toBe("computerFramesOpen");
+    expect(openedComputer.channel).toMatchObject({ kind: 4, port: 20_001 });
+    expect(openedComputer.endpoint.query).toContain("port=20001");
+    expect(openedComputer.endpoint.query).toContain("channel=mock-computer-window-1");
+  });
+
   test("ping returns true against a live responder, false when offline", async () => {
     const mock = new MockAgentResponder();
     expect(await sessionWith(mock).ping()).toBe(true);

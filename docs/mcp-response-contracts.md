@@ -10,7 +10,7 @@ wastes model context and duplicates sensitive data across storage and transport
 surfaces.
 
 This contract applies to the built-in OpenGeni MCP and docs MCP. It does not
-change REST response bodies. Toolspace-proxied tools retain the result contract
+change REST response bodies. Codemode-proxied tools retain the result contract
 of their selected first-party, capability, or per-session provider.
 
 ## Mutation receipt v1
@@ -110,7 +110,7 @@ JSON escape expansion.
 ## Response classification and complete tool matrix
 
 The following is the complete built-in registration inventory. Availability is
-still permission-, deployment-, session-, and Toolspace-mode-dependent.
+still permission-, deployment-, session-, and exact-attempt-catalog-dependent.
 
 | Server / tools | Class | Response contract |
 | --- | --- | --- |
@@ -142,7 +142,7 @@ still permission-, deployment-, session-, and Toolspace-mode-dependent.
 | First-party: `sandbox_provision` | Action output | Essential provisioning or human enrollment result |
 | First-party: `github_connect_link` | Action output | Essential short-lived browser/configuration result |
 | First-party: `github_token` | Action output | Essential short-lived credential result; callers must handle it as a secret |
-| Toolspace-proxied tools (dynamic selected tool names) | Provider/selected-tool output | Preserve the selected first-party or upstream provider result; proxy/raw-transfer adaptation is outside this receipt contract |
+| Codemode catalog tools (dynamic selected tool names) | Exact prepared-tool output | Preserve the same result shape returned through model MCP; Codemode adds no proxy/raw-transfer adaptation |
 
 Reads, lists, and action outputs are not converted into receipts: their result
 contains information the caller did not already provide. This work removes
@@ -255,10 +255,10 @@ Canonical measurement: `apps/api/test/mcp-receipt-size.test.ts`.
   contract-shaped receipt is tested below 64 KiB. Universal output
   normalization/truncation across arbitrary provider and tool output remains
   a separate safety layer; compact receipts do not replace it.
-- **Connector/raw-transfer boundary:** this contract does not change
-  `apps/api/src/mcp/toolspace.ts`, runtime connector proxy adaptation,
-  worker/storage attachment transfer, provider wrappers, or raw-byte paths.
-  Those selected/upstream results remain provider-owned.
+- **Connector/raw-transfer boundary:** this contract does not change the exact
+  attempt Codemode dispatcher, runtime connector adaptation, worker/storage
+  attachment transfer, provider wrappers, or raw-byte paths. Those prepared
+  tool results remain provider-owned.
 - **Compatibility risk:** public MCP behavior is intentionally breaking for
   third-party clients that parse full mutation entities. Consumers must migrate
   to `receipt.resource.id` plus explicit reads. REST behavior is unchanged.

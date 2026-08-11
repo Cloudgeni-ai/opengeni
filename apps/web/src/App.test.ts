@@ -766,7 +766,7 @@ describe("session MCP permission groups", () => {
       "billing:read",
       "billing:manage",
       "workspace:create",
-      "toolspace:call",
+      "codemode:call",
     ]) {
       expect(offered).not.toContain(accountScope);
     }

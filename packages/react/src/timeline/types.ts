@@ -1,4 +1,5 @@
 import type {
+  MediaGenerationResult,
   ResourceRef,
   SessionStatus,
   TimelineAnnotation,
@@ -294,10 +295,12 @@ export type MachineInputMember = {
     | "goal_continuation"
     | "agent_message"
     | "agent_steer_instruction"
-    | "child_terminal_result";
+    | "child_terminal_result"
+    | "media_generation_result";
   classification: "success" | "failure" | "action_required" | "info";
   sourceId: string;
   summary: string;
+  result?: MediaGenerationResult | undefined;
 };
 
 /**

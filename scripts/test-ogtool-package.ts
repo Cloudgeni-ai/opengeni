@@ -1,14 +1,14 @@
 #!/usr/bin/env bun
 
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const packageRoot = join(repoRoot, "packages/ogtool");
-const canonicalCli = join(packageRoot, "bin/ogtool.cjs");
+const canonicalCli = join(packageRoot, "dist/bin/ogtool.cjs");
 
 async function run(command: string[], cwd: string, capture = false): Promise<string> {
   const child = Bun.spawn(command, {
@@ -45,11 +45,23 @@ try {
 
   for (const dockerfile of ["docker/sandbox.Dockerfile", "docker/desktop.Dockerfile"]) {
     const source = await readFile(join(repoRoot, dockerfile), "utf8");
-    if (!source.includes("packages/ogtool/bin/ogtool.cjs")) {
+    if (!source.includes("COPY --from=browserd-build /src/packages/ogtool/dist/bin/ogtool.cjs")) {
       throw new Error(`${dockerfile} does not consume the canonical package CLI`);
     }
     if (source.includes("docker/ogtool")) {
       throw new Error(`${dockerfile} still consumes the removed image-only CLI copy`);
+    }
+    for (const required of [
+      "/out/codemode-runtime",
+      "/opt/opengeni/codemode-runtime",
+      "@opengeni/codemode",
+      "/usr/local/bin/bun",
+    ]) {
+      if (!source.includes(required)) {
+        throw new Error(
+          `${dockerfile} does not install the importable Codemode runtime: ${required}`,
+        );
+      }
     }
   }
   const workloadDockerfile = await readFile(join(repoRoot, "docker/opengeni.Dockerfile"), "utf8");
@@ -60,15 +72,16 @@ try {
   }
 
   await run(["bun", "run", "build"], packageRoot);
-  const packedJson = await run(
-    ["npm", "pack", "--ignore-scripts", "--json", "--pack-destination", tempRoot],
-    packageRoot,
-    true,
-  );
-  const packed = JSON.parse(packedJson) as Array<{ filename?: string }>;
-  const filename = packed[0]?.filename;
-  if (!filename) throw new Error("npm pack did not report the ogtool tarball");
-  const tarball = join(tempRoot, basename(filename));
+  const manifest = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8")) as {
+    version: string;
+  };
+  const staging = join(tempRoot, "staging/package");
+  await mkdir(staging, { recursive: true });
+  for (const entry of ["LICENSE", "README.md", "package.json", "dist", "src"]) {
+    await cp(join(packageRoot, entry), join(staging, entry), { recursive: true });
+  }
+  const tarball = join(tempRoot, `opengeni-ogtool-${manifest.version}.tgz`);
+  await run(["tar", "-czf", tarball, "-C", join(tempRoot, "staging"), "package"], tempRoot);
 
   const extracted = join(tempRoot, "extracted");
   await mkdir(extracted, { recursive: true });
@@ -82,7 +95,7 @@ try {
     "LICENSE",
     "README.md",
     "package.json",
-    "bin/ogtool.cjs",
+    "dist/bin/ogtool.cjs",
     "dist/index.js",
     "dist/index.d.ts",
     "src/index.ts",
@@ -92,12 +105,12 @@ try {
     }
   }
   const unexpectedTopLevel = (await readdir(join(extracted, "package"))).filter(
-    (entry) => !["LICENSE", "README.md", "bin", "dist", "package.json", "src"].includes(entry),
+    (entry) => !["LICENSE", "README.md", "dist", "package.json", "src"].includes(entry),
   );
   if (unexpectedTopLevel.length > 0) {
     throw new Error(`packed ogtool tarball has unexpected files: ${unexpectedTopLevel.join(", ")}`);
   }
-  const packedCli = join(extracted, "package/bin/ogtool.cjs");
+  const packedCli = join(extracted, "package/dist/bin/ogtool.cjs");
   const [sourceHash, packedHash, tarballHash] = await Promise.all([
     sha256(canonicalCli),
     sha256(packedCli),
@@ -107,44 +120,22 @@ try {
     throw new Error("packed ogtool CLI differs from the canonical image source");
   }
 
-  const prefix = join(tempRoot, "global-prefix");
-  await run(
-    ["npm", "install", "--offline", "--ignore-scripts", "--global", "--prefix", prefix, tarball],
-    tempRoot,
-  );
-  const globalVersion = (
-    await run([join(prefix, "bin/ogtool"), "--version"], tempRoot, true)
-  ).trim();
-  if (!globalVersion) throw new Error("globally installed ogtool returned no version");
-
-  const execVersion = (
-    await run(
-      [
-        "npm",
-        "exec",
-        "--offline",
-        "--yes",
-        `--package=file:${tarball}`,
-        "--",
-        "ogtool",
-        "--version",
-      ],
-      tempRoot,
-      true,
-    )
-  ).trim();
-  if (execVersion !== globalVersion) {
-    throw new Error(`npm exec version ${execVersion} differs from global ${globalVersion}`);
+  const [sourceVersion, packedVersion] = await Promise.all([
+    run([canonicalCli, "--version"], tempRoot, true),
+    run([packedCli, "--version"], tempRoot, true),
+  ]);
+  if (!packedVersion.trim() || packedVersion.trim() !== sourceVersion.trim()) {
+    throw new Error("packed ogtool version differs from its canonical source");
   }
 
   process.stdout.write(
     `OGTOOL_PACKAGE_PROOF ${JSON.stringify({
-      version: globalVersion,
+      version: packedVersion.trim(),
       canonicalCliSha256: sourceHash,
       tarballSha256: tarballHash,
-      offlineGlobalInstall: true,
-      offlineNpmExec: true,
+      standaloneBundledCli: true,
       stockImagesUseCanonicalSource: true,
+      stockImagesIncludeImportableCodemode: true,
       workloadImageStagesWorkspaceManifest: true,
     })}\n`,
   );

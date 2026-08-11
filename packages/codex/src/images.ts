@@ -8,6 +8,7 @@ const CODEX_IMAGE_RESPONSE_MAX_BYTES = 90 * 1024 * 1024;
 const CODEX_IMAGE_ERROR_MAX_BYTES = 64 * 1024;
 const CODEX_IMAGE_MAX_BYTES = 64 * 1024 * 1024;
 const CODEX_IMAGE_REQUEST_TIMEOUT_MS = 5 * 60_000;
+const CODEX_IMAGE_MAX_REFERENCES = 5;
 
 const codexImageFetch: FetchLike = async (input, init) =>
   await pinnedFetch(
@@ -27,6 +28,11 @@ export type CodexGeneratedImage = {
   bytes: Uint8Array;
   declaredMediaType: "image/png";
 };
+
+export type CodexImageReferenceInput = Readonly<{
+  mediaType: "image/png" | "image/jpeg" | "image/webp";
+  bytes: Uint8Array;
+}>;
 
 export class CodexImageApiError extends Error {
   constructor(
@@ -53,6 +59,7 @@ export class CodexImageRequestTimeoutError extends Error {
  */
 export async function generateCodexSubscriptionImage(input: {
   prompt: string;
+  references?: readonly CodexImageReferenceInput[];
   turnId: string;
   context: Pick<CodexRequestContext, "clientVersion" | "getToken" | "refresh">;
   abortSignal?: AbortSignal;
@@ -65,6 +72,15 @@ export async function generateCodexSubscriptionImage(input: {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
     throw new RangeError("Codex image request timeout must be a positive safe integer");
   }
+  const references = input.references ?? [];
+  if (references.length > CODEX_IMAGE_MAX_REFERENCES) {
+    throw new RangeError(
+      `Codex image editing accepts at most ${CODEX_IMAGE_MAX_REFERENCES} images`,
+    );
+  }
+  for (const reference of references) {
+    if (reference.bytes.byteLength === 0) throw new Error("Codex image reference is empty");
+  }
   const deadline = new AbortController();
   const timer = setTimeout(
     () => deadline.abort(new CodexImageRequestTimeoutError(timeoutMs)),
@@ -75,19 +91,35 @@ export async function generateCodexSubscriptionImage(input: {
     : deadline.signal;
   const request = async (auth: CodexTokenSnapshot): Promise<Response> => {
     const headers = codexImageHeaders(auth, input.context.clientVersion, input.turnId);
-    return await fetchImpl(`${CODEX_RESPONSES_BASE}/images/generations`, {
-      method: "POST",
-      redirect: "error",
-      headers,
-      body: JSON.stringify({
-        prompt: input.prompt,
-        background: "auto",
-        model: CODEX_IMAGE_MODEL,
-        quality: "auto",
-        size: "auto",
-      }),
-      signal,
-    });
+    return await fetchImpl(
+      `${CODEX_RESPONSES_BASE}/${references.length > 0 ? "images/edits" : "images/generations"}`,
+      {
+        method: "POST",
+        redirect: "error",
+        headers,
+        body: JSON.stringify(
+          references.length > 0
+            ? {
+                images: references.map((reference) => ({
+                  image_url: `data:${reference.mediaType};base64,${Buffer.from(reference.bytes).toString("base64")}`,
+                })),
+                prompt: input.prompt,
+                background: "auto",
+                model: CODEX_IMAGE_MODEL,
+                quality: "auto",
+                size: "auto",
+              }
+            : {
+                prompt: input.prompt,
+                background: "auto",
+                model: CODEX_IMAGE_MODEL,
+                quality: "auto",
+                size: "auto",
+              },
+        ),
+        signal,
+      },
+    );
   };
 
   const operation = (async (): Promise<CodexGeneratedImage> => {

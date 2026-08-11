@@ -7,6 +7,7 @@ ENV OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
 
 COPY package.json bun.lock tsconfig.base.json ./
 COPY apps/api/package.json apps/api/package.json
+COPY apps/browser-extension/package.json apps/browser-extension/package.json
 COPY apps/worker/package.json apps/worker/package.json
 COPY apps/web/package.json apps/web/package.json
 COPY examples/northstar-support/package.json examples/northstar-support/package.json
@@ -15,6 +16,8 @@ COPY packages/artifact-kernel-wasm-document/package.json packages/artifact-kerne
 COPY packages/artifact-kernel-wasm-presentation/package.json packages/artifact-kernel-wasm-presentation/package.json
 COPY packages/artifact-kernel-wasm-spreadsheet/package.json packages/artifact-kernel-wasm-spreadsheet/package.json
 COPY packages/artifact-tool/package.json packages/artifact-tool/package.json
+COPY packages/browserd/package.json packages/browserd/package.json
+COPY packages/codemode/package.json packages/codemode/package.json
 COPY packages/codex/package.json packages/codex/package.json
 COPY packages/config/package.json packages/config/package.json
 COPY packages/contracts/package.json packages/contracts/package.json
@@ -24,6 +27,7 @@ COPY packages/deployment/package.json packages/deployment/package.json
 COPY packages/documents/package.json packages/documents/package.json
 COPY packages/events/package.json packages/events/package.json
 COPY packages/github/package.json packages/github/package.json
+COPY packages/interaction/package.json packages/interaction/package.json
 COPY packages/network/package.json packages/network/package.json
 COPY packages/observability/package.json packages/observability/package.json
 COPY packages/ogtool/package.json packages/ogtool/package.json
@@ -107,7 +111,7 @@ FROM base AS worker
 # than only inside the sandbox. The daemon remains outside this image.
 USER root
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates curl gnupg python3 \
+  && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg gnupg python3 \
   && install -m 0755 -d /etc/apt/keyrings \
   && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
   && chmod a+r /etc/apt/keyrings/docker.asc \

@@ -3,7 +3,7 @@ import { editableArtifactKernelRuntime as presentationRuntime } from "@opengeni/
 import { editableArtifactKernelRuntime as spreadsheetRuntime } from "@opengeni/artifact-kernel-wasm-spreadsheet";
 import { BrowserEditableArtifactWorkbench } from "@opengeni/react/artifacts";
 import type { AccessContext, Workspace } from "@opengeni/sdk";
-import { OpenGeniClient, type EditableArtifactResource } from "@opengeni/sdk/artifacts";
+import type { EditableArtifactResource } from "@opengeni/sdk/artifacts";
 import {
   type EditableArtifactBrowserRuntime,
   type EditableArtifactCacheAuthority,
@@ -23,6 +23,7 @@ import {
   createConsoleEditableArtifactAuthority,
   resolveConsoleEditableArtifactWorkerUrl,
 } from "@/lib/editable-artifact-browser";
+import { editableArtifactClient } from "@/lib/editable-artifact-client";
 
 type OpenArtifact = Readonly<{
   artifact: EditableArtifactResource;
@@ -36,11 +37,6 @@ type LoadState =
   | Readonly<{ kind: "error"; error: Error }>;
 
 const absoluteApiBaseUrl = new URL(apiBaseUrl || "/", window.location.origin);
-const artifactClient = new OpenGeniClient({
-  baseUrl: apiBaseUrl,
-  headers: () => authHeadersForAccessKey(getStoredAccessKey()),
-  fetch: (input, init) => fetch(input, { ...init, credentials: init?.credentials ?? "include" }),
-});
 
 /** First-party consumer of the exact public SDK/React editable-artifact API. */
 export function EditableArtifactRoute({
@@ -153,9 +149,11 @@ async function loadArtifact(
     accessKeyVersion: input.accessKeyVersion,
   });
   const replicaId = createConsoleEditableArtifactReplicaId();
-  const artifact = await artifactClient.getEditableArtifact(input.workspaceId, input.artifactId, {
-    replicaId,
-  });
+  const artifact = await editableArtifactClient.getEditableArtifact(
+    input.workspaceId,
+    input.artifactId,
+    { replicaId },
+  );
   return Object.freeze({ artifact, authority, replicaId });
 }
 

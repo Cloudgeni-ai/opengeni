@@ -11,11 +11,13 @@ export type {
 export type {
   CreateEditableArtifactMaterializationRequest,
   CreateEditableArtifactResourceRequest,
+  EditableArtifactListResource,
   EditableArtifactMaterializationFormat,
   EditableArtifactMaterializationJobResource,
   EditableArtifactMaterializationResultResource,
   EditableArtifactPinnedVersionResource,
   EditableArtifactResource,
+  ListSessionEditableArtifactResourcesOptions,
   PinEditableArtifactVersionRequest,
   ReadEditableArtifactMaterializationOptions,
   ReadEditableArtifactResourceOptions,
@@ -42,7 +44,10 @@ export type { NormalizedMcpOutput } from "./mcp-output";
 export {
   generatedImageSandboxPathMatches,
   parseGeneratedImageReceipt,
+  parseGeneratedVideoReceipt,
+  parseMediaGenerationResult,
   parseRetainedGeneratedImageReference,
+  parseRetainedGeneratedVideoReference,
 } from "./retained-artifacts";
 export {
   CodexRealtimeMicrophoneError,
@@ -94,6 +99,8 @@ export type {
 export { createGatewayRealtimeTransportStarter } from "./gateway-realtime-transport";
 export { projectSessionRealtimeLifecycle } from "./codex-realtime-lifecycle";
 export type { SessionRealtimeLifecycleProjection } from "./codex-realtime-lifecycle";
+// Provider-neutral Browser/Computer resource client + bounded frame protocol.
+export * from "./interaction";
 // Desktop (noVNC) transport contract — pure, zero-dep (the RFB import lives in
 // @opengeni/react). URL assembler + connection state machine + rotation fence.
 export { desktopSocketUrl, nextDesktopState, applyUrlRotation } from "./desktop";
@@ -271,6 +278,7 @@ export {
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
   OPENGENI_CORRELATION_HEADER,
+  GENERATED_VIDEO_MAX_BYTES,
   RETAINED_OUTPUT_DEFAULT_PAGE_BYTES,
   RETAINED_OUTPUT_MAX_PAGE_BYTES,
   SESSION_EVENT_TYPES,
@@ -499,6 +507,9 @@ export type {
   LatencyMode,
   ReasoningEffort,
   GeneratedImageReceipt,
+  GeneratedVideoFacts,
+  GeneratedVideoReceipt,
+  MediaGenerationResult,
   RetainedArtifactContent,
   RetainedArtifactContentOptions,
   RetainedArtifactDownload,
@@ -508,6 +519,19 @@ export type {
   RetainedArtifactUnavailable,
   RetainedOutputKind,
   RetainedOutputUnavailableReason,
+  UpdateVideoGenerationPolicyRequest,
+  VideoArtifactPlaybackSource,
+  VideoGenerationAspectRatio,
+  VideoGenerationCapabilities,
+  VideoGenerationFundingOption,
+  VideoGenerationFundingSource,
+  VideoGenerationModelCapability,
+  VideoGenerationOperationSummary,
+  VideoGenerationPolicy,
+  VideoGenerationPublicStatus,
+  VideoGenerationResolution,
+  VideoGenerationSourceMode,
+  VideoGenerationTerminalFailureStatus,
   RecordingAvailablePayload,
   RecordingCodec,
   RecordingContentType,
@@ -740,6 +764,7 @@ export type {
   WorkspaceMemorySearchResult,
   WorkspaceMemorySearchResponse,
   WorkspaceSettings,
+  WorkspaceVideoGenerationSettings,
   WorkspaceVoiceInputSettings,
   WorkspaceRegisteredPack,
   // Bring-your-own-compute: Machines dashboard + per-machine metrics (M10).

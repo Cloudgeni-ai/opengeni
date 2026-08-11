@@ -55,7 +55,7 @@ Enforcement is fail-closed across the full lifecycle:
 
 - Connection list/get/update/delete and OAuth reconnect require the exact subject.
 - Tool catalog discovery exposes only the current subject's personal connection readiness, never another subject's UUID or metadata.
-- Runtime and Toolspace token resolution use the immutable human initiator captured for the turn.
+- Runtime and Codemode token resolution use the immutable human initiator captured for the turn.
 - A service or scheduled-task initiator can use a personal connection only through its immutable frozen personal-delegation snapshot; it never infers one from the creator or current user.
 - Two different OpenGeni users in the same workspace resolve different Slack rows even when both use `slack.com` and `oauth2`.
 
@@ -169,7 +169,7 @@ The bot connection is a workspace-shared `app_install` row (`subjectId = null`) 
 
 `slack_installation_bindings` is the durable team-routing authority. One active Slack team can point to exactly one OpenGeni account and workspace. The callback takes a transaction-scoped team lock before connection mutation; an exact same-workspace team/bot/bot-user reinstall rotates the encrypted credential in place and preserves the connection UUID used by routing and scheduled tasks. Concurrent exact-principal callbacks converge on that row. A different OpenGeni workspace or Slack bot principal receives an actionable conflict and no second connection is created. Reassignment is intentionally out of scope: there is no last-write-wins move operation or access-link shortcut.
 
-Migration `0203_slack_installation_bindings.sql` backfills one newest row only when all verified legacy rows for a team agree on the exact account/workspace and bot principal. Exact-principal duplicates remain stored but are non-authoritative. Conflicting legacy rows retain their provider credentials and are marked `quarantined`; routing and reinstall fail closed until an explicit forward fix resolves them. The database trigger fences rolling-old writers before they can commit a second binding. After migration, roll forward with binding-aware code rather than dropping the ledger or guessing a tenant; removing the binding authority is not a supported rollback.
+Migration `0212_slack_installation_bindings.sql` backfills one newest row only when all verified legacy rows for a team agree on the exact account/workspace and bot principal. Exact-principal duplicates remain stored but are non-authoritative. Conflicting legacy rows retain their provider credentials and are marked `quarantined`; routing and reinstall fail closed until an explicit forward fix resolves them. The database trigger fences rolling-old writers before they can commit a second binding. After migration, roll forward with binding-aware code rather than dropping the ledger or guessing a tenant; removing the binding authority is not a supported rollback.
 
 ## Start and continue OpenGeni work from Slack
 

@@ -136,6 +136,28 @@ Before editing, identify which layer owns the behavior:
 - Scheduling: scheduled task contracts/routes/core domain helpers, Temporal schedule mapping, dispatch activity.
 - UI: `apps/web` API helpers/types/components.
 
+For pull-request delivery, preserve immutable candidates across a moving base:
+
+- Start from current `main`, but do not merge or rebase `main` again merely
+  because it advances while CI or review runs.
+- “Current-main compatible” requires a fresh mergeability/merge-tree and
+  material-overlap check against current `main`; it does not require current
+  `main` to be present in the candidate's ancestry.
+- Base drift alone does not create a new candidate version or invalidate a
+  head-bound review. Refresh base-bound evidence on the same head when a
+  release contract requires it.
+- Change the source head only for a source defect, actual conflict, or material
+  semantic incompatibility. After two substantive repair revisions, stop for an
+  incident/scope review instead of continuing an unbounded repair loop.
+- Watcher and continuation prompts must explicitly say “verify compatibility
+  without source mutation”; never tell a source owner to “reconcile again” for
+  ordinary protected-branch movement.
+
+The executable contract is `.github/workflows/source-admission.yml` plus
+`scripts/check-source-admission.mjs`: immutable stale-event heads remain
+admissible while protected `main` advances. `AGENTS.md` owns the full repository
+delivery invariant.
+
 After edits, run the smallest relevant verification first, then broader checks if behavior crosses boundaries. Common checks are:
 
 ```bash

@@ -4,6 +4,7 @@ import { and, asc, eq, sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { fromPostgresLosslessJson, LOSSLESS_CONTENT_CODEC_VERSION } from "./lossless-json";
 import * as schema from "./schema";
+import { cancelUnacceptedVideoGenerationsForToolCallsInTransaction } from "./video-generation";
 
 export const TOOL_RESULT_TYPE_BY_CALL_TYPE: Readonly<Record<string, string>> = {
   function_call: "function_call_result",
@@ -326,6 +327,14 @@ export async function closePendingSessionToolCallsInTransaction(
     eventValues.length > 0
       ? await tx.insert(schema.sessionEvents).values(eventValues).returning()
       : [];
+  await cancelUnacceptedVideoGenerationsForToolCallsInTransaction(tx, {
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: input.turnId,
+    toolCallIds: pending.map((call) => call.callId),
+    reason: input.reason,
+    now: input.now,
+  });
   await tx
     .delete(schema.sessionPendingToolCalls)
     .where(

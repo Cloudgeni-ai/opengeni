@@ -2822,7 +2822,7 @@ describe("worker shutdown preemption", () => {
     const steps: string[] = [];
     let releaseTools!: () => void;
     let releaseGitWrite!: () => void;
-    let releaseToolspaceWrite!: () => void;
+    let releaseCodemodeWrite!: () => void;
     let releaseRunCredentialWrite!: () => void;
     const toolsDrained = new Promise<void>((resolve) => {
       releaseTools = resolve;
@@ -2830,8 +2830,8 @@ describe("worker shutdown preemption", () => {
     const gitWriteDrained = new Promise<void>((resolve) => {
       releaseGitWrite = resolve;
     });
-    const toolspaceWriteDrained = new Promise<void>((resolve) => {
-      releaseToolspaceWrite = resolve;
+    const codemodeWriteDrained = new Promise<void>((resolve) => {
+      releaseCodemodeWrite = resolve;
     });
     const runCredentialWriteDrained = new Promise<void>((resolve) => {
       releaseRunCredentialWrite = resolve;
@@ -2863,11 +2863,11 @@ describe("worker shutdown preemption", () => {
       },
       cancellationReason: new Error("STEER"),
       gitCredentialRenewals: [gitRenewal],
-      toolspaceTokenRenewal: {
+      codemodeTokenRenewal: {
         stop: async () => {
-          steps.push("toolspace-draining");
-          await toolspaceWriteDrained;
-          steps.push("toolspace-drained");
+          steps.push("codemode-draining");
+          await codemodeWriteDrained;
+          steps.push("codemode-drained");
         },
       },
       runCredentialRenewal: {
@@ -2898,10 +2898,10 @@ describe("worker shutdown preemption", () => {
 
     releaseGitWrite();
     await Bun.sleep(0);
-    expect(steps.at(-1)).toBe("toolspace-draining");
+    expect(steps.at(-1)).toBe("codemode-draining");
     expect(receipts).toBe(0);
 
-    releaseToolspaceWrite();
+    releaseCodemodeWrite();
     await Bun.sleep(0);
     expect(steps.at(-1)).toBe("run-credentials-draining");
     expect(receipts).toBe(0);
