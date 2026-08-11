@@ -651,17 +651,16 @@ const SettingsSchema = z.object({
   // SOONER than the hard lifetime; the boot invariant forbids a value that would
   // reap before reaperPeriod + idleGrace elapses.
   modalIdleTimeoutSeconds: z.coerce.number().int().positive().optional(),
-  // /workspace FILE PERSISTENCE across warm/cold cycles. Defaults to
-  // `snapshot_filesystem` so EVERY box is created persistence-capable: the reaper
-  // snapshots the live box before it terminates a drained group, and a later
-  // cold-restore hydrates a fresh box from that snapshot (sandbox-file-persistence).
-  // `snapshot_filesystem` requires the manifest declare NO ephemeralPersistencePaths
-  // (buildManifest never sets entry.ephemeral, so it never downgrades to tar). Set
-  // OPENGENI_MODAL_WORKSPACE_PERSISTENCE=tar to opt back out (no native snapshot;
-  // the reaper persists a tar archive — same store+hydrate plumbing, slower).
+  // /workspace FILE PERSISTENCE across warm/cold cycles. Directory snapshots
+  // preserve only the durable user workspace, so provider recovery does not
+  // restore an entire machine image or replace the selected rig/base image.
+  // Existing serialized sessions retain their original persistence mode and
+  // remain recoverable; this default governs newly created Modal sandboxes.
+  // `snapshot_filesystem` remains available for explicit compatibility and
+  // immutable rig-image materialization. `tar` is the portable fallback.
   modalWorkspacePersistence: z
     .enum(["tar", "snapshot_filesystem", "snapshot_directory"])
-    .default("snapshot_filesystem"),
+    .default("snapshot_directory"),
   // Shared desktop toggle: this module reads it for the 6080 port-merge; the
   // owner module (P4.x) acts on it to launch the display stack.
   sandboxDesktopEnabled: EnvBoolean.default(false),

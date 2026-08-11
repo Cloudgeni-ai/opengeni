@@ -2431,15 +2431,17 @@ export function isLazySandboxProvisionRetryable(error: unknown): boolean {
   }
   if (
     error instanceof SandboxLeaseSupersededError ||
-    error instanceof SandboxLeaseTransitionError ||
-    error instanceof SandboxWarmingTimeoutError
+    error instanceof SandboxLeaseTransitionError
   ) {
     return true;
   }
-  const message = error instanceof Error ? error.message : String(error);
-  return /(?:capacity|create|creation|provider|sandbox).*(?:timeout|timed out)|(?:timeout|timed out).*(?:capacity|create|creation|provider|sandbox)|ECONNRESET|ETIMEDOUT|EAI_AGAIN|temporar/i.test(
-    message,
-  );
+  if (error instanceof SandboxWarmingTimeoutError) {
+    return false;
+  }
+  // Provider/transport text is not durable evidence that creation never
+  // happened. Retrying an ambiguous unknown here can create a second box; only
+  // typed, ownership-fenced lifecycle outcomes above are safe to replay.
+  return false;
 }
 
 /** Short workflow-visible anti-churn pacing after a lifecycle transition. The

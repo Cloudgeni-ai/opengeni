@@ -109,6 +109,14 @@ function rigProviderImage(overrides: Partial<RigProviderImage> = {}): RigProvide
     imageDigest: null,
     artifactId: status === "ready" ? "66666666-6666-4666-8666-666666666666" : null,
     providerBindingKeyHash: status === "ready" ? `sha256:${"c".repeat(64)}` : null,
+    ...(status === "ready"
+      ? {
+          coldBootValidation: {
+            version: 1 as const,
+            checkedAt: new Date().toISOString(),
+          },
+        }
+      : {}),
     provenance: {
       kind: "rig_verification",
       targetKind: "version",
@@ -532,6 +540,64 @@ describe("rig provider image build ledger", () => {
     expect((await getRigVersionById(db, ws.workspaceId, versionId))?.providerImages.modal).toEqual(
       claim.image,
     );
+  });
+
+  test("a legacy ready image is rebuilt under the current cold-boot protocol", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const rig = await createRig(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      name: "provider-image-cold-boot-upgrade",
+    });
+    const versionId = rig.activeVersion!.id;
+    const legacyBuild = rigProviderImage({
+      buildRequestId: "77777777-7777-4777-8777-777777777777",
+      provenance: {
+        kind: "rig_verification",
+        targetKind: "version",
+        targetId: versionId,
+      },
+    });
+    const claim = await claimRigVersionProviderImageBuild(db, {
+      workspaceId: ws.workspaceId,
+      versionId,
+      image: legacyBuild,
+      staleAfterMs: 60_000,
+    });
+    expect(claim.status).toBe("claimed");
+    const artifact = await registerRigProviderImageArtifact(ws, versionId, "im-legacy-rig");
+    const { coldBootValidation: _unproven, ...legacyReady } = rigProviderImage({
+      ...claim.image,
+      status: "ready",
+      imageId: "im-legacy-rig",
+      artifactId: artifact.artifactId,
+      providerBindingKeyHash: artifact.providerBindingKeyHash,
+      finishedAt: new Date().toISOString(),
+      error: null,
+    });
+    expect(
+      await finalizeRigVersionProviderImageBuild(db, {
+        workspaceId: ws.workspaceId,
+        versionId,
+        image: legacyReady,
+      }),
+    ).toBe(true);
+
+    const currentBuild = rigProviderImage({
+      ...legacyBuild,
+      buildRequestId: "88888888-8888-4888-8888-888888888888",
+      startedAt: new Date().toISOString(),
+    });
+    const upgrade = await claimRigVersionProviderImageBuild(db, {
+      workspaceId: ws.workspaceId,
+      versionId,
+      image: currentBuild,
+      staleAfterMs: 60_000,
+    });
+    expect(upgrade.status).toBe("claimed");
+    expect(upgrade.image.buildRequestId).toBe(currentBuild.buildRequestId);
+    expect(upgrade.image.coldBootValidation).toBeUndefined();
   });
 
   test("an unsupported record retries only after the caller proves provider support", async () => {

@@ -5830,6 +5830,15 @@ export const RigProviderImage = z
       .string()
       .regex(/^sha256:[0-9a-f]{64}$/u)
       .nullable(),
+    // Added after provider-image v1 shipped. Absence is retained for rolling
+    // compatibility but means runtime must use logical-image + setup fallback
+    // until an explicit verification cold-boots this exact image.
+    coldBootValidation: z
+      .object({
+        version: z.literal(1),
+        checkedAt: z.string().datetime(),
+      })
+      .optional(),
     provenance: z.object({
       kind: z.literal("rig_verification"),
       targetKind: z.enum(["change", "version"]),
@@ -5905,6 +5914,13 @@ export const RigProviderImage = z
         code: "custom",
         path: ["error"],
         message: "ready provider images cannot retain an error",
+      });
+    }
+    if (value.status !== "ready" && value.coldBootValidation !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["coldBootValidation"],
+        message: "only ready provider images may retain cold-boot validation",
       });
     }
   });

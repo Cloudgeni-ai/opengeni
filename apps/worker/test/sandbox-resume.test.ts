@@ -819,7 +819,9 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
         "turn",
         sandboxLeaseHolderIdForAttempt("activity-timeout-message"),
       ),
-    ).rejects.toThrow(/Sandbox backend "local" capacity or creation timed out/);
+    ).rejects.toThrow(
+      /Sandbox backend "local" \(group [^)]+\) did not finish warming within 1s while waiting for the elected sandbox creator/,
+    );
 
     expect(
       await holderCount(workspaceId, groupId, sandboxLeaseHolderIdForAttempt("activity-timeout")),

@@ -13013,7 +13013,7 @@ export async function claimRigVersionProviderImageBuild(
         const retained = await retainRigProviderImageArtifacts(scopedDb, input.workspaceId, {
           [existing.backend]: existing,
         });
-        if (retained[existing.backend]) {
+        if (retained[existing.backend] && existing.coldBootValidation?.version === 1) {
           return { status: "ready", image: existing };
         }
       }
@@ -13034,11 +13034,15 @@ export async function claimRigVersionProviderImageBuild(
       }
     }
 
-    // Failed or stale retries retain the original provider idempotency key so
-    // an ambiguous first snapshot converges on the same immutable Image.
+    // Failed or stale retries retain the provider idempotency key only when it
+    // belongs to the current build protocol. A protocol upgrade deliberately
+    // mints a new key so an older immutable image cannot masquerade as a newly
+    // validated build of the same logical definition.
     const claimed = RigProviderImageContract.parse({
       ...candidate,
-      ...(existing?.buildRequestId ? { buildRequestId: existing.buildRequestId } : {}),
+      ...(existing?.buildRequestId === candidate.buildRequestId
+        ? { buildRequestId: existing.buildRequestId }
+        : {}),
     });
     const providerImages: RigProviderImages = {
       ...row.providerImages,
@@ -34780,7 +34784,6 @@ export async function claimWorkspaceArchiveCapture(
         recoveryStateFromLeaseRow(row).archive.status === "available";
       if (
         input.minIntervalMs > 0 &&
-        archiveComplete &&
         Number.isFinite(priorAtMs) &&
         Date.now() - priorAtMs < input.minIntervalMs
       ) {
@@ -35118,6 +35121,15 @@ export async function registerSandboxCheckpointArtifact(
     providerBinding: Record<string, unknown>;
     workspaceArchive: string;
     workspaceArchiveMeta: SandboxArchiveRevision;
+    /**
+     * Workspace checkpoints are identified by their exact capture source.
+     * Provider-image builds instead use a provider-owned idempotency key: a
+     * retry may run from a successor verifier lease but must converge on the
+     * same exact immutable object. The first source remains immutable
+     * provenance; only a byte-identical object in the same tenant/group may be
+     * reused.
+     */
+    registrationIdentity?: "capture" | "provider_object";
   },
 ): Promise<SandboxCheckpointArtifactRegistration> {
   const verified = validatedModalCheckpoint(input);
@@ -35194,25 +35206,35 @@ export async function registerSandboxCheckpointArtifact(
             for update
           `)
             )[0];
+          const existingProviderObjectMatches =
+            row &&
+            "account_id" in row &&
+            row.account_id === input.accountId &&
+            row.workspace_id === input.workspaceId &&
+            row.sandbox_group_id === input.sandboxGroupId &&
+            row.provenance === "native_capture" &&
+            row.archive_base64 === input.workspaceArchive &&
+            row.archive_sha256 === verified.descriptor.archiveSha256 &&
+            row.object_kind === verified.objectKind &&
+            canonicalModalCheckpointProviderBinding(row.provider_binding)?.key ===
+              providerIdentity.key;
+          const existingCaptureObjectMatches =
+            existingProviderObjectMatches &&
+            stableJson(row.descriptor) === stableJson(verified.descriptor) &&
+            row.descriptor_revision === verified.descriptor.revision;
+          const existingCaptureMatches =
+            existingCaptureObjectMatches &&
+            row.source_lease_id === input.sourceLeaseId &&
+            Number(row.source_lease_epoch) === input.sourceLeaseEpoch &&
+            row.source_instance_id === input.sourceInstanceId &&
+            row.source_workspace_generation !== null &&
+            Number(row.source_workspace_generation) === input.sourceWorkspaceGeneration;
           if (
             !row ||
             ("account_id" in row &&
-              (row.account_id !== input.accountId ||
-                row.workspace_id !== input.workspaceId ||
-                row.sandbox_group_id !== input.sandboxGroupId ||
-                row.source_lease_id !== input.sourceLeaseId ||
-                Number(row.source_lease_epoch) !== input.sourceLeaseEpoch ||
-                row.source_instance_id !== input.sourceInstanceId ||
-                row.source_workspace_generation === null ||
-                Number(row.source_workspace_generation) !== input.sourceWorkspaceGeneration ||
-                row.provenance !== "native_capture" ||
-                row.archive_base64 !== input.workspaceArchive ||
-                row.archive_sha256 !== verified.descriptor.archiveSha256 ||
-                stableJson(row.descriptor) !== stableJson(verified.descriptor) ||
-                row.descriptor_revision !== verified.descriptor.revision ||
-                row.object_kind !== verified.objectKind ||
-                canonicalModalCheckpointProviderBinding(row.provider_binding)?.key !==
-                  providerIdentity.key))
+              (input.registrationIdentity === "provider_object"
+                ? !existingProviderObjectMatches
+                : !existingCaptureMatches))
           ) {
             throw new SandboxCheckpointArtifactRegistrationConflictError(
               "Modal checkpoint object identity collision",
@@ -35222,6 +35244,23 @@ export async function registerSandboxCheckpointArtifact(
             throw new SandboxCheckpointArtifactRegistrationConflictError(
               "Modal checkpoint object was already deleted",
             );
+          }
+          if (
+            input.registrationIdentity === "provider_object" &&
+            (row.state === "delete_pending" || row.state === "delete_failed")
+          ) {
+            await scopedDb.execute(sql`
+              update sandbox_checkpoint_artifacts set
+                state = 'candidate',
+                delete_after = null,
+                delete_claim_id = null,
+                delete_claimed_at = null,
+                last_delete_error = null,
+                updated_at = now()
+              where id = ${row.id}
+                and state in ('delete_pending', 'delete_failed')
+            `);
+            return { id: row.id, state: "candidate", objectId: row.object_id };
           }
           return { id: row.id, state: row.state, objectId: row.object_id };
         },
@@ -36460,7 +36499,6 @@ export async function persistWarmSnapshot(
       }
       if (
         input.minIntervalMs > 0 &&
-        priorArchiveComplete &&
         Number.isFinite(priorAtMs) &&
         capturedAtMs - priorAtMs < input.minIntervalMs
       ) {

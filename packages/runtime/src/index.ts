@@ -154,7 +154,7 @@ import {
   codexAppsSanitizingFetch,
 } from "@opengeni/codex";
 import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, posix as posixPath, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -7985,6 +7985,9 @@ const RIG_SETUP_SKIPPED_SENTINEL = "__OPENGENI_RIG_SETUP_SKIPPED__";
 
 const RIG_SETUP_RUNTIME_MARKER_ROOT = "/tmp/opengeni/rig-setup";
 const RIG_SETUP_PROVIDER_IMAGE_MARKER_ROOT = "/var/opengeni";
+const RIG_SETUP_INLINE_COMMAND_MAX_BYTES = 32 * 1024;
+const RIG_SETUP_PAYLOAD_CHUNK_CHARS = 24 * 1024;
+const RIG_SETUP_PAYLOAD_ROOT = "/tmp/opengeni/rig-setup-payloads";
 
 export type RigSetupScriptCommandOptions = {
   timeoutMs?: number;
@@ -7996,6 +7999,30 @@ export type RigSetupScriptCommandOptions = {
    * provider image's root-owned marker directory. */
   trustedContentMarkerRoot?: string;
 };
+
+function rigSetupHeredocDelimiter(script: string): string {
+  const occupied = new Set(script.split(/\r?\n/u));
+  const digest = createHash("sha256").update(script, "utf8").digest("hex").slice(0, 16);
+  let delimiter = `__OPENGENI_RIG_SETUP_${digest}__`;
+  while (occupied.has(delimiter)) delimiter += "_";
+  return delimiter;
+}
+
+function rigSetupExistingMarkerProbe(versionId: string, contentHash?: string): string {
+  if (contentHash !== undefined && !/^sha256:[0-9a-f]{64}$/u.test(contentHash)) {
+    throw new Error("Rig setup content hash must be a canonical SHA-256 value");
+  }
+  const markers = [`${RIG_SETUP_RUNTIME_MARKER_ROOT}/rig-setup-${versionId}.done`];
+  if (contentHash) {
+    const suffix = `rig-setup-content-${contentHash.slice("sha256:".length)}.done`;
+    markers.push(
+      `${RIG_SETUP_RUNTIME_MARKER_ROOT}/${suffix}`,
+      `${RIG_SETUP_PROVIDER_IMAGE_MARKER_ROOT}/${suffix}`,
+    );
+  }
+  const ready = markers.map((marker) => `[ -f ${shellQuote(marker)} ]`).join(" || ");
+  return `if ${ready}; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi\nexit 42`;
+}
 
 /**
  * The rig-setup command (M3). One idempotent bash program:
@@ -8049,6 +8076,7 @@ export function rigSetupScriptCommand(
   const markerReady = contentMarker
     ? '[ -f "$__OG_RIG_VERSION_MARKER" ] || [ -f "$__OG_RIG_CONTENT_MARKER" ] || [ -f "$__OG_RIG_TRUSTED_CONTENT_MARKER" ]'
     : '[ -f "$__OG_RIG_VERSION_MARKER" ]';
+  const heredocDelimiter = rigSetupHeredocDelimiter(script);
   return [
     "set -u",
     `if ! mkdir -p ${shellQuote(markerRoot)}; then printf '%s\\n' 'unable to create rig setup marker root' >&2; exit 73; fi`,
@@ -8065,9 +8093,9 @@ export function rigSetupScriptCommand(
     "    trap 'rm -rf \"$__OG_RIG_LOCK\"' EXIT",
     `    if ${markerReady}; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
     "    if ! __OG_RIG_SCRIPT=\"$(mktemp)\"; then printf '%s\\n' 'unable to create rig setup script file' >&2; exit 73; fi",
-    "cat > \"$__OG_RIG_SCRIPT\" <<'__OPENGENI_RIG_SETUP_SCRIPT_EOF__'",
+    `cat > "$__OG_RIG_SCRIPT" <<'${heredocDelimiter}'`,
     script,
-    "__OPENGENI_RIG_SETUP_SCRIPT_EOF__",
+    heredocDelimiter,
     '    timeout -k 5s "${__OG_RIG_TIMEOUT_SECS}s" bash "$__OG_RIG_SCRIPT"',
     "__OG_RIG_RC=$?",
     '    rm -f "$__OG_RIG_SCRIPT"',
@@ -8090,6 +8118,57 @@ export function rigSetupScriptCommand(
     "  if ! rmdir \"$__OG_RIG_LOCK\" 2>/dev/null && [ -d \"$__OG_RIG_LOCK\" ]; then printf '%s\\n' 'unable to reclaim stale rig setup lock' >&2; exit 73; fi",
     "done",
   ].join("\n");
+}
+
+async function stageRigSetupScript(
+  session: SandboxSessionLike,
+  script: string,
+  context: SandboxLifecycleHookContext,
+): Promise<string> {
+  const payloadPath = `${RIG_SETUP_PAYLOAD_ROOT}/${randomUUID()}.sh`;
+  const encodedPath = `${payloadPath}.b64`;
+  const encoded = Buffer.from(script, "utf8").toString("base64");
+  const commands = [
+    `set -eu\numask 077\nmkdir -p ${shellQuote(RIG_SETUP_PAYLOAD_ROOT)}\n: > ${shellQuote(encodedPath)}`,
+  ];
+  for (let offset = 0; offset < encoded.length; offset += RIG_SETUP_PAYLOAD_CHUNK_CHARS) {
+    commands.push(
+      `printf '%s' ${shellQuote(encoded.slice(offset, offset + RIG_SETUP_PAYLOAD_CHUNK_CHARS))} >> ${shellQuote(encodedPath)}`,
+    );
+  }
+  commands.push(
+    `set -eu\nbase64 -d ${shellQuote(encodedPath)} > ${shellQuote(payloadPath)}\nchmod 0700 ${shellQuote(payloadPath)}\nrm -f ${shellQuote(encodedPath)}`,
+  );
+  try {
+    for (const command of commands) {
+      const result = await runSandboxLifecycleCommand(
+        session,
+        {
+          cmd: command,
+          workdir: "/workspace",
+          ...(context.runAs ? { runAs: context.runAs } : {}),
+          yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+          maxOutputTokens: 4_000,
+        },
+        context.commandRunner,
+      );
+      assertSandboxCommandSucceeded(result, "Rig setup payload staging");
+    }
+    return payloadPath;
+  } catch (error) {
+    await runSandboxLifecycleCommand(
+      session,
+      {
+        cmd: `rm -f ${shellQuote(payloadPath)} ${shellQuote(encodedPath)}`,
+        workdir: "/workspace",
+        ...(context.runAs ? { runAs: context.runAs } : {}),
+        yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+        maxOutputTokens: 1_000,
+      },
+      context.commandRunner,
+    ).catch(() => undefined);
+    throw error;
+  }
 }
 
 /**
@@ -8117,14 +8196,20 @@ export async function runRigSetupHook(
     rigName: rigSetup.rigName,
   };
   await context.onRuntimeEvent?.({ type: "rig.setup.started", payload });
-  const command = rigSetupScriptCommand(rigSetup.script, rigSetup.versionId, {
+  const commandOptions = {
     timeoutMs: rigSetup.timeoutMs,
     markerRoot: RIG_SETUP_RUNTIME_MARKER_ROOT,
     ...(rigSetup.contentHash !== undefined ? { contentHash: rigSetup.contentHash } : {}),
     trustedContentMarkerRoot: RIG_SETUP_PROVIDER_IMAGE_MARKER_ROOT,
-  });
+  };
+  const inlineCommand = rigSetupScriptCommand(rigSetup.script, rigSetup.versionId, commandOptions);
+  let stagedScriptPath: string | null = null;
+  let executableCommand =
+    Buffer.byteLength(inlineCommand, "utf8") <= RIG_SETUP_INLINE_COMMAND_MAX_BYTES
+      ? inlineCommand
+      : "";
   const execArgs = {
-    cmd: command,
+    cmd: executableCommand,
     workdir: "/workspace",
     ...(context.runAs ? { runAs: context.runAs } : {}),
     // The in-box coreutils timeout is the hard deadline; the SDK yield waits a
@@ -8135,7 +8220,41 @@ export async function runRigSetupHook(
   };
   let result: unknown;
   try {
-    result = await runSandboxLifecycleCommand(session, execArgs, context.commandRunner);
+    if (!executableCommand) {
+      const markerProbe = await runSandboxLifecycleCommand(
+        session,
+        {
+          cmd: rigSetupExistingMarkerProbe(rigSetup.versionId, rigSetup.contentHash),
+          workdir: "/workspace",
+          ...(context.runAs ? { runAs: context.runAs } : {}),
+          yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+          maxOutputTokens: 1_000,
+        },
+        context.commandRunner,
+      );
+      const markerProbeExitCode = sandboxCommandExitCode(markerProbe);
+      if (
+        markerProbeExitCode === 0 &&
+        sandboxCommandOutput(markerProbe).includes(RIG_SETUP_SKIPPED_SENTINEL)
+      ) {
+        result = markerProbe;
+      } else if (markerProbeExitCode !== 42) {
+        assertSandboxCommandSucceeded(markerProbe, "Rig setup marker probe");
+        throw new Error("Rig setup marker probe returned success without its sentinel");
+      }
+      if (result === undefined) {
+        stagedScriptPath = await stageRigSetupScript(session, rigSetup.script, context);
+        executableCommand = rigSetupScriptCommand(
+          `exec bash ${shellQuote(stagedScriptPath)}`,
+          rigSetup.versionId,
+          commandOptions,
+        );
+        execArgs.cmd = executableCommand;
+      }
+    }
+    if (result === undefined) {
+      result = await runSandboxLifecycleCommand(session, execArgs, context.commandRunner);
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await context.onRuntimeEvent?.({
@@ -8149,6 +8268,20 @@ export async function runRigSetupHook(
       `Rig setup failed for rig "${rigSetup.rigName}" (version ${rigSetup.versionId}): ${message}`,
       { cause: error },
     );
+  } finally {
+    if (stagedScriptPath) {
+      await runSandboxLifecycleCommand(
+        session,
+        {
+          cmd: `rm -f ${shellQuote(stagedScriptPath)} ${shellQuote(`${stagedScriptPath}.b64`)}`,
+          workdir: "/workspace",
+          ...(context.runAs ? { runAs: context.runAs } : {}),
+          yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+          maxOutputTokens: 1_000,
+        },
+        context.commandRunner,
+      ).catch(() => undefined);
+    }
   }
   const output = sandboxCommandOutput(result);
   // Marker present → the guard skipped the script. Distinct terminal signal.

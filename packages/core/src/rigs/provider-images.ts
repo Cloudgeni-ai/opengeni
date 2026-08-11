@@ -54,14 +54,15 @@ export function rigProviderImageContentHash(input: {
   );
 }
 
-/** Modal's patched snapshot API accepts a caller-owned UUID idempotency key. */
+/** Modal's patched snapshot API accepts a caller-owned UUID idempotency key.
+ * v2 denotes images proven by a separate cold boot before publication. */
 export function rigProviderImageBuildRequestId(input: {
   targetId: string;
   backend: SandboxBackend;
   contentHash: string;
 }): string {
   const bytes = createHash("sha256")
-    .update("opengeni-rig-provider-image-build-v1\0", "utf8")
+    .update("opengeni-rig-provider-image-build-v2\0", "utf8")
     .update(input.targetId, "utf8")
     .update("\0", "utf8")
     .update(input.backend, "utf8")

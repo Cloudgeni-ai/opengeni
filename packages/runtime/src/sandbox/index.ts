@@ -1078,15 +1078,17 @@ export class SandboxExecReadinessError extends Error {
     public readonly code: "exec_probe_unavailable" | "exec_probe_timeout" | "exec_probe_failed",
     public readonly timeoutMs: number,
     public readonly exitCode: number | null = null,
+    public readonly instanceId: string | null = null,
   ) {
+    const target = instanceId ? `${backend} sandbox ${instanceId}` : `${backend} sandbox`;
     super(
       code === "exec_probe_timeout"
-        ? `sandbox creation timed out waiting for ${backend} command readiness after ${timeoutMs}ms`
+        ? `${target} timed out waiting for command readiness after ${timeoutMs}ms`
         : code === "exec_probe_unavailable"
-          ? `${backend} sandbox session does not expose an exec readiness probe`
+          ? `${target} session does not expose an exec readiness probe`
           : exitCode === null
-            ? `${backend} sandbox exec readiness probe did not return a command exit code`
-            : `${backend} sandbox exec readiness probe failed with exit code ${exitCode}`,
+            ? `${target} exec readiness probe did not return a command exit code`
+            : `${target} exec readiness probe failed with exit code ${exitCode}`,
     );
   }
 }
@@ -1143,7 +1145,13 @@ export async function verifySandboxExecReadiness(
   };
   const run = session.exec ?? session.execCommand;
   if (!run) {
-    throw new SandboxExecReadinessError(established.backendId, "exec_probe_unavailable", timeoutMs);
+    throw new SandboxExecReadinessError(
+      established.backendId,
+      "exec_probe_unavailable",
+      timeoutMs,
+      null,
+      established.instanceId,
+    );
   }
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -1157,7 +1165,13 @@ export async function verifySandboxExecReadiness(
         timer = setTimeout(
           () =>
             reject(
-              new SandboxExecReadinessError(established.backendId, "exec_probe_timeout", timeoutMs),
+              new SandboxExecReadinessError(
+                established.backendId,
+                "exec_probe_timeout",
+                timeoutMs,
+                null,
+                established.instanceId,
+              ),
             ),
           timeoutMs,
         );
@@ -1171,6 +1185,7 @@ export async function verifySandboxExecReadiness(
         "exec_probe_failed",
         timeoutMs,
         exitCode,
+        established.instanceId,
       );
     }
   } finally {
