@@ -993,6 +993,113 @@ describe("browser auth and network resources", () => {
     expect((await listSiteAuthConnections(client.db, scope)).connections[0]).toMatchObject({
       verificationState: "verified",
       lastVerifiedUrl: "https://example.com/app/home",
+      lastCheckedAt: expect.any(String),
     });
+  });
+
+  test("projects only causally newest auth health evidence and schedules maintained repair", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const request = humanSiteAuth();
+    const auth = await createSiteAuthConnection(client.db, {
+      ...scope,
+      ...request,
+      healthPolicy: {
+        mode: "maintained",
+        intervalSeconds: 120,
+        automaticRepair: true,
+      },
+    });
+    expect(auth.connection).toMatchObject({
+      verificationState: "unknown",
+      lastCheckedAt: null,
+      nextCheckAt: expect.any(String),
+    });
+    const browser = await activeBrowser(scope);
+    const start = async (target: string, purpose: "authenticate" | "health_check" | "repair") =>
+      await startAuthRun(client.db, {
+        ...scope,
+        ...browser,
+        operationId: crypto.randomUUID(),
+        siteAuthConnectionId: auth.connection.id,
+        targetId: target,
+        expectedTargetGeneration: `${target}-generation`,
+        expectedDocumentGeneration: `${target}-document`,
+        purpose,
+      });
+
+    const older = await start("older", "health_check");
+    const newer = await start("newer", "repair");
+    await verifyAuthRun(client.db, {
+      ...scope,
+      authRunId: newer.run.id,
+      controllerGeneration: browser.controllerGeneration,
+      targetId: "newer",
+      targetGeneration: "newer-generation",
+      documentGeneration: "newer-document",
+      url: "https://example.com/app/verified",
+      operationId: crypto.randomUUID(),
+      expectedVersion: newer.run.version,
+    });
+    await reportAuthRun(client.db, {
+      ...scope,
+      authRunId: older.run.id,
+      controllerGeneration: browser.controllerGeneration,
+      operationId: crypto.randomUUID(),
+      expectedVersion: older.run.version,
+      state: "failed",
+      failureCode: "stale_check_failed",
+    });
+    let connection = (await listSiteAuthConnections(client.db, scope)).connections[0]!;
+    expect(connection).toMatchObject({
+      verificationState: "verified",
+      lastVerifiedUrl: "https://example.com/app/verified",
+      repairCode: null,
+    });
+
+    const failedCheck = await start("failed-check", "health_check");
+    const checkSettled = await reportAuthRun(client.db, {
+      ...scope,
+      authRunId: failedCheck.run.id,
+      controllerGeneration: browser.controllerGeneration,
+      operationId: crypto.randomUUID(),
+      expectedVersion: failedCheck.run.version,
+      state: "failed",
+      failureCode: "session_expired",
+    });
+    connection = (await listSiteAuthConnections(client.db, scope)).connections[0]!;
+    expect(connection).toMatchObject({
+      verificationState: "needs_repair",
+      repairCode: "session_expired",
+    });
+    expect(Date.parse(connection.nextCheckAt!)).toBe(Date.parse(checkSettled.run.settledAt!));
+
+    const failedRepair = await start("failed-repair", "repair");
+    const repairSettled = await reportAuthRun(client.db, {
+      ...scope,
+      authRunId: failedRepair.run.id,
+      controllerGeneration: browser.controllerGeneration,
+      operationId: crypto.randomUUID(),
+      expectedVersion: failedRepair.run.version,
+      state: "failed",
+      failureCode: "mfa_unavailable",
+    });
+    connection = (await listSiteAuthConnections(client.db, scope)).connections[0]!;
+    expect(connection).toMatchObject({
+      verificationState: "failed",
+      repairCode: "mfa_unavailable",
+    });
+    expect(Date.parse(connection.nextCheckAt!) - Date.parse(repairSettled.run.settledAt!)).toBe(
+      120_000,
+    );
+
+    const updated = await updateSiteAuthConnection(client.db, {
+      ...scope,
+      siteAuthConnectionId: connection.id,
+      operationId: crypto.randomUUID(),
+      expectedVersion: connection.version,
+      healthPolicy: { mode: "on_use", intervalSeconds: null, automaticRepair: true },
+    });
+    expect(updated.connection.nextCheckAt).toBeNull();
   });
 });

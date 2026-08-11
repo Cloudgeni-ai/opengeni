@@ -1689,6 +1689,8 @@ export class MockOpenGeniClient implements SessionClientLike {
       verificationState: "unknown",
       lastVerifiedAt: null,
       lastVerifiedUrl: null,
+      lastCheckedAt: null,
+      nextCheckAt: configuration.healthPolicy.mode === "maintained" ? now : null,
       repairCode: null,
       version: 1,
       createdBySubjectId: "user:demo",
@@ -1711,9 +1713,20 @@ export class MockOpenGeniClient implements SessionClientLike {
     const changes = Object.fromEntries(
       Object.entries(requestedChanges).filter(([, value]) => value !== undefined),
     ) as Partial<SiteAuthConnection>;
+    const status = changes.status ?? current.status;
+    const healthPolicy = changes.healthPolicy ?? current.healthPolicy;
+    const nextCheckAt =
+      status === "active" && healthPolicy.mode === "maintained"
+        ? current.lastCheckedAt && healthPolicy.intervalSeconds !== null
+          ? new Date(
+              Date.parse(current.lastCheckedAt) + healthPolicy.intervalSeconds * 1_000,
+            ).toISOString()
+          : new Date().toISOString()
+        : null;
     const connection: SiteAuthConnection = {
       ...current,
       ...changes,
+      nextCheckAt,
       version: current.version + 1,
       updatedAt: new Date().toISOString(),
     };
@@ -1760,6 +1773,7 @@ export class MockOpenGeniClient implements SessionClientLike {
       controllerGeneration: requireDemoBrowserController(session).controllerGeneration,
       targetGeneration: request.expectedTargetGeneration,
       documentGeneration: request.expectedDocumentGeneration,
+      purpose: request.purpose ?? "authenticate",
       methodId: request.methodId ?? null,
       authorityId: request.authorityId ?? null,
       state: "discovering",

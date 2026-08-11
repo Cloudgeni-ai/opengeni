@@ -862,6 +862,7 @@ describe("interaction contracts", () => {
       controllerGeneration: "controller-1",
       targetGeneration: "target-1",
       documentGeneration: "document-1",
+      purpose: "authenticate",
       methodId: null,
       authorityId: null,
       choices: [],

@@ -295,6 +295,8 @@ export type SiteAuthConnection = SiteAuthConnectionConfiguration & {
   verificationState: "unknown" | "verified" | "needs_repair" | "failed";
   lastVerifiedAt: string | null;
   lastVerifiedUrl: string | null;
+  lastCheckedAt: string | null;
+  nextCheckAt: string | null;
   repairCode: string | null;
   version: number;
   createdBySubjectId: string;
@@ -330,6 +332,7 @@ export type AuthRun = {
   controllerGeneration: string;
   targetGeneration: string;
   documentGeneration: string | null;
+  purpose: "authenticate" | "health_check" | "repair";
   methodId: string | null;
   authorityId: string | null;
   state:
@@ -367,6 +370,7 @@ export type StartAuthRunRequest = {
   targetId: string;
   expectedTargetGeneration: string;
   expectedDocumentGeneration: string | null;
+  purpose?: "authenticate" | "health_check" | "repair" | undefined;
   methodId?: string | undefined;
   authorityId?: string | undefined;
 };

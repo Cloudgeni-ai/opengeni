@@ -158,12 +158,27 @@ function siteAuthConnectionFromRow(row: SiteAuthConnectionRow): SiteAuthConnecti
     verificationState: row.verificationState,
     lastVerifiedAt: row.lastVerifiedAt ? iso(row.lastVerifiedAt) : null,
     lastVerifiedUrl: row.lastVerifiedUrl,
+    lastCheckedAt: row.lastCheckedAt ? iso(row.lastCheckedAt) : null,
+    nextCheckAt: row.nextCheckAt ? iso(row.nextCheckAt) : null,
     repairCode: row.repairCode,
     version: row.version,
     createdBySubjectId: row.createdBySubjectId,
     createdAt: iso(row.createdAt),
     updatedAt: iso(row.updatedAt),
   });
+}
+
+function nextMaintainedAuthCheck(
+  status: SiteAuthConnectionRow["status"],
+  policy: SiteAuthConnectionRow["healthPolicy"],
+  lastCheckedAt: Date | null,
+): Date | null {
+  if (status !== "active" || policy.mode !== "maintained" || policy.intervalSeconds === null) {
+    return null;
+  }
+  return lastCheckedAt
+    ? new Date(lastCheckedAt.getTime() + policy.intervalSeconds * 1_000)
+    : new Date();
 }
 
 async function lockOperation(db: Database, operationId: string): Promise<void> {
@@ -774,6 +789,7 @@ export async function createSiteAuthConnection(
           preferredPlacement: request.preferredPlacement,
           preferredNetworkRouteId: request.preferredNetworkRouteId,
           healthPolicy: request.healthPolicy,
+          nextCheckAt: nextMaintainedAuthCheck("active", request.healthPolicy, null),
           createOperationId: request.operationId,
           createdBySubjectId: input.actorSubjectId,
           updatedBySubjectId: input.actorSubjectId,
@@ -913,6 +929,11 @@ export async function updateSiteAuthConnection(
           preferredPlacement: candidate.preferredPlacement,
           preferredNetworkRouteId: candidate.preferredNetworkRouteId,
           healthPolicy: candidate.healthPolicy,
+          nextCheckAt: nextMaintainedAuthCheck(
+            candidate.status,
+            candidate.healthPolicy,
+            current.lastCheckedAt,
+          ),
           version: candidate.version,
           updatedBySubjectId: input.actorSubjectId,
           updatedAt: sql`now()`,
@@ -969,6 +990,7 @@ function authRunFromRow(row: AuthRunRow): AuthRunValue {
     controllerGeneration: row.controllerGeneration,
     targetGeneration: row.targetGeneration,
     documentGeneration: row.documentGeneration,
+    purpose: row.purpose,
     methodId: row.methodId,
     authorityId: row.authorityId,
     state: row.state,
@@ -985,6 +1007,71 @@ function authRunFromRow(row: AuthRunRow): AuthRunValue {
     updatedAt: iso(row.updatedAt),
     settledAt: row.settledAt ? iso(row.settledAt) : null,
   });
+}
+
+/**
+ * Project only terminal authentication evidence. `healthSequence` is allocated
+ * by PostgreSQL when a run starts, so an older browser may finish later without
+ * overwriting evidence from a newer run. A cancelled run carries no evidence.
+ */
+async function projectSettledAuthRunHealth(
+  db: Database,
+  input: { run: AuthRunRow; actorSubjectId: string },
+): Promise<boolean> {
+  const { run } = input;
+  if ((run.state !== "verified" && run.state !== "failed") || !run.settledAt) return false;
+  const [connection] = await db
+    .select()
+    .from(schema.siteAuthConnections)
+    .where(
+      and(
+        eq(schema.siteAuthConnections.workspaceId, run.workspaceId),
+        eq(schema.siteAuthConnections.id, run.siteAuthConnectionId),
+      ),
+    )
+    .for("update")
+    .limit(1);
+  if (!connection) throw new InteractionResourceNotFoundError("Site auth connection not found");
+  const checkedAt = run.settledAt;
+  const intervalSeconds = connection.healthPolicy.intervalSeconds;
+  const nextCheckAt =
+    connection.status === "active" &&
+    connection.healthPolicy.mode === "maintained" &&
+    intervalSeconds !== null
+      ? run.state === "failed" &&
+        run.purpose === "health_check" &&
+        connection.healthPolicy.automaticRepair
+        ? checkedAt
+        : new Date(checkedAt.getTime() + intervalSeconds * 1_000)
+      : null;
+  const failureState = run.purpose === "repair" ? "failed" : "needs_repair";
+  const [projected] = await db
+    .update(schema.siteAuthConnections)
+    .set({
+      verificationState: run.state === "verified" ? "verified" : failureState,
+      ...(run.state === "verified"
+        ? {
+            lastVerifiedAt: checkedAt,
+            lastVerifiedUrl: run.verifiedUrl,
+            repairCode: null,
+          }
+        : { repairCode: run.failureCode }),
+      lastCheckedAt: checkedAt,
+      nextCheckAt,
+      healthSequence: run.healthSequence,
+      version: sql`${schema.siteAuthConnections.version} + 1`,
+      updatedBySubjectId: input.actorSubjectId,
+      updatedAt: checkedAt,
+    })
+    .where(
+      and(
+        eq(schema.siteAuthConnections.workspaceId, run.workspaceId),
+        eq(schema.siteAuthConnections.id, run.siteAuthConnectionId),
+        sql`${schema.siteAuthConnections.healthSequence} < ${run.healthSequence}`,
+      ),
+    )
+    .returning({ id: schema.siteAuthConnections.id });
+  return Boolean(projected);
 }
 
 async function loadAuthRunRow(
@@ -1320,6 +1407,7 @@ export async function startAuthRun(
     targetId: input.targetId,
     expectedTargetGeneration: input.expectedTargetGeneration,
     expectedDocumentGeneration: input.expectedDocumentGeneration,
+    ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
     ...(input.methodId !== undefined ? { methodId: input.methodId } : {}),
     ...(input.authorityId !== undefined ? { authorityId: input.authorityId } : {}),
   });
@@ -1391,6 +1479,7 @@ export async function startAuthRun(
           controllerGeneration: browser.controllerGeneration,
           targetGeneration: request.expectedTargetGeneration,
           documentGeneration: request.expectedDocumentGeneration,
+          purpose: request.purpose ?? "authenticate",
           methodId: request.methodId ?? null,
           authorityId: request.authorityId ?? null,
           operationId: request.operationId,
@@ -1526,6 +1615,10 @@ export async function reportAuthRun(
       )
       .returning();
     if (!row) throw new InteractionResourceConflictError("Auth run report lost its fence");
+    await projectSettledAuthRunHealth(scopedDb, {
+      run: row,
+      actorSubjectId: input.actorSubjectId,
+    });
     const response = AuthRunMutationResponse.parse({
       run: authRunFromRow(row),
       operationId: request.operationId,
@@ -1900,6 +1993,10 @@ export async function completeProtectedAuthFill(
       if (!updated) {
         throw new InteractionResourceConflictError("Protected-fill settlement lost its auth fence");
       }
+      await projectSettledAuthRunHealth(scopedDb, {
+        run: updated,
+        actorSubjectId: input.actorSubjectId,
+      });
       const response = ProtectedAuthFillResponse.parse({
         run: authRunFromRow(updated),
         status: input.status,
@@ -1998,7 +2095,7 @@ export async function markProtectedAuthFillOutcomeUnknown(
       );
     }
     const metadata = protectedAuthOperationMetadata(operation.metadata);
-    await scopedDb
+    const [failedRun] = await scopedDb
       .update(schema.authRuns)
       .set({
         state: "failed",
@@ -2018,7 +2115,14 @@ export async function markProtectedAuthFillOutcomeUnknown(
           eq(schema.authRuns.version, metadata.authRunVersion),
           sql`${schema.authRuns.settledAt} is null`,
         ),
-      );
+      )
+      .returning();
+    if (failedRun) {
+      await projectSettledAuthRunHealth(scopedDb, {
+        run: failedRun,
+        actorSubjectId: input.actorSubjectId,
+      });
+    }
     await advanceWorkspaceInteractionRevision(scopedDb, input.accountId, input.workspaceId);
   });
 }
@@ -2144,23 +2248,10 @@ export async function verifyAuthRun(
         if (!updated)
           throw new InteractionResourceConflictError("Auth verification lost its fence");
         resultRun = updated;
-        await scopedDb
-          .update(schema.siteAuthConnections)
-          .set({
-            verificationState: "verified",
-            lastVerifiedAt: sql`now()`,
-            lastVerifiedUrl: input.url,
-            repairCode: null,
-            version: sql`${schema.siteAuthConnections.version} + 1`,
-            updatedBySubjectId: input.actorSubjectId,
-            updatedAt: sql`now()`,
-          })
-          .where(
-            and(
-              eq(schema.siteAuthConnections.workspaceId, input.workspaceId),
-              eq(schema.siteAuthConnections.id, run.siteAuthConnectionId),
-            ),
-          );
+        await projectSettledAuthRunHealth(scopedDb, {
+          run: updated,
+          actorSubjectId: input.actorSubjectId,
+        });
       }
     }
     const response = AuthRunMutationResponse.parse({
@@ -2358,12 +2449,16 @@ async function settleLinkedAuthRun(
         eq(schema.authRuns.interventionId, input.interventionId),
       ),
     )
-    .returning({ id: schema.authRuns.id });
+    .returning();
   if (!settled) {
     throw new InteractionResourceConflictError(
       "Linked auth run changed before intervention settlement",
     );
   }
+  await projectSettledAuthRunHealth(db, {
+    run: settled,
+    actorSubjectId: run.createdBySubjectId,
+  });
 }
 
 async function expireInterventionsInScope(

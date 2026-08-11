@@ -1064,6 +1064,9 @@ export const siteAuthConnections = pgTable(
       .default("unknown"),
     lastVerifiedAt: timestamp("last_verified_at", { withTimezone: true }),
     lastVerifiedUrl: text("last_verified_url"),
+    lastCheckedAt: timestamp("last_checked_at", { withTimezone: true }),
+    nextCheckAt: timestamp("next_check_at", { withTimezone: true }),
+    healthSequence: bigint("health_sequence", { mode: "number" }).notNull().default(0),
     repairCode: text("repair_code"),
     version: bigint("version", { mode: "number" }).notNull().default(1),
     createOperationId: uuid("create_operation_id").notNull(),
@@ -1088,6 +1091,11 @@ export const siteAuthConnections = pgTable(
       table.workspaceId,
       table.status,
       table.updatedAt,
+      table.id,
+    ),
+    maintenance: index("site_auth_connections_health_maintenance_idx").on(
+      table.workspaceId,
+      table.nextCheckAt,
       table.id,
     ),
     valuesValid: check(
@@ -1134,6 +1142,27 @@ export const siteAuthConnections = pgTable(
           and ${table.repairCode} is not null
         )`,
     ),
+    healthValid: check(
+      "site_auth_connections_health_check",
+      sql`(
+          (
+            ${table.healthSequence} = 0
+            and ${table.lastCheckedAt} is null
+          ) or (
+            ${table.healthSequence} > 0
+            and ${table.lastCheckedAt} is not null
+          )
+        ) and (
+          (
+            ${table.status} = 'active'
+            and ${table.healthPolicy}->>'mode' = 'maintained'
+            and ${table.nextCheckAt} is not null
+          ) or (
+            not (${table.status} = 'active' and ${table.healthPolicy}->>'mode' = 'maintained')
+            and ${table.nextCheckAt} is null
+          )
+        )`,
+    ),
   }),
 );
 
@@ -1149,6 +1178,12 @@ export const authRuns = pgTable(
     controllerGeneration: text("controller_generation").notNull(),
     targetGeneration: text("target_generation").notNull(),
     documentGeneration: text("document_generation"),
+    purpose: text("purpose", { enum: ["authenticate", "health_check", "repair"] })
+      .notNull()
+      .default("authenticate"),
+    healthSequence: bigint("health_sequence", { mode: "number" })
+      .notNull()
+      .default(sql`nextval('auth_runs_health_sequence_seq'::regclass)`),
     methodId: text("method_id"),
     authorityId: text("authority_id"),
     state: text("state", {
@@ -1217,6 +1252,11 @@ export const authRuns = pgTable(
         and (${table.failureCode} is null or octet_length(${table.failureCode}) between 1 and 512)
         and ${table.version} > 0
         and octet_length(${table.createdBySubjectId}) between 1 and 1024`,
+    ),
+    healthEvidenceValid: check(
+      "auth_runs_health_evidence_check",
+      sql`${table.purpose} in ('authenticate', 'health_check', 'repair')
+        and ${table.healthSequence} > 0`,
     ),
     lifecycleValid: check(
       "auth_runs_lifecycle_check",
