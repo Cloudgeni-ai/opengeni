@@ -75,6 +75,7 @@ export function gallerySession(overrides: Partial<Session> = {}): Session {
     environmentId: null,
     rigId: null,
     rigVersionId: null,
+    channelId: null,
     firstPartyMcpPermissions: null,
     firstPartyMcpTools: [...FIRST_PARTY_MCP_TOOL_NAMES],
     mcpServers: [],

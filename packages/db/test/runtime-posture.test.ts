@@ -142,28 +142,30 @@ describe("runtime database posture evaluator", () => {
         )
         .map(([table]) => table)
         .sort();
+      const hasSessionChannels = new Set<string>(FORCE_RLS_TABLES).has("channels");
+      const channelsDelta = hasSessionChannels ? 1 : 0;
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 215],
+            [FORCE_RLS_TABLES, 215 + channelsDelta],
             [NON_RLS_RUNTIME_TABLES, 11],
-            [RUNTIME_FULL_DML_TABLES, 130],
+            [RUNTIME_FULL_DML_TABLES, 130 + channelsDelta],
             [RUNTIME_READ_ONLY_TABLES, 14],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 41],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 29],
             [PROTECTED_NO_DIRECT_DML_TABLES, 11],
-            [RUNTIME_DML_TABLES, 215],
+            [RUNTIME_DML_TABLES, 215 + channelsDelta],
           ] as const)
         : ([
-            [FORCE_RLS_TABLES, 168],
+            [FORCE_RLS_TABLES, 168 + channelsDelta],
             [NON_RLS_RUNTIME_TABLES, 11],
-            [RUNTIME_FULL_DML_TABLES, 106],
+            [RUNTIME_FULL_DML_TABLES, 106 + channelsDelta],
             [RUNTIME_READ_ONLY_TABLES, 13],
             [readUpdateTables, 0],
             [RUNTIME_READ_INSERT_TABLES, 37],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 12],
             [PROTECTED_NO_DIRECT_DML_TABLES, 11],
-            [RUNTIME_DML_TABLES, 168],
+            [RUNTIME_DML_TABLES, 168 + channelsDelta],
           ] as const);
       for (const [tables, length] of contracts) {
         expect(tables).toHaveLength(length);
@@ -172,7 +174,7 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 226 : 179;
+      const tableCount = (hasCurrentMainActivityLedger ? 226 : 179) + channelsDelta;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount,
       );

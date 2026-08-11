@@ -77,6 +77,10 @@ import type {
   PublishBrowserRevisionResponse,
   ReportAuthRunRequest,
   ResolveInteractionInterventionRequest,
+  Channel,
+  CreateChannelRequest,
+  UpdateChannelRequest,
+  UpdateSessionChannelRequest,
   Rig,
   RigVersion,
   RigChange,
@@ -1038,6 +1042,55 @@ export class MockOpenGeniClient implements SessionClientLike {
     name: string,
   ): Promise<void> {
     await this.deleteEnvironmentVariable(workspaceId, variableSetId, name);
+  }
+
+  // Channels — minimal in-memory demo store.
+  private channels: Channel[] = [];
+
+  async listChannels(): Promise<Channel[]> {
+    return [...this.channels];
+  }
+
+  async createChannel(_workspaceId: string, request: CreateChannelRequest): Promise<Channel> {
+    const now = new Date().toISOString();
+    const channel: Channel = {
+      id: `channel-${this.channels.length + 1}`,
+      accountId: ACCOUNT_ID,
+      workspaceId: WORKSPACE_ID,
+      name: request.name,
+      description: request.description ?? null,
+      createdBy: "user:demo",
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.channels.push(channel);
+    return channel;
+  }
+
+  async updateChannel(
+    _workspaceId: string,
+    channelId: string,
+    request: UpdateChannelRequest,
+  ): Promise<Channel> {
+    const channel = this.channels.find((row) => row.id === channelId);
+    if (!channel) throw new Error(`unknown channel: ${channelId}`);
+    if (request.name !== undefined) channel.name = request.name;
+    if (request.description !== undefined) channel.description = request.description;
+    channel.updatedAt = new Date().toISOString();
+    return { ...channel };
+  }
+
+  async deleteChannel(_workspaceId: string, channelId: string): Promise<void> {
+    this.channels = this.channels.filter((row) => row.id !== channelId);
+  }
+
+  async updateSessionChannel(
+    workspaceId: string,
+    sessionId: string,
+    request: UpdateSessionChannelRequest,
+  ): Promise<Session> {
+    const session = await this.getSession(workspaceId, sessionId);
+    return { ...session, channelId: request.channelId };
   }
 
   // Rigs — minimal in-memory demo store (real UI lands in M5).
@@ -3050,6 +3103,7 @@ export class MockOpenGeniClient implements SessionClientLike {
       environmentId: null,
       rigId: null,
       rigVersionId: null,
+      channelId: null,
       firstPartyMcpPermissions: null,
       firstPartyMcpTools: [],
       mcpServers: [],

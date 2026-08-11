@@ -102,6 +102,7 @@ import type {
   VariableSetVariableMetadata,
   WorkspaceMember,
   WorkspaceRegisteredPack,
+  Channel,
   Rig,
   RigProviderImage,
   RigProviderImages,
@@ -13619,6 +13620,204 @@ export async function deleteRigIfNoActiveSessions(
   });
 }
 
+// --- Channels ---------------------------------------------------------------
+// Workspace-shared rail organization for root sessions. Pure metadata: filing
+// a session into a channel never affects execution, authority, or history.
+
+export class ChannelNameConflictError extends Error {
+  constructor(name: string) {
+    super(`channel name is already in use: ${name}`);
+    this.name = "ChannelNameConflictError";
+  }
+}
+
+export class ChannelNotFoundError extends Error {
+  constructor(channelId: string) {
+    super(`unknown channelId: ${channelId}`);
+    this.name = "ChannelNotFoundError";
+  }
+}
+
+function isChannelNameUniqueViolation(error: unknown): boolean {
+  const candidate = error as {
+    code?: unknown;
+    constraint?: unknown;
+    constraint_name?: unknown;
+    message?: unknown;
+    cause?: unknown;
+  } | null;
+  if (!candidate || typeof candidate !== "object") {
+    return false;
+  }
+  const constraint = String(candidate.constraint ?? candidate.constraint_name ?? "");
+  if (candidate.code === "23505" && constraint === "channels_workspace_name_idx") {
+    return true;
+  }
+  const message = typeof candidate.message === "string" ? candidate.message : "";
+  if (message.includes("channels_workspace_name_idx")) {
+    return true;
+  }
+  return isChannelNameUniqueViolation(candidate.cause);
+}
+
+function mapChannel(row: typeof schema.channels.$inferSelect): Channel {
+  return {
+    id: row.id,
+    accountId: row.accountId,
+    workspaceId: row.workspaceId,
+    name: row.name,
+    description: row.description ?? null,
+    createdBy: row.createdBy ?? null,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+export async function createChannel(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    name: string;
+    description?: string | null;
+    createdBy?: string | null;
+  },
+): Promise<Channel> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      try {
+        const [row] = await scopedDb
+          .insert(schema.channels)
+          .values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            name: input.name,
+            description: input.description ?? null,
+            createdBy: input.createdBy ?? null,
+          })
+          .returning();
+        if (!row) {
+          throw new Error("Failed to create channel");
+        }
+        return mapChannel(row);
+      } catch (error) {
+        if (isChannelNameUniqueViolation(error)) {
+          throw new ChannelNameConflictError(input.name);
+        }
+        throw error;
+      }
+    },
+  );
+}
+
+export async function listChannels(db: Database, workspaceId: string): Promise<Channel[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select()
+      .from(schema.channels)
+      .where(eq(schema.channels.workspaceId, workspaceId))
+      .orderBy(asc(schema.channels.name), asc(schema.channels.id));
+    return rows.map(mapChannel);
+  });
+}
+
+export async function getChannel(
+  db: Database,
+  workspaceId: string,
+  channelId: string,
+): Promise<Channel | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.channels)
+      .where(and(eq(schema.channels.workspaceId, workspaceId), eq(schema.channels.id, channelId)))
+      .limit(1);
+    return row ? mapChannel(row) : null;
+  });
+}
+
+export async function updateChannel(
+  db: Database,
+  workspaceId: string,
+  channelId: string,
+  input: { name?: string | undefined; description?: string | null | undefined },
+): Promise<Channel | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    try {
+      const [row] = await scopedDb
+        .update(schema.channels)
+        .set({
+          ...(input.name !== undefined ? { name: input.name } : {}),
+          ...(input.description !== undefined ? { description: input.description } : {}),
+          updatedAt: new Date(),
+        })
+        .where(and(eq(schema.channels.workspaceId, workspaceId), eq(schema.channels.id, channelId)))
+        .returning();
+      return row ? mapChannel(row) : null;
+    } catch (error) {
+      if (isChannelNameUniqueViolation(error)) {
+        throw new ChannelNameConflictError(input.name ?? "");
+      }
+      throw error;
+    }
+  });
+}
+
+export async function deleteChannel(
+  db: Database,
+  workspaceId: string,
+  channelId: string,
+): Promise<boolean> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .delete(schema.channels)
+      .where(and(eq(schema.channels.workspaceId, workspaceId), eq(schema.channels.id, channelId)))
+      .returning({ id: schema.channels.id });
+    return rows.length > 0;
+  });
+}
+
+// Re-files one session (rail organization only). Resolves the target channel
+// workspace-scoped so a foreign channel id can never be attached; null moves
+// the session back to the unfiled inbox. Deliberately does not bump
+// updatedAt: filing is organization, not activity, and must not reorder the
+// rail's recency buckets.
+export async function setSessionChannel(
+  db: Database,
+  input: { workspaceId: string; sessionId: string; channelId: string | null },
+): Promise<boolean> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    if (input.channelId !== null) {
+      const [channel] = await scopedDb
+        .select({ id: schema.channels.id })
+        .from(schema.channels)
+        .where(
+          and(
+            eq(schema.channels.workspaceId, input.workspaceId),
+            eq(schema.channels.id, input.channelId),
+          ),
+        )
+        .limit(1);
+      if (!channel) {
+        throw new ChannelNotFoundError(input.channelId);
+      }
+    }
+    const rows = await scopedDb
+      .update(schema.sessions)
+      .set({ channelId: input.channelId })
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          eq(schema.sessions.id, input.sessionId),
+        ),
+      )
+      .returning({ id: schema.sessions.id });
+    return rows.length > 0;
+  });
+}
+
 export async function countRigs(db: Database, workspaceId: string): Promise<number> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [{ count } = { count: 0 }] = await scopedDb
@@ -20740,6 +20939,7 @@ export type SessionCreateInput = {
   variableSetId?: string | null;
   rigId?: string | null;
   rigVersionId?: string | null;
+  channelId?: string | null;
   firstPartyMcpPermissions?: Permission[] | null;
   firstPartyMcpTools?: FirstPartyMcpToolName[];
   instructions?: string | null;
@@ -21175,6 +21375,7 @@ async function createSessionInTransaction(
           variableSetId: input.variableSetId ?? null,
           rigId: input.rigId ?? null,
           rigVersionId: input.rigVersionId ?? null,
+          channelId: input.channelId ?? null,
           firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
           firstPartyMcpTools: input.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
           initialPersonalConnectionDelegations: input.personalConnectionDelegations ?? [],
@@ -51790,6 +51991,7 @@ function mapSession(
     // rig-less session; frozen at create so a later promote never moves them.
     rigId: row.rigId ?? null,
     rigVersionId: row.rigVersionId ?? null,
+    channelId: row.channelId ?? null,
     firstPartyMcpPermissions: (row.firstPartyMcpPermissions as Permission[] | null) ?? null,
     firstPartyMcpTools: row.firstPartyMcpTools as FirstPartyMcpToolName[],
     mcpServers,
