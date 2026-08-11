@@ -141,6 +141,7 @@ describe("Slack OAuth browser acceptance", () => {
       expect(state.personalOAuthRequests[0]).toEqual({
         providerDomain: "slack.com",
         mcpUrl: "https://mcp.slack.com/mcp",
+        ownership: "personal",
         returnPath: `/workspaces/${workspaceId}/capabilities?connect_item=${encodeURIComponent(personalSlackCapabilityId)}`,
       });
       expect(JSON.stringify(state.personalOAuthRequests[0]).toLowerCase()).not.toContain(
@@ -227,7 +228,7 @@ describe("Slack OAuth browser acceptance", () => {
       await page
         .getByText("Workspace bot permissions and installation details", { exact: true })
         .click();
-      const reinstall = page.getByRole("button", { name: "Reinstall" });
+      const reinstall = page.getByRole("button", { name: "Reinstall", exact: true });
       await expectVisible(reinstall);
       await Promise.all([page.waitForURL("https://slack.com/**"), reinstall.click()]);
       expect(state.installRequests[1]).toEqual({ connectionId: botConnectionId });
@@ -312,6 +313,7 @@ async function installSlackCapabilityApi(page: Page, state: SlackUiState): Promi
       });
     }
     if (url.pathname === "/v1/workspaces") return json([workspace()]);
+    if (url.pathname === `/v1/workspaces/${workspaceId}`) return json(workspace());
     if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities`) {
       return json({ items: [personalSlackCapability(state.personalEnabled)], installations: [] });
     }
@@ -377,7 +379,16 @@ async function installSlackCapabilityApi(page: Page, state: SlackUiState): Promi
     if (url.pathname === `/v1/workspaces/${workspaceId}/packs`) {
       return json({ packs: [], installations: [] });
     }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/plugins`) return json({ plugins: [] });
+    if (url.pathname === `/v1/workspaces/${workspaceId}/integrations/presets`) {
+      return json({ presets: [] });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/integrations`) {
+      return json({ integrations: [] });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/social/connections`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/variable-sets`) return json([]);
+    if (url.pathname === `/v1/workspaces/${workspaceId}/rigs`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/github/app`) {
       return json({ configured: false, missing: [], installUrl: null });
     }
@@ -545,12 +556,16 @@ async function expectHidden(locator: import("playwright").Locator): Promise<void
 
 async function expectText(locator: import("playwright").Locator, expected: string): Promise<void> {
   await locator.waitFor({ state: "visible", timeout: 15_000 });
+  await waitForCondition(async () => ((await locator.textContent()) ?? "").includes(expected));
   expect((await locator.textContent()) ?? "").toContain(expected);
 }
 
-async function waitForCondition(check: () => boolean, timeoutMs = 15_000): Promise<void> {
+async function waitForCondition(
+  check: () => boolean | Promise<boolean>,
+  timeoutMs = 15_000,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
-  while (!check()) {
+  while (!(await check())) {
     if (Date.now() >= deadline) throw new Error("timed out waiting for browser fixture state");
     await Bun.sleep(25);
   }

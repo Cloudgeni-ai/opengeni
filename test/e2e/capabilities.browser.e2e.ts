@@ -220,6 +220,110 @@ describe("capabilities browser e2e", () => {
     }
   }, 60_000);
 
+  test("responsive theme matrix stays bounded from 320px through 1440px", async () => {
+    const viewports = [
+      { name: "320", width: 320, height: 700, mobile: true },
+      { name: "375", width: 375, height: 812, mobile: true },
+      { name: "768", width: 768, height: 900, mobile: false },
+      { name: "1280", width: 1280, height: 900, mobile: false },
+      { name: "1440", width: 1440, height: 900, mobile: false },
+    ] as const;
+
+    for (const viewport of viewports) {
+      const state: CapabilityState = { enabled: false, failNextEnable: false, enableCalls: 0 };
+      const context = await browser.newContext({
+        viewport: { width: viewport.width, height: viewport.height },
+        hasTouch: viewport.mobile,
+        isMobile: viewport.mobile,
+      });
+      const page = await context.newPage();
+      try {
+        await installCapabilityApi(page, state);
+        await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
+          waitUntil: "networkidle",
+        });
+
+        for (const theme of ["light", "dark"] as const) {
+          await setTheme(page, theme);
+          await expectVisible(page.getByLabel("Search capabilities"));
+          expect(await page.getByLabel("Search capabilities").count()).toBe(1);
+          await assertAccessibleAndBounded(page, '[role="region"][aria-label="Capabilities"]');
+          await page.screenshot({
+            path: `${evidenceDir}responsive-${viewport.name}-${theme}.png`,
+            fullPage: true,
+          });
+        }
+      } finally {
+        await context.close();
+      }
+    }
+  }, 150_000);
+
+  test("forced-colors and reduced-motion preserve the complete control surface", async () => {
+    const state: CapabilityState = { enabled: false, failNextEnable: false, enableCalls: 0 };
+    const context = await browser.newContext({
+      viewport: { width: 768, height: 900 },
+      forcedColors: "active",
+      reducedMotion: "reduce",
+    });
+    const page = await context.newPage();
+    try {
+      await installCapabilityApi(page, state);
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
+        waitUntil: "networkidle",
+      });
+      expect(await page.evaluate(() => matchMedia("(forced-colors: active)").matches)).toBe(true);
+      expect(
+        await page.evaluate(() => matchMedia("(prefers-reduced-motion: reduce)").matches),
+      ).toBe(true);
+      const tile = page.locator(`[data-capability-catalog-tile="${capabilityId}"]`);
+      await expectVisible(tile);
+      const transitionMs = await tile.evaluate((element) => {
+        const value = getComputedStyle(element).transitionDuration.split(",")[0]?.trim() ?? "0s";
+        return value.endsWith("ms") ? Number.parseFloat(value) : Number.parseFloat(value) * 1_000;
+      });
+      expect(transitionMs).toBeLessThanOrEqual(0.01);
+      await assertBounded(page);
+      await page.screenshot({
+        path: `${evidenceDir}forced-colors-reduced-motion-768.png`,
+        fullPage: true,
+      });
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
+  test("a delayed five-thousand-item catalog renders one bounded window and filters responsively", async () => {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    const page = await context.newPage();
+    try {
+      await installLargeCatalogApi(page, 1_500);
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
+        waitUntil: "domcontentloaded",
+      });
+      await expectVisible(page.locator("[data-capability-catalog-skeleton]"));
+
+      const tiles = page.locator("[data-capability-catalog-tile]");
+      await expectVisible(tiles.first());
+      const initialCount = await tiles.count();
+      expect(initialCount).toBeGreaterThan(0);
+      expect(initialCount).toBeLessThanOrEqual(48);
+
+      const startedAt = performance.now();
+      await page.getByLabel("Search capabilities").fill("Capability 4999");
+      await expectVisible(page.locator('[data-capability-catalog-tile="mcp:large-4999"]'));
+      expect(performance.now() - startedAt).toBeLessThan(1_000);
+      expect(await tiles.count()).toBe(1);
+      await assertAccessibleAndBounded(page, '[role="region"][aria-label="Capabilities"]');
+      await page.screenshot({
+        path: `${evidenceDir}large-catalog-filtered-1280.png`,
+        fullPage: true,
+      });
+    } finally {
+      await context.close();
+    }
+  }, 90_000);
+
   test("Google Drive folders configure only the exact named Integration instance", async () => {
     const state: DriveUiState = {
       driveSaves: 0,
@@ -432,6 +536,10 @@ async function openMobbinSheet(page: Page, enabled: boolean): Promise<void> {
 async function assertAccessibleAndBounded(page: Page, selector: string): Promise<void> {
   const axe = await new AxeBuilder({ page }).include(selector).analyze();
   expect(axe.violations).toEqual([]);
+  await assertBounded(page);
+}
+
+async function assertBounded(page: Page): Promise<void> {
   expect(
     await page.evaluate(
       () =>
@@ -608,6 +716,7 @@ async function installCapabilityApi(
     if (url.pathname === `/v1/workspaces/${workspaceId}/variable-sets`) {
       return json([]);
     }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/rigs`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/github/app`) {
       return json({ configured: false, missing: [], installUrl: null });
     }
@@ -652,6 +761,104 @@ async function installCapabilityApi(
         enabledAt: new Date(0).toISOString(),
         updatedAt: new Date(0).toISOString(),
       });
+    }
+    return json({});
+  });
+}
+
+async function installLargeCatalogApi(page: Page, catalogDelayMs: number): Promise<void> {
+  const catalog = Array.from({ length: 5_000 }, (_, index) => ({
+    ...capability(false),
+    id: `mcp:large-${index}`,
+    kind: "mcp",
+    source: "public_registry",
+    name: `Capability ${index}`,
+    description: `Large catalog performance fixture ${index}.`,
+    category: "integrations",
+    tags: ["large-catalog", `row-${index}`],
+    surfaceType: "mcp",
+  }));
+
+  await page.route("http://127.0.0.1:9/**", async (route) => {
+    const url = new URL(route.request().url());
+    const headers = { "x-opengeni-api-contract": apiContractRevision };
+    const json = (body: unknown, status = 200) =>
+      route.fulfill({
+        status,
+        headers,
+        contentType: "application/json",
+        body: JSON.stringify(body),
+      });
+
+    if (url.pathname === "/v1/config/client") {
+      return json({
+        deploymentRevision: "large-catalog-browser-test",
+        apiContractRevision,
+        defaultModel: "gpt-5.6-sol",
+        allowedModels: ["gpt-5.6-sol"],
+        models: [],
+        defaultReasoningEffort: "low",
+        allowedReasoningEfforts: ["low"],
+        mcpServers: [],
+        fileUploads: { enabled: false, maxSizeBytes: 1_048_576 },
+        productAccessMode: "configured",
+        auth: { mode: "none" },
+        structuredServices: { fileSystem: false, git: false, terminalEvents: false },
+      });
+    }
+    if (url.pathname === "/v1/access/me") {
+      return json({
+        mode: "configured",
+        subjectId: "large-catalog-subject",
+        subjectLabel: "Large catalog test",
+        accountGrants: [
+          {
+            accountId,
+            subjectId: "large-catalog-subject",
+            role: "owner",
+            permissions: ["account:admin", "workspace:admin", "capabilities:read"],
+          },
+        ],
+        workspaceGrants: [
+          {
+            workspaceId,
+            accountId,
+            subjectId: "large-catalog-subject",
+            permissions: ["workspace:admin", "capabilities:read", "connections:read"],
+          },
+        ],
+        defaultAccountId: accountId,
+        defaultWorkspaceId: workspaceId,
+      });
+    }
+    if (url.pathname === "/v1/workspaces") return json([workspace()]);
+    if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities`) {
+      await new Promise((resolve) => setTimeout(resolve, catalogDelayMs));
+      return json({ items: catalog, installations: [] });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/connections`) {
+      return json({ connections: [] });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/social/connections`) return json([]);
+    if (url.pathname === `/v1/workspaces/${workspaceId}/integrations/presets`) {
+      return json({ presets: [] });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/integrations`) {
+      return json({ integrations: [] });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/plugins`) {
+      return json({ plugins: [] });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/packs`) {
+      return json({ packs: [], installations: [] });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/variable-sets`) return json([]);
+    if (url.pathname === `/v1/workspaces/${workspaceId}/rigs`) return json([]);
+    if (url.pathname === `/v1/workspaces/${workspaceId}/github/app`) {
+      return json({ configured: false, missing: [], installUrl: null });
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/sessions`) {
+      return json({ sessions: [], pinned: [], pinnedTruncated: false, nextCursor: null });
     }
     return json({});
   });

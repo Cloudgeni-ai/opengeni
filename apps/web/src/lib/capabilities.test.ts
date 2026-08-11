@@ -153,6 +153,25 @@ describe("filterCapabilityCatalogItems", () => {
     );
     expect(filterCapabilityCatalogItems(items, "api", "summar")).toHaveLength(0);
   });
+
+  test("keeps interactive filtering bounded across five thousand catalog rows", () => {
+    const largeCatalog = Array.from({ length: 5_000 }, (_, index) =>
+      item({
+        id: `cap-${index}`,
+        kind: index % 2 === 0 ? "mcp" : "api",
+        name: index === 4_321 ? "Needle Analytics" : `Capability ${index}`,
+        description: `Bounded catalog fixture ${index}`,
+        tags: index === 4_321 ? ["needle", "analytics"] : ["catalog"],
+      }),
+    );
+
+    const startedAt = performance.now();
+    const results = filterCapabilityCatalogItems(largeCatalog, "all", "needle analytics");
+    const durationMs = performance.now() - startedAt;
+
+    expect(results.map((entry) => entry.id)).toEqual(["cap-4321"]);
+    expect(durationMs).toBeLessThan(1_000);
+  });
 });
 
 describe("human labels", () => {

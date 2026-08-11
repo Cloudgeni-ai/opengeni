@@ -477,7 +477,7 @@ export function SocialConnectorControls({
                     ? "bg-status-idle"
                     : connection.status === "needs_reauth"
                       ? "bg-status-waiting"
-                      : "bg-fg-subtle/40",
+                      : "bg-status-cancelled",
                 )}
                 aria-hidden
               />

@@ -151,7 +151,7 @@ export function IntegrationControlCenterView({
 
   return (
     <section
-      className="relative mt-6 overflow-hidden rounded-2xl border border-border bg-surface shadow-sm"
+      className="relative mt-6 overflow-hidden rounded-xl border border-border bg-surface shadow-sm"
       aria-labelledby="integration-control-center-heading"
     >
       <div className="relative flex flex-col gap-4 border-b border-border/80 bg-brand/5 p-5 sm:flex-row sm:items-start sm:justify-between sm:p-6">
@@ -194,11 +194,11 @@ export function IntegrationControlCenterView({
         {loading && presets.length === 0 ? (
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
             {Array.from({ length: 6 }, (_, index) => (
-              <Skeleton key={index} className="h-48 rounded-xl" />
+              <Skeleton key={index} className="h-40 rounded-xl" />
             ))}
           </div>
         ) : loadError ? (
-          <div className="flex flex-col items-start gap-3 rounded-xl border border-danger bg-surface p-4">
+          <div className="flex flex-col items-start gap-3 rounded-xl border border-status-failed/40 bg-surface p-4">
             <div className="flex items-center gap-2 text-sm font-medium text-fg">
               <AlertTriangleIcon className="size-4 text-danger" />
               Services couldn't be loaded

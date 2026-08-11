@@ -53,7 +53,7 @@ export function PersonalSlackAccountCard({
               <h3 id="personal-slack-heading" className="text-sm font-semibold text-fg">
                 Your Slack account
               </h3>
-              <span className="rounded-full border border-brand/20 bg-brand/10 px-2 py-0.5 text-2xs font-medium text-brand">
+              <span className="rounded-full border border-brand/20 bg-brand/10 px-2 py-0.5 text-2xs font-medium text-fg">
                 Personal · only you
               </span>
             </div>

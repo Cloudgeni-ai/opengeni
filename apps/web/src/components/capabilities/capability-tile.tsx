@@ -23,6 +23,7 @@ export const CapabilityTile = memo(function CapabilityTile({
     <button
       type="button"
       onClick={onOpen}
+      data-capability-catalog-tile={item.id}
       className={cn(
         "group flex h-full flex-col gap-3 rounded-xl border border-border bg-surface/50 p-4 text-left",
         "transition-all hover:-translate-y-px hover:border-border-strong hover:bg-surface hover:shadow-md",

@@ -228,6 +228,18 @@ rolling migration. The public capability kind remains the compatible `api`
 contract value while item metadata and the web label identify the surface as an
 Integration.
 
+The web route keeps orchestration separate from catalog presentation.
+`capability-catalog-sections.tsx` owns the typed discovery controls, Enabled
+section, Browse states, registry fallback, and incremental window sentinel;
+provider, source-package, Pack, and connection workflows remain in their owning
+components/hooks. Browse renders at most 48 catalog tiles initially and advances
+in bounded windows near the scroll edge. Logos stay lazy, integration/source
+control centers are code-split, and filtering/searching remains client-local and
+deterministic after the single catalog projection arrives. Browser acceptance
+exercises a delayed 5,000-row response, proves the initial window bound, and
+checks responsive filtering alongside 320/375/768/1280/1440 light/dark,
+forced-colors, reduced-motion, keyboard, coarse-pointer, and Axe states.
+
 ### Plugin packages
 
 A Plugin is a bounded JSON manifest that groups existing safe component

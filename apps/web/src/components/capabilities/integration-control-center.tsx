@@ -509,7 +509,7 @@ export function IntegrationControlCenter({
     <Suspense
       fallback={
         <div
-          className="mt-6 h-72 rounded-2xl border border-border bg-surface"
+          className="mt-6 h-64 rounded-xl border border-border bg-surface"
           aria-label="Loading connected services"
           aria-busy="true"
         />

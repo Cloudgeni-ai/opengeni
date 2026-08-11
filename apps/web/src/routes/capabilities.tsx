@@ -14,33 +14,32 @@ import {
   Building2Icon,
   CheckCircle2Icon,
   ChevronDownIcon,
-  GlobeIcon,
   Loader2Icon,
   PlugIcon,
   PlusIcon,
   RefreshCwIcon,
-  SearchIcon,
 } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { AddCustomDialog } from "@/components/capabilities/add-custom-dialog";
 import {
+  CapabilityBrowseSection,
+  CapabilityDiscoveryControls,
+  EnabledCapabilitiesSection,
+} from "@/components/capabilities/capability-catalog-sections";
+import {
   CapabilityDetailSheet,
   type ConnectAction,
 } from "@/components/capabilities/capability-detail-sheet";
-import { CapabilityLogo } from "@/components/capabilities/capability-logo";
-import { CapabilityTile } from "@/components/capabilities/capability-tile";
 import { PacksSection } from "@/components/capabilities/packs-section";
 import { PersonalSlackAccountCard } from "@/components/capabilities/personal-slack-account-card";
 import { SlackReactionSummonCard } from "@/components/capabilities/slack-reaction-summon-card";
 import { isWorkspaceImportedSkill } from "@/components/capabilities/source-import-flow";
 import { SourcePackagesSection } from "@/components/capabilities/source-packages-section";
-import { LoadErrorState, PageHeader } from "@/components/common";
+import { PageHeader } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { EmptyState } from "@/components/ui/empty-state";
-import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
@@ -49,9 +48,7 @@ import {
   capabilityConnectPlan,
   capabilityCounts,
   capabilityErrorToast,
-  capabilityFilterLabel,
   capabilityInputFromForm,
-  capabilityItemKindLabel,
   connectionHealth,
   connectionToReuseForApiKey,
   createInputFromCatalogItem,
@@ -105,7 +102,6 @@ import type {
 } from "@/types";
 
 const PAGE_SIZE = 48;
-const FILTERS: CapabilityFilter[] = ["all", "pack", "mcp", "api", "skill", "plugin"];
 
 export function canWriteWorkspaceConnections(
   accessContext: AccessContext | null,
@@ -1273,7 +1269,7 @@ export function CapabilitiesRoute({
           }
         />
 
-        <Suspense fallback={<Skeleton className="mt-6 h-72 w-full rounded-2xl" />}>
+        <Suspense fallback={<Skeleton className="mt-6 h-64 w-full rounded-xl" />}>
           <IntegrationControlCenter
             workspaceId={workspaceId}
             connections={connections}
@@ -1499,61 +1495,26 @@ export function CapabilitiesRoute({
           onConfirm={disconnectPersonalSlack}
         />
 
-        {/* Primary search — front and center. */}
-        <div className="relative mt-6">
-          <SearchIcon className="pointer-events-none absolute left-4 top-1/2 size-4 -translate-y-1/2 text-fg-subtle" />
-          <Input
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search integrations, tools, and skills"
-            className="h-12 rounded-xl pl-11 text-base"
-            aria-label="Search capabilities"
-          />
-        </div>
-
-        {/* Kind filters with counts. */}
-        <div className="mt-4 flex flex-wrap gap-2">
-          {FILTERS.map((kind) => (
-            <button
-              key={kind}
-              type="button"
-              onClick={() => setFilter(kind)}
-              className={cn(
-                "inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors",
-                filter === kind
-                  ? "border-brand/40 bg-brand/10 text-brand"
-                  : "border-border bg-surface/50 text-fg-muted hover:border-border-strong hover:text-fg",
-              )}
-            >
-              {capabilityFilterLabel(kind)}
-              <span
-                className={cn("text-2xs", filter === kind ? "text-brand/70" : "text-fg-subtle")}
-              >
-                {counts[kind]}
-              </span>
-            </button>
-          ))}
-        </div>
+        <CapabilityDiscoveryControls
+          query={query}
+          filter={filter}
+          counts={counts}
+          onQueryChange={setQuery}
+          onFilterChange={setFilter}
+        />
 
         <div className="mt-8 space-y-10">
-          {/* Enabled strip. */}
-          {showCatalog && enabledItems.length > 0 ? (
-            <section className="space-y-3">
-              <h2 className="text-sm font-semibold text-fg">Enabled</h2>
-              <div className="grid gap-2 sm:grid-cols-2">
-                {enabledItems.map((item) => (
-                  <EnabledCard
-                    key={item.id}
-                    item={item}
-                    health={connectionHealth(item, connections ?? [], connectionsLoaded)}
-                    logoSrc={logoUrl(item)}
-                    busy={busyId === item.id}
-                    onOpen={() => openItem(item)}
-                    onDisable={() => void disableFromStrip(item)}
-                  />
-                ))}
-              </div>
-            </section>
+          {showCatalog ? (
+            <EnabledCapabilitiesSection
+              items={enabledItems}
+              busyId={busyId}
+              connectionHealth={(item) =>
+                connectionHealth(item, connections ?? [], connectionsLoaded)
+              }
+              logoUrl={logoUrl}
+              onOpen={openItem}
+              onDisable={(item) => void disableFromStrip(item)}
+            />
           ) : null}
 
           {showSourcePackages ? (
@@ -1598,72 +1559,27 @@ export function CapabilitiesRoute({
             />
           ) : null}
 
-          {/* Browse grid. */}
           {showCatalog ? (
-            <section className="space-y-4">
-              {filter === "all" || enabledItems.length > 0 ? (
-                <h2 className="text-sm font-semibold text-fg">Browse</h2>
-              ) : null}
-
-              {catalogView === "loading" ? (
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                  {[
-                    "catalog-skeleton-1",
-                    "catalog-skeleton-2",
-                    "catalog-skeleton-3",
-                    "catalog-skeleton-4",
-                    "catalog-skeleton-5",
-                    "catalog-skeleton-6",
-                    "catalog-skeleton-7",
-                    "catalog-skeleton-8",
-                  ].map((rowKey) => (
-                    <div key={rowKey} className="rounded-xl border border-border bg-surface/50 p-4">
-                      <Skeleton className="size-10 rounded-lg" />
-                      <Skeleton className="mt-3 h-4 w-24" />
-                      <Skeleton className="mt-2 h-3 w-full" />
-                      <Skeleton className="mt-1.5 h-3 w-2/3" />
-                    </div>
-                  ))}
-                </div>
-              ) : catalogView === "error" ? (
-                <LoadErrorState
-                  title="Couldn't load capabilities"
-                  error={loadError}
-                  onRetry={() => void refresh()}
-                />
-              ) : browseItems.length === 0 ? (
-                <RegistryFallback
-                  query={query}
-                  busy={registryBusy}
-                  searched={registrySearched}
-                  results={visibleRegistry}
-                  onSearch={() => void searchRegistry()}
-                  logoUrl={logoUrl}
-                  onOpen={(item) => openItem(item, true)}
-                  emptyDefault={enabledItems.length === 0}
-                />
-              ) : (
-                <>
-                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                    {visibleBrowse.map((item) => (
-                      <CapabilityTile
-                        key={item.id}
-                        item={item}
-                        logoSrc={logoUrl(item)}
-                        onOpen={() => openItem(item)}
-                      />
-                    ))}
-                  </div>
-                  {visibleCount < browseItems.length ? (
-                    <LoadMoreSentinel
-                      onReach={() =>
-                        setVisibleCount((count) => Math.min(count + PAGE_SIZE, browseItems.length))
-                      }
-                    />
-                  ) : null}
-                </>
-              )}
-            </section>
+            <CapabilityBrowseSection
+              filter={filter}
+              query={query}
+              catalogView={catalogView}
+              loadError={loadError}
+              enabledCount={enabledItems.length}
+              browseItems={browseItems}
+              visibleBrowse={visibleBrowse}
+              registryBusy={registryBusy}
+              registrySearched={registrySearched}
+              registryResults={visibleRegistry}
+              logoUrl={logoUrl}
+              onRetry={() => void refresh()}
+              onOpen={openItem}
+              onOpenRegistry={(item) => openItem(item, true)}
+              onSearchRegistry={() => void searchRegistry()}
+              onLoadMore={() =>
+                setVisibleCount((count) => Math.min(count + PAGE_SIZE, browseItems.length))
+              }
+            />
           ) : null}
         </div>
       </div>
@@ -1696,188 +1612,6 @@ export function CapabilitiesRoute({
       />
     </div>
   );
-}
-
-// A compact managed card in the Enabled strip.
-function EnabledCard({
-  item,
-  health,
-  logoSrc,
-  busy,
-  onOpen,
-  onDisable,
-}: {
-  item: CapabilityCatalogItem;
-  health: ConnectionHealth;
-  logoSrc: string | null;
-  busy: boolean;
-  onOpen: () => void;
-  onDisable: () => void;
-}) {
-  // Health is resolved by the installation's connection id: "attention" means the
-  // row is missing or inactive; "none" means no connection is involved;
-  // "unverified" means connections didn't load, so stay neutral (never amber).
-  const needsAttention = health.state === "attention";
-  const canDisable = item.source !== "built_in" && item.source !== "configured";
-  // A broken connection ("Needs attention") is the actionable state, so it wins
-  // the single status slot over staleness — which only gates discovery, still
-  // runs fine, and so reads as quiet neutral text, never an amber alert.
-  const status = needsAttention
-    ? {
-        label: "Needs attention",
-        dot: "bg-status-waiting",
-        text: "text-status-waiting",
-      }
-    : item.stale
-      ? {
-          label: "No longer in registry",
-          dot: "bg-fg-subtle/60",
-          text: "text-fg-subtle",
-        }
-      : {
-          label: health.state === "connected" ? "Connected" : "Enabled",
-          dot: "bg-status-idle",
-          text: "text-fg-subtle",
-        };
-
-  return (
-    <div className="flex items-center gap-3 rounded-xl border border-border bg-surface/50 p-3">
-      <button
-        type="button"
-        onClick={onOpen}
-        data-capability-focus-target
-        data-capability-id={item.id}
-        className="flex min-w-0 flex-1 items-center gap-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg"
-      >
-        <CapabilityLogo src={logoSrc} name={item.name} size="sm" />
-        <div className="min-w-0">
-          <div className="truncate text-sm font-medium text-fg">{item.name}</div>
-          <div className={cn("flex items-center gap-1.5 text-2xs", status.text)}>
-            <span className={cn("size-1.5 rounded-full", status.dot)} />
-            {status.label}
-            <span aria-hidden className="text-fg-subtle/50">
-              ·
-            </span>
-            <span className="truncate">{capabilityItemKindLabel(item)}</span>
-          </div>
-        </div>
-      </button>
-      {canDisable ? (
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          disabled={busy}
-          onClick={onDisable}
-          className="shrink-0"
-        >
-          {busy ? <Loader2Icon className="animate-spin" /> : "Disable"}
-        </Button>
-      ) : (
-        <span className="shrink-0 px-2 text-2xs text-fg-subtle">Built in</span>
-      )}
-    </div>
-  );
-}
-
-// Empty catalog results: offer the public MCP registry, then render registry
-// hits as tiles that open the same connect sheet.
-function RegistryFallback({
-  query,
-  busy,
-  searched,
-  results,
-  onSearch,
-  logoUrl,
-  onOpen,
-  emptyDefault,
-}: {
-  query: string;
-  busy: boolean;
-  searched: string | null;
-  results: CapabilityCatalogItem[];
-  onSearch: () => void;
-  logoUrl: (item: CapabilityCatalogItem) => string | null;
-  onOpen: (item: CapabilityCatalogItem) => void;
-  emptyDefault: boolean;
-}) {
-  const term = query.trim();
-
-  if (results.length > 0) {
-    return (
-      <div className="space-y-3">
-        <p className="text-xs text-fg-subtle">From the public MCP registry</p>
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-          {results.map((item) => (
-            <CapabilityTile
-              key={item.id}
-              item={item}
-              logoSrc={logoUrl(item)}
-              onOpen={() => onOpen(item)}
-            />
-          ))}
-        </div>
-      </div>
-    );
-  }
-
-  if (!term) {
-    return (
-      <EmptyState
-        icon={<PlugIcon className="size-4" />}
-        title={emptyDefault ? "Nothing here yet" : "No matches for this filter"}
-        description={
-          emptyDefault
-            ? "Search the catalog above, connect a custom API, or add an MCP server, Skill, or Plugin."
-            : "Try a different filter or search term."
-        }
-      />
-    );
-  }
-
-  return (
-    <EmptyState
-      icon={<GlobeIcon className="size-4" />}
-      title={
-        searched && searched === term
-          ? `No registry servers match “${term}”`
-          : `No catalog matches for “${term}”`
-      }
-      description="Search the public MCP registry for a server to connect."
-      action={
-        <Button type="button" variant="secondary" size="sm" disabled={busy} onClick={onSearch}>
-          {busy ? <Loader2Icon className="animate-spin" /> : <SearchIcon />}
-          Search the public MCP registry
-        </Button>
-      }
-    />
-  );
-}
-
-// A sentinel that loads the next window of tiles when scrolled into view. The
-// observer is created ONCE per mount and reads the latest callback through a
-// ref — the parent passes a fresh inline onReach every render, and rebuilding
-// the observer each time would re-fire the intersection immediately while the
-// sentinel is still in view, defeating the windowing (a runaway page load).
-function LoadMoreSentinel({ onReach }: { onReach: () => void }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const onReachRef = useRef(onReach);
-  useEffect(() => {
-    onReachRef.current = onReach;
-  }, [onReach]);
-  useEffect(() => {
-    const node = ref.current;
-    if (!node) return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) onReachRef.current();
-      },
-      { rootMargin: "600px" },
-    );
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, []);
-  return <div ref={ref} className="h-1" aria-hidden />;
 }
 
 export function slackBotDocumentDestinationAuthority(

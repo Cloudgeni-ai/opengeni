@@ -374,13 +374,7 @@ function PackCard(props: {
             <ChevronDownIcon className={cn("transition-transform", expanded && "rotate-180")} />
             Contents
           </Button>
-          <Button
-            type="button"
-            size="sm"
-            className="min-w-28"
-            disabled={props.busy}
-            onClick={() => void openInstall()}
-          >
+          <Button type="button" size="sm" disabled={props.busy} onClick={() => void openInstall()}>
             {props.busy ? (
               <Loader2Icon className="animate-spin" />
             ) : installation?.status === "needs_attention" ? (
@@ -505,7 +499,7 @@ function PackInstallationDialog(props: {
 
   return (
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
-      <DialogContent className="max-h-[92dvh] sm:max-w-2xl">
+      <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>
             {preview?.action === "update"
