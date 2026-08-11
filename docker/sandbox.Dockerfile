@@ -13,6 +13,15 @@ ADD --checksum=sha256:8d7b3a1d7b9024beef94e7fc7ce854030ee4d6def5f802b8e0e8824731
 ADD --checksum=sha256:a5005b353a1738dd3d239234841cfcc808a7ec9faaebfcede3528f9fab3ae058 https://github.com/lightpanda-io/browser/archive/refs/tags/0.3.5.tar.gz /lightpanda-0.3.5-source.tar.gz
 ADD --checksum=sha256:8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef https://raw.githubusercontent.com/lightpanda-io/browser/0.3.5/LICENSE /lightpanda-LICENSE
 
+FROM rust:1.82-bookworm AS computer-native-build
+
+WORKDIR /src/agent
+COPY agent .
+RUN set -eux; \
+    cargo build --locked --release -p opengeni-computer-native; \
+    mkdir -p /out; \
+    install -m 0755 target/release/opengeni-computer-native /out/opengeni-computer-native
+
 FROM oven/bun:1.3.14 AS bun-runtime
 
 FROM --platform=$BUILDPLATFORM oven/bun:1.3.14 AS browserd-source-build
@@ -79,6 +88,12 @@ RUN set -eux; \
       printf '%s  %s\n' a5005b353a1738dd3d239234841cfcc808a7ec9faaebfcede3528f9fab3ae058 /usr/local/share/source/lightpanda-0.3.5.tar.gz; \
       printf '%s  %s\n' 8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef /usr/local/share/licenses/lightpanda/LICENSE; \
     } > /out/SHA256SUMS
+
+COPY --from=computer-native-build /out/opengeni-computer-native /out/opengeni-computer-native
+RUN printf '%s  %s\n' \
+      "$(sha256sum /out/opengeni-computer-native | awk '{print $1}')" \
+      /usr/local/lib/opengeni/opengeni-computer-native \
+      >> /out/SHA256SUMS
 
 FROM node:22.22.0-bookworm-slim AS node-runtime
 
@@ -163,6 +178,13 @@ RUN set -eux; \
         wget \
         xvfb \
         xauth \
+        x11-utils \
+        x11-xserver-utils \
+        xkb-data \
+        x11-xkb-utils \
+        dbus-x11 \
+        at-spi2-core \
+        xfwm4 \
         fonts-liberation \
         fonts-noto-color-emoji \
     "; \
@@ -180,7 +202,9 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*; \
     install -d -m 0755 /etc/opengeni; \
     printf '%s\n' /usr/lib/chromium/chromium > /etc/opengeni/browser-engine; \
-    test -x /usr/lib/chromium/chromium
+    test -x /usr/lib/chromium/chromium; \
+    dbus-uuidgen --ensure=/var/lib/dbus/machine-id; \
+    ln -sf /var/lib/dbus/machine-id /etc/machine-id
 
 # ogtool requires a supported Node runtime. Ordinary typed Codemode programs
 # use the exact Bun binary from the already-pinned build image.
@@ -262,11 +286,14 @@ ENV OPENGENI_BROWSERD_PORT=7682
 ENV OPENGENI_BROWSERD_AGENT_BROWSER_BINARY=/usr/local/lib/opengeni/agent-browser
 ENV OPENGENI_BROWSERD_LIGHTPANDA_BINARY=/usr/local/lib/opengeni/lightpanda
 ENV OPENGENI_BROWSERD_BROWSER_EXECUTABLE=/usr/lib/chromium/chromium
+ENV OPENGENI_BROWSERD_COMPUTER_NATIVE_BINARY=/usr/local/lib/opengeni/opengeni-computer-native
+ENV OPENGENI_BROWSERD_COMPUTER_ENVIRONMENT_MODE=isolated_linux
 ENV NODE_PATH=/opt/opengeni/codemode-runtime/node_modules
 
 COPY --from=browserd-build /out/opengeni-browserd /usr/local/bin/opengeni-browserd
 COPY --from=browserd-build /out/agent-browser /usr/local/lib/opengeni/agent-browser
 COPY --from=browserd-build /out/lightpanda /usr/local/lib/opengeni/lightpanda
+COPY --from=browserd-build /out/opengeni-computer-native /usr/local/lib/opengeni/opengeni-computer-native
 COPY --from=browserd-build /out/lightpanda-LICENSE /usr/local/share/licenses/lightpanda/LICENSE
 COPY --from=browserd-build /out/lightpanda-0.3.5-source.tar.gz /usr/local/share/source/lightpanda-0.3.5.tar.gz
 COPY --from=browserd-build /out/SHA256SUMS /usr/local/share/opengeni/browserd-SHA256SUMS
@@ -284,7 +311,8 @@ RUN set -eux; \
                /usr/local/bin/opengeni-terminal-up /usr/local/bin/opengeni-terminal-down \
                /usr/local/bin/opengeni-browserd-up /usr/local/bin/opengeni-browserd-down \
                /usr/local/bin/opengeni-browserd /usr/local/lib/opengeni/agent-browser \
-               /usr/local/lib/opengeni/lightpanda; \
+               /usr/local/lib/opengeni/lightpanda \
+               /usr/local/lib/opengeni/opengeni-computer-native; \
     chmod 0755 /opt/opengeni/ogtool/bin/ogtool.cjs; \
     ln -s /opt/opengeni/ogtool/bin/ogtool.cjs /usr/local/bin/ogtool; \
     node --check /opt/opengeni/ogtool/bin/ogtool.cjs; \

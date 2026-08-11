@@ -355,7 +355,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       connection = await this.ensureConnection();
       const created = await connection.send<{ targetId?: unknown }>(
         "Target.createTarget",
-        { url: launchUrl ?? "about:blank" },
+        { url: launchUrl ?? "about:blank", background: true },
         { timeoutMs: BROWSER_START_TIMEOUT_MS },
       );
       launched = { targetId: created.targetId, url: launchUrl ?? "about:blank" };
@@ -378,9 +378,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       targets.find((candidate) => candidate.type === "page" && candidate.url === launchedUrl) ??
       visiblePageTargets(targets)[0];
     if (!target) throw new Error("managed browser launched without a page target");
-    await connection.send("Target.activateTarget", {
-      targetId: target.targetId,
-    });
     this.selectedTargetId = target.targetId;
     if (deferNavigation) {
       await this.navigate(await this.ensureTargetState(target), url);
@@ -420,11 +417,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const deferNavigation = this.emulation !== null && url !== "about:blank";
     const result = await connection.send<{ targetId?: unknown }>("Target.createTarget", {
       url: deferNavigation ? "about:blank" : url,
+      background: true,
     });
     if (typeof result.targetId !== "string") throw new Error("CDP did not return a target id");
-    await connection.send("Target.activateTarget", {
-      targetId: result.targetId,
-    });
     this.selectedTargetId = result.targetId;
     if (deferNavigation) {
       const info = await this.requireTargetInfo(connection, result.targetId);
@@ -436,7 +431,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   async selectTarget(targetId: string): Promise<BrowserObservationValue> {
     const connection = await this.ensureConnection();
     await this.requireTargetInfo(connection, targetId);
-    await connection.send("Target.activateTarget", { targetId });
     this.selectedTargetId = targetId;
     return await this.observe(targetId);
   }
@@ -1033,6 +1027,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     if (targets.length === 0) {
       const created = await connection.send<{ targetId?: unknown }>("Target.createTarget", {
         url: "about:blank",
+        background: true,
       });
       if (typeof created.targetId !== "string") {
         throw new Error("reconfigured browser did not return a target id");
@@ -1041,7 +1036,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
     const selected = targets[0];
     if (!selected) throw new Error("reconfigured browser has no page target");
-    await connection.send("Target.activateTarget", { targetId: selected.targetId });
     this.selectedTargetId = selected.targetId;
   }
 

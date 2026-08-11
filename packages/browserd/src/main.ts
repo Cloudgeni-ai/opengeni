@@ -263,8 +263,9 @@ async function waitForShutdownSignal(): Promise<void> {
 }
 
 if (import.meta.main) {
-  void runBrowserd().catch(() => {
-    process.stderr.write("opengeni-browserd failed\n");
+  void runBrowserd().catch((error: unknown) => {
+    const message = error instanceof Error ? `${error.name}: ${error.message}` : "unknown error";
+    process.stderr.write(`opengeni-browserd failed: ${boundedDiagnostic(message, 4_096)}\n`);
     process.exitCode = 1;
   });
 }

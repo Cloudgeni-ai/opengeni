@@ -10,6 +10,7 @@ import type {
   BrowserSession,
   BrowserTarget,
 } from "@opengeni/sdk/interaction";
+import { OpenGeniApiError } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type EmbeddedBrowserInteractionClientOverride,
@@ -241,19 +242,46 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
     async (targetId: string): Promise<BrowserTarget> => {
       if (!browserSessionId) throw new Error("No BrowserSession is selected.");
       return await runMutation(browserSessionId, async () => {
-        const target = await client.selectBrowserTarget(workspaceId, browserSessionId, targetId);
-        const observation = await client.observeBrowserTarget(
-          workspaceId,
-          browserSessionId,
-          target.id,
-        );
+        let targets = visible.targets;
+        let target: BrowserTarget;
+        let observation: BrowserObservation;
+        try {
+          target = await client.selectBrowserTarget(workspaceId, browserSessionId, targetId);
+          observation = await client.observeBrowserTarget(workspaceId, browserSessionId, target.id);
+        } catch (cause) {
+          if (!isMissingBrowserTarget(cause)) throw cause;
+          // A physical/attached tab may disappear between inventory and click.
+          // Reconcile once from the authoritative controller inventory and move
+          // to its live selected/first page instead of leaving a dead tab ID in
+          // React state. Session-level 404s are deliberately not swallowed.
+          const response = await client.listBrowserTargets(workspaceId, browserSessionId);
+          targets = response.targets;
+          const fallback = chooseTarget(targets, null);
+          if (!fallback) {
+            selectedTargetIdRef.current = null;
+            observationRef.current = { browserSessionId, observation: null };
+            setState((current) =>
+              current.browserSessionId === browserSessionId
+                ? {
+                    ...current,
+                    targets,
+                    selectedTargetId: null,
+                    observation: null,
+                  }
+                : current,
+            );
+            throw cause;
+          }
+          target = await client.selectBrowserTarget(workspaceId, browserSessionId, fallback.id);
+          observation = await client.observeBrowserTarget(workspaceId, browserSessionId, target.id);
+        }
         selectedTargetIdRef.current = target.id;
         observationRef.current = { browserSessionId, observation };
         setState((current) =>
           current.browserSessionId === browserSessionId
             ? {
                 ...current,
-                targets: current.targets.map((candidate) => ({
+                targets: targets.map((candidate) => ({
                   ...candidate,
                   selected: candidate.id === target.id,
                 })),
@@ -265,7 +293,7 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
         return target;
       });
     },
-    [browserSessionId, client, runMutation, workspaceId],
+    [browserSessionId, client, runMutation, visible.targets, workspaceId],
   );
 
   const openTarget = useCallback(
@@ -485,4 +513,8 @@ function replaceTarget(targets: readonly BrowserTarget[], target: BrowserTarget)
   const next = targets.filter((candidate) => candidate.id !== target.id);
   next.push(target);
   return next.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+}
+
+function isMissingBrowserTarget(error: unknown): boolean {
+  return error instanceof OpenGeniApiError && error.code === "target_not_found";
 }

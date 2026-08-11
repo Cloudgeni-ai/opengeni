@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { StreamFrame, StreamOpen, StreamOpenAck } from "@opengeni/agent-proto";
+import { OpenGeniApiError } from "@opengeni/sdk";
 import type {
   AttachedBrowserDevice,
   BrowserActionReceipt,
@@ -676,6 +677,57 @@ describe("BrowserSession React resources", () => {
     ]);
     await hook.unmount();
   });
+
+  test("reconciles a tab that disappears between inventory and selection", async () => {
+    const stale = target(BROWSER_SESSION_ID, "stale-target");
+    const live = target(BROWSER_SESSION_ID, "live-target");
+    let inventoryCalls = 0;
+    const selectionCalls: string[] = [];
+    const client = fakeClient({
+      getBrowserSession: async () => browserSession(),
+      listBrowserTargets: async () => {
+        inventoryCalls += 1;
+        return {
+          browserSessionId: BROWSER_SESSION_ID,
+          controllerGeneration: "controller-1",
+          targets: inventoryCalls === 1 ? [stale] : [live],
+        };
+      },
+      observeBrowserTarget: async (_workspaceId, _browserSessionId, targetId) =>
+        observation(BROWSER_SESSION_ID, targetId === live.id ? live : stale),
+      selectBrowserTarget: async (_workspaceId, _browserSessionId, targetId) => {
+        selectionCalls.push(targetId);
+        if (targetId === stale.id) {
+          throw new OpenGeniApiError(
+            404,
+            JSON.stringify({
+              error: { code: "target_not_found", message: "browser target does not exist" },
+            }),
+          );
+        }
+        return live;
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useBrowserSession({
+          client,
+          workspaceId: WORKSPACE_ID,
+          browserSessionId: BROWSER_SESSION_ID,
+          pollIntervalMs: 60_000,
+        }),
+      undefined,
+    );
+    await flush(20);
+
+    const selected = await actRun(async () => await hook.result.current.selectTarget(stale.id));
+    expect(selected.id).toBe(live.id);
+    expect(selectionCalls).toEqual([stale.id, live.id]);
+    expect(inventoryCalls).toBe(2);
+    expect(hook.result.current.selectedTarget?.id).toBe(live.id);
+    expect(hook.result.current.error).toBeNull();
+    await hook.unmount();
+  });
 });
 
 describe("BrowserSession frame stream", () => {
@@ -1244,6 +1296,32 @@ describe("BrowserViewer", () => {
     expect(actions).toHaveLength(2);
     expect(canvas?.className).toContain("invisible");
     expect(rendered.container.textContent).toContain("Connecting");
+    await rendered.unmount();
+  });
+
+  test("keeps unrelated workspace browsers discoverable without claiming one for this agent", async () => {
+    const peer = browserSession(PEER_BROWSER_SESSION_ID, PEER_SESSION_ID, "Connected Mac browser");
+    peer.placement = {
+      kind: "connected_machine",
+      sandboxId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    };
+    let controllerReads = 0;
+    const client = fakeClient({
+      listBrowserSessions: async () => ({ revision: 1, sessions: [peer] }),
+      getBrowserSession: async () => {
+        controllerReads += 1;
+        return peer;
+      },
+    });
+    const rendered = await renderComponent(
+      <BrowserViewer client={client} workspaceId={WORKSPACE_ID} sessionId={SESSION_ID} />,
+    );
+    await flush(30);
+
+    expect(controllerReads).toBe(0);
+    expect(rendered.container.textContent).toContain("No browser for this agent");
+    expect(rendered.container.textContent).toContain("Workspace browsers");
+    expect(rendered.container.textContent).toContain("Connected Mac browser");
     await rendered.unmount();
   });
 

@@ -27,6 +27,9 @@ use tokio::{
 };
 
 const BROWSERD_BINARY_ENV: &str = "OPENGENI_BROWSERD_BINARY";
+const AGENT_BROWSER_BINARY_ENV: &str = "OPENGENI_BROWSERD_AGENT_BROWSER_BINARY";
+const LIGHTPANDA_BINARY_ENV: &str = "OPENGENI_BROWSERD_LIGHTPANDA_BINARY";
+const COMPUTER_NATIVE_BINARY_ENV: &str = "OPENGENI_BROWSERD_COMPUTER_NATIVE_BINARY";
 const READY_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_READY_LINE_BYTES: usize = 4_096;
 const MAX_SCOPES: usize = 1_000;
@@ -106,7 +109,6 @@ impl BrowserSidecarManager {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .env("OPENGENI_BROWSERD_ROOT", root.join("state"))
-            .env("OPENGENI_BROWSERD_SOCKET_ROOT", root.join("sockets"))
             .env("OPENGENI_BROWSERD_ADMIN_TOKEN_FILE", &token_file)
             .env("OPENGENI_BROWSERD_HOSTNAME", "127.0.0.1")
             .env("OPENGENI_BROWSERD_PORT", "0")
@@ -117,6 +119,23 @@ impl BrowserSidecarManager {
             // The attached bridge resolves its authority from the same exact
             // config directory as the parent agent, including custom/XDG roots.
             .env("OPENGENI_CONFIG_DIR", &self.config_dir);
+        for (environment, name) in [
+            (AGENT_BROWSER_BINARY_ENV, companion_name("agent-browser")),
+            (LIGHTPANDA_BINARY_ENV, companion_name("lightpanda")),
+            (
+                COMPUTER_NATIVE_BINARY_ENV,
+                companion_name("opengeni-computer-native"),
+            ),
+        ] {
+            // Explicit operator overrides remain authoritative. Release and
+            // local app bundles need no configuration: companions installed
+            // beside browserd are forwarded privately to the child.
+            if std::env::var_os(environment).is_none() {
+                if let Some(path) = discover_companion_binary(&self.binary, &name) {
+                    command.env(environment, path);
+                }
+            }
+        }
         let mut child = command
             .spawn()
             .map_err(|error| PlatformError::from_io("start browser controller sidecar", &error))?;
@@ -162,6 +181,33 @@ impl BrowserSidecarManager {
     }
 }
 
+async fn add_allowed_origins(
+    endpoint: &BrowserControlEndpoint,
+    admin_token: &str,
+    origins: &[String],
+) -> PlatformResult<()> {
+    let request = reqwest::Client::new()
+        .put(format!("http://127.0.0.1:{}/v1/origins", endpoint.port))
+        .bearer_auth(admin_token)
+        .json(&serde_json::json!({ "origins": origins }))
+        .send();
+    let response = tokio::time::timeout(Duration::from_secs(5), request)
+        .await
+        .map_err(|_| {
+            PlatformError::Timeout(
+                "browser controller origin update exceeded its deadline".to_string(),
+            )
+        })?
+        .map_err(|_| PlatformError::os("browser controller origin update failed"))?;
+    if !response.status().is_success() {
+        return Err(PlatformError::os(format!(
+            "browser controller rejected its origin update with status {}",
+            response.status().as_u16()
+        )));
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl BrowserControlBackend for BrowserSidecarManager {
     async fn ensure(
@@ -191,8 +237,18 @@ impl BrowserControlBackend for BrowserSidecarManager {
             if live
                 && existing.scope_generation == scope_generation
                 && existing.token_digest == token_digest
-                && existing.allowed_origins == allowed_origins
             {
+                let additions = allowed_origins
+                    .iter()
+                    .filter(|origin| !existing.allowed_origins.contains(origin))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if !additions.is_empty() {
+                    add_allowed_origins(&existing.endpoint, admin_token, &additions).await?;
+                    existing.allowed_origins.extend(additions);
+                    existing.allowed_origins.sort_unstable();
+                    existing.allowed_origins.dedup();
+                }
                 return Ok(existing.endpoint.clone());
             }
         }
@@ -254,6 +310,8 @@ struct ReadyDocument {
     service: String,
     status: String,
     protocol_version: u32,
+    #[serde(rename = "computer")]
+    _computer_available: bool,
     hostname: String,
     port: u16,
 }
@@ -300,6 +358,25 @@ fn discover_browserd_binary() -> PlatformResult<PathBuf> {
                 "browser controller sidecar is not installed beside the agent".to_string(),
             )
         })
+}
+
+fn companion_name(base: &str) -> String {
+    if cfg!(windows) {
+        format!("{base}.exe")
+    } else {
+        base.to_string()
+    }
+}
+
+fn discover_companion_binary(browserd: &Path, name: &str) -> Option<PathBuf> {
+    let parent = browserd.parent().unwrap_or_else(|| Path::new("."));
+    [
+        parent.join(name),
+        parent.join("../Helpers").join(name),
+        parent.join("../Resources").join(name),
+    ]
+    .into_iter()
+    .find(|candidate| candidate.is_file())
 }
 
 fn bounded_identifier<'a>(value: &'a str, maximum: usize, label: &str) -> PlatformResult<&'a str> {
@@ -456,16 +533,70 @@ mod tests {
     #[tokio::test]
     async fn sidecar_authority_is_owner_only_idempotent_and_generation_fenced() {
         use std::os::unix::fs::PermissionsExt as _;
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
         let temporary = tempfile::tempdir().expect("temporary sidecar root");
+        let origin_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind origin-update fixture");
+        let controller_port = origin_listener
+            .local_addr()
+            .expect("read origin-update fixture address")
+            .port();
+        let origin_update = tokio::spawn(async move {
+            let (mut socket, _) = origin_listener
+                .accept()
+                .await
+                .expect("accept origin update");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1_024];
+            loop {
+                let count = socket.read(&mut chunk).await.expect("read origin update");
+                assert!(count > 0, "origin update ended before its JSON body");
+                request.extend_from_slice(&chunk[..count]);
+                assert!(
+                    request.len() <= 16 * 1_024,
+                    "origin update exceeded test bound"
+                );
+                if request
+                    .windows(b"https://second.opengeni.test".len())
+                    .any(|window| window == b"https://second.opengeni.test")
+                {
+                    break;
+                }
+            }
+            let request = String::from_utf8(request).expect("origin update is UTF-8");
+            assert!(request.starts_with("PUT /v1/origins HTTP/1.1\r\n"));
+            assert!(request.contains(&format!("authorization: Bearer {}", "a".repeat(32))));
+            socket
+                .write_all(b"HTTP/1.1 204 No Content\r\nconnection: close\r\n\r\n")
+                .await
+                .expect("settle origin update");
+        });
         let binary = temporary.path().join("fake-browserd");
+        let environment_capture = temporary.path().join("sidecar-environment");
+        let agent_browser = temporary.path().join(companion_name("agent-browser"));
+        let lightpanda = temporary.path().join(companion_name("lightpanda"));
+        let computer_native = temporary
+            .path()
+            .join(companion_name("opengeni-computer-native"));
+        for companion in [&agent_browser, &lightpanda, &computer_native] {
+            std::fs::write(companion, "companion").expect("write sidecar companion");
+            std::fs::set_permissions(companion, std::fs::Permissions::from_mode(0o700))
+                .expect("make sidecar companion executable");
+        }
         std::fs::write(
             &binary,
-            concat!(
-                "#!/bin/sh\n",
-                "printf '%s\\n' '{\"service\":\"opengeni-browserd\",\"status\":\"ready\",",
-                "\"protocolVersion\":1,\"hostname\":\"127.0.0.1\",\"port\":31337}'\n",
-                "exec sleep 30\n",
+            format!(
+                concat!(
+                    "#!/bin/sh\n",
+                    "printf '%s\\n%s\\n%s\\n' \"$OPENGENI_BROWSERD_AGENT_BROWSER_BINARY\" \"$OPENGENI_BROWSERD_LIGHTPANDA_BINARY\" \"$OPENGENI_BROWSERD_COMPUTER_NATIVE_BINARY\" > '{capture}'\n",
+                    "printf '%s\\n' '{{\"service\":\"opengeni-browserd\",\"status\":\"ready\",",
+                    "\"protocolVersion\":1,\"computer\":true,\"hostname\":\"127.0.0.1\",\"port\":{port}}}'\n",
+                    "exec sleep 30\n",
+                ),
+                capture = environment_capture.display(),
+                port = controller_port,
             ),
         )
         .expect("write browserd double");
@@ -482,6 +613,14 @@ mod tests {
         };
 
         let first = manager.ensure(&request).await.expect("start sidecar");
+        assert_eq!(
+            std::fs::read_to_string(&environment_capture)
+                .expect("read packaged companion environment")
+                .lines()
+                .map(PathBuf::from)
+                .collect::<Vec<_>>(),
+            [agent_browser, lightpanda, computer_native],
+        );
         let replay = manager
             .ensure(&request)
             .await
@@ -490,7 +629,20 @@ mod tests {
             replay, first,
             "identical authority input must not restart browserd"
         );
-        assert_eq!(first.port, 31_337);
+        assert_eq!(first.port, controller_port);
+        request
+            .allowed_origins
+            .push("https://second.opengeni.test".to_string());
+        assert_eq!(
+            manager
+                .ensure(&request)
+                .await
+                .expect("additive origin must preserve the sidecar"),
+            first,
+        );
+        origin_update
+            .await
+            .expect("origin update fixture completed");
         assert_eq!(
             manager
                 .resolve(&request.scope_id, &request.scope_generation)

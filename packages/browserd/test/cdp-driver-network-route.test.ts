@@ -17,6 +17,7 @@ test("installs route emulation on about:blank before the first external navigati
   }> = [];
   let currentUrl = "about:blank";
   let metadataUrl = "about:blank";
+  let secondTarget = false;
   const runner: BrowserCommandRunner = {
     async run<T>(args: readonly string[]): Promise<T> {
       runnerCalls.push([...args]);
@@ -50,6 +51,17 @@ test("installs route emulation on about:blank before the first external navigati
                 url: currentUrl,
                 attached: true,
               },
+              ...(secondTarget
+                ? [
+                    {
+                      targetId: "target-2",
+                      type: "page",
+                      title: "",
+                      url: "about:blank",
+                      attached: true,
+                    },
+                  ]
+                : []),
             ],
           } as T;
         case "Target.attachToTarget":
@@ -60,8 +72,13 @@ test("installs route emulation on about:blank before the first external navigati
                 : "target-session-1",
           } as T;
         case "Target.createTarget":
-          expect(params).toEqual({ url: "about:blank", hidden: true });
-          return { targetId: "metadata-target" } as T;
+          if (params?.hidden === true) {
+            expect(params).toEqual({ url: "about:blank", hidden: true });
+            return { targetId: "metadata-target" } as T;
+          }
+          expect(params).toEqual({ url: "about:blank", background: true });
+          secondTarget = true;
+          return { targetId: "target-2" } as T;
         case "Target.closeTarget":
           expect(params).toEqual({ targetId: "metadata-target" });
           return { success: true } as T;
@@ -143,6 +160,9 @@ test("installs route emulation on about:blank before the first external navigati
     const observation = await driver.start(destination);
     expect(observation.target.url).toBe(destination);
     expect(runnerCalls[0]).toEqual(["open", "about:blank"]);
+    await driver.selectTarget("target-1");
+    expect((await driver.openTarget()).target.id).toBe("target-2");
+    expect(cdpCalls.some((call) => call.method === "Target.activateTarget")).toBe(false);
 
     const navigateIndex = cdpCalls.findIndex(
       (call) => call.method === "Page.navigate" && call.params?.url === destination,

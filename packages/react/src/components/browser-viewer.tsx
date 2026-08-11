@@ -176,7 +176,11 @@ export function BrowserViewer({
 
   useEffect(() => {
     const selectedStillLive = liveSessions.some((session) => session.id === selection?.sessionId);
-    const preferred = relevant[0] ?? liveSessions[0] ?? null;
+    // A manually selected workspace browser stays selected, but an unrelated
+    // browser must never become the implicit browser for this agent. That made
+    // a Modal session appear to own a connected Mac browser.
+    if (selection?.pinned && selectedStillLive) return;
+    const preferred = relevant[0] ?? null;
     if (!preferred) {
       if (selection) setSelection(null);
       return;
@@ -599,7 +603,13 @@ export function BrowserViewer({
         }
         onResolve={resolveIntervention}
       />
-      {selectedRegistrySession && !controllerReady ? (
+      {!selectedRegistrySession ? (
+        <BrowserUnselectedPanel
+          peerCount={liveSessions.length}
+          creating={creating}
+          onCreate={() => createBrowser()}
+        />
+      ) : !controllerReady ? (
         <BrowserLifecyclePanel
           session={selectedRegistrySession}
           attempt={
@@ -805,7 +815,7 @@ function BrowserToolbar(props: {
             onSelect={choose}
           />
           <BrowserSessionGroup
-            label="Other agents"
+            label="Workspace browsers"
             sessions={others}
             identities={props.identities}
             selectedId={props.selectedSessionId}
@@ -846,6 +856,37 @@ function BrowserToolbar(props: {
         creating={props.creating}
         onCreate={props.onCreate}
       />
+    </div>
+  );
+}
+
+function BrowserUnselectedPanel(props: {
+  peerCount: number;
+  creating: boolean;
+  onCreate: () => void;
+}) {
+  return (
+    <div className="grid min-h-0 flex-1 place-items-center bg-og-bg p-6 text-center">
+      <div className="max-w-sm">
+        <span className="mx-auto grid size-10 place-items-center rounded-og-md border border-og-border bg-og-surface-1 text-og-muted">
+          <Globe2Icon className="size-4.5" />
+        </span>
+        <p className="mt-3 text-og-menu font-medium text-og-fg">No browser for this agent</p>
+        <p className="mt-1 text-og-control leading-5 text-og-muted">
+          {props.peerCount === 1
+            ? "One workspace browser is available from the browser menu."
+            : `${props.peerCount} workspace browsers are available from the browser menu.`}
+        </p>
+        <button
+          type="button"
+          disabled={props.creating}
+          onClick={props.onCreate}
+          className="mt-4 inline-flex h-8 items-center gap-1.5 rounded-og-sm border border-og-border bg-og-surface-1 px-3 text-og-control font-medium text-og-fg transition hover:bg-og-surface-2 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <PlusIcon className="size-3.5" />
+          {props.creating ? "Opening…" : "New browser"}
+        </button>
+      </div>
     </div>
   );
 }
