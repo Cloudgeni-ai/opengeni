@@ -141,6 +141,8 @@ describe("portable Skill routes", () => {
       sourceCommit: "a".repeat(40),
       name: "release-operator",
       files: [{ path: "SKILL.md" }],
+      installed: false,
+      installationVersion: null,
     });
 
     sourceCommit = "c".repeat(40);
@@ -172,7 +174,48 @@ describe("portable Skill routes", () => {
       status: "installed",
     });
 
-    const encodedCapabilityId = encodeURIComponent(installed.capabilityId);
+    sourceCommit = "b".repeat(40);
+    const updatePreview = await request("/skills/preview", {
+      method: "POST",
+      body: JSON.stringify({ url: sourceUrl }),
+    }).then(async (response) => await response.json());
+    expect(updatePreview).toMatchObject({
+      installed: true,
+      installationVersion: installed.installationVersion,
+    });
+    const missingUpdateFence = await request("/skills/install", {
+      method: "POST",
+      body: JSON.stringify({
+        url: sourceUrl,
+        expectedSourceCommit: updatePreview.sourceCommit,
+        expectedContentSha256: updatePreview.contentSha256,
+      }),
+    });
+    expect(missingUpdateFence.status).toBe(400);
+    const staleUpdate = await request("/skills/install", {
+      method: "POST",
+      body: JSON.stringify({
+        url: sourceUrl,
+        expectedSourceCommit: updatePreview.sourceCommit,
+        expectedContentSha256: updatePreview.contentSha256,
+        expectedInstallationVersion: installed.installationVersion + 1,
+      }),
+    });
+    expect(staleUpdate.status).toBe(409);
+    const updatedResponse = await request("/skills/install", {
+      method: "POST",
+      body: JSON.stringify({
+        url: sourceUrl,
+        expectedSourceCommit: updatePreview.sourceCommit,
+        expectedContentSha256: updatePreview.contentSha256,
+        expectedInstallationVersion: installed.installationVersion,
+      }),
+    });
+    expect(updatedResponse.status).toBe(200);
+    const updated = await updatedResponse.json();
+    expect(updated.installationVersion).toBe(installed.installationVersion + 1);
+
+    const encodedCapabilityId = encodeURIComponent(updated.capabilityId);
     const uninstallPreviewResponse = await request(
       `/skills/${encodedCapabilityId}/uninstall-preview`,
     );
@@ -180,13 +223,15 @@ describe("portable Skill routes", () => {
     const uninstallPreview = await uninstallPreviewResponse.json();
     expect(uninstallPreview).toMatchObject({
       installed: true,
-      installationVersion: 1,
+      installationVersion: updated.installationVersion,
       removesRuntimeSkill: true,
     });
 
     const stale = await request(`/skills/${encodedCapabilityId}`, {
       method: "DELETE",
-      body: JSON.stringify({ expectedInstallationVersion: 2 }),
+      body: JSON.stringify({
+        expectedInstallationVersion: uninstallPreview.installationVersion + 1,
+      }),
     });
     expect(stale.status).toBe(409);
 
@@ -198,7 +243,7 @@ describe("portable Skill routes", () => {
     });
     expect(removed.status).toBe(200);
     expect(await removed.json()).toEqual({
-      capabilityId: installed.capabilityId,
+      capabilityId: updated.capabilityId,
       status: "uninstalled",
       remainingOwners: [],
     });

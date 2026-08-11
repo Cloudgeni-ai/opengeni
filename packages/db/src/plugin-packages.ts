@@ -32,6 +32,22 @@ export type InstalledPluginPackage = {
   status: string;
 };
 
+export type InstalledPluginPackageSummary = {
+  pluginKey: string;
+  version: string;
+  name: string;
+  description: string;
+  category: string;
+  tags: string[];
+  sourceUrl: string | null;
+  manifestDigest: string;
+  installationVersion: number;
+  componentCount: number;
+  status: "active" | "needs_attention";
+  installedAt: string;
+  updatedAt: string;
+};
+
 export type PreparedPluginPackage = InstalledPluginPackage & {
   operationId: string;
   replayResult: Record<string, unknown> | null;
@@ -86,6 +102,77 @@ export async function getInstalledPluginPackage(
       )
       .limit(1);
     return row ?? null;
+  });
+}
+
+export async function listInstalledPluginPackages(
+  db: Database,
+  workspaceId: string,
+): Promise<InstalledPluginPackageSummary[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({
+        pluginKey: schema.capabilityPlugins.pluginKey,
+        version: schema.capabilityPluginVersions.version,
+        name: schema.capabilityPlugins.name,
+        description: schema.capabilityPlugins.description,
+        category: schema.capabilityPlugins.category,
+        tags: schema.capabilityPlugins.tags,
+        manifestDigest: schema.capabilityPluginVersions.manifestDigest,
+        manifest: schema.capabilityPluginVersions.manifest,
+        installationVersion: schema.capabilityPluginInstallations.version,
+        status: schema.capabilityPluginInstallations.status,
+        installedAt: schema.capabilityPluginInstallations.installedAt,
+        updatedAt: schema.capabilityPluginInstallations.updatedAt,
+      })
+      .from(schema.capabilityPluginInstallations)
+      .innerJoin(
+        schema.capabilityPlugins,
+        eq(schema.capabilityPlugins.id, schema.capabilityPluginInstallations.pluginId),
+      )
+      .innerJoin(
+        schema.capabilityPluginVersions,
+        eq(
+          schema.capabilityPluginVersions.id,
+          schema.capabilityPluginInstallations.pluginVersionId,
+        ),
+      )
+      .where(
+        and(
+          eq(schema.capabilityPluginInstallations.workspaceId, workspaceId),
+          inArray(schema.capabilityPluginInstallations.status, ["active", "needs_attention"]),
+          sql`jsonb_typeof(${schema.capabilityPluginVersions.manifest} -> 'components') = 'array'`,
+          sql`jsonb_typeof(${schema.capabilityPluginVersions.manifest} -> 'bom') = 'array'`,
+        ),
+      )
+      .orderBy(asc(schema.capabilityPlugins.name), asc(schema.capabilityPlugins.pluginKey));
+
+    return rows.map((row) => {
+      const manifest = objectValue(row.manifest);
+      const sourceUrl = stringValue(manifest.sourceUrl);
+      const bom = pluginBom(manifest);
+      if (row.status !== "active" && row.status !== "needs_attention") {
+        throw new Error(`Unknown installed Plugin status: ${row.status}`);
+      }
+      return {
+        pluginKey: row.pluginKey,
+        version: row.version,
+        name: row.name,
+        description: row.description ?? "",
+        category: row.category,
+        tags:
+          stringArray(manifest.tags).length > 0
+            ? stringArray(manifest.tags)
+            : stringArray(row.tags),
+        sourceUrl: sourceUrl && safeHttpUrl(sourceUrl) ? sourceUrl : null,
+        manifestDigest: row.manifestDigest,
+        installationVersion: row.installationVersion,
+        componentCount: bom.length,
+        status: row.status,
+        installedAt: row.installedAt.toISOString(),
+        updatedAt: row.updatedAt.toISOString(),
+      };
+    });
   });
 }
 
@@ -1108,6 +1195,41 @@ function stringArray(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter((entry): entry is string => typeof entry === "string")
     : [];
+}
+
+function pluginBom(value: Record<string, unknown>): PluginBomComponent[] {
+  if (!Array.isArray(value.bom)) return [];
+  return value.bom.flatMap((entry) => {
+    const record = objectValue(entry);
+    const key = stringValue(record.key);
+    const capabilityId = stringValue(record.capabilityId);
+    const digest = stringValue(record.digest);
+    const kind = record.kind;
+    if (
+      !key ||
+      !capabilityId ||
+      !digest ||
+      !/^[0-9a-f]{64}$/.test(digest) ||
+      (kind !== "skill" && kind !== "integration" && kind !== "mcp")
+    ) {
+      return [];
+    }
+    return [{ key, capabilityId, digest, kind }];
+  });
+}
+
+function safeHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      (url.protocol === "https:" || url.protocol === "http:") &&
+      !url.username &&
+      !url.password &&
+      !url.hash
+    );
+  } catch {
+    return false;
+  }
 }
 
 function sha256(value: string): string {

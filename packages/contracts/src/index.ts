@@ -6939,6 +6939,8 @@ export const SkillImportPreview = z.object({
   totalBytes: z.number().int().positive().max(1048576),
   files: z.array(SkillImportFileSummary).min(1).max(128),
   warnings: z.array(z.string().min(1).max(500)).max(32).default([]),
+  installed: z.boolean().default(false),
+  installationVersion: z.number().int().positive().nullable().default(null),
 });
 export type SkillImportPreview = z.infer<typeof SkillImportPreview>;
 
@@ -6946,6 +6948,7 @@ export const InstallSkillRequest = z.object({
   url: z.string().url().max(2048),
   expectedSourceCommit: z.string().regex(/^[0-9a-f]{40,64}$/),
   expectedContentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+  expectedInstallationVersion: z.number().int().positive().optional(),
 });
 export type InstallSkillRequest = z.infer<typeof InstallSkillRequest>;
 
@@ -6956,6 +6959,7 @@ export const InstalledSkill = z.object({
   facetId: z.string().uuid(),
   pluginInstallationId: z.string().uuid(),
   facetInstallationId: z.string().uuid(),
+  installationVersion: z.number().int().positive(),
   source: SkillImportSource,
   sourceUrl: z.string().url(),
   sourceCommit: z.string().regex(/^[0-9a-f]{40,64}$/),
@@ -7405,6 +7409,30 @@ export const InstalledPlugin = z
   })
   .strict();
 export type InstalledPlugin = z.infer<typeof InstalledPlugin>;
+
+export const PluginInstallationSummary = z
+  .object({
+    pluginKey: z.string().min(1).max(200),
+    version: z.string().min(1).max(128),
+    name: z.string().min(1).max(200),
+    description: z.string().max(4000),
+    category: z.string().min(1).max(100),
+    tags: z.array(z.string().min(1).max(100)).max(64),
+    sourceUrl: z.string().url().max(2048).nullable(),
+    manifestDigest: z.string().regex(/^[0-9a-f]{64}$/),
+    installationVersion: z.number().int().positive(),
+    componentCount: z.number().int().nonnegative().max(64),
+    status: z.enum(["active", "needs_attention"]),
+    installedAt: z.string().datetime({ offset: true }),
+    updatedAt: z.string().datetime({ offset: true }),
+  })
+  .strict();
+export type PluginInstallationSummary = z.infer<typeof PluginInstallationSummary>;
+
+export const ListInstalledPluginsResponse = z
+  .object({ plugins: z.array(PluginInstallationSummary).max(1000) })
+  .strict();
+export type ListInstalledPluginsResponse = z.infer<typeof ListInstalledPluginsResponse>;
 
 export const PluginUninstallPreview = z
   .object({

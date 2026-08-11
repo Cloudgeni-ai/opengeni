@@ -55,6 +55,7 @@ import type {
   PluginPreview,
   InstallPluginRequest,
   InstalledPlugin,
+  ListInstalledPluginsResponse,
   PluginUninstallPreview,
   UninstallPluginRequest,
   UninstallPluginResult,
@@ -3713,6 +3714,13 @@ export class OpenGeniClient {
       "POST",
       `/v1/workspaces/${workspaceId}/plugins/preview`,
       request,
+    );
+  }
+
+  async listInstalledPlugins(workspaceId: string): Promise<ListInstalledPluginsResponse> {
+    return await this.requestJson<ListInstalledPluginsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/plugins`,
     );
   }
 

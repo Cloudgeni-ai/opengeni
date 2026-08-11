@@ -18,7 +18,7 @@ afterAll(() => GlobalRegistrator.unregister());
 
 describe("custom API components", () => {
   test("legacy Add custom no longer offers the generic API catalog path", async () => {
-    expect(ADD_CUSTOM_CATALOG_KINDS).toEqual(["mcp", "skill", "plugin"]);
+    expect(ADD_CUSTOM_CATALOG_KINDS).toEqual(["mcp"]);
     expect(ADD_CUSTOM_CATALOG_KINDS).not.toContain("api");
   });
 

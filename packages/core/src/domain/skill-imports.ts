@@ -126,6 +126,8 @@ export async function resolveSkillImport(
         };
       }),
       warnings,
+      installed: false,
+      installationVersion: null,
     },
     files: artifact.files,
   };

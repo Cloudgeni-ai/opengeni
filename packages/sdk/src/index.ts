@@ -759,6 +759,8 @@ export type {
   PluginPreview,
   InstallPluginRequest,
   InstalledPlugin,
+  PluginInstallationSummary,
+  ListInstalledPluginsResponse,
   PluginUninstallPreview,
   UninstallPluginRequest,
   UninstallPluginResult,

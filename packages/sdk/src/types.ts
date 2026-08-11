@@ -4283,12 +4283,15 @@ export type SkillImportPreview = {
   totalBytes: number;
   files: SkillImportFileSummary[];
   warnings: string[];
+  installed: boolean;
+  installationVersion: number | null;
 };
 
 export type InstallSkillRequest = {
   url: string;
   expectedSourceCommit: string;
   expectedContentSha256: string;
+  expectedInstallationVersion?: number | undefined;
 };
 
 export type InstalledSkill = {
@@ -4298,6 +4301,7 @@ export type InstalledSkill = {
   facetId: string;
   pluginInstallationId: string;
   facetInstallationId: string;
+  installationVersion: number;
   source: SkillImportSource;
   sourceUrl: string;
   sourceCommit: string;
@@ -4575,6 +4579,26 @@ export type InstalledPlugin = {
   installationVersion: number;
   componentCount: number;
   status: "installed";
+};
+
+export type PluginInstallationSummary = {
+  pluginKey: string;
+  version: string;
+  name: string;
+  description: string;
+  category: string;
+  tags: string[];
+  sourceUrl: string | null;
+  manifestDigest: string;
+  installationVersion: number;
+  componentCount: number;
+  status: "active" | "needs_attention";
+  installedAt: string;
+  updatedAt: string;
+};
+
+export type ListInstalledPluginsResponse = {
+  plugins: PluginInstallationSummary[];
 };
 
 export type PluginUninstallPreview = {

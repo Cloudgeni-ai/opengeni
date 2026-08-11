@@ -19,6 +19,7 @@ import {
   getPortableSkillUninstallPreview,
   installPortableSkill,
   PortableSkillInstallationVersionConflictError,
+  PortableSkillInstallationVersionRequiredError,
   uninstallPortableSkill,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
@@ -42,7 +43,18 @@ export function registerSkillRoutes(
     await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     const payload = PreviewSkillImportRequest.parse(await c.req.json());
     const resolved = await resolveForRoute(payload.url, github);
-    return c.json(SkillImportPreview.parse(resolved.preview));
+    const installed = await getPortableSkillUninstallPreview(
+      deps.db,
+      workspaceId,
+      portableSkillCapabilityId(resolved.preview),
+    );
+    return c.json(
+      SkillImportPreview.parse({
+        ...resolved.preview,
+        installed: installed.installed,
+        installationVersion: installed.installationVersion,
+      }),
+    );
   });
 
   app.post("/v1/workspaces/:workspaceId/skills/install", async (c) => {
@@ -62,33 +74,51 @@ export function registerSkillRoutes(
     const fileSummaryByPath = new Map(
       resolved.preview.files.map((file) => [file.path, file] as const),
     );
-    const installed = await installPortableSkill(deps.db, {
-      accountId: grant.accountId,
-      workspaceId,
-      subjectId: grant.subjectId,
-      capabilityId: portableSkillCapabilityId(resolved.preview),
-      pluginKey: portableSkillPluginKey(resolved.preview),
-      source: resolved.preview.source,
-      sourceUrl: resolved.preview.sourceUrl,
-      repositoryUrl: resolved.preview.repositoryUrl,
-      sourceCommit: resolved.preview.sourceCommit,
-      sourcePath: resolved.preview.sourcePath,
-      name: resolved.preview.name,
-      description: resolved.preview.description,
-      contentSha256: resolved.preview.contentSha256,
-      totalBytes: resolved.preview.totalBytes,
-      files: resolved.files.map((file) => {
-        const summary = fileSummaryByPath.get(file.path);
-        if (!summary) throw new Error(`Skill preview omitted ${file.path}`);
-        return {
-          path: file.path,
-          content: file.content,
-          byteSize: summary.byteSize,
-          contentSha256: summary.contentSha256,
-        };
-      }),
-    });
-    return c.json(InstalledSkill.parse({ ...installed, status: "installed" }), 201);
+    try {
+      const installed = await installPortableSkill(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+        capabilityId: portableSkillCapabilityId(resolved.preview),
+        pluginKey: portableSkillPluginKey(resolved.preview),
+        source: resolved.preview.source,
+        sourceUrl: resolved.preview.sourceUrl,
+        repositoryUrl: resolved.preview.repositoryUrl,
+        sourceCommit: resolved.preview.sourceCommit,
+        sourcePath: resolved.preview.sourcePath,
+        name: resolved.preview.name,
+        description: resolved.preview.description,
+        contentSha256: resolved.preview.contentSha256,
+        totalBytes: resolved.preview.totalBytes,
+        ...(payload.expectedInstallationVersion !== undefined
+          ? { expectedInstallationVersion: payload.expectedInstallationVersion }
+          : {}),
+        files: resolved.files.map((file) => {
+          const summary = fileSummaryByPath.get(file.path);
+          if (!summary) throw new Error(`Skill preview omitted ${file.path}`);
+          return {
+            path: file.path,
+            content: file.content,
+            byteSize: summary.byteSize,
+            contentSha256: summary.contentSha256,
+          };
+        }),
+      });
+      return c.json(
+        InstalledSkill.parse({ ...installed, status: "installed" }),
+        payload.expectedInstallationVersion === undefined ? 201 : 200,
+      );
+    } catch (error) {
+      if (error instanceof PortableSkillInstallationVersionRequiredError) {
+        throw new HTTPException(400, { message: error.message });
+      }
+      if (error instanceof PortableSkillInstallationVersionConflictError) {
+        throw new HTTPException(409, {
+          message: "The Skill changed after preview. Review the current installation again.",
+        });
+      }
+      throw error;
+    }
   });
 
   app.get("/v1/workspaces/:workspaceId/skills/:capabilityId/uninstall-preview", async (c) => {

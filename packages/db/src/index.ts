@@ -3920,6 +3920,7 @@ export type InstallPortableSkillInput = {
     contentSha256: string;
   }>;
   owner?: PortableSkillOwner;
+  expectedInstallationVersion?: number;
 };
 
 export type InstalledPortableSkill = {
@@ -3929,6 +3930,7 @@ export type InstalledPortableSkill = {
   facetId: string;
   pluginInstallationId: string;
   facetInstallationId: string;
+  installationVersion: number;
   source: "github" | "skills_sh";
   sourceUrl: string;
   sourceCommit: string;
@@ -3980,6 +3982,10 @@ export class PortableSkillInstallationVersionConflictError extends Error {
       `Portable Skill installation ${capabilityId} changed: expected version ${expectedVersion}, current version ${actualVersion}`,
     );
   }
+}
+
+export class PortableSkillInstallationVersionRequiredError extends Error {
+  readonly name = "PortableSkillInstallationVersionRequiredError";
 }
 
 export type EnabledMcpCapabilityServer = {
@@ -6165,6 +6171,27 @@ export async function installPortableSkill(
           )
           .for("update")
           .limit(1);
+        const changesInstalledVersion = Boolean(
+          pluginInstallation &&
+          pluginInstallation.status !== "disabled" &&
+          (pluginInstallation.pluginVersionId !== pluginVersion.id ||
+            pluginInstallation.status !== "active"),
+        );
+        const directInstall = !input.owner || input.owner.kind === "direct";
+        if (changesInstalledVersion && directInstall) {
+          if (input.expectedInstallationVersion === undefined) {
+            throw new PortableSkillInstallationVersionRequiredError(
+              "Updating a Skill requires the previewed installation version",
+            );
+          }
+          if (pluginInstallation!.version !== input.expectedInstallationVersion) {
+            throw new PortableSkillInstallationVersionConflictError(
+              input.capabilityId,
+              input.expectedInstallationVersion,
+              pluginInstallation!.version,
+            );
+          }
+        }
         if (pluginInstallation && pluginInstallation.pluginVersionId !== pluginVersion.id) {
           await assertCapabilityComponentVersionCanChange(tx as unknown as Database, {
             workspaceId: input.workspaceId,
@@ -6335,6 +6362,7 @@ export async function installPortableSkill(
           facetId: facet.id,
           pluginInstallationId: pluginInstallation.id,
           facetInstallationId: facetInstallation.id,
+          installationVersion: pluginInstallation.version,
           source: input.source,
           sourceUrl: input.sourceUrl,
           sourceCommit: input.sourceCommit,
@@ -51403,12 +51431,14 @@ export {
   getInstalledPluginPackage,
   getPluginPackageUninstallPreview,
   installPluginMcpReference,
+  listInstalledPluginPackages,
   PluginInstallationVersionConflictError,
   PluginInstallationVersionRequiredError,
   PluginOperationIdempotencyError,
   preparePluginPackageInstall,
   uninstallPluginPackage,
   type InstalledPluginPackage,
+  type InstalledPluginPackageSummary,
   type PluginBomComponent,
   type PreparedPluginPackage,
 } from "./plugin-packages";

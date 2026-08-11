@@ -44,6 +44,7 @@ import {
   UninstallApiIntegrationResult as ContractUninstallApiIntegrationResult,
   InstallPluginRequest as ContractInstallPluginRequest,
   InstalledPlugin as ContractInstalledPlugin,
+  ListInstalledPluginsResponse as ContractListInstalledPluginsResponse,
   PluginManifest as ContractPluginManifest,
   PluginPreview as ContractPluginPreview,
   PluginUninstallPreview as ContractPluginUninstallPreview,
@@ -141,6 +142,7 @@ import type {
   UninstallApiIntegrationResult,
   InstallPluginRequest,
   InstalledPlugin,
+  ListInstalledPluginsResponse,
   PluginManifest,
   PluginPreview,
   PluginUninstallPreview,
@@ -725,6 +727,9 @@ describe("SDK / contracts parity", () => {
     const acceptPreview = (value: z.infer<typeof ContractPluginPreview>): PluginPreview => value;
     const acceptInstalled = (value: z.infer<typeof ContractInstalledPlugin>): InstalledPlugin =>
       value;
+    const acceptList = (
+      value: z.infer<typeof ContractListInstalledPluginsResponse>,
+    ): ListInstalledPluginsResponse => value;
     const acceptUninstallPreview = (
       value: z.infer<typeof ContractPluginUninstallPreview>,
     ): PluginUninstallPreview => value;
@@ -736,6 +741,7 @@ describe("SDK / contracts parity", () => {
         acceptManifest,
         acceptPreview,
         acceptInstalled,
+        acceptList,
         acceptUninstallPreview,
         acceptUninstallResult,
       ].every((fn) => typeof fn === "function"),

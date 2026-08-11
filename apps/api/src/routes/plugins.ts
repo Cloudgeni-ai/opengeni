@@ -9,6 +9,7 @@ import type { McpServerConfig } from "@opengeni/config";
 import {
   InstallPluginRequest,
   InstalledPlugin,
+  ListInstalledPluginsResponse,
   PluginManifest,
   PluginPreview,
   PluginUninstallPreview,
@@ -39,6 +40,7 @@ import {
   installApiIntegration,
   installPluginMcpReference,
   installPortableSkill,
+  listInstalledPluginPackages,
   PluginInstallationVersionConflictError,
   PluginInstallationVersionRequiredError,
   PluginOperationIdempotencyError,
@@ -87,6 +89,16 @@ export function registerPluginRoutes(
   const transport = createPinnedIntegrationTransport({
     network: deps.settings,
     ...(overrides.fetchImpl ? { fetchImpl: overrides.fetchImpl } : {}),
+  });
+
+  app.get("/v1/workspaces/:workspaceId/plugins", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    return c.json(
+      ListInstalledPluginsResponse.parse({
+        plugins: await listInstalledPluginPackages(deps.db, workspaceId),
+      }),
+    );
   });
 
   app.post("/v1/workspaces/:workspaceId/plugins/preview", async (c) => {

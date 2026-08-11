@@ -14,20 +14,17 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   capabilityFormError,
-  capabilityKindLabel,
   emptyCapabilityForm,
   type CapabilityFormState,
 } from "@/lib/capabilities";
-import { cn } from "@/lib/utils";
 import type { CapabilityKind } from "@/types";
 
 type AddableKind = Exclude<CapabilityKind, "pack">;
-export const ADD_CUSTOM_CATALOG_KINDS: AddableKind[] = ["mcp", "skill", "plugin"];
+export const ADD_CUSTOM_CATALOG_KINDS: AddableKind[] = ["mcp"];
 
 /**
- * "Add custom" owns legacy catalog-backed MCP, Skill, and Plugin rows. Custom
- * APIs deliberately do not appear here: the Integration Control Center routes
- * every OpenAPI/GraphQL source through immutable preview-before-install.
+ * Legacy catalog creation is now MCP-only. Skills, Plugins, OpenAPI, and
+ * GraphQL sources have dedicated immutable preview-before-install flows.
  */
 export function AddCustomDialog({
   open,
@@ -46,7 +43,6 @@ export function AddCustomDialog({
     if (open) setForm(emptyCapabilityForm());
   }, [open]);
 
-  const isMcp = form.kind === "mcp";
   const error = capabilityFormError(form);
   const update = (patch: Partial<CapabilityFormState>) =>
     setForm((current) => ({ ...current, ...patch }));
@@ -55,10 +51,10 @@ export function AddCustomDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>Add a custom capability</DialogTitle>
+          <DialogTitle>Add MCP server</DialogTitle>
           <DialogDescription>
-            Add a remote MCP server, Skill, or Plugin. Use Connect custom API for OpenAPI and
-            GraphQL.
+            Register a remote MCP server. Use the dedicated source review flows for Skills, Plugins,
+            OpenAPI, and GraphQL.
           </DialogDescription>
         </DialogHeader>
 
@@ -69,28 +65,6 @@ export function AddCustomDialog({
             if (!error && !busy) onSubmit(form);
           }}
         >
-          {/* Kind picker */}
-          <div className="grid gap-1.5">
-            <Label className="text-xs text-fg-muted">Type</Label>
-            <div className="grid gap-1.5 rounded-lg border border-border bg-surface/50 p-1 sm:grid-cols-3">
-              {ADD_CUSTOM_CATALOG_KINDS.map((kind) => (
-                <button
-                  key={kind}
-                  type="button"
-                  onClick={() => update({ kind })}
-                  className={cn(
-                    "rounded-md px-2 py-1.5 text-xs font-medium transition-colors",
-                    form.kind === kind
-                      ? "bg-surface-2 text-fg shadow-sm"
-                      : "text-fg-subtle hover:text-fg-muted",
-                  )}
-                >
-                  {capabilityKindLabel(kind)}
-                </button>
-              ))}
-            </div>
-          </div>
-
           <div className="grid gap-1.5">
             <Label htmlFor="add-name" className="text-xs text-fg-muted">
               Name
@@ -99,41 +73,23 @@ export function AddCustomDialog({
               id="add-name"
               value={form.name}
               onChange={(event) => update({ name: event.target.value })}
-              placeholder={
-                isMcp ? "e.g. Internal Tools MCP" : `e.g. ${capabilityKindLabel(form.kind)} name`
-              }
+              placeholder="e.g. Internal Tools MCP"
               autoFocus
             />
           </div>
 
-          {/* Endpoint URL — MCP servers only. */}
-          {isMcp ? (
-            <div className="grid gap-1.5">
-              <Label htmlFor="add-endpoint" className="text-xs text-fg-muted">
-                Server URL
-              </Label>
-              <Input
-                id="add-endpoint"
-                value={form.endpointUrl}
-                onChange={(event) => update({ endpointUrl: event.target.value })}
-                placeholder="https://mcp.example.com/sse"
-                inputMode="url"
-              />
-            </div>
-          ) : (
-            <div className="grid gap-1.5">
-              <Label htmlFor="add-homepage" className="text-xs text-fg-muted">
-                Homepage <span className="text-fg-subtle">(optional)</span>
-              </Label>
-              <Input
-                id="add-homepage"
-                value={form.homepageUrl}
-                onChange={(event) => update({ homepageUrl: event.target.value })}
-                placeholder="https://example.com"
-                inputMode="url"
-              />
-            </div>
-          )}
+          <div className="grid gap-1.5">
+            <Label htmlFor="add-endpoint" className="text-xs text-fg-muted">
+              Server URL
+            </Label>
+            <Input
+              id="add-endpoint"
+              value={form.endpointUrl}
+              onChange={(event) => update({ endpointUrl: event.target.value })}
+              placeholder="https://mcp.example.com/sse"
+              inputMode="url"
+            />
+          </div>
 
           <div className="grid gap-1.5">
             <Label htmlFor="add-description" className="text-xs text-fg-muted">
@@ -164,7 +120,7 @@ export function AddCustomDialog({
             </Button>
             <Button type="submit" disabled={busy || Boolean(error)}>
               {busy ? <Loader2Icon className="animate-spin" /> : <PlusIcon />}
-              Add {capabilityKindLabel(form.kind)}
+              Add MCP server
             </Button>
           </DialogFooter>
         </form>

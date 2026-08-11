@@ -329,6 +329,21 @@ describe("Plugin routes", () => {
       componentCount: 3,
       status: "installed",
     });
+    const listedA = await request("/plugins");
+    expect(listedA.status).toBe(200);
+    expect(await listedA.json()).toEqual({
+      plugins: [
+        expect.objectContaining({
+          pluginKey: "example/plugin-a",
+          version: "1.0.0",
+          sourceUrl: "https://127.0.0.1/plugin-a.json",
+          manifestDigest: previewA.manifestDigest,
+          installationVersion: installedABody.installationVersion,
+          componentCount: 3,
+          status: "active",
+        }),
+      ],
+    });
     const replayA = await install("https://127.0.0.1/plugin-a.json", previewA, operationA);
     expect(replayA.status).toBe(200);
     expect(await replayA.json()).toEqual(installedABody);
@@ -432,6 +447,7 @@ describe("Plugin routes", () => {
     expect(await listInstalledPortableSkills(client.db, workspaceId)).toHaveLength(0);
     expect(await listInstalledApiIntegrations(client.db, workspaceId)).toHaveLength(0);
     expect(await listEnabledMcpCapabilityServers(client.db, workspaceId)).toHaveLength(0);
+    expect(await (await request("/plugins")).json()).toEqual({ plugins: [] });
   }, 120_000);
 
   test("serializes concurrent Plugins that install one shared component identity", async () => {

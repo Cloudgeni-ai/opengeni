@@ -214,13 +214,19 @@ Connection.
 
 The owning endpoints are:
 
+- `GET /v1/workspaces/:workspaceId/plugins`
 - `POST /v1/workspaces/:workspaceId/plugins/preview`
 - `POST /v1/workspaces/:workspaceId/plugins/install`
 - `GET /v1/workspaces/:workspaceId/plugins/:pluginKey/uninstall-preview`
 - `DELETE /v1/workspaces/:workspaceId/plugins/:pluginKey`
 
-The SDK mirrors these as `previewPlugin`, `installPlugin`,
-`previewPluginUninstall`, and `uninstallPlugin`.
+The list projection returns only top-level installed Plugin packages, never the
+internal Plugin records that back direct Skills, Integrations, or MCP
+components. It contains metadata and immutable/version facts only: Plugin key,
+version, source URL, manifest digest, installation version, component count,
+status, and timestamps. The SDK mirrors these as `listInstalledPlugins`,
+`previewPlugin`, `installPlugin`, `previewPluginUninstall`, and
+`uninstallPlugin`.
 
 ## Curated skill library
 
@@ -269,7 +275,12 @@ symlinks, submodules, traversal, invalid UTF-8, duplicate paths, missing
 frontmatter, and bounded-size violations, then returns file digests without
 returning file contents. Install repeats source resolution and requires both
 the previewed commit and whole-artifact SHA-256 to match; source drift is a
-`409` and never installs unreviewed bytes.
+`409` and never installs unreviewed bytes. Preview also reports whether that
+exact Skill is already installed and its current installation version.
+Updating an installed direct Skill requires that optimistic-concurrency
+version; omission is rejected and a stale version returns `409`, so two
+administrators cannot silently overwrite each other's accepted source
+revision.
 
 The normalized v2 persistence model stores the immutable Plugin version, Skill
 facet, exact text files, workspace installation, and component owners under
@@ -337,11 +348,21 @@ Open the **Capabilities** view in the web app to:
 - filter and search the local catalog
 - install and configure role Packs
 - add and enable public MCP Registry results
-- add and connect manual MCP integrations
+- add and connect manual MCP integrations through the MCP-only catalog form
 - detect, review, authenticate, and install custom OpenAPI or GraphQL APIs
 - manage multiple named custom API instances, updates, reconnects, and removals
-- install immutable Skills and inspect their provenance
+- import GitHub/skills.sh Skills through immutable file/commit review, then update or remove the direct owner under an installation-version fence
+- install Plugin manifests through immutable manifest/component review, bind each credentialed component to one exact active Connection, inspect update diffs, and remove only Plugin-owned components
 - select enabled custom MCPs in the agent composer
+
+Workspace-imported Skills and top-level Plugins render in a dedicated **Skills
+and Plugins** section instead of the generic catalog grid. Imported Skills are
+filtered out of the legacy Enabled/Browse projections so the same installation
+never appears twice. Closing and reopening an in-progress source dialog retains
+its input and error state; Plugin mutation retries retain one stable idempotency
+key, while every changed Connection binding must be re-previewed before the
+final install/update action becomes available. Connection-list load failure is
+shown as unavailable data, not misreported as an empty account inventory.
 
 The official MCP Registry is public metadata. Evaluate any server and its endpoint before enabling it in a workspace with sensitive data.
 

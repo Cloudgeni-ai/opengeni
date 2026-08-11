@@ -11,6 +11,7 @@ import {
   installPortableSkill,
   listInstalledPortableSkills,
   PortableSkillInstallationVersionConflictError,
+  PortableSkillInstallationVersionRequiredError,
   uninstallPortableSkill,
   type DbClient,
   type InstallPortableSkillInput,
@@ -207,5 +208,30 @@ describe("portable Skill persistence", () => {
     expect(await listInstalledPortableSkills(client.db, first.workspaceId)).toEqual([
       expect.objectContaining({ capabilityId: input.capabilityId }),
     ]);
+  }, 60_000);
+
+  test("requires and validates the current installation version before a direct update", async () => {
+    if (!available || !client) return;
+    const initial = skillInput("deployment-reviewer");
+    const installed = await installPortableSkill(client.db, initial);
+    const updated = skillInput("deployment-reviewer");
+    updated.sourceCommit = "b".repeat(40);
+    updated.sourceUrl = updated.sourceUrl.replace("a".repeat(40), "b".repeat(40));
+
+    await expect(installPortableSkill(client.db, updated)).rejects.toBeInstanceOf(
+      PortableSkillInstallationVersionRequiredError,
+    );
+    await expect(
+      installPortableSkill(client.db, { ...updated, expectedInstallationVersion: 9 }),
+    ).rejects.toBeInstanceOf(PortableSkillInstallationVersionConflictError);
+    expect(
+      await installPortableSkill(client.db, {
+        ...updated,
+        expectedInstallationVersion: installed.installationVersion,
+      }),
+    ).toMatchObject({
+      sourceCommit: "b".repeat(40),
+      installationVersion: installed.installationVersion + 1,
+    });
   }, 60_000);
 });

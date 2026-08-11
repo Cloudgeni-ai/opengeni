@@ -35,6 +35,8 @@ import { IntegrationControlCenter } from "@/components/capabilities/integration-
 import { PacksSection } from "@/components/capabilities/packs-section";
 import { PersonalSlackAccountCard } from "@/components/capabilities/personal-slack-account-card";
 import { SlackReactionSummonCard } from "@/components/capabilities/slack-reaction-summon-card";
+import { isWorkspaceImportedSkill } from "@/components/capabilities/source-import-flow";
+import { SourcePackagesSection } from "@/components/capabilities/source-packages-section";
 import { LoadErrorState, PageHeader } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
@@ -93,6 +95,7 @@ const GoogleDriveConnectorCard = lazy(async () => {
 import type {
   AccessContext,
   CapabilityCatalogItem,
+  CapabilityInstallation,
   CapabilityPack,
   ConnectorDocumentDestinationAuthority,
   ConnectionMetadata,
@@ -240,6 +243,7 @@ export function CapabilitiesRoute({
   );
 
   const [items, setItems] = useState<CapabilityCatalogItem[]>([]);
+  const [installations, setInstallations] = useState<CapabilityInstallation[]>([]);
   // null = connections have not loaded (or the load failed, e.g. the grant lacks
   // connections:read); an array = loaded, even when empty. Health must not treat a
   // failed load as "every connection was deleted".
@@ -283,10 +287,17 @@ export function CapabilitiesRoute({
   const variableSets = useVariableSets({ workspaceId });
 
   const counts = useMemo(() => capabilityCounts(items), [items]);
-  const catalogView = listViewState({ loading, error: loadError, count: items.length });
+  const catalogView = listViewState({
+    loading,
+    error: loadError,
+    count: items.length,
+  });
 
   const filtered = useMemo(
-    () => filterCapabilityCatalogItems(items, filter, query).filter((item) => item.kind !== "pack"),
+    () =>
+      filterCapabilityCatalogItems(items, filter, query).filter(
+        (item) => item.kind !== "pack" && !isWorkspaceImportedSkill(item),
+      ),
     [items, filter, query],
   );
   // The Enabled strip is the daily-management surface; Browse shows the rest of
@@ -315,6 +326,7 @@ export function CapabilitiesRoute({
   const canManageSlackReaction = canManageSlackReactionSummon(context.accessContext, workspaceId);
 
   const showPacks = filter === "all" || filter === "pack";
+  const showSourcePackages = filter === "all" || filter === "skill" || filter === "plugin";
   const showCatalog = filter !== "pack";
 
   const logoUrl = useCallback(
@@ -441,6 +453,7 @@ export function CapabilitiesRoute({
         client.listSocialConnections(workspaceId).catch(() => null),
       ]);
       setItems(catalog.items);
+      setInstallations(catalog.installations);
       // Don't clobber previously-loaded connections with null on a failed refetch
       // (that would flip healthy items to "unverified" until the next reload); a
       // first-load failure leaves the prior null = "not loaded", which is correct.
@@ -800,7 +813,12 @@ export function CapabilitiesRoute({
       setSheetError(
         reason ? `Couldn't connect: ${reason}.` : "Couldn't connect. Please try again.",
       );
-      setSelected({ id: item.id, registry: false, snapshotFallback: false, snapshot: item });
+      setSelected({
+        id: item.id,
+        registry: false,
+        snapshotFallback: false,
+        snapshot: item,
+      });
     } else {
       toast.error("Connection failed", { description: reason ?? undefined });
     }
@@ -840,7 +858,12 @@ export function CapabilitiesRoute({
       const item = itemId ? (items.find((candidate) => candidate.id === itemId) ?? null) : null;
       if (item) {
         setSheetError(message);
-        setSelected({ id: item.id, registry: false, snapshotFallback: false, snapshot: item });
+        setSelected({
+          id: item.id,
+          registry: false,
+          snapshotFallback: false,
+          snapshot: item,
+        });
       } else {
         toast.error("Connection failed", { description: message });
       }
@@ -861,7 +884,12 @@ export function CapabilitiesRoute({
     window.history.replaceState(null, "", window.location.pathname);
     const item = items.find((candidate) => candidate.id === capabilityId);
     if (item) {
-      setSelected({ id: item.id, registry: false, snapshotFallback: false, snapshot: item });
+      setSelected({
+        id: item.id,
+        registry: false,
+        snapshotFallback: false,
+        snapshot: item,
+      });
     } else {
       setQuery(capabilityId.replace(/^[^:]+:/, ""));
       toast.error("That recommended capability is no longer available");
@@ -889,7 +917,12 @@ export function CapabilitiesRoute({
         normalizeProviderDomain(candidate.connectionRef.providerDomain) === target,
     );
     if (item) {
-      setSelected({ id: item.id, registry: false, snapshotFallback: false, snapshot: item });
+      setSelected({
+        id: item.id,
+        registry: false,
+        snapshotFallback: false,
+        snapshot: item,
+      });
     } else {
       setQuery(domain);
     }
@@ -915,6 +948,7 @@ export function CapabilitiesRoute({
       ]);
       freshItems = catalog.items;
       setItems(catalog.items);
+      setInstallations(catalog.installations);
       // Don't clobber previously-loaded connections with null on a failed refetch
       // (that would flip healthy items to "unverified" until the next reload).
       if (conns !== null) setConnections(conns);
@@ -978,7 +1012,12 @@ export function CapabilitiesRoute({
         ? ((freshItems ?? items).find((candidate) => candidate.id === itemId) ?? null)
         : null;
       if (item)
-        setSelected({ id: item.id, registry: false, snapshotFallback: false, snapshot: item });
+        setSelected({
+          id: item.id,
+          registry: false,
+          snapshotFallback: false,
+          snapshot: item,
+        });
       toast.error(copy.title, { description: copy.description });
     } finally {
       setBusyId(null);
@@ -1171,7 +1210,7 @@ export function CapabilitiesRoute({
               </Button>
               <Button type="button" onClick={() => setAddOpen(true)}>
                 <PlusIcon />
-                Add MCP, Skill, or Plugin
+                Add MCP server
               </Button>
             </>
           }
@@ -1462,6 +1501,23 @@ export function CapabilitiesRoute({
             </section>
           ) : null}
 
+          {showSourcePackages ? (
+            <SourcePackagesSection
+              client={client}
+              workspaceId={workspaceId}
+              items={items}
+              installations={installations}
+              connections={connections}
+              canManage={canManageApiIntegrationInstances}
+              filter={filter}
+              query={query}
+              onChanged={async () => {
+                await refresh();
+                onRuntimeChanged();
+              }}
+            />
+          ) : null}
+
           {/* Packs. */}
           {showPacks ? (
             <PacksSection
@@ -1603,9 +1659,17 @@ function EnabledCard({
   // the single status slot over staleness — which only gates discovery, still
   // runs fine, and so reads as quiet neutral text, never an amber alert.
   const status = needsAttention
-    ? { label: "Needs attention", dot: "bg-status-waiting", text: "text-status-waiting" }
+    ? {
+        label: "Needs attention",
+        dot: "bg-status-waiting",
+        text: "text-status-waiting",
+      }
     : item.stale
-      ? { label: "No longer in registry", dot: "bg-fg-subtle/60", text: "text-fg-subtle" }
+      ? {
+          label: "No longer in registry",
+          dot: "bg-fg-subtle/60",
+          text: "text-fg-subtle",
+        }
       : {
           label: health.state === "connected" ? "Connected" : "Enabled",
           dot: "bg-status-idle",
