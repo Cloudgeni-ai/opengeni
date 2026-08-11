@@ -20,6 +20,13 @@ const migrationPath = join(
   "../drizzle/0218_organization_tenancy_foundation.sql",
 );
 const schemaPath = join(dirname(fileURLToPath(import.meta.url)), "../src/schema.ts");
+const tenancyTables = [
+  "organization_memberships",
+  "organization_user_retention_policies",
+  "organization_user_resource_authorities",
+  "organization_user_resource_grants",
+] as const;
+const tenancySystemOnlyPolicy = "organization_tenancy_system_only";
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -93,14 +100,12 @@ describe("migration 0218 organization tenancy foundation", () => {
   test("is rolling, additive, legacy-safe, and intentionally runtime-inert", async () => {
     const migration = await readFile(migrationPath, "utf8");
     expect(migration.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: rolling");
-    for (const table of [
-      "organization_memberships",
-      "organization_user_retention_policies",
-      "organization_user_resource_authorities",
-      "organization_user_resource_grants",
-    ] as const) {
+    for (const table of tenancyTables) {
       expect(migration).toContain(`CREATE TABLE "${table}"`);
       expect(migration).toContain(`ALTER TABLE "${table}" FORCE ROW LEVEL SECURITY`);
+      expect(migration).toContain(
+        `CREATE POLICY ${tenancySystemOnlyPolicy} ON "${table}"\n  USING (false) WITH CHECK (false);`,
+      );
       expect(FORCE_RLS_TABLES).toContain(table);
       expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain(table);
       expect(RUNTIME_DML_TABLES).not.toContain(table);
@@ -111,7 +116,9 @@ describe("migration 0218 organization tenancy foundation", () => {
     expect(migration).toContain(
       `ADD COLUMN IF NOT EXISTS "authority_epoch" integer NOT NULL DEFAULT 1`,
     );
-    expect(migration).not.toContain("CREATE POLICY");
+    expect(migration.match(/CREATE POLICY organization_tenancy_system_only ON /gu)).toHaveLength(
+      tenancyTables.length,
+    );
     expect(migration).not.toMatch(
       /ALTER TABLE "(?:workspace_variable_sets|rigs|enrollments|codex_subscription_credentials)"/u,
     );
@@ -351,12 +358,91 @@ describe("migration 0218 organization tenancy foundation", () => {
       "23514",
     );
 
+    const policyRows = await shared.admin<
+      {
+        tableName: string;
+        rlsEnabled: boolean;
+        rlsForced: boolean;
+        policyCount: number;
+        policyNames: string[];
+        policyCommands: string[];
+        usingExpressions: string[];
+        checkExpressions: string[];
+        appSelect: boolean;
+        appInsert: boolean;
+        appUpdate: boolean;
+        appDelete: boolean;
+      }[]
+    >`
+      select
+        c.relname as "tableName",
+        c.relrowsecurity as "rlsEnabled",
+        c.relforcerowsecurity as "rlsForced",
+        count(p.oid)::int as "policyCount",
+        coalesce(
+          array_agg(p.polname order by p.polname) filter (where p.oid is not null),
+          '{}'::text[]
+        ) as "policyNames",
+        coalesce(
+          array_agg(p.polcmd::text order by p.polname) filter (where p.oid is not null),
+          '{}'::text[]
+        ) as "policyCommands",
+        coalesce(
+          array_agg(pg_get_expr(p.polqual, p.polrelid) order by p.polname)
+            filter (where p.oid is not null),
+          '{}'::text[]
+        ) as "usingExpressions",
+        coalesce(
+          array_agg(pg_get_expr(p.polwithcheck, p.polrelid) order by p.polname)
+            filter (where p.oid is not null),
+          '{}'::text[]
+        ) as "checkExpressions",
+        has_table_privilege('opengeni_app', c.oid, 'SELECT') as "appSelect",
+        has_table_privilege('opengeni_app', c.oid, 'INSERT') as "appInsert",
+        has_table_privilege('opengeni_app', c.oid, 'UPDATE') as "appUpdate",
+        has_table_privilege('opengeni_app', c.oid, 'DELETE') as "appDelete"
+      from pg_class c
+      join pg_namespace n on n.oid = c.relnamespace
+      left join pg_policy p on p.polrelid = c.oid
+      where n.nspname = current_schema()
+        and c.relname = any(${shared.admin.array([...tenancyTables])})
+      group by c.relname, c.relrowsecurity, c.relforcerowsecurity, c.oid
+      order by c.relname
+    `;
+    expect([...policyRows]).toEqual(
+      tenancyTables.map((tableName) => ({
+        tableName,
+        rlsEnabled: true,
+        rlsForced: true,
+        policyCount: 1,
+        policyNames: [tenancySystemOnlyPolicy],
+        policyCommands: ["*"],
+        usingExpressions: ["false"],
+        checkExpressions: ["false"],
+        appSelect: false,
+        appInsert: false,
+        appUpdate: false,
+        appDelete: false,
+      })),
+    );
+
     const app = postgres(shared.appUrl, { max: 1 });
     try {
-      await expectSqlState(
-        async () => await app`select id from organization_user_resource_authorities limit 1`,
-        "42501",
-      );
+      for (const table of tenancyTables) {
+        await expectSqlState(
+          async () => await app.unsafe(`select * from "${table}" limit 1`),
+          "42501",
+        );
+        await expectSqlState(
+          async () => await app.unsafe(`insert into "${table}" default values`),
+          "42501",
+        );
+        await expectSqlState(
+          async () => await app.unsafe(`update "${table}" set updated_at = updated_at`),
+          "42501",
+        );
+        await expectSqlState(async () => await app.unsafe(`delete from "${table}"`), "42501");
+      }
     } finally {
       await app.end();
     }

@@ -159,9 +159,11 @@ change.
   raw owner subject ids, provider identifiers, or credential material.
 - A caller-provided owner id is never authorization. Runtime activation must
   derive the authenticated membership and workspace grant server-side.
-- New Slice A authority tables are FORCE-RLS with no policies and no direct
-  application-role privileges. They are intentionally unusable until a later
-  reviewed activation slice.
+- New Slice A authority tables are FORCE-RLS with one explicit
+  `organization_tenancy_system_only` policy per table using
+  `USING (false) WITH CHECK (false)`, plus no direct application-role
+  privileges. They are intentionally unusable until a later reviewed
+  activation slice.
 - Existing workspace resource foreign keys and RLS policies remain unchanged.
 
 ## Explicitly deferred

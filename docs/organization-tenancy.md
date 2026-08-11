@@ -23,10 +23,12 @@ It adds:
 - generic session owner, `user_private|workspace_shared` visibility, authority
   epoch, and independent-fork provenance columns.
 
-The new authority tables are deliberately inert: FORCE RLS is enabled with no
-policies, and the standalone application role receives no direct table DML.
-Only migration/operator connections can inspect the scaffold. No API, SDK,
-worker, MCP, UI, or resource DAO uses it in Slice A.
+The new authority tables are deliberately inert: FORCE RLS is enabled with one
+explicit `organization_tenancy_system_only` policy per table using
+`USING (false) WITH CHECK (false)`, and the standalone application role
+receives no direct table DML. Privileged migration/operator connections can
+inspect the scaffold. No API, SDK, worker, MCP, UI, or resource DAO uses it in
+Slice A.
 
 ## Legacy behavior
 

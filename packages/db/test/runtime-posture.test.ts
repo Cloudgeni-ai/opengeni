@@ -417,6 +417,35 @@ describe("runtime database posture evaluator", () => {
     );
   });
 
+  test("accepts one explicit deny-all policy for protected no-DML tables", () => {
+    const posture = safePosture();
+    posture.tables = [
+      {
+        ...posture.tables[0]!,
+        name: "organization_memberships",
+        policyCount: 1,
+        select: false,
+        insert: false,
+        update: false,
+        delete: false,
+      },
+      ...knowledgeAuthorityTables(),
+    ];
+    const inertOptions: RuntimeDatabasePostureOptions = {
+      ...options,
+      protectedTables: ["organization_memberships"],
+      tablePrivileges: {},
+      protectedNoDirectDmlTables: ["organization_memberships"],
+    };
+
+    expect(evaluateRuntimeDatabasePosture(posture, inertOptions)).toEqual([]);
+
+    posture.tables[0]!.policyCount = 0;
+    expect(evaluateRuntimeDatabasePosture(posture, inertOptions)).toContain(
+      "table organization_memberships has no RLS policy",
+    );
+  });
+
   test("rejects a protected table without an explicit privilege class", () => {
     expect(
       evaluateRuntimeDatabasePosture(safePosture(), {

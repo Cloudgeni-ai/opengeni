@@ -251,9 +251,10 @@ CREATE UNIQUE INDEX "organization_user_resource_grants_id_account_idx"
 CREATE INDEX "organization_user_resource_grants_authority_workspace_idx"
   ON "organization_user_resource_grants" ("authority_id", "workspace_id", "status");
 
--- Slice A is intentionally inert. These tables have no policies and no direct
--- opengeni_app privileges, so FORCE RLS is a deny-all backstop until a later
--- reviewed dual-write/backfill/validate/activate slice installs exact behavior.
+-- Slice A is intentionally inert. Each table has one explicit system-only
+-- deny-all policy and no direct opengeni_app privileges, so the runtime role
+-- remains denied until a later reviewed dual-write/backfill/validate/activate
+-- slice installs exact behavior.
 ALTER TABLE "organization_memberships" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "organization_memberships" FORCE ROW LEVEL SECURITY;
 ALTER TABLE "organization_user_retention_policies" ENABLE ROW LEVEL SECURITY;
@@ -262,6 +263,19 @@ ALTER TABLE "organization_user_resource_authorities" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "organization_user_resource_authorities" FORCE ROW LEVEL SECURITY;
 ALTER TABLE "organization_user_resource_grants" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "organization_user_resource_grants" FORCE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS organization_tenancy_system_only ON "organization_memberships";
+CREATE POLICY organization_tenancy_system_only ON "organization_memberships"
+  USING (false) WITH CHECK (false);
+DROP POLICY IF EXISTS organization_tenancy_system_only ON "organization_user_retention_policies";
+CREATE POLICY organization_tenancy_system_only ON "organization_user_retention_policies"
+  USING (false) WITH CHECK (false);
+DROP POLICY IF EXISTS organization_tenancy_system_only ON "organization_user_resource_authorities";
+CREATE POLICY organization_tenancy_system_only ON "organization_user_resource_authorities"
+  USING (false) WITH CHECK (false);
+DROP POLICY IF EXISTS organization_tenancy_system_only ON "organization_user_resource_grants";
+CREATE POLICY organization_tenancy_system_only ON "organization_user_resource_grants"
+  USING (false) WITH CHECK (false);
 
 COMMENT ON TABLE "organization_memberships" IS
   'Organization membership and personal-workspace lifecycle metadata; not workspace content access.';
