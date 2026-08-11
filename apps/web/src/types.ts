@@ -3,6 +3,17 @@
 // console-local shapes (managed auth session and drafts) live here.
 export type {
   AccessContext,
+  AtlassianBrowseItem,
+  AtlassianBrowseResponse,
+  AtlassianConnectionLifecycle,
+  AtlassianConnectionMetadata,
+  AtlassianDisconnectRequest,
+  AtlassianLifecycleActionRequest,
+  AtlassianOAuthStartResponse,
+  AtlassianReadPolicy,
+  AtlassianSelectedSource,
+  AtlassianSourceKind,
+  AtlassianSyncCadence,
   AccessGrant,
   AccountGrant,
   AddWorkspaceMemberRequest,

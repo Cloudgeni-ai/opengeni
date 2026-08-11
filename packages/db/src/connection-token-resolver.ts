@@ -869,7 +869,16 @@ export async function refreshOAuthConnectionCredential(
   if (clientId) {
     body.set("client_id", clientId);
   }
-  const headers: Record<string, string> = { "content-type": "application/x-www-form-urlencoded" };
+  const tokenRequestEncoding =
+    stringValue(
+      (cred.credential as { token_request_encoding?: unknown }).token_request_encoding,
+    ) === "json"
+      ? "json"
+      : "form";
+  const headers: Record<string, string> = {
+    "content-type":
+      tokenRequestEncoding === "json" ? "application/json" : "application/x-www-form-urlencoded",
+  };
   if (clientSecret && authMethod === "client_secret_post") {
     body.set("client_secret", clientSecret);
   } else if (clientId && clientSecret && authMethod === "client_secret_basic") {
@@ -883,12 +892,14 @@ export async function refreshOAuthConnectionCredential(
   if (ref.scopes?.length) {
     body.set("scope", ref.scopes.join(" "));
   }
+  const requestBody: BodyInit =
+    tokenRequestEncoding === "json" ? JSON.stringify(Object.fromEntries(body.entries())) : body;
   const response = await pinnedFetch(
     validatedTokenEndpoint,
     {
       method: "POST",
       headers,
-      body,
+      body: requestBody,
       signal: AbortSignal.timeout(CONNECTION_REFRESH_TIMEOUT_MS),
     },
     settings,

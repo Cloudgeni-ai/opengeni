@@ -110,6 +110,7 @@ import {
   hasLiteralPermission,
   hasPermission,
   authorizedSocialConnectionsForGrant,
+  authorizedAtlassianConnectionsForGrant,
   buildCapabilityCatalog,
   correctWorkspaceMemoryWithSlackPublication,
   requireLiveAgentAttemptAuthorization,
@@ -204,6 +205,13 @@ import {
   createOpenGeniSlackBotClient,
   resolveSlackBotConnectionForTool,
 } from "../integrations/slack-bot";
+import {
+  browseAtlassianSources,
+  getAtlassianLiveItem,
+  revokeAtlassianScheduleAuthorization,
+  searchAtlassianLive,
+} from "../integrations/atlassian";
+import { AtlassianConnectionMetadata } from "@opengeni/contracts/atlassian";
 import { registerEditableArtifactAgentTools } from "./editable-artifacts";
 
 export type McpServerOptions = {
@@ -325,6 +333,9 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   slack_bot_file_content: { allOf: ["connections:read"] },
   slack_bot_post_message: { allOf: ["connections:read"] },
   slack_bot_delete_message: { allOf: ["connections:read"] },
+  atlassian_sources_list: { allOf: ["connections:read"] },
+  atlassian_search: { allOf: ["connections:read"] },
+  atlassian_get: { allOf: ["connections:read"] },
   artifacts_list: { sessionRequired: true, allOf: ["artifacts:read"] },
   artifacts_get_source: { sessionRequired: true, allOf: ["artifacts:read"] },
   artifacts_create: { sessionRequired: true, allOf: ["artifacts:publish"] },
@@ -523,6 +534,7 @@ export function buildOpenGeniMcpServer(
   }
   registerRigTools(server, deps, grant, can, sessionId, json);
   registerSlackBotTools(server, deps, grant, sessionId, json);
+  registerAtlassianTools(server, deps, grant, json);
 
   // Orchestration, variableSet, and GitHub status tools are permission-gated
   // at registration: a grant without the permission does not see the tool.
@@ -1187,10 +1199,17 @@ export function buildOpenGeniMcpServer(
       },
       async ({ id }) => {
         const task = await requireScheduledTask(deps.db, grant.workspaceId, id);
-        await revokeKnowledgeSourceScheduleAuthorization(deps, {
-          task,
-          subjectId: grant.subjectId,
-        });
+        if (task.metadata.connectorKind === "atlassian") {
+          await revokeAtlassianScheduleAuthorization(deps, {
+            task,
+            subjectId: grant.subjectId,
+          });
+        } else {
+          await revokeKnowledgeSourceScheduleAuthorization(deps, {
+            task,
+            subjectId: grant.subjectId,
+          });
+        }
         await deps.workflowClient.deleteScheduledTaskSchedule({
           temporalScheduleId: task.temporalScheduleId,
         });
@@ -1474,6 +1493,116 @@ function registerSlackBotTools(
       json(
         await (await clientFor(connectionId)).deleteMessage({ operationId, channelId, timestamp }),
       ),
+  );
+}
+
+function registerAtlassianTools(
+  server: McpServer,
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  json: JsonResult,
+): void {
+  const connectionFor = async (connectionId?: string) => {
+    const authorized = await authorizedAtlassianConnectionsForGrant({ db: deps.db, grant });
+    const candidates = authorized.filter(({ connection }) =>
+      connectionId ? connection.id === connectionId : true,
+    );
+    if (candidates.length === 0) {
+      throw new Error(
+        connectionId
+          ? "the requested Atlassian connection is unavailable for this turn"
+          : "no Atlassian connection is available for this turn",
+      );
+    }
+    if (!connectionId && candidates.length > 1) {
+      throw new Error(
+        "connectionId is required because multiple Atlassian connections are available",
+      );
+    }
+    const authority = candidates[0]!;
+    const metadata = AtlassianConnectionMetadata.safeParse(authority.connection.metadata);
+    if (!metadata.success) throw new Error("Atlassian connection metadata is invalid");
+    return {
+      connection: authority.connection,
+      metadata: metadata.data,
+      subjectId: authority.subjectId ?? grant.subjectId,
+    };
+  };
+
+  server.registerTool(
+    "atlassian_sources_list",
+    {
+      description:
+        "List the Jira projects and Confluence spaces available through the authorized Atlassian connection, including which sources are selected for OpenGeni. Use this before search when the site or boundary is unclear.",
+      inputSchema: { connectionId: z4.string().uuid().optional() },
+    },
+    async ({ connectionId }) => {
+      const authority = await connectionFor(connectionId);
+      const response = await browseAtlassianSources(deps, {
+        workspaceId: grant.workspaceId,
+        subjectId: authority.subjectId,
+        connectionId: authority.connection.id,
+      });
+      const selected = new Set(authority.metadata.selectedSources.map((source) => source.id));
+      return json({
+        connectionId: authority.connection.id,
+        account: authority.metadata.displayName,
+        items: response.items.map((item) => ({ ...item, selected: selected.has(item.id) })),
+      });
+    },
+  );
+
+  server.registerTool(
+    "atlassian_search",
+    {
+      description:
+        "Search Jira issues and Confluence pages live within the projects and spaces selected for OpenGeni. Results reflect current Atlassian data and permissions, independent of the knowledge sync index.",
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        query: z4.string().min(1).max(500),
+        product: z4.enum(["jira", "confluence"]).optional(),
+        limit: z4.number().int().min(1).max(50).optional(),
+      },
+    },
+    async ({ connectionId, query, product, limit }) => {
+      const authority = await connectionFor(connectionId);
+      return json({
+        connectionId: authority.connection.id,
+        results: await searchAtlassianLive(deps, {
+          workspaceId: grant.workspaceId,
+          subjectId: authority.subjectId,
+          connectionId: authority.connection.id,
+          query,
+          ...(product ? { product } : {}),
+          limit: limit ?? 20,
+        }),
+      });
+    },
+  );
+
+  server.registerTool(
+    "atlassian_get",
+    {
+      description:
+        "Open one current Jira issue or Confluence page, including description or page content and comments. The item must belong to a project or space selected for OpenGeni.",
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        kind: z4.enum(["jira_issue", "confluence_page"]),
+        id: z4.string().min(1).max(256),
+      },
+    },
+    async ({ connectionId, kind, id }) => {
+      const authority = await connectionFor(connectionId);
+      return json(
+        await getAtlassianLiveItem(deps, {
+          workspaceId: grant.workspaceId,
+          subjectId: authority.subjectId,
+          connectionId: authority.connection.id,
+          kind,
+          id,
+        }),
+      );
+    },
   );
 }
 

@@ -12,6 +12,7 @@ import { ClientResumableVoiceInputConfig } from "./transcription-recordings";
 import { MediaGenerationResult } from "./video-generation";
 
 export * from "./slack-bot-scopes";
+export * from "./atlassian";
 export * from "./connector-destinations";
 export * from "./memory-slack-delivery";
 export * from "./image-generation";
@@ -873,6 +874,9 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "slack_bot_file_content",
   "slack_bot_post_message",
   "slack_bot_delete_message",
+  "atlassian_sources_list",
+  "atlassian_search",
+  "atlassian_get",
   "artifacts_list",
   "artifacts_get_source",
   "artifacts_create",
@@ -939,7 +943,8 @@ export const EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS = {
  * any catalogued connector tool and remains independently permission-gated.
  */
 export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
-  (name) => !name.startsWith("social_") && !name.startsWith("slack_bot_"),
+  (name) =>
+    !name.startsWith("social_") && !name.startsWith("slack_bot_") && !name.startsWith("atlassian_"),
 ) satisfies readonly FirstPartyMcpToolName[];
 
 export function prefixedMcpToolName(registryId: string, toolName: string): string {
@@ -2941,7 +2946,7 @@ export const McpPersonalConnectionDelegation = z
     ownerSubjectId: z.string().min(1).max(512),
     providerDomain: z.string().min(1).max(2048),
     kind: z.enum(["oauth2", "api_key", "app_install", "delegated"]).optional(),
-    connectionType: z.enum(["mcp", "social"]).optional(),
+    connectionType: z.enum(["mcp", "social", "atlassian"]).optional(),
   })
   .strict();
 export type McpPersonalConnectionDelegation = z.infer<typeof McpPersonalConnectionDelegation>;
