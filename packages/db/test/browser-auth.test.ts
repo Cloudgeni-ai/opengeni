@@ -46,7 +46,7 @@ import {
   updateNetworkRoute,
   updateSiteAuthConnection,
   verifyAuthRun,
-  withWorkspaceSubjectRls,
+  withWorkspaceSubjectSessionActivityRls,
 } from "../src";
 
 let available = true;
@@ -156,9 +156,12 @@ async function activeBrowser(scope: Awaited<ReturnType<typeof fixture>>) {
 }
 
 async function claimTurn(scope: Awaited<ReturnType<typeof fixture>>) {
-  await withWorkspaceSubjectRls(client.db, scope.workspaceId, scope.actorSubjectId, (db) =>
-    db.transaction((tx) =>
-      submitHumanPromptInTransaction(tx as typeof db, {
+  await withWorkspaceSubjectSessionActivityRls(
+    client.db,
+    scope.workspaceId,
+    scope.actorSubjectId,
+    (db) =>
+      submitHumanPromptInTransaction(db, {
         accountId: scope.accountId,
         workspaceId: scope.workspaceId,
         sessionId: scope.sessionId,
@@ -171,7 +174,6 @@ async function claimTurn(scope: Awaited<ReturnType<typeof fixture>>) {
         reasoningEffortFallback: "low",
         source: "user",
       }),
-    ),
   );
   const attemptId = crypto.randomUUID();
   const claim = await claimSessionWorkForAttempt(client.db, scope.workspaceId, {
@@ -1979,9 +1981,12 @@ describe("browser auth and network resources", () => {
       expectedDocumentGeneration: "continued-document-generation",
       purpose: "health_check",
     });
-    await withWorkspaceSubjectRls(client.db, scope.workspaceId, scope.actorSubjectId, (db) =>
-      db.transaction((tx) =>
-        submitHumanPromptInTransaction(tx as typeof db, {
+    await withWorkspaceSubjectSessionActivityRls(
+      client.db,
+      scope.workspaceId,
+      scope.actorSubjectId,
+      (db) =>
+        submitHumanPromptInTransaction(db, {
           accountId: scope.accountId,
           workspaceId: scope.workspaceId,
           sessionId: claim!.sessionId,
@@ -1994,7 +1999,6 @@ describe("browser auth and network resources", () => {
           reasoningEffortFallback: "low",
           source: "user",
         }),
-      ),
     );
     expect(
       (
