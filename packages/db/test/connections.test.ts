@@ -1415,6 +1415,58 @@ describe("buildConnectionTokenResolver", () => {
     }
   });
 
+  test("provider credentials may request a JSON OAuth refresh body", async () => {
+    const originalFetch = globalThis.fetch;
+    let capturedBody: Record<string, unknown> | null = null;
+    let capturedContentType: string | null = null;
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      capturedContentType = new Headers(init?.headers).get("content-type");
+      return Response.json({
+        access_token: "AC2",
+        refresh_token: "RF2",
+        token_type: "Bearer",
+        expires_in: 3600,
+      });
+    }) as typeof fetch;
+    try {
+      const refreshed = await refreshOAuthConnectionCredential(
+        brokerCredential({
+          kind: "oauth2",
+          credential: {
+            access_token: "AC",
+            refresh_token: "RF",
+            token_endpoint: "https://auth.atlassian.com/oauth/token",
+            client_id: "client-id",
+            client_secret: "client-secret",
+            token_endpoint_auth_method: "client_secret_post",
+            token_request_encoding: "json",
+          },
+        }),
+        { providerDomain: "api.atlassian.com", kind: "oauth2" },
+        settings,
+        {
+          fetchImpl: globalThis.fetch,
+          dnsLookup: async () => [{ address: "93.184.216.34", family: 4 }],
+        },
+      );
+      expect(String(capturedContentType)).toBe("application/json");
+      expect(capturedBody as Record<string, unknown> | null).toEqual({
+        grant_type: "refresh_token",
+        refresh_token: "RF",
+        client_id: "client-id",
+        client_secret: "client-secret",
+      });
+      expect(refreshed.credential).toMatchObject({
+        access_token: "AC2",
+        refresh_token: "RF2",
+        token_request_encoding: "json",
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("a rejected refresh grant (4xx) marks the connection needs_reauth", async () => {
     const stale = brokerCredential({
       id: "conn_oauth",

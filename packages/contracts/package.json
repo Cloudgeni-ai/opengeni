@@ -30,6 +30,10 @@
       "types": "./src/google-drive.ts",
       "default": "./src/google-drive.ts"
     },
+    "./atlassian": {
+      "types": "./src/atlassian.ts",
+      "default": "./src/atlassian.ts"
+    },
     "./connector-destinations": {
       "types": "./src/connector-destinations.ts",
       "default": "./src/connector-destinations.ts"
