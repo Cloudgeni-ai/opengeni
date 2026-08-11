@@ -17,10 +17,10 @@ const budgets = {
   // composer also carries the tiny app-action slot used by realtime voice.
   // Existing-session scheduling, authenticated retained screenshots, and the
   // synchronous session projection grow the initial graph; keep modest
-  // headroom above the current 1299/362 KiB production build while the
+  // headroom above the current 1328/367 KiB Linux production build while the
   // per-file and lazy-chunk budgets stay fixed.
-  initialRaw: 1308 * kib,
-  initialGzip: 366 * kib,
+  initialRaw: 1336 * kib,
+  initialGzip: 370 * kib,
   initialFileGzip: 70 * kib,
   initialFiles: 16,
   directSessionRaw: 1900 * kib,

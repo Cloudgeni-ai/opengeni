@@ -87,7 +87,9 @@ afterAll(async () => {
 
 afterEach(async () => {
   if (!shared) return;
-  await shared.admin`delete from managed_accounts where name = 'slack bot acct'`;
+  // This database belongs exclusively to this test file. TRUNCATE resets the
+  // whole account subtree without violating append-only DELETE triggers.
+  await shared.admin`truncate table managed_accounts cascade`;
 });
 
 async function freshWorkspace(): Promise<{
