@@ -141,6 +141,8 @@ export type RoutingWiringIds = {
    * manifest environment variables." Optional → the resolver defaults to `{}`.
    */
   environment?: Record<string, string>;
+  /** Attempt-local values projected only onto Connected Machine child execs. */
+  transientExecEnvironment?: () => Readonly<Record<string, string>>;
   /**
    * Stage D machine-primary: PIN the already-established turn SelfhostedSession
    * (the `established` arg's session) for THIS machine pointer `(sandboxId, epoch)`
@@ -721,6 +723,9 @@ export function wrapTurnBoxWithRouting(
     // environment variables" throw when the turn pins to a vm). Mirrors the group
     // box, which is created WITH this same environment (resumeBoxForTurn).
     ...(ids.environment !== undefined ? { environment: ids.environment } : {}),
+    ...(ids.transientExecEnvironment !== undefined
+      ? { transientExecEnvironment: ids.transientExecEnvironment }
+      : {}),
     // Stage D machine-primary: pin THIS established SelfhostedSession for the machine
     // pointer so the resolver returns the SAME instance (no two-instance manifest
     // divergence). `established.session` is the SelfhostedSession the establish branch
@@ -907,6 +912,9 @@ export function wrapLazyTurnBoxWithRouting(
     ...selfhostedResolverTimeouts(settings),
     ...(onOp !== undefined ? { selfhostedOnOp: onOp } : {}),
     ...(ids.environment !== undefined ? { environment: ids.environment } : {}),
+    ...(ids.transientExecEnvironment !== undefined
+      ? { transientExecEnvironment: ids.transientExecEnvironment }
+      : {}),
   });
 
   const proxy = new RoutingSandboxSession({
@@ -1022,6 +1030,8 @@ export type SelfhostedTurnSessionArgs = {
    *  the manifest), threaded so the SDK's per-turn provided-session env delta is
    *  empty. */
   environment: Record<string, string>;
+  /** Attempt-local values projected only onto this machine's child execs. */
+  transientExecEnvironment?: () => Readonly<Record<string, string>>;
   /** The session working directory (per-session pointer). Null ⇒ workspace_root. */
   workingDir: string | null;
 };
@@ -1078,6 +1088,9 @@ export async function establishSelfhostedTurnSession(
     controlRpcFactory: controlRpcFactory(bus),
     epoch: args.epoch,
     environment: args.environment,
+    ...(args.transientExecEnvironment !== undefined
+      ? { transientExecEnvironment: args.transientExecEnvironment }
+      : {}),
     workingDir: args.workingDir,
     // Give this turn's exec ops the long deadline (control ops stay short) so a real
     // command is not killed at the control wall.

@@ -4,6 +4,7 @@ export const OGTOOL_PACKAGE_NAME = "@opengeni/ogtool" as const;
 /** Environment variables consumed by the standalone bundled CLI. */
 export const OGTOOL_ENVIRONMENT = {
   url: "OPENGENI_CODEMODE_URL",
+  token: "OPENGENI_CODEMODE_TOKEN",
   tokenFile: "OPENGENI_CODEMODE_TOKEN_FILE",
   packageSpec: "OPENGENI_OGTOOL_PACKAGE_SPEC",
 } as const;

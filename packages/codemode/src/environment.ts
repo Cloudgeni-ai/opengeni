@@ -3,6 +3,7 @@ import { CodemodeClient, type CodemodeCallOptions, type CodemodeToolFunction } f
 
 export const CODEMODE_ENVIRONMENT = {
   url: "OPENGENI_CODEMODE_URL",
+  token: "OPENGENI_CODEMODE_TOKEN",
   tokenFile: "OPENGENI_CODEMODE_TOKEN_FILE",
 } as const;
 
@@ -35,14 +36,22 @@ export function environmentCodemodeClient(
   environment: CodemodeEnvironment = process.env,
 ): CodemodeClient {
   const baseUrl = requiredEnvironment(environment, CODEMODE_ENVIRONMENT.url);
-  const tokenFile = requiredEnvironment(environment, CODEMODE_ENVIRONMENT.tokenFile);
-  const key = `${baseUrl}\u0000${tokenFile}`;
+  const directTokenConfigured = environment[CODEMODE_ENVIRONMENT.token] !== undefined;
+  const tokenFile = directTokenConfigured
+    ? undefined
+    : requiredEnvironment(environment, CODEMODE_ENVIRONMENT.tokenFile);
+  // Never place bearer bytes in the cache identity. The callback rereads the
+  // selected source for every request: managed token-file renewal is live, and
+  // a Connected Machine child never leaves its direct bearer in module state.
+  const key = `${baseUrl}\u0000${directTokenConfigured ? "direct" : `file:${tokenFile}`}`;
   if (environment === process.env && cachedEnvironmentClient?.key === key) {
     return cachedEnvironmentClient.client;
   }
   const client = new CodemodeClient({
     baseUrl,
-    token: async () => await readBearerFile(tokenFile),
+    token: directTokenConfigured
+      ? async () => requiredEnvironment(environment, CODEMODE_ENVIRONMENT.token)
+      : async () => await readBearerFile(tokenFile!),
   });
   if (environment === process.env) cachedEnvironmentClient = { key, client };
   return client;

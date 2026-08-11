@@ -2,8 +2,8 @@
 //
 // Covers the three load-bearing seams a real hosted turn would otherwise be the
 // only witness to:
-//   (B)  sandboxEnvironmentForRun skips platform Git and Codemode credential
-//        delivery when the turn's EFFECTIVE backend is a connected machine.
+//   (B)  sandboxEnvironmentForRun skips platform Git and keeps Codemode material
+//        out of the machine manifest when the effective backend is connected.
 //   (D1) establishSelfhostedTurnSession binds the live machine session DIRECTLY —
 //        no Modal box, env threaded into the manifest (env-parity), agent id + cwd
 //        bound — so a machine-primary turn never establishes or leases a phantom box.
@@ -32,8 +32,8 @@ const cloudSettings = () =>
     gitAuthorEmail: "bot@opengeni.dev",
   });
 
-describe("change B — sandboxEnvironmentForRun no-token skip for a machine turn", () => {
-  test("a repo-attached machine turn skips platform Git and Codemode credentials", async () => {
+describe("change B — sandboxEnvironmentForRun transient delivery for a machine turn", () => {
+  test("a repo-attached machine turn skips platform Git and Codemode manifest pointers", async () => {
     const settings = cloudSettings();
     // A repo resource normally triggers the run-scoped GitHub App token mint. With
     // skipGitHubToken (the effective backend is a connected machine) the mint is
@@ -44,7 +44,7 @@ describe("change B — sandboxEnvironmentForRun no-token skip for a machine turn
       settings,
       [repoResource()],
       {},
-      { skipGitHubToken: true, skipCodemode: true },
+      { skipGitHubToken: true, codemodeDelivery: "transient_exec" },
     );
     expect(gitToken).toBeUndefined();
     expect(env.GH_TOKEN).toBeUndefined();

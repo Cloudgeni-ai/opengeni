@@ -1460,6 +1460,37 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
     expect(manifest.root).toBe("/workspace");
   });
 
+  test("the resolver threads renewed transient values only into selfhosted exec", async () => {
+    const mock = new MockAgentResponder();
+    let token = "first";
+    const resolve = makeActiveBackendResolver({
+      workspaceId: WS,
+      defaultBackend: new FakeBackend("group-modal"),
+      defaultKind: "modal",
+      getSandbox: async (id) => sandboxes[id] ?? null,
+      controlRpcFactory: () => mock,
+      relay: RELAY,
+      transientExecEnvironment: () => ({ OPENGENI_CODEMODE_TOKEN: token }),
+    });
+    const resolved = await resolve({ activeSandboxId: "sbx-self", activeEpoch: 7 });
+    const session = resolved.session as {
+      exec(args: { cmd: string }): Promise<unknown>;
+      serializeSessionState(): Promise<unknown>;
+    };
+    await session.exec({ cmd: "first" });
+    token = "second";
+    await session.exec({ cmd: "second" });
+
+    const first = mock.requests[0]?.req.op;
+    const second = mock.requests[1]?.req.op;
+    if (first?.$case !== "exec" || second?.$case !== "exec") {
+      throw new Error("expected exec requests");
+    }
+    expect(first.exec.env).toEqual({ OPENGENI_CODEMODE_TOKEN: "first" });
+    expect(second.exec.env).toEqual({ OPENGENI_CODEMODE_TOKEN: "second" });
+    expect(JSON.stringify(await session.serializeSessionState())).not.toContain("second");
+  });
+
   test("pinnedSelfhosted (Stage D machine-primary): the machine pointer returns the SAME pinned instance; an epoch move builds fresh", async () => {
     // The instance-identity pin: a machine-primary turn pre-establishes ONE
     // SelfhostedSession and pins it for the steady-state machine pointer so the

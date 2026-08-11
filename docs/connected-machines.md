@@ -29,17 +29,19 @@ client. The matching UI ships in
 | Backend enum | `docker`/`modal`/`local`/… | `selfhosted` |
 
 The model that follows from this: a machine-bound session has **no phantom Modal
-"home box"**, **no OpenGeni git token is distributed to the machine** (it uses
-its own ssh / `gh` / credential helper), repos are **not cloned onto it**, and
+"home box"**, **no OpenGeni Git token is distributed to the machine** (it uses
+its own SSH / `gh` / credential helper), repos are **not cloned onto it**, and
 the agent runs under a **per-session working directory** (making its own
 worktrees under that path as it needs them).
 
-OpenGeni does not mint, seed, renew, or advertise Codemode credentials on a
-Connected Machine. It sends no Codemode URL, token-file pointer, package hint,
-or other manifest environment to machine commands. If an operator wants a
-machine-local integration, they may provision and store an ordinary API
-credential themselves; that credential remains machine-owned and outside the
-Connected Machine lifecycle.
+The exact model-visible tool catalog remains available through Codemode without
+installing a machine credential. OpenGeni sends no Codemode manifest pointer or
+token file. Instead, the worker snapshots a renewable exact-attempt URL/bearer
+only into each new child exec. It is never written to disk or stable machine
+state. The installed binary exposes its absolute path to that authorized child,
+so `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode list|call` works even without
+Bun/Node/`ogtool`. It reaches the same journal/executor as model MCP; the machine
+still owns every ordinary credential and ambient environment.
 
 Machine availability is also not a turn-admission dependency. A text-only turn
 can start while the selected machine is offline. If the model invokes a machine

@@ -298,6 +298,13 @@ export interface SelfhostedSessionDeps {
    */
   environment?: Record<string, string>;
   /**
+   * Attempt-local values projected onto each newly launched child process.
+   * They are deliberately absent from `state`, the manifest, serialized session
+   * envelopes, argv, and the machine filesystem. The callback is reread for
+   * every exec so worker-side bearer renewal is visible without reconnecting.
+   */
+  transientExecEnvironment?: () => Readonly<Record<string, string>>;
+  /**
    * The session's working directory — the BASE every path/cwd is rooted under (see
    * `toMachinePath` / SELFHOSTED_VIRTUAL_ROOT). A launch-workspace_root-relative
    * subdir (resolved under workspace_root by the agent's `resolve_cwd`) or an
@@ -362,6 +369,7 @@ export class SelfhostedSession {
   /** The session working directory — the path/cwd base every op is rooted under
    *  (see `toMachinePath`). "" by default ⇒ today's workspace_root behavior. */
   private readonly workingDir: string;
+  private readonly transientExecEnvironment: (() => Readonly<Record<string, string>>) | undefined;
 
   /**
    * The structural `state` slice consumers read. `agentId`/`instanceId` serve the
@@ -409,6 +417,7 @@ export class SelfhostedSession {
     this.onOp = deps.onOp;
     this.subject = subjectFor(deps.workspaceId, deps.agentId);
     this.workingDir = deps.workingDir ?? "";
+    this.transientExecEnvironment = deps.transientExecEnvironment;
     this.opStreamClient = deps.opStream
       ? new OpStreamExecClient({
           workspaceId: deps.workspaceId,
@@ -617,9 +626,10 @@ export class SelfhostedSession {
       // SELFHOSTED_VIRTUAL_ROOT). Empty → the session workingDir (itself "" by
       // default ⇒ the agent runs in its workspace_root).
       cwd: toMachinePath(args.workdir, this.workingDir),
-      // The machine owns its own shell environment and credentials. Platform
-      // manifest values never cross this boundary.
-      env: {},
+      // The machine owns its ambient shell environment and ordinary credentials.
+      // Only attempt-local values explicitly supplied by the worker cross here;
+      // snapshot now so a later renewal cannot mutate an in-flight request.
+      env: { ...(this.transientExecEnvironment?.() ?? {}) },
       stdin: new Uint8Array(0),
       timeoutMs: executionTimeoutMs,
     };
@@ -1204,6 +1214,7 @@ export class SelfhostedSandboxClient {
   private readonly timeoutMs: number | undefined;
   private readonly execTimeoutMs: number | undefined;
   private readonly environment: Record<string, string> | undefined;
+  private readonly transientExecEnvironment: (() => Readonly<Record<string, string>>) | undefined;
   private readonly workingDir: string | undefined;
   private readonly onOp: SelfhostedOpObserver | undefined;
   private readonly opStream: SelfhostedOpStreamDeps | undefined;
@@ -1229,6 +1240,8 @@ export class SelfhostedSandboxClient {
      *  empty (validateNoEnvironmentDelta). See SelfhostedSessionDeps.environment.
      *  Omitted → `{}` (the negotiation-only path; no turn manifest is applied). */
     environment?: Record<string, string>;
+    /** Attempt-local child-process environment; never persisted or manifested. */
+    transientExecEnvironment?: () => Readonly<Record<string, string>>;
     /** The session working directory threaded into every bound session (the path/
      *  cwd base; see SelfhostedSessionDeps.workingDir). Omitted/empty ⇒ the default
      *  workspace_root behavior. */
@@ -1247,6 +1260,7 @@ export class SelfhostedSandboxClient {
     this.timeoutMs = opts.timeoutMs;
     this.execTimeoutMs = opts.execTimeoutMs;
     this.environment = opts.environment;
+    this.transientExecEnvironment = opts.transientExecEnvironment;
     this.workingDir = opts.workingDir;
     this.onOp = opts.onOp;
     this.opStream = opts.opStream;
@@ -1269,6 +1283,9 @@ export class SelfhostedSandboxClient {
       ...(this.timeoutMs !== undefined ? { timeoutMs: this.timeoutMs } : {}),
       ...(this.execTimeoutMs !== undefined ? { execTimeoutMs: this.execTimeoutMs } : {}),
       ...(this.environment !== undefined ? { environment: this.environment } : {}),
+      ...(this.transientExecEnvironment !== undefined
+        ? { transientExecEnvironment: this.transientExecEnvironment }
+        : {}),
       ...(this.workingDir !== undefined ? { workingDir: this.workingDir } : {}),
       ...(this.onOp !== undefined ? { onOp: this.onOp } : {}),
       ...(this.opStream !== undefined ? { opStream: this.opStream } : {}),
@@ -1342,6 +1359,8 @@ export interface SelfhostedSessionBuild {
   /** The run's declared sandbox environment → the session manifest.environment
    *  (env-parity; see SelfhostedSessionDeps.environment). */
   environment?: Record<string, string>;
+  /** Attempt-local child-process values; see SelfhostedSessionDeps. */
+  transientExecEnvironment?: () => Readonly<Record<string, string>>;
   /** The session working directory (the path/cwd base). Null/absent ⇒ workspace_root. */
   workingDir?: string | null;
   /** The control-op timeout (ping/fs/desktop/pty). Absent ⇒ the 30s default. */
@@ -1385,6 +1404,9 @@ export async function buildSelfhostedBackendSession(
     ...(deps.execTimeoutMs !== undefined ? { execTimeoutMs: deps.execTimeoutMs } : {}),
     ...(deps.onOp !== undefined ? { onOp: deps.onOp } : {}),
     ...(deps.environment !== undefined ? { environment: deps.environment } : {}),
+    ...(deps.transientExecEnvironment !== undefined
+      ? { transientExecEnvironment: deps.transientExecEnvironment }
+      : {}),
     ...(deps.workingDir ? { workingDir: deps.workingDir } : {}),
     ...(deps.opStream !== undefined ? { opStream: deps.opStream } : {}),
   });

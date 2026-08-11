@@ -1502,6 +1502,12 @@ export type BuildAgentOptions = {
   // per-session token file. Required together with codemodeTokenSeed so two
   // sessions sharing one box never overwrite the same pointer.
   codemodeTokenSessionId?: string;
+  /**
+   * Whether this attempt exposes the frozen Codemode catalog. Managed sandboxes
+   * infer this from `codemodeTokenSeed`; Connected Machines set it explicitly
+   * because their bearer is delivered per exec rather than through a token file.
+   */
+  codemodeAvailable?: boolean;
   // Genesis turn only: inject a one-shot instruction into the FIRST model
   // call telling it to title the session via opengeni__set_session_title.
   // Keeping this out of the persistent Agent.instructions prevents every
@@ -1737,10 +1743,7 @@ function composedPersistentAgentInstructions(
         appendSessionInstructions(
           appendWorkspaceMemory(
             appendGitCredentialBindingInstructions(
-              appendCodemodeInstructions(
-                personaAndCore,
-                options.activeSandboxBackend !== "selfhosted" && Boolean(options.codemodeTokenSeed),
-              ),
+              appendCodemodeInstructions(personaAndCore, codemodeIsAvailable(options)),
               options.gitCredentialBindings,
               options.activeSandboxBackend,
             ),
@@ -1770,7 +1773,7 @@ function composedPersistentAgentInstructions(
           ),
           options.persistentSessionSettings,
         ),
-        options.activeSandboxBackend !== "selfhosted" && Boolean(options.codemodeTokenSeed),
+        codemodeIsAvailable(options),
       ),
       options.gitCredentialBindings,
       options.activeSandboxBackend,
@@ -1784,15 +1787,18 @@ function composedPersistentAgentInstructions(
  * composed workspace + CORE instructions, joined by " ". This is GENERIC
  * substrate prompting — the same text for every host, never per-host copy.
  *
- * Included ONLY when `codemodeAvailable` is true, which the caller sets from the
- * exact condition that gates the managed-sandbox token mint: the effective
- * backend is not selfhosted and a token was minted for this turn. A turn with
- * no minted token has no Codemode URL/token and must not
- * advertise a capability that is not there. Placed before the per-session
- * instructions so host/session specificity still wins over this substrate note.
+ * Included ONLY when `codemodeAvailable` is true. Managed sandboxes derive that
+ * from their token-file seed; Connected Machines assert it from the same minted
+ * attempt authority while delivering the bearer in each exact child exec. A turn
+ * with no minted token must not advertise a capability that is not there. Placed
+ * before per-session instructions so host/session specificity still wins.
  */
 export function appendCodemodeInstructions(composed: string, codemodeAvailable: boolean): string {
   return codemodeAvailable ? `${composed} ${CODEMODE_PROGRAMMATIC_DIRECTIVE}` : composed;
+}
+
+function codemodeIsAvailable(options: BuildAgentOptions): boolean {
+  return options.codemodeAvailable ?? Boolean(options.codemodeTokenSeed);
 }
 
 const GIT_BINDING_DISCOVERY_DIRECTIVE =
@@ -1968,6 +1974,9 @@ export function buildOpenGeniAgent(
 ): Agent<any, any> {
   if (Boolean(options.codemodeTokenSeed) !== Boolean(options.codemodeTokenSessionId)) {
     throw new Error("codemodeTokenSeed and codemodeTokenSessionId must be supplied together");
+  }
+  if (options.codemodeAvailable === false && options.codemodeTokenSeed) {
+    throw new Error("codemodeAvailable cannot be false when a Codemode token seed is supplied");
   }
   const artifactRuntimeAvailable = artifactRuntimeIsAvailable(options);
   const editableArtifactToolsAvailable = hasCanonicalEditableArtifactToolSurface(
@@ -5300,10 +5309,11 @@ function takeGenesisTitleInputFilter(agent: Agent<any, any>): CallModelInputFilt
 // Generic substrate prompting for programmatic tool calling (codemode). Same
 // text for every host; gated per-turn by appendCodemodeInstructions on the
 // presence of a minted codemode token, so it only appears when the sandbox
-// exposes $OPENGENI_CODEMODE_URL/_TOKEN_FILE. Stock images carry the importable
-// package and ogtool; custom environments get an exact pinned CLI hint.
+// exposes an attempt-scoped Codemode bearer. Stock images carry the importable
+// package and ogtool; Connected Machines carry the native agent client; custom
+// environments can use the exact pinned package hint.
 export const CODEMODE_PROGRAMMATIC_DIRECTIVE =
-  'Every tool available to you is also callable programmatically from the sandbox through the same frozen catalog, authority, credentials, policy, and execution path. In stock sandboxes, write persistent Bun code with `import { tools, openGeni } from "@opengeni/codemode"`; run `ogtool declarations <file.d.ts>` when project-local catalog types are useful. For shell calls, run `ogtool list`, then `ogtool call <tool-path> \'<json-args>\'`. If `ogtool` is absent and Bun plus $OPENGENI_OGTOOL_PACKAGE_SPEC are available, run the exact deployment-pinned package with `bun x -p "$OPENGENI_OGTOOL_PACKAGE_SPEC" ogtool ...`; never guess a version or install `latest`. Prefer Codemode for loops, polling, bulk filtering, and intermediate data that should remain in the sandbox instead of consuming your context window. Tools requiring human approval return a typed error in Codemode and must be invoked normally.';
+  'Every tool available to you is also callable programmatically from the sandbox through the same frozen catalog, authority, credentials, policy, and execution path. In stock sandboxes, write persistent Bun code with `import { tools, openGeni } from "@opengeni/codemode"`; run `ogtool declarations <file.d.ts>` when project-local catalog types are useful. For shell calls, run `ogtool list`, then `ogtool call <tool-path> \'<json-args>\'`. If `ogtool` is absent and $OPENGENI_CODEMODE_NATIVE_CLIENT is available, use `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode list` and `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode call <tool-path> \'<json-args>\'`; this uses the same public Codemode operation journal, not another tool path. Otherwise, if Bun plus $OPENGENI_OGTOOL_PACKAGE_SPEC are available, run the exact deployment-pinned package with `bun x -p "$OPENGENI_OGTOOL_PACKAGE_SPEC" ogtool ...`; never guess a version or install `latest`. Prefer Codemode for loops, polling, bulk filtering, and intermediate data that should remain in the sandbox instead of consuming your context window. Tools requiring human approval return a typed error in Codemode and must be invoked normally.';
 
 function modelModalityProjectionFilterForAgent(
   agent: object,

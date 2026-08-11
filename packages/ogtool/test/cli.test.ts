@@ -22,6 +22,7 @@ async function run(
     env: {
       ...process.env,
       OPENGENI_CODEMODE_URL: undefined,
+      OPENGENI_CODEMODE_TOKEN: undefined,
       OPENGENI_CODEMODE_TOKEN_FILE: undefined,
       OPENGENI_OGTOOL_PACKAGE_SPEC: undefined,
       ...environment,
@@ -180,6 +181,34 @@ describe("ogtool CLI", () => {
       packageSpec: "@opengeni/ogtool@0.1.0",
     });
     expect(result.stdout).not.toContain("never-print-this");
+  });
+
+  test("doctor and calls prefer an exact transient bearer over an ambient file", async () => {
+    const stale = await tokenFile("stale-file-bearer");
+    const mock = codemodeServer();
+    try {
+      const environment = {
+        OPENGENI_CODEMODE_URL: mock.url,
+        OPENGENI_CODEMODE_TOKEN: "direct-attempt-bearer",
+        OPENGENI_CODEMODE_TOKEN_FILE: stale.path,
+      };
+      const doctorResult = await run(["doctor"], environment);
+      expect(doctorResult.exitCode).toBe(0);
+      expect(JSON.parse(doctorResult.stdout)).toMatchObject({
+        ok: true,
+        tokenMode: "environment",
+        directTokenConfigured: true,
+        directTokenNonempty: true,
+      });
+      expect(doctorResult.stdout).not.toContain("direct-attempt-bearer");
+
+      expect((await run(["list"], environment)).exitCode).toBe(0);
+      expect(mock.requests.map((request) => request.authorization)).toEqual([
+        "Bearer direct-attempt-bearer",
+      ]);
+    } finally {
+      mock.server.stop(true);
+    }
   });
 
   test("lists the exact attempt-frozen catalog projection", async () => {

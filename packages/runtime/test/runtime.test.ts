@@ -2926,9 +2926,9 @@ describe("runtime event normalization", () => {
   });
 
   // ── generic programmatic-tool-calling (codemode) substrate directive ──────
-  // The block is GENERIC substrate prompting, gated by the SAME condition that
-  // gates the sandbox authority: a Codemode token minted for this exact attempt
-  // (surfaced as options.codemodeTokenSeed for a non-selfhosted turn).
+  // The block is GENERIC substrate prompting, gated by exact-attempt Codemode
+  // authority. Managed boxes infer it from the file seed; Connected Machines
+  // assert availability separately because delivery is per exec.
   const codemodeOn = {
     sandboxBackend: "none",
   } as const;
@@ -2949,6 +2949,21 @@ describe("runtime event normalization", () => {
     const agent = buildOpenGeniAgent(testSettings(codemodeOn), []);
     expect(agent.instructions).not.toContain(CODEMODE_PROGRAMMATIC_DIRECTIVE);
     expect(agent.instructions).toBe(HISTORICAL_DEFAULT_INSTRUCTIONS);
+  });
+
+  test("a Connected Machine advertises Codemode without installing a token file", () => {
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "modal" }), [], {
+      activeSandboxBackend: "selfhosted",
+      codemodeAvailable: true,
+    });
+    expect(agent.instructions).toContain(CODEMODE_PROGRAMMATIC_DIRECTIVE);
+    expect(() =>
+      buildOpenGeniAgent(testSettings(codemodeOn), [], {
+        codemodeAvailable: false,
+        codemodeTokenSeed: "ogd_seed",
+        codemodeTokenSessionId: "session-instructions",
+      }),
+    ).toThrow("codemodeAvailable cannot be false");
   });
 
   test("a Codemode bearer cannot be built without its durable session identity", () => {
@@ -3046,7 +3061,7 @@ describe("runtime event normalization", () => {
     // It must name only generic substrate handles (ogtool, $OPENGENI_CODEMODE_*),
     // never a host/product name.
     expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toBe(
-      'Every tool available to you is also callable programmatically from the sandbox through the same frozen catalog, authority, credentials, policy, and execution path. In stock sandboxes, write persistent Bun code with `import { tools, openGeni } from "@opengeni/codemode"`; run `ogtool declarations <file.d.ts>` when project-local catalog types are useful. For shell calls, run `ogtool list`, then `ogtool call <tool-path> \'<json-args>\'`. If `ogtool` is absent and Bun plus $OPENGENI_OGTOOL_PACKAGE_SPEC are available, run the exact deployment-pinned package with `bun x -p "$OPENGENI_OGTOOL_PACKAGE_SPEC" ogtool ...`; never guess a version or install `latest`. Prefer Codemode for loops, polling, bulk filtering, and intermediate data that should remain in the sandbox instead of consuming your context window. Tools requiring human approval return a typed error in Codemode and must be invoked normally.',
+      'Every tool available to you is also callable programmatically from the sandbox through the same frozen catalog, authority, credentials, policy, and execution path. In stock sandboxes, write persistent Bun code with `import { tools, openGeni } from "@opengeni/codemode"`; run `ogtool declarations <file.d.ts>` when project-local catalog types are useful. For shell calls, run `ogtool list`, then `ogtool call <tool-path> \'<json-args>\'`. If `ogtool` is absent and $OPENGENI_CODEMODE_NATIVE_CLIENT is available, use `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode list` and `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode call <tool-path> \'<json-args>\'`; this uses the same public Codemode operation journal, not another tool path. Otherwise, if Bun plus $OPENGENI_OGTOOL_PACKAGE_SPEC are available, run the exact deployment-pinned package with `bun x -p "$OPENGENI_OGTOOL_PACKAGE_SPEC" ogtool ...`; never guess a version or install `latest`. Prefer Codemode for loops, polling, bulk filtering, and intermediate data that should remain in the sandbox instead of consuming your context window. Tools requiring human approval return a typed error in Codemode and must be invoked normally.',
     );
   });
 

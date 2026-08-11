@@ -181,6 +181,7 @@ import {
   OPENGENI_GATEWAY_MODELS,
   OPENGENI_GATEWAY_PROVIDER_ID,
   WORKSPACE_GATEWAY_PROVIDER_ID,
+  codemodeWorkspaceUrl,
   isDirectOpenAiApiBaseUrl,
   resolveModelProvider,
   type ModelUsageInput,
@@ -5747,7 +5748,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           sandboxWorkspaceEnvironmentValues,
           {
             skipGitHubToken: activeSandboxBackend === "selfhosted",
-            skipCodemode: activeSandboxBackend === "selfhosted",
+            codemodeDelivery:
+              activeSandboxBackend === "selfhosted" ? "transient_exec" : "managed_file",
             deferGitHubToken:
               activeSandboxBackend !== "selfhosted" && establishPolicy === "on-demand",
             scope: connectionScope,
@@ -5766,6 +5768,22 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const sandboxEnvironment = sandboxArtifactRuntime.available
         ? { ...baseSandboxEnvironment, ...sandboxArtifactRuntime.environment }
         : baseSandboxEnvironment;
+
+      // One mutable in-memory bearer cell serves every Connected Machine route
+      // in this attempt. SelfhostedSession snapshots it into each exact exec
+      // request; it never enters the manifest, argv, filesystem, RunState, or
+      // serialized session state. Managed renewal updates the same cell so a
+      // later mid-turn swap sees the fresh bearer too.
+      const codemodeTokenState = sandboxCodemodeToken ? { token: sandboxCodemodeToken } : undefined;
+      const transientCodemodeEnvironment = codemodeTokenState
+        ? (): Readonly<Record<string, string>> => ({
+            OPENGENI_CODEMODE_URL: codemodeWorkspaceUrl(runSettings, input.workspaceId),
+            OPENGENI_CODEMODE_TOKEN: codemodeTokenState.token,
+            ...(runSettings.ogtoolPackageSpec
+              ? { OPENGENI_OGTOOL_PACKAGE_SPEC: runSettings.ogtoolPackageSpec }
+              : {}),
+          })
+        : undefined;
 
       const sandboxCodemodeTokenFile = sandboxCodemodeToken
         ? codemodeTokenFileFromEnvironment(sandboxEnvironment, input.sessionId)
@@ -5882,11 +5900,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       };
 
       const attachCodemodeTokenRenewal = async (
-        tokenSession: CodemodeTokenWriterSession,
+        tokenSession?: CodemodeTokenWriterSession,
         initialExpiresAt = sandboxCodemodeTokenExpiresAt,
         initialSandbox?: ResumedTurnSandbox,
       ): Promise<void> => {
-        if (!sandboxCodemodeToken || !initialExpiresAt) return;
+        if (!codemodeTokenState || !initialExpiresAt) return;
         const previous = codemodeTokenRenewal;
         codemodeTokenRenewal = null;
         await previous?.stop();
@@ -5898,37 +5916,38 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             connectionScope,
             codemodeAuthority,
           );
-          if (material) {
-          }
           return material;
         };
         const write = async (material: NonNullable<Awaited<ReturnType<typeof mint>>>) => {
-          const runAs = sandboxRunAs(runSettings);
-          const targetSandbox = resolvedSandbox ?? initialSandbox;
-          if (!targetSandbox) {
-            throw new Error("Codemode token renewal has no exact sandbox lease target");
+          if (tokenSession) {
+            const runAs = sandboxRunAs(runSettings);
+            const targetSandbox = resolvedSandbox ?? initialSandbox;
+            if (!targetSandbox) {
+              throw new Error("Codemode token renewal has no exact sandbox lease target");
+            }
+            await runWorkspaceMutationForSandbox(
+              targetSandbox,
+              "codemodeTokenRenewal",
+              async () =>
+                await refreshCodemodeTokenFile(tokenSession, material.token, {
+                  ...(runAs ? { runAs } : {}),
+                  ...(sandboxCodemodeTokenFile
+                    ? {
+                        tokenFile: sandboxCodemodeTokenFile,
+                        legacyTokenFile: sandboxEnvironment.OPENGENI_CODEMODE_TOKEN_FILE!,
+                      }
+                    : {}),
+                  ...(toolCancellationFenceRef.current
+                    ? {
+                        commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
+                          toolCancellationFenceRef.current,
+                        ),
+                      }
+                    : {}),
+                }),
+            );
           }
-          await runWorkspaceMutationForSandbox(
-            targetSandbox,
-            "codemodeTokenRenewal",
-            async () =>
-              await refreshCodemodeTokenFile(tokenSession, material.token, {
-                ...(runAs ? { runAs } : {}),
-                ...(sandboxCodemodeTokenFile
-                  ? {
-                      tokenFile: sandboxCodemodeTokenFile,
-                      legacyTokenFile: sandboxEnvironment.OPENGENI_CODEMODE_TOKEN_FILE!,
-                    }
-                  : {}),
-                ...(toolCancellationFenceRef.current
-                  ? {
-                      commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
-                        toolCancellationFenceRef.current,
-                      ),
-                    }
-                  : {}),
-              }),
-          );
+          codemodeTokenState.token = material.token;
         };
         let renewalExpiresAt = initialExpiresAt;
         if (renewalExpiresAt.getTime() <= Date.now() + CODEMODE_TOKEN_EXPIRY_LEAD_MS) {
@@ -5970,6 +5989,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
         codemodeTokenRenewal = controller;
       };
+
+      // A Connected Machine needs renewal, but renewal is purely worker-local:
+      // starting this loop performs no control-plane or machine operation.
+      if (activeSandboxBackend === "selfhosted") {
+        await attachCodemodeTokenRenewal();
+      }
 
       const attachRunCredentialRenewal = async (
         credentialSession: RunCredentialCommandSession,
@@ -6170,6 +6195,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               opStream: machineOpStream,
               epoch: activeSandboxPointer!.activeEpoch,
               environment: sandboxEnvironment,
+              ...(transientCodemodeEnvironment
+                ? { transientExecEnvironment: transientCodemodeEnvironment }
+                : {}),
               workingDir: activeSandboxPointer!.workingDir,
             },
           );
@@ -6199,6 +6227,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 workspaceId: input.workspaceId,
                 sessionId: input.sessionId,
                 environment: sandboxEnvironment,
+                ...(transientCodemodeEnvironment
+                  ? { transientExecEnvironment: transientCodemodeEnvironment }
+                  : {}),
                 workspaceMutationFence: {
                   accountId: input.accountId,
                   turnId: turn.id,
@@ -6315,6 +6346,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 workspaceId: input.workspaceId,
                 sessionId: input.sessionId,
                 environment: sandboxEnvironment,
+                ...(transientCodemodeEnvironment
+                  ? { transientExecEnvironment: transientCodemodeEnvironment }
+                  : {}),
                 workspaceMutationFence: {
                   accountId: input.accountId,
                   turnId: turn.id,
@@ -6841,10 +6875,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ...(activeSandboxBackend !== "selfhosted" && !sandboxGitTokens && sandboxGitToken
           ? { gitTokenSeed: sandboxGitToken }
           : {}),
-        // Codemode delivery is managed-sandbox-only. Connected Machines own any
-        // manually configured API credentials and must never be contacted during
-        // turn admission merely to seed OpenGeni tooling.
-        ...(sandboxCodemodeToken
+        ...(sandboxCodemodeToken ? { codemodeAvailable: true } : {}),
+        // Managed boxes receive the bearer through their protected per-session
+        // token file. Connected Machines use transient per-exec delivery above,
+        // so they must not run the file-seeding lifecycle hook.
+        ...(activeSandboxBackend !== "selfhosted" && sandboxCodemodeToken
           ? {
               codemodeTokenSeed: sandboxCodemodeToken,
               codemodeTokenSessionId: input.sessionId,
@@ -7183,6 +7218,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             workspaceId: input.workspaceId,
             sessionId: input.sessionId,
             environment: sandboxEnvironment,
+            ...(transientCodemodeEnvironment
+              ? { transientExecEnvironment: transientCodemodeEnvironment }
+              : {}),
             workspaceMutationFence: {
               accountId: input.accountId,
               turnId: turn.id,
@@ -7767,7 +7805,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   },
                 }
               : {}),
-            ...(sandboxCodemodeToken && sandboxCodemodeTokenExpiresAt && !lazyOwnedSandbox
+            ...(activeSandboxBackend !== "selfhosted" &&
+            sandboxCodemodeToken &&
+            sandboxCodemodeTokenExpiresAt &&
+            !lazyOwnedSandbox
               ? {
                   onCodemodeTokenSessionReady: async (tokenSession: CodemodeTokenWriterSession) => {
                     const renewalSession =
