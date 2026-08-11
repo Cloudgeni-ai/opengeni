@@ -24,6 +24,7 @@ const repoRoot = new URL("../..", import.meta.url).pathname;
 const localAdminUrl = process.env.OPENGENI_CONNECTED_MACHINE_BROWSER_ADMIN_URL?.trim();
 const localAppUrl = process.env.OPENGENI_CONNECTED_MACHINE_BROWSER_APP_URL?.trim();
 const subjectId = "connected-machine-removal-browser-owner";
+const pageDiagnostics = new WeakMap<Page, string[]>();
 
 const workflowClient: SessionWorkflowClient = {
   signalUserMessage: async () => undefined,
@@ -98,7 +99,21 @@ describe("connected machine removal browser e2e", () => {
   }
 
   async function workspaceFromPage(page: Page): Promise<string> {
-    await page.waitForURL(/\/workspaces\/[^/]+\/sessions/, { timeout: 15_000 });
+    try {
+      await page.waitForURL(/\/workspaces\/[^/]+\/sessions/, { timeout: 15_000 });
+    } catch (error) {
+      const [title, body] = await Promise.all([
+        page.title().catch(() => "<unavailable>"),
+        page
+          .locator("body")
+          .innerText()
+          .catch(() => "<unavailable>"),
+      ]);
+      throw new Error(
+        `Workspace bootstrap did not reach the sessions route. URL: ${page.url()}; title: ${title}; body: ${body.slice(0, 2_000)}; diagnostics: ${(pageDiagnostics.get(page) ?? []).join(" | ")}`,
+        { cause: error },
+      );
+    }
     return page.url().match(/\/workspaces\/([^/]+)\/sessions/)![1]!;
   }
 
@@ -172,6 +187,7 @@ describe("connected machine removal browser e2e", () => {
   test("desktop keyboard removal confirms exact details and reconciles the active list", async () => {
     const context = await configuredContext({ viewport: { width: 1440, height: 960 } });
     const page = await context.newPage();
+    trackPageDiagnostics(page);
     try {
       await page.goto(webBaseUrl);
       const workspaceId = await workspaceFromPage(page);
@@ -227,6 +243,7 @@ describe("connected machine removal browser e2e", () => {
       hasTouch: true,
     });
     const page = await context.newPage();
+    trackPageDiagnostics(page);
     try {
       await page.goto(webBaseUrl);
       const workspaceId = await workspaceFromPage(page);
@@ -265,3 +282,22 @@ describe("connected machine removal browser e2e", () => {
     }
   }, 90_000);
 });
+
+function trackPageDiagnostics(page: Page): void {
+  const diagnostics: string[] = [];
+  pageDiagnostics.set(page, diagnostics);
+  page.on("console", (message) => diagnostics.push(`console.${message.type()}: ${message.text()}`));
+  page.on("pageerror", (error) => diagnostics.push(`pageerror: ${error.stack ?? error.message}`));
+  page.on("requestfailed", (request) =>
+    diagnostics.push(
+      `requestfailed: ${request.method()} ${request.url()} (${request.failure()?.errorText ?? "unknown"})`,
+    ),
+  );
+  page.on("response", (response) => {
+    if (response.status() >= 400) {
+      diagnostics.push(
+        `response: ${response.status()} ${response.request().method()} ${response.url()}`,
+      );
+    }
+  });
+}
