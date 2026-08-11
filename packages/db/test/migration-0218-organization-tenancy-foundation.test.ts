@@ -481,7 +481,7 @@ describe("migration 0218 organization tenancy foundation", () => {
       order by c.relname
     `;
     expect([...policyRows]).toEqual(
-      tenancyTables.map((tableName) => ({
+      [...tenancyTables].sort().map((tableName) => ({
         tableName,
         rlsEnabled: true,
         rlsForced: true,
